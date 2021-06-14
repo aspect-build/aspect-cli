@@ -3,6 +3,8 @@ module aspect.build/cli
 go 1.16
 
 require (
+	github.com/bazelbuild/buildtools v0.0.0-20200718160251-b1667ff58f71
+	github.com/manifoldco/promptui v0.8.0
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/magiconair/properties v1.8.5 // indirect
 	github.com/mitchellh/mapstructure v1.4.1 // indirect

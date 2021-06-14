@@ -1,0 +1,15 @@
+load("@io_bazel_rules_go//extras:bindata.bzl", "bindata")
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+bindata(
+    name = "bindata",
+    srcs = glob(["*.tmpl"]),
+    package = "data",
+)
+
+go_library(
+    name = "data",
+    srcs = [":bindata"],
+    importpath = "aspect.build/cli/wspace/data",
+    visibility = ["//visibility:public"],
+)
