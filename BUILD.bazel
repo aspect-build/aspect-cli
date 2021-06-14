@@ -3,6 +3,8 @@ load("@bazel_gazelle//:def.bzl", "gazelle")
 # TODO: follow https://sagikazarmark.hu/blog/vanity-import-paths-in-go/
 # so we have savvy go imports for users
 # gazelle:prefix aspect.build/cli
+# bazelbuild/buildtools uses legacy naming
+# gazelle:resolve go github.com/bazelbuild/buildtools/wspace @com_github_bazelbuild_buildtools//wspace:go_default_library
 gazelle(name = "gazelle")
 
 gazelle(

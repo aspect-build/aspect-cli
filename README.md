@@ -22,8 +22,9 @@ I can find that Aspect is an easier-to-use wrapper and feel motivated and comfor
 
 From aspect.build/install I quickly pick an Installation option, and am guided through to successful install.
 
-The first time I run `aspect` in interactive mode,
-- I choose whether I want to install for all users of my workspace, in which case a bootstrap bit is added to tools/bazel ensuring that the tool is downloaded and spawned for anyone cloning my repo.
+The first time I run `aspect init` in interactive mode,
+- If my pwd doesn't have a WORKSPACE, I'm prompted to create one
+- I choose whether I want to install aspect all users of my workspace, in which case a bootstrap bit is added to tools/bazel ensuring that the tool is downloaded and spawned for anyone cloning my repo.
 
 ## When I run bare `bazel`
 

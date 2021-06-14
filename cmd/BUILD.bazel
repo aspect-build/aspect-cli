@@ -3,6 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "cmd",
     srcs = [
+        "init.go",
         "root.go",
         "version.go",
     ],
@@ -11,6 +12,9 @@ go_library(
     deps = [
         "//bazel",
         "//buildinfo",
+        "//wspace",
+        "@com_github_bazelbuild_buildtools//wspace:go_default_library",
+        "@com_github_manifoldco_promptui//:promptui",
         "@com_github_mitchellh_go_homedir//:go-homedir",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",
