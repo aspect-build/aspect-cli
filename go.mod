@@ -7,6 +7,7 @@ require (
 	github.com/bazelbuild/rules_go v0.28.0
 	github.com/fatih/color v1.12.0
 	github.com/magiconair/properties v1.8.5 // indirect
+	github.com/manifoldco/promptui v0.8.0
 	github.com/mattn/go-isatty v0.0.13
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/mitchellh/mapstructure v1.4.1 // indirect

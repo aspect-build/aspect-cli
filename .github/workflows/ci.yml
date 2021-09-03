@@ -21,6 +21,9 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
       - uses: bazelbuild/setup-bazelisk@v1
+        env:
+          # Bazelisk will download bazel to here
+          XDG_CACHE_HOME: ~/.cache/bazel-repo
       - name: Mount bazel action cache
         uses: actions/cache@v2
         with:

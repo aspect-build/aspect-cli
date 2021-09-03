@@ -1,2 +1,3 @@
 build --workspace_status_command=buildinfo/bazel_stamp_info.sh
 build:release -c opt --stamp
+test --test_env=HOME
