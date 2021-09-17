@@ -29,9 +29,10 @@ func NewBuildCmd(
 
 	cmd := &cobra.Command{
 		Use:   "build",
-		Short: "Invoke a build on targets.",
-		Long:  "Invokes bazel build on provided targets.",
-		RunE:  b.Run,
+		Short: "Builds the specified targets, using the options.",
+		Long: "Invokes bazel build on the specified targets. " +
+			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
+		RunE: b.Run,
 	}
 
 	return cmd
