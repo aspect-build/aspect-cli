@@ -18,6 +18,7 @@ go_test(
     srcs = ["build_test.go"],
     deps = [
         ":build",
+        "//pkg/aspecterrors",
         "//pkg/bazel/mock",
         "//pkg/ioutils",
         "@com_github_golang_mock//gomock",

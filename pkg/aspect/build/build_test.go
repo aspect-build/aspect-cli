@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"aspect.build/cli/pkg/aspect/build"
+	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel/mock"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -28,11 +29,14 @@ func TestBuild(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 		spawner := mock.NewMockSpawner(ctrl)
-		expectErr := fmt.Errorf("failed to run bazel build")
+		expectErr := &aspecterrors.ExitError{
+			Err:      fmt.Errorf("failed to run bazel build"),
+			ExitCode: 5,
+		}
 		spawner.
 			EXPECT().
 			Spawn([]string{"build", "//..."}).
-			Return(1, expectErr)
+			Return(expectErr.ExitCode, expectErr.Err)
 
 		b := build.New(streams, spawner)
 		err := b.Run(nil, []string{"//..."})
