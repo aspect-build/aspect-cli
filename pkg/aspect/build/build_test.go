@@ -31,11 +31,11 @@ func TestBuild(t *testing.T) {
 		expectErr := fmt.Errorf("failed to run bazel build")
 		spawner.
 			EXPECT().
-			Spawn(gomock.Any()).
+			Spawn([]string{"build", "//..."}).
 			Return(1, expectErr)
 
 		b := build.New(streams, spawner)
-		err := b.Run(nil, nil)
+		err := b.Run(nil, []string{"//..."})
 
 		g.Expect(err).To(Equal(expectErr))
 	})
@@ -50,11 +50,11 @@ func TestBuild(t *testing.T) {
 		spawner := mock.NewMockSpawner(ctrl)
 		spawner.
 			EXPECT().
-			Spawn(gomock.Any()).
+			Spawn([]string{"build", "//..."}).
 			Return(0, nil)
 
 		b := build.New(streams, spawner)
-		err := b.Run(nil, nil)
+		err := b.Run(nil, []string{"//..."})
 
 		g.Expect(err).To(BeNil())
 	})
