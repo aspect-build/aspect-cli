@@ -1,10 +1,10 @@
 ## aspect build
 
-Invoke a build on targets
+Invoke a build on targets.
 
 ### Synopsis
 
-Invokes bazel build on provided targets
+Invokes bazel build on provided targets.
 
 ```
 aspect build [flags]
