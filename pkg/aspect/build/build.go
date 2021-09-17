@@ -9,6 +9,7 @@ package build
 import (
 	"github.com/spf13/cobra"
 
+	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -33,7 +34,11 @@ func New(
 // Run runs the aspect build command.
 func (b *Build) Run(_ *cobra.Command, args []string) error {
 	cmd := append([]string{"build"}, args...)
-	if _, err := b.bzl.Spawn(cmd); err != nil {
+	if exitCode, err := b.bzl.Spawn(cmd); exitCode != 0 {
+		err = &aspecterrors.ExitError{
+			Err:      err,
+			ExitCode: exitCode,
+		}
 		return err
 	}
 

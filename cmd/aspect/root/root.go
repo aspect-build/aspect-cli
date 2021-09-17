@@ -34,9 +34,11 @@ func NewDefaultRootCmd() *cobra.Command {
 
 func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "aspect",
-		Short: "Aspect.build bazel wrapper",
-		Long:  boldCyan.Sprintf(`Aspect CLI`) + ` is a better frontend for running bazel`,
+		Use:           "aspect",
+		Short:         "Aspect.build bazel wrapper",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Long:          boldCyan.Sprintf(`Aspect CLI`) + ` is a better frontend for running bazel`,
 	}
 
 	// ### Flags
