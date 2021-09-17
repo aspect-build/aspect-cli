@@ -6,6 +6,7 @@ require (
 	github.com/bazelbuild/bazelisk v1.10.1
 	github.com/bazelbuild/rules_go v0.28.0
 	github.com/fatih/color v1.12.0
+	github.com/golang/mock v1.3.1
 	github.com/magiconair/properties v1.8.5 // indirect
 	github.com/mattn/go-isatty v0.0.13
 	github.com/mitchellh/go-homedir v1.1.0

@@ -1,4 +1,3 @@
-load("@bazel_gomock//:gomock.bzl", "gomock")
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
@@ -22,22 +21,4 @@ go_test(
         ":bazel",
         "@com_github_onsi_gomega//:gomega",
     ],
-)
-
-# gazelle:exclude mock_spawner_test.go
-
-gomock(
-    name = "mock_spawner_source",
-    out = "mock_spawner_test.go",
-    interfaces = ["Spawner"],
-    library = ":bazel",
-    package = "bazel",
-)
-
-go_library(
-    name = "mock_spawner",
-    srcs = [":mock_spawner_source"],
-    importpath = "aspect.build/cli/pkg/bazel_mock",
-    visibility = ["//:__subpackages__"],
-    deps = ["@com_github_golang_mock//gomock"],
 )
