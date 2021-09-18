@@ -20,6 +20,7 @@ import (
 	"aspect.build/cli/cmd/aspect/version"
 	"aspect.build/cli/docs/help/topics"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/setup"
 )
 
 var (
@@ -27,9 +28,12 @@ var (
 	faint    = color.New(color.Faint)
 )
 
+func isATTY() bool {
+	return isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+}
+
 func NewDefaultRootCmd() *cobra.Command {
-	defaultInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-	return NewRootCmd(ioutils.DefaultStreams, defaultInteractive)
+	return NewRootCmd(ioutils.DefaultStreams, isATTY())
 }
 
 func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command {
@@ -63,6 +67,8 @@ func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command
 	viper.AutomaticEnv()
 	if err := viper.ReadInConfig(); err == nil {
 		faint.Fprintln(streams.Stderr, "Using config file:", viper.ConfigFileUsed())
+	} else if isATTY() {
+		setup.SetupWizard()
 	}
 
 	// ### Child commands

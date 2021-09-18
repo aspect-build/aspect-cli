@@ -4,7 +4,6 @@ set -o pipefail -o errexit -o nounset
 HOME="$TEST_TMPDIR"
 ASPECT="$TEST_SRCDIR/build_aspect_cli/cmd/aspect/aspect_/aspect"
 export HOME
-set -x
 
 # Only capture stdout, just like `bazel help` prints to stdout
 help=$($ASPECT help 2>/dev/null) || true
