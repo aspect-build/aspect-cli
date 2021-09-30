@@ -8,10 +8,8 @@ package clean
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/manifoldco/promptui"
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -22,12 +20,48 @@ import (
 
 const (
 	skipPromptKey = "clean.skip_prompt"
+
+	ReclaimOption         = "Reclaim disk space for this workspace (same as bazel clean)"
+	ReclaimAllOption      = "Reclaim disk space for all Bazel workspaces"
+	NonIncrementalOption  = "Prepare to perform a non-incremental build"
+	InvalidateReposOption = "Invalidate all repository rules, causing them to recreate external repos"
+	WorkaroundOption      = "Workaround inconsistent state in the output tree"
+
+	outputBaseHint = `It's faster to perform a non-incremental build by choosing a different output base.
+Instead of running 'clean' you should use the --output_base flag.
+Run 'aspect help clean' for more info.
+`
+	syncHint = `It's faster to invalidate repository rules by using the sync command.
+Instead of running 'clean' you should run 'aspect sync --configure'
+Run 'aspect help clean' for more info.
+`
+	fileIssueHint = `Bazel is a correct build tool, and it should not be possible to get inconstent state.
+We highly recommend you file a bug reporting this problem so that the offending rule
+implementation can be fixed.
+`
+
+	rememberLine1 = "You can skip this prompt to make 'aspect clean' behave the same as 'bazel clean'\n"
+	rememberLine2 = "Remember this choice and skip the prompt in the future"
 )
+
+type SelectRunner interface {
+	Run() (int, string, error)
+}
+
+type PromptRunner interface {
+	Run() (string, error)
+}
 
 // Clean represents the aspect clean command.
 type Clean struct {
 	ioutils.Streams
-	bzl bazel.Spawner
+	bzl               bazel.Spawner
+	isInteractiveMode bool
+
+	Behavior   SelectRunner
+	Workaround PromptRunner
+	Remember   PromptRunner
+	Prefs      viper.Viper
 
 	Expunge      bool
 	ExpungeAsync bool
@@ -37,75 +71,77 @@ type Clean struct {
 func New(
 	streams ioutils.Streams,
 	bzl bazel.Spawner,
-) *Clean {
+	isInteractiveMode bool) *Clean {
 	return &Clean{
-		Streams: streams,
-		bzl:     bzl,
+		Streams:           streams,
+		isInteractiveMode: isInteractiveMode,
+		bzl:               bzl,
 	}
+}
+
+func NewDefault(isInteractive bool) *Clean {
+	c := New(
+		ioutils.DefaultStreams,
+		bazel.New(),
+		isInteractive)
+	c.Behavior = &promptui.Select{
+		Label: "Clean can have a few behaviors. Which do you want?",
+		Items: []string{
+			ReclaimOption,
+			ReclaimAllOption,
+			NonIncrementalOption,
+			InvalidateReposOption,
+			WorkaroundOption,
+		},
+	}
+	c.Workaround = &promptui.Prompt{
+		Label:     "Temporarily workaround the bug by deleting the output folder",
+		IsConfirm: true,
+	}
+	c.Remember = &promptui.Prompt{
+		Label:     rememberLine2,
+		IsConfirm: true,
+	}
+	c.Prefs = *viper.GetViper()
+	return c
 }
 
 // Run runs the aspect build command.
 func (c *Clean) Run(_ *cobra.Command, _ []string) error {
-	skip := viper.GetBool(skipPromptKey)
-	interactive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-	if interactive && !skip {
-		choose := promptui.Select{
-			Label: "Clean can have a few behaviors. Which do you want?",
-			Items: []string{
-				"Reclaim disk space for this workspace (same as bazel clean)",
-				"Reclaim disk space for all Bazel workspaces",
-				"Prepare to perform a non-incremental build",
-				"Invalidate all repository rules, causing them to recreate external repos",
-				"Workaround inconsistent state in the output tree",
-			},
-		}
+	skip := c.Prefs.GetBool(skipPromptKey)
+	if c.isInteractiveMode && !skip {
 
-		i, _, err := choose.Run()
+		_, chosen, err := c.Behavior.Run()
 
 		if err != nil {
-			return fmt.Errorf("prompt failed: %v", err)
+			return fmt.Errorf("prompt failed: %w", err)
 		}
 
-		switch i {
+		switch chosen {
 
-		case 0:
+		case ReclaimOption:
 			// Allow user to opt-out of our fancy "clean" command and just behave like bazel
-			fmt.Println("You can skip this prompt to make 'aspect clean' behave the same as 'bazel clean'")
-			remember := promptui.Prompt{
-				Label:     "Remember this choice and skip the prompt in the future",
-				IsConfirm: true,
-			}
-			_, err := remember.Run()
-			if err == nil {
-				viper.Set(skipPromptKey, "true")
-				if err := viper.WriteConfig(); err != nil {
-					return fmt.Errorf("failed to update config file: %v", err)
+			fmt.Fprint(c.Streams.Stdout, rememberLine1)
+			if _, err := c.Remember.Run(); err == nil {
+				c.Prefs.Set(skipPromptKey, "true")
+				if err := c.Prefs.WriteConfig(); err != nil {
+					return fmt.Errorf("failed to update config file: %w", err)
 				}
 			}
-		case 1:
-			fmt.Printf("Sorry, this is not implemented yet: discover all bazel workspaces on the machine")
+		case ReclaimAllOption:
+			fmt.Fprint(c.Streams.Stdout, "Sorry, this is not implemented yet: discover all bazel workspaces on the machine\n")
 			return nil
-		case 2:
-			fmt.Println("It's faster to perform a non-incremental build by choosing a different output base.")
-			fmt.Println("Instead of running 'clean' you should use the --output_base flag.")
-			fmt.Println("Run 'aspect help clean' for more info.")
+		case NonIncrementalOption:
+			fmt.Fprint(c.Streams.Stdout, outputBaseHint)
 			return nil
-		case 3:
-			fmt.Println("It's faster to invalidate repository rules by using the sync command.")
-			fmt.Println("Instead of running 'clean' you should run 'aspect sync --configure'")
-			fmt.Println("Run 'aspect help clean' for more info.")
+		case InvalidateReposOption:
+			fmt.Fprint(c.Streams.Stdout, syncHint)
 			return nil
-		case 4:
-			fmt.Println("Bazel is a correct build tool, and it should not be possible to get inconstent state.")
-			fmt.Println("We highly recommend you file a bug reporting this problem so that the offending rule")
-			fmt.Println("implementation can be fixed.")
-			workaround := promptui.Prompt{
-				Label:     "Temporarily workaround the bug by deleting the output folder",
-				IsConfirm: true,
-			}
-			_, err := workaround.Run()
+		case WorkaroundOption:
+			fmt.Fprint(c.Streams.Stdout, fileIssueHint)
+			_, err := c.Workaround.Run()
 			if err != nil {
-				return fmt.Errorf("prompt failed: %v", err)
+				return fmt.Errorf("prompt failed: %w", err)
 			}
 		}
 	}
