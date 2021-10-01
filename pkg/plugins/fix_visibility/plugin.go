@@ -14,34 +14,33 @@ import (
 	"regexp"
 	"strings"
 
+	"aspect.build/cli/pkg/aspect/root"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/buildtools/edit"
 	"github.com/manifoldco/promptui"
-	isatty "github.com/mattn/go-isatty"
 	buildv1 "google.golang.org/genproto/googleapis/devtools/build/v1"
 )
 
 type FixVisibilityPlugin struct {
 	stdout            io.Writer
 	buildozer         Runner
-	isInteractiveMode bool
+	isInteractiveMode *bool
 	applyFixPrompt    promptui.Prompt
 	targetsToFix      *fixOrderedSet
 }
 
 func NewDefaultPlugin() *FixVisibilityPlugin {
-	isInteractiveMode := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 	applyFixPrompt := promptui.Prompt{
 		Label:     "Would you like to apply the visibility fixes",
 		IsConfirm: true,
 	}
-	return NewPlugin(os.Stdout, &buildozer{}, isInteractiveMode, applyFixPrompt)
+	return NewPlugin(os.Stdout, &buildozer{}, &root.Interactive, applyFixPrompt)
 }
 
 func NewPlugin(
 	stdout io.Writer,
 	buildozer Runner,
-	isInteractiveMode bool,
+	isInteractiveMode *bool,
 	applyFixPrompt promptui.Prompt,
 ) *FixVisibilityPlugin {
 	return &FixVisibilityPlugin{
@@ -91,7 +90,7 @@ func (plugin *FixVisibilityPlugin) PostBuildHook() error {
 		}
 
 		var applyFix bool
-		if plugin.isInteractiveMode {
+		if *plugin.isInteractiveMode {
 			_, err := plugin.applyFixPrompt.Run()
 			applyFix = err == nil
 		}

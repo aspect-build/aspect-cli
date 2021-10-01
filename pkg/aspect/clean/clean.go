@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"aspect.build/cli/pkg/aspect/root"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
@@ -56,7 +57,7 @@ type PromptRunner interface {
 type Clean struct {
 	ioutils.Streams
 	bzl               bazel.Spawner
-	isInteractiveMode bool
+	isInteractiveMode *bool
 
 	Behavior   SelectRunner
 	Workaround PromptRunner
@@ -71,7 +72,7 @@ type Clean struct {
 func New(
 	streams ioutils.Streams,
 	bzl bazel.Spawner,
-	isInteractiveMode bool) *Clean {
+	isInteractiveMode *bool) *Clean {
 	return &Clean{
 		Streams:           streams,
 		isInteractiveMode: isInteractiveMode,
@@ -79,11 +80,11 @@ func New(
 	}
 }
 
-func NewDefault(isInteractive bool) *Clean {
+func NewDefault() *Clean {
 	c := New(
 		ioutils.DefaultStreams,
 		bazel.New(),
-		isInteractive)
+		&root.Interactive)
 	c.Behavior = &promptui.Select{
 		Label: "Clean can have a few behaviors. Which do you want?",
 		Items: []string{
@@ -109,7 +110,7 @@ func NewDefault(isInteractive bool) *Clean {
 // Run runs the aspect build command.
 func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 	skip := c.Prefs.GetBool(skipPromptKey)
-	if c.isInteractiveMode && !skip {
+	if *c.isInteractiveMode && !skip {
 
 		_, chosen, err := c.Behavior.Run()
 

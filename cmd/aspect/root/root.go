@@ -21,6 +21,7 @@ import (
 	"aspect.build/cli/cmd/aspect/info"
 	"aspect.build/cli/cmd/aspect/version"
 	"aspect.build/cli/docs/help/topics"
+	pkgroot "aspect.build/cli/pkg/aspect/root"
 	"aspect.build/cli/pkg/ioutils"
 )
 
@@ -44,15 +45,13 @@ func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command
 	}
 
 	// ### Flags
-	var cfgFile string
-	var interactive bool
-	cmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.aspect.yaml)")
-	cmd.PersistentFlags().BoolVar(&interactive, "interactive", defaultInteractive, "Interactive mode (e.g. prompts for user input)")
+	cmd.PersistentFlags().StringVar(&pkgroot.CfgFile, "config", "", "config file (default is $HOME/.aspect.yaml)")
+	cmd.PersistentFlags().BoolVar(&pkgroot.Interactive, "interactive", defaultInteractive, "Interactive mode (e.g. prompts for user input)")
 
 	// ### Viper
-	if cfgFile != "" {
+	if pkgroot.CfgFile != "" {
 		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
+		viper.SetConfigFile(pkgroot.CfgFile)
 	} else {
 		// Find home directory.
 		home, err := homedir.Dir()

@@ -58,6 +58,11 @@ func (p chooseWorkaround) Run() (int, string, error) {
 	return 4, clean.WorkaroundOption, nil
 }
 
+var (
+	interactive    = true
+	nonInteractive = false
+)
+
 func TestClean(t *testing.T) {
 
 	t.Run("clean calls bazel clean", func(t *testing.T) {
@@ -71,7 +76,7 @@ func TestClean(t *testing.T) {
 			Spawn([]string{"clean"}).
 			Return(0, nil)
 
-		b := clean.New(ioutils.Streams{}, spawner, false)
+		b := clean.New(ioutils.Streams{}, spawner, &nonInteractive)
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
 
@@ -86,7 +91,7 @@ func TestClean(t *testing.T) {
 			Spawn([]string{"clean", "--expunge"}).
 			Return(0, nil)
 
-		b := clean.New(ioutils.Streams{}, spawner, false)
+		b := clean.New(ioutils.Streams{}, spawner, &nonInteractive)
 		b.Expunge = true
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
@@ -102,7 +107,7 @@ func TestClean(t *testing.T) {
 			Spawn([]string{"clean", "--expunge_async"}).
 			Return(0, nil)
 
-		b := clean.New(ioutils.Streams{}, spawner, false)
+		b := clean.New(ioutils.Streams{}, spawner, &nonInteractive)
 		b.ExpungeAsync = true
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
@@ -120,7 +125,7 @@ func TestClean(t *testing.T) {
 
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		b := clean.New(streams, spawner, true)
+		b := clean.New(streams, spawner, &interactive)
 
 		b.Behavior = chooseReclaim{}
 		b.Remember = deny{}
@@ -142,7 +147,7 @@ func TestClean(t *testing.T) {
 
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		b := clean.New(streams, spawner, true)
+		b := clean.New(streams, spawner, &interactive)
 
 		viper := *viper.New()
 		cfg, err := os.CreateTemp(os.Getenv("TEST_TMPDIR"), "cfg***.ini")
@@ -161,7 +166,7 @@ func TestClean(t *testing.T) {
 		g.Expect(string(content)).To(Equal("[clean]\nskip_prompt=true\n\n"))
 
 		// If we run it again, there should be no prompt
-		c := clean.New(streams, spawner, true)
+		c := clean.New(streams, spawner, &interactive)
 		c.Prefs = viper
 		g.Expect(c.Run(nil, []string{})).Should(Succeed())
 	})
@@ -171,7 +176,7 @@ func TestClean(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 
-		c := clean.New(streams, nil, true)
+		c := clean.New(streams, nil, &interactive)
 		c.Behavior = chooseNonIncremental{}
 		g.Expect(c.Run(nil, []string{})).Should(Succeed())
 		g.Expect(stdout.String()).To(ContainSubstring("use the --output_base flag"))
@@ -182,7 +187,7 @@ func TestClean(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 
-		c := clean.New(streams, nil, true)
+		c := clean.New(streams, nil, &interactive)
 		c.Behavior = chooseInvalidateRepos{}
 		g.Expect(c.Run(nil, []string{})).Should(Succeed())
 		g.Expect(stdout.String()).To(ContainSubstring("aspect sync --configure"))
@@ -202,7 +207,7 @@ func TestClean(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 
-		c := clean.New(streams, spawner, true)
+		c := clean.New(streams, spawner, &interactive)
 		c.Behavior = chooseWorkaround{}
 		c.Workaround = confirm{}
 		g.Expect(c.Run(nil, []string{})).Should(Succeed())
