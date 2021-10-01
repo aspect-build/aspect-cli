@@ -28,6 +28,9 @@ type Build struct {
 	bzl        bazel.Spawner
 	besBackend bep.BESBackend
 	hooks      *hooks.Hooks
+
+	Interesting bool
+	StringVar   string
 }
 
 // New creates a Build command.
@@ -48,6 +51,7 @@ func New(
 // Run runs the aspect build command, calling `bazel build` with a local Build
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
 func (b *Build) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+	fmt.Printf("pack path %s\n", b.StringVar)
 	// TODO(f0rmiga): this is a hook for the build command and should be discussed
 	// as part of the plugin design.
 	defer func() {
