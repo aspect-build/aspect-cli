@@ -6,6 +6,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/build/bep",
     visibility = ["//visibility:public"],
     deps = [
+        "//bazel/buildeventstream/proto",
         "//pkg/aspecterrors",
         "//pkg/aspectgrpc",
         "@go_googleapis//google/devtools/build/v1:build_go_proto",
@@ -19,11 +20,13 @@ go_test(
     srcs = ["bes_backend_test.go"],
     embed = [":bep"],
     deps = [
+        "//bazel/buildeventstream/proto",
         "//pkg/aspecterrors",
         "//pkg/aspectgrpc/mock",
         "//pkg/stdlib/mock",
         "@com_github_golang_mock//gomock",
         "@com_github_onsi_gomega//:gomega",
         "@go_googleapis//google/devtools/build/v1:build_go_proto",
+        "@org_golang_google_protobuf//types/known/anypb",
     ],
 )

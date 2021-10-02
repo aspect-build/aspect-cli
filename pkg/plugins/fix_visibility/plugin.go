@@ -18,7 +18,8 @@ import (
 	"github.com/bazelbuild/buildtools/edit"
 	"github.com/manifoldco/promptui"
 	isatty "github.com/mattn/go-isatty"
-	buildv1 "google.golang.org/genproto/googleapis/devtools/build/v1"
+
+	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 )
 
 type FixVisibilityPlugin struct {
@@ -54,20 +55,25 @@ func NewPlugin(
 }
 
 var visibilityIssueRegex = regexp.MustCompile(`.*target '(.*)' is not visible from target '(.*)'.*`)
-var visibilityIssueSubstring = []byte("is not visible from target")
 
-func (plugin *FixVisibilityPlugin) BEPEventCallback(event *buildv1.BuildEvent) error {
-	bazelEvent := event.GetBazelEvent()
-	if bazelEvent != nil {
-		if !bytes.Contains(bazelEvent.Value, visibilityIssueSubstring) {
-			return nil
-		}
-		matches := visibilityIssueRegex.FindSubmatch(bazelEvent.Value)
-		if len(matches) != 3 {
-			return nil
-		}
-		plugin.targetsToFix.insert(string(matches[1]), string(matches[2]))
+const visibilityIssueSubstring = "is not visible from target"
+
+func (plugin *FixVisibilityPlugin) BEPEventCallback(event *buildeventstream.BuildEvent) error {
+	aborted := event.GetAborted()
+	if aborted == nil {
+		return nil
 	}
+	if aborted.Reason != buildeventstream.Aborted_ANALYSIS_FAILURE {
+		return nil
+	}
+	if !strings.Contains(aborted.Description, visibilityIssueSubstring) {
+		return nil
+	}
+	matches := visibilityIssueRegex.FindStringSubmatch(aborted.Description)
+	if len(matches) != 3 {
+		return nil
+	}
+	plugin.targetsToFix.insert(matches[1], matches[2])
 	return nil
 }
 

@@ -3,6 +3,14 @@ workspace(name = "build_aspect_cli")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
+    name = "io_bazel",
+    patch_args = ["-p1"],
+    patches = ["//bazel/patches:build_event.patch"],
+    sha256 = "12ea7aa11e2bdb12de1dceb9939a22e96f5a480437cb17c123379d8e0fdf5e82",
+    urls = ["https://github.com/bazelbuild/bazel/releases/download/4.2.1/bazel-4.2.1-dist.zip"],
+)
+
+http_archive(
     name = "com_google_protobuf",
     sha256 = "d0f5f605d0d656007ce6c8b5a82df3037e1d8fe8b121ed42e536f569dec16113",
     strip_prefix = "protobuf-3.14.0",

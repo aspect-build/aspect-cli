@@ -1,0 +1,120 @@
+diff --git a/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/BUILD b/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/BUILD
+index 118b30c..211e113 100755
+--- a/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/BUILD
++++ b/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/BUILD
+@@ -31,3 +31,20 @@ proto_library(
+         "//src/main/protobuf:invocation_policy_proto",
+     ],
+ )
++
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
++
++go_proto_library(
++    name = "build_event_stream_go_proto",
++    importpath = "github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto",
++    proto = ":build_event_stream_proto",
++    deps = ["//src/main/protobuf"],
++)
++
++go_library(
++    name = "proto",
++    embed = [":build_event_stream_go_proto"],
++    importpath = "github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto",
++    visibility = ["//visibility:public"],
++)
+diff --git a/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto b/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto
+index 9281055..35e7062 100755
+--- a/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto
++++ b/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto
+@@ -22,6 +22,7 @@ import "src/main/protobuf/invocation_policy.proto";
+
+ option java_package = "com.google.devtools.build.lib.buildeventstream";
+ option java_outer_classname = "BuildEventStreamProtos";
++option go_package = "aspect.build/cli/bazel/buildeventstream/proto";
+
+ // Identifier for a build event. It is deliberately structured to also provide
+ // information about which build target etc the event is related to.
+diff --git a/src/main/protobuf/BUILD b/src/main/protobuf/BUILD
+index 29bca3a..73af4b2 100755
+--- a/src/main/protobuf/BUILD
++++ b/src/main/protobuf/BUILD
+@@ -290,3 +290,42 @@ filegroup(
+         ":xcode_java_proto_srcs",
+     ],
+ )
++
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
++
++go_proto_library(
++    name = "command_line_go_proto",
++    importpath = "github.com/bazelbuild/bazel/src/main/protobuf",
++    proto = ":command_line_proto",
++)
++
++go_proto_library(
++    name = "failure_details_go_proto",
++    importpath = "github.com/bazelbuild/bazel/src/main/protobuf",
++    proto = ":failure_details_proto",
++)
++
++go_proto_library(
++    name = "invocation_policy_go_proto",
++    importpath = "github.com/bazelbuild/bazel/src/main/protobuf",
++    proto = ":invocation_policy_proto",
++)
++
++go_proto_library(
++    name = "option_filters_go_proto",
++    importpath = "github.com/bazelbuild/bazel/src/main/protobuf",
++    proto = ":option_filters_proto",
++)
++
++go_library(
++    name = "protobuf",
++    embed = [
++        ":command_line_go_proto",
++        ":failure_details_go_proto",
++        ":option_filters_go_proto",
++        ":invocation_policy_go_proto",
++    ],
++    importpath = "github.com/bazelbuild/bazel/src/main/protobuf",
++    visibility = ["//visibility:public"],
++)
+diff --git a/src/main/protobuf/command_line.proto b/src/main/protobuf/command_line.proto
+index d5fa6ac..07fac0a 100755
+--- a/src/main/protobuf/command_line.proto
++++ b/src/main/protobuf/command_line.proto
+@@ -17,6 +17,7 @@ package command_line;
+
+ // option java_api_version = 2;
+ option java_package = "com.google.devtools.build.lib.runtime.proto";
++option go_package = "github.com/bazelbuild/bazel/src/main/protobuf";
+
+ import "src/main/protobuf/option_filters.proto";
+
+diff --git a/src/main/protobuf/invocation_policy.proto b/src/main/protobuf/invocation_policy.proto
+index 53572ac..27f5889 100755
+--- a/src/main/protobuf/invocation_policy.proto
++++ b/src/main/protobuf/invocation_policy.proto
+@@ -17,6 +17,7 @@ package blaze.invocation_policy;
+
+ // option java_api_version = 2;
+ option java_package = "com.google.devtools.build.lib.runtime.proto";
++option go_package = "github.com/bazelbuild/bazel/src/main/protobuf";
+
+ // The --invocation_policy flag takes a base64-encoded binary-serialized or text
+ // formatted InvocationPolicy message.
+diff --git a/src/main/protobuf/option_filters.proto b/src/main/protobuf/option_filters.proto
+index 782620d..a6fc797 100755
+--- a/src/main/protobuf/option_filters.proto
++++ b/src/main/protobuf/option_filters.proto
+@@ -16,6 +16,7 @@ package options;
+
+ // option java_api_version = 2;
+ option java_package = "com.google.devtools.common.options.proto";
++option go_package = "github.com/bazelbuild/bazel/src/main/protobuf";
+
+ // IMPORTANT NOTE: These two enums must be kept in sync with their Java
+ // equivalents in src/main/java/com/google/devtools/common/options.

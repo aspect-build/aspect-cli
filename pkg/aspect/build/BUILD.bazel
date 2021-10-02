@@ -6,13 +6,13 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/build",
     visibility = ["//cmd/aspect/build:__pkg__"],
     deps = [
+        "//bazel/buildeventstream/proto",
         "//pkg/aspect/build/bep",
         "//pkg/aspecterrors",
         "//pkg/bazel",
         "//pkg/hooks",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
-        "@go_googleapis//google/devtools/build/v1:build_go_proto",
     ],
 )
 
