@@ -1,0 +1,3 @@
+--
+- name: fix-visibility
+  from: .aspect/plugins/aspect-fix-visibility
