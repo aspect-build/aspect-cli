@@ -15,7 +15,7 @@ syntax = "proto3";
 package options;
 
 // option java_api_version = 2;
-option java_package = "com.google.devtools.common.options.proto";
+option go_package = "github.com/bazelbuild/bazel/src/main/protobuf/options";
 
 // IMPORTANT NOTE: These two enums must be kept in sync with their Java
 // equivalents in src/main/java/com/google/devtools/common/options.

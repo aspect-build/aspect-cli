@@ -6,12 +6,12 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/build",
     visibility = ["//cmd/aspect/build:__pkg__"],
     deps = [
-        "//bazel/buildeventstream/proto",
         "//pkg/aspect/build/bep",
         "//pkg/aspecterrors",
         "//pkg/bazel",
         "//pkg/hooks",
         "//pkg/ioutils",
+        "//third-party/github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto",
         "@com_github_spf13_cobra//:cobra",
     ],
 )

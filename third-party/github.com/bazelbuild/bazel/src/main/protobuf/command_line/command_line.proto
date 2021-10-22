@@ -15,10 +15,9 @@
 syntax = "proto3";
 package command_line;
 
-// option java_api_version = 2;
-option java_package = "com.google.devtools.build.lib.runtime.proto";
+option go_package = "github.com/bazelbuild/bazel/src/main/protobuf/command_line";
 
-import "src/main/protobuf/option_filters.proto";
+import "third-party/github.com/bazelbuild/bazel/src/main/protobuf/options/option_filters.proto";
 
 // Representation of a Bazel command line.
 message CommandLine {
