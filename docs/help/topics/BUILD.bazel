@@ -11,6 +11,7 @@ bindata(
     package = "topics",
 )
 
+# keep
 go_library(
     name = "topics",
     srcs = [":bindata"],  # keep

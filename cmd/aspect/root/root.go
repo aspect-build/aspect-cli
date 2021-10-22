@@ -7,6 +7,7 @@ Not licensed for re-use.
 package root
 
 import (
+	"aspect.build/cli/cmd/aspect/query"
 	"os"
 
 	"github.com/fatih/color"
@@ -83,6 +84,7 @@ func NewRootCmd(
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
+	cmd.AddCommand(query.NewDefaultQueryCmd())
 	cmd.AddCommand(run.NewDefaultRunCmd(pluginSystem))
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultVersionCmd())
