@@ -23,6 +23,8 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
+var isInteractive = ioutils.IsInteractive()
+
 func TestBuild(t *testing.T) {
 	t.Run("when the BES backend setup fails, the aspect build fails", func(t *testing.T) {
 		g := NewGomegaWithT(t)
@@ -60,7 +62,7 @@ func TestBuild(t *testing.T) {
 			Times(0)
 
 		hooks := hooks.New()
-		b := build.New(streams, spawner, besBackend, hooks)
+		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
 		err := b.Run(ctx, nil, []string{"//..."})
 
@@ -104,7 +106,7 @@ func TestBuild(t *testing.T) {
 			Times(0)
 
 		hooks := hooks.New()
-		b := build.New(streams, spawner, besBackend, hooks)
+		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
 		err := b.Run(ctx, nil, []string{"//..."})
 
@@ -152,7 +154,7 @@ func TestBuild(t *testing.T) {
 			Times(1)
 
 		hooks := hooks.New()
-		b := build.New(streams, spawner, besBackend, hooks)
+		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
 		err := b.Run(ctx, nil, []string{"//..."})
 
@@ -201,7 +203,7 @@ func TestBuild(t *testing.T) {
 			Times(1)
 
 		hooks := hooks.New()
-		b := build.New(streams, spawner, besBackend, hooks)
+		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
 		err := b.Run(ctx, nil, []string{"//..."})
 
@@ -247,7 +249,7 @@ func TestBuild(t *testing.T) {
 			Times(1)
 
 		hooks := hooks.New()
-		b := build.New(streams, spawner, besBackend, hooks)
+		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
 		err := b.Run(ctx, nil, []string{"//..."})
 

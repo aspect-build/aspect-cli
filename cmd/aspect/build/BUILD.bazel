@@ -13,7 +13,6 @@ go_library(
         "//pkg/ioutils",
         "//pkg/plugins/fix_visibility",
         "@com_github_manifoldco_promptui//:promptui",
-        "@com_github_mattn_go_isatty//:go-isatty",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",
     ],

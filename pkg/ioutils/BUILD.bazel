@@ -2,7 +2,8 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "ioutils",
-    srcs = ["streams.go"],
+    srcs = ["ioutils.go"],
     importpath = "aspect.build/cli/pkg/ioutils",
     visibility = ["//visibility:public"],
+    deps = ["@com_github_mattn_go_isatty//:go-isatty"],
 )

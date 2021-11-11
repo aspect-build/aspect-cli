@@ -7,17 +7,15 @@ Not licensed for re-use.
 package clean
 
 import (
-	"os"
-
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/clean"
+	"aspect.build/cli/pkg/ioutils"
 )
 
 // NewDefaultCleanCmd creates a new clean cobra command.
 func NewDefaultCleanCmd() *cobra.Command {
-	isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+	isInteractive := ioutils.IsInteractive()
 	c := clean.NewDefault(isInteractive)
 
 	cmd := &cobra.Command{

@@ -7,10 +7,7 @@ Not licensed for re-use.
 package build
 
 import (
-	"os"
-
 	"github.com/manifoldco/promptui"
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -25,7 +22,7 @@ import (
 // NewDefaultBuildCmd creates a new build cobra command with the default
 // dependencies.
 func NewDefaultBuildCmd() *cobra.Command {
-	isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+	isInteractive := ioutils.IsInteractive()
 	return NewBuildCmd(
 		ioutils.DefaultStreams,
 		bazel.New(),

@@ -7,7 +7,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/clean",
-        "@com_github_mattn_go_isatty//:go-isatty",
+        "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
     ],
 )
