@@ -13,6 +13,7 @@ go_library(
         "//pkg/ioutils",
         "//third-party/github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto",
         "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_viper//:viper",
     ],
 )
 

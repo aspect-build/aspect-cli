@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/aspect/build/bep"
@@ -22,10 +23,34 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
+const (
+	skipPromptKey = "build.skip_prompt"
+
+	SpecifiedFolderOption = "All targets in a specified folder (path relative to your WORKSPACE)"
+	CurrentFolderOption   = "All targets in current folder"
+	TargetPatternOption   = "Specific target patterns"
+
+	RememberLine1 = "Remember this choice and skip the prompt in the future"
+)
+
+type SelectRunner interface {
+	Run() (int, string, error)
+}
+
+type PromptRunner interface {
+	Run() (string, error)
+}
+
 // Build represents the aspect build command.
 type Build struct {
 	ioutils.Streams
-	bzl        bazel.Spawner
+	bzl               bazel.Spawner
+	isInteractiveMode bool
+
+	Behavior SelectRunner
+	Remember PromptRunner
+	Prefs    viper.Viper
+
 	besBackend bep.BESBackend
 	hooks      *hooks.Hooks
 }
@@ -34,20 +59,44 @@ type Build struct {
 func New(
 	streams ioutils.Streams,
 	bzl bazel.Spawner,
+	isInteractiveMode bool,
 	besBackend bep.BESBackend,
 	hooks *hooks.Hooks,
 ) *Build {
 	return &Build{
-		Streams:    streams,
-		bzl:        bzl,
-		besBackend: besBackend,
-		hooks:      hooks,
+		Streams:           streams,
+		bzl:               bzl,
+		isInteractiveMode: isInteractiveMode,
+		besBackend:        besBackend,
+		hooks:             hooks,
 	}
 }
 
 // Run runs the aspect build command, calling `bazel build` with a local Build
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
 func (b *Build) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+	skip := b.Prefs.GetBool(skipPromptKey)
+	if b.isInteractiveMode && !skip {
+		_, chosen, err := b.Behavior.Run()
+
+		if err != nil {
+			return fmt.Errorf("prompt failed: %w", err)
+		}
+
+		switch chosen {
+		case SpecifiedFolderOption:
+			fmt.Fprint(b.Streams.Stdout, "Sorry, this is not implemented yet\n")
+			return nil
+		case CurrentFolderOption:
+			fmt.Fprint(b.Streams.Stdout, "Sorry, this is not implemented yet\n")
+			return nil
+		case TargetPatternOption:
+			fmt.Fprint(b.Streams.Stdout, "Sorry, this is not implemented yet\n")
+			return nil
+		}
+
+	}
+
 	// TODO(f0rmiga): this is a hook for the build command and should be discussed
 	// as part of the plugin design.
 	defer func() {
@@ -76,7 +125,7 @@ func (b *Build) Run(ctx context.Context, cmd *cobra.Command, args []string) (exi
 	besBackendFlag := fmt.Sprintf("--bes_backend=grpc://%s", b.besBackend.Addr())
 	exitCode, bazelErr := b.bzl.Spawn(append([]string{"build", besBackendFlag}, args...))
 
-	// Process the subscribers errors before the Bazel one.
+	// Process the subscribers' errors before the Bazel one.
 	subscriberErrors := b.besBackend.Errors()
 	if len(subscriberErrors) > 0 {
 		for _, err := range subscriberErrors {

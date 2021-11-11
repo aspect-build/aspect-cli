@@ -35,7 +35,7 @@ Run 'aspect help clean' for more info.
 Instead of running 'clean' you should run 'aspect sync --configure'
 Run 'aspect help clean' for more info.
 `
-	fileIssueHint = `Bazel is a correct build tool, and it should not be possible to get inconstent state.
+	fileIssueHint = `Bazel is a correct build tool, and it should not be possible to get inconsistent state.
 We highly recommend you file a bug reporting this problem so that the offending rule
 implementation can be fixed.
 `
@@ -71,7 +71,8 @@ type Clean struct {
 func New(
 	streams ioutils.Streams,
 	bzl bazel.Spawner,
-	isInteractiveMode bool) *Clean {
+	isInteractiveMode bool,
+) *Clean {
 	return &Clean{
 		Streams:           streams,
 		isInteractiveMode: isInteractiveMode,
@@ -106,7 +107,7 @@ func NewDefault(isInteractive bool) *Clean {
 	return c
 }
 
-// Run runs the aspect build command.
+// Run runs the aspect clean command.
 func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 	skip := c.Prefs.GetBool(skipPromptKey)
 	if c.isInteractiveMode && !skip {

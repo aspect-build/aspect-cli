@@ -51,7 +51,6 @@ github.com/bazelbuild/buildtools v0.0.0-20200718160251-b1667ff58f71/go.mod h1:5J
 github.com/bazelbuild/buildtools v0.0.0-20210920153738-d6daef01a1a2 h1:hWvEw/36XcpZzKZB2LBYhKSGt72ETiIhudjxd637+4w=
 github.com/bazelbuild/buildtools v0.0.0-20210920153738-d6daef01a1a2/go.mod h1:689QdV3hBP7Vo9dJMmzhoYIyo/9iMhEmHkJcnaPRCbo=
 github.com/bazelbuild/rules_go v0.0.0-20190719190356-6dae44dc5cab/go.mod h1:MC23Dc/wkXEyk3Wpq6lCqz0ZAYOZDw2DR5y3N1q2i7M=
-github.com/bazelbuild/rules_go v0.28.0 h1:fNtx0dJpG5ENGdMj3/GICoi/7z+ixB3IIW5rERTzOgM=
 github.com/bazelbuild/rules_go v0.28.0/go.mod h1:MC23Dc/wkXEyk3Wpq6lCqz0ZAYOZDw2DR5y3N1q2i7M=
 github.com/bgentry/speakeasy v0.1.0/go.mod h1:+zsyZBPWlz7T6j88CTgSN5bM796AkVf0kBD4zp0CCIs=
 github.com/bketelsen/crypt v0.0.4/go.mod h1:aI6NrJ0pMGgvZKL1iVgXLnfIFJtfV+bKCoqOes/6LfM=

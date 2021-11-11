@@ -18,7 +18,7 @@ import (
 // NewDefaultCleanCmd creates a new clean cobra command.
 func NewDefaultCleanCmd() *cobra.Command {
 	isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-	b := clean.NewDefault(isInteractive)
+	c := clean.NewDefault(isInteractive)
 
 	cmd := &cobra.Command{
 		Use:   "clean",
@@ -53,16 +53,16 @@ Workaround inconistent state:
 	Such problems are fixable and these bugs are a high priority.
 	If you ever find an incorrect incremental build, please file a bug report,
 	and only use clean as a temporary workaround.`,
-		RunE: b.Run,
+		RunE: c.Run,
 	}
 
-	cmd.PersistentFlags().BoolVarP(&b.Expunge, "expunge", "", false, `Remove the entire output_base tree.
+	cmd.PersistentFlags().BoolVarP(&c.Expunge, "expunge", "", false, `Remove the entire output_base tree.
 This removes all build output, external repositories,
 and temp files created by Bazel.
 It also stops the Bazel server after the clean,
 equivalent to the shutdown command.`)
 
-	cmd.PersistentFlags().BoolVarP(&b.ExpungeAsync, "expunge_async", "", false, `Expunge in the background.
+	cmd.PersistentFlags().BoolVarP(&c.ExpungeAsync, "expunge_async", "", false, `Expunge in the background.
 It is safe to invoke a Bazel command in the same
 workspace while the asynchronous expunge continues to run.
 Note, however, that this may introduce IO contention.`)

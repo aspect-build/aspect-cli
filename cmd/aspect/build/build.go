@@ -7,7 +7,12 @@ Not licensed for re-use.
 package build
 
 import (
+	"os"
+
+	"github.com/manifoldco/promptui"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"aspect.build/cli/pkg/aspect/build"
 	"aspect.build/cli/pkg/aspect/build/bep"
@@ -20,9 +25,11 @@ import (
 // NewDefaultBuildCmd creates a new build cobra command with the default
 // dependencies.
 func NewDefaultBuildCmd() *cobra.Command {
+	isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 	return NewBuildCmd(
 		ioutils.DefaultStreams,
 		bazel.New(),
+		isInteractive,
 		bep.NewBESBackend(),
 		hooks.New(),
 	)
@@ -32,6 +39,7 @@ func NewDefaultBuildCmd() *cobra.Command {
 func NewBuildCmd(
 	streams ioutils.Streams,
 	bzl bazel.Spawner,
+	isInteractive bool,
 	besBackend bep.BESBackend,
 	hooks *hooks.Hooks,
 ) *cobra.Command {
@@ -41,7 +49,26 @@ func NewBuildCmd(
 	besBackend.RegisterSubscriber(fixVisibilityPlugin.BEPEventCallback)
 	hooks.RegisterPostBuild(fixVisibilityPlugin.PostBuildHook)
 
-	b := build.New(streams, bzl, besBackend, hooks)
+	b := build.New(
+		streams,
+		bzl,
+		isInteractive,
+		besBackend,
+		hooks,
+	)
+	b.Behavior = &promptui.Select{
+		Label: "What would you like to build?",
+		Items: []string{
+			build.SpecifiedFolderOption,
+			build.CurrentFolderOption,
+			build.TargetPatternOption,
+		},
+	}
+	b.Remember = &promptui.Prompt{
+		Label:     build.RememberLine1,
+		IsConfirm: true,
+	}
+	b.Prefs = *viper.GetViper()
 
 	cmd := &cobra.Command{
 		Use:   "build",
