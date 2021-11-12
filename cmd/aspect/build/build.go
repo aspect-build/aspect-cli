@@ -73,7 +73,7 @@ func NewBuildCmd(
 		Long: "Invokes bazel build on the specified targets. " +
 			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
 		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
-			return b.Run(cmd.Context(), cmd, args)
+			return b.Run(cmd.Context(), args)
 		},
 	}
 

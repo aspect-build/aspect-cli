@@ -10,9 +10,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
@@ -21,6 +22,7 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/hooks"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/pathutils"
 )
 
 const (
@@ -72,10 +74,31 @@ func New(
 	}
 }
 
+// Returns a Bazel pattern for all targets within the current folder
+func GetAllInCurrentFolderPattern() (string, error) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+	workspaceRoot := pathutils.FindWorkspaceRoot(workingDirectory)
+	if workspaceRoot == "" {
+		return "", fmt.Errorf("prompt failed: %w", "Current working directory not within a Bazel workspace!")
+	}
+	target, err := filepath.Rel(workspaceRoot, workingDirectory)
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+	if target == "." {
+		return "//...", nil
+	}
+	return "//" + target + "/...", nil
+}
+
 // Run runs the aspect build command, calling `bazel build` with a local Build
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
-func (b *Build) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+func (b *Build) Run(ctx context.Context, args []string) (exitErr error) {
 	skip := b.Prefs.GetBool(skipPromptKey)
+	target := ""
 	if b.isInteractiveMode && !skip {
 		_, chosen, err := b.Behavior.Run()
 
@@ -88,8 +111,11 @@ func (b *Build) Run(ctx context.Context, cmd *cobra.Command, args []string) (exi
 			fmt.Fprint(b.Streams.Stdout, "Sorry, this is not implemented yet\n")
 			return nil
 		case CurrentFolderOption:
-			fmt.Fprint(b.Streams.Stdout, "Sorry, this is not implemented yet\n")
-			return nil
+			target, err = GetAllInCurrentFolderPattern()
+			if err != nil {
+				return err
+			}
+			fmt.Fprint(b.Streams.Stdout, "Building "+target+"\n")
 		case TargetPatternOption:
 			fmt.Fprint(b.Streams.Stdout, "Sorry, this is not implemented yet\n")
 			return nil
@@ -123,7 +149,12 @@ func (b *Build) Run(ctx context.Context, cmd *cobra.Command, args []string) (exi
 	defer b.besBackend.GracefulStop()
 
 	besBackendFlag := fmt.Sprintf("--bes_backend=grpc://%s", b.besBackend.Addr())
-	exitCode, bazelErr := b.bzl.Spawn(append([]string{"build", besBackendFlag}, args...))
+	cmd := []string{"build"}
+	if target != "" {
+		cmd = append(cmd, target)
+	}
+	cmd = append(cmd, besBackendFlag)
+	exitCode, bazelErr := b.bzl.Spawn(append(cmd, args...))
 
 	// Process the subscribers' errors before the Bazel one.
 	subscriberErrors := b.besBackend.Errors()

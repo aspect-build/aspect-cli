@@ -64,7 +64,7 @@ func TestBuild(t *testing.T) {
 		hooks := hooks.New()
 		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
-		err := b.Run(ctx, nil, []string{"//..."})
+		err := b.Run(ctx, []string{"//..."})
 
 		g.Expect(err).To(MatchError(fmt.Errorf("failed to run build command: %w", setupErr)))
 	})
@@ -108,7 +108,7 @@ func TestBuild(t *testing.T) {
 		hooks := hooks.New()
 		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
-		err := b.Run(ctx, nil, []string{"//..."})
+		err := b.Run(ctx, []string{"//..."})
 
 		g.Expect(err).To(MatchError(fmt.Errorf("failed to run build command: %w", serveWaitErr)))
 	})
@@ -156,7 +156,7 @@ func TestBuild(t *testing.T) {
 		hooks := hooks.New()
 		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
-		err := b.Run(ctx, nil, []string{"//..."})
+		err := b.Run(ctx, []string{"//..."})
 
 		g.Expect(err).To(MatchError(expectErr))
 	})
@@ -205,7 +205,7 @@ func TestBuild(t *testing.T) {
 		hooks := hooks.New()
 		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
-		err := b.Run(ctx, nil, []string{"//..."})
+		err := b.Run(ctx, []string{"//..."})
 
 		g.Expect(err).To(MatchError(&aspecterrors.ExitError{ExitCode: 1}))
 		g.Expect(stderr.String()).To(Equal("Error: failed to run build command: error 1\nError: failed to run build command: error 2\n"))
@@ -251,7 +251,7 @@ func TestBuild(t *testing.T) {
 		hooks := hooks.New()
 		b := build.New(streams, spawner, isInteractive, besBackend, hooks)
 		ctx := context.Background()
-		err := b.Run(ctx, nil, []string{"//..."})
+		err := b.Run(ctx, []string{"//..."})
 
 		g.Expect(err).To(BeNil())
 	})
