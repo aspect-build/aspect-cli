@@ -1,3 +1,4 @@
---
 - name: fix-visibility
-  from: .aspect/plugins/aspect-fix-visibility
+  from: ../../bazel-bin/plugins/fix_visibility/fix_visibility_/fix_visibility
+  # The possible log levels are: TRACE, DEBUG, INFO, WARN, ERROR, OFF.
+  log_level: OFF
