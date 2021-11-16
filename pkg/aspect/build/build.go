@@ -29,7 +29,7 @@ const (
 	skipPromptKey = "build.skip_prompt"
 
 	SpecifiedFolderOption = "All targets in a specified folder (path relative to your WORKSPACE)"
-	CurrentFolderOption   = "All targets in current folder"
+	CurrentPackageOption  = "All targets within current package"
 	TargetPatternOption   = "Specific target patterns"
 
 	RememberLine1 = "Remember this choice and skip the prompt in the future"
@@ -74,24 +74,32 @@ func New(
 	}
 }
 
-// Returns a Bazel pattern for all targets within the current folder
-func GetAllInCurrentFolderPattern() (string, error) {
+// TODO: implement
+// func GetAllInSpecifiedFolderPatern() (string, error) {
+
+// }
+
+// Returns a pattern for all targets within the current folder.
+// If findNearestParentPackage is true, then this function returns a pattern for all targets
+func GetAllInCurrentPackagePattern() (string, error) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("prompt failed: %w", err)
 	}
 	workspaceRoot := pathutils.FindWorkspaceRoot(workingDirectory)
 	if workspaceRoot == "" {
-		return "", fmt.Errorf("prompt failed: %w", "Current working directory not within a Bazel workspace!")
+		return "", fmt.Errorf("prompt failed: Current working directory not within a Bazel workspace!")
 	}
-	target, err := filepath.Rel(workspaceRoot, workingDirectory)
+	pkg := pathutils.FindNearestParentPackage(workingDirectory)
+	if pkg == workspaceRoot {
+		// Current directory is the WORKSPACE root
+		return "//:all", nil
+	}
+	pkg, err = filepath.Rel(workspaceRoot, pkg)
 	if err != nil {
 		return "", fmt.Errorf("prompt failed: %w", err)
 	}
-	if target == "." {
-		return "//...", nil
-	}
-	return "//" + target + "/...", nil
+	return "//" + pkg + ":all", nil
 }
 
 // Run runs the aspect build command, calling `bazel build` with a local Build
@@ -110,8 +118,8 @@ func (b *Build) Run(ctx context.Context, args []string) (exitErr error) {
 		case SpecifiedFolderOption:
 			fmt.Fprint(b.Streams.Stdout, "Sorry, this is not implemented yet\n")
 			return nil
-		case CurrentFolderOption:
-			target, err = GetAllInCurrentFolderPattern()
+		case CurrentPackageOption:
+			target, err = GetAllInCurrentPackagePattern()
 			if err != nil {
 				return err
 			}

@@ -57,7 +57,7 @@ func NewBuildCmd(
 		Label: "What would you like to build?",
 		Items: []string{
 			build.SpecifiedFolderOption,
-			build.CurrentFolderOption,
+			build.CurrentPackageOption,
 			build.TargetPatternOption,
 		},
 	}

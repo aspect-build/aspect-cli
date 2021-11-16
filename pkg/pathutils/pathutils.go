@@ -28,15 +28,35 @@ func IsValidWorkspace(path string) bool {
 		IsValidFile(filepath.Join(path, "WORKSPACE.bazel"))
 }
 
-func FindWorkspaceRoot(root string) string {
-	if IsValidWorkspace(root) {
-		return root
+// IsValidPackage returns true iff a file named BUILD or BUILD.bazel exists
+// within the dir at the specified path
+func IsValidPackage(path string) bool {
+	return IsValidFile(filepath.Join(path, "BUILD")) ||
+		IsValidFile(filepath.Join(path, "BUILD.bazel"))
+}
+
+func FindWorkspaceRoot(path string) string {
+	if IsValidWorkspace(path) {
+		return path
 	}
 
-	parentDirectory := filepath.Dir(root)
-	if parentDirectory == root {
+	parentDirectory := filepath.Dir(path)
+	if parentDirectory == path {
 		return ""
 	}
 
 	return FindWorkspaceRoot(parentDirectory)
+}
+
+func FindNearestParentPackage(path string) string {
+	if IsValidPackage(path) {
+		return path
+	}
+
+	parentDirectory := filepath.Dir(path)
+	if parentDirectory == path {
+		return ""
+	}
+
+	return FindNearestParentPackage(parentDirectory)
 }
