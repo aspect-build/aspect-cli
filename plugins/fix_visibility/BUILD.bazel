@@ -7,8 +7,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//pkg/ioutils",
-        "//pkg/plugins/v1alpha1/config",
-        "//pkg/plugins/v1alpha1/plugin",
+        "//pkg/plugin/sdk/v1alpha1/config",
         "//third-party/github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto",
         "@bazel_gazelle//label:go_default_library",
         "@com_github_bazelbuild_buildtools//edit:go_default_library",

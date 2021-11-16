@@ -19,7 +19,7 @@ import (
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugins/v1alpha1/proto"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/proto"
 )
 
 // GRPCPlugin represents a Plugin that communicates over gRPC.

@@ -20,7 +20,7 @@ import (
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugins/v1alpha1/config"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/config"
 )
 
 func main() {

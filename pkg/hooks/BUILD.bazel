@@ -8,6 +8,5 @@ go_library(
     deps = [
         "//pkg/aspecterrors",
         "//pkg/ioutils",
-        "//pkg/plugins/v1alpha1/plugin",
     ],
 )

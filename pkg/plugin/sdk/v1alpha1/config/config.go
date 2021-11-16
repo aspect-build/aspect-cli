@@ -9,7 +9,7 @@ package config
 import (
 	goplugin "github.com/hashicorp/go-plugin"
 
-	"aspect.build/cli/pkg/plugins/v1alpha1/plugin"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/plugin"
 )
 
 // DefaultPluginName is the name each aspect plugin must provide.

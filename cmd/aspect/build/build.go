@@ -15,7 +15,7 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/hooks"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugins/v1alpha1"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha1"
 )
 
 // NewDefaultBuildCmd creates a new build cobra command with the default

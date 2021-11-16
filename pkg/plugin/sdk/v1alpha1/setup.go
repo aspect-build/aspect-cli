@@ -14,8 +14,8 @@ import (
 	goplugin "github.com/hashicorp/go-plugin"
 
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugins/v1alpha1/config"
-	"aspect.build/cli/pkg/plugins/v1alpha1/plugin"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/config"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/plugin"
 )
 
 // PluginSystem is the interface that defines all the methods for the aspect CLI
