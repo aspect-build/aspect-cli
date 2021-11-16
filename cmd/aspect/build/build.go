@@ -15,7 +15,7 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/hooks"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha1"
+	"aspect.build/cli/pkg/plugin/system"
 )
 
 // NewDefaultBuildCmd creates a new build cobra command with the default
@@ -42,7 +42,7 @@ func NewBuildCmd(
 		Long: "Invokes bazel build on the specified targets. " +
 			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
 		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
-			pluginSystem := v1alpha1.NewPluginSystem()
+			pluginSystem := system.NewPluginSystem()
 			if err := pluginSystem.Configure(streams); err != nil {
 				return err
 			}

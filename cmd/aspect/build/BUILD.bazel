@@ -12,7 +12,7 @@ go_library(
         "//pkg/bazel",
         "//pkg/hooks",
         "//pkg/ioutils",
-        "//pkg/plugin/sdk/v1alpha1",
+        "//pkg/plugin/system",
         "@com_github_spf13_cobra//:cobra",
     ],
 )
