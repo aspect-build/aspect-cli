@@ -25,3 +25,69 @@ go_binary(
     ],
     visibility = ["//visibility:public"],
 )
+
+go_binary(
+    name = "fix-visibility-darwin-amd64",
+    out = "fix-visibility-darwin_amd64",
+    embed = [":fix-visibility_lib"],
+    gc_linkopts = [
+        "-s",
+        "-w",
+    ],
+    goarch = "amd64",
+    goos = "darwin",
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+go_binary(
+    name = "fix-visibility-darwin-arm64",
+    out = "fix-visibility-darwin_arm64",
+    embed = [":fix-visibility_lib"],
+    gc_linkopts = [
+        "-s",
+        "-w",
+    ],
+    goarch = "arm64",
+    goos = "darwin",
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+go_binary(
+    name = "fix-visibility-linux-amd64",
+    out = "fix-visibility-linux_amd64",
+    embed = [":fix-visibility_lib"],
+    gc_linkopts = [
+        "-s",
+        "-w",
+    ],
+    goarch = "amd64",
+    goos = "linux",
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+go_binary(
+    name = "fix-visibility-linux-arm64",
+    out = "fix-visibility-linux_arm64",
+    embed = [":fix-visibility_lib"],
+    gc_linkopts = [
+        "-s",
+        "-w",
+    ],
+    goarch = "arm64",
+    goos = "linux",
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+go_binary(
+    name = "fix-visibility-windows-amd64",
+    out = "fix-visibility-windows_amd64.exe",
+    embed = [":fix-visibility_lib"],
+    goarch = "amd64",
+    goos = "windows",
+    pure = "on",
+    visibility = ["//visibility:public"],
+)

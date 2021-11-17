@@ -31,3 +31,8 @@ jobs:
             bazel-out/*-opt-*/bin/cmd/aspect/aspect-darwin_amd64
             bazel-out/*-opt-*/bin/cmd/aspect/aspect-darwin_arm64
             bazel-out/*-opt-*/bin/cmd/aspect/aspect-windows_amd64.exe
+            bazel-out/*/bin/plugins/fix-visibility/fix-visibility-linux_amd64
+            bazel-out/*/bin/plugins/fix-visibility/fix-visibility-linux_arm64
+            bazel-out/*/bin/plugins/fix-visibility/fix-visibility-darwin_amd64
+            bazel-out/*/bin/plugins/fix-visibility/fix-visibility-darwin_arm64
+            bazel-out/*/bin/plugins/fix-visibility/fix-visibility-windows_amd64.exe
