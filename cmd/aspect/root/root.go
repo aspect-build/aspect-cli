@@ -7,10 +7,7 @@ Not licensed for re-use.
 package root
 
 import (
-	"os"
-
 	"github.com/fatih/color"
-	"github.com/mattn/go-isatty"
 	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -32,7 +29,7 @@ var (
 )
 
 func NewDefaultRootCmd() *cobra.Command {
-	defaultInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+	defaultInteractive := ioutils.IsInteractive()
 	return NewRootCmd(ioutils.DefaultStreams, defaultInteractive)
 }
 
