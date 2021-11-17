@@ -7,7 +7,7 @@ multi_platform_binaries(
 
 multi_platform_binaries(
     name = "fix-visibility",
-    embed = ["//plugins/fix_visibility:fix_visibility_lib"],
+    embed = ["//plugins/fix-visibility:fix-visibility_lib"],
     prefix = "plugin-",
 )
 
