@@ -1,6 +1,7 @@
 package bazel
 
 import (
+	"aspect.build/cli/pkg/pathutils"
 	"bufio"
 	"fmt"
 	"github.com/bazelbuild/bazelisk/core"
@@ -188,7 +189,7 @@ func GetEnvOrConfig(name string) string {
 		if err != nil {
 			return
 		}
-		workspaceRoot := findWorkspaceRoot(workingDirectory)
+		workspaceRoot := pathutils.FindWorkspaceRoot(workingDirectory)
 		if workspaceRoot == "" {
 			return
 		}
@@ -218,35 +219,6 @@ func GetEnvOrConfig(name string) string {
 	return fileConfig[name]
 }
 
-// isValidWorkspace returns true iff the supplied path is the workspace root, defined by the presence of
-// a file named WORKSPACE or WORKSPACE.bazel
-// see https://github.com/bazelbuild/bazel/blob/8346ea4cfdd9fbd170d51a528fee26f912dad2d5/src/main/cpp/workspace_layout.cc#L37
-func isValidWorkspace(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-
-	return !info.IsDir()
-}
-
-func findWorkspaceRoot(root string) string {
-	if isValidWorkspace(filepath.Join(root, "WORKSPACE")) {
-		return root
-	}
-
-	if isValidWorkspace(filepath.Join(root, "WORKSPACE.bazel")) {
-		return root
-	}
-
-	parentDirectory := filepath.Dir(root)
-	if parentDirectory == root {
-		return ""
-	}
-
-	return findWorkspaceRoot(parentDirectory)
-}
-
 func getBazelVersion() (string, error) {
 	// Check in this order:
 	// - env var "USE_BAZEL_VERSION" is set to a specific version.
@@ -270,7 +242,7 @@ func getBazelVersion() (string, error) {
 		return "", fmt.Errorf("could not get working directory: %v", err)
 	}
 
-	workspaceRoot := findWorkspaceRoot(workingDirectory)
+	workspaceRoot := pathutils.FindWorkspaceRoot(workingDirectory)
 	if len(workspaceRoot) != 0 {
 		bazelVersionPath := filepath.Join(workspaceRoot, ".bazelversion")
 		if _, err := os.Stat(bazelVersionPath); err == nil {
@@ -377,7 +349,7 @@ func maybeDelegateToWrapper(bazel string) string {
 		return bazel
 	}
 
-	root := findWorkspaceRoot(wd)
+	root := pathutils.FindWorkspaceRoot(wd)
 	wrapper := filepath.Join(root, wrapperPath)
 	if stat, err := os.Stat(wrapper); err != nil || stat.IsDir() || stat.Mode().Perm()&0001 == 0 {
 		return bazel
