@@ -46,10 +46,10 @@ func New(streams ioutils.Streams, bzl bazel.Spawner, isInteractive bool) *Query 
 	}
 }
 
-func (v *Query) Run(_ *cobra.Command, args []string) error {
+func (q *Query) Run(_ *cobra.Command, args []string) error {
 	presets := make(map[string]*PresetQuery)
 	var names []string
-	for _, p := range v.Presets {
+	for _, p := range q.Presets {
 		presets[p.Name] = p
 		names = append(names, fmt.Sprintf("%s: %s", p.Name, p.Description))
 	}
@@ -66,12 +66,12 @@ func (v *Query) Run(_ *cobra.Command, args []string) error {
 			return fmt.Errorf("prompt failed: %w", err)
 		}
 
-		preset = v.Presets[i]
+		preset = q.Presets[i]
 	} else {
 		maybeQueryOrPreset := args[0]
 		if strings.HasPrefix(maybeQueryOrPreset, "\"") || strings.HasPrefix(maybeQueryOrPreset, "'") {
 			// Treat this as a raw query expression?
-			return v.RunQuery(maybeQueryOrPreset, []string{})
+			return q.RunQuery(maybeQueryOrPreset, []string{})
 		} else if value, ok := presets[maybeQueryOrPreset]; ok {
 			// Treat this as the name of the preset query, so don't prompt for it.
 			preset = value
@@ -86,25 +86,32 @@ func (v *Query) Run(_ *cobra.Command, args []string) error {
 	placeholders := regexp.MustCompile(`(\?[a-zA-Z]*)`).FindAllString(query, -1)
 
 	if len(placeholders) > 0 {
-		for _, placeholder := range placeholders {
-			prompt := &promptui.Prompt{
-				Label: fmt.Sprintf("Value for '%s'", strings.TrimPrefix(placeholder, "?")),
+		if (len(placeholders) == len(args) - 1) {
+			for i, placeholder := range placeholders {
+				query = strings.ReplaceAll(query, placeholder, args[i+1])
 			}
-			val, err := prompt.Run()
-			if err != nil {
-				return fmt.Errorf("prompt failed: %w", err)
+		} else {
+			for _, placeholder := range placeholders {
+				prompt := &promptui.Prompt{
+					Label: fmt.Sprintf("Value for '%s'", strings.TrimPrefix(placeholder, "?")),
+				}
+				val, err := prompt.Run()
+	
+				if err != nil {
+					return fmt.Errorf("prompt failed: %w", err)
+				}
+	
+				query = strings.ReplaceAll(query, placeholder, val)
 			}
-
-			query = strings.ReplaceAll(query, placeholder, val)
 		}
 	}
 
-	return v.RunQuery(query, []string{})
+	return q.RunQuery(query, []string{})
 }
 
-func (v *Query) RunQuery(query string, flags []string) error {
-	if v.ShowGraph {
-		return v.RunQueryAndOpenResult(query, flags)
+func (q *Query) RunQuery(query string, flags []string) error {
+	if q.ShowGraph {
+		return q.RunQueryAndOpenResult(query, flags)
 	}
 
 	bazelCmd := []string{
@@ -114,7 +121,7 @@ func (v *Query) RunQuery(query string, flags []string) error {
 
 	bazelCmd = append(bazelCmd, flags...)
 
-	if exitCode, err := v.bzl.Spawn(bazelCmd); exitCode != 0 {
+	if exitCode, err := q.bzl.Spawn(bazelCmd); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,
@@ -125,7 +132,7 @@ func (v *Query) RunQuery(query string, flags []string) error {
 	return nil
 }
 
-func (v *Query) RunQueryAndOpenResult(query string, flags []string) error {
+func (q *Query) RunQueryAndOpenResult(query string, flags []string) error {
 	bazelCmd := []string{
 		"query",
 		query,
@@ -139,7 +146,7 @@ func (v *Query) RunQueryAndOpenResult(query string, flags []string) error {
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := v.bzl.RunCommand(bazelCmd, w)
+		_, err := q.bzl.RunCommand(bazelCmd, w)
 		bazelErrs <- err
 	}()
 

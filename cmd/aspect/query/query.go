@@ -32,6 +32,7 @@ func NewQueryCommand(streams ioutils.Streams, bzl bazel.Spawner) *cobra.Command 
 	cmd := &cobra.Command{
 		Use:   "query",
 		Short: "Executes a dependency graph query.",
+		Long: "Executes a query language expression over a specified subgraph of the build dependency graph.",
 		RunE:  q.Run,
 	}
 
