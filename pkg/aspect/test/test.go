@@ -7,11 +7,10 @@ Not licensed for re-use.
 package test
 
 import (
+	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/spf13/cobra"
-
-	"aspect.build/cli/pkg/aspecterrors"
 )
 
 type Test struct {

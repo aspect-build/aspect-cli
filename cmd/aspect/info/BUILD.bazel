@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//pkg/aspect/info",
         "//pkg/ioutils",
+        "//pkg/pathutils",
         "@com_github_spf13_cobra//:cobra",
     ],
 )

@@ -7,6 +7,7 @@ Not licensed for re-use.
 package build
 
 import (
+	"aspect.build/cli/pkg/pathutils"
 	"github.com/spf13/cobra"
 
 	rootFlags "aspect.build/cli/cmd/aspect/root/flags"
@@ -42,6 +43,11 @@ func NewBuildCmd(
 		Long: "Invokes bazel build on the specified targets. " +
 			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
 		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
+			err := pathutils.CmdNotInvokedInsideWorkspace("build")
+			if err != nil {
+				return err
+			}
+
 			pluginSystem := system.NewPluginSystem()
 			if err := pluginSystem.Configure(streams); err != nil {
 				return err

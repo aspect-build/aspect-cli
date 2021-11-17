@@ -6,6 +6,7 @@ Not licensed for re-use.
 package pathutils
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -45,4 +46,16 @@ func FindWorkspaceRoot(path string) string {
 	}
 
 	return FindWorkspaceRoot(parentDirectory)
+}
+
+func CmdNotInvokedInsideWorkspace(cmdName string) error {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("could not resolve working directory: %w", err)
+	}
+	workspaceRoot := FindWorkspaceRoot(workingDirectory)
+	if workspaceRoot == "" {
+		return fmt.Errorf("the '%s' command is only supported from within a workspace", cmdName)
+	}
+	return nil
 }

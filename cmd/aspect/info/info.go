@@ -7,6 +7,7 @@ Not licensed for re-use
 package info
 
 import (
+	"aspect.build/cli/pkg/pathutils"
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/info"
@@ -18,7 +19,7 @@ func NewDefaultInfoCmd() *cobra.Command {
 }
 
 func NewInfoCmd(streams ioutils.Streams) *cobra.Command {
-	v := info.New(streams)
+	i := info.New(streams)
 
 	cmd := &cobra.Command{
 		Use:   "info",
@@ -42,10 +43,17 @@ the bazel User Manual, and can be programmatically obtained with
 See also 'bazel version' for more detailed bazel version
 information.`,
 		Args: cobra.MaximumNArgs(1),
-		RunE: v.Run,
+		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
+			err := pathutils.CmdNotInvokedInsideWorkspace("info")
+			if err != nil {
+				return err
+			}
+
+			return i.Run(cmd, args)
+		},
 	}
 
-	cmd.PersistentFlags().BoolVarP(&v.ShowMakeEnv, "show_make_env", "", false, `include the set of key/value pairs in the "Make" environment,
+	cmd.PersistentFlags().BoolVarP(&i.ShowMakeEnv, "show_make_env", "", false, `include the set of key/value pairs in the "Make" environment,
 accessible within BUILD files`)
 	return cmd
 }
