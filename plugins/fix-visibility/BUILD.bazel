@@ -28,7 +28,7 @@ go_binary(
 
 go_binary(
     name = "fix-visibility-darwin-amd64",
-    out = "fix-visibility-darwin_amd64",
+    out = "aspect-fix-visibility-darwin_amd64",
     embed = [":fix-visibility_lib"],
     gc_linkopts = [
         "-s",
@@ -42,7 +42,7 @@ go_binary(
 
 go_binary(
     name = "fix-visibility-darwin-arm64",
-    out = "fix-visibility-darwin_arm64",
+    out = "aspect-fix-visibility-darwin_arm64",
     embed = [":fix-visibility_lib"],
     gc_linkopts = [
         "-s",
@@ -56,7 +56,7 @@ go_binary(
 
 go_binary(
     name = "fix-visibility-linux-amd64",
-    out = "fix-visibility-linux_amd64",
+    out = "aspect-fix-visibility-linux_amd64",
     embed = [":fix-visibility_lib"],
     gc_linkopts = [
         "-s",
@@ -70,7 +70,7 @@ go_binary(
 
 go_binary(
     name = "fix-visibility-linux-arm64",
-    out = "fix-visibility-linux_arm64",
+    out = "aspect-fix-visibility-linux_arm64",
     embed = [":fix-visibility_lib"],
     gc_linkopts = [
         "-s",
@@ -84,7 +84,7 @@ go_binary(
 
 go_binary(
     name = "fix-visibility-windows-amd64",
-    out = "fix-visibility-windows_amd64.exe",
+    out = "aspect-fix-visibility-windows_amd64.exe",
     embed = [":fix-visibility_lib"],
     goarch = "amd64",
     goos = "windows",
