@@ -44,12 +44,9 @@ See also 'bazel version' for more detailed bazel version
 information.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
-			err := pathutils.CmdNotInvokedInsideWorkspace("info")
-			if err != nil {
-				return err
-			}
-
-			return i.Run(cmd, args)
+			return pathutils.InvokeCmdInsideWorkspace("info", func() error {
+				return i.Run(cmd, args)
+			})
 		},
 	}
 

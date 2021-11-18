@@ -52,17 +52,14 @@ Workaround inconistent state:
 	If you ever find an incorrect incremental build, please file a bug report,
 	and only use clean as a temporary workaround.`,
 		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
-			err := pathutils.CmdNotInvokedInsideWorkspace("clean")
-			if err != nil {
-				return err
-			}
+			return pathutils.InvokeCmdInsideWorkspace("clean", func() error {
+				isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
+				if err != nil {
+					return err
+				}
 
-			isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
-			if err != nil {
-				return err
-			}
-
-			return c.Run(cmd, args, isInteractiveMode)
+				return c.Run(cmd, args, isInteractiveMode)
+			})
 		},
 	}
 

@@ -48,7 +48,7 @@ func FindWorkspaceRoot(path string) string {
 	return FindWorkspaceRoot(parentDirectory)
 }
 
-func CmdNotInvokedInsideWorkspace(cmdName string) error {
+func InvokeCmdInsideWorkspace(cmdName string, fn func() error) error {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("could not resolve working directory: %w", err)
@@ -57,6 +57,10 @@ func CmdNotInvokedInsideWorkspace(cmdName string) error {
 	if workspaceRoot == "" {
 		return fmt.Errorf("the '%s' command is only supported from within a workspace " +
 			"(below a directory having a WORKSPACE file)", cmdName)
+	}
+	err = fn()
+	if err != nil {
+		return err
 	}
 	return nil
 }

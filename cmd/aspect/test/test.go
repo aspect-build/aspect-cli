@@ -37,12 +37,9 @@ See 'bazel help target-syntax' for details and examples on how to
 specify targets.
 `,
 		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
-			err := pathutils.CmdNotInvokedInsideWorkspace("test")
-			if err != nil {
-				return err
-			}
-
-			return t.Run(cmd, args)
+			return pathutils.InvokeCmdInsideWorkspace("test", func() error {
+				return t.Run(cmd, args)
+			})
 		},
 	}
 

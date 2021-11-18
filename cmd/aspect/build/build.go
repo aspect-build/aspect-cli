@@ -43,29 +43,26 @@ func NewBuildCmd(
 		Long: "Invokes bazel build on the specified targets. " +
 			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
 		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
-			err := pathutils.CmdNotInvokedInsideWorkspace("build")
-			if err != nil {
-				return err
-			}
+			return pathutils.InvokeCmdInsideWorkspace("build", func() error {
+				pluginSystem := system.NewPluginSystem()
+				if err := pluginSystem.Configure(streams); err != nil {
+					return err
+				}
+				defer pluginSystem.TearDown()
 
-			pluginSystem := system.NewPluginSystem()
-			if err := pluginSystem.Configure(streams); err != nil {
-				return err
-			}
-			defer pluginSystem.TearDown()
+				for node := pluginSystem.PluginList().Head; node != nil; node = node.Next {
+					besBackend.RegisterSubscriber(node.Plugin.BEPEventCallback)
+					hooks.RegisterPostBuild(node.Plugin.PostBuildHook)
+				}
 
-			for node := pluginSystem.PluginList().Head; node != nil; node = node.Next {
-				besBackend.RegisterSubscriber(node.Plugin.BEPEventCallback)
-				hooks.RegisterPostBuild(node.Plugin.PostBuildHook)
-			}
+				isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
+				if err != nil {
+					return err
+				}
 
-			isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
-			if err != nil {
-				return err
-			}
-
-			b := build.New(streams, bzl, besBackend, hooks)
-			return b.Run(cmd.Context(), cmd, args, isInteractiveMode)
+				b := build.New(streams, bzl, besBackend, hooks)
+				return b.Run(cmd.Context(), cmd, args, isInteractiveMode)
+			})
 		},
 	}
 
