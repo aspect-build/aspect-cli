@@ -7,7 +7,7 @@ Not licensed for re-use.
 package clean
 
 import (
-	"aspect.build/cli/pkg/ioutils"
+	rootFlags "aspect.build/cli/cmd/aspect/root/flags"
 	"aspect.build/cli/pkg/pathutils"
 	"github.com/spf13/cobra"
 
@@ -16,8 +16,7 @@ import (
 
 // NewDefaultCleanCmd creates a new clean cobra command.
 func NewDefaultCleanCmd() *cobra.Command {
-	isInteractive := ioutils.IsInteractive()
-	c := clean.NewDefault(isInteractive)
+	c := clean.NewDefault()
 
 	cmd := &cobra.Command{
 		Use:   "clean",
@@ -58,7 +57,12 @@ Workaround inconistent state:
 				return err
 			}
 
-			return c.Run(cmd, args)
+			isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
+			if err != nil {
+				return err
+			}
+
+			return c.Run(cmd, args, isInteractiveMode)
 		},
 	}
 

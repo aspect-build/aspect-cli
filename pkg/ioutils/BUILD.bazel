@@ -8,8 +8,5 @@ go_library(
     ],
     importpath = "aspect.build/cli/pkg/ioutils",
     visibility = ["//visibility:public"],
-    deps = [
-        "@com_github_manifoldco_promptui//:promptui",
-        "@com_github_mattn_go_isatty//:go-isatty",
-    ],
+    deps = ["@com_github_manifoldco_promptui//:promptui"],
 )

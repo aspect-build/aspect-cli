@@ -55,7 +55,8 @@ func CmdNotInvokedInsideWorkspace(cmdName string) error {
 	}
 	workspaceRoot := FindWorkspaceRoot(workingDirectory)
 	if workspaceRoot == "" {
-		return fmt.Errorf("the '%s' command is only supported from within a workspace", cmdName)
+		return fmt.Errorf("the '%s' command is only supported from within a workspace " +
+			"(below a directory having a WORKSPACE file)", cmdName)
 	}
 	return nil
 }

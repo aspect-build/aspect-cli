@@ -55,7 +55,6 @@ type PromptRunner interface {
 type Clean struct {
 	ioutils.Streams
 	bzl               bazel.Spawner
-	isInteractiveMode bool
 
 	Behavior   SelectRunner
 	Workaround PromptRunner
@@ -69,20 +68,17 @@ type Clean struct {
 // New creates a Clean command.
 func New(
 	streams ioutils.Streams,
-	bzl bazel.Spawner,
-	isInteractiveMode bool) *Clean {
+	bzl bazel.Spawner) *Clean {
 	return &Clean{
 		Streams:           streams,
-		isInteractiveMode: isInteractiveMode,
 		bzl:               bzl,
 	}
 }
 
-func NewDefault(isInteractive bool) *Clean {
+func NewDefault() *Clean {
 	c := New(
 		ioutils.DefaultStreams,
-		bazel.New(),
-		isInteractive)
+		bazel.New())
 	c.Behavior = &promptui.Select{
 		Label: "Clean can have a few behaviors. Which do you want?",
 		Items: []string{
@@ -106,9 +102,9 @@ func NewDefault(isInteractive bool) *Clean {
 }
 
 // Run runs the aspect build command.
-func (c *Clean) Run(_ *cobra.Command, _ []string) error {
+func (c *Clean) Run(_ *cobra.Command, _ []string, isInteractiveMode bool) error {
 	skip := c.Prefs.GetBool(skipPromptKey)
-	if c.isInteractiveMode && !skip {
+	if isInteractiveMode && !skip {
 
 		_, chosen, err := c.Behavior.Run()
 
