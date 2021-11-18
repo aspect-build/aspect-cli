@@ -9,30 +9,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
-func IsFile(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-
-	return !info.IsDir()
+func IsFileReadable(path string) bool {
+	const R_OK uint32 = 4
+	return syscall.Access(path, R_OK) != syscall.EACCES
 }
 
-// IsValidWorkspace isValidWorkspace returns true iff the supplied path is the workspace root, defined by the presence of
-// a file named WORKSPACE or WORKSPACE.bazel
+// IsValidWorkspace isValidWorkspace returns true iff the supplied path is the workspace root,
+// defined by the presence of a file named WORKSPACE or WORKSPACE.bazel
 // see https://github.com/bazelbuild/bazel/blob/8346ea4cfdd9fbd170d51a528fee26f912dad2d5/src/main/cpp/workspace_layout.cc#L37
 func IsValidWorkspace(path string) bool {
-	return IsFile(filepath.Join(path, "WORKSPACE")) ||
-		IsFile(filepath.Join(path, "WORKSPACE.bazel"))
+	return IsFileReadable(filepath.Join(path, "WORKSPACE")) ||
+		IsFileReadable(filepath.Join(path, "WORKSPACE.bazel"))
 }
 
 // IsValidPackage returns true iff a file named BUILD or BUILD.bazel exists
 // within the dir at the specified path
 func IsValidPackage(path string) bool {
-	return IsFile(filepath.Join(path, "BUILD")) ||
-		IsFile(filepath.Join(path, "BUILD.bazel"))
+	return IsFileReadable(filepath.Join(path, "BUILD")) ||
+		IsFileReadable(filepath.Join(path, "BUILD.bazel"))
 }
 
 func FindWorkspaceRoot(path string) string {
@@ -40,12 +37,19 @@ func FindWorkspaceRoot(path string) string {
 		return path
 	}
 
-	parentDirectory := filepath.Dir(path)
-	if parentDirectory == path {
-		return ""
+	curPath := path
+	parPath := filepath.Dir(curPath)
+	// The stopping condition occurs when we've reached the root directory on disk,
+	// ie. when the current folder's parent is itself.
+	for parPath != curPath {
+		curPath = parPath
+		if IsValidWorkspace(curPath) {
+			return curPath
+		}
+		parPath = filepath.Dir(curPath)
 	}
 
-	return FindWorkspaceRoot(parentDirectory)
+	return ""
 }
 
 func InvokeCmdInsideWorkspace(cmdName string, fn func() error) error {
