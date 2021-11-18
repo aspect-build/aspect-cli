@@ -7,10 +7,11 @@ Not licensed for re-use.
 package test
 
 import (
+	"github.com/spf13/cobra"
+
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
-	"github.com/spf13/cobra"
 )
 
 type Test struct {
@@ -25,11 +26,11 @@ func New(streams ioutils.Streams, bzl bazel.Spawner) *Test {
 	}
 }
 
-func (v *Test) Run(_ *cobra.Command, args []string) error {
+func (testCmd *Test) Run(_ *cobra.Command, args []string) error {
 	bazelCmd := []string{"test"}
 	bazelCmd = append(bazelCmd, args...)
 
-	if exitCode, err := v.bzl.Spawn(bazelCmd); exitCode != 0 {
+	if exitCode, err := testCmd.bzl.Spawn(bazelCmd); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

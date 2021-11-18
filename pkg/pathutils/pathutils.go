@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 )
 
-func IsValidFile(path string) bool {
+func IsFile(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false
@@ -20,19 +20,19 @@ func IsValidFile(path string) bool {
 	return !info.IsDir()
 }
 
-// isValidWorkspace returns true iff the supplied path is the workspace root, defined by the presence of
+// IsValidWorkspace isValidWorkspace returns true iff the supplied path is the workspace root, defined by the presence of
 // a file named WORKSPACE or WORKSPACE.bazel
 // see https://github.com/bazelbuild/bazel/blob/8346ea4cfdd9fbd170d51a528fee26f912dad2d5/src/main/cpp/workspace_layout.cc#L37
 func IsValidWorkspace(path string) bool {
-	return IsValidFile(filepath.Join(path, "WORKSPACE")) ||
-		IsValidFile(filepath.Join(path, "WORKSPACE.bazel"))
+	return IsFile(filepath.Join(path, "WORKSPACE")) ||
+		IsFile(filepath.Join(path, "WORKSPACE.bazel"))
 }
 
 // IsValidPackage returns true iff a file named BUILD or BUILD.bazel exists
 // within the dir at the specified path
 func IsValidPackage(path string) bool {
-	return IsValidFile(filepath.Join(path, "BUILD")) ||
-		IsValidFile(filepath.Join(path, "BUILD.bazel"))
+	return IsFile(filepath.Join(path, "BUILD")) ||
+		IsFile(filepath.Join(path, "BUILD.bazel"))
 }
 
 func FindWorkspaceRoot(path string) string {

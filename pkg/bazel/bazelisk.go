@@ -1,14 +1,8 @@
 package bazel
 
 import (
-	"aspect.build/cli/pkg/pathutils"
 	"bufio"
 	"fmt"
-	"github.com/bazelbuild/bazelisk/core"
-	"github.com/bazelbuild/bazelisk/httputil"
-	"github.com/bazelbuild/bazelisk/platforms"
-	"github.com/bazelbuild/bazelisk/versions"
-	"github.com/mitchellh/go-homedir"
 	"io"
 	"io/ioutil"
 	"log"
@@ -22,6 +16,14 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/bazelbuild/bazelisk/core"
+	"github.com/bazelbuild/bazelisk/httputil"
+	"github.com/bazelbuild/bazelisk/platforms"
+	"github.com/bazelbuild/bazelisk/versions"
+	"github.com/mitchellh/go-homedir"
+
+	"aspect.build/cli/pkg/pathutils"
 )
 
 const (

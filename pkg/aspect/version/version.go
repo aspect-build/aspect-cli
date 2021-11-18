@@ -30,11 +30,11 @@ func New(streams ioutils.Streams) *Version {
 	}
 }
 
-func (v *Version) Run(_ *cobra.Command, _ []string) error {
+func (versionCmd *Version) Run(_ *cobra.Command, _ []string) error {
 	var versionBuilder strings.Builder
-	if v.BuildinfoRelease != "" {
-		versionBuilder.WriteString(v.BuildinfoRelease)
-		if v.BuildinfoGitStatus != "clean" {
+	if versionCmd.BuildinfoRelease != "" {
+		versionBuilder.WriteString(versionCmd.BuildinfoRelease)
+		if versionCmd.BuildinfoGitStatus != "clean" {
 			versionBuilder.WriteString(" (with local changes)")
 		}
 	} else {
@@ -44,12 +44,12 @@ func (v *Version) Run(_ *cobra.Command, _ []string) error {
 	// Check if the --gnu_format flag is set, if that is the case,
 	// the version is printed differently
 	bazelCmd := []string{"version"}
-	if v.GNUFormat {
-		fmt.Fprintf(v.Stdout, "Aspect %s\n", version)
+	if versionCmd.GNUFormat {
+		fmt.Fprintf(versionCmd.Stdout, "Aspect %s\n", version)
 		// Propagate the flag
 		bazelCmd = append(bazelCmd, "--gnu_format")
 	} else {
-		fmt.Fprintf(v.Stdout, "Aspect version: %s\n", version)
+		fmt.Fprintf(versionCmd.Stdout, "Aspect version: %s\n", version)
 	}
 	bzl := bazel.New()
 	bzl.Spawn(bazelCmd)

@@ -26,9 +26,9 @@ func New(streams ioutils.Streams) *Info {
 	}
 }
 
-func (v *Info) Run(_ *cobra.Command, args []string) error {
+func (infoCmd *Info) Run(_ *cobra.Command, args []string) error {
 	bazelCmd := []string{"info"}
-	if v.ShowMakeEnv {
+	if infoCmd.ShowMakeEnv {
 		// Propagate the flag
 		bazelCmd = append(bazelCmd, "--show_make_env")
 	}

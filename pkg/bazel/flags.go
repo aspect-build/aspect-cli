@@ -15,14 +15,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func (b *Bazel) Flags() (map[string]*FlagInfo, error) {
+func (bazel *Bazel) Flags() (map[string]*FlagInfo, error) {
 	r, w := io.Pipe()
 	decoder := base64.NewDecoder(base64.StdEncoding, r)
 	bazelErrs := make(chan error, 1)
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := b.RunCommand([]string{"help", "flags-as-proto"}, w)
+		_, err := bazel.RunCommand([]string{"help", "flags-as-proto"}, w)
 		bazelErrs <- err
 	}()
 

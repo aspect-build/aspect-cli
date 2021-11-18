@@ -71,8 +71,8 @@ func TestClean(t *testing.T) {
 			Spawn([]string{"clean"}).
 			Return(0, nil)
 
-		c := clean.New(ioutils.Streams{}, spawner)
-		g.Expect(c.Run(nil, []string{}, false)).Should(Succeed())
+		cleanCmd := clean.New(ioutils.Streams{}, spawner)
+		g.Expect(cleanCmd.Run(false)).Should(Succeed())
 	})
 
 	t.Run("clean expunge calls bazel clean expunge", func(t *testing.T) {
@@ -86,9 +86,9 @@ func TestClean(t *testing.T) {
 			Spawn([]string{"clean", "--expunge"}).
 			Return(0, nil)
 
-		c := clean.New(ioutils.Streams{}, spawner)
-		c.Expunge = true
-		g.Expect(c.Run(nil, []string{}, false)).Should(Succeed())
+		cleanCmd := clean.New(ioutils.Streams{}, spawner)
+		cleanCmd.Expunge = true
+		g.Expect(cleanCmd.Run(false)).Should(Succeed())
 	})
 
 	t.Run("clean expunge_async calls bazel clean expunge_async", func(t *testing.T) {
@@ -102,9 +102,9 @@ func TestClean(t *testing.T) {
 			Spawn([]string{"clean", "--expunge_async"}).
 			Return(0, nil)
 
-		c := clean.New(ioutils.Streams{}, spawner)
-		c.ExpungeAsync = true
-		g.Expect(c.Run(nil, []string{}, false)).Should(Succeed())
+		cleanCmd := clean.New(ioutils.Streams{}, spawner)
+		cleanCmd.ExpungeAsync = true
+		g.Expect(cleanCmd.Run(false)).Should(Succeed())
 	})
 
 	t.Run("interactive clean prompts for usage, option 1", func(t *testing.T) {
@@ -120,12 +120,12 @@ func TestClean(t *testing.T) {
 
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		c := clean.New(streams, spawner)
+		cleanCmd := clean.New(streams, spawner)
 
-		c.Behavior = chooseReclaim{}
-		c.Remember = deny{}
+		cleanCmd.Behavior = chooseReclaim{}
+		cleanCmd.Remember = deny{}
 
-		g.Expect(c.Run(nil, []string{}, true)).Should(Succeed())
+		g.Expect(cleanCmd.Run(true)).Should(Succeed())
 		g.Expect(stdout.String()).To(ContainSubstring("skip this prompt"))
 	})
 
@@ -142,17 +142,17 @@ func TestClean(t *testing.T) {
 
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		c1 := clean.New(streams, spawner)
+		cleanCmd1 := clean.New(streams, spawner)
 
 		viper := *viper.New()
 		cfg, err := os.CreateTemp(os.Getenv("TEST_TMPDIR"), "cfg***.ini")
 		g.Expect(err).To(BeNil())
 
 		viper.SetConfigFile(cfg.Name())
-		c1.Behavior = chooseReclaim{}
-		c1.Remember = confirm{}
-		c1.Prefs = viper
-		g.Expect(c1.Run(nil, []string{}, true)).Should(Succeed())
+		cleanCmd1.Behavior = chooseReclaim{}
+		cleanCmd1.Remember = confirm{}
+		cleanCmd1.Prefs = viper
+		g.Expect(cleanCmd1.Run(true)).Should(Succeed())
 		g.Expect(stdout.String()).To(ContainSubstring("skip this prompt"))
 
 		// Recorded your preference for next time
@@ -161,9 +161,9 @@ func TestClean(t *testing.T) {
 		g.Expect(string(content)).To(Equal("[clean]\nskip_prompt=true\n\n"))
 
 		// If we run it again, there should be no prompt
-		c2 := clean.New(streams, spawner)
-		c2.Prefs = viper
-		g.Expect(c2.Run(nil, []string{}, true)).Should(Succeed())
+		cleanCmd2 := clean.New(streams, spawner)
+		cleanCmd2.Prefs = viper
+		g.Expect(cleanCmd1.Run(true)).Should(Succeed())
 	})
 
 	t.Run("interactive clean prompts for usage, option 2", func(t *testing.T) {
@@ -171,9 +171,9 @@ func TestClean(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 
-		c := clean.New(streams, nil)
-		c.Behavior = chooseNonIncremental{}
-		g.Expect(c.Run(nil, []string{}, true)).Should(Succeed())
+		cleanCmd := clean.New(streams, nil)
+		cleanCmd.Behavior = chooseNonIncremental{}
+		g.Expect(cleanCmd.Run(true)).Should(Succeed())
 		g.Expect(stdout.String()).To(ContainSubstring("use the --output_base flag"))
 	})
 
@@ -182,9 +182,9 @@ func TestClean(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 
-		c := clean.New(streams, nil)
-		c.Behavior = chooseInvalidateRepos{}
-		g.Expect(c.Run(nil, []string{}, true)).Should(Succeed())
+		cleanCmd := clean.New(streams, nil)
+		cleanCmd.Behavior = chooseInvalidateRepos{}
+		g.Expect(cleanCmd.Run(true)).Should(Succeed())
 		g.Expect(stdout.String()).To(ContainSubstring("aspect sync --configure"))
 	})
 
@@ -202,10 +202,10 @@ func TestClean(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 
-		c := clean.New(streams, spawner)
-		c.Behavior = chooseWorkaround{}
-		c.Workaround = confirm{}
-		g.Expect(c.Run(nil, []string{}, true)).Should(Succeed())
+		cleanCmd := clean.New(streams, spawner)
+		cleanCmd.Behavior = chooseWorkaround{}
+		cleanCmd.Workaround = confirm{}
+		g.Expect(cleanCmd.Run(true)).Should(Succeed())
 		g.Expect(stdout.String()).To(ContainSubstring("recommend you file a bug"))
 	})
 }

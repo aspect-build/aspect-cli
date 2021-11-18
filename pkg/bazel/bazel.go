@@ -33,12 +33,12 @@ func (*Bazel) createRepositories() *core.Repositories {
 
 // Spawn is similar to the main() function of bazelisk
 // see https://github.com/bazelbuild/bazelisk/blob/7c3d9d5/bazelisk.go
-func (b *Bazel) Spawn(command []string) (int, error) {
-	return b.RunCommand(command, nil)
+func (bazel *Bazel) Spawn(command []string) (int, error) {
+	return bazel.RunCommand(command, nil)
 }
 
-func (b *Bazel) RunCommand(command []string, out io.Writer) (int, error) {
-	repos := b.createRepositories()
+func (bazel *Bazel) RunCommand(command []string, out io.Writer) (int, error) {
+	repos := bazel.createRepositories()
 	exitCode, err := RunBazelisk(command, repos, out)
 	return exitCode, err
 }

@@ -34,8 +34,8 @@ func main() {
 	if wd, exists := os.LookupEnv("BUILD_WORKING_DIRECTORY"); exists {
 		_ = os.Chdir(wd)
 	}
-	cmd := root.NewDefaultRootCmd()
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
+	rootCmd := root.NewDefaultRootCmd()
+	if err := rootCmd.ExecuteContext(context.Background()); err != nil {
 		var exitErr *aspecterrors.ExitError
 		if errors.As(err, &exitErr) {
 			if exitErr.Err != nil {

@@ -26,7 +26,7 @@ func New(streams ioutils.Streams) *Docs {
 	}
 }
 
-func (v *Docs) Run(_ *cobra.Command, args []string) error {
+func (docsCmd *Docs) Run(_ *cobra.Command, args []string) error {
 	// TODO: we should open the browser to the bazel version matching what is running
 	dest := "https://docs.bazel.build"
 
