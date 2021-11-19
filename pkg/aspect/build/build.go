@@ -8,12 +8,14 @@ package build
 
 import (
 	"aspect.build/cli/pkg/pathutils"
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"github.com/spf13/viper"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"aspect.build/cli/pkg/aspect/build/bep"
@@ -26,8 +28,8 @@ import (
 const (
 	skipPromptKey = "build.skip_prompt"
 
-	SpecifiedFolderOption = "All targets in a specified package"
-	CurrentPackageOption  = "All targets within current package"
+	SpecifiedPackageOption = "All targets in a specified package (path relative to your workspace root)"
+	CurrentPackageOption   = "All targets within current package"
 	TargetPatternOption   = "Specific target patterns"
 
 	RememberLine1 = "Remember this choice and skip the prompt in the future"
@@ -68,29 +70,32 @@ func New(
 	}
 }
 
-// TODO: implement
-// func GetAllInSpecifiedFolderPatern() (string, error) {
-
-// }
-
-// Returns a pattern for all targets within the current folder.
-// If findNearestParentPackage is true, then this function returns a pattern for all targets
-func GetAllInCurrentPackagePattern() (string, error) {
+// GetAllInSpecifiedFolderPattern Returns a pattern for all targets within the specified folder
+func GetAllInSpecifiedFolderPattern(path string) (string, error) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("prompt failed: %w", err)
 	}
 	workspaceRoot := pathutils.FindWorkspaceRoot(workingDirectory)
-	pkg := pathutils.FindNearestParentPackage(workingDirectory)
-	if pkg == workspaceRoot {
+	pathToPkg := pathutils.FindNearestParentPackage(filepath.Join(workspaceRoot,path))
+	if pathToPkg == workspaceRoot {
 		// Current directory is the WORKSPACE root
 		return "//:all", nil
 	}
-	pkg, err = filepath.Rel(workspaceRoot, pkg)
+	pathToPkg, err = filepath.Rel(workspaceRoot, pathToPkg)
 	if err != nil {
 		return "", fmt.Errorf("prompt failed: %w", err)
 	}
-	return "//" + pkg + ":all", nil
+	return "//" + pathToPkg + ":all", nil
+}
+
+// GetAllInCurrentPackagePattern Returns a pattern for all targets within the current folder
+func GetAllInCurrentPackagePattern() (string, error) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+	return GetAllInSpecifiedFolderPattern(workingDirectory)
 }
 
 // Run runs the aspect build command, calling `bazel build` with a local Build
@@ -111,10 +116,22 @@ func (buildCmd *Build) Run(
 			return fmt.Errorf("prompt failed: %w", err)
 		}
 
+		reader := bufio.NewReader(os.Stdin)
+
 		switch chosen {
-		case SpecifiedFolderOption:
-			fmt.Fprint(buildCmd.Streams.Stdout, "Sorry, this is not implemented yet\n")
-			return nil
+		case SpecifiedPackageOption:
+			fmt.Print("Enter the workspace-relative path to the package:\n")
+			path, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			// convert CRLF to LF
+			path = strings.Replace(path, "\n", "", -1)
+			target, err = GetAllInSpecifiedFolderPattern(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprint(buildCmd.Streams.Stdout, "Building "+target+"\n")
 		case CurrentPackageOption:
 			target, err = GetAllInCurrentPackagePattern()
 			if err != nil {

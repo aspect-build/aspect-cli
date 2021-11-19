@@ -66,7 +66,7 @@ func NewBuildCmd(
 				buildCmd.Behavior = &promptui.Select{
 					Label: "What would you like to build?",
 					Items: []string{
-						build.SpecifiedFolderOption,
+						build.SpecifiedPackageOption,
 						build.CurrentPackageOption,
 						build.TargetPatternOption,
 					},
