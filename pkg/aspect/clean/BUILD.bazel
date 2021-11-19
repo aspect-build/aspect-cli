@@ -10,7 +10,6 @@ go_library(
         "//pkg/bazel",
         "//pkg/ioutils",
         "@com_github_manifoldco_promptui//:promptui",
-        "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",
     ],
 )

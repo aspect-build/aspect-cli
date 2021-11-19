@@ -163,7 +163,7 @@ func TestClean(t *testing.T) {
 		// If we run it again, there should be no prompt
 		cleanCmd2 := clean.New(streams, spawner)
 		cleanCmd2.Prefs = viper
-		g.Expect(cleanCmd1.Run(true)).Should(Succeed())
+		g.Expect(cleanCmd2.Run(true)).Should(Succeed())
 	})
 
 	t.Run("interactive clean prompts for usage, option 2", func(t *testing.T) {

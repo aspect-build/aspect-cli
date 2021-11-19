@@ -1,8 +1,23 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "pathutils",
     srcs = ["pathutils.go"],
     importpath = "aspect.build/cli/pkg/pathutils",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "pathutils_test",
+    srcs = ["pathutils_test.go"],
+    data = glob(["testfixtures/**/*"]),
+    deps = [
+        ":pathutils",
+        "//pkg/aspect/clean",
+        "//pkg/aspect/info",
+        "//pkg/bazel/mock",
+        "//pkg/ioutils",
+        "@com_github_golang_mock//gomock",
+        "@com_github_onsi_gomega//:gomega",
+    ],
 )
