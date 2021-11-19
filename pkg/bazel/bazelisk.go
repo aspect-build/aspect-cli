@@ -191,8 +191,8 @@ func GetEnvOrConfig(name string) string {
 		if err != nil {
 			return
 		}
-		workspaceRoot := pathutils.FindWorkspaceRoot(workingDirectory)
-		if workspaceRoot == "" {
+		workspaceRoot, err := pathutils.FindWorkspaceRoot(workingDirectory)
+		if err != nil {
 			return
 		}
 		rcFilePath := filepath.Join(workspaceRoot, ".bazeliskrc")
@@ -244,7 +244,10 @@ func getBazelVersion() (string, error) {
 		return "", fmt.Errorf("could not get working directory: %v", err)
 	}
 
-	workspaceRoot := pathutils.FindWorkspaceRoot(workingDirectory)
+	workspaceRoot, err := pathutils.FindWorkspaceRoot(workingDirectory)
+	if err != nil {
+		return "", fmt.Errorf("getBazelVersion() called outside of a workspace; %v", err)
+	}
 	if len(workspaceRoot) != 0 {
 		bazelVersionPath := filepath.Join(workspaceRoot, ".bazelversion")
 		if _, err := os.Stat(bazelVersionPath); err == nil {
@@ -351,7 +354,10 @@ func maybeDelegateToWrapper(bazel string) string {
 		return bazel
 	}
 
-	root := pathutils.FindWorkspaceRoot(wd)
+	root, err := pathutils.FindWorkspaceRoot(wd)
+	if err != nil {
+		return bazel
+	}
 	wrapper := filepath.Join(root, wrapperPath)
 	if stat, err := os.Stat(wrapper); err != nil || stat.IsDir() || stat.Mode().Perm()&0001 == 0 {
 		return bazel

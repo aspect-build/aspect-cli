@@ -111,14 +111,16 @@ func TestFindWorkspaceRoot(t *testing.T) {
 
 	t.Run("path is within a workspace", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		path := "testfixtures/workspace_1/pkg_1"
-		g.Expect(pathutils.FindWorkspaceRoot(path)).To(Equal("testfixtures/workspace_1"))
+		workspaceRoot, err := pathutils.FindWorkspaceRoot("testfixtures/workspace_1/pkg_1")
+		g.Expect(err).To(BeNil())
+		g.Expect(workspaceRoot).To(Equal("testfixtures/workspace_1"))
 	})
 
 	t.Run("path is not within a workspace", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		path := "testfixtures/"
-		g.Expect(pathutils.FindWorkspaceRoot(path)).To(Equal(""))
+		workspaceRoot, err := pathutils.FindWorkspaceRoot("testfixtures/")
+		g.Expect(err).To(BeNil())
+		g.Expect(workspaceRoot).To(Equal(""))
 	})
 }
 
@@ -126,13 +128,17 @@ func TestFindNearestParentPackage(t *testing.T) {
 
 	t.Run("path is within a package", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		g.Expect(pathutils.FindNearestParentPackage("testfixtures/workspace_1/pkg_1/foo/bar")).
+		pkg, err := pathutils.FindNearestParentPackage("testfixtures/workspace_1/pkg_1/foo/bar")
+		g.Expect(err).To(BeNil())
+		g.Expect(pkg).
 			To(Equal("testfixtures/workspace_1/pkg_1"))
 	})
 
 	t.Run("path is not within a package", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		g.Expect(pathutils.FindNearestParentPackage("testfixtures/")).To(Equal(""))
+		pkg, err := pathutils.FindNearestParentPackage("testfixtures/")
+		g.Expect(err).To(BeNil())
+		g.Expect(pkg).To(Equal(""))
 	})
 }
 

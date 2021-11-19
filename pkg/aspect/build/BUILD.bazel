@@ -1,5 +1,10 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
+# aspect:default
+# //pkg/aspect/clean:clean
+# :build
+# :build_test
+
 go_library(
     name = "build",
     srcs = ["build.go"],

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 )
 
 func IsFile(path string) bool {
@@ -35,9 +37,23 @@ func IsPackage(path string) bool {
 		IsFile(filepath.Join(path, "BUILD.bazel"))
 }
 
-func FindParentPathSatisfyingCondition(path string, condition func(string) bool) string {
+// GetBuildFilePath returns the path to the build file for a specified path to a package root
+func GetBuildFilePath(pkgPath string) (string, error) {
+	if IsFile(filepath.Join(pkgPath, "BUILD")) {
+		return filepath.Join(pkgPath, "BUILD"), nil
+	} else if IsFile(filepath.Join(pkgPath, "BUILD.bazel")) {
+		return filepath.Join(pkgPath, "BUILD.bazel"), nil
+	}
+	return "", fmt.Errorf("supplied path is not a path to a package root")
+}
+
+func getFunctionName(i interface{}) string {
+	return runtime.FuncForPC(reflect.ValueOf(i).Pointer()).Name()
+}
+
+func FindParentPathSatisfyingCondition(path string, condition func(string) bool) (string, error) {
 	if condition(path) {
-		return path
+		return path, nil
 	}
 
 	curPath := path
@@ -47,19 +63,19 @@ func FindParentPathSatisfyingCondition(path string, condition func(string) bool)
 	for parPath != curPath {
 		curPath = parPath
 		if condition(curPath) {
-			return curPath
+			return curPath, nil
 		}
 		parPath = filepath.Dir(curPath)
 	}
 
-	return ""
+	return "", fmt.Errorf("no parent path found satisfying condition %v", getFunctionName(condition))
 }
 
-func FindWorkspaceRoot(path string) string {
+func FindWorkspaceRoot(path string) (string, error) {
 	return FindParentPathSatisfyingCondition(path, IsWorkspace)
 }
 
-func FindNearestParentPackage(path string) string {
+func FindNearestParentPackage(path string) (string, error) {
 	return FindParentPathSatisfyingCondition(path, IsPackage)
 }
 
@@ -68,8 +84,8 @@ func InvokeCmdInsideWorkspace(cmdName string, fn func() error) error {
 	if err != nil {
 		return fmt.Errorf("could not resolve working directory: %w", err)
 	}
-	workspaceRoot := FindWorkspaceRoot(workingDirectory)
-	if workspaceRoot == "" {
+	_, err = FindWorkspaceRoot(workingDirectory)
+	if err != nil {
 		return fmt.Errorf("the '%s' command is only supported from within a workspace " +
 			"(below a directory having a WORKSPACE file)", cmdName)
 	}
@@ -80,14 +96,14 @@ func InvokeCmdInsideWorkspace(cmdName string, fn func() error) error {
 	return nil
 }
 
-// GetAllInSpecifiedFolderPattern Returns a pattern for all targets within the specified folder
-func GetAllInSpecifiedFolderPattern(path string) (string, error) {
+// GetAllInSpecifiedPackagePattern Returns a pattern for all targets within the specified package
+func GetAllInSpecifiedPackagePattern(path string) (string, error) {
 	workingDirectory, err := os.Getwd()
+	workspaceRoot, err := FindWorkspaceRoot(workingDirectory)
+	pathToPkg, err := FindNearestParentPackage(filepath.Join(workspaceRoot,path))
 	if err != nil {
-		return "", fmt.Errorf("prompt failed: %w", err)
+		return "", fmt.Errorf("GetAllInSpecifiedPackagePattern failed: %w", err)
 	}
-	workspaceRoot := FindWorkspaceRoot(workingDirectory)
-	pathToPkg := FindNearestParentPackage(filepath.Join(workspaceRoot,path))
 	if pathToPkg == workspaceRoot {
 		// Current directory is the WORKSPACE root
 		return "//:all", nil
@@ -105,5 +121,5 @@ func GetAllInCurrentPackagePattern() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("prompt failed: %w", err)
 	}
-	return GetAllInSpecifiedFolderPattern(workingDirectory)
+	return GetAllInSpecifiedPackagePattern(workingDirectory)
 }

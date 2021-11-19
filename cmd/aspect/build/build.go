@@ -69,6 +69,7 @@ func NewBuildCmd(
 						build.SpecifiedPackageOption,
 						build.CurrentPackageOption,
 						build.TargetPatternOption,
+						build.CommonTargetsOption,
 					},
 				}
 				buildCmd.Remember = &promptui.Prompt{

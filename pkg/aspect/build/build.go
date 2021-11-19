@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -25,9 +26,10 @@ import (
 const (
 	skipPromptKey = "build.skip_prompt"
 
-	SpecifiedPackageOption = "All targets in a specified package (path relative to your workspace root)"
+	CommonTargetsOption    = "Common targets defined in a specified package (path relative to your workspace root)"
 	CurrentPackageOption   = "All targets within current package"
-	TargetPatternOption   = "Specific target patterns"
+	SpecifiedPackageOption = "All targets in a specified package (path relative to your workspace root)"
+	TargetPatternOption    = "Specific target patterns"
 
 	RememberLine1 = "Remember this choice and skip the prompt in the future"
 )
@@ -77,7 +79,7 @@ func (buildCmd *Build) Run(
 	skip := buildCmd.Prefs.GetBool(skipPromptKey)
 	// TODO(f0rmiga): this is a hook for the build command and should be discussed
 	// as part of the plugin design.
-	targets := ""
+	targets := []string{}
 	if isInteractiveMode && !skip {
 		_, chosen, err := buildCmd.Behavior.Run()
 
@@ -86,21 +88,44 @@ func (buildCmd *Build) Run(
 		}
 
 		switch chosen {
-		case SpecifiedPackageOption:
+		case CommonTargetsOption:
 			fmt.Print("Enter the workspace-relative path to the package:\n")
-			path := ioutils.ReadLine()
-			targets, err = pathutils.GetAllInSpecifiedFolderPattern(path)
+			inputPath, err := ioutils.ReadLine()
+			if err != nil {
+				return err
+			}
+			pkg, err := pathutils.FindNearestParentPackage(inputPath)
+			if err != nil {
+				return err
+			}
+			targets, err = ioutils.ReadCommonTargets(pkg)
 			if err != nil {
 				return err
 			}
 		case CurrentPackageOption:
-			targets, err = pathutils.GetAllInCurrentPackagePattern()
+			target, err := pathutils.GetAllInCurrentPackagePattern()
+			if err != nil {
+				return err
+			}
+			targets = append(targets, target)
+		case SpecifiedPackageOption:
+			fmt.Print("Enter the workspace-relative path to the package:\n")
+			path, err := ioutils.ReadLine()
+			if err != nil {
+				return err
+			}
+			target, err := pathutils.GetAllInSpecifiedPackagePattern(path)
+			targets = append(targets, target)
 			if err != nil {
 				return err
 			}
 		case TargetPatternOption:
-			fmt.Print("Enter the target patterns you want to build:\n")
-			targets = ioutils.ReadLine()
+			fmt.Print("Enter the target patterns you want to build, separated by spaces:\n")
+			targetString, err := ioutils.ReadLine()
+			targets = strings.Split(targetString, " ")
+			if err != nil {
+				return err
+			}
 		}
 
 	}
@@ -129,9 +154,11 @@ func (buildCmd *Build) Run(
 
 	besBackendFlag := fmt.Sprintf("--bes_backend=grpc://%s", buildCmd.besBackend.Addr())
 	cmd := []string{"build"}
-	if targets != "" {
-		fmt.Fprint(buildCmd.Streams.Stdout, "Building "+targets+"\n")
-		cmd = append(cmd, targets)
+	if len(targets) > 0 {
+		for _, target := range targets {
+			cmd = append(cmd, target)
+		}
+		fmt.Fprint(buildCmd.Streams.Stdout, "Building " + strings.Join(targets, " ") + "\n")
 	}
 	cmd = append(cmd, besBackendFlag)
 	exitCode, bazelErr := buildCmd.bzl.Spawn(append(cmd, args...))
