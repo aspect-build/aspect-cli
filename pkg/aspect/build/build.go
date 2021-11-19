@@ -7,22 +7,19 @@ Not licensed for re-use.
 package build
 
 import (
-	"aspect.build/cli/pkg/pathutils"
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"github.com/spf13/viper"
-	"os"
-	"path/filepath"
-	"strings"
 	"time"
+
+	"github.com/spf13/viper"
 
 	"aspect.build/cli/pkg/aspect/build/bep"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/hooks"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/pathutils"
 )
 
 const (
@@ -70,34 +67,6 @@ func New(
 	}
 }
 
-// GetAllInSpecifiedFolderPattern Returns a pattern for all targets within the specified folder
-func GetAllInSpecifiedFolderPattern(path string) (string, error) {
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("prompt failed: %w", err)
-	}
-	workspaceRoot := pathutils.FindWorkspaceRoot(workingDirectory)
-	pathToPkg := pathutils.FindNearestParentPackage(filepath.Join(workspaceRoot,path))
-	if pathToPkg == workspaceRoot {
-		// Current directory is the WORKSPACE root
-		return "//:all", nil
-	}
-	pathToPkg, err = filepath.Rel(workspaceRoot, pathToPkg)
-	if err != nil {
-		return "", fmt.Errorf("prompt failed: %w", err)
-	}
-	return "//" + pathToPkg + ":all", nil
-}
-
-// GetAllInCurrentPackagePattern Returns a pattern for all targets within the current folder
-func GetAllInCurrentPackagePattern() (string, error) {
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("prompt failed: %w", err)
-	}
-	return GetAllInSpecifiedFolderPattern(workingDirectory)
-}
-
 // Run runs the aspect build command, calling `bazel build` with a local Build
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
 func (buildCmd *Build) Run(
@@ -108,7 +77,7 @@ func (buildCmd *Build) Run(
 	skip := buildCmd.Prefs.GetBool(skipPromptKey)
 	// TODO(f0rmiga): this is a hook for the build command and should be discussed
 	// as part of the plugin design.
-	target := ""
+	targets := ""
 	if isInteractiveMode && !skip {
 		_, chosen, err := buildCmd.Behavior.Run()
 
@@ -116,31 +85,22 @@ func (buildCmd *Build) Run(
 			return fmt.Errorf("prompt failed: %w", err)
 		}
 
-		reader := bufio.NewReader(os.Stdin)
-
 		switch chosen {
 		case SpecifiedPackageOption:
 			fmt.Print("Enter the workspace-relative path to the package:\n")
-			path, err := reader.ReadString('\n')
+			path := ioutils.ReadLine()
+			targets, err = pathutils.GetAllInSpecifiedFolderPattern(path)
 			if err != nil {
 				return err
 			}
-			// convert CRLF to LF
-			path = strings.Replace(path, "\n", "", -1)
-			target, err = GetAllInSpecifiedFolderPattern(path)
-			if err != nil {
-				return err
-			}
-			fmt.Fprint(buildCmd.Streams.Stdout, "Building "+target+"\n")
 		case CurrentPackageOption:
-			target, err = GetAllInCurrentPackagePattern()
+			targets, err = pathutils.GetAllInCurrentPackagePattern()
 			if err != nil {
 				return err
 			}
-			fmt.Fprint(buildCmd.Streams.Stdout, "Building "+target+"\n")
 		case TargetPatternOption:
-			fmt.Fprint(buildCmd.Streams.Stdout, "Sorry, this is not implemented yet\n")
-			return nil
+			fmt.Print("Enter the target patterns you want to build:\n")
+			targets = ioutils.ReadLine()
 		}
 
 	}
@@ -169,8 +129,9 @@ func (buildCmd *Build) Run(
 
 	besBackendFlag := fmt.Sprintf("--bes_backend=grpc://%s", buildCmd.besBackend.Addr())
 	cmd := []string{"build"}
-	if target != "" {
-		cmd = append(cmd, target)
+	if targets != "" {
+		fmt.Fprint(buildCmd.Streams.Stdout, "Building "+targets+"\n")
+		cmd = append(cmd, targets)
 	}
 	cmd = append(cmd, besBackendFlag)
 	exitCode, bazelErr := buildCmd.bzl.Spawn(append(cmd, args...))

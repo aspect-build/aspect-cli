@@ -79,3 +79,31 @@ func InvokeCmdInsideWorkspace(cmdName string, fn func() error) error {
 	}
 	return nil
 }
+
+// GetAllInSpecifiedFolderPattern Returns a pattern for all targets within the specified folder
+func GetAllInSpecifiedFolderPattern(path string) (string, error) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+	workspaceRoot := FindWorkspaceRoot(workingDirectory)
+	pathToPkg := FindNearestParentPackage(filepath.Join(workspaceRoot,path))
+	if pathToPkg == workspaceRoot {
+		// Current directory is the WORKSPACE root
+		return "//:all", nil
+	}
+	pathToPkg, err = filepath.Rel(workspaceRoot, pathToPkg)
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+	return "//" + pathToPkg + ":all", nil
+}
+
+// GetAllInCurrentPackagePattern Returns a pattern for all targets within the current folder
+func GetAllInCurrentPackagePattern() (string, error) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+	return GetAllInSpecifiedFolderPattern(workingDirectory)
+}

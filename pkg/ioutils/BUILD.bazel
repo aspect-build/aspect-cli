@@ -4,6 +4,7 @@ go_library(
     name = "ioutils",
     srcs = [
         "prompt.go",
+        "reader.go",
         "streams.go",
     ],
     importpath = "aspect.build/cli/pkg/ioutils",
