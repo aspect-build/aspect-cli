@@ -7,7 +7,9 @@ Not licensed for re-use.
 package build
 
 import (
+	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	rootFlags "aspect.build/cli/cmd/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/build"
@@ -61,6 +63,19 @@ func NewBuildCmd(
 				}
 
 				buildCmd := build.New(streams, bzl, besBackend, hooks)
+				buildCmd.Behavior = &promptui.Select{
+					Label: "What would you like to build?",
+					Items: []string{
+						build.SpecifiedFolderOption,
+						build.CurrentPackageOption,
+						build.TargetPatternOption,
+					},
+				}
+				buildCmd.Remember = &promptui.Prompt{
+					Label:     build.RememberLine1,
+					IsConfirm: true,
+				}
+				buildCmd.Prefs = *viper.GetViper()
 				return buildCmd.Run(cmd.Context(), args, isInteractiveMode)
 			})
 		},

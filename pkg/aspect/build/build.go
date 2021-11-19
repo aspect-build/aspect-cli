@@ -7,9 +7,13 @@ Not licensed for re-use.
 package build
 
 import (
+	"aspect.build/cli/pkg/pathutils"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/spf13/viper"
+	"os"
+	"path/filepath"
 	"time"
 
 	"aspect.build/cli/pkg/aspect/build/bep"
@@ -19,12 +23,34 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
+const (
+	skipPromptKey = "build.skip_prompt"
+
+	SpecifiedFolderOption = "All targets in a specified package"
+	CurrentPackageOption  = "All targets within current package"
+	TargetPatternOption   = "Specific target patterns"
+
+	RememberLine1 = "Remember this choice and skip the prompt in the future"
+)
+
+type SelectRunner interface {
+	Run() (int, string, error)
+}
+
+type PromptRunner interface {
+	Run() (string, error)
+}
+
 // Build represents the aspect build command.
 type Build struct {
 	ioutils.Streams
 	bzl        bazel.Spawner
 	besBackend bep.BESBackend
 	hooks      *hooks.Hooks
+
+	Behavior SelectRunner
+	Remember PromptRunner
+	Prefs    viper.Viper
 }
 
 // New creates a Build command.
@@ -42,6 +68,31 @@ func New(
 	}
 }
 
+// TODO: implement
+// func GetAllInSpecifiedFolderPatern() (string, error) {
+
+// }
+
+// Returns a pattern for all targets within the current folder.
+// If findNearestParentPackage is true, then this function returns a pattern for all targets
+func GetAllInCurrentPackagePattern() (string, error) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+	workspaceRoot := pathutils.FindWorkspaceRoot(workingDirectory)
+	pkg := pathutils.FindNearestParentPackage(workingDirectory)
+	if pkg == workspaceRoot {
+		// Current directory is the WORKSPACE root
+		return "//:all", nil
+	}
+	pkg, err = filepath.Rel(workspaceRoot, pkg)
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+	return "//" + pkg + ":all", nil
+}
+
 // Run runs the aspect build command, calling `bazel build` with a local Build
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
 func (buildCmd *Build) Run(
@@ -49,8 +100,33 @@ func (buildCmd *Build) Run(
 	args []string,
 	isInteractiveMode bool,
 ) (exitErr error) {
+	skip := buildCmd.Prefs.GetBool(skipPromptKey)
 	// TODO(f0rmiga): this is a hook for the build command and should be discussed
 	// as part of the plugin design.
+	target := ""
+	if isInteractiveMode && !skip {
+		_, chosen, err := buildCmd.Behavior.Run()
+
+		if err != nil {
+			return fmt.Errorf("prompt failed: %w", err)
+		}
+
+		switch chosen {
+		case SpecifiedFolderOption:
+			fmt.Fprint(buildCmd.Streams.Stdout, "Sorry, this is not implemented yet\n")
+			return nil
+		case CurrentPackageOption:
+			target, err = GetAllInCurrentPackagePattern()
+			if err != nil {
+				return err
+			}
+			fmt.Fprint(buildCmd.Streams.Stdout, "Building "+target+"\n")
+		case TargetPatternOption:
+			fmt.Fprint(buildCmd.Streams.Stdout, "Sorry, this is not implemented yet\n")
+			return nil
+		}
+
+	}
 	defer func() {
 		errs := buildCmd.hooks.ExecutePostBuild(isInteractiveMode).Errors()
 		if len(errs) > 0 {
@@ -75,9 +151,14 @@ func (buildCmd *Build) Run(
 	defer buildCmd.besBackend.GracefulStop()
 
 	besBackendFlag := fmt.Sprintf("--bes_backend=grpc://%s", buildCmd.besBackend.Addr())
-	exitCode, bazelErr := buildCmd.bzl.Spawn(append([]string{"build", besBackendFlag}, args...))
+	cmd := []string{"build"}
+	if target != "" {
+		cmd = append(cmd, target)
+	}
+	cmd = append(cmd, besBackendFlag)
+	exitCode, bazelErr := buildCmd.bzl.Spawn(append(cmd, args...))
 
-	// Process the subscribers errors before the Bazel one.
+	// Process the subscribers' errors before the Bazel one.
 	subscriberErrors := buildCmd.besBackend.Errors()
 	if len(subscriberErrors) > 0 {
 		for _, err := range subscriberErrors {

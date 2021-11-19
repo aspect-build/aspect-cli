@@ -11,6 +11,8 @@ go_library(
         "//pkg/bazel",
         "//pkg/hooks",
         "//pkg/ioutils",
+        "//pkg/pathutils",
+        "@com_github_spf13_viper//:viper",
     ],
 )
 

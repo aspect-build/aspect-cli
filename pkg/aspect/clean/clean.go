@@ -34,7 +34,7 @@ Run 'aspect help clean' for more info.
 Instead of running 'clean' you should run 'aspect sync --configure'
 Run 'aspect help clean' for more info.
 `
-	fileIssueHint = `Bazel is a correct build tool, and it should not be possible to get inconstent state.
+	fileIssueHint = `Bazel is a correct build tool, and it should not be possible to get inconsistent state.
 We highly recommend you file a bug reporting this problem so that the offending rule
 implementation can be fixed.
 `
