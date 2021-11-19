@@ -49,14 +49,14 @@ func TestIsValidWorkspace(t *testing.T) {
 		t.Run("with WORKSPACE file", func(t *testing.T) {
 			g := NewGomegaWithT(t)
 			path := "testfixtures/workspace_1"
-			isWorkspace := pathutils.IsValidWorkspace(path)
+			isWorkspace := pathutils.IsWorkspace(path)
 			g.Expect(isWorkspace).To(BeTrue())
 		})
 
 		t.Run("with WORKSPACE.bazel file", func(t *testing.T) {
 			g := NewGomegaWithT(t)
 			path := "testfixtures/workspace_2"
-			isWorkspace := pathutils.IsValidWorkspace(path)
+			isWorkspace := pathutils.IsWorkspace(path)
 			g.Expect(isWorkspace).To(BeTrue())
 		})
 	})
@@ -64,7 +64,7 @@ func TestIsValidWorkspace(t *testing.T) {
 	t.Run("path is not a workspace root", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		path := "testfixtures"
-		isWorkspace := pathutils.IsValidWorkspace(path)
+		isWorkspace := pathutils.IsWorkspace(path)
 		g.Expect(isWorkspace).To(BeFalse())
 	})
 }
@@ -81,7 +81,7 @@ func TestIsValidPackage(t *testing.T) {
 			err := os.Rename(path + "/BUILD_bazel", path + "/BUILD.bazel")
 			g.Expect(err).To(BeNil())
 
-			isPkg := pathutils.IsValidPackage(path)
+			isPkg := pathutils.IsPackage(path)
 			g.Expect(isPkg).To(BeTrue())
 		})
 
@@ -94,7 +94,7 @@ func TestIsValidPackage(t *testing.T) {
 			err := os.Rename(path + "/BUILD_", path + "/BUILD")
 			g.Expect(err).To(BeNil())
 
-			isPkg := pathutils.IsValidPackage(path)
+			isPkg := pathutils.IsPackage(path)
 			g.Expect(isPkg).To(BeTrue())
 		})
 	})
@@ -102,7 +102,7 @@ func TestIsValidPackage(t *testing.T) {
 	t.Run("path is not a package", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		path := "testfixtures/workspace_1"
-		isPkg := pathutils.IsValidPackage(path)
+		isPkg := pathutils.IsPackage(path)
 		g.Expect(isPkg).To(BeFalse())
 	})
 }
@@ -119,6 +119,20 @@ func TestFindWorkspaceRoot(t *testing.T) {
 		g := NewGomegaWithT(t)
 		path := "testfixtures/"
 		g.Expect(pathutils.FindWorkspaceRoot(path)).To(Equal(""))
+	})
+}
+
+func TestFindNearestParentPackage(t *testing.T) {
+
+	t.Run("path is within a package", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		g.Expect(pathutils.FindNearestParentPackage("testfixtures/workspace_1/pkg_1/foo/bar")).
+			To(Equal("testfixtures/workspace_1/pkg_1"))
+	})
+
+	t.Run("path is not within a package", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		g.Expect(pathutils.FindNearestParentPackage("testfixtures/")).To(Equal(""))
 	})
 }
 

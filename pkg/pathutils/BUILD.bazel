@@ -13,11 +13,8 @@ go_test(
     data = glob(["testfixtures/**/*"]),
     deps = [
         ":pathutils",
-        "//pkg/aspect/clean",
         "//pkg/aspect/info",
-        "//pkg/bazel/mock",
         "//pkg/ioutils",
-        "@com_github_golang_mock//gomock",
         "@com_github_onsi_gomega//:gomega",
     ],
 )

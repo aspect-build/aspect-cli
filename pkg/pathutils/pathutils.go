@@ -20,23 +20,23 @@ func IsFile(path string) bool {
 	return !info.IsDir()
 }
 
-// IsValidWorkspace isValidWorkspace returns true iff the supplied path is the workspace root,
+// IsWorkspace isValidWorkspace returns true iff the supplied path is the workspace root,
 // defined by the presence of a file named WORKSPACE or WORKSPACE.bazel
 // see https://github.com/bazelbuild/bazel/blob/8346ea4cfdd9fbd170d51a528fee26f912dad2d5/src/main/cpp/workspace_layout.cc#L37
-func IsValidWorkspace(path string) bool {
+func IsWorkspace(path string) bool {
 	return IsFile(filepath.Join(path, "WORKSPACE")) ||
 		IsFile(filepath.Join(path, "WORKSPACE.bazel"))
 }
 
-// IsValidPackage returns true iff a file named BUILD or BUILD.bazel exists
+// IsPackage returns true iff a file named BUILD or BUILD.bazel exists
 // within the dir at the specified path
-func IsValidPackage(path string) bool {
+func IsPackage(path string) bool {
 	return IsFile(filepath.Join(path, "BUILD")) ||
 		IsFile(filepath.Join(path, "BUILD.bazel"))
 }
 
-func FindWorkspaceRoot(path string) string {
-	if IsValidWorkspace(path) {
+func FindParentPathSatisfyingCondition(path string, condition func(string) bool) string {
+	if condition(path) {
 		return path
 	}
 
@@ -46,13 +46,21 @@ func FindWorkspaceRoot(path string) string {
 	// ie. when the current folder's parent is itself.
 	for parPath != curPath {
 		curPath = parPath
-		if IsValidWorkspace(curPath) {
+		if condition(curPath) {
 			return curPath
 		}
 		parPath = filepath.Dir(curPath)
 	}
 
 	return ""
+}
+
+func FindWorkspaceRoot(path string) string {
+	return FindParentPathSatisfyingCondition(path, IsWorkspace)
+}
+
+func FindNearestParentPackage(path string) string {
+	return FindParentPathSatisfyingCondition(path, IsPackage)
 }
 
 func InvokeCmdInsideWorkspace(cmdName string, fn func() error) error {
