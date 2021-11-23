@@ -1,0 +1,20 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "pathutils",
+    srcs = ["pathutils.go"],
+    importpath = "aspect.build/cli/pkg/pathutils",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_spf13_cobra//:cobra"],
+)
+
+go_test(
+    name = "pathutils_test",
+    srcs = ["pathutils_test.go"],
+    data = glob(["testfixtures/**/*"]),
+    embed = [":pathutils"],
+    deps = [
+        "@com_github_onsi_gomega//:gomega",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
