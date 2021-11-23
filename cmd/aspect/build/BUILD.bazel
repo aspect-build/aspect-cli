@@ -8,11 +8,11 @@ go_library(
     deps = [
         "//cmd/aspect/root/flags",
         "//pkg/aspect/build",
-        "//pkg/aspect/build/bep",
+        "//pkg/aspecterrors",
         "//pkg/bazel",
-        "//pkg/hooks",
         "//pkg/ioutils",
         "//pkg/plugin/system",
+        "//pkg/plugin/system/bep",
         "@com_github_spf13_cobra//:cobra",
     ],
 )

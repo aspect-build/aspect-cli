@@ -14,7 +14,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	err := doc.GenMarkdownTree(root.NewDefaultRootCmd(), os.Args[1])
+	err := doc.GenMarkdownTree(root.NewDefaultRootCmd(nil), os.Args[1])
 	if err != nil {
 		log.Fatal(err)
 	}

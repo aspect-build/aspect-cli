@@ -14,6 +14,8 @@ import (
 
 	"aspect.build/cli/cmd/aspect/root"
 	"aspect.build/cli/pkg/aspecterrors"
+	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/system"
 )
 
 func main() {
@@ -34,7 +36,15 @@ func main() {
 	if wd, exists := os.LookupEnv("BUILD_WORKING_DIRECTORY"); exists {
 		_ = os.Chdir(wd)
 	}
-	cmd := root.NewDefaultRootCmd()
+
+	pluginSystem := system.NewPluginSystem()
+	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	defer pluginSystem.TearDown()
+
+	cmd := root.NewDefaultRootCmd(pluginSystem)
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		var exitErr *aspecterrors.ExitError
 		if errors.As(err, &exitErr) {

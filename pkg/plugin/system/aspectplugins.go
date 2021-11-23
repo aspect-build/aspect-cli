@@ -58,6 +58,9 @@ func (f *finder) Find() (string, error) {
 		return "", fmt.Errorf("failed to find .aspectplugins: %w", err)
 	}
 	for {
+		if cwd == "/" {
+			break
+		}
 		workspacePath := path.Join(cwd, workspaceFilename)
 		if _, err := f.osStat(workspacePath); err != nil {
 			if !os.IsNotExist(err) {

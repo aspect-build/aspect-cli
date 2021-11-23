@@ -7,23 +7,31 @@ Not licensed for re-use.
 package system
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
+	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 
+	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/config"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/plugin"
+	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
 // PluginSystem is the interface that defines all the methods for the aspect CLI
 // plugin system intended to be used by the Core.
 type PluginSystem interface {
 	Configure(streams ioutils.Streams) error
-	PluginList() *PluginList
 	TearDown()
+	WithBESBackend(
+		ctx context.Context,
+		fn func(besBackend bep.BESBackend) error,
+	) error
+	ExecutePostBuild(isInteractiveMode bool) *aspecterrors.ErrorList
 }
 
 type pluginSystem struct {
@@ -32,6 +40,7 @@ type pluginSystem struct {
 	clientFactory ClientFactory
 	clients       []ClientProvider
 	plugins       *PluginList
+	promptRunner  ioutils.PromptRunner
 }
 
 // NewPluginSystem instantiates a default internal implementation of the
@@ -42,6 +51,7 @@ func NewPluginSystem() PluginSystem {
 		parser:        NewParser(),
 		clientFactory: &clientFactory{},
 		plugins:       &PluginList{},
+		promptRunner:  ioutils.NewPromptRunner(),
 	}
 }
 
@@ -105,9 +115,38 @@ func (ps *pluginSystem) TearDown() {
 	}
 }
 
-// PluginList returns the list of configures plugins.
-func (ps *pluginSystem) PluginList() *PluginList {
-	return ps.plugins
+// WithBESBackend starts a BES backend, executes the provided function with the
+// BES backend injected, and gracefully stops it when the provided function
+// returns.
+func (ps *pluginSystem) WithBESBackend(
+	ctx context.Context,
+	fn func(besBackend bep.BESBackend) error,
+) error {
+	besBackend := bep.NewBESBackend()
+	for node := ps.plugins.head; node != nil; node = node.next {
+		besBackend.RegisterSubscriber(node.plugin.BEPEventCallback)
+	}
+	if err := besBackend.Setup(); err != nil {
+		return fmt.Errorf("failed to run BES backend: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := besBackend.ServeWait(ctx); err != nil {
+		return fmt.Errorf("failed to run BES backend: %w", err)
+	}
+	defer besBackend.GracefulStop()
+	return fn(besBackend)
+}
+
+// ExecutePostBuild executes all post-build hooks from all plugins.
+func (ps *pluginSystem) ExecutePostBuild(isInteractiveMode bool) *aspecterrors.ErrorList {
+	errors := &aspecterrors.ErrorList{}
+	for node := ps.plugins.head; node != nil; node = node.next {
+		if err := node.plugin.PostBuildHook(isInteractiveMode, ps.promptRunner); err != nil {
+			errors.Insert(err)
+		}
+	}
+	return errors
 }
 
 // ClientFactory hides the call to goplugin.NewClient.
@@ -132,22 +171,22 @@ type ClientProvider interface {
 // PluginList implements a simple linked list for the parsed plugins from the
 // plugins file.
 type PluginList struct {
-	Head *PluginNode
+	head *PluginNode
 	tail *PluginNode
 }
 
 func (l *PluginList) insert(p plugin.Plugin) {
-	node := &PluginNode{Plugin: p}
-	if l.Head == nil {
-		l.Head = node
+	node := &PluginNode{plugin: p}
+	if l.head == nil {
+		l.head = node
 	} else {
-		l.tail.Next = node
+		l.tail.next = node
 	}
 	l.tail = node
 }
 
 // PluginNode is a node in the PluginList linked list.
 type PluginNode struct {
-	Next   *PluginNode
-	Plugin plugin.Plugin
+	next   *PluginNode
+	plugin plugin.Plugin
 }

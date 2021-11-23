@@ -7,81 +7,39 @@ Not licensed for re-use.
 package build
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"time"
 
-	"github.com/spf13/cobra"
-
-	"aspect.build/cli/pkg/aspect/build/bep"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/hooks"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
 // Build represents the aspect build command.
 type Build struct {
 	ioutils.Streams
-	bzl        bazel.Spawner
-	besBackend bep.BESBackend
-	hooks      *hooks.Hooks
+	bzl bazel.Spawner
 }
 
 // New creates a Build command.
 func New(
 	streams ioutils.Streams,
 	bzl bazel.Spawner,
-	besBackend bep.BESBackend,
-	hooks *hooks.Hooks,
 ) *Build {
 	return &Build{
-		Streams:    streams,
-		bzl:        bzl,
-		besBackend: besBackend,
-		hooks:      hooks,
+		Streams: streams,
+		bzl:     bzl,
 	}
 }
 
 // Run runs the aspect build command, calling `bazel build` with a local Build
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
-func (b *Build) Run(
-	ctx context.Context,
-	cmd *cobra.Command,
-	args []string,
-	isInteractiveMode bool,
-) (exitErr error) {
-	// TODO(f0rmiga): this is a hook for the build command and should be discussed
-	// as part of the plugin design.
-	defer func() {
-		errs := b.hooks.ExecutePostBuild(isInteractiveMode).Errors()
-		if len(errs) > 0 {
-			for _, err := range errs {
-				fmt.Fprintf(b.Streams.Stderr, "Error: failed to run build command: %v\n", err)
-			}
-			var err *aspecterrors.ExitError
-			if errors.As(exitErr, &err) {
-				err.ExitCode = 1
-			}
-		}
-	}()
-
-	if err := b.besBackend.Setup(); err != nil {
-		return fmt.Errorf("failed to run build command: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	if err := b.besBackend.ServeWait(ctx); err != nil {
-		return fmt.Errorf("failed to run build command: %w", err)
-	}
-	defer b.besBackend.GracefulStop()
-
-	besBackendFlag := fmt.Sprintf("--bes_backend=grpc://%s", b.besBackend.Addr())
+func (b *Build) Run(args []string, besBackend bep.BESBackend) (exitErr error) {
+	besBackendFlag := fmt.Sprintf("--bes_backend=grpc://%s", besBackend.Addr())
 	exitCode, bazelErr := b.bzl.Spawn(append([]string{"build", besBackendFlag}, args...))
 
 	// Process the subscribers errors before the Bazel one.
-	subscriberErrors := b.besBackend.Errors()
+	subscriberErrors := besBackend.Errors()
 	if len(subscriberErrors) > 0 {
 		for _, err := range subscriberErrors {
 			fmt.Fprintf(b.Streams.Stderr, "Error: failed to run build command: %v\n", err)
