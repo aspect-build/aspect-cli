@@ -37,7 +37,7 @@ func NewDefaultRootCmd() *cobra.Command {
 }
 
 func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command {
-	cmd := &cobra.Command{
+	rootCmd := &cobra.Command{
 		Use:           "aspect",
 		Short:         "Aspect.build bazel wrapper",
 		SilenceUsage:  true,
@@ -50,8 +50,8 @@ func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command
 	// ### Flags
 	var cfgFile string
 	var interactive bool
-	cmd.PersistentFlags().StringVar(&cfgFile, flags.ConfigFlagName, "", "config file (default is $HOME/.aspect.yaml)")
-	cmd.PersistentFlags().BoolVar(&interactive, flags.InteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, flags.ConfigFlagName, "", "config file (default is $HOME/.aspect.yaml)")
+	rootCmd.PersistentFlags().BoolVar(&interactive, flags.InteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
 
 	// ### Viper
 	if cfgFile != "" {
@@ -73,30 +73,30 @@ func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command
 
 	// ### Child commands
 	// IMPORTANT: when adding a new command, also update the _DOCS list in /docs/BUILD.bazel
-	cmd.AddCommand(build.NewDefaultBuildCmd())
-	cmd.AddCommand(clean.NewDefaultCleanCmd())
-	cmd.AddCommand(version.NewDefaultVersionCmd())
-	cmd.AddCommand(docs.NewDefaultDocsCmd())
-	cmd.AddCommand(info.NewDefaultInfoCmd())
-	cmd.AddCommand(test.NewDefaultTestCmd())
+	rootCmd.AddCommand(build.NewDefaultBuildCmd())
+	rootCmd.AddCommand(clean.NewDefaultCleanCmd())
+	rootCmd.AddCommand(version.NewDefaultVersionCmd())
+	rootCmd.AddCommand(docs.NewDefaultDocsCmd())
+	rootCmd.AddCommand(info.NewDefaultInfoCmd())
+	rootCmd.AddCommand(test.NewDefaultTestCmd())
 
 	// ### "Additional help topic commands" which are not runnable
 	// https://pkg.go.dev/github.com/spf13/cobra#Command.IsAdditionalHelpTopicCommand
-	cmd.AddCommand(&cobra.Command{
+	rootCmd.AddCommand(&cobra.Command{
 		Use:   "target-syntax",
 		Short: "Explains the syntax for specifying targets.",
 		Long:  topics.MustAssetString("target-syntax.md"),
 	})
-	cmd.AddCommand(&cobra.Command{
+	rootCmd.AddCommand(&cobra.Command{
 		Use:   "info-keys",
 		Short: "Displays a list of keys used by the info command.",
 		Long:  topics.MustAssetString("info-keys.md"),
 	})
-	cmd.AddCommand(&cobra.Command{
+	rootCmd.AddCommand(&cobra.Command{
 		Use:   "tags",
 		Short: "Conventions for tags which are special",
 		Long:  topics.MustAssetString("tags.md"),
 	})
 
-	return cmd
+	return rootCmd
 }

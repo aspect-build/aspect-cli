@@ -14,19 +14,19 @@ import (
 	"aspect.build/cli/pkg/aspecterrors"
 )
 
-type Test struct {
+type TestCmd struct {
 	ioutils.Streams
 	bzl bazel.Spawner
 }
 
-func New(streams ioutils.Streams, bzl bazel.Spawner) *Test {
-	return &Test{
+func New(streams ioutils.Streams, bzl bazel.Spawner) *TestCmd {
+	return &TestCmd{
 		Streams: streams,
 		bzl:     bzl,
 	}
 }
 
-func (v *Test) Run(_ *cobra.Command, args []string) error {
+func (v *TestCmd) Run(_ *cobra.Command, args []string) error {
 	bazelCmd := []string{"test"}
 	bazelCmd = append(bazelCmd, args...)
 

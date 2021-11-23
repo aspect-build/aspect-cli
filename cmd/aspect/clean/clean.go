@@ -7,18 +7,16 @@ Not licensed for re-use.
 package clean
 
 import (
-	"os"
-
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
+	rootFlags "aspect.build/cli/cmd/aspect/root/flags"
+	"aspect.build/cli/pkg/pathutils"
 	"aspect.build/cli/pkg/aspect/clean"
 )
 
 // NewDefaultCleanCmd creates a new clean cobra command.
 func NewDefaultCleanCmd() *cobra.Command {
-	isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-	b := clean.NewDefault(isInteractive)
+	cleanCmd := clean.NewDefault()
 
 	cmd := &cobra.Command{
 		Use:   "clean",
@@ -53,16 +51,25 @@ Workaround inconistent state:
 	Such problems are fixable and these bugs are a high priority.
 	If you ever find an incorrect incremental build, please file a bug report,
 	and only use clean as a temporary workaround.`,
-		RunE: b.Run,
+		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
+			return pathutils.InvokeCmdInsideWorkspace(func(cmd *cobra.Command, args []string) error {
+				isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
+				if err != nil {
+					return err
+				}
+
+				return cleanCmd.Run(isInteractiveMode)
+			})(cmd, args)
+		},
 	}
 
-	cmd.PersistentFlags().BoolVarP(&b.Expunge, "expunge", "", false, `Remove the entire output_base tree.
+	cmd.PersistentFlags().BoolVarP(&cleanCmd.Expunge, "expunge", "", false, `Remove the entire output_base tree.
 This removes all build output, external repositories,
 and temp files created by Bazel.
 It also stops the Bazel server after the clean,
 equivalent to the shutdown command.`)
 
-	cmd.PersistentFlags().BoolVarP(&b.ExpungeAsync, "expunge_async", "", false, `Expunge in the background.
+	cmd.PersistentFlags().BoolVarP(&cleanCmd.ExpungeAsync, "expunge_async", "", false, `Expunge in the background.
 It is safe to invoke a Bazel command in the same
 workspace while the asynchronous expunge continues to run.
 Note, however, that this may introduce IO contention.`)

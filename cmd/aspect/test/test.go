@@ -7,6 +7,7 @@ Not licensed for re-use
 package test
 
 import (
+	"aspect.build/cli/pkg/pathutils"
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/test"
@@ -19,7 +20,7 @@ func NewDefaultTestCmd() *cobra.Command {
 }
 
 func NewTestCmd(streams ioutils.Streams, bzl bazel.Spawner) *cobra.Command {
-	v := test.New(streams, bzl)
+	testCmd := test.New(streams, bzl)
 
 	cmd := &cobra.Command{
 		Use:   "test",
@@ -35,7 +36,11 @@ don't forget to pass all your 'build' options to 'test' too.
 See 'bazel help target-syntax' for details and examples on how to
 specify targets.
 `,
-		RunE: v.Run,
+		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
+			return pathutils.InvokeCmdInsideWorkspace(func(cmd *cobra.Command, args []string) error {
+				return testCmd.Run(cmd, args)
+			})(cmd, args)
+		},
 	}
 
 	return cmd

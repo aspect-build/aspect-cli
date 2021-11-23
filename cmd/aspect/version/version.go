@@ -19,19 +19,19 @@ func NewDefaultVersionCmd() *cobra.Command {
 }
 
 func NewVersionCmd(streams ioutils.Streams) *cobra.Command {
-	v := version.New(streams)
+	versionCmd := version.New(streams)
 
-	v.BuildinfoRelease = buildinfo.Release
-	v.BuildinfoGitStatus = buildinfo.GitStatus
+	versionCmd.BuildinfoRelease = buildinfo.Release
+	versionCmd.BuildinfoGitStatus = buildinfo.GitStatus
 
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version of aspect CLI as well as tools it invokes.",
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
-		RunE:  v.Run,
+		RunE:  versionCmd.Run,
 	}
 
-	cmd.PersistentFlags().BoolVarP(&v.GNUFormat, "gnu_format", "", false, "format space-separated following GNU convention")
+	cmd.PersistentFlags().BoolVarP(&versionCmd.GNUFormat, "gnu_format", "", false, "format space-separated following GNU convention")
 
 	return cmd
 }

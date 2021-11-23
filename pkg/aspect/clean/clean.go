@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	"github.com/manifoldco/promptui"
-	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
 	"aspect.build/cli/pkg/aspecterrors"
@@ -70,21 +69,18 @@ type Clean struct {
 // New creates a Clean command.
 func New(
 	streams ioutils.Streams,
-	bzl bazel.Spawner,
-	isInteractiveMode bool) *Clean {
+	bzl bazel.Spawner) *Clean {
 	return &Clean{
 		Streams:           streams,
-		isInteractiveMode: isInteractiveMode,
 		bzl:               bzl,
 	}
 }
 
-func NewDefault(isInteractive bool) *Clean {
-	c := New(
+func NewDefault() *Clean {
+	cleanCmd := New(
 		ioutils.DefaultStreams,
-		bazel.New(),
-		isInteractive)
-	c.Behavior = &promptui.Select{
+		bazel.New())
+	cleanCmd.Behavior = &promptui.Select{
 		Label: "Clean can have a few behaviors. Which do you want?",
 		Items: []string{
 			ReclaimOption,
@@ -94,24 +90,24 @@ func NewDefault(isInteractive bool) *Clean {
 			WorkaroundOption,
 		},
 	}
-	c.Workaround = &promptui.Prompt{
+	cleanCmd.Workaround = &promptui.Prompt{
 		Label:     "Temporarily workaround the bug by deleting the output folder",
 		IsConfirm: true,
 	}
-	c.Remember = &promptui.Prompt{
+	cleanCmd.Remember = &promptui.Prompt{
 		Label:     rememberLine2,
 		IsConfirm: true,
 	}
-	c.Prefs = *viper.GetViper()
-	return c
+	cleanCmd.Prefs = *viper.GetViper()
+	return cleanCmd
 }
 
-// Run runs the aspect build command.
-func (c *Clean) Run(_ *cobra.Command, _ []string) error {
-	skip := c.Prefs.GetBool(skipPromptKey)
-	if c.isInteractiveMode && !skip {
+// Run runs the aspect clean command.
+func (cleanCmd *Clean) Run(isInteractiveMode bool) error {
+	skip := cleanCmd.Prefs.GetBool(skipPromptKey)
+	if cleanCmd.isInteractiveMode && !skip {
 
-		_, chosen, err := c.Behavior.Run()
+		_, chosen, err := cleanCmd.Behavior.Run()
 
 		if err != nil {
 			return fmt.Errorf("prompt failed: %w", err)
@@ -121,39 +117,39 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 
 		case ReclaimOption:
 			// Allow user to opt-out of our fancy "clean" command and just behave like bazel
-			fmt.Fprint(c.Streams.Stdout, rememberLine1)
-			if _, err := c.Remember.Run(); err == nil {
-				c.Prefs.Set(skipPromptKey, "true")
-				if err := c.Prefs.WriteConfig(); err != nil {
+			fmt.Fprint(cleanCmd.Streams.Stdout, rememberLine1)
+			if _, err := cleanCmd.Remember.Run(); err == nil {
+				cleanCmd.Prefs.Set(skipPromptKey, "true")
+				if err := cleanCmd.Prefs.WriteConfig(); err != nil {
 					return fmt.Errorf("failed to update config file: %w", err)
 				}
 			}
 		case ReclaimAllOption:
-			fmt.Fprint(c.Streams.Stdout, "Sorry, this is not implemented yet: discover all bazel workspaces on the machine\n")
+			fmt.Fprint(cleanCmd.Streams.Stdout, "Sorry, this is not implemented yet: discover all bazel workspaces on the machine\n")
 			return nil
 		case NonIncrementalOption:
-			fmt.Fprint(c.Streams.Stdout, outputBaseHint)
+			fmt.Fprint(cleanCmd.Streams.Stdout, outputBaseHint)
 			return nil
 		case InvalidateReposOption:
-			fmt.Fprint(c.Streams.Stdout, syncHint)
+			fmt.Fprint(cleanCmd.Streams.Stdout, syncHint)
 			return nil
 		case WorkaroundOption:
-			fmt.Fprint(c.Streams.Stdout, fileIssueHint)
-			_, err := c.Workaround.Run()
+			fmt.Fprint(cleanCmd.Streams.Stdout, fileIssueHint)
+			_, err := cleanCmd.Workaround.Run()
 			if err != nil {
 				return fmt.Errorf("prompt failed: %w", err)
 			}
 		}
 	}
 
-	cmd := []string{"clean"}
-	if c.Expunge {
-		cmd = append(cmd, "--expunge")
+	bazelCmd := []string{"clean"}
+	if cleanCmd.Expunge {
+		bazelCmd = append(bazelCmd, "--expunge")
 	}
-	if c.ExpungeAsync {
-		cmd = append(cmd, "--expunge_async")
+	if cleanCmd.ExpungeAsync {
+		bazelCmd = append(bazelCmd, "--expunge_async")
 	}
-	if exitCode, err := c.bzl.Spawn(cmd); exitCode != 0 {
+	if exitCode, err := cleanCmd.bzl.Spawn(bazelCmd); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

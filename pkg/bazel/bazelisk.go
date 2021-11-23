@@ -3,11 +3,6 @@ package bazel
 import (
 	"bufio"
 	"fmt"
-	"github.com/bazelbuild/bazelisk/core"
-	"github.com/bazelbuild/bazelisk/httputil"
-	"github.com/bazelbuild/bazelisk/platforms"
-	"github.com/bazelbuild/bazelisk/versions"
-	"github.com/mitchellh/go-homedir"
 	"io"
 	"io/ioutil"
 	"log"
@@ -21,6 +16,14 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/bazelbuild/bazelisk/core"
+	"github.com/bazelbuild/bazelisk/httputil"
+	"github.com/bazelbuild/bazelisk/platforms"
+	"github.com/bazelbuild/bazelisk/versions"
+	"github.com/mitchellh/go-homedir"
+
+	"aspect.build/cli/pkg/pathutils"
 )
 
 const (
@@ -33,8 +36,9 @@ var (
 	// BazeliskVersion is filled in via x_defs when building a release.
 	BazeliskVersion = "development"
 
-	fileConfig     map[string]string
-	fileConfigOnce sync.Once
+	fileConfig      map[string]string
+	fileConfigOnce  sync.Once
+	workspaceFinder pathutils.WorkspaceFinder
 )
 
 // RunBazelisk runs the main Bazelisk logic for the given arguments and Bazel repositories.
@@ -90,7 +94,7 @@ func RunBazelisk(args []string, repos *core.Repositories, out io.Writer) (int, e
 		}
 
 		baseDirectory := filepath.Join(bazeliskHome, "downloads", bazelForkOrURL)
-		bazelPath, err = downloadBazel(bazelFork, resolvedBazelVersion, baseDirectory, repos, downloader)
+		bazelPath, err = downloadBazel(resolvedBazelVersion, baseDirectory, repos, downloader)
 		if err != nil {
 			return -1, fmt.Errorf("could not download Bazel: %v", err)
 		}
@@ -188,10 +192,11 @@ func GetEnvOrConfig(name string) string {
 		if err != nil {
 			return
 		}
-		workspaceRoot := findWorkspaceRoot(workingDirectory)
-		if workspaceRoot == "" {
+		workspaceRoot, err := workspaceFinder.Find(workingDirectory)
+		if err != nil {
 			return
 		}
+		workspaceRoot = filepath.Dir(workspaceRoot)
 		rcFilePath := filepath.Join(workspaceRoot, ".bazeliskrc")
 		contents, err := ioutil.ReadFile(rcFilePath)
 		if err != nil {
@@ -218,35 +223,6 @@ func GetEnvOrConfig(name string) string {
 	return fileConfig[name]
 }
 
-// isValidWorkspace returns true iff the supplied path is the workspace root, defined by the presence of
-// a file named WORKSPACE or WORKSPACE.bazel
-// see https://github.com/bazelbuild/bazel/blob/8346ea4cfdd9fbd170d51a528fee26f912dad2d5/src/main/cpp/workspace_layout.cc#L37
-func isValidWorkspace(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-
-	return !info.IsDir()
-}
-
-func findWorkspaceRoot(root string) string {
-	if isValidWorkspace(filepath.Join(root, "WORKSPACE")) {
-		return root
-	}
-
-	if isValidWorkspace(filepath.Join(root, "WORKSPACE.bazel")) {
-		return root
-	}
-
-	parentDirectory := filepath.Dir(root)
-	if parentDirectory == root {
-		return ""
-	}
-
-	return findWorkspaceRoot(parentDirectory)
-}
-
 func getBazelVersion() (string, error) {
 	// Check in this order:
 	// - env var "USE_BAZEL_VERSION" is set to a specific version.
@@ -270,7 +246,11 @@ func getBazelVersion() (string, error) {
 		return "", fmt.Errorf("could not get working directory: %v", err)
 	}
 
-	workspaceRoot := findWorkspaceRoot(workingDirectory)
+	workspaceRoot, err := workspaceFinder.Find(workingDirectory)
+	if err != nil {
+		return "", fmt.Errorf("could not get workspace root: %v", err)
+	}
+	workspaceRoot = filepath.Dir(workspaceRoot)
 	if len(workspaceRoot) != 0 {
 		bazelVersionPath := filepath.Join(workspaceRoot, ".bazelversion")
 		if _, err := os.Stat(bazelVersionPath); err == nil {
@@ -312,7 +292,7 @@ func parseBazelForkAndVersion(bazelForkAndVersion string) (string, string, error
 	return bazelFork, bazelVersion, nil
 }
 
-func downloadBazel(fork string, version string, baseDirectory string, repos *core.Repositories, downloader core.DownloadFunc) (string, error) {
+func downloadBazel(version string, baseDirectory string, repos *core.Repositories, downloader core.DownloadFunc) (string, error) {
 	pathSegment, err := platforms.DetermineBazelFilename(version, false)
 	if err != nil {
 		return "", fmt.Errorf("could not determine path segment to use for Bazel binary: %v", err)
@@ -372,13 +352,17 @@ func maybeDelegateToWrapper(bazel string) string {
 		return bazel
 	}
 
-	wd, err := os.Getwd()
+	workingDirectory, err := os.Getwd()
 	if err != nil {
 		return bazel
 	}
 
-	root := findWorkspaceRoot(wd)
-	wrapper := filepath.Join(root, wrapperPath)
+	workspaceRoot, err := workspaceFinder.Find(workingDirectory)
+	if err != nil {
+		return bazel
+	}
+	workspaceRoot = filepath.Dir(workspaceRoot)
+	wrapper := filepath.Join(workspaceRoot, wrapperPath)
 	if stat, err := os.Stat(wrapper); err != nil || stat.IsDir() || stat.Mode().Perm()&0001 == 0 {
 		return bazel
 	}

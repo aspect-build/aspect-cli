@@ -7,11 +7,11 @@ Not licensed for re-use.
 package info
 
 import (
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/ioutils"
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspecterrors"
+	"aspect.build/cli/pkg/bazel"
+	"aspect.build/cli/pkg/ioutils"
 )
 
 type Info struct {
@@ -26,9 +26,9 @@ func New(streams ioutils.Streams) *Info {
 	}
 }
 
-func (v *Info) Run(_ *cobra.Command, args []string) error {
+func (infoCmd *Info) Run(_ *cobra.Command, args []string) error {
 	bazelCmd := []string{"info"}
-	if v.ShowMakeEnv {
+	if infoCmd.ShowMakeEnv {
 		// Propagate the flag
 		bazelCmd = append(bazelCmd, "--show_make_env")
 	}

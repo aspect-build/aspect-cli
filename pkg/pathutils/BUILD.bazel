@@ -1,0 +1,9 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "pathutils",
+    srcs = ["pathutils.go"],
+    importpath = "aspect.build/cli/pkg/pathutils",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_spf13_cobra//:cobra"],
+)
