@@ -17,8 +17,6 @@ import (
 
 // https://github.com/bazelbuild/bazel/blob/8346ea4c/src/main/cpp/workspace_layout.cc#L37
 var workspaceFilenames = []string{"WORKSPACE", "WORKSPACE.bazel"}
-// TODO: create package finder
-var packageFilenames = []string{"BUILD", "BUILD.bazel"}
 
 type RunFn func(cmd *cobra.Command, args []string) (exitErr error)
 
@@ -60,7 +58,6 @@ func NewDefaultWorkspaceFinder() *WorkspaceFinder {
 // Find finds the WORKSPACE file under a Bazel workspace. If the returned
 // path is empty and no error was produced, the user's current working directory
 // is not a Bazel workspace.
-// TODO create unit tests
 func (f *WorkspaceFinder) Find(cwd string) (string, error) {
 	for {
 		if cwd == "." {

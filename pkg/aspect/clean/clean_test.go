@@ -161,9 +161,9 @@ func TestClean(t *testing.T) {
 		g.Expect(string(content)).To(Equal("[clean]\nskip_prompt=true\n\n"))
 
 		// If we run it again, there should be no prompt
-		cleanCmd := clean.New(streams, spawner)
-		cleanCmd.Prefs = viper
-		g.Expect(cleanCmd.Run(true)).Should(Succeed())
+		cleanCmd2 := clean.New(streams, spawner)
+		cleanCmd2.Prefs = viper
+		g.Expect(cleanCmd2.Run(true)).Should(Succeed())
 	})
 
 	t.Run("interactive clean prompts for usage, option 2", func(t *testing.T) {

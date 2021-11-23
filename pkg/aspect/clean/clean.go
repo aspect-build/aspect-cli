@@ -55,7 +55,6 @@ type PromptRunner interface {
 type Clean struct {
 	ioutils.Streams
 	bzl               bazel.Spawner
-	isInteractiveMode bool
 
 	Behavior   SelectRunner
 	Workaround PromptRunner
@@ -105,7 +104,7 @@ func NewDefault() *Clean {
 // Run runs the aspect clean command.
 func (cleanCmd *Clean) Run(isInteractiveMode bool) error {
 	skip := cleanCmd.Prefs.GetBool(skipPromptKey)
-	if cleanCmd.isInteractiveMode && !skip {
+	if isInteractiveMode && !skip {
 
 		_, chosen, err := cleanCmd.Behavior.Run()
 
