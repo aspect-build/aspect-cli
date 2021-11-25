@@ -17,7 +17,7 @@ import (
 )
 
 // https://github.com/bazelbuild/bazel/blob/8346ea4c/src/main/cpp/workspace_layout.cc#L37
-var workspaceFilenames = []string{"WORKSPACE", "WORKSPACE.bazel"}
+var WorkspaceFilenames = []string{"WORKSPACE", "WORKSPACE.bazel"}
 
 // RunFn is the function signature for the cobra RunE function in the cobra.Command.
 type RunFn func(cmd *cobra.Command, args []string) (exitErr error)
@@ -71,14 +71,14 @@ func (f *WorkspaceFinder) Find(cwd string) (string, error) {
 		if cwd == "." || cwd == filepath.Dir(cwd) {
 			return "", nil
 		}
-		for _, workspaceFilename := range workspaceFilenames {
+		for _, workspaceFilename := range WorkspaceFilenames {
 			workspacePath := path.Join(cwd, workspaceFilename)
 			if _, err := f.osStat(workspacePath); err == nil {
 				return workspacePath, nil
 			} else if !os.IsNotExist(err) {
 				return "", fmt.Errorf("failed to find bazel workspace: %w", err)
 			}
-			cwd = filepath.Dir(cwd)
 		}
+		cwd = filepath.Dir(cwd)
 	}
 }
