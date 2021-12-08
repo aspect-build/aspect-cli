@@ -24,6 +24,7 @@ import (
 	"aspect.build/cli/cmd/aspect/version"
 	"aspect.build/cli/docs/help/topics"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/system"
 )
 
 var (
@@ -31,12 +32,16 @@ var (
 	faint    = color.New(color.Faint)
 )
 
-func NewDefaultRootCmd() *cobra.Command {
+func NewDefaultRootCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	defaultInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-	return NewRootCmd(ioutils.DefaultStreams, defaultInteractive)
+	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive)
 }
 
-func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command {
+func NewRootCmd(
+	streams ioutils.Streams,
+	pluginSystem system.PluginSystem,
+	defaultInteractive bool,
+) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "aspect",
 		Short:         "Aspect.build bazel wrapper",
@@ -73,7 +78,7 @@ func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command
 
 	// ### Child commands
 	// IMPORTANT: when adding a new command, also update the _DOCS list in /docs/BUILD.bazel
-	cmd.AddCommand(build.NewDefaultBuildCmd())
+	cmd.AddCommand(build.NewDefaultBuildCmd(pluginSystem))
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
 	cmd.AddCommand(version.NewDefaultVersionCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())

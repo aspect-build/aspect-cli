@@ -89,10 +89,9 @@ func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error 
 }
 
 // PostBuildHook is called from the Core to execute the Plugin PostBuildHook. It
-// starts the prompt runner server and ignores the prompt runner argument since
-// the signature of this method has to match the Plugin interface.
-func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, _ ioutils.PromptRunner) error {
-	prompterServer := &PrompterGRPCServer{}
+// starts the prompt runner server with the provided PromptRunner.
+func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
+	prompterServer := &PrompterGRPCServer{promptRunner: promptRunner}
 	var s *grpc.Server
 	serverFunc := func(opts []grpc.ServerOption) *grpc.Server {
 		s = grpc.NewServer(opts...)
@@ -112,14 +111,16 @@ func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, _ ioutils.PromptRunne
 
 // PrompterGRPCServer implements the gRPC server that runs on the Core and is
 // passed to the Plugin to allow prompt actions to the CLI user.
-type PrompterGRPCServer struct{}
+type PrompterGRPCServer struct {
+	promptRunner ioutils.PromptRunner
+}
 
 // Run translates the gRPC call to perform a prompt Run on the Core.
 func (p *PrompterGRPCServer) Run(
 	ctx context.Context,
 	req *proto.PromptRunReq,
 ) (*proto.PromptRunRes, error) {
-	prompt := &promptui.Prompt{
+	prompt := promptui.Prompt{
 		Label:       req.GetLabel(),
 		Default:     req.GetDefault(),
 		AllowEdit:   req.GetAllowEdit(),
@@ -129,7 +130,7 @@ func (p *PrompterGRPCServer) Run(
 		IsVimMode:   req.GetIsVimMode(),
 	}
 
-	result, err := prompt.Run()
+	result, err := p.promptRunner.Run(prompt)
 	res := &proto.PromptRunRes{Result: result}
 	if err != nil {
 		res.Error = &proto.PromptRunRes_Error{

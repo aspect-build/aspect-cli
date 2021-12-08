@@ -13,3 +13,16 @@ import "github.com/manifoldco/promptui"
 type PromptRunner interface {
 	Run(prompt promptui.Prompt) (string, error)
 }
+
+// promptRunner implements a default PromptRunner.
+type promptRunner struct{}
+
+// NewPromptRunner creates a new default prompt runner.
+func NewPromptRunner() PromptRunner {
+	return &promptRunner{}
+}
+
+// Run runs the given prompt.
+func (pr *promptRunner) Run(prompt promptui.Prompt) (string, error) {
+	return prompt.Run()
+}

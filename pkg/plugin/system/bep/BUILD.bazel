@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "bep",
     srcs = ["bes_backend.go"],
-    importpath = "aspect.build/cli/pkg/aspect/build/bep",
+    importpath = "aspect.build/cli/pkg/plugin/system/bep",
     visibility = ["//visibility:public"],
     deps = [
         "//bazel/buildeventstream/proto",

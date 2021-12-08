@@ -7,7 +7,7 @@ gomock(
     name = "mock_bep_source",
     out = "mock_bep_test.go",
     interfaces = ["BESBackend"],
-    library = "//pkg/aspect/build/bep",
+    library = "//pkg/plugin/system/bep",
     package = "mock",
     visibility = ["//visibility:private"],
 )
@@ -18,10 +18,10 @@ go_library(
         "doc.go",
         ":mock_bep_source",  # keep
     ],
-    importpath = "aspect.build/cli/pkg/aspect/build/bep/mock",
+    importpath = "aspect.build/cli/pkg/plugin/system/bep/mock",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//pkg/aspect/build/bep",  # keep
+        "//pkg/plugin/system/bep",  # keep
         "@com_github_golang_mock//gomock",  # keep
         "@org_golang_google_grpc//:grpc",  # keep
     ],

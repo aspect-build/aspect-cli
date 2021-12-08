@@ -11,6 +11,8 @@ go_library(
     deps = [
         "//cmd/aspect/root",
         "//pkg/aspecterrors",
+        "//pkg/ioutils",
+        "//pkg/plugin/system",
     ],
 )
 

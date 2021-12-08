@@ -6,12 +6,10 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/build",
     visibility = ["//cmd/aspect/build:__pkg__"],
     deps = [
-        "//pkg/aspect/build/bep",
         "//pkg/aspecterrors",
         "//pkg/bazel",
-        "//pkg/hooks",
         "//pkg/ioutils",
-        "@com_github_spf13_cobra//:cobra",
+        "//pkg/plugin/system/bep",
     ],
 )
 
@@ -20,11 +18,10 @@ go_test(
     srcs = ["build_test.go"],
     deps = [
         ":build",
-        "//pkg/aspect/build/bep/mock",
         "//pkg/aspecterrors",
         "//pkg/bazel/mock",
-        "//pkg/hooks",
         "//pkg/ioutils",
+        "//pkg/plugin/system/bep/mock",
         "@com_github_golang_mock//gomock",
         "@com_github_onsi_gomega//:gomega",
     ],
