@@ -18,13 +18,13 @@ import (
 // Build represents the aspect build command.
 type Build struct {
 	ioutils.Streams
-	bzl bazel.Spawner
+	bzl bazel.Bazel
 }
 
 // New creates a Build command.
 func New(
 	streams ioutils.Streams,
-	bzl bazel.Spawner,
+	bzl bazel.Bazel,
 ) *Build {
 	return &Build{
 		Streams: streams,

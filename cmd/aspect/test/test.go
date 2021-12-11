@@ -12,15 +12,14 @@ import (
 	"aspect.build/cli/pkg/aspect/test"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/pathutils"
 )
 
 func NewDefaultTestCmd() *cobra.Command {
 	return NewTestCmd(ioutils.DefaultStreams, bazel.New())
 }
 
-func NewTestCmd(streams ioutils.Streams, bzl bazel.Spawner) *cobra.Command {
-	v := test.New(streams, bzl)
-
+func NewTestCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "test",
 		Short: "Builds the specified targets and runs all test targets among them.",
@@ -35,7 +34,11 @@ don't forget to pass all your 'build' options to 'test' too.
 See 'bazel help target-syntax' for details and examples on how to
 specify targets.
 `,
-		RunE: v.Run,
+		RunE: pathutils.InvokeCmdInsideWorkspace(func(workspaceRoot string, cmd *cobra.Command, args []string) (exitErr error) {
+			bzl.SetWorkspaceRoot(workspaceRoot)
+			t := test.New(streams, bzl)
+			return t.Run(cmd, args)
+		}),
 	}
 
 	return cmd

@@ -11,6 +11,7 @@ go_library(
         "//pkg/aspecterrors",
         "//pkg/bazel",
         "//pkg/ioutils",
+        "//pkg/pathutils",
         "//pkg/plugin/system",
         "//pkg/plugin/system/bep",
         "@com_github_spf13_cobra//:cobra",

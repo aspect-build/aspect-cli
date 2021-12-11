@@ -1,4 +1,4 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
 load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 
@@ -7,7 +7,6 @@ go_library(
     srcs = [
         "bazel.go",
         "bazelisk.go",
-        "flags.go",
     ],
     embed = [":bazel_go_proto"],
     importpath = "aspect.build/cli/pkg/bazel",
@@ -20,15 +19,6 @@ go_library(
         "@com_github_bazelbuild_bazelisk//versions:go_default_library",
         "@com_github_mitchellh_go_homedir//:go-homedir",
         "@org_golang_google_protobuf//proto",
-    ],
-)
-
-go_test(
-    name = "bazel_test",
-    srcs = ["bazel_test.go"],
-    deps = [
-        ":bazel",
-        "@com_github_onsi_gomega//:gomega",
     ],
 )
 
