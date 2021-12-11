@@ -55,7 +55,7 @@ type PromptRunner interface {
 // Clean represents the aspect clean command.
 type Clean struct {
 	ioutils.Streams
-	bzl               bazel.Spawner
+	bzl               bazel.Bazel
 	isInteractiveMode bool
 
 	Behavior   SelectRunner
@@ -70,7 +70,7 @@ type Clean struct {
 // New creates a Clean command.
 func New(
 	streams ioutils.Streams,
-	bzl bazel.Spawner,
+	bzl bazel.Bazel,
 	isInteractiveMode bool) *Clean {
 	return &Clean{
 		Streams:           streams,
@@ -79,10 +79,10 @@ func New(
 	}
 }
 
-func NewDefault(isInteractive bool) *Clean {
+func NewDefault(bzl bazel.Bazel, isInteractive bool) *Clean {
 	c := New(
 		ioutils.DefaultStreams,
-		bazel.New(),
+		bzl,
 		isInteractive)
 	c.Behavior = &promptui.Select{
 		Label: "Clean can have a few behaviors. Which do you want?",

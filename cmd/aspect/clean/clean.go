@@ -13,12 +13,20 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/clean"
+	"aspect.build/cli/pkg/bazel"
+	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/pathutils"
 )
 
-// NewDefaultCleanCmd creates a new clean cobra command.
+// NewDefaultCleanCmd creates a new default clean cobra command.
 func NewDefaultCleanCmd() *cobra.Command {
-	isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-	b := clean.NewDefault(isInteractive)
+	return NewCleanCmd(ioutils.DefaultStreams, bazel.New())
+}
+
+// NewCleanCmd creates a new clean cobra command.
+func NewCleanCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
+	var expunge bool
+	var expungeAsync bool
 
 	cmd := &cobra.Command{
 		Use:   "clean",
@@ -53,16 +61,23 @@ Workaround inconistent state:
 	Such problems are fixable and these bugs are a high priority.
 	If you ever find an incorrect incremental build, please file a bug report,
 	and only use clean as a temporary workaround.`,
-		RunE: b.Run,
+		RunE: pathutils.InvokeCmdInsideWorkspace(func(workspaceRoot string, cmd *cobra.Command, args []string) (exitErr error) {
+			bzl.SetWorkspaceRoot(workspaceRoot)
+			isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+			c := clean.NewDefault(bzl, isInteractive)
+			c.Expunge = expunge
+			c.ExpungeAsync = expungeAsync
+			return c.Run(cmd, args)
+		}),
 	}
 
-	cmd.PersistentFlags().BoolVarP(&b.Expunge, "expunge", "", false, `Remove the entire output_base tree.
+	cmd.PersistentFlags().BoolVarP(&expunge, "expunge", "", false, `Remove the entire output_base tree.
 This removes all build output, external repositories,
 and temp files created by Bazel.
 It also stops the Bazel server after the clean,
 equivalent to the shutdown command.`)
 
-	cmd.PersistentFlags().BoolVarP(&b.ExpungeAsync, "expunge_async", "", false, `Expunge in the background.
+	cmd.PersistentFlags().BoolVarP(&expungeAsync, "expunge_async", "", false, `Expunge in the background.
 It is safe to invoke a Bazel command in the same
 workspace while the asynchronous expunge continues to run.
 Note, however, that this may introduce IO contention.`)

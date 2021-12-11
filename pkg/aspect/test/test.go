@@ -16,21 +16,21 @@ import (
 
 type Test struct {
 	ioutils.Streams
-	bzl bazel.Spawner
+	bzl bazel.Bazel
 }
 
-func New(streams ioutils.Streams, bzl bazel.Spawner) *Test {
+func New(streams ioutils.Streams, bzl bazel.Bazel) *Test {
 	return &Test{
 		Streams: streams,
 		bzl:     bzl,
 	}
 }
 
-func (v *Test) Run(_ *cobra.Command, args []string) error {
+func (t *Test) Run(_ *cobra.Command, args []string) error {
 	bazelCmd := []string{"test"}
 	bazelCmd = append(bazelCmd, args...)
 
-	if exitCode, err := v.bzl.Spawn(bazelCmd); exitCode != 0 {
+	if exitCode, err := t.bzl.Spawn(bazelCmd); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,
