@@ -14,8 +14,10 @@ import (
 
 	hclog "github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
+	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspecterrors"
+	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/config"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/plugin"
@@ -27,10 +29,7 @@ import (
 type PluginSystem interface {
 	Configure(streams ioutils.Streams) error
 	TearDown()
-	WithBESBackend(
-		ctx context.Context,
-		fn func(besBackend bep.BESBackend) error,
-	) error
+	BESBackendInterceptor() interceptors.Interceptor
 	ExecutePostBuild(isInteractiveMode bool) *aspecterrors.ErrorList
 }
 
@@ -115,27 +114,34 @@ func (ps *pluginSystem) TearDown() {
 	}
 }
 
-// WithBESBackend starts a BES backend, executes the provided function with the
-// BES backend injected, and gracefully stops it when the provided function
-// returns.
-func (ps *pluginSystem) WithBESBackend(
-	ctx context.Context,
-	fn func(besBackend bep.BESBackend) error,
-) error {
-	besBackend := bep.NewBESBackend()
-	for node := ps.plugins.head; node != nil; node = node.next {
-		besBackend.RegisterSubscriber(node.plugin.BEPEventCallback)
+// BESBackendInterceptorKeyType is a type for the BESBackendInterceptorKey that
+// avoids collisions.
+type BESBackendInterceptorKeyType bool
+
+// BESBackendInterceptorKeyType is the key for the injected BES backend into
+// the context.
+const BESBackendInterceptorKey BESBackendInterceptorKeyType = true
+
+// BESBackendInterceptor starts a BES backend and injects it into the context.
+// It gracefully stops the  server after the main command is executed.
+func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
+	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
+		besBackend := bep.NewBESBackend()
+		for node := ps.plugins.head; node != nil; node = node.next {
+			besBackend.RegisterSubscriber(node.plugin.BEPEventCallback)
+		}
+		if err := besBackend.Setup(); err != nil {
+			return fmt.Errorf("failed to run BES backend: %w", err)
+		}
+		ctx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		if err := besBackend.ServeWait(ctx); err != nil {
+			return fmt.Errorf("failed to run BES backend: %w", err)
+		}
+		defer besBackend.GracefulStop()
+		ctx = context.WithValue(ctx, BESBackendInterceptorKey, besBackend)
+		return next(ctx, cmd, args)
 	}
-	if err := besBackend.Setup(); err != nil {
-		return fmt.Errorf("failed to run BES backend: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	if err := besBackend.ServeWait(ctx); err != nil {
-		return fmt.Errorf("failed to run BES backend: %w", err)
-	}
-	defer besBackend.GracefulStop()
-	return fn(besBackend)
 }
 
 // ExecutePostBuild executes all post-build hooks from all plugins.

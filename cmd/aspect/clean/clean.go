@@ -7,6 +7,7 @@ Not licensed for re-use.
 package clean
 
 import (
+	"context"
 	"os"
 
 	"github.com/mattn/go-isatty"
@@ -14,8 +15,8 @@ import (
 
 	"aspect.build/cli/pkg/aspect/clean"
 	"aspect.build/cli/pkg/bazel"
+	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/pathutils"
 )
 
 // NewDefaultCleanCmd creates a new default clean cobra command.
@@ -61,14 +62,20 @@ Workaround inconistent state:
 	Such problems are fixable and these bugs are a high priority.
 	If you ever find an incorrect incremental build, please file a bug report,
 	and only use clean as a temporary workaround.`,
-		RunE: pathutils.InvokeCmdInsideWorkspace(func(workspaceRoot string, cmd *cobra.Command, args []string) (exitErr error) {
-			bzl.SetWorkspaceRoot(workspaceRoot)
-			isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-			c := clean.NewDefault(bzl, isInteractive)
-			c.Expunge = expunge
-			c.ExpungeAsync = expungeAsync
-			return c.Run(cmd, args)
-		}),
+		RunE: interceptors.Run(
+			[]interceptors.Interceptor{
+				interceptors.WorkspaceRootInterceptor(),
+			},
+			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
+				bzl.SetWorkspaceRoot(workspaceRoot)
+				isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+				c := clean.NewDefault(bzl, isInteractive)
+				c.Expunge = expunge
+				c.ExpungeAsync = expungeAsync
+				return c.Run(cmd, args)
+			},
+		),
 	}
 
 	cmd.PersistentFlags().BoolVarP(&expunge, "expunge", "", false, `Remove the entire output_base tree.

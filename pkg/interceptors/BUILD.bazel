@@ -1,0 +1,30 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "interceptors",
+    srcs = [
+        "run.go",
+        "workspace.go",
+    ],
+    importpath = "aspect.build/cli/pkg/interceptors",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/pathutils",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
+
+go_test(
+    name = "interceptors_test",
+    srcs = [
+        "run_test.go",
+        "workspace_test.go",
+    ],
+    embed = [":interceptors"],
+    deps = [
+        "//pkg/pathutils/mock",
+        "@com_github_golang_mock//gomock",
+        "@com_github_onsi_gomega//:gomega",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

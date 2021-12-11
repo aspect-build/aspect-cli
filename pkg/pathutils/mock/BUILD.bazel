@@ -6,7 +6,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 gomock(
     name = "mock_finder_source",
     out = "mock_finder_test.go",
-    interfaces = ["Finder"],
+    interfaces = ["WorkspaceFinder"],
     library = "//pkg/pathutils",
     package = "mock",
     visibility = ["//visibility:private"],

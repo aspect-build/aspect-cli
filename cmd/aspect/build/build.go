@@ -7,6 +7,7 @@ Not licensed for re-use.
 package build
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -16,8 +17,8 @@ import (
 	"aspect.build/cli/pkg/aspect/build"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
+	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/pathutils"
 	"aspect.build/cli/pkg/plugin/system"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
@@ -38,38 +39,42 @@ func NewBuildCmd(
 	pluginSystem system.PluginSystem,
 	bzl bazel.Bazel,
 ) *cobra.Command {
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "build",
 		Short: "Builds the specified targets, using the options.",
 		Long: "Invokes bazel build on the specified targets. " +
 			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
-		RunE: pathutils.InvokeCmdInsideWorkspace(func(workspaceRoot string, cmd *cobra.Command, args []string) (exitErr error) {
-			isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
-			if err != nil {
-				return err
-			}
-
-			// TODO(f0rmiga): test this post-build hook.
-			defer func() {
-				errs := pluginSystem.ExecutePostBuild(isInteractiveMode).Errors()
-				if len(errs) > 0 {
-					for _, err := range errs {
-						fmt.Fprintf(streams.Stderr, "Error: failed to run build command: %v\n", err)
-					}
-					var err *aspecterrors.ExitError
-					if errors.As(exitErr, &err) {
-						err.ExitCode = 1
-					}
+		RunE: interceptors.Run(
+			[]interceptors.Interceptor{
+				interceptors.WorkspaceRootInterceptor(),
+				pluginSystem.BESBackendInterceptor(),
+			},
+			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
+				if err != nil {
+					return err
 				}
-			}()
 
-			bzl.SetWorkspaceRoot(workspaceRoot)
-			b := build.New(streams, bzl)
-			return pluginSystem.WithBESBackend(cmd.Context(), func(besBackend bep.BESBackend) error {
+				// TODO(f0rmiga): test this post-build hook.
+				defer func() {
+					errs := pluginSystem.ExecutePostBuild(isInteractiveMode).Errors()
+					if len(errs) > 0 {
+						for _, err := range errs {
+							fmt.Fprintf(streams.Stderr, "Error: failed to run build command: %v\n", err)
+						}
+						var err *aspecterrors.ExitError
+						if errors.As(exitErr, &err) {
+							err.ExitCode = 1
+						}
+					}
+				}()
+
+				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
+				bzl.SetWorkspaceRoot(workspaceRoot)
+				b := build.New(streams, bzl)
+				besBackend := ctx.Value(system.BESBackendInterceptorKey).(bep.BESBackend)
 				return b.Run(args, besBackend)
-			})
-		}),
+			},
+		),
 	}
-
-	return cmd
 }

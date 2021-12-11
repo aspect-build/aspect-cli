@@ -14,81 +14,9 @@ import (
 
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
-	"github.com/spf13/cobra"
 
-	pathutils_mock "aspect.build/cli/pkg/pathutils/mock"
 	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
 )
-
-func TestInvokeCmdInsideWorkspace(t *testing.T) {
-	t.Run("when the workspace finder fails, the returned function fails", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		wd := "fake_working_directory/foo/bar"
-		expectedErr := fmt.Errorf("failed to find yada yada yada")
-
-		finder := pathutils_mock.NewMockFinder(ctrl)
-		finder.EXPECT().
-			Find(wd).
-			Return("", expectedErr).
-			Times(1)
-
-		cmd := &cobra.Command{Use: "fake"}
-
-		err := invokeCmdInsideWorkspace(finder, wd, nil)(cmd, nil)
-		g.Expect(err).To(MatchError(expectedErr))
-	})
-
-	t.Run("when the workspace finder returns empty, the returned function fails", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		wd := "fake_working_directory/foo/bar"
-		cmdName := "fake"
-		expectedErrStr := fmt.Sprintf("failed to run command %q: the current working directory %q is not a Bazel workspace", cmdName, wd)
-
-		finder := pathutils_mock.NewMockFinder(ctrl)
-		finder.EXPECT().
-			Find(wd).
-			Return("", nil).
-			Times(1)
-
-		cmd := &cobra.Command{Use: cmdName}
-
-		err := invokeCmdInsideWorkspace(finder, wd, nil)(cmd, nil)
-		g.Expect(err).To(MatchError(expectedErrStr))
-	})
-
-	t.Run("succeeds", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		wd := "fake_working_directory/foo/bar"
-		workspacePath := "fake_working_directory/WORKSPACE"
-		expectedWorkspaceRoot := "fake_working_directory"
-
-		finder := pathutils_mock.NewMockFinder(ctrl)
-		finder.EXPECT().
-			Find(wd).
-			Return(workspacePath, nil).
-			Times(1)
-
-		cmd := &cobra.Command{Use: "fake"}
-		args := []string{"foo", "bar"}
-
-		err := invokeCmdInsideWorkspace(finder, wd, func(workspaceRoot string, _cmd *cobra.Command, _args []string) (exitErr error) {
-			g.Expect(workspaceRoot).To(Equal(expectedWorkspaceRoot))
-			g.Expect(_cmd).To(Equal(cmd))
-			g.Expect(_args).To(Equal(args))
-			return nil
-		})(cmd, args)
-		g.Expect(err).To(BeNil())
-	})
-}
 
 func TestWorkspaceFinder(t *testing.T) {
 	t.Run("when os.Stat fails, Find fails", func(t *testing.T) {

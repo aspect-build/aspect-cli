@@ -4,8 +4,11 @@ import (
 	"log"
 	"os"
 
-	"aspect.build/cli/cmd/aspect/root"
 	"github.com/spf13/cobra/doc"
+
+	"aspect.build/cli/cmd/aspect/root"
+	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/system"
 )
 
 func main() {
@@ -14,7 +17,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	err := doc.GenMarkdownTree(root.NewDefaultRootCmd(nil), os.Args[1])
+	pluginSystem := system.NewPluginSystem()
+	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
+		log.Fatal(err)
+	}
+	defer pluginSystem.TearDown()
+
+	err := doc.GenMarkdownTree(root.NewDefaultRootCmd(pluginSystem), os.Args[1])
 	if err != nil {
 		log.Fatal(err)
 	}
