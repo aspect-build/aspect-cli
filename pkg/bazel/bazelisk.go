@@ -3,11 +3,6 @@ package bazel
 import (
 	"bufio"
 	"fmt"
-	"github.com/bazelbuild/bazelisk/core"
-	"github.com/bazelbuild/bazelisk/httputil"
-	"github.com/bazelbuild/bazelisk/platforms"
-	"github.com/bazelbuild/bazelisk/versions"
-	"github.com/mitchellh/go-homedir"
 	"io"
 	"io/ioutil"
 	"log"
@@ -21,6 +16,12 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/bazelbuild/bazelisk/core"
+	"github.com/bazelbuild/bazelisk/httputil"
+	"github.com/bazelbuild/bazelisk/platforms"
+	"github.com/bazelbuild/bazelisk/versions"
+	"github.com/mitchellh/go-homedir"
 )
 
 const (
@@ -37,11 +38,19 @@ var (
 	fileConfigOnce sync.Once
 )
 
-// RunBazelisk runs the main Bazelisk logic for the given arguments and Bazel repositories.
-func RunBazelisk(args []string, repos *core.Repositories, out io.Writer) (int, error) {
-	httputil.UserAgent = getUserAgent()
+type Bazelisk struct {
+	workspaceRoot string
+}
 
-	bazeliskHome := GetEnvOrConfig("BAZELISK_HOME")
+func NewBazelisk(workspaceRoot string) *Bazelisk {
+	return &Bazelisk{workspaceRoot: workspaceRoot}
+}
+
+// Run runs the main Bazelisk logic for the given arguments and Bazel repositories.
+func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, out io.Writer) (int, error) {
+	httputil.UserAgent = bazelisk.getUserAgent()
+
+	bazeliskHome := bazelisk.GetEnvOrConfig("BAZELISK_HOME")
 	if len(bazeliskHome) == 0 {
 		userCacheDir, err := os.UserCacheDir()
 		if err != nil {
@@ -56,7 +65,7 @@ func RunBazelisk(args []string, repos *core.Repositories, out io.Writer) (int, e
 		return -1, fmt.Errorf("could not create directory %s: %v", bazeliskHome, err)
 	}
 
-	bazelVersionString, err := getBazelVersion()
+	bazelVersionString, err := bazelisk.getBazelVersion()
 	if err != nil {
 		return -1, fmt.Errorf("could not get Bazel version: %v", err)
 	}
@@ -73,7 +82,7 @@ func RunBazelisk(args []string, repos *core.Repositories, out io.Writer) (int, e
 	// If we aren't using a local Bazel binary, we'll have to parse the version string and
 	// download the version that the user wants.
 	if !filepath.IsAbs(bazelPath) {
-		bazelFork, bazelVersion, err := parseBazelForkAndVersion(bazelVersionString)
+		bazelFork, bazelVersion, err := bazelisk.parseBazelForkAndVersion(bazelVersionString)
 		if err != nil {
 			return -1, fmt.Errorf("could not parse Bazel fork and version: %v", err)
 		}
@@ -84,19 +93,19 @@ func RunBazelisk(args []string, repos *core.Repositories, out io.Writer) (int, e
 			return -1, fmt.Errorf("could not resolve the version '%s' to an actual version number: %v", bazelVersion, err)
 		}
 
-		bazelForkOrURL := dirForURL(GetEnvOrConfig(core.BaseURLEnv))
+		bazelForkOrURL := dirForURL(bazelisk.GetEnvOrConfig(core.BaseURLEnv))
 		if len(bazelForkOrURL) == 0 {
 			bazelForkOrURL = bazelFork
 		}
 
 		baseDirectory := filepath.Join(bazeliskHome, "downloads", bazelForkOrURL)
-		bazelPath, err = downloadBazel(bazelFork, resolvedBazelVersion, baseDirectory, repos, downloader)
+		bazelPath, err = bazelisk.downloadBazel(bazelFork, resolvedBazelVersion, baseDirectory, repos, downloader)
 		if err != nil {
 			return -1, fmt.Errorf("could not download Bazel: %v", err)
 		}
 	} else {
 		baseDirectory := filepath.Join(bazeliskHome, "local")
-		bazelPath, err = linkLocalBazel(baseDirectory, bazelPath)
+		bazelPath, err = bazelisk.linkLocalBazel(baseDirectory, bazelPath)
 		if err != nil {
 			return -1, fmt.Errorf("cound not link local Bazel: %v", err)
 		}
@@ -105,7 +114,7 @@ func RunBazelisk(args []string, repos *core.Repositories, out io.Writer) (int, e
 	// --print_env must be the first argument.
 	if len(args) > 0 && args[0] == "--print_env" {
 		// print environment variables for sub-processes
-		cmd := makeBazelCmd(bazelPath, args, nil)
+		cmd := bazelisk.makeBazelCmd(bazelPath, args, nil)
 		for _, val := range cmd.Env {
 			fmt.Println(val)
 		}
@@ -114,21 +123,21 @@ func RunBazelisk(args []string, repos *core.Repositories, out io.Writer) (int, e
 
 	// --strict and --migrate must be the first argument.
 	if len(args) > 0 && (args[0] == "--strict" || args[0] == "--migrate") {
-		cmd, err := getBazelCommand(args)
+		cmd, err := bazelisk.getBazelCommand(args)
 		if err != nil {
 			return -1, err
 		}
-		newFlags, err := getIncompatibleFlags(bazelPath, cmd)
+		newFlags, err := bazelisk.getIncompatibleFlags(bazelPath, cmd)
 		if err != nil {
 			return -1, fmt.Errorf("could not get the list of incompatible flags: %v", err)
 		}
 
 		if args[0] == "--migrate" {
-			migrate(bazelPath, args[1:], newFlags)
+			bazelisk.migrate(bazelPath, args[1:], newFlags)
 		} else {
 			// When --strict is present, it expands to the list of --incompatible_ flags
 			// that should be enabled for the given Bazel version.
-			args = insertArgs(args[1:], newFlags)
+			args = bazelisk.insertArgs(args[1:], newFlags)
 		}
 	}
 
@@ -152,14 +161,14 @@ func RunBazelisk(args []string, repos *core.Repositories, out io.Writer) (int, e
 		}
 	}
 
-	exitCode, err := runBazel(bazelPath, args, out)
+	exitCode, err := bazelisk.runBazel(bazelPath, args, out)
 	if err != nil {
 		return -1, fmt.Errorf("could not run Bazel: %v", err)
 	}
 	return exitCode, nil
 }
 
-func getBazelCommand(args []string) (string, error) {
+func (bazelisk *Bazelisk) getBazelCommand(args []string) (string, error) {
 	for _, a := range args {
 		if !strings.HasPrefix(a, "-") {
 			return a, nil
@@ -168,8 +177,8 @@ func getBazelCommand(args []string) (string, error) {
 	return "", fmt.Errorf("could not find a valid Bazel command in %q. Please run `bazel help` if you need help on how to use Bazel.", strings.Join(args, " "))
 }
 
-func getUserAgent() string {
-	agent := GetEnvOrConfig("BAZELISK_USER_AGENT")
+func (bazelisk *Bazelisk) getUserAgent() string {
+	agent := bazelisk.GetEnvOrConfig("BAZELISK_USER_AGENT")
 	if len(agent) > 0 {
 		return agent
 	}
@@ -177,22 +186,14 @@ func getUserAgent() string {
 }
 
 // GetEnvOrConfig reads a configuration value from the environment, but fall back to reading it from .bazeliskrc in the workspace root.
-func GetEnvOrConfig(name string) string {
+func (bazelisk *Bazelisk) GetEnvOrConfig(name string) string {
 	if val := os.Getenv(name); val != "" {
 		return val
 	}
 
 	// Parse .bazeliskrc in the workspace root, once, if it can be found.
 	fileConfigOnce.Do(func() {
-		workingDirectory, err := os.Getwd()
-		if err != nil {
-			return
-		}
-		workspaceRoot := findWorkspaceRoot(workingDirectory)
-		if workspaceRoot == "" {
-			return
-		}
-		rcFilePath := filepath.Join(workspaceRoot, ".bazeliskrc")
+		rcFilePath := filepath.Join(bazelisk.workspaceRoot, ".bazeliskrc")
 		contents, err := ioutil.ReadFile(rcFilePath)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -218,36 +219,7 @@ func GetEnvOrConfig(name string) string {
 	return fileConfig[name]
 }
 
-// isValidWorkspace returns true iff the supplied path is the workspace root, defined by the presence of
-// a file named WORKSPACE or WORKSPACE.bazel
-// see https://github.com/bazelbuild/bazel/blob/8346ea4cfdd9fbd170d51a528fee26f912dad2d5/src/main/cpp/workspace_layout.cc#L37
-func isValidWorkspace(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-
-	return !info.IsDir()
-}
-
-func findWorkspaceRoot(root string) string {
-	if isValidWorkspace(filepath.Join(root, "WORKSPACE")) {
-		return root
-	}
-
-	if isValidWorkspace(filepath.Join(root, "WORKSPACE.bazel")) {
-		return root
-	}
-
-	parentDirectory := filepath.Dir(root)
-	if parentDirectory == root {
-		return ""
-	}
-
-	return findWorkspaceRoot(parentDirectory)
-}
-
-func getBazelVersion() (string, error) {
+func (bazelisk *Bazelisk) getBazelVersion() (string, error) {
 	// Check in this order:
 	// - env var "USE_BAZEL_VERSION" is set to a specific version.
 	// - env var "USE_NIGHTLY_BAZEL" or "USE_BAZEL_NIGHTLY" is set -> latest
@@ -260,19 +232,13 @@ func getBazelVersion() (string, error) {
 	// - workspace_root/.bazelversion exists -> read contents, that version.
 	// - workspace_root/WORKSPACE contains a version -> that version. (TODO)
 	// - fallback: latest release
-	bazelVersion := GetEnvOrConfig("USE_BAZEL_VERSION")
+	bazelVersion := bazelisk.GetEnvOrConfig("USE_BAZEL_VERSION")
 	if len(bazelVersion) != 0 {
 		return bazelVersion, nil
 	}
 
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("could not get working directory: %v", err)
-	}
-
-	workspaceRoot := findWorkspaceRoot(workingDirectory)
-	if len(workspaceRoot) != 0 {
-		bazelVersionPath := filepath.Join(workspaceRoot, ".bazelversion")
+	if len(bazelisk.workspaceRoot) != 0 {
+		bazelVersionPath := filepath.Join(bazelisk.workspaceRoot, ".bazelversion")
 		if _, err := os.Stat(bazelVersionPath); err == nil {
 			f, err := os.Open(bazelVersionPath)
 			if err != nil {
@@ -296,7 +262,7 @@ func getBazelVersion() (string, error) {
 	return "latest", nil
 }
 
-func parseBazelForkAndVersion(bazelForkAndVersion string) (string, string, error) {
+func (bazelisk *Bazelisk) parseBazelForkAndVersion(bazelForkAndVersion string) (string, string, error) {
 	var bazelFork, bazelVersion string
 
 	versionInfo := strings.Split(bazelForkAndVersion, "/")
@@ -312,7 +278,7 @@ func parseBazelForkAndVersion(bazelForkAndVersion string) (string, string, error
 	return bazelFork, bazelVersion, nil
 }
 
-func downloadBazel(fork string, version string, baseDirectory string, repos *core.Repositories, downloader core.DownloadFunc) (string, error) {
+func (bazelisk *Bazelisk) downloadBazel(fork string, version string, baseDirectory string, repos *core.Repositories, downloader core.DownloadFunc) (string, error) {
 	pathSegment, err := platforms.DetermineBazelFilename(version, false)
 	if err != nil {
 		return "", fmt.Errorf("could not determine path segment to use for Bazel binary: %v", err)
@@ -321,14 +287,14 @@ func downloadBazel(fork string, version string, baseDirectory string, repos *cor
 	destFile := "bazel" + platforms.DetermineExecutableFilenameSuffix()
 	destinationDir := filepath.Join(baseDirectory, pathSegment, "bin")
 
-	if url := GetEnvOrConfig(core.BaseURLEnv); url != "" {
+	if url := bazelisk.GetEnvOrConfig(core.BaseURLEnv); url != "" {
 		return repos.DownloadFromBaseURL(url, version, destinationDir, destFile)
 	}
 
 	return downloader(destinationDir, destFile)
 }
 
-func copyFile(src, dst string, perm os.FileMode) error {
+func (bazelisk *Bazelisk) copyFile(src, dst string, perm os.FileMode) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -346,7 +312,7 @@ func copyFile(src, dst string, perm os.FileMode) error {
 	return err
 }
 
-func linkLocalBazel(baseDirectory string, bazelPath string) (string, error) {
+func (bazelisk *Bazelisk) linkLocalBazel(baseDirectory string, bazelPath string) (string, error) {
 	normalizedBazelPath := dirForURL(bazelPath)
 	destinationDir := filepath.Join(baseDirectory, normalizedBazelPath, "bin")
 	err := os.MkdirAll(destinationDir, 0755)
@@ -358,7 +324,7 @@ func linkLocalBazel(baseDirectory string, bazelPath string) (string, error) {
 		err = os.Symlink(bazelPath, destinationPath)
 		// If can't create Symlink, fallback to copy
 		if err != nil {
-			err = copyFile(bazelPath, destinationPath, 0755)
+			err = bazelisk.copyFile(bazelPath, destinationPath, 0755)
 			if err != nil {
 				return "", fmt.Errorf("cound not copy file from %s to %s: %v", bazelPath, destinationPath, err)
 			}
@@ -367,18 +333,12 @@ func linkLocalBazel(baseDirectory string, bazelPath string) (string, error) {
 	return destinationPath, nil
 }
 
-func maybeDelegateToWrapper(bazel string) string {
-	if GetEnvOrConfig(skipWrapperEnv) != "" {
+func (bazelisk *Bazelisk) maybeDelegateToWrapper(bazel string) string {
+	if bazelisk.GetEnvOrConfig(skipWrapperEnv) != "" {
 		return bazel
 	}
 
-	wd, err := os.Getwd()
-	if err != nil {
-		return bazel
-	}
-
-	root := findWorkspaceRoot(wd)
-	wrapper := filepath.Join(root, wrapperPath)
+	wrapper := filepath.Join(bazelisk.workspaceRoot, wrapperPath)
 	if stat, err := os.Stat(wrapper); err != nil || stat.IsDir() || stat.Mode().Perm()&0001 == 0 {
 		return bazel
 	}
@@ -386,7 +346,7 @@ func maybeDelegateToWrapper(bazel string) string {
 	return wrapper
 }
 
-func prependDirToPathList(cmd *exec.Cmd, dir string) {
+func (bazelisk *Bazelisk) prependDirToPathList(cmd *exec.Cmd, dir string) {
 	found := false
 	for idx, val := range cmd.Env {
 		splits := strings.Split(val, "=")
@@ -405,15 +365,15 @@ func prependDirToPathList(cmd *exec.Cmd, dir string) {
 	}
 }
 
-func makeBazelCmd(bazel string, args []string, out io.Writer) *exec.Cmd {
-	execPath := maybeDelegateToWrapper(bazel)
+func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, out io.Writer) *exec.Cmd {
+	execPath := bazelisk.maybeDelegateToWrapper(bazel)
 
 	cmd := exec.Command(execPath, args...)
 	cmd.Env = append(os.Environ(), skipWrapperEnv+"=true")
 	if execPath != bazel {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", bazelReal, bazel))
 	}
-	prependDirToPathList(cmd, filepath.Dir(execPath))
+	bazelisk.prependDirToPathList(cmd, filepath.Dir(execPath))
 	cmd.Stdin = os.Stdin
 	if out == nil {
 		cmd.Stdout = os.Stdout
@@ -424,8 +384,8 @@ func makeBazelCmd(bazel string, args []string, out io.Writer) *exec.Cmd {
 	return cmd
 }
 
-func runBazel(bazel string, args []string, out io.Writer) (int, error) {
-	cmd := makeBazelCmd(bazel, args, out)
+func (bazelisk *Bazelisk) runBazel(bazel string, args []string, out io.Writer) (int, error) {
+	cmd := bazelisk.makeBazelCmd(bazel, args, out)
 	err := cmd.Start()
 	if err != nil {
 		return 1, fmt.Errorf("could not start Bazel: %v", err)
@@ -454,9 +414,9 @@ func runBazel(bazel string, args []string, out io.Writer) (int, error) {
 }
 
 // getIncompatibleFlags returns all incompatible flags for the current Bazel command in alphabetical order.
-func getIncompatibleFlags(bazelPath, cmd string) ([]string, error) {
+func (bazelisk *Bazelisk) getIncompatibleFlags(bazelPath, cmd string) ([]string, error) {
 	out := strings.Builder{}
-	if _, err := runBazel(bazelPath, []string{"help", cmd, "--short"}, &out); err != nil {
+	if _, err := bazelisk.runBazel(bazelPath, []string{"help", cmd, "--short"}, &out); err != nil {
 		return nil, fmt.Errorf("unable to determine incompatible flags with binary %s: %v", bazelPath, err)
 	}
 
@@ -472,7 +432,7 @@ func getIncompatibleFlags(bazelPath, cmd string) ([]string, error) {
 // insertArgs will insert newArgs in baseArgs. If baseArgs contains the
 // "--" argument, newArgs will be inserted before that. Otherwise, newArgs
 // is appended.
-func insertArgs(baseArgs []string, newArgs []string) []string {
+func (bazelisk *Bazelisk) insertArgs(baseArgs []string, newArgs []string) []string {
 	var result []string
 	inserted := false
 	for _, arg := range baseArgs {
@@ -489,14 +449,14 @@ func insertArgs(baseArgs []string, newArgs []string) []string {
 	return result
 }
 
-func shutdownIfNeeded(bazelPath string) {
-	bazeliskClean := GetEnvOrConfig("BAZELISK_SHUTDOWN")
+func (bazelisk *Bazelisk) shutdownIfNeeded(bazelPath string) {
+	bazeliskClean := bazelisk.GetEnvOrConfig("BAZELISK_SHUTDOWN")
 	if len(bazeliskClean) == 0 {
 		return
 	}
 
 	fmt.Printf("bazel shutdown\n")
-	exitCode, err := runBazel(bazelPath, []string{"shutdown"}, nil)
+	exitCode, err := bazelisk.runBazel(bazelPath, []string{"shutdown"}, nil)
 	fmt.Printf("\n")
 	if err != nil {
 		log.Fatalf("failed to run bazel shutdown: %v", err)
@@ -507,14 +467,14 @@ func shutdownIfNeeded(bazelPath string) {
 	}
 }
 
-func cleanIfNeeded(bazelPath string) {
-	bazeliskClean := GetEnvOrConfig("BAZELISK_CLEAN")
+func (bazelisk *Bazelisk) cleanIfNeeded(bazelPath string) {
+	bazeliskClean := bazelisk.GetEnvOrConfig("BAZELISK_CLEAN")
 	if len(bazeliskClean) == 0 {
 		return
 	}
 
 	fmt.Printf("bazel clean --expunge\n")
-	exitCode, err := runBazel(bazelPath, []string{"clean", "--expunge"}, nil)
+	exitCode, err := bazelisk.runBazel(bazelPath, []string{"clean", "--expunge"}, nil)
 	fmt.Printf("\n")
 	if err != nil {
 		log.Fatalf("failed to run clean: %v", err)
@@ -526,14 +486,14 @@ func cleanIfNeeded(bazelPath string) {
 }
 
 // migrate will run Bazel with each flag separately and report which ones are failing.
-func migrate(bazelPath string, baseArgs []string, flags []string) {
+func (bazelisk *Bazelisk) migrate(bazelPath string, baseArgs []string, flags []string) {
 	// 1. Try with all the flags.
-	args := insertArgs(baseArgs, flags)
+	args := bazelisk.insertArgs(baseArgs, flags)
 	fmt.Printf("\n\n--- Running Bazel with all incompatible flags\n\n")
-	shutdownIfNeeded(bazelPath)
-	cleanIfNeeded(bazelPath)
+	bazelisk.shutdownIfNeeded(bazelPath)
+	bazelisk.cleanIfNeeded(bazelPath)
 	fmt.Printf("bazel %s\n", strings.Join(args, " "))
-	exitCode, err := runBazel(bazelPath, args, nil)
+	exitCode, err := bazelisk.runBazel(bazelPath, args, nil)
 	if err != nil {
 		log.Fatalf("could not run Bazel: %v", err)
 	}
@@ -545,10 +505,10 @@ func migrate(bazelPath string, baseArgs []string, flags []string) {
 	// 2. Try with no flags, as a sanity check.
 	args = baseArgs
 	fmt.Printf("\n\n--- Running Bazel with no incompatible flags\n\n")
-	shutdownIfNeeded(bazelPath)
-	cleanIfNeeded(bazelPath)
+	bazelisk.shutdownIfNeeded(bazelPath)
+	bazelisk.cleanIfNeeded(bazelPath)
 	fmt.Printf("bazel %s\n", strings.Join(args, " "))
-	exitCode, err = runBazel(bazelPath, args, nil)
+	exitCode, err = bazelisk.runBazel(bazelPath, args, nil)
 	if err != nil {
 		log.Fatalf("could not run Bazel: %v", err)
 	}
@@ -561,12 +521,12 @@ func migrate(bazelPath string, baseArgs []string, flags []string) {
 	var passList []string
 	var failList []string
 	for _, arg := range flags {
-		args = insertArgs(baseArgs, []string{arg})
+		args = bazelisk.insertArgs(baseArgs, []string{arg})
 		fmt.Printf("\n\n--- Running Bazel with %s\n\n", arg)
-		shutdownIfNeeded(bazelPath)
-		cleanIfNeeded(bazelPath)
+		bazelisk.shutdownIfNeeded(bazelPath)
+		bazelisk.cleanIfNeeded(bazelPath)
 		fmt.Printf("bazel %s\n", strings.Join(args, " "))
-		exitCode, err = runBazel(bazelPath, args, nil)
+		exitCode, err = bazelisk.runBazel(bazelPath, args, nil)
 		if err != nil {
 			log.Fatalf("could not run Bazel: %v", err)
 		}

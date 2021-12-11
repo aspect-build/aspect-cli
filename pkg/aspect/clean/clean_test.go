@@ -65,13 +65,13 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		spawner := mock.NewMockSpawner(ctrl)
-		spawner.
+		bzl := mock.NewMockBazel(ctrl)
+		bzl.
 			EXPECT().
 			Spawn([]string{"clean"}).
 			Return(0, nil)
 
-		b := clean.New(ioutils.Streams{}, spawner, false)
+		b := clean.New(ioutils.Streams{}, bzl, false)
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
 
@@ -80,13 +80,13 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		spawner := mock.NewMockSpawner(ctrl)
-		spawner.
+		bzl := mock.NewMockBazel(ctrl)
+		bzl.
 			EXPECT().
 			Spawn([]string{"clean", "--expunge"}).
 			Return(0, nil)
 
-		b := clean.New(ioutils.Streams{}, spawner, false)
+		b := clean.New(ioutils.Streams{}, bzl, false)
 		b.Expunge = true
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
@@ -96,13 +96,13 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		spawner := mock.NewMockSpawner(ctrl)
-		spawner.
+		bzl := mock.NewMockBazel(ctrl)
+		bzl.
 			EXPECT().
 			Spawn([]string{"clean", "--expunge_async"}).
 			Return(0, nil)
 
-		b := clean.New(ioutils.Streams{}, spawner, false)
+		b := clean.New(ioutils.Streams{}, bzl, false)
 		b.ExpungeAsync = true
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
@@ -112,15 +112,15 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		spawner := mock.NewMockSpawner(ctrl)
-		spawner.
+		bzl := mock.NewMockBazel(ctrl)
+		bzl.
 			EXPECT().
 			Spawn([]string{"clean"}).
 			Return(0, nil)
 
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		b := clean.New(streams, spawner, true)
+		b := clean.New(streams, bzl, true)
 
 		b.Behavior = chooseReclaim{}
 		b.Remember = deny{}
@@ -134,15 +134,15 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		spawner := mock.NewMockSpawner(ctrl)
-		spawner.
+		bzl := mock.NewMockBazel(ctrl)
+		bzl.
 			EXPECT().
 			Spawn([]string{"clean"}).
 			Return(0, nil).AnyTimes()
 
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		b := clean.New(streams, spawner, true)
+		b := clean.New(streams, bzl, true)
 
 		viper := *viper.New()
 		cfg, err := os.CreateTemp(os.Getenv("TEST_TMPDIR"), "cfg***.ini")
@@ -161,7 +161,7 @@ func TestClean(t *testing.T) {
 		g.Expect(string(content)).To(Equal("[clean]\nskip_prompt=true\n\n"))
 
 		// If we run it again, there should be no prompt
-		c := clean.New(streams, spawner, true)
+		c := clean.New(streams, bzl, true)
 		c.Prefs = viper
 		g.Expect(c.Run(nil, []string{})).Should(Succeed())
 	})
@@ -193,8 +193,8 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		spawner := mock.NewMockSpawner(ctrl)
-		spawner.
+		bzl := mock.NewMockBazel(ctrl)
+		bzl.
 			EXPECT().
 			Spawn([]string{"clean"}).
 			Return(0, nil)
@@ -202,7 +202,7 @@ func TestClean(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 
-		c := clean.New(streams, spawner, true)
+		c := clean.New(streams, bzl, true)
 		c.Behavior = chooseWorkaround{}
 		c.Workaround = confirm{}
 		g.Expect(c.Run(nil, []string{})).Should(Succeed())

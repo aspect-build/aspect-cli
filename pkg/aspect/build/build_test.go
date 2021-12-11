@@ -28,12 +28,12 @@ func TestBuild(t *testing.T) {
 		defer ctrl.Finish()
 
 		streams := ioutils.Streams{}
-		spawner := bazel_mock.NewMockSpawner(ctrl)
+		bzl := bazel_mock.NewMockBazel(ctrl)
 		expectErr := &aspecterrors.ExitError{
 			Err:      fmt.Errorf("failed to run bazel build"),
 			ExitCode: 5,
 		}
-		spawner.
+		bzl.
 			EXPECT().
 			Spawn([]string{"build", "--bes_backend=grpc://127.0.0.1:12345", "//..."}).
 			Return(expectErr.ExitCode, expectErr.Err)
@@ -48,7 +48,7 @@ func TestBuild(t *testing.T) {
 			Errors().
 			Times(1)
 
-		b := build.New(streams, spawner)
+		b := build.New(streams, bzl)
 		err := b.Run([]string{"//..."}, besBackend)
 
 		g.Expect(err).To(MatchError(expectErr))
@@ -61,8 +61,8 @@ func TestBuild(t *testing.T) {
 
 		var stderr strings.Builder
 		streams := ioutils.Streams{Stderr: &stderr}
-		spawner := bazel_mock.NewMockSpawner(ctrl)
-		spawner.
+		bzl := bazel_mock.NewMockBazel(ctrl)
+		bzl.
 			EXPECT().
 			Spawn([]string{"build", "--bes_backend=grpc://127.0.0.1:12345", "//..."}).
 			Return(0, nil)
@@ -81,7 +81,7 @@ func TestBuild(t *testing.T) {
 			}).
 			Times(1)
 
-		b := build.New(streams, spawner)
+		b := build.New(streams, bzl)
 		err := b.Run([]string{"//..."}, besBackend)
 
 		g.Expect(err).To(MatchError(&aspecterrors.ExitError{ExitCode: 1}))
@@ -94,8 +94,8 @@ func TestBuild(t *testing.T) {
 		defer ctrl.Finish()
 
 		streams := ioutils.Streams{}
-		spawner := bazel_mock.NewMockSpawner(ctrl)
-		spawner.
+		bzl := bazel_mock.NewMockBazel(ctrl)
+		bzl.
 			EXPECT().
 			Spawn([]string{"build", "--bes_backend=grpc://127.0.0.1:12345", "//..."}).
 			Return(0, nil)
@@ -110,7 +110,7 @@ func TestBuild(t *testing.T) {
 			Errors().
 			Times(1)
 
-		b := build.New(streams, spawner)
+		b := build.New(streams, bzl)
 		err := b.Run([]string{"//..."}, besBackend)
 
 		g.Expect(err).To(BeNil())

@@ -17,6 +17,7 @@ import (
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/pathutils"
 	"aspect.build/cli/pkg/plugin/system"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
@@ -35,14 +36,14 @@ func NewDefaultBuildCmd(pluginSystem system.PluginSystem) *cobra.Command {
 func NewBuildCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
-	bzl bazel.Spawner,
+	bzl bazel.Bazel,
 ) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "build",
 		Short: "Builds the specified targets, using the options.",
 		Long: "Invokes bazel build on the specified targets. " +
 			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
-		RunE: func(cmd *cobra.Command, args []string) (exitErr error) {
+		RunE: pathutils.InvokeCmdInsideWorkspace(func(workspaceRoot string, cmd *cobra.Command, args []string) (exitErr error) {
 			isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
 			if err != nil {
 				return err
@@ -62,11 +63,12 @@ func NewBuildCmd(
 				}
 			}()
 
+			bzl.SetWorkspaceRoot(workspaceRoot)
 			b := build.New(streams, bzl)
 			return pluginSystem.WithBESBackend(cmd.Context(), func(besBackend bep.BESBackend) error {
 				return b.Run(args, besBackend)
 			})
-		},
+		}),
 	}
 
 	return cmd

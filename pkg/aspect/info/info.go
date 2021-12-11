@@ -26,7 +26,7 @@ func New(streams ioutils.Streams) *Info {
 	}
 }
 
-func (v *Info) Run(_ *cobra.Command, args []string) error {
+func (v *Info) Run(workspaceRoot string, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"info"}
 	if v.ShowMakeEnv {
 		// Propagate the flag
@@ -34,6 +34,7 @@ func (v *Info) Run(_ *cobra.Command, args []string) error {
 	}
 	bazelCmd = append(bazelCmd, args...)
 	bzl := bazel.New()
+	bzl.SetWorkspaceRoot(workspaceRoot)
 
 	if exitCode, err := bzl.Spawn(bazelCmd); exitCode != 0 {
 		err = &aspecterrors.ExitError{
