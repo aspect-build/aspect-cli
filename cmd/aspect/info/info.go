@@ -10,8 +10,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/info"
+	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/pathutils"
 )
 
 func NewDefaultInfoCmd() *cobra.Command {
@@ -43,7 +43,12 @@ the bazel User Manual, and can be programmatically obtained with
 See also 'bazel version' for more detailed bazel version
 information.`,
 		Args: cobra.MaximumNArgs(1),
-		RunE: pathutils.InvokeCmdInsideWorkspace(v.Run),
+		RunE: interceptors.Run(
+			[]interceptors.Interceptor{
+				interceptors.WorkspaceRootInterceptor(),
+			},
+			v.Run,
+		),
 	}
 
 	cmd.PersistentFlags().BoolVarP(&v.ShowMakeEnv, "show_make_env", "", false, `include the set of key/value pairs in the "Make" environment,

@@ -7,12 +7,14 @@ Not licensed for re-use
 package test
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/test"
 	"aspect.build/cli/pkg/bazel"
+	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/pathutils"
 )
 
 func NewDefaultTestCmd() *cobra.Command {
@@ -20,7 +22,7 @@ func NewDefaultTestCmd() *cobra.Command {
 }
 
 func NewTestCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "test",
 		Short: "Builds the specified targets and runs all test targets among them.",
 		Long: `Builds the specified targets and runs all test targets among them (test targets
@@ -34,12 +36,16 @@ don't forget to pass all your 'build' options to 'test' too.
 See 'bazel help target-syntax' for details and examples on how to
 specify targets.
 `,
-		RunE: pathutils.InvokeCmdInsideWorkspace(func(workspaceRoot string, cmd *cobra.Command, args []string) (exitErr error) {
-			bzl.SetWorkspaceRoot(workspaceRoot)
-			t := test.New(streams, bzl)
-			return t.Run(cmd, args)
-		}),
+		RunE: interceptors.Run(
+			[]interceptors.Interceptor{
+				interceptors.WorkspaceRootInterceptor(),
+			},
+			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
+				bzl.SetWorkspaceRoot(workspaceRoot)
+				t := test.New(streams, bzl)
+				return t.Run(cmd, args)
+			},
+		),
 	}
-
-	return cmd
 }

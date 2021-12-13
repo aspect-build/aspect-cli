@@ -7,7 +7,10 @@ Not licensed for re-use.
 package info
 
 import (
+	"context"
+
 	"aspect.build/cli/pkg/bazel"
+	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/spf13/cobra"
 
@@ -26,7 +29,7 @@ func New(streams ioutils.Streams) *Info {
 	}
 }
 
-func (v *Info) Run(workspaceRoot string, _ *cobra.Command, args []string) error {
+func (v *Info) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"info"}
 	if v.ShowMakeEnv {
 		// Propagate the flag
@@ -34,6 +37,7 @@ func (v *Info) Run(workspaceRoot string, _ *cobra.Command, args []string) error 
 	}
 	bazelCmd = append(bazelCmd, args...)
 	bzl := bazel.New()
+	workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
 	bzl.SetWorkspaceRoot(workspaceRoot)
 
 	if exitCode, err := bzl.Spawn(bazelCmd); exitCode != 0 {
