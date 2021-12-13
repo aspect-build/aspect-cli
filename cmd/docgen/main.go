@@ -11,7 +11,6 @@ import (
 func main() {
 	if len(os.Args) != 2 {
 		log.Fatal("Usage: cmd/docgen /path/to/outdir")
-		os.Exit(1)
 	}
 
 	err := doc.GenMarkdownTree(root.NewDefaultRootCmd(nil), os.Args[1])
