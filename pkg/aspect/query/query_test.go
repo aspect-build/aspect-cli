@@ -29,7 +29,7 @@ func TestQuery(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		spawner := mock.NewMockSpawner(ctrl)
+		spawner := mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
 			Spawn([]string{"query", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).

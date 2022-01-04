@@ -31,14 +31,14 @@ type PresetQuery struct {
 type Query struct {
 	ioutils.Streams
 
-	bzl           bazel.Spawner
+	bzl           bazel.Bazel
 	isInteractive bool
 
 	Presets   []*PresetQuery
 	ShowGraph bool
 }
 
-func New(streams ioutils.Streams, bzl bazel.Spawner, isInteractive bool) *Query {
+func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 	return &Query{
 		Streams:       streams,
 		bzl:           bzl,

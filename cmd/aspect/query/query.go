@@ -17,7 +17,7 @@ func NewDefaultQueryCmd() *cobra.Command {
 	return NewQueryCommand(ioutils.DefaultStreams, bazel.New())
 }
 
-func NewQueryCommand(streams ioutils.Streams, bzl bazel.Spawner) *cobra.Command {
+func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	q := query.New(streams, bzl, true)
 
 	// Load these from somewhere
