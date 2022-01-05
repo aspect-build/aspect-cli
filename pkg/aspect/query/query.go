@@ -71,6 +71,8 @@ func (q *Query) Run(_ *cobra.Command, args []string) error {
 		maybeQueryOrPreset := args[0]
 		if value, ok := presets[maybeQueryOrPreset]; ok {
 			// Treat this as the name of the preset query, so don't prompt for it.
+			fmt.Printf("Preset query \"%s\" selected\n", value.Name)
+			fmt.Printf("%s: %s\n", value.Name, value.Description)
 			preset = value
 		} else {
 			// Treat this as a raw query expression

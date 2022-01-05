@@ -24,8 +24,8 @@ func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	q.Presets = []*query.PresetQuery{
 		{
 			Name:        "why",
-			Description: "Determine why a target depends on another",
-			Query:       "somepath(?target, ?dependency)",
+			Description: "Determine why targetA depends on targetB",
+			Query:       "somepath(?targetA, ?targetB)",
 		},
 	}
 
