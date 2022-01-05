@@ -69,12 +69,12 @@ func (q *Query) Run(_ *cobra.Command, args []string) error {
 		preset = q.Presets[i]
 	} else {
 		maybeQueryOrPreset := args[0]
-		if strings.HasPrefix(maybeQueryOrPreset, "\"") || strings.HasPrefix(maybeQueryOrPreset, "'") {
-			// Treat this as a raw query expression?
-			return q.RunQuery(maybeQueryOrPreset, []string{})
-		} else if value, ok := presets[maybeQueryOrPreset]; ok {
+		if value, ok := presets[maybeQueryOrPreset]; ok {
 			// Treat this as the name of the preset query, so don't prompt for it.
 			preset = value
+		} else {
+			// Treat this as a raw query expression
+			return q.RunQuery(maybeQueryOrPreset, []string{})
 		}
 	}
 
