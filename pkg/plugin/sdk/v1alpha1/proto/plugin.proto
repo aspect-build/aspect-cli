@@ -10,6 +10,7 @@ option go_package = "aspect.build/cli/pkg/plugin/sdk/v1alpha1/proto";
 service Plugin {
   rpc BEPEventCallback(BEPEventCallbackReq) returns (BEPEventCallbackRes);
   rpc PostBuildHook(PostBuildHookReq) returns (PostBuildHookRes);
+  rpc PostTestHook(PostTestHookReq) returns (PostTestHookRes);
 }
 
 message BEPEventCallbackReq {
@@ -24,6 +25,13 @@ message PostBuildHookReq {
 }
 
 message PostBuildHookRes {}
+
+message PostTestHookReq {
+  uint32 broker_id = 1;
+  bool is_interactive_mode = 2;
+}
+
+message PostTestHookRes {}
 
 // Prompter is the service used by the Plugin instances to request prompt
 // actions to the Core from the CLI users.

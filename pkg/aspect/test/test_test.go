@@ -8,6 +8,7 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
+	bep_mock "aspect.build/cli/pkg/plugin/system/bep/mock"
 )
 
 // Embrace the stutter :)
@@ -20,10 +21,21 @@ func TestTest(t *testing.T) {
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"test"}).
+			Spawn([]string{"test", "--bes_backend=grpc://127.0.0.1:12345"}).
 			Return(0, nil)
 
+		besBackend := bep_mock.NewMockBESBackend(ctrl)
+		besBackend.
+			EXPECT().
+			Addr().
+			Return("127.0.0.1:12345").
+			Times(1)
+		besBackend.
+			EXPECT().
+			Errors().
+			Times(1)
+
 		b := test.New(ioutils.Streams{}, bzl)
-		g.Expect(b.Run(nil, []string{})).Should(Succeed())
+		g.Expect(b.Run([]string{}, besBackend)).Should(Succeed())
 	})
 }

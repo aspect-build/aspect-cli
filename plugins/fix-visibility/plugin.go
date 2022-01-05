@@ -154,6 +154,17 @@ func (plugin *FixVisibilityPlugin) PostBuildHook(
 	return nil
 }
 
+// PostTestHook satisfies the Plugin interface. It prompts the user for
+// automatic fixes when in interactive mode. If the user rejects the automatic
+// fixes, or if running in non-interactive mode, the commands to perform the fixes
+// are printed to the terminal.
+func (plugin *FixVisibilityPlugin) PostTestHook(
+	isInteractiveMode bool,
+	promptRunner ioutils.PromptRunner,
+) error {
+	return plugin.PostBuildHook(isInteractiveMode, promptRunner)
+}
+
 func (plugin *FixVisibilityPlugin) hasPrivateVisibility(toFix string) (bool, error) {
 	visibility, err := plugin.buildozer.run("print visibility", toFix)
 	if err != nil {
