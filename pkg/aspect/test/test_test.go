@@ -3,11 +3,12 @@ package test_test
 import (
 	"testing"
 
+	"github.com/golang/mock/gomock"
+	. "github.com/onsi/gomega"
+
 	"aspect.build/cli/pkg/aspect/test"
 	"aspect.build/cli/pkg/bazel/mock"
 	"aspect.build/cli/pkg/ioutils"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/gomega"
 	bep_mock "aspect.build/cli/pkg/plugin/system/bep/mock"
 )
 

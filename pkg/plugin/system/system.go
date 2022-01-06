@@ -19,8 +19,8 @@ import (
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/config"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/plugin"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
