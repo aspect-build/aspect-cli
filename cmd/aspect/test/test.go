@@ -23,7 +23,7 @@ import (
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
-// NewDefaultTestCmd creates a new build cobra command with the default
+// NewDefaultTestCmd creates a new test cobra command with the default
 // dependencies.
 func NewDefaultTestCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewTestCmd(
