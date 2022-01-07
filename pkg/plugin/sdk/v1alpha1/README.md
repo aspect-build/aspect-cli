@@ -1,4 +1,4 @@
-# Plugin SDK v1alpha1
+# Plugin SDK v1alpha7
 
 This is the SDK for creating plugins for the Aspect CLI using the Go language.
 
