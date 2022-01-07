@@ -19,8 +19,8 @@ import (
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/config"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/plugin"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
@@ -31,6 +31,7 @@ type PluginSystem interface {
 	TearDown()
 	BESBackendInterceptor() interceptors.Interceptor
 	ExecutePostBuild(isInteractiveMode bool) *aspecterrors.ErrorList
+	ExecutePostTest(isInteractiveMode bool) *aspecterrors.ErrorList
 }
 
 type pluginSystem struct {
@@ -149,6 +150,17 @@ func (ps *pluginSystem) ExecutePostBuild(isInteractiveMode bool) *aspecterrors.E
 	errors := &aspecterrors.ErrorList{}
 	for node := ps.plugins.head; node != nil; node = node.next {
 		if err := node.plugin.PostBuildHook(isInteractiveMode, ps.promptRunner); err != nil {
+			errors.Insert(err)
+		}
+	}
+	return errors
+}
+
+// ExecutePostTest executes all post-build hooks from all plugins.
+func (ps *pluginSystem) ExecutePostTest(isInteractiveMode bool) *aspecterrors.ErrorList {
+	errors := &aspecterrors.ErrorList{}
+	for node := ps.plugins.head; node != nil; node = node.next {
+		if err := node.plugin.PostTestHook(isInteractiveMode, ps.promptRunner); err != nil {
 			errors.Insert(err)
 		}
 	}

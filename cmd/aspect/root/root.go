@@ -83,7 +83,7 @@ func NewRootCmd(
 	cmd.AddCommand(version.NewDefaultVersionCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
-	cmd.AddCommand(test.NewDefaultTestCmd())
+	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
 
 	// ### "Additional help topic commands" which are not runnable
 	// https://pkg.go.dev/github.com/spf13/cobra#Command.IsAdditionalHelpTopicCommand

@@ -26,7 +26,7 @@ import (
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha1/config"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
 )
 
 func main() {
@@ -152,6 +152,17 @@ func (plugin *FixVisibilityPlugin) PostBuildHook(
 	}
 
 	return nil
+}
+
+// PostTestHook satisfies the Plugin interface. It prompts the user for
+// automatic fixes when in interactive mode. If the user rejects the automatic
+// fixes, or if running in non-interactive mode, the commands to perform the fixes
+// are printed to the terminal.
+func (plugin *FixVisibilityPlugin) PostTestHook(
+	isInteractiveMode bool,
+	promptRunner ioutils.PromptRunner,
+) error {
+	return plugin.PostBuildHook(isInteractiveMode, promptRunner)
 }
 
 func (plugin *FixVisibilityPlugin) hasPrivateVisibility(toFix string) (bool, error) {
