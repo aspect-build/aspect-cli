@@ -68,7 +68,7 @@ go_rules_dependencies()
 
 go_embed_data_dependencies()
 
-go_register_toolchains(version = "1.17.3")
+go_register_toolchains(version = "1.17.5")
 
 gazelle_dependencies()
 
