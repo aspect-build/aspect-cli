@@ -67,7 +67,7 @@ specify targets.
 					errs := pluginSystem.ExecutePostTest(isInteractiveMode).Errors()
 					if len(errs) > 0 {
 						for _, err := range errs {
-							fmt.Fprintf(streams.Stderr, "Error: failed to run build command: %v\n", err)
+							fmt.Fprintf(streams.Stderr, "Error: failed to run test command: %v\n", err)
 						}
 						var err *aspecterrors.ExitError
 						if errors.As(exitErr, &err) {
