@@ -19,11 +19,11 @@ import (
 	"aspect.build/cli/cmd/aspect/clean"
 	"aspect.build/cli/cmd/aspect/docs"
 	"aspect.build/cli/cmd/aspect/info"
-	"aspect.build/cli/cmd/aspect/root/flags"
 	"aspect.build/cli/cmd/aspect/run"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
 	"aspect.build/cli/docs/help/topics"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
 )

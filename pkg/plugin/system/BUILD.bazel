@@ -9,6 +9,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/plugin/system",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",
         "//pkg/interceptors",
         "//pkg/ioutils",

@@ -8,14 +8,17 @@ package system
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
+	"reflect"
 	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 	"github.com/spf13/cobra"
 
+	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -30,8 +33,8 @@ type PluginSystem interface {
 	Configure(streams ioutils.Streams) error
 	TearDown()
 	BESBackendInterceptor() interceptors.Interceptor
-	ExecutePostBuild(isInteractiveMode bool) *aspecterrors.ErrorList
-	ExecutePostTest(isInteractiveMode bool) *aspecterrors.ErrorList
+	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
+	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 }
 
 type pluginSystem struct {
@@ -145,26 +148,47 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 	}
 }
 
-// ExecutePostBuild executes all post-build hooks from all plugins.
-func (ps *pluginSystem) ExecutePostBuild(isInteractiveMode bool) *aspecterrors.ErrorList {
-	errors := &aspecterrors.ErrorList{}
-	for node := ps.plugins.head; node != nil; node = node.next {
-		if err := node.plugin.PostBuildHook(isInteractiveMode, ps.promptRunner); err != nil {
-			errors.Insert(err)
-		}
-	}
-	return errors
+// BuildHooksInterceptor returns an interceptor that runs the pre and post-build
+// hooks from all plugins.
+func (ps *pluginSystem) BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor {
+	return ps.commandHooksInterceptor("PostBuildHook", streams)
 }
 
-// ExecutePostTest executes all post-build hooks from all plugins.
-func (ps *pluginSystem) ExecutePostTest(isInteractiveMode bool) *aspecterrors.ErrorList {
-	errors := &aspecterrors.ErrorList{}
-	for node := ps.plugins.head; node != nil; node = node.next {
-		if err := node.plugin.PostTestHook(isInteractiveMode, ps.promptRunner); err != nil {
-			errors.Insert(err)
+// TestHooksInterceptor returns an interceptor that runs the pre and post-test
+// hooks from all plugins.
+func (ps *pluginSystem) TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor {
+	return ps.commandHooksInterceptor("PostTestHook", streams)
+}
+
+func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams ioutils.Streams) interceptors.Interceptor {
+	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) (exitErr error) {
+		isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
+		if err != nil {
+			return err
 		}
+
+		// TODO(f0rmiga): test this hook.
+		defer func() {
+			hasErrors := false
+			for node := ps.plugins.head; node != nil; node = node.next {
+				params := []reflect.Value{
+					reflect.ValueOf(isInteractiveMode),
+					reflect.ValueOf(ps.promptRunner),
+				}
+				if err := reflect.ValueOf(node.plugin).MethodByName(methodName).Call(params)[0].Interface(); err != nil {
+					fmt.Fprintf(streams.Stderr, "Error: failed to run 'aspect %s' command: %v\n", cmd.Use, err)
+					hasErrors = true
+				}
+			}
+			if hasErrors {
+				var err *aspecterrors.ExitError
+				if errors.As(exitErr, &err) {
+					err.ExitCode = 1
+				}
+			}
+		}()
+		return next(ctx, cmd, args)
 	}
-	return errors
 }
 
 // ClientFactory hides the call to goplugin.NewClient.
