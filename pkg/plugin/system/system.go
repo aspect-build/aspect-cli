@@ -164,7 +164,7 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) (exitErr error) {
 		isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to run 'aspect %s' command: %w", cmd.Use, err)
 		}
 
 		// TODO(f0rmiga): test this hook.
