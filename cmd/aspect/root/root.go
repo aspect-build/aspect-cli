@@ -20,6 +20,7 @@ import (
 	"aspect.build/cli/cmd/aspect/docs"
 	"aspect.build/cli/cmd/aspect/info"
 	"aspect.build/cli/cmd/aspect/root/flags"
+	"aspect.build/cli/cmd/aspect/run"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
 	"aspect.build/cli/docs/help/topics"
@@ -80,10 +81,11 @@ func NewRootCmd(
 	// IMPORTANT: when adding a new command, also update the _DOCS list in /docs/BUILD.bazel
 	cmd.AddCommand(build.NewDefaultBuildCmd(pluginSystem))
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
-	cmd.AddCommand(version.NewDefaultVersionCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
+	cmd.AddCommand(run.NewDefaultRunCmd(pluginSystem))
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
+	cmd.AddCommand(version.NewDefaultVersionCmd())
 
 	// ### "Additional help topic commands" which are not runnable
 	// https://pkg.go.dev/github.com/spf13/cobra#Command.IsAdditionalHelpTopicCommand
