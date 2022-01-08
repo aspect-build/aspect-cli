@@ -1,0 +1,17 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "run",
+    srcs = ["run.go"],
+    importpath = "aspect.build/cli/cmd/aspect/run",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/aspect/run",
+        "//pkg/bazel",
+        "//pkg/interceptors",
+        "//pkg/ioutils",
+        "//pkg/plugin/system",
+        "//pkg/plugin/system/bep",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

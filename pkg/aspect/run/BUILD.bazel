@@ -1,10 +1,10 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "test",
-    srcs = ["test.go"],
-    importpath = "aspect.build/cli/pkg/aspect/test",
-    visibility = ["//visibility:public"],
+    name = "run",
+    srcs = ["run.go"],
+    importpath = "aspect.build/cli/pkg/aspect/run",
+    visibility = ["//cmd/aspect/run:__pkg__"],
     deps = [
         "//pkg/aspecterrors",
         "//pkg/bazel",
@@ -14,10 +14,11 @@ go_library(
 )
 
 go_test(
-    name = "test_test",
-    srcs = ["test_test.go"],
+    name = "run_test",
+    srcs = ["run_test.go"],
     deps = [
-        ":test",
+        ":run",
+        "//pkg/aspecterrors",
         "//pkg/bazel/mock",
         "//pkg/ioutils",
         "//pkg/plugin/system/bep/mock",
