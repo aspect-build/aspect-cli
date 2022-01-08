@@ -13,7 +13,6 @@ go_library(
         "//cmd/aspect/clean",
         "//cmd/aspect/docs",
         "//cmd/aspect/info",
-        "//cmd/aspect/root/flags",
         "//cmd/aspect/run",
         "//cmd/aspect/test",
         "//cmd/aspect/version",
