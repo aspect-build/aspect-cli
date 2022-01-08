@@ -9,6 +9,7 @@ _DOCS = [
     "aspect_clean.md",
     "aspect_docs.md",
     "aspect_info.md",
+    "aspect_run.md",
     "aspect_test.md",
     "aspect_version.md",
 ]
