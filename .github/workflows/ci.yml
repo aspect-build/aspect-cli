@@ -34,6 +34,8 @@ jobs:
       - name: Validate changed files
         if: github.event_name == 'pull_request'
         run: ./.github/workflows/validate_changed_files.sh ${{ github.head_ref }} ${{ github.base_ref }}
+      - name: Tidy up repository
+        run: ./.github/workflows/tidy_up_repository.sh
       - name: bazel test //...
         env:
           XDG_CACHE_HOME: .cache/bazel-repo
