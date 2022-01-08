@@ -1,4 +1,12 @@
 load("@bazel_gazelle//:def.bzl", "gazelle")
+load("@io_bazel_rules_go//go:def.bzl", "TOOLS_NOGO", "nogo")
+
+nogo(
+    name = "nogo",
+    config = "nogo_config.json",
+    visibility = ["//visibility:public"],
+    deps = TOOLS_NOGO,
+)
 
 # TODO: follow https://sagikazarmark.hu/blog/vanity-import-paths-in-go/
 # so we have savvy go imports for users

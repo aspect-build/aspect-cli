@@ -106,8 +106,8 @@ func TestWorkspaceRootInterceptor(t *testing.T) {
 		cmd := &cobra.Command{Use: "fake"}
 		args := []string{"foo", "bar"}
 		next := func(_ctx context.Context, _cmd *cobra.Command, _args []string) error {
-			ctx := context.WithValue(ctx, WorkspaceRootKey, expectedWorkspaceRoot)
-			g.Expect(_ctx).To(Equal(ctx))
+			ctxWithWorkspace := context.WithValue(ctx, WorkspaceRootKey, expectedWorkspaceRoot)
+			g.Expect(_ctx).To(Equal(ctxWithWorkspace))
 			g.Expect(_cmd).To(Equal(cmd))
 			g.Expect(_args).To(Equal(args))
 			return nil

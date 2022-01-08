@@ -68,7 +68,10 @@ go_rules_dependencies()
 
 go_embed_data_dependencies()
 
-go_register_toolchains(version = "1.17.5")
+go_register_toolchains(
+    version = "1.17.5",
+    nogo = "@//:nogo",
+)
 
 gazelle_dependencies()
 
