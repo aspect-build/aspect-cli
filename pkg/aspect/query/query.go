@@ -7,18 +7,19 @@ Not licensed for re-use.
 package query
 
 import (
-	"aspect.build/cli/pkg/aspecterrors"
-	"aspect.build/cli/pkg/bazel"
 	"fmt"
-	"github.com/manifoldco/promptui"
-	"github.com/pkg/browser"
-	"github.com/spf13/cobra"
 	"io"
 	"io/ioutil"
 	"net/url"
 	"regexp"
 	"strings"
 
+	"github.com/manifoldco/promptui"
+	"github.com/pkg/browser"
+	"github.com/spf13/cobra"
+
+	"aspect.build/cli/pkg/aspecterrors"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
 
@@ -71,12 +72,12 @@ func (q *Query) Run(_ *cobra.Command, args []string) error {
 		maybeQueryOrPreset := args[0]
 		if value, ok := presets[maybeQueryOrPreset]; ok {
 			// Treat this as the name of the preset query, so don't prompt for it.
-			fmt.Printf("Preset query \"%s\" selected\n", value.Name)
-			fmt.Printf("%s: %s\n", value.Name, value.Description)
+			fmt.Fprintf(q.Streams.Stdout, "Preset query \"%s\" selected\n", value.Name)
+			fmt.Fprintf(q.Streams.Stdout, "%s: %s\n", value.Name, value.Description)
 			preset = value
 		} else {
 			// Treat this as a raw query expression
-			return q.RunQuery(maybeQueryOrPreset, []string{})
+			return q.RunQuery(maybeQueryOrPreset)
 		}
 	}
 
@@ -87,33 +88,31 @@ func (q *Query) Run(_ *cobra.Command, args []string) error {
 	query := preset.Query
 	placeholders := regexp.MustCompile(`(\?[a-zA-Z]*)`).FindAllString(query, -1)
 
-	if len(placeholders) > 0 {
-		if (len(placeholders) == len(args) - 1) {
-			for i, placeholder := range placeholders {
-				query = strings.ReplaceAll(query, placeholder, args[i+1])
+	if len(placeholders) == len(args)-1 {
+		for i, placeholder := range placeholders {
+			query = strings.ReplaceAll(query, placeholder, args[i+1])
+		}
+	} else if len(placeholders) > 0 {
+		for _, placeholder := range placeholders {
+			prompt := &promptui.Prompt{
+				Label: fmt.Sprintf("Value for '%s'", strings.TrimPrefix(placeholder, "?")),
 			}
-		} else {
-			for _, placeholder := range placeholders {
-				prompt := &promptui.Prompt{
-					Label: fmt.Sprintf("Value for '%s'", strings.TrimPrefix(placeholder, "?")),
-				}
-				val, err := prompt.Run()
-	
-				if err != nil {
-					return fmt.Errorf("prompt failed: %w", err)
-				}
-	
-				query = strings.ReplaceAll(query, placeholder, val)
+			val, err := prompt.Run()
+
+			if err != nil {
+				return fmt.Errorf("prompt failed: %w", err)
 			}
+
+			query = strings.ReplaceAll(query, placeholder, val)
 		}
 	}
 
-	return q.RunQuery(query, []string{})
+	return q.RunQuery(query)
 }
 
-func (q *Query) RunQuery(query string, flags []string) error {
+func (q *Query) RunQuery(query string) error {
 	if q.ShowGraph {
-		return q.RunQueryAndOpenResult(query, flags)
+		return q.RunQueryAndOpenResult(query)
 	}
 
 	bazelCmd := []string{
@@ -121,7 +120,7 @@ func (q *Query) RunQuery(query string, flags []string) error {
 		query,
 	}
 
-	bazelCmd = append(bazelCmd, flags...)
+	bazelCmd = append(bazelCmd)
 
 	if exitCode, err := q.bzl.Spawn(bazelCmd); exitCode != 0 {
 		err = &aspecterrors.ExitError{
@@ -134,14 +133,14 @@ func (q *Query) RunQuery(query string, flags []string) error {
 	return nil
 }
 
-func (q *Query) RunQueryAndOpenResult(query string, flags []string) error {
+func (q *Query) RunQueryAndOpenResult(query string) error {
 	bazelCmd := []string{
 		"query",
 		query,
 		"--output=graph",
 	}
 
-	bazelCmd = append(bazelCmd, flags...)
+	bazelCmd = append(bazelCmd)
 
 	r, w := io.Pipe()
 	bazelErrs := make(chan error, 1)

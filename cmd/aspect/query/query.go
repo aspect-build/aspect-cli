@@ -20,7 +20,8 @@ func NewDefaultQueryCmd() *cobra.Command {
 func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	q := query.New(streams, bzl, true)
 
-	// Load these from somewhere
+	// TODO: Queries should be loadable from the plugin config
+	// https://github.com/aspect-build/aspect-cli/issues/98
 	q.Presets = []*query.PresetQuery{
 		{
 			Name:        "why",
@@ -32,7 +33,7 @@ func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query",
 		Short: "Executes a dependency graph query.",
-		Long: "Executes a query language expression over a specified subgraph of the build dependency graph.",
+		Long:  "Executes a query language expression over a specified subgraph of the build dependency graph.",
 		RunE:  q.Run,
 	}
 

@@ -7,7 +7,6 @@ Not licensed for re-use.
 package root
 
 import (
-	"aspect.build/cli/cmd/aspect/query"
 	"os"
 
 	"github.com/fatih/color"
@@ -20,6 +19,8 @@ import (
 	"aspect.build/cli/cmd/aspect/clean"
 	"aspect.build/cli/cmd/aspect/docs"
 	"aspect.build/cli/cmd/aspect/info"
+	"aspect.build/cli/cmd/aspect/query"
+	"aspect.build/cli/cmd/aspect/root/flags"
 	"aspect.build/cli/cmd/aspect/run"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
