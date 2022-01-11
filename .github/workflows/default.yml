@@ -25,6 +25,13 @@ jobs:
             ~/.cache/bazel
             ~/.cache/bazel-repo
           key: bazel-cache
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          restore-keys: ${{ runner.os }}-go-
       - name: Tidy up repository
         run: ./.github/workflows/tidy_up_repository.sh
       - name: bazel test //...
