@@ -1,0 +1,40 @@
+name: Default
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+  # Allows you to run this workflow manually from the Actions tab.
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: bazelbuild/setup-bazelisk@v1
+      - name: Bazel caches
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cache/bazel
+            ~/.cache/bazel-repo
+          key: bazel-cache
+      - name: Validate changed files
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'allow sdk change')
+        run: ./.github/workflows/validate_changed_files.sh ${{ github.head_ref }} ${{ github.base_ref }}
+      - name: Tidy up repository
+        run: ./.github/workflows/tidy_up_repository.sh
+      - name: bazel test //...
+        env:
+          XDG_CACHE_HOME: ~/.cache/bazel-repo
+        run: |
+          bazel \
+            --bazelrc=.github/workflows/ci.bazelrc \
+            --bazelrc=.bazelrc \
+            test \
+            --disk_cache="${HOME}/.cache/bazel" \
+            --repository_cache="${HOME}/.cache/bazel-repo" \
+            //...
