@@ -4,7 +4,8 @@ set -o errexit -o nounset -o pipefail
 
 # First verify if the repository is clean.
 if ! git diff --exit-code; then
-    >&2 echo "ERROR: The repository is not clean - please verify the changes and fix them."
+    error_msg="ERROR: The repository is not clean - please verify the changes and fix them."
+    echo "::error ::${error_msg}"
     exit 1
 fi
 
@@ -20,7 +21,8 @@ commands=(
 for cmd in "${commands[@]}"; do
     /bin/bash -c "${cmd}"
     if ! git diff --exit-code; then
-        >&2 echo "ERROR: Please run '${cmd}' and commit the changes."
+        error_msg="ERROR: Please run '${cmd}' and commit the changes."
+        echo "::error ::${error_msg}"
         exit 1
     fi
 done
