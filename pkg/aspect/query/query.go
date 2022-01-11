@@ -49,10 +49,14 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 
 func (q *Query) Run(_ *cobra.Command, args []string) error {
 	presets := make(map[string]*PresetQuery)
-	var names []string
-	for _, p := range q.Presets {
+	presetNames := make([]string, len(q.Presets))
+	for i, p := range q.Presets {
+		if _, exists := presets[p.Name]; exists {
+			err := fmt.Errorf("duplicated preset query name %q", p.Name)
+			return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
+		}
 		presets[p.Name] = p
-		names = append(names, fmt.Sprintf("%s: %s", p.Name, p.Description))
+		presetNames[i] = fmt.Sprintf("%s: %s", p.Name, p.Description)
 	}
 
 	var preset *PresetQuery
@@ -76,7 +80,7 @@ func (q *Query) Run(_ *cobra.Command, args []string) error {
 			fmt.Fprintf(q.Streams.Stdout, "%s: %s\n", value.Name, value.Description)
 			preset = value
 		} else {
-			// Treat this as a raw query expression
+			// Treat this as a raw query expression.
 			return q.RunQuery(maybeQueryOrPreset)
 		}
 	}
