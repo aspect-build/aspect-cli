@@ -25,7 +25,8 @@ jobs:
             ~/.cache/bazel
             ~/.cache/bazel-repo
           key: bazel-cache
-      - uses: actions/cache@v2
+      - name: Go cache
+        uses: actions/cache@v2
         with:
           path: |
             ~/.cache/go-build
