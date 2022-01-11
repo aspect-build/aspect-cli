@@ -131,7 +131,7 @@ func (q *Query) RunQuery(query string) error {
 			Err:      err,
 			ExitCode: exitCode,
 		}
-		return err
+		return fmt.Errorf("failed to run query %q: %w", query, err)
 	}
 
 	return nil
