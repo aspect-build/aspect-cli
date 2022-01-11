@@ -154,11 +154,18 @@ func (plugin *FixVisibilityPlugin) PostBuildHook(
 	return nil
 }
 
-// PostTestHook satisfies the Plugin interface. It prompts the user for
-// automatic fixes when in interactive mode. If the user rejects the automatic
-// fixes, or if running in non-interactive mode, the commands to perform the fixes
-// are printed to the terminal.
+// PostTestHook satisfies the Plugin interface. In this case, it just calls the
+// PostBuildHook.
 func (plugin *FixVisibilityPlugin) PostTestHook(
+	isInteractiveMode bool,
+	promptRunner ioutils.PromptRunner,
+) error {
+	return plugin.PostBuildHook(isInteractiveMode, promptRunner)
+}
+
+// PostRunHook satisfies the Plugin interface. In this case, it just calls the
+// PostBuildHook.
+func (plugin *FixVisibilityPlugin) PostRunHook(
 	isInteractiveMode bool,
 	promptRunner ioutils.PromptRunner,
 ) error {

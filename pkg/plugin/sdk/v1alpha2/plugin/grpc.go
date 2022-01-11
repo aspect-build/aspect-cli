@@ -93,6 +93,25 @@ func (m *GRPCServer) PostTestHook(
 		m.Impl.PostTestHook(req.IsInteractiveMode, prompter)
 }
 
+// PostRunHook translates the gRPC call to the Plugin PostRunHook
+// implementation. It starts a prompt runner that is passed to the Plugin
+// instance to be able to perform prompt actions to the CLI user.
+func (m *GRPCServer) PostRunHook(
+	ctx context.Context,
+	req *proto.PostRunHookReq,
+) (*proto.PostRunHookRes, error) {
+	conn, err := m.broker.Dial(req.BrokerId)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	client := proto.NewPrompterClient(conn)
+	prompter := &PrompterGRPCClient{client: client}
+	return &proto.PostRunHookRes{},
+		m.Impl.PostRunHook(req.IsInteractiveMode, prompter)
+}
+
 // GRPCClient implements the gRPC client that is used by the Core to communicate
 // with the Plugin instances.
 type GRPCClient struct {
@@ -145,6 +164,27 @@ func (m *GRPCClient) PostTestHook(isInteractiveMode bool, promptRunner ioutils.P
 		IsInteractiveMode: isInteractiveMode,
 	}
 	_, err := m.client.PostTestHook(context.Background(), req)
+	s.Stop()
+	return err
+}
+
+// PostRunHook is called from the Core to execute the Plugin PostRunHook. It
+// starts the prompt runner server with the provided PromptRunner.
+func (m *GRPCClient) PostRunHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
+	prompterServer := &PrompterGRPCServer{promptRunner: promptRunner}
+	var s *grpc.Server
+	serverFunc := func(opts []grpc.ServerOption) *grpc.Server {
+		s = grpc.NewServer(opts...)
+		proto.RegisterPrompterServer(s, prompterServer)
+		return s
+	}
+	brokerID := m.broker.NextId()
+	go m.broker.AcceptAndServe(brokerID, serverFunc)
+	req := &proto.PostRunHookReq{
+		BrokerId:          brokerID,
+		IsInteractiveMode: isInteractiveMode,
+	}
+	_, err := m.client.PostRunHook(context.Background(), req)
 	s.Stop()
 	return err
 }

@@ -49,10 +49,9 @@ use 'bazel run --script_path' to write a script and then execute it.
 			[]interceptors.Interceptor{
 				interceptors.WorkspaceRootInterceptor(),
 				pluginSystem.BESBackendInterceptor(),
+				pluginSystem.RunHooksInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				// TODO(f0rmiga): post-run hook.
-
 				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
 				bzl.SetWorkspaceRoot(workspaceRoot)
 				r := run.New(streams, bzl)

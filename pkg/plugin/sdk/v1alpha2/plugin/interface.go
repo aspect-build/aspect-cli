@@ -22,4 +22,8 @@ type Plugin interface {
 		isInteractiveMode bool,
 		promptRunner ioutils.PromptRunner,
 	) error
+	PostRunHook(
+		isInteractiveMode bool,
+		promptRunner ioutils.PromptRunner,
+	) error
 }

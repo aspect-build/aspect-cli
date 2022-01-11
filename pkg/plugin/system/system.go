@@ -35,6 +35,7 @@ type PluginSystem interface {
 	BESBackendInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
+	RunHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 }
 
 type pluginSystem struct {
@@ -158,6 +159,12 @@ func (ps *pluginSystem) BuildHooksInterceptor(streams ioutils.Streams) intercept
 // hooks from all plugins.
 func (ps *pluginSystem) TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 	return ps.commandHooksInterceptor("PostTestHook", streams)
+}
+
+// TestHooksInterceptor returns an interceptor that runs the pre and post-test
+// hooks from all plugins.
+func (ps *pluginSystem) RunHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor {
+	return ps.commandHooksInterceptor("PostRunHook", streams)
 }
 
 func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams ioutils.Streams) interceptors.Interceptor {
