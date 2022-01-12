@@ -37,7 +37,5 @@ func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		RunE:  q.Run,
 	}
 
-	cmd.PersistentFlags().BoolVarP(&q.ShowGraph, "show_graph", "", false, `Shows a graph for of the result`)
-
 	return cmd
 }

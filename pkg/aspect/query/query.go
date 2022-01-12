@@ -8,14 +8,10 @@ package query
 
 import (
 	"fmt"
-	"io"
-	"io/ioutil"
-	"net/url"
 	"regexp"
 	"strings"
 
 	"github.com/manifoldco/promptui"
-	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspecterrors"
@@ -35,8 +31,7 @@ type Query struct {
 	Bzl           bazel.Bazel
 	IsInteractive bool
 
-	Presets   []*PresetQuery
-	ShowGraph bool
+	Presets []*PresetQuery
 
 	GetAPrompt func(label string) PromptRunner
 	GetASelect func(presetNames []string) SelectRunner
@@ -138,10 +133,6 @@ func GetASelect(presetNames []string) SelectRunner {
 }
 
 func (q *Query) RunQuery(query string) error {
-	if q.ShowGraph {
-		return q.RunQueryAndOpenResult(query)
-	}
-
 	bazelCmd := []string{
 		"query",
 		query,
@@ -155,41 +146,6 @@ func (q *Query) RunQuery(query string) error {
 			ExitCode: exitCode,
 		}
 		return fmt.Errorf("failed to run query %q: %w", query, err)
-	}
-
-	return nil
-}
-
-func (q *Query) RunQueryAndOpenResult(query string) error {
-	bazelCmd := []string{
-		"query",
-		query,
-		"--output=graph",
-	}
-
-	bazelCmd = append(bazelCmd)
-
-	r, w := io.Pipe()
-	bazelErrs := make(chan error, 1)
-	defer close(bazelErrs)
-	go func() {
-		defer w.Close()
-		_, err := q.Bzl.RunCommand(bazelCmd, w)
-		bazelErrs <- err
-	}()
-
-	bazelQueryOutput, err := ioutil.ReadAll(r)
-	if err != nil {
-		return fmt.Errorf("failed to get bazel query response: %w", err)
-	}
-
-	if err := <-bazelErrs; err != nil {
-		return fmt.Errorf("failed to get bazel query response: %w", err)
-	}
-
-	graphVizUrl := fmt.Sprintf("https://edotor.net/?engine=dot#%s", url.PathEscape(string(bazelQueryOutput)))
-	if err := browser.OpenURL(graphVizUrl); err != nil {
-		return fmt.Errorf("failed to open link in the browser: %w", err)
 	}
 
 	return nil
