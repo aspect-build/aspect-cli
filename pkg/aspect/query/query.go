@@ -32,22 +32,27 @@ type PresetQuery struct {
 type Query struct {
 	ioutils.Streams
 
-	bzl           bazel.Bazel
-	isInteractive bool
+	Bzl           bazel.Bazel
+	IsInteractive bool
 
 	Presets   []*PresetQuery
 	ShowGraph bool
+
+	GetAPrompt func(label string) PromptRunner
+	GetASelect func(presetNames []string) SelectRunner
 }
 
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 	return &Query{
 		Streams:       streams,
-		bzl:           bzl,
-		isInteractive: isInteractive,
+		Bzl:           bzl,
+		IsInteractive: isInteractive,
+		GetAPrompt:    GetAPrompt,
+		GetASelect:    GetASelect,
 	}
 }
 
-func (q *Query) Run(_ *cobra.Command, args []string) error {
+func (q *Query) Run(cmd *cobra.Command, args []string) error {
 	presets := make(map[string]*PresetQuery)
 	presetNames := make([]string, len(q.Presets))
 	for i, p := range q.Presets {
@@ -61,12 +66,10 @@ func (q *Query) Run(_ *cobra.Command, args []string) error {
 
 	var preset *PresetQuery
 	if len(args) == 0 {
-		selectQueryPrompt := &promptui.Select{
-			Label: "Select a preset query",
-			Items: names,
-		}
+		selectQueryPrompt := q.GetASelect(presetNames)
 
 		i, _, err := selectQueryPrompt.Run()
+
 		if err != nil {
 			return fmt.Errorf("prompt failed: %w", err)
 		}
@@ -98,9 +101,8 @@ func (q *Query) Run(_ *cobra.Command, args []string) error {
 		}
 	} else if len(placeholders) > 0 {
 		for _, placeholder := range placeholders {
-			prompt := &promptui.Prompt{
-				Label: fmt.Sprintf("Value for '%s'", strings.TrimPrefix(placeholder, "?")),
-			}
+			label := fmt.Sprintf("Value for '%s'", strings.TrimPrefix(placeholder, "?"))
+			prompt := q.GetAPrompt(label)
 			val, err := prompt.Run()
 
 			if err != nil {
@@ -112,6 +114,27 @@ func (q *Query) Run(_ *cobra.Command, args []string) error {
 	}
 
 	return q.RunQuery(query)
+}
+
+type PromptRunner interface {
+	Run() (string, error)
+}
+
+func GetAPrompt(label string) PromptRunner {
+	return &promptui.Prompt{
+		Label: label,
+	}
+}
+
+type SelectRunner interface {
+	Run() (int, string, error)
+}
+
+func GetASelect(presetNames []string) SelectRunner {
+	return &promptui.Select{
+		Label: "Select a preset query",
+		Items: presetNames,
+	}
 }
 
 func (q *Query) RunQuery(query string) error {
@@ -126,7 +149,7 @@ func (q *Query) RunQuery(query string) error {
 
 	bazelCmd = append(bazelCmd)
 
-	if exitCode, err := q.bzl.Spawn(bazelCmd); exitCode != 0 {
+	if exitCode, err := q.Bzl.Spawn(bazelCmd); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,
@@ -151,7 +174,7 @@ func (q *Query) RunQueryAndOpenResult(query string) error {
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := q.bzl.RunCommand(bazelCmd, w)
+		_, err := q.Bzl.RunCommand(bazelCmd, w)
 		bazelErrs <- err
 	}()
 
