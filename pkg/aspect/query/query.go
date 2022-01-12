@@ -38,10 +38,21 @@ type Query struct {
 }
 
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
+	// TODO: Queries should be loadable from the plugin config
+	// https://github.com/aspect-build/aspect-cli/issues/98
+	presets := []*PresetQuery{
+		{
+			Name:        "why",
+			Description: "Determine why targetA depends on targetB",
+			Query:       "somepath(?targetA, ?targetB)",
+		},
+	}
+
 	return &Query{
 		Streams:       streams,
 		Bzl:           bzl,
 		IsInteractive: isInteractive,
+		Presets:       presets,
 		GetAPrompt:    GetAPrompt,
 		GetASelect:    GetASelect,
 	}

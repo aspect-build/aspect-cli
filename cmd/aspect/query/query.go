@@ -20,16 +20,6 @@ func NewDefaultQueryCmd() *cobra.Command {
 func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	q := query.New(streams, bzl, true)
 
-	// TODO: Queries should be loadable from the plugin config
-	// https://github.com/aspect-build/aspect-cli/issues/98
-	q.Presets = []*query.PresetQuery{
-		{
-			Name:        "why",
-			Description: "Determine why targetA depends on targetB",
-			Query:       "somepath(?targetA, ?targetB)",
-		},
-	}
-
 	cmd := &cobra.Command{
 		Use:   "query",
 		Short: "Executes a dependency graph query.",
