@@ -8,14 +8,10 @@ package build
 
 import (
 	"context"
-	"errors"
-	"fmt"
 
 	"github.com/spf13/cobra"
 
-	rootFlags "aspect.build/cli/cmd/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/build"
-	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -48,27 +44,9 @@ func NewBuildCmd(
 			[]interceptors.Interceptor{
 				interceptors.WorkspaceRootInterceptor(),
 				pluginSystem.BESBackendInterceptor(),
+				pluginSystem.BuildHooksInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
-				if err != nil {
-					return err
-				}
-
-				// TODO(f0rmiga): test this post-build hook.
-				defer func() {
-					errs := pluginSystem.ExecutePostBuild(isInteractiveMode).Errors()
-					if len(errs) > 0 {
-						for _, err := range errs {
-							fmt.Fprintf(streams.Stderr, "Error: failed to run build command: %v\n", err)
-						}
-						var err *aspecterrors.ExitError
-						if errors.As(exitErr, &err) {
-							err.ExitCode = 1
-						}
-					}
-				}()
-
 				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
 				bzl.SetWorkspaceRoot(workspaceRoot)
 				b := build.New(streams, bzl)

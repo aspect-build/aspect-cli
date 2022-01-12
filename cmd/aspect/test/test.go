@@ -8,14 +8,10 @@ package test
 
 import (
 	"context"
-	"errors"
-	"fmt"
 
 	"github.com/spf13/cobra"
 
-	rootFlags "aspect.build/cli/cmd/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/test"
-	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -56,26 +52,9 @@ specify targets.
 			[]interceptors.Interceptor{
 				interceptors.WorkspaceRootInterceptor(),
 				pluginSystem.BESBackendInterceptor(),
+				pluginSystem.TestHooksInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
-				if err != nil {
-					return err
-				}
-
-				defer func() {
-					errs := pluginSystem.ExecutePostTest(isInteractiveMode).Errors()
-					if len(errs) > 0 {
-						for _, err := range errs {
-							fmt.Fprintf(streams.Stderr, "Error: failed to run test command: %v\n", err)
-						}
-						var err *aspecterrors.ExitError
-						if errors.As(exitErr, &err) {
-							err.ExitCode = 1
-						}
-					}
-				}()
-
 				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
 				bzl.SetWorkspaceRoot(workspaceRoot)
 				t := test.New(streams, bzl)
