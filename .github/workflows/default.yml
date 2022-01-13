@@ -24,7 +24,8 @@ jobs:
           path: |
             ~/.cache/bazel
             ~/.cache/bazel-repo
-          key: bazel-cache
+          key: bazel-cache-${{ hashFiles('**/*.go', '**/BUILD.bazel', '**/*.bzl', 'WORKSPACE') }}
+          restore-keys: bazel-cache-
       - name: Go cache
         uses: actions/cache@v2
         with:
