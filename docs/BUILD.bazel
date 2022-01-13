@@ -1,23 +1,40 @@
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load(":command_list.bzl", "COMMAND_LIST")
 
-# This list must be updated when we add a new command
-# buildifier: keep sorted
-_DOCS = [
-    "aspect.md",
-    "aspect_build.md",
-    "aspect_clean.md",
-    "aspect_docs.md",
-    "aspect_info.md",
-    "aspect_run.md",
-    "aspect_test.md",
-    "aspect_version.md",
+_DOCS = ["aspect.md"] + [
+    "aspect_{}.md".format(cmd)
+    for cmd in COMMAND_LIST
 ]
+
+genrule(
+    name = "command_list_bzl",
+    outs = ["command_list.bzl"],
+    cmd = "$(execpath //cmd/docgen) bzl-command-list > $@",
+    tools = ["//cmd/docgen"],
+)
+
+write_file(
+    name = "gen_command_list_update",
+    out = "command_list_update.sh",
+    content = [
+        "#!/usr/bin/env bash",
+        "set -o errexit -o nounset -o pipefail",
+        "cd $BUILD_WORKSPACE_DIRECTORY",
+        "cp -fv bazel-bin/docs/command_list.bzl docs/command_list.bzl",
+    ],
+)
+
+sh_binary(
+    name = "command_list_update",
+    srcs = ["command_list_update.sh"],
+    data = [":command_list_bzl"],
+)
 
 genrule(
     name = "docgen",
     outs = ["gen/" + d for d in _DOCS],
-    cmd = "$(execpath //cmd/docgen) $(@D)/gen",
+    cmd = "$(execpath //cmd/docgen) gen-markdown --output-dir $(@D)/gen",
     tools = ["//cmd/docgen"],
 )
 
@@ -39,6 +56,7 @@ write_file(
     out = "update.sh",
     content = [
         "#!/usr/bin/env bash",
+        "set -o errexit -o nounset -o pipefail",
         "cd $BUILD_WORKSPACE_DIRECTORY",
     ] + [
         "cp -fv bazel-bin/docs/gen/{0} docs/{0}".format(file)

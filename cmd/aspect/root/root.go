@@ -101,7 +101,7 @@ func NewRootCmd(
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use:   "tags",
-		Short: "Conventions for tags which are special",
+		Short: "Conventions for tags which are special.",
 		Long:  topics.MustAssetString("tags.md"),
 	})
 

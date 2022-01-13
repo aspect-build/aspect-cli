@@ -16,6 +16,7 @@ commands=(
     "bazel run @go_sdk//:bin/go -- mod tidy"
     "bazel run //:update_go_deps"
     "bazel run //:gazelle"
+    "bazel run //docs:command_list_update"
 )
 
 for cmd in "${commands[@]}"; do
