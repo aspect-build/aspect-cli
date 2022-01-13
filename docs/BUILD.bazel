@@ -10,7 +10,7 @@ _DOCS = ["aspect.md"] + [
 genrule(
     name = "command_list_bzl",
     outs = ["command_list.bzl"],
-    cmd = "$(execpath //cmd/docgen) command-list > $@",
+    cmd = "$(execpath //cmd/docgen) bzl-command-list > $@",
     tools = ["//cmd/docgen"],
 )
 
