@@ -60,14 +60,13 @@ func NewGenMarkdownCmd(aspectRootCmd *cobra.Command) *cobra.Command {
 		Use:   "gen-markdown",
 		Short: "Generates the markdown documentation.",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if outputDir == "" {
-				return fmt.Errorf("missing --output-dir")
-			}
 			return doc.GenMarkdownTree(aspectRootCmd, outputDir)
 		},
 	}
 
-	cmd.PersistentFlags().StringVar(&outputDir, "output-dir", "", "The path to the output directory.")
+	outputDirFlag := "output-dir"
+	cmd.PersistentFlags().StringVar(&outputDir, outputDirFlag, "", "The path to the output directory.")
+	cmd.MarkPersistentFlagRequired(outputDirFlag)
 
 	return cmd
 }
