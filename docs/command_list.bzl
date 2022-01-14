@@ -6,6 +6,7 @@ COMMAND_LIST = [
     "clean",
     "docs",
     "info",
+    "query",
     "run",
     "test",
     "version",
