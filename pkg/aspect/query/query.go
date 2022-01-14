@@ -33,8 +33,8 @@ type Query struct {
 
 	Presets []*PresetQuery
 
-	GetAPrompt func(label string) PromptRunner
-	GetASelect func(presetNames []string) SelectRunner
+	Prompt func(label string) PromptRunner
+	Select func(presetNames []string) SelectRunner
 }
 
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
@@ -53,8 +53,8 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 		Bzl:           bzl,
 		IsInteractive: isInteractive,
 		Presets:       presets,
-		GetAPrompt:    GetAPrompt,
-		GetASelect:    GetASelect,
+		Prompt:        Prompt,
+		Select:        Select,
 	}
 }
 
@@ -72,12 +72,12 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 
 	var preset *PresetQuery
 	if len(args) == 0 {
-		selectQueryPrompt := q.GetASelect(presetNames)
+		selectQueryPrompt := q.Select(presetNames)
 
 		i, _, err := selectQueryPrompt.Run()
 
 		if err != nil {
-			return fmt.Errorf("prompt failed: %w", err)
+			return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
 		}
 
 		preset = q.Presets[i]
@@ -95,7 +95,8 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	if preset == nil {
-		return fmt.Errorf("unable to determine preset query")
+		err := fmt.Errorf("unable to determine preset query")
+		return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
 	}
 
 	query := preset.Query
@@ -108,11 +109,11 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 	} else if len(placeholders) > 0 {
 		for _, placeholder := range placeholders {
 			label := fmt.Sprintf("Value for '%s'", strings.TrimPrefix(placeholder, "?"))
-			prompt := q.GetAPrompt(label)
+			prompt := q.Prompt(label)
 			val, err := prompt.Run()
 
 			if err != nil {
-				return fmt.Errorf("prompt failed: %w", err)
+				return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
 			}
 
 			query = strings.ReplaceAll(query, placeholder, val)
@@ -126,7 +127,7 @@ type PromptRunner interface {
 	Run() (string, error)
 }
 
-func GetAPrompt(label string) PromptRunner {
+func Prompt(label string) PromptRunner {
 	return &promptui.Prompt{
 		Label: label,
 	}
@@ -136,7 +137,7 @@ type SelectRunner interface {
 	Run() (int, string, error)
 }
 
-func GetASelect(presetNames []string) SelectRunner {
+func Select(presetNames []string) SelectRunner {
 	return &promptui.Select{
 		Label: "Select a preset query",
 		Items: presetNames,
@@ -148,8 +149,6 @@ func (q *Query) RunQuery(query string) error {
 		"query",
 		query,
 	}
-
-	bazelCmd = append(bazelCmd)
 
 	if exitCode, err := q.Bzl.Spawn(bazelCmd); exitCode != 0 {
 		err = &aspecterrors.ExitError{

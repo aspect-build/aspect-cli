@@ -13,6 +13,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
+	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/query"
 	query_mock "aspect.build/cli/pkg/aspect/query/mock"
@@ -78,7 +79,7 @@ func TestQuery(t *testing.T) {
 			Streams:       streams,
 			Bzl:           spawner,
 			IsInteractive: true,
-			GetAPrompt: func(label string) query.PromptRunner {
+			Prompt: func(label string) query.PromptRunner {
 				return promptRunner
 			},
 		}
@@ -105,6 +106,8 @@ func TestQuery(t *testing.T) {
 
 		spawner := bazel_mock.NewMockBazel(ctrl)
 
+		cmd := &cobra.Command{Use: "fake"}
+
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)
 		gomock.InOrder(
 			promptRunner.
@@ -123,7 +126,7 @@ func TestQuery(t *testing.T) {
 			Streams:       streams,
 			Bzl:           spawner,
 			IsInteractive: true,
-			GetAPrompt: func(label string) query.PromptRunner {
+			Prompt: func(label string) query.PromptRunner {
 				return promptRunner
 			},
 		}
@@ -134,7 +137,7 @@ func TestQuery(t *testing.T) {
 				Query:       "somepath(?target, ?dependency)",
 			},
 		}
-		err := q.Run(nil, []string{"why"})
+		err := q.Run(cmd, []string{"why"})
 		g.Expect(err).To(MatchError(expectedError))
 	})
 
@@ -177,11 +180,11 @@ func TestQuery(t *testing.T) {
 			Streams:       streams,
 			Bzl:           spawner,
 			IsInteractive: true,
-			GetAPrompt: func(label string) query.PromptRunner {
+			Prompt: func(label string) query.PromptRunner {
 				g.Expect(strings.Contains(label, "targettwo") || strings.Contains(label, "dependencytwo")).To(Equal(true))
 				return promptRunner
 			},
-			GetASelect: func(presetNames []string) query.SelectRunner {
+			Select: func(presetNames []string) query.SelectRunner {
 				return selectRunner
 			},
 		}
