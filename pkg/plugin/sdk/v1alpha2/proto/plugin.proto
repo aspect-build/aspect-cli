@@ -11,6 +11,7 @@ service Plugin {
   rpc BEPEventCallback(BEPEventCallbackReq) returns (BEPEventCallbackRes);
   rpc PostBuildHook(PostBuildHookReq) returns (PostBuildHookRes);
   rpc PostTestHook(PostTestHookReq) returns (PostTestHookRes);
+  rpc PostRunHook(PostRunHookReq) returns (PostRunHookRes);
 }
 
 message BEPEventCallbackReq {
@@ -32,6 +33,13 @@ message PostTestHookReq {
 }
 
 message PostTestHookRes {}
+
+message PostRunHookReq {
+  uint32 broker_id = 1;
+  bool is_interactive_mode = 2;
+}
+
+message PostRunHookRes {}
 
 // Prompter is the service used by the Plugin instances to request prompt
 // actions to the Core from the CLI users.
