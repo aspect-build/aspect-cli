@@ -11,6 +11,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
+      - name: Bazel caches
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cache/bazel
+            ~/.cache/bazel-repo
+          key: >-
+            bazel-cache-${{ hashFiles('**/*.go', '**/BUILD.bazel', '**/*.bzl',
+            'WORKSPACE') }}
+          restore-keys: bazel-cache-
       - uses: bazelbuild/setup-bazelisk@v1
       - name: Build release artifacts
         run: |
@@ -19,7 +29,14 @@ jobs:
             exit 1
           fi
           rm -rf /tmp/aspect/release
-          bazel --bazelrc=.github/workflows/ci.bazelrc --bazelrc=.bazelrc run --config=release //release -- /tmp/aspect/release
+          bazel \
+            --bazelrc=.github/workflows/ci.bazelrc \
+            --bazelrc=.bazelrc \
+            run \
+            --config=release \
+            --disk_cache="${HOME}/.cache/bazel" \
+            --repository_cache="${HOME}/.cache/bazel-repo" \
+            //release -- /tmp/aspect/release
           if /tmp/aspect/release/aspect-linux_amd64 version | grep '(with local changes)'; then
             >&2 echo "ERROR: the release contained changes in the git state and the release will not be produced"
             exit 1
