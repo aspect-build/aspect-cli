@@ -7,7 +7,7 @@ Not licensed for re-use
 package query
 
 import (
-	"aspect.build/cli/pkg/aspect/query"
+	"aspect.build/cli/pkg/aspect/query/query"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/spf13/cobra"

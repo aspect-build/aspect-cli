@@ -1,15 +1,14 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
-    name = "query",
-    srcs = ["query.go"],
-    importpath = "aspect.build/cli/pkg/aspect/query",
+    name = "cquery",
+    srcs = ["cquery.go"],
+    importpath = "aspect.build/cli/cmd/aspect/query/cquery",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/aspecterrors",
+        "//pkg/aspect/query/cquery",
         "//pkg/bazel",
         "//pkg/ioutils",
-        "@com_github_manifoldco_promptui//:promptui",
         "@com_github_spf13_cobra//:cobra",
     ],
 )

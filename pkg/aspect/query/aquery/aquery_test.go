@@ -4,7 +4,7 @@ Copyright © 2021 Aspect Build Systems Inc
 Not licensed for re-use.
 */
 
-package query_test
+package aquery_test
 
 import (
 	"fmt"
@@ -16,6 +16,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/query"
+	shared "aspect.build/cli/pkg/aspect/query"
+	"aspect.build/cli/pkg/aspect/query/aquery"
 	query_mock "aspect.build/cli/pkg/aspect/query/mock"
 	bazel_mock "aspect.build/cli/pkg/bazel/mock"
 	"aspect.build/cli/pkg/ioutils"
@@ -30,17 +32,18 @@ func TestQuery(t *testing.T) {
 		spawner := bazel_mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
-			Spawn([]string{"query", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).
+			Spawn([]string{"aquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).
 			Return(0, nil)
 
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		q := query.New(streams, spawner, true)
-		q.Presets = []*query.PresetQuery{
+		q := aquery.New(streams, spawner, true)
+		q.Presets = []*shared.PresetQuery{
 			{
 				Name:        "why",
 				Description: "Determine why a target depends on another",
 				Query:       "somepath(?target, ?dependency)",
+				Verb:        "aquery",
 			},
 		}
 
@@ -58,7 +61,7 @@ func TestQuery(t *testing.T) {
 		spawner := bazel_mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
-			Spawn([]string{"query", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).
+			Spawn([]string{"aquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).
 			Return(0, nil)
 
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)
@@ -75,19 +78,20 @@ func TestQuery(t *testing.T) {
 				Times(1),
 		)
 
-		q := &query.Query{
+		q := &aquery.AQuery{
 			Streams:       streams,
 			Bzl:           spawner,
 			IsInteractive: true,
-			Prompt: func(label string) query.PromptRunner {
+			Prompt: func(label string) shared.PromptRunner {
 				return promptRunner
 			},
 		}
-		q.Presets = []*query.PresetQuery{
+		q.Presets = []*shared.PresetQuery{
 			{
 				Name:        "why",
 				Description: "Determine why a target depends on another",
 				Query:       "somepath(?target, ?dependency)",
+				Verb:        "aquery",
 			},
 		}
 		err := q.Run(nil, []string{"why"})
@@ -122,19 +126,20 @@ func TestQuery(t *testing.T) {
 				Times(1),
 		)
 
-		q := &query.Query{
+		q := &aquery.AQuery{
 			Streams:       streams,
 			Bzl:           spawner,
 			IsInteractive: true,
-			Prompt: func(label string) query.PromptRunner {
+			Prompt: func(label string) shared.PromptRunner {
 				return promptRunner
 			},
 		}
-		q.Presets = []*query.PresetQuery{
+		q.Presets = []*shared.PresetQuery{
 			{
 				Name:        "why",
 				Description: "Determine why a target depends on another",
 				Query:       "somepath(?target, ?dependency)",
+				Verb:        "aquery",
 			},
 		}
 		err := q.Run(cmd, []string{"why"})
@@ -152,7 +157,7 @@ func TestQuery(t *testing.T) {
 		spawner := bazel_mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
-			Spawn([]string{"query", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).
+			Spawn([]string{"aquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).
 			Return(0, nil)
 
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)
@@ -176,7 +181,7 @@ func TestQuery(t *testing.T) {
 			Return(1, "", nil).
 			Times(1)
 
-		q := &query.Query{
+		q := &aquery.AQuery{
 			Streams:       streams,
 			Bzl:           spawner,
 			IsInteractive: true,
@@ -193,16 +198,19 @@ func TestQuery(t *testing.T) {
 				Name:        "why1",
 				Description: "Determine why a target depends on another",
 				Query:       "somepath(?targetone, ?dependencyone)",
+				Verb:        "aquery",
 			},
 			{
 				Name:        "why2",
 				Description: "Determine why a target depends on another",
 				Query:       "somepath(?targettwo, ?dependencytwo)",
+				Verb:        "aquery",
 			},
 			{
 				Name:        "why3",
 				Description: "Determine why a target depends on another",
 				Query:       "somepath(?targetthree, ?dependencythree)",
+				Verb:        "aquery",
 			},
 		}
 		err := q.Run(nil, []string{})
