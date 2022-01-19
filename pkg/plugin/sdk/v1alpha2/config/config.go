@@ -17,7 +17,7 @@ const DefaultPluginName = "aspectplugin"
 
 // Handshake is the shared handshake config for the v1alpha2 protocol.
 var Handshake = goplugin.HandshakeConfig{
-	ProtocolVersion:  1,
+	ProtocolVersion:  2,
 	MagicCookieKey:   "PLUGIN",
 	MagicCookieValue: "ASPECT",
 }
