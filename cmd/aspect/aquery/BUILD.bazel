@@ -1,12 +1,12 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
-    name = "cquery",
-    srcs = ["cquery.go"],
-    importpath = "aspect.build/cli/cmd/aspect/query/cquery",
+    name = "aquery",
+    srcs = ["aquery.go"],
+    importpath = "aspect.build/cli/cmd/aspect/aquery",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/aspect/query/cquery",
+        "//pkg/aspect/query/aquery",
         "//pkg/bazel",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",

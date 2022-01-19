@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "query",
     srcs = ["query.go"],
-    importpath = "aspect.build/cli/cmd/aspect/query/query",
+    importpath = "aspect.build/cli/cmd/aspect/query",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/query/query",

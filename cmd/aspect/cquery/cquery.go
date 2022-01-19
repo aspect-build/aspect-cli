@@ -7,10 +7,11 @@ Not licensed for re-use
 package cquery
 
 import (
+	"github.com/spf13/cobra"
+
 	"aspect.build/cli/pkg/aspect/query/cquery"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
-	"github.com/spf13/cobra"
 )
 
 func NewDefaultCQueryCmd() *cobra.Command {
