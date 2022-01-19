@@ -34,6 +34,7 @@ type PluginSystem interface {
 	TearDown()
 	BESBackendInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
+	SetupPlugins() *aspecterrors.ErrorList
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	RunHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 }
@@ -104,8 +105,11 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
+		properties := aspectplugin.properties
+
 		aspectplugin := rawplugin.(plugin.Plugin)
-		ps.plugins.insert(aspectplugin)
+
+		ps.plugins.insert(aspectplugin, properties)
 	}
 
 	return nil
@@ -167,6 +171,18 @@ func (ps *pluginSystem) RunHooksInterceptor(streams ioutils.Streams) interceptor
 	return ps.commandHooksInterceptor("PostRunHook", streams)
 }
 
+// SetupPlugins executes the Setup Hook for all configured plugins and provides
+// those plugins with their configured properties
+func (ps *pluginSystem) SetupPlugins() *aspecterrors.ErrorList {
+	errors := &aspecterrors.ErrorList{}
+	for node := ps.plugins.head; node != nil; node = node.next {
+		if err := node.plugin.SetupHook(node.properties); err != nil {
+			errors.Insert(err)
+		}
+	}
+	return errors
+}
+
 func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams ioutils.Streams) interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) (exitErr error) {
 		isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
@@ -224,8 +240,8 @@ type PluginList struct {
 	tail *PluginNode
 }
 
-func (l *PluginList) insert(p plugin.Plugin) {
-	node := &PluginNode{plugin: p}
+func (l *PluginList) insert(p plugin.Plugin, properties string) {
+	node := &PluginNode{plugin: p, properties: properties}
 	if l.head == nil {
 		l.head = node
 	} else {
@@ -236,6 +252,7 @@ func (l *PluginList) insert(p plugin.Plugin) {
 
 // PluginNode is a node in the PluginList linked list.
 type PluginNode struct {
-	next   *PluginNode
-	plugin plugin.Plugin
+	next       *PluginNode
+	plugin     plugin.Plugin
+	properties string
 }

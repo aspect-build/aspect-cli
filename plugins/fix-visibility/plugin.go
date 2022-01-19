@@ -86,6 +86,14 @@ func (plugin *FixVisibilityPlugin) BEPEventCallback(event *buildeventstream.Buil
 
 const removePrivateVisibilityBuildozerCommand = "remove visibility //visibility:private"
 
+// SetupHook satisfies the Plugin interface. It provides the plugin with its
+// configured properties from the aspect config file.
+func (plugin *FixVisibilityPlugin) SetupHook(
+	properties string,
+) error {
+	return nil
+}
+
 // PostBuildHook satisfies the Plugin interface. It prompts the user for
 // automatic fixes when in interactive mode. If the user rejects the automatic
 // fixes, or if running in non-interactive mode, the commands to perform the fixes
