@@ -39,11 +39,4 @@ jobs:
       - name: bazel test //...
         env:
           XDG_CACHE_HOME: ~/.cache/bazel-repo
-        run: |
-          bazel \
-            --bazelrc=.github/workflows/ci.bazelrc \
-            --bazelrc=.bazelrc \
-            test \
-            --disk_cache="${HOME}/.cache/bazel" \
-            --repository_cache="${HOME}/.cache/bazel-repo" \
-            //...
+        run: bazel --bazelrc=.github/workflows/ci.bazelrc --bazelrc=.bazelrc test //...
