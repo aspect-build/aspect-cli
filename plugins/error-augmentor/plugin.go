@@ -55,7 +55,7 @@ func (plugin *ErrorAugmentorPlugin) SetupHook(
 
 	var processedProperties errorMappings
 	if err := plugin.yamlUnmarshalStrict([]byte(properties), &processedProperties); err != nil {
-		return fmt.Errorf("failed to parse incoming properties: %w", err)
+		return fmt.Errorf("failed to setup: failed to parse properties: %w", err)
 	}
 
 	// change map keys into regex objects now so they are ready to use and we only need to compile the regex once
