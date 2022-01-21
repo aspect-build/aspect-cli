@@ -105,11 +105,11 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
-		properties := aspectplugin.properties
-
-		aspectplugin := rawplugin.(plugin.Plugin)
-
-		ps.plugins.insert(aspectplugin, properties)
+		node := &PluginNode{
+			plugin:     rawplugin.(plugin.Plugin),
+			properties: aspectplugin.properties,
+		}
+		ps.plugins.insert(node)
 	}
 
 	return nil
@@ -240,8 +240,7 @@ type PluginList struct {
 	tail *PluginNode
 }
 
-func (l *PluginList) insert(p plugin.Plugin, properties []byte) {
-	node := &PluginNode{plugin: p, properties: properties}
+func (l *PluginList) insert(node *PluginNode) {
 	if l.head == nil {
 		l.head = node
 	} else {

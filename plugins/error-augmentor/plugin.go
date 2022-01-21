@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	goplugin "github.com/hashicorp/go-plugin"
 	"gopkg.in/yaml.v2"
@@ -24,10 +25,13 @@ func main() {
 }
 
 type ErrorAugmentorPlugin struct {
-	properties          []byte
-	hintMap             map[*regexp.Regexp]string
-	yamlUnmarshalStrict func(in []byte, out interface{}) (err error)
-	helpfulHints        *helpfulHintSet
+	properties             []byte
+	hintMap                map[*regexp.Regexp]string
+	yamlUnmarshalStrict    func(in []byte, out interface{}) (err error)
+	helpfulHints           *helpfulHintSet
+	helpfulHintsMutex      sync.Mutex
+	errorMessages          chan string
+	errorMessagesWaitGroup sync.WaitGroup
 }
 
 func NewDefaultPlugin() *ErrorAugmentorPlugin {
@@ -64,13 +68,19 @@ func (plugin *ErrorAugmentorPlugin) SetupHook(
 		plugin.hintMap[regexp.MustCompile(r)] = m
 	}
 
+	plugin.errorMessages = make(chan string, 64)
+	for i := 0; i < 4; i++ {
+		go plugin.errorMessageProcessor()
+		plugin.errorMessagesWaitGroup.Add(1)
+	}
+
 	return nil
 }
 
 func (plugin *ErrorAugmentorPlugin) BEPEventCallback(event *buildeventstream.BuildEvent) error {
 	aborted := event.GetAborted()
 	if aborted != nil {
-		plugin.processErrorMessage(aborted.Description)
+		plugin.errorMessages <- aborted.Description
 
 		// We exit early here because there will not be a progress message when the event was of type "aborted".
 		return nil
@@ -79,11 +89,21 @@ func (plugin *ErrorAugmentorPlugin) BEPEventCallback(event *buildeventstream.Bui
 	progress := event.GetProgress()
 
 	if progress != nil {
+		// TODO: Should we also check for stdout?
 		stderr := progress.GetStderr()
-		plugin.processErrorMessage(stderr)
+		if stderr != "" {
+			plugin.errorMessages <- stderr
+		}
 	}
 
 	return nil
+}
+
+func (plugin *ErrorAugmentorPlugin) errorMessageProcessor() {
+	for errorMessage := range plugin.errorMessages {
+		plugin.processErrorMessage(errorMessage)
+	}
+	plugin.errorMessagesWaitGroup.Done()
 }
 
 func (plugin *ErrorAugmentorPlugin) processErrorMessage(errorMessage string) {
@@ -100,7 +120,9 @@ func (plugin *ErrorAugmentorPlugin) processErrorMessage(errorMessage string) {
 				str = strings.ReplaceAll(helpfulHint, fmt.Sprint("$", i), match)
 			}
 
+			plugin.helpfulHintsMutex.Lock()
 			plugin.helpfulHints.insert(str)
+			plugin.helpfulHintsMutex.Unlock()
 		}
 	}
 }
@@ -109,6 +131,9 @@ func (plugin *ErrorAugmentorPlugin) PostBuildHook(
 	isInteractiveMode bool,
 	promptRunner ioutils.PromptRunner,
 ) error {
+	close(plugin.errorMessages)
+	plugin.errorMessagesWaitGroup.Wait()
+
 	if plugin.helpfulHints.size == 0 {
 		return nil
 	}
