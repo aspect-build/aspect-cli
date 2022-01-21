@@ -26,8 +26,8 @@ func main() {
 type ErrorAugmentorPlugin struct {
 	properties          string
 	hintMap             map[*regexp.Regexp]string
-	helpfulHints        []string
 	yamlUnmarshalStrict func(in []byte, out interface{}) (err error)
+	helpfulHints        *helpfulHintSet
 }
 
 func NewDefaultPlugin() *ErrorAugmentorPlugin {
@@ -38,8 +38,8 @@ func NewPlugin() *ErrorAugmentorPlugin {
 	return &ErrorAugmentorPlugin{
 		properties:          "",
 		hintMap:             map[*regexp.Regexp]string{},
-		helpfulHints:        make([]string, 0),
 		yamlUnmarshalStrict: yaml.UnmarshalStrict,
+		helpfulHints:        &helpfulHintSet{nodes: make(map[helpfulHintNode]struct{})},
 	}
 }
 
@@ -97,20 +97,10 @@ func (plugin *ErrorAugmentorPlugin) processErrorMessage(errorMessage string) {
 				if i == 0 {
 					continue
 				}
-				str = strings.ReplaceAll(str, fmt.Sprint("$", i), match)
+				str = strings.ReplaceAll(helpfulHint, fmt.Sprint("$", i), match)
 			}
 
-			hintExists := false
-			for _, existingHint := range plugin.helpfulHints {
-				if existingHint == str {
-					hintExists = true
-					break
-				}
-			}
-
-			if !hintExists {
-				plugin.helpfulHints = append(plugin.helpfulHints, str)
-			}
+			plugin.helpfulHints.insert(str)
 		}
 	}
 }
@@ -119,7 +109,7 @@ func (plugin *ErrorAugmentorPlugin) PostBuildHook(
 	isInteractiveMode bool,
 	promptRunner ioutils.PromptRunner,
 ) error {
-	if len(plugin.helpfulHints) == 0 {
+	if plugin.helpfulHints.size == 0 {
 		return nil
 	}
 
@@ -128,8 +118,8 @@ func (plugin *ErrorAugmentorPlugin) PostBuildHook(
 	plugin.printMiddle("Aspect CLI Error Augmentor")
 	plugin.printMiddle("")
 
-	for _, hint := range plugin.helpfulHints {
-		plugin.printMiddle("- " + hint)
+	for node := plugin.helpfulHints.head; node != nil; node = node.next {
+		plugin.printMiddle("- " + node.helpfulHint)
 	}
 
 	plugin.printBreak()
@@ -176,4 +166,32 @@ func (plugin *ErrorAugmentorPlugin) PostRunHook(
 	promptRunner ioutils.PromptRunner,
 ) error {
 	return plugin.PostBuildHook(isInteractiveMode, promptRunner)
+}
+
+type helpfulHintSet struct {
+	head  *helpfulHintNode
+	tail  *helpfulHintNode
+	nodes map[helpfulHintNode]struct{}
+	size  int
+}
+
+func (s *helpfulHintSet) insert(helpfulHint string) {
+	node := helpfulHintNode{
+		helpfulHint: helpfulHint,
+	}
+	if _, exists := s.nodes[node]; !exists {
+		s.nodes[node] = struct{}{}
+		if s.head == nil {
+			s.head = &node
+		} else {
+			s.tail.next = &node
+		}
+		s.tail = &node
+		s.size++
+	}
+}
+
+type helpfulHintNode struct {
+	next        *helpfulHintNode
+	helpfulHint string
 }
