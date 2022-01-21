@@ -136,7 +136,7 @@ func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error 
 
 // SetupHook is called from the Core to execute the Plugin SetupHook.
 func (m *GRPCClient) SetupHook(
-	properties string,
+	properties []byte,
 ) error {
 	req := &proto.SetupHookReq{
 		Properties: properties,

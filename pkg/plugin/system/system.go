@@ -240,7 +240,7 @@ type PluginList struct {
 	tail *PluginNode
 }
 
-func (l *PluginList) insert(p plugin.Plugin, properties string) {
+func (l *PluginList) insert(p plugin.Plugin, properties []byte) {
 	node := &PluginNode{plugin: p, properties: properties}
 	if l.head == nil {
 		l.head = node
@@ -254,5 +254,5 @@ func (l *PluginList) insert(p plugin.Plugin, properties string) {
 type PluginNode struct {
 	next       *PluginNode
 	plugin     plugin.Plugin
-	properties string
+	properties []byte
 }

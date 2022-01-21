@@ -28,7 +28,7 @@ type AspectPlugin struct {
 	From          string                 `yaml:"from"`
 	LogLevel      string                 `yaml:"log_level"`
 	PropertiesMap map[string]interface{} `yaml:"properties"`
-	properties    string
+	properties    []byte
 }
 
 // Finder is the interface that wraps the simple Find method that performs the
@@ -124,7 +124,7 @@ func (p *parser) Parse(aspectpluginsPath string) ([]AspectPlugin, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse .aspectplugins: %w", err)
 		}
-		plugin.properties = string(marshalledProperties)
+		plugin.properties = marshalledProperties
 		processedPlugins = append(processedPlugins, plugin)
 	}
 

@@ -14,7 +14,7 @@ import (
 // Plugin determines how an aspect Plugin should be implemented.
 type Plugin interface {
 	BEPEventCallback(event *buildeventstream.BuildEvent) error
-	SetupHook(properties string) error
+	SetupHook(properties []byte) error
 	PostBuildHook(
 		isInteractiveMode bool,
 		promptRunner ioutils.PromptRunner,

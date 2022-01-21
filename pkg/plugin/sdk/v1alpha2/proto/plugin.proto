@@ -22,7 +22,7 @@ message BEPEventCallbackReq {
 message BEPEventCallbackRes {}
 
 message SetupHookReq {
-  string properties = 1;
+  bytes properties = 1;
 }
 
 message SetupHookRes {}

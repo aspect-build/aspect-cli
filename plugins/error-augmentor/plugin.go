@@ -24,7 +24,7 @@ func main() {
 }
 
 type ErrorAugmentorPlugin struct {
-	properties          string
+	properties          []byte
 	hintMap             map[*regexp.Regexp]string
 	yamlUnmarshalStrict func(in []byte, out interface{}) (err error)
 	helpfulHints        *helpfulHintSet
@@ -36,7 +36,7 @@ func NewDefaultPlugin() *ErrorAugmentorPlugin {
 
 func NewPlugin() *ErrorAugmentorPlugin {
 	return &ErrorAugmentorPlugin{
-		properties:          "",
+		properties:          nil,
 		hintMap:             map[*regexp.Regexp]string{},
 		yamlUnmarshalStrict: yaml.UnmarshalStrict,
 		helpfulHints:        &helpfulHintSet{nodes: make(map[helpfulHintNode]struct{})},
@@ -49,12 +49,12 @@ type errorMappings struct {
 }
 
 func (plugin *ErrorAugmentorPlugin) SetupHook(
-	properties string,
+	properties []byte,
 ) error {
 	plugin.properties = properties
 
 	var processedProperties errorMappings
-	if err := plugin.yamlUnmarshalStrict([]byte(properties), &processedProperties); err != nil {
+	if err := plugin.yamlUnmarshalStrict(properties, &processedProperties); err != nil {
 		return fmt.Errorf("failed to setup: failed to parse properties: %w", err)
 	}
 

@@ -89,7 +89,7 @@ const removePrivateVisibilityBuildozerCommand = "remove visibility //visibility:
 // SetupHook satisfies the Plugin interface. It provides the plugin with its
 // configured properties from the aspect config file.
 func (plugin *FixVisibilityPlugin) SetupHook(
-	properties string,
+	properties []byte,
 ) error {
 	return nil
 }
