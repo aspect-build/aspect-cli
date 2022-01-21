@@ -152,6 +152,8 @@ func (plugin *ErrorAugmentorPlugin) PostBuildHook(
 }
 
 func (plugin *ErrorAugmentorPlugin) printBreak() {
+	// using buffer so that we can easily determine the current length of the string and
+	// ensure we create a proper square with a straight border
 	var b strings.Builder
 
 	fmt.Fprintf(&b, " ")
@@ -166,6 +168,8 @@ func (plugin *ErrorAugmentorPlugin) printBreak() {
 }
 
 func (plugin *ErrorAugmentorPlugin) printMiddle(str string) {
+	// using buffer so that we can easily determine the current length of the string and
+	// ensure we create a proper square with a straight border
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "| ")
