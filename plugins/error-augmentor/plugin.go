@@ -116,6 +116,8 @@ func (plugin *ErrorAugmentorPlugin) processErrorMessage(errorMessage string) {
 		matches := regex.FindStringSubmatch(errorMessage)
 
 		if len(matches) > 0 {
+
+			// apply regex capture group replacements to given hint
 			for i, match := range matches {
 				if i == 0 {
 					continue
