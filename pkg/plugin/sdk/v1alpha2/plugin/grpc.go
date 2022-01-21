@@ -60,8 +60,7 @@ func (m *GRPCServer) SetupHook(
 	ctx context.Context,
 	req *proto.SetupHookReq,
 ) (*proto.SetupHookRes, error) {
-	return &proto.SetupHookRes{},
-		m.Impl.SetupHook(req.Properties)
+	return &proto.SetupHookRes{}, m.Impl.SetupHook(req.Properties)
 }
 
 // PostBuildHook translates the gRPC call to the Plugin PostBuildHook

@@ -25,7 +25,7 @@ func main() {
 
 type ErrorAugmentorPlugin struct {
 	properties          string
-	regex               map[*regexp.Regexp]string
+	hintMap             map[*regexp.Regexp]string
 	helpfulHints        []string
 	yamlUnmarshalStrict func(in []byte, out interface{}) (err error)
 }
@@ -37,7 +37,7 @@ func NewDefaultPlugin() *ErrorAugmentorPlugin {
 func NewPlugin() *ErrorAugmentorPlugin {
 	return &ErrorAugmentorPlugin{
 		properties:          "",
-		regex:               map[*regexp.Regexp]string{},
+		hintMap:             map[*regexp.Regexp]string{},
 		helpfulHints:        make([]string, 0),
 		yamlUnmarshalStrict: yaml.UnmarshalStrict,
 	}
@@ -61,7 +61,7 @@ func (plugin *ErrorAugmentorPlugin) SetupHook(
 	// change map keys into regex objects now so they are ready to use and we only need to compile the regex once
 	for r, m := range processedProperties.ErrorMappings {
 		// r for regex, m for message
-		plugin.regex[regexp.MustCompile(r)] = m
+		plugin.hintMap[regexp.MustCompile(r)] = m
 	}
 
 	return nil
@@ -87,7 +87,7 @@ func (plugin *ErrorAugmentorPlugin) BEPEventCallback(event *buildeventstream.Bui
 }
 
 func (plugin *ErrorAugmentorPlugin) processErrorMessage(errorMessage string) {
-	for regex, helpfulHint := range plugin.regex {
+	for regex, helpfulHint := range plugin.hintMap {
 		matches := regex.FindStringSubmatch(errorMessage)
 
 		if len(matches) > 0 {

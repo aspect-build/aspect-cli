@@ -4,6 +4,6 @@
   log_level: OFF
   properties:
     error_mappings:
-      "was not created by genrule": "Your genrule is broken"
-      "declared output '(.*)' was not created by genrule.": "File not created by genrule: $1"
-      "Executing genrule (.*) failed: not all outputs were created or valid": "Genrule $1 did not create its output properly. Did you forget to add an $@"
+      "was not created by genrule": "Your genrule is broken."
+      "declared output '(.*)' was not created by genrule.": "File not created by genrule: $1."
+      "Executing genrule (.*) failed: not all outputs were created or valid": "Genrule $1 did not create its output properly. Did you forget to add an $@?"
