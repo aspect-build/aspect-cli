@@ -116,17 +116,15 @@ func (plugin *ErrorAugmentorPlugin) processErrorMessage(errorMessage string) {
 		matches := regex.FindStringSubmatch(errorMessage)
 
 		if len(matches) > 0 {
-			str := fmt.Sprint(helpfulHint)
-
 			for i, match := range matches {
 				if i == 0 {
 					continue
 				}
-				str = strings.ReplaceAll(helpfulHint, fmt.Sprint("$", i), match)
+				helpfulHint = strings.ReplaceAll(helpfulHint, fmt.Sprint("$", i), match)
 			}
 
 			plugin.helpfulHintsMutex.Lock()
-			plugin.helpfulHints.insert(str)
+			plugin.helpfulHints.insert(helpfulHint)
 			plugin.helpfulHintsMutex.Unlock()
 		}
 	}
