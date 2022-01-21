@@ -72,7 +72,7 @@ func (plugin *ErrorAugmentorPlugin) BEPEventCallback(event *buildeventstream.Bui
 	if aborted != nil {
 		plugin.processErrorMessage(aborted.Description)
 
-		// if aborted then there will not be a progress messages so exit early
+		// We exit early here because there will not be a progress message when the event was of type "aborted".
 		return nil
 	}
 
