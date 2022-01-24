@@ -9,7 +9,7 @@ package query
 import (
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/pkg/aspect/query/query"
+	"aspect.build/cli/pkg/aspect/query"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )

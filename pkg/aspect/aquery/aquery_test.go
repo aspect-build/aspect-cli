@@ -15,10 +15,9 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/pkg/aspect/query"
-	shared "aspect.build/cli/pkg/aspect/query"
-	"aspect.build/cli/pkg/aspect/query/aquery"
-	query_mock "aspect.build/cli/pkg/aspect/query/mock"
+	"aspect.build/cli/pkg/aspect/aquery"
+	"aspect.build/cli/pkg/aspect/query/shared"
+	query_mock "aspect.build/cli/pkg/aspect/query/shared/mock"
 	bazel_mock "aspect.build/cli/pkg/bazel/mock"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -185,15 +184,15 @@ func TestQuery(t *testing.T) {
 			Streams:       streams,
 			Bzl:           spawner,
 			IsInteractive: true,
-			Prompt: func(label string) query.PromptRunner {
+			Prompt: func(label string) shared.PromptRunner {
 				g.Expect(strings.Contains(label, "targettwo") || strings.Contains(label, "dependencytwo")).To(Equal(true))
 				return promptRunner
 			},
-			Select: func(presetNames []string) query.SelectRunner {
+			Select: func(presetNames []string) shared.SelectRunner {
 				return selectRunner
 			},
 		}
-		q.Presets = []*query.PresetQuery{
+		q.Presets = []*shared.PresetQuery{
 			{
 				Name:        "why1",
 				Description: "Determine why a target depends on another",

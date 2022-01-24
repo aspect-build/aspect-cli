@@ -9,7 +9,7 @@ package aquery
 import (
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/pkg/aspect/query/aquery"
+	"aspect.build/cli/pkg/aspect/aquery"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )

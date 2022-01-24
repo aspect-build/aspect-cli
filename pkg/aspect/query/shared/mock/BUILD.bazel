@@ -11,7 +11,7 @@ gomock(
         "PromptRunner",
         "SelectRunner",
     ],
-    library = "//pkg/aspect/query",
+    library = "//pkg/aspect/query/shared",
     package = "mock",
     visibility = ["//visibility:private"],
 )
@@ -22,7 +22,7 @@ go_library(
         "doc.go",
         ":mock_query_source",  # keep
     ],
-    importpath = "aspect.build/cli/pkg/aspect/query/mock",
+    importpath = "aspect.build/cli/pkg/aspect/query/shared/mock",
     visibility = ["//:__subpackages__"],
     deps = [
         "@com_github_golang_mock//gomock",  # keep

@@ -9,7 +9,7 @@ package cquery
 import (
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/pkg/aspect/query/cquery"
+	"aspect.build/cli/pkg/aspect/cquery"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )

@@ -6,7 +6,7 @@ go_library(
     importpath = "aspect.build/cli/cmd/aspect/query",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/aspect/query/query",
+        "//pkg/aspect/query",
         "//pkg/bazel",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",

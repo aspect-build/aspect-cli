@@ -1,12 +1,12 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "cquery",
-    srcs = ["cquery.go"],
-    importpath = "aspect.build/cli/pkg/aspect/query/cquery",
+    name = "aquery",
+    srcs = ["aquery.go"],
+    importpath = "aspect.build/cli/pkg/aspect/aquery",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/aspect/query",
+        "//pkg/aspect/query/shared",
         "//pkg/bazel",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
@@ -14,12 +14,12 @@ go_library(
 )
 
 go_test(
-    name = "cquery_test",
-    srcs = ["cquery_test.go"],
+    name = "aquery_test",
+    srcs = ["aquery_test.go"],
     deps = [
-        ":cquery",
-        "//pkg/aspect/query",
-        "//pkg/aspect/query/mock",
+        ":aquery",
+        "//pkg/aspect/query/shared",
+        "//pkg/aspect/query/shared/mock",
         "//pkg/bazel/mock",
         "//pkg/ioutils",
         "@com_github_golang_mock//gomock",
