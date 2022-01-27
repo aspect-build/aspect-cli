@@ -10,6 +10,14 @@ package clean
 
 import (
 	"fmt"
+	"io/ioutil"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
@@ -54,6 +62,19 @@ type PromptRunner interface {
 	Run() (string, error)
 }
 
+type bazelDirInfo struct {
+	path               string
+	size               float64
+	hRSize             float64 // HumanReadableSize
+	unit               string
+	workspaceName      string
+	comparator         float64
+	isCurrentWorkspace bool
+	accessTime         time.Duration
+	processed          bool
+	userAsked          bool
+}
+
 // Clean represents the aspect clean command.
 type Clean struct {
 	ioutils.Streams
@@ -67,6 +88,16 @@ type Clean struct {
 
 	Expunge      bool
 	ExpungeAsync bool
+
+	// reclaimAll
+	bazelDirs       map[string]bazelDirInfo
+	bazelDirsMutex  sync.Mutex
+	deleteMutex     sync.Mutex
+	deleteCounter   int
+	chanErrors      *errorSet
+	errorChannel    chan error
+	deleteChannel   chan string
+	sizeCalcChannel chan bazelDirInfo
 }
 
 // New creates a Clean command.
@@ -78,6 +109,8 @@ func New(
 		Streams:           streams,
 		isInteractiveMode: isInteractiveMode,
 		bzl:               bzl,
+		deleteCounter:     0,
+		chanErrors:        &errorSet{nodes: make(map[errorNode]struct{})},
 	}
 }
 
@@ -131,8 +164,7 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 				}
 			}
 		case ReclaimAllOption:
-			fmt.Fprint(c.Streams.Stdout, "Sorry, this is not implemented yet: discover all bazel workspaces on the machine\n")
-			return nil
+			return c.reclaimAll()
 		case NonIncrementalOption:
 			fmt.Fprint(c.Streams.Stdout, outputBaseHint)
 			return nil
@@ -164,4 +196,357 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+func (c *Clean) reclaimAll() error {
+	bazelBaseDir, currentWorkingBase, err := c.findBazelBaseDir()
+	if err != nil {
+		return err
+	}
+
+	bazelWorkspaces, err := ioutil.ReadDir(bazelBaseDir)
+	if err != nil {
+		return err
+	}
+
+	c.bazelDirs = make(map[string]bazelDirInfo)
+
+	c.sizeCalcChannel = make(chan bazelDirInfo, 64)
+	c.deleteChannel = make(chan string, 64)
+	c.errorChannel = make(chan error, 64)
+
+	// threads for calculating sizes of directories
+	for i := 0; i < 5; i++ {
+		go c.directoryProcessor()
+	}
+
+	// threads for deleting directories
+	for i := 0; i < 5; i++ {
+		go c.deleteProcessor()
+	}
+
+	// thread for processing errors from the other threads
+	go c.errorProcessor()
+
+	for _, workspace := range bazelWorkspaces {
+		workspaceInfo := bazelDirInfo{
+			path:               bazelBaseDir + "/" + workspace.Name(),
+			isCurrentWorkspace: workspace.Name() == currentWorkingBase,
+		}
+
+		workspaceInfo.accessTime = c.GetAccessTime(workspace)
+
+		execrootFiles, readDirErr := ioutil.ReadDir(bazelBaseDir + "/" + workspace.Name() + "/execroot")
+		if readDirErr != nil {
+			// install and cache folders will get here
+			// TODO: do we want to clean the cache folder?
+			continue
+		}
+
+		if len(execrootFiles) != 2 {
+			// will not be able to determine the workspace name
+			// TODO: Do we want to have an "other" or an "unknown" and remove any that fall here
+			continue
+		}
+
+		for _, execrootFile := range execrootFiles {
+			if execrootFile.Name() != "DO_NOT_BUILD_HERE" {
+				workspaceInfo.workspaceName = execrootFile.Name()
+			}
+		}
+
+		c.bazelDirsMutex.Lock()
+		c.bazelDirs[workspaceInfo.path] = workspaceInfo
+		c.bazelDirsMutex.Unlock()
+
+		c.sizeCalcChannel <- workspaceInfo
+	}
+
+	var spaceReclaimed float64 // size in bytes
+	for i := 0; i < len(c.bazelDirs); i++ {
+		processedBazelWorkspaceDirectories := c.getProcessedBazelWorkspaceDirectories()
+
+		// getProcessedBazelWorkspaceDirectories will only return if there is at least one directory to remove
+		dir := processedBazelWorkspaceDirectories[0]
+
+		prompt := &promptui.Prompt{
+			Label:     fmt.Sprintf("Workspace: %s, Age: %s, Size: %.2f %s. Would you like to remove", dir.workspaceName, dir.accessTime, dir.hRSize, dir.unit),
+			IsConfirm: true,
+		}
+		_, promptErr := prompt.Run()
+
+		if promptErr == nil {
+			fmt.Printf("%s added to the delete queue\n", dir.workspaceName)
+			c.manipulateDeleteCounter(1)
+			c.deleteChannel <- dir.path
+			spaceReclaimed = spaceReclaimed + dir.size
+		}
+
+		c.bazelDirsMutex.Lock()
+		replacementDir := c.bazelDirs[dir.path]
+		replacementDir.userAsked = true
+		c.bazelDirs[dir.path] = replacementDir
+		c.bazelDirsMutex.Unlock()
+
+		// we dont want to ask the user if they want to continue when they have just finished with the last item
+		if i < len(c.bazelDirs)-1 {
+			_, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(spaceReclaimed)
+			prompt2 := &promptui.Prompt{
+				Label:     fmt.Sprintf("Space reclaimed: %.2f %s. Would you like to continue", hRSpaceReclaimed, unit),
+				IsConfirm: true,
+			}
+			_, promptErr = prompt2.Run()
+			if promptErr != nil {
+				break
+			}
+		}
+	}
+
+	// Holding function. Will recursively print and sleep until all deletes have completed
+	c.waitForDeletes()
+
+	_, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(spaceReclaimed)
+	fmt.Printf("Disk Space Gained: %.2f %s. Exiting...\n", hRSpaceReclaimed, unit)
+
+	// close all the channels
+	close(c.sizeCalcChannel)
+	close(c.deleteChannel)
+	close(c.errorChannel)
+
+	if c.chanErrors.size > 0 {
+		// TODO: If there is more than one error do we want to combine them before returning?
+		return c.chanErrors.head.err
+	}
+
+	return err
+}
+
+func (c *Clean) manipulateDeleteCounter(increment int) {
+	c.deleteMutex.Lock()
+	c.deleteCounter = c.deleteCounter + increment
+	c.deleteMutex.Unlock()
+}
+
+func (c *Clean) waitForDeletes() {
+	c.waitForDeletesInternal(true)
+}
+
+func (c *Clean) waitForDeletesInternal(firstCall bool) {
+	c.deleteMutex.Lock()
+	counterSize := c.deleteCounter
+	c.deleteMutex.Unlock()
+
+	if counterSize > 0 {
+		// we need to wait
+		if firstCall {
+			fmt.Print("Waiting for delete's to complete")
+		} else {
+			fmt.Print(".")
+		}
+		time.Sleep(100 * time.Millisecond)
+		c.waitForDeletesInternal(false)
+		if firstCall {
+			fmt.Println("")
+		}
+	}
+}
+
+func (c *Clean) directoryProcessor() {
+	for dir := range c.sizeCalcChannel {
+		size, hRSize, unit := c.getDirSize(dir.path)
+
+		c.bazelDirsMutex.Lock()
+
+		replacementDir := c.bazelDirs[dir.path]
+		replacementDir.size = size
+		replacementDir.hRSize = hRSize
+		replacementDir.unit = unit
+		replacementDir.processed = true
+		differ := replacementDir.accessTime.Hours() * float64(size)
+
+		if replacementDir.isCurrentWorkspace {
+			// if we can avoid cleaning the current working directory then do so
+			// keeping the current bazel cache will mean faster build times for the user
+			differ = differ / 2
+		}
+
+		replacementDir.comparator = differ
+		c.bazelDirs[dir.path] = replacementDir
+
+		c.bazelDirsMutex.Unlock()
+	}
+}
+
+func (c *Clean) deleteProcessor() {
+	for dir := range c.deleteChannel {
+
+		// otherwise certain files will throw a permission error when we try to remove them
+		cmd := exec.Command("chmod", "-R", "777", dir)
+		_, err := cmd.Output()
+		if err != nil {
+			c.errorChannel <- fmt.Errorf("failed to chmod on %s: %w", dir, err)
+			c.manipulateDeleteCounter(-1)
+
+			// make sure this does what I think it will do. Otherwise put the code from below into an else block
+			continue
+		}
+
+		// remove entire folder
+		err = os.RemoveAll(dir)
+		if err != nil {
+			c.errorChannel <- fmt.Errorf("failed to delete %s: %w", dir, err)
+		}
+		c.manipulateDeleteCounter(-1)
+	}
+}
+
+func (c *Clean) errorProcessor() {
+	for err := range c.errorChannel {
+		c.chanErrors.insert(err)
+	}
+}
+
+func (c *Clean) findBazelBaseDir() (string, string, error) {
+	var bazelOutputBase, currentWorkingBase string
+
+	cwd, err := os.Getwd()
+
+	if err != nil {
+		return bazelOutputBase, currentWorkingBase, err
+	}
+
+	files, err := ioutil.ReadDir(cwd)
+	if err != nil {
+		return bazelOutputBase, currentWorkingBase, err
+	}
+
+	for _, file := range files {
+
+		// bazel-bin, bazel-out, etc... will be symlinks, so we can eliminate most files immediately
+		if file.Mode()&os.ModeSymlink != 0 {
+			actualPath, _ := os.Readlink(cwd + "/" + file.Name())
+
+			if strings.Contains(actualPath, "bazel") && strings.Contains(actualPath, "/execroot/") {
+				execrootBase := strings.Split(actualPath, "/execroot/")[0]
+				execrootSplit := strings.Split(execrootBase, "/")
+				currentWorkingBase = execrootSplit[len(execrootSplit)-1]
+				bazelOutputBase = strings.Join(execrootSplit[:len(execrootSplit)-1], "/")
+				break
+			}
+		}
+	}
+
+	return bazelOutputBase, currentWorkingBase, err
+}
+
+func (c *Clean) getProcessedBazelWorkspaceDirectories() []bazelDirInfo {
+	return c.getProcessedBazelWorkspaceDirectoriesInternal(true)
+}
+
+// do not call except for getProcessedBazelWorkspaceDirectories and recursively
+func (c *Clean) getProcessedBazelWorkspaceDirectoriesInternal(firstCall bool) []bazelDirInfo {
+	c.bazelDirsMutex.Lock()
+	bazelWorkspaceDirectories := make([]bazelDirInfo, 0)
+
+	for _, bazelDirectoryInfo := range c.bazelDirs {
+		if bazelDirectoryInfo.processed && !bazelDirectoryInfo.userAsked {
+			bazelWorkspaceDirectories = append(bazelWorkspaceDirectories, bazelDirectoryInfo)
+		}
+	}
+
+	c.bazelDirsMutex.Unlock()
+
+	if len(bazelWorkspaceDirectories) == 0 {
+		if firstCall {
+			fmt.Print("Processing bazel workspaces")
+		} else {
+			fmt.Print(".")
+		}
+		time.Sleep(100 * time.Millisecond)
+		return c.getProcessedBazelWorkspaceDirectoriesInternal(false)
+	}
+	if !firstCall {
+		fmt.Println("")
+	}
+
+	// we want to suggest removing bazel workspaces with the larger comparators first
+	sort.Slice(bazelWorkspaceDirectories, func(i, j int) bool {
+		return bazelWorkspaceDirectories[j].comparator < bazelWorkspaceDirectories[i].comparator
+	})
+
+	return bazelWorkspaceDirectories
+}
+
+func (c *Clean) getDirSize(path string) (float64, float64, string) {
+	var size float64
+
+	filepath.Walk(path, func(path string, file os.FileInfo, err error) error {
+		if !file.IsDir() {
+			size += float64(file.Size())
+		}
+
+		return nil
+	})
+
+	return c.makeBytesHumanReadable(size)
+}
+
+func (c *Clean) makeBytesHumanReadable(bytes float64) (float64, float64, string) {
+	humanReadable, unit := c.makeBytesHumanReadableInternal(bytes, "bytes")
+	return bytes, humanReadable, unit
+}
+
+func (c *Clean) makeBytesHumanReadableInternal(bytes float64, unit string) (float64, string) {
+	if bytes < 1024 {
+		return bytes, unit
+	}
+
+	bytes = bytes / 1024
+
+	switch unit {
+	case "bytes":
+		unit = "KB"
+	case "KB":
+		unit = "MB"
+	case "MB":
+		unit = "GB"
+	case "GB":
+		unit = "TB"
+	case "TB":
+		unit = "PB"
+	}
+
+	if bytes >= 1024 {
+		return c.makeBytesHumanReadableInternal(bytes, unit)
+	}
+
+	return bytes, unit
+}
+
+type errorSet struct {
+	head  *errorNode
+	tail  *errorNode
+	nodes map[errorNode]struct{}
+	size  int
+}
+
+func (s *errorSet) insert(err error) {
+	node := errorNode{
+		err: err,
+	}
+	if _, exists := s.nodes[node]; !exists {
+		s.nodes[node] = struct{}{}
+		if s.head == nil {
+			s.head = &node
+		} else {
+			s.tail.next = &node
+		}
+		s.tail = &node
+		s.size++
+	}
+}
+
+type errorNode struct {
+	next *errorNode
+	err  error
 }
