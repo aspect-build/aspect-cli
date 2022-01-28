@@ -51,6 +51,10 @@ func (b *bazel) Spawn(command []string) (int, error) {
 
 func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 	repos := b.createRepositories()
+	if len(b.workspaceRoot) < 1 {
+		panic("Illegal state: running bazel without the workspaceRoot set")
+	}
+
 	bazelisk := NewBazelisk(b.workspaceRoot)
 	exitCode, err := bazelisk.Run(command, repos, out)
 	return exitCode, err

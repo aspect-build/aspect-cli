@@ -7,18 +7,22 @@ Not licensed for re-use
 package version
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/pkg/aspect/version"
+	"aspect.build/cli/pkg/bazel"
+	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
 
 func NewDefaultVersionCmd() *cobra.Command {
-	return NewVersionCmd(ioutils.DefaultStreams)
+	return NewVersionCmd(ioutils.DefaultStreams, bazel.New())
 }
 
-func NewVersionCmd(streams ioutils.Streams) *cobra.Command {
+func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	v := version.New(streams)
 
 	v.BuildinfoRelease = buildinfo.Release
@@ -28,7 +32,16 @@ func NewVersionCmd(streams ioutils.Streams) *cobra.Command {
 		Use:   "version",
 		Short: "Print the version of aspect CLI as well as tools it invokes.",
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
-		RunE:  v.Run,
+		RunE: interceptors.Run(
+			[]interceptors.Interceptor{
+				interceptors.WorkspaceRootInterceptor(),
+			},
+			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
+				bzl.SetWorkspaceRoot(workspaceRoot)
+				return v.Run(bzl)
+			},
+		),
 	}
 
 	cmd.PersistentFlags().BoolVarP(&v.GNUFormat, "gnu_format", "", false, "format space-separated following GNU convention")
