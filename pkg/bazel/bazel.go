@@ -20,6 +20,7 @@ import (
 )
 
 type Bazel interface {
+	AQuery(expr string) (*ActionGraphContainer, error)
 	SetWorkspaceRoot(workspaceRoot string)
 	Spawn(command []string) (int, error)
 	RunCommand(command []string, out io.Writer) (int, error)
@@ -93,4 +94,33 @@ func (b *bazel) Flags() (map[string]*FlagInfo, error) {
 	}
 
 	return flags, nil
+}
+
+func (b *bazel) AQuery(query string) (*ActionGraphContainer, error) {
+	r, w := io.Pipe()
+	agc := &ActionGraphContainer{}
+
+	// decoder := base64.NewDecoder(base64.StdEncoding, r)
+	bazelErrs := make(chan error, 1)
+	defer close(bazelErrs)
+	go func() {
+		defer w.Close()
+		_, err := b.RunCommand([]string{"aquery", "--output=proto", query}, w)
+		bazelErrs <- err
+	}()
+
+	protoBytes, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Bazel aquery output: %w", err)
+	}
+
+	if err := <-bazelErrs; err != nil {
+		return nil, fmt.Errorf("failed to run Bazel aquery: %w", err)
+	}
+
+	proto.Unmarshal(protoBytes, agc)
+	if err := proto.Unmarshal(protoBytes, agc); err != nil {
+		return nil, fmt.Errorf("Failed to parse ActionGraphContainer: %w", err)
+	}
+	return agc, nil
 }

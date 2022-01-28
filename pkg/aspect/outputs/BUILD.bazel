@@ -1,0 +1,14 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "outputs",
+    srcs = ["outputs.go"],
+    importpath = "aspect.build/cli/pkg/aspect/outputs",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/aspecterrors",
+        "//pkg/bazel",
+        "//pkg/ioutils",
+        "@org_golang_google_protobuf//proto",
+    ],
+)

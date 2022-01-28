@@ -23,6 +23,7 @@ import (
 	"aspect.build/cli/cmd/aspect/cquery"
 	"aspect.build/cli/cmd/aspect/docs"
 	"aspect.build/cli/cmd/aspect/info"
+	"aspect.build/cli/cmd/aspect/outputs"
 	"aspect.build/cli/cmd/aspect/query"
 	"aspect.build/cli/cmd/aspect/run"
 	"aspect.build/cli/cmd/aspect/test"
@@ -107,6 +108,7 @@ func NewRootCmd(
 	cmd.AddCommand(build.NewDefaultBuildCmd(pluginSystem))
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
+	cmd.AddCommand(outputs.NewDefaultOutputsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
 	cmd.AddCommand(aquery.NewDefaultAQueryCmd())
 	cmd.AddCommand(cquery.NewDefaultCQueryCmd())

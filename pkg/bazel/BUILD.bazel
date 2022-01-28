@@ -24,8 +24,12 @@ go_library(
 
 proto_library(
     name = "bazel_proto",
-    srcs = ["flags.proto"],
+    srcs = [
+        "analysis_v2.proto",
+        "flags.proto",
+    ],
     visibility = ["//visibility:public"],
+    deps = ["//third-party/github.com/bazelbuild/bazel/src/main/protobuf:blaze_query_proto"],
 )
 
 go_proto_library(
@@ -33,4 +37,5 @@ go_proto_library(
     importpath = "aspect.build/cli/pkg/bazel",
     proto = ":bazel_proto",
     visibility = ["//visibility:public"],
+    deps = ["//third-party/github.com/bazelbuild/bazel/src/main/protobuf"],
 )
