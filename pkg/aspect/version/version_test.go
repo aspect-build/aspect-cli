@@ -13,16 +13,19 @@ import (
 	. "github.com/onsi/gomega"
 
 	"aspect.build/cli/pkg/aspect/version"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
 
 func TestVersion(t *testing.T) {
+	bzl := bazel.New()
+	bzl.SetWorkspaceRoot(".")
 	t.Run("without release build info", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 		v := version.New(streams)
-		err := v.Run(nil, nil)
+		err := v.Run(bzl)
 		g.Expect(err).To(BeNil())
 		g.Expect(stdout.String()).To(Equal("Aspect version: unknown [not built with --stamp]\n"))
 	})
@@ -35,7 +38,7 @@ func TestVersion(t *testing.T) {
 			v := version.New(streams)
 			v.BuildinfoRelease = "1.2.3"
 			v.BuildinfoGitStatus = "clean"
-			err := v.Run(nil, nil)
+			err := v.Run(bzl)
 			g.Expect(err).To(BeNil())
 			g.Expect(stdout.String()).To(Equal("Aspect version: 1.2.3\n"))
 		})
@@ -47,7 +50,7 @@ func TestVersion(t *testing.T) {
 			v := version.New(streams)
 			v.BuildinfoRelease = "1.2.3"
 			v.BuildinfoGitStatus = ""
-			err := v.Run(nil, nil)
+			err := v.Run(bzl)
 			g.Expect(err).To(BeNil())
 			g.Expect(stdout.String()).To(Equal("Aspect version: 1.2.3 (with local changes)\n"))
 		})
@@ -61,7 +64,7 @@ func TestVersion(t *testing.T) {
 		v.GNUFormat = true
 		v.BuildinfoRelease = "1.2.3"
 		v.BuildinfoGitStatus = "clean"
-		err := v.Run(nil, nil)
+		err := v.Run(bzl)
 		g.Expect(err).To(BeNil())
 		g.Expect(stdout.String()).To(Equal("Aspect 1.2.3\n"))
 	})

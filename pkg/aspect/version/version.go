@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/spf13/cobra"
-
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -30,7 +28,7 @@ func New(streams ioutils.Streams) *Version {
 	}
 }
 
-func (v *Version) Run(_ *cobra.Command, _ []string) error {
+func (v *Version) Run(bzl bazel.Bazel) error {
 	var versionBuilder strings.Builder
 	if v.BuildinfoRelease != "" {
 		versionBuilder.WriteString(v.BuildinfoRelease)
@@ -51,7 +49,6 @@ func (v *Version) Run(_ *cobra.Command, _ []string) error {
 	} else {
 		fmt.Fprintf(v.Stdout, "Aspect version: %s\n", version)
 	}
-	bzl := bazel.New()
 	bzl.Spawn(bazelCmd)
 
 	return nil
