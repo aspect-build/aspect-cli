@@ -212,7 +212,7 @@ func (c *Clean) reclaimAll() error {
 	c.bazelDirs = make(map[string]bazelDirInfo)
 
 	c.sizeCalcChannel = make(chan bazelDirInfo, 64)
-	c.deleteChannel = make(chan string, 64)
+	c.deleteChannel = make(chan string, 128)
 	c.errorChannel = make(chan error, 64)
 
 	// threads for calculating sizes of directories
@@ -379,6 +379,24 @@ func (c *Clean) directoryProcessor() {
 
 func (c *Clean) deleteProcessor() {
 	for dir := range c.deleteChannel {
+
+		// can probably do this for more folders as well. Need to figure out the correct pattern though
+		files, _ := ioutil.ReadDir(dir + "/external")
+		for _, file := range files {
+			// if !strings.Contains(file.Name(), "@") {
+			// }
+
+			// TODO: If on linux / windows do this differently
+			// On linux you can probably just do /tmp
+			// On windows dont do this splitting functionality at all
+			newFolder := "/private/var/tmp/aspect_delete/" + strings.Replace(dir, "/", "", -1)
+			newPath := newFolder + "/" + file.Name()
+			os.MkdirAll(newFolder, os.ModePerm)
+			os.Rename(dir+"/external/"+file.Name(), newPath)
+
+			c.manipulateDeleteCounter(1)
+			c.deleteChannel <- newPath
+		}
 
 		// otherwise certain files will throw a permission error when we try to remove them
 		cmd := exec.Command("chmod", "-R", "777", dir)
