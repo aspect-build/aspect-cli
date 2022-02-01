@@ -7,7 +7,6 @@ Not licensed for re-use.
 package root
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/fatih/color"
@@ -67,9 +66,6 @@ func NewRootCmd(
 	viper.SetConfigName(".aspectconfig")
 	if err := viper.ReadInConfig(); err == nil {
 		faint.Fprintln(streams.Stderr, "Using config file:", viper.ConfigFileUsed())
-	} else {
-
-		fmt.Println("err", err)
 	}
 
 	// ### Viper
@@ -88,8 +84,6 @@ func NewRootCmd(
 	viper.AutomaticEnv()
 	if err := viper.MergeInConfig(); err == nil {
 		faint.Fprintln(streams.Stderr, "Using config file:", viper.ConfigFileUsed())
-	} else {
-		fmt.Println(err)
 	}
 
 	// ### Child commands
