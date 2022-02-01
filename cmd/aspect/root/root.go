@@ -7,6 +7,7 @@ Not licensed for re-use.
 package root
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/fatih/color"
@@ -62,6 +63,15 @@ func NewRootCmd(
 	cmd.PersistentFlags().StringVar(&cfgFile, flags.ConfigFlagName, "", "config file (default is $HOME/.aspect.yaml)")
 	cmd.PersistentFlags().BoolVar(&interactive, flags.InteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
 
+	viper.AddConfigPath(".")
+	viper.SetConfigName(".aspectconfig")
+	if err := viper.ReadInConfig(); err == nil {
+		faint.Fprintln(streams.Stderr, "Using config file:", viper.ConfigFileUsed())
+	} else {
+
+		fmt.Println("err", err)
+	}
+
 	// ### Viper
 	if cfgFile != "" {
 		// Use config file from the flag.
@@ -76,8 +86,10 @@ func NewRootCmd(
 		viper.SetConfigName(".aspect")
 	}
 	viper.AutomaticEnv()
-	if err := viper.ReadInConfig(); err == nil {
+	if err := viper.MergeInConfig(); err == nil {
 		faint.Fprintln(streams.Stderr, "Using config file:", viper.ConfigFileUsed())
+	} else {
+		fmt.Println(err)
 	}
 
 	// ### Child commands

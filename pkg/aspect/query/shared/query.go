@@ -17,6 +17,7 @@ import (
 
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
@@ -64,9 +65,7 @@ func Select(presetNames []string) SelectRunner {
 	}
 }
 
-func PrecannedQueries(verb string) []*PresetQuery {
-	// TODO: Queries should be loadable from the plugin config
-	// https://github.com/aspect-build/aspect-cli/issues/98
+func PrecannedQueries(verb string, viper viper.Viper) []*PresetQuery {
 	presets := []*PresetQuery{
 		{
 			Name:        "why",
@@ -92,6 +91,28 @@ func PrecannedQueries(verb string) []*PresetQuery {
 			Query:       "deps(?target)",
 			Verb:        "cquery",
 		},
+	}
+
+	presetsKey := "query.presets"
+
+	userDefinedQueries := viper.GetStringMap(presetsKey)
+
+	for name := range userDefinedQueries {
+		userDefinedQuery := viper.GetStringMapString(fmt.Sprintf("%s.%s", presetsKey, name))
+
+		presetQuery := &PresetQuery{
+			Name:        name,
+			Description: userDefinedQuery["description"],
+			Query:       userDefinedQuery["query"],
+			Verb:        userDefinedQuery["verb"],
+		}
+
+		presetExists, existingPresetIndex := isPresetQueryInSlice(presetQuery, presets)
+		if presetExists {
+			presets = removePresetQuery(presets, existingPresetIndex)
+		}
+
+		presets = append(presets, presetQuery)
 	}
 
 	switch verb {
@@ -220,4 +241,19 @@ func SelectQuery(
 
 func GetPrettyError(cmd *cobra.Command, err error) error {
 	return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
+}
+
+// if preset query is present return true and the index of where it is found
+// if preset query is not preset return false and -1 for index
+func isPresetQueryInSlice(presetQuery *PresetQuery, presetQueries []*PresetQuery) (bool, int) {
+	for i, existingPresetQuery := range presetQueries {
+		if existingPresetQuery.Name == presetQuery.Name && existingPresetQuery.Verb == presetQuery.Verb {
+			return true, i
+		}
+	}
+	return false, -1
+}
+
+func removePresetQuery(presetQueries []*PresetQuery, i int) []*PresetQuery {
+	return append(presetQueries[:i], presetQueries[i+1:]...)
 }

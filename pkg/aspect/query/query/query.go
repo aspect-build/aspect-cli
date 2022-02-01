@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"aspect.build/cli/pkg/aspect/query/shared"
+	shared "aspect.build/cli/pkg/aspect/query"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -41,10 +41,8 @@ type Query struct {
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 	v := *viper.GetViper()
 
-	// the list of available preset queries will potentially be updated during the "Run" function.
-	// if the user requests that query also show aquery and cquery predefined queries then these
-	// will be added to the list of presets
-	presets := shared.PrecannedQueries("query", v)
+	// will potentially be updated during Run() if the user requests that query also show aquery and cquery predefined queries
+	presets := shared.GetPrecannedQueries("query", v)
 
 	return &Query{
 		Streams:       streams,
@@ -77,14 +75,14 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	verb := cmd.Use
+	verb := "query"
 
 	if q.Prefs.GetBool(useCQuery) {
 		verb = "cquery"
 	}
 
 	if q.Prefs.GetBool(allowAllQueries) {
-		q.Presets = shared.PrecannedQueries("", q.Prefs)
+		q.Presets = shared.GetPrecannedQueries("", q.Prefs)
 	}
 
 	presets, presetNames, err := shared.ProcessQueries(q.Presets)
@@ -92,7 +90,7 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	presetVerb, query, runReplacements, err := shared.SelectQuery(verb, presets, q.Presets, presetNames, q.Streams, args, q.Select)
+	verb, query, runReplacements, err := shared.SelectQuery(verb, presets, q.Presets, presetNames, q.Streams, args, q.Select)
 
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
@@ -106,7 +104,7 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return shared.RunQuery(q.Bzl, presetVerb, query)
+	return shared.RunQuery(q.Bzl, verb, query)
 }
 
 func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question string) error {

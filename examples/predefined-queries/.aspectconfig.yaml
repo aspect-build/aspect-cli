@@ -1,0 +1,18 @@
+query:
+  presets:
+    foo:
+      description: "List deps"
+      query: "deps(?target)"
+      verb: "query"
+    afoo:
+      description: "List deps"
+      query: "deps(?target)"
+      verb: "aquery"
+    cfoo:
+      description: "List deps"
+      query: "deps(?target)"
+      verb: "cquery"
+    why:
+      description: "Override the default why verb. Determine why targetA depends on targetB"
+      query: "somepath(?targetA, ?targetB)"
+      verb: "query"
