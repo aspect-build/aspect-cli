@@ -15,8 +15,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"aspect.build/cli/cmd/aspect/aquery"
 	"aspect.build/cli/cmd/aspect/build"
 	"aspect.build/cli/cmd/aspect/clean"
+	"aspect.build/cli/cmd/aspect/cquery"
 	"aspect.build/cli/cmd/aspect/docs"
 	"aspect.build/cli/cmd/aspect/info"
 	"aspect.build/cli/cmd/aspect/query"
@@ -84,6 +86,8 @@ func NewRootCmd(
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
+	cmd.AddCommand(aquery.NewDefaultAQueryCmd())
+	cmd.AddCommand(cquery.NewDefaultCQueryCmd())
 	cmd.AddCommand(query.NewDefaultQueryCmd())
 	cmd.AddCommand(run.NewDefaultRunCmd(pluginSystem))
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))

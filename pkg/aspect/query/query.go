@@ -8,22 +8,21 @@ package query
 
 import (
 	"fmt"
-	"regexp"
-	"strings"
 
-	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
-	"aspect.build/cli/pkg/aspecterrors"
+	"aspect.build/cli/pkg/aspect/query/shared"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
 
-type PresetQuery struct {
-	Name        string
-	Description string
-	Query       string
-}
+const (
+	useCQuery               = "query.cquery.use"
+	useCQueryInquired       = "query.cquery.inquired"
+	allowAllQueries         = "query.all.allow"
+	allowAllQueriesInquired = "query.all.inquired"
+)
 
 type Query struct {
 	ioutils.Streams
@@ -31,131 +30,95 @@ type Query struct {
 	Bzl           bazel.Bazel
 	IsInteractive bool
 
-	Presets []*PresetQuery
+	Presets []*shared.PresetQuery
+	Prefs   viper.Viper
 
-	Prompt func(label string) PromptRunner
-	Select func(presetNames []string) SelectRunner
+	Prompt       func(label string) shared.PromptRunner
+	Confirmation func(question string) shared.ConfirmationRunner
+	Select       func(presetNames []string) shared.SelectRunner
 }
 
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
-	// TODO: Queries should be loadable from the plugin config
-	// https://github.com/aspect-build/aspect-cli/issues/98
-	presets := []*PresetQuery{
-		{
-			Name:        "why",
-			Description: "Determine why targetA depends on targetB",
-			Query:       "somepath(?targetA, ?targetB)",
-		},
-	}
+	// the list of available preset queries will potentially be updated during the "Run" function.
+	// if the user requests that query also show aquery and cquery predefined queries then these
+	// will be added to the list of presets
+	presets := shared.PrecannedQueries("query")
 
 	return &Query{
 		Streams:       streams,
 		Bzl:           bzl,
 		IsInteractive: isInteractive,
 		Presets:       presets,
-		Prompt:        Prompt,
-		Select:        Select,
+		Prompt:        shared.Prompt,
+		Select:        shared.Select,
+		Confirmation:  shared.Confirmation,
+		Prefs:         *viper.GetViper(),
 	}
 }
 
 func (q *Query) Run(cmd *cobra.Command, args []string) error {
-	presets := make(map[string]*PresetQuery)
-	presetNames := make([]string, len(q.Presets))
-	for i, p := range q.Presets {
-		if _, exists := presets[p.Name]; exists {
-			err := fmt.Errorf("duplicated preset query name %q", p.Name)
-			return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
-		}
-		presets[p.Name] = p
-		presetNames[i] = fmt.Sprintf("%s: %s", p.Name, p.Description)
+	err := q.checkConfig(
+		allowAllQueries,
+		allowAllQueriesInquired,
+		"Include predefined aquery's and cquery's when calling query",
+	)
+	if err != nil {
+		return err
 	}
 
-	var preset *PresetQuery
-	if len(args) == 0 {
-		selectQueryPrompt := q.Select(presetNames)
+	err = q.checkConfig(
+		useCQuery,
+		useCQueryInquired,
+		"Use cquery instead of query",
+	)
+	if err != nil {
+		return err
+	}
 
-		i, _, err := selectQueryPrompt.Run()
+	verb := cmd.Use
+
+	if q.Prefs.GetBool(useCQuery) {
+		verb = "cquery"
+	}
+
+	if q.Prefs.GetBool(allowAllQueries) {
+		q.Presets = shared.PrecannedQueries("")
+	}
+
+	presets, presetNames, err := shared.ProcessQueries(q.Presets)
+	if err != nil {
+		return shared.GetPrettyError(cmd, err)
+	}
+
+	presetVerb, query, runReplacements, err := shared.SelectQuery(verb, presets, q.Presets, presetNames, q.Streams, args, q.Select)
+
+	if err != nil {
+		return shared.GetPrettyError(cmd, err)
+	}
+
+	if runReplacements {
+		query, err = shared.ReplacePlaceholders(query, args, q.Prompt)
 
 		if err != nil {
-			return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
-		}
-
-		preset = q.Presets[i]
-	} else {
-		maybeQueryOrPreset := args[0]
-		if value, ok := presets[maybeQueryOrPreset]; ok {
-			// Treat this as the name of the preset query, so don't prompt for it.
-			fmt.Fprintf(q.Streams.Stdout, "Preset query \"%s\" selected\n", value.Name)
-			fmt.Fprintf(q.Streams.Stdout, "%s: %s\n", value.Name, value.Description)
-			preset = value
-		} else {
-			// Treat this as a raw query expression.
-			return q.RunQuery(maybeQueryOrPreset)
+			return shared.GetPrettyError(cmd, err)
 		}
 	}
 
-	if preset == nil {
-		err := fmt.Errorf("unable to determine preset query")
-		return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
-	}
+	return shared.RunQuery(q.Bzl, presetVerb, query)
+}
 
-	query := preset.Query
-	placeholders := regexp.MustCompile(`(\?[a-zA-Z]*)`).FindAllString(query, -1)
+func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question string) error {
+	if !q.Prefs.GetBool(baseInquiredKey) {
+		q.Prefs.Set(baseInquiredKey, true)
 
-	if len(placeholders) == len(args)-1 {
-		for i, placeholder := range placeholders {
-			query = strings.ReplaceAll(query, placeholder, args[i+1])
+		// Y = no error; N = error
+		_, err := q.Confirmation(question).Run()
+
+		q.Prefs.Set(baseUseKey, err == nil)
+
+		if err := q.Prefs.WriteConfig(); err != nil {
+			return fmt.Errorf("failed to update config file: %w", err)
 		}
-	} else if len(placeholders) > 0 {
-		for _, placeholder := range placeholders {
-			label := fmt.Sprintf("Value for '%s'", strings.TrimPrefix(placeholder, "?"))
-			prompt := q.Prompt(label)
-			val, err := prompt.Run()
-
-			if err != nil {
-				return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
-			}
-
-			query = strings.ReplaceAll(query, placeholder, val)
-		}
-	}
-
-	return q.RunQuery(query)
-}
-
-type PromptRunner interface {
-	Run() (string, error)
-}
-
-func Prompt(label string) PromptRunner {
-	return &promptui.Prompt{
-		Label: label,
-	}
-}
-
-type SelectRunner interface {
-	Run() (int, string, error)
-}
-
-func Select(presetNames []string) SelectRunner {
-	return &promptui.Select{
-		Label: "Select a preset query",
-		Items: presetNames,
-	}
-}
-
-func (q *Query) RunQuery(query string) error {
-	bazelCmd := []string{
-		"query",
-		query,
-	}
-
-	if exitCode, err := q.Bzl.Spawn(bazelCmd); exitCode != 0 {
-		err = &aspecterrors.ExitError{
-			Err:      err,
-			ExitCode: exitCode,
-		}
-		return fmt.Errorf("failed to run query %q: %w", query, err)
 	}
 
 	return nil

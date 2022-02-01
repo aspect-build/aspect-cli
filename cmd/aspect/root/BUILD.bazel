@@ -9,8 +9,10 @@ go_library(
         "//cmd/docgen:__pkg__",
     ],
     deps = [
+        "//cmd/aspect/aquery",
         "//cmd/aspect/build",
         "//cmd/aspect/clean",
+        "//cmd/aspect/cquery",
         "//cmd/aspect/docs",
         "//cmd/aspect/info",
         "//cmd/aspect/query",

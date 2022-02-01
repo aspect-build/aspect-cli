@@ -1,24 +1,23 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "query",
-    srcs = ["query.go"],
-    importpath = "aspect.build/cli/pkg/aspect/query",
+    name = "cquery",
+    srcs = ["cquery.go"],
+    importpath = "aspect.build/cli/pkg/aspect/cquery",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/query/shared",
         "//pkg/bazel",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
-        "@com_github_spf13_viper//:viper",
     ],
 )
 
 go_test(
-    name = "query_test",
-    srcs = ["query_test.go"],
+    name = "cquery_test",
+    srcs = ["cquery_test.go"],
     deps = [
-        ":query",
+        ":cquery",
         "//pkg/aspect/query/shared",
         "//pkg/aspect/query/shared/mock",
         "//pkg/bazel/mock",
@@ -26,6 +25,5 @@ go_test(
         "@com_github_golang_mock//gomock",
         "@com_github_onsi_gomega//:gomega",
         "@com_github_spf13_cobra//:cobra",
-        "@com_github_spf13_viper//:viper",
     ],
 )
