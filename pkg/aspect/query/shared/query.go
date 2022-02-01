@@ -23,6 +23,8 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
+var placeholderRegex = regexp.MustCompile(`(\?[a-zA-Z]*)`)
+
 type PresetQuery struct {
 	Name        string
 	Description string
@@ -62,7 +64,7 @@ func Select(presetNames []string) SelectRunner {
 	}
 }
 
-func GetPrecannedQueries(verb string) []*PresetQuery {
+func PrecannedQueries(verb string) []*PresetQuery {
 	// TODO: Queries should be loadable from the plugin config
 	// https://github.com/aspect-build/aspect-cli/issues/98
 	presets := []*PresetQuery{
@@ -149,10 +151,11 @@ func RunQuery(bzl bazel.Bazel, verb string, query string) error {
 }
 
 func ReplacePlaceholders(query string, args []string, p func(label string) PromptRunner) (string, error) {
-	placeholders := regexp.MustCompile(`(\?[a-zA-Z]*)`).FindAllString(query, -1)
+	placeholders := placeholderRegex.FindAllString(query, -1)
 
 	if len(placeholders) == len(args)-1 {
 		for i, placeholder := range placeholders {
+			fmt.Printf("%s set to %s\n", strings.Replace(placeholder, "?", "", 1), args[i+1])
 			// todo.... Print out targetA was set to //foo and targetB was set to //bar
 			query = strings.ReplaceAll(query, placeholder, args[i+1])
 		}

@@ -39,8 +39,10 @@ type Query struct {
 }
 
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
-	// will potentially be updated during Run() if the user requests that query also show aquery and cquery predefined queries
-	presets := shared.GetPrecannedQueries("query")
+	// the list of available preset queries will potentially be updated during the "Run" function.
+	// if the user requests that query also show aquery and cquery predefined queries then these
+	// will be added to the list of presets
+	presets := shared.PrecannedQueries("query")
 
 	return &Query{
 		Streams:       streams,
@@ -73,14 +75,14 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	verb := "query"
+	verb := cmd.Use
 
 	if q.Prefs.GetBool(useCQuery) {
 		verb = "cquery"
 	}
 
 	if q.Prefs.GetBool(allowAllQueries) {
-		q.Presets = shared.GetPrecannedQueries("")
+		q.Presets = shared.PrecannedQueries("")
 	}
 
 	presets, presetNames, err := shared.ProcessQueries(q.Presets)
@@ -88,7 +90,7 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	verb, query, runReplacements, err := shared.SelectQuery(verb, presets, q.Presets, presetNames, q.Streams, args, q.Select)
+	presetVerb, query, runReplacements, err := shared.SelectQuery(verb, presets, q.Presets, presetNames, q.Streams, args, q.Select)
 
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
@@ -102,17 +104,17 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return shared.RunQuery(q.Bzl, verb, query)
+	return shared.RunQuery(q.Bzl, presetVerb, query)
 }
 
 func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question string) error {
 	if !q.Prefs.GetBool(baseInquiredKey) {
 		q.Prefs.Set(baseInquiredKey, true)
 
-		// if user types in y or Y then err will be nil. Any other input will not result in nil
-		_, someErr := q.Confirmation(question).Run()
+		// Y = no error; N = error
+		_, err := q.Confirmation(question).Run()
 
-		q.Prefs.Set(baseUseKey, someErr == nil)
+		q.Prefs.Set(baseUseKey, err == nil)
 
 		if err := q.Prefs.WriteConfig(); err != nil {
 			return fmt.Errorf("failed to update config file: %w", err)

@@ -28,7 +28,7 @@ type CQuery struct {
 }
 
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *CQuery {
-	presets := shared.GetPrecannedQueries("cquery")
+	presets := shared.PrecannedQueries("cquery")
 
 	return &CQuery{
 		Streams:       streams,
@@ -42,13 +42,12 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *CQuery {
 }
 
 func (q *CQuery) Run(cmd *cobra.Command, args []string) error {
-	verb := "cquery"
 	presets, presetNames, err := shared.ProcessQueries(q.Presets)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	verb, query, runReplacements, err := shared.SelectQuery(verb, presets, q.Presets, presetNames, q.Streams, args, q.Select)
+	presetVerb, query, runReplacements, err := shared.SelectQuery(cmd.Use, presets, q.Presets, presetNames, q.Streams, args, q.Select)
 
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
@@ -62,5 +61,5 @@ func (q *CQuery) Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return shared.RunQuery(q.Bzl, verb, query)
+	return shared.RunQuery(q.Bzl, presetVerb, query)
 }

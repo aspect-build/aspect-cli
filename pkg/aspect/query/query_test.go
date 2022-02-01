@@ -55,7 +55,8 @@ func TestQuery(t *testing.T) {
 		viper.SetConfigFile(cfg.Name())
 		q.Prefs = viper
 
-		g.Expect(q.Run(nil, []string{"why", "//cmd/aspect/query:query", "@com_github_bazelbuild_bazelisk//core:go_default_library"})).Should(Succeed())
+		cmd := &cobra.Command{Use: "query"}
+		g.Expect(q.Run(cmd, []string{"why", "//cmd/aspect/query:query", "@com_github_bazelbuild_bazelisk//core:go_default_library"})).Should(Succeed())
 	})
 
 	t.Run("query can be selected by default and will prompt for inputs", func(t *testing.T) {
@@ -126,7 +127,8 @@ func TestQuery(t *testing.T) {
 
 		viper.SetConfigFile(cfg.Name())
 		q.Prefs = viper
-		err = q.Run(nil, []string{"why"})
+		cmd := &cobra.Command{Use: "query"}
+		err = q.Run(cmd, []string{"why"})
 		g.Expect(err).To(BeNil())
 	})
 
@@ -141,8 +143,6 @@ func TestQuery(t *testing.T) {
 		streams := ioutils.Streams{Stdout: &stdout}
 
 		spawner := bazel_mock.NewMockBazel(ctrl)
-
-		cmd := &cobra.Command{Use: "fake"}
 
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)
 		gomock.InOrder(
@@ -199,6 +199,7 @@ func TestQuery(t *testing.T) {
 		viper.SetConfigFile(cfg.Name())
 		q.Prefs = viper
 
+		cmd := &cobra.Command{Use: "query"}
 		err = q.Run(cmd, []string{"why"})
 		g.Expect(err).To(MatchError(expectedError))
 	})
@@ -257,7 +258,6 @@ func TestQuery(t *testing.T) {
 			Bzl:           spawner,
 			IsInteractive: true,
 			Prompt: func(label string) shared.PromptRunner {
-				fmt.Println("label:", label)
 				g.Expect(strings.Contains(label, "targettwo") || strings.Contains(label, "dependencytwo")).To(Equal(true))
 				return promptRunner
 			},
@@ -295,7 +295,8 @@ func TestQuery(t *testing.T) {
 
 		viper.SetConfigFile(cfg.Name())
 		q.Prefs = viper
-		err = q.Run(nil, []string{})
+		cmd := &cobra.Command{Use: "query"}
+		err = q.Run(cmd, []string{})
 		g.Expect(err).To(BeNil())
 	})
 }
