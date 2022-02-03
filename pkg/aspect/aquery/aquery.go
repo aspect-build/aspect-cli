@@ -8,6 +8,7 @@ package aquery
 
 import (
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"aspect.build/cli/pkg/aspect/query/shared"
 	"aspect.build/cli/pkg/bazel"
@@ -21,6 +22,7 @@ type AQuery struct {
 	IsInteractive bool
 
 	Presets []*shared.PresetQuery
+	Prefs   viper.Viper
 
 	Prompt       func(label string) shared.PromptRunner
 	Confirmation func(question string) shared.ConfirmationRunner
@@ -28,7 +30,9 @@ type AQuery struct {
 }
 
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *AQuery {
-	presets := shared.PrecannedQueries("aquery")
+	v := *viper.GetViper()
+
+	presets := shared.PrecannedQueries("aquery", v)
 
 	return &AQuery{
 		Streams:       streams,
@@ -38,6 +42,7 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *AQuery {
 		Prompt:        shared.Prompt,
 		Select:        shared.Select,
 		Confirmation:  shared.Confirmation,
+		Prefs:         v,
 	}
 }
 

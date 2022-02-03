@@ -39,10 +39,12 @@ type Query struct {
 }
 
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
+	v := *viper.GetViper()
+
 	// the list of available preset queries will potentially be updated during the "Run" function.
 	// if the user requests that query also show aquery and cquery predefined queries then these
 	// will be added to the list of presets
-	presets := shared.PrecannedQueries("query")
+	presets := shared.PrecannedQueries("query", v)
 
 	return &Query{
 		Streams:       streams,
@@ -52,7 +54,7 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 		Prompt:        shared.Prompt,
 		Select:        shared.Select,
 		Confirmation:  shared.Confirmation,
-		Prefs:         *viper.GetViper(),
+		Prefs:         v,
 	}
 }
 
@@ -82,7 +84,7 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	if q.Prefs.GetBool(allowAllQueries) {
-		q.Presets = shared.PrecannedQueries("")
+		q.Presets = shared.PrecannedQueries("", q.Prefs)
 	}
 
 	presets, presetNames, err := shared.ProcessQueries(q.Presets)

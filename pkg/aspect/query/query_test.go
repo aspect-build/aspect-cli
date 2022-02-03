@@ -299,4 +299,31 @@ func TestQuery(t *testing.T) {
 		err = q.Run(cmd, []string{})
 		g.Expect(err).To(BeNil())
 	})
+
+	t.Run("user defined queries can overwrite default predefined queries", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+
+		viper := *viper.New()
+		cfg, err := os.CreateTemp(os.Getenv("TEST_TMPDIR"), "cfg***.ini")
+
+		g.Expect(err).To(BeNil())
+
+		viper.SetConfigFile(cfg.Name())
+		viper.Set("query.presets.why.description", "Override the default why verb. Determine why targetA depends on targetB")
+		viper.Set("query.presets.why.query", "somepath(?targetA, ?targetB)")
+		viper.Set("query.presets.why.verb", "query")
+
+		result := shared.PrecannedQueries("query", viper)
+		g.Expect(len(result)).To(Equal(2))
+
+		g.Expect(result[0].Description).To(Equal("Get the deps of a target"))
+		g.Expect(result[0].Query).To(Equal("deps(?target)"))
+		g.Expect(result[0].Verb).To(Equal("query"))
+		g.Expect(result[0].Name).To(Equal("deps"))
+
+		g.Expect(result[1].Description).To(Equal("Override the default why verb. Determine why targetA depends on targetB"))
+		g.Expect(result[1].Query).To(Equal("somepath(?targetA, ?targetB)"))
+		g.Expect(result[1].Verb).To(Equal("query"))
+		g.Expect(result[1].Name).To(Equal("why"))
+	})
 }
