@@ -8,18 +8,22 @@ export HOME
 touch WORKSPACE
 
 mkdir foo
-echo "genrule(" > foo/BUILD
-echo "    name = \"foo\"," >> foo/BUILD
-echo "    outs = [\"foo.txt\"]," >> foo/BUILD
-echo "    cmd = \"touch \$@\"," >> foo/BUILD
-echo ")" >> foo/BUILD
+cat > foo/BUILD <<'EOF'
+genrule(
+    name = "foo",
+    outs = ["foo.txt"],
+    cmd = "touch $@",
+)
+EOF
 
-echo "query:" > .aspectconfig.yaml
-echo "  presets:" >> .aspectconfig.yaml
-echo "    foo:" >> .aspectconfig.yaml
-echo "      description: \"List deps\"" >> .aspectconfig.yaml
-echo "      query: \"deps(?target)\"" >> .aspectconfig.yaml
-echo "      verb: \"query\"" >> .aspectconfig.yaml
+cat > .aspect.yaml <<'EOF'
+query:
+  presets:
+    foo:
+      description: "List deps"
+      query: "deps(?target)"
+      verb: "query"
+EOF
 
 # Only capture stdout, just like `bazel version` prints to stdout
 query=$($ASPECT query foo //foo 2>/dev/null) || "$ASPECT" query foo //foo
