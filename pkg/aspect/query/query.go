@@ -113,10 +113,10 @@ func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question 
 	if !q.Prefs.GetBool(baseInquiredKey) {
 		q.Prefs.Set(baseInquiredKey, true)
 
-		// if user types in y or Y then err will be nil. Any other input will not result in nil
-		_, someErr := q.Confirmation(question).Run()
+		// Y = no error; N = error
+		_, err := q.Confirmation(question).Run()
 
-		q.Prefs.Set(baseUseKey, someErr == nil)
+		q.Prefs.Set(baseUseKey, err == nil)
 
 		if err := q.Prefs.WriteConfig(); err != nil {
 			return fmt.Errorf("failed to update config file: %w", err)
