@@ -63,14 +63,13 @@ func (plugin *ErrorAugmentorPlugin) Setup(
 	}
 
 	// change map keys into regex objects now so they are ready to use and we only need to compile the regex once
-	for r, m := range processedProperties.ErrorMappings {
-		// r for regex, m for message
-		regex, err := regexp.Compile(r)
+	for pattern, message := range processedProperties.ErrorMappings {
+		regex, err := regexp.Compile(pattern)
 		if err != nil {
 			return err
 		}
 
-		plugin.hintMap[regex] = m
+		plugin.hintMap[regex] = message
 	}
 
 	plugin.errorMessages = make(chan string, 64)
