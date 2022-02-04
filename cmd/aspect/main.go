@@ -38,12 +38,12 @@ func main() {
 	}
 
 	pluginSystem := system.NewPluginSystem()
-	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
+	if err := pluginSystem.ConfigurePluginSystem(ioutils.DefaultStreams); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 
-	setupErrors := pluginSystem.SetupPlugins().Errors()
+	setupErrors := pluginSystem.ConfigurePlugins().Errors()
 
 	if len(setupErrors) > 0 {
 		for _, err := range setupErrors {

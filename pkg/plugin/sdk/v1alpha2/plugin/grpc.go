@@ -55,12 +55,12 @@ func (m *GRPCServer) BEPEventCallback(
 	return &proto.BEPEventCallbackRes{}, m.Impl.BEPEventCallback(req.Event)
 }
 
-// SetupHook translates the gRPC call to the Plugin SetupHook implementation.
-func (m *GRPCServer) SetupHook(
+// Setup translates the gRPC call to the Plugin Setup implementation.
+func (m *GRPCServer) Setup(
 	ctx context.Context,
-	req *proto.SetupHookReq,
-) (*proto.SetupHookRes, error) {
-	return &proto.SetupHookRes{}, m.Impl.SetupHook(req.Properties)
+	req *proto.SetupReq,
+) (*proto.SetupRes, error) {
+	return &proto.SetupRes{}, m.Impl.Setup(req.Properties)
 }
 
 // PostBuildHook translates the gRPC call to the Plugin PostBuildHook
@@ -134,14 +134,14 @@ func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error 
 	return err
 }
 
-// SetupHook is called from the Core to execute the Plugin SetupHook.
-func (m *GRPCClient) SetupHook(
+// Setup is called from the Core to execute the Plugin Setup.
+func (m *GRPCClient) Setup(
 	properties []byte,
 ) error {
-	req := &proto.SetupHookReq{
+	req := &proto.SetupReq{
 		Properties: properties,
 	}
-	_, err := m.client.SetupHook(context.Background(), req)
+	_, err := m.client.Setup(context.Background(), req)
 	return err
 }
 

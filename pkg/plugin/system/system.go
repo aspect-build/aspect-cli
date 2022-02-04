@@ -30,11 +30,11 @@ import (
 // PluginSystem is the interface that defines all the methods for the aspect CLI
 // plugin system intended to be used by the Core.
 type PluginSystem interface {
-	Configure(streams ioutils.Streams) error
+	ConfigurePluginSystem(streams ioutils.Streams) error
 	TearDown()
 	BESBackendInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
-	SetupPlugins() *aspecterrors.ErrorList
+	ConfigurePlugins() *aspecterrors.ErrorList
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	RunHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 }
@@ -60,8 +60,8 @@ func NewPluginSystem() PluginSystem {
 	}
 }
 
-// Configure configures the plugin system.
-func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
+// ConfigurePluginSystem configures the plugin system.
+func (ps *pluginSystem) ConfigurePluginSystem(streams ioutils.Streams) error {
 	aspectpluginsPath, err := ps.finder.Find()
 	if err != nil {
 		return fmt.Errorf("failed to configure plugin system: %w", err)
@@ -171,12 +171,12 @@ func (ps *pluginSystem) RunHooksInterceptor(streams ioutils.Streams) interceptor
 	return ps.commandHooksInterceptor("PostRunHook", streams)
 }
 
-// SetupPlugins executes the Setup Hook for all configured plugins and provides
+// ConfigurePlugins executes the Setup for all configured plugins and provides
 // those plugins with their configured properties
-func (ps *pluginSystem) SetupPlugins() *aspecterrors.ErrorList {
+func (ps *pluginSystem) ConfigurePlugins() *aspecterrors.ErrorList {
 	errors := &aspecterrors.ErrorList{}
 	for node := ps.plugins.head; node != nil; node = node.next {
-		if err := node.plugin.SetupHook(node.properties); err != nil {
+		if err := node.plugin.Setup(node.properties); err != nil {
 			errors.Insert(err)
 		}
 	}

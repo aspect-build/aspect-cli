@@ -52,7 +52,7 @@ type errorMappings struct {
 	ErrorMappings map[string]string `yaml:"error_mappings"`
 }
 
-func (plugin *ErrorAugmentorPlugin) SetupHook(
+func (plugin *ErrorAugmentorPlugin) Setup(
 	properties []byte,
 ) error {
 	plugin.properties = properties
