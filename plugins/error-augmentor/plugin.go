@@ -95,7 +95,11 @@ func (plugin *ErrorAugmentorPlugin) BEPEventCallback(event *buildeventstream.Bui
 	progress := event.GetProgress()
 
 	if progress != nil {
-		// TODO: Should we also check for stdout?
+		stdout := progress.GetStdout()
+		if stdout != "" {
+			plugin.errorMessages <- stdout
+		}
+
 		stderr := progress.GetStderr()
 		if stderr != "" {
 			plugin.errorMessages <- stderr
