@@ -107,7 +107,7 @@ func (ps *pluginSystem) ConfigurePluginSystem(streams ioutils.Streams) error {
 
 		node := &PluginNode{
 			plugin:     rawplugin.(plugin.Plugin),
-			properties: aspectplugin.properties,
+			properties: aspectplugin.propertiesBytes,
 		}
 		ps.plugins.insert(node)
 	}

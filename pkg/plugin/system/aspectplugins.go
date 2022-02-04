@@ -24,11 +24,11 @@ const (
 
 // AspectPlugin represents a plugin entry in the plugins file.
 type AspectPlugin struct {
-	Name          string                 `yaml:"name"`
-	From          string                 `yaml:"from"`
-	LogLevel      string                 `yaml:"log_level"`
-	PropertiesMap map[string]interface{} `yaml:"properties"`
-	properties    []byte
+	Name            string                 `yaml:"name"`
+	From            string                 `yaml:"from"`
+	LogLevel        string                 `yaml:"log_level"`
+	Properties      map[string]interface{} `yaml:"properties"`
+	propertiesBytes []byte
 }
 
 // Finder is the interface that wraps the simple Find method that performs the
@@ -120,11 +120,11 @@ func (p *parser) Parse(aspectpluginsPath string) ([]AspectPlugin, error) {
 
 	var processedPlugins []AspectPlugin
 	for _, plugin := range aspectplugins {
-		marshalledProperties, err := p.yamlMarshal(plugin.PropertiesMap)
+		propertiesBytes, err := p.yamlMarshal(plugin.Properties)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse .aspectplugins: %w", err)
 		}
-		plugin.properties = marshalledProperties
+		plugin.propertiesBytes = propertiesBytes
 		processedPlugins = append(processedPlugins, plugin)
 	}
 
