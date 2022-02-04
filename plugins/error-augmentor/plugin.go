@@ -47,7 +47,7 @@ func NewPlugin() *ErrorAugmentorPlugin {
 	}
 }
 
-// will be used to unmarshal plugin properties specific to this plugin
+// errorMappings is used to unmarshal the error mappings from the plugin properties provided by the CLI core.
 type errorMappings struct {
 	ErrorMappings map[string]string `yaml:"error_mappings"`
 }
