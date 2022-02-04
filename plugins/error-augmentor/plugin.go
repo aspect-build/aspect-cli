@@ -125,6 +125,8 @@ func (plugin *ErrorAugmentorPlugin) processErrorMessage(errorMessage string) {
 			// apply regex capture group replacements to given hint
 			for i, match := range matches {
 				if i == 0 {
+					// skipping the first match because it will always contain the entire result
+					// of the regex match. We are only after specific capture groups
 					continue
 				}
 				helpfulHint = strings.ReplaceAll(helpfulHint, fmt.Sprint("$", i), match)
