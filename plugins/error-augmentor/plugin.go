@@ -47,9 +47,11 @@ func NewPlugin() *ErrorAugmentorPlugin {
 	}
 }
 
-// errorMappings is used to unmarshal the error mappings from the plugin properties provided by the CLI core.
-type errorMappings struct {
-	ErrorMappings map[string]string `yaml:"error_mappings"`
+// pluginProperties is used to unmarshal the error mappings and processor_count from the plugin
+// properties provided by the CLI core.
+type pluginProperties struct {
+	ErrorMappings  map[string]string `yaml:"error_mappings"`
+	ProcessorCount int               `yaml:"processor_count"`
 }
 
 func (plugin *ErrorAugmentorPlugin) Setup(
@@ -57,7 +59,7 @@ func (plugin *ErrorAugmentorPlugin) Setup(
 ) error {
 	plugin.properties = properties
 
-	var processedProperties errorMappings
+	var processedProperties pluginProperties
 	if err := plugin.yamlUnmarshalStrict(properties, &processedProperties); err != nil {
 		return fmt.Errorf("failed to setup: failed to parse properties: %w", err)
 	}
@@ -72,8 +74,8 @@ func (plugin *ErrorAugmentorPlugin) Setup(
 		plugin.hintMap[regex] = message
 	}
 
-	plugin.errorMessages = make(chan string, 64)
-	for i := 0; i < 4; i++ {
+	plugin.errorMessages = make(chan string, processedProperties.ProcessorCount*processedProperties.ProcessorCount)
+	for i := 0; i < processedProperties.ProcessorCount; i++ {
 		go plugin.errorMessageProcessor()
 		plugin.errorMessagesWaitGroup.Add(1)
 	}
