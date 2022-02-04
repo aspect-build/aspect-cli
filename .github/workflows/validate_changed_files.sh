@@ -7,10 +7,11 @@ VALID_FILE_PATHS=('pkg/plugin/sdk/v1alpha2') # Array of filepaths that are allow
 
 # by default the only local branch will be pull/PR#/merge
 # fetch only the latest commit from the 2 branches in question to avoid fetching the entire repo which could be costly
-git fetch --depth 1 origin "$1"
-git fetch --depth 1 origin "$2"
 
-git diff "origin/$1..origin/$2" --name-only | while read -r file; do
+git fetch --depth 1 origin "${GITHUB_BASE_REF}"
+git fetch --depth 1 origin "${GITHUB_REF}"
+
+git diff --name-only "origin/${GITHUB_BASE_REF}..${GITHUB_SHA}" | while read -r file; do
 
     # check if filepath matches a valid path. If so move to the next change
     for valid_path in "${VALID_FILE_PATHS[@]}"; do
