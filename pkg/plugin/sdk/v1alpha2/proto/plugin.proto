@@ -11,6 +11,8 @@ service Plugin {
   rpc BEPEventCallback(BEPEventCallbackReq) returns (BEPEventCallbackRes);
   rpc Setup(SetupReq) returns (SetupRes);
   rpc PostBuildHook(PostBuildHookReq) returns (PostBuildHookRes);
+  rpc CustomCommands(CustomCommandsReq) returns (CustomCommandsRes);
+  rpc CustomCommandCallback(CustomCommandCallbackReq) returns (CustomCommandCallbackRes);
   rpc PostTestHook(PostTestHookReq) returns (PostTestHookRes);
   rpc PostRunHook(PostRunHookReq) returns (PostRunHookRes);
 }
@@ -33,6 +35,30 @@ message PostBuildHookReq {
 }
 
 message PostBuildHookRes {}
+
+message Command {
+  string use = 1;
+  string short_desc = 2;
+  string long_desc = 3;
+}
+
+message CustomCommandsReq {}
+
+message CustomCommandsRes {
+  repeated Command commands = 1;
+}
+
+message Context {
+  string workspaceRoot = 1;
+}
+
+message CustomCommandCallbackReq {
+  string customCommand = 1;
+  Context ctx = 2;
+  repeated string args = 3;
+}
+
+message CustomCommandCallbackRes {}
 
 message PostTestHookReq {
   uint32 broker_id = 1;

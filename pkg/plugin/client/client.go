@@ -9,6 +9,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 
@@ -28,6 +29,10 @@ type Factory interface {
 
 func NewFactory() Factory {
 	return &clientFactory{}
+}
+
+type CustomCommandCallbackFn interface {
+	CustomCommandCallback(customCommand string, ctx context.Context, args []string) error
 }
 
 type clientFactory struct{}
@@ -66,8 +71,13 @@ func (*clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.Stre
 	}
 
 	res := &PluginInstance{
-		Plugin:   rawplugin.(plugin.Plugin),
-		Provider: goclient,
+		Plugin:         rawplugin.(plugin.Plugin),
+		Provider:       goclient,
+		CustomCommands: map[string]*plugin.Command{},
+	}
+
+	if customCommandCallback, ok := rawplugin.(CustomCommandCallbackFn); ok {
+		res.CustomCommandCallback = customCommandCallback
 	}
 
 	return res, nil
@@ -85,4 +95,6 @@ type Provider interface {
 type PluginInstance struct {
 	plugin.Plugin
 	Provider
+	CustomCommands        map[string]*plugin.Command
+	CustomCommandCallback CustomCommandCallbackFn
 }

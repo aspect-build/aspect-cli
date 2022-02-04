@@ -33,6 +33,7 @@ import (
 type PluginSystem interface {
 	Configure(streams ioutils.Streams) error
 	TearDown()
+	AddCustomCommands(cmd *cobra.Command) *cobra.Command
 	BESBackendInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
@@ -45,6 +46,11 @@ type pluginSystem struct {
 	clientFactory client.Factory
 	plugins       *PluginList
 	promptRunner  ioutils.PromptRunner
+	callbackMap   map[string]CustomCommandCallbackFn
+}
+
+type CustomCommandCallbackFn interface {
+	CustomCommandCallback(customCommand string, ctx context.Context, args []string) error
 }
 
 // NewPluginSystem instantiates a default internal implementation of the
@@ -56,6 +62,7 @@ func NewPluginSystem() PluginSystem {
 		clientFactory: client.NewFactory(),
 		plugins:       &PluginList{},
 		promptRunner:  ioutils.NewPromptRunner(),
+		callbackMap:   make(map[string]CustomCommandCallbackFn),
 	}
 }
 
@@ -96,6 +103,45 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 
 func (ps *pluginSystem) addPlugin(plugin *client.PluginInstance) {
 	ps.plugins.insert(plugin)
+}
+
+func (ps *pluginSystem) AddCustomCommands(cmd *cobra.Command) *cobra.Command {
+	for node := ps.plugins.head; node != nil; node = node.next {
+		result, err := node.payload.Plugin.CustomCommands()
+		if err != nil {
+			// handle errors properly
+			fmt.Println("Printing an error from AddCustomCommands")
+			fmt.Println(err)
+		}
+
+		for _, command := range result {
+
+			// node.customCommands = append(node.customCommands, command.Use)
+			node.payload.CustomCommands[command.Use] = command
+
+			ps.callbackMap[command.Use] = node.payload.CustomCommandCallback
+
+			cmd.AddCommand(&cobra.Command{
+				Use:   command.Use,
+				Short: command.ShortDesc,
+				Long:  command.LongDesc,
+				RunE: interceptors.Run(
+					[]interceptors.Interceptor{
+						interceptors.WorkspaceRootInterceptor(),
+					},
+					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+						callback := ps.callbackMap[cmd.Use]
+						if callback == nil {
+							return fmt.Errorf("Callback function not found")
+						}
+
+						return callback.CustomCommandCallback(command.Use, ctx, args)
+					},
+				),
+			})
+		}
+	}
+	return cmd
 }
 
 // TearDown tears down the plugin system, making all the necessary actions to

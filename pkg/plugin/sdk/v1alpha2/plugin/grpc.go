@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc"
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
+	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/proto"
 )
@@ -82,6 +83,46 @@ func (m *GRPCServer) PostBuildHook(
 	prompter := &PrompterGRPCClient{client: client}
 	return &proto.PostBuildHookRes{},
 		m.Impl.PostBuildHook(req.IsInteractiveMode, prompter)
+}
+
+// CustomCommands translates the gRPC call to the Plugin CustomCommands
+// implementation. It returns a list of commands that the plugin implements.
+func (m *GRPCServer) CustomCommands(
+	ctx context.Context,
+	req *proto.CustomCommandsReq,
+) (*proto.CustomCommandsRes, error) {
+	customCommands, err := m.Impl.CustomCommands()
+
+	saveRunFunctions(customCommands)
+
+	pbCommands := make([]*proto.Command, 0)
+	for _, command := range customCommands {
+		pbCommand := &proto.Command{
+			Use:       command.Use,
+			ShortDesc: command.ShortDesc,
+			LongDesc:  command.LongDesc,
+		}
+		pbCommands = append(pbCommands, pbCommand)
+	}
+
+	pb := &proto.CustomCommandsRes{
+		Commands: pbCommands,
+	}
+
+	return pb, err
+}
+
+// CustomCommandCallback translates the gRPC call to the sdk CustomCommandCallback
+// implementation.
+func (m *GRPCServer) CustomCommandCallback(
+	_ context.Context,
+	req *proto.CustomCommandCallbackReq,
+) (*proto.CustomCommandCallbackRes, error) {
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, interceptors.WorkspaceRootKey, req.Ctx.WorkspaceRoot)
+
+	return &proto.CustomCommandCallbackRes{},
+		executeRunFunction(req.CustomCommand, ctx, req.Args)
 }
 
 // PostTestHook translates the gRPC call to the Plugin PostTestHook
@@ -165,6 +206,41 @@ func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, promptRunner ioutils.
 	}
 	_, err := m.client.PostBuildHook(context.Background(), req)
 	s.Stop()
+	return err
+}
+
+// CustomCommands is called from the Core to execute the Plugin CustomCommands.
+// It returns a list of commands that the plugin implements.
+func (m *GRPCClient) CustomCommands() ([]*Command, error) {
+	req := &proto.CustomCommandsReq{}
+	customCommandsPB, err := m.client.CustomCommands(context.Background(), req)
+
+	customCommands := make([]*Command, 0)
+
+	for _, pbCommand := range customCommandsPB.Commands {
+		customCommands = append(customCommands, &Command{
+			Use:       pbCommand.Use,
+			ShortDesc: pbCommand.ShortDesc,
+			LongDesc:  pbCommand.LongDesc,
+			Run:       nil,
+		})
+	}
+
+	return customCommands, err
+}
+
+// CustomCommandCallback is called from the Core to execute the sdk CustomCommandCallback.
+func (m *GRPCClient) CustomCommandCallback(customCommand string, ctx context.Context, args []string) error {
+	pbContext := &proto.Context{
+		WorkspaceRoot: ctx.Value(interceptors.WorkspaceRootKey).(string),
+	}
+
+	req := &proto.CustomCommandCallbackReq{
+		CustomCommand: customCommand,
+		Ctx:           pbContext,
+		Args:          args,
+	}
+	_, err := m.client.CustomCommandCallback(context.Background(), req)
 	return err
 }
 
