@@ -11,11 +11,8 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/bazel",
-        "//pkg/ioutils",
         "//pkg/pathutils",
-        "@com_github_mitchellh_go_homedir//:go-homedir",
         "@com_github_spf13_cobra//:cobra",
-        "@com_github_spf13_viper//:viper",
     ],
 )
 
