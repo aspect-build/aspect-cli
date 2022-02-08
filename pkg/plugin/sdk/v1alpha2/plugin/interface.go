@@ -86,6 +86,7 @@ type Command struct {
 }
 
 func saveRunFunctions(commands []*Command) error {
+
 	for _, cmd := range commands {
 		if _, exists := fnMap[cmd.Use]; exists {
 			return fmt.Errorf("command '%s' is declared more than once by plugin", cmd.Use)
