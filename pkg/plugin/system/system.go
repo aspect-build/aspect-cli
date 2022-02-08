@@ -59,7 +59,7 @@ func NewPluginSystem() PluginSystem {
 	}
 }
 
-// ConfigurePluginSystem configures the plugin system.
+// Configure configures the plugin system.
 func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 	aspectpluginsPath, err := ps.finder.Find()
 	if err != nil {
