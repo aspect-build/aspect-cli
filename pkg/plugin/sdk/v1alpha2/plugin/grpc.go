@@ -222,7 +222,6 @@ func (m *GRPCClient) CustomCommands() ([]*Command, error) {
 			Use:       pbCommand.Use,
 			ShortDesc: pbCommand.ShortDesc,
 			LongDesc:  pbCommand.LongDesc,
-			Run:       nil,
 		})
 	}
 
