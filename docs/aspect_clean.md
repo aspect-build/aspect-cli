@@ -57,8 +57,8 @@ aspect clean [flags]
 ### Options inherited from parent commands
 
 ```
-      --config string   config file (default is $HOME/.aspect.yaml)
-      --interactive     Interactive mode (e.g. prompts for user input)
+      --aspect:config string   config file (default is $HOME/.aspect.yaml)
+      --aspect:interactive     Interactive mode (e.g. prompts for user input)
 ```
 
 ### SEE ALSO
