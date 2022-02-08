@@ -3,14 +3,19 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "interceptors",
     srcs = [
+        "bazel_flags.go",
         "run.go",
         "workspace.go",
     ],
     importpath = "aspect.build/cli/pkg/interceptors",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/bazel",
+        "//pkg/ioutils",
         "//pkg/pathutils",
+        "@com_github_mitchellh_go_homedir//:go-homedir",
         "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_viper//:viper",
     ],
 )
 

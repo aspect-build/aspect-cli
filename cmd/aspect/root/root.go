@@ -13,9 +13,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
-	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
 	"aspect.build/cli/cmd/aspect/aquery"
 	"aspect.build/cli/cmd/aspect/build"
@@ -58,49 +56,7 @@ func NewRootCmd(
 		DisableAutoGenTag: true,
 	}
 
-	// ### Flags
-	var cfgFile string
-	var interactive bool
-	cmd.PersistentFlags().StringVar(&cfgFile, flags.ConfigFlagName, "", "config file (default is $HOME/.aspect.yaml)")
-	cmd.PersistentFlags().BoolVar(&interactive, flags.InteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
-
-	// If user specifies the config file to use then we want to only use that config.
-	// If user does not specify a config file to use then we want to load ".aspect" from the
-	// $HOME directory and from the root of the repo (if it exists).
-	// Adding a second config path using "AddConfigPath" does not work because we dont
-	// change the config name using "AddConfigPath". This results in loading the same config
-	// file twice. A workaround for this is to have a second viper instance load the repo
-	// config and merge them together. Source: https://github.com/spf13/viper/issues/181
-	repoViper := viper.New()
-
-	if cfgFile != "" {
-		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
-	} else {
-		// Find home directory.
-		home, err := homedir.Dir()
-		cobra.CheckErr(err)
-
-		// Search for config in home directory with name ".aspect" (without extension).
-		viper.AddConfigPath(home)
-		viper.SetConfigName(".aspect")
-
-		// Search for config in root of current repo with name ".aspect" (without extension).
-		repoViper.AddConfigPath(".")
-		repoViper.SetConfigName(".aspect")
-		repoViper.AutomaticEnv()
-	}
-
-	viper.AutomaticEnv()
-	if err := viper.ReadInConfig(); err == nil {
-		faint.Fprintln(streams.Stderr, "Using config file:", viper.ConfigFileUsed())
-	}
-
-	if err := repoViper.ReadInConfig(); err == nil {
-		faint.Fprintln(streams.Stderr, "Using config file:", repoViper.ConfigFileUsed())
-	}
-
-	viper.MergeConfigMap(repoViper.AllSettings())
+	flags.AddGlobalFlags(cmd, defaultInteractive)
 
 	// ### Child commands
 	// IMPORTANT: when adding a new command, also update the _DOCS list in /docs/BUILD.bazel

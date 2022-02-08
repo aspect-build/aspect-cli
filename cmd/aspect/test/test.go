@@ -50,9 +50,11 @@ don't forget to pass all your 'build' options to 'test' too.
 See 'bazel help target-syntax' for details and examples on how to
 specify targets.
 `,
+		DisableFlagParsing: true,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				interceptors.WorkspaceRootInterceptor(),
+				interceptors.BazelFlagInterceptor(),
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.TestHooksInterceptor(streams),
 			},

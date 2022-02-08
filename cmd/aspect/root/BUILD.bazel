@@ -21,6 +21,7 @@ go_library(
         "//cmd/aspect/version",
         "//docs/help/topics",
         "//pkg/aspect/root/flags",
+        "//pkg/interceptors",
         "//pkg/ioutils",
         "//pkg/plugin/system",
         "@com_github_fatih_color//:color",

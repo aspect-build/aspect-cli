@@ -35,6 +35,7 @@ type Bazel interface {
 	SetWorkspaceRoot(workspaceRoot string)
 	Spawn(command []string) (int, error)
 	RunCommand(command []string, out io.Writer) (int, error)
+	Flags() (map[string]*FlagInfo, error)
 }
 
 type bazel struct {

@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/clean"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -64,9 +65,12 @@ Workaround inconistent state:
 	Such problems are fixable and these bugs are a high priority.
 	If you ever find an incorrect incremental build, please file a bug report,
 	and only use clean as a temporary workaround.`,
+		DisableFlagParsing: true,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				interceptors.WorkspaceRootInterceptor(),
+				interceptors.BazelFlagInterceptor(),
+				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)

@@ -44,10 +44,12 @@ the bazel User Manual, and can be programmatically obtained with
 
 See also 'bazel version' for more detailed bazel version
 information.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:               cobra.MaximumNArgs(1),
+		DisableFlagParsing: true,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				interceptors.WorkspaceRootInterceptor(),
+				interceptors.BazelFlagInterceptor(),
 			},
 			v.Run,
 		),

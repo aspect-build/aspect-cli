@@ -10,7 +10,7 @@ package flags
 
 const (
 	// ConfigFlagName is the --config flag for the root command.
-	ConfigFlagName = "config"
+	ConfigFlagName = "aspect:config"
 	// InteractiveFlagName is the --interactive flag for the root command.
-	InteractiveFlagName = "interactive"
+	InteractiveFlagName = "aspect:interactive"
 )

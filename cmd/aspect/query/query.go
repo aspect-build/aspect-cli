@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/query"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -25,12 +26,15 @@ func NewDefaultQueryCmd() *cobra.Command {
 
 func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "query",
-		Short: "Executes a dependency graph query.",
-		Long:  "Executes a query language expression over a specified subgraph of the build dependency graph.",
+		Use:                "query",
+		Short:              "Executes a dependency graph query.",
+		Long:               "Executes a query language expression over a specified subgraph of the build dependency graph.",
+		DisableFlagParsing: true,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				interceptors.WorkspaceRootInterceptor(),
+				interceptors.BazelFlagInterceptor(),
+				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
