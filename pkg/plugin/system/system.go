@@ -30,11 +30,10 @@ import (
 // PluginSystem is the interface that defines all the methods for the aspect CLI
 // plugin system intended to be used by the Core.
 type PluginSystem interface {
-	ConfigurePluginSystem(streams ioutils.Streams) error
+	Configure(streams ioutils.Streams) error
 	TearDown()
 	BESBackendInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
-	ConfigurePlugins() *aspecterrors.ErrorList
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	RunHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 }
@@ -61,7 +60,7 @@ func NewPluginSystem() PluginSystem {
 }
 
 // ConfigurePluginSystem configures the plugin system.
-func (ps *pluginSystem) ConfigurePluginSystem(streams ioutils.Streams) error {
+func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 	aspectpluginsPath, err := ps.finder.Find()
 	if err != nil {
 		return fmt.Errorf("failed to configure plugin system: %w", err)
@@ -105,11 +104,14 @@ func (ps *pluginSystem) ConfigurePluginSystem(streams ioutils.Streams) error {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
-		node := &PluginNode{
-			plugin:     rawplugin.(plugin.Plugin),
-			properties: aspectplugin.propertiesBytes,
+		propertiesBytes := aspectplugin.propertiesBytes
+
+		aspectplugin := rawplugin.(plugin.Plugin)
+		if err := aspectplugin.Setup(propertiesBytes); err != nil {
+			return fmt.Errorf("failed to setup plugin: %w", err)
 		}
-		ps.plugins.insert(node)
+
+		ps.plugins.insert(aspectplugin)
 	}
 
 	return nil
@@ -171,18 +173,6 @@ func (ps *pluginSystem) RunHooksInterceptor(streams ioutils.Streams) interceptor
 	return ps.commandHooksInterceptor("PostRunHook", streams)
 }
 
-// ConfigurePlugins executes the Setup for all configured plugins and provides
-// those plugins with their configured properties
-func (ps *pluginSystem) ConfigurePlugins() *aspecterrors.ErrorList {
-	errors := &aspecterrors.ErrorList{}
-	for node := ps.plugins.head; node != nil; node = node.next {
-		if err := node.plugin.Setup(node.properties); err != nil {
-			errors.Insert(err)
-		}
-	}
-	return errors
-}
-
 func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams ioutils.Streams) interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) (exitErr error) {
 		isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
@@ -240,7 +230,8 @@ type PluginList struct {
 	tail *PluginNode
 }
 
-func (l *PluginList) insert(node *PluginNode) {
+func (l *PluginList) insert(p plugin.Plugin) {
+	node := &PluginNode{plugin: p}
 	if l.head == nil {
 		l.head = node
 	} else {
@@ -251,7 +242,6 @@ func (l *PluginList) insert(node *PluginNode) {
 
 // PluginNode is a node in the PluginList linked list.
 type PluginNode struct {
-	next       *PluginNode
-	plugin     plugin.Plugin
-	properties []byte
+	next   *PluginNode
+	plugin plugin.Plugin
 }

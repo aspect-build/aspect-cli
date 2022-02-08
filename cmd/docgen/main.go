@@ -16,7 +16,7 @@ func main() {
 	cmd := &cobra.Command{Use: "docgen"}
 
 	pluginSystem := system.NewPluginSystem()
-	if err := pluginSystem.ConfigurePluginSystem(ioutils.DefaultStreams); err != nil {
+	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
 		log.Fatal(err)
 	}
 	defer pluginSystem.TearDown()
