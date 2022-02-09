@@ -28,13 +28,13 @@ type Interceptor func(ctx context.Context, cmd *cobra.Command, args []string, ne
 func Run(interceptors []Interceptor, fn RunEContextFn) RunEFn {
 	return func(cmd *cobra.Command, args []string) error {
 		current := fn
-		for i := len(interceptors) - 1; i > 0; i-- {
-			j := i
+		for i := len(interceptors) - 1; i >= 0; i-- {
+			interceptor := interceptors[i]
 			next := current
 			current = func(ctx context.Context, cmd *cobra.Command, args []string) error {
-				return interceptors[j](ctx, cmd, args, next)
+				return interceptor(ctx, cmd, args, next)
 			}
 		}
-		return interceptors[0](cmd.Context(), cmd, args, current)
+		return current(cmd.Context(), cmd, args)
 	}
 }
