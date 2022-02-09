@@ -27,6 +27,7 @@ import (
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
 )
 
 func main() {
@@ -37,6 +38,8 @@ func main() {
 
 // FixVisibilityPlugin implements an aspect CLI plugin.
 type FixVisibilityPlugin struct {
+	plugin.Base
+
 	buildozer    runner
 	targetsToFix *fixOrderedSet
 }
