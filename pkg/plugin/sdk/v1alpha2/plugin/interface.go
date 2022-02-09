@@ -55,7 +55,7 @@ func (*Base) BEPEventCallback(*buildeventstream.BuildEvent) error {
 }
 
 // BEPEventCallback satisfies Plugin.BEPEventCallback.
-func (*Base) CustomCommands(*buildeventstream.BuildEvent) ([]*Command, error) {
+func (*Base) CustomCommands() ([]*Command, error) {
 	return nil, nil
 }
 

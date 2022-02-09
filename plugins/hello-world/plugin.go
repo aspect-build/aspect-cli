@@ -12,8 +12,6 @@ import (
 
 	goplugin "github.com/hashicorp/go-plugin"
 
-	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
-	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
 	aspectplugin "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
 )
@@ -22,7 +20,9 @@ func main() {
 	goplugin.Serve(config.NewConfigFor(NewDefaultPlugin()))
 }
 
-type HelloWorldPlugin struct{}
+type HelloWorldPlugin struct {
+	aspectplugin.Base
+}
 
 func NewDefaultPlugin() *HelloWorldPlugin {
 	return NewPlugin()
@@ -30,31 +30,6 @@ func NewDefaultPlugin() *HelloWorldPlugin {
 
 func NewPlugin() *HelloWorldPlugin {
 	return &HelloWorldPlugin{}
-}
-
-func (plugin *HelloWorldPlugin) BEPEventCallback(event *buildeventstream.BuildEvent) error {
-	return nil
-}
-
-func (plugin *HelloWorldPlugin) PostBuildHook(
-	isInteractiveMode bool,
-	promptRunner ioutils.PromptRunner,
-) error {
-	return nil
-}
-
-func (plugin *HelloWorldPlugin) PostTestHook(
-	isInteractiveMode bool,
-	promptRunner ioutils.PromptRunner,
-) error {
-	return plugin.PostBuildHook(isInteractiveMode, promptRunner)
-}
-
-func (plugin *HelloWorldPlugin) PostRunHook(
-	isInteractiveMode bool,
-	promptRunner ioutils.PromptRunner,
-) error {
-	return plugin.PostBuildHook(isInteractiveMode, promptRunner)
 }
 
 func (plugin *HelloWorldPlugin) CustomCommands() ([]*aspectplugin.Command, error) {
