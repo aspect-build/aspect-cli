@@ -26,15 +26,16 @@ type Interceptor func(ctx context.Context, cmd *cobra.Command, args []string, ne
 // Run returns a function that matches the cobra RunE signature. It assembles
 // the interceptors and main command to be run in the correct sequence.
 func Run(interceptors []Interceptor, fn RunEContextFn) RunEFn {
-	return func(cmd *cobra.Command, args []string) error {
-		current := fn
-		for i := len(interceptors) - 1; i >= 0; i-- {
-			interceptor := interceptors[i]
-			next := current
-			current = func(ctx context.Context, cmd *cobra.Command, args []string) error {
-				return interceptor(ctx, cmd, args, next)
-			}
+	current := fn
+	for i := len(interceptors) - 1; i >= 0; i-- {
+		interceptor := interceptors[i]
+		next := current
+		current = func(ctx context.Context, cmd *cobra.Command, args []string) error {
+			return interceptor(ctx, cmd, args, next)
 		}
+	}
+
+	return func(cmd *cobra.Command, args []string) error {
 		return current(cmd.Context(), cmd, args)
 	}
 }
