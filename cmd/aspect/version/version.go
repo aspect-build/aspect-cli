@@ -48,7 +48,7 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		),
 	}
 
-	cmd.PersistentFlags().BoolVarP(&v.GNUFormat, "gnu_format", "", false, "format space-separated following GNU convention")
+	cmd.PersistentFlags().BoolVarP(&v.GNUFormat, "aspect:gnu_format", "", false, "format space-separated following GNU convention")
 
 	return cmd
 }
