@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func ExampleRun() {
+func ExampleRun_interceptor_order() {
 	g := NewGomega(func(message string, callerSkip ...int) {
 		log.Fatal(message)
 	})
@@ -47,6 +47,30 @@ func ExampleRun() {
 	// called "fake" with [foo bar], and ctx contains "injected value"
 	// interceptor 2: "injected value"
 	// interceptor 1
+}
+
+func ExampleRun_nointerceptors() {
+	g := NewGomega(func(message string, callerSkip ...int) {
+		log.Fatal(message)
+	})
+
+	ctx := context.Background()
+	args := []string{"foo", "bar"}
+	os.Args = append([]string{"fake"}, args...)
+	cmd := &cobra.Command{Use: "fake"}
+	cmd.RunE = Run(
+		[]Interceptor{},
+		func(_ctx context.Context, _cmd *cobra.Command, _args []string) error {
+			g.Expect(_cmd).To(Equal(cmd))
+			g.Expect(_args).To(Equal(args))
+			fmt.Printf("called %q with %v\n", _cmd.Use, _args)
+			return nil
+		},
+	)
+	cmd.ExecuteContext(ctx)
+
+	// Output:
+	// called "fake" with [foo bar]
 }
 
 func LoggingInterceptor1() Interceptor {
