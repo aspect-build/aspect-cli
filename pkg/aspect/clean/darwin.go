@@ -4,6 +4,9 @@ package clean
 
 import (
 	"io/fs"
+	"os"
+	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -26,4 +29,18 @@ func (c *Clean) GetAccessTime(workspace fs.FileInfo) time.Duration {
 	}
 
 	return smallestTime
+}
+
+func (c *Clean) MoveFolderToTmp(dir string, name string) string {
+	newFolder := "/private/var/tmp/aspect_delete/" + strings.Replace(dir, "/", "", -1)
+	newPath := newFolder + "/" + name
+	os.MkdirAll(newFolder, os.ModePerm)
+	os.Rename(dir+"/external/"+name, newPath)
+
+	return newPath
+}
+
+func (c *Clean) ChangeFolderPermissions(folder string) ([]byte, error) {
+	cmd := exec.Command("chmod", "-R", "777", folder)
+	return cmd.Output()
 }

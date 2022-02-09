@@ -25,3 +25,11 @@ func (c *Clean) GetAccessTime(workspace fs.FileInfo) time.Duration {
 
 	return smallestTime
 }
+
+func (c *Clean) MoveFolderToTmp(dir string, name string) string {
+	return ""
+}
+
+func (c *Clean) ChangeFolderPermissions(folder string) ([]byte, error) {
+	return nil, nil
+}

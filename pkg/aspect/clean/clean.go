@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -238,13 +237,16 @@ func (c *Clean) reclaimAll() error {
 
 		execrootFiles, readDirErr := ioutil.ReadDir(bazelBaseDir + "/" + workspace.Name() + "/execroot")
 		if readDirErr != nil {
-			// install and cache folders will get here
-			// TODO: do we want to clean the cache folder?
+			// install and cache folders will end up here. Currently we dont want to remove these
 			continue
 		}
 
-		if len(execrootFiles) != 2 {
-			// will not be able to determine the workspace name
+		// We expect these folders to have 2 things
+		//   - Firstly, a file named "DO_NOT_BUILD_HERE"
+		//   - Secondly, a folder named after the given workspace
+		// We can use the given second folder to determine the name of the workspace. We want this
+		// so that we can ask the user if they want to remove a given workspace
+		if (len(execrootFiles) == 1 && execrootFiles[0].Name() == "DO_NOT_BUILD_HERE") || len(execrootFiles) > 2 {
 			// TODO: Do we want to have an "other" or an "unknown" and remove any that fall here
 			continue
 		}
@@ -288,7 +290,7 @@ func (c *Clean) reclaimAll() error {
 		c.bazelDirs[dir.path] = replacementDir
 		c.bazelDirsMutex.Unlock()
 
-		// we dont want to ask the user if they want to continue when they have just finished with the last item
+		// we dont want to ask the user if they want to continue when there are no more items
 		if i < len(c.bazelDirs)-1 {
 			_, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(spaceReclaimed)
 			prompt2 := &promptui.Prompt{
@@ -362,15 +364,17 @@ func (c *Clean) directoryProcessor() {
 		replacementDir.hRSize = hRSize
 		replacementDir.unit = unit
 		replacementDir.processed = true
-		differ := replacementDir.accessTime.Hours() * float64(size)
+		comparator := replacementDir.accessTime.Hours() * float64(size)
 
 		if replacementDir.isCurrentWorkspace {
-			// if we can avoid cleaning the current working directory then do so
-			// keeping the current bazel cache will mean faster build times for the user
-			differ = differ / 2
+			// If we can avoid cleaning the current working directory then maybe we want to do so?
+			// If the user has selected this mode then they just want to reclaim resources.
+			// Keeping the bazel workspace for the current repo will mean faster build times for that repo.
+			// Dividing by 2 so that the current workspace will be listed later to the user.
+			comparator = comparator / 2
 		}
 
-		replacementDir.comparator = differ
+		replacementDir.comparator = comparator
 		c.bazelDirs[dir.path] = replacementDir
 
 		c.bazelDirsMutex.Unlock()
@@ -380,32 +384,24 @@ func (c *Clean) directoryProcessor() {
 func (c *Clean) deleteProcessor() {
 	for dir := range c.deleteChannel {
 
-		// can probably do this for more folders as well. Need to figure out the correct pattern though
-		files, _ := ioutil.ReadDir(dir + "/external")
-		for _, file := range files {
-			// if !strings.Contains(file.Name(), "@") {
-			// }
+		// We know that there will be an "external" folder that could be deleted in parallel.
+		// So we can move those folders to a tmp filepath and add them as seperate deletes that will
+		// therefore happen in parallel.
+		externalFolders, _ := ioutil.ReadDir(dir + "/external")
+		for _, folder := range externalFolders {
+			newPath := c.MoveFolderToTmp(dir, folder.Name())
 
-			// TODO: If on linux / windows do this differently
-			// On linux you can probably just do /tmp
-			// On windows dont do this splitting functionality at all
-			newFolder := "/private/var/tmp/aspect_delete/" + strings.Replace(dir, "/", "", -1)
-			newPath := newFolder + "/" + file.Name()
-			os.MkdirAll(newFolder, os.ModePerm)
-			os.Rename(dir+"/external/"+file.Name(), newPath)
-
-			c.manipulateDeleteCounter(1)
-			c.deleteChannel <- newPath
+			if newPath != "" {
+				c.manipulateDeleteCounter(1)
+				c.deleteChannel <- newPath
+			}
 		}
 
 		// otherwise certain files will throw a permission error when we try to remove them
-		cmd := exec.Command("chmod", "-R", "777", dir)
-		_, err := cmd.Output()
+		_, err := c.ChangeFolderPermissions(dir)
 		if err != nil {
 			c.errorChannel <- fmt.Errorf("failed to chmod on %s: %w", dir, err)
 			c.manipulateDeleteCounter(-1)
-
-			// make sure this does what I think it will do. Otherwise put the code from below into an else block
 			continue
 		}
 
@@ -461,7 +457,6 @@ func (c *Clean) getProcessedBazelWorkspaceDirectories() []bazelDirInfo {
 	return c.getProcessedBazelWorkspaceDirectoriesInternal(true)
 }
 
-// do not call except for getProcessedBazelWorkspaceDirectories and recursively
 func (c *Clean) getProcessedBazelWorkspaceDirectoriesInternal(firstCall bool) []bazelDirInfo {
 	c.bazelDirsMutex.Lock()
 	bazelWorkspaceDirectories := make([]bazelDirInfo, 0)
