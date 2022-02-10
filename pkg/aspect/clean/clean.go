@@ -9,10 +9,14 @@
 package clean
 
 import (
+	"bufio"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -72,6 +76,7 @@ type bazelDirInfo struct {
 	accessTime         time.Duration
 	processed          bool
 	userAsked          bool
+	isCache            bool
 }
 
 // Clean represents the aspect clean command.
@@ -198,6 +203,14 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 }
 
 func (c *Clean) reclaimAll() error {
+	c.bazelDirs = make(map[string]bazelDirInfo)
+
+	c.sizeCalcChannel = make(chan bazelDirInfo, 64)
+	c.deleteChannel = make(chan string, 128)
+	c.errorChannel = make(chan error, 64)
+
+	c.findDiskCaches()
+
 	bazelBaseDir, currentWorkingBase, err := c.findBazelBaseDir()
 	if err != nil {
 		return err
@@ -207,12 +220,6 @@ func (c *Clean) reclaimAll() error {
 	if err != nil {
 		return err
 	}
-
-	c.bazelDirs = make(map[string]bazelDirInfo)
-
-	c.sizeCalcChannel = make(chan bazelDirInfo, 64)
-	c.deleteChannel = make(chan string, 128)
-	c.errorChannel = make(chan error, 64)
 
 	// threads for calculating sizes of directories
 	for i := 0; i < 5; i++ {
@@ -231,6 +238,7 @@ func (c *Clean) reclaimAll() error {
 		workspaceInfo := bazelDirInfo{
 			path:               bazelBaseDir + "/" + workspace.Name(),
 			isCurrentWorkspace: workspace.Name() == currentWorkingBase,
+			isCache:            false,
 		}
 
 		workspaceInfo.accessTime = c.GetAccessTime(workspace)
@@ -271,8 +279,12 @@ func (c *Clean) reclaimAll() error {
 		// getProcessedBazelWorkspaceDirectories will only return if there is at least one directory to remove
 		dir := processedBazelWorkspaceDirectories[0]
 
+		label := fmt.Sprintf("Workspace: %s, Age: %s, Size: %.2f %s. Would you like to remove", dir.workspaceName, dir.accessTime, dir.hRSize, dir.unit)
+		if dir.isCache {
+			label = fmt.Sprintf("Cache: %s, Age: %s, Size: %.2f %s. Would you like to remove", dir.workspaceName, dir.accessTime, dir.hRSize, dir.unit)
+		}
 		prompt := &promptui.Prompt{
-			Label:     fmt.Sprintf("Workspace: %s, Age: %s, Size: %.2f %s. Would you like to remove", dir.workspaceName, dir.accessTime, dir.hRSize, dir.unit),
+			Label:     label,
 			IsConfirm: true,
 		}
 		_, promptErr := prompt.Run()
@@ -321,6 +333,80 @@ func (c *Clean) reclaimAll() error {
 	}
 
 	return err
+}
+
+func (c *Clean) findDiskCaches() {
+	var reg = regexp.MustCompile(`--disk_cache.+?(\/.+?)"`)
+
+	tempDir, err := ioutil.TempDir("", "DirName")
+	if err != nil {
+		c.errorChannel <- fmt.Errorf("failed to create tmp dir: %w", err)
+		return
+	}
+	defer os.RemoveAll(tempDir)
+
+	bepLocation := tempDir + "/bep.json"
+
+	// r, w := io.Pipe()
+
+	// decoder := base64.NewDecoder(base64.StdEncoding, r)
+	// helpProtoBytes, err := ioutil.ReadAll(decoder)
+	// _ = helpProtoBytes
+	// defer w.Close()
+	// c.bzl.RunCommand([]string{"query", "//", "--build_event_json_file=" + bepLocation}, w)
+
+	r, w := io.Pipe()
+	decoder := base64.NewDecoder(base64.StdEncoding, r)
+	go func() {
+		defer w.Close()
+		c.bzl.RunCommand([]string{"query", "//", "--build_event_json_file=" + bepLocation, "--ui_event_filters=-info,-stdout,-stderr,-error", "--noshow_progress"}, w)
+	}()
+
+	helpProtoBytes, _ := ioutil.ReadAll(decoder)
+	_ = helpProtoBytes
+
+	file, err := os.Open(bepLocation)
+	if err != nil {
+		c.errorChannel <- fmt.Errorf("failed to read file: %w", err)
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		text := scanner.Text()
+		if strings.Contains(text, "unstructuredCommandLine") {
+			result := reg.FindAllStringSubmatch(text, -1)
+			for i := range result {
+				cachePath := result[i][1]
+
+				cacheInfo := bazelDirInfo{
+					path:               cachePath,
+					isCurrentWorkspace: false,
+					isCache:            true,
+				}
+				fileStat, err := os.Stat(cachePath)
+
+				if err != nil {
+					c.errorChannel <- fmt.Errorf("failed to stat cache folder: %w", err)
+					return
+				}
+
+				cacheInfo.accessTime = c.GetAccessTime(fileStat)
+				cacheInfo.workspaceName = cachePath
+
+				c.bazelDirsMutex.Lock()
+				c.bazelDirs[cachePath] = cacheInfo
+				c.bazelDirsMutex.Unlock()
+				c.sizeCalcChannel <- cacheInfo
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		c.errorChannel <- fmt.Errorf("failed to read file: %w", err)
+		return
+	}
 }
 
 func (c *Clean) manipulateDeleteCounter(increment int) {
