@@ -46,7 +46,6 @@ type pluginSystem struct {
 	clientFactory client.Factory
 	plugins       *PluginList
 	promptRunner  ioutils.PromptRunner
-	callbackMap   map[string]CustomCommandCallbackFn
 }
 
 type CustomCommandCallbackFn interface {
@@ -62,7 +61,6 @@ func NewPluginSystem() PluginSystem {
 		clientFactory: client.NewFactory(),
 		plugins:       &PluginList{},
 		promptRunner:  ioutils.NewPromptRunner(),
-		callbackMap:   make(map[string]CustomCommandCallbackFn),
 	}
 }
 
@@ -114,10 +112,7 @@ func (ps *pluginSystem) AddCustomCommands(cmd *cobra.Command) (*cobra.Command, e
 
 		for _, command := range result {
 
-			// node.customCommands = append(node.customCommands, command.Use)
-			node.payload.CustomCommands[command.Use] = command
-
-			ps.callbackMap[command.Use] = node.payload.CustomCommandCallback
+			callback := node.payload.CustomCommandCallback
 
 			cmd.AddCommand(&cobra.Command{
 				Use:   command.Use,
@@ -128,11 +123,6 @@ func (ps *pluginSystem) AddCustomCommands(cmd *cobra.Command) (*cobra.Command, e
 						interceptors.WorkspaceRootInterceptor(),
 					},
 					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-						callback := ps.callbackMap[cmd.Use]
-						if callback == nil {
-							return fmt.Errorf("Callback function not found")
-						}
-
 						return callback.CustomCommandCallback(command.Use, ctx, args)
 					},
 				),
