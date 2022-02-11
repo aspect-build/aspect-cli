@@ -17,6 +17,9 @@ import (
 var (
 	exposedBazelFlags = []string{
 		"keep_going",
+		"expunge",
+		"expunge_async",
+		"show_make_env",
 	}
 )
 

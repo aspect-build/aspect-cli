@@ -42,8 +42,10 @@ aspect clean [flags]
 ### Options
 
 ```
-  -h, --help         help for clean
-  -k, --keep_going   Continue as much as possible after an error.  While the target that failed and those that depend on it cannot be analyzed, other prerequisites of these targets can be.
+      --expunge                If true, clean removes the entire working tree for this %{product} instance, which includes all %{product}-created temporary and build output files, and stops the %{product} server if it is running.
+      --expunge_async string   If specified, clean asynchronously removes the entire working tree for this %{product} instance, which includes all %{product}-created temporary and build output files, and stops the %{product} server if it is running. When this command completes, it will be safe to execute new commands in the same client, even though the deletion may continue in the background.
+  -h, --help                   help for clean
+  -k, --keep_going             Continue as much as possible after an error.  While the target that failed and those that depend on it cannot be analyzed, other prerequisites of these targets can be.
 ```
 
 ### Options inherited from parent commands
