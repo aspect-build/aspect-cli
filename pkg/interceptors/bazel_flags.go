@@ -49,9 +49,6 @@ func BazelFlagInterceptor() Interceptor {
 
 func bazelflagInterceptor(bzl bazel.Bazel) Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next RunEContextFn) error {
-		workspaceRoot := ctx.Value(WorkspaceRootKey).(string)
-		bzl.SetWorkspaceRoot(workspaceRoot)
-
 		if bzlFlags, err := bzl.Flags(); err != nil {
 			return fmt.Errorf("unable to determine available bazel flags")
 		} else {

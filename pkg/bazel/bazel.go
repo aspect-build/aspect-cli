@@ -24,11 +24,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Global mutable state!
-// This is for performance, avoiding a lookup of the workspace directory for every
-// instance of a bazel struct.
-// We know the workspace location is constant for the lifetime of an `aspect` cli execution.
-var workspaceRoot string
+// This is global so that if we can have multiple implementations of bazel
+// without needing to either find / set the workspace root every time.
+// Will be set when the first instance of bazel is created via "New()".
+var workspaceRoot string = ""
 
 type Bazel interface {
 	AQuery(expr string) (*ActionGraphContainer, error)
