@@ -50,14 +50,10 @@ use 'bazel run --script_path' to write a script and then execute it.
 		DisableFlagParsing: true,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
-				interceptors.BazelFlagInterceptor(),
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.RunHooksInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				r := run.New(streams, bzl)
 				besBackend := ctx.Value(system.BESBackendInterceptorKey).(bep.BESBackend)
 				return r.Run(args, besBackend)

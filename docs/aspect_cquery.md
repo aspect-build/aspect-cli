@@ -13,7 +13,8 @@ aspect cquery [flags]
 ### Options
 
 ```
-  -h, --help   help for cquery
+  -h, --help         help for cquery
+  -k, --keep_going   Continue as much as possible after an error.  While the target that failed and those that depend on it cannot be analyzed, other prerequisites of these targets can be.
 ```
 
 ### Options inherited from parent commands

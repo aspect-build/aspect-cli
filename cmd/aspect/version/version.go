@@ -36,13 +36,8 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		Long:               `Prints version info on colon-separated lines, just like bazel does`,
 		DisableFlagParsing: true,
 		RunE: interceptors.Run(
-			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
-				interceptors.BazelFlagInterceptor(),
-			},
+			[]interceptors.Interceptor{},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				return v.Run(bzl)
 			},
 		),

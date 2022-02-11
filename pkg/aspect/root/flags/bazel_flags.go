@@ -56,7 +56,7 @@ func AddBazelFlags(cmd *cobra.Command) error {
 
 	bzl := bazel.New()
 	if bzlFlags, err := bzl.Flags(); err != nil {
-		return fmt.Errorf("unable to determine available bazel flags")
+		return fmt.Errorf("unable to determine available bazel flags: %w", err)
 	} else {
 		for flag := range bzlFlags {
 			for _, command := range bzlFlags[flag].Commands {

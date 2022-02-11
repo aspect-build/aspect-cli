@@ -26,19 +26,14 @@ func NewDefaultAQueryCmd() *cobra.Command {
 
 func NewAQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:                "aquery",
-		Short:              "Executes an aquery.",
-		Long:               "Executes a query language expression over a specified subgraph of the build dependency graph using aquery.",
-		DisableFlagParsing: true,
+		Use:   "aquery",
+		Short: "Executes an aquery.",
+		Long:  "Executes a query language expression over a specified subgraph of the build dependency graph using aquery.",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
-				interceptors.BazelFlagInterceptor(),
 				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				q := aquery.New(streams, bzl, true)
 				return q.Run(cmd, args)
 			},
