@@ -47,7 +47,6 @@ provided by .bazelrc.
 If your script needs stdin or execution not constrained by the bazel lock,
 use 'bazel run --script_path' to write a script and then execute it.
 `,
-		DisableFlagParsing: true,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				pluginSystem.BESBackendInterceptor(),

@@ -31,10 +31,9 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	v.BuildinfoGitStatus = buildinfo.GitStatus
 
 	cmd := &cobra.Command{
-		Use:                "version",
-		Short:              "Print the version of aspect CLI as well as tools it invokes.",
-		Long:               `Prints version info on colon-separated lines, just like bazel does`,
-		DisableFlagParsing: true,
+		Use:   "version",
+		Short: "Print the version of aspect CLI as well as tools it invokes.",
+		Long:  `Prints version info on colon-separated lines, just like bazel does`,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
