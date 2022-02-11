@@ -10,13 +10,14 @@ import (
 	"context"
 	"strings"
 
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/interceptors"
-	"aspect.build/cli/pkg/ioutils"
 	"github.com/fatih/color"
 	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"aspect.build/cli/pkg/bazel"
+	"aspect.build/cli/pkg/interceptors"
+	"aspect.build/cli/pkg/ioutils"
 )
 
 var (

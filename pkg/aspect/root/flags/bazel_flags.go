@@ -10,8 +10,9 @@ import (
 	"fmt"
 	"strings"
 
-	"aspect.build/cli/pkg/bazel"
 	"github.com/spf13/cobra"
+
+	"aspect.build/cli/pkg/bazel"
 )
 
 var (
