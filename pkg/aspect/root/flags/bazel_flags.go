@@ -56,21 +56,25 @@ func AddBazelFlags(cmd *cobra.Command) error {
 	if bzlFlags, err := bzl.Flags(); err != nil {
 		return fmt.Errorf("unable to determine available bazel flags: %w", err)
 	} else {
-		for flag := range bzlFlags {
-			for _, command := range bzlFlags[flag].Commands {
+		for flagName := range bzlFlags {
+			flag := bzlFlags[flagName]
+			flagAbbreviation := flag.GetAbbreviation()
+			flagDoc := flag.GetDocumentation()
+
+			for _, command := range flag.Commands {
 				if subcommand, ok := subCommands[command]; ok {
-					if bzlFlags[flag].GetHasNegativeFlag() {
-						subcommand.Flags().BoolP(flag, bzlFlags[flag].GetAbbreviation(), false, bzlFlags[flag].GetDocumentation())
-						subcommand.Flags().Bool("no"+flag, false, bzlFlags[flag].GetDocumentation())
-						markFlagAsHidden(subcommand, flag)
-						markFlagAsHidden(subcommand, "no"+flag)
-					} else if bzlFlags[flag].GetAllowsMultiple() {
+					if flag.GetHasNegativeFlag() {
+						subcommand.Flags().BoolP(flagName, flagAbbreviation, false, flagDoc)
+						subcommand.Flags().Bool("no"+flagName, false, flagDoc)
+						markFlagAsHidden(subcommand, flagName)
+						markFlagAsHidden(subcommand, "no"+flagName)
+					} else if flag.GetAllowsMultiple() {
 						var key = MultiString{value: &[]string{}}
-						subcommand.Flags().VarP(&key, flag, bzlFlags[flag].GetAbbreviation(), bzlFlags[flag].GetDocumentation())
-						markFlagAsHidden(subcommand, flag)
+						subcommand.Flags().VarP(&key, flagName, flagAbbreviation, flagDoc)
+						markFlagAsHidden(subcommand, flagName)
 					} else {
-						subcommand.Flags().StringP(flag, bzlFlags[flag].GetAbbreviation(), "", bzlFlags[flag].GetDocumentation())
-						markFlagAsHidden(subcommand, flag)
+						subcommand.Flags().StringP(flagName, flagAbbreviation, "", flagDoc)
+						markFlagAsHidden(subcommand, flagName)
 					}
 				}
 			}
