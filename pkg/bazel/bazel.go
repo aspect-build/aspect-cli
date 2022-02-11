@@ -26,7 +26,7 @@ import (
 
 // This is global so that if we can have multiple implementations of bazel
 // without needing to either find / set the workspace root every time.
-// Will be set when the first instance of bazel is created via "New()".
+// Will be set when the first instance of bazel run.
 var workspaceRoot string = ""
 
 type Bazel interface {

@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -30,11 +29,10 @@ func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 }
 
 func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
-	bzl := bazel.New()
-	return flagInterceptor(bzl, streams)
+	return flagInterceptor(streams)
 }
 
-func flagInterceptor(bzl bazel.Bazel, streams ioutils.Streams) interceptors.Interceptor {
+func flagInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 		if cmd.DisableFlagParsing {
 			cmd.DisableFlagParsing = false
