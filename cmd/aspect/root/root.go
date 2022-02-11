@@ -89,7 +89,7 @@ func NewRootCmd(
 		Long:  topics.MustAssetString("tags.md"),
 	})
 
-	// Run this command after all bazel flags have been added to "cmd".
+	// Run this command after all bazel verbs have been added to "cmd".
 	err := flags.AddBazelFlags(cmd)
 
 	return cmd, err
