@@ -23,12 +23,6 @@ var (
 	}
 )
 
-type Value interface {
-	String() string
-	Set(string) error
-	Type() string
-}
-
 type MultiString struct {
 	value *[]string
 }
