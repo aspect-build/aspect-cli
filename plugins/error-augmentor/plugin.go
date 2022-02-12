@@ -170,7 +170,7 @@ func (plugin *ErrorAugmentorPlugin) printBreak() {
 
 	fmt.Fprintf(&b, " ")
 
-	for i := 0; i < 150; i++ {
+	for i := 0; i < 90; i++ {
 		fmt.Fprintf(&b, "-")
 	}
 
@@ -187,7 +187,7 @@ func (plugin *ErrorAugmentorPlugin) printMiddle(str string) {
 	fmt.Fprintf(&b, "| ")
 	fmt.Fprintf(&b, str)
 
-	for b.Len() < 151 {
+	for b.Len() < 91 {
 		fmt.Fprintf(&b, " ")
 	}
 
