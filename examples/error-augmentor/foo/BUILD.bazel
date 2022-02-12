@@ -1,0 +1,6 @@
+# Throw an error due to a missing output file
+genrule(
+    name = "foo",
+    outs = ["foo.txt"],
+    cmd = "echo 'hello'",
+)

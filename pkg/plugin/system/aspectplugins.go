@@ -24,10 +24,11 @@ const (
 
 // AspectPlugin represents a plugin entry in the plugins file.
 type AspectPlugin struct {
-	Name       string                 `yaml:"name"`
-	From       string                 `yaml:"from"`
-	LogLevel   string                 `yaml:"log_level"`
-	Properties map[string]interface{} `yaml:"properties"`
+	Name            string                 `yaml:"name"`
+	From            string                 `yaml:"from"`
+	LogLevel        string                 `yaml:"log_level"`
+	Properties      map[string]interface{} `yaml:"properties"`
+	propertiesBytes []byte
 }
 
 // Finder is the interface that wraps the simple Find method that performs the
@@ -90,6 +91,7 @@ type Parser interface {
 type parser struct {
 	ioutilReadFile      func(filename string) ([]byte, error)
 	yamlUnmarshalStrict func(in []byte, out interface{}) (err error)
+	yamlMarshal         func(in interface{}) (out []byte, err error)
 }
 
 // NewParser instantiates a default internal implementation of the Parser
@@ -98,6 +100,7 @@ func NewParser() Parser {
 	return &parser{
 		ioutilReadFile:      ioutil.ReadFile,
 		yamlUnmarshalStrict: yaml.UnmarshalStrict,
+		yamlMarshal:         yaml.Marshal,
 	}
 }
 
@@ -114,5 +117,16 @@ func (p *parser) Parse(aspectpluginsPath string) ([]AspectPlugin, error) {
 	if err := p.yamlUnmarshalStrict(aspectpluginsData, &aspectplugins); err != nil {
 		return nil, fmt.Errorf("failed to parse .aspectplugins: %w", err)
 	}
-	return aspectplugins, nil
+
+	var processedPlugins []AspectPlugin
+	for _, plugin := range aspectplugins {
+		propertiesBytes, err := p.yamlMarshal(plugin.Properties)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse .aspectplugins: %w", err)
+		}
+		plugin.propertiesBytes = propertiesBytes
+		processedPlugins = append(processedPlugins, plugin)
+	}
+
+	return processedPlugins, nil
 }

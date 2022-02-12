@@ -55,6 +55,14 @@ func (m *GRPCServer) BEPEventCallback(
 	return &proto.BEPEventCallbackRes{}, m.Impl.BEPEventCallback(req.Event)
 }
 
+// Setup translates the gRPC call to the Plugin Setup implementation.
+func (m *GRPCServer) Setup(
+	ctx context.Context,
+	req *proto.SetupReq,
+) (*proto.SetupRes, error) {
+	return &proto.SetupRes{}, m.Impl.Setup(req.Properties)
+}
+
 // PostBuildHook translates the gRPC call to the Plugin PostBuildHook
 // implementation. It starts a prompt runner that is passed to the Plugin
 // instance to be able to perform prompt actions to the CLI user.
@@ -123,6 +131,17 @@ type GRPCClient struct {
 // BEPEventCallback.
 func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error {
 	_, err := m.client.BEPEventCallback(context.Background(), &proto.BEPEventCallbackReq{Event: event})
+	return err
+}
+
+// Setup is called from the Core to execute the Plugin Setup.
+func (m *GRPCClient) Setup(
+	properties []byte,
+) error {
+	req := &proto.SetupReq{
+		Properties: properties,
+	}
+	_, err := m.client.Setup(context.Background(), req)
 	return err
 }
 

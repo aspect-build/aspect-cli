@@ -42,6 +42,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
+
 	defer pluginSystem.TearDown()
 
 	cmd := root.NewDefaultRootCmd(pluginSystem)

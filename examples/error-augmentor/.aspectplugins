@@ -1,0 +1,10 @@
+- name: error-augmentor
+  from: ../../bazel-bin/plugins/error-augmentor/error-augmentor_/error-augmentor
+  # The possible log levels are: TRACE, DEBUG, INFO, WARN, ERROR, OFF.
+  log_level: OFF
+  properties:
+    error_mappings:
+      "was not created by genrule": "Your genrule is broken."
+      "declared output '(.*)' was not created by genrule.": "File not created by genrule: $1."
+      "Executing genrule (.*) failed: not all outputs were created or valid": "Genrule $1 did not create its output properly. Did you forget to add an $@?"
+    processor_count: 5

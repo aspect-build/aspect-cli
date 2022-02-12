@@ -104,7 +104,13 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
+		propertiesBytes := aspectplugin.propertiesBytes
+
 		aspectplugin := rawplugin.(plugin.Plugin)
+		if err := aspectplugin.Setup(propertiesBytes); err != nil {
+			return fmt.Errorf("failed to setup plugin: %w", err)
+		}
+
 		ps.plugins.insert(aspectplugin)
 	}
 
