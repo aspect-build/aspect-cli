@@ -36,6 +36,11 @@ type Base struct{}
 
 var _ Plugin = (*Base)(nil)
 
+// Setup satisfies Plugin.Setup.
+func (*Base) Setup([]byte) error {
+	return nil
+}
+
 // BEPEventCallback satisfies Plugin.BEPEventCallback.
 func (*Base) BEPEventCallback(*buildeventstream.BuildEvent) error {
 	return nil
