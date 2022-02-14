@@ -76,8 +76,6 @@ func (*Base) PostRunHook(bool, ioutils.PromptRunner) error {
 
 type CustomCommandFn (func(ctx context.Context, args []string) error)
 
-var fnMap map[string]CustomCommandFn = make(map[string]CustomCommandFn)
-
 type Command struct {
 	Use       string
 	ShortDesc string
@@ -85,21 +83,31 @@ type Command struct {
 	Run       CustomCommandFn
 }
 
-func saveRunFunctions(commands []*Command) error {
+type CommandManager interface {
+	Save(commands []*Command) error
+	Execute(command string, ctx context.Context, args []string) error // Not sure about this signature, haven't read the whole code yet.
+}
 
+type PluginCommandManager struct {
+	commands map[string]CustomCommandFn
+}
+
+func (cm *PluginCommandManager) Save(commands []*Command) error {
 	for _, cmd := range commands {
-		if _, exists := fnMap[cmd.Use]; exists {
+		if _, exists := cm.commands[cmd.Use]; exists {
 			return fmt.Errorf("command '%s' is declared more than once by plugin", cmd.Use)
 		}
-		fnMap[cmd.Use] = cmd.Run
+		cm.commands[cmd.Use] = cmd.Run
 	}
 
 	return nil
 }
 
-func executeRunFunction(command string, ctx context.Context, args []string) error {
-	return fnMap[command](ctx, args)
+func (cm *PluginCommandManager) Execute(command string, ctx context.Context, args []string) error {
+	return cm.commands[command](ctx, args)
 }
+
+var _ CommandManager = (*PluginCommandManager)(nil)
 
 func GetWorkspaceRoot(ctx context.Context) string {
 	return ctx.Value(interceptors.WorkspaceRootKey).(string)

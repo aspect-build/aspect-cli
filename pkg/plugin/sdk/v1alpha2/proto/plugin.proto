@@ -12,7 +12,7 @@ service Plugin {
   rpc Setup(SetupReq) returns (SetupRes);
   rpc PostBuildHook(PostBuildHookReq) returns (PostBuildHookRes);
   rpc CustomCommands(CustomCommandsReq) returns (CustomCommandsRes);
-  rpc CustomCommandCallback(CustomCommandCallbackReq) returns (CustomCommandCallbackRes);
+  rpc ExecuteCustomCommand(ExecuteCustomCommandReq) returns (ExecuteCustomCommandRes);
   rpc PostTestHook(PostTestHookReq) returns (PostTestHookRes);
   rpc PostRunHook(PostRunHookReq) returns (PostRunHookRes);
 }
@@ -52,13 +52,13 @@ message Context {
   string workspaceRoot = 1;
 }
 
-message CustomCommandCallbackReq {
+message ExecuteCustomCommandReq {
   string customCommand = 1;
   Context ctx = 2;
   repeated string args = 3;
 }
 
-message CustomCommandCallbackRes {}
+message ExecuteCustomCommandRes {}
 
 message PostTestHookReq {
   uint32 broker_id = 1;

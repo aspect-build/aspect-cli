@@ -48,8 +48,11 @@ type pluginSystem struct {
 	promptRunner  ioutils.PromptRunner
 }
 
-type CustomCommandCallbackFn interface {
-	CustomCommandCallback(customCommand string, ctx context.Context, args []string) error
+// CustomCommandExecutor requires the Plugin implementations to provide the
+// ExecuteCustomCommand method so that the Core can ask over gRPC for a specific command to
+// be executed. `cmdName` is the name of the custom command the plugin created.
+type CustomCommandExecutor interface {
+	ExecuteCustomCommand(cmdName string, ctx context.Context, args []string) error
 }
 
 // NewPluginSystem instantiates a default internal implementation of the
@@ -123,7 +126,7 @@ func (ps *pluginSystem) AddCustomCommands(cmd *cobra.Command) (*cobra.Command, e
 						interceptors.WorkspaceRootInterceptor(),
 					},
 					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-						return callback.CustomCommandCallback(command.Use, ctx, args)
+						return callback.ExecuteCustomCommand(command.Use, ctx, args)
 					},
 				),
 			})

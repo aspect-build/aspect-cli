@@ -33,7 +33,13 @@ type GRPCPlugin struct {
 
 // GRPCServer registers an instance of the GRPCServer in the Plugin binary.
 func (p *GRPCPlugin) GRPCServer(broker *goplugin.GRPCBroker, s *grpc.Server) error {
-	proto.RegisterPluginServer(s, &GRPCServer{Impl: p.Impl, broker: broker})
+	proto.RegisterPluginServer(s, &GRPCServer{
+		Impl:   p.Impl,
+		broker: broker,
+		commandManager: &PluginCommandManager{
+			commands: make(map[string]CustomCommandFn),
+		},
+	})
 	return nil
 }
 
@@ -45,8 +51,9 @@ func (p *GRPCPlugin) GRPCClient(ctx context.Context, broker *goplugin.GRPCBroker
 
 // GRPCServer implements the gRPC server that runs on the Plugin instances.
 type GRPCServer struct {
-	Impl   Plugin
-	broker *goplugin.GRPCBroker
+	Impl           Plugin
+	broker         *goplugin.GRPCBroker
+	commandManager CommandManager
 }
 
 // BEPEventCallback translates the gRPC call to the Plugin BEPEventCallback
@@ -93,7 +100,7 @@ func (m *GRPCServer) CustomCommands(
 ) (*proto.CustomCommandsRes, error) {
 	customCommands, err := m.Impl.CustomCommands()
 
-	saveRunFunctions(customCommands)
+	m.commandManager.Save(customCommands)
 
 	pbCommands := make([]*proto.Command, 0)
 	for _, command := range customCommands {
@@ -112,17 +119,17 @@ func (m *GRPCServer) CustomCommands(
 	return pb, err
 }
 
-// CustomCommandCallback translates the gRPC call to the sdk CustomCommandCallback
+// ExecuteCustomCommand translates the gRPC call to the sdk ExecuteCustomCommand
 // implementation.
-func (m *GRPCServer) CustomCommandCallback(
+func (m *GRPCServer) ExecuteCustomCommand(
 	_ context.Context,
-	req *proto.CustomCommandCallbackReq,
-) (*proto.CustomCommandCallbackRes, error) {
+	req *proto.ExecuteCustomCommandReq,
+) (*proto.ExecuteCustomCommandRes, error) {
 	ctx := context.Background()
 	ctx = context.WithValue(ctx, interceptors.WorkspaceRootKey, req.Ctx.WorkspaceRoot)
 
-	return &proto.CustomCommandCallbackRes{},
-		executeRunFunction(req.CustomCommand, ctx, req.Args)
+	return &proto.ExecuteCustomCommandRes{},
+		m.commandManager.Execute(req.CustomCommand, ctx, req.Args)
 }
 
 // PostTestHook translates the gRPC call to the Plugin PostTestHook
@@ -228,18 +235,18 @@ func (m *GRPCClient) CustomCommands() ([]*Command, error) {
 	return customCommands, err
 }
 
-// CustomCommandCallback is called from the Core to execute the sdk CustomCommandCallback.
-func (m *GRPCClient) CustomCommandCallback(customCommand string, ctx context.Context, args []string) error {
+// ExecuteCustomCommand is called from the Core to execute the sdk ExecuteCustomCommand.
+func (m *GRPCClient) ExecuteCustomCommand(customCommand string, ctx context.Context, args []string) error {
 	pbContext := &proto.Context{
 		WorkspaceRoot: ctx.Value(interceptors.WorkspaceRootKey).(string),
 	}
 
-	req := &proto.CustomCommandCallbackReq{
+	req := &proto.ExecuteCustomCommandReq{
 		CustomCommand: customCommand,
 		Ctx:           pbContext,
 		Args:          args,
 	}
-	_, err := m.client.CustomCommandCallback(context.Background(), req)
+	_, err := m.client.ExecuteCustomCommand(context.Background(), req)
 	return err
 }
 
