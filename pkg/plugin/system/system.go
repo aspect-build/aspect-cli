@@ -33,7 +33,7 @@ import (
 type PluginSystem interface {
 	Configure(streams ioutils.Streams) error
 	TearDown()
-	AddCustomCommands(cmd *cobra.Command) (*cobra.Command, error)
+	RegisterCustomCommands(cmd *cobra.Command) error
 	BESBackendInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
@@ -106,11 +106,11 @@ func (ps *pluginSystem) addPlugin(plugin *client.PluginInstance) {
 	ps.plugins.insert(plugin)
 }
 
-func (ps *pluginSystem) AddCustomCommands(cmd *cobra.Command) (*cobra.Command, error) {
+func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 	for node := ps.plugins.head; node != nil; node = node.next {
 		result, err := node.payload.Plugin.CustomCommands()
 		if err != nil {
-			return cmd, fmt.Errorf("unable to retrieve custom commands from plugin: %w", err)
+			return fmt.Errorf("unable to retrieve custom commands from plugin: %w", err)
 		}
 
 		for _, command := range result {
@@ -132,7 +132,7 @@ func (ps *pluginSystem) AddCustomCommands(cmd *cobra.Command) (*cobra.Command, e
 			})
 		}
 	}
-	return cmd, nil
+	return nil
 }
 
 // TearDown tears down the plugin system, making all the necessary actions to

@@ -29,8 +29,9 @@ func main() {
 	}
 	defer pluginSystem.TearDown()
 
-	aspectRootCmd, err := root.NewDefaultRootCmd(pluginSystem)
-	if err != nil {
+	aspectRootCmd := root.NewDefaultRootCmd(pluginSystem)
+
+	if err := pluginSystem.RegisterCustomCommands(cmd); err != nil {
 		log.Fatal(err)
 	}
 
