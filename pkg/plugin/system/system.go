@@ -111,10 +111,14 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			return fmt.Errorf("failed to setup plugin: %w", err)
 		}
 
-		ps.plugins.insert(aspectplugin)
+		ps.addPlugin(aspectplugin)
 	}
 
 	return nil
+}
+
+func (ps *pluginSystem) addPlugin(plugin plugin.Plugin) {
+	ps.plugins.insert(plugin)
 }
 
 // TearDown tears down the plugin system, making all the necessary actions to
@@ -180,9 +184,8 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 			return fmt.Errorf("failed to run 'aspect %s' command: %w", cmd.Use, err)
 		}
 
-		// TODO(f0rmiga): test this hook.
 		defer func() {
-			hasErrors := false
+			hasPluginErrors := false
 			for node := ps.plugins.head; node != nil; node = node.next {
 				params := []reflect.Value{
 					reflect.ValueOf(isInteractiveMode),
@@ -190,10 +193,10 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 				}
 				if err := reflect.ValueOf(node.plugin).MethodByName(methodName).Call(params)[0].Interface(); err != nil {
 					fmt.Fprintf(streams.Stderr, "Error: failed to run 'aspect %s' command: %v\n", cmd.Use, err)
-					hasErrors = true
+					hasPluginErrors = true
 				}
 			}
-			if hasErrors {
+			if hasPluginErrors {
 				var err *aspecterrors.ExitError
 				if errors.As(exitErr, &err) {
 					err.ExitCode = 1
