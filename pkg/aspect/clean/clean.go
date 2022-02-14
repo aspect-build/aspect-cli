@@ -288,9 +288,7 @@ func (c *Clean) reclaimAll() error {
 	close(c.errorChannel)
 
 	if c.chanErrors.size > 0 {
-		// TODO: If there is more than one error do we want to combine them before returning?
-
-		return c.chanErrors.head.err
+		return c.chanErrors.generateError()
 	}
 
 	return nil
@@ -395,7 +393,7 @@ func (c *Clean) findBazelWorkspaces() {
 			continue
 		}
 
-		// We expect these folders to have up to 2 things
+		// We expect these folders to have up to 2 files / folders
 		//   - Firstly, a file named "DO_NOT_BUILD_HERE"
 		//   - Secondly, a folder named after the given workspace
 		// We can use the given second folder to determine the name of the workspace. We want this
@@ -532,7 +530,7 @@ func (c *Clean) findBazelBaseDir() (string, string, error) {
 
 	for _, file := range files {
 
-		// bazel-bin, bazel-out, etc... will be symlinks, so we can eliminate most files immediately
+		// bazel-bin, bazel-out, etc... will be symlinks, so we can eliminate non-symlinks immediately
 		if file.Mode()&os.ModeSymlink != 0 {
 			actualPath, _ := os.Readlink(cwd + "/" + file.Name())
 
@@ -637,6 +635,18 @@ type errorSet struct {
 	tail  *errorNode
 	nodes map[errorNode]struct{}
 	size  int
+}
+
+func (s *errorSet) generateError() error {
+	var err error
+	for node := s.head; node != nil; node = node.next {
+		if err == nil {
+			err = node.err
+		} else {
+			err = fmt.Errorf("%s, %w", err, node.err)
+		}
+	}
+	return err
 }
 
 func (s *errorSet) insert(err error) {
