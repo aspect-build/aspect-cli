@@ -57,6 +57,10 @@ implementation can be fixed.
 	rememberLine2 = "Remember this choice and skip the prompt in the future"
 )
 
+var (
+	diskCacheRegex = regexp.MustCompile(`--disk_cache.+?(\/.+?)"`)
+)
+
 type SelectRunner interface {
 	Run() (int, string, error)
 }
@@ -209,18 +213,6 @@ func (c *Clean) reclaimAll() error {
 	c.deleteChannel = make(chan string, 128)
 	c.errorChannel = make(chan error, 64)
 
-	c.findDiskCaches()
-
-	bazelBaseDir, currentWorkingBase, err := c.findBazelBaseDir()
-	if err != nil {
-		return err
-	}
-
-	bazelWorkspaces, err := ioutil.ReadDir(bazelBaseDir)
-	if err != nil {
-		return err
-	}
-
 	// threads for calculating sizes of directories
 	for i := 0; i < 5; i++ {
 		go c.directoryProcessor()
@@ -234,45 +226,13 @@ func (c *Clean) reclaimAll() error {
 	// thread for processing errors from the other threads
 	go c.errorProcessor()
 
-	for _, workspace := range bazelWorkspaces {
-		workspaceInfo := bazelDirInfo{
-			path:               bazelBaseDir + "/" + workspace.Name(),
-			isCurrentWorkspace: workspace.Name() == currentWorkingBase,
-			isCache:            false,
-		}
+	// will find disk caches and add them to the processing queue
+	c.findDiskCaches()
 
-		workspaceInfo.accessTime = c.GetAccessTime(workspace)
+	// will find bazel workspaces and add them to the processing queue
+	c.findBazelWorkspaces()
 
-		execrootFiles, readDirErr := ioutil.ReadDir(bazelBaseDir + "/" + workspace.Name() + "/execroot")
-		if readDirErr != nil {
-			// install and cache folders will end up here. Currently we dont want to remove these
-			continue
-		}
-
-		// We expect these folders to have 2 things
-		//   - Firstly, a file named "DO_NOT_BUILD_HERE"
-		//   - Secondly, a folder named after the given workspace
-		// We can use the given second folder to determine the name of the workspace. We want this
-		// so that we can ask the user if they want to remove a given workspace
-		if (len(execrootFiles) == 1 && execrootFiles[0].Name() == "DO_NOT_BUILD_HERE") || len(execrootFiles) > 2 {
-			// TODO: Do we want to have an "other" or an "unknown" and remove any that fall here
-			continue
-		}
-
-		for _, execrootFile := range execrootFiles {
-			if execrootFile.Name() != "DO_NOT_BUILD_HERE" {
-				workspaceInfo.workspaceName = execrootFile.Name()
-			}
-		}
-
-		c.bazelDirsMutex.Lock()
-		c.bazelDirs[workspaceInfo.path] = workspaceInfo
-		c.bazelDirsMutex.Unlock()
-
-		c.sizeCalcChannel <- workspaceInfo
-	}
-
-	var spaceReclaimed float64 // size in bytes
+	var spaceReclaimed float64
 	for i := 0; i < len(c.bazelDirs); i++ {
 		processedBazelWorkspaceDirectories := c.getProcessedBazelWorkspaceDirectories()
 
@@ -329,15 +289,14 @@ func (c *Clean) reclaimAll() error {
 
 	if c.chanErrors.size > 0 {
 		// TODO: If there is more than one error do we want to combine them before returning?
+
 		return c.chanErrors.head.err
 	}
 
-	return err
+	return nil
 }
 
 func (c *Clean) findDiskCaches() {
-	var reg = regexp.MustCompile(`--disk_cache.+?(\/.+?)"`)
-
 	tempDir, err := ioutil.TempDir("", "DirName")
 	if err != nil {
 		c.errorChannel <- fmt.Errorf("failed to create tmp dir: %w", err)
@@ -347,19 +306,17 @@ func (c *Clean) findDiskCaches() {
 
 	bepLocation := tempDir + "/bep.json"
 
-	// r, w := io.Pipe()
-
-	// decoder := base64.NewDecoder(base64.StdEncoding, r)
-	// helpProtoBytes, err := ioutil.ReadAll(decoder)
-	// _ = helpProtoBytes
-	// defer w.Close()
-	// c.bzl.RunCommand([]string{"query", "//", "--build_event_json_file=" + bepLocation}, w)
-
 	r, w := io.Pipe()
 	decoder := base64.NewDecoder(base64.StdEncoding, r)
 	go func() {
 		defer w.Close()
-		c.bzl.RunCommand([]string{"query", "//", "--build_event_json_file=" + bepLocation, "--ui_event_filters=-info,-stdout,-stderr,-error", "--noshow_progress"}, w)
+		c.bzl.RunCommand([]string{
+			"query",
+			"//",
+			"--build_event_json_file=" + bepLocation,
+			"--ui_event_filters=-fatal,-error,-warning,-info,-progress,-debug,-start,-finish,-subcommand,-stdout,-stderr,-pass,-fail,-timeout,-cancelled,-depchecker",
+			"--noshow_progress",
+		}, w)
 	}()
 
 	helpProtoBytes, _ := ioutil.ReadAll(decoder)
@@ -376,7 +333,7 @@ func (c *Clean) findDiskCaches() {
 	for scanner.Scan() {
 		text := scanner.Text()
 		if strings.Contains(text, "unstructuredCommandLine") {
-			result := reg.FindAllStringSubmatch(text, -1)
+			result := diskCacheRegex.FindAllStringSubmatch(text, -1)
 			for i := range result {
 				cachePath := result[i][1]
 
@@ -406,6 +363,59 @@ func (c *Clean) findDiskCaches() {
 	if err := scanner.Err(); err != nil {
 		c.errorChannel <- fmt.Errorf("failed to read file: %w", err)
 		return
+	}
+}
+
+func (c *Clean) findBazelWorkspaces() {
+	bazelBaseDir, currentWorkingBase, err := c.findBazelBaseDir()
+	if err != nil {
+		c.errorChannel <- fmt.Errorf("failed to find bazel working dir: %w", err)
+		return
+	}
+
+	bazelWorkspaces, err := ioutil.ReadDir(bazelBaseDir)
+	if err != nil {
+		c.errorChannel <- fmt.Errorf("failed to find bazel worksapces: %w", err)
+		return
+	}
+
+	// find bazel workspaces and start processing
+	for _, workspace := range bazelWorkspaces {
+		workspaceInfo := bazelDirInfo{
+			path:               bazelBaseDir + "/" + workspace.Name(),
+			isCurrentWorkspace: workspace.Name() == currentWorkingBase,
+			isCache:            false,
+		}
+
+		workspaceInfo.accessTime = c.GetAccessTime(workspace)
+
+		execrootFiles, readDirErr := ioutil.ReadDir(bazelBaseDir + "/" + workspace.Name() + "/execroot")
+		if readDirErr != nil {
+			// install and cache folders will end up here. Currently we dont want to remove these
+			continue
+		}
+
+		// We expect these folders to have up to 2 things
+		//   - Firstly, a file named "DO_NOT_BUILD_HERE"
+		//   - Secondly, a folder named after the given workspace
+		// We can use the given second folder to determine the name of the workspace. We want this
+		// so that we can ask the user if they want to remove a given workspace
+		if (len(execrootFiles) == 1 && execrootFiles[0].Name() == "DO_NOT_BUILD_HERE") || len(execrootFiles) > 2 {
+			// TODO: Do we want to have an "other" or an "unknown" and remove any that fall here
+			continue
+		}
+
+		for _, execrootFile := range execrootFiles {
+			if execrootFile.Name() != "DO_NOT_BUILD_HERE" {
+				workspaceInfo.workspaceName = execrootFile.Name()
+			}
+		}
+
+		c.bazelDirsMutex.Lock()
+		c.bazelDirs[workspaceInfo.path] = workspaceInfo
+		c.bazelDirsMutex.Unlock()
+
+		c.sizeCalcChannel <- workspaceInfo
 	}
 }
 
