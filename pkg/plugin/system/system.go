@@ -110,7 +110,7 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 	for node := ps.plugins.head; node != nil; node = node.next {
 		result, err := node.payload.Plugin.CustomCommands()
 		if err != nil {
-			return fmt.Errorf("unable to retrieve custom commands from plugin: %w", err)
+			return fmt.Errorf("failed to register custom commands: %w", err)
 		}
 
 		for _, command := range result {
