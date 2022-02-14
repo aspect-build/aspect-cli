@@ -33,25 +33,23 @@ func NewPlugin() *HelloWorldPlugin {
 }
 
 func (plugin *HelloWorldPlugin) CustomCommands() ([]*aspectplugin.Command, error) {
-	commandList := make([]*aspectplugin.Command, 0)
+	return []*aspectplugin.Command{
+		{
+			Use:       "hello-world",
+			ShortDesc: "Print 'Hello World!' to the command line.",
+			LongDesc:  "Print 'Hello World!' to the command line. Echo any given argument. Then run a 'bazel help'",
+			Run: func(ctx context.Context, args []string) error {
+				fmt.Println("Hello World!")
+				fmt.Print("Arguments passed to command: ")
+				fmt.Println(args)
+				fmt.Println("Going to run: 'bazel help'")
 
-	commandList = append(commandList, &aspectplugin.Command{
-		Use:       "hello-world",
-		ShortDesc: "Print 'Hello World!' to the command line.",
-		LongDesc:  "Print 'Hello World!' to the command line. Echo any given argument. Then run a 'bazel help'",
-		Run: func(ctx context.Context, args []string) error {
-			fmt.Println("Hello World!")
-			fmt.Print("Arguments passed to command: ")
-			fmt.Println(args)
-			fmt.Println("Going to run: 'bazel help'")
+				bzl := aspectplugin.GetBazel(ctx)
 
-			bzl := aspectplugin.GetBazel(ctx)
+				bzl.Spawn([]string{"help"})
 
-			bzl.Spawn([]string{"help"})
-
-			return nil
+				return nil
+			},
 		},
-	})
-
-	return commandList, nil
+	}, nil
 }
