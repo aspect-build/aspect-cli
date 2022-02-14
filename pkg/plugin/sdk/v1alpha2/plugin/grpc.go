@@ -102,7 +102,7 @@ func (m *GRPCServer) CustomCommands(
 
 	m.commandManager.Save(customCommands)
 
-	pbCommands := make([]*proto.Command, 0)
+	pbCommands := make([]*proto.Command, 0, len(customCommands))
 	for _, command := range customCommands {
 		pbCommand := &proto.Command{
 			Use:       command.Use,
