@@ -74,7 +74,7 @@ func (*Base) PostRunHook(bool, ioutils.PromptRunner) error {
 	return nil
 }
 
-type CustomCommandFn (func(ctx context.Context, args []string) error)
+type CustomCommandFn (func(ctx context.Context, args []string, bzl bazel.Bazel) error)
 
 type Command struct {
 	Use       string
@@ -104,18 +104,11 @@ func (cm *PluginCommandManager) Save(commands []*Command) error {
 }
 
 func (cm *PluginCommandManager) Execute(command string, ctx context.Context, args []string) error {
-	return cm.commands[command](ctx, args)
+	workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
+	bzl := bazel.New()
+	bzl.SetWorkspaceRoot(workspaceRoot)
+
+	return cm.commands[command](ctx, args, bzl)
 }
 
 var _ CommandManager = (*PluginCommandManager)(nil)
-
-func GetWorkspaceRoot(ctx context.Context) string {
-	return ctx.Value(interceptors.WorkspaceRootKey).(string)
-}
-
-func GetBazel(ctx context.Context) bazel.Bazel {
-	workspaceRoot := GetWorkspaceRoot(ctx)
-	bzl := bazel.New()
-	bzl.SetWorkspaceRoot(workspaceRoot)
-	return bzl
-}

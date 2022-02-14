@@ -6,6 +6,7 @@ go_library(
     importpath = "aspect.build/cli/plugins/hello-world",
     visibility = ["//release:__pkg__"],
     deps = [
+        "//pkg/bazel",
         "//pkg/plugin/sdk/v1alpha2/config",
         "//pkg/plugin/sdk/v1alpha2/plugin",
         "@com_github_hashicorp_go_plugin//:go-plugin",

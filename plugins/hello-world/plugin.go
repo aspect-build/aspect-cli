@@ -12,6 +12,7 @@ import (
 
 	goplugin "github.com/hashicorp/go-plugin"
 
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
 	aspectplugin "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
 )
@@ -38,13 +39,11 @@ func (plugin *HelloWorldPlugin) CustomCommands() ([]*aspectplugin.Command, error
 			Use:       "hello-world",
 			ShortDesc: "Print 'Hello World!' to the command line.",
 			LongDesc:  "Print 'Hello World!' to the command line. Echo any given argument. Then run a 'bazel help'",
-			Run: func(ctx context.Context, args []string) error {
+			Run: func(ctx context.Context, args []string, bzl bazel.Bazel) error {
 				fmt.Println("Hello World!")
 				fmt.Print("Arguments passed to command: ")
 				fmt.Println(args)
 				fmt.Println("Going to run: 'bazel help'")
-
-				bzl := aspectplugin.GetBazel(ctx)
 
 				bzl.Spawn([]string{"help"})
 
