@@ -1,0 +1,16 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "client",
+    srcs = ["client.go"],
+    importpath = "aspect.build/cli/pkg/plugin/client",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/ioutils",
+        "//pkg/plugin/loader",
+        "//pkg/plugin/sdk/v1alpha2/config",
+        "//pkg/plugin/sdk/v1alpha2/plugin",
+        "@com_github_hashicorp_go_hclog//:go-hclog",
+        "@com_github_hashicorp_go_plugin//:go-plugin",
+    ],
+)

@@ -10,22 +10,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"reflect"
 	"time"
 
 	yaml "gopkg.in/yaml.v2"
 
-	hclog "github.com/hashicorp/go-hclog"
-	goplugin "github.com/hashicorp/go-plugin"
 	"github.com/spf13/cobra"
 
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
+	"aspect.build/cli/pkg/plugin/client"
+	"aspect.build/cli/pkg/plugin/loader"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
@@ -41,10 +38,9 @@ type PluginSystem interface {
 }
 
 type pluginSystem struct {
-	finder        Finder
-	parser        Parser
-	clientFactory ClientFactory
-	clients       []ClientProvider
+	finder        loader.Finder
+	parser        loader.Parser
+	clientFactory client.Factory
 	plugins       *PluginList
 	promptRunner  ioutils.PromptRunner
 }
@@ -53,9 +49,9 @@ type pluginSystem struct {
 // PluginSystem interface.
 func NewPluginSystem() PluginSystem {
 	return &pluginSystem{
-		finder:        NewFinder(),
-		parser:        NewParser(),
-		clientFactory: &clientFactory{},
+		finder:        loader.NewFinder(),
+		parser:        loader.NewParser(),
+		clientFactory: client.NewFactory(),
 		plugins:       &PluginList{},
 		promptRunner:  ioutils.NewPromptRunner(),
 	}
@@ -72,46 +68,20 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 		return fmt.Errorf("failed to configure plugin system: %w", err)
 	}
 
-	ps.clients = make([]ClientProvider, 0, len(aspectplugins))
-	for _, aspectplugin := range aspectplugins {
-		logLevel := hclog.LevelFromString(aspectplugin.LogLevel)
-		if logLevel == hclog.NoLevel {
-			logLevel = hclog.Error
-		}
-		pluginLogger := hclog.New(&hclog.LoggerOptions{
-			Name:  aspectplugin.Name,
-			Level: logLevel,
-		})
+	for _, p := range aspectplugins {
 		// TODO(f0rmiga): make this loop concurrent so that all plugins are
 		// configured faster.
-		clientConfig := &goplugin.ClientConfig{
-			HandshakeConfig:  config.Handshake,
-			Plugins:          config.PluginMap,
-			Cmd:              exec.Command(aspectplugin.From),
-			AllowedProtocols: []goplugin.Protocol{goplugin.ProtocolGRPC},
-			SyncStdout:       streams.Stdout,
-			SyncStderr:       streams.Stderr,
-			Logger:           pluginLogger,
-		}
-		client := ps.clientFactory.New(clientConfig)
-		ps.clients = append(ps.clients, client)
 
-		rpcClient, err := client.Client()
+		aspectplugin, err := ps.clientFactory.New(p, streams)
 		if err != nil {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
-		rawplugin, err := rpcClient.Dispense(config.DefaultPluginName)
+		propertiesBytes, err := yaml.Marshal(p.Properties)
 		if err != nil {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
-		propertiesBytes, err := yaml.Marshal(aspectplugin.Properties)
-		if err != nil {
-			return fmt.Errorf("failed to configure plugin system: %w", err)
-		}
-
-		aspectplugin := rawplugin.(plugin.Plugin)
 		if err := aspectplugin.Setup(propertiesBytes); err != nil {
 			return fmt.Errorf("failed to setup plugin: %w", err)
 		}
@@ -122,15 +92,15 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 	return nil
 }
 
-func (ps *pluginSystem) addPlugin(plugin plugin.Plugin) {
+func (ps *pluginSystem) addPlugin(plugin *client.PluginInstance) {
 	ps.plugins.insert(plugin)
 }
 
 // TearDown tears down the plugin system, making all the necessary actions to
 // clean up the system.
 func (ps *pluginSystem) TearDown() {
-	for _, client := range ps.clients {
-		client.Kill()
+	for node := ps.plugins.head; node != nil; node = node.next {
+		node.payload.Kill()
 	}
 }
 
@@ -148,7 +118,7 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 		besBackend := bep.NewBESBackend()
 		for node := ps.plugins.head; node != nil; node = node.next {
-			besBackend.RegisterSubscriber(node.plugin.BEPEventCallback)
+			besBackend.RegisterSubscriber(node.payload.BEPEventCallback)
 		}
 		if err := besBackend.Setup(); err != nil {
 			return fmt.Errorf("failed to run BES backend: %w", err)
@@ -196,7 +166,7 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 					reflect.ValueOf(isInteractiveMode),
 					reflect.ValueOf(ps.promptRunner),
 				}
-				if err := reflect.ValueOf(node.plugin).MethodByName(methodName).Call(params)[0].Interface(); err != nil {
+				if err := reflect.ValueOf(node.payload.Plugin).MethodByName(methodName).Call(params)[0].Interface(); err != nil {
 					fmt.Fprintf(streams.Stderr, "Error: failed to run 'aspect %s' command: %v\n", cmd.Use, err)
 					hasPluginErrors = true
 				}
@@ -212,25 +182,6 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 	}
 }
 
-// ClientFactory hides the call to goplugin.NewClient.
-type ClientFactory interface {
-	New(*goplugin.ClientConfig) ClientProvider
-}
-
-type clientFactory struct{}
-
-// New calls the goplugin.NewClient with the given config.
-func (*clientFactory) New(config *goplugin.ClientConfig) ClientProvider {
-	return goplugin.NewClient(config)
-}
-
-// ClientProvider is an interface for goplugin.Client returned by
-// goplugin.NewClient.
-type ClientProvider interface {
-	Client() (goplugin.ClientProtocol, error)
-	Kill()
-}
-
 // PluginList implements a simple linked list for the parsed plugins from the
 // plugins file.
 type PluginList struct {
@@ -238,8 +189,8 @@ type PluginList struct {
 	tail *PluginNode
 }
 
-func (l *PluginList) insert(p plugin.Plugin) {
-	node := &PluginNode{plugin: p}
+func (l *PluginList) insert(p *client.PluginInstance) {
+	node := &PluginNode{payload: p}
 	if l.head == nil {
 		l.head = node
 	} else {
@@ -250,6 +201,6 @@ func (l *PluginList) insert(p plugin.Plugin) {
 
 // PluginNode is a node in the PluginList linked list.
 type PluginNode struct {
-	next   *PluginNode
-	plugin plugin.Plugin
+	next    *PluginNode
+	payload *client.PluginInstance
 }
