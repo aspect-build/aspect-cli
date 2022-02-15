@@ -22,6 +22,7 @@ import (
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/client"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
 	"aspect.build/cli/pkg/plugin/system/bep"
@@ -41,8 +42,8 @@ type PluginSystem interface {
 type pluginSystem struct {
 	finder        Finder
 	parser        Parser
-	clientFactory ClientFactory
-	clients       []ClientProvider
+	clientFactory client.Factory
+	clients       []client.Provider
 	plugins       *PluginList
 	promptRunner  ioutils.PromptRunner
 }
@@ -53,7 +54,7 @@ func NewPluginSystem() PluginSystem {
 	return &pluginSystem{
 		finder:        NewFinder(),
 		parser:        NewParser(),
-		clientFactory: &clientFactory{},
+		clientFactory: client.NewFactory(),
 		plugins:       &PluginList{},
 		promptRunner:  ioutils.NewPromptRunner(),
 	}
@@ -70,7 +71,7 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 		return fmt.Errorf("failed to configure plugin system: %w", err)
 	}
 
-	ps.clients = make([]ClientProvider, 0, len(aspectplugins))
+	ps.clients = make([]client.Provider, 0, len(aspectplugins))
 	for _, aspectplugin := range aspectplugins {
 		logLevel := hclog.LevelFromString(aspectplugin.LogLevel)
 		if logLevel == hclog.NoLevel {
@@ -91,10 +92,10 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			SyncStderr:       streams.Stderr,
 			Logger:           pluginLogger,
 		}
-		client := ps.clientFactory.New(clientConfig)
-		ps.clients = append(ps.clients, client)
+		clientProvider := ps.clientFactory.New(clientConfig)
+		ps.clients = append(ps.clients, clientProvider)
 
-		rpcClient, err := client.Client()
+		rpcClient, err := clientProvider.Client()
 		if err != nil {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
@@ -205,25 +206,6 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 		}()
 		return next(ctx, cmd, args)
 	}
-}
-
-// ClientFactory hides the call to goplugin.NewClient.
-type ClientFactory interface {
-	New(*goplugin.ClientConfig) ClientProvider
-}
-
-type clientFactory struct{}
-
-// New calls the goplugin.NewClient with the given config.
-func (*clientFactory) New(config *goplugin.ClientConfig) ClientProvider {
-	return goplugin.NewClient(config)
-}
-
-// ClientProvider is an interface for goplugin.Client returned by
-// goplugin.NewClient.
-type ClientProvider interface {
-	Client() (goplugin.ClientProtocol, error)
-	Kill()
 }
 
 // PluginList implements a simple linked list for the parsed plugins from the

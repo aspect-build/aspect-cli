@@ -13,6 +13,7 @@ go_library(
         "//pkg/aspecterrors",
         "//pkg/interceptors",
         "//pkg/ioutils",
+        "//pkg/plugin/client",
         "//pkg/plugin/sdk/v1alpha2/config",
         "//pkg/plugin/sdk/v1alpha2/plugin",
         "//pkg/plugin/system/bep",
