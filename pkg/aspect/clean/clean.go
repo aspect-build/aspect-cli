@@ -226,17 +226,21 @@ func (c *Clean) reclaimAll() error {
 	// thread for processing errors from the other threads
 	go c.errorProcessor()
 
-	// will find disk caches and add them to the processing queue
+	// will find disk caches and add them to the directoryProcessor queue
 	c.findDiskCaches()
 
-	// will find bazel workspaces and add them to the processing queue
+	// will find bazel workspaces and add them to the directoryProcessor queue
 	c.findBazelWorkspaces()
 
+	// At this point we will know how many workspaces / caches we will need to clean.
+	// What we dont know is the size of those workspaces. While we are waiting for all
+	// of the processing to happen we can start prompting for the ones that have completed.
 	var spaceReclaimed float64
 	for i := 0; i < len(c.bazelDirs); i++ {
 		processedBazelWorkspaceDirectories := c.getProcessedBazelWorkspaceDirectories()
 
-		// getProcessedBazelWorkspaceDirectories will only return if there is at least one directory to remove
+		// Waiting function. Will only return once there is at least 1 directory that
+		// we can prompt the user about. Will inform the user that we are waiting
 		dir := processedBazelWorkspaceDirectories[0]
 
 		label := fmt.Sprintf("Workspace: %s, Age: %s, Size: %.2f %s. Would you like to remove", dir.workspaceName, dir.accessTime, dir.hRSize, dir.unit)
@@ -257,12 +261,12 @@ func (c *Clean) reclaimAll() error {
 		}
 
 		c.bazelDirsMutex.Lock()
-		replacementDir := c.bazelDirs[dir.path]
-		replacementDir.userAsked = true
-		c.bazelDirs[dir.path] = replacementDir
+		bazelDir := c.bazelDirs[dir.path]
+		bazelDir.userAsked = true
+		c.bazelDirs[dir.path] = bazelDir
 		c.bazelDirsMutex.Unlock()
 
-		// we dont want to ask the user if they want to continue when there are no more items
+		// we dont want to ask the user if they want to continue on the last item
 		if i < len(c.bazelDirs)-1 {
 			_, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(spaceReclaimed)
 			prompt2 := &promptui.Prompt{
@@ -295,7 +299,7 @@ func (c *Clean) reclaimAll() error {
 }
 
 func (c *Clean) findDiskCaches() {
-	tempDir, err := ioutil.TempDir("", "DirName")
+	tempDir, err := ioutil.TempDir("", "tmp_bazel_output")
 	if err != nil {
 		c.errorChannel <- fmt.Errorf("failed to create tmp dir: %w", err)
 		return
@@ -308,17 +312,23 @@ func (c *Clean) findDiskCaches() {
 	decoder := base64.NewDecoder(base64.StdEncoding, r)
 	go func() {
 		defer w.Close()
+
+		// Running an invalid query should ensure that repository rules are not executed.
+		// However, bazel will still emit its BEP containing the flag that we are interested in.
+		// This will ensure it returns quickly and allows us to easily access said flag.
 		c.bzl.RunCommand([]string{
 			"query",
 			"//",
 			"--build_event_json_file=" + bepLocation,
+
+			// We dont want bazel to print anything to the command line.
+			// We are only interested in the BEP output
 			"--ui_event_filters=-fatal,-error,-warning,-info,-progress,-debug,-start,-finish,-subcommand,-stdout,-stderr,-pass,-fail,-timeout,-cancelled,-depchecker",
 			"--noshow_progress",
 		}, w)
 	}()
 
-	helpProtoBytes, _ := ioutil.ReadAll(decoder)
-	_ = helpProtoBytes
+	ioutil.ReadAll(decoder)
 
 	file, err := os.Open(bepLocation)
 	if err != nil {
@@ -453,14 +463,14 @@ func (c *Clean) directoryProcessor() {
 
 		c.bazelDirsMutex.Lock()
 
-		replacementDir := c.bazelDirs[dir.path]
-		replacementDir.size = size
-		replacementDir.hRSize = hRSize
-		replacementDir.unit = unit
-		replacementDir.processed = true
-		comparator := replacementDir.accessTime.Hours() * float64(size)
+		bazelDir := c.bazelDirs[dir.path]
+		bazelDir.size = size
+		bazelDir.hRSize = hRSize
+		bazelDir.unit = unit
+		bazelDir.processed = true
+		comparator := bazelDir.accessTime.Hours() * float64(size)
 
-		if replacementDir.isCurrentWorkspace {
+		if bazelDir.isCurrentWorkspace {
 			// If we can avoid cleaning the current working directory then maybe we want to do so?
 			// If the user has selected this mode then they just want to reclaim resources.
 			// Keeping the bazel workspace for the current repo will mean faster build times for that repo.
@@ -468,8 +478,8 @@ func (c *Clean) directoryProcessor() {
 			comparator = comparator / 2
 		}
 
-		replacementDir.comparator = comparator
-		c.bazelDirs[dir.path] = replacementDir
+		bazelDir.comparator = comparator
+		c.bazelDirs[dir.path] = bazelDir
 
 		c.bazelDirsMutex.Unlock()
 	}
