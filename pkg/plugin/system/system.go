@@ -14,6 +14,8 @@ import (
 	"reflect"
 	"time"
 
+	yaml "gopkg.in/yaml.v2"
+
 	hclog "github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 	"github.com/spf13/cobra"
@@ -104,7 +106,10 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
-		propertiesBytes := aspectplugin.propertiesBytes
+		propertiesBytes, err := yaml.Marshal(aspectplugin.Properties)
+		if err != nil {
+			return fmt.Errorf("failed to configure plugin system: %w", err)
+		}
 
 		aspectplugin := rawplugin.(plugin.Plugin)
 		if err := aspectplugin.Setup(propertiesBytes); err != nil {
