@@ -12,10 +12,11 @@ import (
 	"fmt"
 	"os/exec"
 
-	hclog "github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/logger"
 	"aspect.build/cli/pkg/plugin/loader"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
@@ -34,14 +35,8 @@ type clientFactory struct{}
 
 // New calls the goplugin.NewClient with the given config.
 func (*clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.Streams) (*PluginInstance, error) {
-	logLevel := hclog.LevelFromString(aspectplugin.LogLevel)
-	if logLevel == hclog.NoLevel {
-		logLevel = hclog.Error
-	}
-	pluginLogger := hclog.New(&hclog.LoggerOptions{
-		Name:  aspectplugin.Name,
-		Level: logLevel,
-	})
+	invocationID := bazel.InvovationID()
+	pluginLogger := logger.CreatePluginLoggingHook(invocationID, aspectplugin.Name, aspectplugin.LogLevel)
 
 	clientConfig := &goplugin.ClientConfig{
 		HandshakeConfig:  config.Handshake,

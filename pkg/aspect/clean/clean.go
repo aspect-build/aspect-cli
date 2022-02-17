@@ -18,6 +18,7 @@ import (
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/logger"
 )
 
 const (
@@ -110,6 +111,7 @@ func NewDefault(bzl bazel.Bazel, isInteractive bool) *Clean {
 
 // Run runs the aspect build command.
 func (c *Clean) Run(_ *cobra.Command, _ []string) error {
+	logger.Info("Hello world from the clean command")
 	skip := c.Prefs.GetBool(skipPromptKey)
 	if c.isInteractiveMode && !skip {
 

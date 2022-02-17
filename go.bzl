@@ -623,6 +623,12 @@ def deps():
         sum = "h1:9f412s+6RmYXLWZSEzVVgPGK7C2PphHj5RJrvfx9AWI=",
         version = "v1.0.1",
     )
+    go_repository(
+        name = "com_github_natefinch_lumberjack",
+        importpath = "github.com/natefinch/lumberjack",
+        sum = "h1:4QJd3OLAMgj7ph+yZTuX13Ld4UpgHp07nNdFX7mqFfM=",
+        version = "v2.0.0+incompatible",
+    )
 
     go_repository(
         name = "com_github_nxadm_tail",
@@ -876,6 +882,12 @@ def deps():
         importpath = "gopkg.in/ini.v1",
         sum = "h1:duBzk771uxoUuOlyRLkHsygud9+5lrlGjdFBb4mSKDU=",
         version = "v1.62.0",
+    )
+    go_repository(
+        name = "in_gopkg_natefinch_lumberjack_v2",
+        importpath = "gopkg.in/natefinch/lumberjack.v2",
+        sum = "h1:1Lc07Kr7qY4U2YPouBjpCLxpiyxIVoxqXgkXLknAOE8=",
+        version = "v2.0.0",
     )
 
     go_repository(

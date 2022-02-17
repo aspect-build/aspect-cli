@@ -14,6 +14,7 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/logger"
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspecterrors"
@@ -23,15 +24,20 @@ type Info struct {
 	ioutils.Streams
 
 	ShowMakeEnv bool
+
+	logger logger.Logger
 }
 
 func New(streams ioutils.Streams) *Info {
 	return &Info{
 		Streams: streams,
+		logger:  logger.CreateLogger("bazel-info"),
 	}
 }
 
 func (v *Info) Run(ctx context.Context, _ *cobra.Command, args []string) error {
+	logger.Info("Log with no prefix from info command")
+	v.logger.Info("Log with prefix from info command")
 	bazelCmd := []string{"info"}
 	if v.ShowMakeEnv {
 		// Propagate the flag

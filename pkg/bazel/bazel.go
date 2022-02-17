@@ -13,11 +13,55 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"strings"
+	"time"
 
+	"aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
 	"google.golang.org/protobuf/proto"
 )
+
+var invocationID string = ""
+
+func generateInvocationID() {
+	t := time.Now()
+
+	dateString := stringifyInt(t.Year(), 4) + stringifyInt(int(t.Month()), 2) + stringifyInt(t.Day(), 2)
+
+	nanosecondStr := stringifyInt(t.Nanosecond(), 6)
+
+	timeString := stringifyInt(t.Hour(), 2) +
+		stringifyInt(t.Minute(), 2) +
+		"-" +
+		stringifyInt(t.Second(), 2) +
+		nanosecondStr[:2] +
+		"-" +
+		nanosecondStr[2:6]
+
+	superSpecialHexString := "617370656374" // I wonder what this says when converted back to a string?
+
+	invocationID = dateString + "-" + timeString + "-" + superSpecialHexString
+}
+
+func InvovationID() string {
+	if invocationID == "" {
+		generateInvocationID()
+	}
+	return invocationID
+}
+
+func SetInvovationID(id string) {
+	invocationID = id
+}
+
+func stringifyInt(i int, length int) string {
+	str := fmt.Sprint(i)
+	for len(str) < length {
+		str = "0" + str
+	}
+	return str
+}
 
 type Bazel interface {
 	SetWorkspaceRoot(workspaceRoot string)
@@ -52,13 +96,32 @@ func (b *bazel) Spawn(command []string) (int, error) {
 }
 
 func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
+	// should maybe do the entire thing here? In case someone calls this directly
 	repos := b.createRepositories()
+	if len(invocationID) < 1 {
+		panic("Illegal state: running bazel without invocationID set")
+	}
 	if len(b.workspaceRoot) < 1 {
 		panic("Illegal state: running bazel without the workspaceRoot set")
 	}
 
+	containsInvocationId := false
+	for _, cmd := range command {
+		if strings.Contains(cmd, "--invocation_id=") || strings.Contains(cmd, "--invocation_id ") {
+			containsInvocationId = true
+			break
+		}
+	}
+
+	if !containsInvocationId {
+		command = append(command, "--invocation_id="+invocationID)
+	}
+
+	logger.Command(strings.Join(append([]string{"bazel"}, command...), " "))
+
 	bazelisk := NewBazelisk(b.workspaceRoot)
 	exitCode, err := bazelisk.Run(command, repos, out)
+	// if at the end of the command then print here
 	return exitCode, err
 }
 

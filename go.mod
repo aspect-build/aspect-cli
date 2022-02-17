@@ -14,6 +14,7 @@ require (
 	github.com/manifoldco/promptui v0.8.0
 	github.com/mattn/go-isatty v0.0.13
 	github.com/mitchellh/go-homedir v1.1.0
+	github.com/natefinch/lumberjack v2.0.0+incompatible
 	github.com/onsi/gomega v1.16.0
 	github.com/pkg/browser v0.0.0-20210904010418-6d279e18f982
 	github.com/spf13/cobra v1.2.1
@@ -51,4 +52,5 @@ require (
 	golang.org/x/sys v0.0.0-20210903071746-97244b99971b // indirect
 	golang.org/x/text v0.3.7 // indirect
 	gopkg.in/ini.v1 v1.62.0 // indirect
+	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 )

@@ -28,6 +28,7 @@ import (
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/logger"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
 )
@@ -44,6 +45,8 @@ type FixVisibilityPlugin struct {
 
 	buildozer    runner
 	targetsToFix *fixOrderedSet
+
+	logger logger.Logger
 }
 
 // NewDefaultPlugin creates a new FixVisibilityPlugin with the default
@@ -58,6 +61,7 @@ func NewPlugin(buildozer runner) *FixVisibilityPlugin {
 	return &FixVisibilityPlugin{
 		buildozer:    buildozer,
 		targetsToFix: &fixOrderedSet{nodes: make(map[fixNode]struct{})},
+		logger:       logger.CreatePluginLogger(),
 	}
 }
 
@@ -96,6 +100,10 @@ const removePrivateVisibilityBuildozerCommand = "remove visibility //visibility:
 func (plugin *FixVisibilityPlugin) Setup(
 	properties []byte,
 ) error {
+	plugin.logger.Info("hello there from setup")
+	plugin.logger.Trace("hello there from setup")
+	plugin.logger.Error("hello there from setup")
+	logger.Info("testing from plugin setup")
 	return nil
 }
 
