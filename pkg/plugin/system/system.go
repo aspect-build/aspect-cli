@@ -166,7 +166,7 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 					reflect.ValueOf(isInteractiveMode),
 					reflect.ValueOf(ps.promptRunner),
 				}
-				if err := reflect.ValueOf(node.payload.Plugin).MethodByName(methodName).Call(params)[0].Interface(); err != nil {
+				if err := reflect.ValueOf(node.payload).MethodByName(methodName).Call(params)[0].Interface(); err != nil {
 					fmt.Fprintf(streams.Stderr, "Error: failed to run 'aspect %s' command: %v\n", cmd.Use, err)
 					hasPluginErrors = true
 				}
