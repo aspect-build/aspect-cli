@@ -1,8 +1,10 @@
 /*
-Copyright © 2021 Aspect Build Systems Inc
-
-Not licensed for re-use.
-*/
+ * Copyright 2022 Aspect Build Systems, Inc.
+ *
+ * Licensed under the aspect.build Commercial License (the "License");
+ * you may not use this file except in compliance with the License.
+ * Full License text is in the LICENSE file included in the root of this repository.
+ */
 
 // Variables in this file will be replaced by the linker when Bazel is run with --stamp
 // The time should be in format '2018-12-12 12:30:00 UTC'
