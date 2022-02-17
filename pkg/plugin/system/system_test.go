@@ -19,6 +19,8 @@ import (
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/client"
+	client_mock "aspect.build/cli/pkg/plugin/client/mock"
 	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin/mock"
 )
 
@@ -47,7 +49,10 @@ func TestPluginSystemInterceptors(t *testing.T) {
 
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(plugin)
+		ps.addPlugin(&client.PluginInstance{
+			Plugin:   plugin,
+			Provider: client_mock.NewMockProvider(ctrl),
+		})
 
 		// Expect the callbacks in reverse-order of execution
 		gomock.InOrder(
@@ -87,8 +92,14 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin1 := plugin_mock.NewMockPlugin(ctrl)
 		plugin2 := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(plugin1)
-		ps.addPlugin(plugin2)
+		ps.addPlugin(&client.PluginInstance{
+			Plugin:   plugin1,
+			Provider: client_mock.NewMockProvider(ctrl),
+		})
+		ps.addPlugin(&client.PluginInstance{
+			Plugin:   plugin2,
+			Provider: client_mock.NewMockProvider(ctrl),
+		})
 
 		// Expect the callbacks in reverse-order of execution, plugins in order added
 		gomock.InOrder(
@@ -125,7 +136,10 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		// Plugin to be invoked
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(plugin)
+		ps.addPlugin(&client.PluginInstance{
+			Plugin:   plugin,
+			Provider: client_mock.NewMockProvider(ctrl),
+		})
 
 		// Expect the callbacks in reverse-order of execution
 		gomock.InOrder(
@@ -165,7 +179,10 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		// Plugin to be invoked
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(plugin)
+		ps.addPlugin(&client.PluginInstance{
+			Plugin:   plugin,
+			Provider: client_mock.NewMockProvider(ctrl),
+		})
 
 		// Expect the callbacks in reverse-order of execution
 		gomock.InOrder(
@@ -242,7 +259,10 @@ func TestPluginSystemInterceptors(t *testing.T) {
 			) error {
 				return fmt.Errorf("plugin error")
 			})
-		ps.addPlugin(plugin)
+		ps.addPlugin(&client.PluginInstance{
+			Plugin:   plugin,
+			Provider: client_mock.NewMockProvider(ctrl),
+		})
 
 		// Hook interceptors
 		runInterceptor := ps.RunHooksInterceptor(streams)

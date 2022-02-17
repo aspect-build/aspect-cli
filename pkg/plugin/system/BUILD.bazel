@@ -2,10 +2,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "system",
-    srcs = [
-        "aspectplugins.go",
-        "system.go",
-    ],
+    srcs = ["system.go"],
     importpath = "aspect.build/cli/pkg/plugin/system",
     visibility = ["//visibility:public"],
     deps = [
@@ -13,11 +10,9 @@ go_library(
         "//pkg/aspecterrors",
         "//pkg/interceptors",
         "//pkg/ioutils",
-        "//pkg/plugin/sdk/v1alpha2/config",
-        "//pkg/plugin/sdk/v1alpha2/plugin",
+        "//pkg/plugin/client",
+        "//pkg/plugin/loader",
         "//pkg/plugin/system/bep",
-        "@com_github_hashicorp_go_hclog//:go-hclog",
-        "@com_github_hashicorp_go_plugin//:go-plugin",
         "@com_github_spf13_cobra//:cobra",
         "@in_gopkg_yaml_v2//:yaml_v2",
     ],
@@ -31,6 +26,8 @@ go_test(
         "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",
         "//pkg/ioutils",
+        "//pkg/plugin/client",
+        "//pkg/plugin/client/mock",
         "//pkg/plugin/sdk/v1alpha2/plugin/mock",
         "@com_github_golang_mock//gomock",
         "@com_github_onsi_gomega//:gomega",
