@@ -15,6 +15,8 @@ import (
 	"reflect"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	yaml "gopkg.in/yaml.v2"
 
 	"github.com/spf13/cobra"
@@ -71,28 +73,32 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 		return fmt.Errorf("failed to configure plugin system: %w", err)
 	}
 
+	g := new(errgroup.Group)
+
 	for _, p := range aspectplugins {
-		// TODO(f0rmiga): make this loop concurrent so that all plugins are
-		// configured faster.
+		p := p
 
-		aspectplugin, err := ps.clientFactory.New(p, streams)
-		if err != nil {
-			return fmt.Errorf("failed to configure plugin system: %w", err)
-		}
+		g.Go(func() error {
+			aspectplugin, err := ps.clientFactory.New(p, streams)
+			if err != nil {
+				return fmt.Errorf("failed to configure plugin system: %w", err)
+			}
 
-		propertiesBytes, err := yaml.Marshal(p.Properties)
-		if err != nil {
-			return fmt.Errorf("failed to configure plugin system: %w", err)
-		}
+			propertiesBytes, err := yaml.Marshal(p.Properties)
+			if err != nil {
+				return fmt.Errorf("failed to configure plugin system: %w", err)
+			}
 
-		if err := aspectplugin.Setup(propertiesBytes); err != nil {
-			return fmt.Errorf("failed to setup plugin: %w", err)
-		}
+			if err := aspectplugin.Setup(propertiesBytes); err != nil {
+				return fmt.Errorf("failed to setup plugin: %w", err)
+			}
 
-		ps.addPlugin(aspectplugin)
+			ps.addPlugin(aspectplugin)
+			return nil
+		})
 	}
 
-	return nil
+	return g.Wait()
 }
 
 func (ps *pluginSystem) addPlugin(plugin *client.PluginInstance) {
