@@ -40,3 +40,15 @@ repos:
     rev: "v2.4.0"
     hooks:
       - id: prettier
+  - repo: https://github.com/Lucas-C/pre-commit-hooks
+    rev: v1.1.12
+    hooks:
+      - id: insert-license
+        files: \.go$
+        args:
+          # Note: when changing the license_header file, use this to replace existing headers
+          # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
+          - --license-filepath
+          - hooks/license_header
+          - --comment-style
+          - /*| *| */
