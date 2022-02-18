@@ -38,9 +38,9 @@ func createInterceptorCommand() *cobra.Command {
 	return cmd
 }
 
-func generateNode(p plugin.Plugin) *client.PluginInstance {
+func generatePluginInstance(p plugin.Plugin, ctrl *gomock.Controller) *client.PluginInstance {
 	return &client.PluginInstance{
-		Plugin:         plugin,
+		Plugin:         p,
 		Provider:       client_mock.NewMockProvider(ctrl),
 		CustomCommands: map[string]*plugin.Command{},
 	}
@@ -60,7 +60,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(generateNode(plugin))
+		ps.addPlugin(generatePluginInstance(plugin, ctrl))
 
 		// Expect the callbacks in reverse-order of execution
 		gomock.InOrder(
@@ -100,8 +100,8 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin1 := plugin_mock.NewMockPlugin(ctrl)
 		plugin2 := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(generateNode(plugin1))
-		ps.addPlugin(generateNode(plugin2))
+		ps.addPlugin(generatePluginInstance(plugin1, ctrl))
+		ps.addPlugin(generatePluginInstance(plugin2, ctrl))
 
 		// Expect the callbacks in reverse-order of execution, plugins in order added
 		gomock.InOrder(
@@ -138,7 +138,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		// Plugin to be invoked
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(generateNode(plugin))
+		ps.addPlugin(generatePluginInstance(plugin, ctrl))
 
 		// Expect the callbacks in reverse-order of execution
 		gomock.InOrder(
@@ -178,7 +178,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		// Plugin to be invoked
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(generateNode(plugin))
+		ps.addPlugin(generatePluginInstance(plugin, ctrl))
 
 		// Expect the callbacks in reverse-order of execution
 		gomock.InOrder(
@@ -255,7 +255,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 			) error {
 				return fmt.Errorf("plugin error")
 			})
-		ps.addPlugin(generateNode(plugin))
+		ps.addPlugin(generatePluginInstance(plugin, ctrl))
 
 		// Hook interceptors
 		runInterceptor := ps.RunHooksInterceptor(streams)
