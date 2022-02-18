@@ -23,8 +23,8 @@ git diff --name-only "origin/${GITHUB_BASE_REF}..${GITHUB_SHA}" | while read -r 
     # check if filepath matches an invalid path
     for invalid_path in "${INVALID_FILE_PATHS[@]}"; do
         if [[ "${file}" == "${invalid_path}"* ]]; then
-            echo "Branch contains changes to versioned sdk files"
-            echo "Add the 'allow sdk change' tag to bypass this check"
+            echo "Branch contains changes to versioned SDK files."
+            echo "Add the 'allow sdk change' tag to the PR and re-trigger CI to bypass this check."
             exit 1
         fi
     done
