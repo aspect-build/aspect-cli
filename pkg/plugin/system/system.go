@@ -115,7 +115,7 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 
 		for _, command := range result {
 
-			callback := node.payload.CustomCommandCallback
+			callback := node.payload.CustomCommandExecutor
 
 			cmd.AddCommand(&cobra.Command{
 				Use:   command.Use,
