@@ -15,6 +15,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -104,7 +105,6 @@ type Clean struct {
 	deleteCounter   int
 	chanErrors      *errorSet
 	errorChannel    chan error
-	deleteChannel   chan string
 	sizeCalcChannel chan bazelDirInfo
 }
 
@@ -207,20 +207,31 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 }
 
 func (c *Clean) reclaimAll() error {
+	// If something unexpected goes wrong with the recursive waiting functions found below,
+	// we want to make sure the user can still kill the process
+	ctrlC := make(chan os.Signal, 1)
+	signal.Notify(ctrlC, os.Interrupt)
+	go func() {
+		for range ctrlC {
+			os.Exit(0)
+		}
+	}()
+
 	c.bazelDirs = make(map[string]bazelDirInfo)
 
 	c.sizeCalcChannel = make(chan bazelDirInfo, 64)
-	c.deleteChannel = make(chan string, 128)
 	c.errorChannel = make(chan error, 64)
+
+	deleteQueue := make(chan string, 128)
 
 	// threads for calculating sizes of directories
 	for i := 0; i < 5; i++ {
 		go c.directoryProcessor()
 	}
 
-	// threads for deleting directories
-	for i := 0; i < 5; i++ {
-		go c.deleteProcessor()
+	// Goroutines for deleting directories.
+	for i := 0; i < 8; i++ {
+		go c.deleteProcessor(deleteQueue)
 	}
 
 	// thread for processing errors from the other threads
@@ -256,7 +267,7 @@ func (c *Clean) reclaimAll() error {
 		if promptErr == nil {
 			fmt.Printf("%s added to the delete queue\n", dir.workspaceName)
 			c.manipulateDeleteCounter(1)
-			c.deleteChannel <- dir.path
+			deleteQueue <- dir.path
 			spaceReclaimed = spaceReclaimed + dir.size
 		}
 
@@ -288,7 +299,7 @@ func (c *Clean) reclaimAll() error {
 
 	// close all the channels
 	close(c.sizeCalcChannel)
-	close(c.deleteChannel)
+	close(deleteQueue)
 	close(c.errorChannel)
 
 	if c.chanErrors.size > 0 {
@@ -485,35 +496,34 @@ func (c *Clean) directoryProcessor() {
 	}
 }
 
-func (c *Clean) deleteProcessor() {
-	for dir := range c.deleteChannel {
+func (c *Clean) deleteProcessor(deleteQueue chan string) {
+	for dir := range deleteQueue {
 
 		// We know that there will be an "external" folder that could be deleted in parallel.
 		// So we can move those folders to a tmp filepath and add them as seperate deletes that will
 		// therefore happen in parallel.
-		externalFolders, _ := ioutil.ReadDir(dir + "/external")
+		externalFolders, _ := ioutil.ReadDir(filepath.Join(dir, "external"))
 		for _, folder := range externalFolders {
 			newPath := c.MoveFolderToTmp(dir, folder.Name())
 
 			if newPath != "" {
 				c.manipulateDeleteCounter(1)
-				c.deleteChannel <- newPath
+				deleteQueue <- newPath
 			}
 		}
 
 		// otherwise certain files will throw a permission error when we try to remove them
-		_, err := c.ChangeFolderPermissions(dir)
-		if err != nil {
-			c.errorChannel <- fmt.Errorf("failed to chmod on %s: %w", dir, err)
+		if _, err := c.ChangeFolderPermissions(dir); err != nil {
 			c.manipulateDeleteCounter(-1)
-			continue
+			c.errorChannel <- fmt.Errorf("failed to delete %q: %w", dir, err)
 		}
 
 		// remove entire folder
-		err = os.RemoveAll(dir)
-		if err != nil {
-			c.errorChannel <- fmt.Errorf("failed to delete %s: %w", dir, err)
+		if err := os.RemoveAll(dir); err != nil {
+			c.manipulateDeleteCounter(-1)
+			c.errorChannel <- fmt.Errorf("failed to delete %q: %w", dir, err)
 		}
+
 		c.manipulateDeleteCounter(-1)
 	}
 }
