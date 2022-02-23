@@ -107,6 +107,12 @@ func (ps *pluginSystem) addPlugin(plugin *client.PluginInstance) {
 }
 
 func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
+	existingCommands := make(map[string]*cobra.Command)
+
+	for _, command := range cmd.Commands() {
+		existingCommands[command.Use] = command
+	}
+
 	for node := ps.plugins.head; node != nil; node = node.next {
 		result, err := node.payload.Plugin.CustomCommands()
 		if err != nil {
@@ -114,6 +120,9 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 		}
 
 		for _, command := range result {
+			if _, ok := existingCommands[command.Use]; ok {
+				return fmt.Errorf("failed to register custom commands: plugin implements a command with a protected name: %s", command.Use)
+			}
 
 			callback := node.payload.CustomCommandExecutor
 
