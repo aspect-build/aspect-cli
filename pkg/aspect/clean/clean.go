@@ -10,6 +10,7 @@ package clean
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -55,9 +56,7 @@ implementation can be fixed.
 	rememberLine2 = "Remember this choice and skip the prompt in the future"
 )
 
-var (
-	diskCacheRegex = regexp.MustCompile(`--disk_cache.+?(\/.+?)"`)
-)
+var diskCacheRegex = regexp.MustCompile(`--disk_cache.+?(\/.+?)"`)
 
 type SelectRunner interface {
 	Run() (int, string, error)
@@ -206,11 +205,11 @@ func (c *Clean) reclaimAll() error {
 
 	errors := errorSet{nodes: make(map[errorNode]struct{})}
 
-	// thread for processing errors from the other threads
+	// Goroutine for processing errors from the other threads
 	go c.errorProcessor(errorQueue, &errorWaitGroup, &errors)
 	errorWaitGroup.Add(1)
 
-	// threads for calculating sizes of directories
+	// Goroutines for calculating sizes of directories
 	for i := 0; i < 5; i++ {
 		go c.sizeCalculator(sizeCalcQueue, confirmationQueue, &sizeCalcWaitGroup)
 		sizeCalcWaitGroup.Add(1)
@@ -224,9 +223,7 @@ func (c *Clean) reclaimAll() error {
 	go c.sizePrinter(sizeQueue, &sizeWaitGroup)
 	sizeWaitGroup.Add(1)
 
-	go c.errorProcessor(errorQueue, &errorWaitGroup, &errors)
-	errorWaitGroup.Add(1)
-
+	// Goroutine for prompting the user to confirm deletion.
 	go c.confirmationActor(confirmationQueue, deleteQueue, &confirmationWaitGroup, &deleteWaitGroup)
 	confirmationWaitGroup.Add(1)
 
@@ -237,7 +234,7 @@ func (c *Clean) reclaimAll() error {
 	c.findBazelWorkspaces(sizeCalcQueue, errorQueue)
 
 	// directories added to sizeCalcQueue synchronously so we can close the
-	// channel before waiting
+	// channel before waiting for the calculations to complete
 	close(sizeCalcQueue)
 	sizeCalcWaitGroup.Wait()
 
@@ -251,14 +248,14 @@ func (c *Clean) reclaimAll() error {
 	deleteWaitGroup.Wait()
 	close(deleteQueue)
 
+	// sizeQueue will contain all the sizes once the deletes are completed so
+	// we can close the chan before we wait
 	close(sizeQueue)
 	sizeWaitGroup.Wait()
 
+	// all the errors we will receive will be in the errorQueue at this point so we can close the queue before waiting
 	close(errorQueue)
 	errorWaitGroup.Wait()
-
-	// _, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(spaceReclaimed)
-	// fmt.Printf("Disk Space Gained: %.2f %s. Exiting...\n", hRSpaceReclaimed, unit)
 
 	if errors.size > 0 {
 		return errors.generateError()
@@ -290,6 +287,25 @@ func (c *Clean) confirmationActor(
 			fmt.Printf("%s added to the delete queue\n", bazelDir.workspaceName)
 			deleteWaitGroup.Add(1)
 			deleteQueue <- bazelDir
+		} else {
+			// promptui.ErrInterrupt is the error returned when the user inputs ctrl-c
+			if errors.Is(err, promptui.ErrInterrupt) {
+				// if the user has hit ctrl-c we want to stop prompting them and allow
+				// the program to exit gracefully
+				break
+			}
+		}
+
+		promptContinue := &promptui.Prompt{
+			Label:     "Would you like to continue?",
+			IsConfirm: true,
+		}
+		if _, err := promptContinue.Run(); err != nil {
+			break
+		} else {
+			if errors.Is(err, promptui.ErrInterrupt) {
+				break
+			}
 		}
 	}
 	confirmationWaitGroup.Done()
@@ -306,7 +322,7 @@ func (c *Clean) findDiskCaches(
 	}
 	defer os.RemoveAll(tempDir)
 
-	bepLocation := tempDir + "/bep.json"
+	bepLocation := filepath.Join(tempDir, "bep.json")
 
 	// Running an invalid query should ensure that repository rules are not executed.
 	// However, bazel will still emit its BEP containing the flag that we are interested in.
@@ -382,14 +398,14 @@ func (c *Clean) findBazelWorkspaces(
 	// find bazel workspaces and start processing
 	for _, workspace := range bazelWorkspaces {
 		workspaceInfo := bazelDirInfo{
-			path:               bazelBaseDir + "/" + workspace.Name(),
+			path:               filepath.Join(bazelBaseDir, workspace.Name()),
 			isCurrentWorkspace: workspace.Name() == currentWorkingBase,
 			isCache:            false,
 		}
 
 		workspaceInfo.accessTime = c.GetAccessTime(workspace)
 
-		execrootFiles, readDirErr := ioutil.ReadDir(bazelBaseDir + "/" + workspace.Name() + "/execroot")
+		execrootFiles, readDirErr := ioutil.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
 		if readDirErr != nil {
 			// install and cache folders will end up here. Dont want to remove these
 			continue
@@ -510,36 +526,36 @@ func (c *Clean) sizePrinter(sizeQueue <-chan float64, waitGroup *sync.WaitGroup)
 }
 
 func (c *Clean) findBazelBaseDir() (string, string, error) {
-	var bazelOutputBase, currentWorkingBase string
-
 	cwd, err := os.Getwd()
-
 	if err != nil {
-		return bazelOutputBase, currentWorkingBase, err
+		return "", "", fmt.Errorf("failed to find Bazel base dir: %w", err)
 	}
 
 	files, err := ioutil.ReadDir(cwd)
 	if err != nil {
-		return bazelOutputBase, currentWorkingBase, err
+		return "", "", fmt.Errorf("failed to find Bazel base dir: %w", err)
 	}
 
 	for _, file := range files {
 
 		// bazel-bin, bazel-out, etc... will be symlinks, so we can eliminate non-symlinks immediately
 		if file.Mode()&os.ModeSymlink != 0 {
-			actualPath, _ := os.Readlink(cwd + "/" + file.Name())
+			actualPath, err := os.Readlink(filepath.Join(cwd, file.Name()))
+			if err != nil {
+				return "", "", fmt.Errorf("failed to find Bazel base dir: %w", err)
+			}
 
 			if strings.Contains(actualPath, "bazel") && strings.Contains(actualPath, "/execroot/") {
 				execrootBase := strings.Split(actualPath, "/execroot/")[0]
 				execrootSplit := strings.Split(execrootBase, "/")
-				currentWorkingBase = execrootSplit[len(execrootSplit)-1]
-				bazelOutputBase = strings.Join(execrootSplit[:len(execrootSplit)-1], "/")
-				break
+				currentWorkingBase := execrootSplit[len(execrootSplit)-1]
+				bazelOutputBase := strings.Join(execrootSplit[:len(execrootSplit)-1], "/")
+				return bazelOutputBase, currentWorkingBase, nil
 			}
 		}
 	}
 
-	return bazelOutputBase, currentWorkingBase, err
+	return "", "", fmt.Errorf("failed to find Bazel base dir: bazel output symlinks not found in directory")
 }
 
 func (c *Clean) getDirSize(path string) (float64, float64, string) {
