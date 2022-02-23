@@ -16,6 +16,7 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/proto"
 )
 
 // Plugin determines how an aspect Plugin should be implemented.
@@ -77,10 +78,24 @@ func (*Base) PostRunHook(bool, ioutils.PromptRunner) error {
 type CustomCommandFn (func(ctx context.Context, args []string, bzl bazel.Bazel) error)
 
 type Command struct {
-	Use       string
-	ShortDesc string
-	LongDesc  string
-	Run       CustomCommandFn
+	*proto.Command
+	Run CustomCommandFn
+}
+
+func NewCommand(
+	use string,
+	shortDesc string,
+	longDesc string,
+	run func(ctx context.Context, args []string, bzl bazel.Bazel) error,
+) *Command {
+	return &Command{
+		Command: &proto.Command{
+			Use:       use,
+			ShortDesc: shortDesc,
+			LongDesc:  longDesc,
+		},
+		Run: run,
+	}
 }
 
 type CommandManager interface {

@@ -104,12 +104,7 @@ func (m *GRPCServer) CustomCommands(
 
 	pbCommands := make([]*proto.Command, 0, len(customCommands))
 	for _, command := range customCommands {
-		pbCommand := &proto.Command{
-			Use:       command.Use,
-			ShortDesc: command.ShortDesc,
-			LongDesc:  command.LongDesc,
-		}
-		pbCommands = append(pbCommands, pbCommand)
+		pbCommands = append(pbCommands, command.Command)
 	}
 
 	pb := &proto.CustomCommandsRes{
@@ -225,11 +220,7 @@ func (m *GRPCClient) CustomCommands() ([]*Command, error) {
 	customCommands := make([]*Command, 0)
 
 	for _, pbCommand := range customCommandsPB.Commands {
-		customCommands = append(customCommands, &Command{
-			Use:       pbCommand.Use,
-			ShortDesc: pbCommand.ShortDesc,
-			LongDesc:  pbCommand.LongDesc,
-		})
+		customCommands = append(customCommands, &Command{Command: pbCommand})
 	}
 
 	return customCommands, err

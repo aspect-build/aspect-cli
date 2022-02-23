@@ -9,6 +9,7 @@ go_library(
         "//pkg/bazel",
         "//pkg/plugin/sdk/v1alpha2/config",
         "//pkg/plugin/sdk/v1alpha2/plugin",
+        "//pkg/plugin/sdk/v1alpha2/proto",
         "@com_github_hashicorp_go_plugin//:go-plugin",
     ],
 )
