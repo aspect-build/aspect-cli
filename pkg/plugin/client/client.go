@@ -74,9 +74,8 @@ func (*clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.Stre
 	}
 
 	res := &PluginInstance{
-		Plugin:         rawplugin.(plugin.Plugin),
-		Provider:       goclient,
-		CustomCommands: map[string]*plugin.Command{},
+		Plugin:   rawplugin.(plugin.Plugin),
+		Provider: goclient,
 	}
 
 	if customCommandExecutor, ok := rawplugin.(CustomCommandExecutor); ok {
@@ -98,6 +97,5 @@ type Provider interface {
 type PluginInstance struct {
 	plugin.Plugin
 	Provider
-	CustomCommands        map[string]*plugin.Command
 	CustomCommandExecutor CustomCommandExecutor
 }
