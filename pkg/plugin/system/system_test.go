@@ -532,7 +532,7 @@ func TestConfigure(t *testing.T) {
 
 		err := ps.Configure(streams)
 
-		g.Expect(err).To(MatchError("failed to setup plugin: setup error"))
+		g.Expect(err).To(MatchError("failed to configure plugin system: setup error"))
 	})
 
 	t.Run("marshaled properties are passed to plugin.Setup", func(t *testing.T) {

@@ -15,11 +15,9 @@ import (
 	"reflect"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
-	yaml "gopkg.in/yaml.v2"
-
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
+	yaml "gopkg.in/yaml.v2"
 
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
@@ -90,7 +88,7 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			}
 
 			if err := aspectplugin.Setup(propertiesBytes); err != nil {
-				return fmt.Errorf("failed to setup plugin: %w", err)
+				return fmt.Errorf("failed to configure plugin system: %w", err)
 			}
 
 			ps.addPlugin(aspectplugin)
