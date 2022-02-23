@@ -48,13 +48,6 @@ type pluginSystem struct {
 	promptRunner  ioutils.PromptRunner
 }
 
-// CustomCommandExecutor requires the Plugin implementations to provide the
-// ExecuteCustomCommand method so that the Core can ask over gRPC for a specific command to
-// be executed. `cmdName` is the name of the custom command the plugin created.
-type CustomCommandExecutor interface {
-	ExecuteCustomCommand(cmdName string, ctx context.Context, args []string) error
-}
-
 // NewPluginSystem instantiates a default internal implementation of the
 // PluginSystem interface.
 func NewPluginSystem() PluginSystem {
