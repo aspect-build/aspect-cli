@@ -100,7 +100,7 @@ func NewCommand(
 
 type CommandManager interface {
 	Save(commands []*Command) error
-	Execute(command string, ctx context.Context, args []string) error // Not sure about this signature, haven't read the whole code yet.
+	Execute(command string, ctx context.Context, args []string) error
 }
 
 type PluginCommandManager struct {
