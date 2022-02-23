@@ -100,6 +100,10 @@ func (m *GRPCServer) CustomCommands(
 ) (*proto.CustomCommandsRes, error) {
 	customCommands, err := m.Impl.CustomCommands()
 
+	if err != nil {
+		return nil, err
+	}
+
 	m.commandManager.Save(customCommands)
 
 	pbCommands := make([]*proto.Command, 0, len(customCommands))
@@ -111,7 +115,7 @@ func (m *GRPCServer) CustomCommands(
 		Commands: pbCommands,
 	}
 
-	return pb, err
+	return pb, nil
 }
 
 // ExecuteCustomCommand translates the gRPC call to the sdk ExecuteCustomCommand
