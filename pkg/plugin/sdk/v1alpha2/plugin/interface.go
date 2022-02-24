@@ -75,13 +75,18 @@ func (*Base) PostRunHook(bool, ioutils.PromptRunner) error {
 	return nil
 }
 
+// CustomCommandFn defines the parameters of that the Run functions will be called with.
 type CustomCommandFn (func(ctx context.Context, args []string, bzl bazel.Bazel) error)
 
+// Command defines the information needed to create a custom command that will be callable when
+// running the CLI.
 type Command struct {
 	*proto.Command
 	Run CustomCommandFn
 }
 
+// NewCommand is a wrapper around Command. Designed to be used as a cleaner way to make a Command
+// given Command's nested proto
 func NewCommand(
 	use string,
 	shortDesc string,
@@ -98,15 +103,20 @@ func NewCommand(
 	}
 }
 
+// CommandManager is internal to the SDK and is used to manage custom commands that
+// are provided by plugins.
 type CommandManager interface {
 	Save(commands []*Command) error
 	Execute(command string, ctx context.Context, args []string) error
 }
 
+// PluginCommandManager is internal to the SDK and is used to manage custom commands that
+// are provided by plugins.
 type PluginCommandManager struct {
 	commands map[string]CustomCommandFn
 }
 
+// Save satisfies CommandManager.
 func (cm *PluginCommandManager) Save(commands []*Command) error {
 	for _, cmd := range commands {
 		if _, exists := cm.commands[cmd.Use]; exists {
@@ -118,6 +128,7 @@ func (cm *PluginCommandManager) Save(commands []*Command) error {
 	return nil
 }
 
+// Execute satisfies CommandManager.
 func (cm *PluginCommandManager) Execute(command string, ctx context.Context, args []string) error {
 	workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
 	bzl := bazel.New()

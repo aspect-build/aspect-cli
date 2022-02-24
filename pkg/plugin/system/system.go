@@ -99,6 +99,8 @@ func (ps *pluginSystem) addPlugin(plugin *client.PluginInstance) {
 	ps.plugins.insert(plugin)
 }
 
+// RegisterCustomCommands processes custom commands provided by plugins and adds
+// them as commands to the core whilst setting up callbacks for the those commands.
 func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 	existingCommands := make(map[string]*cobra.Command)
 
