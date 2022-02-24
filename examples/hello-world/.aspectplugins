@@ -1,0 +1,4 @@
+- name: hello-world
+  from: ../../bazel-bin/plugins/hello-world/hello-world_/hello-world
+  # The possible log levels are: TRACE, DEBUG, INFO, WARN, ERROR, OFF.
+  log_level: OFF

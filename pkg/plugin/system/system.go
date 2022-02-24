@@ -33,6 +33,7 @@ import (
 type PluginSystem interface {
 	Configure(streams ioutils.Streams) error
 	TearDown()
+	RegisterCustomCommands(cmd *cobra.Command) error
 	BESBackendInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
@@ -96,6 +97,46 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 
 func (ps *pluginSystem) addPlugin(plugin *client.PluginInstance) {
 	ps.plugins.insert(plugin)
+}
+
+// RegisterCustomCommands processes custom commands provided by plugins and adds
+// them as commands to the core whilst setting up callbacks for the those commands.
+func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
+	internalCommands := make(map[string]struct{})
+
+	for _, command := range cmd.Commands() {
+		internalCommands[command.Use] = struct{}{}
+	}
+
+	for node := ps.plugins.head; node != nil; node = node.next {
+		result, err := node.payload.Plugin.CustomCommands()
+		if err != nil {
+			return fmt.Errorf("failed to register custom commands: %w", err)
+		}
+
+		for _, command := range result {
+			if _, ok := internalCommands[command.Use]; ok {
+				return fmt.Errorf("failed to register custom commands: plugin implements a command with a protected name: %s", command.Use)
+			}
+
+			callback := node.payload.CustomCommandExecutor
+
+			cmd.AddCommand(&cobra.Command{
+				Use:   command.Use,
+				Short: command.ShortDesc,
+				Long:  command.LongDesc,
+				RunE: interceptors.Run(
+					[]interceptors.Interceptor{
+						interceptors.WorkspaceRootInterceptor(),
+					},
+					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+						return callback.ExecuteCustomCommand(command.Use, ctx, args)
+					},
+				),
+			})
+		}
+	}
+	return nil
 }
 
 // TearDown tears down the plugin system, making all the necessary actions to

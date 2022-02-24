@@ -20,6 +20,7 @@ import (
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
 )
 
 func main() {
@@ -27,6 +28,8 @@ func main() {
 }
 
 type ErrorAugmentorPlugin struct {
+	plugin.Base
+
 	properties             []byte
 	hintMap                map[*regexp.Regexp]string
 	yamlUnmarshalStrict    func(in []byte, out interface{}) (err error)

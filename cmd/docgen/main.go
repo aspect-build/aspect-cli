@@ -31,6 +31,10 @@ func main() {
 
 	aspectRootCmd := root.NewDefaultRootCmd(pluginSystem)
 
+	if err := pluginSystem.RegisterCustomCommands(cmd); err != nil {
+		log.Fatal(err)
+	}
+
 	cmd.AddCommand(NewBzlCommandListCmd(aspectRootCmd))
 	cmd.AddCommand(NewGenMarkdownCmd(aspectRootCmd))
 

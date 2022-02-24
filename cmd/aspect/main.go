@@ -48,6 +48,12 @@ func main() {
 	defer pluginSystem.TearDown()
 
 	cmd := root.NewDefaultRootCmd(pluginSystem)
+
+	if err := pluginSystem.RegisterCustomCommands(cmd); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		var exitErr *aspecterrors.ExitError
 		if errors.As(err, &exitErr) {

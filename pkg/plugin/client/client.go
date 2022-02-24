@@ -9,6 +9,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 
@@ -28,6 +29,13 @@ type Factory interface {
 
 func NewFactory() Factory {
 	return &clientFactory{}
+}
+
+// CustomCommandExecutor requires the Plugin implementations to provide the
+// ExecuteCustomCommand method so that the Core can ask over gRPC for a specific command to
+// be executed. `cmdName` is the name of the custom command the plugin created.
+type CustomCommandExecutor interface {
+	ExecuteCustomCommand(cmdName string, ctx context.Context, args []string) error
 }
 
 type clientFactory struct{}
@@ -70,6 +78,10 @@ func (*clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.Stre
 		Provider: goclient,
 	}
 
+	if customCommandExecutor, ok := rawplugin.(CustomCommandExecutor); ok {
+		res.CustomCommandExecutor = customCommandExecutor
+	}
+
 	return res, nil
 }
 
@@ -85,4 +97,5 @@ type Provider interface {
 type PluginInstance struct {
 	plugin.Plugin
 	Provider
+	CustomCommandExecutor
 }

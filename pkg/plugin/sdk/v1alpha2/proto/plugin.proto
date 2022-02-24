@@ -9,10 +9,12 @@ option go_package = "aspect.build/cli/pkg/plugin/sdk/v1alpha2/proto";
 // Plugin is the service used by the Core to communicate with a Plugin instance.
 service Plugin {
   rpc BEPEventCallback(BEPEventCallbackReq) returns (BEPEventCallbackRes);
-  rpc Setup(SetupReq) returns (SetupRes);
+  rpc CustomCommands(CustomCommandsReq) returns (CustomCommandsRes);
+  rpc ExecuteCustomCommand(ExecuteCustomCommandReq) returns (ExecuteCustomCommandRes);
   rpc PostBuildHook(PostBuildHookReq) returns (PostBuildHookRes);
   rpc PostTestHook(PostTestHookReq) returns (PostTestHookRes);
   rpc PostRunHook(PostRunHookReq) returns (PostRunHookRes);
+  rpc Setup(SetupReq) returns (SetupRes);
 }
 
 message BEPEventCallbackReq {
@@ -33,6 +35,30 @@ message PostBuildHookReq {
 }
 
 message PostBuildHookRes {}
+
+message Command {
+  string use = 1;
+  string short_desc = 2;
+  string long_desc = 3;
+}
+
+message CustomCommandsReq {}
+
+message CustomCommandsRes {
+  repeated Command commands = 1;
+}
+
+message Context {
+  string workspaceRoot = 1;
+}
+
+message ExecuteCustomCommandReq {
+  string customCommand = 1;
+  Context ctx = 2;
+  repeated string args = 3;
+}
+
+message ExecuteCustomCommandRes {}
 
 message PostTestHookReq {
   uint32 broker_id = 1;
