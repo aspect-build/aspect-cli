@@ -98,14 +98,11 @@ func (b *bazel) Spawn(command []string) (int, error) {
 
 func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 	repos := b.createRepositories()
-	if len(invocationID) < 1 {
-		panic("Illegal state: running bazel without invocationID set")
-	}
 	if len(b.workspaceRoot) < 1 {
 		panic("Illegal state: running bazel without the workspaceRoot set")
 	}
 
-	if !b.containsFlag(command, "invocation_id") {
+	if len(invocationID) > 0 && !b.containsFlag(command, "invocation_id") {
 		command = append(command, "--invocation_id="+invocationID)
 	}
 

@@ -10,6 +10,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 
 	"github.com/spf13/cobra"
@@ -17,10 +18,13 @@ import (
 
 	"aspect.build/cli/cmd/aspect/root"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/logger"
 	"aspect.build/cli/pkg/plugin/system"
 )
 
 func main() {
+	logger.CreateMockLogger(io.Discard)
+
 	cmd := &cobra.Command{Use: "docgen"}
 
 	pluginSystem := system.NewPluginSystem()
