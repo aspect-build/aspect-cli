@@ -221,7 +221,7 @@ func (m *GRPCClient) CustomCommands() ([]*Command, error) {
 	req := &proto.CustomCommandsReq{}
 	customCommandsPB, err := m.client.CustomCommands(context.Background(), req)
 
-	customCommands := make([]*Command, 0)
+	customCommands := make([]*Command, 0, len(customCommandsPB.Commands))
 
 	for _, pbCommand := range customCommandsPB.Commands {
 		customCommands = append(customCommands, &Command{Command: pbCommand})

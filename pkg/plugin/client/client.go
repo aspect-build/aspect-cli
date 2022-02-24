@@ -97,5 +97,5 @@ type Provider interface {
 type PluginInstance struct {
 	plugin.Plugin
 	Provider
-	CustomCommandExecutor CustomCommandExecutor
+	CustomCommandExecutor
 }
