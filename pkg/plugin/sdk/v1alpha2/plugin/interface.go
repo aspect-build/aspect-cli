@@ -91,7 +91,7 @@ func NewCommand(
 	use string,
 	shortDesc string,
 	longDesc string,
-	run func(ctx context.Context, args []string, bzl bazel.Bazel) error,
+	run CustomCommandFn,
 ) *Command {
 	return &Command{
 		Command: &proto.Command{
