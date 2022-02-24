@@ -110,7 +110,7 @@ type PluginCommandManager struct {
 func (cm *PluginCommandManager) Save(commands []*Command) error {
 	for _, cmd := range commands {
 		if _, exists := cm.commands[cmd.Use]; exists {
-			return fmt.Errorf("command '%s' is declared more than once by plugin", cmd.Use)
+			return fmt.Errorf("command %q is declared more than once by plugin", cmd.Use)
 		}
 		cm.commands[cmd.Use] = cmd.Run
 	}
