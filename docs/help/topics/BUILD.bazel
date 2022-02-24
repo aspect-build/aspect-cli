@@ -9,6 +9,7 @@ bindata(
         "target-syntax.md",
     ],
     package = "topics",
+    strip_external = True,
 )
 
 go_library(
