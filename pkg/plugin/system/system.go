@@ -102,10 +102,10 @@ func (ps *pluginSystem) addPlugin(plugin *client.PluginInstance) {
 // RegisterCustomCommands processes custom commands provided by plugins and adds
 // them as commands to the core whilst setting up callbacks for the those commands.
 func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
-	existingCommands := make(map[string]*cobra.Command)
+	internalCommands := make(map[string]struct{})
 
 	for _, command := range cmd.Commands() {
-		existingCommands[command.Use] = command
+		internalCommands[command.Use] = struct{}{}
 	}
 
 	for node := ps.plugins.head; node != nil; node = node.next {
@@ -115,7 +115,7 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 		}
 
 		for _, command := range result {
-			if _, ok := existingCommands[command.Use]; ok {
+			if _, ok := internalCommands[command.Use]; ok {
 				return fmt.Errorf("failed to register custom commands: plugin implements a command with a protected name: %s", command.Use)
 			}
 
