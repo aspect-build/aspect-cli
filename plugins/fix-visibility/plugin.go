@@ -100,10 +100,7 @@ const removePrivateVisibilityBuildozerCommand = "remove visibility //visibility:
 func (plugin *FixVisibilityPlugin) Setup(
 	properties []byte,
 ) error {
-	plugin.logger.Info("hello there from setup")
-	plugin.logger.Trace("hello there from setup")
-	plugin.logger.Error("hello there from setup")
-	logger.Info("testing from plugin setup")
+	plugin.logger.Info("The plugin has been setup!")
 	return nil
 }
 

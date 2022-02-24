@@ -41,6 +41,7 @@ func generateInvocationID() {
 
 	superSpecialHexString := "617370656374" // I wonder what this says when converted back to a string?
 
+	// TODO: Do we want to add the PID to the end here? Can use os.Getpid()
 	invocationID = dateString + "-" + timeString + "-" + superSpecialHexString
 }
 
@@ -96,7 +97,6 @@ func (b *bazel) Spawn(command []string) (int, error) {
 }
 
 func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
-	// should maybe do the entire thing here? In case someone calls this directly
 	repos := b.createRepositories()
 	if len(invocationID) < 1 {
 		panic("Illegal state: running bazel without invocationID set")
@@ -105,15 +105,7 @@ func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 		panic("Illegal state: running bazel without the workspaceRoot set")
 	}
 
-	containsInvocationId := false
-	for _, cmd := range command {
-		if strings.Contains(cmd, "--invocation_id=") || strings.Contains(cmd, "--invocation_id ") {
-			containsInvocationId = true
-			break
-		}
-	}
-
-	if !containsInvocationId {
+	if !b.containsFlag(command, "invocation_id") {
 		command = append(command, "--invocation_id="+invocationID)
 	}
 
@@ -123,6 +115,15 @@ func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 	exitCode, err := bazelisk.Run(command, repos, out)
 	// if at the end of the command then print here
 	return exitCode, err
+}
+
+func (b *bazel) containsFlag(command []string, flag string) bool {
+	for _, cmd := range command {
+		if strings.Contains(cmd, fmt.Sprintf("--%s=", flag)) || strings.Contains(cmd, fmt.Sprintf("--%s ", flag)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *bazel) Flags() (map[string]*FlagInfo, error) {
