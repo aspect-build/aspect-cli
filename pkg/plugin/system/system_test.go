@@ -10,6 +10,7 @@ package system
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -17,12 +18,15 @@ import (
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/cobra"
+	yaml "gopkg.in/yaml.v2"
 
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/client"
 	client_mock "aspect.build/cli/pkg/plugin/client/mock"
+	"aspect.build/cli/pkg/plugin/loader"
+	loader_mock "aspect.build/cli/pkg/plugin/loader/mock"
 	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin/mock"
 )
 
@@ -276,6 +280,306 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		})
 
 		g.Expect(err).NotTo(BeNil())
+		g.Expect(err.(*aspecterrors.ExitError).Err).To(MatchError("interceptor error"))
 		g.Expect(err.(*aspecterrors.ExitError).ExitCode).To(Equal(1))
+	})
+}
+
+func TestConfigure(t *testing.T) {
+	t.Run("fails when Finder fails to find plugin config file", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
+
+		finder := loader_mock.NewMockFinder(ctrl)
+		finder.EXPECT().Find().Return("", errors.New("finder"))
+
+		ps := &pluginSystem{finder: finder}
+
+		err := ps.Configure(streams)
+
+		g.Expect(err).To(MatchError("failed to configure plugin system: finder"))
+	})
+
+	t.Run("fails when Parser fails to parse plugin config file", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
+
+		finder := loader_mock.NewMockFinder(ctrl)
+		finder.EXPECT().Find().Return("/foo/bar", nil)
+
+		parser := loader_mock.NewMockParser(ctrl)
+		parser.EXPECT().Parse("/foo/bar").Return(
+			[]loader.AspectPlugin{},
+			errors.New("parser"),
+		)
+
+		ps := &pluginSystem{
+			finder: finder,
+			parser: parser,
+		}
+
+		err := ps.Configure(streams)
+
+		g.Expect(err).To(MatchError("failed to configure plugin system: parser"))
+	})
+
+	t.Run("works when 0 plugins are found in config file", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
+
+		finder := loader_mock.NewMockFinder(ctrl)
+		finder.EXPECT().Find().Return("/foo/bar", nil)
+
+		parser := loader_mock.NewMockParser(ctrl)
+		parser.EXPECT().Parse("/foo/bar").Return([]loader.AspectPlugin{}, nil)
+
+		ps := &pluginSystem{
+			finder: finder,
+			parser: parser,
+		}
+
+		err := ps.Configure(streams)
+
+		g.Expect(err).To(BeNil())
+	})
+
+	t.Run("creates and persists each plugin after invoking plugin.Setup()", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
+
+		testPlugin := loader.AspectPlugin{
+			Name:     "test plugin",
+			From:     "...",
+			LogLevel: "debug",
+		}
+		testPlugin2 := loader.AspectPlugin{
+			Name:     "test plugin2",
+			From:     "...",
+			LogLevel: "debug",
+		}
+
+		p1 := plugin_mock.NewMockPlugin(ctrl)
+		p1.EXPECT().Setup(gomock.Any())
+		p2 := plugin_mock.NewMockPlugin(ctrl)
+		p2.EXPECT().Setup(gomock.Any())
+
+		finder := loader_mock.NewMockFinder(ctrl)
+		finder.EXPECT().Find().Return("/foo/bar", nil)
+
+		parser := loader_mock.NewMockParser(ctrl)
+		parser.EXPECT().Parse("/foo/bar").Return(
+			[]loader.AspectPlugin{testPlugin, testPlugin2},
+			nil,
+		)
+
+		factory := client_mock.NewMockFactory(ctrl)
+		factory.EXPECT().New(testPlugin, streams).Return(
+			&client.PluginInstance{
+				Plugin:   p1,
+				Provider: client_mock.NewMockProvider(ctrl),
+			},
+			nil,
+		)
+		factory.EXPECT().New(testPlugin2, streams).Return(
+			&client.PluginInstance{
+				Plugin:   p2,
+				Provider: client_mock.NewMockProvider(ctrl),
+			},
+			nil,
+		)
+
+		ps := &pluginSystem{
+			finder:        finder,
+			parser:        parser,
+			clientFactory: factory,
+			plugins:       &PluginList{},
+		}
+
+		err := ps.Configure(streams)
+
+		g.Expect(err).To(BeNil())
+		g.Expect(ps.plugins.head.payload.Plugin).To(Equal(p1))
+		g.Expect(ps.plugins.tail.payload.Plugin).To(Equal(p2))
+	})
+
+	t.Run("fails when a plugin initialization fails", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
+
+		testPlugin := loader.AspectPlugin{
+			Name:     "test plugin",
+			From:     "...",
+			LogLevel: "debug",
+		}
+		testPlugin2 := loader.AspectPlugin{
+			Name:     "test plugin2",
+			From:     "...",
+			LogLevel: "debug",
+		}
+
+		p1 := plugin_mock.NewMockPlugin(ctrl)
+		p1.EXPECT().Setup(gomock.Any())
+
+		finder := loader_mock.NewMockFinder(ctrl)
+		finder.EXPECT().Find().Return("/foo/bar", nil)
+
+		parser := loader_mock.NewMockParser(ctrl)
+		parser.EXPECT().Parse("/foo/bar").Return(
+			[]loader.AspectPlugin{testPlugin, testPlugin2},
+			nil,
+		)
+
+		factory := client_mock.NewMockFactory(ctrl)
+		factory.EXPECT().New(testPlugin, streams).Return(
+			&client.PluginInstance{
+				Plugin:   p1,
+				Provider: client_mock.NewMockProvider(ctrl),
+			},
+			nil,
+		)
+		factory.EXPECT().New(testPlugin2, streams).Return(
+			&client.PluginInstance{},
+			errors.New("plugin New() error"),
+		)
+
+		ps := &pluginSystem{
+			finder:        finder,
+			parser:        parser,
+			clientFactory: factory,
+			plugins:       &PluginList{},
+		}
+
+		err := ps.Configure(streams)
+
+		g.Expect(err).To(MatchError("failed to configure plugin system: plugin New() error"))
+	})
+
+	t.Run("fails when a plugin setup fails", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
+
+		testPlugin := loader.AspectPlugin{
+			Name:     "test plugin",
+			From:     "...",
+			LogLevel: "debug",
+		}
+		testPlugin2 := loader.AspectPlugin{
+			Name:     "test plugin2",
+			From:     "...",
+			LogLevel: "debug",
+		}
+
+		p1 := plugin_mock.NewMockPlugin(ctrl)
+		p1.EXPECT().Setup(gomock.Any())
+		p2 := plugin_mock.NewMockPlugin(ctrl)
+		p2.EXPECT().Setup(gomock.Any()).Return(errors.New("setup error"))
+
+		finder := loader_mock.NewMockFinder(ctrl)
+		finder.EXPECT().Find().Return("/foo/bar", nil)
+
+		parser := loader_mock.NewMockParser(ctrl)
+		parser.EXPECT().Parse("/foo/bar").Return(
+			[]loader.AspectPlugin{testPlugin, testPlugin2},
+			nil,
+		)
+
+		factory := client_mock.NewMockFactory(ctrl)
+		factory.EXPECT().New(testPlugin, streams).Return(
+			&client.PluginInstance{
+				Plugin:   p1,
+				Provider: client_mock.NewMockProvider(ctrl),
+			},
+			nil,
+		)
+		factory.EXPECT().New(testPlugin2, streams).Return(
+			&client.PluginInstance{
+				Plugin:   p2,
+				Provider: client_mock.NewMockProvider(ctrl),
+			},
+			nil,
+		)
+
+		ps := &pluginSystem{
+			finder:        finder,
+			parser:        parser,
+			clientFactory: factory,
+			plugins:       &PluginList{},
+		}
+
+		err := ps.Configure(streams)
+
+		g.Expect(err).To(MatchError("failed to setup plugin: setup error"))
+	})
+
+	t.Run("marshaled properties are passed to plugin.Setup", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
+
+		pluginProperties := make(map[string]interface{})
+		propertiesBytes, _ := yaml.Marshal(pluginProperties)
+
+		testPlugin := loader.AspectPlugin{
+			Name:       "test plugin",
+			From:       "...",
+			LogLevel:   "debug",
+			Properties: pluginProperties,
+		}
+
+		p1 := plugin_mock.NewMockPlugin(ctrl)
+		p1.EXPECT().Setup(propertiesBytes)
+
+		finder := loader_mock.NewMockFinder(ctrl)
+		finder.EXPECT().Find().Return("/foo/bar", nil)
+
+		parser := loader_mock.NewMockParser(ctrl)
+		parser.EXPECT().Parse("/foo/bar").Return([]loader.AspectPlugin{testPlugin}, nil)
+
+		factory := client_mock.NewMockFactory(ctrl)
+		factory.EXPECT().New(testPlugin, streams).Return(
+			&client.PluginInstance{
+				Plugin:   p1,
+				Provider: client_mock.NewMockProvider(ctrl),
+			},
+			nil,
+		)
+
+		ps := &pluginSystem{
+			finder:        finder,
+			parser:        parser,
+			clientFactory: factory,
+			plugins:       &PluginList{},
+		}
+
+		err := ps.Configure(streams)
+
+		g.Expect(err).To(BeNil())
 	})
 }
