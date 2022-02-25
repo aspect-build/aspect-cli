@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/info"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -46,7 +47,9 @@ See also 'bazel version' for more detailed bazel version
 information.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: interceptors.Run(
-			[]interceptors.Interceptor{},
+			[]interceptors.Interceptor{
+				flags.FlagsInterceptor(streams),
+			},
 			v.Run,
 		),
 	}

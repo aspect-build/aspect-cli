@@ -1,4 +1,12 @@
 /*
+ * Copyright 2022 Aspect Build Systems, Inc.
+ *
+ * Licensed under the aspect.build Commercial License (the "License");
+ * you may not use this file except in compliance with the License.
+ * Full License text is in the LICENSE file included in the root of this repository.
+ */
+
+/*
 Copyright © 2021 Aspect Build Systems Inc
 
 Not licensed for re-use.
@@ -29,10 +37,6 @@ func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 }
 
 func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
-	return flagInterceptor(streams)
-}
-
-func flagInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 		if cmd.DisableFlagParsing {
 			cmd.DisableFlagParsing = false

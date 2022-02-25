@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/test"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
@@ -52,6 +53,7 @@ specify targets.
 `,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
+				flags.FlagsInterceptor(streams),
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.TestHooksInterceptor(streams),
 			},

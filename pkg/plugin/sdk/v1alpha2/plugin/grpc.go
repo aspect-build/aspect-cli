@@ -20,7 +20,6 @@ import (
 	"google.golang.org/grpc"
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
-	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/proto"
 )
@@ -125,7 +124,6 @@ func (m *GRPCServer) ExecuteCustomCommand(
 	req *proto.ExecuteCustomCommandReq,
 ) (*proto.ExecuteCustomCommandRes, error) {
 	ctx := context.Background()
-	ctx = context.WithValue(ctx, interceptors.WorkspaceRootKey, req.Ctx.WorkspaceRoot)
 
 	return &proto.ExecuteCustomCommandRes{},
 		m.commandManager.Execute(req.CustomCommand, ctx, req.Args)
@@ -232,9 +230,7 @@ func (m *GRPCClient) CustomCommands() ([]*Command, error) {
 
 // ExecuteCustomCommand is called from the Core to execute the sdk ExecuteCustomCommand.
 func (m *GRPCClient) ExecuteCustomCommand(customCommand string, ctx context.Context, args []string) error {
-	pbContext := &proto.Context{
-		WorkspaceRoot: ctx.Value(interceptors.WorkspaceRootKey).(string),
-	}
+	pbContext := &proto.Context{}
 
 	req := &proto.ExecuteCustomCommandReq{
 		CustomCommand: customCommand,

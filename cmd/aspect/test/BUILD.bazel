@@ -6,6 +6,7 @@ go_library(
     importpath = "aspect.build/cli/cmd/aspect/test",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/aspect/root/flags",
         "//pkg/aspect/test",
         "//pkg/bazel",
         "//pkg/interceptors",

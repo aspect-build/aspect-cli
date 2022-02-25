@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/buildinfo"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/version"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
@@ -35,7 +36,9 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		Short: "Print the version of aspect CLI as well as tools it invokes.",
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
 		RunE: interceptors.Run(
-			[]interceptors.Interceptor{},
+			[]interceptors.Interceptor{
+				flags.FlagsInterceptor(streams),
+			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 				return v.Run(bzl)
 			},

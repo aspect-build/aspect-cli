@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/build"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -44,6 +45,7 @@ func NewBuildCmd(
 			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
+				flags.FlagsInterceptor(streams),
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.BuildHooksInterceptor(streams),
 			},

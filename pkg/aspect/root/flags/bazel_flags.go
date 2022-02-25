@@ -1,4 +1,12 @@
 /*
+ * Copyright 2022 Aspect Build Systems, Inc.
+ *
+ * Licensed under the aspect.build Commercial License (the "License");
+ * you may not use this file except in compliance with the License.
+ * Full License text is in the LICENSE file included in the root of this repository.
+ */
+
+/*
 Copyright © 2021 Aspect Build Systems Inc
 
 Not licensed for re-use.
@@ -65,6 +73,7 @@ func AddBazelFlags(cmd *cobra.Command) error {
 
 		for _, command := range flag.Commands {
 			if subcommand, ok := subCommands[command]; ok {
+				subcommand.DisableFlagParsing = true // only want to disable flag parsing on actual bazel verbs
 				if flag.GetHasNegativeFlag() {
 					subcommand.Flags().BoolP(flagName, flagAbbreviation, false, flagDoc)
 					subcommand.Flags().Bool("no"+flagName, false, flagDoc)

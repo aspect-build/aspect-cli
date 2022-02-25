@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/run"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
@@ -49,6 +50,7 @@ use 'bazel run --script_path' to write a script and then execute it.
 `,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
+				flags.FlagsInterceptor(streams),
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.RunHooksInterceptor(streams),
 			},
