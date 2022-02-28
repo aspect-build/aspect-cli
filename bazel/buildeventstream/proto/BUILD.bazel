@@ -1,4 +1,4 @@
-# gazelle:exclude dummy.go
+# gazelle:exclude build_event_stream.pb.go
 
 alias(
     name = "proto",
