@@ -5,13 +5,6 @@
  * you may not use this file except in compliance with the License.
  * Full License text is in the LICENSE file included in the root of this repository.
  */
-
-/*
-Copyright © 2021 Aspect Build Systems Inc
-
-Not licensed for re-use.
-*/
-
 package main
 
 import (

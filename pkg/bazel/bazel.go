@@ -100,7 +100,6 @@ func (b *bazel) AQuery(query string) (*ActionGraphContainer, error) {
 	r, w := io.Pipe()
 	agc := &ActionGraphContainer{}
 
-	// decoder := base64.NewDecoder(base64.StdEncoding, r)
 	bazelErrs := make(chan error, 1)
 	defer close(bazelErrs)
 	go func() {
