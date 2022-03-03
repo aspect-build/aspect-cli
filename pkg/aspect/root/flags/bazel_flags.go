@@ -33,11 +33,11 @@ var (
 )
 
 type MultiString struct {
-	value *[]string
+	value []string
 }
 
 func (s *MultiString) Set(value string) error {
-	*s.value = append(*s.value, value)
+	s.value = append(s.value, value)
 	return nil
 }
 
@@ -46,11 +46,11 @@ func (s *MultiString) Type() string {
 }
 
 func (s *MultiString) String() string {
-	return fmt.Sprintf("[ %s ]", strings.Join(*s.value, ", "))
+	return fmt.Sprintf("[ %s ]", strings.Join(s.value, ", "))
 }
 
 func (s *MultiString) First() string {
-	return (*s.value)[0]
+	return (s.value)[0]
 }
 
 func AddBazelFlags(cmd *cobra.Command) error {
@@ -80,7 +80,7 @@ func AddBazelFlags(cmd *cobra.Command) error {
 					markFlagAsHidden(subcommand, flagName)
 					markFlagAsHidden(subcommand, "no"+flagName)
 				} else if flag.GetAllowsMultiple() {
-					var key = MultiString{value: &[]string{}}
+					var key = MultiString{value: []string{}}
 					subcommand.Flags().VarP(&key, flagName, flagAbbreviation, flagDoc)
 					markFlagAsHidden(subcommand, flagName)
 				} else {
