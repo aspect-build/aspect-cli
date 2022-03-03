@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//cmd/aspect/root",
         "//pkg/ioutils",
+        "//pkg/logger",
         "//pkg/plugin/system",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_cobra//doc",

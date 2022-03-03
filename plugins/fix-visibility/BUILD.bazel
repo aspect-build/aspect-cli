@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//bazel/buildeventstream/proto",
         "//pkg/ioutils",
+        "//pkg/logger",
         "//pkg/plugin/sdk/v1alpha2/config",
         "//pkg/plugin/sdk/v1alpha2/plugin",
         "@bazel_gazelle//label:go_default_library",

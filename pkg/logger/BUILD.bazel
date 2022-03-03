@@ -1,0 +1,13 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "logger",
+    srcs = ["logger.go"],
+    importpath = "aspect.build/cli/pkg/logger",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_hashicorp_go_hclog//:go-hclog",
+        "@com_github_mitchellh_go_homedir//:go-homedir",
+        "@com_github_natefinch_lumberjack//:lumberjack",
+    ],
+)

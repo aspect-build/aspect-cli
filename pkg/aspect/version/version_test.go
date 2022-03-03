@@ -9,6 +9,7 @@
 package version_test
 
 import (
+	"io"
 	"strings"
 	"testing"
 
@@ -17,9 +18,11 @@ import (
 	"aspect.build/cli/pkg/aspect/version"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/logger"
 )
 
 func TestVersion(t *testing.T) {
+	logger.CreateMockLogger(io.Discard)
 	bzl := bazel.New()
 	bzl.SetWorkspaceRoot(".")
 	t.Run("without release build info", func(t *testing.T) {

@@ -13,11 +13,56 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"strings"
+	"time"
 
+	"aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
 	"google.golang.org/protobuf/proto"
 )
+
+var invocationID string = ""
+
+func generateInvocationID() {
+	t := time.Now()
+
+	dateString := stringifyInt(t.Year(), 4) + stringifyInt(int(t.Month()), 2) + stringifyInt(t.Day(), 2)
+
+	nanosecondStr := stringifyInt(t.Nanosecond(), 6)
+
+	timeString := stringifyInt(t.Hour(), 2) +
+		stringifyInt(t.Minute(), 2) +
+		"-" +
+		stringifyInt(t.Second(), 2) +
+		nanosecondStr[:2] +
+		"-" +
+		nanosecondStr[2:6]
+
+	superSpecialHexString := "617370656374" // I wonder what this says when converted back to a string?
+
+	// TODO: Do we want to add the PID to the end here? Can use os.Getpid()
+	invocationID = dateString + "-" + timeString + "-" + superSpecialHexString
+}
+
+func InvovationID() string {
+	if invocationID == "" {
+		generateInvocationID()
+	}
+	return invocationID
+}
+
+func SetInvovationID(id string) {
+	invocationID = id
+}
+
+func stringifyInt(i int, length int) string {
+	str := fmt.Sprint(i)
+	for len(str) < length {
+		str = "0" + str
+	}
+	return str
+}
 
 type Bazel interface {
 	SetWorkspaceRoot(workspaceRoot string)
@@ -57,9 +102,25 @@ func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 		panic("Illegal state: running bazel without the workspaceRoot set")
 	}
 
+	if len(invocationID) > 0 && !b.containsFlag(command, "invocation_id") {
+		command = append(command, "--invocation_id="+invocationID)
+	}
+
+	logger.Command(strings.Join(append([]string{"bazel"}, command...), " "))
+
 	bazelisk := NewBazelisk(b.workspaceRoot)
 	exitCode, err := bazelisk.Run(command, repos, out)
+	// if at the end of the command then print here
 	return exitCode, err
+}
+
+func (b *bazel) containsFlag(command []string, flag string) bool {
+	for _, cmd := range command {
+		if strings.Contains(cmd, fmt.Sprintf("--%s=", flag)) || strings.Contains(cmd, fmt.Sprintf("--%s ", flag)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *bazel) Flags() (map[string]*FlagInfo, error) {
