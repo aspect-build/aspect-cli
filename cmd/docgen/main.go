@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra/doc"
 
 	"aspect.build/cli/cmd/aspect/root"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
 )
@@ -29,8 +30,10 @@ func main() {
 	}
 	defer pluginSystem.TearDown()
 
-	aspectRootCmd, err := root.NewDefaultRootCmd(pluginSystem)
-	if err != nil {
+	aspectRootCmd := root.NewDefaultRootCmd(pluginSystem)
+
+	// Run this command after all bazel verbs have been added to "cmd".
+	if err := flags.AddBazelFlags(cmd); err != nil {
 		log.Fatal(err)
 	}
 

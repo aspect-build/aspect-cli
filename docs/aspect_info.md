@@ -31,8 +31,8 @@ aspect info [flags]
 
 ```
   -h, --help            help for info
-  -k, --keep_going      Continue as much as possible after an error.  While the target that failed and those that depend on it cannot be analyzed, other prerequisites of these targets can be.
-      --show_make_env   Include the "Make" environment in the output.
+      --show_make_env   include the set of key/value pairs in the "Make" environment,
+                        accessible within BUILD files
 ```
 
 ### Options inherited from parent commands

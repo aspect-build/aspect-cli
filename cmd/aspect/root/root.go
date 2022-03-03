@@ -36,7 +36,7 @@ var (
 	faint    = color.New(color.Faint)
 )
 
-func NewDefaultRootCmd(pluginSystem system.PluginSystem) (*cobra.Command, error) {
+func NewDefaultRootCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	defaultInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive)
 }
@@ -45,7 +45,7 @@ func NewRootCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
 	defaultInteractive bool,
-) (*cobra.Command, error) {
+) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "aspect",
 		Short:         "Aspect.build bazel wrapper",
@@ -89,8 +89,5 @@ func NewRootCmd(
 		Long:  topics.MustAssetString("tags.md"),
 	})
 
-	// Run this command after all bazel verbs have been added to "cmd".
-	err := flags.AddBazelFlags(cmd)
-
-	return cmd, err
+	return cmd
 }
