@@ -31,11 +31,14 @@ var (
 	faint = color.New(color.Faint)
 )
 
+// AddGlobalFlags will add aspect specfic flags to all cobra commands.
 func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 	cmd.PersistentFlags().String(ConfigFlagName, "", "config file (default is $HOME/.aspect.yaml)")
 	cmd.PersistentFlags().Bool(InteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
 }
 
+// FlagsIntercepor will parse the incoming flags and remove any aspect specific flags from the
+// list of args.
 func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 		if cmd.DisableFlagParsing {
