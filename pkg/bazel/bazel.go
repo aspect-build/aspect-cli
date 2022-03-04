@@ -119,7 +119,7 @@ func (b *bazel) AQuery(query string) (*ActionGraphContainer, error) {
 
 	proto.Unmarshal(protoBytes, agc)
 	if err := proto.Unmarshal(protoBytes, agc); err != nil {
-		return nil, fmt.Errorf("Failed to parse ActionGraphContainer: %w", err)
+		return nil, fmt.Errorf("failed to run Bazel aquery: parsing ActionGraphContainer: %w", err)
 	}
 	return agc, nil
 }
