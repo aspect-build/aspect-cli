@@ -63,6 +63,7 @@ func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 	return exitCode, err
 }
 
+// Flags fetches the metadata for Bazel's command line flags.
 func (b *bazel) Flags() (map[string]*FlagInfo, error) {
 	r, w := io.Pipe()
 	decoder := base64.NewDecoder(base64.StdEncoding, r)
@@ -96,6 +97,7 @@ func (b *bazel) Flags() (map[string]*FlagInfo, error) {
 	return flags, nil
 }
 
+// AQuery runs a `bazel aquery` command and returns the resulting parsed proto data.
 func (b *bazel) AQuery(query string) (*ActionGraphContainer, error) {
 	r, w := io.Pipe()
 	agc := &ActionGraphContainer{}
