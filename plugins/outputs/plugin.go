@@ -79,7 +79,7 @@ func (plugin *Outputs) CustomCommands() ([]*aspectplugin.Command, error) {
 						return *prefixes[pathID]
 					}
 					fragment := frags[pathID]
-					// reconstruct the path from the parent pointers
+					// Reconstruct the path from the parent pointers.
 					segments := []string{fragment.Label}
 
 					if fragment.ParentId > 0 {
