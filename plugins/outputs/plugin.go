@@ -98,7 +98,7 @@ func (plugin *Outputs) CustomCommands() ([]*aspectplugin.Command, error) {
 						segments := prefix(artifact.PathFragmentId)
 						var path strings.Builder
 						// assemble in reverse order
-						for i := len(segments) - 1; i >= 0; i -= 1 {
+						for i := len(segments) - 1; i >= 0; i-- {
 							path.WriteString(segments[i])
 							if i > 0 {
 								path.WriteString("/")
