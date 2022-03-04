@@ -90,7 +90,7 @@ func (plugin *Outputs) CustomCommands() ([]*aspectplugin.Command, error) {
 				}
 
 				for _, a := range agc.Actions {
-					if len(mnemonicFilter) > 0 && (a.Mnemonic != mnemonicFilter) {
+					if len(mnemonicFilter) > 0 && a.Mnemonic != mnemonicFilter {
 						continue
 					}
 					for _, i := range a.OutputIds {
