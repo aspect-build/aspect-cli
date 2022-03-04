@@ -110,7 +110,7 @@ func (b *bazel) AQuery(query string) (*ActionGraphContainer, error) {
 
 	protoBytes, err := ioutil.ReadAll(r)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Bazel aquery output: %w", err)
+		return nil, fmt.Errorf("failed to run Bazel aquery: %w", err)
 	}
 
 	if err := <-bazelErrs; err != nil {
