@@ -20,6 +20,7 @@ import (
 )
 
 type Bazel interface {
+	AQuery(expr string) (*ActionGraphContainer, error)
 	SetWorkspaceRoot(workspaceRoot string)
 	Spawn(command []string) (int, error)
 	RunCommand(command []string, out io.Writer) (int, error)
@@ -62,6 +63,7 @@ func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 	return exitCode, err
 }
 
+// Flags fetches the metadata for Bazel's command line flags.
 func (b *bazel) Flags() (map[string]*FlagInfo, error) {
 	r, w := io.Pipe()
 	decoder := base64.NewDecoder(base64.StdEncoding, r)
@@ -93,4 +95,33 @@ func (b *bazel) Flags() (map[string]*FlagInfo, error) {
 	}
 
 	return flags, nil
+}
+
+// AQuery runs a `bazel aquery` command and returns the resulting parsed proto data.
+func (b *bazel) AQuery(query string) (*ActionGraphContainer, error) {
+	r, w := io.Pipe()
+	agc := &ActionGraphContainer{}
+
+	bazelErrs := make(chan error, 1)
+	defer close(bazelErrs)
+	go func() {
+		defer w.Close()
+		_, err := b.RunCommand([]string{"aquery", "--output=proto", query}, w)
+		bazelErrs <- err
+	}()
+
+	protoBytes, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run Bazel aquery: %w", err)
+	}
+
+	if err := <-bazelErrs; err != nil {
+		return nil, fmt.Errorf("failed to run Bazel aquery: %w", err)
+	}
+
+	proto.Unmarshal(protoBytes, agc)
+	if err := proto.Unmarshal(protoBytes, agc); err != nil {
+		return nil, fmt.Errorf("failed to run Bazel aquery: parsing ActionGraphContainer: %w", err)
+	}
+	return agc, nil
 }
