@@ -12,11 +12,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
 	yaml "gopkg.in/yaml.v2"
 
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
@@ -167,7 +169,16 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 		for node := ps.plugins.head; node != nil; node = node.next {
 			besBackend.RegisterSubscriber(node.payload.BEPEventCallback)
 		}
-		if err := besBackend.Setup(); err != nil {
+		opts := []grpc.ServerOption{
+			// Bazel doesn't seem to set a maximum send message size, therefore
+			// we match the default send message for Go, which should be enough
+			// for all messages sent by Bazel (roughly 2.14GB).
+			grpc.MaxRecvMsgSize(math.MaxInt32),
+			// Here we are just being explicit with the default value since we
+			// also set the receive message size.
+			grpc.MaxSendMsgSize(math.MaxInt32),
+		}
+		if err := besBackend.Setup(opts...); err != nil {
 			return fmt.Errorf("failed to run BES backend: %w", err)
 		}
 		ctx, cancel := context.WithTimeout(ctx, time.Second)

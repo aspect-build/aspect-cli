@@ -61,6 +61,7 @@ func NewBESBackend() BESBackend {
 
 // Setup sets up the gRPC server.
 func (bb *besBackend) Setup(opts ...grpc.ServerOption) error {
+	// Never expose this to the network.
 	lis, err := bb.netListen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("failed to setup BES backend: %w", err)
