@@ -18,7 +18,9 @@ import (
 )
 
 var (
-	exposedBazelFlags = []string{
+	// Bazel flags specified here will be shown when running "aspect help".
+	// By default bazel flags are hidden.
+	documentedBazelFlags = []string{
 		"keep_going",
 		"expunge",
 		"expunge_async",
@@ -97,8 +99,8 @@ func AddBazelFlags(cmd *cobra.Command) error {
 }
 
 func markFlagAsHidden(cmd *cobra.Command, flag string) {
-	for _, exposedFlag := range exposedBazelFlags {
-		if exposedFlag == flag {
+	for _, documentedFlag := range documentedBazelFlags {
+		if documentedFlag == flag {
 			return
 		}
 	}

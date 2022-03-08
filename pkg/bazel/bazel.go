@@ -24,10 +24,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// This is global so that if we can have multiple implementations of bazel
-// without needing to either find / set the workspace root every time.
-// Will be set when the first instance of bazel run.
-var workspaceRoot string = ""
+// Global mutable state!
+// This is for performance, avoiding a lookup of the workspace directory for every
+// instance of a bazel struct.
+// We know the workspace location is constant for the lifetime of an `aspect` cli execution.
+var workspaceRoot string
 
 type Bazel interface {
 	AQuery(expr string) (*ActionGraphContainer, error)
@@ -46,11 +47,6 @@ func New() Bazel {
 		osGetwd:         os.Getwd,
 		workspaceFinder: pathutils.DefaultWorkspaceFinder,
 	}
-}
-
-// Deprecated. WorkspaceRoot is set lazily by this class
-func (b *bazel) SetWorkspaceRoot(w string) {
-	workspaceRoot = w
 }
 
 // maybeSetWorkspaceRoot lazily sets the workspaceRoot if it isn't set already.
