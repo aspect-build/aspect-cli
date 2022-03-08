@@ -70,7 +70,9 @@ func (m *GRPCServer) Setup(
 	ctx context.Context,
 	req *proto.SetupReq,
 ) (*proto.SetupRes, error) {
-	return &proto.SetupRes{}, m.Impl.Setup(req.Properties)
+	file := NewAspectPluginFile(req.File.Path)
+	config := NewSetupConfig(file, req.Properties)
+	return &proto.SetupRes{}, m.Impl.Setup(config)
 }
 
 // PostBuildHook translates the gRPC call to the Plugin PostBuildHook
