@@ -13,8 +13,8 @@ aspect version [flags]
 ### Options
 
 ```
-      --aspect:gnu_format   format space-separated following GNU convention
-  -h, --help                help for version
+      --gnu_format   format space-separated following GNU convention
+  -h, --help         help for version
 ```
 
 ### Options inherited from parent commands
