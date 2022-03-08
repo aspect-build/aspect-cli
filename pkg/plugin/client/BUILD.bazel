@@ -8,8 +8,8 @@ go_library(
     deps = [
         "//pkg/ioutils",
         "//pkg/plugin/loader",
-        "//pkg/plugin/sdk/v1alpha2/config",
-        "//pkg/plugin/sdk/v1alpha2/plugin",
+        "//pkg/plugin/sdk/v1alpha3/config",
+        "//pkg/plugin/sdk/v1alpha3/plugin",
         "@com_github_hashicorp_go_hclog//:go-hclog",
         "@com_github_hashicorp_go_plugin//:go-plugin",
     ],

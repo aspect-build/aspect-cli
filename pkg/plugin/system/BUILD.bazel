@@ -32,7 +32,7 @@ go_test(
         "//pkg/plugin/client/mock",
         "//pkg/plugin/loader",
         "//pkg/plugin/loader/mock",
-        "//pkg/plugin/sdk/v1alpha2/plugin/mock",
+        "//pkg/plugin/sdk/v1alpha3/plugin/mock",
         "@com_github_golang_mock//gomock",
         "@com_github_onsi_gomega//:gomega",
         "@com_github_spf13_cobra//:cobra",
