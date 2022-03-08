@@ -6,12 +6,6 @@
  * Full License text is in the LICENSE file included in the root of this repository.
  */
 
-/*
-Copyright © 2021 Aspect Build Systems Inc
-
-Not licensed for re-use.
-*/
-
 package flags
 
 import (
