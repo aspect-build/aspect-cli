@@ -27,7 +27,7 @@ import (
 	client_mock "aspect.build/cli/pkg/plugin/client/mock"
 	"aspect.build/cli/pkg/plugin/loader"
 	loader_mock "aspect.build/cli/pkg/plugin/loader/mock"
-	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin/mock"
+	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin/mock"
 )
 
 func createInterceptorCommand() *cobra.Command {

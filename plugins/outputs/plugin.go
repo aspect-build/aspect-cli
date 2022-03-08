@@ -22,8 +22,8 @@ import (
 	goplugin "github.com/hashicorp/go-plugin"
 
 	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
-	aspectplugin "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/config"
+	aspectplugin "aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
 )
 
 func main() {
