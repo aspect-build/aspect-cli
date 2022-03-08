@@ -11,11 +11,10 @@ genrule(
     name = "command_list_bzl",
     # We need to be able to start bazel so that we can get the correct flags
     srcs = [
-        "//:WORKSPACE",
         "//:.bazelversion",
     ],
     outs = ["command_list.bzl"],
-    cmd = "export HOME=$$(pwd); $(execpath //cmd/docgen) bzl-command-list > $@",
+    cmd = "export HOME=$$(pwd); touch WORKSPACE; $(execpath //cmd/docgen) bzl-command-list > $@",
     tools = ["//cmd/docgen"],
 )
 
@@ -40,11 +39,10 @@ genrule(
     name = "docgen",
     # We need to be able to start bazel so that we can get the correct flags
     srcs = [
-        "//:WORKSPACE",
         "//:.bazelversion",
     ],
     outs = ["gen/" + d for d in _DOCS],
-    cmd = "export HOME=$$(pwd); $(execpath //cmd/docgen) gen-markdown --output-dir $(@D)/gen",
+    cmd = "export HOME=$$(pwd); touch WORKSPACE; $(execpath //cmd/docgen) gen-markdown --output-dir $(@D)/gen",
     tools = ["//cmd/docgen"],
 )
 

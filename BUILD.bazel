@@ -2,9 +2,8 @@ load("@bazel_gazelle//:def.bzl", "gazelle")
 load("@io_bazel_rules_go//go:def.bzl", "TOOLS_NOGO", "nogo")
 
 # When generating the documents for this repo bazel needs to be started so that we can generate
-# the correct flags. To do this we need a WORKSPACE and .bazelversion
+# the correct flags. To do this we need version from .bazelversion
 exports_files([
-    "WORKSPACE",
     ".bazelversion",
 ])
 
