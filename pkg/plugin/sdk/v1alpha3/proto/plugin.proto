@@ -25,6 +25,11 @@ message BEPEventCallbackRes {}
 
 message SetupReq {
   bytes properties = 1;
+  File file = 2;
+}
+
+message File {
+  string path = 1;
 }
 
 message SetupRes {}

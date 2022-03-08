@@ -35,7 +35,38 @@ type Plugin interface {
 		isInteractiveMode bool,
 		promptRunner ioutils.PromptRunner,
 	) error
-	Setup(properties []byte) error
+	Setup(config *SetupConfig) error
+}
+
+// SetupConfig represents a plugin configuration parsed from the aspectplugins
+// file.
+type SetupConfig struct {
+	File       *AspectPluginFile
+	Properties []byte
+}
+
+// NewSetupConfig creates a new SetupConfig.
+func NewSetupConfig(
+	file *AspectPluginFile,
+	properties []byte,
+) *SetupConfig {
+	return &SetupConfig{
+		File:       file,
+		Properties: properties,
+	}
+}
+
+// AspectPluginFile contains metadata for the aspectplugins file relevant for
+// a plugin.
+type AspectPluginFile struct {
+	Path string
+}
+
+// NewAspectPluginFile creates a new AspectPluginFile.
+func NewAspectPluginFile(path string) *AspectPluginFile {
+	return &AspectPluginFile{
+		Path: path,
+	}
 }
 
 // Base satisfies the Plugin interface. For plugins that only implement a subset
@@ -46,7 +77,7 @@ type Base struct{}
 var _ Plugin = (*Base)(nil)
 
 // Setup satisfies Plugin.Setup.
-func (*Base) Setup([]byte) error {
+func (*Base) Setup(*SetupConfig) error {
 	return nil
 }
 

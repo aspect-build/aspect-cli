@@ -27,6 +27,7 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/client"
 	"aspect.build/cli/pkg/plugin/loader"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
@@ -84,12 +85,14 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 				return fmt.Errorf("failed to configure plugin system: %w", err)
 			}
 
-			propertiesBytes, err := yaml.Marshal(p.Properties)
+			properties, err := yaml.Marshal(p.Properties)
 			if err != nil {
 				return fmt.Errorf("failed to configure plugin system: %w", err)
 			}
 
-			if err := aspectplugin.Setup(propertiesBytes); err != nil {
+			aspectPluginFile := plugin.NewAspectPluginFile(aspectpluginsPath)
+			setupConfig := plugin.NewSetupConfig(aspectPluginFile, properties)
+			if err := aspectplugin.Setup(setupConfig); err != nil {
 				return fmt.Errorf("failed to configure plugin system: %w", err)
 			}
 
