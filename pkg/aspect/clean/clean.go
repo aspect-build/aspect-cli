@@ -216,6 +216,10 @@ func (c *Clean) reclaimAll() error {
 	}
 
 	// Goroutines for deleting directories.
+	// We dont add to the wait group here as deleteProcessor will add to the deleteWaitGroup itself.
+	// This is due to deleteProcessor breaking up its deletes and adding subdirectories to the
+	// deleteQueue as it does the deleting. Where the other wait groups ensure all their goroutines
+	// have finished processing, deleteWaitGroup ensures deleteQueue is empty before the program exits.
 	for i := 0; i < 8; i++ {
 		go c.deleteProcessor(deleteQueue, &deleteWaitGroup, sizeQueue, errorQueue)
 	}
