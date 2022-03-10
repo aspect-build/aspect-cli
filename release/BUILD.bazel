@@ -5,16 +5,24 @@ multi_platform_binaries(
     embed = ["//cmd/aspect:aspect_lib"],
 )
 
-multi_platform_binaries(
-    name = "fix-visibility",
-    embed = ["//plugins/fix-visibility:fix-visibility_lib"],
-    prefix = "plugin-",
-)
+# TODO(alexeagle): ship a single "plugins bundle" binary?
+# it's overall smaller download and less work for users
+_PLUGINS = [
+    "error-augmentor",
+    "fix-visibility",
+    "outputs",
+]
+
+[
+    multi_platform_binaries(
+        name = p,
+        embed = ["//plugins/{0}:{0}_lib".format(p)],
+        prefix = "plugin-",
+    )
+    for p in _PLUGINS
+]
 
 release(
     name = "release",
-    targets = [
-        ":aspect",
-        ":fix-visibility",
-    ],
+    targets = _PLUGINS + [":aspect"],
 )
