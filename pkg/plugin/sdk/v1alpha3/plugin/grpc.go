@@ -187,10 +187,13 @@ func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error 
 
 // Setup is called from the Core to execute the Plugin Setup.
 func (m *GRPCClient) Setup(
-	properties []byte,
+	config *SetupConfig,
 ) error {
 	req := &proto.SetupReq{
-		Properties: properties,
+		Properties: config.Properties,
+		File: &proto.File{
+			Path: config.File.Path,
+		},
 	}
 	_, err := m.client.Setup(context.Background(), req)
 	return err
