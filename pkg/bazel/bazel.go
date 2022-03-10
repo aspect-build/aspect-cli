@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"aspect.build/cli/pkg/pathutils"
-
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
 	"google.golang.org/protobuf/proto"
