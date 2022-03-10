@@ -13,11 +13,21 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"os"
+	"path"
+
+	"aspect.build/cli/pkg/pathutils"
 
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
 	"google.golang.org/protobuf/proto"
 )
+
+// Global mutable state!
+// This is for performance, avoiding a lookup of the workspace directory for every
+// instance of a bazel struct.
+// We know the workspace location is constant for the lifetime of an `aspect` cli execution.
+var workspaceRoot string
 
 type Bazel interface {
 	AQuery(expr string) (*ActionGraphContainer, error)
@@ -27,15 +37,42 @@ type Bazel interface {
 }
 
 type bazel struct {
-	workspaceRoot string
+	osGetwd         func() (dir string, err error)
+	workspaceFinder pathutils.WorkspaceFinder
 }
 
 func New() Bazel {
-	return &bazel{}
+	return &bazel{
+		osGetwd:         os.Getwd,
+		workspaceFinder: pathutils.DefaultWorkspaceFinder,
+	}
 }
 
-func (b *bazel) SetWorkspaceRoot(workspaceRoot string) {
-	b.workspaceRoot = workspaceRoot
+// Deprecated. WorkspaceRoot is set lazily by this class
+func (b *bazel) SetWorkspaceRoot(w string) {
+	workspaceRoot = w
+}
+
+// maybeSetWorkspaceRoot lazily sets the workspaceRoot if it isn't set already.
+func (b *bazel) maybeSetWorkspaceRoot() error {
+	fail := func(err error) error {
+		return fmt.Errorf("failed to find bazel workspace root: %w", err)
+	}
+	if len(workspaceRoot) < 1 {
+		wd, err := b.osGetwd()
+		if err != nil {
+			return fail(err)
+		}
+		workspacePath, err := b.workspaceFinder.Find(wd)
+		if err != nil {
+			return fail(err)
+		}
+		if workspacePath == "" {
+			return fail(fmt.Errorf("the current working directory %q is not a Bazel workspace", wd))
+		}
+		workspaceRoot = path.Dir(workspacePath)
+	}
+	return nil
 }
 
 func (*bazel) createRepositories() *core.Repositories {
@@ -54,11 +91,11 @@ func (b *bazel) Spawn(command []string) (int, error) {
 
 func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 	repos := b.createRepositories()
-	if len(b.workspaceRoot) < 1 {
-		panic("Illegal state: running bazel without the workspaceRoot set")
+	if err := b.maybeSetWorkspaceRoot(); err != nil {
+		return 1, err
 	}
 
-	bazelisk := NewBazelisk(b.workspaceRoot)
+	bazelisk := NewBazelisk(workspaceRoot)
 	exitCode, err := bazelisk.Run(command, repos, out)
 	return exitCode, err
 }
