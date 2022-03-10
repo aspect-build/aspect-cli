@@ -187,11 +187,11 @@ message KeyValuePair {
 }
 
 message ConfiguredTarget {
-  // The target. We use blaze_query.Target defined in build.proto instead of
-  // the Target defined in this file because blaze_query.Target is much heavier
+  // The target. We use blaze_query_aspect_mirror.Target defined in build.proto instead of
+  // the Target defined in this file because blaze_query_aspect_mirror.Target is much heavier
   // and will output proto results similar to what users are familiar with from
   // regular blaze query.
-  blaze_query.Target target = 1;
+  blaze_query_aspect_mirror.Target target = 1;
 
   // The configuration
   Configuration configuration = 2;
