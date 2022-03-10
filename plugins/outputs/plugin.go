@@ -17,7 +17,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	goplugin "github.com/hashicorp/go-plugin"
 
@@ -63,62 +62,14 @@ func (plugin *Outputs) NewOutputsCommand() aspectplugin.CustomCommandFn {
 		if err != nil {
 			return err
 		}
-
-		// Use RAM to store lookup maps for these identifiers
-		// rather than an O(n^2) algorithm of searching on each access.
-		frags := make(map[uint32]*bazel.PathFragment)
-		for _, f := range agc.PathFragments {
-			frags[f.Id] = f
-		}
-		arts := make(map[uint32]*bazel.Artifact)
-		for _, a := range agc.Artifacts {
-			arts[a.Id] = a
-		}
-
-		// The paths in the proto data are organized as a trie
-		// to make the representation more compact.
-		// https://en.wikipedia.org/wiki/Trie
-		// Make a map to store each prefix so we can memoize common paths
-		prefixes := make(map[uint32]*[]string)
-
-		// Declare a recursive function to walk up the trie to the root.
-		var prefix func(pathID uint32) []string
-
-		prefix = func(pathID uint32) []string {
-			if prefixes[pathID] != nil {
-				return *prefixes[pathID]
-			}
-			fragment := frags[pathID]
-			// Reconstruct the path from the parent pointers.
-			segments := []string{fragment.Label}
-
-			if fragment.ParentId > 0 {
-				segments = append(segments, prefix(fragment.ParentId)...)
-			}
-			prefixes[pathID] = &segments
-			return segments
-		}
-
-		for _, a := range agc.Actions {
-			if len(mnemonicFilter) > 0 && a.Mnemonic != mnemonicFilter {
-				continue
-			}
-			for _, i := range a.OutputIds {
-				artifact := arts[i]
-				segments := prefix(artifact.PathFragmentId)
-				var path strings.Builder
-				// Assemble in reverse order.
-				for i := len(segments) - 1; i >= 0; i-- {
-					path.WriteString(segments[i])
-					if i > 0 {
-						path.WriteString("/")
-					}
+		outs := bazel.ParseOutputs(agc)
+		for _, a := range outs {
+			if len(mnemonicFilter) > 0 {
+				if a.Mnemonic == mnemonicFilter {
+					fmt.Printf("%s\n", a.Path)
 				}
-				if len(mnemonicFilter) > 0 {
-					fmt.Printf("%s\n", path.String())
-				} else {
-					fmt.Printf("%s %s\n", a.Mnemonic, path.String())
-				}
+			} else {
+				fmt.Printf("%s %s\n", a.Mnemonic, a.Path)
 			}
 		}
 		return nil
