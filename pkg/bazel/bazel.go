@@ -15,6 +15,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"strings"
 
 	"aspect.build/cli/pkg/pathutils"
 
@@ -161,4 +162,69 @@ func (b *bazel) AQuery(query string) (*ActionGraphContainer, error) {
 		return nil, fmt.Errorf("failed to run Bazel aquery: parsing ActionGraphContainer: %w", err)
 	}
 	return agc, nil
+}
+
+type Output struct {
+	Mnemonic string
+	Path     string
+}
+
+// ParseOutputs reads the proto result of AQuery and extracts the output file paths with their generator mnemonics.
+func ParseOutputs(agc *ActionGraphContainer) []Output {
+	// Use RAM to store lookup maps for these identifiers
+	// rather than an O(n^2) algorithm of searching on each access.
+	frags := make(map[uint32]*PathFragment)
+	for _, f := range agc.PathFragments {
+		frags[f.Id] = f
+	}
+	arts := make(map[uint32]*Artifact)
+	for _, a := range agc.Artifacts {
+		arts[a.Id] = a
+	}
+
+	// The paths in the proto data are organized as a trie
+	// to make the representation more compact.
+	// https://en.wikipedia.org/wiki/Trie
+	// Make a map to store each prefix so we can memoize common paths
+	prefixes := make(map[uint32]*[]string)
+
+	// Declare a recursive function to walk up the trie to the root.
+	var prefix func(pathID uint32) []string
+
+	prefix = func(pathID uint32) []string {
+		if prefixes[pathID] != nil {
+			return *prefixes[pathID]
+		}
+		fragment := frags[pathID]
+		// Reconstruct the path from the parent pointers.
+		segments := []string{fragment.Label}
+
+		if fragment.ParentId > 0 {
+			segments = append(segments, prefix(fragment.ParentId)...)
+		}
+		prefixes[pathID] = &segments
+		return segments
+	}
+
+	result := make([]Output, 10)
+	for _, a := range agc.Actions {
+		for _, i := range a.OutputIds {
+			artifact := arts[i]
+			segments := prefix(artifact.PathFragmentId)
+			var path strings.Builder
+			// Assemble in reverse order.
+			for i := len(segments) - 1; i >= 0; i-- {
+				path.WriteString(segments[i])
+				if i > 0 {
+					path.WriteString("/")
+				}
+			}
+			fmt.Println(a.Mnemonic)
+			result = append(result, Output{
+				a.Mnemonic,
+				path.String(),
+			})
+		}
+	}
+	return result
 }
