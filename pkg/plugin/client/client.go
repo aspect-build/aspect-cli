@@ -47,8 +47,8 @@ type clientFactory struct {
 }
 
 // buildPlugin asks bazel to build the target and returns the path to the resulting binary
-func (this *clientFactory) buildPlugin(target string) (string, error) {
-	agc, err := this.bzl.AQuery(target)
+func (c *clientFactory) buildPlugin(target string) (string, error) {
+	agc, err := c.bzl.AQuery(target)
 	if err != nil {
 		return "", err
 	}
@@ -66,11 +66,10 @@ func (this *clientFactory) buildPlugin(target string) (string, error) {
 		return "", fmt.Errorf("no output file from a GoLink action was found for target %v", target)
 	}
 
-	// TODO: only perform a build if needed, not every time aspect is run!
 	// TODO: we should be careful to use the right flags for this build
 	// to avoid busting the analysis cache. We want to pretend to be a typical
 	// build the developer or CI would be performing.
-	if _, err := this.bzl.Spawn(append([]string{"build", target})); err != nil {
+	if _, err := c.bzl.Spawn(append([]string{"build", target})); err != nil {
 		return "", fmt.Errorf("failed to build plugin %v with Bazel: %w", target, err)
 	}
 
@@ -78,7 +77,7 @@ func (this *clientFactory) buildPlugin(target string) (string, error) {
 }
 
 // New calls the goplugin.NewClient with the given config.
-func (this *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.Streams) (*PluginInstance, error) {
+func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.Streams) (*PluginInstance, error) {
 	logLevel := hclog.LevelFromString(aspectplugin.LogLevel)
 	if logLevel == hclog.NoLevel {
 		logLevel = hclog.Error
@@ -89,7 +88,7 @@ func (this *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils
 	})
 
 	if strings.HasPrefix(aspectplugin.From, "//") {
-		if built, err := this.buildPlugin(aspectplugin.From); err != nil {
+		if built, err := c.buildPlugin(aspectplugin.From); err != nil {
 			return nil, err
 		} else {
 			aspectplugin.From = built

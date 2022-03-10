@@ -1,41 +1,51 @@
 # Aspect CLI Plugins
 
-NB: plugin support is still in design phase, the documentation below may not yet
-apply.
-
-The plugin system is inspired by the excellent system developed for HashiCorp's
-`terraform` CLI.
+The plugin system is based on the excellent system developed by HashiCorp for the `terraform` CLI.
 
 ## High-level design
 
 A plugin is any program with a gRPC server that implements our plugin protocol.
+
 We provide convenient support for writing plugins in Go, but this is not
-required. Plugins are hosted and versioned independently from the aspect CLI.
+required. You can write a plugin in any language.
+Plugins are hosted and versioned independently from the aspect CLI.
 
 The aspect CLI process spawns the plugin as a subprocess, then connects as a
 gRPC client to it. The client and server run a negotiation protocol to determine
 version compatibility and what capabilities the plugin provides.
 
+You can read more about this archecture here:
+<https://github.com/hashicorp/go-plugin/blob/master/README.md>
+
 ## Plugin configuration
 
-In your [aspect CLI config], list the plugins you'd like to install. You can use
-semver ranges to constrain the versions which can be used. When aspect runs, it
-will prompt you to re-lock the dependencies to exact versions if they have
-changed. We also verify the checksum of the plugin contents against what was
-first installed.
+In a `.aspectplugins` file at the repository root, list the plugins you'd like to install.
+
+This is a yaml file. The shortest example provides a name and a local path to the plugin binary:
+
+```yaml
+- name: some-plugin
+  from: ./path/to/plugin_binary
+```
+
+The `from` line may start with `//` in which case it is interpreted as a [Bazel Label] in the
+current workspace.
+That label must be a `*_binary` rule which builds a plugin binary. When the CLI loads this
+plugin, it first builds it from source.
+This is useful as a local development round-trip while authoring a plugin. However it is not a
+great way to deploy a plugin to users, as it causes them to perform an extra build every time
+they run `aspect`, whether they intend to use the plugin or not.
+
+In the future, we'll add more ways to specify a plugin, such as with a remote URL.
+This would use semver ranges to constrain the versions which can be used.
+When aspect runs, it can then prompt you to re-lock the dependencies to exact versions if they
+have changed, and can verify the checksum of the plugin contents against what was first installed.
 
 > The locking semantics follow the [Trust on first use] approach.
 
 [trust on first use]: https://en.wikipedia.org/wiki/Trust_on_first_use
-[aspect cli config]: TODO
-
-## Plugin discovery
-
-TODO: where we search to resolve plugins on disk or fetch them from network
-TODO: how to author a local plugin and resolve it for development
+[bazel label]: https://bazel.build/concepts/labels
 
 ## Capabilities
 
-Plugins can implement any of the following:
-
-- BuildComplete
+More documentation on the plugin API coming soon!
