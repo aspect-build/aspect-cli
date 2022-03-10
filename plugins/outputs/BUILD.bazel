@@ -4,7 +4,7 @@ go_library(
     name = "outputs_lib",
     srcs = ["plugin.go"],
     importpath = "aspect.build/cli/plugins/outputs",
-    visibility = ["//visibility:private"],
+    visibility = ["//release:__pkg__"],
     deps = [
         "//pkg/bazel",
         "//pkg/plugin/sdk/v1alpha3/config",
