@@ -17,7 +17,12 @@
 
 syntax = "proto2";
 
-package blaze_query;
+// Package name has been modified from upstream!
+// Package names in the protobuf domain of a go binary need to be unique.
+// "blaze_query" is a protobuf package name which has the potential to be 
+// imported and used within external bazel related dependencies. For example, 
+// we have hit a conflict with buildozer. Renaming to avoid conflicts
+package blaze_query_aspect_mirror;
 
 message License {
   repeated string license_type = 1;
