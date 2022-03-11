@@ -176,6 +176,8 @@ type GRPCClient struct {
 	broker *goplugin.GRPCBroker
 }
 
+var _ Plugin = (*GRPCClient)(nil)
+
 // BEPEventCallback is called from the Core to execute the Plugin
 // BEPEventCallback.
 func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error {
@@ -184,9 +186,7 @@ func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error 
 }
 
 // Setup is called from the Core to execute the Plugin Setup.
-func (m *GRPCClient) Setup(
-	config *SetupConfig,
-) error {
+func (m *GRPCClient) Setup(config *SetupConfig) error {
 	req := &proto.SetupReq{
 		Properties: config.Properties,
 		File: &proto.File{
