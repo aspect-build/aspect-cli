@@ -48,8 +48,8 @@ github.com/bazelbuild/bazel-gazelle v0.23.0/go.mod h1:3mHi4TYn0QxwdMKPJfj3FKhZxY
 github.com/bazelbuild/bazelisk v1.10.1 h1:2EWA2lRrt/k8B5ASt0mlTDQ+7mnzvKdF6ShNWLbk0o0=
 github.com/bazelbuild/bazelisk v1.10.1/go.mod h1:s3ZIQZj3l9iCk/03rBgjhYvqz0c5SPRvoQCZuz8Lw/4=
 github.com/bazelbuild/buildtools v0.0.0-20200718160251-b1667ff58f71/go.mod h1:5JP0TXzWDHXv8qvxRC4InIazwdyDseBDbzESUMKk1yU=
-github.com/bazelbuild/buildtools v0.0.0-20210920153738-d6daef01a1a2 h1:hWvEw/36XcpZzKZB2LBYhKSGt72ETiIhudjxd637+4w=
-github.com/bazelbuild/buildtools v0.0.0-20210920153738-d6daef01a1a2/go.mod h1:689QdV3hBP7Vo9dJMmzhoYIyo/9iMhEmHkJcnaPRCbo=
+github.com/bazelbuild/buildtools v0.0.0-20220309170518-00b6eb9152e1 h1:OTZvWRvUf3CXcNUlA9YTEF/9xJKIl8RnHK8g6SatBD8=
+github.com/bazelbuild/buildtools v0.0.0-20220309170518-00b6eb9152e1/go.mod h1:689QdV3hBP7Vo9dJMmzhoYIyo/9iMhEmHkJcnaPRCbo=
 github.com/bazelbuild/rules_go v0.0.0-20190719190356-6dae44dc5cab/go.mod h1:MC23Dc/wkXEyk3Wpq6lCqz0ZAYOZDw2DR5y3N1q2i7M=
 github.com/bazelbuild/rules_go v0.28.0/go.mod h1:MC23Dc/wkXEyk3Wpq6lCqz0ZAYOZDw2DR5y3N1q2i7M=
 github.com/bgentry/speakeasy v0.1.0/go.mod h1:+zsyZBPWlz7T6j88CTgSN5bM796AkVf0kBD4zp0CCIs=
