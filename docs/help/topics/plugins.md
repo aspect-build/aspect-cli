@@ -21,7 +21,7 @@ You can read more about this archecture here:
 
 In a `.aspectplugins` file at the repository root, list the plugins you'd like to install.
 
-This is a yaml file. The shortest example provides a name and a local path to the plugin binary:
+This is a YAML file. The shortest example provides a name and a local path to the plugin binary:
 
 ```yaml
 - name: some-plugin
@@ -32,14 +32,14 @@ The `from` line may start with `//` in which case it is interpreted as a [Bazel 
 current workspace.
 That label must be a `*_binary` rule which builds a plugin binary. When the CLI loads this
 plugin, it first builds it from source.
-This is useful as a local development round-trip while authoring a plugin. However it is not a
+This is useful as a local development round-trip while authoring a plugin. However, it is not a
 great way to deploy a plugin to users, as it causes them to perform an extra build every time
 they run `aspect`, whether they intend to use the plugin or not.
 
 In the future, we'll add more ways to specify a plugin, such as with a remote URL.
-This would use semver ranges to constrain the versions which can be used.
+This would use semantic versioning ranges to constrain the versions which can be used.
 When aspect runs, it can then prompt you to re-lock the dependencies to exact versions if they
-have changed, and can verify the checksum of the plugin contents against what was first installed.
+have changed, and can verify the integrity of the plugin contents against what was first installed.
 
 > The locking semantics follow the [Trust on first use] approach.
 

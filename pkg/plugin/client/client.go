@@ -46,31 +46,34 @@ type clientFactory struct {
 	bzl bazel.Bazel
 }
 
-// buildPlugin asks bazel to build the target and returns the path to the resulting binary
+// buildPlugin asks bazel to build the target and returns the path to the resulting binary.
 func (c *clientFactory) buildPlugin(target string) (string, error) {
-	agc, err := c.bzl.AQuery(target)
+	queryOutput, err := c.bzl.AQuery(target)
 	if err != nil {
 		return "", err
 	}
-	outs := bazel.ParseOutputs(agc)
+	outs := bazel.ParseOutputs(queryOutput)
 
 	var pluginPath string
 	for _, a := range outs {
 		// TODO: don't hard-code GoLink, plugins could be written in other languages
+		// https://github.com/aspect-build/aspect-cli/issues/179
 		if a.Mnemonic == "GoLink" {
 			pluginPath = a.Path
 			break
 		}
 	}
 	if pluginPath == "" {
-		return "", fmt.Errorf("no output file from a GoLink action was found for target %v", target)
+		return "", fmt.Errorf("failed to build plugin %q with Bazel: no output file from a GoLink action was found", target)
 	}
 
-	// TODO: we should be careful to use the right flags for this build
+	// WARNING: be careful to use flags for this build matching the .bazelrc
 	// to avoid busting the analysis cache. We want to pretend to be a typical
 	// build the developer or CI would be performing.
-	if _, err := c.bzl.Spawn(append([]string{"build", target})); err != nil {
-		return "", fmt.Errorf("failed to build plugin %v with Bazel: %w", target, err)
+	// This is important only in the setup we don't recommend, where normal users
+	// are building the plugin from source instead of a pre-built binary.
+	if _, err := c.bzl.Spawn([]string{"build", target}); err != nil {
+		return "", fmt.Errorf("failed to build plugin %q with Bazel: %w", target, err)
 	}
 
 	return pluginPath, nil
