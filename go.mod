@@ -5,7 +5,7 @@ go 1.17
 require (
 	github.com/bazelbuild/bazel-gazelle v0.23.0
 	github.com/bazelbuild/bazelisk v1.10.1
-	github.com/bazelbuild/buildtools v0.0.0-20210920153738-d6daef01a1a2
+	github.com/bazelbuild/buildtools v0.0.0-20220309170518-00b6eb9152e1
 	github.com/fatih/color v1.12.0
 	github.com/golang/mock v1.5.0
 	github.com/golang/protobuf v1.5.2
