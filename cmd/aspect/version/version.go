@@ -35,12 +35,8 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		Short: "Print the version of aspect CLI as well as tools it invokes.",
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
 		RunE: interceptors.Run(
-			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
-			},
+			[]interceptors.Interceptor{},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				return v.Run(bzl)
 			},
 		),

@@ -44,13 +44,10 @@ func NewBuildCmd(
 			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.BuildHooksInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				b := build.New(streams, bzl)
 				besBackend := ctx.Value(system.BESBackendInterceptorKey).(bep.BESBackend)
 				return b.Run(args, besBackend)

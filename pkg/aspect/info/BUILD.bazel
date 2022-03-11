@@ -8,7 +8,6 @@ go_library(
     deps = [
         "//pkg/aspecterrors",
         "//pkg/bazel",
-        "//pkg/interceptors",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
     ],

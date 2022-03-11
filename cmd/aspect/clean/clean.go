@@ -65,12 +65,8 @@ Workaround inconistent state:
 	If you ever find an incorrect incremental build, please file a bug report,
 	and only use clean as a temporary workaround.`,
 		RunE: interceptors.Run(
-			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
-			},
+			[]interceptors.Interceptor{},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 				c := clean.NewDefault(bzl, isInteractive)
 				c.Expunge = expunge

@@ -29,12 +29,8 @@ func NewCQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		Short: "Executes a cquery.",
 		Long:  "Executes a query language expression over a specified subgraph of the build dependency graph using cquery.",
 		RunE: interceptors.Run(
-			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
-			},
+			[]interceptors.Interceptor{},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				q := cquery.New(streams, bzl, true)
 				return q.Run(cmd, args)
 			},

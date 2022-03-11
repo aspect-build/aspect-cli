@@ -21,7 +21,6 @@ import (
 
 func TestVersion(t *testing.T) {
 	bzl := bazel.New()
-	bzl.SetWorkspaceRoot(".")
 	t.Run("without release build info", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		var stdout strings.Builder

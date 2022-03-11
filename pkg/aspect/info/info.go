@@ -12,7 +12,6 @@ import (
 	"context"
 
 	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/spf13/cobra"
 
@@ -39,8 +38,6 @@ func (v *Info) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	}
 	bazelCmd = append(bazelCmd, args...)
 	bzl := bazel.New()
-	workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-	bzl.SetWorkspaceRoot(workspaceRoot)
 
 	if exitCode, err := bzl.Spawn(bazelCmd); exitCode != 0 {
 		err = &aspecterrors.ExitError{

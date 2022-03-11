@@ -52,13 +52,10 @@ specify targets.
 `,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.TestHooksInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				t := test.New(streams, bzl)
 				besBackend := ctx.Value(system.BESBackendInterceptorKey).(bep.BESBackend)
 				return t.Run(args, besBackend)
