@@ -14,7 +14,6 @@ import (
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/proto"
 )
@@ -161,10 +160,7 @@ func (cm *PluginCommandManager) Save(commands []*Command) error {
 
 // Execute satisfies CommandManager.
 func (cm *PluginCommandManager) Execute(command string, ctx context.Context, args []string) error {
-	workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
 	bzl := bazel.New()
-	bzl.SetWorkspaceRoot(workspaceRoot)
-
 	return cm.commands[command](ctx, args, bzl)
 }
 
