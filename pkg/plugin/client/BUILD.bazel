@@ -6,6 +6,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/plugin/client",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/bazel",
         "//pkg/ioutils",
         "//pkg/plugin/loader",
         "//pkg/plugin/sdk/v1alpha3/config",

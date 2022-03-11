@@ -5,6 +5,7 @@ bindata(
     name = "bindata",
     srcs = [
         "info-keys.md",
+        "plugins.md",
         "tags.md",
         "target-syntax.md",
     ],
