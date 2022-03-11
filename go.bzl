@@ -53,8 +53,8 @@ def deps():
         name = "com_github_bazelbuild_buildtools",
         build_naming_convention = "go_default_library",
         importpath = "github.com/bazelbuild/buildtools",
-        sum = "h1:hWvEw/36XcpZzKZB2LBYhKSGt72ETiIhudjxd637+4w=",
-        version = "v0.0.0-20210920153738-d6daef01a1a2",
+        sum = "h1:OTZvWRvUf3CXcNUlA9YTEF/9xJKIl8RnHK8g6SatBD8=",
+        version = "v0.0.0-20220309170518-00b6eb9152e1",
     )
 
     go_repository(

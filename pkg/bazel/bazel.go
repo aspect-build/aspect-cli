@@ -13,28 +13,62 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"os"
+	"path"
+	"strings"
+
+	"aspect.build/cli/pkg/pathutils"
 
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
 	"google.golang.org/protobuf/proto"
 )
 
+// Global mutable state!
+// This is for performance, avoiding a lookup of the workspace directory for every
+// instance of a bazel struct.
+// We know the workspace location is constant for the lifetime of an `aspect` cli execution.
+var workspaceRoot string
+
 type Bazel interface {
-	SetWorkspaceRoot(workspaceRoot string)
+	AQuery(expr string) (*ActionGraphContainer, error)
 	Spawn(command []string) (int, error)
 	RunCommand(command []string, out io.Writer) (int, error)
+	Flags() (map[string]*FlagInfo, error)
 }
 
 type bazel struct {
-	workspaceRoot string
+	osGetwd         func() (dir string, err error)
+	workspaceFinder pathutils.WorkspaceFinder
 }
 
 func New() Bazel {
-	return &bazel{}
+	return &bazel{
+		osGetwd:         os.Getwd,
+		workspaceFinder: pathutils.DefaultWorkspaceFinder,
+	}
 }
 
-func (b *bazel) SetWorkspaceRoot(workspaceRoot string) {
-	b.workspaceRoot = workspaceRoot
+// maybeSetWorkspaceRoot lazily sets the workspaceRoot if it isn't set already.
+func (b *bazel) maybeSetWorkspaceRoot() error {
+	fail := func(err error) error {
+		return fmt.Errorf("failed to find bazel workspace root: %w", err)
+	}
+	if len(workspaceRoot) < 1 {
+		wd, err := b.osGetwd()
+		if err != nil {
+			return fail(err)
+		}
+		workspacePath, err := b.workspaceFinder.Find(wd)
+		if err != nil {
+			return fail(err)
+		}
+		if workspacePath == "" {
+			return fail(fmt.Errorf("the current working directory %q is not a Bazel workspace", wd))
+		}
+		workspaceRoot = path.Dir(workspacePath)
+	}
+	return nil
 }
 
 func (*bazel) createRepositories() *core.Repositories {
@@ -53,15 +87,16 @@ func (b *bazel) Spawn(command []string) (int, error) {
 
 func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 	repos := b.createRepositories()
-	if len(b.workspaceRoot) < 1 {
-		panic("Illegal state: running bazel without the workspaceRoot set")
+	if err := b.maybeSetWorkspaceRoot(); err != nil {
+		return 1, err
 	}
 
-	bazelisk := NewBazelisk(b.workspaceRoot)
+	bazelisk := NewBazelisk(workspaceRoot)
 	exitCode, err := bazelisk.Run(command, repos, out)
 	return exitCode, err
 }
 
+// Flags fetches the metadata for Bazel's command line flags.
 func (b *bazel) Flags() (map[string]*FlagInfo, error) {
 	r, w := io.Pipe()
 	decoder := base64.NewDecoder(base64.StdEncoding, r)
@@ -93,4 +128,98 @@ func (b *bazel) Flags() (map[string]*FlagInfo, error) {
 	}
 
 	return flags, nil
+}
+
+// AQuery runs a `bazel aquery` command and returns the resulting parsed proto data.
+func (b *bazel) AQuery(query string) (*ActionGraphContainer, error) {
+	r, w := io.Pipe()
+	agc := &ActionGraphContainer{}
+
+	bazelErrs := make(chan error, 1)
+	defer close(bazelErrs)
+	go func() {
+		defer w.Close()
+		_, err := b.RunCommand([]string{"aquery", "--output=proto", query}, w)
+		bazelErrs <- err
+	}()
+
+	protoBytes, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run Bazel aquery: %w", err)
+	}
+
+	if err := <-bazelErrs; err != nil {
+		return nil, fmt.Errorf("failed to run Bazel aquery: %w", err)
+	}
+
+	proto.Unmarshal(protoBytes, agc)
+	if err := proto.Unmarshal(protoBytes, agc); err != nil {
+		return nil, fmt.Errorf("failed to run Bazel aquery: parsing ActionGraphContainer: %w", err)
+	}
+	return agc, nil
+}
+
+type Output struct {
+	Mnemonic string
+	Path     string
+}
+
+// ParseOutputs reads the proto result of AQuery and extracts the output file paths with their generator mnemonics.
+func ParseOutputs(agc *ActionGraphContainer) []Output {
+	// Use RAM to store lookup maps for these identifiers
+	// rather than an O(n^2) algorithm of searching on each access.
+	frags := make(map[uint32]*PathFragment)
+	for _, f := range agc.PathFragments {
+		frags[f.Id] = f
+	}
+	arts := make(map[uint32]*Artifact)
+	for _, a := range agc.Artifacts {
+		arts[a.Id] = a
+	}
+
+	// The paths in the proto data are organized as a trie
+	// to make the representation more compact.
+	// https://en.wikipedia.org/wiki/Trie
+	// Make a map to store each prefix so we can memoize common paths
+	prefixes := make(map[uint32]*[]string)
+
+	// Declare a recursive function to walk up the trie to the root.
+	var prefix func(pathID uint32) []string
+
+	prefix = func(pathID uint32) []string {
+		if prefixes[pathID] != nil {
+			return *prefixes[pathID]
+		}
+		fragment := frags[pathID]
+		// Reconstruct the path from the parent pointers.
+		segments := []string{fragment.Label}
+
+		if fragment.ParentId > 0 {
+			segments = append(segments, prefix(fragment.ParentId)...)
+		}
+		prefixes[pathID] = &segments
+		return segments
+	}
+
+	result := make([]Output, 10)
+	for _, a := range agc.Actions {
+		for _, i := range a.OutputIds {
+			artifact := arts[i]
+			segments := prefix(artifact.PathFragmentId)
+			var path strings.Builder
+			// Assemble in reverse order.
+			for i := len(segments) - 1; i >= 0; i-- {
+				path.WriteString(segments[i])
+				if i > 0 {
+					path.WriteString("/")
+				}
+			}
+			fmt.Println(a.Mnemonic)
+			result = append(result, Output{
+				a.Mnemonic,
+				path.String(),
+			})
+		}
+	}
+	return result
 }

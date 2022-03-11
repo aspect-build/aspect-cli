@@ -9,8 +9,12 @@ _DOCS = ["aspect.md"] + [
 
 genrule(
     name = "command_list_bzl",
+    # We need to be able to start bazel so that we can get the correct flags
+    srcs = [
+        "//:.bazelversion",
+    ],
     outs = ["command_list.bzl"],
-    cmd = "$(execpath //cmd/docgen) bzl-command-list > $@",
+    cmd = "export HOME=$$(pwd); touch WORKSPACE; $(execpath //cmd/docgen) bzl-command-list > $@",
     tools = ["//cmd/docgen"],
 )
 
@@ -33,8 +37,12 @@ sh_binary(
 
 genrule(
     name = "docgen",
+    # We need to be able to start bazel so that we can get the correct flags
+    srcs = [
+        "//:.bazelversion",
+    ],
     outs = ["gen/" + d for d in _DOCS],
-    cmd = "$(execpath //cmd/docgen) gen-markdown --output-dir $(@D)/gen",
+    cmd = "export HOME=$$(pwd); touch WORKSPACE; $(execpath //cmd/docgen) gen-markdown --output-dir $(@D)/gen",
     tools = ["//cmd/docgen"],
 )
 

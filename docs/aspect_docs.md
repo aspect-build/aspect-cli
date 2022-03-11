@@ -6,7 +6,7 @@ Open documentation in the browser.
 
 Given a selected topic, open the relevant API docs in a browser window.
 The mechanism of choosing the browser to open is documented at https://github.com/pkg/browser
-By default, opens docs.bazel.build
+By default, opens bazel.build/docs
 
 ```
 aspect docs [flags]
@@ -21,8 +21,8 @@ aspect docs [flags]
 ### Options inherited from parent commands
 
 ```
-      --config string   config file (default is $HOME/.aspect.yaml)
-      --interactive     Interactive mode (e.g. prompts for user input)
+      --aspect:config string   config file (default is $HOME/.aspect.yaml)
+      --aspect:interactive     Interactive mode (e.g. prompts for user input)
 ```
 
 ### SEE ALSO

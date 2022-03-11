@@ -12,11 +12,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
 	yaml "gopkg.in/yaml.v2"
 
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
@@ -25,6 +27,7 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/client"
 	"aspect.build/cli/pkg/plugin/loader"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
@@ -82,12 +85,14 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 				return fmt.Errorf("failed to configure plugin system: %w", err)
 			}
 
-			propertiesBytes, err := yaml.Marshal(p.Properties)
+			properties, err := yaml.Marshal(p.Properties)
 			if err != nil {
 				return fmt.Errorf("failed to configure plugin system: %w", err)
 			}
 
-			if err := aspectplugin.Setup(propertiesBytes); err != nil {
+			aspectPluginFile := plugin.NewAspectPluginFile(aspectpluginsPath)
+			setupConfig := plugin.NewSetupConfig(aspectPluginFile, properties)
+			if err := aspectplugin.Setup(setupConfig); err != nil {
 				return fmt.Errorf("failed to configure plugin system: %w", err)
 			}
 
@@ -130,9 +135,7 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 				Short: command.ShortDesc,
 				Long:  command.LongDesc,
 				RunE: interceptors.Run(
-					[]interceptors.Interceptor{
-						interceptors.WorkspaceRootInterceptor(),
-					},
+					[]interceptors.Interceptor{},
 					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 						return callback.ExecuteCustomCommand(command.Use, ctx, args)
 					},
@@ -167,7 +170,16 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 		for node := ps.plugins.head; node != nil; node = node.next {
 			besBackend.RegisterSubscriber(node.payload.BEPEventCallback)
 		}
-		if err := besBackend.Setup(); err != nil {
+		opts := []grpc.ServerOption{
+			// Bazel doesn't seem to set a maximum send message size, therefore
+			// we match the default send message for Go, which should be enough
+			// for all messages sent by Bazel (roughly 2.14GB).
+			grpc.MaxRecvMsgSize(math.MaxInt32),
+			// Here we are just being explicit with the default value since we
+			// also set the receive message size.
+			grpc.MaxSendMsgSize(math.MaxInt32),
+		}
+		if err := besBackend.Setup(opts...); err != nil {
 			return fmt.Errorf("failed to run BES backend: %w", err)
 		}
 		ctx, cancel := context.WithTimeout(ctx, time.Second)

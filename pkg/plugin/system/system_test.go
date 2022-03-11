@@ -27,7 +27,8 @@ import (
 	client_mock "aspect.build/cli/pkg/plugin/client/mock"
 	"aspect.build/cli/pkg/plugin/loader"
 	loader_mock "aspect.build/cli/pkg/plugin/loader/mock"
-	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin/mock"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
+	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin/mock"
 )
 
 func createInterceptorCommand() *cobra.Command {
@@ -543,18 +544,20 @@ func TestConfigure(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
 
-		pluginProperties := make(map[string]interface{})
-		propertiesBytes, _ := yaml.Marshal(pluginProperties)
+		propertiesMap := make(map[string]interface{})
+		propertiesBytes, _ := yaml.Marshal(propertiesMap)
+		file := plugin.NewAspectPluginFile("/foo/bar")
+		setupConfig := plugin.NewSetupConfig(file, propertiesBytes)
 
 		testPlugin := loader.AspectPlugin{
 			Name:       "test plugin",
 			From:       "...",
 			LogLevel:   "debug",
-			Properties: pluginProperties,
+			Properties: propertiesMap,
 		}
 
 		p1 := plugin_mock.NewMockPlugin(ctrl)
-		p1.EXPECT().Setup(propertiesBytes)
+		p1.EXPECT().Setup(setupConfig)
 
 		finder := loader_mock.NewMockFinder(ctrl)
 		finder.EXPECT().Find().Return("/foo/bar", nil)

@@ -3,7 +3,7 @@
 set -o errexit -o nounset -o pipefail
 
 INVALID_FILE_PATHS=('pkg/plugin/sdk') # Array of filepaths that are not allowed
-VALID_FILE_PATHS=('pkg/plugin/sdk/v1alpha2') # Array of filepaths that are allowed
+VALID_FILE_PATHS=('pkg/plugin/sdk/v1alpha3') # Array of filepaths that are allowed
 
 # by default the only local branch will be pull/PR#/merge
 # fetch only the latest commit from the 2 branches in question to avoid fetching the entire repo which could be costly

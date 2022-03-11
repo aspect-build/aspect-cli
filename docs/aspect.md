@@ -9,9 +9,9 @@ Aspect CLI is a better frontend for running bazel
 ### Options
 
 ```
-      --config string   config file (default is $HOME/.aspect.yaml)
-  -h, --help            help for aspect
-      --interactive     Interactive mode (e.g. prompts for user input)
+      --aspect:config string   config file (default is $HOME/.aspect.yaml)
+      --aspect:interactive     Interactive mode (e.g. prompts for user input)
+  -h, --help                   help for aspect
 ```
 
 ### SEE ALSO

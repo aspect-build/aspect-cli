@@ -28,8 +28,8 @@ import (
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/config"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
 )
 
 func main() {
@@ -90,14 +90,6 @@ func (plugin *FixVisibilityPlugin) BEPEventCallback(event *buildeventstream.Buil
 }
 
 const removePrivateVisibilityBuildozerCommand = "remove visibility //visibility:private"
-
-// Setup satisfies the Plugin interface. It provides the plugin with its
-// configured properties from the aspect config file.
-func (plugin *FixVisibilityPlugin) Setup(
-	properties []byte,
-) error {
-	return nil
-}
 
 // PostBuildHook satisfies the Plugin interface. It prompts the user for
 // automatic fixes when in interactive mode. If the user rejects the automatic

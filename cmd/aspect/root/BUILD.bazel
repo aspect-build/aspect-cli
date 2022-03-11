@@ -25,8 +25,6 @@ go_library(
         "//pkg/plugin/system",
         "@com_github_fatih_color//:color",
         "@com_github_mattn_go_isatty//:go-isatty",
-        "@com_github_mitchellh_go_homedir//:go-homedir",
         "@com_github_spf13_cobra//:cobra",
-        "@com_github_spf13_viper//:viper",
     ],
 )

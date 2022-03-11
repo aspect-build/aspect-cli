@@ -19,8 +19,8 @@ import (
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/config"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
 )
 
 func main() {
@@ -30,7 +30,6 @@ func main() {
 type ErrorAugmentorPlugin struct {
 	plugin.Base
 
-	properties             []byte
 	hintMap                map[*regexp.Regexp]string
 	yamlUnmarshalStrict    func(in []byte, out interface{}) (err error)
 	helpfulHints           *helpfulHintSet
@@ -45,7 +44,6 @@ func NewDefaultPlugin() *ErrorAugmentorPlugin {
 
 func NewPlugin() *ErrorAugmentorPlugin {
 	return &ErrorAugmentorPlugin{
-		properties:          nil,
 		hintMap:             map[*regexp.Regexp]string{},
 		yamlUnmarshalStrict: yaml.UnmarshalStrict,
 		helpfulHints:        &helpfulHintSet{nodes: make(map[helpfulHintNode]struct{})},
@@ -59,13 +57,9 @@ type pluginProperties struct {
 	ProcessorCount int               `yaml:"processor_count"`
 }
 
-func (plugin *ErrorAugmentorPlugin) Setup(
-	properties []byte,
-) error {
-	plugin.properties = properties
-
+func (plugin *ErrorAugmentorPlugin) Setup(config *plugin.SetupConfig) error {
 	var processedProperties pluginProperties
-	if err := plugin.yamlUnmarshalStrict(properties, &processedProperties); err != nil {
+	if err := plugin.yamlUnmarshalStrict(config.Properties, &processedProperties); err != nil {
 		return fmt.Errorf("failed to setup: failed to parse properties: %w", err)
 	}
 

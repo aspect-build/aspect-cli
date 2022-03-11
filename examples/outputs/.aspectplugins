@@ -1,0 +1,2 @@
+- name: outputs
+  from: ../../bazel-bin/plugins/outputs/outputs_/outputs

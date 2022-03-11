@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/buildinfo"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/version"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
@@ -36,11 +37,9 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
+				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				return v.Run(bzl)
 			},
 		),
