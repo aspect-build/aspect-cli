@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/clean"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -66,11 +67,9 @@ Workaround inconistent state:
 	and only use clean as a temporary workaround.`,
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
+				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 				c := clean.NewDefault(bzl, isInteractive)
 				c.Expunge = expunge

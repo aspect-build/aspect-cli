@@ -15,6 +15,7 @@ import (
 	"os"
 
 	"aspect.build/cli/cmd/aspect/root"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
@@ -48,6 +49,12 @@ func main() {
 	defer pluginSystem.TearDown()
 
 	cmd := root.NewDefaultRootCmd(pluginSystem)
+
+	// Run this command after all bazel verbs have been added to "cmd".
+	if err := flags.AddBazelFlags(cmd); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
 
 	if err := pluginSystem.RegisterCustomCommands(cmd); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)

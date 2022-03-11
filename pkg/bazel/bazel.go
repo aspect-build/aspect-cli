@@ -32,9 +32,9 @@ var workspaceRoot string
 
 type Bazel interface {
 	AQuery(expr string) (*ActionGraphContainer, error)
-	SetWorkspaceRoot(workspaceRoot string)
 	Spawn(command []string) (int, error)
 	RunCommand(command []string, out io.Writer) (int, error)
+	Flags() (map[string]*FlagInfo, error)
 }
 
 type bazel struct {
@@ -47,11 +47,6 @@ func New() Bazel {
 		osGetwd:         os.Getwd,
 		workspaceFinder: pathutils.DefaultWorkspaceFinder,
 	}
-}
-
-// Deprecated. WorkspaceRoot is set lazily by this class
-func (b *bazel) SetWorkspaceRoot(w string) {
-	workspaceRoot = w
 }
 
 // maybeSetWorkspaceRoot lazily sets the workspaceRoot if it isn't set already.

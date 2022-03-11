@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/cquery"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -30,11 +31,9 @@ func NewCQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		Long:  "Executes a query language expression over a specified subgraph of the build dependency graph using cquery.",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
-				interceptors.WorkspaceRootInterceptor(),
+				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				workspaceRoot := ctx.Value(interceptors.WorkspaceRootKey).(string)
-				bzl.SetWorkspaceRoot(workspaceRoot)
 				q := cquery.New(streams, bzl, true)
 				return q.Run(cmd, args)
 			},
