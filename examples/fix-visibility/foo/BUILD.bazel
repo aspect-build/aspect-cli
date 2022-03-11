@@ -1,8 +1,0 @@
-genrule(
-    name = "foo",
-    srcs = ["//bar"],
-    outs = ["foo.sh"],
-    cmd = "echo '#!/bin/sh\ncat $(execpath //bar)' > '$@'",
-    executable = True,
-    visibility = ["//visibility:public"],
-)
