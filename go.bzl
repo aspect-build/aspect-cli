@@ -35,12 +35,6 @@ def deps():
         sum = "h1:BUAU3CGlLvorLI26FmByPp2eC2qla6E1Tw+scpcg/to=",
         version = "v0.0.0-20180808171621-7fddfc383310",
     )
-    go_repository(
-        name = "com_github_bazelbuild_bazel_gazelle",
-        importpath = "github.com/bazelbuild/bazel-gazelle",
-        sum = "h1:Ks6YN+WkOv2lYWlvf7ksxUpLvrDbBHPBXXUrBFQ3BZM=",
-        version = "v0.23.0",
-    )
 
     go_repository(
         name = "com_github_bazelbuild_bazelisk",
@@ -48,13 +42,6 @@ def deps():
         importpath = "github.com/bazelbuild/bazelisk",
         sum = "h1:2EWA2lRrt/k8B5ASt0mlTDQ+7mnzvKdF6ShNWLbk0o0=",
         version = "v1.10.1",
-    )
-    go_repository(
-        name = "com_github_bazelbuild_buildtools",
-        build_naming_convention = "go_default_library",
-        importpath = "github.com/bazelbuild/buildtools",
-        sum = "h1:OTZvWRvUf3CXcNUlA9YTEF/9xJKIl8RnHK8g6SatBD8=",
-        version = "v0.0.0-20220309170518-00b6eb9152e1",
     )
 
     go_repository(
@@ -75,12 +62,6 @@ def deps():
         importpath = "github.com/bketelsen/crypt",
         sum = "h1:w/jqZtC9YD4DS/Vp9GhWfWcCpuAL58oTnLoI8vE9YHU=",
         version = "v0.0.4",
-    )
-    go_repository(
-        name = "com_github_bmatcuk_doublestar",
-        importpath = "github.com/bmatcuk/doublestar",
-        sum = "h1:oC24CykoSAB8zd7XgruHo33E0cHJf/WhQA/7BeXj+x0=",
-        version = "v1.2.2",
     )
 
     go_repository(
@@ -938,13 +919,6 @@ def deps():
         importpath = "rsc.io/sampler",
         sum = "h1:7uVkIFmeBqHfdjD+gZwtXXI+RODJ2Wc4O7MPEh/QiW4=",
         version = "v1.3.0",
-    )
-
-    go_repository(
-        name = "net_starlark_go",
-        importpath = "go.starlark.net",
-        sum = "h1:xwwDQW5We85NaTk2APgoN9202w/l0DVGp+GZMfsrh7s=",
-        version = "v0.0.0-20210223155950-e043a3d3c984",
     )
 
     go_repository(
