@@ -11,7 +11,7 @@ proto_library(
 
 go_proto_library(
     name = "command_line_go_proto",
-    importpath = "aspect.build/cli/third-party/github.com/bazelbuild/bazel/src/main/protobuf/command_line",
+    importpath = "github.com/bazelbuild/bazel/src/main/protobuf/command_line",
     proto = ":command_line_proto",
     visibility = ["//visibility:public"],
     deps = ["//third-party/github.com/bazelbuild/bazel/src/main/protobuf/options"],
@@ -20,6 +20,6 @@ go_proto_library(
 go_library(
     name = "command_line",
     embed = [":command_line_go_proto"],
-    importpath = "aspect.build/cli/third-party/github.com/bazelbuild/bazel/src/main/protobuf/command_line",
+    importpath = "github.com/bazelbuild/bazel/src/main/protobuf/command_line",
     visibility = ["//visibility:public"],
 )

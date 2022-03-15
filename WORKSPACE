@@ -34,6 +34,11 @@ http_archive(
 
 http_archive(
     name = "io_bazel_rules_go",
+    patch_args = [
+        "-p1",
+        "-s",
+    ],
+    patches = ["//:rules_go.patch"],
     sha256 = "d6b2513456fe2229811da7eb67a444be7785f5323c6708b38d851d2b51e54d83",
     urls = [
         "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.30.0/rules_go-v0.30.0.zip",

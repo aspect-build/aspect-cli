@@ -1,0 +1,81 @@
+diff --git a/proto/def.bzl b/proto/def.bzl
+index a20459d6..efc674ec 100644
+--- a/proto/def.bzl
++++ b/proto/def.bzl
+@@ -12,6 +12,9 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++load("@aspect_bazel_lib//lib:default_info_files.bzl", "make_default_info_files")
++load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
++load("@bazel_skylib//lib:paths.bzl", "paths")
+ load(
+     "//go:def.bzl",
+     "GoLibrary",
+@@ -134,7 +137,7 @@ def _go_proto_library_impl(ctx):
+         ])
+     return providers + [OutputGroupInfo(**output_groups)]
+ 
+-go_proto_library = rule(
++_go_proto_library = rule(
+     implementation = _go_proto_library_impl,
+     attrs = {
+         "proto": attr.label(providers = [ProtoInfo]),
+@@ -165,6 +168,57 @@ go_proto_library = rule(
+ # go_proto_library is a rule that takes a proto_library (in the proto
+ # attribute) and produces a go library for it.
+ 
++def go_proto_library(name, importpath, proto_srcs = [], **kwargs):
++    """Wrap go_proto_library with write_source_files.
++
++    This causes the resulting .pb.go files to be checked into the source tree.
++    Args:
++        name: name of the go_proto_library rule produced
++        importpath: passed to go_proto_library#importpath
++        proto_srcs: the srcs of the proto_library target passed to go_proto_library#proto
++            If unset, a glob() of all ".proto" files in the package is used.
++        **kwargs: remaining arguments to go_proto_library
++    """
++
++    _go_proto_library(
++        name = name,
++        importpath = importpath,
++        **kwargs
++    )
++
++    is_external = native.repository_name() != "@"
++    if is_external:
++        return
++
++    # Based on our knowledge of the rule implementation,
++    # predict the output paths it writes.
++    proto_out_path = "{0}/{1}_/{2}/%s.pb.go".format(
++        native.package_name(),
++        name,
++        importpath,
++    )
++
++    gen_srcs_filegroup = "_{}.gensrcs".format(name)
++
++    if len(proto_srcs) < 1:
++        proto_srcs = native.glob(["*.proto"])
++
++    native.filegroup(
++        name = gen_srcs_filegroup,
++        srcs = [name],
++        output_group = "go_generated_srcs",
++    )
++
++    write_source_files(
++        name = name + ".update_go_pb",
++        files = {
++            base + ".pb.go": make_default_info_files(base + "_pb_go", gen_srcs_filegroup, [proto_out_path % base])
++            for base in [paths.replace_extension(p, "") for p in proto_srcs]
++        },
++        suggested_update_target = "//:update_go_pb",
++        visibility = ["//:__pkg__"],
++    )
++
+ def go_grpc_library(**kwargs):
+     # TODO: Deprecate once gazelle generates just go_proto_library
+     go_proto_library(compilers = ["@io_bazel_rules_go//proto:go_grpc"], **kwargs)
