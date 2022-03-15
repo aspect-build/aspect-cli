@@ -27,7 +27,6 @@ import (
 	client_mock "aspect.build/cli/pkg/plugin/client/mock"
 	"aspect.build/cli/pkg/plugin/loader"
 	loader_mock "aspect.build/cli/pkg/plugin/loader/mock"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
 	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin/mock"
 )
 
@@ -546,8 +545,8 @@ func TestConfigure(t *testing.T) {
 
 		propertiesMap := make(map[string]interface{})
 		propertiesBytes, _ := yaml.Marshal(propertiesMap)
-		file := plugin.NewAspectPluginFile("/foo/bar")
-		setupConfig := plugin.NewSetupConfig(file, propertiesBytes)
+		file := loader.NewAspectPluginFile("/foo/bar")
+		setupConfig := loader.NewSetupConfig(file, propertiesBytes)
 
 		testPlugin := loader.AspectPlugin{
 			Name:       "test plugin",

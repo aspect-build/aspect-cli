@@ -21,6 +21,7 @@ import (
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/loader"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/proto"
 )
 
@@ -69,8 +70,8 @@ func (m *GRPCServer) Setup(
 	ctx context.Context,
 	req *proto.SetupReq,
 ) (*proto.SetupRes, error) {
-	file := NewAspectPluginFile(req.File.Path)
-	config := NewSetupConfig(file, req.Properties)
+	file := loader.NewAspectPluginFile(req.File.Path)
+	config := loader.NewSetupConfig(file, req.Properties)
 	return &proto.SetupRes{}, m.Impl.Setup(config)
 }
 
@@ -186,7 +187,7 @@ func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error 
 }
 
 // Setup is called from the Core to execute the Plugin Setup.
-func (m *GRPCClient) Setup(config *SetupConfig) error {
+func (m *GRPCClient) Setup(config *loader.SetupConfig) error {
 	req := &proto.SetupReq{
 		Properties: config.Properties,
 		File: &proto.File{

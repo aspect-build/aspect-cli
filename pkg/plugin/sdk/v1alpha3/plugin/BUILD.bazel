@@ -12,6 +12,7 @@ go_library(
         "//bazel/buildeventstream/proto",
         "//pkg/bazel",
         "//pkg/ioutils",
+        "//pkg/plugin/loader",
         "//pkg/plugin/sdk/v1alpha3/proto",
         "@com_github_hashicorp_go_plugin//:go-plugin",
         "@com_github_manifoldco_promptui//:promptui",

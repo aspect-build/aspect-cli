@@ -23,6 +23,7 @@ go_library(
     deps = [
         "//bazel/buildeventstream/proto",  # keep
         "//pkg/ioutils",  # keep
+        "//pkg/plugin/loader",  # keep
         "//pkg/plugin/sdk/v1alpha3/plugin",  # keep
         "@com_github_golang_mock//gomock",  # keep
     ],

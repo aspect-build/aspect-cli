@@ -15,6 +15,7 @@ import (
 	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/loader"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/proto"
 )
 
@@ -34,38 +35,7 @@ type Plugin interface {
 		isInteractiveMode bool,
 		promptRunner ioutils.PromptRunner,
 	) error
-	Setup(config *SetupConfig) error
-}
-
-// SetupConfig represents a plugin configuration parsed from the aspectplugins
-// file.
-type SetupConfig struct {
-	File       *AspectPluginFile
-	Properties []byte
-}
-
-// NewSetupConfig creates a new SetupConfig.
-func NewSetupConfig(
-	file *AspectPluginFile,
-	properties []byte,
-) *SetupConfig {
-	return &SetupConfig{
-		File:       file,
-		Properties: properties,
-	}
-}
-
-// AspectPluginFile contains metadata for the aspectplugins file relevant for
-// a plugin.
-type AspectPluginFile struct {
-	Path string
-}
-
-// NewAspectPluginFile creates a new AspectPluginFile.
-func NewAspectPluginFile(path string) *AspectPluginFile {
-	return &AspectPluginFile{
-		Path: path,
-	}
+	Setup(config *loader.SetupConfig) error
 }
 
 // Base satisfies the Plugin interface. For plugins that only implement a subset
@@ -76,7 +46,7 @@ type Base struct{}
 var _ Plugin = (*Base)(nil)
 
 // Setup satisfies Plugin.Setup.
-func (*Base) Setup(*SetupConfig) error {
+func (*Base) Setup(*loader.SetupConfig) error {
 	return nil
 }
 
