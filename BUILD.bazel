@@ -1,3 +1,4 @@
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 load("@bazel_gazelle//:def.bzl", "gazelle")
 load("@io_bazel_rules_go//go:def.bzl", "TOOLS_NOGO", "nogo")
 
@@ -14,10 +15,12 @@ nogo(
     deps = TOOLS_NOGO,
 )
 
-# TODO: follow https://sagikazarmark.hu/blog/vanity-import-paths-in-go/
-# so we have savvy go imports for users
 # gazelle:prefix aspect.build/cli
+# gazelle:exclude **/*.pb.go
 # gazelle:resolve go aspect.build/cli/bazel/buildeventstream/proto //bazel/buildeventstream/proto
+# gazelle-TODO:
+#   cannot use :map_kind go_proto_library go_proto_library //:go_proto_library.bzl
+#   because we need gazelle to understand the built-in kind, see https://github.com/bazelbuild/bazel-gazelle/issues/1162
 gazelle(name = "gazelle")
 
 gazelle(
@@ -28,6 +31,25 @@ gazelle(
         "-prune",
     ],
     command = "update-repos",
+)
+
+# Run this target to update all the generated .pb.go files in the repo:
+# bazel run //:update_go_pb
+#
+# Note that each target also has a corresponding test asserting that the
+# generated files stay up-to-date.
+write_source_files(
+    name = "update_go_pb",
+    additional_update_targets = [
+        "//pkg/bazel:bazel_go_proto.update_go_pb",
+        "//pkg/plugin/sdk/v1alpha3/proto:proto_go_proto.update_go_pb",
+        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf:blaze_query_go_proto.update_go_pb",
+        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf/command_line:command_line_go_proto.update_go_pb",
+        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf/failure_details:failure_details_go_proto.update_go_pb",
+        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf/invocation_policy:invocation_policy_go_proto.update_go_pb",
+        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf/options:options_go_proto.update_go_pb",
+        "//third-party/github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto:proto_go_proto.update_go_pb",
+    ],
 )
 
 alias(

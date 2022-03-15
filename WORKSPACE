@@ -17,6 +17,13 @@ load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
 protobuf_deps()
 
 http_archive(
+    name = "aspect_bazel_lib",
+    sha256 = "4f018d3c685174115188ffb778fca10a3f43f82bbbf0aa63361c1cd02f708dbb",
+    strip_prefix = "bazel-lib-0.5.3",
+    url = "https://github.com/aspect-build/bazel-lib/archive/refs/tags/v0.5.3.tar.gz",
+)
+
+http_archive(
     name = "bazel_skylib",
     sha256 = "58f558d04a936cade1d4744d12661317e51f6a21e3dd7c50b96dc14f3fa3b87d",
     strip_prefix = "bazel-skylib-df3c9e2735f02a7fe8cd80db4db00fec8e13d25f",
@@ -27,6 +34,11 @@ http_archive(
 
 http_archive(
     name = "io_bazel_rules_go",
+    patch_args = [
+        "-p1",
+        "-s",
+    ],
+    patches = ["//:rules_go.patch"],
     sha256 = "d6b2513456fe2229811da7eb67a444be7785f5323c6708b38d851d2b51e54d83",
     urls = [
         "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.30.0/rules_go-v0.30.0.zip",
