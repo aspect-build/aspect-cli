@@ -10,7 +10,7 @@ proto_library(
 
 go_proto_library(
     name = "options_go_proto",
-    importpath = "github.com/bazelbuild/bazel/src/main/protobuf/options",
+    importpath = "aspect.build/cli/third-party/github.com/bazelbuild/bazel/src/main/protobuf/options",  #keep
     proto = ":options_proto",
     visibility = ["//visibility:public"],
 )
@@ -18,6 +18,6 @@ go_proto_library(
 go_library(
     name = "options",
     embed = [":options_go_proto"],
-    importpath = "github.com/bazelbuild/bazel/src/main/protobuf/options",
+    importpath = "aspect.build/cli/third-party/github.com/bazelbuild/bazel/src/main/protobuf/options",  # keep
     visibility = ["//visibility:public"],
 )

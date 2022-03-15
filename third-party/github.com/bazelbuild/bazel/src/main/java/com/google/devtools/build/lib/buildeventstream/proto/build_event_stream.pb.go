@@ -7,9 +7,9 @@
 package proto
 
 import (
+	command_line "aspect.build/cli/third-party/github.com/bazelbuild/bazel/src/main/protobuf/command_line"
 	failure_details "aspect.build/cli/third-party/github.com/bazelbuild/bazel/src/main/protobuf/failure_details"
-	command_line "github.com/bazelbuild/bazel/src/main/protobuf/command_line"
-	invocation_policy "github.com/bazelbuild/bazel/src/main/protobuf/invocation_policy"
+	invocation_policy "aspect.build/cli/third-party/github.com/bazelbuild/bazel/src/main/protobuf/invocation_policy"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
