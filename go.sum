@@ -43,6 +43,8 @@ github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kd
 github.com/armon/circbuf v0.0.0-20150827004946-bbbad097214e/go.mod h1:3U/XgcO3hCbHZ8TKRvWD2dDTCfh9M9ya+I9JpbB7O8o=
 github.com/armon/go-metrics v0.0.0-20180917152333-f0300d1749da/go.mod h1:Q73ZrmVTwzkszR9V5SSuryQ31EELlFMUz1kKyl939pY=
 github.com/armon/go-radix v0.0.0-20180808171621-7fddfc383310/go.mod h1:ufUuZ+zHj4x4TnLV4JWEpy2hxWSpsRywHrMgIH9cCH8=
+github.com/bazelbuild/bazel v0.0.0-20220315122738-5c9c8aa059eb h1:nAMESqyX2m8GyQ1JwEu9Efe7//B3TXpb672Kx7lCdT8=
+github.com/bazelbuild/bazel v0.0.0-20220315142521-4c56447fe18e h1:A7kDlXYOhYLTbeNFnA858x1XVBHREf0mDVPagpQmryc=
 github.com/bazelbuild/bazel-gazelle v0.23.0 h1:Ks6YN+WkOv2lYWlvf7ksxUpLvrDbBHPBXXUrBFQ3BZM=
 github.com/bazelbuild/bazel-gazelle v0.23.0/go.mod h1:3mHi4TYn0QxwdMKPJfj3FKhZxYgWm46DjWQQPOg20BY=
 github.com/bazelbuild/bazelisk v1.10.1 h1:2EWA2lRrt/k8B5ASt0mlTDQ+7mnzvKdF6ShNWLbk0o0=
