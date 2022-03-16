@@ -17,6 +17,8 @@ import (
 	"path"
 	"strings"
 
+	"aspect.build/cli/bazel/analysis"
+	"aspect.build/cli/bazel/flags"
 	"aspect.build/cli/pkg/pathutils"
 
 	"github.com/bazelbuild/bazelisk/core"
@@ -31,10 +33,10 @@ import (
 var workspaceRoot string
 
 type Bazel interface {
-	AQuery(expr string) (*ActionGraphContainer, error)
+	AQuery(expr string) (*analysis.ActionGraphContainer, error)
 	Spawn(command []string) (int, error)
 	RunCommand(command []string, out io.Writer) (int, error)
-	Flags() (map[string]*FlagInfo, error)
+	Flags() (map[string]*flags.FlagInfo, error)
 }
 
 type bazel struct {
@@ -97,7 +99,7 @@ func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 }
 
 // Flags fetches the metadata for Bazel's command line flags.
-func (b *bazel) Flags() (map[string]*FlagInfo, error) {
+func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	r, w := io.Pipe()
 	decoder := base64.NewDecoder(base64.StdEncoding, r)
 	bazelErrs := make(chan error, 1)
@@ -117,12 +119,12 @@ func (b *bazel) Flags() (map[string]*FlagInfo, error) {
 		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
 	}
 
-	flagCollection := &FlagCollection{}
+	flagCollection := &flags.FlagCollection{}
 	if err := proto.Unmarshal(helpProtoBytes, flagCollection); err != nil {
 		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
 	}
 
-	flags := make(map[string]*FlagInfo)
+	flags := make(map[string]*flags.FlagInfo)
 	for i := range flagCollection.FlagInfos {
 		flags[*flagCollection.FlagInfos[i].Name] = flagCollection.FlagInfos[i]
 	}
@@ -131,9 +133,9 @@ func (b *bazel) Flags() (map[string]*FlagInfo, error) {
 }
 
 // AQuery runs a `bazel aquery` command and returns the resulting parsed proto data.
-func (b *bazel) AQuery(query string) (*ActionGraphContainer, error) {
+func (b *bazel) AQuery(query string) (*analysis.ActionGraphContainer, error) {
 	r, w := io.Pipe()
-	agc := &ActionGraphContainer{}
+	agc := &analysis.ActionGraphContainer{}
 
 	bazelErrs := make(chan error, 1)
 	defer close(bazelErrs)
@@ -165,14 +167,14 @@ type Output struct {
 }
 
 // ParseOutputs reads the proto result of AQuery and extracts the output file paths with their generator mnemonics.
-func ParseOutputs(agc *ActionGraphContainer) []Output {
+func ParseOutputs(agc *analysis.ActionGraphContainer) []Output {
 	// Use RAM to store lookup maps for these identifiers
 	// rather than an O(n^2) algorithm of searching on each access.
-	frags := make(map[uint32]*PathFragment)
+	frags := make(map[uint32]*analysis.PathFragment)
 	for _, f := range agc.PathFragments {
 		frags[f.Id] = f
 	}
-	arts := make(map[uint32]*Artifact)
+	arts := make(map[uint32]*analysis.Artifact)
 	for _, a := range agc.Artifacts {
 		arts[a.Id] = a
 	}

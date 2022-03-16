@@ -21,7 +21,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin/mock",
     visibility = ["//visibility:public"],
     deps = [
-        "//bazel/buildeventstream/proto",  # keep
+        "//bazel/buildeventstream",  # keep
         "//pkg/ioutils",  # keep
         "//pkg/plugin/sdk/v1alpha2/plugin",  # keep
         "@com_github_golang_mock//gomock",  # keep

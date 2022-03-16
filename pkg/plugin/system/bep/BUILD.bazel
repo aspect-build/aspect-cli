@@ -6,7 +6,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/plugin/system/bep",
     visibility = ["//visibility:public"],
     deps = [
-        "//bazel/buildeventstream/proto",
+        "//bazel/buildeventstream",
         "//pkg/aspecterrors",
         "//pkg/aspectgrpc",
         "@go_googleapis//google/devtools/build/v1:build_go_proto",
@@ -20,7 +20,7 @@ go_test(
     srcs = ["bes_backend_test.go"],
     embed = [":bep"],
     deps = [
-        "//bazel/buildeventstream/proto",
+        "//bazel/buildeventstream",
         "//pkg/aspecterrors",
         "//pkg/aspectgrpc/mock",
         "//pkg/stdlib/mock",

@@ -9,7 +9,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin",
     visibility = ["//visibility:public"],
     deps = [
-        "//bazel/buildeventstream/proto",
+        "//bazel/buildeventstream",
         "//pkg/bazel",
         "//pkg/ioutils",
         "//pkg/plugin/sdk/v1alpha2/proto",

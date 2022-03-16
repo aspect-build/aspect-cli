@@ -12,7 +12,7 @@ import (
 	"context"
 	"fmt"
 
-	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
+	buildeventstream "aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/proto"

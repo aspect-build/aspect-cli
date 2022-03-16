@@ -20,7 +20,7 @@ import (
 	buildv1 "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/protobuf/types/known/anypb"
 
-	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
+	buildeventstream "aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/aspecterrors"
 	grpc_mock "aspect.build/cli/pkg/aspectgrpc/mock"
 	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"

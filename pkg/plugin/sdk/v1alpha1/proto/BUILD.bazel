@@ -8,7 +8,7 @@ proto_library(
     name = "proto_proto",
     srcs = ["plugin.proto"],
     visibility = ["//visibility:public"],
-    deps = ["//third-party/github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto:proto_proto"],
+    deps = ["//bazel/buildeventstream:buildeventstream_proto"],
 )
 
 go_proto_library(
@@ -17,7 +17,7 @@ go_proto_library(
     importpath = "aspect.build/cli/pkg/plugin/sdk/v1alpha1/proto",
     proto = ":proto_proto",
     visibility = ["//visibility:public"],
-    deps = ["//third-party/github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto"],
+    deps = ["//bazel/buildeventstream"],
 )
 
 go_library(

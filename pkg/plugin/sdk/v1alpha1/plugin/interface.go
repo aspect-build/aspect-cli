@@ -9,7 +9,7 @@
 package plugin
 
 import (
-	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
+	buildeventstream "aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/ioutils"
 )
 
