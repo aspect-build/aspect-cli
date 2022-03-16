@@ -39,7 +39,7 @@ gazelle(
 # Note that each target also has a corresponding test asserting that the
 # generated files stay up-to-date.
 # Re-generate this list with:
-# bazel 2>/dev/null query 'kind(go_proto_library, //...)' | xargs -I {} echo "        \"{}.update_go_pb\","
+# bazel 2>/dev/null query 'kind(go_proto_library, //...)' | xargs -I {} buildozer 'add additional_update_targets {}.update_go_pb' //:update_go_pb
 write_source_files(
     name = "update_go_pb",
     additional_update_targets = [
