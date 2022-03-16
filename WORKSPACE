@@ -18,9 +18,9 @@ protobuf_deps()
 
 http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "4f018d3c685174115188ffb778fca10a3f43f82bbbf0aa63361c1cd02f708dbb",
-    strip_prefix = "bazel-lib-0.5.3",
-    url = "https://github.com/aspect-build/bazel-lib/archive/refs/tags/v0.5.3.tar.gz",
+    sha256 = "4d709266337d8e147fb647d6dfa3bbcfb6983ab79bece9cf661e3dc13ae3c3bc",
+    strip_prefix = "bazel-lib-0.6.1",
+    url = "https://github.com/aspect-build/bazel-lib/archive/refs/tags/v0.6.1.tar.gz",
 )
 
 http_archive(
@@ -34,16 +34,9 @@ http_archive(
 
 http_archive(
     name = "io_bazel_rules_go",
-    patch_args = [
-        "-p1",
-        "-s",
-    ],
-    patches = ["//:rules_go.patch"],
-    sha256 = "d6b2513456fe2229811da7eb67a444be7785f5323c6708b38d851d2b51e54d83",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.30.0/rules_go-v0.30.0.zip",
-        "https://github.com/bazelbuild/rules_go/releases/download/v0.30.0/rules_go-v0.30.0.zip",
-    ],
+    sha256 = "d10309af5f19c08cb489760d547414135dc64c46e38071225b834588e4ef1a87",
+    strip_prefix = "rules_go-134efd77b2a1d81a0ab86661ccdc5328d43e47dc",
+    urls = ["https://github.com/aspect-build/rules_go/archive/134efd77b2a1d81a0ab86661ccdc5328d43e47dc.zip"],
 )
 
 load("@io_bazel_rules_go//extras:embed_data_deps.bzl", "go_embed_data_dependencies")
