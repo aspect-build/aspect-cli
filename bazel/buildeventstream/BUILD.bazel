@@ -1,0 +1,33 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+proto_library(
+    name = "buildeventstream_proto",
+    srcs = ["build_event_stream.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel/command_line:command_line_proto",
+        "//bazel/failure_details:failure_details_proto",
+        "//bazel/invocation_policy:invocation_policy_proto",
+    ],
+)
+
+go_proto_library(
+    name = "buildeventstream_go_proto",
+    importpath = "aspect.build/cli/bazel/buildeventstream",
+    proto = ":buildeventstream_proto",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel/command_line",
+        "//bazel/failure_details",
+        "//bazel/invocation_policy",
+    ],
+)
+
+go_library(
+    name = "buildeventstream",
+    embed = [":buildeventstream_go_proto"],
+    importpath = "aspect.build/cli/bazel/buildeventstream",
+    visibility = ["//visibility:public"],
+)

@@ -17,10 +17,10 @@ nogo(
 
 # gazelle:prefix aspect.build/cli
 # gazelle:exclude **/*.pb.go
-# gazelle:resolve go aspect.build/cli/bazel/buildeventstream/proto //bazel/buildeventstream/proto
 # gazelle-TODO:
 #   cannot use :map_kind go_proto_library go_proto_library //:go_proto_library.bzl
 #   because we need gazelle to understand the built-in kind, see https://github.com/bazelbuild/bazel-gazelle/issues/1162
+#   so instead we are using the aspect-build/rules_go fork which has our write_source_files feature
 gazelle(name = "gazelle")
 
 gazelle(
@@ -38,17 +38,22 @@ gazelle(
 #
 # Note that each target also has a corresponding test asserting that the
 # generated files stay up-to-date.
+# Re-generate this list with:
+# bazel 2>/dev/null query 'kind(go_proto_library, //...)' | xargs -I {} buildozer 'add additional_update_targets {}.update_go_pb' //:update_go_pb
 write_source_files(
     name = "update_go_pb",
     additional_update_targets = [
-        "//pkg/bazel:bazel_go_proto.update_go_pb",
+        "//bazel/analysis:bazel_go_proto.update_go_pb",
+        "//bazel/buildeventstream:buildeventstream_go_proto.update_go_pb",
+        "//bazel/command_line:command_line_go_proto.update_go_pb",
+        "//bazel/failure_details:failure_details_go_proto.update_go_pb",
+        "//bazel/flags:bazel_go_proto.update_go_pb",
+        "//bazel/invocation_policy:blaze_invocation_policy_go_proto.update_go_pb",
+        "//bazel/options:options_go_proto.update_go_pb",
+        "//bazel/query:blaze_query_aspect_mirror_go_proto.update_go_pb",
+        "//pkg/plugin/sdk/v1alpha1/proto:proto_go_proto.update_go_pb",
+        "//pkg/plugin/sdk/v1alpha2/proto:proto_go_proto.update_go_pb",
         "//pkg/plugin/sdk/v1alpha3/proto:proto_go_proto.update_go_pb",
-        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf:blaze_query_go_proto.update_go_pb",
-        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf/command_line:command_line_go_proto.update_go_pb",
-        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf/failure_details:failure_details_go_proto.update_go_pb",
-        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf/invocation_policy:invocation_policy_go_proto.update_go_pb",
-        "//third-party/github.com/bazelbuild/bazel/src/main/protobuf/options:options_go_proto.update_go_pb",
-        "//third-party/github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto:proto_go_proto.update_go_pb",
     ],
 )
 

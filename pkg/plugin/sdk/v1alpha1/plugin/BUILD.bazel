@@ -9,7 +9,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/plugin/sdk/v1alpha1/plugin",
     visibility = ["//visibility:public"],
     deps = [
-        "//bazel/buildeventstream/proto",
+        "//bazel/buildeventstream",
         "//pkg/ioutils",
         "//pkg/plugin/sdk/v1alpha1/proto",
         "@com_github_hashicorp_go_plugin//:go-plugin",

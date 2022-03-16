@@ -19,7 +19,7 @@ import (
 	buildv1 "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/grpc"
 
-	buildeventstream "aspect.build/cli/bazel/buildeventstream/proto"
+	buildeventstream "aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/aspectgrpc"
 )

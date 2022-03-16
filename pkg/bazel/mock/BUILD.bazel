@@ -21,6 +21,8 @@ go_library(
     importpath = "aspect.build/cli/pkg/bazel/mock",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//bazel/analysis",  # keep
+        "//bazel/flags",  # keep
         "//pkg/bazel",  # keep
         "@com_github_golang_mock//gomock",  # keep
     ],

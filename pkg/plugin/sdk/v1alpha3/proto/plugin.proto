@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package proto;
 
-import "third-party/github.com/bazelbuild/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto";
+import "bazel/buildeventstream/build_event_stream.proto";
 
 option go_package = "aspect.build/cli/pkg/plugin/sdk/v1alpha3/proto";
 
