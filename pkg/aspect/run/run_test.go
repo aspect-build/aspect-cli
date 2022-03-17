@@ -43,7 +43,7 @@ func TestRun(t *testing.T) {
 		besBackend.
 			EXPECT().
 			Addr().
-			Return("127.0.0.1:12345").
+			Return("grpc://127.0.0.1:12345").
 			Times(1)
 		besBackend.
 			EXPECT().
@@ -72,7 +72,7 @@ func TestRun(t *testing.T) {
 		besBackend.
 			EXPECT().
 			Addr().
-			Return("127.0.0.1:12345").
+			Return("grpc://127.0.0.1:12345").
 			Times(1)
 		besBackend.
 			EXPECT().
@@ -105,7 +105,7 @@ func TestRun(t *testing.T) {
 		besBackend.
 			EXPECT().
 			Addr().
-			Return("127.0.0.1:12345").
+			Return("grpc://127.0.0.1:12345").
 			Times(1)
 		besBackend.
 			EXPECT().

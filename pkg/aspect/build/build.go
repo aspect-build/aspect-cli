@@ -37,7 +37,7 @@ func New(
 // Run runs the aspect build command, calling `bazel build` with a local Build
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
 func (b *Build) Run(args []string, besBackend bep.BESBackend) (exitErr error) {
-	besBackendFlag := fmt.Sprintf("--bes_backend=grpc://%s", besBackend.Addr())
+	besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
 	exitCode, bazelErr := b.bzl.Spawn(append([]string{"build", besBackendFlag}, args...))
 
 	// Process the subscribers errors before the Bazel one.

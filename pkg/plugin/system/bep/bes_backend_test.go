@@ -83,7 +83,7 @@ func TestServeWait(t *testing.T) {
 		grpcDialer := grpc_mock.NewMockDialer(ctrl)
 		grpcDialer.
 			EXPECT().
-			DialContext(gomock.Any(), "127.0.0.1:12345", gomock.Any(), gomock.Any()).
+			DialContext(gomock.Any(), "grpc://127.0.0.1:12345", gomock.Any(), gomock.Any()).
 			Return(nil, fmt.Errorf("dial error")).
 			AnyTimes()
 
@@ -123,7 +123,7 @@ func TestServeWait(t *testing.T) {
 		grpcDialer := grpc_mock.NewMockDialer(ctrl)
 		grpcDialer.
 			EXPECT().
-			DialContext(gomock.Any(), "127.0.0.1:12345", gomock.Any(), gomock.Any()).
+			DialContext(gomock.Any(), "grpc://127.0.0.1:12345", gomock.Any(), gomock.Any()).
 			Return(nil, context.DeadlineExceeded).
 			Times(1)
 
@@ -169,7 +169,7 @@ func TestServeWait(t *testing.T) {
 		grpcDialer := grpc_mock.NewMockDialer(ctrl)
 		grpcDialer.
 			EXPECT().
-			DialContext(gomock.Any(), "127.0.0.1:12345", gomock.Any(), gomock.Any()).
+			DialContext(gomock.Any(), "grpc://127.0.0.1:12345", gomock.Any(), gomock.Any()).
 			Return(clientConn, nil).
 			Times(1)
 
