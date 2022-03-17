@@ -36,6 +36,7 @@ http_archive(
     name = "io_bazel_rules_go",
     sha256 = "d10309af5f19c08cb489760d547414135dc64c46e38071225b834588e4ef1a87",
     strip_prefix = "rules_go-134efd77b2a1d81a0ab86661ccdc5328d43e47dc",
+    # From March 15, 2022
     urls = ["https://github.com/aspect-build/rules_go/archive/134efd77b2a1d81a0ab86661ccdc5328d43e47dc.zip"],
 )
 
@@ -48,7 +49,7 @@ go_embed_data_dependencies()
 
 go_register_toolchains(
     nogo = "@//:nogo",
-    version = "1.17.6",
+    version = "1.18",
 )
 
 http_archive(
