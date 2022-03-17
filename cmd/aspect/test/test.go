@@ -59,7 +59,7 @@ specify targets.
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 				t := test.New(streams, bzl)
-				besBackend := ctx.Value(system.BESBackendInterceptorKey).(bep.BESBackend)
+				besBackend := bep.BESBackendFromContext(ctx)
 				return t.Run(args, besBackend)
 			},
 		),

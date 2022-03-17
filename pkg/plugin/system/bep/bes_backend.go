@@ -25,6 +25,14 @@ import (
 	"aspect.build/cli/pkg/aspectgrpc"
 )
 
+// besBackendInterceptorKeyType is a type for the BESBackendInterceptorKey that
+// avoids collisions.
+type besBackendInterceptorKeyType byte
+
+// besBackendInterceptorKey is the key for the injected BES backend into
+// the context.
+const besBackendInterceptorKey besBackendInterceptorKeyType = 0x00
+
 // BESBackend implements a Build Event Protocol backend to be passed to the
 // `bazel build` command so that the Aspect plugins can register as subscribers
 // to the build events.
@@ -37,6 +45,17 @@ type BESBackend interface {
 	Addr() string
 	RegisterSubscriber(callback CallbackFn)
 	Errors() []error
+}
+
+// BESBackendFromContext extracts a BESBackend from the given context. It panics
+// if the context doesn't have a BESBackend set up.
+func BESBackendFromContext(ctx context.Context) BESBackend {
+	return ctx.Value(besBackendInterceptorKey).(BESBackend)
+}
+
+// InjectBESBackend injects the given BESBackend into the context.
+func InjectBESBackend(ctx context.Context, besBackend BESBackend) context.Context {
+	return context.WithValue(ctx, besBackendInterceptorKey, besBackend)
 }
 
 type besBackend struct {
