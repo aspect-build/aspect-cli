@@ -30,7 +30,7 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *Test {
 }
 
 func (t *Test) Run(args []string, besBackend bep.BESBackend) (exitErr error) {
-	besBackendFlag := fmt.Sprintf("--bes_backend=grpc://%s", besBackend.Addr())
+	besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
 	bazelCmd := []string{"test", besBackendFlag}
 	bazelCmd = append(bazelCmd, args...)
 

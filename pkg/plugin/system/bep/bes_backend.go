@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 
 	"github.com/golang/protobuf/ptypes/empty"
 	buildv1 "google.golang.org/genproto/googleapis/devtools/build/v1"
@@ -110,9 +111,14 @@ func (bb *besBackend) GracefulStop() {
 // Addr returns the address for the gRPC server. Since the address is determined
 // by the OS based on an available port at the time the gRPC server starts, this
 // method returns the address to be used to construct the `bes_backend` flag
-// passed to the `bazel build` command.
+// passed to the `bazel (build|test|run)` commands. The address includes the
+// scheme (protocol).
 func (bb *besBackend) Addr() string {
-	return bb.listener.Addr().String()
+	url := url.URL{
+		Scheme: "grpc",
+		Host:   bb.listener.Addr().String(),
+	}
+	return url.String()
 }
 
 // Errors return the errors produced by the subscriber callback functions.
