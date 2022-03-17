@@ -51,7 +51,7 @@ func NewBuildCmd(
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 				b := build.New(streams, bzl)
-				besBackend := ctx.Value(system.BESBackendInterceptorKey).(bep.BESBackend)
+				besBackend := bep.BESBackendFromContext(ctx)
 				return b.Run(args, besBackend)
 			},
 		),

@@ -56,7 +56,7 @@ use 'bazel run --script_path' to write a script and then execute it.
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 				r := run.New(streams, bzl)
-				besBackend := ctx.Value(system.BESBackendInterceptorKey).(bep.BESBackend)
+				besBackend := bep.BESBackendFromContext(ctx)
 				return r.Run(args, besBackend)
 			},
 		),

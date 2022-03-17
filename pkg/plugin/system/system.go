@@ -154,14 +154,6 @@ func (ps *pluginSystem) TearDown() {
 	}
 }
 
-// BESBackendInterceptorKeyType is a type for the BESBackendInterceptorKey that
-// avoids collisions.
-type BESBackendInterceptorKeyType bool
-
-// BESBackendInterceptorKeyType is the key for the injected BES backend into
-// the context.
-const BESBackendInterceptorKey BESBackendInterceptorKeyType = true
-
 // BESBackendInterceptor starts a BES backend and injects it into the context.
 // It gracefully stops the  server after the main command is executed.
 func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
@@ -188,7 +180,7 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 			return fmt.Errorf("failed to run BES backend: %w", err)
 		}
 		defer besBackend.GracefulStop()
-		ctx = context.WithValue(ctx, BESBackendInterceptorKey, besBackend)
+		ctx = bep.InjectBESBackend(ctx, besBackend)
 		return next(ctx, cmd, args)
 	}
 }
