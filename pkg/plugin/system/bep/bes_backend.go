@@ -101,7 +101,7 @@ func (bb *besBackend) ServeWait(ctx context.Context) error {
 			errs <- err
 		}
 	}()
-	serverAddr := bb.Addr()
+	serverAddr := bb.listener.Addr().String()
 	for {
 		select {
 		case err := <-errs:
