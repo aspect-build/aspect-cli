@@ -76,6 +76,22 @@ func AddBazelFlags(cmd *cobra.Command) error {
 		flagDoc := flag.GetDocumentation()
 
 		for _, command := range flag.Commands {
+			if command == "startup" {
+				if flag.GetHasNegativeFlag() {
+					cmd.PersistentFlags().Bool(flagName, false, flagDoc)
+					cmd.PersistentFlags().Bool("no"+flagName, false, flagDoc)
+					markFlagAsHidden(cmd, flagName)
+					markFlagAsHidden(cmd, "no"+flagName)
+				} else if flag.GetAllowsMultiple() {
+					var key = MultiString{value: []string{}}
+					cmd.PersistentFlags().VarP(&key, flagName, flagAbbreviation, flagDoc)
+					markFlagAsHidden(cmd, flagName)
+				} else {
+					cmd.PersistentFlags().StringP(flagName, flagAbbreviation, "", flagDoc)
+					markFlagAsHidden(cmd, flagName)
+				}
+
+			}
 			if subcommand, ok := subCommands[command]; ok {
 				subcommand.DisableFlagParsing = true // only want to disable flag parsing on actual bazel verbs
 				if flag.GetHasNegativeFlag() {
