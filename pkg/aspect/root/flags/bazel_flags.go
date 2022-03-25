@@ -122,4 +122,5 @@ func markFlagAsHidden(cmd *cobra.Command, flag string) {
 	}
 
 	cmd.Flags().MarkHidden(flag)
+	cmd.PersistentFlags().MarkHidden(flag)
 }
