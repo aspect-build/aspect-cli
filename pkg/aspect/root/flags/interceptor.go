@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -31,10 +32,11 @@ func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 	cmd.PersistentFlags().Bool(InteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
 }
 
-// FlagsIntercepor will parse the incoming flags and remove any aspect specific flags from the
-// list of args.
+// FlagsIntercepor will parse the incoming flags and remove any aspect specific flags or bazel
+// startup flags from the list of args.
 func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
+
 		if cmd.DisableFlagParsing {
 			cmd.DisableFlagParsing = false
 
@@ -42,6 +44,30 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 				return err
 			}
 		}
+
+		bzl := bazel.New()
+		availableStartupFlags := bzl.AvailableStartupFlags()
+		startupFlags := []string{}
+		argsWithoutStartupFlags := []string{}
+
+		for _, arg := range args {
+			isStartup := false
+			for _, availableStartupFlag := range availableStartupFlags {
+				if arg == "--"+availableStartupFlag || strings.Contains(arg, "--"+availableStartupFlag+"=") {
+					isStartup = true
+					break
+				}
+			}
+
+			if isStartup {
+				startupFlags = append(startupFlags, arg)
+			} else {
+				argsWithoutStartupFlags = append(argsWithoutStartupFlags, arg)
+			}
+		}
+
+		bzl.SetStartupFlags(startupFlags)
+		args = argsWithoutStartupFlags
 
 		// If user specifies the config file to use then we want to only use that config.
 		// If user does not specify a config file to use then we want to load ".aspect" from the

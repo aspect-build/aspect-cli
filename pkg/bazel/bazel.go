@@ -32,11 +32,26 @@ import (
 // We know the workspace location is constant for the lifetime of an `aspect` cli execution.
 var workspaceRoot string
 
+// Global mutable state!
+// This is for performance, avoiding a lookup of the possible startup flags for every
+// instance of a bazel struct.
+// We know the flags will be constant for the lifetime of an `aspect` cli execution.
+var availableStartupFlags []string
+
+// Global mutable state!
+// This is for performance, avoiding needing to set the specified startup flags for every
+// instance of a bazel struct.
+// We know the specified startup flags will be constant for the lifetime of an `aspect`
+// cli execution.
+var startupFlags []string
+
 type Bazel interface {
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
 	Spawn(command []string) (int, error)
 	RunCommand(command []string, out io.Writer) (int, error)
 	Flags() (map[string]*flags.FlagInfo, error)
+	AvailableStartupFlags() []string
+	SetStartupFlags(flags []string)
 }
 
 type bazel struct {
@@ -73,6 +88,22 @@ func (b *bazel) maybeSetWorkspaceRoot() error {
 	return nil
 }
 
+// AvailableStartupFlags will return the full list of startup flags available for
+// the current version of bazel. This is NOT the list of startup flags that have been
+// set for the current run via SetStartupFlags.
+func (b *bazel) AvailableStartupFlags() []string {
+	if len(availableStartupFlags) == 0 {
+		b.Flags()
+	}
+	return availableStartupFlags
+}
+
+// SetStartupFlags will set the startup flags to be used by bazel during all bazel runs
+// performed during the current instantiation of the aspect CLI.
+func (b *bazel) SetStartupFlags(flags []string) {
+	startupFlags = flags
+}
+
 func (*bazel) createRepositories() *core.Repositories {
 	gcs := &repositories.GCSRepo{}
 	gitHub := repositories.CreateGitHubRepo(core.GetEnvOrConfig("BAZELISK_GITHUB_TOKEN"))
@@ -88,6 +119,10 @@ func (b *bazel) Spawn(command []string) (int, error) {
 }
 
 func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
+
+	// Prepend startup flags
+	command = append(startupFlags, command...)
+
 	repos := b.createRepositories()
 	if err := b.maybeSetWorkspaceRoot(); err != nil {
 		return 1, err
@@ -127,6 +162,14 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	flags := make(map[string]*flags.FlagInfo)
 	for i := range flagCollection.FlagInfos {
 		flags[*flagCollection.FlagInfos[i].Name] = flagCollection.FlagInfos[i]
+		for _, command := range flags[*flagCollection.FlagInfos[i].Name].Commands {
+			if command == "startup" {
+				availableStartupFlags = append(availableStartupFlags, *flagCollection.FlagInfos[i].Name)
+				if flags[*flagCollection.FlagInfos[i].Name].GetHasNegativeFlag() {
+					availableStartupFlags = append(availableStartupFlags, "no"+*flagCollection.FlagInfos[i].Name)
+				}
+			}
+		}
 	}
 
 	return flags, nil
