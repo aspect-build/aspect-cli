@@ -1,5 +1,13 @@
 //go:build windows
 
+/*
+ * Copyright 2022 Aspect Build Systems, Inc.
+ *
+ * Licensed under the aspect.build Commercial License (the "License");
+ * you may not use this file except in compliance with the License.
+ * Full License text is in the LICENSE file included in the root of this repository.
+ */
+
 package clean
 
 import (
@@ -27,9 +35,11 @@ func (c *Clean) GetAccessTime(workspace fs.FileInfo) time.Duration {
 }
 
 func (c *Clean) MoveFolderToTmp(dir string, name string) string {
+	// TODO: Add functionality. https://github.com/aspect-build/aspect-cli/issues/196
 	return ""
 }
 
 func (c *Clean) ChangeFolderPermissions(folder string) ([]byte, error) {
+	// TODO: Add functionality. https://github.com/aspect-build/aspect-cli/issues/196
 	return nil, nil
 }
