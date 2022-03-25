@@ -56,7 +56,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(&client.PluginInstance{
+		ps.plugins.insert(&client.PluginInstance{
 			Plugin:   plugin,
 			Provider: client_mock.NewMockProvider(ctrl),
 		})
@@ -99,11 +99,11 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin1 := plugin_mock.NewMockPlugin(ctrl)
 		plugin2 := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(&client.PluginInstance{
+		ps.plugins.insert(&client.PluginInstance{
 			Plugin:   plugin1,
 			Provider: client_mock.NewMockProvider(ctrl),
 		})
-		ps.addPlugin(&client.PluginInstance{
+		ps.plugins.insert(&client.PluginInstance{
 			Plugin:   plugin2,
 			Provider: client_mock.NewMockProvider(ctrl),
 		})
@@ -143,7 +143,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		// Plugin to be invoked
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(&client.PluginInstance{
+		ps.plugins.insert(&client.PluginInstance{
 			Plugin:   plugin,
 			Provider: client_mock.NewMockProvider(ctrl),
 		})
@@ -186,7 +186,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		// Plugin to be invoked
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(&client.PluginInstance{
+		ps.plugins.insert(&client.PluginInstance{
 			Plugin:   plugin,
 			Provider: client_mock.NewMockProvider(ctrl),
 		})
@@ -266,7 +266,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 			) error {
 				return fmt.Errorf("plugin error")
 			})
-		ps.addPlugin(&client.PluginInstance{
+		ps.plugins.insert(&client.PluginInstance{
 			Plugin:   plugin,
 			Provider: client_mock.NewMockProvider(ctrl),
 		})
