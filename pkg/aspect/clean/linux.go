@@ -1,11 +1,21 @@
 //go:build linux
 
+/*
+ * Copyright 2022 Aspect Build Systems, Inc.
+ *
+ * Licensed under the aspect.build Commercial License (the "License");
+ * you may not use this file except in compliance with the License.
+ * Full License text is in the LICENSE file included in the root of this repository.
+ */
+
 package clean
 
 import (
 	"io/fs"
+	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -32,10 +42,14 @@ func (c *Clean) GetAccessTime(workspace fs.FileInfo) time.Duration {
 }
 
 func (c *Clean) MoveFolderToTmp(dir string, name string) string {
-	newFolder := "/tmp/aspect_delete/" + strings.Replace(dir, "/", "", -1)
-	newPath := newFolder + "/" + name
+	tempDir, err := ioutil.TempDir("", "aspect_delete")
+	if err != nil {
+		return ""
+	}
+	newFolder := filepath.Join(tempDir + strings.Replace(dir, "/", "", -1))
+	newPath := filepath.Join(newFolder, name)
 	os.MkdirAll(newFolder, os.ModePerm)
-	os.Rename(dir+"/external/"+name, newPath)
+	os.Rename(filepath.Join(dir, "external", name), newPath)
 
 	return newPath
 }
