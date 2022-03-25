@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -75,6 +76,7 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 	}
 
 	g := new(errgroup.Group)
+	var mutex sync.Mutex
 
 	for _, p := range aspectplugins {
 		p := p
@@ -82,30 +84,32 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 		g.Go(func() error {
 			aspectplugin, err := ps.clientFactory.New(p, streams)
 			if err != nil {
-				return fmt.Errorf("failed to configure plugin system: %w", err)
+				return err
 			}
 
 			properties, err := yaml.Marshal(p.Properties)
 			if err != nil {
-				return fmt.Errorf("failed to configure plugin system: %w", err)
+				return err
 			}
 
 			aspectPluginFile := plugin.NewAspectPluginFile(aspectpluginsPath)
 			setupConfig := plugin.NewSetupConfig(aspectPluginFile, properties)
 			if err := aspectplugin.Setup(setupConfig); err != nil {
-				return fmt.Errorf("failed to configure plugin system: %w", err)
+				return err
 			}
 
-			ps.addPlugin(aspectplugin)
+			mutex.Lock()
+			ps.plugins.insert(aspectplugin)
+			mutex.Unlock()
 			return nil
 		})
 	}
 
-	return g.Wait()
-}
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("failed to configure plugin system: %w", err)
+	}
 
-func (ps *pluginSystem) addPlugin(plugin *client.PluginInstance) {
-	ps.plugins.insert(plugin)
+	return nil
 }
 
 // RegisterCustomCommands processes custom commands provided by plugins and adds
