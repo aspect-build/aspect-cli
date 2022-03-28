@@ -24,6 +24,7 @@ go_library(
         "//bazel/analysis",  # keep
         "//bazel/flags",  # keep
         "//pkg/bazel",  # keep
+        "//pkg/ioutils",  # keep
         "@com_github_golang_mock//gomock",  # keep
     ],
 )
