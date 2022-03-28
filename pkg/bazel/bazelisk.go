@@ -9,8 +9,14 @@
 package bazel
 
 import (
+	"aspect.build/cli/pkg/ioutils"
 	"bufio"
 	"fmt"
+	"github.com/bazelbuild/bazelisk/core"
+	"github.com/bazelbuild/bazelisk/httputil"
+	"github.com/bazelbuild/bazelisk/platforms"
+	"github.com/bazelbuild/bazelisk/versions"
+	"github.com/mitchellh/go-homedir"
 	"io"
 	"io/ioutil"
 	"log"
@@ -24,12 +30,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-
-	"github.com/bazelbuild/bazelisk/core"
-	"github.com/bazelbuild/bazelisk/httputil"
-	"github.com/bazelbuild/bazelisk/platforms"
-	"github.com/bazelbuild/bazelisk/versions"
-	"github.com/mitchellh/go-homedir"
 )
 
 const (
@@ -55,7 +55,7 @@ func NewBazelisk(workspaceRoot string) *Bazelisk {
 }
 
 // Run runs the main Bazelisk logic for the given arguments and Bazel repositories.
-func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, out io.Writer) (int, error) {
+func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams) (int, error) {
 	httputil.UserAgent = bazelisk.getUserAgent()
 
 	bazeliskHome := bazelisk.GetEnvOrConfig("BAZELISK_HOME")
@@ -122,7 +122,7 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, out io.Wr
 	// --print_env must be the first argument.
 	if len(args) > 0 && args[0] == "--print_env" {
 		// print environment variables for sub-processes
-		cmd := bazelisk.makeBazelCmd(bazelPath, args, nil)
+		cmd := bazelisk.makeBazelCmd(bazelPath, args, ioutils.DefaultStreams)
 		for _, val := range cmd.Env {
 			fmt.Println(val)
 		}
@@ -169,7 +169,7 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, out io.Wr
 		}
 	}
 
-	exitCode, err := bazelisk.runBazel(bazelPath, args, out)
+	exitCode, err := bazelisk.runBazel(bazelPath, args, streams)
 	if err != nil {
 		return -1, fmt.Errorf("could not run Bazel: %v", err)
 	}
@@ -373,7 +373,7 @@ func (bazelisk *Bazelisk) prependDirToPathList(cmd *exec.Cmd, dir string) {
 	}
 }
 
-func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, out io.Writer) *exec.Cmd {
+func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams ioutils.Streams) *exec.Cmd {
 	execPath := bazelisk.maybeDelegateToWrapper(bazel)
 
 	cmd := exec.Command(execPath, args...)
@@ -382,18 +382,14 @@ func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, out io.Write
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", bazelReal, bazel))
 	}
 	bazelisk.prependDirToPathList(cmd, filepath.Dir(execPath))
-	cmd.Stdin = os.Stdin
-	if out == nil {
-		cmd.Stdout = os.Stdout
-	} else {
-		cmd.Stdout = out
-	}
-	cmd.Stderr = os.Stderr
+	cmd.Stdin = streams.Stdin
+	cmd.Stdout = streams.Stdout
+	cmd.Stderr = streams.Stderr
 	return cmd
 }
 
-func (bazelisk *Bazelisk) runBazel(bazel string, args []string, out io.Writer) (int, error) {
-	cmd := bazelisk.makeBazelCmd(bazel, args, out)
+func (bazelisk *Bazelisk) runBazel(bazel string, args []string, streams ioutils.Streams) (int, error) {
+	cmd := bazelisk.makeBazelCmd(bazel, args, streams)
 	err := cmd.Start()
 	if err != nil {
 		return 1, fmt.Errorf("could not start Bazel: %v", err)
@@ -424,7 +420,12 @@ func (bazelisk *Bazelisk) runBazel(bazel string, args []string, out io.Writer) (
 // getIncompatibleFlags returns all incompatible flags for the current Bazel command in alphabetical order.
 func (bazelisk *Bazelisk) getIncompatibleFlags(bazelPath, cmd string) ([]string, error) {
 	out := strings.Builder{}
-	if _, err := bazelisk.runBazel(bazelPath, []string{"help", cmd, "--short"}, &out); err != nil {
+	streams := ioutils.Streams{
+		Stdin:  os.Stdin,
+		Stdout: &out,
+		Stderr: nil,
+	}
+	if _, err := bazelisk.runBazel(bazelPath, []string{"help", cmd, "--short"}, streams); err != nil {
 		return nil, fmt.Errorf("unable to determine incompatible flags with binary %s: %v", bazelPath, err)
 	}
 
@@ -464,7 +465,7 @@ func (bazelisk *Bazelisk) shutdownIfNeeded(bazelPath string) {
 	}
 
 	fmt.Printf("bazel shutdown\n")
-	exitCode, err := bazelisk.runBazel(bazelPath, []string{"shutdown"}, nil)
+	exitCode, err := bazelisk.runBazel(bazelPath, []string{"shutdown"}, ioutils.DefaultStreams)
 	fmt.Printf("\n")
 	if err != nil {
 		log.Fatalf("failed to run bazel shutdown: %v", err)
@@ -482,7 +483,7 @@ func (bazelisk *Bazelisk) cleanIfNeeded(bazelPath string) {
 	}
 
 	fmt.Printf("bazel clean --expunge\n")
-	exitCode, err := bazelisk.runBazel(bazelPath, []string{"clean", "--expunge"}, nil)
+	exitCode, err := bazelisk.runBazel(bazelPath, []string{"clean", "--expunge"}, ioutils.DefaultStreams)
 	fmt.Printf("\n")
 	if err != nil {
 		log.Fatalf("failed to run clean: %v", err)
@@ -501,7 +502,7 @@ func (bazelisk *Bazelisk) migrate(bazelPath string, baseArgs []string, flags []s
 	bazelisk.shutdownIfNeeded(bazelPath)
 	bazelisk.cleanIfNeeded(bazelPath)
 	fmt.Printf("bazel %s\n", strings.Join(args, " "))
-	exitCode, err := bazelisk.runBazel(bazelPath, args, nil)
+	exitCode, err := bazelisk.runBazel(bazelPath, args, ioutils.DefaultStreams)
 	if err != nil {
 		log.Fatalf("could not run Bazel: %v", err)
 	}
@@ -516,7 +517,7 @@ func (bazelisk *Bazelisk) migrate(bazelPath string, baseArgs []string, flags []s
 	bazelisk.shutdownIfNeeded(bazelPath)
 	bazelisk.cleanIfNeeded(bazelPath)
 	fmt.Printf("bazel %s\n", strings.Join(args, " "))
-	exitCode, err = bazelisk.runBazel(bazelPath, args, nil)
+	exitCode, err = bazelisk.runBazel(bazelPath, args, ioutils.DefaultStreams)
 	if err != nil {
 		log.Fatalf("could not run Bazel: %v", err)
 	}
@@ -534,7 +535,7 @@ func (bazelisk *Bazelisk) migrate(bazelPath string, baseArgs []string, flags []s
 		bazelisk.shutdownIfNeeded(bazelPath)
 		bazelisk.cleanIfNeeded(bazelPath)
 		fmt.Printf("bazel %s\n", strings.Join(args, " "))
-		exitCode, err = bazelisk.runBazel(bazelPath, args, nil)
+		exitCode, err = bazelisk.runBazel(bazelPath, args, ioutils.DefaultStreams)
 		if err != nil {
 			log.Fatalf("could not run Bazel: %v", err)
 		}

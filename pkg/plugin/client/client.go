@@ -11,6 +11,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -67,12 +68,18 @@ func (c *clientFactory) buildPlugin(target string) (string, error) {
 		return "", fmt.Errorf("failed to build plugin %q with Bazel: no output file from a GoLink action was found", target)
 	}
 
+	streams := ioutils.Streams{
+		Stdin:  os.Stdin,
+		Stdout: nil,
+		Stderr: nil,
+	}
+
 	// WARNING: be careful to use flags for this build matching the .bazelrc
 	// to avoid busting the analysis cache. We want to pretend to be a typical
 	// build the developer or CI would be performing.
 	// This is important only in the setup we don't recommend, where normal users
 	// are building the plugin from source instead of a pre-built binary.
-	if _, err := c.bzl.Spawn([]string{"build", target}); err != nil {
+	if _, err := c.bzl.RunCommand([]string{"build", target}, streams); err != nil {
 		return "", fmt.Errorf("failed to build plugin %q with Bazel: %w", target, err)
 	}
 

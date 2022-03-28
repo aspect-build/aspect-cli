@@ -9,6 +9,7 @@
 package bazel
 
 import (
+	"aspect.build/cli/pkg/ioutils"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -48,7 +49,7 @@ var startupFlags []string
 type Bazel interface {
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
 	Spawn(command []string) (int, error)
-	RunCommand(command []string, out io.Writer) (int, error)
+	RunCommand(command []string, streams ioutils.Streams) (int, error)
 	Flags() (map[string]*flags.FlagInfo, error)
 	AvailableStartupFlags() []string
 	SetStartupFlags(flags []string)
@@ -115,10 +116,10 @@ func (*bazel) createRepositories() *core.Repositories {
 // Spawn is similar to the main() function of bazelisk
 // see https://github.com/bazelbuild/bazelisk/blob/7c3d9d5/bazelisk.go
 func (b *bazel) Spawn(command []string) (int, error) {
-	return b.RunCommand(command, nil)
+	return b.RunCommand(command, ioutils.DefaultStreams)
 }
 
-func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
+func (b *bazel) RunCommand(command []string, streams ioutils.Streams) (int, error) {
 
 	// Prepend startup flags
 	command = append(startupFlags, command...)
@@ -129,19 +130,24 @@ func (b *bazel) RunCommand(command []string, out io.Writer) (int, error) {
 	}
 
 	bazelisk := NewBazelisk(workspaceRoot)
-	exitCode, err := bazelisk.Run(command, repos, out)
+	exitCode, err := bazelisk.Run(command, repos, streams)
 	return exitCode, err
 }
 
 // Flags fetches the metadata for Bazel's command line flags.
 func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	r, w := io.Pipe()
+	streams := ioutils.Streams{
+		Stdin:  os.Stdin,
+		Stdout: w,
+		Stderr: nil,
+	}
 	decoder := base64.NewDecoder(base64.StdEncoding, r)
 	bazelErrs := make(chan error, 1)
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := b.RunCommand([]string{"help", "flags-as-proto"}, w)
+		_, err := b.RunCommand([]string{"help", "flags-as-proto"}, streams)
 		bazelErrs <- err
 	}()
 
@@ -178,13 +184,18 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 // AQuery runs a `bazel aquery` command and returns the resulting parsed proto data.
 func (b *bazel) AQuery(query string) (*analysis.ActionGraphContainer, error) {
 	r, w := io.Pipe()
+	streams := ioutils.Streams{
+		Stdin:  os.Stdin,
+		Stdout: w,
+		Stderr: nil,
+	}
 	agc := &analysis.ActionGraphContainer{}
 
 	bazelErrs := make(chan error, 1)
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := b.RunCommand([]string{"aquery", "--output=proto", query}, w)
+		_, err := b.RunCommand([]string{"aquery", "--output=proto", query}, streams)
 		bazelErrs <- err
 	}()
 
@@ -259,7 +270,6 @@ func ParseOutputs(agc *analysis.ActionGraphContainer) []Output {
 					path.WriteString("/")
 				}
 			}
-			fmt.Println(a.Mnemonic)
 			result = append(result, Output{
 				a.Mnemonic,
 				path.String(),
