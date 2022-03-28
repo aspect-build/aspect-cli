@@ -201,7 +201,7 @@ func (ps *pluginSystem) TestHooksInterceptor(streams ioutils.Streams) intercepto
 	return ps.commandHooksInterceptor("PostTestHook", streams)
 }
 
-// TestHooksInterceptor returns an interceptor that runs the pre and post-test
+// RunHooksInterceptor returns an interceptor that runs the pre and post-run
 // hooks from all plugins.
 func (ps *pluginSystem) RunHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 	return ps.commandHooksInterceptor("PostRunHook", streams)
