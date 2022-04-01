@@ -9,14 +9,8 @@
 package bazel
 
 import (
-	"aspect.build/cli/pkg/ioutils"
 	"bufio"
 	"fmt"
-	"github.com/bazelbuild/bazelisk/core"
-	"github.com/bazelbuild/bazelisk/httputil"
-	"github.com/bazelbuild/bazelisk/platforms"
-	"github.com/bazelbuild/bazelisk/versions"
-	"github.com/mitchellh/go-homedir"
 	"io"
 	"io/ioutil"
 	"log"
@@ -30,6 +24,14 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/bazelbuild/bazelisk/core"
+	"github.com/bazelbuild/bazelisk/httputil"
+	"github.com/bazelbuild/bazelisk/platforms"
+	"github.com/bazelbuild/bazelisk/versions"
+	"github.com/mitchellh/go-homedir"
+
+	"aspect.build/cli/pkg/ioutils"
 )
 
 const (
@@ -395,7 +397,7 @@ func (bazelisk *Bazelisk) runBazel(bazel string, args []string, streams ioutils.
 		return 1, fmt.Errorf("could not start Bazel: %v", err)
 	}
 
-	c := make(chan os.Signal)
+	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		s := <-c
