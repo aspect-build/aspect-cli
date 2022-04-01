@@ -9,7 +9,20 @@
       "(third_party|vendor|external)/.*": "only run for first-party code"
     }
   },
+  "fieldalignment": {
+    "exclude_files": {
+      ".*/bindata.go": "only run for first-party code",
+      ".*/mock_.*\\.go": "only run for first-party code",
+      ".*/.*\\.pb\\.go": "only run for first-party code",
+      "(third_party|vendor|external)/.*": "only run for first-party code"
+    }
+  },
   "nilness": {
+    "exclude_files": {
+      "(third_party|vendor|external)/.*": "only run for first-party code"
+    }
+  },
+  "reflectvaluecompare": {
     "exclude_files": {
       "(third_party|vendor|external)/.*": "only run for first-party code"
     }
@@ -18,6 +31,11 @@
     "exclude_files": {
       "(third_party|vendor|external)/.*": "only run for first-party code",
       "pkg/bazel/bazelisk.go": "copied third-party code"
+    }
+  },
+  "sigchanyzer": {
+    "exclude_files": {
+      "(third_party|vendor|external)/.*": "only run for first-party code"
     }
   },
   "stdmethods": {
@@ -31,6 +49,11 @@
     }
   },
   "unsafeptr": {
+    "exclude_files": {
+      "(third_party|vendor|external)/.*": "only run for first-party code"
+    }
+  },
+  "unusedwrite": {
     "exclude_files": {
       "(third_party|vendor|external)/.*": "only run for first-party code"
     }
