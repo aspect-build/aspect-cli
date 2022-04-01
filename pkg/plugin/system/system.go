@@ -141,7 +141,7 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 				RunE: interceptors.Run(
 					[]interceptors.Interceptor{},
 					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-						return callback.ExecuteCustomCommand(command.Use, ctx, args)
+						return callback.ExecuteCustomCommand(cmd.Use, ctx, args)
 					},
 				),
 			})
