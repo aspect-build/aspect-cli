@@ -14,10 +14,20 @@
       "(third_party|vendor|external)/.*": "only run for first-party code"
     }
   },
+  "reflectvaluecompare": {
+    "exclude_files": {
+      "(third_party|vendor|external)/.*": "only run for first-party code"
+    }
+  },
   "shadow": {
     "exclude_files": {
       "(third_party|vendor|external)/.*": "only run for first-party code",
       "pkg/bazel/bazelisk.go": "copied third-party code"
+    }
+  },
+  "sigchanyzer": {
+    "exclude_files": {
+      "(third_party|vendor|external)/.*": "only run for first-party code"
     }
   },
   "stdmethods": {
@@ -31,6 +41,11 @@
     }
   },
   "unsafeptr": {
+    "exclude_files": {
+      "(third_party|vendor|external)/.*": "only run for first-party code"
+    }
+  },
+  "unusedwrite": {
     "exclude_files": {
       "(third_party|vendor|external)/.*": "only run for first-party code"
     }
