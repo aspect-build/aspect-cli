@@ -45,7 +45,6 @@ the bazel User Manual, and can be programmatically obtained with
 
 See also 'bazel version' for more detailed bazel version
 information.`,
-		Args: cobra.MaximumNArgs(1),
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
