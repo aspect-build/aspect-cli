@@ -49,7 +49,7 @@ go_embed_data_dependencies()
 
 go_register_toolchains(
     nogo = "@//:nogo",
-    version = "1.18",
+    version = "1.18.1",
 )
 
 http_archive(
