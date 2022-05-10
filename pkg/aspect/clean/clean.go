@@ -206,12 +206,10 @@ func (c *Clean) reclaimAll() error {
 
 	// Goroutine for processing errors from the other threads.
 	go c.errorProcessor(errorQueue, &errorWaitGroup, &errors)
-	errorWaitGroup.Add(1)
 
 	// Goroutines for calculating sizes of directories.
 	for i := 0; i < 5; i++ {
 		go c.sizeCalculator(sizeCalcQueue, confirmationQueue, &sizeCalcWaitGroup)
-		sizeCalcWaitGroup.Add(1)
 	}
 
 	// Goroutines for deleting directories.
@@ -224,11 +222,9 @@ func (c *Clean) reclaimAll() error {
 	}
 
 	go c.sizePrinter(sizeQueue, &sizeWaitGroup)
-	sizeWaitGroup.Add(1)
 
 	// Goroutine for prompting the user to confirm deletion.
 	go c.confirmationActor(confirmationQueue, deleteQueue, &confirmationWaitGroup, &deleteWaitGroup)
-	confirmationWaitGroup.Add(1)
 
 	// will find disk caches and add them to the sizeCalculator queue
 	c.findDiskCaches(sizeCalcQueue, errorQueue)
@@ -273,6 +269,7 @@ func (c *Clean) confirmationActor(
 	confirmationWaitGroup *sync.WaitGroup,
 	deleteWaitGroup *sync.WaitGroup,
 ) {
+	confirmationWaitGroup.Add(1)
 	for bazelDir := range directories {
 		var label string
 		if bazelDir.isCache {
@@ -445,6 +442,8 @@ func (c *Clean) sizeCalculator(
 	out chan<- bazelDirInfo,
 	waitGroup *sync.WaitGroup,
 ) {
+	waitGroup.Add(1)
+
 	for bazelDir := range in {
 		size, humanReadableSize, unit := c.getDirSize(bazelDir.path)
 
@@ -515,6 +514,7 @@ func (c *Clean) deleteProcessor(
 }
 
 func (c *Clean) errorProcessor(errorQueue <-chan error, waitGroup *sync.WaitGroup, errors *errorSet) {
+	waitGroup.Add(1)
 	for err := range errorQueue {
 		errors.insert(err)
 	}
@@ -522,6 +522,8 @@ func (c *Clean) errorProcessor(errorQueue <-chan error, waitGroup *sync.WaitGrou
 }
 
 func (c *Clean) sizePrinter(sizeQueue <-chan float64, waitGroup *sync.WaitGroup) {
+	waitGroup.Add(1)
+
 	var totalSize float64 = 0
 
 	for size := range sizeQueue {
