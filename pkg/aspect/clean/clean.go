@@ -204,11 +204,11 @@ func (c *Clean) reclaimAll() error {
 
 	errors := errorSet{nodes: make(map[errorNode]struct{})}
 
-	// Goroutine for processing errors from the other threads
+	// Goroutine for processing errors from the other threads.
 	go c.errorProcessor(errorQueue, &errorWaitGroup, &errors)
 	errorWaitGroup.Add(1)
 
-	// Goroutines for calculating sizes of directories
+	// Goroutines for calculating sizes of directories.
 	for i := 0; i < 5; i++ {
 		go c.sizeCalculator(sizeCalcQueue, confirmationQueue, &sizeCalcWaitGroup)
 		sizeCalcWaitGroup.Add(1)
