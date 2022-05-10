@@ -226,10 +226,10 @@ func (c *Clean) reclaimAll() error {
 	// Goroutine for prompting the user to confirm deletion.
 	go c.confirmationActor(confirmationQueue, deleteQueue, &confirmationWaitGroup, &deleteWaitGroup)
 
-	// will find disk caches and add them to the sizeCalculator queue
+	// Find disk caches and add them to the sizeCalculator queue
 	c.findDiskCaches(sizeCalcQueue, errorQueue)
 
-	// will find bazel workspaces and add them to the sizeCalculator queue
+	// Find bazel workspaces and add them to the sizeCalculator queue
 	c.findBazelWorkspaces(sizeCalcQueue, errorQueue)
 
 	// directories added to sizeCalcQueue synchronously so we can close the
