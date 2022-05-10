@@ -226,33 +226,34 @@ func (c *Clean) reclaimAll() error {
 	// Goroutine for prompting the user to confirm deletion.
 	go c.confirmationActor(confirmationQueue, deleteQueue, &confirmationWaitGroup, &deleteWaitGroup)
 
-	// Find disk caches and add them to the sizeCalculator queue
+	// Find disk caches and add them to the sizeCalculator queue.
 	c.findDiskCaches(sizeCalcQueue, errorQueue)
 
-	// Find bazel workspaces and add them to the sizeCalculator queue
+	// Find bazel workspaces and add them to the sizeCalculator queue.
 	c.findBazelWorkspaces(sizeCalcQueue, errorQueue)
 
-	// directories added to sizeCalcQueue synchronously so we can close the
-	// channel before waiting for the calculations to complete
+	// Since the directories are added to sizeCalcQueue synchronously, so we can
+	// close the channel before waiting for the calculations to complete.
 	close(sizeCalcQueue)
 	sizeCalcWaitGroup.Wait()
 
-	// confirmationQueue will be filled before sizeCalcWaitGroup completes
-	// so we can close the channel before waiting
+	// Since the confirmationQueue will be filled before sizeCalcWaitGroup completes,
+	// we can close the channel before waiting.
 	close(confirmationQueue)
 	confirmationWaitGroup.Wait()
 
-	// deleteQueue can add to itself to improve speeds. We need to wait for
-	// deletes to complete before we can close the channel
+	// Since the deleteQueue can add to itself to improve speeds. We need to wait for
+	// all deletes to complete before we can close the channel.
 	deleteWaitGroup.Wait()
 	close(deleteQueue)
 
-	// sizeQueue will contain all the sizes once the deletes are completed so
-	// we can close the chan before we wait
+	// Since the sizeQueue will contain all the sizes once the deletes are completed,
+	// we can close the chan before we wait.
 	close(sizeQueue)
 	sizeWaitGroup.Wait()
 
-	// all the errors we will receive will be in the errorQueue at this point so we can close the queue before waiting
+	// All the errors we will receive will be in the errorQueue at this point,
+	// so we can close the queue before waiting.
 	close(errorQueue)
 	errorWaitGroup.Wait()
 
