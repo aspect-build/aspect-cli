@@ -12,7 +12,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -69,7 +68,7 @@ type PromptRunner interface {
 type bazelDirInfo struct {
 	path               string
 	size               float64
-	hRSize             float64 // HumanReadableSize
+	humanReadableSize  float64
 	unit               string
 	workspaceName      string
 	comparator         float64
@@ -277,9 +276,9 @@ func (c *Clean) confirmationActor(
 	for bazelDir := range directories {
 		var label string
 		if bazelDir.isCache {
-			label = fmt.Sprintf("Cache: %s, Age: %s, Size: %.2f %s. Would you like to remove?", bazelDir.workspaceName, bazelDir.accessTime, bazelDir.hRSize, bazelDir.unit)
+			label = fmt.Sprintf("Cache: %s, Age: %s, Size: %.2f %s. Would you like to remove?", bazelDir.workspaceName, bazelDir.accessTime, bazelDir.humanReadableSize, bazelDir.unit)
 		} else {
-			label = fmt.Sprintf("Workspace: %s, Age: %s, Size: %.2f %s. Would you like to remove?", bazelDir.workspaceName, bazelDir.accessTime, bazelDir.hRSize, bazelDir.unit)
+			label = fmt.Sprintf("Workspace: %s, Age: %s, Size: %.2f %s. Would you like to remove?", bazelDir.workspaceName, bazelDir.accessTime, bazelDir.humanReadableSize, bazelDir.unit)
 		}
 
 		promptRemove := &promptui.Prompt{
@@ -328,6 +327,12 @@ func (c *Clean) findDiskCaches(
 
 	bepLocation := filepath.Join(tempDir, "bep.json")
 
+	streams := ioutils.Streams{
+		Stdin:  nil,
+		Stdout: nil,
+		Stderr: nil,
+	}
+
 	// Running an invalid query should ensure that repository rules are not executed.
 	// However, bazel will still emit its BEP containing the flag that we are interested in.
 	// This will ensure it returns quickly and allows us to easily access said flag.
@@ -340,7 +345,7 @@ func (c *Clean) findDiskCaches(
 		// We are only interested in the BEP output
 		"--ui_event_filters=-fatal,-error,-warning,-info,-progress,-debug,-start,-finish,-subcommand,-stdout,-stderr,-pass,-fail,-timeout,-cancelled,-depchecker",
 		"--noshow_progress",
-	}, io.Discard)
+	}, streams)
 
 	file, err := os.Open(bepLocation)
 	if err != nil {
@@ -441,10 +446,10 @@ func (c *Clean) sizeCalculator(
 	waitGroup *sync.WaitGroup,
 ) {
 	for bazelDir := range in {
-		size, hRSize, unit := c.getDirSize(bazelDir.path)
+		size, humanReadableSize, unit := c.getDirSize(bazelDir.path)
 
 		bazelDir.size = size
-		bazelDir.hRSize = hRSize
+		bazelDir.humanReadableSize = humanReadableSize
 		bazelDir.unit = unit
 		bazelDir.processed = true
 		comparator := bazelDir.accessTime.Hours() * float64(size)
