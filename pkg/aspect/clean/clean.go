@@ -289,10 +289,10 @@ func (c *Clean) confirmationActor(
 			deleteWaitGroup.Add(1)
 			deleteQueue <- bazelDir
 		} else {
-			// promptui.ErrInterrupt is the error returned when the user inputs ctrl-c
+			// promptui.ErrInterrupt is the error returned when SIGINT is received.
+			// This is most likely due to the user hitting ctrl+c in the terminal.
 			if errors.Is(err, promptui.ErrInterrupt) {
-				// if the user has hit ctrl-c we want to stop prompting them and allow
-				// the program to exit gracefully
+				// We allow the program to gracefully exit in such case.
 				break
 			}
 		}
@@ -402,7 +402,7 @@ func (c *Clean) findBazelWorkspaces(
 		return
 	}
 
-	// find bazel workspaces and start processing
+	// Find bazel workspaces and start processing.
 	for _, workspace := range bazelWorkspaces {
 		workspaceInfo := bazelDirInfo{
 			path:               filepath.Join(bazelBaseDir, workspace.Name()),
@@ -414,15 +414,15 @@ func (c *Clean) findBazelWorkspaces(
 
 		execrootFiles, readDirErr := ioutil.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
 		if readDirErr != nil {
-			// install and cache folders will end up here. Dont want to remove these
+			// The install and cache folders will end up here.We must not remove these
 			continue
 		}
 
-		// We expect these folders to have up to 2 files / folders
-		//   - Firstly, a file named "DO_NOT_BUILD_HERE"
-		//   - Secondly, a folder named after the given workspace
+		// We expect these folders to have up to 2 files / folders:
+		//   - Firstly, a file named "DO_NOT_BUILD_HERE".
+		//   - Secondly, a folder named after the given workspace.
 		// We can use the given second folder to determine the name of the workspace. We want this
-		// so that we can ask the user if they want to remove a given workspace
+		// so that we can ask the user if they want to remove a given workspace.
 		if (len(execrootFiles) == 1 && execrootFiles[0].Name() == "DO_NOT_BUILD_HERE") || len(execrootFiles) > 2 {
 			// TODO: Group up unkown workspaces into one prompt?
 			workspaceInfo.workspaceName = "Unknown Workspace"
@@ -494,14 +494,15 @@ func (c *Clean) deleteProcessor(
 			}
 		}
 
-		// otherwise certain files will throw a permission error when we try to remove them
+		// The permissions set in the directories being removed don't allow write access,
+		// so we change the permissions before removing those directories.
 		if _, err := c.ChangeFolderPermissions(bazelDir.path); err != nil {
 			waitGroup.Done()
 			errors <- fmt.Errorf("failed to delete %q: %w", bazelDir.path, err)
 			continue
 		}
 
-		// remove entire folder
+		// Remove the entire directory tree.
 		if err := os.RemoveAll(bazelDir.path); err != nil {
 			waitGroup.Done()
 			errors <- fmt.Errorf("failed to delete %q: %w", bazelDir.path, err)
@@ -550,7 +551,7 @@ func (c *Clean) findBazelBaseDir() (string, string, error) {
 
 	for _, file := range files {
 
-		// bazel-bin, bazel-out, etc... will be symlinks, so we can eliminate non-symlinks immediately
+		// bazel-bin, bazel-out, etc... will be symlinks, so we can eliminate non-symlinks immediately.
 		if file.Mode()&os.ModeSymlink != 0 {
 			actualPath, err := os.Readlink(filepath.Join(cwd, file.Name()))
 			if err != nil {
