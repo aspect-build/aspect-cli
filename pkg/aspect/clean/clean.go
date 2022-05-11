@@ -121,7 +121,7 @@ func NewDefault(bzl bazel.Bazel, isInteractive bool) *Clean {
 		},
 	}
 	c.Workaround = &promptui.Prompt{
-		Label:     "Temporarily workaround the bug by deleting the output folder",
+		Label:     "Temporarily workaround the bug by deleting the output directory",
 		IsConfirm: true,
 	}
 	c.Remember = &promptui.Prompt{
@@ -364,7 +364,7 @@ func (c *Clean) findDiskCaches(
 				fileStat, err := os.Stat(cachePath)
 
 				if err != nil {
-					errors <- fmt.Errorf("failed to stat cache folder: %w", err)
+					errors <- fmt.Errorf("failed to stat cache directory: %w", err)
 					return
 				}
 
@@ -410,14 +410,14 @@ func (c *Clean) findBazelWorkspaces(
 
 		execrootFiles, readDirErr := ioutil.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
 		if readDirErr != nil {
-			// The install and cache folders will end up here.We must not remove these
+			// The install and cache directories will end up here.We must not remove these
 			continue
 		}
 
-		// We expect these folders to have up to 2 files / folders:
+		// We expect these directories to have up to 2 files / directories:
 		//   - Firstly, a file named "DO_NOT_BUILD_HERE".
-		//   - Secondly, a folder named after the given workspace.
-		// We can use the given second folder to determine the name of the workspace. We want this
+		//   - Secondly, a directory named after the given workspace.
+		// We can use the given second directory to determine the name of the workspace. We want this
 		// so that we can ask the user if they want to remove a given workspace.
 		if (len(execrootFiles) == 1 && execrootFiles[0].Name() == "DO_NOT_BUILD_HERE") || len(execrootFiles) > 2 {
 			// TODO: Group up unkown workspaces into one prompt?
@@ -474,25 +474,25 @@ func (c *Clean) deleteProcessor(
 ) {
 	for bazelDir := range deleteQueue {
 
-		// We know that there will be an "external" folder that could be deleted in parallel.
-		// So we can move those folders to a tmp filepath and add them as seperate deletes that will
+		// We know that there will be an "external" directory that could be deleted in parallel.
+		// So we can move those directories to a tmp filepath and add them as seperate deletes that will
 		// therefore happen in parallel.
-		externalFolders, _ := ioutil.ReadDir(filepath.Join(bazelDir.path, "external"))
-		for _, folder := range externalFolders {
-			newPath := c.MoveFolderToTmp(bazelDir.path, folder.Name())
+		externalDirectories, _ := ioutil.ReadDir(filepath.Join(bazelDir.path, "external"))
+		for _, directory := range externalDirectories {
+			newPath := c.MoveDirectoryToTmp(bazelDir.path, directory.Name())
 
 			if newPath != "" {
 				waitGroup.Add(1)
 				deleteQueue <- bazelDirInfo{
 					path: newPath,
-					size: 0, // dont want to calculate the size for the subfolders. Just include the parent size
+					size: 0, // dont want to calculate the size for the subdirectories. Just include the parent size
 				}
 			}
 		}
 
 		// The permissions set in the directories being removed don't allow write access,
 		// so we change the permissions before removing those directories.
-		if _, err := c.ChangeFolderPermissions(bazelDir.path); err != nil {
+		if _, err := c.ChangeDirectoryPermissions(bazelDir.path); err != nil {
 			waitGroup.Done()
 			errors <- fmt.Errorf("failed to delete %q: %w", bazelDir.path, err)
 			continue

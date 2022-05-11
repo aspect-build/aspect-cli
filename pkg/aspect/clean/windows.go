@@ -34,12 +34,12 @@ func (c *Clean) GetAccessTime(workspace fs.FileInfo) time.Duration {
 	return smallestTime
 }
 
-func (c *Clean) MoveFolderToTmp(dir string, name string) string {
+func (c *Clean) MoveDirectoryToTmp(dir string, name string) string {
 	// TODO: Add functionality. https://github.com/aspect-build/aspect-cli/issues/196
 	return ""
 }
 
-func (c *Clean) ChangeFolderPermissions(folder string) ([]byte, error) {
+func (c *Clean) ChangeDirectoryPermissions(directory string) ([]byte, error) {
 	// TODO: Add functionality. https://github.com/aspect-build/aspect-cli/issues/196
 	return nil, nil
 }

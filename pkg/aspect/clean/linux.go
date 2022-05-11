@@ -41,20 +41,20 @@ func (c *Clean) GetAccessTime(workspace fs.FileInfo) time.Duration {
 	return smallestTime
 }
 
-func (c *Clean) MoveFolderToTmp(dir string, name string) string {
+func (c *Clean) MoveDirectoryToTmp(dir string, name string) string {
 	tempDir, err := ioutil.TempDir("", "aspect_delete")
 	if err != nil {
 		return ""
 	}
-	newFolder := filepath.Join(tempDir + strings.Replace(dir, "/", "", -1))
-	newPath := filepath.Join(newFolder, name)
-	os.MkdirAll(newFolder, os.ModePerm)
+	newDirectory := filepath.Join(tempDir + strings.Replace(dir, "/", "", -1))
+	newPath := filepath.Join(newDirectory, name)
+	os.MkdirAll(newDirectory, os.ModePerm)
 	os.Rename(filepath.Join(dir, "external", name), newPath)
 
 	return newPath
 }
 
-func (c *Clean) ChangeFolderPermissions(folder string) ([]byte, error) {
-	cmd := exec.Command("chmod", "-R", "777", folder)
+func (c *Clean) ChangeDirectoryPermissions(directory string) ([]byte, error) {
+	cmd := exec.Command("chmod", "-R", "777", directory)
 	return cmd.Output()
 }
