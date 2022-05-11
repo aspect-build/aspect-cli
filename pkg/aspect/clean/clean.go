@@ -420,7 +420,8 @@ func (c *Clean) findBazelWorkspaces(
 		// We can use the given second directory to determine the name of the workspace. We want this
 		// so that we can ask the user if they want to remove a given workspace.
 		if (len(execrootFiles) == 1 && execrootFiles[0].Name() == "DO_NOT_BUILD_HERE") || len(execrootFiles) > 2 {
-			// TODO: Group up unkown workspaces into one prompt?
+			// TODO: Only ask the user if they want to remove unknown workspace once.
+			// https://github.com/aspect-build/aspect-cli/issues/208
 			workspaceInfo.workspaceName = "Unknown Workspace"
 		} else {
 			for _, execrootFile := range execrootFiles {
