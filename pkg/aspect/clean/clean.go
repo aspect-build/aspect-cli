@@ -301,12 +301,8 @@ func (c *Clean) confirmationActor(
 			Label:     "Would you like to continue?",
 			IsConfirm: true,
 		}
-		if _, err := promptContinue.Run(); err != nil {
+		if _, err := promptContinue.Run(); err != nil || errors.Is(err, promptui.ErrInterrupt) {
 			break
-		} else {
-			if errors.Is(err, promptui.ErrInterrupt) {
-				break
-			}
 		}
 	}
 	confirmationWaitGroup.Done()
@@ -398,7 +394,7 @@ func (c *Clean) findBazelWorkspaces(
 
 	bazelWorkspaces, err := ioutil.ReadDir(bazelBaseDir)
 	if err != nil {
-		errors <- fmt.Errorf("failed to find bazel worksapces: %w", err)
+		errors <- fmt.Errorf("failed to find bazel workspaces: %w", err)
 		return
 	}
 
