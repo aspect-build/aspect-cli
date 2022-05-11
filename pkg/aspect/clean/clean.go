@@ -486,7 +486,11 @@ func (c *Clean) deleteProcessor(
 				waitGroup.Add(1)
 				deleteQueue <- bazelDirInfo{
 					path: newPath,
-					size: 0, // dont want to calculate the size for the subdirectories. Just include the parent size
+					// Size is used to calculate how much space has been reclaimed.
+					// This bazelDirInfo is for a subdirectory we want to delete in parallel.
+					// Rather than calculate the size of each subdirectory we can just use the
+					// already calculate size of the parent.
+					size: 0,
 				}
 			}
 		}
