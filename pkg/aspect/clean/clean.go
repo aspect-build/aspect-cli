@@ -53,6 +53,8 @@ implementation can be fixed.
 
 	rememberLine1 = "You can skip this prompt to make 'aspect clean' behave the same as 'bazel clean'\n"
 	rememberLine2 = "Remember this choice and skip the prompt in the future"
+
+	unstructuredArgsBEPKey = "unstructuredCommandLine"
 )
 
 var diskCacheRegex = regexp.MustCompile(`--disk_cache.+?(\/.+?)"`)
@@ -351,7 +353,7 @@ func (c *Clean) findDiskCaches(
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		text := scanner.Text()
-		if strings.Contains(text, "unstructuredCommandLine") {
+		if strings.Contains(text, unstructuredArgsBEPKey) {
 			result := diskCacheRegex.FindAllStringSubmatch(text, -1)
 			for i := range result {
 				cachePath := result[i][1]
