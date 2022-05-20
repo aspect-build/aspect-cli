@@ -105,9 +105,9 @@ func New(
 	}
 }
 
-func NewDefault(bzl bazel.Bazel, isInteractive bool) *Clean {
+func NewDefault(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Clean {
 	c := New(
-		ioutils.DefaultStreams,
+		streams,
 		bzl,
 		isInteractive)
 	c.Behavior = &promptui.Select{
@@ -285,7 +285,7 @@ func (c *Clean) confirmationActor(
 		}
 
 		if _, err := promptRemove.Run(); err == nil {
-			fmt.Printf("%s added to the delete queue\n", bazelDir.workspaceName)
+			fmt.Fprintf(c.Streams.Stdout, "%s added to the delete queue\n", bazelDir.workspaceName)
 			deleteWaitGroup.Add(1)
 			deleteQueue <- bazelDir
 		} else {
@@ -534,7 +534,7 @@ func (c *Clean) sizePrinter(sizeQueue <-chan float64, waitGroup *sync.WaitGroup)
 	}
 
 	_, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(totalSize)
-	fmt.Printf("Space reclaimed: %.2f%s\n", hRSpaceReclaimed, unit)
+	fmt.Fprintf(c.Streams.Stdout, "Space reclaimed: %.2f%s\n", hRSpaceReclaimed, unit)
 
 	waitGroup.Done()
 }
