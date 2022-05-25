@@ -561,11 +561,14 @@ func (c *Clean) findBazelBaseDir() (string, string, error) {
 				return "", "", fmt.Errorf("failed to find Bazel base directory: failed to follow symlink: %w", err)
 			}
 
-			if strings.Contains(actualPath, "bazel") && strings.Contains(actualPath, "/execroot/") {
-				execrootBase := strings.Split(actualPath, "/execroot/")[0]
-				execrootSplit := strings.Split(execrootBase, "/")
+			pathSeparator := string(os.PathSeparator)
+			execrootSection := pathSeparator + "execroot" + pathSeparator
+
+			if strings.Contains(actualPath, "bazel") && strings.Contains(actualPath, execrootSection) {
+				execrootBase := strings.Split(actualPath, execrootSection)[0]
+				execrootSplit := strings.Split(execrootBase, pathSeparator)
 				currentWorkingBase := execrootSplit[len(execrootSplit)-1]
-				bazelOutputBase := strings.Join(execrootSplit[:len(execrootSplit)-1], "/")
+				bazelOutputBase := strings.Join(execrootSplit[:len(execrootSplit)-1], pathSeparator)
 				return bazelOutputBase, currentWorkingBase, nil
 			}
 		}
