@@ -316,7 +316,7 @@ func (c *Clean) findDiskCaches(
 ) {
 	tempDir, err := ioutil.TempDir("", "tmp_bazel_output")
 	if err != nil {
-		errors <- fmt.Errorf("failed to create tmp dir: %w", err)
+		errors <- fmt.Errorf("failed to find disk caches: failed to create tmp dir: %w", err)
 		return
 	}
 	defer os.RemoveAll(tempDir)
@@ -345,7 +345,7 @@ func (c *Clean) findDiskCaches(
 
 	file, err := os.Open(bepLocation)
 	if err != nil {
-		errors <- fmt.Errorf("failed to read file: %w", err)
+		errors <- fmt.Errorf("failed to find disk caches: failed to open BEP file: %w", err)
 		return
 	}
 	defer file.Close()
@@ -366,7 +366,7 @@ func (c *Clean) findDiskCaches(
 				fileStat, err := os.Stat(cachePath)
 
 				if err != nil {
-					errors <- fmt.Errorf("failed to stat cache directory: %w", err)
+					errors <- fmt.Errorf("failed to find disk caches: failed to stat potential cache: %w", err)
 					return
 				}
 
@@ -379,7 +379,7 @@ func (c *Clean) findDiskCaches(
 	}
 
 	if err := scanner.Err(); err != nil {
-		errors <- fmt.Errorf("failed to read file: %w", err)
+		errors <- fmt.Errorf("failed to find disk caches: failed to read BEP file: %w", err)
 		return
 	}
 }
@@ -390,13 +390,13 @@ func (c *Clean) findBazelWorkspaces(
 ) {
 	bazelBaseDir, currentWorkingBase, err := c.findBazelBaseDir()
 	if err != nil {
-		errors <- fmt.Errorf("failed to find bazel working dir: %w", err)
+		errors <- fmt.Errorf("failed to find bazel workspaces: failed to find bazel base directory: %w", err)
 		return
 	}
 
 	bazelWorkspaces, err := ioutil.ReadDir(bazelBaseDir)
 	if err != nil {
-		errors <- fmt.Errorf("failed to find bazel workspaces: %w", err)
+		errors <- fmt.Errorf("failed to find bazel workspaces: failed to read bazel base directory: %w", err)
 		return
 	}
 
@@ -501,7 +501,7 @@ func (c *Clean) deleteProcessor(
 		// so we change the permissions before removing those directories.
 		if _, err := c.ChangeDirectoryPermissions(bazelDir.path); err != nil {
 			waitGroup.Done()
-			errors <- fmt.Errorf("failed to delete %q: %w", bazelDir.path, err)
+			errors <- fmt.Errorf("failed to delete %q: failed to change permissions: %w", bazelDir.path, err)
 			continue
 		}
 
@@ -544,12 +544,12 @@ func (c *Clean) sizePrinter(sizeQueue <-chan float64, waitGroup *sync.WaitGroup)
 func (c *Clean) findBazelBaseDir() (string, string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to find Bazel base dir: %w", err)
+		return "", "", fmt.Errorf("failed to find Bazel base directory: failed to get current working directory: %w", err)
 	}
 
 	files, err := ioutil.ReadDir(cwd)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to find Bazel base dir: %w", err)
+		return "", "", fmt.Errorf("failed to find Bazel base directory: failed to read current working directory %w", err)
 	}
 
 	for _, file := range files {
@@ -558,7 +558,7 @@ func (c *Clean) findBazelBaseDir() (string, string, error) {
 		if file.Mode()&os.ModeSymlink != 0 {
 			actualPath, err := os.Readlink(filepath.Join(cwd, file.Name()))
 			if err != nil {
-				return "", "", fmt.Errorf("failed to find Bazel base dir: %w", err)
+				return "", "", fmt.Errorf("failed to find Bazel base directory: failed to follow symlink: %w", err)
 			}
 
 			if strings.Contains(actualPath, "bazel") && strings.Contains(actualPath, "/execroot/") {
@@ -571,7 +571,7 @@ func (c *Clean) findBazelBaseDir() (string, string, error) {
 		}
 	}
 
-	return "", "", fmt.Errorf("failed to find Bazel base dir: bazel output symlinks not found in directory")
+	return "", "", fmt.Errorf("failed to find Bazel base directory: bazel output symlinks not found in directory")
 }
 
 func (c *Clean) getDirSize(path string) (float64, float64, string) {
