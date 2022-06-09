@@ -7,7 +7,6 @@ export HOME
 touch WORKSPACE
 
 mkdir foo
-
 cat > foo/BUILD <<'EOF'
 genrule(
     name = "foo",
@@ -17,11 +16,11 @@ genrule(
 EOF
 
 # Only capture stdout, just like `bazel version` prints to stdout
-query=$($ASPECT query 'deps(//foo)' 2>/dev/null) || "$ASPECT" query 'deps(//foo)'
+query=$($ASPECT query foo //foo 2>/dev/null) || "$ASPECT" query foo //foo
 
 # Should list the //foo:foo genrule that we have created
 [[ "$query" =~ "//foo:foo" ]] || {
-    echo >&2 "Expected 'aspect query deps(//foo)' stdout to contain '//foo:foo', but was"
+    echo >&2 "Expected 'aspect query foo //foo' stdout to contain '//foo:foo', but was"
     echo "$query"
     exit 1
 }

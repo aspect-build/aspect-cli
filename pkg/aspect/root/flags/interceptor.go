@@ -10,6 +10,7 @@ package flags
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/fatih/color"
@@ -72,11 +73,10 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 		// If user specifies the config file to use then we want to only use that config.
 		// If user does not specify a config file to use then we want to load ".aspect" from the
 		// $HOME directory and from the root of the repo (if it exists).
-		// Adding a second config path using "AddConfigPath" does not work because we dont
+		// Adding a second config path using "AddConfigPath" does not work because we don't
 		// change the config name using "AddConfigPath". This results in loading the same config
 		// file twice. A workaround for this is to have a second viper instance load the repo
 		// config and merge them together. Source: https://github.com/spf13/viper/issues/181
-		repoViper := viper.New()
 
 		cfgFile, err := cmd.Flags().GetString(ConfigFlagName)
 		if err != nil {
@@ -86,31 +86,80 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 		if cfgFile != "" {
 			// Use config file from the flag.
 			viper.SetConfigFile(cfgFile)
+			viper.AutomaticEnv()
+
+			if err := viper.ReadInConfig(); err != nil {
+				if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+					// this file does not exist where the user set with the flag
+					return fmt.Errorf("Failed to read config file from flag not found at: %s", cfgFile)
+				} else {
+					return fmt.Errorf("Failed when trying to find config file when flag set with %s: %w", cfgFile, err)
+				}
+			} else {
+				faint.Fprintln(streams.Stderr, "Using config file:", viper.ConfigFileUsed())
+			}
+
 		} else {
-			// Find home directory.
+			// used to search in current directory
+			viper.AddConfigPath(".")
+			viper.SetConfigName(".aspect")
+			// this seems to require being explicitly set
+			// https://github.com/spf13/viper/issues/109
+			// https://github.com/spf13/viper/issues/316
+			viper.SetConfigType("yaml")
+
+			// used to search in home directory
 			home, err := homedir.Dir()
 			cobra.CheckErr(err)
 
-			// Search for config in home directory with name ".aspect" (without extension).
-			viper.AddConfigPath(home)
-			viper.SetConfigName(".aspect")
+			viper.AutomaticEnv()
 
-			// Search for config in root of current repo with name ".aspect" (without extension).
-			repoViper.AddConfigPath(".")
-			repoViper.SetConfigName(".aspect")
-			repoViper.AutomaticEnv()
+			// what do we want to do with error handeling for all of these reads?
+			// it should be consistent just not sure what it should be
+			// the errors that aren't viper.ConfigFileNotFoundError will still be thrown how should they be handled?
+
+			// search in current directory first
+			if err := viper.ReadInConfig(); err != nil {
+				if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+					// search in home directory next
+					viper.AddConfigPath(home)
+					if err = viper.ReadInConfig(); err != nil {
+						if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+							// Config file not found;
+							// create new config file if it does not exist
+							if err = viper.WriteConfigAs(fmt.Sprintf("%s/.aspect.yaml", home)); err != nil {
+								// if you can't write to home directory fail
+								return fmt.Errorf("Failed to write Config file in the home directory %s: %w", home, err)
+							}
+						} else {
+							return fmt.Errorf("Failed when reading Config file in the home directory %s: %w", home, err)
+						}
+					}
+				} else {
+					return fmt.Errorf("Failed when reading Config file in the current directory: %w", err)
+				}
+			} else {
+				// the first config file is found and now we need to check for a second config file
+				// if a second file is found merge them if not continue with just the previous file
+				repoViper := viper.New()
+				repoViper.AddConfigPath(home)
+				repoViper.SetConfigName(".aspect")
+				repoViper.SetConfigType("yaml")
+				repoViper.AutomaticEnv()
+
+				if err := repoViper.ReadInConfig(); err != nil {
+					if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+						return fmt.Errorf("Failed when reading second Config file in the home directory %s: %w", home, err)
+					}
+				} else {
+					// this means there is another file so we have to merge it
+					// not sure of the exact order files are currently merged
+					// root file should override the home file though
+					// would also be good to know if there is ever a user aspect file
+					viper.MergeConfigMap(repoViper.AllSettings())
+				}
+			}
 		}
-
-		viper.AutomaticEnv()
-		if err := viper.ReadInConfig(); err == nil {
-			faint.Fprintln(streams.Stderr, "Using config file:", viper.ConfigFileUsed())
-		}
-
-		if err := repoViper.ReadInConfig(); err == nil {
-			faint.Fprintln(streams.Stderr, "Using config file:", repoViper.ConfigFileUsed())
-		}
-
-		viper.MergeConfigMap(repoViper.AllSettings())
 
 		// Remove "aspect:*" args from the list of args. These should be accessed via cmd.Flags()
 		updatedArgs := make([]string, 0)
