@@ -27,6 +27,7 @@ import (
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/osutils"
 )
 
 const (
@@ -93,6 +94,8 @@ type Clean struct {
 
 	Expunge      bool
 	ExpungeAsync bool
+
+	OsUtils osutils.OsUtils
 }
 
 // New creates a Clean command.
@@ -131,6 +134,7 @@ func NewDefault(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *C
 		IsConfirm: true,
 	}
 	c.Prefs = *viper.GetViper()
+	c.OsUtils = osutils.NewDefault()
 	return c
 }
 
@@ -370,7 +374,7 @@ func (c *Clean) findDiskCaches(
 					return
 				}
 
-				cacheInfo.accessTime = c.GetAccessTime(fileStat)
+				cacheInfo.accessTime = c.OsUtils.GetAccessTime(fileStat)
 				cacheInfo.workspaceName = cachePath
 
 				sizeCalcQueue <- cacheInfo
@@ -408,7 +412,7 @@ func (c *Clean) findBazelWorkspaces(
 			isCache:            false,
 		}
 
-		workspaceInfo.accessTime = c.GetAccessTime(workspace)
+		workspaceInfo.accessTime = c.OsUtils.GetAccessTime(workspace)
 
 		execrootFiles, readDirErr := ioutil.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
 		if readDirErr != nil {
@@ -482,7 +486,7 @@ func (c *Clean) deleteProcessor(
 		// therefore happen in parallel.
 		externalDirectories, _ := ioutil.ReadDir(filepath.Join(bazelDir.path, "external"))
 		for _, directory := range externalDirectories {
-			newPath := c.MoveDirectoryToTmp(bazelDir.path, directory.Name())
+			newPath := c.OsUtils.MoveDirectoryToTmp(bazelDir.path, directory.Name())
 
 			if newPath != "" {
 				waitGroup.Add(1)
@@ -499,7 +503,7 @@ func (c *Clean) deleteProcessor(
 
 		// The permissions set in the directories being removed don't allow write access,
 		// so we change the permissions before removing those directories.
-		if _, err := c.ChangeDirectoryPermissions(bazelDir.path); err != nil {
+		if _, err := c.OsUtils.ChangeDirectoryPermissions(bazelDir.path); err != nil {
 			waitGroup.Done()
 			errors <- fmt.Errorf("failed to delete %q: failed to change permissions: %w", bazelDir.path, err)
 			continue

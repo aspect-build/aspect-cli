@@ -8,27 +8,25 @@
  * Full License text is in the LICENSE file included in the root of this repository.
  */
 
-package clean
+package osutils
 
 import (
 	"io/fs"
-	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 )
 
-func (c *Clean) GetAccessTime(workspace fs.FileInfo) time.Duration {
+func (o *OsUtils) getAccessTimeInternal(workspace fs.FileInfo) time.Duration {
 	accessTime := workspace.Sys().(*syscall.Stat_t).Atimespec
 	createdTime := workspace.Sys().(*syscall.Stat_t).Ctimespec
 	modifiedTime := workspace.Sys().(*syscall.Stat_t).Mtimespec
 
-	timeSinceAccess := time.Since(time.Unix(accessTime.Sec, accessTime.Nsec))
-	timeSinceCreation := time.Since(time.Unix(createdTime.Sec, createdTime.Nsec))
-	timeSinceModified := time.Since(time.Unix(modifiedTime.Sec, modifiedTime.Nsec))
+	timeSinceAccess := o.TimeSince(o.TimeUnix(accessTime.Sec, accessTime.Nsec))
+	timeSinceCreation := o.TimeSince(o.TimeUnix(createdTime.Sec, createdTime.Nsec))
+	timeSinceModified := o.TimeSince(o.TimeUnix(modifiedTime.Sec, modifiedTime.Nsec))
 
 	smallestTime := timeSinceAccess
 
@@ -41,20 +39,20 @@ func (c *Clean) GetAccessTime(workspace fs.FileInfo) time.Duration {
 	return smallestTime
 }
 
-func (c *Clean) MoveDirectoryToTmp(dir string, name string) string {
-	tempDir, err := ioutil.TempDir("", "aspect_delete")
+func (o *OsUtils) moveDirectoryToTmpInternal(dir string, name string) string {
+	tempDir, err := o.IoutilTempDir("", "aspect_delete")
 	if err != nil {
 		return ""
 	}
 	newDirectory := filepath.Join(tempDir + strings.Replace(dir, "/", "", -1))
 	newPath := filepath.Join(newDirectory, name)
-	os.MkdirAll(newDirectory, os.ModePerm)
-	os.Rename(filepath.Join(dir, "external", name), newPath)
+	o.OsMkdirAll(newDirectory, os.ModePerm)
+	o.OsRename(filepath.Join(dir, "external", name), newPath)
 
 	return newPath
 }
 
-func (c *Clean) ChangeDirectoryPermissions(directory string) ([]byte, error) {
-	cmd := exec.Command("chmod", "-R", "777", directory)
+func (o *OsUtils) changeDirectoryPermissionsInternal(directory string) ([]byte, error) {
+	cmd := o.OsExecCommand("chmod", "-R", "777", directory)
 	return cmd.Output()
 }
