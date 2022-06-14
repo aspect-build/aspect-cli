@@ -10,14 +10,6 @@ go_library(
     ],
     importpath = "aspect.build/cli/pkg/osutils",
     visibility = ["//visibility:public"],
-    deps = [
-        "//pkg/aspecterrors",
-        "//pkg/bazel",
-        "//pkg/ioutils",
-        "@com_github_manifoldco_promptui//:promptui",
-        "@com_github_spf13_cobra//:cobra",
-        "@com_github_spf13_viper//:viper",
-    ],
 )
 
 go_test(
@@ -25,11 +17,8 @@ go_test(
     srcs = ["darwin_test.go"],
     deps = [
         ":osutils",
-        "//pkg/bazel/mock",
-        "//pkg/ioutils",
         "//pkg/stdlib/mock",
         "@com_github_golang_mock//gomock",
         "@com_github_onsi_gomega//:gomega",
-        "@com_github_spf13_viper//:viper",
     ],
 )
