@@ -61,13 +61,13 @@ func NewDefault() OsUtils {
 }
 
 func (os *OsUtils) GetAccessTime(workspace fs.FileInfo) time.Duration {
-	return os.getAccessTimeInternal(workspace)
+	return os.getAccessTime(workspace)
 }
 
 func (os *OsUtils) MoveDirectoryToTmp(dir string, name string) string {
-	return os.moveDirectoryToTmpInternal(dir, name)
+	return os.moveDirectoryToTmp(dir, name)
 }
 
 func (os *OsUtils) ChangeDirectoryPermissions(directory string) ([]byte, error) {
-	return os.changeDirectoryPermissionsInternal(directory)
+	return os.changeDirectoryPermissions(directory)
 }

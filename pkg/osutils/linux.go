@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-func (o *OsUtils) getAccessTimeInternal(workspace fs.FileInfo) time.Duration {
+func (o *OsUtils) getAccessTime(workspace fs.FileInfo) time.Duration {
 	accessTime := workspace.Sys().(*syscall.Stat_t).Atim
 	createdTime := workspace.Sys().(*syscall.Stat_t).Ctim
 	modifiedTime := workspace.Sys().(*syscall.Stat_t).Mtim
@@ -41,7 +41,7 @@ func (o *OsUtils) getAccessTimeInternal(workspace fs.FileInfo) time.Duration {
 	return smallestTime
 }
 
-func (o *OsUtils) moveDirectoryToTmpInternal(dir string, name string) string {
+func (o *OsUtils) moveDirectoryToTmp(dir string, name string) string {
 	tempDir, err := ioutil.TempDir("", "aspect_delete")
 	if err != nil {
 		return ""
@@ -54,7 +54,7 @@ func (o *OsUtils) moveDirectoryToTmpInternal(dir string, name string) string {
 	return newPath
 }
 
-func (o *OsUtils) changeDirectoryPermissionsInternal(directory string) ([]byte, error) {
+func (o *OsUtils) changeDirectoryPermissions(directory string) ([]byte, error) {
 	cmd := exec.Command("chmod", "-R", "777", directory)
 	return cmd.Output()
 }

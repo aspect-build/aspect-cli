@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-func (o *OsUtils) getAccessTimeInternal(workspace fs.FileInfo) time.Duration {
+func (o *OsUtils) getAccessTime(workspace fs.FileInfo) time.Duration {
 	winFileData := workspace.Sys().(*syscall.Win32FileAttributeData)
 
 	timeSinceAccess := o.TimeSince(o.TimeUnix(0, winFileData.LastAccessTime.Nanoseconds()))
@@ -34,12 +34,12 @@ func (o *OsUtils) getAccessTimeInternal(workspace fs.FileInfo) time.Duration {
 	return smallestTime
 }
 
-func (o *OsUtils) moveDirectoryToTmpInternal(dir string, name string) string {
+func (o *OsUtils) moveDirectoryToTmp(dir string, name string) string {
 	// TODO: Add functionality. https://github.com/aspect-build/aspect-cli/issues/196
 	return ""
 }
 
-func (o *OsUtils) changeDirectoryPermissionsInternal(directory string) ([]byte, error) {
+func (o *OsUtils) changeDirectoryPermissions(directory string) ([]byte, error) {
 	// TODO: Add functionality. https://github.com/aspect-build/aspect-cli/issues/196
 	return nil, nil
 }
