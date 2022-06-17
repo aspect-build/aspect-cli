@@ -1,22 +1,23 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "osutils",
+    name = "filesystem",
     srcs = [
         "darwin.go",
+        "filesystem.go",
         "linux.go",
-        "osutils.go",
         "windows.go",
     ],
-    importpath = "aspect.build/cli/pkg/osutils",
+    importpath = "aspect.build/cli/pkg/osutils/filesystem",
     visibility = ["//visibility:public"],
 )
 
 go_test(
-    name = "osutils_test",
+    name = "filesystem_test",
     srcs = ["darwin_test.go"],
     deps = [
-        ":osutils",
+        ":filesystem",
+        "//pkg/osutils/filesystem/mock",
         "//pkg/stdlib/mock",
         "@com_github_golang_mock//gomock",
         "@com_github_onsi_gomega//:gomega",

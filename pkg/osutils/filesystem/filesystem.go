@@ -6,7 +6,7 @@
  * Full License text is in the LICENSE file included in the root of this repository.
  */
 
-package osutils
+package filesystem
 
 import (
 	"io/fs"
@@ -36,38 +36,68 @@ func osRename(oldpath string, newpath string) error {
 	return os.Rename(oldpath, newpath)
 }
 
-func osExecCommand(name string, arg ...string) *exec.Cmd {
+// type ConfirmationRunner interface {
+// 	Run() (string, error)
+// }
+
+// func Confirmation(question string) ConfirmationRunner {
+// 	return &promptui.Prompt{
+// 		Label:     question,
+// 		IsConfirm: true,
+// 	}
+// }
+
+type ExecCmdRunner interface {
+	Output() ([]byte, error)
+
+	// func (*exec.Cmd).Output() ([]byte, error)
+}
+
+// func ExecCmd(question string) ExecCmdRunner {
+// 	return &promptui.Prompt{
+// 		Label:     question,
+// 		IsConfirm: true,
+// 	}
+// }
+
+func osExecCommand(name string, arg ...string) ExecCmdRunner {
 	return exec.Command(name, arg...)
 }
 
-type OsUtils struct {
+func osStat(name string) (fs.FileInfo, error) {
+	return os.Stat(name)
+}
+
+type Filesystem struct {
 	TimeSince     func(time.Time) time.Duration
 	TimeUnix      func(int64, int64) time.Time
 	IoutilTempDir func(string, string) (name string, err error)
 	OsMkdirAll    func(string, fs.FileMode) error
 	OsRename      func(string, string) error
-	OsExecCommand func(string, ...string) *exec.Cmd
+	OsExecCommand func(string, ...string) ExecCmdRunner
+	OsStat        func(string) (fs.FileInfo, error)
 }
 
-func NewDefault() OsUtils {
-	osUtils := OsUtils{}
+func NewDefault() Filesystem {
+	osUtils := Filesystem{}
 	osUtils.TimeSince = timeSince
 	osUtils.TimeUnix = timeUnix
 	osUtils.IoutilTempDir = ioutilTempDir
 	osUtils.OsMkdirAll = osMkdirAll
 	osUtils.OsRename = osRename
 	osUtils.OsExecCommand = osExecCommand
+	osUtils.OsStat = osStat
 	return osUtils
 }
 
-func (os *OsUtils) GetAccessTime(workspace fs.FileInfo) time.Duration {
-	return os.getAccessTime(workspace)
+func (f *Filesystem) GetAccessTime(workspace fs.FileInfo) time.Duration {
+	return f.getAccessTime(workspace)
 }
 
-func (os *OsUtils) MoveDirectoryToTmp(dir string, name string) string {
-	return os.moveDirectoryToTmp(dir, name)
+func (f *Filesystem) MoveDirectoryToTmp(dir string, name string) string {
+	return f.moveDirectoryToTmp(dir, name)
 }
 
-func (os *OsUtils) ChangeDirectoryPermissions(directory string) ([]byte, error) {
-	return os.changeDirectoryPermissions(directory)
+func (f *Filesystem) ChangeDirectoryPermissions(directory string, permissions string) ([]byte, error) {
+	return f.changeDirectoryPermissions(directory, permissions)
 }

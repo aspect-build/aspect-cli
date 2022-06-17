@@ -8,7 +8,7 @@
  * Full License text is in the LICENSE file included in the root of this repository.
  */
 
-package osutils
+package filesystem
 
 import (
 	"io/fs"
@@ -21,14 +21,14 @@ import (
 	"time"
 )
 
-func (o *OsUtils) getAccessTime(workspace fs.FileInfo) time.Duration {
+func (f *Filesystem) getAccessTime(workspace fs.FileInfo) time.Duration {
 	accessTime := workspace.Sys().(*syscall.Stat_t).Atim
 	createdTime := workspace.Sys().(*syscall.Stat_t).Ctim
 	modifiedTime := workspace.Sys().(*syscall.Stat_t).Mtim
 
-	timeSinceAccess := o.TimeSince(o.TimeUnix(accessTime.Sec, accessTime.Nsec))
-	timeSinceCreation := o.TimeSince(o.TimeUnix(createdTime.Sec, createdTime.Nsec))
-	timeSinceModified := o.TimeSince(o.TimeUnix(modifiedTime.Sec, modifiedTime.Nsec))
+	timeSinceAccess := f.TimeSince(f.TimeUnix(accessTime.Sec, accessTime.Nsec))
+	timeSinceCreation := f.TimeSince(f.TimeUnix(createdTime.Sec, createdTime.Nsec))
+	timeSinceModified := f.TimeSince(f.TimeUnix(modifiedTime.Sec, modifiedTime.Nsec))
 
 	smallestTime := timeSinceAccess
 
@@ -41,7 +41,7 @@ func (o *OsUtils) getAccessTime(workspace fs.FileInfo) time.Duration {
 	return smallestTime
 }
 
-func (o *OsUtils) moveDirectoryToTmp(dir string, name string) string {
+func (f *Filesystem) moveDirectoryToTmp(dir string, name string) string {
 	tempDir, err := ioutil.TempDir("", "aspect_delete")
 	if err != nil {
 		return ""
@@ -54,7 +54,7 @@ func (o *OsUtils) moveDirectoryToTmp(dir string, name string) string {
 	return newPath
 }
 
-func (o *OsUtils) changeDirectoryPermissions(directory string) ([]byte, error) {
+func (f *Filesystem) changeDirectoryPermissions(directory string, permissions string) ([]byte, error) {
 	cmd := exec.Command("chmod", "-R", "777", directory)
 	return cmd.Output()
 }

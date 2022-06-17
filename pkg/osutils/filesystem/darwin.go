@@ -8,9 +8,11 @@
  * Full License text is in the LICENSE file included in the root of this repository.
  */
 
-package osutils
+package filesystem
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -19,14 +21,16 @@ import (
 	"time"
 )
 
-func (o *OsUtils) getAccessTime(workspace fs.FileInfo) time.Duration {
+const ChmodPath = "/bin/chmod"
+
+func (f *Filesystem) getAccessTime(workspace fs.FileInfo) time.Duration {
 	accessTime := workspace.Sys().(*syscall.Stat_t).Atimespec
 	createdTime := workspace.Sys().(*syscall.Stat_t).Ctimespec
 	modifiedTime := workspace.Sys().(*syscall.Stat_t).Mtimespec
 
-	timeSinceAccess := o.TimeSince(o.TimeUnix(accessTime.Sec, accessTime.Nsec))
-	timeSinceCreation := o.TimeSince(o.TimeUnix(createdTime.Sec, createdTime.Nsec))
-	timeSinceModified := o.TimeSince(o.TimeUnix(modifiedTime.Sec, modifiedTime.Nsec))
+	timeSinceAccess := f.TimeSince(f.TimeUnix(accessTime.Sec, accessTime.Nsec))
+	timeSinceCreation := f.TimeSince(f.TimeUnix(createdTime.Sec, createdTime.Nsec))
+	timeSinceModified := f.TimeSince(f.TimeUnix(modifiedTime.Sec, modifiedTime.Nsec))
 
 	smallestTime := timeSinceAccess
 
@@ -39,20 +43,23 @@ func (o *OsUtils) getAccessTime(workspace fs.FileInfo) time.Duration {
 	return smallestTime
 }
 
-func (o *OsUtils) moveDirectoryToTmp(dir string, name string) string {
-	tempDir, err := o.IoutilTempDir("", "aspect_delete")
+func (f *Filesystem) moveDirectoryToTmp(dir string, name string) string {
+	tempDir, err := f.IoutilTempDir("", "aspect_delete")
 	if err != nil {
 		return ""
 	}
 	newDirectory := filepath.Join(tempDir + strings.Replace(dir, "/", "", -1))
 	newPath := filepath.Join(newDirectory, name)
-	o.OsMkdirAll(newDirectory, os.ModePerm)
-	o.OsRename(filepath.Join(dir, "external", name), newPath)
+	f.OsMkdirAll(newDirectory, os.ModePerm)
+	f.OsRename(filepath.Join(dir, "external", name), newPath)
 
 	return newPath
 }
 
-func (o *OsUtils) changeDirectoryPermissions(directory string) ([]byte, error) {
-	cmd := o.OsExecCommand("chmod", "-R", "777", directory)
+func (f *Filesystem) changeDirectoryPermissions(directory string, permissions string) ([]byte, error) {
+	if _, err := f.OsStat(ChmodPath); errors.Is(err, os.ErrNotExist) {
+		panic(fmt.Errorf("%q does not exist", ChmodPath))
+	}
+	cmd := f.OsExecCommand(ChmodPath, "-R", permissions, directory)
 	return cmd.Output()
 }

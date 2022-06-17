@@ -6,9 +6,10 @@
  * Full License text is in the LICENSE file included in the root of this repository.
  */
 
-package osutils_test
+package filesystem_test
 
 import (
+	"io/fs"
 	"syscall"
 	"testing"
 	"time"
@@ -16,7 +17,8 @@ import (
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
 
-	"aspect.build/cli/pkg/osutils"
+	"aspect.build/cli/pkg/osutils/filesystem"
+	filesystem_mock "aspect.build/cli/pkg/osutils/filesystem/mock"
 	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
 )
 
@@ -51,7 +53,7 @@ func TestDarwinOsUtils(t *testing.T) {
 
 		fakeDuration := fakeSecondTime.Sub(fakeFirstTime)
 
-		o := osutils.OsUtils{}
+		o := filesystem.Filesystem{}
 		o.TimeSince = func(t time.Time) time.Duration {
 			return fakeDuration
 		}
@@ -101,7 +103,7 @@ func TestDarwinOsUtils(t *testing.T) {
 		fakeLongDuration := fakeFourthTime.Sub(fakeFirstTime)
 
 		// Short Duration First
-		osutilsShortFirst := osutils.OsUtils{}
+		osutilsShortFirst := filesystem.Filesystem{}
 		osutilsShortFirst.TimeSince = func(t time.Time) time.Duration {
 			if t == fakeFirstTime {
 				return fakeShortDuration
@@ -123,7 +125,7 @@ func TestDarwinOsUtils(t *testing.T) {
 		g.Expect(osutilsShortFirst.GetAccessTime(fsFileInfo)).To(Equal(fakeShortDuration))
 
 		// Short Duration Second
-		osutilsShortSecond := osutils.OsUtils{}
+		osutilsShortSecond := filesystem.Filesystem{}
 		osutilsShortSecond.TimeSince = func(t time.Time) time.Duration {
 			if t == fakeFirstTime {
 				return fakeMediumDuration
@@ -145,7 +147,7 @@ func TestDarwinOsUtils(t *testing.T) {
 		g.Expect(osutilsShortSecond.GetAccessTime(fsFileInfo)).To(Equal(fakeShortDuration))
 
 		// Short Duration Third
-		osutilsShortThird := osutils.OsUtils{}
+		osutilsShortThird := filesystem.Filesystem{}
 		osutilsShortThird.TimeSince = func(t time.Time) time.Duration {
 			if t == fakeFirstTime {
 				return fakeMediumDuration
@@ -166,4 +168,40 @@ func TestDarwinOsUtils(t *testing.T) {
 		}
 		g.Expect(osutilsShortThird.GetAccessTime(fsFileInfo)).To(Equal(fakeShortDuration))
 	})
+
+	t.Run("ChangeDirectoryPermissions runs successfully", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		fsFileInfo := stdlib_mock.NewMockFSFileInfo(ctrl)
+		execCmdRunner := filesystem_mock.NewMockExecCmdRunner(ctrl)
+
+		gomock.InOrder(
+			execCmdRunner.EXPECT().
+				Output().
+				Return(nil, nil).
+				Times(1),
+		)
+
+		fakeFilePermissions := "0777"
+		fakeFileFolder := "/some/folder"
+
+		o := filesystem.Filesystem{}
+		o.OsExecCommand = func(name string, arg ...string) filesystem.ExecCmdRunner {
+			g.Expect(name).To(Equal(filesystem.ChmodPath))
+			g.Expect(arg).To(Equal([]string{"-R", fakeFilePermissions, fakeFileFolder}))
+			return execCmdRunner
+		}
+
+		o.OsStat = func(name string) (fs.FileInfo, error) {
+			g.Expect(name).To(Equal(filesystem.ChmodPath))
+			return fsFileInfo, nil
+		}
+
+		_, err := o.ChangeDirectoryPermissions(fakeFileFolder, fakeFilePermissions)
+		g.Expect(err).To(BeNil())
+
+	})
+
 }

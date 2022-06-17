@@ -8,7 +8,7 @@
  * Full License text is in the LICENSE file included in the root of this repository.
  */
 
-package osutils
+package filesystem
 
 import (
 	"io/fs"
@@ -16,12 +16,12 @@ import (
 	"time"
 )
 
-func (o *OsUtils) getAccessTime(workspace fs.FileInfo) time.Duration {
+func (f *Filesystem) getAccessTime(workspace fs.FileInfo) time.Duration {
 	winFileData := workspace.Sys().(*syscall.Win32FileAttributeData)
 
-	timeSinceAccess := o.TimeSince(o.TimeUnix(0, winFileData.LastAccessTime.Nanoseconds()))
-	timeSinceCreation := o.TimeSince(o.TimeUnix(0, winFileData.CreationTime.Nanoseconds()))
-	timeSinceModified := o.TimeSince(o.TimeUnix(0, winFileData.LastWriteTime.Nanoseconds()))
+	timeSinceAccess := f.TimeSince(f.TimeUnix(0, winFileData.LastAccessTime.Nanoseconds()))
+	timeSinceCreation := f.TimeSince(f.TimeUnix(0, winFileData.CreationTime.Nanoseconds()))
+	timeSinceModified := f.TimeSince(f.TimeUnix(0, winFileData.LastWriteTime.Nanoseconds()))
 
 	smallestTime := timeSinceAccess
 
@@ -34,12 +34,12 @@ func (o *OsUtils) getAccessTime(workspace fs.FileInfo) time.Duration {
 	return smallestTime
 }
 
-func (o *OsUtils) moveDirectoryToTmp(dir string, name string) string {
+func (f *Filesystem) moveDirectoryToTmp(dir string, name string) string {
 	// TODO: Add functionality. https://github.com/aspect-build/aspect-cli/issues/196
 	return ""
 }
 
-func (o *OsUtils) changeDirectoryPermissions(directory string) ([]byte, error) {
+func (f *Filesystem) changeDirectoryPermissions(directory string, permissions string) ([]byte, error) {
 	// TODO: Add functionality. https://github.com/aspect-build/aspect-cli/issues/196
 	return nil, nil
 }

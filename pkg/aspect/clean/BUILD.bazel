@@ -9,7 +9,7 @@ go_library(
         "//pkg/aspecterrors",
         "//pkg/bazel",
         "//pkg/ioutils",
-        "//pkg/osutils",
+        "//pkg/osutils/filesystem",
         "@com_github_manifoldco_promptui//:promptui",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",
