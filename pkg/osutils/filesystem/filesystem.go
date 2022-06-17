@@ -36,29 +36,9 @@ func osRename(oldpath string, newpath string) error {
 	return os.Rename(oldpath, newpath)
 }
 
-// type ConfirmationRunner interface {
-// 	Run() (string, error)
-// }
-
-// func Confirmation(question string) ConfirmationRunner {
-// 	return &promptui.Prompt{
-// 		Label:     question,
-// 		IsConfirm: true,
-// 	}
-// }
-
 type ExecCmdRunner interface {
 	Output() ([]byte, error)
-
-	// func (*exec.Cmd).Output() ([]byte, error)
 }
-
-// func ExecCmd(question string) ExecCmdRunner {
-// 	return &promptui.Prompt{
-// 		Label:     question,
-// 		IsConfirm: true,
-// 	}
-// }
 
 func osExecCommand(name string, arg ...string) ExecCmdRunner {
 	return exec.Command(name, arg...)
@@ -94,7 +74,7 @@ func (f *Filesystem) GetAccessTime(workspace fs.FileInfo) time.Duration {
 	return f.getAccessTime(workspace)
 }
 
-func (f *Filesystem) MoveDirectoryToTmp(dir string, name string) string {
+func (f *Filesystem) MoveDirectoryToTmp(dir string, name string) (string, error) {
 	return f.moveDirectoryToTmp(dir, name)
 }
 

@@ -41,17 +41,25 @@ func (f *Filesystem) getAccessTime(workspace fs.FileInfo) time.Duration {
 	return smallestTime
 }
 
-func (f *Filesystem) moveDirectoryToTmp(dir string, name string) string {
+func (f *Filesystem) moveDirectoryToTmp(dir string, name string) (string, error) {
 	tempDir, err := ioutil.TempDir("", "aspect_delete")
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	newDirectory := filepath.Join(tempDir + strings.Replace(dir, "/", "", -1))
 	newPath := filepath.Join(newDirectory, name)
-	os.MkdirAll(newDirectory, os.ModePerm)
-	os.Rename(filepath.Join(dir, "external", name), newPath)
 
-	return newPath
+	err = os.MkdirAll(newDirectory, os.ModePerm)
+	if err != nil {
+		return "", err
+	}
+
+	err = os.Rename(filepath.Join(dir, "external", name), newPath)
+	if err != nil {
+		return "", err
+	}
+
+	return newPath, nil
 }
 
 func (f *Filesystem) changeDirectoryPermissions(directory string, permissions string) ([]byte, error) {

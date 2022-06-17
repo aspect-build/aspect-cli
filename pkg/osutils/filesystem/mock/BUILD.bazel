@@ -1,7 +1,7 @@
 load("@bazel_gomock//:gomock.bzl", "gomock")
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
-# gazelle:exclude mock_query_test.go
+# gazelle:exclude mock_filesystem_test.go
 
 gomock(
     name = "mock_filesystem_source",

@@ -201,7 +201,35 @@ func TestDarwinOsUtils(t *testing.T) {
 
 		_, err := o.ChangeDirectoryPermissions(fakeFileFolder, fakeFilePermissions)
 		g.Expect(err).To(BeNil())
+	})
 
+	t.Run("MoveDirectoryToTmp runs successfully", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		fakeDirectory := "/some/fake/directory/"
+		fakeNewTmpDirName := "foo"
+		fakeTmpDir := "/new/tmp/dir/"
+
+		o := filesystem.Filesystem{}
+
+		o.IoutilTempDir = func(dir string, pattern string) (name string, err error) {
+			return fakeTmpDir, nil
+		}
+
+		o.OsMkdirAll = func(path string, perm fs.FileMode) error {
+			return nil
+		}
+
+		o.OsRename = func(oldpath string, newpath string) error {
+			return nil
+		}
+
+		tmpDir, err := o.MoveDirectoryToTmp(fakeDirectory, fakeNewTmpDirName)
+		g.Expect(tmpDir).To(ContainSubstring(fakeTmpDir))
+		g.Expect(tmpDir).To(ContainSubstring(fakeNewTmpDirName))
+		g.Expect(err).To(BeNil())
 	})
 
 }

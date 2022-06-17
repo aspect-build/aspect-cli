@@ -486,7 +486,12 @@ func (c *Clean) deleteProcessor(
 		// therefore happen in parallel.
 		externalDirectories, _ := ioutil.ReadDir(filepath.Join(bazelDir.path, "external"))
 		for _, directory := range externalDirectories {
-			newPath := c.Filesystem.MoveDirectoryToTmp(bazelDir.path, directory.Name())
+			newPath, err := c.Filesystem.MoveDirectoryToTmp(bazelDir.path, directory.Name())
+
+			if err != nil {
+				errors <- fmt.Errorf("failed to delete %q: failed to move directory to tmp: %w", bazelDir.path, err)
+				continue
+			}
 
 			if newPath != "" {
 				waitGroup.Add(1)
