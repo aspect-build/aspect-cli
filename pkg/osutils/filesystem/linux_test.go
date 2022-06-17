@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build linux
 
 /*
  * Copyright 2022 Aspect Build Systems, Inc.
@@ -24,7 +24,7 @@ import (
 	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
 )
 
-func TestDarwinOsUtils(t *testing.T) {
+func TestLinuxOsUtils(t *testing.T) {
 	t.Run("GetAccessTime runs successfully", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		ctrl := gomock.NewController(t)
@@ -38,9 +38,9 @@ func TestDarwinOsUtils(t *testing.T) {
 		}
 
 		alternateSysInfo := syscall.Stat_t{
-			Atimespec: timespec,
-			Mtimespec: timespec,
-			Ctimespec: timespec,
+			Atim: timespec,
+			Mtim: timespec,
+			Ctim: timespec,
 		}
 
 		gomock.InOrder(
@@ -74,15 +74,15 @@ func TestDarwinOsUtils(t *testing.T) {
 		fsFileInfo := stdlib_mock.NewMockFSFileInfo(ctrl)
 
 		alternateSysInfo := syscall.Stat_t{
-			Atimespec: syscall.Timespec{
+			Atim: syscall.Timespec{
 				Sec:  1,
 				Nsec: 0,
 			},
-			Mtimespec: syscall.Timespec{
+			Mtim: syscall.Timespec{
 				Sec:  2,
 				Nsec: 0,
 			},
-			Ctimespec: syscall.Timespec{
+			Ctim: syscall.Timespec{
 				Sec:  3,
 				Nsec: 0,
 			},

@@ -1,5 +1,9 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
+# gazelle:exclude darwin_test.go
+# gazelle:exclude linux_test.go
+# gazelle:exclude windows_test.go
+
 go_library(
     name = "filesystem",
     srcs = [
@@ -13,8 +17,35 @@ go_library(
 )
 
 go_test(
-    name = "filesystem_test",
+    name = "filesystem_test_macos",
     srcs = ["darwin_test.go"],
+    target_compatible_with = ["@platforms//os:macos"],
+    deps = [
+        ":filesystem",
+        "//pkg/osutils/filesystem/mock",
+        "//pkg/stdlib/mock",
+        "@com_github_golang_mock//gomock",
+        "@com_github_onsi_gomega//:gomega",
+    ],
+)
+
+go_test(
+    name = "filesystem_test_linux",
+    srcs = ["linux_test.go"],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        ":filesystem",
+        "//pkg/osutils/filesystem/mock",
+        "//pkg/stdlib/mock",
+        "@com_github_golang_mock//gomock",
+        "@com_github_onsi_gomega//:gomega",
+    ],
+)
+
+go_test(
+    name = "filesystem_test_windows",
+    srcs = ["windows_test.go"],
+    target_compatible_with = ["@platforms//os:windows"],
     deps = [
         ":filesystem",
         "//pkg/osutils/filesystem/mock",

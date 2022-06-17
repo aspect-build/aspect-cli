@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build windows
 
 /*
  * Copyright 2022 Aspect Build Systems, Inc.
@@ -24,7 +24,7 @@ import (
 	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
 )
 
-func TestDarwinOsUtils(t *testing.T) {
+func TestWindowsOsUtils(t *testing.T) {
 	t.Run("GetAccessTime runs successfully", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		ctrl := gomock.NewController(t)
@@ -74,15 +74,15 @@ func TestDarwinOsUtils(t *testing.T) {
 		fsFileInfo := stdlib_mock.NewMockFSFileInfo(ctrl)
 
 		alternateSysInfo := syscall.Stat_t{
-			Atimespec: syscall.Timespec{
+			Atim: syscall.Timespec{
 				Sec:  1,
 				Nsec: 0,
 			},
-			Mtimespec: syscall.Timespec{
+			Mtim: syscall.Timespec{
 				Sec:  2,
 				Nsec: 0,
 			},
-			Ctimespec: syscall.Timespec{
+			Ctim: syscall.Timespec{
 				Sec:  3,
 				Nsec: 0,
 			},
@@ -176,30 +176,7 @@ func TestDarwinOsUtils(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		fsFileInfo := stdlib_mock.NewMockFSFileInfo(ctrl)
-		execCmdRunner := filesystem_mock.NewMockExecCmdRunner(ctrl)
-
-		gomock.InOrder(
-			execCmdRunner.EXPECT().
-				Output().
-				Return(nil, nil).
-				Times(1),
-		)
-
-		fakeFilePermissions := "0777"
-		fakeFileFolder := "/some/folder"
-
 		o := filesystem.Filesystem{}
-		o.OsExecCommand = func(name string, arg ...string) filesystem.ExecCmdRunner {
-			g.Expect(name).To(Equal(filesystem.ChmodPath))
-			g.Expect(arg).To(Equal([]string{"-R", fakeFilePermissions, fakeFileFolder}))
-			return execCmdRunner
-		}
-
-		o.OsStat = func(name string) (fs.FileInfo, error) {
-			g.Expect(name).To(Equal(filesystem.ChmodPath))
-			return fsFileInfo, nil
-		}
 
 		_, err := o.ChangeDirectoryPermissions(fakeFileFolder, fakeFilePermissions)
 		g.Expect(err).To(BeNil())
@@ -210,27 +187,9 @@ func TestDarwinOsUtils(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		fakeDirectory := "/some/fake/directory/"
-		fakeNewTmpDirName := "foo"
-		fakeTmpDir := "/new/tmp/dir/"
-
 		o := filesystem.Filesystem{}
 
-		o.IoutilTempDir = func(dir string, pattern string) (name string, err error) {
-			return fakeTmpDir, nil
-		}
-
-		o.OsMkdirAll = func(path string, perm fs.FileMode) error {
-			return nil
-		}
-
-		o.OsRename = func(oldpath string, newpath string) error {
-			return nil
-		}
-
 		tmpDir, err := o.MoveDirectoryToTmp(fakeDirectory, fakeNewTmpDirName)
-		g.Expect(tmpDir).To(ContainSubstring(fakeTmpDir))
-		g.Expect(tmpDir).To(ContainSubstring(fakeNewTmpDirName))
 		g.Expect(err).To(BeNil())
 	})
 

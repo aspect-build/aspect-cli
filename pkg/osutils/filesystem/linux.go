@@ -11,15 +11,17 @@
 package filesystem
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 )
+
+const ChmodPath = "/usr/bin/chmod"
 
 func (f *Filesystem) getAccessTime(workspace fs.FileInfo) time.Duration {
 	accessTime := workspace.Sys().(*syscall.Stat_t).Atim
@@ -42,19 +44,19 @@ func (f *Filesystem) getAccessTime(workspace fs.FileInfo) time.Duration {
 }
 
 func (f *Filesystem) moveDirectoryToTmp(dir string, name string) (string, error) {
-	tempDir, err := ioutil.TempDir("", "aspect_delete")
+	tempDir, err := f.IoutilTempDir("", "aspect_delete")
 	if err != nil {
 		return "", nil
 	}
 	newDirectory := filepath.Join(tempDir + strings.Replace(dir, "/", "", -1))
 	newPath := filepath.Join(newDirectory, name)
 
-	err = os.MkdirAll(newDirectory, os.ModePerm)
+	err = f.OsMkdirAll(newDirectory, os.ModePerm)
 	if err != nil {
 		return "", err
 	}
 
-	err = os.Rename(filepath.Join(dir, "external", name), newPath)
+	err = f.OsRename(filepath.Join(dir, "external", name), newPath)
 	if err != nil {
 		return "", err
 	}
@@ -63,6 +65,9 @@ func (f *Filesystem) moveDirectoryToTmp(dir string, name string) (string, error)
 }
 
 func (f *Filesystem) changeDirectoryPermissions(directory string, permissions string) ([]byte, error) {
-	cmd := exec.Command("chmod", "-R", "777", directory)
+	if _, err := f.OsStat(ChmodPath); errors.Is(err, os.ErrNotExist) {
+		panic(fmt.Errorf("%q does not exist", ChmodPath))
+	}
+	cmd := f.OsExecCommand(ChmodPath, "-R", permissions, directory)
 	return cmd.Output()
 }
