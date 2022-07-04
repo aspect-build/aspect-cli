@@ -31,7 +31,7 @@ func TestBazel(t *testing.T) {
 			workspaceFinder: nil,
 		}
 
-		_, err := bzl.Spawn([]string{"help"})
+		_, err := bzl.Spawn("help")
 		g.Expect(err).To(MatchError(expectedErr))
 	})
 
@@ -57,7 +57,7 @@ func TestBazel(t *testing.T) {
 			workspaceFinder: workspaceFinder,
 		}
 
-		_, err := bzl.Spawn([]string{"help"})
+		_, err := bzl.Spawn("help")
 		g.Expect(err).To(MatchError(expectedErr))
 	})
 
@@ -83,7 +83,7 @@ func TestBazel(t *testing.T) {
 			workspaceFinder: workspaceFinder,
 		}
 
-		_, err := bzl.Spawn([]string{"help"})
+		_, err := bzl.Spawn("help")
 		g.Expect(err).To(MatchError(expectedErrStr))
 	})
 }

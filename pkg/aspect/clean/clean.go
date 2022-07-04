@@ -180,7 +180,7 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 	if c.ExpungeAsync {
 		cmd = append(cmd, "--expunge_async")
 	}
-	if exitCode, err := c.bzl.Spawn(cmd); exitCode != 0 {
+	if exitCode, err := c.bzl.Spawn(cmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,
@@ -332,16 +332,20 @@ func (c *Clean) findDiskCaches(
 	// Running an invalid query should ensure that repository rules are not executed.
 	// However, bazel will still emit its BEP containing the flag that we are interested in.
 	// This will ensure it returns quickly and allows us to easily access said flag.
-	c.bzl.RunCommand([]string{
+	c.bzl.RunCommand(
+		bazel.BazelContext{
+			WorkspaceRoot: "",
+			EnvVars:       nil,
+			Streams:       streams,
+		},
 		"query",
 		"//",
-		"--build_event_json_file=" + bepLocation,
+		"--build_event_json_file="+bepLocation,
 
 		// We dont want bazel to print anything to the command line.
 		// We are only interested in the BEP output
 		"--ui_event_filters=-fatal,-error,-warning,-info,-progress,-debug,-start,-finish,-subcommand,-stdout,-stderr,-pass,-fail,-timeout,-cancelled,-depchecker",
-		"--noshow_progress",
-	}, streams)
+		"--noshow_progress")
 
 	file, err := os.Open(bepLocation)
 	if err != nil {

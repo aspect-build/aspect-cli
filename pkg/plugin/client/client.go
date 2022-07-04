@@ -79,7 +79,13 @@ func (c *clientFactory) buildPlugin(target string) (string, error) {
 	// build the developer or CI would be performing.
 	// This is important only in the setup we don't recommend, where normal users
 	// are building the plugin from source instead of a pre-built binary.
-	if _, err := c.bzl.RunCommand([]string{"build", target}, streams); err != nil {
+	if _, err := c.bzl.RunCommand(
+		bazel.BazelContext{
+			WorkspaceRoot: "",
+			EnvVars:       nil,
+			Streams:       streams,
+		},
+		"build", target); err != nil {
 		return "", fmt.Errorf("failed to build plugin %q with Bazel: %w", target, err)
 	}
 

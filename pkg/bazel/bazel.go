@@ -31,7 +31,7 @@ import (
 // This is for performance, avoiding a lookup of the workspace directory for every
 // instance of a bazel struct.
 // We know the workspace location is constant for the lifetime of an `aspect` cli execution.
-var workspaceRoot string
+var defaultWorkspaceRoot string
 
 // Global mutable state!
 // This is for performance, avoiding a lookup of the possible startup flags for every
@@ -46,10 +46,16 @@ var availableStartupFlags []string
 // cli execution.
 var startupFlags []string
 
+type BazelContext struct {
+	WorkspaceRoot string
+	EnvVars       map[string]string
+	Streams       ioutils.Streams
+}
+
 type Bazel interface {
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
-	Spawn(command []string) (int, error)
-	RunCommand(command []string, streams ioutils.Streams) (int, error)
+	Spawn(command ...string) (int, error)
+	RunCommand(context BazelContext, command ...string) (int, error)
 	Flags() (map[string]*flags.FlagInfo, error)
 	AvailableStartupFlags() []string
 	SetStartupFlags(flags []string)
@@ -67,12 +73,20 @@ func New() Bazel {
 	}
 }
 
-// maybeSetWorkspaceRoot lazily sets the workspaceRoot if it isn't set already.
+func DefaultBazelContext() BazelContext {
+	return BazelContext{
+		WorkspaceRoot: "",
+		EnvVars:       nil,
+		Streams:       ioutils.DefaultStreams,
+	}
+}
+
+// maybeSetWorkspaceRoot lazily sets the defaultWorkspaceRoot if it isn't set already.
 func (b *bazel) maybeSetWorkspaceRoot() error {
 	fail := func(err error) error {
 		return fmt.Errorf("failed to find bazel workspace root: %w", err)
 	}
-	if len(workspaceRoot) < 1 {
+	if len(defaultWorkspaceRoot) < 1 {
 		wd, err := b.osGetwd()
 		if err != nil {
 			return fail(err)
@@ -84,7 +98,7 @@ func (b *bazel) maybeSetWorkspaceRoot() error {
 		if workspacePath == "" {
 			return fail(fmt.Errorf("the current working directory %q is not a Bazel workspace", wd))
 		}
-		workspaceRoot = path.Dir(workspacePath)
+		defaultWorkspaceRoot = path.Dir(workspacePath)
 	}
 	return nil
 }
@@ -115,22 +129,28 @@ func (*bazel) createRepositories() *core.Repositories {
 
 // Spawn is similar to the main() function of bazelisk
 // see https://github.com/bazelbuild/bazelisk/blob/7c3d9d5/bazelisk.go
-func (b *bazel) Spawn(command []string) (int, error) {
-	return b.RunCommand(command, ioutils.DefaultStreams)
+func (b *bazel) Spawn(command ...string) (int, error) {
+	return b.RunCommand(DefaultBazelContext(), command...)
 }
 
-func (b *bazel) RunCommand(command []string, streams ioutils.Streams) (int, error) {
-
+func (b *bazel) RunCommand(context BazelContext, command ...string) (int, error) {
 	// Prepend startup flags
 	command = append(startupFlags, command...)
 
 	repos := b.createRepositories()
-	if err := b.maybeSetWorkspaceRoot(); err != nil {
-		return 1, err
+
+	var workspaceRoot string
+	if context.WorkspaceRoot == "" {
+		if err := b.maybeSetWorkspaceRoot(); err != nil {
+			return 1, err
+		}
+		workspaceRoot = defaultWorkspaceRoot
+	} else {
+		workspaceRoot = context.WorkspaceRoot
 	}
 
 	bazelisk := NewBazelisk(workspaceRoot)
-	exitCode, err := bazelisk.Run(command, repos, streams)
+	exitCode, err := bazelisk.Run(command, repos, context.Streams)
 	return exitCode, err
 }
 
@@ -147,7 +167,13 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := b.RunCommand([]string{"help", "flags-as-proto"}, streams)
+		_, err := b.RunCommand(
+			BazelContext{
+				WorkspaceRoot: "",
+				EnvVars:       nil,
+				Streams:       streams,
+			},
+			"help", "flags-as-proto")
 		bazelErrs <- err
 	}()
 
@@ -195,7 +221,13 @@ func (b *bazel) AQuery(query string) (*analysis.ActionGraphContainer, error) {
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := b.RunCommand([]string{"aquery", "--output=proto", query}, streams)
+		_, err := b.RunCommand(
+			BazelContext{
+				WorkspaceRoot: "",
+				EnvVars:       nil,
+				Streams:       streams,
+			},
+			"aquery", "--output=proto")
 		bazelErrs <- err
 	}()
 

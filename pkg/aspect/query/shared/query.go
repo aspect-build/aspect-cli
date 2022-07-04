@@ -157,12 +157,7 @@ func ProcessQueries(presets []*PresetQuery) (map[string]*PresetQuery, []string, 
 }
 
 func RunQuery(bzl bazel.Bazel, verb string, query string) error {
-	bazelCmd := []string{
-		verb,
-		query,
-	}
-
-	if exitCode, err := bzl.Spawn(bazelCmd); exitCode != 0 {
+	if exitCode, err := bzl.Spawn(verb, query); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

@@ -39,7 +39,7 @@ func (v *Info) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd = append(bazelCmd, args...)
 	bzl := bazel.New()
 
-	if exitCode, err := bzl.Spawn(bazelCmd); exitCode != 0 {
+	if exitCode, err := bzl.Spawn(bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,
