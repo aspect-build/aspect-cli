@@ -9,29 +9,22 @@
 package bazel
 
 import (
-	"aspect.build/cli/pkg/ioutils"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
-	"path"
 	"strings"
 
 	"aspect.build/cli/bazel/analysis"
 	"aspect.build/cli/bazel/flags"
-	"aspect.build/cli/pkg/pathutils"
+	"aspect.build/cli/pkg/bazel/workspace"
+	"aspect.build/cli/pkg/ioutils"
 
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
 	"google.golang.org/protobuf/proto"
 )
-
-// Global mutable state!
-// This is for performance, avoiding a lookup of the workspace directory for every
-// instance of a bazel struct.
-// We know the workspace location is constant for the lifetime of an `aspect` cli execution.
-var workspaceRoot string
 
 // Global mutable state!
 // This is for performance, avoiding a lookup of the possible startup flags for every
@@ -56,37 +49,13 @@ type Bazel interface {
 }
 
 type bazel struct {
-	osGetwd         func() (dir string, err error)
-	workspaceFinder pathutils.WorkspaceFinder
+	workspaceFinder workspace.Finder
 }
 
 func New() Bazel {
 	return &bazel{
-		osGetwd:         os.Getwd,
-		workspaceFinder: pathutils.DefaultWorkspaceFinder,
+		workspaceFinder: workspace.DefaultFinder,
 	}
-}
-
-// maybeSetWorkspaceRoot lazily sets the workspaceRoot if it isn't set already.
-func (b *bazel) maybeSetWorkspaceRoot() error {
-	fail := func(err error) error {
-		return fmt.Errorf("failed to find bazel workspace root: %w", err)
-	}
-	if len(workspaceRoot) < 1 {
-		wd, err := b.osGetwd()
-		if err != nil {
-			return fail(err)
-		}
-		workspacePath, err := b.workspaceFinder.Find(wd)
-		if err != nil {
-			return fail(err)
-		}
-		if workspacePath == "" {
-			return fail(fmt.Errorf("the current working directory %q is not a Bazel workspace", wd))
-		}
-		workspaceRoot = path.Dir(workspacePath)
-	}
-	return nil
 }
 
 // AvailableStartupFlags will return the full list of startup flags available for
@@ -125,7 +94,9 @@ func (b *bazel) RunCommand(command []string, streams ioutils.Streams) (int, erro
 	command = append(startupFlags, command...)
 
 	repos := b.createRepositories()
-	if err := b.maybeSetWorkspaceRoot(); err != nil {
+
+	workspaceRoot, err := b.workspaceFinder.Find()
+	if err != nil {
 		return 1, err
 	}
 
