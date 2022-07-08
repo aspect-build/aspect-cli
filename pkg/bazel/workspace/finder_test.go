@@ -14,10 +14,10 @@ import (
 	"os"
 	"testing"
 
-	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
-
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
+
+	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
 )
 
 func TestWorkspaceFinder(t *testing.T) {
