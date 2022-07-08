@@ -6,7 +6,7 @@
  * Full License text is in the LICENSE file included in the root of this repository.
  */
 
-package pathutils
+package workspace
 
 import (
 	"fmt"
@@ -14,30 +14,51 @@ import (
 	"os"
 	"testing"
 
+	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
+
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
-
-	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
 )
 
 func TestWorkspaceFinder(t *testing.T) {
+	t.Run("when os.Getwd fails, Find fails", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		expectedErr := fmt.Errorf("os.Getwd failed")
+
+		finder := &finder{
+			osGetwd: func() (string, error) {
+				return "", expectedErr
+			},
+		}
+		workspacePath, err := finder.Find()
+		g.Expect(workspacePath).To(BeEmpty())
+		g.Expect(err).To(MatchError(expectedErr))
+	})
+
 	t.Run("when os.Stat fails, Find fails", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		wd := "fake_working_directory/foo/bar"
 		expectedErr := fmt.Errorf("os.Stat failed")
 
-		finder := &workspaceFinder{osStat: func(s string) (fs.FileInfo, error) {
-			return nil, expectedErr
-		}}
-		workspacePath, err := finder.Find(wd)
+		finder := &finder{
+			osGetwd: func() (string, error) {
+				return "fake_working_directory/foo/bar", nil
+			},
+			osStat: func(s string) (fs.FileInfo, error) {
+				return nil, expectedErr
+			},
+		}
+		workspacePath, err := finder.Find()
 		g.Expect(workspacePath).To(BeEmpty())
 		g.Expect(err).To(MatchError(expectedErr))
 	})
 
-	t.Run("when a WORKSPACE is not found, the returned workspacePath is empty", func(t *testing.T) {
+	t.Run("when a WORKSPACE is not found, Find fails", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 
 		// We also make sure that Find doesn't get into an infinite loop.
@@ -55,12 +76,18 @@ func TestWorkspaceFinder(t *testing.T) {
 		}
 
 		for _, wd := range wds {
-			finder := &workspaceFinder{osStat: func(s string) (fs.FileInfo, error) {
-				return nil, os.ErrNotExist
-			}}
-			workspacePath, err := finder.Find(wd)
+			expectedErr := fmt.Errorf("failed to find bazel workspace: the current working directory \"%s\" is not a Bazel workspace", wd)
+			finder := &finder{
+				osGetwd: func() (string, error) {
+					return wd, nil
+				},
+				osStat: func(s string) (fs.FileInfo, error) {
+					return nil, os.ErrNotExist
+				},
+			}
+			workspacePath, err := finder.Find()
 			g.Expect(workspacePath).To(BeEmpty())
-			g.Expect(err).To(BeNil())
+			g.Expect(err).To(MatchError(expectedErr))
 		}
 	})
 
@@ -70,19 +97,22 @@ func TestWorkspaceFinder(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			wd := "fake_working_directory/foo/bar"
-
 			fsFileInfo := stdlib_mock.NewMockFSFileInfo(ctrl)
 			fsFileInfo.EXPECT().
 				IsDir().
 				Return(false).
 				Times(1)
 
-			finder := &workspaceFinder{osStat: func(s string) (fs.FileInfo, error) {
-				return fsFileInfo, nil
-			}}
-			workspacePath, err := finder.Find(wd)
-			g.Expect(workspacePath).To(Equal("fake_working_directory/foo/bar/WORKSPACE"))
+			finder := &finder{
+				osGetwd: func() (string, error) {
+					return "fake_working_directory/foo/bar", nil
+				},
+				osStat: func(s string) (fs.FileInfo, error) {
+					return fsFileInfo, nil
+				},
+			}
+			workspacePath, err := finder.Find()
+			g.Expect(workspacePath).To(Equal("fake_working_directory/foo/bar"))
 			g.Expect(err).To(BeNil())
 		})
 		t.Run("case 2", func(t *testing.T) {
@@ -90,8 +120,6 @@ func TestWorkspaceFinder(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			wd := "fake_working_directory/foo/bar"
-
 			fsFileInfo := stdlib_mock.NewMockFSFileInfo(ctrl)
 			gomock.InOrder(
 				fsFileInfo.EXPECT().
@@ -104,11 +132,16 @@ func TestWorkspaceFinder(t *testing.T) {
 					Times(1),
 			)
 
-			finder := &workspaceFinder{osStat: func(s string) (fs.FileInfo, error) {
-				return fsFileInfo, nil
-			}}
-			workspacePath, err := finder.Find(wd)
-			g.Expect(workspacePath).To(Equal("fake_working_directory/foo/bar/WORKSPACE.bazel"))
+			finder := &finder{
+				osGetwd: func() (string, error) {
+					return "fake_working_directory/foo/bar", nil
+				},
+				osStat: func(s string) (fs.FileInfo, error) {
+					return fsFileInfo, nil
+				},
+			}
+			workspacePath, err := finder.Find()
+			g.Expect(workspacePath).To(Equal("fake_working_directory/foo/bar"))
 			g.Expect(err).To(BeNil())
 		})
 		t.Run("case 3", func(t *testing.T) {
@@ -116,8 +149,6 @@ func TestWorkspaceFinder(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			wd := "fake_working_directory/foo/bar"
-
 			fsFileInfo := stdlib_mock.NewMockFSFileInfo(ctrl)
 			gomock.InOrder(
 				fsFileInfo.EXPECT().
@@ -134,11 +165,16 @@ func TestWorkspaceFinder(t *testing.T) {
 					Times(1),
 			)
 
-			finder := &workspaceFinder{osStat: func(s string) (fs.FileInfo, error) {
-				return fsFileInfo, nil
-			}}
-			workspacePath, err := finder.Find(wd)
-			g.Expect(workspacePath).To(Equal("fake_working_directory/foo/WORKSPACE"))
+			finder := &finder{
+				osGetwd: func() (string, error) {
+					return "fake_working_directory/foo/bar", nil
+				},
+				osStat: func(s string) (fs.FileInfo, error) {
+					return fsFileInfo, nil
+				},
+			}
+			workspacePath, err := finder.Find()
+			g.Expect(workspacePath).To(Equal("fake_working_directory/foo"))
 			g.Expect(err).To(BeNil())
 		})
 		t.Run("case 4", func(t *testing.T) {
@@ -146,8 +182,6 @@ func TestWorkspaceFinder(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			wd := "fake_working_directory/foo/bar"
-
 			fsFileInfo := stdlib_mock.NewMockFSFileInfo(ctrl)
 			gomock.InOrder(
 				fsFileInfo.EXPECT().
@@ -168,11 +202,16 @@ func TestWorkspaceFinder(t *testing.T) {
 					Times(1),
 			)
 
-			finder := &workspaceFinder{osStat: func(s string) (fs.FileInfo, error) {
-				return fsFileInfo, nil
-			}}
-			workspacePath, err := finder.Find(wd)
-			g.Expect(workspacePath).To(Equal("fake_working_directory/foo/WORKSPACE.bazel"))
+			finder := &finder{
+				osGetwd: func() (string, error) {
+					return "fake_working_directory/foo/bar", nil
+				},
+				osStat: func(s string) (fs.FileInfo, error) {
+					return fsFileInfo, nil
+				},
+			}
+			workspacePath, err := finder.Find()
+			g.Expect(workspacePath).To(Equal("fake_working_directory/foo"))
 			g.Expect(err).To(BeNil())
 		})
 	})

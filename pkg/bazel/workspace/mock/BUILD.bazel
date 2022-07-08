@@ -6,8 +6,8 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 gomock(
     name = "mock_finder_source",
     out = "mock_finder_test.go",
-    interfaces = ["WorkspaceFinder"],
-    library = "//pkg/pathutils",
+    interfaces = ["Finder"],
+    library = "//pkg/bazel/workspace",
     package = "mock",
     visibility = ["//visibility:private"],
 )
@@ -18,7 +18,7 @@ go_library(
         "doc.go",
         ":mock_finder_source",  # keep
     ],
-    importpath = "aspect.build/cli/pkg/pathutils/mock",
+    importpath = "aspect.build/cli/pkg/bazel/workspace/mock",
     visibility = ["//:__subpackages__"],
     deps = [
         "@com_github_golang_mock//gomock",  # keep

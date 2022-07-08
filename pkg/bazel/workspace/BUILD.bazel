@@ -1,17 +1,16 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "pathutils",
-    srcs = ["pathutils.go"],
-    importpath = "aspect.build/cli/pkg/pathutils",
+    name = "workspace",
+    srcs = ["finder.go"],
+    importpath = "aspect.build/cli/pkg/bazel/workspace",
     visibility = ["//visibility:public"],
 )
 
 go_test(
-    name = "pathutils_test",
-    srcs = ["pathutils_test.go"],
-    data = glob(["testfixtures/**/*"]),
-    embed = [":pathutils"],
+    name = "workspace_test",
+    srcs = ["finder_test.go"],
+    embed = [":workspace"],
     deps = [
         "//pkg/stdlib/mock",
         "@com_github_golang_mock//gomock",
