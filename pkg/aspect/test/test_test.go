@@ -27,10 +27,11 @@ func TestTest(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
+		streams := ioutils.Streams{}
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"test", "--bes_backend=grpc://127.0.0.1:12345"}).
+			Spawn([]string{"test", "--bes_backend=grpc://127.0.0.1:12345"}, streams).
 			Return(0, nil)
 
 		besBackend := bep_mock.NewMockBESBackend(ctrl)
@@ -44,7 +45,7 @@ func TestTest(t *testing.T) {
 			Errors().
 			Times(1)
 
-		b := test.New(ioutils.Streams{}, bzl)
+		b := test.New(streams, bzl)
 		g.Expect(b.Run([]string{}, besBackend)).Should(Succeed())
 	})
 }

@@ -180,7 +180,7 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 	if c.ExpungeAsync {
 		cmd = append(cmd, "--expunge_async")
 	}
-	if exitCode, err := c.bzl.Spawn(cmd); exitCode != 0 {
+	if exitCode, err := c.bzl.Spawn(cmd, c.Streams); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

@@ -30,14 +30,14 @@ func TestQuery(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout}
 		spawner := bazel_mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
-			Spawn([]string{"cquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).
+			Spawn([]string{"cquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}, streams).
 			Return(0, nil)
 
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
 		q := cquery.New(streams, spawner, true)
 		q.Presets = []*shared.PresetQuery{
 			{
@@ -63,7 +63,7 @@ func TestQuery(t *testing.T) {
 		spawner := bazel_mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
-			Spawn([]string{"cquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).
+			Spawn([]string{"cquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}, streams).
 			Return(0, nil)
 
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)
@@ -159,7 +159,7 @@ func TestQuery(t *testing.T) {
 		spawner := bazel_mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
-			Spawn([]string{"cquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}).
+			Spawn([]string{"cquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}, streams).
 			Return(0, nil)
 
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)

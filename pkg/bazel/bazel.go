@@ -41,7 +41,7 @@ var startupFlags []string
 
 type Bazel interface {
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
-	Spawn(command []string) (int, error)
+	Spawn(command []string, streams ioutils.Streams) (int, error)
 	RunCommand(command []string, streams ioutils.Streams) (int, error)
 	Flags() (map[string]*flags.FlagInfo, error)
 	AvailableStartupFlags() []string
@@ -50,12 +50,32 @@ type Bazel interface {
 
 type bazel struct {
 	workspaceFinder workspace.Finder
+
+	overrideWorkspaceRoot string
+	env                   []string
 }
 
 func New() Bazel {
 	return &bazel{
 		workspaceFinder: workspace.DefaultFinder,
 	}
+}
+
+// WithOverrideWorkspaceRoot returns a new instance of Bazel, overriding the
+// value for the workspace root.
+func (b *bazel) WithOverrideWorkspaceRoot(workspaceRoot string) Bazel {
+	newBazel := *b
+	newBazel.workspaceFinder = nil
+	newBazel.overrideWorkspaceRoot = workspaceRoot
+	return &newBazel
+}
+
+// WithEnv returns a new instance of Bazel, setting the provided environment
+// variables.
+func (b *bazel) WithEnv(env []string) Bazel {
+	newBazel := *b
+	newBazel.env = env
+	return &newBazel
 }
 
 // AvailableStartupFlags will return the full list of startup flags available for
@@ -84,24 +104,28 @@ func (*bazel) createRepositories() *core.Repositories {
 
 // Spawn is similar to the main() function of bazelisk
 // see https://github.com/bazelbuild/bazelisk/blob/7c3d9d5/bazelisk.go
-func (b *bazel) Spawn(command []string) (int, error) {
-	return b.RunCommand(command, ioutils.DefaultStreams)
+func (b *bazel) Spawn(command []string, streams ioutils.Streams) (int, error) {
+	return b.RunCommand(command, streams)
 }
 
 func (b *bazel) RunCommand(command []string, streams ioutils.Streams) (int, error) {
-
 	// Prepend startup flags
 	command = append(startupFlags, command...)
 
 	repos := b.createRepositories()
 
-	workspaceRoot, err := b.workspaceFinder.Find()
-	if err != nil {
-		return 1, err
+	var bazelisk *Bazelisk
+	if b.overrideWorkspaceRoot != "" {
+		bazelisk = NewBazelisk(b.overrideWorkspaceRoot)
+	} else {
+		workspaceRoot, err := b.workspaceFinder.Find()
+		if err != nil {
+			return 1, err
+		}
+		bazelisk = NewBazelisk(workspaceRoot)
 	}
 
-	bazelisk := NewBazelisk(workspaceRoot)
-	exitCode, err := bazelisk.Run(command, repos, streams)
+	exitCode, err := bazelisk.Run(command, repos, streams, b.env)
 	return exitCode, err
 }
 

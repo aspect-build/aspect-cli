@@ -67,13 +67,14 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
+		streams := ioutils.Streams{}
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean"}).
+			Spawn([]string{"clean"}, streams).
 			Return(0, nil)
 
-		b := clean.New(ioutils.Streams{}, bzl, false)
+		b := clean.New(streams, bzl, false)
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
 
@@ -82,13 +83,14 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
+		streams := ioutils.Streams{}
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean", "--expunge"}).
+			Spawn([]string{"clean", "--expunge"}, streams).
 			Return(0, nil)
 
-		b := clean.New(ioutils.Streams{}, bzl, false)
+		b := clean.New(streams, bzl, false)
 		b.Expunge = true
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
@@ -98,13 +100,14 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
+		streams := ioutils.Streams{}
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean", "--expunge_async"}).
+			Spawn([]string{"clean", "--expunge_async"}, streams).
 			Return(0, nil)
 
-		b := clean.New(ioutils.Streams{}, bzl, false)
+		b := clean.New(streams, bzl, false)
 		b.ExpungeAsync = true
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
@@ -114,14 +117,14 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout}
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean"}).
+			Spawn([]string{"clean"}, streams).
 			Return(0, nil)
 
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
 		b := clean.New(streams, bzl, true)
 
 		b.Behavior = chooseReclaim{}
@@ -136,14 +139,14 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout}
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean"}).
+			Spawn([]string{"clean"}, streams).
 			Return(0, nil).AnyTimes()
 
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
 		b := clean.New(streams, bzl, true)
 
 		viper := *viper.New()
@@ -195,14 +198,13 @@ func TestClean(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout}
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean"}).
+			Spawn([]string{"clean"}, streams).
 			Return(0, nil)
-
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
 
 		c := clean.New(streams, bzl, true)
 		c.Behavior = chooseWorkaround{}
