@@ -57,7 +57,7 @@ func NewBazelisk(workspaceRoot string) *Bazelisk {
 }
 
 // Run runs the main Bazelisk logic for the given arguments and Bazel repositories.
-func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams) (int, error) {
+func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams, env []string) (int, error) {
 	httputil.UserAgent = bazelisk.getUserAgent()
 
 	bazeliskHome := bazelisk.GetEnvOrConfig("BAZELISK_HOME")
@@ -124,9 +124,9 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 	// --print_env must be the first argument.
 	if len(args) > 0 && args[0] == "--print_env" {
 		// print environment variables for sub-processes
-		cmd := bazelisk.makeBazelCmd(bazelPath, args, ioutils.DefaultStreams)
+		cmd := bazelisk.makeBazelCmd(bazelPath, args, streams, env)
 		for _, val := range cmd.Env {
-			fmt.Println(val)
+			fmt.Fprintln(streams.Stdout, val)
 		}
 		return 0, nil
 	}
@@ -143,7 +143,7 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 		}
 
 		if args[0] == "--migrate" {
-			bazelisk.migrate(bazelPath, args[1:], newFlags)
+			bazelisk.migrate(streams, bazelPath, args[1:], newFlags)
 		} else {
 			// When --strict is present, it expands to the list of --incompatible_ flags
 			// that should be enabled for the given Bazel version.
@@ -165,13 +165,13 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 		}
 
 		if gnuFormat {
-			fmt.Printf("Bazelisk %s\n", BazeliskVersion)
+			fmt.Fprintf(streams.Stdout, "Bazelisk %s\n", BazeliskVersion)
 		} else {
-			fmt.Printf("Bazelisk version: %s\n", BazeliskVersion)
+			fmt.Fprintf(streams.Stdout, "Bazelisk version: %s\n", BazeliskVersion)
 		}
 	}
 
-	exitCode, err := bazelisk.runBazel(bazelPath, args, streams)
+	exitCode, err := bazelisk.runBazel(bazelPath, args, streams, env)
 	if err != nil {
 		return -1, fmt.Errorf("could not run Bazel: %v", err)
 	}
@@ -375,11 +375,15 @@ func (bazelisk *Bazelisk) prependDirToPathList(cmd *exec.Cmd, dir string) {
 	}
 }
 
-func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams ioutils.Streams) *exec.Cmd {
+func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams ioutils.Streams, env []string) *exec.Cmd {
 	execPath := bazelisk.maybeDelegateToWrapper(bazel)
 
 	cmd := exec.Command(execPath, args...)
-	cmd.Env = append(os.Environ(), skipWrapperEnv+"=true")
+	cmd.Env = os.Environ()
+	if env != nil {
+		cmd.Env = append(cmd.Env, env...)
+	}
+	cmd.Env = append(cmd.Env, skipWrapperEnv+"=true")
 	if execPath != bazel {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", bazelReal, bazel))
 	}
@@ -390,8 +394,8 @@ func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams iout
 	return cmd
 }
 
-func (bazelisk *Bazelisk) runBazel(bazel string, args []string, streams ioutils.Streams) (int, error) {
-	cmd := bazelisk.makeBazelCmd(bazel, args, streams)
+func (bazelisk *Bazelisk) runBazel(bazel string, args []string, streams ioutils.Streams, env []string) (int, error) {
+	cmd := bazelisk.makeBazelCmd(bazel, args, streams, env)
 	err := cmd.Start()
 	if err != nil {
 		return 1, fmt.Errorf("could not start Bazel: %v", err)
@@ -427,7 +431,7 @@ func (bazelisk *Bazelisk) getIncompatibleFlags(bazelPath, cmd string) ([]string,
 		Stdout: &out,
 		Stderr: nil,
 	}
-	if _, err := bazelisk.runBazel(bazelPath, []string{"help", cmd, "--short"}, streams); err != nil {
+	if _, err := bazelisk.runBazel(bazelPath, []string{"help", cmd, "--short"}, streams, nil); err != nil {
 		return nil, fmt.Errorf("unable to determine incompatible flags with binary %s: %v", bazelPath, err)
 	}
 
@@ -460,71 +464,71 @@ func (bazelisk *Bazelisk) insertArgs(baseArgs []string, newArgs []string) []stri
 	return result
 }
 
-func (bazelisk *Bazelisk) shutdownIfNeeded(bazelPath string) {
+func (bazelisk *Bazelisk) shutdownIfNeeded(streams ioutils.Streams, bazelPath string) {
 	bazeliskClean := bazelisk.GetEnvOrConfig("BAZELISK_SHUTDOWN")
 	if len(bazeliskClean) == 0 {
 		return
 	}
 
-	fmt.Printf("bazel shutdown\n")
-	exitCode, err := bazelisk.runBazel(bazelPath, []string{"shutdown"}, ioutils.DefaultStreams)
-	fmt.Printf("\n")
+	fmt.Fprintf(streams.Stdout, "bazel shutdown\n")
+	exitCode, err := bazelisk.runBazel(bazelPath, []string{"shutdown"}, streams, nil)
+	fmt.Fprintf(streams.Stdout, "\n")
 	if err != nil {
 		log.Fatalf("failed to run bazel shutdown: %v", err)
 	}
 	if exitCode != 0 {
-		fmt.Printf("Failure: shutdown command failed.\n")
+		fmt.Fprintf(streams.Stderr, "Failure: shutdown command failed.\n")
 		os.Exit(exitCode)
 	}
 }
 
-func (bazelisk *Bazelisk) cleanIfNeeded(bazelPath string) {
+func (bazelisk *Bazelisk) cleanIfNeeded(streams ioutils.Streams, bazelPath string) {
 	bazeliskClean := bazelisk.GetEnvOrConfig("BAZELISK_CLEAN")
 	if len(bazeliskClean) == 0 {
 		return
 	}
 
-	fmt.Printf("bazel clean --expunge\n")
-	exitCode, err := bazelisk.runBazel(bazelPath, []string{"clean", "--expunge"}, ioutils.DefaultStreams)
-	fmt.Printf("\n")
+	fmt.Fprintf(streams.Stdout, "bazel clean --expunge\n")
+	exitCode, err := bazelisk.runBazel(bazelPath, []string{"clean", "--expunge"}, streams, nil)
+	fmt.Fprintf(streams.Stdout, "\n")
 	if err != nil {
 		log.Fatalf("failed to run clean: %v", err)
 	}
 	if exitCode != 0 {
-		fmt.Printf("Failure: clean command failed.\n")
+		fmt.Fprintf(streams.Stdout, "Failure: clean command failed.\n")
 		os.Exit(exitCode)
 	}
 }
 
 // migrate will run Bazel with each flag separately and report which ones are failing.
-func (bazelisk *Bazelisk) migrate(bazelPath string, baseArgs []string, flags []string) {
+func (bazelisk *Bazelisk) migrate(streams ioutils.Streams, bazelPath string, baseArgs []string, flags []string) {
 	// 1. Try with all the flags.
 	args := bazelisk.insertArgs(baseArgs, flags)
-	fmt.Printf("\n\n--- Running Bazel with all incompatible flags\n\n")
-	bazelisk.shutdownIfNeeded(bazelPath)
-	bazelisk.cleanIfNeeded(bazelPath)
-	fmt.Printf("bazel %s\n", strings.Join(args, " "))
-	exitCode, err := bazelisk.runBazel(bazelPath, args, ioutils.DefaultStreams)
+	fmt.Fprintf(streams.Stdout, "\n\n--- Running Bazel with all incompatible flags\n\n")
+	bazelisk.shutdownIfNeeded(streams, bazelPath)
+	bazelisk.cleanIfNeeded(streams, bazelPath)
+	fmt.Fprintf(streams.Stdout, "bazel %s\n", strings.Join(args, " "))
+	exitCode, err := bazelisk.runBazel(bazelPath, args, streams, nil)
 	if err != nil {
 		log.Fatalf("could not run Bazel: %v", err)
 	}
 	if exitCode == 0 {
-		fmt.Printf("Success: No migration needed.\n")
+		fmt.Fprintf(streams.Stdout, "Success: No migration needed.\n")
 		os.Exit(0)
 	}
 
 	// 2. Try with no flags, as a sanity check.
 	args = baseArgs
-	fmt.Printf("\n\n--- Running Bazel with no incompatible flags\n\n")
-	bazelisk.shutdownIfNeeded(bazelPath)
-	bazelisk.cleanIfNeeded(bazelPath)
-	fmt.Printf("bazel %s\n", strings.Join(args, " "))
-	exitCode, err = bazelisk.runBazel(bazelPath, args, ioutils.DefaultStreams)
+	fmt.Fprintf(streams.Stdout, "\n\n--- Running Bazel with no incompatible flags\n\n")
+	bazelisk.shutdownIfNeeded(streams, bazelPath)
+	bazelisk.cleanIfNeeded(streams, bazelPath)
+	fmt.Fprintf(streams.Stdout, "bazel %s\n", strings.Join(args, " "))
+	exitCode, err = bazelisk.runBazel(bazelPath, args, streams, nil)
 	if err != nil {
 		log.Fatalf("could not run Bazel: %v", err)
 	}
 	if exitCode != 0 {
-		fmt.Printf("Failure: Command failed, even without incompatible flags.\n")
+		fmt.Fprintf(streams.Stdout, "Failure: Command failed, even without incompatible flags.\n")
 		os.Exit(exitCode)
 	}
 
@@ -533,11 +537,11 @@ func (bazelisk *Bazelisk) migrate(bazelPath string, baseArgs []string, flags []s
 	var failList []string
 	for _, arg := range flags {
 		args = bazelisk.insertArgs(baseArgs, []string{arg})
-		fmt.Printf("\n\n--- Running Bazel with %s\n\n", arg)
-		bazelisk.shutdownIfNeeded(bazelPath)
-		bazelisk.cleanIfNeeded(bazelPath)
-		fmt.Printf("bazel %s\n", strings.Join(args, " "))
-		exitCode, err = bazelisk.runBazel(bazelPath, args, ioutils.DefaultStreams)
+		fmt.Fprintf(streams.Stdout, "\n\n--- Running Bazel with %s\n\n", arg)
+		bazelisk.shutdownIfNeeded(streams, bazelPath)
+		bazelisk.cleanIfNeeded(streams, bazelPath)
+		fmt.Fprintf(streams.Stdout, "bazel %s\n", strings.Join(args, " "))
+		exitCode, err = bazelisk.runBazel(bazelPath, args, streams, nil)
 		if err != nil {
 			log.Fatalf("could not run Bazel: %v", err)
 		}
@@ -550,16 +554,16 @@ func (bazelisk *Bazelisk) migrate(bazelPath string, baseArgs []string, flags []s
 
 	print := func(l []string) {
 		for _, arg := range l {
-			fmt.Printf("  %s\n", arg)
+			fmt.Fprintf(streams.Stdout, "  %s\n", arg)
 		}
 	}
 
 	// 4. Print report
-	fmt.Printf("\n\n+++ Result\n\n")
-	fmt.Printf("Command was successful with the following flags:\n")
+	fmt.Fprintf(streams.Stdout, "\n\n+++ Result\n\n")
+	fmt.Fprintf(streams.Stdout, "Command was successful with the following flags:\n")
 	print(passList)
-	fmt.Printf("\n")
-	fmt.Printf("Migration is needed for the following flags:\n")
+	fmt.Fprintf(streams.Stdout, "\n")
+	fmt.Fprintf(streams.Stdout, "Migration is needed for the following flags:\n")
 	print(failList)
 
 	os.Exit(1)

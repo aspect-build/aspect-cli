@@ -51,7 +51,7 @@ func (v *Version) Run(bzl bazel.Bazel) error {
 	} else {
 		fmt.Fprintf(v.Stdout, "Aspect version: %s\n", version)
 	}
-	bzl.Spawn(bazelCmd)
+	bzl.Spawn(bazelCmd, v.Streams)
 
 	return nil
 }

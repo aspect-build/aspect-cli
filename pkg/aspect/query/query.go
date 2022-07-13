@@ -108,7 +108,7 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return shared.RunQuery(q.Bzl, presetVerb, query)
+	return shared.RunQuery(q.Bzl, presetVerb, query, q.Streams)
 }
 
 func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question string) error {

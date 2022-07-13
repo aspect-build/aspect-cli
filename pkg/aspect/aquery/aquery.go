@@ -68,5 +68,5 @@ func (q *AQuery) Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return shared.RunQuery(q.Bzl, presetVerb, query)
+	return shared.RunQuery(q.Bzl, presetVerb, query, q.Streams)
 }
