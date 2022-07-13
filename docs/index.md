@@ -78,9 +78,17 @@ Companies with more than 250 employees can contact us at sales@aspect.dev for a 
 
 # Installation
 
-## Using a package manager
+## In `.bazelversion` (recommended)
 
-> Coming soon
+Add a new line at the top of your `.bazelversion` file containing `aspect-build/[version]`,
+keeping your original content on following lines.
+
+For example, to use Aspect CLI 1.2.3 with Bazel 5.2.0, your `.bazelversion` would contain
+
+```
+aspect-build/1.2.3
+5.2.0
+```
 
 ## Manual installation
 
