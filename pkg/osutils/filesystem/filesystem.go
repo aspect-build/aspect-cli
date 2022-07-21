@@ -36,6 +36,7 @@ func osRename(oldpath string, newpath string) error {
 	return os.Rename(oldpath, newpath)
 }
 
+// ExecCmdRunner is the interface that wraps exec.Command from the os package
 type ExecCmdRunner interface {
 	Output() ([]byte, error)
 }
@@ -48,6 +49,8 @@ func osStat(name string) (fs.FileInfo, error) {
 	return os.Stat(name)
 }
 
+// Filesystem creates multiple signatures representing functions that would normally interact directly
+// with the filesystem
 type Filesystem struct {
 	TimeSince     func(time.Time) time.Duration
 	TimeUnix      func(int64, int64) time.Time
@@ -58,6 +61,7 @@ type Filesystem struct {
 	OsStat        func(string) (fs.FileInfo, error)
 }
 
+// NewDefault creates a new default Filesystem
 func NewDefault() Filesystem {
 	osUtils := Filesystem{}
 	osUtils.TimeSince = timeSince
@@ -70,14 +74,17 @@ func NewDefault() Filesystem {
 	return osUtils
 }
 
+// GetAccessTime finds the most recent time that a file was created, modified or accessed
 func (f *Filesystem) GetAccessTime(workspace fs.FileInfo) time.Duration {
 	return f.getAccessTime(workspace)
 }
 
+// MoveDirectoryToTmp will move a given directory to /tmp
 func (f *Filesystem) MoveDirectoryToTmp(dir string, name string) (string, error) {
 	return f.moveDirectoryToTmp(dir, name)
 }
 
+// ChangeDirectoryPermissions will update a directory to have the given permissions
 func (f *Filesystem) ChangeDirectoryPermissions(directory string, permissions string) ([]byte, error) {
 	return f.changeDirectoryPermissions(directory, permissions)
 }
