@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-const ChmodPath = "/bin/chmod"
+const ChmodPath = "chmod"
 
 func (f *Filesystem) getAccessTime(workspace fs.FileInfo) time.Duration {
 	accessTime := workspace.Sys().(*syscall.Stat_t).Atimespec
