@@ -10,22 +10,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
       - name: Validate changed files
         if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'allow sdk change')
         run: ./.github/workflows/validate_changed_files.sh
-      - uses: bazelbuild/setup-bazelisk@v1
-      - name: Bazel caches
-        uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cache/bazel
-            ~/.cache/bazel-repo
-          key: bazel-cache-${{ hashFiles('**/*.go', '**/BUILD.bazel', '**/*.bzl', 'WORKSPACE') }}
-          restore-keys: bazel-cache-
       - name: Go cache
         uses: actions/cache@v2
         with:
@@ -34,8 +25,17 @@ jobs:
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: ${{ runner.os }}-go-
+      - uses: bazelbuild/setup-bazelisk@v1
       - name: Tidy up repository
         run: ./.github/workflows/tidy_up_repository.sh
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+      - uses: bazelbuild/setup-bazelisk@v1
       - name: bazel test //...
         env:
           XDG_CACHE_HOME: ~/.cache/bazel-repo
