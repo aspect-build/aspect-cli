@@ -2,18 +2,14 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "clean",
-    srcs = [
-        "clean.go",
-        "darwin.go",
-        "linux.go",
-        "windows.go",
-    ],
+    srcs = ["clean.go"],
     importpath = "aspect.build/cli/pkg/aspect/clean",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspecterrors",
         "//pkg/bazel",
         "//pkg/ioutils",
+        "//pkg/osutils/filesystem",
         "@com_github_manifoldco_promptui//:promptui",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",
