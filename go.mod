@@ -1,9 +1,9 @@
 module aspect.build/cli
 
-go 1.17
+go 1.19
 
 require (
-	github.com/bazelbuild/bazelisk v1.10.1
+	github.com/bazelbuild/bazelisk v1.13.2
 	github.com/fatih/color v1.12.0
 	github.com/golang/mock v1.5.0
 	github.com/golang/protobuf v1.5.2
@@ -24,10 +24,11 @@ require (
 )
 
 require (
+	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.0 // indirect
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
-	github.com/hashicorp/go-version v1.3.0 // indirect
+	github.com/hashicorp/go-version v1.6.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/hashicorp/yamux v0.0.0-20180604194846-3520598351bb // indirect
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
