@@ -1,11 +1,3 @@
-# Enable platform specific configuration settings.
-build --enable_platform_specific_config
-
-# Don't try and auto detect the cc toolchain, as we use our own gcc toolchains.
-build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
-build --incompatible_strict_action_env=true
-build --incompatible_enable_cc_toolchain_resolution
-
 build --workspace_status_command=buildinfo/bazel_stamp_info.sh
 build:release -c opt --stamp
 build --incompatible_strict_action_env
