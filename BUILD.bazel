@@ -65,7 +65,7 @@ nogo(
 gazelle(name = "gazelle")
 
 gazelle(
-    name = "update_go_deps",
+    name = "gazelle_update_repos",
     args = [
         "-from_file=go.mod",
         "-to_macro=go.bzl%deps",

@@ -99,7 +99,7 @@ func (*bazel) createRepositories() *core.Repositories {
 	gitHub := repositories.CreateGitHubRepo(core.GetEnvOrConfig("BAZELISK_GITHUB_TOKEN"))
 	// Fetch LTS releases, release candidates and Bazel-at-commits from GCS, forks and rolling releases from GitHub.
 	// TODO(https://github.com/bazelbuild/bazelisk/issues/228): get rolling releases from GCS, too.
-	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gitHub, true)
+	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
 }
 
 // Spawn is similar to the main() function of bazelisk

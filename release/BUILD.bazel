@@ -3,9 +3,11 @@ load(":release.bzl", "multi_platform_binaries", "release")
 multi_platform_binaries(
     name = "aspect",
     embed = ["//cmd/aspect:aspect_lib"],
+    tags = ["manual"],
 )
 
 release(
     name = "release",
+    tags = ["manual"],
     targets = [":aspect"],
 )
