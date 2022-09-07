@@ -1,0 +1,38 @@
+diff --git a/toolchain/cc_toolchain_config.bzl b/toolchain/cc_toolchain_config.bzl
+index 8785a8e..5e84644 100644
+--- a/toolchain/cc_toolchain_config.bzl
++++ b/toolchain/cc_toolchain_config.bzl
+@@ -60,6 +60,15 @@ def cc_toolchain_config(
+         abi_version,
+         abi_libc_version,
+     ) = {
++        "darwin-arm64": (
++            "clang-arm64-darwin",
++            "arm64-apple-macosx",
++            "darwin",
++            "macosx",
++            "clang",
++            "darwin_arm64",
++            "darwin_arm64",
++        ),
+         "darwin-x86_64": (
+             "clang-x86_64-darwin",
+             "x86_64-apple-macosx",
+diff --git a/toolchain/internal/common.bzl b/toolchain/internal/common.bzl
+index 7493c64..eefb7d3 100644
+--- a/toolchain/internal/common.bzl
++++ b/toolchain/internal/common.bzl
+@@ -12,7 +12,12 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-SUPPORTED_TARGETS = [("linux", "x86_64"), ("linux", "aarch64"), ("darwin", "x86_64")]
++SUPPORTED_TARGETS = [
++    ("darwin", "arm64"),
++    ("darwin", "x86_64"),
++    ("linux", "aarch64"),
++    ("linux", "x86_64"),
++]
+ 
+ host_tool_features = struct(
+     SUPPORTS_ARG_FILE = "supports_arg_file",
