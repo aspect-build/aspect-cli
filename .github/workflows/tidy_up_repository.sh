@@ -14,7 +14,7 @@ fi
 commands=(
     "bazel run @go_sdk//:bin/go -- fmt \$(go list ./... | grep -v /bazel-/)"
     "bazel run @go_sdk//:bin/go -- mod tidy"
-    "bazel run //:update_go_deps"
+    "bazel run //:gazelle_update_repos"
     "bazel run //:gazelle"
     "bazel run //docs:command_list_update"
 )

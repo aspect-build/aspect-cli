@@ -1,4 +1,4 @@
-"This file managed by `bazel run //:update_go_deps`"
+"This file managed by `bazel run //:gazelle_update_repos`"
 
 load("@bazel_gazelle//:deps.bzl", "go_repository")
 
