@@ -11,7 +11,7 @@ PLATFORMS = [
     struct(os = "windows", arch = "amd64", ext = ".exe", gc_linkopts = []),
 ]
 
-def multi_platform_binaries(name, embed, prefix = ""):
+def multi_platform_binaries(name, embed, prefix = "", **kwargs):
     """The multi_platform_binaries macro creates a go_binary for each platform.
 
     Args:
@@ -20,6 +20,7 @@ def multi_platform_binaries(name, embed, prefix = ""):
         embed: the list of targets passed to each go_binary target in this
             macro.
         prefix: an optional prefix added to the output Go binary file name.
+        **kwargs: extra arguments.
     """
     targets = []
     for platform in PLATFORMS:
@@ -33,15 +34,17 @@ def multi_platform_binaries(name, embed, prefix = ""):
             goos = platform.os,
             pure = "on",
             visibility = ["//visibility:public"],
+            **kwargs
         )
         targets.append(Label("//{}:{}".format(native.package_name(), target_name)))
 
     native.filegroup(
         name = name,
         srcs = targets,
+        **kwargs
     )
 
-def release(name, targets):
+def release(name, targets, **kwargs):
     """The release macro creates the artifact copier script.
 
     It's an executable script that copies all artifacts produced by the given
@@ -50,6 +53,7 @@ def release(name, targets):
     Args:
         name: the name of the genrule.
         targets: a list of filegroups passed to the artifact copier.
+        **kwargs: extra arguments.
     """
     native.genrule(
         name = name,
@@ -60,4 +64,5 @@ def release(name, targets):
             locations = " ".join(["$(locations {})".format(target) for target in targets]),
         ),
         tools = ["//release:create_release.sh"],
+        **kwargs
     )
