@@ -6,8 +6,17 @@ multi_platform_binaries(
     tags = ["manual"],
 )
 
+multi_platform_binaries(
+    name = "bootstrap",
+    embed = ["//cmd/bootstrap:bootstrap_lib"],
+    tags = ["manual"],
+)
+
 release(
     name = "release",
     tags = ["manual"],
-    targets = [":aspect"],
+    targets = [
+        ":aspect",
+        ":bootstrap",
+    ],
 )
