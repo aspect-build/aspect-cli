@@ -1,7 +1,7 @@
 # Aspect Bootstrap Utility
 
-The `bootstrap` utility is a lightweight command-line application that can be installed on client
-machines, allowing them to easily initialze a Bazel workspace to use the `aspect-cli`.
+The `bootstrap` utility is a lightweight command-line application that is installed on a client
+machine, allowing the client to easily initialze a Bazel workspace to use the `aspect-cli`.
 
 ## Use Case
 
