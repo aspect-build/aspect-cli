@@ -15,6 +15,7 @@ source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \
 assertions_sh_location=aspect_bazel_lib/shlib/lib/assertions.sh
 assertions_sh="$(rlocation "${assertions_sh_location}")" || \
   (echo >&2 "Failed to locate ${assertions_sh_location}" && exit 1)
+# shellcheck disable=SC1090
 source "${assertions_sh}"
 
 # Variables
