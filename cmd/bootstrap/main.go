@@ -16,8 +16,17 @@
 
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+
+	"aspect.build/cli/cmd/bootstrap/root"
+)
 
 func main() {
-	fmt.Println("Hello, World!")
+	rootCmd := root.NewRootCmd()
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Whoops. There was an error while executing your CLI '%s'", err)
+		os.Exit(1)
+	}
 }

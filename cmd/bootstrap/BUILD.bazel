@@ -8,6 +8,7 @@ go_library(
         "//cmd:__subpackages__",
         "//release:__pkg__",
     ],
+    deps = ["//cmd/bootstrap/root"],
 )
 
 go_binary(
