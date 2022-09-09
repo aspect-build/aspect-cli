@@ -26,5 +26,6 @@ bootstrap="$(rlocation "${bootstrap_location}")/bootstrap_/bootstrap" || \
 
 # Tests
 
+# Ensure that the help text is rendered
 output=$($bootstrap 2>/dev/null)
-assert_match "Hello, World!" "${output}"
+assert_match "Aspect CLI is a better frontend for running bazel" "${output}"

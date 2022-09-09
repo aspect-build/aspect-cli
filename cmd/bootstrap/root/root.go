@@ -1,8 +1,7 @@
 package root
 
 import (
-	"fmt"
-
+	"aspect.build/cli/cmd/bootstrap/version"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -21,9 +20,7 @@ func NewRootCmd() *cobra.Command {
 		Long:          boldCyan.Sprintf(`Aspect CLI`) + ` is a better frontend for running bazel`,
 		// Suppress timestamps in generated Markdown, for determinism
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("Hello, World!")
-		},
 	}
+	cmd.AddCommand(version.NewVersionCmd())
 	return cmd
 }
