@@ -1,34 +1,27 @@
 #!/usr/bin/env bash
 
-set -o pipefail -o errexit -o nounset
+# --- begin runfiles.bash initialization v2 ---
+# Copy-pasted from the Bazel Bash runfiles library v2.
+set -uo pipefail; f=bazel_tools/tools/bash/runfiles/runfiles.bash
+# shellcheck disable=SC1090
+source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \
+  source "$(grep -sm1 "^$f " "${RUNFILES_MANIFEST_FILE:-/dev/null}" | cut -f2- -d' ')" 2>/dev/null || \
+  source "$0.runfiles/$f" 2>/dev/null || \
+  source "$(grep -sm1 "^$f " "$0.runfiles_manifest" | cut -f2- -d' ')" 2>/dev/null || \
+  source "$(grep -sm1 "^$f " "$0.exe.runfiles_manifest" | cut -f2- -d' ')" 2>/dev/null || \
+  { echo>&2 "ERROR: cannot find $f"; exit 1; }; f=; set -e
+# --- end runfiles.bash initialization v2 ---
 
-# Functions
-
-fail() {
-  local err_msg="${1:-}"
-  [[ -n "${err_msg}" ]] || err_msg="Unspecified error occurred."
-  echo >&2 "${err_msg}"
-  exit 1
-}
-
-make_err_msg() {
-  local err_msg="${1}"
-  local prefix="${2:-}"
-  [[ -z "${prefix}" ]] || \
-    local err_msg="${prefix} ${err_msg}"
-  echo "${err_msg}"
-}
-
-assert_match() {
-  local pattern=${1}
-  local actual="${2}"
-  local err_msg="$(make_err_msg "Expected to match. pattern: ${pattern}, actual: ${actual}" "${3:-}")"
-  [[ "${actual}" =~ ${pattern} ]] || fail "${err_msg}"
-}
+assertions_sh_location=aspect_bazel_lib/shlib/lib/assertions.sh
+assertions_sh="$(rlocation "${assertions_sh_location}")" || \
+  (echo >&2 "Failed to locate ${assertions_sh_location}" && exit 1)
+source "${assertions_sh}"
 
 # Variables
 
-bootstrap="$TEST_SRCDIR/build_aspect_cli/cmd/bootstrap/bootstrap_/bootstrap"
+bootstrap_location=build_aspect_cli/cmd/bootstrap
+bootstrap="$(rlocation "${bootstrap_location}")/bootstrap_/bootstrap" || \
+  (echo >&2 "Failed to locate ${bootstrap_location}" && exit 1)
 
 # Tests
 

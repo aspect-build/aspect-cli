@@ -2,4 +2,8 @@ sh_test(
     name = "no_cmd_test",
     srcs = ["no_cmd_test.sh"],
     data = ["//cmd/bootstrap"],
+    deps = [
+        "@aspect_bazel_lib//shlib/lib:assertions",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
 )
