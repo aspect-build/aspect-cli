@@ -7,3 +7,13 @@ sh_test(
         "@bazel_tools//tools/bash/runfiles",
     ],
 )
+
+sh_test(
+    name = "version_test",
+    srcs = ["version_test.sh"],
+    data = ["//cmd/bootstrap"],
+    deps = [
+        "@aspect_bazel_lib//shlib/lib:assertions",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)

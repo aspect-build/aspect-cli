@@ -26,8 +26,7 @@ bootstrap_location=build_aspect_cli/cmd/bootstrap
 bootstrap="$(rlocation "${bootstrap_location}")/bootstrap_/bootstrap" || \
   (echo >&2 "Failed to locate ${bootstrap_location}" && exit 1)
 
-# Tests
+# MARK - Test
 
-# Ensure that the help text is rendered
-output=$($bootstrap 2>/dev/null)
-assert_match "Aspect CLI is a better frontend for running bazel" "${output}"
+output=$($bootstrap version 2>/dev/null)
+assert_match "Placeholder for version info." "${output}"
