@@ -16,11 +16,16 @@ load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
 
 protobuf_deps()
 
-http_archive(
+# http_archive(
+#     name = "aspect_bazel_lib",
+#     sha256 = "4d709266337d8e147fb647d6dfa3bbcfb6983ab79bece9cf661e3dc13ae3c3bc",
+#     strip_prefix = "bazel-lib-0.6.1",
+#     url = "https://github.com/aspect-build/bazel-lib/archive/refs/tags/v0.6.1.tar.gz",
+# )
+
+local_repository(
     name = "aspect_bazel_lib",
-    sha256 = "4d709266337d8e147fb647d6dfa3bbcfb6983ab79bece9cf661e3dc13ae3c3bc",
-    strip_prefix = "bazel-lib-0.6.1",
-    url = "https://github.com/aspect-build/bazel-lib/archive/refs/tags/v0.6.1.tar.gz",
+    path = "/Users/chuck/code/aspect-build/bazel-lib/port_shlib_assertions",
 )
 
 http_archive(
