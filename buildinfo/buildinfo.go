@@ -20,6 +20,12 @@
 // Release will be a comma-separated string representation of any tags.
 package buildinfo
 
+const (
+	DefaultRelease   = "no release"
+	DefaultGitStatus = "unknown"
+	CleanGitStatus   = "clean"
+)
+
 // BuildTime is a string representation of when this binary was built.
 var BuildTime = "an unknown time"
 
@@ -30,11 +36,21 @@ var HostName = "an unknown machine"
 var GitCommit = "an unknown revision"
 
 // GitStatus is whether the git workspace was clean.
-var GitStatus = "unknown"
+var GitStatus = DefaultGitStatus
 
 // Release is the revision number, if any.
-var Release = "no release"
+var Release = DefaultRelease
 
 func IsStamped() bool {
 	return BuildTime != "{BUILD_TIME}"
+}
+
+// TODO(chuck): Add test for HasRelease
+func HasRelease() bool {
+	return Release != ""
+}
+
+// TODO(chuck): Add test for IsClean
+func IsClean() bool {
+	return GitStatus == CleanGitStatus
 }
