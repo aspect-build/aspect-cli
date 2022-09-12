@@ -1,9 +1,10 @@
 package version
 
 import (
-	"strings"
+	"os"
 
 	"aspect.build/cli/buildinfo"
+	"aspect.build/cli/pkg/versionwriter"
 	"github.com/spf13/cobra"
 )
 
@@ -12,16 +13,13 @@ func NewVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print the version of aspect CLI as well as tools it invokes.",
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
-		Run: func(cmd *cobra.Command, args []string) {
-			var versionBuilder strings.Builder
-			if buildinfo.Release != "" {
-				versionBuilder.WriteString(buildinfo.Release)
-				if buildinfo.GitStatus != "clean" {
-					versionBuilder.WriteString(" (with local changes)")
-				}
-			} else {
-				versionBuilder.WriteString("unknown [not built with --stamp]")
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bi := buildinfo.Current()
+			vw := versionwriter.NewFromBuildInfo("Aspect", *bi, versionwriter.Conventional)
+			if _, err := vw.Print(os.Stdout); err != nil {
+				return err
 			}
+			return nil
 		},
 	}
 }

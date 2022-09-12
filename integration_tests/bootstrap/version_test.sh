@@ -28,5 +28,5 @@ bootstrap="$(rlocation "${bootstrap_location}")/bootstrap_/bootstrap" || \
 
 # MARK - Test
 
-output=$($bootstrap version 2>/dev/null)
-assert_match "Placeholder for version info." "${output}"
+output=$($bootstrap version)
+assert_match "Aspect version:" "${output}"

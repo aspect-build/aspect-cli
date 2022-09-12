@@ -4,7 +4,10 @@ go_library(
     name = "versionwriter",
     srcs = ["version_writer.go"],
     importpath = "aspect.build/cli/pkg/versionwriter",
-    visibility = ["//pkg:__subpackages__"],
+    visibility = [
+        "//cmd:__subpackages__",
+        "//pkg:__subpackages__",
+    ],
     deps = ["//buildinfo"],
 )
 
