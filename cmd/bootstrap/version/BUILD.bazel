@@ -5,5 +5,8 @@ go_library(
     srcs = ["version.go"],
     importpath = "aspect.build/cli/cmd/bootstrap/version",
     visibility = ["//visibility:public"],
-    deps = ["@com_github_spf13_cobra//:cobra"],
+    deps = [
+        "//buildinfo",
+        "@com_github_spf13_cobra//:cobra",
+    ],
 )

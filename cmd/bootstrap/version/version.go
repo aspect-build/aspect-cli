@@ -1,8 +1,9 @@
 package version
 
 import (
-	"fmt"
+	"strings"
 
+	"aspect.build/cli/buildinfo"
 	"github.com/spf13/cobra"
 )
 
@@ -12,16 +13,15 @@ func NewVersionCmd() *cobra.Command {
 		Short: "Print the version of aspect CLI as well as tools it invokes.",
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
 		Run: func(cmd *cobra.Command, args []string) {
-			// TODO(chuck): IMPLEMENT ME!
-			fmt.Println("Placeholder for version info.")
+			var versionBuilder strings.Builder
+			if buildinfo.Release != "" {
+				versionBuilder.WriteString(buildinfo.Release)
+				if buildinfo.GitStatus != "clean" {
+					versionBuilder.WriteString(" (with local changes)")
+				}
+			} else {
+				versionBuilder.WriteString("unknown [not built with --stamp]")
+			}
 		},
-		// RunE: interceptors.Run(
-		// 	[]interceptors.Interceptor{
-		// 		flags.FlagsInterceptor(streams),
-		// 	},
-		// 	func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-		// 		return v.Run(bzl)
-		// 	},
-		// ),
 	}
 }

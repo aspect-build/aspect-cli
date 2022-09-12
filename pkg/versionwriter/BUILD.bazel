@@ -1,0 +1,19 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "versionwriter",
+    srcs = ["version_writer.go"],
+    importpath = "aspect.build/cli/pkg/versionwriter",
+    visibility = ["//pkg:__subpackages__"],
+    deps = ["//buildinfo"],
+)
+
+go_test(
+    name = "versionwriter_test",
+    srcs = ["version_writer_test.go"],
+    deps = [
+        ":versionwriter",
+        "//buildinfo",
+        "@com_github_stretchr_testify//assert",
+    ],
+)
