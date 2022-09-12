@@ -21,9 +21,7 @@
 package buildinfo
 
 const (
-	DefaultRelease   = "no release"
-	DefaultGitStatus = "unknown"
-	CleanGitStatus   = "clean"
+	CleanGitStatus = "clean"
 )
 
 // BuildTime is a string representation of when this binary was built.
@@ -36,21 +34,53 @@ var HostName = "an unknown machine"
 var GitCommit = "an unknown revision"
 
 // GitStatus is whether the git workspace was clean.
-var GitStatus = DefaultGitStatus
+var GitStatus = "unknown"
 
 // Release is the revision number, if any.
-var Release = DefaultRelease
+var Release = "no release"
 
 func IsStamped() bool {
 	return BuildTime != "{BUILD_TIME}"
 }
 
-// TODO(chuck): Add test for HasRelease
-func HasRelease() bool {
-	return Release != ""
+type BuildInfo struct {
+	BuildTime string
+	HostName  string
+	GitCommit string
+	GitStatus string
+	Release   string
 }
 
-// TODO(chuck): Add test for IsClean
-func IsClean() bool {
-	return GitStatus == CleanGitStatus
+func New(
+	buildTime string,
+	hostName string,
+	gitCommit string,
+	gitStatus string,
+	release string,
+) *BuildInfo {
+	return &BuildInfo{
+		BuildTime: buildTime,
+		HostName:  hostName,
+		GitCommit: gitCommit,
+		GitStatus: gitStatus,
+		Release:   release,
+	}
+}
+
+func Current() *BuildInfo {
+	return New(
+		BuildTime,
+		HostName,
+		GitCommit,
+		GitStatus,
+		Release,
+	)
+}
+
+func (bi BuildInfo) HasRelease() bool {
+	return bi.Release != ""
+}
+
+func (bi BuildInfo) IsClean() bool {
+	return bi.GitStatus == CleanGitStatus
 }

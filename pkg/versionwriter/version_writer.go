@@ -13,6 +13,9 @@ type Format int
 const (
 	GNU Format = iota
 	Conventional
+
+	NotCleanVersionSuffix = " (with local changes)"
+	NoReleaseVersion      = "unknown [not built with --stamp]"
 )
 
 type VersionWriter struct {
@@ -29,15 +32,15 @@ func New(name string, version string, format Format) *VersionWriter {
 	}
 }
 
-func NewFromBuildInfo(name string, format Format) *VersionWriter {
+func NewFromBuildInfo(name string, bi buildinfo.BuildInfo, format Format) *VersionWriter {
 	var versionBuilder strings.Builder
-	if buildinfo.HasRelease() {
-		versionBuilder.WriteString(buildinfo.Release)
-		if !buildinfo.IsClean() {
-			versionBuilder.WriteString(" (with local changes)")
+	if bi.HasRelease() {
+		versionBuilder.WriteString(bi.Release)
+		if !bi.IsClean() {
+			versionBuilder.WriteString(NotCleanVersionSuffix)
 		}
 	} else {
-		versionBuilder.WriteString("unknown [not built with --stamp]")
+		versionBuilder.WriteString(NoReleaseVersion)
 	}
 	return New(name, versionBuilder.String(), format)
 }
@@ -45,15 +48,16 @@ func NewFromBuildInfo(name string, format Format) *VersionWriter {
 func (vw VersionWriter) String() string {
 	switch vw.Format {
 	case GNU:
-		return fmt.Sprintf("%s %s\n", vw.Name, vw.Version)
+		return fmt.Sprintf("%s %s", vw.Name, vw.Version)
 	case Conventional:
-		return fmt.Sprintf("%s version: %s\n", vw.Name, vw.Version)
+		// Conventional is the default case
+		fallthrough
 	default:
 		// Use the Conventional format, if not recognized
-		return fmt.Sprintf("%s version: %s\n", vw.Name, vw.Version)
+		return fmt.Sprintf("%s version: %s", vw.Name, vw.Version)
 	}
 }
 
 func (vw VersionWriter) Print(w io.Writer) (n int, err error) {
-	return fmt.Fprintf(w, vw.String())
+	return fmt.Fprintf(w, vw.String()+"\n")
 }
