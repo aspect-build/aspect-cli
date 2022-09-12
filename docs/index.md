@@ -1,11 +1,7 @@
-Aspect is a build system based on Bazel.
-
 The `aspect` CLI is a drop-in replacement for the `bazel` CLI that comes with Bazel.
-We also provide Bazel "rules" to integrate tightly with language ecosystems.
 
-Aspect provides a simpler, intutive experience for developers new to Bazel,
-adds the power tools that make advanced users more productive
-and the customizability your DevInfra team needs to support your organization.
+Aspect is the power tool that lets a DevInfra team provide a simpler,
+more intutive, customizable experience their Bazel users.
 
 ## Customize Bazel for your organization
 
@@ -34,11 +30,11 @@ Read more in the [plugins documentation](/help/topics/plugins)
 
 ## Interactive
 
-When running in an interactive terminal, `aspect` gives helpful prompts to
+When running in an interactive terminal, `aspect` can give helpful prompts to
 fix mistakes in how you run the tool, your Bazel configuration, or your code.
 
 In this example, the Bazel configuration didn't allow a dependency because the
-`visibility` attribute needed adjustment, so the user is prompted if they'd like
+`visibility` attribute needed adjustment, so a plugin prompts the user if they'd like
 the source files edited:
 
 <script id="asciicast-eL4HL3BZhobRD8U4UIRKzyb8R" src="https://asciinema.org/a/eL4HL3BZhobRD8U4UIRKzyb8R.js" async></script>
@@ -50,16 +46,9 @@ Some other examples of interactivity:
 
 When run outside an interactive terminal, such as on CI, the prompts are instead printed
 for developers to copy-paste to their machine.
-
-## Bazel Rules
-
-We are experts in Bazel rules. In addition to being the maintainers of rules_nodejs and rules_python under the bazelbuild GitHub org, Aspect hosts our own next-generation rulesets.
-See the pinned repositories on our GitHub homepage: <https://github.com/aspect-build>
+page: <https://github.com/aspect-build>
 
 ## Expert help is a click away
-
-Our Bazel documentation site, <https://docs.aspect.build> makes it easy to search for
-the missing documentation across all Bazel rulesets.
 
 `aspect` is sponsored by Aspect Development, a Bazel consulting company.
 If your organization needs more help to make your Bazel migration a success,
@@ -73,20 +62,21 @@ It is a superset of what Bazel provides, so you can always go back to running `b
 
 In fact, it includes `bazelisk` which is the recommended version manager from the Bazel team.
 
-It is open-source, and free for use by individuals, non-profits, and small businesses.
-Companies with more than 250 employees can contact us at sales@aspect.dev for a license quote.
+It is open-source, and licensed under Apache 2.0
 
 # Installation
 
 ## In `.bazelversion` (recommended)
 
+Assuming your users already use Bazelisk, one line is all you need.
+
 Add a new line at the top of your `.bazelversion` file containing `aspect-build/[version]`,
 keeping your original content on following lines.
 
-For example, to use Aspect CLI 1.2.3 with Bazel 5.2.0, your `.bazelversion` would contain
+For example, to use Aspect CLI 0.6.0 with Bazel 5.2.0, your `.bazelversion` would contain
 
 ```
-aspect-build/1.2.3
+aspect-build/0.6.0
 5.2.0
 ```
 
