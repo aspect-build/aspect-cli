@@ -1,6 +1,7 @@
 package versionwriter_test
 
 import (
+	"bytes"
 	"testing"
 
 	"aspect.build/cli/buildinfo"
@@ -68,5 +69,15 @@ func TestString(t *testing.T) {
 }
 
 func TestPrint(t *testing.T) {
-	t.Error("IMPLEMENT ME!")
+	vw := versionwriter.New("Chicken", "1.2.3", versionwriter.Conventional)
+
+	var buffer bytes.Buffer
+	written, err := vw.Print(&buffer)
+	if err != nil {
+		t.Errorf("error from Print(): %s", err)
+		return
+	}
+	assert.True(t, written > 0)
+	output := buffer.String()
+	assert.Equal(t, "Chicken version: 1.2.3\n", output)
 }
