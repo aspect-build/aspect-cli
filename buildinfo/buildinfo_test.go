@@ -28,7 +28,15 @@ func TestNew(t *testing.T) {
 }
 
 func TestCurrent(t *testing.T) {
-	t.Error("IMPLEMENT ME!")
+	actual := buildinfo.Current()
+	expected := &buildinfo.BuildInfo{
+		BuildTime: buildinfo.BuildTime,
+		HostName:  buildinfo.HostName,
+		GitCommit: buildinfo.GitCommit,
+		GitStatus: buildinfo.GitStatus,
+		Release:   buildinfo.Release,
+	}
+	assert.Equal(t, expected, actual)
 }
 
 func TestBuildinfoHasRelease(t *testing.T) {
