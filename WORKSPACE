@@ -18,9 +18,9 @@ protobuf_deps()
 
 http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "4d709266337d8e147fb647d6dfa3bbcfb6983ab79bece9cf661e3dc13ae3c3bc",
-    strip_prefix = "bazel-lib-0.6.1",
-    url = "https://github.com/aspect-build/bazel-lib/archive/refs/tags/v0.6.1.tar.gz",
+    sha256 = "3a4745bb5a649612148ab9fdb4bdfcf0fa4120b469fabdb007acb50f85670139",
+    strip_prefix = "bazel-lib-1.11.7",
+    url = "https://github.com/aspect-build/bazel-lib/archive/refs/tags/v1.11.7.tar.gz",
 )
 
 http_archive(
