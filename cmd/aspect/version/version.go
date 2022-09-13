@@ -35,9 +35,7 @@ func NewDefaultVersionCmd() *cobra.Command {
 
 func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	v := version.New(streams)
-
-	v.BuildinfoRelease = buildinfo.Release
-	v.BuildinfoGitStatus = buildinfo.GitStatus
+	v.BuildInfo = *buildinfo.Current()
 
 	cmd := &cobra.Command{
 		Use:   "version",
@@ -52,8 +50,12 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 			},
 		),
 	}
-
-	cmd.PersistentFlags().BoolVarP(&v.GNUFormat, "gnu_format", "", false, "format space-separated following GNU convention")
-
+	cmd.PersistentFlags().BoolVarP(
+		&v.GNUFormat,
+		"gnu_format",
+		"",
+		false,
+		"format space-separated following GNU convention",
+	)
 	return cmd
 }

@@ -22,9 +22,18 @@ import (
 
 	. "github.com/onsi/gomega"
 
+	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/pkg/aspect/version"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
+)
+
+const (
+	buildTime      = "build time"
+	hostName       = "host"
+	gitCommit      = "git commit"
+	dirtyGitStatus = ""
+	release        = "1.2.3"
 )
 
 func TestVersion(t *testing.T) {
@@ -45,8 +54,13 @@ func TestVersion(t *testing.T) {
 			var stdout strings.Builder
 			streams := ioutils.Streams{Stdout: &stdout}
 			v := version.New(streams)
-			v.BuildinfoRelease = "1.2.3"
-			v.BuildinfoGitStatus = "clean"
+			v.BuildInfo = *buildinfo.New(
+				buildTime,
+				hostName,
+				gitCommit,
+				buildinfo.CleanGitStatus,
+				release,
+			)
 			err := v.Run(bzl)
 			g.Expect(err).To(BeNil())
 			g.Expect(stdout.String()).To(Equal("Aspect version: 1.2.3\n"))
@@ -57,8 +71,13 @@ func TestVersion(t *testing.T) {
 			var stdout strings.Builder
 			streams := ioutils.Streams{Stdout: &stdout}
 			v := version.New(streams)
-			v.BuildinfoRelease = "1.2.3"
-			v.BuildinfoGitStatus = ""
+			v.BuildInfo = *buildinfo.New(
+				buildTime,
+				hostName,
+				gitCommit,
+				dirtyGitStatus,
+				release,
+			)
 			err := v.Run(bzl)
 			g.Expect(err).To(BeNil())
 			g.Expect(stdout.String()).To(Equal("Aspect version: 1.2.3 (with local changes)\n"))
@@ -71,8 +90,13 @@ func TestVersion(t *testing.T) {
 		streams := ioutils.Streams{Stdout: &stdout}
 		v := version.New(streams)
 		v.GNUFormat = true
-		v.BuildinfoRelease = "1.2.3"
-		v.BuildinfoGitStatus = "clean"
+		v.BuildInfo = *buildinfo.New(
+			buildTime,
+			hostName,
+			gitCommit,
+			buildinfo.CleanGitStatus,
+			release,
+		)
 		err := v.Run(bzl)
 		g.Expect(err).To(BeNil())
 		g.Expect(stdout.String()).To(Equal("Aspect 1.2.3\n"))
