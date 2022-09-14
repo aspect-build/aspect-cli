@@ -26,6 +26,6 @@ go_test(
     srcs = ["build_info_test.go"],
     deps = [
         ":buildinfo",
-        "@com_github_stretchr_testify//assert",
+        "@com_github_onsi_gomega//:gomega",
     ],
 )
