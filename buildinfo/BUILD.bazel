@@ -12,7 +12,10 @@ _GO_STAMP_X_DEFS = {
 
 go_library(
     name = "buildinfo",
-    srcs = ["buildinfo.go"],
+    srcs = [
+        "buildinfo.go",
+        "version_writer.go",
+    ],
     importpath = "aspect.build/cli/buildinfo",
     visibility = ["//visibility:public"],
     x_defs = _GO_STAMP_X_DEFS,
@@ -20,7 +23,10 @@ go_library(
 
 go_test(
     name = "buildinfo_test",
-    srcs = ["buildinfo_test.go"],
+    srcs = [
+        "buildinfo_test.go",
+        "version_writer_test.go",
+    ],
     deps = [
         ":buildinfo",
         "@com_github_stretchr_testify//assert",
