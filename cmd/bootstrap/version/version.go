@@ -23,15 +23,6 @@ func NewVersionCmd() *cobra.Command {
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bi := buildinfo.Current()
-			// format := versionwriter.Conventional
-			// if gnuFormat {
-			// 	format = versionwriter.GNU
-			// }
-			// vw := versionwriter.NewFromBuildInfo("Aspect", *bi, format)
-			// if _, err := vw.Print(os.Stdout); err != nil {
-			// 	return err
-			// }
-
 			format := buildinfo.ConventionalFormat
 			if gnuFormat {
 				format = buildinfo.GNUFormat
