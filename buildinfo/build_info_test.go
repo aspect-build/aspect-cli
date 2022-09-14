@@ -59,6 +59,10 @@ func TestBuildinfoHasRelease(t *testing.T) {
 		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, "")
 		assert.False(t, bi.HasRelease())
 	})
+	t.Run("has pre-stamp release value", func(t *testing.T) {
+		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, buildinfo.PreStampRelease)
+		assert.False(t, bi.HasRelease())
+	})
 }
 
 func TestBuildinfoIsClean(t *testing.T) {

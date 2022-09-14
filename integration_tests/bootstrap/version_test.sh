@@ -29,7 +29,7 @@ bootstrap="$(rlocation "${bootstrap_location}")/bootstrap_/bootstrap" || \
 # MARK - Test
 
 output=$($bootstrap version)
-assert_match "Aspect version: no release" "${output}"
+assert_match "Aspect version: unknown" "${output}"
 
 output=$($bootstrap version --gnu_format)
-assert_match "Aspect no release" "${output}"
+assert_match "Aspect unknown" "${output}"

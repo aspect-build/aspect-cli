@@ -25,7 +25,10 @@ const (
 	// Git status
 	CleanGitStatus = "clean"
 
-	// Version related constants
+	// Release values
+	PreStampRelease = "no release"
+
+	// Version constants
 	NotCleanVersionSuffix = " (with local changes)"
 	NoReleaseVersion      = "unknown [not built with --stamp]"
 )
@@ -73,8 +76,7 @@ func Current() *BuildInfo {
 }
 
 func (bi BuildInfo) HasRelease() bool {
-	// TODO(chuck): Add check for "no release"
-	return bi.Release != ""
+	return bi.Release != "" && bi.Release != PreStampRelease
 }
 
 func (bi BuildInfo) IsClean() bool {
