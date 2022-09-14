@@ -47,10 +47,6 @@ func (v *Version) Run(bzl bazel.Bazel) error {
 	if _, err := fmt.Fprintln(v.Stdout, version); err != nil {
 		return err
 	}
-	// vw := versionwriter.NewFromBuildInfo("Aspect", v.BuildInfo, format)
-	// if _, err := vw.Print(v.Stdout); err != nil {
-	// 	return err
-	// }
 
 	// Check if the --gnu_format flag is set, if that is the case,
 	// the version is printed differently
