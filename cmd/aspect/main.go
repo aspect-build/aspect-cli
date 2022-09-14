@@ -18,8 +18,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"os"
 
 	"aspect.build/cli/cmd/aspect/root"
@@ -50,8 +48,7 @@ func main() {
 
 	pluginSystem := system.NewPluginSystem()
 	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+		aspecterrors.HandleError(err)
 	}
 
 	defer pluginSystem.TearDown()
@@ -60,25 +57,14 @@ func main() {
 
 	// Run this command after all bazel verbs have been added to "cmd".
 	if err := flags.AddBazelFlags(cmd); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+		aspecterrors.HandleError(err)
 	}
 
 	if err := pluginSystem.RegisterCustomCommands(cmd); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+		aspecterrors.HandleError(err)
 	}
 
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
-		var exitErr *aspecterrors.ExitError
-		if errors.As(err, &exitErr) {
-			if exitErr.Err != nil {
-				fmt.Fprintln(os.Stderr, "Error:", err)
-			}
-			os.Exit(exitErr.ExitCode)
-		}
-
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+		aspecterrors.HandleError(err)
 	}
 }

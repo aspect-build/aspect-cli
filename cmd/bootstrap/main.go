@@ -17,16 +17,13 @@
 package main
 
 import (
-	"fmt"
-	"os"
-
 	"aspect.build/cli/cmd/bootstrap/root"
+	"aspect.build/cli/pkg/aspecterrors"
 )
 
 func main() {
 	rootCmd := root.NewRootCmd()
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Whoops. There was an error while executing your CLI '%s'", err)
-		os.Exit(1)
+		aspecterrors.HandleError(err)
 	}
 }
