@@ -128,6 +128,7 @@ func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question 
 
 		q.Prefs.Set(baseUseKey, err == nil)
 
+		// TODO(chuck): FIX ME!
 		if err := q.Prefs.WriteConfig(); err != nil {
 			return fmt.Errorf("failed to update config file: %w", err)
 		}
