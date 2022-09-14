@@ -20,8 +20,15 @@
 // Release will be a comma-separated string representation of any tags.
 package buildinfo
 
+import "strings"
+
 const (
+	// Git status
 	CleanGitStatus = "clean"
+
+	// Version related constants
+	NotCleanVersionSuffix = " (with local changes)"
+	NoReleaseVersion      = "unknown [not built with --stamp]"
 )
 
 // BuildTime is a string representation of when this binary was built.
@@ -78,9 +85,23 @@ func Current() *BuildInfo {
 }
 
 func (bi BuildInfo) HasRelease() bool {
+	// TODO(chuck): Add check for "no release"
 	return bi.Release != ""
 }
 
 func (bi BuildInfo) IsClean() bool {
 	return bi.GitStatus == CleanGitStatus
+}
+
+func (bi BuildInfo) Version() string {
+	var versionBuilder strings.Builder
+	if bi.HasRelease() {
+		versionBuilder.WriteString(bi.Release)
+		if !bi.IsClean() {
+			versionBuilder.WriteString(NotCleanVersionSuffix)
+		}
+	} else {
+		versionBuilder.WriteString(NoReleaseVersion)
+	}
+	return versionBuilder.String()
 }
