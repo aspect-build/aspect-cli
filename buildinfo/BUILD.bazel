@@ -14,6 +14,7 @@ go_library(
     name = "buildinfo",
     srcs = [
         "buildinfo.go",
+        "stamp.go",
         "version_writer.go",
     ],
     importpath = "aspect.build/cli/buildinfo",

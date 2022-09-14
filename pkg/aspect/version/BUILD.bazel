@@ -9,7 +9,6 @@ go_library(
         "//buildinfo",
         "//pkg/bazel",
         "//pkg/ioutils",
-        "//pkg/versionwriter",
     ],
 )
 
