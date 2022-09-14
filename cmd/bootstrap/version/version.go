@@ -27,7 +27,7 @@ func NewVersionCmd() *cobra.Command {
 			if gnuFormat {
 				format = buildinfo.GNUFormat
 			}
-			version := bi.UtilityVersion("Aspect", format)
+			version := bi.CommandVersion("Aspect", format)
 			if _, err := fmt.Println(version); err != nil {
 				return err
 			}

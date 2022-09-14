@@ -104,17 +104,17 @@ func TestVersion(t *testing.T) {
 	})
 }
 
-func TestUtilityVersion(t *testing.T) {
+func TestCommandVersion(t *testing.T) {
 	t.Run("with conventional format", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release)
-		actual := bi.UtilityVersion(name, buildinfo.ConventionalFormat)
+		actual := bi.CommandVersion(name, buildinfo.ConventionalFormat)
 		g.Expect(actual).To(Equal("Chicken version: 1.2.3"))
 	})
 	t.Run("with GNU format", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release)
-		actual := bi.UtilityVersion(name, buildinfo.GNUFormat)
+		actual := bi.CommandVersion(name, buildinfo.GNUFormat)
 		g.Expect(actual).To(Equal("Chicken 1.2.3"))
 	})
 }

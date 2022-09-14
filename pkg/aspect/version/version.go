@@ -43,7 +43,7 @@ func (v *Version) Run(bzl bazel.Bazel) error {
 	if v.GNUFormat {
 		format = buildinfo.GNUFormat
 	}
-	version := v.BuildInfo.UtilityVersion("Aspect", format)
+	version := v.BuildInfo.CommandVersion("Aspect", format)
 	if _, err := fmt.Fprintln(v.Stdout, version); err != nil {
 		return err
 	}

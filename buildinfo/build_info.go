@@ -96,7 +96,7 @@ func (bi BuildInfo) Version() string {
 	return versionBuilder.String()
 }
 
-func (bi BuildInfo) UtilityVersion(name string, format VersionFormat) string {
+func (bi BuildInfo) CommandVersion(name string, format VersionFormat) string {
 	switch format {
 	case GNUFormat:
 		return fmt.Sprintf("%s %s", name, bi.Version())
