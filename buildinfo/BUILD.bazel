@@ -15,7 +15,6 @@ go_library(
     srcs = [
         "build_info.go",
         "stamp.go",
-        "version_writer.go",
     ],
     importpath = "aspect.build/cli/buildinfo",
     visibility = ["//visibility:public"],
@@ -24,10 +23,7 @@ go_library(
 
 go_test(
     name = "buildinfo_test",
-    srcs = [
-        "build_info_test.go",
-        "version_writer_test.go",
-    ],
+    srcs = ["build_info_test.go"],
     deps = [
         ":buildinfo",
         "@com_github_stretchr_testify//assert",

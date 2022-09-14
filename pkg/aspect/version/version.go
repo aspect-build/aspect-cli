@@ -17,10 +17,11 @@
 package version
 
 import (
+	"fmt"
+
 	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/versionwriter"
 )
 
 type Version struct {
@@ -38,14 +39,18 @@ func New(streams ioutils.Streams) *Version {
 
 func (v *Version) Run(bzl bazel.Bazel) error {
 	// Write the version
-	format := versionwriter.Conventional
+	format := buildinfo.ConventionalFormat
 	if v.GNUFormat {
-		format = versionwriter.GNU
+		format = buildinfo.GNUFormat
 	}
-	vw := versionwriter.NewFromBuildInfo("Aspect", v.BuildInfo, format)
-	if _, err := vw.Print(v.Stdout); err != nil {
+	version := v.BuildInfo.UtilityVersion("Aspect", format)
+	if _, err := fmt.Fprintln(v.Stdout, version); err != nil {
 		return err
 	}
+	// vw := versionwriter.NewFromBuildInfo("Aspect", v.BuildInfo, format)
+	// if _, err := vw.Print(v.Stdout); err != nil {
+	// 	return err
+	// }
 
 	// Check if the --gnu_format flag is set, if that is the case,
 	// the version is printed differently

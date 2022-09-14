@@ -16,7 +16,10 @@
 
 package buildinfo
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 const (
 	// Git status
@@ -25,6 +28,14 @@ const (
 	// Version related constants
 	NotCleanVersionSuffix = " (with local changes)"
 	NoReleaseVersion      = "unknown [not built with --stamp]"
+)
+
+type VersionFormat int
+
+const (
+	// VersionFormat
+	ConventionalFormat VersionFormat = iota
+	GNUFormat
 )
 
 type BuildInfo struct {
@@ -81,4 +92,17 @@ func (bi BuildInfo) Version() string {
 		versionBuilder.WriteString(NoReleaseVersion)
 	}
 	return versionBuilder.String()
+}
+
+func (bi BuildInfo) UtilityVersion(name string, format VersionFormat) string {
+	switch format {
+	case GNUFormat:
+		return fmt.Sprintf("%s %s", name, bi.Version())
+	case ConventionalFormat:
+		// Conventional is the default case
+		fallthrough
+	default:
+		// Use the Conventional format, if not recognized
+		return fmt.Sprintf("%s version: %s", name, bi.Version())
+	}
 }

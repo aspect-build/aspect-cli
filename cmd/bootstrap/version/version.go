@@ -1,10 +1,9 @@
 package version
 
 import (
-	"os"
+	"fmt"
 
 	"aspect.build/cli/buildinfo"
-	"aspect.build/cli/pkg/versionwriter"
 	"github.com/spf13/cobra"
 )
 
@@ -16,12 +15,21 @@ func NewVersionCmd() *cobra.Command {
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bi := buildinfo.Current()
-			format := versionwriter.Conventional
+			// format := versionwriter.Conventional
+			// if gnuFormat {
+			// 	format = versionwriter.GNU
+			// }
+			// vw := versionwriter.NewFromBuildInfo("Aspect", *bi, format)
+			// if _, err := vw.Print(os.Stdout); err != nil {
+			// 	return err
+			// }
+
+			format := buildinfo.ConventionalFormat
 			if gnuFormat {
-				format = versionwriter.GNU
+				format = buildinfo.GNUFormat
 			}
-			vw := versionwriter.NewFromBuildInfo("Aspect", *bi, format)
-			if _, err := vw.Print(os.Stdout); err != nil {
+			version := bi.UtilityVersion("Aspect", format)
+			if _, err := fmt.Println(version); err != nil {
 				return err
 			}
 			return nil

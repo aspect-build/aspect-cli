@@ -13,6 +13,9 @@ const (
 	gitCommit = "git commit"
 	gitStatus = "git status"
 	release   = "1.2.3"
+
+	name    = "Chicken"
+	version = "1.2.3"
 )
 
 func TestNew(t *testing.T) {
@@ -76,5 +79,18 @@ func TestVersion(t *testing.T) {
 		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, "")
 		actual := bi.Version()
 		assert.Equal(t, buildinfo.NoReleaseVersion, actual)
+	})
+}
+
+func TestUtilityVersion(t *testing.T) {
+	t.Run("with conventional format", func(t *testing.T) {
+		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release)
+		actual := bi.UtilityVersion(name, buildinfo.ConventionalFormat)
+		assert.Equal(t, "Chicken version: 1.2.3", actual)
+	})
+	t.Run("with GNU format", func(t *testing.T) {
+		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release)
+		actual := bi.UtilityVersion(name, buildinfo.GNUFormat)
+		assert.Equal(t, "Chicken 1.2.3", actual)
 	})
 }
