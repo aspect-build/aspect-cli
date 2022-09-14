@@ -43,6 +43,10 @@ The `from` line points to the plugin binary and can take one of these forms:
 2. A filesystem path, either relative to the `.aspectplugins` file or absolute.
 3. A string starting with `//` in which case it is interpreted as a [Bazel Label] in the
    current workspace.
+4. An http/https URL where the plugin can be downloaded from.
+   To get a binary for the right platform, we append one of these
+   platform suffixes before fetching:
+   `-darwin_amd64`, `-darwin_arm64`, `-linux_amd64`, `-linux_arm64`, `-windows_amd64.exe`
 
 When the `from` line is a label, it must be a `*_binary` rule which builds a plugin binary.
 When the CLI loads this plugin, it first builds it from source.
