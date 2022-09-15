@@ -11,4 +11,9 @@ go_library(
 go_test(
     name = "configutils_test",
     srcs = ["Write_test.go"],
+    deps = [
+        ":configutils",
+        "@com_github_onsi_gomega//:gomega",
+        "@com_github_spf13_viper//:viper",
+    ],
 )

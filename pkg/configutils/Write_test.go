@@ -16,13 +16,67 @@
 
 package configutils_test
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"aspect.build/cli/pkg/configutils"
+	. "github.com/onsi/gomega"
+	"github.com/spf13/viper"
+)
+
+const (
+	configBasename = ".aspect"
+	configType     = "yaml"
+	configFilename = ".aspect.yaml"
+)
+
+func NewTempDir(t *testing.T) string {
+	tempDir, err := os.MkdirTemp("", "config_write")
+	if err != nil {
+		t.Errorf("Failed to create temp directory. %s", err)
+		return ""
+	}
+	t.Cleanup(func() { os.RemoveAll(tempDir) })
+	return tempDir
+}
+
+func NewViper(tempDir string) *viper.Viper {
+	v := viper.New()
+	v.AddConfigPath(tempDir)
+	v.SetConfigName(".aspect")
+	v.SetConfigType("yaml")
+	return v
+}
 
 func TestWrite(t *testing.T) {
 	t.Run("config file does not exist", func(t *testing.T) {
-		t.Error("IMPLEMENT ME!")
+		g := NewWithT(t)
+		tempDir := NewTempDir(t)
+		v := NewViper(tempDir)
+
+		err := configutils.Write(v)
+		g.Expect(err).ToNot(HaveOccurred())
+
+		configPath := filepath.Join(tempDir, configFilename)
+		g.Expect(configPath).To(BeAnExistingFile())
 	})
 	t.Run("config file does exist", func(t *testing.T) {
+		// g := NewWithT(t)
+
+		// tempDir, err := os.MkdirTemp("", "config_write")
+		// if err != nil {
+		// 	g.Expect(err).ToNot(HaveOccurred())
+		// 	return
+		// }
+		// defer os.RemoveAll(tempDir)
+
+		// v := viper.New()
+		// v.AddConfigPath(tempDir)
+		// v.SetConfigName(".aspect")
+		// v.SetConfigType("yaml")
+
 		t.Error("IMPLEMENT ME!")
 	})
 }

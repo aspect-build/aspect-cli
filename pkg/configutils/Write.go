@@ -16,9 +16,7 @@
 
 package configutils
 
-import (
-	"github.com/spf13/viper"
-)
+import "github.com/spf13/viper"
 
 func Write(v *viper.Viper) error {
 	// Workaround for issue with WriteConfig
