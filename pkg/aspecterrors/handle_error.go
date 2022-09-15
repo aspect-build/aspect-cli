@@ -14,16 +14,25 @@
  * limitations under the License.
  */
 
-package main
+package aspecterrors
 
 import (
-	"aspect.build/cli/cmd/bootstrap/root"
-	"aspect.build/cli/pkg/aspecterrors"
+	"errors"
+	"fmt"
+	"os"
 )
 
-func main() {
-	rootCmd := root.NewRootCmd()
-	if err := rootCmd.Execute(); err != nil {
-		aspecterrors.HandleError(err)
+// Output information about the provided error and terminate the process. This should only be used
+// in an application's main function or equivalent.
+func HandleError(err error) {
+	var exitErr *ExitError
+	if errors.As(err, &exitErr) {
+		if exitErr.Err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+		}
+		os.Exit(exitErr.ExitCode)
 	}
+
+	fmt.Fprintln(os.Stderr, "Error:", err)
+	os.Exit(1)
 }

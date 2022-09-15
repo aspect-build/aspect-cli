@@ -18,8 +18,8 @@ package version
 
 import (
 	"fmt"
-	"strings"
 
+	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -27,9 +27,8 @@ import (
 type Version struct {
 	ioutils.Streams
 
-	BuildinfoRelease   string
-	BuildinfoGitStatus string
-	GNUFormat          bool
+	BuildInfo buildinfo.BuildInfo
+	GNUFormat bool
 }
 
 func New(streams ioutils.Streams) *Version {
@@ -39,25 +38,22 @@ func New(streams ioutils.Streams) *Version {
 }
 
 func (v *Version) Run(bzl bazel.Bazel) error {
-	var versionBuilder strings.Builder
-	if v.BuildinfoRelease != "" {
-		versionBuilder.WriteString(v.BuildinfoRelease)
-		if v.BuildinfoGitStatus != "clean" {
-			versionBuilder.WriteString(" (with local changes)")
-		}
-	} else {
-		versionBuilder.WriteString("unknown [not built with --stamp]")
+	// Write the version
+	format := buildinfo.ConventionalFormat
+	if v.GNUFormat {
+		format = buildinfo.GNUFormat
 	}
-	version := versionBuilder.String()
+	version := v.BuildInfo.CommandVersion("Aspect", format)
+	if _, err := fmt.Fprintln(v.Stdout, version); err != nil {
+		return err
+	}
+
 	// Check if the --gnu_format flag is set, if that is the case,
 	// the version is printed differently
 	bazelCmd := []string{"version"}
 	if v.GNUFormat {
-		fmt.Fprintf(v.Stdout, "Aspect %s\n", version)
 		// Propagate the flag
 		bazelCmd = append(bazelCmd, "--gnu_format")
-	} else {
-		fmt.Fprintf(v.Stdout, "Aspect version: %s\n", version)
 	}
 	bzl.Spawn(bazelCmd, v.Streams)
 

@@ -6,6 +6,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/version",
     visibility = ["//visibility:public"],
     deps = [
+        "//buildinfo",
         "//pkg/bazel",
         "//pkg/ioutils",
     ],
@@ -16,6 +17,7 @@ go_test(
     srcs = ["version_test.go"],
     deps = [
         ":version",
+        "//buildinfo",
         "//pkg/bazel",
         "//pkg/ioutils",
         "@com_github_onsi_gomega//:gomega",

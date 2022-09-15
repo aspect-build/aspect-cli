@@ -17,41 +17,33 @@
 package version
 
 import (
-	"context"
-
-	"github.com/spf13/cobra"
+	"fmt"
 
 	"aspect.build/cli/buildinfo"
-	"aspect.build/cli/pkg/aspect/root/flags"
-	"aspect.build/cli/pkg/aspect/version"
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/interceptors"
-	"aspect.build/cli/pkg/ioutils"
+	"github.com/spf13/cobra"
 )
 
-func NewDefaultVersionCmd() *cobra.Command {
-	return NewVersionCmd(ioutils.DefaultStreams, bazel.New())
-}
-
-func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
-	v := version.New(streams)
-	v.BuildInfo = *buildinfo.Current()
-
+func NewVersionCmd() *cobra.Command {
+	gnuFormat := false
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version of aspect CLI as well as tools it invokes.",
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
-		RunE: interceptors.Run(
-			[]interceptors.Interceptor{
-				flags.FlagsInterceptor(streams),
-			},
-			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				return v.Run(bzl)
-			},
-		),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bi := buildinfo.Current()
+			format := buildinfo.ConventionalFormat
+			if gnuFormat {
+				format = buildinfo.GNUFormat
+			}
+			version := bi.CommandVersion("Aspect", format)
+			if _, err := fmt.Println(version); err != nil {
+				return err
+			}
+			return nil
+		},
 	}
 	cmd.PersistentFlags().BoolVarP(
-		&v.GNUFormat,
+		&gnuFormat,
 		"gnu_format",
 		"",
 		false,

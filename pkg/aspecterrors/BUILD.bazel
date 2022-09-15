@@ -2,7 +2,10 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "aspecterrors",
-    srcs = ["errors.go"],
+    srcs = [
+        "errors.go",
+        "handle_error.go",
+    ],
     importpath = "aspect.build/cli/pkg/aspecterrors",
     visibility = ["//:__subpackages__"],
 )
