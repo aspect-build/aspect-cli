@@ -165,7 +165,6 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 			fmt.Fprint(c.Streams.Stdout, rememberLine1)
 			if _, err := c.Remember.Run(); err == nil {
 				c.Prefs.Set(skipPromptKey, "true")
-				// if err := c.Prefs.WriteConfig(); err != nil {
 				if err := configutils.Write(&c.Prefs); err != nil {
 					return fmt.Errorf("failed to update config file: %w", err)
 				}
