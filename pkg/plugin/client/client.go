@@ -111,6 +111,15 @@ func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.St
 		} else {
 			aspectplugin.From = built
 		}
+	} else if strings.Contains(aspectplugin.From, "/") {
+		// TODO: handle githuborg/reponame format: https://github.com/aspect-build/aspect-cli/issues/250
+		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
+			downloaded, err := DownloadPlugin(aspectplugin.From, aspectplugin.Name)
+			if err != nil {
+				return nil, err
+			}
+			aspectplugin.From = downloaded
+		}
 	}
 	clientConfig := &goplugin.ClientConfig{
 		HandshakeConfig:  config.Handshake,
