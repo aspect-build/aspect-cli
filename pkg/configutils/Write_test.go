@@ -51,32 +51,40 @@ func NewViper(tempDir string) *viper.Viper {
 }
 
 func TestWrite(t *testing.T) {
-	t.Run("config file does not exist", func(t *testing.T) {
-		g := NewWithT(t)
-		tempDir := NewTempDir(t)
-		v := NewViper(tempDir)
+	g := NewWithT(t)
+	tempDir := NewTempDir(t)
+	configPath := filepath.Join(tempDir, configFilename)
 
-		err := configutils.Write(v)
-		g.Expect(err).ToNot(HaveOccurred())
+	v := NewViper(tempDir)
 
-		configPath := filepath.Join(tempDir, configFilename)
-		g.Expect(configPath).To(BeAnExistingFile())
-	})
-	t.Run("config file does exist", func(t *testing.T) {
-		// g := NewWithT(t)
+	// Set a value
+	key := "chicken"
+	value := "hello"
+	v.Set(key, value)
 
-		// tempDir, err := os.MkdirTemp("", "config_write")
-		// if err != nil {
-		// 	g.Expect(err).ToNot(HaveOccurred())
-		// 	return
-		// }
-		// defer os.RemoveAll(tempDir)
+	// Verify initial write succeeds
+	err := configutils.Write(v)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(configPath).To(BeAnExistingFile())
 
-		// v := viper.New()
-		// v.AddConfigPath(tempDir)
-		// v.SetConfigName(".aspect")
-		// v.SetConfigType("yaml")
+	// Verify value was written
+	v = NewViper(tempDir)
+	err = v.ReadInConfig()
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(v.Get(key)).To(Equal(value))
 
-		t.Error("IMPLEMENT ME!")
-	})
+	// Set a new value
+	newValue := "goodbye"
+	v.Set(key, newValue)
+
+	// Verify second write succeeds
+	err = configutils.Write(v)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(configPath).To(BeAnExistingFile())
+
+	// Verify new value was written
+	v = NewViper(tempDir)
+	err = v.ReadInConfig()
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(v.Get(key)).To(Equal(newValue))
 }
