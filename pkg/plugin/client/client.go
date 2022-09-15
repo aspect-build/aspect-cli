@@ -112,7 +112,14 @@ func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.St
 			aspectplugin.From = built
 		}
 	} else if strings.Contains(aspectplugin.From, "/") {
-		// TODO: handle githuborg/reponame format: https://github.com/aspect-build/aspect-cli/issues/250
+		if strings.HasPrefix(aspectplugin.From, "github.com/") {
+			if len(aspectplugin.Version) < 1 {
+				return nil, fmt.Errorf("when using a plugin released on GitHub, the version field is required")
+			}
+			// Example release URL:
+			// https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.1.0/plugin-plugin-linux_amd64
+			aspectplugin.From = fmt.Sprintf("https://%s/releases/download/%s/%s", aspectplugin.From, aspectplugin.Version, aspectplugin.Name)
+		}
 		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
 			downloaded, err := DownloadPlugin(aspectplugin.From, aspectplugin.Name)
 			if err != nil {

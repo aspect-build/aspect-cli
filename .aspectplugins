@@ -1,0 +1,4 @@
+# Example: uncommenting this will install our plugin that adds "bazel hello-world"
+#- name: hello-world
+#  version: v0.2.0
+#  from: github.com/aspect-build/aspect-cli-plugin-template

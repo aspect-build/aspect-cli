@@ -36,6 +36,7 @@ const (
 type AspectPlugin struct {
 	Name       string                 `yaml:"name"`
 	From       string                 `yaml:"from"`
+	Version    string                 `yaml:"version"`
 	LogLevel   string                 `yaml:"log_level"`
 	Properties map[string]interface{} `yaml:"properties"`
 }
