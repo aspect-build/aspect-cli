@@ -112,16 +112,23 @@ func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.St
 			aspectplugin.From = built
 		}
 	} else if strings.Contains(aspectplugin.From, "/") {
-		if strings.HasPrefix(aspectplugin.From, "github.com/") {
-			if len(aspectplugin.Version) < 1 {
-				return nil, fmt.Errorf("when using a plugin released on GitHub, the version field is required")
-			}
-			// Example release URL:
-			// https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.1.0/plugin-plugin-linux_amd64
-			aspectplugin.From = fmt.Sprintf("https://%s/releases/download/%s/%s", aspectplugin.From, aspectplugin.Version, aspectplugin.Name)
+		if len(aspectplugin.Version) < 1 {
+			return nil, fmt.Errorf("failed to download plugin '%s': the version field is required", aspectplugin.Name)
 		}
+		// Syntax sugar:
+		//   from: github.com/org/repo
+		// is the same as
+		//   from: https://github.com/org/repo/releases/download
+		// Example release URL:
+		//   https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.1.0/plugin-plugin-linux_amd64
+		if strings.HasPrefix(aspectplugin.From, "github.com/") {
+			aspectplugin.From = fmt.Sprintf("https://%s/releases/download", aspectplugin.From)
+		}
+		// Example release URL:
+		// http://static.aspect.build/v0.1.0/plugin-aspect-pro-darwin_amd64
 		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
-			downloaded, err := DownloadPlugin(aspectplugin.From, aspectplugin.Name)
+			versionedUrl := fmt.Sprintf("%s/%s/%s", aspectplugin.From, aspectplugin.Version, aspectplugin.Name)
+			downloaded, err := DownloadPlugin(versionedUrl, aspectplugin.Name)
 			if err != nil {
 				return nil, err
 			}
