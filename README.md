@@ -25,8 +25,6 @@ For instance, to view the version of go, you execute the following:
 
 `bazel run go -- version`
 
-This will run the command with the bazel managed version of go
-
 ## Resolving merge conflicts on go.mod, go.sum and deps.bzl
 
 If you have not made any custom changes to these files but have conflicts in your merge, then you can run:
