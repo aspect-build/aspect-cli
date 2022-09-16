@@ -17,7 +17,7 @@ To make changes to your go files, run the following to fix your dependencies and
 
 `bazel run tidy`
 
-if you want to run a go command on the repo run
+To run a command using the Bazel managed version of go, use the following pattern:
 
 `bazel run go -- ` followed by your go command
 
