@@ -21,7 +21,7 @@ if you want to run a go command on the repo run
 
 `bazel run go -- ` followed by your go command
 
-ex
+For instance, to view the version of go, you execute the following:
 
 `bazel run go -- version`
 
