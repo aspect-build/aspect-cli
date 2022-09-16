@@ -1,0 +1,19 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "configutils",
+    srcs = ["write.go"],
+    importpath = "aspect.build/cli/pkg/configutils",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_spf13_viper//:viper"],
+)
+
+go_test(
+    name = "configutils_test",
+    srcs = ["write_test.go"],
+    deps = [
+        ":configutils",
+        "@com_github_onsi_gomega//:gomega",
+        "@com_github_spf13_viper//:viper",
+    ],
+)

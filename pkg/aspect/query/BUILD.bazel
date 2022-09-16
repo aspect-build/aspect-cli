@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//pkg/aspect/query/shared",
         "//pkg/bazel",
+        "//pkg/configutils",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",
