@@ -34,7 +34,7 @@ If you have not made any custom changes to these files but have conflicts in you
 git fetch origin --prune
 git checkout origin/main -- go.mod go.sum deps.bzl
 
-bazel run //:tidy
+`bazel run //:tidy`
 
 This will fetch go.mod, go.sum and deps.bzl from origin/main and replace your files with them.
 Then, go tidy and gazelle will be run over these files to update them.
