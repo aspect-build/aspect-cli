@@ -13,7 +13,7 @@ https://pre-commit.com/#installation
 
 # Dev Workflow
 
-make changes to your go files then run this to fix your deps and build files
+To make changes to your go files, run the following to fix your dependencies and build files:
 
 `bazel run tidy`
 
