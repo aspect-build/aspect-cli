@@ -5,6 +5,7 @@ COMMAND_LIST = [
     "analyze-profile",
     "aquery",
     "build",
+    "canonicalize-flags",
     "clean",
     "cquery",
     "docs",

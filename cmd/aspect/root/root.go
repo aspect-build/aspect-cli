@@ -26,6 +26,7 @@ import (
 	"aspect.build/cli/cmd/aspect/analyzeprofile"
 	"aspect.build/cli/cmd/aspect/aquery"
 	"aspect.build/cli/cmd/aspect/build"
+	"aspect.build/cli/cmd/aspect/canonicalizeflags"
 	"aspect.build/cli/cmd/aspect/clean"
 	"aspect.build/cli/cmd/aspect/cquery"
 	"aspect.build/cli/cmd/aspect/docs"
@@ -73,6 +74,7 @@ func NewRootCmd(
 	cmd.AddCommand(analyzeprofile.NewDefaultAnalyzeProfileCmd())
 	cmd.AddCommand(aquery.NewDefaultAQueryCmd())
 	cmd.AddCommand(build.NewDefaultBuildCmd(pluginSystem))
+	cmd.AddCommand(canonicalizeflags.NewDefaultCanonicalizeFlagsCmd())
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
 	cmd.AddCommand(cquery.NewDefaultCQueryCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())

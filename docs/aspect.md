@@ -19,6 +19,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect analyze-profile](aspect_analyze-profile.md)	 - Analyzes build profile data.
 * [aspect aquery](aspect_aquery.md)	 - Executes an aquery.
 * [aspect build](aspect_build.md)	 - Builds the specified targets, using the options.
+* [aspect canonicalize-flags](aspect_canonicalize-flags.md)	 - Canonicalizes a list of bazel options.
 * [aspect clean](aspect_clean.md)	 - Removes the output tree.
 * [aspect cquery](aspect_cquery.md)	 - Executes a cquery.
 * [aspect docs](aspect_docs.md)	 - Open documentation in the browser.
