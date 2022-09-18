@@ -15,6 +15,7 @@ COMMAND_LIST = [
     "modquery",
     "query",
     "run",
+    "shutdown",
     "sync",
     "test",
     "version",
