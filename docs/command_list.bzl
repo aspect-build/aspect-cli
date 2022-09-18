@@ -12,6 +12,7 @@ COMMAND_LIST = [
     "dump",
     "fetch",
     "info",
+    "license",
     "mobile-install",
     "modquery",
     "print_action",
