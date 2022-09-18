@@ -24,6 +24,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect cquery](aspect_cquery.md)	 - Executes a cquery.
 * [aspect docs](aspect_docs.md)	 - Open documentation in the browser.
 * [aspect dump](aspect_dump.md)	 - Dumps the internal state of the bazel server process.
+* [aspect fetch](aspect_fetch.md)	 - Fetches external repositories that are prerequisites to the targets.
 * [aspect info](aspect_info.md)	 - Displays runtime info about the bazel server.
 * [aspect query](aspect_query.md)	 - Executes a dependency graph query.
 * [aspect run](aspect_run.md)	 - Builds the specified target and runs it with the given arguments.
