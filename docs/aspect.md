@@ -26,6 +26,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect dump](aspect_dump.md)	 - Dumps the internal state of the bazel server process.
 * [aspect fetch](aspect_fetch.md)	 - Fetches external repositories that are prerequisites to the targets.
 * [aspect info](aspect_info.md)	 - Displays runtime info about the bazel server.
+* [aspect mobile-install](aspect_mobile-install.md)	 - Installs targets to mobile devices.
 * [aspect modquery](aspect_modquery.md)	 - Queries the Bzlmod external dependency graph.
 * [aspect print_action](aspect_print_action.md)	 - Prints the command line args for compiling a file.
 * [aspect query](aspect_query.md)	 - Executes a dependency graph query.
