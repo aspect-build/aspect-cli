@@ -69,17 +69,17 @@ func NewRootCmd(
 
 	// ### Child commands
 	// IMPORTANT: when adding a new command, also update the _DOCS list in /docs/BUILD.bazel
+	cmd.AddCommand(aquery.NewDefaultAQueryCmd())
 	cmd.AddCommand(build.NewDefaultBuildCmd(pluginSystem))
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
+	cmd.AddCommand(cquery.NewDefaultCQueryCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
-	cmd.AddCommand(aquery.NewDefaultAQueryCmd())
-	cmd.AddCommand(cquery.NewDefaultCQueryCmd())
 	cmd.AddCommand(query.NewDefaultQueryCmd())
 	cmd.AddCommand(run.NewDefaultRunCmd(pluginSystem))
+	cmd.AddCommand(sync.NewDefaultSyncCmd())
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultVersionCmd())
-	cmd.AddCommand(sync.NewDefaultSyncCmd())
 
 	// ### "Additional help topic commands" which are not runnable
 	// https://pkg.go.dev/github.com/spf13/cobra#Command.IsAdditionalHelpTopicCommand
