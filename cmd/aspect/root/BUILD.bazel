@@ -9,6 +9,7 @@ go_library(
         "//cmd/docgen:__pkg__",
     ],
     deps = [
+        "//cmd/aspect/analyzeprofile",
         "//cmd/aspect/aquery",
         "//cmd/aspect/build",
         "//cmd/aspect/clean",

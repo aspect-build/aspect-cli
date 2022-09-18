@@ -23,6 +23,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
+	"aspect.build/cli/cmd/aspect/analyzeprofile"
 	"aspect.build/cli/cmd/aspect/aquery"
 	"aspect.build/cli/cmd/aspect/build"
 	"aspect.build/cli/cmd/aspect/clean"
@@ -68,7 +69,8 @@ func NewRootCmd(
 	flags.AddGlobalFlags(cmd, defaultInteractive)
 
 	// ### Child commands
-	// IMPORTANT: when adding a new command, also update the _DOCS list in /docs/BUILD.bazel
+	// IMPORTANT: when adding a new command, also update the COMMAND_LIST list in /docs/command_list.bzl
+	cmd.AddCommand(analyzeprofile.NewDefaultAnalyzeProfileCmd())
 	cmd.AddCommand(aquery.NewDefaultAQueryCmd())
 	cmd.AddCommand(build.NewDefaultBuildCmd(pluginSystem))
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
