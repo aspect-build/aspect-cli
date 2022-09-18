@@ -27,6 +27,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect fetch](aspect_fetch.md)	 - Fetches external repositories that are prerequisites to the targets.
 * [aspect info](aspect_info.md)	 - Displays runtime info about the bazel server.
 * [aspect modquery](aspect_modquery.md)	 - Queries the Bzlmod external dependency graph.
+* [aspect print_action](aspect_print_action.md)	 - Prints the command line args for compiling a file.
 * [aspect query](aspect_query.md)	 - Executes a dependency graph query.
 * [aspect run](aspect_run.md)	 - Builds the specified target and runs it with the given arguments.
 * [aspect shutdown](aspect_shutdown.md)	 - Stops the bazel server.
