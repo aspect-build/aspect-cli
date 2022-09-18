@@ -31,6 +31,7 @@ import (
 	"aspect.build/cli/cmd/aspect/info"
 	"aspect.build/cli/cmd/aspect/query"
 	"aspect.build/cli/cmd/aspect/run"
+	"aspect.build/cli/cmd/aspect/sync"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
 	"aspect.build/cli/docs/help/topics"
@@ -78,6 +79,7 @@ func NewRootCmd(
 	cmd.AddCommand(run.NewDefaultRunCmd(pluginSystem))
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultVersionCmd())
+	cmd.AddCommand(sync.NewDefaultSyncCmd())
 
 	// ### "Additional help topic commands" which are not runnable
 	// https://pkg.go.dev/github.com/spf13/cobra#Command.IsAdditionalHelpTopicCommand

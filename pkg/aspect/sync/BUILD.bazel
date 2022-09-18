@@ -1,0 +1,14 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "sync",
+    srcs = ["sync.go"],
+    importpath = "aspect.build/cli/pkg/aspect/sync",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/aspecterrors",
+        "//pkg/bazel",
+        "//pkg/ioutils",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
