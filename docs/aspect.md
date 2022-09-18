@@ -24,6 +24,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect info](aspect_info.md)	 - Displays runtime info about the bazel server.
 * [aspect query](aspect_query.md)	 - Executes a dependency graph query.
 * [aspect run](aspect_run.md)	 - Builds the specified target and runs it with the given arguments.
+* [aspect sync](aspect_sync.md)	 - Syncs all repositories specified in the workspace file.
 * [aspect test](aspect_test.md)	 - Builds the specified targets and runs all test targets among them.
 * [aspect version](aspect_version.md)	 - Print the version of aspect CLI as well as tools it invokes.
 

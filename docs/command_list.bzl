@@ -10,6 +10,7 @@ COMMAND_LIST = [
     "info",
     "query",
     "run",
+    "sync",
     "test",
     "version",
 ]
