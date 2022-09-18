@@ -9,6 +9,7 @@ COMMAND_LIST = [
     "clean",
     "cquery",
     "docs",
+    "dump",
     "info",
     "query",
     "run",

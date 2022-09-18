@@ -16,6 +16,7 @@ go_library(
         "//cmd/aspect/clean",
         "//cmd/aspect/cquery",
         "//cmd/aspect/docs",
+        "//cmd/aspect/dump",
         "//cmd/aspect/info",
         "//cmd/aspect/query",
         "//cmd/aspect/run",
