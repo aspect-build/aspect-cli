@@ -77,11 +77,18 @@ func NewRootCmd(
 	cmd.AddCommand(canonicalizeflags.NewDefaultCanonicalizeFlagsCmd())
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
 	cmd.AddCommand(cquery.NewDefaultCQueryCmd())
+	// dump
+	// fetch
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
+	// license
+	// mobile-install
+	// modquery
+	// print_action
 	cmd.AddCommand(query.NewDefaultQueryCmd())
 	cmd.AddCommand(run.NewDefaultRunCmd(pluginSystem))
 	cmd.AddCommand(sync.NewDefaultSyncCmd())
+	// shutdown
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultVersionCmd())
 
