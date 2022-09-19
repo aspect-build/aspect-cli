@@ -13,6 +13,7 @@ COMMAND_LIST = [
     "fetch",
     "info",
     "modquery",
+    "print_action",
     "query",
     "run",
     "shutdown",
