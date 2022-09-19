@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//pkg/aspecterrors",
         "//pkg/bazel",
+        "//pkg/configutils",
         "//pkg/ioutils",
         "//pkg/osutils/filesystem",
         "@com_github_manifoldco_promptui//:promptui",

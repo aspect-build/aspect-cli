@@ -102,10 +102,12 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 			// Search for config in home directory with name ".aspect" (without extension).
 			viper.AddConfigPath(home)
 			viper.SetConfigName(".aspect")
+			viper.SetConfigType("yaml")
 
 			// Search for config in root of current repo with name ".aspect" (without extension).
 			repoViper.AddConfigPath(".")
 			repoViper.SetConfigName(".aspect")
+			repoViper.SetConfigType("yaml")
 			repoViper.AutomaticEnv()
 		}
 

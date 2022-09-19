@@ -17,6 +17,7 @@ go_library(
         "//cmd/aspect/info",
         "//cmd/aspect/query",
         "//cmd/aspect/run",
+        "//cmd/aspect/sync",
         "//cmd/aspect/test",
         "//cmd/aspect/version",
         "//docs/help/topics",
