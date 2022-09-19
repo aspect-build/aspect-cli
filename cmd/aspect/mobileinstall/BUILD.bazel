@@ -1,0 +1,15 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "mobileinstall",
+    srcs = ["mobileinstall.go"],
+    importpath = "aspect.build/cli/cmd/aspect/mobileinstall",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/aspect/mobileinstall",
+        "//pkg/aspect/root/flags",
+        "//pkg/interceptors",
+        "//pkg/ioutils",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

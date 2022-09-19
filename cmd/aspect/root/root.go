@@ -33,6 +33,7 @@ import (
 	"aspect.build/cli/cmd/aspect/dump"
 	"aspect.build/cli/cmd/aspect/fetch"
 	"aspect.build/cli/cmd/aspect/info"
+	"aspect.build/cli/cmd/aspect/mobileinstall"
 	"aspect.build/cli/cmd/aspect/modquery"
 	"aspect.build/cli/cmd/aspect/printaction"
 	"aspect.build/cli/cmd/aspect/query"
@@ -87,7 +88,7 @@ func NewRootCmd(
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
 	// license
-	// mobile-install
+	cmd.AddCommand(mobileinstall.NewDefaultMobileInstallCmd())
 	cmd.AddCommand(modquery.NewDefaultModQueryCmd())
 	cmd.AddCommand(printaction.NewDefaultPrintActionCmd())
 	cmd.AddCommand(query.NewDefaultQueryCmd())
