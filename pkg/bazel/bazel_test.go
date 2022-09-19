@@ -24,16 +24,17 @@ package bazel
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/gomega"
-
 	workspace_mock "aspect.build/cli/pkg/bazel/workspace/mock"
 	"aspect.build/cli/pkg/ioutils"
+	"github.com/golang/mock/gomock"
+	. "github.com/onsi/gomega"
 )
 
 var testTmpdir = os.Getenv("TEST_TMPDIR")
@@ -132,5 +133,42 @@ func TestBazel(t *testing.T) {
 		_, err := bzl.WithOverrideWorkspaceRoot(workspaceOverrideDir).Spawn([]string{"build"}, streams)
 		g.Expect(err).To(Not(HaveOccurred()))
 		g.Expect(out.String()).To(Equal("wrapper called"))
+	})
+}
+
+func TestWorkspaceRoot(t *testing.T) {
+	t.Run("finds the workspace root", func(t *testing.T) {
+		g := NewWithT(t)
+
+		curWd, err := os.Getwd()
+		g.Expect(err).ToNot(HaveOccurred())
+
+		// wr, err := os.MkdirTemp("", "wksp_root")
+		wr := filepath.Join(curWd, "wksp_root")
+		err = os.Mkdir(wr, 0750)
+		g.Expect(err).ToNot(HaveOccurred())
+		defer os.RemoveAll(wr)
+
+		workspace, err := os.Create(filepath.Join(wr, "WORKSPACE"))
+		_, err = io.WriteString(workspace, `workspace(name = "temp_workspace")`)
+		workspace.Close()
+
+		defer os.Chdir(curWd)
+		os.Chdir(wr)
+
+		// DEBUG BEGIN
+		log.Printf("*** CHUCK:  curWd: %+#v", curWd)
+		log.Printf("*** CHUCK:  wr: %+#v", wr)
+		debugWd, err := os.Getwd()
+		log.Printf("*** CHUCK:  debugWd: %+#v", debugWd)
+		// DEBUG END
+
+		b := New()
+		actual, err := b.WorkspaceRoot()
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actual).To(Equal(wr))
+	})
+	t.Run("with override", func(t *testing.T) {
+		t.Error("IMPLEMENT ME!")
 	})
 }

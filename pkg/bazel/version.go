@@ -42,12 +42,6 @@ type Version struct {
 	Aspect string
 }
 
-// func (v Version) InitAspect() {
-// }
-
-// func (v Version) Write(path string) error {
-// }
-
 // Returns a version with default values.
 func NewVersion() *Version {
 	bi := buildinfo.Current()
@@ -109,3 +103,10 @@ func SafeVersionFromFile(path string) (*Version, error) {
 	}
 	return NewVersionFromFile(path)
 }
+
+// func (v Version) InitAspect() {
+// }
+
+// func (v Version) Write(path string) error {
+// }
+
