@@ -25,12 +25,12 @@ package bazel
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"aspect.build/cli/pkg/bazel/workspace"
 	workspace_mock "aspect.build/cli/pkg/bazel/workspace/mock"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/golang/mock/gomock"
@@ -137,13 +137,13 @@ func TestBazel(t *testing.T) {
 }
 
 func TestWorkspaceRoot(t *testing.T) {
+	// Skipping the override
 	t.Run("finds the workspace root", func(t *testing.T) {
 		g := NewWithT(t)
 
 		curWd, err := os.Getwd()
 		g.Expect(err).ToNot(HaveOccurred())
 
-		// wr, err := os.MkdirTemp("", "wksp_root")
 		wr := filepath.Join(curWd, "wksp_root")
 		err = os.Mkdir(wr, 0750)
 		g.Expect(err).ToNot(HaveOccurred())
@@ -156,19 +156,32 @@ func TestWorkspaceRoot(t *testing.T) {
 		defer os.Chdir(curWd)
 		os.Chdir(wr)
 
-		// DEBUG BEGIN
-		log.Printf("*** CHUCK:  curWd: %+#v", curWd)
-		log.Printf("*** CHUCK:  wr: %+#v", wr)
-		debugWd, err := os.Getwd()
-		log.Printf("*** CHUCK:  debugWd: %+#v", debugWd)
-		// DEBUG END
-
 		b := New()
 		actual, err := b.WorkspaceRoot()
 		g.Expect(err).ToNot(HaveOccurred())
 		g.Expect(actual).To(Equal(wr))
 	})
 	t.Run("with override", func(t *testing.T) {
-		t.Error("IMPLEMENT ME!")
+		g := NewWithT(t)
+
+		curWd, err := os.Getwd()
+		g.Expect(err).ToNot(HaveOccurred())
+
+		wr := filepath.Join(curWd, "wksp_root")
+		err = os.Mkdir(wr, 0750)
+		g.Expect(err).ToNot(HaveOccurred())
+		defer os.RemoveAll(wr)
+
+		wksp, err := os.Create(filepath.Join(wr, "WORKSPACE"))
+		_, err = io.WriteString(wksp, `workspace(name = "temp_workspace")`)
+		wksp.Close()
+
+		b := &bazel{
+			workspaceFinder: workspace.DefaultFinder,
+		}
+		bzl := b.WithOverrideWorkspaceRoot(wr)
+		actual, err := bzl.WorkspaceRoot()
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actual).To(Equal(wr))
 	})
 }
