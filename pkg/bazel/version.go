@@ -64,7 +64,7 @@ func NewVersionFromReader(reader io.Reader) (*Version, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Scan()
 	for scanner.Scan() {
-		t := scanner.Text()
+		t := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(t, aspectBuildVersionPrefix) {
 			if aVer != "" {
 				return nil, fmt.Errorf("encountered multiple `aspect-build` version declarations")
@@ -77,6 +77,11 @@ func NewVersionFromReader(reader io.Reader) (*Version, error) {
 		} else {
 			return nil, fmt.Errorf("unexpected line while reading Bazel version. line: %s", t)
 		}
+	}
+
+	// If the file did not provide any version values, return a default version
+	if bVer == "" && aVer == "" {
+		return NewVersion(), nil
 	}
 
 	return &Version{

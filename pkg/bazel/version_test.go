@@ -17,6 +17,7 @@
 package bazel_test
 
 import (
+	"strings"
 	"testing"
 
 	"aspect.build/cli/buildinfo"
@@ -41,7 +42,71 @@ func TestNewVersion(t *testing.T) {
 }
 
 func TestNewVersionFromReader(t *testing.T) {
-	t.Error("IMPLEMENT ME!")
+	t.Run("Bazel version, Aspect version", func(t *testing.T) {
+		g := NewWithT(t)
+		input := `
+aspect-build/0.6.0
+5.3.0
+`
+		actual, err := bazel.NewVersionFromReader(strings.NewReader(input))
+		g.Expect(err).ToNot(HaveOccurred())
+		expected := &bazel.Version{
+			Bazel:  "5.3.0",
+			Aspect: "0.6.0",
+		}
+		g.Expect(actual).To(Equal(expected))
+	})
+	t.Run("Bazel version, no Aspect version", func(t *testing.T) {
+		g := NewWithT(t)
+		input := `
+5.3.0
+`
+		actual, err := bazel.NewVersionFromReader(strings.NewReader(input))
+		g.Expect(err).ToNot(HaveOccurred())
+		expected := &bazel.Version{
+			Bazel:  "5.3.0",
+			Aspect: "",
+		}
+		g.Expect(actual).To(Equal(expected))
+	})
+	t.Run("no Bazel version, Aspect version", func(t *testing.T) {
+		g := NewWithT(t)
+		input := `
+aspect-build/0.6.0
+`
+		actual, err := bazel.NewVersionFromReader(strings.NewReader(input))
+		g.Expect(err).ToNot(HaveOccurred())
+		expected := &bazel.Version{
+			Bazel:  "",
+			Aspect: "0.6.0",
+		}
+		g.Expect(actual).To(Equal(expected))
+	})
+	t.Run("no Bazel version, no Aspect version", func(t *testing.T) {
+		g := NewWithT(t)
+		input := ""
+		actual, err := bazel.NewVersionFromReader(strings.NewReader(input))
+		g.Expect(err).ToNot(HaveOccurred())
+		expected := &bazel.Version{
+			Bazel:  "",
+			Aspect: buildinfo.PreStampRelease,
+		}
+		g.Expect(actual).To(Equal(expected))
+	})
+	t.Run("with extraneous whitespace", func(t *testing.T) {
+		g := NewWithT(t)
+		input := `
+   aspect-build/0.6.0
+5.3.0   
+`
+		actual, err := bazel.NewVersionFromReader(strings.NewReader(input))
+		g.Expect(err).ToNot(HaveOccurred())
+		expected := &bazel.Version{
+			Bazel:  "5.3.0",
+			Aspect: "0.6.0",
+		}
+		g.Expect(actual).To(Equal(expected))
+	})
 }
 
 func TestNewVersionFromFile(t *testing.T) {
