@@ -2,3 +2,8 @@
 #- name: hello-world
 #  version: v0.2.0
 #  from: github.com/aspect-build/aspect-cli-plugin-template
+
+# Example: Aspect's pro plugin
+# - name: plugin-aspect-pro
+#   from: https://static.aspect.build/cli
+#   version: v0.8.0
