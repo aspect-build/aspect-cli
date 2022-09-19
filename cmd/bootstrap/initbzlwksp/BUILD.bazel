@@ -1,9 +1,9 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
-    name = "init",
+    name = "initbzlwksp",
     srcs = ["init.go"],
-    importpath = "aspect.build/cli/cmd/bootstrap/init",
+    importpath = "aspect.build/cli/cmd/bootstrap/initbzlwksp",
     visibility = ["//visibility:public"],
     deps = ["@com_github_spf13_cobra//:cobra"],
 )

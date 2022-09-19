@@ -5,12 +5,14 @@ go_library(
     srcs = [
         "bazel.go",
         "bazelisk.go",
+        "version.go",
     ],
     importpath = "aspect.build/cli/pkg/bazel",
     visibility = ["//visibility:public"],
     deps = [
         "//bazel/analysis",
         "//bazel/flags",
+        "//buildinfo",
         "//pkg/bazel/workspace",
         "//pkg/ioutils",
         "@com_github_bazelbuild_bazelisk//core",
@@ -25,7 +27,10 @@ go_library(
 
 go_test(
     name = "bazel_test",
-    srcs = ["bazel_test.go"],
+    srcs = [
+        "bazel_test.go",
+        "version_test.go",
+    ],
     embed = [":bazel"],
     deps = [
         "//pkg/bazel/workspace/mock",

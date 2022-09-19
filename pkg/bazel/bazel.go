@@ -49,11 +49,12 @@ var startupFlags []string
 
 type Bazel interface {
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
-	Spawn(command []string, streams ioutils.Streams) (int, error)
-	RunCommand(command []string, streams ioutils.Streams) (int, error)
-	Flags() (map[string]*flags.FlagInfo, error)
 	AvailableStartupFlags() []string
+	Flags() (map[string]*flags.FlagInfo, error)
+	RunCommand(command []string, streams ioutils.Streams) (int, error)
 	SetStartupFlags(flags []string)
+	Spawn(command []string, streams ioutils.Streams) (int, error)
+	WorkspaceRoot() (string, error)
 }
 
 type bazel struct {
@@ -110,6 +111,14 @@ func (*bazel) createRepositories() *core.Repositories {
 	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
 }
 
+// Returns the path to the root of the Bazel workspace.
+func (b *bazel) WorkspaceRoot() (string, error) {
+	if b.overrideWorkspaceRoot != "" {
+		return b.overrideWorkspaceRoot, nil
+	}
+	return b.workspaceFinder.Find()
+}
+
 // Spawn is similar to the main() function of bazelisk
 // see https://github.com/bazelbuild/bazelisk/blob/7c3d9d5/bazelisk.go
 func (b *bazel) Spawn(command []string, streams ioutils.Streams) (int, error) {
@@ -122,16 +131,11 @@ func (b *bazel) RunCommand(command []string, streams ioutils.Streams) (int, erro
 
 	repos := b.createRepositories()
 
-	var bazelisk *Bazelisk
-	if b.overrideWorkspaceRoot != "" {
-		bazelisk = NewBazelisk(b.overrideWorkspaceRoot)
-	} else {
-		workspaceRoot, err := b.workspaceFinder.Find()
-		if err != nil {
-			return 1, err
-		}
-		bazelisk = NewBazelisk(workspaceRoot)
+	workspaceRoot, err := b.WorkspaceRoot()
+	if err != nil {
+		return 1, err
 	}
+	bazelisk := NewBazelisk(workspaceRoot)
 
 	exitCode, err := bazelisk.Run(command, repos, streams, b.env)
 	return exitCode, err

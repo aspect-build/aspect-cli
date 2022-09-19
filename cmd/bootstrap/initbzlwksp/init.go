@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package init
+package initbzlwksp
 
 import (
 	"github.com/spf13/cobra"
@@ -25,8 +25,28 @@ func NewInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Initialize a Bazel workspace to use the aspect CLI.",
 		Long:  `Initializes a Bazel workspace to use the aspect CLI.`,
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// TODO(chuck): IMPLEMENT ME!
+
+			// var path string
+			// if len(args) > 0 {
+			// 	path = args[0]
+			// } else {
+			// 	b := bazel.New()
+			// 	wr, err := b.WorksapceRoot()
+			// 	if err != nil {
+			// 		return err
+			// 	}
+			// 	path = bazel.VersionPath(wr)
+			// }
+
+			// version, err := bazel.SafeVersionFromFile(path)
+			// if err != nil {
+			// 	return err
+			// }
+			// version.InitAspect()
+			// err = version.Write(path)
 			return nil
 		},
 	}

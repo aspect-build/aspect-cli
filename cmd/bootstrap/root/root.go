@@ -1,7 +1,7 @@
 package root
 
 import (
-	"aspect.build/cli/cmd/bootstrap/init"
+	"aspect.build/cli/cmd/bootstrap/initbzlwksp"
 	"aspect.build/cli/cmd/bootstrap/version"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -23,6 +23,6 @@ func NewRootCmd() *cobra.Command {
 		DisableAutoGenTag: true,
 	}
 	cmd.AddCommand(version.NewVersionCmd())
-	cmd.AddCommand(init.NewInitCmd())
+	cmd.AddCommand(initbzlwksp.NewInitCmd())
 	return cmd
 }
