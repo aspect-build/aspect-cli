@@ -10,6 +10,7 @@ COMMAND_LIST = [
     "cquery",
     "docs",
     "dump",
+    "fetch",
     "info",
     "query",
     "run",

@@ -31,6 +31,7 @@ import (
 	"aspect.build/cli/cmd/aspect/cquery"
 	"aspect.build/cli/cmd/aspect/docs"
 	"aspect.build/cli/cmd/aspect/dump"
+	"aspect.build/cli/cmd/aspect/fetch"
 	"aspect.build/cli/cmd/aspect/info"
 	"aspect.build/cli/cmd/aspect/query"
 	"aspect.build/cli/cmd/aspect/run"
@@ -79,7 +80,7 @@ func NewRootCmd(
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
 	cmd.AddCommand(cquery.NewDefaultCQueryCmd())
 	cmd.AddCommand(dump.NewDefaultDumpCmd())
-	// fetch
+	cmd.AddCommand(fetch.NewDefaultFetchCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
 	// license
