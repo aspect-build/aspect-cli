@@ -104,9 +104,24 @@ func SafeVersionFromFile(path string) (*Version, error) {
 	return NewVersionFromFile(path)
 }
 
+func (v *Version) WriteOutput() string {
+	output := make([]string, 0, 2)
+	if v.Aspect != "" {
+		output = append(output, fmt.Sprintf("%s%s", aspectBuildVersionPrefix, v.Aspect))
+	}
+	if v.Bazel != "" {
+		output = append(output, v.Bazel)
+	}
+	return strings.Join(output, "\n")
+}
+
+func (v Version) Write(writer io.Writer) error {
+	_, err := io.WriteString(writer, v.WriteOutput())
+	return err
+}
+
+// func (v Version) WriteToFile(path string) error {
+// }
+
 // func (v Version) InitAspect() {
 // }
-
-// func (v Version) Write(path string) error {
-// }
-

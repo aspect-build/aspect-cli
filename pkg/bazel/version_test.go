@@ -181,3 +181,59 @@ aspect-build/0.6.0
 		g.Expect(actual).To(Equal(expected))
 	})
 }
+
+func TestWriteOutput(t *testing.T) {
+	t.Run("Aspect version, Bazel version", func(t *testing.T) {
+		g := NewWithT(t)
+		v := &bazel.Version{
+			Bazel:  "5.3.0",
+			Aspect: "0.6.0",
+		}
+		actual := v.WriteOutput()
+		expected := `aspect-build/0.6.0
+5.3.0`
+		g.Expect(actual).To(Equal(expected))
+	})
+	t.Run("no Aspect version, Bazel version", func(t *testing.T) {
+		g := NewWithT(t)
+		v := &bazel.Version{
+			Bazel:  "5.3.0",
+			Aspect: "",
+		}
+		actual := v.WriteOutput()
+		expected := `5.3.0`
+		g.Expect(actual).To(Equal(expected))
+	})
+	t.Run("Aspect version, no Bazel version", func(t *testing.T) {
+		g := NewWithT(t)
+		v := &bazel.Version{
+			Bazel:  "",
+			Aspect: "0.6.0",
+		}
+		actual := v.WriteOutput()
+		expected := `aspect-build/0.6.0`
+		g.Expect(actual).To(Equal(expected))
+	})
+	t.Run("no Aspect version, no Bazel version", func(t *testing.T) {
+		g := NewWithT(t)
+		v := &bazel.Version{
+			Bazel:  "",
+			Aspect: "",
+		}
+		actual := v.WriteOutput()
+		expected := ``
+		g.Expect(actual).To(Equal(expected))
+	})
+}
+
+func TestWrite(t *testing.T) {
+	t.Error("IMPLEMENT ME!")
+}
+
+func TestWriteToFile(t *testing.T) {
+	t.Error("IMPLEMENT ME!")
+}
+
+func TestInitAspect(t *testing.T) {
+	t.Error("IMPLEMENT ME!")
+}
