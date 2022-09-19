@@ -29,7 +29,7 @@ import (
 
 const (
 	workspaceFilename     = "WORKSPACE"
-	aspectpluginsFilename = ".aspectplugins"
+	aspectpluginsFilename = ".aspect/cli/plugins.yaml"
 )
 
 // AspectPlugin represents a plugin entry in the plugins file.
@@ -61,12 +61,12 @@ func NewFinder() Finder {
 	}
 }
 
-// Find finds the .aspectplugins file under a Bazel workspace. If the returned
+// Find finds the plugins.yaml file under a Bazel workspace. If the returned
 // path is empty and no error was produced, the file doesn't exist.
 func (f *finder) Find() (string, error) {
 	cwd, err := f.osGetwd()
 	if err != nil {
-		return "", fmt.Errorf("failed to find .aspectplugins: %w", err)
+		return "", fmt.Errorf("failed to locate plugins.yaml: %w", err)
 	}
 	for {
 		if cwd == "/" {
@@ -75,7 +75,7 @@ func (f *finder) Find() (string, error) {
 		workspacePath := path.Join(cwd, workspaceFilename)
 		if _, err := f.osStat(workspacePath); err != nil {
 			if !os.IsNotExist(err) {
-				return "", fmt.Errorf("failed to find .aspectplugins: %w", err)
+				return "", fmt.Errorf("failed to find Bazel workspace: %w", err)
 			}
 			cwd = filepath.Dir(cwd)
 			continue
@@ -83,7 +83,7 @@ func (f *finder) Find() (string, error) {
 		aspectpluginsPath := path.Join(cwd, aspectpluginsFilename)
 		if _, err := f.osStat(aspectpluginsPath); err != nil {
 			if !os.IsNotExist(err) {
-				return "", fmt.Errorf("failed to find .aspectplugins: %w", err)
+				return "", fmt.Errorf("failed to find .aspect/cli/plugins.yaml: %w", err)
 			}
 			break
 		}
@@ -121,11 +121,11 @@ func (p *parser) Parse(aspectpluginsPath string) ([]AspectPlugin, error) {
 	}
 	aspectpluginsData, err := p.ioutilReadFile(aspectpluginsPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse .aspectplugins: %w", err)
+		return nil, fmt.Errorf("failed to parse plugins.yaml: %w", err)
 	}
 	var aspectplugins []AspectPlugin
 	if err := p.yamlUnmarshalStrict(aspectpluginsData, &aspectplugins); err != nil {
-		return nil, fmt.Errorf("failed to parse .aspectplugins: %w", err)
+		return nil, fmt.Errorf("failed to parse plugins.yaml: %w", err)
 	}
 
 	return aspectplugins, nil
