@@ -17,6 +17,8 @@
 package bazel_test
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -110,14 +112,63 @@ aspect-build/0.6.0
 }
 
 func TestNewVersionFromFile(t *testing.T) {
-	t.Error("IMPLEMENT ME!")
+	g := NewWithT(t)
+	input := `
+aspect-build/0.6.0
+5.3.0
+`
+	f, err := os.CreateTemp("", ".bazelversion")
+	defer f.Close()
+	g.Expect(err).ToNot(HaveOccurred())
+	_, err = io.WriteString(f, input)
+	g.Expect(err).ToNot(HaveOccurred())
+	err = f.Sync()
+	g.Expect(err).ToNot(HaveOccurred())
+
+	actual, err := bazel.NewVersionFromFile(f.Name())
+	g.Expect(err).ToNot(HaveOccurred())
+	expected := &bazel.Version{
+		Bazel:  "5.3.0",
+		Aspect: "0.6.0",
+	}
+	g.Expect(actual).To(Equal(expected))
 }
 
 func TestSafeVersionFromFile(t *testing.T) {
 	t.Run("when .bazelversion exists", func(t *testing.T) {
-		t.Error("IMPLEMENT ME!")
+		g := NewWithT(t)
+		input := `
+aspect-build/0.6.0
+5.3.0
+`
+		f, err := os.CreateTemp("", ".bazelversion")
+		defer f.Close()
+		g.Expect(err).ToNot(HaveOccurred())
+		_, err = io.WriteString(f, input)
+		g.Expect(err).ToNot(HaveOccurred())
+		err = f.Sync()
+		g.Expect(err).ToNot(HaveOccurred())
+
+		actual, err := bazel.SafeVersionFromFile(f.Name())
+		g.Expect(err).ToNot(HaveOccurred())
+		expected := &bazel.Version{
+			Bazel:  "5.3.0",
+			Aspect: "0.6.0",
+		}
+		g.Expect(actual).To(Equal(expected))
 	})
 	t.Run("when .bazelversion does not exist", func(t *testing.T) {
-		t.Error("IMPLEMENT ME!")
+		g := NewWithT(t)
+		wr, err := os.MkdirTemp("", "wksp_root")
+		g.Expect(err).ToNot(HaveOccurred())
+
+		path := bazel.VersionPath(wr)
+		actual, err := bazel.SafeVersionFromFile(path)
+		g.Expect(err).ToNot(HaveOccurred())
+		expected := &bazel.Version{
+			Bazel:  "",
+			Aspect: buildinfo.PreStampRelease,
+		}
+		g.Expect(actual).To(Equal(expected))
 	})
 }
