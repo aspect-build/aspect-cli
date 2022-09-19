@@ -12,6 +12,7 @@ COMMAND_LIST = [
     "dump",
     "fetch",
     "info",
+    "modquery",
     "query",
     "run",
     "sync",
