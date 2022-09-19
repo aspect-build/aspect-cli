@@ -36,6 +36,7 @@ import (
 	"aspect.build/cli/cmd/aspect/modquery"
 	"aspect.build/cli/cmd/aspect/query"
 	"aspect.build/cli/cmd/aspect/run"
+	"aspect.build/cli/cmd/aspect/shutdown"
 	"aspect.build/cli/cmd/aspect/sync"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
@@ -91,7 +92,7 @@ func NewRootCmd(
 	cmd.AddCommand(query.NewDefaultQueryCmd())
 	cmd.AddCommand(run.NewDefaultRunCmd(pluginSystem))
 	cmd.AddCommand(sync.NewDefaultSyncCmd())
-	// shutdown
+	cmd.AddCommand(shutdown.NewDefaultShutdownCmd())
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultVersionCmd())
 
