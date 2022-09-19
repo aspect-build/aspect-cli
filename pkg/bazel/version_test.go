@@ -118,7 +118,11 @@ aspect-build/0.6.0
 5.3.0
 `
 	f, err := os.CreateTemp("", ".bazelversion")
-	defer f.Close()
+	defer func() {
+		f.Close()
+		os.RemoveAll(f.Name())
+	}()
+
 	g.Expect(err).ToNot(HaveOccurred())
 	_, err = io.WriteString(f, input)
 	g.Expect(err).ToNot(HaveOccurred())
@@ -142,7 +146,11 @@ aspect-build/0.6.0
 5.3.0
 `
 		f, err := os.CreateTemp("", ".bazelversion")
-		defer f.Close()
+		defer func() {
+			f.Close()
+			os.RemoveAll(f.Name())
+		}()
+
 		g.Expect(err).ToNot(HaveOccurred())
 		_, err = io.WriteString(f, input)
 		g.Expect(err).ToNot(HaveOccurred())
@@ -161,6 +169,7 @@ aspect-build/0.6.0
 		g := NewWithT(t)
 		wr, err := os.MkdirTemp("", "wksp_root")
 		g.Expect(err).ToNot(HaveOccurred())
+		defer os.RemoveAll(wr)
 
 		path := bazel.VersionPath(wr)
 		actual, err := bazel.SafeVersionFromFile(path)
