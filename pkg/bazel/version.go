@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	aspectBuildVersionPrefix = "aspect-build/"
+	aspectBuildVersionPrefix    = "aspect-build/"
 	defaultBazelVersionBasename = ".bazelversion"
 )
 
@@ -49,12 +49,12 @@ type Version struct {
 // }
 
 // Returns a version with default values.
-func NewVersion() (*Version, error) {
+func NewVersion() *Version {
 	bi := buildinfo.Current()
 	return &Version{
 		Bazel:  "",
 		Aspect: bi.Release,
-	}, nil
+	}
 }
 
 func NewVersionFromReader(reader io.Reader) (*Version, error) {
@@ -98,7 +98,7 @@ func NewVersionFromFile(path string) (*Version, error) {
 func SafeVersionFromFile(path string) (*Version, error) {
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return NewVersion()
+			return NewVersion(), nil
 		}
 		return nil, err
 	}

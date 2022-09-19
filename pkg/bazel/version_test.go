@@ -19,6 +19,7 @@ package bazel_test
 import (
 	"testing"
 
+	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/pkg/bazel"
 	. "github.com/onsi/gomega"
 )
@@ -30,7 +31,13 @@ func TestVersionPath(t *testing.T) {
 }
 
 func TestNewVersion(t *testing.T) {
-	t.Error("IMPLEMENT ME!")
+	g := NewWithT(t)
+	actual := bazel.NewVersion()
+	expected := &bazel.Version{
+		Bazel:  "",
+		Aspect: buildinfo.PreStampRelease,
+	}
+	g.Expect(actual).To(Equal(expected))
 }
 
 func TestNewVersionFromReader(t *testing.T) {
