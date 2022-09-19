@@ -17,6 +17,7 @@
 package configutils_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,9 +28,10 @@ import (
 )
 
 const (
-	configBasename = ".aspect"
-	configType     = "yaml"
-	configFilename = ".aspect.yaml"
+	configDirectory = ".aspect/cli"
+	configBasename  = ".aspect/cli/config"
+	configType      = "yaml"
+	configFilename  = ".aspect/cli/config.yaml"
 )
 
 func NewTempDir(t *testing.T) string {
@@ -45,8 +47,8 @@ func NewTempDir(t *testing.T) string {
 func NewViper(tempDir string) *viper.Viper {
 	v := viper.New()
 	v.AddConfigPath(tempDir)
-	v.SetConfigName(".aspect")
-	v.SetConfigType("yaml")
+	v.SetConfigName(configBasename)
+	v.SetConfigType(configType)
 	return v
 }
 
@@ -56,6 +58,9 @@ func TestWrite(t *testing.T) {
 	configPath := filepath.Join(tempDir, configFilename)
 
 	v := NewViper(tempDir)
+
+	// Create the config directory exists under the tempDir directory
+	os.MkdirAll(fmt.Sprintf("%s/%s", tempDir, configDirectory), os.ModePerm)
 
 	// Set a value
 	key := "chicken"

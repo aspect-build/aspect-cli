@@ -18,6 +18,8 @@ package flags
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/fatih/color"
@@ -36,7 +38,7 @@ var (
 
 // AddGlobalFlags will add aspect specfic flags to all cobra commands.
 func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
-	cmd.PersistentFlags().String(ConfigFlagName, "", "config file (default is $HOME/.aspect.yaml)")
+	cmd.PersistentFlags().String(ConfigFlagName, "", "config file (default is $HOME/.aspect/cli/config.yaml)")
 	cmd.PersistentFlags().Bool(InteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
 }
 
@@ -99,14 +101,17 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 			home, err := homedir.Dir()
 			cobra.CheckErr(err)
 
-			// Search for config in home directory with name ".aspect" (without extension).
+			// Search for config in home directory
 			viper.AddConfigPath(home)
-			viper.SetConfigName(".aspect")
+			viper.SetConfigName(".aspect/cli/config")
 			viper.SetConfigType("yaml")
 
-			// Search for config in root of current repo with name ".aspect" (without extension).
+			// Ensure the config directory exists under the home directory
+			os.MkdirAll(fmt.Sprintf("%s/.aspect/cli", home), os.ModePerm)
+
+			// Search for config in root of current repo
 			repoViper.AddConfigPath(".")
-			repoViper.SetConfigName(".aspect")
+			repoViper.SetConfigName(".aspect/cli/config")
 			repoViper.SetConfigType("yaml")
 			repoViper.AutomaticEnv()
 		}
