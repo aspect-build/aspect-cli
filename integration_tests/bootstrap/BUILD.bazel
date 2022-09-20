@@ -17,3 +17,13 @@ sh_test(
         "@bazel_tools//tools/bash/runfiles",
     ],
 )
+
+sh_test(
+    name = "init_test",
+    srcs = ["init_test.sh"],
+    data = ["//cmd/bootstrap"],
+    deps = [
+        "@aspect_bazel_lib//shlib/lib:assertions",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
