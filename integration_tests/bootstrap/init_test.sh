@@ -30,9 +30,19 @@ bootstrap="$(rlocation "${bootstrap_location}")/bootstrap_/bootstrap" || \
 
 # Set up workspace
 echo 'workspace(name = "temp_workspace")' > WORKSPACE
-
-$bootstrap init
 bazel_version_path="${PWD}/.bazelversion"
+
+# Initialize .bazelversion when it does not exist
+$bootstrap init
 [[ -f "${bazel_version_path}" ]] || fail ".bazelversion does not exist"
 bazel_version_contents="$(< "${bazel_version_path}")"
-assert_match "aspect-build/no release" "${bazel_version_contents}" "missing aspect CLI version"
+assert_match "aspect-build/no release" "${bazel_version_contents}" \
+  "missing aspect CLI version when init from no file"
+
+# Initialize .bazelversion when it does exist and is empty
+echo "" > "${bazel_version_path}"
+$bootstrap init
+[[ -f "${bazel_version_path}" ]] || fail ".bazelversion does not exist"
+bazel_version_contents="$(< "${bazel_version_path}")"
+assert_match "aspect-build/no release" "${bazel_version_contents}" \
+  "missing aspect CLI version when init from empty file"
