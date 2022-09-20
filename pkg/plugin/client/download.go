@@ -38,7 +38,7 @@ func DetermineExecutableFilenameSuffix() string {
 
 // DetermineBazelFilename returns the correct file name of a local Bazel binary.
 // The logic produces the same naming as our /release/release.bzl gives to our aspect-cli binaries.
-func DeterminePluginFilename(basename string) (string, error) {
+func DeterminePluginFilename(pluginName string) (string, error) {
 	var machineName string
 	switch runtime.GOARCH {
 	case "amd64", "arm64":
@@ -57,27 +57,29 @@ func DeterminePluginFilename(basename string) (string, error) {
 
 	filenameSuffix := DetermineExecutableFilenameSuffix()
 
-	return fmt.Sprintf("%s-%s_%s%s", basename, osName, machineName, filenameSuffix), nil
+	return fmt.Sprintf("%s-%s_%s%s", pluginName, osName, machineName, filenameSuffix), nil
 }
 
-func DownloadPlugin(url string, name string) (string, error) {
+func DownloadPlugin(url string, name string, version string) (string, error) {
 	userCacheDir, err := os.UserCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("could not get the user's cache directory: %v", err)
 	}
 
-	pluginsCache := filepath.Join(userCacheDir, "aspect-cli")
+	pluginsCache := filepath.Join(userCacheDir, "aspect-cli", "plugins", name, version)
 	err = os.MkdirAll(pluginsCache, 0755)
 	if err != nil {
 		return "", fmt.Errorf("could not create directory %s: %v", pluginsCache, err)
 	}
 
-	actualUrl, err := DeterminePluginFilename(url)
+	filename, err := DeterminePluginFilename(name)
 	if err != nil {
 		return "", fmt.Errorf("unable to determine filename to fetch: %v", err)
 	}
 
-	pluginfile, err := httputil.DownloadBinary(actualUrl, pluginsCache, name)
+	versionedUrl := fmt.Sprintf("%s/%s/%s", url, version, filename)
+
+	pluginfile, err := httputil.DownloadBinary(versionedUrl, pluginsCache, filename)
 	if err != nil {
 		return "", fmt.Errorf("unable to fetch remote plugin from %s: %v", url, err)
 	}

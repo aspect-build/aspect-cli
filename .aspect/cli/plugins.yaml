@@ -1,0 +1,8 @@
+# Uncomment once on Aspect CLI v0.9.0
+# - name: plugin-aspect-pro
+#   from: https://static.aspect.build/cli
+#   version: v0.9.0
+#   properties:
+#     error_augmentor:
+#     fix_visibility:
+#     outputs:
