@@ -263,5 +263,8 @@ func TestWriteToFile(t *testing.T) {
 }
 
 func TestInitAspect(t *testing.T) {
-	t.Error("IMPLEMENT ME!")
+	g := NewWithT(t)
+	v := &bazel.Version{}
+	v.InitAspect()
+	g.Expect(v.Aspect).To(Equal(buildinfo.PreStampRelease))
 }

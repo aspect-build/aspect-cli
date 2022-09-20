@@ -44,11 +44,9 @@ type Version struct {
 
 // Returns a version with default values.
 func NewVersion() *Version {
-	bi := buildinfo.Current()
-	return &Version{
-		Bazel:  "",
-		Aspect: bi.Release,
-	}
+	v := &Version{}
+	v.InitAspect()
+	return v
 }
 
 func NewVersionFromReader(reader io.Reader) (*Version, error) {
@@ -129,5 +127,7 @@ func (v Version) WriteToFile(path string) error {
 	return v.Write(f)
 }
 
-// func (v Version) InitAspect() {
-// }
+func (v *Version) InitAspect() {
+	bi := buildinfo.Current()
+	v.Aspect = bi.Release
+}
