@@ -120,8 +120,14 @@ func (v Version) Write(writer io.Writer) error {
 	return err
 }
 
-// func (v Version) WriteToFile(path string) error {
-// }
+func (v Version) WriteToFile(path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return v.Write(f)
+}
 
 // func (v Version) InitAspect() {
 // }

@@ -17,6 +17,7 @@
 package bazel_test
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"strings"
@@ -227,11 +228,38 @@ func TestWriteOutput(t *testing.T) {
 }
 
 func TestWrite(t *testing.T) {
-	t.Error("IMPLEMENT ME!")
+	g := NewWithT(t)
+	v := &bazel.Version{
+		Bazel:  "5.3.0",
+		Aspect: "0.6.0",
+	}
+	var b bytes.Buffer
+	err := v.Write(&b)
+	g.Expect(err).ToNot(HaveOccurred())
+	actual := b.String()
+	expected := `aspect-build/0.6.0
+5.3.0`
+	g.Expect(actual).To(Equal(expected))
 }
 
 func TestWriteToFile(t *testing.T) {
-	t.Error("IMPLEMENT ME!")
+	g := NewWithT(t)
+	wr, err := os.MkdirTemp("", "wksp_root")
+	g.Expect(err).ToNot(HaveOccurred())
+
+	v := &bazel.Version{
+		Bazel:  "5.3.0",
+		Aspect: "0.6.0",
+	}
+	vp := bazel.VersionPath(wr)
+	err = v.WriteToFile(vp)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	data, err := os.ReadFile(vp)
+	actual := string(data)
+	expected := `aspect-build/0.6.0
+5.3.0`
+	g.Expect(actual).To(Equal(expected))
 }
 
 func TestInitAspect(t *testing.T) {
