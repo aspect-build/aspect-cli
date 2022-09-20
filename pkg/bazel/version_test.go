@@ -175,10 +175,7 @@ aspect-build/0.6.0
 		path := bazel.VersionPath(wr)
 		actual, err := bazel.SafeVersionFromFile(path)
 		g.Expect(err).ToNot(HaveOccurred())
-		expected := &bazel.Version{
-			Bazel:  "",
-			Aspect: buildinfo.PreStampRelease,
-		}
+		expected := &bazel.Version{}
 		g.Expect(actual).To(Equal(expected))
 	})
 }

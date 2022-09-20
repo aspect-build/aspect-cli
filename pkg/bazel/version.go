@@ -95,7 +95,7 @@ func NewVersionFromFile(path string) (*Version, error) {
 func SafeVersionFromFile(path string) (*Version, error) {
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return NewVersion(), nil
+			return &Version{}, nil
 		}
 		return nil, err
 	}

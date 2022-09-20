@@ -17,6 +17,7 @@
 package initbzlwksp
 
 import (
+	"aspect.build/cli/pkg/bazel"
 	"github.com/spf13/cobra"
 )
 
@@ -27,27 +28,24 @@ func NewInitCmd() *cobra.Command {
 		Long:  `Initializes a Bazel workspace to use the aspect CLI.`,
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// TODO(chuck): IMPLEMENT ME!
+			var path string
+			if len(args) > 0 {
+				path = args[0]
+			} else {
+				b := bazel.New()
+				wr, err := b.WorkspaceRoot()
+				if err != nil {
+					return err
+				}
+				path = bazel.VersionPath(wr)
+			}
 
-			// var path string
-			// if len(args) > 0 {
-			// 	path = args[0]
-			// } else {
-			// 	b := bazel.New()
-			// 	wr, err := b.WorksapceRoot()
-			// 	if err != nil {
-			// 		return err
-			// 	}
-			// 	path = bazel.VersionPath(wr)
-			// }
-
-			// version, err := bazel.SafeVersionFromFile(path)
-			// if err != nil {
-			// 	return err
-			// }
-			// version.InitAspect()
-			// err = version.Write(path)
-			return nil
+			version, err := bazel.SafeVersionFromFile(path)
+			if err != nil {
+				return err
+			}
+			version.InitAspect()
+			return version.WriteToFile(path)
 		},
 	}
 }
