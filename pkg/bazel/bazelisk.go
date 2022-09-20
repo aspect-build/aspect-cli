@@ -17,7 +17,6 @@
 package bazel
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -256,33 +255,13 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, error) {
 	}
 
 	if len(bazelisk.workspaceRoot) != 0 {
-		bazelVersionPath := filepath.Join(bazelisk.workspaceRoot, ".bazelversion")
-		if _, err := os.Stat(bazelVersionPath); err == nil {
-			f, err := os.Open(bazelVersionPath)
-			if err != nil {
-				return "", fmt.Errorf("could not read %s: %v", bazelVersionPath, err)
-			}
-			defer f.Close()
-
-			scanner := bufio.NewScanner(f)
-			scanner.Split(bufio.ScanLines)
-			scanner.Scan()
-			bazelVersion := scanner.Text()
-			// If the first line of .bazelversion is Aspect CLI, then when we call
-			// bazelisk it will read the file again and we'll call ourselves in a loop.
-			// We don't want to be re-entrant, so detect when our fork is selected.
-			// In this case, the user should put their bazel version on the following line.
-			if strings.HasPrefix(bazelVersion, "aspect-build/") {
-				scanner.Scan()
-				bazelVersion = scanner.Text()
-			}
-			if err := scanner.Err(); err != nil {
-				return "", fmt.Errorf("could not read version from file %s: %v", bazelVersion, err)
-			}
-
-			if len(bazelVersion) != 0 {
-				return bazelVersion, nil
-			}
+		bazelVersionPath := VersionPath(bazelisk.workspaceRoot)
+		bv, err := SafeVersionFromFile(bazelVersionPath)
+		if err != nil {
+			return "", err
+		}
+		if bv.Bazel != "" {
+			return bv.Bazel, nil
 		}
 	}
 
