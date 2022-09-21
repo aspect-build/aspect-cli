@@ -46,8 +46,6 @@ var availableStartupFlags []string
 // cli execution.
 var startupFlags []string
 
-// TODO(chuck): REMOVE ME
-
 type BazelProvider func() (Bazel, error)
 
 type Bazel interface {
