@@ -37,22 +37,6 @@ const (
 	release        = "1.2.3"
 )
 
-// func createWorkspace() (string, error) {
-// 	wr, err := os.MkdirTemp("", "wksp_root")
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	wksp, err := os.Create(filepath.Join(wr, "WORKSPACE"))
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	defer wksp.Close()
-// 	if _, err := io.WriteString(wksp, `workspace(name = "test_workspace")`); err != nil {
-// 		return "", err
-// 	}
-// 	return wr, nil
-// }
-
 func TestVersion(t *testing.T) {
 	t.Run("with a Bazel instance", func(t *testing.T) {
 		g := NewWithT(t)
