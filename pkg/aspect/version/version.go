@@ -48,6 +48,12 @@ func (v *Version) Run(bzl bazel.Bazel) error {
 		return err
 	}
 
+	// If we do not have a Bazel workspace, do not bother trying to get additional version
+	// information.
+	if bzl == nil {
+		return nil
+	}
+
 	// Check if the --gnu_format flag is set, if that is the case,
 	// the version is printed differently
 	bazelCmd := []string{"version"}
