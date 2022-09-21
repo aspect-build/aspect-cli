@@ -28,6 +28,7 @@ import (
 	"aspect.build/cli/bazel/flags"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
+
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
 	"google.golang.org/protobuf/proto"
