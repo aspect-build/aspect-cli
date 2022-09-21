@@ -8,7 +8,7 @@ go_library(
         "interceptor.go",
     ],
     importpath = "aspect.build/cli/pkg/aspect/root/flags",
-    visibility = ["//:__subpackages__"],
+    visibility = ["//visibility:public"],
     deps = [
         "//pkg/bazel",
         "//pkg/interceptors",
