@@ -20,6 +20,7 @@ import (
 	"fmt"
 )
 
+// Represents a failure to find a Bazel workspace.
 type NotFoundError struct {
 	StartDir string
 }
@@ -28,6 +29,7 @@ func (nfe *NotFoundError) Error() string {
 	return fmt.Sprintf("failed to find a Bazel workspace starting at %s", nfe.StartDir)
 }
 
+// Determines whether the provided error is a NotFoundError.
 func IsNotFoundError(err error) bool {
 	if err == nil {
 		return false
