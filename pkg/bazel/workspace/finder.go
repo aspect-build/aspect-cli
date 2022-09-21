@@ -52,7 +52,7 @@ func (f *finder) Find(startDir string) (string, error) {
 				if os.IsNotExist(err) {
 					continue
 				}
-				return "", &NotFoundError{startDir: startDir}
+				return "", &NotFoundError{StartDir: startDir}
 			}
 			if fileInfo.IsDir() {
 				continue

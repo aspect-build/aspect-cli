@@ -38,7 +38,7 @@ func TestWorkspaceFinder(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		expectedErr := &NotFoundError{startDir: startDir}
+		expectedErr := &NotFoundError{StartDir: startDir}
 
 		finder := &finder{
 			osStat: func(s string) (fs.FileInfo, error) {

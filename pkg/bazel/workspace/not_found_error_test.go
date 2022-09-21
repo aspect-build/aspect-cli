@@ -14,24 +14,25 @@
  * limitations under the License.
  */
 
-package workspace
+package workspace_test
 
 import (
-	"fmt"
+	"errors"
+	"testing"
+
+	"aspect.build/cli/pkg/bazel/workspace"
+	. "github.com/onsi/gomega"
 )
 
-type NotFoundError struct {
-	StartDir string
-}
-
-func (nfe *NotFoundError) Error() string {
-	return fmt.Sprintf("failed to find a Bazel workspace starting at %s", nfe.StartDir)
-}
-
-func IsNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	_, ok := err.(*NotFoundError)
-	return ok
+func TestIsNotFoundError(t *testing.T) {
+	t.Run("when it is a NotFoundError", func(t *testing.T) {
+		g := NewWithT(t)
+		err := &workspace.NotFoundError{StartDir: "path"}
+		g.Expect(workspace.IsNotFoundError(err)).To(BeTrue())
+	})
+	t.Run("when it is not a NotFoundError", func(t *testing.T) {
+		g := NewWithT(t)
+		err := errors.New("not a NotFoundError")
+		g.Expect(workspace.IsNotFoundError(err)).To(BeFalse())
+	})
 }
