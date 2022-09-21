@@ -32,7 +32,7 @@ import (
 func main() {
 	cmd := &cobra.Command{Use: "docgen"}
 
-	pluginSystem := system.NewPluginSystem()
+	pluginSystem := system.NewDefaultPluginSystem()
 	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
 		log.Fatal(err)
 	}

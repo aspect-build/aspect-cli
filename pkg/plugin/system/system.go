@@ -53,22 +53,37 @@ type PluginSystem interface {
 }
 
 type pluginSystem struct {
-	finder        loader.Finder
-	parser        loader.Parser
-	clientFactory client.Factory
-	plugins       *PluginList
-	promptRunner  ioutils.PromptRunner
+	finder         loader.Finder
+	parser         loader.Parser
+	clientFactory  client.Factory
+	plugins        *PluginList
+	promptRunner   ioutils.PromptRunner
+	defaultPlugins []loader.AspectPlugin
 }
 
-// NewPluginSystem instantiates a default internal implementation of the
+// NewDefaultPluginSystem instantiates a default internal implementation of the
 // PluginSystem interface.
-func NewPluginSystem() PluginSystem {
+func NewDefaultPluginSystem() PluginSystem {
 	return &pluginSystem{
-		finder:        loader.NewFinder(),
-		parser:        loader.NewParser(),
-		clientFactory: client.NewFactory(),
-		plugins:       &PluginList{},
-		promptRunner:  ioutils.NewPromptRunner(),
+		finder:         loader.NewFinder(),
+		parser:         loader.NewParser(),
+		clientFactory:  client.NewFactory(),
+		plugins:        &PluginList{},
+		promptRunner:   ioutils.NewPromptRunner(),
+		defaultPlugins: []loader.AspectPlugin{},
+	}
+}
+
+// NewPluginSystem instantiates an implementation of the PluginSystem interface
+// that allow default plugins to be specified.
+func NewPluginSystem(defaultPlugins []loader.AspectPlugin) PluginSystem {
+	return &pluginSystem{
+		finder:         loader.NewFinder(),
+		parser:         loader.NewParser(),
+		clientFactory:  client.NewFactory(),
+		plugins:        &PluginList{},
+		promptRunner:   ioutils.NewPromptRunner(),
+		defaultPlugins: defaultPlugins,
 	}
 }
 
@@ -83,11 +98,28 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 		return fmt.Errorf("failed to configure plugin system: %w", err)
 	}
 
+	// Put the default plugins in a map for later use
+	defaultPluginsMap := map[string]loader.AspectPlugin{}
+	for _, p := range ps.defaultPlugins {
+		defaultPluginsMap[p.Name] = p
+	}
+
 	g := new(errgroup.Group)
 	var mutex sync.Mutex
 
+	// TODO: support merging plugin configurations from defaultPlugins, workspace
+	// plugins.yaml & user plugins.yaml
+
 	for _, p := range aspectplugins {
 		p := p
+
+		defaultPlugin, ok := defaultPluginsMap[p.Name]
+		if ok {
+			if p.From == "" && p.Version == "" {
+				p.From = defaultPlugin.From
+				p.Version = defaultPlugin.Version
+			}
+		}
 
 		g.Go(func() error {
 			aspectplugin, err := ps.clientFactory.New(p, streams)

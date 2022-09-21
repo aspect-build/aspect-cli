@@ -46,7 +46,7 @@ func main() {
 		_ = os.Chdir(wd)
 	}
 
-	pluginSystem := system.NewPluginSystem()
+	pluginSystem := system.NewDefaultPluginSystem()
 	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
 		aspecterrors.HandleError(err)
 	}

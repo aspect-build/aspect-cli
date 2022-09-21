@@ -62,7 +62,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		ctx := context.Background()
 		cmd := createInterceptorCommand()
 
-		ps := NewPluginSystem().(*pluginSystem)
+		ps := NewDefaultPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
 		ps.plugins.insert(&client.PluginInstance{
 			Plugin:   plugin,
@@ -104,7 +104,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		cmd := createInterceptorCommand()
 
 		// Plugins to be invoked
-		ps := NewPluginSystem().(*pluginSystem)
+		ps := NewDefaultPluginSystem().(*pluginSystem)
 		plugin1 := plugin_mock.NewMockPlugin(ctrl)
 		plugin2 := plugin_mock.NewMockPlugin(ctrl)
 		ps.plugins.insert(&client.PluginInstance{
@@ -149,7 +149,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		cmd := createInterceptorCommand()
 
 		// Plugin to be invoked
-		ps := NewPluginSystem().(*pluginSystem)
+		ps := NewDefaultPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
 		ps.plugins.insert(&client.PluginInstance{
 			Plugin:   plugin,
@@ -192,7 +192,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		cmd := createInterceptorCommand()
 
 		// Plugin to be invoked
-		ps := NewPluginSystem().(*pluginSystem)
+		ps := NewDefaultPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
 		ps.plugins.insert(&client.PluginInstance{
 			Plugin:   plugin,
@@ -235,7 +235,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		ctx := context.Background()
 		cmd := createInterceptorCommand()
 
-		ps := NewPluginSystem().(*pluginSystem)
+		ps := NewDefaultPluginSystem().(*pluginSystem)
 
 		// Hook interceptor returning an error
 		runInterceptor := ps.RunHooksInterceptor(streams)
@@ -262,7 +262,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		ctx := context.Background()
 		cmd := createInterceptorCommand()
 
-		ps := NewPluginSystem().(*pluginSystem)
+		ps := NewDefaultPluginSystem().(*pluginSystem)
 
 		// Plugin returning an error
 		plugin := plugin_mock.NewMockPlugin(ctrl)
