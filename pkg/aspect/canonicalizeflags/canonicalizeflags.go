@@ -39,9 +39,12 @@ func New(streams ioutils.Streams) *CanonicalizeFlags {
 func (v *CanonicalizeFlags) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"canonicalize-flags"}
 	bazelCmd = append(bazelCmd, args...)
-	bzl := bazel.New()
+	bzl, err := bazel.FindFromWd()
+	if err != nil {
+		return err
+	}
 
-	if exitCode, err := bzl.Spawn(bazelCmd, v.Streams); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(bazelCmd, v.Streams); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

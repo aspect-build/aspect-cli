@@ -2,14 +2,20 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "workspace",
-    srcs = ["finder.go"],
+    srcs = [
+        "finder.go",
+        "not_found_error.go",
+    ],
     importpath = "aspect.build/cli/pkg/bazel/workspace",
     visibility = ["//visibility:public"],
 )
 
 go_test(
     name = "workspace_test",
-    srcs = ["finder_test.go"],
+    srcs = [
+        "finder_test.go",
+        "not_found_error_test.go",
+    ],
     embed = [":workspace"],
     deps = [
         "//pkg/stdlib/mock",

@@ -42,7 +42,7 @@ func (t *Test) Run(args []string, besBackend bep.BESBackend) (exitErr error) {
 	bazelCmd := []string{"test", besBackendFlag}
 	bazelCmd = append(bazelCmd, args...)
 
-	exitCode, bazelErr := t.bzl.Spawn(bazelCmd, t.Streams)
+	exitCode, bazelErr := t.bzl.RunCommand(bazelCmd, t.Streams)
 
 	// Process the subscribers errors before the Bazel one.
 	subscriberErrors := besBackend.Errors()

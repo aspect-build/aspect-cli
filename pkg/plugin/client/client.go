@@ -39,9 +39,7 @@ type Factory interface {
 }
 
 func NewFactory() Factory {
-	return &clientFactory{
-		bzl: bazel.New(),
-	}
+	return &clientFactory{}
 }
 
 // CustomCommandExecutor requires the Plugin implementations to provide the
@@ -55,9 +53,24 @@ type clientFactory struct {
 	bzl bazel.Bazel
 }
 
+func (c *clientFactory) bazel() (bazel.Bazel, error) {
+	if c.bzl == nil {
+		var err error
+		c.bzl, err = bazel.FindFromWd()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return c.bzl, nil
+}
+
 // buildPlugin asks bazel to build the target and returns the path to the resulting binary.
 func (c *clientFactory) buildPlugin(target string) (string, error) {
-	queryOutput, err := c.bzl.AQuery(target)
+	bzl, err := c.bazel()
+	if err != nil {
+		return "", err
+	}
+	queryOutput, err := bzl.AQuery(target)
 	if err != nil {
 		return "", err
 	}
@@ -87,7 +100,7 @@ func (c *clientFactory) buildPlugin(target string) (string, error) {
 	// build the developer or CI would be performing.
 	// This is important only in the setup we don't recommend, where normal users
 	// are building the plugin from source instead of a pre-built binary.
-	if _, err := c.bzl.RunCommand([]string{"build", target}, streams); err != nil {
+	if _, err := bzl.RunCommand([]string{"build", target}, streams); err != nil {
 		return "", fmt.Errorf("failed to build plugin %q with Bazel: %w", target, err)
 	}
 

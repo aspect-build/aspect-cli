@@ -55,7 +55,10 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 			}
 		}
 
-		bzl := bazel.New()
+		bzl, err := bazel.FindFromWd()
+		if err != nil {
+			return err
+		}
 		availableStartupFlags := bzl.AvailableStartupFlags()
 		startupFlags := []string{}
 		argsWithoutStartupFlags := []string{}

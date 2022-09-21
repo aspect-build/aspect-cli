@@ -45,9 +45,12 @@ func (v *Info) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 		bazelCmd = append(bazelCmd, "--show_make_env")
 	}
 	bazelCmd = append(bazelCmd, args...)
-	bzl := bazel.New()
+	bzl, err := bazel.FindFromWd()
+	if err != nil {
+		return err
+	}
 
-	if exitCode, err := bzl.Spawn(bazelCmd, v.Streams); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(bazelCmd, v.Streams); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

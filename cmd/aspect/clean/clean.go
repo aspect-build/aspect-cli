@@ -32,11 +32,11 @@ import (
 
 // NewDefaultCleanCmd creates a new default clean cobra command.
 func NewDefaultCleanCmd() *cobra.Command {
-	return NewCleanCmd(ioutils.DefaultStreams, bazel.New())
+	return NewCleanCmd(ioutils.DefaultStreams, bazel.FindFromWd)
 }
 
 // NewCleanCmd creates a new clean cobra command.
-func NewCleanCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
+func NewCleanCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	var expunge bool
 	var expungeAsync bool
 
@@ -79,6 +79,10 @@ Workaround inconistent state:
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 				isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+				bzl, err := bzlProvider()
+				if err != nil {
+					return err
+				}
 				c := clean.NewDefault(streams, bzl, isInteractive)
 				c.Expunge = expunge
 				c.ExpungeAsync = expungeAsync

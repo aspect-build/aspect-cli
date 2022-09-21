@@ -79,7 +79,7 @@ func TestClean(t *testing.T) {
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean"}, streams).
+			RunCommand([]string{"clean"}, streams).
 			Return(0, nil)
 
 		b := clean.New(streams, bzl, false)
@@ -95,7 +95,7 @@ func TestClean(t *testing.T) {
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean", "--expunge"}, streams).
+			RunCommand([]string{"clean", "--expunge"}, streams).
 			Return(0, nil)
 
 		b := clean.New(streams, bzl, false)
@@ -112,7 +112,7 @@ func TestClean(t *testing.T) {
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean", "--expunge_async"}, streams).
+			RunCommand([]string{"clean", "--expunge_async"}, streams).
 			Return(0, nil)
 
 		b := clean.New(streams, bzl, false)
@@ -130,7 +130,7 @@ func TestClean(t *testing.T) {
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean"}, streams).
+			RunCommand([]string{"clean"}, streams).
 			Return(0, nil)
 
 		b := clean.New(streams, bzl, true)
@@ -152,7 +152,7 @@ func TestClean(t *testing.T) {
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean"}, streams).
+			RunCommand([]string{"clean"}, streams).
 			Return(0, nil).AnyTimes()
 
 		b := clean.New(streams, bzl, true)
@@ -211,7 +211,7 @@ func TestClean(t *testing.T) {
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			Spawn([]string{"clean"}, streams).
+			RunCommand([]string{"clean"}, streams).
 			Return(0, nil)
 
 		c := clean.New(streams, bzl, true)

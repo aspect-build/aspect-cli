@@ -20,11 +20,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
 
 	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/pkg/aspect/version"
-	"aspect.build/cli/pkg/bazel"
+	bazel_mock "aspect.build/cli/pkg/bazel/mock"
 	"aspect.build/cli/pkg/ioutils"
 )
 
@@ -37,18 +38,54 @@ const (
 )
 
 func TestVersion(t *testing.T) {
-	bzl := bazel.New()
-	t.Run("without release build info", func(t *testing.T) {
+	t.Run("with a Bazel instance", func(t *testing.T) {
+		g := NewWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout}
+		bzl := bazel_mock.NewMockBazel(ctrl)
+		bzl.
+			EXPECT().
+			RunCommand([]string{"version"}, streams).
+			Return(0, nil)
+
+		v := version.New(streams)
+		err := v.Run(bzl)
+		g.Expect(err).To(BeNil())
+	})
+
+	t.Run("with a Bazel instance, with --gnu_format", func(t *testing.T) {
+		g := NewWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout}
+		bzl := bazel_mock.NewMockBazel(ctrl)
+		bzl.
+			EXPECT().
+			RunCommand([]string{"version", "--gnu_format"}, streams).
+			Return(0, nil)
+
+		v := version.New(streams)
+		v.GNUFormat = true
+		err := v.Run(bzl)
+		g.Expect(err).To(BeNil())
+	})
+
+	t.Run("no Bazel instance, without release build info", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
 		v := version.New(streams)
-		err := v.Run(bzl)
+		err := v.Run(nil)
 		g.Expect(err).To(BeNil())
 		g.Expect(stdout.String()).To(Equal("Aspect version: unknown [not built with --stamp]\n"))
 	})
 
-	t.Run("with release build info", func(t *testing.T) {
+	t.Run("no Bazel instance, with release build info", func(t *testing.T) {
 		t.Run("git is clean", func(t *testing.T) {
 			g := NewGomegaWithT(t)
 			var stdout strings.Builder
@@ -61,7 +98,7 @@ func TestVersion(t *testing.T) {
 				buildinfo.CleanGitStatus,
 				release,
 			)
-			err := v.Run(bzl)
+			err := v.Run(nil)
 			g.Expect(err).To(BeNil())
 			g.Expect(stdout.String()).To(Equal("Aspect version: 1.2.3\n"))
 		})
@@ -78,13 +115,13 @@ func TestVersion(t *testing.T) {
 				dirtyGitStatus,
 				release,
 			)
-			err := v.Run(bzl)
+			err := v.Run(nil)
 			g.Expect(err).To(BeNil())
 			g.Expect(stdout.String()).To(Equal("Aspect version: 1.2.3 (with local changes)\n"))
 		})
 	})
 
-	t.Run("with --gnu_format", func(t *testing.T) {
+	t.Run("no Bazel instance, with --gnu_format", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
@@ -97,7 +134,7 @@ func TestVersion(t *testing.T) {
 			buildinfo.CleanGitStatus,
 			release,
 		)
-		err := v.Run(bzl)
+		err := v.Run(nil)
 		g.Expect(err).To(BeNil())
 		g.Expect(stdout.String()).To(Equal("Aspect 1.2.3\n"))
 	})

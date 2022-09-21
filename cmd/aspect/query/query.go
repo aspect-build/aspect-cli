@@ -29,10 +29,10 @@ import (
 )
 
 func NewDefaultQueryCmd() *cobra.Command {
-	return NewQueryCommand(ioutils.DefaultStreams, bazel.New())
+	return NewQueryCommand(ioutils.DefaultStreams, bazel.FindFromWd)
 }
 
-func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
+func NewQueryCommand(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query",
 		Short: "Executes a dependency graph query.",
@@ -42,6 +42,10 @@ func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				bzl, err := bzlProvider()
+				if err != nil {
+					return err
+				}
 				q := query.New(streams, bzl, true)
 				return q.Run(cmd, args)
 			},

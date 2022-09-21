@@ -168,7 +168,10 @@ func (cm *PluginCommandManager) Save(commands []*Command) error {
 
 // Execute satisfies CommandManager.
 func (cm *PluginCommandManager) Execute(command string, ctx context.Context, args []string) error {
-	bzl := bazel.New()
+	bzl, err := bazel.FindFromWd()
+	if err != nil {
+		return err
+	}
 	return cm.commands[command](ctx, args, bzl)
 }
 

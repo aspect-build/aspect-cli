@@ -72,7 +72,10 @@ func AddBazelFlags(cmd *cobra.Command) error {
 		subCommands[command.Use] = command
 	}
 
-	bzl := bazel.New()
+	bzl, err := bazel.FindFromWd()
+	if err != nil {
+		return err
+	}
 	bzlFlags, err := bzl.Flags()
 	if err != nil {
 		return fmt.Errorf("unable to determine available bazel flags: %w", err)

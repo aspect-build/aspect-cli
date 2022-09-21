@@ -29,10 +29,10 @@ import (
 )
 
 func NewDefaultAQueryCmd() *cobra.Command {
-	return NewAQueryCommand(ioutils.DefaultStreams, bazel.New())
+	return NewAQueryCommand(ioutils.DefaultStreams, bazel.FindFromWd)
 }
 
-func NewAQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
+func NewAQueryCommand(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "aquery",
 		Short: "Executes an aquery.",
@@ -42,6 +42,10 @@ func NewAQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				bzl, err := bzlProvider()
+				if err != nil {
+					return err
+				}
 				q := aquery.New(streams, bzl, true)
 				return q.Run(cmd, args)
 			},
