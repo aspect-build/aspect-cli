@@ -4,7 +4,7 @@ go_library(
     name = "build",
     srcs = ["build.go"],
     importpath = "aspect.build/cli/cmd/aspect/build",
-    visibility = ["//cmd/aspect/root:__pkg__"],
+    visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/build",
         "//pkg/aspect/root/flags",

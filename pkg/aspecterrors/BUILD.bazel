@@ -7,5 +7,5 @@ go_library(
         "handle_error.go",
     ],
     importpath = "aspect.build/cli/pkg/aspecterrors",
-    visibility = ["//:__subpackages__"],
+    visibility = ["//visibility:public"],
 )

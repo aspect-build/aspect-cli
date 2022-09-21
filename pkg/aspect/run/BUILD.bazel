@@ -4,7 +4,7 @@ go_library(
     name = "run",
     srcs = ["run.go"],
     importpath = "aspect.build/cli/pkg/aspect/run",
-    visibility = ["//cmd/aspect/run:__pkg__"],
+    visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspecterrors",
         "//pkg/bazel",
