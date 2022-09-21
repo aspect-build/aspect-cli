@@ -25,6 +25,7 @@ import (
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/version"
 	"aspect.build/cli/pkg/bazel"
+	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -47,7 +48,7 @@ func NewVersionCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *co
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 				bzl, err := bzlProvider()
-				if err != nil {
+				if err != nil && !workspace.IsNotFoundError(err) {
 					return err
 				}
 				return v.Run(bzl)
