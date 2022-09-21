@@ -33,19 +33,6 @@ const (
 )
 
 func TestWorkspaceFinder(t *testing.T) {
-	// t.Run("when os.Getwd fails, Find fails", func(t *testing.T) {
-	// 	g := NewGomegaWithT(t)
-	// 	ctrl := gomock.NewController(t)
-	// 	defer ctrl.Finish()
-
-	// 	expectedErr := fmt.Errorf("os.Getwd failed")
-
-	// 	finder := &finder{}
-	// 	workspacePath, err := finder.Find()
-	// 	g.Expect(workspacePath).To(BeEmpty())
-	// 	g.Expect(err).To(MatchError(expectedErr))
-	// })
-
 	t.Run("when os.Stat fails, Find fails", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		ctrl := gomock.NewController(t)
