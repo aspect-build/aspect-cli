@@ -19,7 +19,6 @@ package loader
 import (
 	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -108,7 +107,7 @@ type parser struct {
 // interface.
 func NewParser() Parser {
 	return &parser{
-		ioutilReadFile:      ioutil.ReadFile,
+		ioutilReadFile:      os.ReadFile,
 		yamlUnmarshalStrict: yaml.UnmarshalStrict,
 		yamlMarshal:         yaml.Marshal,
 	}

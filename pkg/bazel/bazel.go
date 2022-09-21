@@ -20,7 +20,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 
@@ -143,7 +142,7 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 		bazelErrs <- err
 	}()
 
-	helpProtoBytes, err := ioutil.ReadAll(decoder)
+	helpProtoBytes, err := io.ReadAll(decoder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
 	}
@@ -191,7 +190,7 @@ func (b *bazel) AQuery(query string) (*analysis.ActionGraphContainer, error) {
 		bazelErrs <- err
 	}()
 
-	protoBytes, err := ioutil.ReadAll(r)
+	protoBytes, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run Bazel aquery: %w", err)
 	}
