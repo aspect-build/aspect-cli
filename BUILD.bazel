@@ -2,6 +2,8 @@ load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 load("@bazel_gazelle//:def.bzl", "gazelle")
 load("@io_bazel_rules_go//go:def.bzl", "nogo")
 
+# gazelle:resolve go github.com/golang/protobuf/ptypes/empty @com_github_golang_protobuf//ptypes/empty:empty
+
 # When generating the documents for this repo bazel needs to be started so that we can generate
 # the correct flags. To do this we need version from .bazelversion
 exports_files([
