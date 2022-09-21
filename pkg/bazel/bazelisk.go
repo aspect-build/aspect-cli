@@ -20,7 +20,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -212,7 +211,7 @@ func (bazelisk *Bazelisk) GetEnvOrConfig(name string) string {
 	// Parse .bazeliskrc in the workspace root, once, if it can be found.
 	fileConfigOnce.Do(func() {
 		rcFilePath := filepath.Join(bazelisk.workspaceRoot, ".bazeliskrc")
-		contents, err := ioutil.ReadFile(rcFilePath)
+		contents, err := os.ReadFile(rcFilePath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return

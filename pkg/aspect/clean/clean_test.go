@@ -18,7 +18,6 @@ package clean_test
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
@@ -169,7 +168,7 @@ func TestClean(t *testing.T) {
 		g.Expect(stdout.String()).To(ContainSubstring("skip this prompt"))
 
 		// Recorded your preference for next time
-		content, err := ioutil.ReadFile(cfg.Name())
+		content, err := os.ReadFile(cfg.Name())
 		g.Expect(err).To(BeNil())
 		g.Expect(string(content)).To(Equal("[clean]\nskip_prompt=true\n"))
 

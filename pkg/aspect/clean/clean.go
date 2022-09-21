@@ -20,7 +20,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -327,7 +326,7 @@ func (c *Clean) findDiskCaches(
 	sizeCalcQueue chan<- bazelDirInfo,
 	errors chan<- error,
 ) {
-	tempDir, err := ioutil.TempDir("", "tmp_bazel_output")
+	tempDir, err := os.MkdirTemp("", "tmp_bazel_output")
 	if err != nil {
 		errors <- fmt.Errorf("failed to find disk caches: failed to create tmp dir: %w", err)
 		return
@@ -407,7 +406,7 @@ func (c *Clean) findBazelWorkspaces(
 		return
 	}
 
-	bazelWorkspaces, err := ioutil.ReadDir(bazelBaseDir)
+	bazelWorkspaces, err := os.ReadDir(bazelBaseDir)
 	if err != nil {
 		errors <- fmt.Errorf("failed to find bazel workspaces: failed to read bazel base directory: %w", err)
 		return
@@ -421,9 +420,14 @@ func (c *Clean) findBazelWorkspaces(
 			isCache:            false,
 		}
 
-		workspaceInfo.accessTime = c.Filesystem.GetAccessTime(workspace)
+		wkFileInfo, err := workspace.Info()
+		if err != nil {
+			errors <- fmt.Errorf("failed to find bazel workspaces: failed to retrieve file info: %w", err)
+			return
+		}
+		workspaceInfo.accessTime = c.Filesystem.GetAccessTime(wkFileInfo)
 
-		execrootFiles, readDirErr := ioutil.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
+		execrootFiles, readDirErr := os.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
 		if readDirErr != nil {
 			// The install and cache directories will end up here.We must not remove these
 			continue
@@ -493,7 +497,7 @@ func (c *Clean) deleteProcessor(
 		// We know that there will be an "external" directory that could be deleted in parallel.
 		// So we can move those directories to a tmp filepath and add them as seperate deletes that will
 		// therefore happen in parallel.
-		externalDirectories, _ := ioutil.ReadDir(filepath.Join(bazelDir.path, "external"))
+		externalDirectories, _ := os.ReadDir(filepath.Join(bazelDir.path, "external"))
 		for _, directory := range externalDirectories {
 			newPath, err := c.Filesystem.MoveDirectoryToTmp(bazelDir.path, directory.Name())
 
@@ -565,13 +569,16 @@ func (c *Clean) findBazelBaseDir() (string, string, error) {
 		return "", "", fmt.Errorf("failed to find Bazel base directory: failed to get current working directory: %w", err)
 	}
 
-	files, err := ioutil.ReadDir(cwd)
+	files, err := os.ReadDir(cwd)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to find Bazel base directory: failed to read current working directory %w", err)
 	}
 
-	for _, file := range files {
-
+	for _, dirEntry := range files {
+		file, err := dirEntry.Info()
+		if err != nil {
+			return "", "", err
+		}
 		// bazel-bin, bazel-out, etc... will be symlinks, so we can eliminate non-symlinks immediately.
 		if file.Mode()&os.ModeSymlink != 0 {
 			actualPath, err := os.Readlink(filepath.Join(cwd, file.Name()))

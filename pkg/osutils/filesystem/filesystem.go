@@ -18,7 +18,6 @@ package filesystem
 
 import (
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"time"
@@ -33,7 +32,7 @@ func timeUnix(sec int64, nsec int64) time.Time {
 }
 
 func ioutilTempDir(dir string, pattern string) (name string, err error) {
-	return ioutil.TempDir(dir, pattern)
+	return os.MkdirTemp(dir, pattern)
 }
 
 func osMkdirAll(path string, perm fs.FileMode) error {
