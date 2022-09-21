@@ -27,6 +27,14 @@ import (
 // https://github.com/bazelbuild/bazel/blob/8346ea4c/src/main/cpp/workspace_layout.cc#L37
 var workspaceFilenames = []string{"WORKSPACE", "WORKSPACE.bazel"}
 
+type NotFoundError struct {
+	startDir string
+}
+
+func (nfe *NotFoundError) Error() string {
+	return fmt.Sprintf("failed to find a Bazel workspace starting at %s", nfe.startDir)
+}
+
 // Finder wraps the Find method that performs the finding of the WORKSPACE file
 // in the user's Bazel project.
 type Finder interface {
@@ -52,7 +60,8 @@ func (f *finder) Find(startDir string) (string, error) {
 				if os.IsNotExist(err) {
 					continue
 				}
-				return "", fmt.Errorf("failed to find bazel workspace: %w", err)
+				// return "", fmt.Errorf("failed to find bazel workspace: %w", err)
+				return "", &NotFoundError{startDir: startDir}
 			}
 			if fileInfo.IsDir() {
 				continue
