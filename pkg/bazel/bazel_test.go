@@ -57,47 +57,11 @@ func init() {
 	if err := os.WriteFile(wrapperOverridePath, wrapperContents, 0777); err != nil {
 		panic(err)
 	}
-	// if err := os.Chdir(workspaceDir); err != nil {
-	// 	panic(err)
-	// }
 }
-
-// func createWorkspace() (string, error) {
-// 	wr, err := os.MkdirTemp("", "wksp_root")
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	wksp, err := os.Create(filepath.Join(wr, "WORKSPACE"))
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	defer wksp.Close()
-// 	if _, err := io.WriteString(wksp, `workspace(name = "test_workspace")`); err != nil {
-// 		return "", err
-// 	}
-// 	return wr, nil
-// }
 
 func TestBazel(t *testing.T) {
 	t.Run("when a custom environment is passed, it should be used by bazelisk", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		// ctrl := gomock.NewController(t)
-		// defer ctrl.Finish()
-
-		// workspaceFinder := workspace_mock.NewMockFinder(ctrl)
-		// workspaceFinder.EXPECT().
-		// 	Find().
-		// 	Return("", nil).
-		// 	Times(1)
-
-		// bzl := &bazel{
-		// 	workspaceFinder: workspaceFinder,
-		// }
-
-		// wr, err := createWorkspace()
-		// g.Expect(err).ToNot(HaveOccurred())
-		// defer os.RemoveAll(wr)
-		// bzl := bazel.New(wr)
 
 		bzl := New(workspaceDir)
 
@@ -111,22 +75,6 @@ func TestBazel(t *testing.T) {
 
 	t.Run("when the workspace override directory is set, it should be used by bazelisk", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		// ctrl := gomock.NewController(t)
-		// defer ctrl.Finish()
-
-		// workspaceFinder := workspace_mock.NewMockFinder(ctrl)
-		// workspaceFinder.EXPECT().
-		// 	Find().
-		// 	Times(0)
-
-		// bzl := &bazel{
-		// 	workspaceFinder: workspaceFinder,
-		// }
-
-		// wr, err := createWorkspace()
-		// g.Expect(err).ToNot(HaveOccurred())
-		// defer os.RemoveAll(wr)
-		// bzl := bazel.New(wr)
 
 		bzl := New(workspaceOverrideDir)
 
