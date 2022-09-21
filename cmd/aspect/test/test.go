@@ -36,14 +36,14 @@ func NewDefaultTestCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewTestCmd(
 		ioutils.DefaultStreams,
 		pluginSystem,
-		bazel.New(),
+		bazel.FindFromWd,
 	)
 }
 
 func NewTestCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
-	bzl bazel.Bazel,
+	bzlProvider bazel.BazelProvider,
 ) *cobra.Command {
 	return &cobra.Command{
 		Use:   "test",
@@ -66,6 +66,10 @@ specify targets.
 				pluginSystem.TestHooksInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				bzl, err := bzlProvider()
+				if err != nil {
+					return err
+				}
 				t := test.New(streams, bzl)
 				besBackend := bep.BESBackendFromContext(ctx)
 				return t.Run(args, besBackend)

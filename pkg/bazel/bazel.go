@@ -28,7 +28,6 @@ import (
 	"aspect.build/cli/bazel/flags"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
-
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
 	"google.golang.org/protobuf/proto"
@@ -47,9 +46,11 @@ var availableStartupFlags []string
 // cli execution.
 var startupFlags []string
 
+type BazelProvider func() (Bazel, error)
+
 type Bazel interface {
+	WithEnv(env []string) Bazel
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
-	Spawn(command []string, streams ioutils.Streams) (int, error)
 	RunCommand(command []string, streams ioutils.Streams) (int, error)
 	Flags() (map[string]*flags.FlagInfo, error)
 	AvailableStartupFlags() []string
@@ -57,34 +58,54 @@ type Bazel interface {
 }
 
 type bazel struct {
-	workspaceFinder workspace.Finder
-
-	overrideWorkspaceRoot string
-	env                   []string
+	workspaceRoot string
+	env           []string
 }
 
-func New() Bazel {
+func New(workspaceRoot string) Bazel {
 	return &bazel{
-		workspaceFinder: workspace.DefaultFinder,
+		workspaceRoot: workspaceRoot,
 	}
 }
 
-// WithOverrideWorkspaceRoot returns a new instance of Bazel, overriding the
-// value for the workspace root.
-func (b *bazel) WithOverrideWorkspaceRoot(workspaceRoot string) Bazel {
-	newBazel := *b
-	newBazel.workspaceFinder = nil
-	newBazel.overrideWorkspaceRoot = workspaceRoot
-	return &newBazel
+func Find(startDir string) (Bazel, error) {
+	finder := workspace.DefaultFinder
+	wr, err := finder.Find(startDir)
+	if err != nil {
+		return nil, err
+	}
+	return New(wr), nil
 }
 
-// WithEnv returns a new instance of Bazel, setting the provided environment
-// variables.
-func (b *bazel) WithEnv(env []string) Bazel {
-	newBazel := *b
-	newBazel.env = env
-	return &newBazel
+func FindFromWd() (Bazel, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	return Find(wd)
 }
+
+func (b *bazel) WithEnv(env []string) Bazel {
+	b.env = env
+	return b
+}
+
+// // WithOverrideWorkspaceRoot returns a new instance of Bazel, overriding the
+// // value for the workspace root.
+// func (b *bazel) WithOverrideWorkspaceRoot(workspaceRoot string) Bazel {
+// 	newBazel := *b
+// 	newBazel.workspaceFinder = nil
+// 	newBazel.overrideWorkspaceRoot = workspaceRoot
+// 	return &newBazel
+// }
+
+// // WithEnv returns a new instance of Bazel, setting the provided environment
+// // variables.
+// func (b *bazel) WithEnv(env []string) Bazel {
+// 	newBazel := *b
+// 	newBazel.env = env
+// 	return &newBazel
+// }
 
 // AvailableStartupFlags will return the full list of startup flags available for
 // the current version of bazel. This is NOT the list of startup flags that have been
@@ -110,29 +131,13 @@ func (*bazel) createRepositories() *core.Repositories {
 	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
 }
 
-// Spawn is similar to the main() function of bazelisk
-// see https://github.com/bazelbuild/bazelisk/blob/7c3d9d5/bazelisk.go
-func (b *bazel) Spawn(command []string, streams ioutils.Streams) (int, error) {
-	return b.RunCommand(command, streams)
-}
-
 func (b *bazel) RunCommand(command []string, streams ioutils.Streams) (int, error) {
 	// Prepend startup flags
 	command = append(startupFlags, command...)
 
 	repos := b.createRepositories()
 
-	var bazelisk *Bazelisk
-	if b.overrideWorkspaceRoot != "" {
-		bazelisk = NewBazelisk(b.overrideWorkspaceRoot)
-	} else {
-		workspaceRoot, err := b.workspaceFinder.Find()
-		if err != nil {
-			return 1, err
-		}
-		bazelisk = NewBazelisk(workspaceRoot)
-	}
-
+	bazelisk := NewBazelisk(b.workspaceRoot)
 	exitCode, err := bazelisk.Run(command, repos, streams, b.env)
 	return exitCode, err
 }

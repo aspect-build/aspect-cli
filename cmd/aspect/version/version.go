@@ -30,10 +30,10 @@ import (
 )
 
 func NewDefaultVersionCmd() *cobra.Command {
-	return NewVersionCmd(ioutils.DefaultStreams, bazel.New())
+	return NewVersionCmd(ioutils.DefaultStreams, bazel.FindFromWd)
 }
 
-func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
+func NewVersionCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	v := version.New(streams)
 	v.BuildInfo = *buildinfo.Current()
 
@@ -46,6 +46,10 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				bzl, err := bzlProvider()
+				if err != nil {
+					return err
+				}
 				return v.Run(bzl)
 			},
 		),

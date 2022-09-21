@@ -170,7 +170,7 @@ func RunQuery(bzl bazel.Bazel, verb string, query string, streams ioutils.Stream
 		query,
 	}
 
-	if exitCode, err := bzl.Spawn(bazelCmd, streams); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(bazelCmd, streams); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

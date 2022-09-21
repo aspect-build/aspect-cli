@@ -36,14 +36,14 @@ func NewDefaultRunCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewRunCmd(
 		ioutils.DefaultStreams,
 		pluginSystem,
-		bazel.New(),
+		bazel.FindFromWd,
 	)
 }
 
 func NewRunCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
-	bzl bazel.Bazel,
+	bzlProvider bazel.BazelProvider,
 ) *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",
@@ -63,6 +63,10 @@ use 'bazel run --script_path' to write a script and then execute it.
 				pluginSystem.RunHooksInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				bzl, err := bzlProvider()
+				if err != nil {
+					return err
+				}
 				r := run.New(streams, bzl)
 				besBackend := bep.BESBackendFromContext(ctx)
 				return r.Run(args, besBackend)

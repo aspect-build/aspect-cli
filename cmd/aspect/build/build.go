@@ -36,7 +36,7 @@ func NewDefaultBuildCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewBuildCmd(
 		ioutils.DefaultStreams,
 		pluginSystem,
-		bazel.New(),
+		bazel.FindFromWd,
 	)
 }
 
@@ -44,7 +44,7 @@ func NewDefaultBuildCmd(pluginSystem system.PluginSystem) *cobra.Command {
 func NewBuildCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
-	bzl bazel.Bazel,
+	bzlProvider bazel.BazelProvider,
 ) *cobra.Command {
 	return &cobra.Command{
 		Use:   "build",
@@ -58,6 +58,10 @@ func NewBuildCmd(
 				pluginSystem.BuildHooksInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+				bzl, err := bzlProvider()
+				if err != nil {
+					return err
+				}
 				b := build.New(streams, bzl)
 				besBackend := bep.BESBackendFromContext(ctx)
 				return b.Run(args, besBackend)

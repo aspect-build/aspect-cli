@@ -43,7 +43,7 @@ func TestQuery(t *testing.T) {
 		spawner := bazel_mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
-			Spawn([]string{"aquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}, streams).
+			RunCommand([]string{"aquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}, streams).
 			Return(0, nil)
 
 		q := aquery.New(streams, spawner, true)
@@ -71,7 +71,7 @@ func TestQuery(t *testing.T) {
 		spawner := bazel_mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
-			Spawn([]string{"aquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}, streams).
+			RunCommand([]string{"aquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}, streams).
 			Return(0, nil)
 
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)
@@ -167,7 +167,7 @@ func TestQuery(t *testing.T) {
 		spawner := bazel_mock.NewMockBazel(ctrl)
 		spawner.
 			EXPECT().
-			Spawn([]string{"aquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}, streams).
+			RunCommand([]string{"aquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)"}, streams).
 			Return(0, nil)
 
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)

@@ -29,10 +29,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
 
-	workspace_mock "aspect.build/cli/pkg/bazel/workspace/mock"
 	"aspect.build/cli/pkg/ioutils"
 )
 
@@ -59,77 +57,84 @@ func init() {
 	if err := os.WriteFile(wrapperOverridePath, wrapperContents, 0777); err != nil {
 		panic(err)
 	}
-	if err := os.Chdir(workspaceDir); err != nil {
-		panic(err)
-	}
+	// if err := os.Chdir(workspaceDir); err != nil {
+	// 	panic(err)
+	// }
 }
 
+// func createWorkspace() (string, error) {
+// 	wr, err := os.MkdirTemp("", "wksp_root")
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	wksp, err := os.Create(filepath.Join(wr, "WORKSPACE"))
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	defer wksp.Close()
+// 	if _, err := io.WriteString(wksp, `workspace(name = "test_workspace")`); err != nil {
+// 		return "", err
+// 	}
+// 	return wr, nil
+// }
+
 func TestBazel(t *testing.T) {
-	t.Run("when the workspace finder fails, Spawn fails", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		expectedErr := fmt.Errorf("failed to find yada yada yada")
-
-		workspaceFinder := workspace_mock.NewMockFinder(ctrl)
-		workspaceFinder.EXPECT().
-			Find().
-			Return("", expectedErr).
-			Times(1)
-
-		bzl := &bazel{
-			workspaceFinder: workspaceFinder,
-		}
-
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
-		_, err := bzl.Spawn([]string{"--print_env"}, streams)
-		g.Expect(err).To(MatchError(expectedErr))
-	})
-
 	t.Run("when a custom environment is passed, it should be used by bazelisk", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
+		// ctrl := gomock.NewController(t)
+		// defer ctrl.Finish()
 
-		workspaceFinder := workspace_mock.NewMockFinder(ctrl)
-		workspaceFinder.EXPECT().
-			Find().
-			Return("", nil).
-			Times(1)
+		// workspaceFinder := workspace_mock.NewMockFinder(ctrl)
+		// workspaceFinder.EXPECT().
+		// 	Find().
+		// 	Return("", nil).
+		// 	Times(1)
 
-		bzl := &bazel{
-			workspaceFinder: workspaceFinder,
-		}
+		// bzl := &bazel{
+		// 	workspaceFinder: workspaceFinder,
+		// }
+
+		// wr, err := createWorkspace()
+		// g.Expect(err).ToNot(HaveOccurred())
+		// defer os.RemoveAll(wr)
+		// bzl := bazel.New(wr)
+
+		bzl := New(workspaceDir)
 
 		env := []string{fmt.Sprintf("FOO=%s", "BAR")}
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		_, err := bzl.WithEnv(env).Spawn([]string{"--print_env"}, streams)
+		_, err := bzl.WithEnv(env).RunCommand([]string{"--print_env"}, streams)
 		g.Expect(err).To(Not(HaveOccurred()))
 		g.Expect(stdout.String()).To(ContainSubstring("FOO=BAR"))
 	})
 
 	t.Run("when the workspace override directory is set, it should be used by bazelisk", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
+		// ctrl := gomock.NewController(t)
+		// defer ctrl.Finish()
 
-		workspaceFinder := workspace_mock.NewMockFinder(ctrl)
-		workspaceFinder.EXPECT().
-			Find().
-			Times(0)
+		// workspaceFinder := workspace_mock.NewMockFinder(ctrl)
+		// workspaceFinder.EXPECT().
+		// 	Find().
+		// 	Times(0)
 
-		bzl := &bazel{
-			workspaceFinder: workspaceFinder,
-		}
+		// bzl := &bazel{
+		// 	workspaceFinder: workspaceFinder,
+		// }
+
+		// wr, err := createWorkspace()
+		// g.Expect(err).ToNot(HaveOccurred())
+		// defer os.RemoveAll(wr)
+		// bzl := bazel.New(wr)
+
+		bzl := New(workspaceOverrideDir)
 
 		var out strings.Builder
 		streams := ioutils.Streams{Stdout: &out, Stderr: &out}
 		// workspaceOverrideDir is an unconventional location that has a tools/bazel to be used.
 		// It must run the tools/bazel we placed under that location.
-		_, err := bzl.WithOverrideWorkspaceRoot(workspaceOverrideDir).Spawn([]string{"build"}, streams)
+		_, err := bzl.RunCommand([]string{"build"}, streams)
 		g.Expect(err).To(Not(HaveOccurred()))
 		g.Expect(out.String()).To(Equal("wrapper called"))
 	})
