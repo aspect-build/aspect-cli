@@ -90,23 +90,6 @@ func (b *bazel) WithEnv(env []string) Bazel {
 	return b
 }
 
-// // WithOverrideWorkspaceRoot returns a new instance of Bazel, overriding the
-// // value for the workspace root.
-// func (b *bazel) WithOverrideWorkspaceRoot(workspaceRoot string) Bazel {
-// 	newBazel := *b
-// 	newBazel.workspaceFinder = nil
-// 	newBazel.overrideWorkspaceRoot = workspaceRoot
-// 	return &newBazel
-// }
-
-// // WithEnv returns a new instance of Bazel, setting the provided environment
-// // variables.
-// func (b *bazel) WithEnv(env []string) Bazel {
-// 	newBazel := *b
-// 	newBazel.env = env
-// 	return &newBazel
-// }
-
 // AvailableStartupFlags will return the full list of startup flags available for
 // the current version of bazel. This is NOT the list of startup flags that have been
 // set for the current run via SetStartupFlags.
