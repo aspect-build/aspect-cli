@@ -44,7 +44,7 @@ func (v *Shutdown) Run(ctx context.Context, _ *cobra.Command, args []string) err
 		return err
 	}
 
-	if exitCode, err := bzl.RunCommand(bazelCmd, v.Streams); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(v.Streams, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

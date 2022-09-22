@@ -48,7 +48,7 @@ func TestVersion(t *testing.T) {
 		bzl := bazel_mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			RunCommand([]string{"version"}, streams).
+			RunCommand(streams, "version").
 			Return(0, nil)
 
 		v := version.New(streams)
@@ -66,7 +66,7 @@ func TestVersion(t *testing.T) {
 		bzl := bazel_mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			RunCommand([]string{"version", "--gnu_format"}, streams).
+			RunCommand(streams, "version", "--gnu_format").
 			Return(0, nil)
 
 		v := version.New(streams)

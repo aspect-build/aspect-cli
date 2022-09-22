@@ -61,7 +61,7 @@ func (v *Version) Run(bzl bazel.Bazel) error {
 		// Propagate the flag
 		bazelCmd = append(bazelCmd, "--gnu_format")
 	}
-	bzl.RunCommand(bazelCmd, v.Streams)
+	bzl.RunCommand(v.Streams, bazelCmd...)
 
 	return nil
 }

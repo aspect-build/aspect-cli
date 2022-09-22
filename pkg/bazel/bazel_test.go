@@ -68,7 +68,7 @@ func TestBazel(t *testing.T) {
 		env := []string{fmt.Sprintf("FOO=%s", "BAR")}
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		_, err := bzl.WithEnv(env).RunCommand([]string{"--print_env"}, streams)
+		_, err := bzl.WithEnv(env).RunCommand(streams, "--print_env")
 		g.Expect(err).To(Not(HaveOccurred()))
 		g.Expect(stdout.String()).To(ContainSubstring("FOO=BAR"))
 	})
@@ -82,7 +82,7 @@ func TestBazel(t *testing.T) {
 		streams := ioutils.Streams{Stdout: &out, Stderr: &out}
 		// workspaceOverrideDir is an unconventional location that has a tools/bazel to be used.
 		// It must run the tools/bazel we placed under that location.
-		_, err := bzl.RunCommand([]string{"build"}, streams)
+		_, err := bzl.RunCommand(streams, "build")
 		g.Expect(err).To(Not(HaveOccurred()))
 		g.Expect(out.String()).To(Equal("wrapper called"))
 	})

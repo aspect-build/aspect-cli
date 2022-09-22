@@ -51,7 +51,7 @@ type BazelProvider func() (Bazel, error)
 type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
-	RunCommand(command []string, streams ioutils.Streams) (int, error)
+	RunCommand(streams ioutils.Streams, command ...string) (int, error)
 	Flags() (map[string]*flags.FlagInfo, error)
 	AvailableStartupFlags() []string
 	SetStartupFlags(flags []string)
@@ -114,7 +114,7 @@ func (*bazel) createRepositories() *core.Repositories {
 	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
 }
 
-func (b *bazel) RunCommand(command []string, streams ioutils.Streams) (int, error) {
+func (b *bazel) RunCommand(streams ioutils.Streams, command ...string) (int, error) {
 	// Prepend startup flags
 	command = append(startupFlags, command...)
 
@@ -138,7 +138,7 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := b.RunCommand([]string{"help", "flags-as-proto"}, streams)
+		_, err := b.RunCommand(streams, "help", "flags-as-proto")
 		bazelErrs <- err
 	}()
 
@@ -186,7 +186,7 @@ func (b *bazel) AQuery(query string) (*analysis.ActionGraphContainer, error) {
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := b.RunCommand([]string{"aquery", "--output=proto", query}, streams)
+		_, err := b.RunCommand(streams, "aquery", "--output=proto", query)
 		bazelErrs <- err
 	}()
 
