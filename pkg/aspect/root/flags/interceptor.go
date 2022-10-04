@@ -22,7 +22,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -30,10 +29,6 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-)
-
-var (
-	faint = color.New(color.Faint)
 )
 
 // AddGlobalFlags will add aspect specfic flags to all cobra commands.
@@ -120,13 +115,12 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 		}
 
 		viper.AutomaticEnv()
-		if err := viper.ReadInConfig(); err == nil {
-			faint.Fprintln(streams.Stderr, "Using config file:", viper.ConfigFileUsed())
-		}
 
-		if err := repoViper.ReadInConfig(); err == nil {
-			faint.Fprintln(streams.Stderr, "Using config file:", repoViper.ConfigFileUsed())
-		}
+		// Attempt to read the config files. If we add logging infrastructure, we should log an info
+		// when starting to read (viper.ConfigFileUsed(), repoViper.ConfigFileUsed()) and a warning
+		// if the file(s) are not found.
+		_ = viper.ReadInConfig()
+		_ = repoViper.ReadInConfig()
 
 		viper.MergeConfigMap(repoViper.AllSettings())
 
