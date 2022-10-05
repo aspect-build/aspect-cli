@@ -37,7 +37,7 @@ import (
 // This is for performance, avoiding a lookup of the possible startup flags for every
 // instance of a bazel struct.
 // We know the flags will be constant for the lifetime of an `aspect` cli execution.
-var availableStartupFlags []string
+var allFlags map[string]*flags.FlagInfo
 
 // Global mutable state!
 // This is for performance, avoiding needing to set the specified startup flags for every
@@ -52,9 +52,8 @@ type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
 	RunCommand(streams ioutils.Streams, command ...string) (int, error)
+	InitializeStartupFlags(args []string) ([]string, error)
 	Flags() (map[string]*flags.FlagInfo, error)
-	AvailableStartupFlags() []string
-	SetStartupFlags(flags []string)
 }
 
 type bazel struct {
@@ -90,22 +89,6 @@ func (b *bazel) WithEnv(env []string) Bazel {
 	return b
 }
 
-// AvailableStartupFlags will return the full list of startup flags available for
-// the current version of bazel. This is NOT the list of startup flags that have been
-// set for the current run via SetStartupFlags.
-func (b *bazel) AvailableStartupFlags() []string {
-	if len(availableStartupFlags) == 0 {
-		b.Flags()
-	}
-	return availableStartupFlags
-}
-
-// SetStartupFlags will set the startup flags to be used by bazel during all bazel runs
-// performed during the current instantiation of the aspect CLI.
-func (b *bazel) SetStartupFlags(flags []string) {
-	startupFlags = flags
-}
-
 func (*bazel) createRepositories() *core.Repositories {
 	gcs := &repositories.GCSRepo{}
 	gitHub := repositories.CreateGitHubRepo(core.GetEnvOrConfig("BAZELISK_GITHUB_TOKEN"))
@@ -125,8 +108,53 @@ func (b *bazel) RunCommand(streams ioutils.Streams, command ...string) (int, err
 	return exitCode, err
 }
 
-// Flags fetches the metadata for Bazel's command line flags.
+// Initializes start-up flags from args and returns args without start-up flags
+func (b *bazel) InitializeStartupFlags(args []string) ([]string, error) {
+	// Ensure allFlags is initialized
+	b.Flags()
+
+	argsWithoutStartupFlags := make([]string, 0, 1000)
+	argsWithoutStartupFlags = append(argsWithoutStartupFlags, args[0])
+
+	allStartupFlags := make([]string, 0, 1000)
+	for flagName, flagInfo := range allFlags {
+		for _, command := range flagInfo.Commands {
+			if command == "startup" {
+				allStartupFlags = append(allStartupFlags, flagName)
+				if flagInfo.GetHasNegativeFlag() {
+					allStartupFlags = append(allStartupFlags, "no"+flagName)
+				}
+			}
+		}
+	}
+
+	startupFlags = make([]string, 0, 100)
+	for _, arg := range args[1:] {
+		isStartup := false
+		for _, availableStartupFlag := range allStartupFlags {
+			if arg == "--"+availableStartupFlag || strings.Contains(arg, "--"+availableStartupFlag+"=") {
+				isStartup = true
+				break
+			}
+		}
+		if isStartup {
+			startupFlags = append(startupFlags, arg)
+		} else {
+			argsWithoutStartupFlags = append(argsWithoutStartupFlags, arg)
+		}
+	}
+
+	return argsWithoutStartupFlags, nil
+}
+
+// Flags fetches the metadata for Bazel's command line flag via `bazel help flags-as-proto`
 func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
+	if allFlags != nil {
+		return allFlags, nil
+	}
+
+	allFlags = make(map[string]*flags.FlagInfo)
+
 	r, w := io.Pipe()
 	streams := ioutils.Streams{
 		Stdin:  os.Stdin,
@@ -156,20 +184,11 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
 	}
 
-	flags := make(map[string]*flags.FlagInfo)
 	for i := range flagCollection.FlagInfos {
-		flags[*flagCollection.FlagInfos[i].Name] = flagCollection.FlagInfos[i]
-		for _, command := range flags[*flagCollection.FlagInfos[i].Name].Commands {
-			if command == "startup" {
-				availableStartupFlags = append(availableStartupFlags, *flagCollection.FlagInfos[i].Name)
-				if flags[*flagCollection.FlagInfos[i].Name].GetHasNegativeFlag() {
-					availableStartupFlags = append(availableStartupFlags, "no"+*flagCollection.FlagInfos[i].Name)
-				}
-			}
-		}
+		allFlags[*flagCollection.FlagInfos[i].Name] = flagCollection.FlagInfos[i]
 	}
 
-	return flags, nil
+	return allFlags, nil
 }
 
 // AQuery runs a `bazel aquery` command and returns the resulting parsed proto data.

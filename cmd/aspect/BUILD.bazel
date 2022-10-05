@@ -12,6 +12,7 @@ go_library(
         "//cmd/aspect/root",
         "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",
+        "//pkg/bazel",
         "//pkg/ioutils",
         "//pkg/plugin/system",
     ],

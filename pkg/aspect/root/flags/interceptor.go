@@ -26,7 +26,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -49,33 +48,6 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 				return err
 			}
 		}
-
-		bzl, err := bazel.FindFromWd()
-		if err != nil {
-			return err
-		}
-		availableStartupFlags := bzl.AvailableStartupFlags()
-		startupFlags := []string{}
-		argsWithoutStartupFlags := []string{}
-
-		for _, arg := range args {
-			isStartup := false
-			for _, availableStartupFlag := range availableStartupFlags {
-				if arg == "--"+availableStartupFlag || strings.Contains(arg, "--"+availableStartupFlag+"=") {
-					isStartup = true
-					break
-				}
-			}
-
-			if isStartup {
-				startupFlags = append(startupFlags, arg)
-			} else {
-				argsWithoutStartupFlags = append(argsWithoutStartupFlags, arg)
-			}
-		}
-
-		bzl.SetStartupFlags(startupFlags)
-		args = argsWithoutStartupFlags
 
 		// If user specifies the config file to use then we want to only use that config.
 		// If user does not specify a config file to use then we want to load ".aspect" from the
