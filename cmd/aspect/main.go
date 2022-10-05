@@ -23,6 +23,7 @@ import (
 	"aspect.build/cli/cmd/aspect/root"
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
 )
@@ -45,6 +46,17 @@ func main() {
 	if wd, exists := os.LookupEnv("BUILD_WORKING_DIRECTORY"); exists {
 		_ = os.Chdir(wd)
 	}
+
+	bzl, err := bazel.FindFromWd()
+	if err != nil {
+		aspecterrors.HandleError(err)
+	}
+
+	argsWithoutStartupFlags, err := bzl.InitializeStartupFlags(os.Args)
+	if err != nil {
+		aspecterrors.HandleError(err)
+	}
+	os.Args = argsWithoutStartupFlags
 
 	pluginSystem := system.NewPluginSystem()
 	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {

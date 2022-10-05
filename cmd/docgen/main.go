@@ -19,18 +19,31 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 
 	"aspect.build/cli/cmd/aspect/root"
 	"aspect.build/cli/pkg/aspect/root/flags"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
 )
 
 func main() {
 	cmd := &cobra.Command{Use: "docgen"}
+
+	bzl, err := bazel.FindFromWd()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	argsWithoutStartupFlags, err := bzl.InitializeStartupFlags(os.Args)
+	if err != nil {
+		log.Fatal(err)
+	}
+	os.Args = argsWithoutStartupFlags
 
 	pluginSystem := system.NewPluginSystem()
 	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
