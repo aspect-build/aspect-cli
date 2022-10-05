@@ -164,11 +164,12 @@ func ProcessQueries(presets []*PresetQuery) (map[string]*PresetQuery, []string, 
 	return processedPresets, presetNames, nil
 }
 
-func RunQuery(bzl bazel.Bazel, verb string, query string, streams ioutils.Streams) error {
+func RunQuery(bzl bazel.Bazel, verb string, query string, streams ioutils.Streams, args ...string) error {
 	bazelCmd := []string{
 		verb,
 		query,
 	}
+	bazelCmd = append(bazelCmd, args...)
 
 	if exitCode, err := bzl.RunCommand(streams, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{

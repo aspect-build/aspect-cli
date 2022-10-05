@@ -115,9 +115,11 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return shared.GetPrettyError(cmd, err)
 		}
-	}
 
-	return shared.RunQuery(q.Bzl, presetVerb, query, q.Streams)
+		return shared.RunQuery(q.Bzl, presetVerb, query, q.Streams)
+	} else {
+		return shared.RunQuery(q.Bzl, presetVerb, query, q.Streams, args[1:]...)
+	}
 }
 
 func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question string) error {
