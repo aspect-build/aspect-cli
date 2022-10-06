@@ -18,7 +18,6 @@ package flags
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -35,33 +34,6 @@ var (
 		"show_make_env",
 	}
 )
-
-// MultiString is the golang implementation of bazel multi-string arguments that satisfies
-// Value from cobra's Flags().Var functions.
-type MultiString struct {
-	value []string
-}
-
-// Set satisfies Value from cobra's Flags().Var functions.
-func (s *MultiString) Set(value string) error {
-	s.value = append(s.value, value)
-	return nil
-}
-
-// Type satisfies Value from cobra's Flags().Var functions.
-func (s *MultiString) Type() string {
-	return "multiString"
-}
-
-// String satisfies Value from cobra's Flags().Var functions.
-func (s *MultiString) String() string {
-	return fmt.Sprintf("[ %s ]", strings.Join(s.value, ", "))
-}
-
-// First satisfies Value from cobra's Flags().Var functions
-func (s *MultiString) First() string {
-	return (s.value)[0]
-}
 
 // AddBazelFlags will process the configured cobra commands and add bazel
 // flags to those commands.
