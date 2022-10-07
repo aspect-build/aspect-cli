@@ -23,6 +23,15 @@ import (
 	"github.com/spf13/pflag"
 )
 
+const (
+	BoolFlagTrue  = "true"
+	BoolFlagFalse = "false"
+	BoolFlagYes   = "yes"
+	BoolFlagNo    = "no"
+	BoolFlag1     = "1"
+	BoolFlag0     = "0"
+)
+
 func RegisterNoableBool(flags *pflag.FlagSet, name string, value bool, usage string) *bool {
 	return RegisterNoableBoolP(flags, name, "", value, usage)
 }
@@ -45,27 +54,28 @@ func RegisterNoableBoolP(
 	usage string) *bool {
 
 	result := value
-	nb := &noableBool{value: &result}
 
+	trueNB := &noableBool{value: &result, valueWhenTrue: true}
 	flag := &pflag.Flag{
 		Name:      name,
 		Shorthand: shorthand,
 		Usage:     usage,
-		Value:     nb,
-		DefValue:  nb.String(),
+		Value:     trueNB,
+		DefValue:  trueNB.String(),
 		// The value that will be passed to Set() if no other values are specified.
-		NoOptDefVal: "true",
+		NoOptDefVal: BoolFlagTrue,
 	}
 	flags.AddFlag(flag)
 
+	falseNB := &noableBool{value: &result, valueWhenTrue: false}
 	noFlag := &pflag.Flag{
 		Name:      "no" + name,
 		Shorthand: "",
 		Usage:     usage,
-		Value:     nb,
-		DefValue:  nb.String(),
+		Value:     falseNB,
+		DefValue:  falseNB.String(),
 		// The value that will be passed to Set() if no other values are specified.
-		NoOptDefVal: "false",
+		NoOptDefVal: BoolFlagTrue,
 	}
 	flags.AddFlag(noFlag)
 
@@ -79,6 +89,8 @@ func boolStr(value bool) string {
 type noableBool struct {
 	// The address of the actual value.
 	value *bool
+	// The value that should be set when the flag is set to true.
+	valueWhenTrue bool
 }
 
 func (nb *noableBool) Type() string {
@@ -90,13 +102,32 @@ func (nb *noableBool) String() string {
 }
 
 func (nb *noableBool) Set(value string) error {
-	switch strings.ToLower(value) {
-	case "true", "yes", "1":
-		*nb.value = true
-	case "false", "no", "0":
-		*nb.value = false
-	default:
-		return fmt.Errorf("invalid bool value %s", value)
+	normalizedValue := strings.ToLower(value)
+	var inValue bool
+	// If this is the noXXX flag
+	if !nb.valueWhenTrue {
+		// The only allowed value for a noXXX flag is true
+		if normalizedValue == BoolFlagTrue {
+			inValue = true
+		} else {
+			return fmt.Errorf("invalid no flag value '%s'", value)
+		}
+	} else {
+		switch normalizedValue {
+		case BoolFlagTrue, BoolFlagYes, BoolFlag1:
+			inValue = true
+		case BoolFlagFalse, BoolFlagNo, BoolFlag0:
+			inValue = false
+		default:
+			return fmt.Errorf("invalid bool value '%s'", value)
+		}
+	}
+
+	// Set the actual boolean value
+	if inValue {
+		*nb.value = nb.valueWhenTrue
+	} else {
+		*nb.value = !nb.valueWhenTrue
 	}
 	return nil
 }

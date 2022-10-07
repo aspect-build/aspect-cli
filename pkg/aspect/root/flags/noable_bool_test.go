@@ -17,7 +17,7 @@
 package flags_test
 
 import (
-	"strings"
+	"fmt"
 	"testing"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
@@ -25,29 +25,31 @@ import (
 	"github.com/spf13/pflag"
 )
 
-func assertMsg(args []string) string {
-	return "parsing '" + strings.Join(args, " ") + "'"
+func assertMsg(arg string) string {
+	return fmt.Sprintf("parsing '%s'", arg)
 }
 
-func doBoolFlagTest(g *WithT, initial, expected bool, args ...string) {
+func doBoolFlagTest(g *WithT, initial, expected bool, arg string) {
 	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	boolValuePtr := flags.RegisterNoableBoolP(flagSet, "foo", "f", initial, "this is a boolean flag")
 	g.Expect(*boolValuePtr).To(Equal(initial))
 
-	msg := assertMsg(args)
-	err := flagSet.Parse(args)
+	msg := assertMsg(arg)
+	err := flagSet.Parse([]string{arg})
 	g.Expect(err).ToNot(HaveOccurred(), msg)
 	g.Expect(*boolValuePtr).To(Equal(expected), msg)
 }
 
-func doInvalidBoolFlagTest(g *WithT, args ...string) {
+func doInvalidBoolFlagTest(g *WithT, arg string, expectedErrMsgSubstring string) {
 	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	flags.RegisterNoableBoolP(flagSet, "foo", "f", false, "this is a boolean flag")
 
-	msg := assertMsg(args)
-	err := flagSet.Parse(args)
+	msg := assertMsg(arg)
+	err := flagSet.Parse([]string{arg})
 	g.Expect(err).To(HaveOccurred(), msg)
-	g.Expect(err.Error()).To(ContainSubstring("invalid bool value"))
+	if len(expectedErrMsgSubstring) > 0 {
+		g.Expect(err.Error()).To(ContainSubstring(expectedErrMsgSubstring), msg)
+	}
 }
 
 func TestNoableBool(t *testing.T) {
@@ -62,5 +64,7 @@ func TestNoableBool(t *testing.T) {
 	doBoolFlagTest(g, true, false, "--foo=0")
 	doBoolFlagTest(g, false, true, "-f")
 
-	doInvalidBoolFlagTest(g, "--foo=hello")
+	doInvalidBoolFlagTest(g, "--foo=hello", "invalid bool value 'hello'")
+	doInvalidBoolFlagTest(g, "--nofoo=yes", "invalid no flag value 'yes'")
+	doInvalidBoolFlagTest(g, "--nonofoo", "")
 }
