@@ -17,6 +17,7 @@
 package flags_test
 
 import (
+	"log"
 	"strings"
 	"testing"
 
@@ -25,12 +26,14 @@ import (
 	"github.com/spf13/pflag"
 )
 
-func doBoolFlagTest(g *WithT, expected bool, args ...string) {
-	initValue := !expected
-
+func doBoolFlagTest(g *WithT, initial, expected bool, args ...string) {
 	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	boolValuePtr := flags.RegisterNoableBool(flagSet, "foo", false, "this is a boolean flag")
-	*boolValuePtr = initValue
+	*boolValuePtr = initial
+
+	// DEBUG BEGIN
+	log.Printf("*** CHUCK: =====")
+	// DEBUG END
 
 	msg := "parsing '" + strings.Join(args, " ") + "'"
 	err := flagSet.Parse(args)
@@ -42,12 +45,10 @@ func TestNoableBool(t *testing.T) {
 	g := NewWithT(t)
 	// From Bazel doc
 	// https://bazel.build/reference/command-line-reference#option-syntax
-	doBoolFlagTest(g, true, "--foo")
-	doBoolFlagTest(g, false, "--nofoo")
-	doBoolFlagTest(g, true, "--foo=true")
-	doBoolFlagTest(g, false, "--foo=false")
-	doBoolFlagTest(g, true, "--foo=yes")
-	doBoolFlagTest(g, false, "--foo=no")
-	doBoolFlagTest(g, true, "--foo=1")
-	doBoolFlagTest(g, false, "--foo=0")
+	doBoolFlagTest(g, false, true, "--foo")
+	doBoolFlagTest(g, true, false, "--nofoo")
+	doBoolFlagTest(g, false, true, "--foo=yes")
+	doBoolFlagTest(g, true, false, "--foo=no")
+	doBoolFlagTest(g, false, true, "--foo=1")
+	doBoolFlagTest(g, true, false, "--foo=0")
 }
