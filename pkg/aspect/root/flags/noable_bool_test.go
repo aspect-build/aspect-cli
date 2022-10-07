@@ -27,7 +27,7 @@ import (
 
 func doBoolFlagTest(g *WithT, initial, expected bool, args ...string) {
 	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
-	boolValuePtr := flags.RegisterNoableBool(flagSet, "foo", false, "this is a boolean flag")
+	boolValuePtr := flags.RegisterNoableBoolP(flagSet, "foo", "f", false, "this is a boolean flag")
 	*boolValuePtr = initial
 
 	msg := "parsing '" + strings.Join(args, " ") + "'"
@@ -46,4 +46,5 @@ func TestNoableBool(t *testing.T) {
 	doBoolFlagTest(g, true, false, "--foo=no")
 	doBoolFlagTest(g, false, true, "--foo=1")
 	doBoolFlagTest(g, true, false, "--foo=0")
+	doBoolFlagTest(g, false, true, "-f")
 }

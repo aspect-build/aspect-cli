@@ -86,7 +86,7 @@ func AddBazelFlags(cmd *cobra.Command) error {
 					// subcommand.Flags().StringP(flagName, flagAbbreviation, "false", flagDoc)
 					// subcommand.Flags().String("no"+flagName, "false", flagDoc)
 					// TODO(chuck): Do something about the flagAbbreviation
-					RegisterNoableBool(subcommand.Flags(), flagName, false, flagDoc)
+					RegisterNoableBoolP(subcommand.Flags(), flagName, flagAbbreviation, false, flagDoc)
 					markFlagAsHidden(subcommand, flagName)
 					markFlagAsHidden(subcommand, "no"+flagName)
 				} else if flag.GetAllowsMultiple() {

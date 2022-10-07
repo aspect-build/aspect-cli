@@ -23,6 +23,10 @@ import (
 	"github.com/spf13/pflag"
 )
 
+func RegisterNoableBool(flags *pflag.FlagSet, name string, value bool, usage string) *bool {
+	return RegisterNoableBoolP(flags, name, "", value, usage)
+}
+
 // Register a boolean flag that supports the Bazel option parsing.
 // https://bazel.build/reference/command-line-reference#option-syntax
 // Examples:
@@ -33,14 +37,19 @@ import (
 //	--foo=no
 //	--foo=1
 //	--foo=0
-func RegisterNoableBool(flags *pflag.FlagSet, name string, value bool, usage string) *bool {
-	result := value
+func RegisterNoableBoolP(
+	flags *pflag.FlagSet,
+	name string,
+	shorthand string,
+	value bool,
+	usage string) *bool {
 
+	result := value
 	nb := &noableBool{value: &result}
 
 	flag := &pflag.Flag{
 		Name:      name,
-		Shorthand: "",
+		Shorthand: shorthand,
 		Usage:     usage,
 		Value:     nb,
 		DefValue:  nb.String(),
