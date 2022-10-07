@@ -40,10 +40,15 @@ func doBoolFlagTest(g *WithT, initial, expected bool, args ...string) {
 	g.Expect(*boolValuePtr).To(Equal(expected), msg)
 }
 
-// func doInvalidBoolFlagTest(g *WithT, args ...string) {
-// 	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
-// 	boolValuePtr := flags.RegisterNoableBoolP(flagSet, "foo", "f", false, "this is a boolean flag")
-// }
+func doInvalidBoolFlagTest(g *WithT, args ...string) {
+	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.RegisterNoableBoolP(flagSet, "foo", "f", false, "this is a boolean flag")
+
+	msg := assertMsg(args)
+	err := flagSet.Parse(args)
+	g.Expect(err).To(HaveOccurred(), msg)
+	g.Expect(err.Error()).To(ContainSubstring("invalid bool value"))
+}
 
 func TestNoableBool(t *testing.T) {
 	g := NewWithT(t)
@@ -56,4 +61,6 @@ func TestNoableBool(t *testing.T) {
 	doBoolFlagTest(g, false, true, "--foo=1")
 	doBoolFlagTest(g, true, false, "--foo=0")
 	doBoolFlagTest(g, false, true, "-f")
+
+	doInvalidBoolFlagTest(g, "--foo=hello")
 }
