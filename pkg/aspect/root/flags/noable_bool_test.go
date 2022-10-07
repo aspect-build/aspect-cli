@@ -58,11 +58,16 @@ func TestNoableBool(t *testing.T) {
 	// https://bazel.build/reference/command-line-reference#option-syntax
 	doBoolFlagTest(g, false, true, "--foo")
 	doBoolFlagTest(g, true, false, "--nofoo")
+	doBoolFlagTest(g, false, true, "--foo=true")
+	doBoolFlagTest(g, true, false, "--foo=false")
 	doBoolFlagTest(g, false, true, "--foo=yes")
 	doBoolFlagTest(g, true, false, "--foo=no")
 	doBoolFlagTest(g, false, true, "--foo=1")
 	doBoolFlagTest(g, true, false, "--foo=0")
 	doBoolFlagTest(g, false, true, "-f")
+	doBoolFlagTest(g, false, true, "--foo=True")
+	doBoolFlagTest(g, false, true, "--foo=YES")
+	doBoolFlagTest(g, true, false, "--foo=nO")
 
 	doInvalidBoolFlagTest(g, "--foo=hello", "invalid bool value 'hello'")
 	doInvalidBoolFlagTest(g, "--nofoo=yes", "invalid no flag value 'yes'")
