@@ -17,7 +17,6 @@
 package flags_test
 
 import (
-	"log"
 	"strings"
 	"testing"
 
@@ -30,10 +29,6 @@ func doBoolFlagTest(g *WithT, initial, expected bool, args ...string) {
 	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	boolValuePtr := flags.RegisterNoableBool(flagSet, "foo", false, "this is a boolean flag")
 	*boolValuePtr = initial
-
-	// DEBUG BEGIN
-	log.Printf("*** CHUCK: =====")
-	// DEBUG END
 
 	msg := "parsing '" + strings.Join(args, " ") + "'"
 	err := flagSet.Parse(args)
