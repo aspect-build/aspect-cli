@@ -25,16 +25,25 @@ import (
 	"github.com/spf13/pflag"
 )
 
+func assertMsg(args []string) string {
+	return "parsing '" + strings.Join(args, " ") + "'"
+}
+
 func doBoolFlagTest(g *WithT, initial, expected bool, args ...string) {
 	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
-	boolValuePtr := flags.RegisterNoableBoolP(flagSet, "foo", "f", false, "this is a boolean flag")
-	*boolValuePtr = initial
+	boolValuePtr := flags.RegisterNoableBoolP(flagSet, "foo", "f", initial, "this is a boolean flag")
+	g.Expect(*boolValuePtr).To(Equal(initial))
 
-	msg := "parsing '" + strings.Join(args, " ") + "'"
+	msg := assertMsg(args)
 	err := flagSet.Parse(args)
 	g.Expect(err).ToNot(HaveOccurred(), msg)
 	g.Expect(*boolValuePtr).To(Equal(expected), msg)
 }
+
+// func doInvalidBoolFlagTest(g *WithT, args ...string) {
+// 	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
+// 	boolValuePtr := flags.RegisterNoableBoolP(flagSet, "foo", "f", false, "this is a boolean flag")
+// }
 
 func TestNoableBool(t *testing.T) {
 	g := NewWithT(t)
