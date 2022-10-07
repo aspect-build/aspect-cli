@@ -61,10 +61,6 @@ func AddBazelFlags(cmd *cobra.Command) error {
 		for _, command := range flag.Commands {
 			if command == "startup" {
 				if flag.GetHasNegativeFlag() {
-					// // We should not set these as Bool flags since Cobra doesn't allow for "no" values.
-					// // See https://github.com/aspect-build/aspect-cli/issues/287.
-					// cmd.PersistentFlags().String(flagName, "false", flagDoc)
-					// cmd.PersistentFlags().String("no"+flagName, "false", flagDoc)
 					RegisterNoableBool(cmd.PersistentFlags(), flagName, false, flagDoc)
 					markFlagAsHidden(cmd, flagName)
 					markFlagAsHidden(cmd, "no"+flagName)
@@ -81,11 +77,6 @@ func AddBazelFlags(cmd *cobra.Command) error {
 			if subcommand, ok := subCommands[command]; ok {
 				subcommand.DisableFlagParsing = true // only want to disable flag parsing on actual bazel verbs
 				if flag.GetHasNegativeFlag() {
-					// // We should not set these as Bool flags since Cobra doesn't allow for "no" values.
-					// // See https://github.com/aspect-build/aspect-cli/issues/287.
-					// subcommand.Flags().StringP(flagName, flagAbbreviation, "false", flagDoc)
-					// subcommand.Flags().String("no"+flagName, "false", flagDoc)
-					// TODO(chuck): Do something about the flagAbbreviation
 					RegisterNoableBoolP(subcommand.Flags(), flagName, flagAbbreviation, false, flagDoc)
 					markFlagAsHidden(subcommand, flagName)
 					markFlagAsHidden(subcommand, "no"+flagName)
