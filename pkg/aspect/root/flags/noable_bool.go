@@ -32,11 +32,12 @@ const (
 	BoolFlag0     = "0"
 )
 
+// RegisterNoableBool registers a boolean flag that supports Bazel option parsing.
 func RegisterNoableBool(flags *pflag.FlagSet, name string, value bool, usage string) *bool {
 	return RegisterNoableBoolP(flags, name, "", value, usage)
 }
 
-// Register a boolean flag that supports Bazel option parsing.
+// RegisterNoableBoolP registers a boolean flag that supports Bazel option parsing with a shorthand.
 // https://bazel.build/reference/command-line-reference#option-syntax
 //
 // This implementation normalizes any user-provided values before processing. Hence,
