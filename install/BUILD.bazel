@@ -1,0 +1,8 @@
+sh_binary(
+    name = "install",
+    srcs = ["install.sh"],
+    data = [
+        "//cmd/aspect",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
