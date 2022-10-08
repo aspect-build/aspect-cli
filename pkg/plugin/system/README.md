@@ -5,13 +5,13 @@ features on top of Bazel.
 
 ## Glossary
 
-- Aspect CLI Core, or simply Core, refers to the core system of the CLI that
-  holds the control over the lifecycle of Plugin instances.
-- Plugin instance, or sometimes just Plugin, refers to a binary application that
-  uses this SDK to extend the functionality of the Core.
-- Plugin maintainer refers to a person that maintains a Plugin implementation.
-- Aspect CLI SDK refers to the development kit that abstracts away all the
-  complexity of implementing a Plugin for the Core.
+-   Aspect CLI Core, or simply Core, refers to the core system of the CLI that
+    holds the control over the lifecycle of Plugin instances.
+-   Plugin instance, or sometimes just Plugin, refers to a binary application that
+    uses this SDK to extend the functionality of the Core.
+-   Plugin maintainer refers to a person that maintains a Plugin implementation.
+-   Aspect CLI SDK refers to the development kit that abstracts away all the
+    complexity of implementing a Plugin for the Core.
 
 ## Overview
 
