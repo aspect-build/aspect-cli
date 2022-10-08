@@ -41,7 +41,7 @@ assert_same_contents() {
   diff "${first}" "${second}" || fail "Contents for ${first} and ${second} differ."
 }
 
-# Test
+# Setup
 
 bin_dir="${PWD}/bin"
 expected_dest_path="${bin_dir}/aspect"
@@ -51,9 +51,21 @@ setup_test() {
   mkdir -p "${bin_dir}"
 }
 
-# Install the binary
+# Test clean install
+
 setup_test
 output="$("${install}" --bin "${bin_dir}")"
 assert_file_exists "${expected_dest_path}"
 assert_same_contents "${aspect}" "${expected_dest_path}"
 assert_match "Aspect CLI installed: ${expected_dest_path}" "${output}"
+
+# Test existing file
+
+setup_test
+echo "Not a binary" > "${expected_dest_path}"
+output="$("${install}" --bin "${bin_dir}")"
+assert_file_exists "${expected_dest_path}"
+assert_same_contents "${aspect}" "${expected_dest_path}"
+assert_match "Removing existing file ${expected_dest_path}" "${output}"
+assert_match "Aspect CLI installed: ${expected_dest_path}" "${output}"
+

@@ -94,7 +94,7 @@ dest_path="${bin_dir}/aspect"
 
 # Remove an existing file
 if [[ -e "${dest_path}" ]]; then
-  warn "Removing existing file ${dest_path}."
+  echo "Removing existing file ${dest_path}."
   rm "${dest_path}"
 fi
 
