@@ -51,6 +51,13 @@ setup_test() {
   mkdir -p "${bin_dir}"
 }
 
+# Test help flag
+
+setup_test
+output="$("${install}" --help)"
+assert_match "Install the Aspect CLI on the system." "${output}"
+assert_match "Usage:" "${output}"
+
 # Test clean install
 
 setup_test
