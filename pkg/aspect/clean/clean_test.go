@@ -170,7 +170,7 @@ func TestClean(t *testing.T) {
 		// Recorded your preference for next time
 		content, err := os.ReadFile(cfg.Name())
 		g.Expect(err).To(BeNil())
-		g.Expect(string(content)).To(Equal("[clean]\nskip_prompt=true\n"))
+		g.Expect(string(content)).To(ContainSubstring("[clean]\nskip_prompt=true"))
 
 		// If we run it again, there should be no prompt
 		c := clean.New(streams, bzl, true)
