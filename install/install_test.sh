@@ -76,3 +76,10 @@ assert_same_contents "${aspect}" "${expected_dest_path}"
 assert_match "Removing existing file ${expected_dest_path}" "${output}"
 assert_match "Aspect CLI installed: ${expected_dest_path}" "${output}"
 
+# Test create destination directory
+
+setup_test
+rm -rf "${bin_dir}"
+output="$("${install}" --bin "${bin_dir}")"
+assert_match "The installation directory was not found. Creating ${bin_dir}" "${output}"
+assert_match "Aspect CLI installed: ${expected_dest_path}" "${output}"

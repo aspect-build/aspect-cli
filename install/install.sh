@@ -68,6 +68,7 @@ EOF
 # Process Arguments
 
 bin_dir=/usr/local/bin
+create_if_missing=true
 args=()
 while (("$#")); do
   case "${1}" in
@@ -79,6 +80,14 @@ while (("$#")); do
       bin_dir="${2}"
       shift 2
       ;;
+    "--create_if_missing")
+      create_if_missing=true
+      shift 1
+      ;;
+    "--nocreate_if_missing")
+      create_if_missing=false
+      shift 1
+      ;;
     *)
       args+=("${1}")
       shift 1
@@ -87,7 +96,12 @@ while (("$#")); do
 done
 
 if [[ ! -d "${bin_dir}" ]]; then
-  usage_error "The installation directory was not found. ${bin_dir}"
+  if [[ "${create_if_missing}" == "true" ]]; then
+    echo "The installation directory was not found. Creating ${bin_dir}."
+    mkdir -p "${bin_dir}"
+  else
+    usage_error "The installation directory was not found. ${bin_dir}"
+  fi
 fi
 
 dest_path="${bin_dir}/aspect"
