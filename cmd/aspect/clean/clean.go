@@ -18,9 +18,7 @@ package clean
 
 import (
 	"context"
-	"os"
 
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/clean"
@@ -78,12 +76,15 @@ Workaround inconistent state:
 				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 				bzl, err := bzlProvider()
 				if err != nil {
 					return err
 				}
-				c := clean.NewDefault(streams, bzl, isInteractive)
+				isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(flags.InteractiveFlagName)
+				if err != nil {
+					return err
+				}
+				c := clean.NewDefault(streams, bzl, isInteractiveMode)
 				c.Expunge = expunge
 				c.ExpungeAsync = expungeAsync
 				return c.Run(cmd, args)
