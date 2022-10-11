@@ -4,7 +4,7 @@ Executes an aquery.
 
 ### Synopsis
 
-Executes a query language expression over a specified subgraph of the build dependency graph using aquery.
+Executes a query language expression over a specified subgraph of the action graph.
 
 ```
 aspect aquery [flags]
