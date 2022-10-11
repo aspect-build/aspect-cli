@@ -54,7 +54,7 @@ var (
 )
 
 func NewDefaultRootCmd(pluginSystem system.PluginSystem) *cobra.Command {
-	defaultInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+	defaultInteractive := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
 	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive)
 }
 
