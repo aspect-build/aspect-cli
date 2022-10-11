@@ -1,0 +1,20 @@
+sh_binary(
+    name = "install",
+    srcs = ["install.sh"],
+    data = [
+        "//cmd/aspect",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
+    name = "install_test",
+    srcs = ["install_test.sh"],
+    data = [
+        ":install",
+    ],
+    deps = [
+        "@aspect_bazel_lib//shlib/lib:assertions",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
