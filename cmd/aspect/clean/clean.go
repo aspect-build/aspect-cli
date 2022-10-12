@@ -41,6 +41,8 @@ func NewCleanCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobr
 	cmd := &cobra.Command{
 		Use:   "clean",
 		Short: "Removes the output tree.",
+		Args: cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
+		ValidArgs: []string{"all"},
 		Long: `Removes bazel-created output, including all object files, and bazel metadata.
 
 clean deletes the output directories for all build configurations performed by
@@ -53,6 +55,9 @@ configurations will be cleaned.
 Recall that each Bazel instance is associated with a single workspace,
 thus the clean command will delete all outputs from all builds you've
 done with that Bazel instance in that workspace.
+
+'clean all': Aspect CLI adds the ability to clean *all* Bazel workspaces on your machine,
+by adding the argument "all".
 
 NOTE: clean is primarily intended for reclaiming disk space for workspaces
 that are no longer needed.
@@ -80,11 +85,7 @@ Workaround inconistent state:
 				if err != nil {
 					return err
 				}
-				isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(flags.InteractiveFlagName)
-				if err != nil {
-					return err
-				}
-				c := clean.NewDefault(streams, bzl, isInteractiveMode)
+				c := clean.NewDefault(streams, bzl)
 				c.Expunge = expunge
 				c.ExpungeAsync = expungeAsync
 				return c.Run(cmd, args)
