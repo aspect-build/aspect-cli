@@ -8,7 +8,6 @@ go_library(
     deps = [
         "//pkg/aspecterrors",
         "//pkg/bazel",
-        "//pkg/configutils",
         "//pkg/ioutils",
         "//pkg/osutils/filesystem",
         "@com_github_manifoldco_promptui//:promptui",
@@ -26,6 +25,5 @@ go_test(
         "//pkg/ioutils",
         "@com_github_golang_mock//gomock",
         "@com_github_onsi_gomega//:gomega",
-        "@com_github_spf13_viper//:viper",
     ],
 )

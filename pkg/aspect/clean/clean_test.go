@@ -18,13 +18,10 @@ package clean_test
 
 import (
 	"fmt"
-	"os"
-	"strings"
 	"testing"
 
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
-	"github.com/spf13/viper"
 
 	"aspect.build/cli/pkg/aspect/clean"
 	"aspect.build/cli/pkg/bazel/mock"
@@ -43,30 +40,6 @@ func (p deny) Run() (string, error) {
 	return "", fmt.Errorf("said no")
 }
 
-type chooseReclaim struct{}
-
-func (p chooseReclaim) Run() (int, string, error) {
-	return 0, clean.ReclaimOption, nil
-}
-
-type chooseNonIncremental struct{}
-
-func (p chooseNonIncremental) Run() (int, string, error) {
-	return 2, clean.NonIncrementalOption, nil
-}
-
-type chooseInvalidateRepos struct{}
-
-func (p chooseInvalidateRepos) Run() (int, string, error) {
-	return 3, clean.InvalidateReposOption, nil
-}
-
-type chooseWorkaround struct{}
-
-func (p chooseWorkaround) Run() (int, string, error) {
-	return 4, clean.WorkaroundOption, nil
-}
-
 func TestClean(t *testing.T) {
 
 	t.Run("clean calls bazel clean", func(t *testing.T) {
@@ -81,7 +54,7 @@ func TestClean(t *testing.T) {
 			RunCommand(streams, "clean").
 			Return(0, nil)
 
-		b := clean.New(streams, bzl, false)
+		b := clean.New(streams, bzl)
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
 
@@ -97,7 +70,7 @@ func TestClean(t *testing.T) {
 			RunCommand(streams, "clean", "--expunge").
 			Return(0, nil)
 
-		b := clean.New(streams, bzl, false)
+		b := clean.New(streams, bzl)
 		b.Expunge = true
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
@@ -114,109 +87,8 @@ func TestClean(t *testing.T) {
 			RunCommand(streams, "clean", "--expunge_async").
 			Return(0, nil)
 
-		b := clean.New(streams, bzl, false)
+		b := clean.New(streams, bzl)
 		b.ExpungeAsync = true
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
-	})
-
-	t.Run("interactive clean prompts for usage, option 1", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
-		bzl := mock.NewMockBazel(ctrl)
-		bzl.
-			EXPECT().
-			RunCommand(streams, "clean").
-			Return(0, nil)
-
-		b := clean.New(streams, bzl, true)
-
-		b.Behavior = chooseReclaim{}
-		b.Remember = deny{}
-
-		g.Expect(b.Run(nil, []string{})).Should(Succeed())
-		g.Expect(stdout.String()).To(ContainSubstring("skip this prompt"))
-	})
-
-	t.Run("interactive clean prompts for usage, option 1 and save", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
-		bzl := mock.NewMockBazel(ctrl)
-		bzl.
-			EXPECT().
-			RunCommand(streams, "clean").
-			Return(0, nil).AnyTimes()
-
-		b := clean.New(streams, bzl, true)
-
-		viper := *viper.New()
-		cfg, err := os.CreateTemp(os.Getenv("TEST_TMPDIR"), "cfg***.ini")
-		g.Expect(err).To(BeNil())
-
-		viper.SetConfigFile(cfg.Name())
-		b.Behavior = chooseReclaim{}
-		b.Remember = confirm{}
-		b.Prefs = viper
-		g.Expect(b.Run(nil, []string{})).Should(Succeed())
-		g.Expect(stdout.String()).To(ContainSubstring("skip this prompt"))
-
-		// Recorded your preference for next time
-		content, err := os.ReadFile(cfg.Name())
-		g.Expect(err).To(BeNil())
-		g.Expect(string(content)).To(ContainSubstring("[clean]\nskip_prompt=true"))
-
-		// If we run it again, there should be no prompt
-		c := clean.New(streams, bzl, true)
-		c.Prefs = viper
-		g.Expect(c.Run(nil, []string{})).Should(Succeed())
-	})
-
-	t.Run("interactive clean prompts for usage, option 2", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
-
-		c := clean.New(streams, nil, true)
-		c.Behavior = chooseNonIncremental{}
-		g.Expect(c.Run(nil, []string{})).Should(Succeed())
-		g.Expect(stdout.String()).To(ContainSubstring("use the --output_base flag"))
-	})
-
-	t.Run("interactive clean prompts for usage, option 3", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
-
-		c := clean.New(streams, nil, true)
-		c.Behavior = chooseInvalidateRepos{}
-		g.Expect(c.Run(nil, []string{})).Should(Succeed())
-		g.Expect(stdout.String()).To(ContainSubstring("aspect sync --configure"))
-	})
-
-	t.Run("interactive clean prompts for usage, option 5", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
-		bzl := mock.NewMockBazel(ctrl)
-		bzl.
-			EXPECT().
-			RunCommand(streams, "clean").
-			Return(0, nil)
-
-		c := clean.New(streams, bzl, true)
-		c.Behavior = chooseWorkaround{}
-		c.Workaround = confirm{}
-		g.Expect(c.Run(nil, []string{})).Should(Succeed())
-		g.Expect(stdout.String()).To(ContainSubstring("recommend you file a bug"))
 	})
 }
