@@ -47,7 +47,7 @@ func NewRunCmd(
 ) *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",
-		Short: "Builds the specified target and runs it with the given arguments.",
+		Short: "Build a single target and run it with the given arguments",
 		// TODO(f0rmiga): the following comment from 'bazel --help run' may not
 		// be what we want to provide to our users.
 		Long: `'run' accepts any 'build' options, and will inherit any defaults
@@ -56,6 +56,7 @@ provided by .bazelrc.
 If your script needs stdin or execution not constrained by the bazel lock,
 use 'bazel run --script_path' to write a script and then execute it.
 `,
+		GroupID: "common",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

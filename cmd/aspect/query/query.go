@@ -35,8 +35,14 @@ func NewDefaultQueryCmd() *cobra.Command {
 func NewQueryCommand(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query",
-		Short: "Executes a dependency graph query.",
-		Long:  "Executes a query language expression over a specified subgraph of the build dependency graph.",
+		Short: "Query the dependency graph, ignoring configuration flags",
+		Long:  `Executes a query language expression over a specified subgraph of the build dependency graph.
+
+Note that this ignores the current configuration. Most users should use cquery instead,
+unless you have a specific need to query the unconfigured graph.`,
+		// Note: we list query in the "built-in" rather than "common" group because most users should
+		// use cquery most of the time.
+		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

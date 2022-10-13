@@ -32,7 +32,7 @@ func NewDefaultPrintActionCmd() *cobra.Command {
 func NewPrintActionCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "print_action",
-		Short: "Prints the command line args for compiling a file.",
+		Short: "Print the command line args for compiling a file",
 		Long: `Builds the specified targets and prints the extra actions for the given
 targets. Right now, the targets have to be relative paths to source files,
 and the --compile_one_dependency option has to be enabled.
@@ -43,6 +43,7 @@ all your 'build' options to 'print_action' too.
 
 See 'bazel help target-syntax' for details and examples on how to
 specify targets.`,
+		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

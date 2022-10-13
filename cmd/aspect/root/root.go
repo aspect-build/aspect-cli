@@ -74,6 +74,9 @@ func NewRootCmd(
 	}
 
 	flags.AddGlobalFlags(cmd, defaultInteractive)
+	cmd.AddGroup(&cobra.Group{ID: "common", Title: "Common Bazel Commands:"})
+	cmd.AddGroup(&cobra.Group{ID: "plugin", Title: "Custom Commands from Plugins:"})
+	cmd.AddGroup(&cobra.Group{ID: "built-in", Title: "Other Bazel Built-in Commands:"})
 
 	// ### Child commands
 	// IMPORTANT: when adding a new command, also update the COMMAND_LIST list in /docs/command_list.bzl

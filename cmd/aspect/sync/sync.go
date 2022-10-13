@@ -32,12 +32,13 @@ func NewDefaultSyncCmd() *cobra.Command {
 func NewSyncCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Syncs all repositories specified in the workspace file.",
+		Short: "Sync all repositories specified in the WORKSPACE file",
 		Long: `Ensures that all Starlark repository rules of the top-level WORKSPACE
 file are called.
 
 NOTE: This command is still very experimental and the precise semantics
 will change in the near future.`,
+		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

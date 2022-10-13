@@ -32,10 +32,11 @@ func NewDefaultCanonicalizeFlagsCmd() *cobra.Command {
 func NewCanonicalizeFlagsCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "canonicalize-flags",
-		Short: "Canonicalizes a list of bazel options.",
+		Short: "Present a list of bazel options in a canonical form",
 		Long: `This command canonicalizes a list of bazel options.
-
+		
 Don't forget to prepend  '--' to end option parsing before the flags to canonicalize.`,
+		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

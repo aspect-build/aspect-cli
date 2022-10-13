@@ -35,8 +35,9 @@ func NewDefaultAQueryCmd() *cobra.Command {
 func NewAQueryCommand(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "aquery",
-		Short: "Executes an aquery.",
-		Long:  "Executes a query language expression over a specified subgraph of the build dependency graph using aquery.",
+		Short: "Query the action graph",
+		Long:  "Executes a query language expression over a specified subgraph of the action graph using aquery.",
+		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

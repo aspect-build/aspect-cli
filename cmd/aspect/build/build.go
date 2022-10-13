@@ -48,9 +48,11 @@ func NewBuildCmd(
 ) *cobra.Command {
 	return &cobra.Command{
 		Use:   "build",
-		Short: "Builds the specified targets, using the options.",
-		Long: "Invokes bazel build on the specified targets. " +
-			"See 'bazel help target-syntax' for details and examples on how to specify targets to build.",
+		Short: "Build the specified targets",
+		Long: `Invokes bazel build on the specified targets.
+
+See 'bazel help target-syntax' for details and examples on how to specify targets to build.`,
+		GroupID: "common",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

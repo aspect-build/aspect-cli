@@ -34,7 +34,7 @@ func NewInfoCmd(streams ioutils.Streams) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "info",
-		Short: "Displays runtime info about the bazel server.",
+		Short: "Display runtime info about the bazel server",
 		Long: `Displays information about the state of the bazel process in the
 form of several "key: value" pairs.  This includes the locations of
 several output directories.  Because some of the
@@ -53,6 +53,7 @@ the bazel User Manual, and can be programmatically obtained with
 
 See also 'bazel version' for more detailed bazel version
 information.`,
+		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
