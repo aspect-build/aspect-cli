@@ -146,6 +146,7 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 				Use:   command.Use,
 				Short: command.ShortDesc,
 				Long:  command.LongDesc,
+				GroupID: "plugin",
 				RunE: interceptors.Run(
 					[]interceptors.Interceptor{},
 					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {

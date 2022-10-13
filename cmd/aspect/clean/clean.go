@@ -40,7 +40,7 @@ func NewCleanCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobr
 
 	cmd := &cobra.Command{
 		Use:   "clean",
-		Short: "Removes the output tree.",
+		Short: "Remove the output tree",
 		Args: cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
 		ValidArgs: []string{"all"},
 		Long: `Removes bazel-created output, including all object files, and bazel metadata.
@@ -76,6 +76,7 @@ Workaround inconistent state:
 	Such problems are fixable and these bugs are a high priority.
 	If you ever find an incorrect incremental build, please file a bug report,
 	and only use clean as a temporary workaround.`,
+		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

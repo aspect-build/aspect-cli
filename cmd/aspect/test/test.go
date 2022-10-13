@@ -47,7 +47,7 @@ func NewTestCmd(
 ) *cobra.Command {
 	return &cobra.Command{
 		Use:   "test",
-		Short: "Builds the specified targets and runs all test targets among them.",
+		Short: "Build the specified targets and run all test targets among them",
 		Long: `Builds the specified targets and runs all test targets among them (test targets
 might also need to satisfy provided tag, size or language filters) using
 the specified options.
@@ -59,6 +59,7 @@ don't forget to pass all your 'build' options to 'test' too.
 See 'bazel help target-syntax' for details and examples on how to
 specify targets.
 `,
+		GroupID: "common",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

@@ -35,8 +35,11 @@ func NewDefaultCQueryCmd() *cobra.Command {
 func NewCQueryCommand(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cquery",
-		Short: "Executes a cquery.",
+		Short: "Query the dependency graph, honoring configuration flags",
 		Long:  "Executes a query language expression over a specified subgraph of the build dependency graph using cquery.",
+		// Note, we should cquery in the "common" commands rather than query, because most users
+		// ought to use cquery most of the time.
+		GroupID: "common",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

@@ -40,8 +40,9 @@ func NewVersionCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *co
 
 	cmd := &cobra.Command{
 		Use:   "version",
-		Short: "Print the version of aspect CLI as well as tools it invokes.",
+		Short: "Print the version of aspect CLI as well as tools it invokes",
 		Long:  `Prints version info on colon-separated lines, just like bazel does`,
+		GroupID: "common",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

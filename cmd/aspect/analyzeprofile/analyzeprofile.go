@@ -32,7 +32,7 @@ func NewDefaultAnalyzeProfileCmd() *cobra.Command {
 func NewAnalyzeProfileCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "analyze-profile",
-		Short: "Analyzes build profile data.",
+		Short: "Analyze build profile data",
 		Long: `Analyzes build profile data for the given profile data files.
 
 Analyzes each specified profile data file and prints the results.  The
@@ -42,6 +42,7 @@ input files must have been produced by the 'bazel build
 By default, a summary of the analysis is printed.  For post-processing
 with scripts, the --dump=raw option is recommended, causing this
 command to dump profile data in easily-parsed format.`,
+		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
