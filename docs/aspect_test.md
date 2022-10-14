@@ -1,6 +1,6 @@
 ## aspect test
 
-Builds the specified targets and runs all test targets among them.
+Build the specified targets and run all test targets among them
 
 ### Synopsis
 

@@ -1,6 +1,6 @@
 ## aspect cquery
 
-Executes a cquery.
+Query the dependency graph, honoring configuration flags
 
 ### Synopsis
 
