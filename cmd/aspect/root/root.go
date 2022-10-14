@@ -68,7 +68,7 @@ func NewRootCmd(
 		Short:         "Aspect.build bazel wrapper",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Long:          boldCyan.Sprintf(`Aspect CLI`) + ` is a better frontend for running bazel`,
+		Long:          boldCyan.Sprintf(`Aspect CLI`) + ` is an awesome frontend for running bazel`,
 		// Suppress timestamps in generated Markdown, for determinism
 		DisableAutoGenTag: true,
 	}
