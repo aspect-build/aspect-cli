@@ -1,6 +1,6 @@
 ## aspect clean
 
-Removes the output tree.
+Remove the output tree
 
 ### Synopsis
 
@@ -16,6 +16,9 @@ configurations will be cleaned.
 Recall that each Bazel instance is associated with a single workspace,
 thus the clean command will delete all outputs from all builds you've
 done with that Bazel instance in that workspace.
+
+'clean all': Aspect CLI adds the ability to clean *all* Bazel workspaces on your machine,
+by adding the argument "all".
 
 NOTE: clean is primarily intended for reclaiming disk space for workspaces
 that are no longer needed.

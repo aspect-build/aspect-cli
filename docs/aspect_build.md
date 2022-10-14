@@ -1,10 +1,12 @@
 ## aspect build
 
-Builds the specified targets, using the options.
+Build the specified targets
 
 ### Synopsis
 
-Invokes bazel build on the specified targets. See 'bazel help target-syntax' for details and examples on how to specify targets to build.
+Invokes bazel build on the specified targets.
+
+See 'bazel help target-syntax' for details and examples on how to specify targets to build.
 
 ```
 aspect build [flags]

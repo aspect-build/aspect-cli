@@ -1,10 +1,13 @@
 ## aspect query
 
-Executes a dependency graph query.
+Query the dependency graph, ignoring configuration flags
 
 ### Synopsis
 
 Executes a query language expression over a specified subgraph of the build dependency graph.
+
+Note that this ignores the current configuration. Most users should use cquery instead,
+unless you have a specific need to query the unconfigured graph.
 
 ```
 aspect query [flags]

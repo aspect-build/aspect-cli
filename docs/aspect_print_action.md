@@ -1,6 +1,6 @@
 ## aspect print_action
 
-Prints the command line args for compiling a file.
+Print the command line args for compiling a file
 
 ### Synopsis
 

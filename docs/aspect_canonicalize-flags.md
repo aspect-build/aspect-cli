@@ -1,11 +1,11 @@
 ## aspect canonicalize-flags
 
-Canonicalizes a list of bazel options.
+Present a list of bazel options in a canonical form
 
 ### Synopsis
 
 This command canonicalizes a list of bazel options.
-
+		
 Don't forget to prepend  '--' to end option parsing before the flags to canonicalize.
 
 ```

@@ -1,6 +1,6 @@
 ## aspect shutdown
 
-Stops the bazel server.
+Stop the bazel server
 
 ### Synopsis
 

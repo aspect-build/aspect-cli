@@ -1,6 +1,6 @@
 ## aspect run
 
-Builds the specified target and runs it with the given arguments.
+Build a single target and run it with the given arguments
 
 ### Synopsis
 

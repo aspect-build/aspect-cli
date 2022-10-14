@@ -10,8 +10,8 @@ set -x
 # Only capture stdout, just like `bazel help` prints to stdout
 help=$($ASPECT help 2>/dev/null) || true
 
-[[ "$help" =~ "Available Commands:" ]] || {
-    echo >&2 "Expected 'aspect help' stdout to contain 'Available Commands:', but was"
+[[ "$help" =~ "Bazel Commands:" ]] || {
+    echo >&2 "Expected 'aspect help' stdout to contain 'Bazel Commands:', but was"
     echo "$help"
     exit 1
 }

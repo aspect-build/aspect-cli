@@ -1,6 +1,6 @@
 ## aspect fetch
 
-Fetches external repositories that are prerequisites to the targets.
+Fetch external repositories that are prerequisites to the targets
 
 ### Synopsis
 

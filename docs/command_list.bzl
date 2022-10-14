@@ -12,13 +12,10 @@ COMMAND_LIST = [
     "dump",
     "fetch",
     "info",
-    "mobile-install",
-    "modquery",
     "print_action",
     "query",
     "run",
     "shutdown",
-    "sync",
     "test",
     "version",
 ]

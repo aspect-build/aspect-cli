@@ -1,10 +1,10 @@
 ## aspect aquery
 
-Executes an aquery.
+Query the action graph
 
 ### Synopsis
 
-Executes a query language expression over a specified subgraph of the build dependency graph using aquery.
+Executes a query language expression over a specified subgraph of the action graph using aquery.
 
 ```
 aspect aquery [flags]

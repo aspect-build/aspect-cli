@@ -1,6 +1,6 @@
 ## aspect analyze-profile
 
-Analyzes build profile data.
+Analyze build profile data
 
 ### Synopsis
 
