@@ -31,9 +31,9 @@ func NewDefaultFetchCmd() *cobra.Command {
 
 func NewFetchCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "fetch",
-		Short: "Fetch external repositories that are prerequisites to the targets",
-		Long:  "Fetches all external dependencies for the targets given.",
+		Use:     "fetch",
+		Short:   "Fetch external repositories that are prerequisites to the targets",
+		Long:    "Fetches all external dependencies for the targets given.",
 		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{

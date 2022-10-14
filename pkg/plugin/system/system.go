@@ -143,9 +143,9 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 			callback := node.payload.CustomCommandExecutor
 
 			cmd.AddCommand(&cobra.Command{
-				Use:   command.Use,
-				Short: command.ShortDesc,
-				Long:  command.LongDesc,
+				Use:     command.Use,
+				Short:   command.ShortDesc,
+				Long:    command.LongDesc,
 				GroupID: "plugin",
 				RunE: interceptors.Run(
 					[]interceptors.Interceptor{},

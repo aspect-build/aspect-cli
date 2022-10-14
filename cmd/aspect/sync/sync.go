@@ -38,7 +38,7 @@ file are called.
 
 NOTE: This command is still very experimental and the precise semantics
 will change in the near future.`,
-		Hidden: true, // This command is documented as "very experimental"
+		Hidden:  true, // This command is documented as "very experimental"
 		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{

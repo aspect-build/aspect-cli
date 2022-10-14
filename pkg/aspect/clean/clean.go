@@ -67,9 +67,9 @@ type bazelDirInfo struct {
 // Clean represents the aspect clean command.
 type Clean struct {
 	ioutils.Streams
-	bzl               bazel.Bazel
+	bzl bazel.Bazel
 
-	Prefs      viper.Viper
+	Prefs viper.Viper
 
 	Expunge      bool
 	ExpungeAsync bool
@@ -82,8 +82,8 @@ func New(
 	streams ioutils.Streams,
 	bzl bazel.Bazel) *Clean {
 	return &Clean{
-		Streams:           streams,
-		bzl:               bzl,
+		Streams: streams,
+		bzl:     bzl,
 	}
 }
 

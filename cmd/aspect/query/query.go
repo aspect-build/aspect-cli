@@ -36,7 +36,7 @@ func NewQueryCommand(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *
 	cmd := &cobra.Command{
 		Use:   "query",
 		Short: "Query the dependency graph, ignoring configuration flags",
-		Long:  `Executes a query language expression over a specified subgraph of the build dependency graph.
+		Long: `Executes a query language expression over a specified subgraph of the build dependency graph.
 
 Note that this ignores the current configuration. Most users should use cquery instead,
 unless you have a specific need to query the unconfigured graph.`,

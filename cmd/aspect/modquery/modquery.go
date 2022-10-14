@@ -61,7 +61,7 @@ bazel modquery tree root
 NOTE: This command is still very experimental and the precise semantics
 will change in the near future.`,
 		GroupID: "built-in",
-		Hidden: true, // This command is documented as "very experimental"
+		Hidden:  true, // This command is documented as "very experimental"
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
