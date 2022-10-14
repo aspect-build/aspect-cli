@@ -39,9 +39,9 @@ func NewCleanCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobr
 	var expungeAsync bool
 
 	cmd := &cobra.Command{
-		Use:   "clean",
-		Short: "Remove the output tree",
-		Args: cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
+		Use:       "clean",
+		Short:     "Remove the output tree",
+		Args:      cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
 		ValidArgs: []string{"all"},
 		Long: `Removes bazel-created output, including all object files, and bazel metadata.
 

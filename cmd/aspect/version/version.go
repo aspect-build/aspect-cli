@@ -32,7 +32,7 @@ import (
 func NewDefaultVersionCmd() *cobra.Command {
 	// Bazel doesn't need to be in a workspace when running "version"
 	workspaceRoot := ""
-	return NewVersionCmd(ioutils.DefaultStreams, bazel.New(workspaceRoot))	
+	return NewVersionCmd(ioutils.DefaultStreams, bazel.New(workspaceRoot))
 }
 
 func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
@@ -40,9 +40,9 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	v.BuildInfo = *buildinfo.Current()
 
 	cmd := &cobra.Command{
-		Use:   "version",
-		Short: "Print the versions of Aspect CLI, Bazelisk, and Bazel",
-		Long:  `Prints version info on colon-separated lines, just like bazel does`,
+		Use:     "version",
+		Short:   "Print the versions of Aspect CLI, Bazelisk, and Bazel",
+		Long:    `Prints version info on colon-separated lines, just like bazel does`,
 		GroupID: "common",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
