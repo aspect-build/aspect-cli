@@ -35,6 +35,7 @@ import (
 	"aspect.build/cli/cmd/aspect/info"
 	"aspect.build/cli/cmd/aspect/mobileinstall"
 	"aspect.build/cli/cmd/aspect/modquery"
+	"aspect.build/cli/cmd/aspect/print"
 	"aspect.build/cli/cmd/aspect/printaction"
 	"aspect.build/cli/cmd/aspect/query"
 	"aspect.build/cli/cmd/aspect/run"
@@ -75,6 +76,7 @@ func NewRootCmd(
 
 	flags.AddGlobalFlags(cmd, defaultInteractive)
 	cmd.AddGroup(&cobra.Group{ID: "common", Title: "Common Bazel Commands:"})
+	cmd.AddGroup(&cobra.Group{ID: "aspect", Title: "Commands only in Aspect CLI:"})
 	cmd.AddGroup(&cobra.Group{ID: "plugin", Title: "Custom Commands from Plugins:"})
 	cmd.AddGroup(&cobra.Group{ID: "built-in", Title: "Other Bazel Built-in Commands:"})
 
@@ -93,6 +95,7 @@ func NewRootCmd(
 	// license
 	cmd.AddCommand(mobileinstall.NewDefaultMobileInstallCmd())
 	cmd.AddCommand(modquery.NewDefaultModQueryCmd())
+	cmd.AddCommand(print.NewDefaultPrintCmd())
 	cmd.AddCommand(printaction.NewDefaultPrintActionCmd())
 	cmd.AddCommand(query.NewDefaultQueryCmd())
 	cmd.AddCommand(run.NewDefaultRunCmd(pluginSystem))
