@@ -31,13 +31,19 @@ func NewDefaultAnalyzeProfileCmd() *cobra.Command {
 
 func NewAnalyzeProfileCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "analyze-profile",
+		Use:   "analyze-profile <command.profile.gz>",
+		Args:  cobra.MinimumNArgs(1),
 		Short: "Analyze build profile data",
-		Long: `Analyzes build profile data for the given profile data files.
+		Long: `Analyzes build profile data for the given profile data file(s).
 
-Analyzes each specified profile data file and prints the results.  The
-input files must have been produced by the 'bazel build
---profile=file' command.
+Analyzes each specified profile data file and prints the results.
+The profile is commonly written to $(bazel info output_base)/command.profile.gz
+after a build command completes.
+You can use the --profile=<file> flag to supply an alternative path where the profile is written.
+
+This command just dumps profile data to stdout. To inspect a profile you may want to use a GUI
+instead, such as the 'chrome//:tracing' interface built into Chromium / Google Chrome, or
+<https://ui.perfetto.dev/>.
 
 By default, a summary of the analysis is printed.  For post-processing
 with scripts, the --dump=raw option is recommended, causing this
