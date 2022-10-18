@@ -39,11 +39,13 @@ func NewCleanCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobr
 	var expungeAsync bool
 
 	cmd := &cobra.Command{
-		Use:       "clean",
+		Use:       "clean [--expunge] [all]",
 		Short:     "Remove the output tree",
 		Args:      cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
 		ValidArgs: []string{"all"},
 		Long: `Removes bazel-created output, including all object files, and bazel metadata.
+
+Documentation: <https://bazel.build/docs/user-manual#clean>
 
 clean deletes the output directories for all build configurations performed by
 this Bazel instance, or the entire working tree created by this Bazel instance,
