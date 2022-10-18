@@ -37,7 +37,10 @@ func NewDumpCmd(streams ioutils.Streams) *cobra.Command {
 
 This command is provided as an aid to debugging, not as a stable interface, so
 users should not try to parse the output; instead, use 'query' or 'info' for
-this purpose.`,
+this purpose.
+
+Documentation: <https://bazel.build/docs/user-manual#dump>`,
+		Hidden:  true,
 		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
