@@ -9,11 +9,11 @@ export HOME
 touch WORKSPACE
 
 # Only capture stdout
-info=$($ASPECT info bazel-bin --color=no 2> /dev/null) || "$ASPECT" info bazel-bin --color=no
+info=$($ASPECT info bazel-bin 2> /dev/null) || "$ASPECT" info bazel-bin
 
 # Should include a path section that contains bazel-out
 [[ "$info" =~ "/bazel-out/" ]] || {
-    echo >&2 "Expected 'aspect info bazel-bin --color=no' stdout to contain 'bazel-out', but was"
+    echo >&2 "Expected 'aspect info bazel-bin' stdout to contain 'bazel-out', but was"
     echo "$info"
     exit 1
 }
