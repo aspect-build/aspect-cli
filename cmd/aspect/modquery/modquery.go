@@ -31,7 +31,7 @@ func NewDefaultModQueryCmd() *cobra.Command {
 
 func NewModQueryCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "modquery",
+		Use:   "modquery <query_type> [<args> ...]",
 		Short: "Query the Bzlmod external dependency graph",
 		Long: `The command will display a dependency tree or parts of the dependency tree, structured to display different kinds of insights depending on the query type.
 Calling the command with no argument will default to:
