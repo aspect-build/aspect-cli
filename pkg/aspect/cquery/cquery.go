@@ -62,7 +62,7 @@ func (q *CQuery) Run(cmd *cobra.Command, args []string) error {
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	presetVerb, query, runReplacements, err := shared.SelectQuery(cmd.Use, presets, q.Presets, presetNames, q.Streams, args, q.Select)
+	presetVerb, query, runReplacements, err := shared.SelectQuery(cmd.CalledAs(), presets, q.Presets, presetNames, q.Streams, args, q.Select)
 
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)

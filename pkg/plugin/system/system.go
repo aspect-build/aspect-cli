@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,9 +125,9 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 // them as commands to the core whilst setting up callbacks for the those commands.
 func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 	internalCommands := make(map[string]struct{})
-
 	for _, command := range cmd.Commands() {
-		internalCommands[command.Use] = struct{}{}
+		cmdName := strings.SplitN(command.Use, " ", 2)[0]
+		internalCommands[cmdName] = struct{}{}
 	}
 
 	for node := ps.plugins.head; node != nil; node = node.next {
@@ -136,7 +137,8 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 		}
 
 		for _, command := range result {
-			if _, ok := internalCommands[command.Use]; ok {
+			cmdName := strings.SplitN(command.Use, " ", 2)[0]
+			if _, ok := internalCommands[cmdName]; ok {
 				return fmt.Errorf("failed to register custom commands: plugin implements a command with a protected name: %s", command.Use)
 			}
 
@@ -150,7 +152,7 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 				RunE: interceptors.Run(
 					[]interceptors.Interceptor{},
 					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-						return callback.ExecuteCustomCommand(cmd.Use, ctx, args)
+						return callback.ExecuteCustomCommand(cmdName, ctx, args)
 					},
 				),
 			})
@@ -220,7 +222,7 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) (exitErr error) {
 		isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
 		if err != nil {
-			return fmt.Errorf("failed to run 'aspect %s' command: %w", cmd.Use, err)
+			return fmt.Errorf("failed to run 'aspect %s' command: %w", cmd.CalledAs(), err)
 		}
 
 		defer func() {
@@ -231,7 +233,7 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 					reflect.ValueOf(ps.promptRunner),
 				}
 				if err := reflect.ValueOf(node.payload).MethodByName(methodName).Call(params)[0].Interface(); err != nil {
-					fmt.Fprintf(streams.Stderr, "Error: failed to run 'aspect %s' command: %v\n", cmd.Use, err)
+					fmt.Fprintf(streams.Stderr, "Error: failed to run 'aspect %s' command: %v\n", cmd.CalledAs(), err)
 					hasPluginErrors = true
 				}
 			}

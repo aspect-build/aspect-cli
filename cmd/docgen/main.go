@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
@@ -84,7 +85,8 @@ func NewBzlCommandListCmd(aspectRootCmd *cobra.Command) *cobra.Command {
 			cmds := aspectRootCmd.Commands()
 			for _, cmd := range cmds {
 				if cmd.IsAvailableCommand() {
-					fmt.Printf("    %q,\n", cmd.Use)
+					cmdName := strings.SplitN(cmd.Use, " ", 2)[0]
+					fmt.Printf("    %q,\n", cmdName)
 				}
 			}
 			fmt.Println("]")

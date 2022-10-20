@@ -251,7 +251,7 @@ func SelectQuery(
 }
 
 func GetPrettyError(cmd *cobra.Command, err error) error {
-	return fmt.Errorf("failed to run 'aspect %s': %w", cmd.Use, err)
+	return fmt.Errorf("failed to run 'aspect %s': %w", cmd.CalledAs(), err)
 }
 
 // if preset query is present return true and the index of where it is found
