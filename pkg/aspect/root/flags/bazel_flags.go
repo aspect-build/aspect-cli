@@ -18,6 +18,7 @@ package flags
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -41,7 +42,8 @@ func AddBazelFlags(cmd *cobra.Command) error {
 	subCommands := make(map[string]*cobra.Command)
 
 	for _, command := range cmd.Commands() {
-		subCommands[command.Use] = command
+		cmdName := strings.SplitN(cmd.Use, " ", 2)[0]
+		subCommands[cmdName] = command
 	}
 
 	bzl, err := bazel.FindFromWd()

@@ -19,6 +19,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/bazel"
@@ -157,10 +158,11 @@ type PluginCommandManager struct {
 // Save satisfies CommandManager.
 func (cm *PluginCommandManager) Save(commands []*Command) error {
 	for _, cmd := range commands {
-		if _, exists := cm.commands[cmd.Use]; exists {
-			return fmt.Errorf("command %q is declared more than once by plugin", cmd.Use)
+		cmdName := strings.SplitN(cmd.Use, " ", 2)[0]
+		if _, exists := cm.commands[cmdName]; exists {
+			return fmt.Errorf("command %q is declared more than once by plugin", cmdName)
 		}
-		cm.commands[cmd.Use] = cmd.Run
+		cm.commands[cmdName] = cmd.Run
 	}
 
 	return nil

@@ -45,7 +45,7 @@ func ExampleRun_interceptor_order() {
 			g.Expect(_cmd).To(Equal(cmd))
 			g.Expect(_args).To(Equal(args))
 			ctxVal := _ctx.Value("my_key").(string)
-			fmt.Printf("called %q with %v, and ctx contains %q\n", _cmd.Use, _args, ctxVal)
+			fmt.Printf("called %q with %v, and ctx contains %q\n", _cmd.CalledAs(), _args, ctxVal)
 			return nil
 		},
 	)
