@@ -59,11 +59,8 @@ Values may be one of:
 - path: the absolute path to the BUILD file that contains the rules
 
 print uses the same library as 'buildozer' so this documentation is relevant as well:
-https://github.com/bazelbuild/buildtools/blob/master/buildozer/README.md#print-commands
-
-Examples:
-` + "```" + `
-# Print the entire definition (including comments) of the //base:heapcheck rule:
+https://github.com/bazelbuild/buildtools/blob/master/buildozer/README.md#print-commands`,
+		Example: `# Print the entire definition (including comments) of the //base:heapcheck rule:
 aspect print //base:heapcheck
 
 # Print the kind of a target
@@ -79,8 +76,7 @@ aspect print --output=default_visibility base:%package
 aspect print --output=label,deps //cli/...:%go_library 2>/dev/null | cut -d' ' -f1
 
 # Print the list of labels in //base that explicitly set the testonly attribute:
-aspect print --output=label --output=testonly 'base:*' 2>/dev/null
-` + "```",
+aspect print --output=label --output=testonly 'base:*' 2>/dev/null`,
 		GroupID: "aspect",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
