@@ -37,16 +37,12 @@ func NewDocsCmd(streams ioutils.Streams) *cobra.Command {
 		Long: `Given a selected topic, open the relevant API docs in a browser window.
 
 The mechanism of choosing the browser to open is documented at https://github.com/pkg/browser
-By default, opens bazel.build/docs
-
-Examples:
-` + "```" + `
-# Open the Bazel glossary of terms
+By default, opens bazel.build/docs`,
+		Example: `# Open the Bazel glossary of terms
 % aspect docs glossary
 
 # Open the docs for the aspect-build/rules_js ruleset
-% aspect docs rules_js
-` + "```",
+% aspect docs rules_js`,
 		RunE: v.Run,
 	}
 
