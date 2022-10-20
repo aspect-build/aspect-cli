@@ -6,10 +6,20 @@ Present a list of bazel options in a canonical form
 
 This command canonicalizes a list of bazel options.
 		
-Don't forget to prepend  '--' to end option parsing before the flags to canonicalize.
+This is useful when you need a unique key to group Bazel invocations by their flags.
+
+Documentation: <https://bazel.build/docs/user-manual#canonicalize-flags>
 
 ```
-aspect canonicalize-flags [flags]
+aspect canonicalize-flags -- <bazel flags>
+```
+
+### Examples
+
+```
+% aspect canonicalize-flags -- -k -c opt
+--keep_going=1
+--compilation_mode=opt
 ```
 
 ### Options

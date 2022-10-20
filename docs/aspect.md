@@ -23,10 +23,9 @@ Aspect CLI is a better frontend for running bazel
 * [aspect clean](aspect_clean.md)	 - Remove the output tree
 * [aspect cquery](aspect_cquery.md)	 - Query the dependency graph, honoring configuration flags
 * [aspect docs](aspect_docs.md)	 - Open documentation in the browser
-* [aspect dump](aspect_dump.md)	 - Dump the internal state of the bazel server process
 * [aspect fetch](aspect_fetch.md)	 - Fetch external repositories that are prerequisites to the targets
 * [aspect info](aspect_info.md)	 - Display runtime info about the bazel server
-* [aspect print_action](aspect_print_action.md)	 - Print the command line args for compiling a file
+* [aspect print](aspect_print.md)	 - Print syntax elements from BUILD files
 * [aspect query](aspect_query.md)	 - Query the dependency graph, ignoring configuration flags
 * [aspect run](aspect_run.md)	 - Build a single target and run it with the given arguments
 * [aspect shutdown](aspect_shutdown.md)	 - Stop the bazel server

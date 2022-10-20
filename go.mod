@@ -4,6 +4,7 @@ go 1.19
 
 require (
 	github.com/bazelbuild/bazelisk v1.13.2
+	github.com/bazelbuild/buildtools v0.0.0-20221004120235-7186f635531b
 	github.com/fatih/color v1.13.0
 	github.com/golang/mock v1.5.0
 	github.com/golang/protobuf v1.5.2
