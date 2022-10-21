@@ -42,7 +42,7 @@ func (v *Docs) Run(_ *cobra.Command, args []string) error {
 
 	// Detect requests for docs on rules, which we host
 	if len(args) == 1 {
-		if strings.HasPrefix(args[0], "rules_") {
+		if strings.HasPrefix(args[0], "rules_") || args[0] == "bazel-lib" {
 			dest = fmt.Sprintf("https://docs.aspect.build/%s", args[0])
 		} else {
 			dest = fmt.Sprintf("https://bazel.build/reference/%s.html", args[0])
