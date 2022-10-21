@@ -1,13 +1,22 @@
 ## aspect fetch
 
-Fetches external repositories that are prerequisites to the targets.
+Fetch external repositories that are prerequisites to the targets
 
 ### Synopsis
 
 Fetches all external dependencies for the targets given.
 
+Note that Bazel uses the term "fetch" to mean both downloading remote files, and also running local
+installation commands declared by rules for these external files.
+
+Documentation: <https://bazel.build/run/build#fetching-external-dependencies>
+
+If you observe fetching that should not be needed to build the
+requested targets, this may indicate an "eager fetch" bug in some ruleset you rely on.
+Read more: <https://blog.aspect.dev/avoid-eager-fetches>
+
 ```
-aspect fetch [flags]
+aspect fetch <target patterns> [flags]
 ```
 
 ### Options

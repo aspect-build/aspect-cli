@@ -9,7 +9,7 @@ export HOME
 touch WORKSPACE
 
 mkdir -p foo
-cat > foo/BUILD <<'EOF'
+cat > foo/BUILD << 'EOF'
 genrule(
     name = "foo",
     outs = ["foo.txt"],
@@ -18,7 +18,7 @@ genrule(
 EOF
 
 # Only capture stdout, just like `bazel version` prints to stdout
-query=$($ASPECT query 'deps(//foo)' 2>/dev/null) || "$ASPECT" query 'deps(//foo)'
+query=$($ASPECT query 'deps(//foo)' 2> /dev/null) || "$ASPECT" query 'deps(//foo)'
 
 # Should list the //foo:foo genrule that we have created
 [[ "$query" =~ "//foo:foo" ]] || {

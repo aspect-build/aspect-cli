@@ -58,6 +58,8 @@ nogo(
 
 # gazelle:prefix aspect.build/cli
 # gazelle:exclude **/*.pb.go
+# gazelle:resolve go github.com/bazelbuild/buildtools/edit @com_github_bazelbuild_buildtools//edit:go_default_library
+
 # gazelle-TODO:
 #   cannot use :map_kind go_proto_library go_proto_library //:go_proto_library.bzl
 #   because we need gazelle to understand the built-in kind, see https://github.com/bazelbuild/bazel-gazelle/issues/1162

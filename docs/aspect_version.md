@@ -1,6 +1,6 @@
 ## aspect version
 
-Print the version of aspect CLI as well as tools it invokes.
+Print the versions of Aspect CLI, Bazelisk, and Bazel
 
 ### Synopsis
 

@@ -32,8 +32,11 @@ func NewDefaultShutdownCmd() *cobra.Command {
 func NewShutdownCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "shutdown",
-		Short: "Stops the bazel server.",
-		Long:  "This command shuts down the memory resident bazel server process.",
+		Short: "Stop the bazel server",
+		Long: `This command shuts down the memory resident bazel server process.
+
+Documentation: <https://bazel.build/docs/user-manual#shutdown>`,
+		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

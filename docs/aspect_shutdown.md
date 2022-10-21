@@ -1,10 +1,12 @@
 ## aspect shutdown
 
-Stops the bazel server.
+Stop the bazel server
 
 ### Synopsis
 
 This command shuts down the memory resident bazel server process.
+
+Documentation: <https://bazel.build/docs/user-manual#shutdown>
 
 ```
 aspect shutdown [flags]

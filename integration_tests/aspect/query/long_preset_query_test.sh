@@ -9,7 +9,7 @@ export HOME
 touch WORKSPACE
 
 mkdir -p foo
-cat > foo/BUILD <<'EOF'
+cat > foo/BUILD << 'EOF'
 genrule(
     name = "foo",
     outs = ["foo.txt"],
@@ -18,7 +18,7 @@ genrule(
 EOF
 
 mkdir -p .aspect/cli
-cat > .aspect/cli/config.yaml <<'EOF'
+cat > .aspect/cli/config.yaml << 'EOF'
 query:
   presets:
     foo:
@@ -28,7 +28,7 @@ query:
 EOF
 
 # Only capture stdout, just like `bazel version` prints to stdout
-query=$($ASPECT query foo //foo 2>/dev/null) || "$ASPECT" query foo //foo
+query=$($ASPECT query foo //foo 2> /dev/null) || "$ASPECT" query foo //foo
 
 # Should list the //foo:foo genrule that we have created
 [[ "$query" =~ "//foo:foo" ]] || {

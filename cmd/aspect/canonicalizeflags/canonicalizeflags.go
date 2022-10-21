@@ -31,11 +31,18 @@ func NewDefaultCanonicalizeFlagsCmd() *cobra.Command {
 
 func NewCanonicalizeFlagsCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "canonicalize-flags",
-		Short: "Canonicalizes a list of bazel options.",
+		Use:   "canonicalize-flags -- <bazel flags>",
+		Short: "Present a list of bazel options in a canonical form",
 		Long: `This command canonicalizes a list of bazel options.
+		
+This is useful when you need a unique key to group Bazel invocations by their flags.
 
-Don't forget to prepend  '--' to end option parsing before the flags to canonicalize.`,
+Documentation: <https://bazel.build/docs/user-manual#canonicalize-flags>`,
+		Example: `% aspect canonicalize-flags -- -k -c opt
+--keep_going=1
+--compilation_mode=opt`,
+		DisableFlagsInUseLine: true,
+		GroupID:               "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),

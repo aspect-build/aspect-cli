@@ -88,7 +88,7 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	verb := cmd.Use
+	verb := "query"
 
 	if q.Prefs.GetBool(useCQuery) {
 		verb = "cquery"

@@ -18,6 +18,7 @@ package flags
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -41,12 +42,16 @@ func AddBazelFlags(cmd *cobra.Command) error {
 	subCommands := make(map[string]*cobra.Command)
 
 	for _, command := range cmd.Commands() {
-		subCommands[command.Use] = command
+		cmdName := strings.SplitN(cmd.Use, " ", 2)[0]
+		subCommands[cmdName] = command
 	}
 
 	bzl, err := bazel.FindFromWd()
 	if err != nil {
-		return err
+		// We cannot run Bazel, but this just means we have no flags to add.
+		// This will be the case when running aspect help from outside a workspace, for example.
+		// If Bazel is really needed for the current command, an error will be handled somewhere else.
+		return nil
 	}
 	bzlFlags, err := bzl.Flags()
 	if err != nil {

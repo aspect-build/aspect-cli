@@ -25,32 +25,30 @@ import (
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/version"
 	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
 
 func NewDefaultVersionCmd() *cobra.Command {
-	return NewVersionCmd(ioutils.DefaultStreams, bazel.FindFromWd)
+	// Bazel doesn't need to be in a workspace when running "version"
+	workspaceRoot := ""
+	return NewVersionCmd(ioutils.DefaultStreams, bazel.New(workspaceRoot))
 }
 
-func NewVersionCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
+func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	v := version.New(streams)
 	v.BuildInfo = *buildinfo.Current()
 
 	cmd := &cobra.Command{
-		Use:   "version",
-		Short: "Print the version of aspect CLI as well as tools it invokes.",
-		Long:  `Prints version info on colon-separated lines, just like bazel does`,
+		Use:     "version",
+		Short:   "Print the versions of Aspect CLI, Bazelisk, and Bazel",
+		Long:    `Prints version info on colon-separated lines, just like bazel does`,
+		GroupID: "common",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				bzl, err := bzlProvider()
-				if err != nil && !workspace.IsNotFoundError(err) {
-					return err
-				}
 				return v.Run(bzl)
 			},
 		),

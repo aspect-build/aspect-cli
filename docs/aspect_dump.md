@@ -1,6 +1,6 @@
 ## aspect dump
 
-Dumps the internal state of the bazel server process.
+Dump the internal state of the bazel server process
 
 ### Synopsis
 

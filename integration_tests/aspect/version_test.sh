@@ -7,7 +7,7 @@ export HOME
 touch WORKSPACE
 
 # Only capture stdout, just like `bazel version` prints to stdout
-ver=$($ASPECT version 2>/dev/null) || "$ASPECT" version
+ver=$($ASPECT version 2> /dev/null) || "$ASPECT" version
 
 # Should print our own version
 [[ "$ver" =~ "Aspect version:" ]] || {

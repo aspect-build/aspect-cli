@@ -4,6 +4,7 @@ go 1.19
 
 require (
 	github.com/bazelbuild/bazelisk v1.13.2
+	github.com/bazelbuild/buildtools v0.0.0-20221004120235-7186f635531b
 	github.com/fatih/color v1.13.0
 	github.com/golang/mock v1.5.0
 	github.com/golang/protobuf v1.5.2
@@ -14,7 +15,7 @@ require (
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/onsi/gomega v1.16.0
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
-	github.com/spf13/cobra v1.5.0
+	github.com/spf13/cobra v1.6.0
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.13.0
 	golang.org/x/sync v0.0.0-20220819030929-7fc1605a5dde

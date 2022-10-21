@@ -18,6 +18,7 @@ go_library(
         "//cmd/aspect/info",
         "//cmd/aspect/mobileinstall",
         "//cmd/aspect/modquery",
+        "//cmd/aspect/print",
         "//cmd/aspect/printaction",
         "//cmd/aspect/query",
         "//cmd/aspect/run",

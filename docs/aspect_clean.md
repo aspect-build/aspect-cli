@@ -1,10 +1,12 @@
 ## aspect clean
 
-Removes the output tree.
+Remove the output tree
 
 ### Synopsis
 
 Removes bazel-created output, including all object files, and bazel metadata.
+
+Documentation: <https://bazel.build/docs/user-manual#clean>
 
 clean deletes the output directories for all build configurations performed by
 this Bazel instance, or the entire working tree created by this Bazel instance,
@@ -16,6 +18,9 @@ configurations will be cleaned.
 Recall that each Bazel instance is associated with a single workspace,
 thus the clean command will delete all outputs from all builds you've
 done with that Bazel instance in that workspace.
+
+'clean all': Aspect CLI adds the ability to clean *all* Bazel workspaces on your machine,
+by adding the argument "all".
 
 NOTE: clean is primarily intended for reclaiming disk space for workspaces
 that are no longer needed.
@@ -36,7 +41,7 @@ Workaround inconistent state:
 	and only use clean as a temporary workaround.
 
 ```
-aspect clean [flags]
+aspect clean [--expunge] [all] [flags]
 ```
 
 ### Options

@@ -33,36 +33,11 @@ import (
 
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/configutils"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/osutils/filesystem"
 )
 
 const (
-	skipPromptKey = "clean.skip_prompt"
-
-	ReclaimOption         = "Reclaim disk space for this workspace (same as bazel clean)"
-	ReclaimAllOption      = "Reclaim disk space for all Bazel workspaces"
-	NonIncrementalOption  = "Prepare to perform a non-incremental build"
-	InvalidateReposOption = "Invalidate all repository rules, causing them to recreate external repos"
-	WorkaroundOption      = "Workaround inconsistent state in the output tree"
-
-	outputBaseHint = `It's faster to perform a non-incremental build by choosing a different output base.
-Instead of running 'clean' you should use the --output_base flag.
-Run 'aspect help clean' for more info.
-`
-	syncHint = `It's faster to invalidate repository rules by using the sync command.
-Instead of running 'clean' you should run 'aspect sync --configure'
-Run 'aspect help clean' for more info.
-`
-	fileIssueHint = `Bazel is a correct build tool, and it should not be possible to get inconstent state.
-We highly recommend you file a bug reporting this problem so that the offending rule
-implementation can be fixed.
-`
-
-	rememberLine1 = "You can skip this prompt to make 'aspect clean' behave the same as 'bazel clean'\n"
-	rememberLine2 = "Remember this choice and skip the prompt in the future"
-
 	unstructuredArgsBEPKey = "unstructuredCommandLine"
 )
 
@@ -92,13 +67,9 @@ type bazelDirInfo struct {
 // Clean represents the aspect clean command.
 type Clean struct {
 	ioutils.Streams
-	bzl               bazel.Bazel
-	isInteractiveMode bool
+	bzl bazel.Bazel
 
-	Behavior   SelectRunner
-	Workaround PromptRunner
-	Remember   PromptRunner
-	Prefs      viper.Viper
+	Prefs viper.Viper
 
 	Expunge      bool
 	ExpungeAsync bool
@@ -109,79 +80,29 @@ type Clean struct {
 // New creates a Clean command.
 func New(
 	streams ioutils.Streams,
-	bzl bazel.Bazel,
-	isInteractiveMode bool) *Clean {
+	bzl bazel.Bazel) *Clean {
 	return &Clean{
-		Streams:           streams,
-		isInteractiveMode: isInteractiveMode,
-		bzl:               bzl,
+		Streams: streams,
+		bzl:     bzl,
 	}
 }
 
-func NewDefault(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Clean {
-	c := New(
-		streams,
-		bzl,
-		isInteractive)
-	c.Behavior = &promptui.Select{
-		Label: "Clean can have a few behaviors. Which do you want?",
-		Items: []string{
-			ReclaimOption,
-			ReclaimAllOption,
-			NonIncrementalOption,
-			InvalidateReposOption,
-			WorkaroundOption,
-		},
-	}
-	c.Workaround = &promptui.Prompt{
-		Label:     "Temporarily workaround the bug by deleting the output directory",
-		IsConfirm: true,
-	}
-	c.Remember = &promptui.Prompt{
-		Label:     rememberLine2,
-		IsConfirm: true,
-	}
+func NewDefault(streams ioutils.Streams, bzl bazel.Bazel) *Clean {
+	c := New(streams, bzl)
 	c.Prefs = *viper.GetViper()
 	c.Filesystem = filesystem.NewDefault()
 	return c
 }
 
 // Run runs the aspect build command.
-func (c *Clean) Run(_ *cobra.Command, _ []string) error {
-	skip := c.Prefs.GetBool(skipPromptKey)
-	if c.isInteractiveMode && !skip {
-
-		_, chosen, err := c.Behavior.Run()
-
-		if err != nil {
-			return fmt.Errorf("prompt failed: %w", err)
-		}
-
-		switch chosen {
-
-		case ReclaimOption:
-			// Allow user to opt-out of our fancy "clean" command and just behave like bazel
-			fmt.Fprint(c.Streams.Stdout, rememberLine1)
-			if _, err := c.Remember.Run(); err == nil {
-				c.Prefs.Set(skipPromptKey, "true")
-				if err := configutils.Write(&c.Prefs); err != nil {
-					return fmt.Errorf("failed to update config file: %w", err)
-				}
-			}
-		case ReclaimAllOption:
+func (c *Clean) Run(_ *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "all":
 			return c.reclaimAll()
-		case NonIncrementalOption:
-			fmt.Fprint(c.Streams.Stdout, outputBaseHint)
-			return nil
-		case InvalidateReposOption:
-			fmt.Fprint(c.Streams.Stdout, syncHint)
-			return nil
-		case WorkaroundOption:
-			fmt.Fprint(c.Streams.Stdout, fileIssueHint)
-			_, err := c.Workaround.Run()
-			if err != nil {
-				return fmt.Errorf("prompt failed: %w", err)
-			}
+		default:
+			// This is defense-in-depth, cobra should validate the args
+			panic(fmt.Sprintf("unknown type '%s' for clean", args[0]))
 		}
 	}
 

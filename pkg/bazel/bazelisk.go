@@ -48,8 +48,9 @@ const (
 )
 
 var (
-	// BazeliskVersion is filled in via x_defs when building a release.
-	BazeliskVersion = "development"
+	// BazeliskVersion is based on our vendoring the file on 2021 Sept 24, this was the latest tag
+	// FIXME: we should "rebase" on newer Bazelisk, though that's hard because we made lots of edits.
+	BazeliskVersion = "v1.10.1"
 
 	fileConfig     map[string]string
 	fileConfigOnce sync.Once
