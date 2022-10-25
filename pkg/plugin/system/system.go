@@ -77,11 +77,11 @@ func NewPluginSystem() PluginSystem {
 func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 	aspectpluginsPath, err := ps.finder.Find()
 	if err != nil {
-		return fmt.Errorf("failed to configure plugin system: %w", err)
+		return fmt.Errorf("failed to find plugin: %w", err)
 	}
 	aspectplugins, err := ps.parser.Parse(aspectpluginsPath)
 	if err != nil {
-		return fmt.Errorf("failed to configure plugin system: %w", err)
+		return fmt.Errorf("failed to parse plugin: %w", err)
 	}
 
 	g := new(errgroup.Group)

@@ -18,6 +18,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -104,7 +105,16 @@ func (c *clientFactory) buildPlugin(target string) (string, error) {
 		return "", fmt.Errorf("failed to build plugin %q with Bazel: %w", target, err)
 	}
 
-	return pluginPath, nil
+	// Resolve the full path to the plugin
+	absPluginPath, err := bzl.AbsPathRelativeToWorkspace(pluginPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve the plugin path %q", pluginPath)
+	}
+	if _, err := os.Stat(absPluginPath); errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("the plugin binary was not found %q", absPluginPath)
+	}
+
+	return absPluginPath, nil
 }
 
 // New calls the goplugin.NewClient with the given config.
@@ -162,12 +172,12 @@ func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.St
 
 	rpcClient, err := goclient.Client()
 	if err != nil {
-		return nil, fmt.Errorf("failed to configure plugin client: %w", err)
+		return nil, fmt.Errorf("failed to retrieve plugin client: %w", err)
 	}
 
 	rawplugin, err := rpcClient.Dispense(config.DefaultPluginName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to configure plugin client: %w", err)
+		return nil, fmt.Errorf("failed to dispense plugin client: %w", err)
 	}
 
 	res := &PluginInstance{
