@@ -63,12 +63,13 @@ func TestBazel(t *testing.T) {
 	t.Run("when a custom environment is passed, it should be used by bazelisk", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 
-		bzl := New(workspaceDir)
+		bzl, err := New(workspaceDir)
+		g.Expect(err).ToNot(HaveOccurred())
 
 		env := []string{fmt.Sprintf("FOO=%s", "BAR")}
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout}
-		_, err := bzl.WithEnv(env).RunCommand(streams, "--print_env")
+		_, err = bzl.WithEnv(env).RunCommand(streams, "--print_env")
 		g.Expect(err).To(Not(HaveOccurred()))
 		g.Expect(stdout.String()).To(ContainSubstring("FOO=BAR"))
 	})
@@ -76,14 +77,58 @@ func TestBazel(t *testing.T) {
 	t.Run("when the workspace override directory is set, it should be used by bazelisk", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 
-		bzl := New(workspaceOverrideDir)
+		bzl, err := New(workspaceOverrideDir)
+		g.Expect(err).ToNot(HaveOccurred())
 
 		var out strings.Builder
 		streams := ioutils.Streams{Stdout: &out, Stderr: &out}
 		// workspaceOverrideDir is an unconventional location that has a tools/bazel to be used.
 		// It must run the tools/bazel we placed under that location.
-		_, err := bzl.RunCommand(streams, "build")
+		_, err = bzl.RunCommand(streams, "build")
 		g.Expect(err).To(Not(HaveOccurred()))
 		g.Expect(out.String()).To(Equal("wrapper called"))
+	})
+}
+
+func TestAbsPathRelativeToWorkspace(t *testing.T) {
+	t.Run("when the argument is a relative path", func(t *testing.T) {
+		g := NewWithT(t)
+
+		relativePath := "chicken"
+
+		bzl, err := New(workspaceDir)
+		g.Expect(err).ToNot(HaveOccurred())
+
+		actual, err := bzl.AbsPathRelativeToWorkspace(relativePath)
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(filepath.IsAbs(actual)).To(BeTrue())
+
+		absWorkspaceDir, err := filepath.Abs(workspaceDir)
+		g.Expect(err).ToNot(HaveOccurred())
+		expected := filepath.Join(absWorkspaceDir, relativePath)
+		g.Expect(actual).To(Equal(expected))
+
+	})
+	t.Run("when the argument is an absolute path", func(t *testing.T) {
+		g := NewWithT(t)
+
+		bzl, err := New(workspaceDir)
+		g.Expect(err).ToNot(HaveOccurred())
+
+		path := "/path/to/somewhere"
+		actual, err := bzl.AbsPathRelativeToWorkspace(path)
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(actual).To(Equal(path))
+	})
+	t.Run("when Bazel instance does not have a workspace root", func(t *testing.T) {
+		g := NewWithT(t)
+
+		relativePath := "chicken"
+		bzl := NoWorkspaceRoot()
+
+		actual, err := bzl.AbsPathRelativeToWorkspace(relativePath)
+		g.Expect(actual).To(Equal(""))
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(Equal("the bazel instance does not have a workspace root"))
 	})
 }

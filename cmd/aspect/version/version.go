@@ -31,8 +31,7 @@ import (
 
 func NewDefaultVersionCmd() *cobra.Command {
 	// Bazel doesn't need to be in a workspace when running "version"
-	workspaceRoot := ""
-	return NewVersionCmd(ioutils.DefaultStreams, bazel.New(workspaceRoot))
+	return NewVersionCmd(ioutils.DefaultStreams, bazel.NoWorkspaceRoot())
 }
 
 func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {

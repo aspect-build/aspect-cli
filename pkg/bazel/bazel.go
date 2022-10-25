@@ -18,9 +18,11 @@ package bazel
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"aspect.build/cli/bazel/analysis"
@@ -54,6 +56,7 @@ type Bazel interface {
 	RunCommand(streams ioutils.Streams, command ...string) (int, error)
 	InitializeStartupFlags(args []string) ([]string, error)
 	Flags() (map[string]*flags.FlagInfo, error)
+	AbsPathRelativeToWorkspace(relativePath string) (string, error)
 }
 
 type bazel struct {
@@ -61,10 +64,22 @@ type bazel struct {
 	env           []string
 }
 
-func New(workspaceRoot string) Bazel {
-	return &bazel{
-		workspaceRoot: workspaceRoot,
+func New(workspaceRoot string) (Bazel, error) {
+	// If we are given a non-empty workspace root, make sure that it is an absolute path. We support
+	// an empty workspace root for Bazel commands that support being run outside of a workspace
+	// (e.g. version).
+	absWkspRoot, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return nil, err
 	}
+	return &bazel{
+		workspaceRoot: absWkspRoot,
+	}, nil
+}
+
+func NoWorkspaceRoot() Bazel {
+	// This is a special case where we run Bazel without a workspace (e.g., version).
+	return &bazel{}
 }
 
 func Find(startDir string) (Bazel, error) {
@@ -73,7 +88,7 @@ func Find(startDir string) (Bazel, error) {
 	if err != nil {
 		return nil, err
 	}
-	return New(wr), nil
+	return New(wr)
 }
 
 func FindFromWd() (Bazel, error) {
@@ -223,6 +238,16 @@ func (b *bazel) AQuery(query string) (*analysis.ActionGraphContainer, error) {
 		return nil, fmt.Errorf("failed to run Bazel aquery: parsing ActionGraphContainer: %w", err)
 	}
 	return agc, nil
+}
+
+func (b *bazel) AbsPathRelativeToWorkspace(relativePath string) (string, error) {
+	if b.workspaceRoot == "" {
+		return "", errors.New("the bazel instance does not have a workspace root")
+	}
+	if filepath.IsAbs(relativePath) {
+		return relativePath, nil
+	}
+	return filepath.Join(b.workspaceRoot, relativePath), nil
 }
 
 type Output struct {

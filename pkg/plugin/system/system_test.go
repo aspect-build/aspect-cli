@@ -310,7 +310,7 @@ func TestConfigure(t *testing.T) {
 
 		err := ps.Configure(streams)
 
-		g.Expect(err).To(MatchError("failed to configure plugin system: finder"))
+		g.Expect(err).To(MatchError("failed to find plugin: finder"))
 	})
 
 	t.Run("fails when Parser fails to parse plugin config file", func(t *testing.T) {
@@ -337,7 +337,7 @@ func TestConfigure(t *testing.T) {
 
 		err := ps.Configure(streams)
 
-		g.Expect(err).To(MatchError("failed to configure plugin system: parser"))
+		g.Expect(err).To(MatchError("failed to parse plugin: parser"))
 	})
 
 	t.Run("works when 0 plugins are found in config file", func(t *testing.T) {
