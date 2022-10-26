@@ -95,6 +95,9 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			if err != nil {
 				return err
 			}
+			if aspectplugin == nil {
+				return nil
+			}
 
 			properties, err := yaml.Marshal(p.Properties)
 			if err != nil {

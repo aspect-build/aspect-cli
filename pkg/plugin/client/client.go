@@ -18,7 +18,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,7 +26,6 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 
-	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/loader"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/config"
@@ -51,93 +49,20 @@ type CustomCommandExecutor interface {
 }
 
 type clientFactory struct {
-	bzl bazel.Bazel
-}
-
-func (c *clientFactory) bazel() (bazel.Bazel, error) {
-	if c.bzl == nil {
-		var err error
-		c.bzl, err = bazel.FindFromWd()
-		if err != nil {
-			return nil, err
-		}
-	}
-	return c.bzl, nil
-}
-
-// buildPlugin asks bazel to build the target and returns the path to the resulting binary.
-func (c *clientFactory) buildPlugin(target string) (string, error) {
-	bzl, err := c.bazel()
-	if err != nil {
-		return "", err
-	}
-	queryOutput, err := bzl.AQuery(target)
-	if err != nil {
-		return "", err
-	}
-	outs := bazel.ParseOutputs(queryOutput)
-
-	var pluginPath string
-	for _, a := range outs {
-		// TODO: don't hard-code GoLink, plugins could be written in other languages
-		// https://github.com/aspect-build/aspect-cli/issues/179
-		if a.Mnemonic == "GoLink" {
-			pluginPath = a.Path
-			break
-		}
-	}
-	if pluginPath == "" {
-		return "", fmt.Errorf("failed to build plugin %q with Bazel: no output file from a GoLink action was found", target)
-	}
-
-	streams := ioutils.Streams{
-		Stdin:  os.Stdin,
-		Stdout: nil,
-		Stderr: nil,
-	}
-
-	// WARNING: be careful to use flags for this build matching the .bazelrc
-	// to avoid busting the analysis cache. We want to pretend to be a typical
-	// build the developer or CI would be performing.
-	// This is important only in the setup we don't recommend, where normal users
-	// are building the plugin from source instead of a pre-built binary.
-	if _, err := bzl.RunCommand(streams, "build", target); err != nil {
-		return "", fmt.Errorf("failed to build plugin %q with Bazel: %w", target, err)
-	}
-
-	// Resolve the full path to the plugin
-	absPluginPath, err := bzl.AbsPathRelativeToWorkspace(pluginPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve the plugin path %q", pluginPath)
-	}
-	if _, err := os.Stat(absPluginPath); errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("the plugin binary was not found %q", absPluginPath)
-	}
-
-	return absPluginPath, nil
 }
 
 // New calls the goplugin.NewClient with the given config.
 func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.Streams) (*PluginInstance, error) {
 	logLevel := hclog.LevelFromString(aspectplugin.LogLevel)
 	if logLevel == hclog.NoLevel {
-		logLevel = hclog.Error
+		logLevel = hclog.Warn
 	}
 	pluginLogger := hclog.New(&hclog.LoggerOptions{
 		Name:  aspectplugin.Name,
 		Level: logLevel,
 	})
 
-	if strings.HasPrefix(aspectplugin.From, "//") {
-		if built, err := c.buildPlugin(aspectplugin.From); err != nil {
-			return nil, err
-		} else {
-			aspectplugin.From = built
-		}
-	} else if strings.Contains(aspectplugin.From, "/") {
-		if len(aspectplugin.Version) < 1 {
-			return nil, fmt.Errorf("failed to download plugin '%s': the version field is required", aspectplugin.Name)
-		}
+	if strings.Contains(aspectplugin.From, "/") {
 		// Syntax sugar:
 		//   from: github.com/org/repo
 		// is the same as
@@ -151,11 +76,17 @@ func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.St
 		//   from:          https://static.aspect.build/cli
 		//   versioned url: https://static.aspect.build/cli/v0.9.0/plugin-aspect-pro-darwin_amd64
 		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
+			if len(aspectplugin.Version) < 1 {
+				return nil, fmt.Errorf("cannot download plugin '%s': the version field is required", aspectplugin.Name)
+			}
 			downloaded, err := DownloadPlugin(aspectplugin.From, aspectplugin.Name, aspectplugin.Version)
 			if err != nil {
 				return nil, err
 			}
 			aspectplugin.From = downloaded
+		} else if _, err := os.Stat(aspectplugin.From); err != nil {
+			pluginLogger.Warn(fmt.Sprintf("skipping install for plugin: does not exist at path %s.", aspectplugin.From))
+			return nil, nil
 		}
 	}
 	clientConfig := &goplugin.ClientConfig{
