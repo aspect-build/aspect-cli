@@ -1,0 +1,3 @@
+# The ts gazelle plugin wants to add ts_project entries here. This prevents
+# that until we can address the underlying issue.
+# gazelle:ts_extension disabled
