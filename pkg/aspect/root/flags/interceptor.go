@@ -96,10 +96,10 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 
 		viper.MergeConfigMap(repoViper.AllSettings())
 
-		// Remove "aspect:*" args from the list of args. These should be accessed via cmd.Flags()
+		// Remove "--aspect:*" flags from the list of args. These should be accessed via cmd.Flags()
 		updatedArgs := make([]string, 0)
 		for i := 0; i < len(args); i++ {
-			if strings.Contains(args[i], "aspect:") {
+			if strings.HasPrefix(args[i], "--aspect:") {
 				continue
 			}
 
