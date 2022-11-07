@@ -41,9 +41,9 @@ var (
 func AddBazelFlags(cmd *cobra.Command) error {
 	subCommands := make(map[string]*cobra.Command)
 
-	for _, command := range cmd.Commands() {
-		cmdName := strings.SplitN(cmd.Use, " ", 2)[0]
-		subCommands[cmdName] = command
+	for _, subCmd := range cmd.Commands() {
+		subCmdName := strings.SplitN(subCmd.Use, " ", 2)[0]
+		subCommands[subCmdName] = subCmd
 	}
 
 	bzl, err := bazel.FindFromWd()
