@@ -2,10 +2,12 @@ sh_test(
     name = "long_preset_query_test",
     srcs = ["long_preset_query_test.sh"],
     data = ["//cmd/aspect"],
+    tags = ["manual"],
 )
 
 sh_test(
     name = "passthrough_query_test",
     srcs = ["passthrough_query_test.sh"],
     data = ["//cmd/aspect"],
+    tags = ["manual"],
 )
