@@ -36,5 +36,5 @@ var GitStatus = "unknown"
 var Release = "no release"
 
 func IsStamped() bool {
-	return BuildTime != "{BUILD_TIME}"
+	return BuildTime != "{BUILD_TIMESTAMP}"
 }
