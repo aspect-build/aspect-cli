@@ -11,6 +11,7 @@ go_library(
     deps = [
         "//bazel/analysis",
         "//bazel/flags",
+        "//buildinfo",
         "//pkg/bazel/workspace",
         "//pkg/ioutils",
         "@com_github_bazelbuild_bazelisk//core",
