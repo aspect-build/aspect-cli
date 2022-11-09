@@ -23,7 +23,6 @@ Not licensed for re-use.
 package bazel
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,20 +59,6 @@ func init() {
 }
 
 func TestBazel(t *testing.T) {
-	t.Run("when a custom environment is passed, it should be used by bazelisk", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-
-		bzl, err := New(workspaceDir)
-		g.Expect(err).ToNot(HaveOccurred())
-
-		env := []string{fmt.Sprintf("FOO=%s", "BAR")}
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout}
-		_, err = bzl.WithEnv(env).RunCommand(streams, "--print_env")
-		g.Expect(err).To(Not(HaveOccurred()))
-		g.Expect(stdout.String()).To(ContainSubstring("FOO=BAR"))
-	})
-
 	t.Run("when the workspace override directory is set, it should be used by bazelisk", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 
