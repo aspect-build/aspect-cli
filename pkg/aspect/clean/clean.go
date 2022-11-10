@@ -95,25 +95,26 @@ func NewDefault(streams ioutils.Streams, bzl bazel.Bazel) *Clean {
 }
 
 // Run runs the aspect build command.
-func (c *Clean) Run(_ *cobra.Command, args []string) error {
-	if len(args) > 0 {
-		switch args[0] {
-		case "all":
-			return c.reclaimAll()
-		default:
-			// This is defense-in-depth, cobra should validate the args
-			panic(fmt.Sprintf("unknown type '%s' for clean", args[0]))
+func (c *Clean) Run(cmd *cobra.Command, args []string) error {
+	cleanAll := false
+
+	// TODO: move separation of flags and arguments to a high level of abstraction
+	flags := make([]string, 0)
+	for i := 0; i < len(args); i++ {
+		if args[i] == "all" {
+			cleanAll = true
+			continue
 		}
+		flags = append(flags, args[i])
 	}
 
-	cmd := []string{"clean"}
-	if c.Expunge {
-		cmd = append(cmd, "--expunge")
+	if cleanAll {
+		return c.reclaimAll()
 	}
-	if c.ExpungeAsync {
-		cmd = append(cmd, "--expunge_async")
-	}
-	if exitCode, err := c.bzl.RunCommand(c.Streams, cmd...); exitCode != 0 {
+
+	bazelCmd := []string{"clean"}
+	bazelCmd = append(bazelCmd, flags...)
+	if exitCode, err := c.bzl.RunCommand(c.Streams, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

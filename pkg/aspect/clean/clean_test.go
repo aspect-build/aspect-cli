@@ -57,38 +57,4 @@ func TestClean(t *testing.T) {
 		b := clean.New(streams, bzl)
 		g.Expect(b.Run(nil, []string{})).Should(Succeed())
 	})
-
-	t.Run("clean expunge calls bazel clean expunge", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		streams := ioutils.Streams{}
-		bzl := mock.NewMockBazel(ctrl)
-		bzl.
-			EXPECT().
-			RunCommand(streams, "clean", "--expunge").
-			Return(0, nil)
-
-		b := clean.New(streams, bzl)
-		b.Expunge = true
-		g.Expect(b.Run(nil, []string{})).Should(Succeed())
-	})
-
-	t.Run("clean expunge_async calls bazel clean expunge_async", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		streams := ioutils.Streams{}
-		bzl := mock.NewMockBazel(ctrl)
-		bzl.
-			EXPECT().
-			RunCommand(streams, "clean", "--expunge_async").
-			Return(0, nil)
-
-		b := clean.New(streams, bzl)
-		b.ExpungeAsync = true
-		g.Expect(b.Run(nil, []string{})).Should(Succeed())
-	})
 }

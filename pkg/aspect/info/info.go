@@ -28,8 +28,6 @@ import (
 
 type Info struct {
 	ioutils.Streams
-
-	ShowMakeEnv bool
 }
 
 func New(streams ioutils.Streams) *Info {
@@ -40,10 +38,6 @@ func New(streams ioutils.Streams) *Info {
 
 func (v *Info) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"info"}
-	if v.ShowMakeEnv {
-		// Propagate the flag
-		bazelCmd = append(bazelCmd, "--show_make_env")
-	}
 	bazelCmd = append(bazelCmd, args...)
 	bzl, err := bazel.FindFromWd()
 	if err != nil {
