@@ -24,6 +24,7 @@ go_library(
         "//cmd/aspect/query",
         "//cmd/aspect/run",
         "//cmd/aspect/shutdown",
+        "//cmd/aspect/support",
         "//cmd/aspect/sync",
         "//cmd/aspect/test",
         "//cmd/aspect/version",
