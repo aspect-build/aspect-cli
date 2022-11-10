@@ -86,7 +86,7 @@ func Find(startDir string) (Bazel, error) {
 	finder := workspace.DefaultFinder
 	wr, err := finder.Find(startDir)
 	if err != nil {
-		return nil, err
+		return NoWorkspaceRoot(), nil
 	}
 	return New(wr)
 }
