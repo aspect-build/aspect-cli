@@ -39,7 +39,7 @@ func NewVersionCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *co
 
 	cmd := &cobra.Command{
 		Use:     "version",
-		Short:   "Print the versions of Aspect CLI, Bazelisk, and Bazel",
+		Short:   "Print the versions of Aspect CLI and Bazel",
 		Long:    `Prints version info on colon-separated lines, just like bazel does`,
 		GroupID: "common",
 		RunE: interceptors.Run(
