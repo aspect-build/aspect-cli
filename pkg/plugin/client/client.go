@@ -18,7 +18,10 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -77,17 +80,52 @@ func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.St
 		//   versioned url: https://static.aspect.build/cli/v0.9.0/plugin-aspect-pro-darwin_amd64
 		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
 			if len(aspectplugin.Version) < 1 {
-				return nil, fmt.Errorf("cannot download plugin '%s': the version field is required", aspectplugin.Name)
+				return nil, fmt.Errorf("cannot download plugin %q: the version field is required", aspectplugin.Name)
 			}
-			downloaded, err := DownloadPlugin(aspectplugin.From, aspectplugin.Name, aspectplugin.Version)
+			downloadedPath, err := DownloadPlugin(aspectplugin.From, aspectplugin.Name, aspectplugin.Version)
 			if err != nil {
 				return nil, err
 			}
-			aspectplugin.From = downloaded
+			aspectplugin.From = downloadedPath
 		} else if _, err := os.Stat(aspectplugin.From); err != nil {
-			pluginLogger.Warn(fmt.Sprintf("skipping install for plugin: does not exist at path %s.", aspectplugin.From))
+			pluginLogger.Warn(fmt.Sprintf("skipping install for plugin: does not exist at path %q.", aspectplugin.From))
 			return nil, nil
 		}
+	}
+
+	checksumFile := fmt.Sprintf("%s.sha256", aspectplugin.From)
+
+	var checksum []byte
+	if _, err := os.Stat(checksumFile); err != nil {
+		// We calculate the hashsum in case it was not provided by the remote server.
+		hash := sha256.New()
+		f, err := os.Open(aspectplugin.From)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
+		}
+		defer f.Close()
+		if _, err := io.Copy(hash, f); err != nil {
+			return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
+		}
+		checksum = hash.Sum(nil)
+		if err := os.WriteFile(checksumFile, []byte(hex.EncodeToString(checksum)), 0400); err != nil {
+			return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
+		}
+	} else {
+		b, err := os.ReadFile(checksumFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
+		}
+		decoded, err := hex.DecodeString(strings.Split(string(b), " ")[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
+		}
+		checksum = decoded
+	}
+
+	secureConfig := &goplugin.SecureConfig{
+		Checksum: checksum,
+		Hash:     sha256.New(),
 	}
 	clientConfig := &goplugin.ClientConfig{
 		HandshakeConfig:  config.Handshake,
@@ -97,6 +135,7 @@ func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.St
 		SyncStdout:       streams.Stdout,
 		SyncStderr:       streams.Stderr,
 		Logger:           pluginLogger,
+		SecureConfig:     secureConfig,
 	}
 
 	goclient := goplugin.NewClient(clientConfig)

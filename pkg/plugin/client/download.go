@@ -20,25 +20,52 @@ package client
 
 import (
 	"fmt"
+	"io"
+	"io/fs"
+	"io/ioutil"
+	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
-
-	"github.com/bazelbuild/bazelisk/httputil"
 )
 
-// DetermineExecutableFilenameSuffix returns the extension for binaries on the current operating system.
-func DetermineExecutableFilenameSuffix() string {
-	filenameSuffix := ""
-	if runtime.GOOS == "windows" {
-		filenameSuffix = ".exe"
+func DownloadPlugin(url string, name string, version string) (string, error) {
+	userCacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("could not get the user's cache directory: %v", err)
 	}
-	return filenameSuffix
+
+	pluginsCache := filepath.Join(userCacheDir, "aspect-cli", "plugins", name, version)
+	err = os.MkdirAll(pluginsCache, 0755)
+	if err != nil {
+		return "", fmt.Errorf("could not create directory %s: %v", pluginsCache, err)
+	}
+
+	filename, err := determinePluginFilename(name)
+	if err != nil {
+		return "", fmt.Errorf("unable to determine filename to fetch: %v", err)
+	}
+
+	versionedURL := fmt.Sprintf("%s/%s/%s", url, version, filename)
+
+	pluginfile, err := downloadFile(versionedURL, pluginsCache, filename, 0700)
+	if err != nil {
+		return "", fmt.Errorf("unable to fetch remote plugin from %s: %v", url, err)
+	}
+
+	sha256URL := fmt.Sprintf("%s.sha256", versionedURL)
+	sha256Filename := fmt.Sprintf("%s.sha256", filename)
+
+	// We don't care if this errors. We have logic to do Trust on first use (TOFU).
+	downloadFile(sha256URL, pluginsCache, sha256Filename, 0400)
+
+	return pluginfile, nil
 }
 
-// DetermineBazelFilename returns the correct file name of a local Bazel binary.
+// determineBazelFilename returns the correct file name of a local Bazel binary.
 // The logic produces the same naming as our /release/release.bzl gives to our aspect-cli binaries.
-func DeterminePluginFilename(pluginName string) (string, error) {
+func determinePluginFilename(pluginName string) (string, error) {
 	var machineName string
 	switch runtime.GOARCH {
 	case "amd64", "arm64":
@@ -55,33 +82,52 @@ func DeterminePluginFilename(pluginName string) (string, error) {
 		return "", fmt.Errorf("unsupported operating system \"%s\", must be Linux, macOS or Windows", runtime.GOOS)
 	}
 
-	filenameSuffix := DetermineExecutableFilenameSuffix()
+	filenameSuffix := ""
+	if runtime.GOOS == "windows" {
+		filenameSuffix = ".exe"
+	}
 
 	return fmt.Sprintf("%s-%s_%s%s", pluginName, osName, machineName, filenameSuffix), nil
 }
 
-func DownloadPlugin(url string, name string, version string) (string, error) {
-	userCacheDir, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("could not get the user's cache directory: %v", err)
+func downloadFile(originURL, destDir, destFile string, mode fs.FileMode) (string, error) {
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return "", fmt.Errorf("could not create directory %s: %v", destDir, err)
+	}
+	destinationPath := filepath.Join(destDir, destFile)
+
+	if _, err := os.Stat(destinationPath); err != nil {
+		tmpfile, err := ioutil.TempFile(destDir, "download")
+		if err != nil {
+			return "", fmt.Errorf("could not create temporary file: %v", err)
+		}
+		defer os.Remove(tmpfile.Name())
+		defer tmpfile.Close()
+
+		log.Printf("Downloading %s...", originURL)
+
+		resp, err := http.Get(originURL)
+		if err != nil {
+			return "", fmt.Errorf("HTTP GET %s failed: %v", originURL, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			return "", fmt.Errorf("HTTP GET %s failed with error %v", originURL, resp.StatusCode)
+		}
+
+		if _, err := io.Copy(tmpfile, resp.Body); err != nil {
+			return "", fmt.Errorf("could not copy from %s to %s: %v", originURL, tmpfile.Name(), err)
+		}
+
+		if err := os.Chmod(tmpfile.Name(), mode); err != nil {
+			return "", fmt.Errorf("could not chmod file %s: %v", tmpfile.Name(), err)
+		}
+
+		if err := os.Rename(tmpfile.Name(), destinationPath); err != nil {
+			return "", fmt.Errorf("could not move %s to %s: %v", tmpfile.Name(), destinationPath, err)
+		}
 	}
 
-	pluginsCache := filepath.Join(userCacheDir, "aspect-cli", "plugins", name, version)
-	err = os.MkdirAll(pluginsCache, 0755)
-	if err != nil {
-		return "", fmt.Errorf("could not create directory %s: %v", pluginsCache, err)
-	}
-
-	filename, err := DeterminePluginFilename(name)
-	if err != nil {
-		return "", fmt.Errorf("unable to determine filename to fetch: %v", err)
-	}
-
-	versionedUrl := fmt.Sprintf("%s/%s/%s", url, version, filename)
-
-	pluginfile, err := httputil.DownloadBinary(versionedUrl, pluginsCache, filename)
-	if err != nil {
-		return "", fmt.Errorf("unable to fetch remote plugin from %s: %v", url, err)
-	}
-	return pluginfile, nil
+	return destinationPath, nil
 }
