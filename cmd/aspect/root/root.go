@@ -29,6 +29,7 @@ import (
 	"aspect.build/cli/cmd/aspect/build"
 	"aspect.build/cli/cmd/aspect/canonicalizeflags"
 	"aspect.build/cli/cmd/aspect/clean"
+	"aspect.build/cli/cmd/aspect/configure"
 	"aspect.build/cli/cmd/aspect/cquery"
 	"aspect.build/cli/cmd/aspect/docs"
 	"aspect.build/cli/cmd/aspect/dump"
@@ -56,22 +57,33 @@ var (
 	faint    = color.New(color.Faint)
 )
 
+func NewProRootCmd(pluginSystem system.PluginSystem) *cobra.Command {
+	defaultInteractive := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
+	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive, true)
+}
+
 func NewDefaultRootCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	defaultInteractive := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
-	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive)
+	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive, false)
 }
 
 func NewRootCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
 	defaultInteractive bool,
+	pro bool,
 ) *cobra.Command {
+	productName := "Aspect CLI"
+	if pro {
+		productName = "Aspect CLI Pro"
+	}
+
 	cmd := &cobra.Command{
 		Use:           "aspect",
-		Short:         "Aspect.build bazel wrapper",
+		Short:         productName,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Long:          boldCyan.Sprintf(`Aspect CLI`) + ` is a better frontend for running bazel`,
+		Long:          boldCyan.Sprintf(productName) + ` is a better frontend for running bazel`,
 		// Suppress timestamps in generated Markdown, for determinism
 		DisableAutoGenTag: true,
 		Version:           buildinfo.Current().Version(),
@@ -108,8 +120,11 @@ func NewRootCmd(
 	cmd.AddCommand(shutdown.NewDefaultShutdownCmd())
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultVersionCmd())
-	// Pro commands
-	cmd.AddCommand(support.NewDefaultSupportCmd())
+	if !pro {
+		// Pro command stubs
+		cmd.AddCommand(configure.NewDefaultConfigureCmd())
+		cmd.AddCommand(support.NewDefaultSupportCmd())
+	}
 
 	// ### "Additional help topic commands" which are not runnable
 	// https://pkg.go.dev/github.com/spf13/cobra#Command.IsAdditionalHelpTopicCommand

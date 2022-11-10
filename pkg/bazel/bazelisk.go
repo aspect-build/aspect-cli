@@ -162,11 +162,12 @@ func (bazelisk *Bazelisk) GetEnvOrConfig(name string) string {
 			splits := strings.Split(versionString, "/")
 			version = splits[len(splits)-1]
 		}
-		if version == buildinfo.Current().Version() || os.Getenv("ASPECT_REENTRANT") != "" {
-			// If version of aspect running is correct OR we have already re-entered from another aspect,
-			// ignore the BAZELISK_BASE_URL and USE_BAZEL_VERSION since we don't want to be re-entrant.
-			// These settings are meant for bootstrapping the Aspect CLI Pro using Bazelisk. See Aspect
-			// CLI Pro README for more info.
+		devVersion := strings.HasPrefix(buildinfo.Current().Version(), "unknown")
+		if version == buildinfo.Current().Version() || devVersion || os.Getenv("ASPECT_REENTRANT") != "" {
+			// If version of aspect running is correct OR this is a developemtn version OR we have already
+			// re-entered from another aspect, ignore the BAZELISK_BASE_URL and USE_BAZEL_VERSION since we
+			// don't want to be re-entrant. These settings are meant for bootstrapping the Aspect CLI Pro
+			// using Bazelisk. See Aspect CLI Pro README for more info.
 			if name == core.BaseURLEnv {
 				return envVal
 			}

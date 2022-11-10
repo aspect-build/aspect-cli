@@ -12,6 +12,7 @@ go_library(
         "//cmd/aspect/build",
         "//cmd/aspect/canonicalizeflags",
         "//cmd/aspect/clean",
+        "//cmd/aspect/configure",
         "//cmd/aspect/cquery",
         "//cmd/aspect/docs",
         "//cmd/aspect/dump",
