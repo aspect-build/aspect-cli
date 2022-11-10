@@ -40,6 +40,7 @@ func New(streams ioutils.Streams) *Version {
 
 func (v *Version) Run(cmd *cobra.Command, bzl bazel.Bazel, args []string) error {
 	// Determine the format
+	name := "Aspect CLI"
 	format := buildinfo.ConventionalFormat
 	if cmd != nil {
 		gnuFormat, err := cmd.Flags().GetBool("gnu_format")
@@ -47,12 +48,13 @@ func (v *Version) Run(cmd *cobra.Command, bzl bazel.Bazel, args []string) error 
 			return fmt.Errorf("failed to get value of --gnu_format flag: %w", err)
 		}
 		if gnuFormat {
+			name = "aspect"
 			format = buildinfo.GNUFormat
 		}
 	}
 
 	// Write the version
-	version := v.BuildInfo.CommandVersion("Aspect", format)
+	version := v.BuildInfo.CommandVersion(name, format)
 	if _, err := fmt.Fprintln(v.Stdout, version); err != nil {
 		return err
 	}

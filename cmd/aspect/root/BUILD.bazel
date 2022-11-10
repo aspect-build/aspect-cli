@@ -6,6 +6,7 @@ go_library(
     importpath = "aspect.build/cli/cmd/aspect/root",
     visibility = ["//visibility:public"],
     deps = [
+        "//buildinfo",
         "//cmd/aspect/analyzeprofile",
         "//cmd/aspect/aquery",
         "//cmd/aspect/build",

@@ -81,7 +81,7 @@ func TestVersion(t *testing.T) {
 		v := version.New(streams)
 		err := v.Run(nil, nil, []string{})
 		g.Expect(err).To(BeNil())
-		g.Expect(stdout.String()).To(Equal("Aspect version: unknown [not built with --stamp]\n"))
+		g.Expect(stdout.String()).To(Equal("Aspect CLI version: unknown [not built with --stamp]\n"))
 	})
 
 	t.Run("no Bazel instance, with release build info", func(t *testing.T) {
@@ -99,7 +99,7 @@ func TestVersion(t *testing.T) {
 			)
 			err := v.Run(nil, nil, []string{})
 			g.Expect(err).To(BeNil())
-			g.Expect(stdout.String()).To(Equal("Aspect version: 1.2.3\n"))
+			g.Expect(stdout.String()).To(Equal("Aspect CLI version: 1.2.3\n"))
 		})
 
 		t.Run("git is dirty", func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestVersion(t *testing.T) {
 			)
 			err := v.Run(nil, nil, []string{})
 			g.Expect(err).To(BeNil())
-			g.Expect(stdout.String()).To(Equal("Aspect version: 1.2.3 (with local changes)\n"))
+			g.Expect(stdout.String()).To(Equal("Aspect CLI version: 1.2.3 (with local changes)\n"))
 		})
 	})
 

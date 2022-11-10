@@ -23,6 +23,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
+	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/cmd/aspect/analyzeprofile"
 	"aspect.build/cli/cmd/aspect/aquery"
 	"aspect.build/cli/cmd/aspect/build"
@@ -72,7 +73,10 @@ func NewRootCmd(
 		Long:          boldCyan.Sprintf(`Aspect CLI`) + ` is a better frontend for running bazel`,
 		// Suppress timestamps in generated Markdown, for determinism
 		DisableAutoGenTag: true,
+		Version:           buildinfo.Current().Version(),
 	}
+	cmd.SetVersionTemplate(`{{with .Name}}{{printf "%s " .}}{{end}}{{printf "%s" .Version}}
+`)
 
 	flags.AddGlobalFlags(cmd, defaultInteractive)
 	cmd.AddGroup(&cobra.Group{ID: "common", Title: "Common Bazel Commands:"})

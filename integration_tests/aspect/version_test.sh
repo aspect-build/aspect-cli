@@ -10,8 +10,8 @@ touch WORKSPACE
 ver=$($ASPECT version 2> /dev/null) || "$ASPECT" version
 
 # Should print our own version
-[[ "$ver" =~ "Aspect version:" ]] || {
-    echo >&2 "Expected 'aspect version' stdout to contain 'Aspect version:', but was"
+[[ "$ver" =~ "Aspect CLI version:" ]] || {
+    echo >&2 "Expected 'aspect version' stdout to contain 'Aspect CLI version:', but was"
     echo "$ver"
     exit 1
 }
@@ -19,6 +19,16 @@ ver=$($ASPECT version 2> /dev/null) || "$ASPECT" version
 # Should also call through to `bazel version`
 [[ "$ver" =~ "Build label:" ]] || {
     echo >&2 "Expected 'aspect version' stdout to contain 'Build label:', but was"
+    echo "$ver"
+    exit 1
+}
+
+# Only capture stdout, just like `bazel version` prints to stdout
+ver=$($ASPECT --version 2> /dev/null) || "$ASPECT" --version
+
+# Should print our own version
+[[ "$ver" =~ "aspect " ]] || {
+    echo >&2 "Expected 'aspect version' stdout to contain 'aspect ', but was"
     echo "$ver"
     exit 1
 }
