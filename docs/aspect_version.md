@@ -1,6 +1,6 @@
 ## aspect version
 
-Print the versions of Aspect CLI, Bazelisk, and Bazel
+Print the versions of Aspect CLI and Bazel
 
 ### Synopsis
 
@@ -13,8 +13,7 @@ aspect version [flags]
 ### Options
 
 ```
-      --gnu_format   format space-separated following GNU convention
-  -h, --help         help for version
+  -h, --help   help for version
 ```
 
 ### Options inherited from parent commands

@@ -27,7 +27,8 @@
   },
   "sigchanyzer": {
     "exclude_files": {
-      "(third_party|vendor|external)/.*": "only run for first-party code"
+      "(third_party|vendor|external)/.*": "only run for first-party code",
+      "pkg/bazel/bazelisk.go": "copied third-party code"
     }
   },
   "stdmethods": {
