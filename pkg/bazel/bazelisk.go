@@ -148,6 +148,21 @@ func (bazelisk *Bazelisk) GetEnvOrConfig(name string) string {
 
 	fileConfigOnce.Do(bazelisk.loadFileConfig)
 
+	// Special case for Aspect CLI Pro if config file BaseUrlEnv is set to https://static.aspect.build/cli
+	baseUrl := fileConfig[core.BaseURLEnv]
+	if strings.Contains(baseUrl, "aspect.build/") {
+		// If the BAZELISK_BASE_URL is set to a URL such as https://static.aspect.build/cli in .bazeliskrc
+		// then ignore the BAZELISK_BASE_URL and USE_BAZEL_VERSION since we don't want to be
+		// re-entrant. These settings are meant for bootstrapping the Aspect CLI Pro using Bazelisk.
+		// See Aspect CLI Pro README for more info.
+		if name == core.BaseURLEnv {
+			return ""
+		}
+		if name == "USE_BAZEL_VERSION" {
+			return ""
+		}
+	}
+
 	return fileConfig[name]
 }
 
