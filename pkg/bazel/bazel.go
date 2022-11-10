@@ -53,6 +53,7 @@ type BazelProvider func() (Bazel, error)
 type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
+	MaybeReenterAspect(streams ioutils.Streams, command ...string)
 	RunCommand(streams ioutils.Streams, command ...string) (int, error)
 	InitializeStartupFlags(args []string) ([]string, error)
 	Flags() (map[string]*flags.FlagInfo, error)
@@ -110,6 +111,19 @@ func (*bazel) createRepositories() *core.Repositories {
 	// Fetch LTS releases, release candidates and Bazel-at-commits from GCS, forks and rolling releases from GitHub.
 	// TODO(https://github.com/bazelbuild/bazelisk/issues/228): get rolling releases from GCS, too.
 	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
+}
+
+func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, command ...string) {
+	repos := b.createRepositories()
+
+	bazelisk := NewBazelisk(b.workspaceRoot)
+	// Calling bazelisk.GetEnvOrConfig has the side-effect of setting AspectReenter.
+	// TODO: this pattern could get cleaned up so it does not rely on the side-effect
+	bazelisk.GetEnvOrConfig("USE_BAZEL_VERSION")
+	if bazelisk.AspectReenter {
+		exitCode, _ := bazelisk.Run(command, repos, streams, b.env)
+		os.Exit(exitCode)
+	}
 }
 
 func (b *bazel) RunCommand(streams ioutils.Streams, command ...string) (int, error) {
