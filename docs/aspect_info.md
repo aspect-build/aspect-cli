@@ -31,9 +31,7 @@ aspect info [keys] [flags]
 ### Options
 
 ```
-  -h, --help            help for info
-      --show_make_env   include the set of key/value pairs in the "Make" environment,
-                        accessible within BUILD files
+  -h, --help   help for info
 ```
 
 ### Options inherited from parent commands
