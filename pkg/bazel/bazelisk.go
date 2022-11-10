@@ -54,6 +54,10 @@ var (
 
 type Bazelisk struct {
 	workspaceRoot string
+
+	// Set to true in GetEnvOrConfig if this aspect binary is not the user's desired
+	// version and should re-enter another aspect binary of a different version
+	AspectReenter bool
 }
 
 func NewBazelisk(workspaceRoot string) *Bazelisk {
@@ -142,25 +146,43 @@ func (bazelisk *Bazelisk) getUserAgent() string {
 
 // GetEnvOrConfig reads a configuration value from the environment, but fall back to reading it from .bazeliskrc in the workspace root.
 func (bazelisk *Bazelisk) GetEnvOrConfig(name string) string {
-	if val := os.Getenv(name); val != "" {
-		return val
-	}
-
+	envVal := os.Getenv(name)
 	fileConfigOnce.Do(bazelisk.loadFileConfig)
 
 	// Special case for Aspect CLI Pro if config file BaseUrlEnv is set to https://static.aspect.build/cli
 	baseUrl := fileConfig[core.BaseURLEnv]
 	if strings.Contains(baseUrl, "aspect.build/") {
-		// If the BAZELISK_BASE_URL is set to a URL such as https://static.aspect.build/cli in .bazeliskrc
-		// then ignore the BAZELISK_BASE_URL and USE_BAZEL_VERSION since we don't want to be
-		// re-entrant. These settings are meant for bootstrapping the Aspect CLI Pro using Bazelisk.
-		// See Aspect CLI Pro README for more info.
-		if name == core.BaseURLEnv {
-			return ""
+		// If the BAZELISK_BASE_URL is set to a URL such as https://static.aspect.build/cli in
+		// .bazeliskrc, Bazelisk is configured for bootstrapping Aspect CLI. In case some is running an
+		// installed version of aspect, however, we do need to check that the version we're running
+		// matches the desired version configured in .bazeliskrc.
+		version := buildinfo.Current().Version()
+		versionString := fileConfig["USE_BAZEL_VERSION"]
+		if len(versionString) > 0 {
+			splits := strings.Split(versionString, "/")
+			version = splits[len(splits)-1]
 		}
-		if name == "USE_BAZEL_VERSION" {
-			return ""
+		if version == buildinfo.Current().Version() || os.Getenv("ASPECT_REENTRANT") != "" {
+			// If version of aspect running is correct OR we have already re-entered from another aspect,
+			// ignore the BAZELISK_BASE_URL and USE_BAZEL_VERSION since we don't want to be re-entrant.
+			// These settings are meant for bootstrapping the Aspect CLI Pro using Bazelisk. See Aspect
+			// CLI Pro README for more info.
+			if name == core.BaseURLEnv {
+				return envVal
+			}
+			if name == "USE_BAZEL_VERSION" {
+				return envVal
+			}
+		} else {
+			// The version of aspect running does not match the desired version and we have not already
+			// re-entered from another aspect. Set AspectReenter so this aspect downloads and gives
+			// up control to the desired version of aspect.
+			bazelisk.AspectReenter = true
 		}
+	}
+
+	if envVal != "" {
+		return envVal
 	}
 
 	return fileConfig[name]
@@ -419,6 +441,9 @@ func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams iout
 		cmd.Env = append(cmd.Env, env...)
 	}
 	cmd.Env = append(cmd.Env, skipWrapperEnv+"=true")
+	if bazelisk.AspectReenter {
+		cmd.Env = append(cmd.Env, "ASPECT_REENTRANT=true")
+	}
 	if execPath != bazel {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", bazelReal, bazel))
 	}
@@ -431,6 +456,7 @@ func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams iout
 
 func (bazelisk *Bazelisk) runBazel(bazel string, args []string, streams ioutils.Streams, env []string) (int, error) {
 	cmd := bazelisk.makeBazelCmd(bazel, args, streams, env)
+
 	err := cmd.Start()
 	if err != nil {
 		return 1, fmt.Errorf("could not start Bazel: %v", err)
