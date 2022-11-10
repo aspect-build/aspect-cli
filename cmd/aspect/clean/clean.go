@@ -35,14 +35,9 @@ func NewDefaultCleanCmd() *cobra.Command {
 
 // NewCleanCmd creates a new clean cobra command.
 func NewCleanCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
-	var expunge bool
-	var expungeAsync bool
-
 	cmd := &cobra.Command{
-		Use:       "clean [--expunge] [all]",
-		Short:     "Remove the output tree",
-		Args:      cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
-		ValidArgs: []string{"all"},
+		Use:   "clean [--expunge] [all]",
+		Short: "Remove the output tree",
 		Long: `Removes bazel-created output, including all object files, and bazel metadata.
 
 Documentation: <https://bazel.build/docs/user-manual#clean>
@@ -89,22 +84,10 @@ Workaround inconistent state:
 					return err
 				}
 				c := clean.NewDefault(streams, bzl)
-				c.Expunge = expunge
-				c.ExpungeAsync = expungeAsync
 				return c.Run(cmd, args)
 			},
 		),
 	}
 
-	cmd.PersistentFlags().BoolVarP(&expunge, "expunge", "", false, `Remove the entire output_base tree.
-This removes all build output, external repositories,
-and temp files created by Bazel.
-It also stops the Bazel server after the clean,
-equivalent to the shutdown command.`)
-
-	cmd.PersistentFlags().BoolVarP(&expungeAsync, "expunge_async", "", false, `Expunge in the background.
-It is safe to invoke a Bazel command in the same
-workspace while the asynchronous expunge continues to run.
-Note, however, that this may introduce IO contention.`)
 	return cmd
 }

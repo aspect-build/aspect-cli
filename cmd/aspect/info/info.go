@@ -62,8 +62,5 @@ See also 'aspect version' for more detailed version information about the tool.`
 			v.Run,
 		),
 	}
-
-	cmd.PersistentFlags().BoolVarP(&v.ShowMakeEnv, "show_make_env", "", false, `include the set of key/value pairs in the "Make" environment,
-accessible within BUILD files`)
 	return cmd
 }

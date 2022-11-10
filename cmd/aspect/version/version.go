@@ -48,16 +48,9 @@ func NewVersionCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 				flags.FlagsInterceptor(streams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				return v.Run(bzl)
+				return v.Run(cmd, bzl, args)
 			},
 		),
 	}
-	cmd.PersistentFlags().BoolVarP(
-		&v.GNUFormat,
-		"gnu_format",
-		"",
-		false,
-		"format space-separated following GNU convention",
-	)
 	return cmd
 }
