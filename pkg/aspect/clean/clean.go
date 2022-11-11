@@ -29,7 +29,6 @@ import (
 
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
@@ -69,11 +68,6 @@ type Clean struct {
 	ioutils.Streams
 	bzl bazel.Bazel
 
-	Prefs viper.Viper
-
-	Expunge      bool
-	ExpungeAsync bool
-
 	Filesystem filesystem.Filesystem
 }
 
@@ -89,7 +83,6 @@ func New(
 
 func NewDefault(streams ioutils.Streams, bzl bazel.Bazel) *Clean {
 	c := New(streams, bzl)
-	c.Prefs = *viper.GetViper()
 	c.Filesystem = filesystem.NewDefault()
 	return c
 }
