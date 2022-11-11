@@ -1,7 +1,6 @@
 - name: plugin-aspect-pro
-  from: https://static.aspect.build/cli
-  version: v0.9.0
-  properties:
-    error_augmentor:
-    fix_visibility:
-    outputs:
+  from: https://static.aspect.build/aspect
+  version: 4.2.0
+- name: plugin-aspect-buildkite
+  from: https://static.aspect.build/aspect
+  version: 4.2.0
