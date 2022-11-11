@@ -6,8 +6,8 @@ Interactive, human-escalated support for Bazel problems
 
 support collects recent Bazel invocations and collects relevant log files.
 
-		 It then posts a message to a Slack channel on behalf of the user, posting the problem report in
-		 a form that makes it easier for responders to understand the context and reproduce the problem.
+It then posts a message to a Slack channel on behalf of the user, posting the problem report in
+a form that makes it easier for responders to understand the context and reproduce the problem.
 
 ```
 aspect support [flags]
