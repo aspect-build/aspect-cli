@@ -45,5 +45,5 @@ $ aspect aquery 'inputs(".*cpp", deps(//src/target_a))'
 
 ### SEE ALSO
 
-* [aspect](aspect.md)	 - Aspect.build bazel wrapper
+* [aspect](aspect.md)	 - Aspect CLI
 

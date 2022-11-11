@@ -1,19 +1,19 @@
-## aspect version
+## aspect configure
 
-Print the versions of Aspect CLI and Bazel
+Generate and update BUILD files
 
 ### Synopsis
 
-Prints version info on colon-separated lines, just like bazel does
+Generates and updates BUILD files from sources for Typescript, Golang and Protobuf.
 
 ```
-aspect version [flags]
+aspect configure [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for version
+  -h, --help   help for configure
 ```
 
 ### Options inherited from parent commands

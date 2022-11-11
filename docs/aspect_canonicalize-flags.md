@@ -37,5 +37,5 @@ aspect canonicalize-flags -- <bazel flags>
 
 ### SEE ALSO
 
-* [aspect](aspect.md)	 - Aspect.build bazel wrapper
+* [aspect](aspect.md)	 - Aspect CLI
 
