@@ -1,4 +1,6 @@
+load(":bazelisk_artifacts.bzl", "bazelisk_artifacts")
 load(":release.bzl", "multi_platform_binaries", "release")
+load(":version_file.bzl", "version_file")
 
 multi_platform_binaries(
     name = "aspect",
@@ -6,10 +8,27 @@ multi_platform_binaries(
     tags = ["manual"],
 )
 
+version_file(
+    name = "aspect_version",
+    version_var = "STABLE_BUILD_SCM_TAG",
+)
+
+bazelisk_artifacts(
+    name = "aspect_bazelisk_artifacts",
+    darwin_arm64 = ":aspect-darwin-arm64",
+    darwin_x86_64 = ":aspect-darwin-amd64",
+    linux_arm64 = ":aspect-linux-arm64",
+    linux_x86_64 = ":aspect-linux-amd64",
+    tags = ["manual"],
+    version_file = ":aspect_version",
+    windows_x86_64 = ":aspect-windows-amd64",
+)
+
 release(
     name = "release",
     tags = ["manual"],
     targets = [
         ":aspect",
+        ":aspect_bazelisk_artifacts",
     ],
 )

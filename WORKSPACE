@@ -23,6 +23,14 @@ http_archive(
     url = "https://github.com/aspect-build/bazel-lib/archive/refs/tags/v1.11.7.tar.gz",
 )
 
+# Needed in //release/version_file.bzl for @aspect_rules_js//js/private:expand_template.bzl
+http_archive(
+    name = "aspect_rules_js",
+    sha256 = "99657daed85eb5e764663fc2a534d4488b3b157719d9ddc64fbac0fd4510b677",
+    strip_prefix = "rules_js-1.6.8",
+    url = "https://github.com/aspect-build/rules_js/archive/refs/tags/v1.6.8.tar.gz",
+)
+
 http_archive(
     name = "bazel_skylib",
     sha256 = "58f558d04a936cade1d4744d12661317e51f6a21e3dd7c50b96dc14f3fa3b87d",
@@ -92,4 +100,15 @@ http_archive(
     urls = [
         "https://github.com/jmhodges/bazel_gomock/archive/refs/tags/v1.3.tar.gz",
     ],
+)
+
+load("@aspect_rules_js//js:repositories.bzl", "rules_js_dependencies")
+
+rules_js_dependencies()
+
+load("@rules_nodejs//nodejs:repositories.bzl", "nodejs_register_toolchains")
+
+nodejs_register_toolchains(
+    name = "nodejs",
+    node_version = "17.9.1",
 )

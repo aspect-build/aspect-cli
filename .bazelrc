@@ -1,4 +1,4 @@
-build --workspace_status_command=$(pwd)/bazel_stamp_info.sh
+build --workspace_status_command "${PWD}/workspace_status.sh"
 build:release -c opt --stamp
 build --incompatible_strict_action_env
 

@@ -11,5 +11,11 @@ echo 'mkdir -p "${dst}"'
 
 for artifact in "$@"; do
   echo "echo \"Copying ${artifact} to \${dst}\""
-  echo "cp \"${artifact}\" \"\${dst}\""
+  echo "if [ -d \"${artifact}\" ]; then"
+  echo "  for f in \"${artifact}\"/*; do"
+  echo "    cp \"\${f}\" \"\${dst}\""
+  echo "  done"
+  echo "else"
+  echo "  cp \"${artifact}\" \"\${dst}\""
+  echo "fi"
 done
