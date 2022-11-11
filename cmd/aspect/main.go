@@ -29,19 +29,7 @@ import (
 )
 
 func main() {
-	// Detect whether we are being run as a tools/bazel wrapper (look for BAZEL_REAL in the environment)
-	// If so,
-	//     Is this a bazel-native command? just call through to bazel without touching the arguments for now
-	//     Is this an aspect-custom command? (like `outputs`) then write an implementation
-	// otherwise,
-	//     we are installing ourselves. Check with the user they intended to do that.
-	//     then create
-	//         - a WORKSPACE file, ask the user for the repository name if interactive
-	//     ask the user if they want to install for all users of the workspace, if so
-	//         - tools/bazel file and put our bootstrap code in there
-	//
-
-	// Convenience for local development: under `bazel run //:aspect` respect the
+	// Convenience for local development: under `bazel run <aspect binary target>` respect the
 	// users working directory, don't run in the execroot
 	if wd, exists := os.LookupEnv("BUILD_WORKING_DIRECTORY"); exists {
 		_ = os.Chdir(wd)
@@ -52,6 +40,12 @@ func main() {
 		aspecterrors.HandleError(err)
 	}
 
+	streams := ioutils.DefaultStreams
+
+	// Re-enter another version of aspect if the version currently running is not
+	// the desired version
+	bzl.MaybeReenterAspect(streams, os.Args[1:]...)
+
 	argsWithoutStartupFlags, err := bzl.InitializeStartupFlags(os.Args)
 	if err != nil {
 		aspecterrors.HandleError(err)
@@ -59,7 +53,7 @@ func main() {
 	os.Args = argsWithoutStartupFlags
 
 	pluginSystem := system.NewPluginSystem()
-	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
+	if err := pluginSystem.Configure(streams); err != nil {
 		aspecterrors.HandleError(err)
 	}
 
