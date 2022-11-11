@@ -20,14 +20,18 @@ package client
 
 import (
 	"fmt"
+	"github.com/fatih/color"
 	"io"
 	"io/fs"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+)
+
+var (
+	faint = color.New(color.Faint)
 )
 
 func DownloadPlugin(url string, name string, version string) (string, error) {
@@ -104,7 +108,7 @@ func downloadFile(originURL, destDir, destFile string, mode fs.FileMode) (string
 		defer os.Remove(tmpfile.Name())
 		defer tmpfile.Close()
 
-		log.Printf("Downloading %s...", originURL)
+		faint.Println("Downloading", originURL)
 
 		resp, err := http.Get(originURL)
 		if err != nil {
