@@ -34,5 +34,5 @@ aspect fetch <target patterns> [flags]
 
 ### SEE ALSO
 
-* [aspect](aspect.md)	 - Aspect.build bazel wrapper
+* [aspect](aspect.md)	 - Aspect CLI
 

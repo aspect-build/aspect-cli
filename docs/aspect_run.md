@@ -50,5 +50,5 @@ aspect run [--run_under=command-prefix] <target> -- [args for program ...]
 
 ### SEE ALSO
 
-* [aspect](aspect.md)	 - Aspect.build bazel wrapper
+* [aspect](aspect.md)	 - Aspect CLI
 

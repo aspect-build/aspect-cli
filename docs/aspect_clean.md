@@ -59,5 +59,5 @@ aspect clean [--expunge] [all] [flags]
 
 ### SEE ALSO
 
-* [aspect](aspect.md)	 - Aspect.build bazel wrapper
+* [aspect](aspect.md)	 - Aspect CLI
 

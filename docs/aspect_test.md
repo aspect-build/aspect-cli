@@ -48,5 +48,5 @@ aspect test [--build_tests_only] <target pattern> [<target pattern> ...] [flags]
 
 ### SEE ALSO
 
-* [aspect](aspect.md)	 - Aspect.build bazel wrapper
+* [aspect](aspect.md)	 - Aspect CLI
 

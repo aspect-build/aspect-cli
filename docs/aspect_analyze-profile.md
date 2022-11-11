@@ -38,5 +38,5 @@ aspect analyze-profile <command.profile.gz> [flags]
 
 ### SEE ALSO
 
-* [aspect](aspect.md)	 - Aspect.build bazel wrapper
+* [aspect](aspect.md)	 - Aspect CLI
 

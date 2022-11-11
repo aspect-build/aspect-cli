@@ -73,5 +73,5 @@ aspect print --output=label --output=testonly 'base:*' 2>/dev/null
 
 ### SEE ALSO
 
-* [aspect](aspect.md)	 - Aspect.build bazel wrapper
+* [aspect](aspect.md)	 - Aspect CLI
 
