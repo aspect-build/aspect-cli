@@ -37,6 +37,7 @@ import (
 	"aspect.build/cli/cmd/aspect/info"
 	"aspect.build/cli/cmd/aspect/mobileinstall"
 	"aspect.build/cli/cmd/aspect/modquery"
+	"aspect.build/cli/cmd/aspect/outputs"
 	"aspect.build/cli/cmd/aspect/print"
 	"aspect.build/cli/cmd/aspect/printaction"
 	"aspect.build/cli/cmd/aspect/query"
@@ -120,6 +121,7 @@ func NewRootCmd(
 	cmd.AddCommand(shutdown.NewDefaultShutdownCmd())
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultVersionCmd())
+	cmd.AddCommand(outputs.NewDefaultOutputsCmd())
 	if !pro {
 		// Pro command stubs
 		cmd.AddCommand(configure.NewDefaultConfigureCmd())

@@ -20,6 +20,7 @@ go_library(
         "//cmd/aspect/info",
         "//cmd/aspect/mobileinstall",
         "//cmd/aspect/modquery",
+        "//cmd/aspect/outputs",
         "//cmd/aspect/print",
         "//cmd/aspect/printaction",
         "//cmd/aspect/query",
