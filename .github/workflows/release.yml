@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - '*.*.*'
 
 jobs:
   build:
@@ -18,8 +18,7 @@ jobs:
             ~/.cache/bazel
             ~/.cache/bazel-repo
           key: >-
-            bazel-cache-${{ hashFiles('**/*.go', '**/BUILD.bazel', '**/*.bzl',
-            'WORKSPACE') }}
+            bazel-cache-${{ hashFiles('**/*.go', '**/BUILD.bazel', '**/*.bzl', 'WORKSPACE') }}
           restore-keys: bazel-cache-
       - uses: bazelbuild/setup-bazelisk@v1
       - name: Build release artifacts
@@ -37,6 +36,6 @@ jobs:
       - name: Create GitHub draft release and upload artifacts
         uses: softprops/action-gh-release@v1
         with:
-          prerelease: true
-          draft: true
+          # Use GH feature to populate the changelog automatically
+          generate_release_notes: true
           files: /tmp/aspect/release/*

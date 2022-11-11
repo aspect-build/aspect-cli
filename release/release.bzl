@@ -2,6 +2,7 @@
 """
 
 load("@io_bazel_rules_go//go:def.bzl", "go_binary")
+load(":hashes.bzl", "hashes")
 
 PLATFORMS = [
     struct(os = "darwin", arch = "amd64", ext = "", gc_linkopts = ["-s", "-w"]),
@@ -25,6 +26,7 @@ def multi_platform_binaries(name, embed, prefix = "", **kwargs):
     targets = []
     for platform in PLATFORMS:
         target_name = "{}-{}-{}".format(name, platform.os, platform.arch)
+        target_label = Label("//{}:{}".format(native.package_name(), target_name))
         go_binary(
             name = target_name,
             out = "{}{}-{}_{}{}".format(prefix, name, platform.os, platform.arch, platform.ext),
@@ -36,7 +38,14 @@ def multi_platform_binaries(name, embed, prefix = "", **kwargs):
             visibility = ["//visibility:public"],
             **kwargs
         )
-        targets.append(Label("//{}:{}".format(native.package_name(), target_name)))
+        hashes_name = "{}_hashes".format(target_name)
+        hashes_label = Label("//{}:{}".format(native.package_name(), hashes_name))
+        hashes(
+            name = hashes_name,
+            src = target_label,
+            **kwargs
+        )
+        targets.extend([target_label, hashes_label])
 
     native.filegroup(
         name = name,
