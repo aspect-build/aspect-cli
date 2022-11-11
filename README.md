@@ -1,39 +1,83 @@
-# aspect-cli
+The `aspect` CLI is a drop-in replacement for the `bazel` CLI that comes with Bazel.
 
-This is the source repository for the Aspect command-line interface for Bazel.
-Check out our homepage at https://aspect.build
+# Why Aspect CLI
 
-It's currently in pre-release.
+Every organization has a different engineering culture and developer stack.
+Bazel was designed for Google's workflows, not yours.
+Many companies have found they have to write a wrapper around Bazel.
+This starts out as a small need to shim something in the developer workflow, and is often an
+untested Bash script living in `/tools/bazel` which Bazelisk understands as a wrapper script.
 
-Contact us at hello@aspect.dev if you'd like to discuss partnerships.
+Over time, the wrapper accumulates more code, and is a constant source of developer distress.
 
-# Pre-commit install
+See more on our product webpage: <https://aspect.build/cli>
 
-https://pre-commit.com/#installation
+# Installation
 
-# Dev Workflow
+## MacOS
 
-To make changes to your go files, run the following to fix your dependencies and build files:
+On MacOS, you can run
 
-`bazel run tidy`
+```sh
+% brew install aspect-build/aspect/aspect-cli-pro
+```
 
-To run a command using the Bazel managed version of go, use the following pattern:
+This installs the `aspect` command and also links it to `bazel`, just like the [bazelisk] installer does.
 
-`bazel run go -- ` followed by your go command
+> We plan to have a standard "core" homebrew formula so this will just be `brew install aspect` in the future.
 
-For instance, to view the version of go, you execute the following:
+## Bazelisk
 
-`bazel run go -- version`
+On any platform, so long as you already have [bazelisk] installed, you can have [bazelisk]
+install the Aspect CLI just like it can install the standard Bazel CLI.
+Add this to your `.bazeliskrc` in your project folder to install Aspect for all developers:
 
-## Resolving merge conflicts on go.mod, go.sum and deps.bzl
+```
+BAZELISK_BASE_URL=https://static.aspect.build/aspect
+USE_BAZEL_VERSION=aspect/4.2.0
+```
 
-If you have not made any custom changes to these files but have conflicts in your merge, then you can run:
+Note that in all cases, the `.bazelversion` file continues to indicate which version of the
+Bazel tool is fetched and run beneath the wrapper.
 
-git fetch origin --prune
-git checkout origin/main -- go.mod go.sum deps.bzl
+## Manual
 
-`bazel run //:tidy`
+You can manually install a binary from our [GitHub Releases] page and put it in your PATH.
 
-This will fetch go.mod, go.sum and deps.bzl from origin/main and replace your files with them.
-Then, go tidy and gazelle will be run over these files to update them.
-After this, you should be able to merge your changes without any conflicts in those files.
+On MacOS you can bypass the "Unknown Developer" dialog by running
+
+```shell
+xattr -c $(which aspect)
+```
+
+before launching `aspect`.
+
+# Usage
+
+Just run `aspect help` to see the available commands.
+Some are the standard ones you know from Bazel, and others are new, such as `print` and `docs`.
+
+## Write a plugin
+
+Aspect's plugin system allows you to fit Bazel into your team's development process,
+with custom commands, behaviors, and integrations.
+
+A plugin is any program (written in any language) that serves our gRPC protocol.
+The easiest way to get started is to clone our
+[starter template repo](https://github.com/aspect-build/aspect-cli-plugin-template).
+
+See the [Plugin Documentation](./help/topics/plugins.md) for more information on how to write a plugin.
+
+# For Enterprise
+
+`aspect` is sponsored by Aspect Development, a Bazel consulting company.
+If your organization needs more help to make your Bazel migration a success,
+come find us at [aspect.dev](https://aspect.dev)
+
+We also offer a Professional edition of the Aspect CLI.
+This adds features that big codebases rely on, like BUILD file generation.
+See our website at <http://aspect.build> to learn more about our offerings.
+
+[bazel]: http://bazel.build
+[github releases]: https://github.com/aspect-dev/aspect-cli/releases
+[bazelisk]: https://github.com/bazelbuild/bazelisk
