@@ -149,36 +149,39 @@ func (bazelisk *Bazelisk) GetEnvOrConfig(name string) string {
 	envVal := os.Getenv(name)
 	fileConfigOnce.Do(bazelisk.loadFileConfig)
 
-	// Special case for Aspect CLI Pro if config file BaseUrlEnv is set to https://static.aspect.build/aspect
-	baseUrl := fileConfig[core.BaseURLEnv]
-	if strings.Contains(baseUrl, "aspect.build/") {
-		// If the BAZELISK_BASE_URL is set to a URL such as https://static.aspect.build/aspect in
-		// .bazeliskrc, Bazelisk is configured for bootstrapping Aspect CLI. In case some is running an
-		// installed version of aspect, however, we do need to check that the version we're running
-		// matches the desired version configured in .bazeliskrc.
-		version := buildinfo.Current().Version()
-		versionString := fileConfig["USE_BAZEL_VERSION"]
-		if len(versionString) > 0 {
-			splits := strings.Split(versionString, "/")
-			version = splits[len(splits)-1]
+	// In some cases if .bazeliskrc is configured to bootstrap Aspect, we need to either ignore the
+	// BaseURLEnv and USE_BAZEL_VERSION from .bazeliskrc OR we should re-enter a child Aspect CLI
+	// because we're a locally installed Aspect CLI and the repository is configured for a different
+	// version.
+	if name == core.BaseURLEnv || name == "USE_BAZEL_VERSION" {
+		// If we were bootstrapped by Bazelisk or by a parent Aspect then we need to ignore both
+		// core.BaseURLEnv && USE_BAZEL_VERSION in the version file. This protects against infinite
+		// re-entrance incase we can't detect if .bazeliskrc is configured for this version below.
+		bazeliskRentrant := os.Getenv(skipWrapperEnv) != ""
+		aspectRentrant := os.Getenv("ASPECT_REENTRANT") != ""
+		if bazeliskRentrant || aspectRentrant {
+			return envVal
 		}
-		devVersion := strings.HasPrefix(buildinfo.Current().Version(), "unknown")
-		if version == buildinfo.Current().Version() || devVersion || os.Getenv("ASPECT_REENTRANT") != "" {
-			// If version of aspect running is correct OR this is a developemtn version OR we have already
-			// re-entered from another aspect, ignore the BAZELISK_BASE_URL and USE_BAZEL_VERSION since we
-			// don't want to be re-entrant. These settings are meant for bootstrapping the Aspect CLI Pro
-			// using Bazelisk. See Aspect CLI Pro README for more info.
-			if name == core.BaseURLEnv {
-				return envVal
+		baseUrl := fileConfig[core.BaseURLEnv]
+		versionString := fileConfig["USE_BAZEL_VERSION"]
+		bazeliskBootstrapConfigured := strings.HasPrefix("aspect/", versionString) || strings.Contains(baseUrl, "aspect.build/") || strings.Contains(baseUrl, "github.com/aspect-build/")
+		if bazeliskBootstrapConfigured {
+			version := buildinfo.Current().Version()
+			devVersion := strings.HasPrefix(buildinfo.Current().Version(), "unknown")
+			if len(versionString) > 0 {
+				splits := strings.Split(versionString, "/")
+				version = splits[len(splits)-1]
 			}
-			if name == "USE_BAZEL_VERSION" {
+			if version == buildinfo.Current().Version() || devVersion {
+				// If version of aspect running is correct OR this is a development version ignore
+				// BaseURLEnv and USE_BAZEL_VERSION from .bazeliskrc
 				return envVal
+			} else {
+				// The version of aspect running does not appear to match the desired version. Set
+				// AspectReenter so this aspect downloads and gives up control to the desired version of
+				// aspect.
+				bazelisk.AspectReenter = true
 			}
-		} else {
-			// The version of aspect running does not match the desired version and we have not already
-			// re-entered from another aspect. Set AspectReenter so this aspect downloads and gives
-			// up control to the desired version of aspect.
-			bazelisk.AspectReenter = true
 		}
 	}
 
