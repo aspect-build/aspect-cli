@@ -19,7 +19,7 @@ See more on our product webpage: <https://aspect.build/cli>
 On MacOS, you can run
 
 ```sh
-% brew install aspect-build/aspect/aspect-cli-pro
+% brew install aspect-build/aspect/aspect-pro
 ```
 
 This installs the `aspect` command and also links it to `bazel`, just like the [bazelisk] installer does.
@@ -33,8 +33,8 @@ install the Aspect CLI just like it can install the standard Bazel CLI.
 Add this to your `.bazeliskrc` in your project folder to install Aspect for all developers:
 
 ```
-BAZELISK_BASE_URL=https://static.aspect.build/aspect
-USE_BAZEL_VERSION=aspect/4.2.0
+BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
+USE_BAZEL_VERSION=aspect/4.2.1
 ```
 
 Note that in all cases, the `.bazelversion` file continues to indicate which version of the
