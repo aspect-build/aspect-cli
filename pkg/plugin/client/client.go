@@ -76,8 +76,8 @@ func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.St
 			aspectplugin.From = fmt.Sprintf("https://%s/releases/download", aspectplugin.From)
 		}
 		// Example release URL:
-		//   from:          https://static.aspect.build/cli
-		//   versioned url: https://static.aspect.build/cli/v0.9.0/plugin-aspect-pro-darwin_amd64
+		//   from:          https://static.aspect.build/aspect
+		//   versioned url: https://static.aspect.build/aspect/4.2.1/plugin-aspect-pro-darwin_amd64
 		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
 			if len(aspectplugin.Version) < 1 {
 				return nil, fmt.Errorf("cannot download plugin %q: the version field is required", aspectplugin.Name)
