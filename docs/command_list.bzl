@@ -8,6 +8,7 @@ COMMAND_LIST = [
     "canonicalize-flags",
     "clean",
     "configure",
+    "coverage",
     "cquery",
     "docs",
     "fetch",

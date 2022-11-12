@@ -22,6 +22,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect canonicalize-flags](aspect_canonicalize-flags.md)	 - Present a list of bazel options in a canonical form
 * [aspect clean](aspect_clean.md)	 - Remove the output tree
 * [aspect configure](aspect_configure.md)	 - Generate and update BUILD files
+* [aspect coverage](aspect_coverage.md)	 - Same as 'test', but also generates a code coverage report.
 * [aspect cquery](aspect_cquery.md)	 - Query the dependency graph, honoring configuration flags
 * [aspect docs](aspect_docs.md)	 - Open documentation in the browser
 * [aspect fetch](aspect_fetch.md)	 - Fetch external repositories that are prerequisites to the targets
