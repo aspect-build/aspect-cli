@@ -1,0 +1,14 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "coverage",
+    srcs = ["coverage.go"],
+    importpath = "aspect.build/cli/pkg/aspect/coverage",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/aspecterrors",
+        "//pkg/bazel",
+        "//pkg/ioutils",
+        "//pkg/plugin/system/bep",
+    ],
+)

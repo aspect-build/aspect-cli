@@ -30,6 +30,7 @@ import (
 	"aspect.build/cli/cmd/aspect/canonicalizeflags"
 	"aspect.build/cli/cmd/aspect/clean"
 	"aspect.build/cli/cmd/aspect/configure"
+	"aspect.build/cli/cmd/aspect/coverage"
 	"aspect.build/cli/cmd/aspect/cquery"
 	"aspect.build/cli/cmd/aspect/docs"
 	"aspect.build/cli/cmd/aspect/dump"
@@ -105,6 +106,7 @@ func NewRootCmd(
 	cmd.AddCommand(build.NewDefaultBuildCmd(pluginSystem))
 	cmd.AddCommand(canonicalizeflags.NewDefaultCanonicalizeFlagsCmd())
 	cmd.AddCommand(clean.NewDefaultCleanCmd())
+	cmd.AddCommand(coverage.NewDefaultCoverageCmd(pluginSystem))
 	cmd.AddCommand(cquery.NewDefaultCQueryCmd())
 	cmd.AddCommand(dump.NewDefaultDumpCmd())
 	cmd.AddCommand(fetch.NewDefaultFetchCmd())
