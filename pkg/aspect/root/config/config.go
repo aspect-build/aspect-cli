@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strings"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"github.com/mitchellh/go-homedir"
@@ -127,8 +128,9 @@ func loadHomeConfig(configFlagValues *ConfigFlagValues) error {
 
 func maybeLoadConfigFile(f string) error {
 	v := viper.New()
-	v.AddConfigPath(path.Dir(f))
-	v.SetConfigName(path.Base(f))
+	v.AddConfigPath(path.Dir(f))                                   // the directory to look for the config file in
+	v.SetConfigName(strings.TrimSuffix(path.Base(f), path.Ext(f))) // the config file name with extension
+	v.SetConfigType(path.Ext(f)[1:])                               // the config file extension without leading dot
 	if err := v.ReadInConfig(); err != nil {
 		// Ignore "file not found" error for repo config file (it may not exist)
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
