@@ -1,0 +1,28 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "config",
+    srcs = [
+        "config.go",
+        "root.go",
+        "write.go",
+    ],
+    importpath = "aspect.build/cli/pkg/aspect/root/config",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/aspect/root/flags",
+        "@com_github_mitchellh_go_homedir//:go-homedir",
+        "@com_github_spf13_pflag//:pflag",
+        "@com_github_spf13_viper//:viper",
+    ],
+)
+
+go_test(
+    name = "config_test",
+    srcs = ["write_test.go"],
+    deps = [
+        ":config",
+        "@com_github_onsi_gomega//:gomega",
+        "@com_github_spf13_viper//:viper",
+    ],
+)

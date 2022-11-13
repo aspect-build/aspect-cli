@@ -41,10 +41,11 @@ import (
 )
 
 const (
-	bazelReal      = "BAZEL_REAL"
-	skipWrapperEnv = "BAZELISK_SKIP_WRAPPER"
-	wrapperPath    = "./tools/bazel"
-	rcFileName     = ".bazeliskrc"
+	bazelReal         = "BAZEL_REAL"
+	skipWrapperEnv    = "BAZELISK_SKIP_WRAPPER"
+	aspectRentrantEnv = "ASPECT_REENTRANT"
+	wrapperPath       = "./tools/bazel"
+	rcFileName        = ".bazeliskrc"
 )
 
 var (
@@ -158,7 +159,7 @@ func (bazelisk *Bazelisk) GetEnvOrConfig(name string) string {
 		// core.BaseURLEnv && USE_BAZEL_VERSION in the version file. This protects against infinite
 		// re-entrance incase we can't detect if .bazeliskrc is configured for this version below.
 		bazeliskRentrant := os.Getenv(skipWrapperEnv) != ""
-		aspectRentrant := os.Getenv("ASPECT_REENTRANT") != ""
+		aspectRentrant := os.Getenv(aspectRentrantEnv) != ""
 		if bazeliskRentrant || aspectRentrant {
 			return envVal
 		}
@@ -445,9 +446,7 @@ func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams iout
 		cmd.Env = append(cmd.Env, env...)
 	}
 	cmd.Env = append(cmd.Env, skipWrapperEnv+"=true")
-	if bazelisk.AspectReenter {
-		cmd.Env = append(cmd.Env, "ASPECT_REENTRANT=true")
-	}
+	cmd.Env = append(cmd.Env, aspectRentrantEnv+"=true")
 	if execPath != bazel {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", bazelReal, bazel))
 	}

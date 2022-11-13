@@ -7,8 +7,8 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/query/shared",
+        "//pkg/aspect/root/config",
         "//pkg/bazel",
-        "//pkg/configutils",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",

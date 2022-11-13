@@ -14,11 +14,18 @@
  * limitations under the License.
  */
 
-package flags
+package config
 
-const (
-	// ConfigFlagName is the --config flag for the root command.
-	ConfigFlagName = "aspect:config"
-	// InteractiveFlagName is the --interactive flag for the root command.
-	InteractiveFlagName = "aspect:interactive"
-)
+import "github.com/spf13/viper"
+
+func Write(v *viper.Viper) error {
+	// Workaround for issue with WriteConfig
+	// https://github.com/spf13/viper/issues/433
+	var err error
+	if err = v.WriteConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			err = v.SafeWriteConfig()
+		}
+	}
+	return err
+}

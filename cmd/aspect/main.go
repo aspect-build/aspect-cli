@@ -21,6 +21,7 @@ import (
 	"os"
 
 	"aspect.build/cli/cmd/aspect/root"
+	"aspect.build/cli/pkg/aspect/root/config"
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
@@ -40,11 +41,15 @@ func main() {
 		aspecterrors.HandleError(err)
 	}
 
+	if err := config.Load(os.Args); err != nil {
+		aspecterrors.HandleError(err)
+	}
+
 	streams := ioutils.DefaultStreams
 
 	// Re-enter another version of aspect if the version currently running is not
 	// the desired version
-	bzl.MaybeReenterAspect(streams, os.Args[1:]...)
+	bzl.MaybeReenterAspect(streams, os.Args[1:])
 
 	argsWithoutStartupFlags, err := bzl.InitializeStartupFlags(os.Args)
 	if err != nil {
