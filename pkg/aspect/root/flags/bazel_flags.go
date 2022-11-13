@@ -37,6 +37,34 @@ var (
 	}
 )
 
+var (
+	// Bazel flags that expand to other flags. These are boolean flags that are not no-able. Currently
+	// there is no way to detect these so we have to keep list up-to-date manually with the union of
+	// these flags across all Bazel versions we support.
+	// These were gathered by searching https://bazel.build/reference/command-line-reference for "Expands to:"
+	expandoFlags = map[string]struct{}{
+		"debug_app":                             {},
+		"experimental_persistent_javac":         {},
+		"experimental_spawn_scheduler":          {},
+		"expunge_async":                         {},
+		"host_jvm_debug":                        {},
+		"java_debug":                            {},
+		"long":                                  {},
+		"noorder_results":                       {},
+		"null":                                  {},
+		"order_results":                         {},
+		"persistent_android_dex_desugar":        {},
+		"persistent_android_resource_processor": {},
+		"persistent_multiplex_android_dex_desugar":        {},
+		"persistent_multiplex_android_resource_processor": {},
+		"persistent_multiplex_android_tools":              {},
+		"remote_download_minimal":                         {},
+		"remote_download_toplevel":                        {},
+		"short":                                           {},
+		"start_app":                                       {},
+	}
+)
+
 // AddBazelFlags will process the configured cobra commands and add bazel
 // flags to those commands.
 func AddBazelFlags(cmd *cobra.Command) error {
@@ -75,10 +103,14 @@ func AddBazelFlags(cmd *cobra.Command) error {
 					cmd.PersistentFlags().VarP(&key, flagName, flagAbbreviation, flagDoc)
 					markFlagAsHidden(cmd, flagName)
 				} else {
-					cmd.PersistentFlags().StringP(flagName, flagAbbreviation, "", flagDoc)
+					_, isExpando := expandoFlags[flagName]
+					if isExpando {
+						cmd.PersistentFlags().BoolP(flagName, flagAbbreviation, false, flagDoc)
+					} else {
+						cmd.PersistentFlags().StringP(flagName, flagAbbreviation, "", flagDoc)
+					}
 					markFlagAsHidden(cmd, flagName)
 				}
-
 			}
 			if subcommand, ok := subCommands[command]; ok {
 				subcommand.DisableFlagParsing = true // only want to disable flag parsing on actual bazel verbs
@@ -91,7 +123,12 @@ func AddBazelFlags(cmd *cobra.Command) error {
 					subcommand.Flags().VarP(&key, flagName, flagAbbreviation, flagDoc)
 					markFlagAsHidden(subcommand, flagName)
 				} else {
-					subcommand.Flags().StringP(flagName, flagAbbreviation, "", flagDoc)
+					_, isExpando := expandoFlags[flagName]
+					if isExpando {
+						subcommand.Flags().BoolP(flagName, flagAbbreviation, false, flagDoc)
+					} else {
+						subcommand.Flags().StringP(flagName, flagAbbreviation, "", flagDoc)
+					}
 					markFlagAsHidden(subcommand, flagName)
 				}
 			}
