@@ -17,7 +17,10 @@
 package config
 
 import (
+	"math"
+
 	goplugin "github.com/hashicorp/go-plugin"
+	"google.golang.org/grpc"
 
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
 )
@@ -46,6 +49,17 @@ func NewConfigFor(p plugin.Plugin) *goplugin.ServeConfig {
 		Plugins: map[string]goplugin.Plugin{
 			DefaultPluginName: &plugin.GRPCPlugin{Impl: p},
 		},
-		GRPCServer: goplugin.DefaultGRPCServer,
+		GRPCServer: func(opts []grpc.ServerOption) *grpc.Server {
+			return grpc.NewServer(append(
+				opts,
+				// Bazel doesn't seem to set a maximum send message size, therefore
+				// we match the default send message for Go, which should be enough
+				// for all messages sent by Bazel (roughly 2.14GB).
+				grpc.MaxRecvMsgSize(math.MaxInt32),
+				// Here we are just being explicit with the default value since we
+				// also set the receive message size.
+				grpc.MaxSendMsgSize(math.MaxInt32),
+			)...)
+		},
 	}
 }
