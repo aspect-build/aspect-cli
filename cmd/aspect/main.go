@@ -51,6 +51,10 @@ func main() {
 	// the desired version
 	bzl.MaybeReenterAspect(streams, os.Args[1:])
 
+	// Handle --version and -v before initializing the plugin system so these special
+	// "commands" are fast and don't require download plugins before output the version.
+	root.MaybeAspectVersionFlag(streams, os.Args[1:])
+
 	argsWithoutStartupFlags, err := bzl.InitializeStartupFlags(os.Args)
 	if err != nil {
 		aspecterrors.HandleError(err)
