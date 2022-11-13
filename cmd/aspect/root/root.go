@@ -17,6 +17,7 @@
 package root
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/fatih/color"
@@ -69,6 +70,13 @@ func NewDefaultRootCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive, false)
 }
 
+func MaybeAspectVersionFlag(streams ioutils.Streams, args []string) {
+	if len(args) == 1 && (args[0] == "--version" || args[0] == "-v") {
+		fmt.Fprintf(streams.Stdout, "aspect %s\n", buildinfo.Current().Version())
+		os.Exit(0)
+	}
+}
+
 func NewRootCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
@@ -90,6 +98,8 @@ func NewRootCmd(
 		DisableAutoGenTag: true,
 		Version:           buildinfo.Current().Version(),
 	}
+
+	// Fallback version template incase it is not handled by MaybeAspectVersionFlag
 	cmd.SetVersionTemplate(`{{with .Name}}{{printf "%s " .}}{{end}}{{printf "%s" .Version}}
 `)
 
