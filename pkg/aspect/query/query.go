@@ -23,8 +23,8 @@ import (
 	"github.com/spf13/viper"
 
 	"aspect.build/cli/pkg/aspect/query/shared"
+	"aspect.build/cli/pkg/aspect/root/config"
 	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/configutils"
 	"aspect.build/cli/pkg/ioutils"
 )
 
@@ -131,7 +131,7 @@ func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question 
 
 		q.Prefs.Set(baseUseKey, err == nil)
 
-		if err := configutils.Write(&q.Prefs); err != nil {
+		if err := config.Write(&q.Prefs); err != nil {
 			return fmt.Errorf("failed to update config file: %w", err)
 		}
 	}

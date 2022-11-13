@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	bazelFlags "aspect.build/cli/bazel/flags"
 	"github.com/spf13/pflag"
 )
 
@@ -32,6 +33,18 @@ const (
 	BoolFlag0     = "0"
 )
 
+// Prefixes a flag name with "no" to determine the Bazel negative flag from a flag name. Also takes
+// into consideration the 'aspect:' prefix so that a flag such as 'aspect:foo' get a negative flag
+// name of 'aspect:nofoo'. For example, `nohome_rc` is the negative of `home_rc` and
+// `aspect:nohome_config` is the negative of 'aspect:home_config'
+func NoNameAspect(name string) string {
+	if strings.HasPrefix(name, AspectFlagPrefix) {
+		return fmt.Sprintf("%s%s%s", AspectFlagPrefix, bazelFlags.BazelNoPrefix, name[len(AspectFlagPrefix):])
+	} else {
+		return bazelFlags.BazelNoPrefix + name
+	}
+}
+
 // RegisterNoableBool registers a boolean flag that supports Bazel option parsing.
 func RegisterNoableBool(flags *pflag.FlagSet, name string, value bool, usage string) *bool {
 	return RegisterNoableBoolP(flags, name, "", value, usage)
@@ -39,6 +52,9 @@ func RegisterNoableBool(flags *pflag.FlagSet, name string, value bool, usage str
 
 // RegisterNoableBoolP registers a boolean flag that supports Bazel option parsing with a shorthand.
 // https://bazel.build/reference/command-line-reference#option-syntax
+//
+// By default the noable variants are -[no]foo which mimics how Bazel handles boolean flags.
+// For Aspect CLI flags, which start with 'aspect:', the noable variants are --aspect:[no]foo.
 //
 // This implementation normalizes any user-provided values before processing. Hence,
 // `--foo=yes` is the same as `--foo=YES`.
@@ -55,10 +71,10 @@ func RegisterNoableBoolP(
 	flags *pflag.FlagSet,
 	name string,
 	shorthand string,
-	value bool,
+	defaultValue bool,
 	usage string) *bool {
 
-	result := value
+	result := defaultValue
 
 	trueNB := &noableBool{value: &result, valueWhenTrue: true}
 	flag := &pflag.Flag{
@@ -74,7 +90,7 @@ func RegisterNoableBoolP(
 
 	falseNB := &noableBool{value: &result, valueWhenTrue: false}
 	noFlag := &pflag.Flag{
-		Name:      "no" + name,
+		Name:      NoNameAspect(name),
 		Shorthand: "",
 		Usage:     usage,
 		Value:     falseNB,

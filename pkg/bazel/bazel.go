@@ -53,7 +53,7 @@ type BazelProvider func() (Bazel, error)
 type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
-	MaybeReenterAspect(streams ioutils.Streams, command ...string)
+	MaybeReenterAspect(streams ioutils.Streams, args []string)
 	RunCommand(streams ioutils.Streams, command ...string) (int, error)
 	InitializeStartupFlags(args []string) ([]string, error)
 	Flags() (map[string]*flags.FlagInfo, error)
@@ -113,7 +113,7 @@ func (*bazel) createRepositories() *core.Repositories {
 	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
 }
 
-func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, command ...string) {
+func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string) {
 	repos := b.createRepositories()
 
 	bazelisk := NewBazelisk(b.workspaceRoot)
@@ -121,7 +121,7 @@ func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, command ...string) {
 	// TODO: this pattern could get cleaned up so it does not rely on the side-effect
 	bazelisk.GetEnvOrConfig("USE_BAZEL_VERSION")
 	if bazelisk.AspectReenter {
-		exitCode, _ := bazelisk.Run(command, repos, streams, b.env)
+		exitCode, _ := bazelisk.Run(args, repos, streams, b.env)
 		os.Exit(exitCode)
 	}
 }
@@ -151,7 +151,7 @@ func (b *bazel) InitializeStartupFlags(args []string) ([]string, error) {
 			if command == "startup" {
 				allStartupFlags = append(allStartupFlags, flagName)
 				if flagInfo.GetHasNegativeFlag() {
-					allStartupFlags = append(allStartupFlags, "no"+flagName)
+					allStartupFlags = append(allStartupFlags, flags.NoName(flagName))
 				}
 			}
 		}

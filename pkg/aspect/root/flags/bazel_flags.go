@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"aspect.build/cli/bazel/flags"
 	"aspect.build/cli/pkg/bazel"
 )
 
@@ -68,9 +69,9 @@ func AddBazelFlags(cmd *cobra.Command) error {
 				if flag.GetHasNegativeFlag() {
 					RegisterNoableBool(cmd.PersistentFlags(), flagName, false, flagDoc)
 					markFlagAsHidden(cmd, flagName)
-					markFlagAsHidden(cmd, "no"+flagName)
+					markFlagAsHidden(cmd, flags.NoName(flagName))
 				} else if flag.GetAllowsMultiple() {
-					var key = MultiString{value: []string{}}
+					var key = MultiString{}
 					cmd.PersistentFlags().VarP(&key, flagName, flagAbbreviation, flagDoc)
 					markFlagAsHidden(cmd, flagName)
 				} else {
@@ -84,9 +85,9 @@ func AddBazelFlags(cmd *cobra.Command) error {
 				if flag.GetHasNegativeFlag() {
 					RegisterNoableBoolP(subcommand.Flags(), flagName, flagAbbreviation, false, flagDoc)
 					markFlagAsHidden(subcommand, flagName)
-					markFlagAsHidden(subcommand, "no"+flagName)
+					markFlagAsHidden(subcommand, flags.NoName(flagName))
 				} else if flag.GetAllowsMultiple() {
-					var key = MultiString{value: []string{}}
+					var key = MultiString{}
 					subcommand.Flags().VarP(&key, flagName, flagAbbreviation, flagDoc)
 					markFlagAsHidden(subcommand, flagName)
 				} else {

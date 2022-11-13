@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package configutils_test
+package config_test
 
 import (
 	"fmt"
@@ -22,7 +22,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"aspect.build/cli/pkg/configutils"
+	"aspect.build/cli/pkg/aspect/root/config"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/viper"
 )
@@ -68,7 +68,7 @@ func TestWrite(t *testing.T) {
 	v.Set(key, value)
 
 	// Verify initial write succeeds
-	err := configutils.Write(v)
+	err := config.Write(v)
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(configPath).To(BeAnExistingFile())
 
@@ -83,7 +83,7 @@ func TestWrite(t *testing.T) {
 	v.Set(key, newValue)
 
 	// Verify second write succeeds
-	err = configutils.Write(v)
+	err = config.Write(v)
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(configPath).To(BeAnExistingFile())
 

@@ -45,7 +45,7 @@ func createInterceptorCommand() *cobra.Command {
 	}
 
 	// Required flags for interceptor hooks
-	cmd.PersistentFlags().Bool(rootFlags.InteractiveFlagName, false, "")
+	cmd.PersistentFlags().Bool(rootFlags.AspectInteractiveFlagName, false, "")
 
 	return cmd
 }

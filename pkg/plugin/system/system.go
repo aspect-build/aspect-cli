@@ -223,7 +223,7 @@ func (ps *pluginSystem) RunHooksInterceptor(streams ioutils.Streams) interceptor
 
 func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams ioutils.Streams) interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) (exitErr error) {
-		isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.InteractiveFlagName)
+		isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(rootFlags.AspectInteractiveFlagName)
 		if err != nil {
 			return fmt.Errorf("failed to run 'aspect %s' command: %w", cmd.CalledAs(), err)
 		}

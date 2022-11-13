@@ -47,3 +47,7 @@ func (s *MultiString) String() string {
 func (s *MultiString) First() string {
 	return (s.value)[0]
 }
+
+func (s *MultiString) Get() []string {
+	return s.value
+}
