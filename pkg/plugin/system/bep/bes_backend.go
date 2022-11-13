@@ -27,6 +27,7 @@ import (
 	"github.com/golang/protobuf/ptypes/empty"
 	buildv1 "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/aspecterrors"
@@ -115,7 +116,12 @@ func (bb *besBackend) ServeWait(ctx context.Context) error {
 		case err := <-errs:
 			return fmt.Errorf("failed to serve and wait BES backend: %w", err)
 		default:
-			conn, err := bb.grpcDialer.DialContext(ctx, serverAddr, grpc.WithInsecure(), grpc.WithBlock())
+			conn, err := bb.grpcDialer.DialContext(
+				ctx,
+				serverAddr,
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithBlock(),
+			)
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) {
 					return fmt.Errorf("failed to serve and wait BES backend: %w", err)
