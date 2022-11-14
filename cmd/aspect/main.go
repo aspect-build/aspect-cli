@@ -47,9 +47,14 @@ func main() {
 
 	streams := ioutils.DefaultStreams
 
-	// Re-enter another version of aspect if the version currently running is not
-	// the desired version
-	bzl.MaybeReenterAspect(streams, os.Args[1:])
+	// Re-enter another aspect if version running is not the configured version
+	reentered, exitCode, err := bzl.MaybeReenterAspect(streams, os.Args[1:])
+	if reentered {
+		if err != nil {
+			aspecterrors.HandleError(err)
+		}
+		os.Exit(exitCode)
+	}
 
 	// Handle --version and -v before initializing the plugin system so these special
 	// "commands" are fast and don't require download plugins before output the version.

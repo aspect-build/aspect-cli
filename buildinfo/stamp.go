@@ -35,6 +35,9 @@ var GitStatus = "unknown"
 // Release is the revision number, if any.
 var Release = "no release"
 
+// IsAspectPro indicates if this is an Aspect CLI Pro build
+var IsAspectPro = ""
+
 func IsStamped() bool {
 	return BuildTime != "{BUILD_TIMESTAMP}"
 }
