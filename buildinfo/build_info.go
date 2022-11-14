@@ -42,11 +42,12 @@ const (
 )
 
 type BuildInfo struct {
-	BuildTime string
-	HostName  string
-	GitCommit string
-	GitStatus string
-	Release   string
+	BuildTime   string
+	HostName    string
+	GitCommit   string
+	GitStatus   string
+	Release     string
+	IsAspectPro bool
 }
 
 func New(
@@ -55,13 +56,15 @@ func New(
 	gitCommit string,
 	gitStatus string,
 	release string,
+	pro bool,
 ) *BuildInfo {
 	return &BuildInfo{
-		BuildTime: buildTime,
-		HostName:  hostName,
-		GitCommit: gitCommit,
-		GitStatus: gitStatus,
-		Release:   release,
+		BuildTime:   buildTime,
+		HostName:    hostName,
+		GitCommit:   gitCommit,
+		GitStatus:   gitStatus,
+		Release:     release,
+		IsAspectPro: pro,
 	}
 }
 
@@ -72,6 +75,7 @@ func Current() *BuildInfo {
 		GitCommit,
 		GitStatus,
 		Release,
+		IsAspectPro != "",
 	)
 }
 
@@ -96,15 +100,31 @@ func (bi BuildInfo) Version() string {
 	return versionBuilder.String()
 }
 
-func (bi BuildInfo) CommandVersion(name string, format VersionFormat) string {
+func (bi BuildInfo) Name() string {
+	if bi.IsAspectPro {
+		return "Aspect CLI Pro"
+	} else {
+		return "Aspect CLI"
+	}
+}
+
+func (bi BuildInfo) GnuName() string {
+	if bi.IsAspectPro {
+		return "aspect pro"
+	} else {
+		return "aspect"
+	}
+}
+
+func (bi BuildInfo) CommandVersion(format VersionFormat) string {
 	switch format {
 	case GNUFormat:
-		return fmt.Sprintf("%s %s", name, bi.Version())
+		return fmt.Sprintf("%s %s", bi.GnuName(), bi.Version())
 	case ConventionalFormat:
 		// Conventional is the default case
 		fallthrough
 	default:
 		// Use the Conventional format, if not recognized
-		return fmt.Sprintf("%s version: %s", name, bi.Version())
+		return fmt.Sprintf("%s version: %s", bi.Name(), bi.Version())
 	}
 }

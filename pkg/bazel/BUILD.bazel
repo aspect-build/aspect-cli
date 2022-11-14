@@ -3,6 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "bazel",
     srcs = [
+        "aspect_config.go",
         "bazel.go",
         "bazelisk.go",
     ],
@@ -20,6 +21,7 @@ go_library(
         "@com_github_bazelbuild_bazelisk//repositories",
         "@com_github_bazelbuild_bazelisk//versions",
         "@com_github_mitchellh_go_homedir//:go-homedir",
+        "@com_github_spf13_viper//:viper",
         "@org_golang_google_protobuf//proto",
     ],
 )
