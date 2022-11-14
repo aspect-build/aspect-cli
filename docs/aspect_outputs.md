@@ -44,7 +44,7 @@ bazel-out/k8-fastbuild/bin/cli/pro/pro_/pro
 ### Options inherited from parent commands
 
 ```
-      --aspect:config string   config file (default is $HOME/.aspect/cli/config.yaml)
+      --aspect:config string   User-specified Aspect CLI config file. /dev/null indicates that all further --aspect:config flags will be ignored.
       --aspect:interactive     Interactive mode (e.g. prompts for user input)
 ```
 
