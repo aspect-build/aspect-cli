@@ -59,7 +59,8 @@ go_rules_dependencies()
 go_embed_data_dependencies()
 
 go_register_toolchains(
-    nogo = "@//:nogo",
+    # TODO: re-enable no-go once versions are synced with silo
+    # nogo = "@//:nogo",
     version = "1.19.1",
 )
 
