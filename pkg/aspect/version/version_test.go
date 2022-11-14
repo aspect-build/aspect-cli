@@ -96,6 +96,7 @@ func TestVersion(t *testing.T) {
 				gitCommit,
 				buildinfo.CleanGitStatus,
 				release,
+				false,
 			)
 			err := v.Run(nil, nil, []string{})
 			g.Expect(err).To(BeNil())
@@ -113,6 +114,7 @@ func TestVersion(t *testing.T) {
 				gitCommit,
 				dirtyGitStatus,
 				release,
+				false,
 			)
 			err := v.Run(nil, nil, []string{})
 			g.Expect(err).To(BeNil())
@@ -132,6 +134,7 @@ func TestVersion(t *testing.T) {
 	// 		gitCommit,
 	// 		buildinfo.CleanGitStatus,
 	// 		release,
+	//    false,
 	// 	)
 	// 	err := v.Run(nil, nil, []string{})
 	// 	g.Expect(err).To(BeNil())

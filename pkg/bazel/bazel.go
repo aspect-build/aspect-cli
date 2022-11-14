@@ -53,7 +53,7 @@ type BazelProvider func() (Bazel, error)
 type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
-	MaybeReenterAspect(streams ioutils.Streams, args []string)
+	MaybeReenterAspect(streams ioutils.Streams, args []string) (bool, int, error)
 	RunCommand(streams ioutils.Streams, command ...string) (int, error)
 	InitializeStartupFlags(args []string) ([]string, error)
 	Flags() (map[string]*flags.FlagInfo, error)
@@ -113,17 +113,22 @@ func (*bazel) createRepositories() *core.Repositories {
 	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
 }
 
-func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string) {
-	repos := b.createRepositories()
-
+// Check if we should re-enter a different version and/or tier of the Aspect CLI and re-enter if we should.
+// Error is returned if version and/or tier are misconfigured in the Aspect CLI config.
+func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string) (bool, int, error) {
 	bazelisk := NewBazelisk(b.workspaceRoot)
-	// Calling bazelisk.GetEnvOrConfig has the side-effect of setting AspectReenter.
+
+	// Calling bazelisk.getBazelVersion() has the side-effect of setting AspectShouldReenter.
 	// TODO: this pattern could get cleaned up so it does not rely on the side-effect
-	bazelisk.GetEnvOrConfig("USE_BAZEL_VERSION")
-	if bazelisk.AspectReenter {
-		exitCode, _ := bazelisk.Run(args, repos, streams, b.env)
-		os.Exit(exitCode)
+	bazelisk.getBazelVersion()
+
+	if bazelisk.AspectShouldReenter {
+		repos := b.createRepositories()
+		exitCode, err := bazelisk.Run(args, repos, streams, b.env)
+		return true, exitCode, err
 	}
+
+	return false, 0, nil
 }
 
 func (b *bazel) RunCommand(streams ioutils.Streams, command ...string) (int, error) {
@@ -140,7 +145,10 @@ func (b *bazel) RunCommand(streams ioutils.Streams, command ...string) (int, err
 // Initializes start-up flags from args and returns args without start-up flags
 func (b *bazel) InitializeStartupFlags(args []string) ([]string, error) {
 	// Ensure allFlags is initialized
-	b.Flags()
+	_, err := b.Flags()
+	if err != nil {
+		return args, err
+	}
 
 	argsWithoutStartupFlags := make([]string, 0, 1000)
 	argsWithoutStartupFlags = append(argsWithoutStartupFlags, args[0])
