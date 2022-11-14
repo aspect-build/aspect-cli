@@ -60,19 +60,14 @@ var (
 	faint    = color.New(color.Faint)
 )
 
-func NewProRootCmd(pluginSystem system.PluginSystem) *cobra.Command {
-	defaultInteractive := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
-	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive, true)
-}
-
 func NewDefaultRootCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	defaultInteractive := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
-	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive, false)
+	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive)
 }
 
 func MaybeAspectVersionFlag(streams ioutils.Streams, args []string) {
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "-v") {
-		fmt.Fprintf(streams.Stdout, "aspect %s\n", buildinfo.Current().Version())
+		fmt.Fprintf(streams.Stdout, "%s %s\n", buildinfo.Current().GnuName(), buildinfo.Current().Version())
 		os.Exit(0)
 	}
 }
@@ -81,27 +76,20 @@ func NewRootCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
 	defaultInteractive bool,
-	pro bool,
 ) *cobra.Command {
-	productName := "Aspect CLI"
-	if pro {
-		productName = "Aspect CLI Pro"
-	}
-
 	cmd := &cobra.Command{
 		Use:           "aspect",
-		Short:         productName,
+		Short:         buildinfo.Current().Name(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Long:          boldCyan.Sprintf(productName) + ` is a better frontend for running bazel`,
+		Long:          boldCyan.Sprintf(buildinfo.Current().Name()) + ` is a better frontend for running bazel`,
 		// Suppress timestamps in generated Markdown, for determinism
 		DisableAutoGenTag: true,
 		Version:           buildinfo.Current().Version(),
 	}
 
 	// Fallback version template incase it is not handled by MaybeAspectVersionFlag
-	cmd.SetVersionTemplate(`{{with .Name}}{{printf "%s " .}}{{end}}{{printf "%s" .Version}}
-`)
+	cmd.SetVersionTemplate(fmt.Sprintf("%s %s\n", buildinfo.Current().GnuName(), buildinfo.Current().Version()))
 
 	flags.AddGlobalFlags(cmd, defaultInteractive)
 	cmd.AddGroup(&cobra.Group{ID: "common", Title: "Common Bazel Commands:"})
@@ -134,8 +122,8 @@ func NewRootCmd(
 	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultVersionCmd())
 	cmd.AddCommand(outputs.NewDefaultOutputsCmd())
-	if !pro {
-		// Pro command stubs
+	if !buildinfo.Current().IsAspectPro {
+		// Aspect CLI Pro command stubs
 		cmd.AddCommand(configure.NewDefaultConfigureCmd())
 		cmd.AddCommand(support.NewDefaultSupportCmd())
 	}
