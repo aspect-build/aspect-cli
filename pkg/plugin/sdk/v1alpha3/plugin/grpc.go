@@ -22,6 +22,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	goplugin "github.com/hashicorp/go-plugin"
 	"github.com/manifoldco/promptui"
@@ -210,9 +211,12 @@ func (m *GRPCClient) Setup(config *SetupConfig) error {
 func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
 	prompterServer := &PrompterGRPCServer{promptRunner: promptRunner}
 	var s *grpc.Server
+	var wg sync.WaitGroup
+	wg.Add(1)
 	serverFunc := func(opts []grpc.ServerOption) *grpc.Server {
 		s = grpc.NewServer(opts...)
 		proto.RegisterPrompterServer(s, prompterServer)
+		defer wg.Done()
 		return s
 	}
 	brokerID := m.broker.NextId()
@@ -221,6 +225,7 @@ func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, promptRunner ioutils.
 		BrokerId:          brokerID,
 		IsInteractiveMode: isInteractiveMode,
 	}
+	wg.Wait()
 	_, err := m.client.PostBuildHook(context.Background(), req)
 	s.Stop()
 	return err
@@ -259,9 +264,12 @@ func (m *GRPCClient) ExecuteCustomCommand(customCommand string, ctx context.Cont
 func (m *GRPCClient) PostTestHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
 	prompterServer := &PrompterGRPCServer{promptRunner: promptRunner}
 	var s *grpc.Server
+	var wg sync.WaitGroup
+	wg.Add(1)
 	serverFunc := func(opts []grpc.ServerOption) *grpc.Server {
 		s = grpc.NewServer(opts...)
 		proto.RegisterPrompterServer(s, prompterServer)
+		defer wg.Done()
 		return s
 	}
 	brokerID := m.broker.NextId()
@@ -270,6 +278,7 @@ func (m *GRPCClient) PostTestHook(isInteractiveMode bool, promptRunner ioutils.P
 		BrokerId:          brokerID,
 		IsInteractiveMode: isInteractiveMode,
 	}
+	wg.Wait()
 	_, err := m.client.PostTestHook(context.Background(), req)
 	s.Stop()
 	return err
@@ -280,9 +289,12 @@ func (m *GRPCClient) PostTestHook(isInteractiveMode bool, promptRunner ioutils.P
 func (m *GRPCClient) PostRunHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
 	prompterServer := &PrompterGRPCServer{promptRunner: promptRunner}
 	var s *grpc.Server
+	var wg sync.WaitGroup
+	wg.Add(1)
 	serverFunc := func(opts []grpc.ServerOption) *grpc.Server {
 		s = grpc.NewServer(opts...)
 		proto.RegisterPrompterServer(s, prompterServer)
+		defer wg.Done()
 		return s
 	}
 	brokerID := m.broker.NextId()
@@ -291,6 +303,7 @@ func (m *GRPCClient) PostRunHook(isInteractiveMode bool, promptRunner ioutils.Pr
 		BrokerId:          brokerID,
 		IsInteractiveMode: isInteractiveMode,
 	}
+	wg.Wait()
 	_, err := m.client.PostRunHook(context.Background(), req)
 	s.Stop()
 	return err
