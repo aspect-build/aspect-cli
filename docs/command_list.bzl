@@ -13,6 +13,7 @@ COMMAND_LIST = [
     "docs",
     "fetch",
     "info",
+    "license",
     "outputs",
     "print",
     "query",
