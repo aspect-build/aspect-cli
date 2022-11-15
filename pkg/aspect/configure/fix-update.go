@@ -52,7 +52,7 @@ type updateConfig struct {
 	print0         bool
 }
 
-type emitFunc func(c *config.Config, f *rule.File) error
+type emitFunc func(c *config.Config, f *rule.File) (bool, error)
 
 var modeFromName = map[string]emitFunc{
 	"print": printFile,
@@ -234,7 +234,14 @@ var genericLoads = []rule.LoadInfo{
 	},
 }
 
-func runFixUpdate(wd string, languages []language.Language, cmd command, args []string) (err error) {
+type FixUpdateStatus struct {
+	NumBuildFilesVisited int
+	NumBuildFilesUpdated int
+}
+
+func runFixUpdate(wd string, languages []language.Language, cmd command, args []string) (*FixUpdateStatus, error) {
+	stats := FixUpdateStatus{}
+
 	cexts := make([]config.Configurer, 0, len(languages)+4)
 	cexts = append(cexts,
 		&config.CommonConfigurer{},
@@ -248,7 +255,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 
 	c, err := newFixUpdateConfiguration(wd, cmd, args, cexts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	mrslv := newMetaResolver()
@@ -266,7 +273,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 	ruleIndex := resolve.NewRuleIndex(mrslv.Resolver, exts...)
 
 	if err := fixRepoFiles(c, loads); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Visit all directories in the repository.
@@ -381,25 +388,31 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			unionKindInfoMaps(kinds, v.mappedKindInfo))
 	}
 
+	stats.NumBuildFilesVisited = len(visits)
+
 	// Emit merged files.
 	var exit error
 	for _, v := range visits {
 		merger.FixLoads(v.file, applyKindMappings(v.mappedKinds, loads))
-		if err := uc.emit(v.c, v.file); err != nil {
+		updated, err := uc.emit(v.c, v.file)
+		if err != nil {
 			if err == errExit {
 				exit = err
 			} else {
 				log.Print(err)
 			}
 		}
+		if updated {
+			stats.NumBuildFilesUpdated++
+		}
 	}
 	if uc.patchPath != "" {
 		if err := ioutil.WriteFile(uc.patchPath, uc.patchBuffer.Bytes(), 0o666); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return exit
+	return &stats, exit
 }
 
 func newFixUpdateConfiguration(wd string, cmd command, args []string, cexts []config.Configurer) (*config.Config, error) {
@@ -450,7 +463,7 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 				return err
 			}
 		}
-		if err := uc.emit(c, f); err != nil {
+		if _, err := uc.emit(c, f); err != nil {
 			return err
 		}
 	}
