@@ -5,8 +5,9 @@ go_library(
     srcs = ["main.go"],
     importpath = "aspect.build/cli/cmd/aspect",
     visibility = [
-        "//cli:__pkg__",
+        "//cli:__pkg__",  # For silo release
         "//cmd:__subpackages__",
+        "//release:__pkg__",  # For https://github.com/aspect-build/aspect-cli release
     ],
     deps = [
         "//cmd/aspect/root",
