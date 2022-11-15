@@ -1,5 +1,4 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 
 go_library(
     name = "license",
@@ -16,10 +15,4 @@ go_library(
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
     ],
-)
-
-copy_file(
-    name = "license_file",
-    src = "//cli/core:LICENSE",
-    out = "LICENSE",
 )
