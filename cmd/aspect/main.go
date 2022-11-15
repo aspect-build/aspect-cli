@@ -22,7 +22,6 @@ import (
 
 	"aspect.build/cli/cmd/aspect/root"
 	"aspect.build/cli/pkg/aspect/root/config"
-	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
@@ -76,7 +75,7 @@ func main() {
 	cmd := root.NewDefaultRootCmd(pluginSystem)
 
 	// Run this command after all bazel verbs have been added to "cmd".
-	if err := flags.AddBazelFlags(cmd); err != nil {
+	if err := bazel.AddBazelFlags(cmd); err != nil {
 		aspecterrors.HandleError(err)
 	}
 

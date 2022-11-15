@@ -27,6 +27,7 @@ import (
 
 	"aspect.build/cli/bazel/analysis"
 	"aspect.build/cli/bazel/flags"
+	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
 
@@ -159,7 +160,7 @@ func (b *bazel) InitializeStartupFlags(args []string) ([]string, error) {
 			if command == "startup" {
 				allStartupFlags = append(allStartupFlags, flagName)
 				if flagInfo.GetHasNegativeFlag() {
-					allStartupFlags = append(allStartupFlags, flags.NoName(flagName))
+					allStartupFlags = append(allStartupFlags, rootFlags.NoFlagName(flagName))
 				}
 			}
 		}

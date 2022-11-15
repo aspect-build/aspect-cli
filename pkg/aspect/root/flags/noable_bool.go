@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"strings"
 
-	bazelFlags "aspect.build/cli/bazel/flags"
 	"github.com/spf13/pflag"
 )
 
@@ -33,15 +32,20 @@ const (
 	BoolFlag0     = "0"
 )
 
+const (
+	// The prefix that Bazel & Aspect use for negative flags such as --nohome_rc && --aspect:nohome_config
+	NoFlagPrefix = "no"
+)
+
 // Prefixes a flag name with "no" to determine the Bazel negative flag from a flag name. Also takes
 // into consideration the 'aspect:' prefix so that a flag such as 'aspect:foo' get a negative flag
 // name of 'aspect:nofoo'. For example, `nohome_rc` is the negative of `home_rc` and
 // `aspect:nohome_config` is the negative of 'aspect:home_config'
-func NoNameAspect(name string) string {
+func NoFlagName(name string) string {
 	if strings.HasPrefix(name, AspectFlagPrefix) {
-		return fmt.Sprintf("%s%s%s", AspectFlagPrefix, bazelFlags.BazelNoPrefix, name[len(AspectFlagPrefix):])
+		return fmt.Sprintf("%s%s%s", AspectFlagPrefix, NoFlagPrefix, name[len(AspectFlagPrefix):])
 	} else {
-		return bazelFlags.BazelNoPrefix + name
+		return NoFlagPrefix + name
 	}
 }
 
@@ -90,7 +94,7 @@ func RegisterNoableBoolP(
 
 	falseNB := &noableBool{value: &result, valueWhenTrue: false}
 	noFlag := &pflag.Flag{
-		Name:      NoNameAspect(name),
+		Name:      NoFlagName(name),
 		Shorthand: "",
 		Usage:     usage,
 		Value:     falseNB,

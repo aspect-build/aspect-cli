@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "aspect_config.go",
         "bazel.go",
+        "bazel_flags.go",
         "bazelisk.go",
     ],
     importpath = "aspect.build/cli/pkg/bazel",
@@ -13,6 +14,7 @@ go_library(
         "//bazel/analysis",
         "//bazel/flags",
         "//buildinfo",
+        "//pkg/aspect/root/flags",
         "//pkg/bazel/workspace",
         "//pkg/ioutils",
         "@com_github_bazelbuild_bazelisk//core",
@@ -21,6 +23,7 @@ go_library(
         "@com_github_bazelbuild_bazelisk//repositories",
         "@com_github_bazelbuild_bazelisk//versions",
         "@com_github_mitchellh_go_homedir//:go-homedir",
+        "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",
         "@org_golang_google_protobuf//proto",
     ],

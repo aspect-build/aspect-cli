@@ -14,16 +14,14 @@
  * limitations under the License.
  */
 
-package flags
+package bazel
 
 import (
 	"fmt"
 	"strings"
 
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"github.com/spf13/cobra"
-
-	"aspect.build/cli/bazel/flags"
-	"aspect.build/cli/pkg/bazel"
 )
 
 var (
@@ -76,7 +74,7 @@ func AddBazelFlags(cmd *cobra.Command) error {
 		subCommands[subCmdName] = subCmd
 	}
 
-	bzl, err := bazel.FindFromWd()
+	bzl, err := FindFromWd()
 	if err != nil {
 		// We cannot run Bazel, but this just means we have no flags to add.
 		// This will be the case when running aspect help from outside a workspace, for example.
@@ -96,11 +94,11 @@ func AddBazelFlags(cmd *cobra.Command) error {
 		for _, command := range flag.Commands {
 			if command == "startup" {
 				if flag.GetHasNegativeFlag() {
-					RegisterNoableBool(cmd.PersistentFlags(), flagName, false, flagDoc)
+					flags.RegisterNoableBool(cmd.PersistentFlags(), flagName, false, flagDoc)
 					markFlagAsHidden(cmd, flagName)
-					markFlagAsHidden(cmd, flags.NoName(flagName))
+					markFlagAsHidden(cmd, flags.NoFlagName(flagName))
 				} else if flag.GetAllowsMultiple() {
-					var key = MultiString{}
+					var key = flags.MultiString{}
 					cmd.PersistentFlags().VarP(&key, flagName, flagAbbreviation, flagDoc)
 					markFlagAsHidden(cmd, flagName)
 				} else {
@@ -116,11 +114,11 @@ func AddBazelFlags(cmd *cobra.Command) error {
 			if subcommand, ok := subCommands[command]; ok {
 				subcommand.DisableFlagParsing = true // only want to disable flag parsing on actual bazel verbs
 				if flag.GetHasNegativeFlag() {
-					RegisterNoableBoolP(subcommand.Flags(), flagName, flagAbbreviation, false, flagDoc)
+					flags.RegisterNoableBoolP(subcommand.Flags(), flagName, flagAbbreviation, false, flagDoc)
 					markFlagAsHidden(subcommand, flagName)
-					markFlagAsHidden(subcommand, flags.NoName(flagName))
+					markFlagAsHidden(subcommand, flags.NoFlagName(flagName))
 				} else if flag.GetAllowsMultiple() {
-					var key = MultiString{}
+					var key = flags.MultiString{}
 					subcommand.Flags().VarP(&key, flagName, flagAbbreviation, flagDoc)
 					markFlagAsHidden(subcommand, flagName)
 				} else {
