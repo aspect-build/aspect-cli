@@ -6,6 +6,7 @@ load("@io_bazel_rules_go//go:def.bzl", "nogo")
 # the correct flags. To do this we need version from .bazelversion
 exports_files([
     ".bazelversion",
+    "LICENSE",
 ])
 
 nogo(
