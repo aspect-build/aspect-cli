@@ -27,6 +27,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect docs](aspect_docs.md)	 - Open documentation in the browser
 * [aspect fetch](aspect_fetch.md)	 - Fetch external repositories that are prerequisites to the targets
 * [aspect info](aspect_info.md)	 - Display runtime info about the bazel server
+* [aspect license](aspect_license.md)	 - Prints the license of this software.
 * [aspect outputs](aspect_outputs.md)	 - Print paths to declared output files
 * [aspect print](aspect_print.md)	 - Print syntax elements from BUILD files
 * [aspect query](aspect_query.md)	 - Query the dependency graph, ignoring configuration flags
