@@ -3,6 +3,7 @@ module aspect.build/cli
 go 1.19
 
 require (
+	github.com/bazelbuild/bazel-gazelle v0.28.0
 	github.com/bazelbuild/bazelisk v1.13.2
 	github.com/bazelbuild/buildtools v0.0.0-20221004120235-7186f635531b
 	github.com/fatih/color v1.13.0
@@ -15,10 +16,12 @@ require (
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/onsi/gomega v1.16.0
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
+	github.com/pmezard/go-difflib v1.0.0
 	github.com/spf13/cobra v1.6.0
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.13.0
-	golang.org/x/sync v0.0.0-20220819030929-7fc1605a5dde
+	golang.org/x/exp v0.0.0-20221114191408-850992195362
+	golang.org/x/sync v0.1.0
 	google.golang.org/genproto v0.0.0-20220902135211-223410557253
 	google.golang.org/grpc v1.49.0
 	google.golang.org/protobuf v1.28.1
@@ -27,9 +30,10 @@ require (
 
 require (
 	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
+	github.com/bmatcuk/doublestar/v4 v4.2.0 // indirect
 	github.com/chzyer/readline v1.5.1 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
-	github.com/fsnotify/fsnotify v1.5.4 // indirect
+	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/hashicorp/go-version v1.6.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
@@ -46,9 +50,11 @@ require (
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/subosito/gotenv v1.4.1 // indirect
-	golang.org/x/net v0.0.0-20220906165146-f3363e06e74c // indirect
-	golang.org/x/sys v0.0.0-20220906165534-d0df966e6959 // indirect
-	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/mod v0.6.0 // indirect
+	golang.org/x/net v0.1.0 // indirect
+	golang.org/x/sys v0.1.0 // indirect
+	golang.org/x/text v0.4.0 // indirect
+	golang.org/x/tools v0.2.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
