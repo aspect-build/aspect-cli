@@ -21,7 +21,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect build](aspect_build.md)	 - Build the specified targets
 * [aspect canonicalize-flags](aspect_canonicalize-flags.md)	 - Present a list of bazel options in a canonical form
 * [aspect clean](aspect_clean.md)	 - Remove the output tree
-* [aspect configure](aspect_configure.md)	 - Generate and update BUILD files
+* [aspect configure](aspect_configure.md)	 - Generate and update BUILD files for Golang and Protobuf
 * [aspect coverage](aspect_coverage.md)	 - Same as 'test', but also generates a code coverage report.
 * [aspect cquery](aspect_cquery.md)	 - Query the dependency graph, honoring configuration flags
 * [aspect docs](aspect_docs.md)	 - Open documentation in the browser
@@ -30,6 +30,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect license](aspect_license.md)	 - Prints the license of this software.
 * [aspect outputs](aspect_outputs.md)	 - Print paths to declared output files
 * [aspect print](aspect_print.md)	 - Print syntax elements from BUILD files
+* [aspect pro](aspect_pro.md)	 - Enable Aspect CLI Pro features
 * [aspect query](aspect_query.md)	 - Query the dependency graph, ignoring configuration flags
 * [aspect run](aspect_run.md)	 - Build a single target and run it with the given arguments
 * [aspect shutdown](aspect_shutdown.md)	 - Stop the bazel server
