@@ -1,0 +1,15 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "license",
+    srcs = ["license.go"],
+    importpath = "aspect.build/cli/cmd/aspect/license",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/aspect/license",
+        "//pkg/aspect/root/flags",
+        "//pkg/interceptors",
+        "//pkg/ioutils",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
