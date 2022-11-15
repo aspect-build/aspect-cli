@@ -16,6 +16,7 @@ COMMAND_LIST = [
     "license",
     "outputs",
     "print",
+    "pro",
     "query",
     "run",
     "shutdown",
