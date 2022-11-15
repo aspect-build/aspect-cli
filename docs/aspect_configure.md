@@ -1,10 +1,10 @@
 ## aspect configure
 
-Generate and update BUILD files for Golang and Protobuf
+Update BUILD files for JavaScript, TypeScript, Go and Protobuf
 
 ### Synopsis
 
-Generates and updates BUILD files from sources for Golang and Protobuf.
+Generates and updates BUILD files from sources for JavaScript, TypeScript, Go and Protobuf.
 
 ```
 aspect configure [flags]
