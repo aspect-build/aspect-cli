@@ -34,7 +34,7 @@ Add this to your `.bazeliskrc` in your project folder to install Aspect for all 
 
 ```
 BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
-USE_BAZEL_VERSION=aspect/4.2.2
+USE_BAZEL_VERSION=aspect/4.3.0
 ```
 
 Note that in all cases, the `.bazelversion` file continues to indicate which version of the
