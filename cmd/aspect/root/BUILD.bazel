@@ -25,6 +25,7 @@ go_library(
         "//cmd/aspect/outputs",
         "//cmd/aspect/print",
         "//cmd/aspect/printaction",
+        "//cmd/aspect/pro",
         "//cmd/aspect/query",
         "//cmd/aspect/run",
         "//cmd/aspect/shutdown",

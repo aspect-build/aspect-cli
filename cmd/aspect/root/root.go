@@ -43,6 +43,7 @@ import (
 	"aspect.build/cli/cmd/aspect/outputs"
 	"aspect.build/cli/cmd/aspect/print"
 	"aspect.build/cli/cmd/aspect/printaction"
+	"aspect.build/cli/cmd/aspect/pro"
 	"aspect.build/cli/cmd/aspect/query"
 	"aspect.build/cli/cmd/aspect/run"
 	"aspect.build/cli/cmd/aspect/shutdown"
@@ -123,8 +124,9 @@ func NewRootCmd(
 	cmd.AddCommand(version.NewDefaultVersionCmd())
 	cmd.AddCommand(outputs.NewDefaultOutputsCmd())
 	if !buildinfo.Current().IsAspectPro {
-		// Aspect CLI license command
+		// Aspect CLI only commands
 		cmd.AddCommand(license.NewDefaultLicenseCmd())
+		cmd.AddCommand(pro.NewDefaultProCmd())
 		// Aspect CLI Pro command stubs
 		cmd.AddCommand(configure.NewDefaultConfigureCmd())
 		cmd.AddCommand(support.NewDefaultSupportCmd())
