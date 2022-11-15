@@ -17,35 +17,44 @@
 package configure
 
 import (
-	"context"
-	"fmt"
-
 	"github.com/spf13/cobra"
 
+	"aspect.build/cli/pkg/aspect/configure"
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
+	"github.com/bazelbuild/bazel-gazelle/language"
+	golang "github.com/bazelbuild/bazel-gazelle/language/go"
+	"github.com/bazelbuild/bazel-gazelle/language/proto"
 )
 
-func ProOnly(ctx context.Context, cmd *cobra.Command, args []string) error {
-	return fmt.Errorf("The configure command is only available in Pro. Run 'aspect pro' to enable Pro features.")
-}
-
 func NewDefaultConfigureCmd() *cobra.Command {
-	return NewConfigureCmd(ioutils.DefaultStreams, ProOnly)
+	var languages = []language.Language{
+		proto.NewLanguage(),
+		golang.NewLanguage(),
+	}
+
+	return NewConfigureCmd(
+		ioutils.DefaultStreams,
+		languages,
+		"Generate and update BUILD files for Golang and Protobuf",
+		"Generates and updates BUILD files from sources for Golang and Protobuf.",
+	)
 }
 
-func NewConfigureCmd(streams ioutils.Streams, cmdRunner interceptors.RunEContextFn) *cobra.Command {
+func NewConfigureCmd(streams ioutils.Streams, languages []language.Language, shortDesc string, longDesc string) *cobra.Command {
+	v := configure.New(streams, languages)
+
 	cmd := &cobra.Command{
 		Use:     "configure",
-		Short:   "Generate and update BUILD files",
-		Long:    "Generates and updates BUILD files from sources for Typescript, Golang and Protobuf.",
+		Short:   shortDesc,
+		Long:    longDesc,
 		GroupID: "aspect",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			cmdRunner,
+			v.Run,
 		),
 	}
 	return cmd
