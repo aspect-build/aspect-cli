@@ -17,12 +17,14 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"strings"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
+	"aspect.build/cli/pkg/bazel/workspace"
 	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -48,12 +50,24 @@ func Load(args []string) error {
 		return err
 	}
 
-	if err := loadWorkspaceConfig(configFlagValues); err != nil {
+	workspaceConfig, err := LoadWorkspaceConfig()
+	if err != nil {
 		return err
 	}
+	if configFlagValues.WorkspaceConfig {
+		if err := viper.MergeConfigMap(workspaceConfig.AllSettings()); err != nil {
+			return err
+		}
+	}
 
-	if err := loadHomeConfig(configFlagValues); err != nil {
+	homeConfig, err := LoadHomeConfig()
+	if err != nil {
 		return err
+	}
+	if configFlagValues.HomeConfig {
+		if err := viper.MergeConfigMap(homeConfig.AllSettings()); err != nil {
+			return err
+		}
 	}
 
 	for _, f := range configFlagValues.UserConfigs {
@@ -62,8 +76,12 @@ func Load(args []string) error {
 			// search for a user config file, such as in release builds.
 			break
 		}
-		if err := loadConfigFile(f); err != nil {
+		userConfig, err := LoadConfigFile(f)
+		if err != nil {
 			return fmt.Errorf("Failed to load Aspect CLI config file '%s' specified with --aspect:config flag: %w", f, err)
+		}
+		if err := viper.MergeConfigMap(userConfig.AllSettings()); err != nil {
+			return err
 		}
 	}
 
@@ -99,34 +117,126 @@ func ParseConfigFlags(args []string) (*ConfigFlagValues, error) {
 	}, nil
 }
 
-func loadWorkspaceConfig(configFlagValues *ConfigFlagValues) error {
-	if configFlagValues.WorkspaceConfig {
-		// Search for config in root of current repo
-		return maybeLoadConfigFile(fmt.Sprintf("%s/%s", AspectConfigFolder, AspectConfigFile))
+func WorkspaceConfigFolder() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
 	}
-	return nil
+	workspaceRoot, err := workspace.DefaultFinder.Find(cwd)
+	if err != nil {
+		return "", nil
+	}
+
+	return path.Join(workspaceRoot, AspectConfigFolder), nil
 }
 
-func loadHomeConfig(configFlagValues *ConfigFlagValues) error {
+func WorkspaceConfigFile() (string, error) {
+	configFolder, err := WorkspaceConfigFolder()
+	if err != nil {
+		return "", err
+	}
+
+	return path.Join(configFolder, AspectConfigFile), nil
+}
+
+func LoadWorkspaceConfig() (*viper.Viper, error) {
+	configFile, err := WorkspaceConfigFile()
+	if err != nil {
+		return nil, err
+	}
+
+	return MaybeLoadConfigFile(configFile)
+}
+
+// Sets a value in the Aspect CLI $WORKSPACE configuration.
+// Returns the path of the config file written to & true if the configuration file is newly created.
+func SetInWorkspaceConfig(key string, value interface{}) (string, bool, error) {
+	config, err := LoadWorkspaceConfig()
+	if err != nil {
+		return "", false, err
+	}
+
+	configFile, err := WorkspaceConfigFile()
+	if err != nil {
+		return "", false, err
+	}
+
+	configExists, err := exists(configFile)
+	if err != nil {
+		return "", false, err
+	}
+
+	config.Set(key, value)
+
+	if !configExists {
+		// Ensure the config directory exists before writing
+		if err := os.MkdirAll(AspectConfigFolder, os.ModePerm); err != nil {
+			return "", false, err
+		}
+	}
+
+	return configFile, !configExists, Write(config)
+}
+
+func HomeConfigFolder() (string, error) {
 	home, err := homedir.Dir()
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	homeConfigFolder := fmt.Sprintf("%s/%s", home, AspectConfigFolder)
-
-	// Ensure the config directory exists under the home directory.
-	// This is so that viper can create the user home config if desired.
-	os.MkdirAll(homeConfigFolder, os.ModePerm)
-
-	if configFlagValues.HomeConfig {
-		// Search for config in the user home directory
-		return maybeLoadConfigFile(fmt.Sprintf("%s/%s", homeConfigFolder, AspectConfigFile))
-	}
-	return nil
+	return path.Join(home, AspectConfigFolder), nil
 }
 
-func maybeLoadConfigFile(f string) error {
+func HomeConfigFile() (string, error) {
+	configFolder, err := HomeConfigFolder()
+	if err != nil {
+		return "", err
+	}
+
+	return path.Join(configFolder, AspectConfigFile), nil
+}
+
+func LoadHomeConfig() (*viper.Viper, error) {
+	configFile, err := HomeConfigFile()
+	if err != nil {
+		return nil, err
+	}
+
+	return MaybeLoadConfigFile(configFile)
+}
+
+// Sets a value in the Aspect CLI $HOME configuration.
+// Returns the path of the config file written to & true if the configuration file is newly created.
+func SetInHomeConfig(key string, value interface{}) (string, bool, error) {
+	config, err := LoadHomeConfig()
+	if err != nil {
+		return "", false, err
+	}
+
+	configFile, err := HomeConfigFile()
+	if err != nil {
+		return "", false, err
+	}
+
+	configExists, err := exists(configFile)
+	if err != nil {
+		return "", false, err
+	}
+
+	config.Set(key, value)
+
+	if !configExists {
+		// Ensure the config directory exists before writing.
+		if err := os.MkdirAll(path.Dir(configFile), os.ModePerm); err != nil {
+			return "", false, err
+		}
+	}
+
+	return configFile, !configExists, Write(config)
+}
+
+// Load a config file if it is found
+func MaybeLoadConfigFile(f string) (*viper.Viper, error) {
 	v := viper.New()
 	v.AddConfigPath(path.Dir(f))                                   // the directory to look for the config file in
 	v.SetConfigName(strings.TrimSuffix(path.Base(f), path.Ext(f))) // the config file name with extension
@@ -134,24 +244,30 @@ func maybeLoadConfigFile(f string) error {
 	if err := v.ReadInConfig(); err != nil {
 		// Ignore "file not found" error for repo config file (it may not exist)
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return err
+			return nil, err
 		}
 	}
-	if err := viper.MergeConfigMap(v.AllSettings()); err != nil {
-		return err
-	}
-	return nil
+	return v, nil
 }
 
-func loadConfigFile(f string) error {
+// Load a config file and fail if it is not found
+func LoadConfigFile(f string) (*viper.Viper, error) {
 	v := viper.New()
 	v.SetConfigFile(f)
 	if err := v.ReadInConfig(); err != nil {
 		// Fail is config file specified on the command line is not found
-		return err
+		return nil, err
 	}
-	if err := viper.MergeConfigMap(v.AllSettings()); err != nil {
-		return err
+	return v, nil
+}
+
+func exists(name string) (bool, error) {
+	_, err := os.Stat(name)
+	if err == nil {
+		return true, nil
 	}
-	return nil
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }

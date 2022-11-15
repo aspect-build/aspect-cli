@@ -37,6 +37,7 @@ import (
 	"github.com/mitchellh/go-homedir"
 
 	"aspect.build/cli/buildinfo"
+	"aspect.build/cli/pkg/aspect/root/config"
 	"aspect.build/cli/pkg/ioutils"
 )
 
@@ -231,6 +232,13 @@ func parseFileConfig(rcFilePath string) (map[string]string, error) {
 	return config, nil
 }
 
+type aspectRuntimeInfo struct {
+	Reentrant bool
+	Version   string
+	DevBuild  bool
+	BaseUrl   string
+}
+
 func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	// The logic in upstream Bazelisk v1.15.0
 	// (https://github.com/bazelbuild/bazelisk/blob/c9081741bc1420d601140a4232b5c48872370fdc/core/core.go#L318)
@@ -266,25 +274,27 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	//     - workspace_root/.bazeliskrc exists -> read contents, in contents:
 	//       var "USE_BAZEL_FALLBACK_VERSION" is set to a fallback version format.
 	//     - fallback version format "silent:latest"
-	aspectReentrant := len(os.Getenv(aspectReentrantEnv)) != 0
-	aspectVersion := buildinfo.Current().Version()
-	aspectDevBuild := strings.HasPrefix(buildinfo.Current().Version(), "unknown")
-	aspectBaseUrl := aspectBaseUrls[buildinfo.Current().IsAspectPro]
+	aspectRuntime := &aspectRuntimeInfo{
+		Reentrant: len(os.Getenv(aspectReentrantEnv)) != 0,
+		Version:   buildinfo.Current().Version(),
+		DevBuild:  strings.HasPrefix(buildinfo.Current().Version(), "unknown"),
+		BaseUrl:   config.AspectBaseUrl(buildinfo.Current().IsAspectPro),
+	}
 
-	configAspect, err := getAspectConfig()
+	aspectConfig, err := config.GetVersionConfig()
 	if err != nil {
 		return "", "", fmt.Errorf("could not get aspect config: %w", err)
 	}
 
 	// If an aspect version is configured and we are not already re-entrant that takes precedence.
-	if !aspectReentrant && len(configAspect.Version) != 0 {
-		mismatchVersion := configAspect.Version != aspectVersion
-		mismatchBaseUrl := configAspect.BaseUrl != aspectBaseUrl
-		if !aspectDevBuild && (mismatchVersion || mismatchBaseUrl) {
+	if !aspectRuntime.Reentrant && len(aspectConfig.Version) != 0 {
+		mismatchVersion := aspectConfig.Version != aspectRuntime.Version
+		mismatchBaseUrl := aspectConfig.BaseUrl != aspectRuntime.BaseUrl
+		if !aspectRuntime.DevBuild && (mismatchVersion || mismatchBaseUrl) {
 			// Re-enter the configured version of aspect if there is a version or base url mismatch
 			// and this is not a development build
 			bazelisk.AspectShouldReenter = true                    // (A)
-			return configAspect.Version, configAspect.BaseUrl, nil // (A)
+			return aspectConfig.Version, aspectConfig.BaseUrl, nil // (A)
 		}
 	}
 
@@ -296,7 +306,7 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 		// base url from the env or the .bazelversion files below
 		bazelVersion = os.Getenv("USE_BAZEL_VERSION") // (B)
 		baseUrl = os.Getenv(core.BaseURLEnv)          // (B)
-	} else if !aspectReentrant {
+	} else if !aspectRuntime.Reentrant {
 		// If we were not bootstrapped by bazelisk or aspect we must still check if .bazeliskrc
 		// has an aspect bootstrap configured
 		bazeliskBazelVersion := bazelisk.GetConfig("USE_BAZEL_VERSION")
@@ -305,9 +315,9 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 		if bazeliskBootstrapConfigured {
 			splits := strings.Split(bazeliskBazelVersion, "/")
 			bazeliskAspectVersion := splits[len(splits)-1]
-			mismatchVersion := bazeliskAspectVersion != aspectVersion
-			mismatchBaseUrl := bazeliskAspectBaseUrl != aspectBaseUrl
-			if !aspectDevBuild && len(configAspect.Version) == 0 && (mismatchVersion || mismatchBaseUrl) {
+			mismatchVersion := bazeliskAspectVersion != aspectRuntime.Version
+			mismatchBaseUrl := bazeliskAspectBaseUrl != aspectRuntime.BaseUrl
+			if !aspectRuntime.DevBuild && len(aspectConfig.Version) == 0 && (mismatchVersion || mismatchBaseUrl) {
 				// Re-enter the configured version of aspect if there is a version or base url mismatch
 				// and this is not a development build and no version configured in aspect config
 				bazelisk.AspectShouldReenter = true                      // (C)
