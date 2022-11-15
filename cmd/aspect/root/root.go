@@ -37,6 +37,7 @@ import (
 	"aspect.build/cli/cmd/aspect/dump"
 	"aspect.build/cli/cmd/aspect/fetch"
 	"aspect.build/cli/cmd/aspect/info"
+	"aspect.build/cli/cmd/aspect/license"
 	"aspect.build/cli/cmd/aspect/mobileinstall"
 	"aspect.build/cli/cmd/aspect/modquery"
 	"aspect.build/cli/cmd/aspect/outputs"
@@ -110,7 +111,6 @@ func NewRootCmd(
 	cmd.AddCommand(fetch.NewDefaultFetchCmd())
 	cmd.AddCommand(docs.NewDefaultDocsCmd())
 	cmd.AddCommand(info.NewDefaultInfoCmd())
-	// license
 	cmd.AddCommand(mobileinstall.NewDefaultMobileInstallCmd())
 	cmd.AddCommand(modquery.NewDefaultModQueryCmd())
 	cmd.AddCommand(print.NewDefaultPrintCmd())
@@ -123,6 +123,8 @@ func NewRootCmd(
 	cmd.AddCommand(version.NewDefaultVersionCmd())
 	cmd.AddCommand(outputs.NewDefaultOutputsCmd())
 	if !buildinfo.Current().IsAspectPro {
+		// Aspect CLI license command
+		cmd.AddCommand(license.NewDefaultLicenseCmd())
 		// Aspect CLI Pro command stubs
 		cmd.AddCommand(configure.NewDefaultConfigureCmd())
 		cmd.AddCommand(support.NewDefaultSupportCmd())
