@@ -1,4 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 
 go_library(
     name = "license",
@@ -15,4 +17,17 @@ go_library(
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
     ],
+)
+
+# go fmt needs the file being embedded in the source tree. A symlink is insufficient:
+# "license.go:38:12: pattern LICENSE: cannot embed irregular file LICENSE"
+copy_file(
+    name = "license_file",
+    src = "//:LICENSE",
+    out = "_LICENSE",
+)
+
+write_source_files(
+    name = "write_license_file",
+    files = {"LICENSE": ":_LICENSE"},
 )
