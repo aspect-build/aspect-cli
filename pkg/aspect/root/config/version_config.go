@@ -56,33 +56,39 @@ func AspectBaseUrl(isProTier bool) string {
 	}
 }
 
-type VersionConfig struct {
-	ProTier bool
+type VersionTuple struct {
+	Tier    string
 	Version string
-	BaseUrl string
+}
+
+type VersionConfig struct {
+	VersionTuple
+	BaseUrl   string
+	IsProTier bool
 }
 
 func GetVersionConfig() (*VersionConfig, error) {
-	tier, version, err := ParseConfigVersion(viper.GetString("version"))
+	versionString := viper.GetString("version")
+	versionTuple, err := ParseConfigVersion(versionString)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Unrecognized Aspect CLI tier in version in configuration: '%s'. Version should be [<tier>/]<version> with an optional tier set to one of: %s. Please fix your Aspect CLI configuration and try again.", versionString, validTiersCommaList)
 	}
 
 	isProTier := false
-	if tier == "" {
+	if versionTuple.Tier == "" {
 		if buildinfo.Current().IsAspectPro {
-			tier = "pro"
+			versionTuple.Tier = "pro"
 			isProTier = true
 		}
 	} else {
-		if !IsValidTier(tier) {
-			return nil, fmt.Errorf("Unrecognized Aspect CLI tier in version in configuration: '%s'. Version should be [<tier>/]<version> with an optional tier set to one of: %s. Please fix your Aspect CLI configuration and try again.", tier, validTiersCommaList)
+		if !IsValidTier(versionTuple.Tier) {
+			return nil, fmt.Errorf("Unrecognized Aspect CLI tier in version in configuration: '%s'. Version should be [<tier>/]<version> with an optional tier set to one of: %s. Please fix your Aspect CLI configuration and try again.", versionTuple.Tier, validTiersCommaList)
 		}
-		isProTier = IsProTier(tier)
+		isProTier = IsProTier(versionTuple.Tier)
 	}
 
-	if version == "" {
-		version = buildinfo.Current().Version()
+	if versionTuple.Version == "" {
+		versionTuple.Version = buildinfo.Current().Version()
 	}
 
 	baseUrl := viper.GetString("base_url")
@@ -91,32 +97,35 @@ func GetVersionConfig() (*VersionConfig, error) {
 	}
 
 	return &VersionConfig{
-		ProTier: isProTier,
-		Version: version,
-		BaseUrl: baseUrl,
+		VersionTuple: versionTuple,
+		BaseUrl:      baseUrl,
+		IsProTier:    isProTier,
 	}, nil
 }
 
-func ParseConfigVersion(version string) (string, string, error) {
+func ParseConfigVersion(version string) (VersionTuple, error) {
+	result := VersionTuple{"", ""}
 	if len(version) == 0 {
-		return "", "", nil
+		return result, nil
 	}
 
-	tier := ""
-	if version[0] < '0' || version[0] > '9' {
+	if version[0] >= '0' && version[0] <= '9' {
+		// Version is numeric with no tier component
+		result.Version = version
+	} else {
 		// There is a tier component to the version: <tier> or <tier>/1.2.3
 		splits := strings.Split(version, "/")
 		if len(splits) == 1 {
-			tier = splits[0]
+			result.Tier = splits[0]
 			// Only tier is specified;  version is derived above from running version
 		} else if len(splits) == 2 {
 			// Both tier and version are specified in the Aspect CLI config
-			tier = splits[0]
-			version = splits[1]
+			result.Tier = splits[0]
+			result.Version = splits[1]
 		} else {
-			return "", "", fmt.Errorf("Invalid Aspect CLI version in configuration: '%s'. Version should be [<tier>/]<version> with an optional tier set to one of: %s. Please fix your Aspect CLI configuration and try again.", version, validTiersCommaList)
+			return result, fmt.Errorf("Invalid Aspect CLI version: '%s'. Version should be [<tier>/]<version>.", version)
 		}
 	}
 
-	return tier, version, nil
+	return result, nil
 }

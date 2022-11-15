@@ -23,7 +23,10 @@ go_library(
 
 go_test(
     name = "config_test",
-    srcs = ["write_test.go"],
+    srcs = [
+        "version_config_test.go",
+        "write_test.go",
+    ],
     deps = [
         ":config",
         "@com_github_onsi_gomega//:gomega",
