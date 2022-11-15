@@ -4,7 +4,6 @@ go_library(
     name = "flags",
     srcs = [
         "aspect_flags.go",
-        "bazel_flags.go",
         "interceptor.go",
         "multi_string.go",
         "noable_bool.go",
@@ -12,8 +11,6 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/root/flags",
     visibility = ["//visibility:public"],
     deps = [
-        "//bazel/flags",
-        "//pkg/bazel",
         "//pkg/interceptors",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",

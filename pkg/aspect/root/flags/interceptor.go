@@ -32,10 +32,10 @@ func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 	cmd.PersistentFlags().String(AspectConfigFlagName, "", fmt.Sprintf("User-specified Aspect CLI config file. /dev/null indicates that all further --%s flags will be ignored.", AspectConfigFlagName))
 	RegisterNoableBool(cmd.PersistentFlags(), AspectWorkspaceConfigFlagName, true, "Whether or not to look for the workspace config file at $workspace/.aspect/cli/config.yaml")
 	cmd.PersistentFlags().MarkHidden(AspectWorkspaceConfigFlagName)
-	cmd.PersistentFlags().MarkHidden(NoNameAspect(AspectWorkspaceConfigFlagName))
+	cmd.PersistentFlags().MarkHidden(NoFlagName(AspectWorkspaceConfigFlagName))
 	RegisterNoableBool(cmd.PersistentFlags(), AspectHomeConfigFlagName, true, "Whether or not to look for the home config file at $HOME/.aspect/cli/config.yaml")
 	cmd.PersistentFlags().MarkHidden(AspectHomeConfigFlagName)
-	cmd.PersistentFlags().MarkHidden(NoNameAspect(AspectHomeConfigFlagName))
+	cmd.PersistentFlags().MarkHidden(NoFlagName(AspectHomeConfigFlagName))
 	cmd.PersistentFlags().Bool(AspectInteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
 }
 

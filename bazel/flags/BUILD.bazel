@@ -17,7 +17,6 @@ go_proto_library(
 
 go_library(
     name = "flags",
-    srcs = ["helpers.go"],
     embed = [":bazel_go_proto"],
     importpath = "aspect.build/cli/bazel/flags",
     visibility = ["//visibility:public"],
