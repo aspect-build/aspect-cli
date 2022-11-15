@@ -11,8 +11,6 @@ go_library(
         "//pkg/interceptors",
         "//pkg/ioutils",
         "@bazel_gazelle//language:go_default_library",
-        "@bazel_gazelle//language/go:go_default_library",
-        "@bazel_gazelle//language/proto:go_default_library",
         "@com_github_spf13_cobra//:cobra",
     ],
 )

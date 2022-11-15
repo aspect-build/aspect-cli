@@ -24,31 +24,19 @@ import (
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/bazelbuild/bazel-gazelle/language"
-	golang "github.com/bazelbuild/bazel-gazelle/language/go"
-	"github.com/bazelbuild/bazel-gazelle/language/proto"
 )
 
 func NewDefaultConfigureCmd() *cobra.Command {
-	var languages = []language.Language{
-		proto.NewLanguage(),
-		golang.NewLanguage(),
-	}
-
-	return NewConfigureCmd(
-		ioutils.DefaultStreams,
-		languages,
-		"Generate and update BUILD files for Golang and Protobuf",
-		"Generates and updates BUILD files from sources for Golang and Protobuf.",
-	)
+	return NewConfigureCmd(ioutils.DefaultStreams, map[string]language.Language{})
 }
 
-func NewConfigureCmd(streams ioutils.Streams, languages []language.Language, shortDesc string, longDesc string) *cobra.Command {
+func NewConfigureCmd(streams ioutils.Streams, languages map[string]language.Language) *cobra.Command {
 	v := configure.New(streams, languages)
 
 	cmd := &cobra.Command{
 		Use:     "configure",
-		Short:   shortDesc,
-		Long:    longDesc,
+		Short:   "Update BUILD files for JavaScript, TypeScript, Go and Protobuf",
+		Long:    "Generates and updates BUILD files from sources for JavaScript, TypeScript, Go and Protobuf.",
 		GroupID: "aspect",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
