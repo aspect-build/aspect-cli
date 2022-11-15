@@ -5,15 +5,19 @@ go_library(
     srcs = [
         "config.go",
         "root.go",
+        "version_config.go",
         "write.go",
     ],
     importpath = "aspect.build/cli/pkg/aspect/root/config",
     visibility = ["//visibility:public"],
     deps = [
+        "//buildinfo",
         "//pkg/aspect/root/flags",
+        "//pkg/bazel/workspace",
         "@com_github_mitchellh_go_homedir//:go-homedir",
         "@com_github_spf13_pflag//:pflag",
         "@com_github_spf13_viper//:viper",
+        "@org_golang_x_exp//maps",
     ],
 )
 

@@ -17,8 +17,8 @@
 package config_test
 
 import (
-	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 
@@ -60,7 +60,7 @@ func TestWrite(t *testing.T) {
 	v := NewViper(tempDir)
 
 	// Create the config directory exists under the tempDir directory
-	os.MkdirAll(fmt.Sprintf("%s/%s", tempDir, configDirectory), os.ModePerm)
+	os.MkdirAll(path.Join(tempDir, configDirectory), os.ModePerm)
 
 	// Set a value
 	key := "chicken"
