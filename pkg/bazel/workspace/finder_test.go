@@ -17,7 +17,6 @@
 package workspace
 
 import (
-	"fmt"
 	"io/fs"
 	"os"
 	"testing"
@@ -68,7 +67,7 @@ func TestWorkspaceFinder(t *testing.T) {
 		}
 
 		for _, wd := range wds {
-			expectedErr := fmt.Errorf("failed to find bazel workspace: the current working directory \"%s\" is not a Bazel workspace", wd)
+			expectedErr := &NotFoundError{StartDir: wd}
 			finder := &finder{
 				osStat: func(s string) (fs.FileInfo, error) {
 					return nil, os.ErrNotExist
