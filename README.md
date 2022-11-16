@@ -68,12 +68,6 @@ The easiest way to get started is to clone our
 
 See the [Plugin Documentation](./help/topics/plugins.md) for more information on how to write a plugin.
 
-# Need help or having issues?
-
-If you think you've hit a bug please file a [Bug Report](https://github.com/aspect-build/aspect-cli/issues/new/choose).
-
-You can also find us on [Bazel Slack](https://slack.bazel.build/) on the #aspect-dev channel.
-
 # For Enterprise
 
 `aspect` is sponsored by Aspect Development, a Bazel consulting company.

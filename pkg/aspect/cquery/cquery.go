@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/viper"
 
 	"aspect.build/cli/pkg/aspect/query/shared"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -57,26 +58,26 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *CQuery {
 }
 
 func (q *CQuery) Run(cmd *cobra.Command, args []string) error {
+	flags, args := flags.SeparateFlagsFromArgs(args)
+
 	presets, presetNames, err := shared.ProcessQueries(q.Presets)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	presetVerb, query, runReplacements, err := shared.SelectQuery(cmd.CalledAs(), presets, q.Presets, presetNames, q.Streams, args, q.Select)
-
+	command, query, runReplacements, err := shared.SelectQuery(cmd.CalledAs(), presets, q.Presets, presetNames, q.Streams, args, q.Select)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
 
 	if runReplacements {
 		query, err = shared.ReplacePlaceholders(query, args, q.Prompt)
-
 		if err != nil {
 			return shared.GetPrettyError(cmd, err)
 		}
 
-		return shared.RunQuery(q.Bzl, presetVerb, query, q.Streams)
+		return shared.RunQuery(q.Bzl, command, q.Streams, flags, []string{query})
 	} else {
-		return shared.RunQuery(q.Bzl, presetVerb, query, q.Streams, args[1:]...)
+		return shared.RunQuery(q.Bzl, command, q.Streams, flags, args)
 	}
 }

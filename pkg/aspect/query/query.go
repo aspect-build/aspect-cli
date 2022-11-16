@@ -24,6 +24,7 @@ import (
 
 	"aspect.build/cli/pkg/aspect/query/shared"
 	"aspect.build/cli/pkg/aspect/root/config"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -70,28 +71,35 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 }
 
 func (q *Query) Run(cmd *cobra.Command, args []string) error {
-	err := q.checkConfig(
-		allowAllQueries,
-		allowAllQueriesInquired,
-		"Include predefined aquery's and cquery's when calling query",
-	)
-	if err != nil {
-		return err
+	flags, args := flags.SeparateFlagsFromArgs(args)
+
+	if len(args) == 0 {
+		// Only check the query configuration if user calls the command with no arguments
+		// so we don't go interactive when a user runs `aspect [ac]query <expression>` after
+		// installing aspect
+		err := q.checkConfig(
+			allowAllQueries,
+			allowAllQueriesInquired,
+			"Include predefined aquery's and cquery's when calling query",
+		)
+		if err != nil {
+			return err
+		}
+
+		err = q.checkConfig(
+			useCQuery,
+			useCQueryInquired,
+			"Use cquery instead of query",
+		)
+		if err != nil {
+			return err
+		}
 	}
 
-	err = q.checkConfig(
-		useCQuery,
-		useCQueryInquired,
-		"Use cquery instead of query",
-	)
-	if err != nil {
-		return err
-	}
-
-	verb := "query"
+	command := "query"
 
 	if q.Prefs.GetBool(useCQuery) {
-		verb = "cquery"
+		command = "cquery"
 	}
 
 	if q.Prefs.GetBool(allowAllQueries) {
@@ -103,22 +111,20 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	presetVerb, query, runReplacements, err := shared.SelectQuery(verb, presets, q.Presets, presetNames, q.Streams, args, q.Select)
-
+	command, query, runReplacements, err := shared.SelectQuery(command, presets, q.Presets, presetNames, q.Streams, args, q.Select)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
 
 	if runReplacements {
 		query, err = shared.ReplacePlaceholders(query, args, q.Prompt)
-
 		if err != nil {
 			return shared.GetPrettyError(cmd, err)
 		}
 
-		return shared.RunQuery(q.Bzl, presetVerb, query, q.Streams)
+		return shared.RunQuery(q.Bzl, command, q.Streams, flags, []string{query})
 	} else {
-		return shared.RunQuery(q.Bzl, presetVerb, query, q.Streams, args[1:]...)
+		return shared.RunQuery(q.Bzl, command, q.Streams, flags, args)
 	}
 }
 
@@ -129,10 +135,14 @@ func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question 
 		// Y = no error; N = error
 		_, err := q.Confirmation(question).Run()
 
-		q.Prefs.Set(baseUseKey, err == nil)
-
-		if err := config.Write(&q.Prefs); err != nil {
-			return fmt.Errorf("failed to update config file: %w", err)
+		configFile, created, err := config.SetInHomeConfig(baseUseKey, err == nil)
+		if err != nil {
+			return err
+		}
+		if created {
+			fmt.Printf("Created %s\n", configFile)
+		} else {
+			fmt.Printf("Updated %s\n", configFile)
 		}
 	}
 
