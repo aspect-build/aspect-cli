@@ -81,7 +81,6 @@ func GetVersionConfig() (*VersionConfig, error) {
 		Configured:   versionTuple.Version != "" || versionTuple.Tier != "",
 	}
 
-	isProTier := false
 	if versionTuple.Tier == "" {
 		if buildinfo.Current().IsAspectPro {
 			result.Tier = "pro"
@@ -100,7 +99,7 @@ func GetVersionConfig() (*VersionConfig, error) {
 
 	result.BaseUrl = viper.GetString("base_url")
 	if len(result.BaseUrl) == 0 {
-		result.BaseUrl = AspectBaseUrl(isProTier)
+		result.BaseUrl = AspectBaseUrl(result.IsProTier)
 	}
 
 	return &result, nil
