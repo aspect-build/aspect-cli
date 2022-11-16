@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - '*.*.*'
+      - '5.*.*'
 
 jobs:
   build:
