@@ -139,6 +139,10 @@ func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question 
 		if err != nil {
 			return err
 		}
+		_, _, err = config.SetInHomeConfig(baseInquiredKey, true)
+		if err != nil {
+			return err
+		}
 		if created {
 			fmt.Printf("Created %s\n", configFile)
 		} else {
