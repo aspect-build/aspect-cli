@@ -70,7 +70,7 @@ A plugin is any program (written in any language) that serves our gRPC protocol.
 The easiest way to get started is to clone our
 [starter template repo](https://github.com/aspect-build/aspect-cli-plugin-template).
 
-See the [Plugin Documentation](./help/topics/plugins.md) for more information on how to write a plugin.
+See the [Plugin Documentation](./docs/help/topics/plugins.md) for more information on how to write a plugin.
 
 # Need help or having issues?
 
