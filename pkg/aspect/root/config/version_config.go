@@ -63,8 +63,10 @@ type VersionTuple struct {
 
 type VersionConfig struct {
 	VersionTuple
-	BaseUrl   string
-	IsProTier bool
+	Configured bool
+	AutoTier   bool
+	BaseUrl    string
+	IsProTier  bool
 }
 
 func GetVersionConfig() (*VersionConfig, error) {
@@ -74,33 +76,34 @@ func GetVersionConfig() (*VersionConfig, error) {
 		return nil, fmt.Errorf("Unrecognized Aspect CLI tier in version in configuration: '%s'. Version should be [<tier>/]<version> with an optional tier set to one of: %s. Please fix your Aspect CLI configuration and try again.", versionString, validTiersCommaList)
 	}
 
+	result := VersionConfig{
+		VersionTuple: versionTuple,
+		Configured:   versionTuple.Version != "" || versionTuple.Tier != "",
+	}
+
 	isProTier := false
 	if versionTuple.Tier == "" {
 		if buildinfo.Current().IsAspectPro {
-			versionTuple.Tier = "pro"
-			isProTier = true
+			result.Tier = "pro"
+			result.IsProTier = true
 		}
 	} else {
 		if !IsValidTier(versionTuple.Tier) {
 			return nil, fmt.Errorf("Unrecognized Aspect CLI tier in version in configuration: '%s'. Version should be [<tier>/]<version> with an optional tier set to one of: %s. Please fix your Aspect CLI configuration and try again.", versionTuple.Tier, validTiersCommaList)
 		}
-		isProTier = IsProTier(versionTuple.Tier)
+		result.IsProTier = IsProTier(versionTuple.Tier)
 	}
 
-	if versionTuple.Version == "" {
-		versionTuple.Version = buildinfo.Current().Version()
+	if result.Version == "" {
+		result.Version = buildinfo.Current().Version()
 	}
 
-	baseUrl := viper.GetString("base_url")
-	if len(baseUrl) == 0 {
-		baseUrl = AspectBaseUrl(isProTier)
+	result.BaseUrl = viper.GetString("base_url")
+	if len(result.BaseUrl) == 0 {
+		result.BaseUrl = AspectBaseUrl(isProTier)
 	}
 
-	return &VersionConfig{
-		VersionTuple: versionTuple,
-		BaseUrl:      baseUrl,
-		IsProTier:    isProTier,
-	}, nil
+	return &result, nil
 }
 
 func ParseConfigVersion(version string) (VersionTuple, error) {

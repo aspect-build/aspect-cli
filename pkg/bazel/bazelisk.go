@@ -287,7 +287,7 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	}
 
 	// If an aspect version is configured and we are not already re-entrant that takes precedence.
-	if !aspectRuntime.Reentrant && len(aspectConfig.Version) != 0 {
+	if !aspectRuntime.Reentrant && aspectConfig.Configured {
 		mismatchVersion := aspectConfig.Version != aspectRuntime.Version
 		mismatchBaseUrl := aspectConfig.BaseUrl != aspectRuntime.BaseUrl
 		if !aspectRuntime.DevBuild && (mismatchVersion || mismatchBaseUrl) {
@@ -317,7 +317,7 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 			bazeliskAspectVersion := splits[len(splits)-1]
 			mismatchVersion := bazeliskAspectVersion != aspectRuntime.Version
 			mismatchBaseUrl := bazeliskAspectBaseUrl != aspectRuntime.BaseUrl
-			if !aspectRuntime.DevBuild && len(aspectConfig.Version) == 0 && (mismatchVersion || mismatchBaseUrl) {
+			if !aspectRuntime.DevBuild && !aspectConfig.Configured && (mismatchVersion || mismatchBaseUrl) {
 				// Re-enter the configured version of aspect if there is a version or base url mismatch
 				// and this is not a development build and no version configured in aspect config
 				bazelisk.AspectShouldReenter = true                      // (C)
