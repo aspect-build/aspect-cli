@@ -19,7 +19,7 @@ See more on our product webpage: <https://aspect.build/cli>
 On MacOS, you can run
 
 ```sh
-% brew install aspect-build/aspect/aspect-pro
+% brew install aspect-build/aspect/aspect
 ```
 
 This installs the `aspect` command and also links it to `bazel`, just like the [bazelisk] installer does.
