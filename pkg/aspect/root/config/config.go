@@ -52,9 +52,12 @@ func Load(args []string) error {
 
 	workspaceConfig, err := LoadWorkspaceConfig()
 	if err != nil {
-		return err
+		// Ignore err if it is a workspace.NotFoundError
+		if _, ok := err.(*workspace.NotFoundError); !ok {
+			return err
+		}
 	}
-	if configFlagValues.WorkspaceConfig {
+	if workspaceConfig != nil && configFlagValues.WorkspaceConfig {
 		if err := viper.MergeConfigMap(workspaceConfig.AllSettings()); err != nil {
 			return err
 		}
@@ -124,7 +127,7 @@ func WorkspaceConfigFolder() (string, error) {
 	}
 	workspaceRoot, err := workspace.DefaultFinder.Find(cwd)
 	if err != nil {
-		return "", nil
+		return "", err
 	}
 
 	return path.Join(workspaceRoot, AspectConfigFolder), nil

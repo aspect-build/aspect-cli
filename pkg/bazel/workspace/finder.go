@@ -17,7 +17,6 @@
 package workspace
 
 import (
-	"fmt"
 	"io/fs"
 	"os"
 	"path"
@@ -25,7 +24,7 @@ import (
 )
 
 // https://github.com/bazelbuild/bazel/blob/8346ea4c/src/main/cpp/workspace_layout.cc#L37
-var workspaceFilenames = []string{"WORKSPACE", "WORKSPACE.bazel"}
+var validWorkspaceFiles = []string{"WORKSPACE", "WORKSPACE.bazel"}
 
 // Finder wraps the Find method that performs the finding of the WORKSPACE file
 // in the user's Bazel project.
@@ -44,23 +43,22 @@ var DefaultFinder = &finder{
 
 // Find tries to find the root of a Bazel workspace.
 func (f *finder) Find(startDir string) (string, error) {
-	for current := startDir; current != "." && current != filepath.Dir(current); current = filepath.Dir(current) {
-		for _, workspaceFilename := range workspaceFilenames {
-			workspacePath := path.Join(current, workspaceFilename)
-			fileInfo, err := f.osStat(workspacePath)
+	for maybeDir := startDir; maybeDir != "." && maybeDir != filepath.Dir(maybeDir); maybeDir = filepath.Dir(maybeDir) {
+		for _, wf := range validWorkspaceFiles {
+			maybeWorkspaceFile := path.Join(maybeDir, wf)
+			stat, err := f.osStat(maybeWorkspaceFile)
 			if err != nil {
 				if os.IsNotExist(err) {
 					continue
 				}
-				return "", &NotFoundError{StartDir: startDir}
+				return "", err
 			}
-			if fileInfo.IsDir() {
+			if stat.IsDir() {
 				continue
 			}
-			workspaceRoot := path.Dir(workspacePath)
-			return workspaceRoot, nil
+			return path.Dir(maybeWorkspaceFile), nil
 		}
 	}
 
-	return "", fmt.Errorf("failed to find bazel workspace: the current working directory %q is not a Bazel workspace", startDir)
+	return "", &NotFoundError{StartDir: startDir}
 }
