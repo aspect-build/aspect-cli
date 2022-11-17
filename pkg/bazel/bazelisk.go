@@ -456,7 +456,7 @@ func (bazelisk *Bazelisk) maybeDelegateToWrapper(bazel string) string {
 	}
 
 	wrapper := filepath.Join(bazelisk.workspaceRoot, wrapperPath)
-	if stat, err := os.Stat(wrapper); err != nil || stat.IsDir() || stat.Mode().Perm()&0001 == 0 {
+	if stat, err := os.Stat(wrapper); err != nil || stat.IsDir() || stat.Mode().Perm()&0111 == 0 {
 		return bazel
 	}
 
