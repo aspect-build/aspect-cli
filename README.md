@@ -26,6 +26,10 @@ This installs the `aspect` command and also links it to `bazel`, just like the [
 
 > We plan to have a standard "core" homebrew formula so this will just be `brew install aspect` in the future.
 
+## Linux
+
+On Linux, you can download the `aspect` binary on our [Releases](https://github.com/aspect-build/aspect-cli/releases) page and add it to your `PATH` manually. This also works on MacOS and Windows.
+
 ## Bazelisk
 
 On any platform, so long as you already have [bazelisk] installed, you can have [bazelisk]
