@@ -14,7 +14,7 @@ See more on our product webpage: <https://aspect.build/cli>
 
 # Installation
 
-## MacOS
+## Homebrew (MacOS)
 
 On MacOS, you can run
 
@@ -26,35 +26,25 @@ This installs the `aspect` command and also links it to `bazel`, just like the [
 
 > We plan to have a standard "core" homebrew formula so this will just be `brew install aspect` in the future.
 
-## Linux
-
-On Linux, you can download the `aspect` binary on our [Releases](https://github.com/aspect-build/aspect-cli/releases) page and add it to your `PATH` manually. This also works on MacOS and Windows.
-
-## Bazelisk
+## Bazelisk (MacOS / Linux / Windows)
 
 On any platform, so long as you already have [bazelisk] installed, you can have [bazelisk]
 install the Aspect CLI just like it can install the standard Bazel CLI.
 Add this to your `.bazeliskrc` in your project folder to install Aspect for all developers:
 
-```
-BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
-USE_BAZEL_VERSION=aspect/5.0.1
-```
+From the release you wish to use: https://github.com/aspect-build/aspect-cli/releases copy the `.bazeliskrc` snippet
+into your `.bazeliskrc` file to install Aspect for all developers in this repository.
 
 Note that in all cases, the `.bazelversion` file continues to indicate which version of the
 Bazel tool is fetched and run beneath the wrapper.
 
-## Manual
+## Manual (MacOS / Linux / Windows)
 
-You can manually install a binary from our [GitHub Releases] page and put it in your PATH.
+On any platform, you can download the `aspect` binary for your platform on our
+[Releases](https://github.com/aspect-build/aspect-cli/releases) page and add it to your `PATH` manually.
 
-On MacOS you can bypass the "Unknown Developer" dialog by running
-
-```shell
-xattr -c $(which aspect)
-```
-
-before launching `aspect`.
+Note, if you manually install for MacOS, you can bypass the "Unknown Developer" dialog by running
+`xattr -c $(which aspect)` before launching `aspect`.
 
 # Usage
 
