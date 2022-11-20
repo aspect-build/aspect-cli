@@ -68,5 +68,11 @@ have changed, and can verify the integrity of the plugin contents against what w
 
 Another future enhancement is for From to accept a string starting with `//`, which is interpreted as a [Bazel Label] in the current workspace.
 
+    When the `from` line is a label, it will be a `*_binary` rule which builds a plugin binary.
+    When the CLI loads this plugin, it first builds it from source.
+    This is useful as a local development round-trip while authoring a plugin. However, it is not a
+    great way to deploy a plugin to users, as it causes them to perform an extra build every time
+    they run `aspect`, whether they intend to use the plugin or not.
+
 [trust on first use]: https://en.wikipedia.org/wiki/Trust_on_first_use
 [bazel label]: https://bazel.build/concepts/labels
