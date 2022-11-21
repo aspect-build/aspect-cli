@@ -36,7 +36,7 @@ func New(streams ioutils.Streams) *MobileInstall {
 	}
 }
 
-func (v *MobileInstall) Run(ctx context.Context, _ *cobra.Command, args []string) error {
+func (runner *MobileInstall) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"mobile-install"}
 	bazelCmd = append(bazelCmd, args...)
 	bzl, err := bazel.FindFromWd()
@@ -44,7 +44,7 @@ func (v *MobileInstall) Run(ctx context.Context, _ *cobra.Command, args []string
 		return err
 	}
 
-	if exitCode, err := bzl.RunCommand(v.Streams, bazelCmd...); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(runner.Streams, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

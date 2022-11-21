@@ -38,7 +38,7 @@ func New(streams ioutils.Streams) *Print {
 	}
 }
 
-func (v *Print) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
+func (runner *Print) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
 	var stdout bytes.Buffer
 	var stderr strings.Builder
 	opts := &edit.Options{
@@ -55,6 +55,7 @@ func (v *Print) Run(ctx context.Context, cmd *cobra.Command, args []string) erro
 		return fmt.Errorf("buildozer exit %d: %s", ret, stderr.String())
 	}
 
+	// TODO: print to runner.Streams stdout
 	fmt.Print(stdout.String())
 	return nil
 }

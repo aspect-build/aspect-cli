@@ -36,7 +36,7 @@ func New(streams ioutils.Streams) *Outputs {
 	}
 }
 
-func (v *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) error {
+func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("a label is required as the first argument to aspect outputs")
 	}

@@ -36,7 +36,7 @@ func New(streams ioutils.Streams) *Shutdown {
 	}
 }
 
-func (v *Shutdown) Run(ctx context.Context, _ *cobra.Command, args []string) error {
+func (runner *Shutdown) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"shutdown"}
 	bazelCmd = append(bazelCmd, args...)
 	bzl, err := bazel.FindFromWd()
@@ -44,7 +44,7 @@ func (v *Shutdown) Run(ctx context.Context, _ *cobra.Command, args []string) err
 		return err
 	}
 
-	if exitCode, err := bzl.RunCommand(v.Streams, bazelCmd...); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(runner.Streams, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

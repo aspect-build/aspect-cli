@@ -37,7 +37,7 @@ func New(streams ioutils.Streams) *Pro {
 	}
 }
 
-func (v *Pro) Run(ctx context.Context, _ *cobra.Command, args []string) error {
+func (runner *Pro) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	if err := enableProForUser(); err != nil {
 		return err
 	}

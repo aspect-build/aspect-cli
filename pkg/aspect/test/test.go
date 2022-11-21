@@ -37,18 +37,18 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *Test {
 	}
 }
 
-func (t *Test) Run(args []string, besBackend bep.BESBackend) (exitErr error) {
+func (runner *Test) Run(args []string, besBackend bep.BESBackend) (exitErr error) {
 	besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
 	bazelCmd := []string{"test", besBackendFlag}
 	bazelCmd = append(bazelCmd, args...)
 
-	exitCode, bazelErr := t.bzl.RunCommand(t.Streams, bazelCmd...)
+	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, bazelCmd...)
 
 	// Process the subscribers errors before the Bazel one.
 	subscriberErrors := besBackend.Errors()
 	if len(subscriberErrors) > 0 {
 		for _, err := range subscriberErrors {
-			fmt.Fprintf(t.Streams.Stderr, "Error: failed to run test command: %v\n", err)
+			fmt.Fprintf(runner.Streams.Stderr, "Error: failed to run test command: %v\n", err)
 		}
 		exitCode = 1
 	}
