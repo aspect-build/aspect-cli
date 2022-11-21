@@ -57,27 +57,27 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *CQuery {
 	}
 }
 
-func (q *CQuery) Run(cmd *cobra.Command, args []string) error {
+func (runner *CQuery) Run(cmd *cobra.Command, args []string) error {
 	flags, args := flags.SeparateFlagsFromArgs(args)
 
-	presets, presetNames, err := shared.ProcessQueries(q.Presets)
+	presets, presetNames, err := shared.ProcessQueries(runner.Presets)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	command, query, runReplacements, err := shared.SelectQuery(cmd.CalledAs(), presets, q.Presets, presetNames, q.Streams, args, q.Select)
+	command, query, runReplacements, err := shared.SelectQuery(cmd.CalledAs(), presets, runner.Presets, presetNames, runner.Streams, args, runner.Select)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
 
 	if runReplacements {
-		query, err = shared.ReplacePlaceholders(query, args, q.Prompt)
+		query, err = shared.ReplacePlaceholders(query, args, runner.Prompt)
 		if err != nil {
 			return shared.GetPrettyError(cmd, err)
 		}
 
-		return shared.RunQuery(q.Bzl, command, q.Streams, flags, []string{query})
+		return shared.RunQuery(runner.Bzl, command, runner.Streams, flags, []string{query})
 	} else {
-		return shared.RunQuery(q.Bzl, command, q.Streams, flags, args)
+		return shared.RunQuery(runner.Bzl, command, runner.Streams, flags, args)
 	}
 }

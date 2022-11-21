@@ -53,7 +53,7 @@ func pluralize(s string, num int) string {
 	}
 }
 
-func (v *Configure) Run(_ context.Context, _ *cobra.Command, args []string) error {
+func (runner *Configure) Run(_ context.Context, _ *cobra.Command, args []string) error {
 	languages := make([]language.Language, 0, 32)
 	languageKeys := make([]string, 0, 32)
 
@@ -70,23 +70,23 @@ func (v *Configure) Run(_ context.Context, _ *cobra.Command, args []string) erro
 		languageKeys = append(languageKeys, "go")
 	}
 
-	for key, language := range v.additionalLanguages {
+	for key, language := range runner.additionalLanguages {
 		languages = append(languages, language)
 		languageKeys = append(languageKeys, key)
 	}
 
 	if len(languageKeys) != 0 {
-		fmt.Fprintf(v.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(languageKeys, ", "))
+		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(languageKeys, ", "))
 	}
 
 	viper.SetDefault("configure.languages.javascript", true)
-	if viper.GetBool("configure.languages.javascript") && v.additionalLanguages["javascript"] == nil {
+	if viper.GetBool("configure.languages.javascript") && runner.additionalLanguages["javascript"] == nil {
 		// Let the user know that this language is available in Pro
 		workspaceConfigFile, err := config.WorkspaceConfigFile()
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(v.Streams.Stderr, `
+		fmt.Fprintf(runner.Streams.Stderr, `
 ===============================================================================
 JavaScript and TypeScript BUILD file generation is available in Aspect CLI Pro.
 Run 'aspect pro' to enable Pro features -or- to turn off this message add the
@@ -101,7 +101,7 @@ configure:
 	}
 
 	if len(languageKeys) == 0 {
-		fmt.Fprintln(v.Streams.Stderr, "No languages configured for BUILD file generation")
+		fmt.Fprintln(runner.Streams.Stderr, "No languages configured for BUILD file generation")
 		return nil
 	}
 
@@ -116,7 +116,7 @@ configure:
 		return err
 	}
 
-	fmt.Fprintf(v.Streams.Stdout, "%v BUILD %s visited\n", stats.NumBuildFilesVisited, pluralize("file", stats.NumBuildFilesVisited))
-	fmt.Fprintf(v.Streams.Stdout, "%v BUILD %s updated\n", stats.NumBuildFilesUpdated, pluralize("file", stats.NumBuildFilesUpdated))
+	fmt.Fprintf(runner.Streams.Stdout, "%runner BUILD %s visited\n", stats.NumBuildFilesVisited, pluralize("file", stats.NumBuildFilesVisited))
+	fmt.Fprintf(runner.Streams.Stdout, "%runner BUILD %s updated\n", stats.NumBuildFilesUpdated, pluralize("file", stats.NumBuildFilesUpdated))
 	return nil
 }

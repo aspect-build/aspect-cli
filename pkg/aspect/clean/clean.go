@@ -82,13 +82,13 @@ func New(
 }
 
 func NewDefault(streams ioutils.Streams, bzl bazel.Bazel) *Clean {
-	c := New(streams, bzl)
-	c.Filesystem = filesystem.NewDefault()
-	return c
+	runner := New(streams, bzl)
+	runner.Filesystem = filesystem.NewDefault()
+	return runner
 }
 
 // Run runs the aspect build command.
-func (c *Clean) Run(cmd *cobra.Command, args []string) error {
+func (runner *Clean) Run(cmd *cobra.Command, args []string) error {
 	cleanAll := false
 
 	// TODO: move separation of flags and arguments to a high level of abstraction
@@ -102,12 +102,12 @@ func (c *Clean) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	if cleanAll {
-		return c.reclaimAll()
+		return runner.reclaimAll()
 	}
 
 	bazelCmd := []string{"clean"}
 	bazelCmd = append(bazelCmd, flags...)
-	if exitCode, err := c.bzl.RunCommand(c.Streams, bazelCmd...); exitCode != 0 {
+	if exitCode, err := runner.bzl.RunCommand(runner.Streams, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,
@@ -118,7 +118,7 @@ func (c *Clean) Run(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func (c *Clean) reclaimAll() error {
+func (runner *Clean) reclaimAll() error {
 	sizeCalcQueue := make(chan bazelDirInfo, 64)
 	confirmationQueue := make(chan bazelDirInfo, 64)
 	deleteQueue := make(chan bazelDirInfo, 128)
@@ -134,11 +134,11 @@ func (c *Clean) reclaimAll() error {
 	errors := errorSet{nodes: make(map[errorNode]struct{})}
 
 	// Goroutine for processing errors from the other threads.
-	go c.errorProcessor(errorQueue, &errorWaitGroup, &errors)
+	go runner.errorProcessor(errorQueue, &errorWaitGroup, &errors)
 
 	// Goroutines for calculating sizes of directories.
 	for i := 0; i < 5; i++ {
-		go c.sizeCalculator(sizeCalcQueue, confirmationQueue, &sizeCalcWaitGroup)
+		go runner.sizeCalculator(sizeCalcQueue, confirmationQueue, &sizeCalcWaitGroup)
 	}
 
 	// Goroutines for deleting directories.
@@ -147,19 +147,19 @@ func (c *Clean) reclaimAll() error {
 	// deleteQueue as it does the deleting. Where the other wait groups ensure all their goroutines
 	// have finished processing, deleteWaitGroup ensures deleteQueue is empty before the program exits.
 	for i := 0; i < 8; i++ {
-		go c.deleteProcessor(deleteQueue, &deleteWaitGroup, sizeQueue, errorQueue)
+		go runner.deleteProcessor(deleteQueue, &deleteWaitGroup, sizeQueue, errorQueue)
 	}
 
-	go c.sizePrinter(sizeQueue, &sizeWaitGroup)
+	go runner.sizePrinter(sizeQueue, &sizeWaitGroup)
 
 	// Goroutine for prompting the user to confirm deletion.
-	go c.confirmationActor(confirmationQueue, deleteQueue, &confirmationWaitGroup, &deleteWaitGroup)
+	go runner.confirmationActor(confirmationQueue, deleteQueue, &confirmationWaitGroup, &deleteWaitGroup)
 
 	// Find disk caches and add them to the sizeCalculator queue.
-	c.findDiskCaches(sizeCalcQueue, errorQueue)
+	runner.findDiskCaches(sizeCalcQueue, errorQueue)
 
 	// Find bazel workspaces and add them to the sizeCalculator queue.
-	c.findBazelWorkspaces(sizeCalcQueue, errorQueue)
+	runner.findBazelWorkspaces(sizeCalcQueue, errorQueue)
 
 	// Since the directories are added to sizeCalcQueue synchronously, so we can
 	// close the channel before waiting for the calculations to complete.
@@ -193,7 +193,7 @@ func (c *Clean) reclaimAll() error {
 	return nil
 }
 
-func (c *Clean) confirmationActor(
+func (runner *Clean) confirmationActor(
 	directories <-chan bazelDirInfo,
 	deleteQueue chan<- bazelDirInfo,
 	confirmationWaitGroup *sync.WaitGroup,
@@ -214,12 +214,12 @@ func (c *Clean) confirmationActor(
 		}
 
 		if _, err := promptRemove.Run(); err == nil {
-			fmt.Fprintf(c.Streams.Stdout, "%s added to the delete queue\n", bazelDir.workspaceName)
+			fmt.Fprintf(runner.Streams.Stdout, "%s added to the delete queue\n", bazelDir.workspaceName)
 			deleteWaitGroup.Add(1)
 			deleteQueue <- bazelDir
 		} else {
 			// promptui.ErrInterrupt is the error returned when SIGINT is received.
-			// This is most likely due to the user hitting ctrl+c in the terminal.
+			// This is most likely due to the user hitting ctrl+runner in the terminal.
 			if errors.Is(err, promptui.ErrInterrupt) {
 				// We allow the program to gracefully exit in such case.
 				break
@@ -237,7 +237,7 @@ func (c *Clean) confirmationActor(
 	confirmationWaitGroup.Done()
 }
 
-func (c *Clean) findDiskCaches(
+func (runner *Clean) findDiskCaches(
 	sizeCalcQueue chan<- bazelDirInfo,
 	errors chan<- error,
 ) {
@@ -259,7 +259,7 @@ func (c *Clean) findDiskCaches(
 	// Running an invalid query should ensure that repository rules are not executed.
 	// However, bazel will still emit its BEP containing the flag that we are interested in.
 	// This will ensure it returns quickly and allows us to easily access said flag.
-	c.bzl.RunCommand(
+	runner.bzl.RunCommand(
 		streams,
 		"query",
 		"//",
@@ -298,7 +298,7 @@ func (c *Clean) findDiskCaches(
 					return
 				}
 
-				cacheInfo.accessTime = c.Filesystem.GetAccessTime(fileStat)
+				cacheInfo.accessTime = runner.Filesystem.GetAccessTime(fileStat)
 				cacheInfo.workspaceName = cachePath
 
 				sizeCalcQueue <- cacheInfo
@@ -312,11 +312,11 @@ func (c *Clean) findDiskCaches(
 	}
 }
 
-func (c *Clean) findBazelWorkspaces(
+func (runner *Clean) findBazelWorkspaces(
 	sizeCalcQueue chan<- bazelDirInfo,
 	errors chan<- error,
 ) {
-	bazelBaseDir, currentWorkingBase, err := c.findBazelBaseDir()
+	bazelBaseDir, currentWorkingBase, err := runner.findBazelBaseDir()
 	if err != nil {
 		errors <- fmt.Errorf("failed to find bazel workspaces: failed to find bazel base directory: %w", err)
 		return
@@ -341,7 +341,7 @@ func (c *Clean) findBazelWorkspaces(
 			errors <- fmt.Errorf("failed to find bazel workspaces: failed to retrieve file info: %w", err)
 			return
 		}
-		workspaceInfo.accessTime = c.Filesystem.GetAccessTime(wkFileInfo)
+		workspaceInfo.accessTime = runner.Filesystem.GetAccessTime(wkFileInfo)
 
 		execrootFiles, readDirErr := os.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
 		if readDirErr != nil {
@@ -370,7 +370,7 @@ func (c *Clean) findBazelWorkspaces(
 	}
 }
 
-func (c *Clean) sizeCalculator(
+func (runner *Clean) sizeCalculator(
 	in <-chan bazelDirInfo,
 	out chan<- bazelDirInfo,
 	waitGroup *sync.WaitGroup,
@@ -378,7 +378,7 @@ func (c *Clean) sizeCalculator(
 	waitGroup.Add(1)
 
 	for bazelDir := range in {
-		size, humanReadableSize, unit := c.getDirSize(bazelDir.path)
+		size, humanReadableSize, unit := runner.getDirSize(bazelDir.path)
 
 		bazelDir.size = size
 		bazelDir.humanReadableSize = humanReadableSize
@@ -402,7 +402,7 @@ func (c *Clean) sizeCalculator(
 	waitGroup.Done()
 }
 
-func (c *Clean) deleteProcessor(
+func (runner *Clean) deleteProcessor(
 	deleteQueue chan bazelDirInfo,
 	waitGroup *sync.WaitGroup,
 	sizeQueue chan<- float64,
@@ -415,7 +415,7 @@ func (c *Clean) deleteProcessor(
 		// therefore happen in parallel.
 		externalDirectories, _ := os.ReadDir(filepath.Join(bazelDir.path, "external"))
 		for _, directory := range externalDirectories {
-			newPath, err := c.Filesystem.MoveDirectoryToTmp(bazelDir.path, directory.Name())
+			newPath, err := runner.Filesystem.MoveDirectoryToTmp(bazelDir.path, directory.Name())
 
 			if err != nil {
 				errors <- fmt.Errorf("failed to delete %q: failed to move directory to tmp: %w", bazelDir.path, err)
@@ -437,7 +437,7 @@ func (c *Clean) deleteProcessor(
 
 		// The permissions set in the directories being removed don't allow write access,
 		// so we change the permissions before removing those directories.
-		if _, err := c.Filesystem.ChangeDirectoryPermissions(bazelDir.path, "0777"); err != nil {
+		if _, err := runner.Filesystem.ChangeDirectoryPermissions(bazelDir.path, "0777"); err != nil {
 			waitGroup.Done()
 			errors <- fmt.Errorf("failed to delete %q: failed to change permissions: %w", bazelDir.path, err)
 			continue
@@ -456,7 +456,7 @@ func (c *Clean) deleteProcessor(
 	}
 }
 
-func (c *Clean) errorProcessor(errorQueue <-chan error, waitGroup *sync.WaitGroup, errors *errorSet) {
+func (runner *Clean) errorProcessor(errorQueue <-chan error, waitGroup *sync.WaitGroup, errors *errorSet) {
 	waitGroup.Add(1)
 	for err := range errorQueue {
 		errors.insert(err)
@@ -464,7 +464,7 @@ func (c *Clean) errorProcessor(errorQueue <-chan error, waitGroup *sync.WaitGrou
 	waitGroup.Done()
 }
 
-func (c *Clean) sizePrinter(sizeQueue <-chan float64, waitGroup *sync.WaitGroup) {
+func (runner *Clean) sizePrinter(sizeQueue <-chan float64, waitGroup *sync.WaitGroup) {
 	waitGroup.Add(1)
 
 	var totalSize float64 = 0
@@ -473,13 +473,13 @@ func (c *Clean) sizePrinter(sizeQueue <-chan float64, waitGroup *sync.WaitGroup)
 		totalSize = totalSize + size
 	}
 
-	_, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(totalSize)
-	fmt.Fprintf(c.Streams.Stdout, "Space reclaimed: %.2f%s\n", hRSpaceReclaimed, unit)
+	_, hRSpaceReclaimed, unit := runner.makeBytesHumanReadable(totalSize)
+	fmt.Fprintf(runner.Streams.Stdout, "Space reclaimed: %.2f%s\n", hRSpaceReclaimed, unit)
 
 	waitGroup.Done()
 }
 
-func (c *Clean) findBazelBaseDir() (string, string, error) {
+func (runner *Clean) findBazelBaseDir() (string, string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", "", fmt.Errorf("failed to find Bazel base directory: failed to get current working directory: %w", err)
@@ -516,7 +516,7 @@ func (c *Clean) findBazelBaseDir() (string, string, error) {
 	return "", "", fmt.Errorf("failed to find Bazel base directory: bazel output symlinks not found in directory")
 }
 
-func (c *Clean) getDirSize(path string) (float64, float64, string) {
+func (runner *Clean) getDirSize(path string) (float64, float64, string) {
 	var size float64
 
 	filepath.Walk(path, func(path string, file os.FileInfo, err error) error {
@@ -527,15 +527,15 @@ func (c *Clean) getDirSize(path string) (float64, float64, string) {
 		return nil
 	})
 
-	return c.makeBytesHumanReadable(size)
+	return runner.makeBytesHumanReadable(size)
 }
 
-func (c *Clean) makeBytesHumanReadable(bytes float64) (float64, float64, string) {
-	humanReadable, unit := c.makeBytesHumanReadableInternal(bytes, "bytes")
+func (runner *Clean) makeBytesHumanReadable(bytes float64) (float64, float64, string) {
+	humanReadable, unit := runner.makeBytesHumanReadableInternal(bytes, "bytes")
 	return bytes, humanReadable, unit
 }
 
-func (c *Clean) makeBytesHumanReadableInternal(bytes float64, unit string) (float64, string) {
+func (runner *Clean) makeBytesHumanReadableInternal(bytes float64, unit string) (float64, string) {
 	if bytes < 1024 {
 		return bytes, unit
 	}
@@ -556,7 +556,7 @@ func (c *Clean) makeBytesHumanReadableInternal(bytes float64, unit string) (floa
 	}
 
 	if bytes >= 1024 {
-		return c.makeBytesHumanReadableInternal(bytes, unit)
+		return runner.makeBytesHumanReadableInternal(bytes, unit)
 	}
 
 	return bytes, unit

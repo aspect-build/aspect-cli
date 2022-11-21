@@ -36,7 +36,7 @@ func New(streams ioutils.Streams) *Docs {
 	}
 }
 
-func (v *Docs) Run(_ *cobra.Command, args []string) error {
+func (runner *Docs) Run(_ *cobra.Command, args []string) error {
 	// TODO: we should open the browser to the bazel version matching what is running
 	dest := "https://bazel.build/docs"
 
@@ -52,7 +52,7 @@ func (v *Docs) Run(_ *cobra.Command, args []string) error {
 	// as far as I can tell, Algolia doesn't provide a way to render results on a dedicated search page
 	// so I can't find a way to hyperlink to a search result.
 	if err := browser.OpenURL(dest); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open link in the browser: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to open link in the browser: %runner\n", err)
 	}
 
 	return nil

@@ -49,7 +49,7 @@ func New(streams ioutils.Streams, licenseText string) *License {
 	}
 }
 
-func (v *License) Run(ctx context.Context, _ *cobra.Command, args []string) error {
+func (runner *License) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	// ASCII art generated with https://patorjk.com/software/taag/ "ANSI Shadow" font
 	if buildinfo.Current().IsAspectPro {
 		fmt.Printf(`
@@ -80,7 +80,7 @@ func (v *License) Run(ctx context.Context, _ *cobra.Command, args []string) erro
 
 `)
 	}
-	fmt.Print(v.licenseText)
+	fmt.Print(runner.licenseText)
 
 	// ASCII art generated with https://patorjk.com/software/taag/ "Standard" font
 	fmt.Printf(`
@@ -102,7 +102,7 @@ func (v *License) Run(ctx context.Context, _ *cobra.Command, args []string) erro
 		return err
 	}
 
-	if exitCode, err := bzl.RunCommand(v.Streams, bazelCmd...); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(runner.Streams, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

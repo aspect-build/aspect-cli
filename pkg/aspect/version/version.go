@@ -38,7 +38,7 @@ func New(streams ioutils.Streams) *Version {
 	}
 }
 
-func (v *Version) Run(cmd *cobra.Command, bzl bazel.Bazel, args []string) error {
+func (runner *Version) Run(cmd *cobra.Command, bzl bazel.Bazel, args []string) error {
 	// Determine the format
 	format := buildinfo.ConventionalFormat
 	if cmd != nil {
@@ -52,8 +52,8 @@ func (v *Version) Run(cmd *cobra.Command, bzl bazel.Bazel, args []string) error 
 	}
 
 	// Write the version
-	version := v.BuildInfo.CommandVersion(format)
-	if _, err := fmt.Fprintln(v.Stdout, version); err != nil {
+	version := runner.BuildInfo.CommandVersion(format)
+	if _, err := fmt.Fprintln(runner.Stdout, version); err != nil {
 		return err
 	}
 
@@ -65,7 +65,7 @@ func (v *Version) Run(cmd *cobra.Command, bzl bazel.Bazel, args []string) error 
 
 	bazelCmd := []string{"version"}
 	bazelCmd = append(bazelCmd, args...)
-	if exitCode, err := bzl.RunCommand(v.Streams, bazelCmd...); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(runner.Streams, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

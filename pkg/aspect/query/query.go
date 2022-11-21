@@ -51,12 +51,12 @@ type Query struct {
 }
 
 func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
-	v := *viper.GetViper()
+	runner := *viper.GetViper()
 
 	// the list of available preset queries will potentially be updated during the "Run" function.
 	// if the user requests that query also show aquery and cquery predefined queries then these
 	// will be added to the list of presets
-	presets := shared.PrecannedQueries("query", v)
+	presets := shared.PrecannedQueries("query", runner)
 
 	return &Query{
 		Streams:       streams,
@@ -66,18 +66,18 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 		Prompt:        shared.Prompt,
 		Select:        shared.Select,
 		Confirmation:  shared.Confirmation,
-		Prefs:         v,
+		Prefs:         runner,
 	}
 }
 
-func (q *Query) Run(cmd *cobra.Command, args []string) error {
+func (runner *Query) Run(cmd *cobra.Command, args []string) error {
 	flags, args := flags.SeparateFlagsFromArgs(args)
 
 	if len(args) == 0 {
 		// Only check the query configuration if user calls the command with no arguments
 		// so we don't go interactive when a user runs `aspect [ac]query <expression>` after
 		// installing aspect
-		err := q.checkConfig(
+		err := runner.checkConfig(
 			allowAllQueries,
 			allowAllQueriesInquired,
 			"Include predefined aquery's and cquery's when calling query",
@@ -86,7 +86,7 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		err = q.checkConfig(
+		err = runner.checkConfig(
 			useCQuery,
 			useCQueryInquired,
 			"Use cquery instead of query",
@@ -98,42 +98,42 @@ func (q *Query) Run(cmd *cobra.Command, args []string) error {
 
 	command := "query"
 
-	if q.Prefs.GetBool(useCQuery) {
+	if runner.Prefs.GetBool(useCQuery) {
 		command = "cquery"
 	}
 
-	if q.Prefs.GetBool(allowAllQueries) {
-		q.Presets = shared.PrecannedQueries("", q.Prefs)
+	if runner.Prefs.GetBool(allowAllQueries) {
+		runner.Presets = shared.PrecannedQueries("", runner.Prefs)
 	}
 
-	presets, presetNames, err := shared.ProcessQueries(q.Presets)
+	presets, presetNames, err := shared.ProcessQueries(runner.Presets)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	command, query, runReplacements, err := shared.SelectQuery(command, presets, q.Presets, presetNames, q.Streams, args, q.Select)
+	command, query, runReplacements, err := shared.SelectQuery(command, presets, runner.Presets, presetNames, runner.Streams, args, runner.Select)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
 
 	if runReplacements {
-		query, err = shared.ReplacePlaceholders(query, args, q.Prompt)
+		query, err = shared.ReplacePlaceholders(query, args, runner.Prompt)
 		if err != nil {
 			return shared.GetPrettyError(cmd, err)
 		}
 
-		return shared.RunQuery(q.Bzl, command, q.Streams, flags, []string{query})
+		return shared.RunQuery(runner.Bzl, command, runner.Streams, flags, []string{query})
 	} else {
-		return shared.RunQuery(q.Bzl, command, q.Streams, flags, args)
+		return shared.RunQuery(runner.Bzl, command, runner.Streams, flags, args)
 	}
 }
 
-func (q *Query) checkConfig(baseUseKey string, baseInquiredKey string, question string) error {
-	if !q.Prefs.GetBool(baseInquiredKey) {
-		q.Prefs.Set(baseInquiredKey, true)
+func (runner *Query) checkConfig(baseUseKey string, baseInquiredKey string, question string) error {
+	if !runner.Prefs.GetBool(baseInquiredKey) {
+		runner.Prefs.Set(baseInquiredKey, true)
 
 		// Y = no error; N = error
-		_, err := q.Confirmation(question).Run()
+		_, err := runner.Confirmation(question).Run()
 
 		configFile, created, err := config.SetInHomeConfig(baseUseKey, err == nil)
 		if err != nil {
