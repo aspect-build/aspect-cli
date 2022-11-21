@@ -31,11 +31,11 @@ func ProOnly(ctx context.Context, cmd *cobra.Command, args []string) error {
 	return fmt.Errorf("The support command is available in Aspect CLI Pro.. Run 'aspect pro' to enable Pro features.")
 }
 
-func NewDefaultSupportCmd() *cobra.Command {
-	return NewSupportCmd(ioutils.DefaultStreams, ProOnly)
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams, ProOnly)
 }
 
-func NewSupportCmd(streams ioutils.Streams, cmdRunner interceptors.RunEContextFn) *cobra.Command {
+func NewCmd(streams ioutils.Streams, cmdRunner interceptors.RunEContextFn) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "support",
 		Short: "Interactive, human-escalated support for Bazel problems",

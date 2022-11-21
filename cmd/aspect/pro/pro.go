@@ -25,11 +25,11 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-func NewDefaultProCmd() *cobra.Command {
-	return NewProCmd(ioutils.DefaultStreams)
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams)
 }
 
-func NewProCmd(streams ioutils.Streams) *cobra.Command {
+func NewCmd(streams ioutils.Streams) *cobra.Command {
 	v := pro.New(streams)
 
 	cmd := &cobra.Command{

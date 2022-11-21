@@ -28,13 +28,13 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-// NewDefaultCleanCmd creates a new default clean cobra command.
-func NewDefaultCleanCmd() *cobra.Command {
-	return NewCleanCmd(ioutils.DefaultStreams, bazel.FindFromWd)
+// NewDefaultCmd creates a new default clean cobra command.
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams, bazel.FindFromWd)
 }
 
-// NewCleanCmd creates a new clean cobra command.
-func NewCleanCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
+// NewCmd creates a new clean cobra command.
+func NewCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clean [--expunge] [all]",
 		Short: "Remove the output tree",

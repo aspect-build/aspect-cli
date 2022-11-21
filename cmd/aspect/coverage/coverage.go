@@ -30,17 +30,17 @@ import (
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
-// NewDefaultCoverageCmd creates a new coverage cobra command with the default
+// NewDefaultCmd creates a new coverage cobra command with the default
 // dependencies.
-func NewDefaultCoverageCmd(pluginSystem system.PluginSystem) *cobra.Command {
-	return NewCoverageCmd(
+func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
+	return NewCmd(
 		ioutils.DefaultStreams,
 		pluginSystem,
 		bazel.FindFromWd,
 	)
 }
 
-func NewCoverageCmd(
+func NewCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
 	bzlProvider bazel.BazelProvider,

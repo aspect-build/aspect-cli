@@ -30,17 +30,17 @@ import (
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
-// NewDefaultRunCmd creates a new run cobra command with the default
+// NewDefaultCmd creates a new run cobra command with the default
 // dependencies.
-func NewDefaultRunCmd(pluginSystem system.PluginSystem) *cobra.Command {
-	return NewRunCmd(
+func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
+	return NewCmd(
 		ioutils.DefaultStreams,
 		pluginSystem,
 		bazel.FindFromWd,
 	)
 }
 
-func NewRunCmd(
+func NewCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
 	bzlProvider bazel.BazelProvider,

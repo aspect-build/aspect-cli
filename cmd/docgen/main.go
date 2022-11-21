@@ -51,7 +51,7 @@ func main() {
 	}
 	defer pluginSystem.TearDown()
 
-	aspectRootCmd := root.NewDefaultRootCmd(pluginSystem)
+	aspectRootCmd := root.NewDefaultCmd(pluginSystem)
 
 	// Run this command after all bazel verbs have been added to "cmd".
 	if err := bazel.AddBazelFlags(cmd); err != nil {

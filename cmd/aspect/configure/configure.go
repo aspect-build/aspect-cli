@@ -26,11 +26,11 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/language"
 )
 
-func NewDefaultConfigureCmd() *cobra.Command {
-	return NewConfigureCmd(ioutils.DefaultStreams, map[string]language.Language{})
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams, map[string]language.Language{})
 }
 
-func NewConfigureCmd(streams ioutils.Streams, languages map[string]language.Language) *cobra.Command {
+func NewCmd(streams ioutils.Streams, languages map[string]language.Language) *cobra.Command {
 	v := configure.New(streams, languages)
 
 	cmd := &cobra.Command{

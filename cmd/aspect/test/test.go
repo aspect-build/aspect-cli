@@ -30,17 +30,17 @@ import (
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
-// NewDefaultTestCmd creates a new test cobra command with the default
+// NewDefaultCmd creates a new test cobra command with the default
 // dependencies.
-func NewDefaultTestCmd(pluginSystem system.PluginSystem) *cobra.Command {
-	return NewTestCmd(
+func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
+	return NewCmd(
 		ioutils.DefaultStreams,
 		pluginSystem,
 		bazel.FindFromWd,
 	)
 }
 
-func NewTestCmd(
+func NewCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
 	bzlProvider bazel.BazelProvider,

@@ -28,7 +28,7 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-func NewDefaultAQueryCmd() *cobra.Command {
+func NewDefaultCmd() *cobra.Command {
 	return NewAQueryCommand(ioutils.DefaultStreams, bazel.FindFromWd)
 }
 
