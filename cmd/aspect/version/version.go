@@ -29,11 +29,11 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-func NewDefaultVersionCmd() *cobra.Command {
-	return NewVersionCmd(ioutils.DefaultStreams, bazel.FindFromWd)
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams, bazel.FindFromWd)
 }
 
-func NewVersionCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
+func NewCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	v := version.New(streams)
 	v.BuildInfo = *buildinfo.Current()
 

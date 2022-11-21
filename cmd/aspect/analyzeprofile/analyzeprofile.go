@@ -25,11 +25,11 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-func NewDefaultAnalyzeProfileCmd() *cobra.Command {
-	return NewAnalyzeProfileCmd(ioutils.DefaultStreams)
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams)
 }
 
-func NewAnalyzeProfileCmd(streams ioutils.Streams) *cobra.Command {
+func NewCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "analyze-profile <command.profile.gz>",
 		Args:  cobra.MinimumNArgs(1),

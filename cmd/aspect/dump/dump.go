@@ -25,11 +25,11 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-func NewDefaultDumpCmd() *cobra.Command {
-	return NewDumpCmd(ioutils.DefaultStreams)
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams)
 }
 
-func NewDumpCmd(streams ioutils.Streams) *cobra.Command {
+func NewCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dump",
 		Short: "Dump the internal state of the bazel server process",

@@ -25,11 +25,11 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-func NewDefaultCanonicalizeFlagsCmd() *cobra.Command {
-	return NewCanonicalizeFlagsCmd(ioutils.DefaultStreams)
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams)
 }
 
-func NewCanonicalizeFlagsCmd(streams ioutils.Streams) *cobra.Command {
+func NewCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "canonicalize-flags -- <bazel flags>",
 		Short: "Present a list of bazel options in a canonical form",

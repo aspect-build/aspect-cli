@@ -25,11 +25,11 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-func NewDefaultMobileInstallCmd() *cobra.Command {
-	return NewMobileInstallCmd(ioutils.DefaultStreams)
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams)
 }
 
-func NewMobileInstallCmd(streams ioutils.Streams) *cobra.Command {
+func NewCmd(streams ioutils.Streams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mobile-install",
 		Short: "Install targets to mobile devices",

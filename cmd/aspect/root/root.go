@@ -62,9 +62,9 @@ var (
 	faint    = color.New(color.Faint)
 )
 
-func NewDefaultRootCmd(pluginSystem system.PluginSystem) *cobra.Command {
+func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	defaultInteractive := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
-	return NewRootCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive)
+	return NewCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive)
 }
 
 func MaybeAspectVersionFlag(streams ioutils.Streams, args []string) {
@@ -74,7 +74,7 @@ func MaybeAspectVersionFlag(streams ioutils.Streams, args []string) {
 	}
 }
 
-func NewRootCmd(
+func NewCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
 	defaultInteractive bool,
@@ -101,35 +101,35 @@ func NewRootCmd(
 
 	// ### Child commands
 	// IMPORTANT: when adding a new command, also update the COMMAND_LIST list in /docs/command_list.bzl
-	cmd.AddCommand(analyzeprofile.NewDefaultAnalyzeProfileCmd())
-	cmd.AddCommand(aquery.NewDefaultAQueryCmd())
-	cmd.AddCommand(build.NewDefaultBuildCmd(pluginSystem))
-	cmd.AddCommand(canonicalizeflags.NewDefaultCanonicalizeFlagsCmd())
-	cmd.AddCommand(clean.NewDefaultCleanCmd())
-	cmd.AddCommand(coverage.NewDefaultCoverageCmd(pluginSystem))
-	cmd.AddCommand(cquery.NewDefaultCQueryCmd())
-	cmd.AddCommand(dump.NewDefaultDumpCmd())
-	cmd.AddCommand(fetch.NewDefaultFetchCmd())
-	cmd.AddCommand(docs.NewDefaultDocsCmd())
-	cmd.AddCommand(info.NewDefaultInfoCmd())
-	cmd.AddCommand(mobileinstall.NewDefaultMobileInstallCmd())
-	cmd.AddCommand(modquery.NewDefaultModQueryCmd())
-	cmd.AddCommand(print.NewDefaultPrintCmd())
-	cmd.AddCommand(printaction.NewDefaultPrintActionCmd())
-	cmd.AddCommand(query.NewDefaultQueryCmd())
-	cmd.AddCommand(run.NewDefaultRunCmd(pluginSystem))
-	cmd.AddCommand(sync.NewDefaultSyncCmd())
-	cmd.AddCommand(shutdown.NewDefaultShutdownCmd())
-	cmd.AddCommand(test.NewDefaultTestCmd(pluginSystem))
-	cmd.AddCommand(version.NewDefaultVersionCmd())
-	cmd.AddCommand(outputs.NewDefaultOutputsCmd())
+	cmd.AddCommand(analyzeprofile.NewDefaultCmd())
+	cmd.AddCommand(aquery.NewDefaultCmd())
+	cmd.AddCommand(build.NewDefaultCmd(pluginSystem))
+	cmd.AddCommand(canonicalizeflags.NewDefaultCmd())
+	cmd.AddCommand(clean.NewDefaultCmd())
+	cmd.AddCommand(coverage.NewDefaultCmd(pluginSystem))
+	cmd.AddCommand(cquery.NewDefaultCmd())
+	cmd.AddCommand(dump.NewDefaultCmd())
+	cmd.AddCommand(fetch.NewDefaultCmd())
+	cmd.AddCommand(docs.NewDefaultCmd())
+	cmd.AddCommand(info.NewDefaultCmd())
+	cmd.AddCommand(mobileinstall.NewDefaultCmd())
+	cmd.AddCommand(modquery.NewDefaultCmd())
+	cmd.AddCommand(print.NewDefaultCmd())
+	cmd.AddCommand(printaction.NewDefaultCmd())
+	cmd.AddCommand(query.NewDefaultCmd())
+	cmd.AddCommand(run.NewDefaultCmd(pluginSystem))
+	cmd.AddCommand(sync.NewDefaultCmd())
+	cmd.AddCommand(shutdown.NewDefaultCmd())
+	cmd.AddCommand(test.NewDefaultCmd(pluginSystem))
+	cmd.AddCommand(version.NewDefaultCmd())
+	cmd.AddCommand(outputs.NewDefaultCmd())
 	if !buildinfo.Current().IsAspectPro {
 		// Aspect CLI only commands
-		cmd.AddCommand(license.NewDefaultLicenseCmd())
-		cmd.AddCommand(pro.NewDefaultProCmd())
+		cmd.AddCommand(license.NewDefaultCmd())
+		cmd.AddCommand(pro.NewDefaultCmd())
 		// Aspect CLI Pro command stubs
-		cmd.AddCommand(configure.NewDefaultConfigureCmd())
-		cmd.AddCommand(support.NewDefaultSupportCmd())
+		cmd.AddCommand(configure.NewDefaultCmd())
+		cmd.AddCommand(support.NewDefaultCmd())
 	}
 
 	// ### "Additional help topic commands" which are not runnable

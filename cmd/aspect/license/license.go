@@ -25,11 +25,11 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-func NewDefaultLicenseCmd() *cobra.Command {
-	return NewLicenseCmd(ioutils.DefaultStreams, "")
+func NewDefaultCmd() *cobra.Command {
+	return NewCmd(ioutils.DefaultStreams, "")
 }
 
-func NewLicenseCmd(streams ioutils.Streams, licenseText string) *cobra.Command {
+func NewCmd(streams ioutils.Streams, licenseText string) *cobra.Command {
 	v := license.New(streams, licenseText)
 
 	cmd := &cobra.Command{
