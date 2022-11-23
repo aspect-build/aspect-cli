@@ -30,12 +30,13 @@ Follow instructions on the README to customize the plugin for your org.
 
 In a `.aspect/cli/plugins.yaml` file at the repository root, list the plugins you'd like to install.
 
-This is a YAML file. A typical example is as follows:
+This is a YAML file. As an example, this file will install the plugin defined by the aspect-cli-plugin-template
+starter repo referenced earlier:
 
 ```yaml
 - name: hello-world
   from: github.com/aspect-build/aspect-cli-plugin-template
-  version: v0.2.0
+  version: v0.3.1
 ```
 
 The `from` line points to the plugin binary and can take one of these forms:
@@ -52,7 +53,7 @@ The `from` line points to the plugin binary and can take one of these forms:
     `-darwin_amd64`, `-darwin_arm64`, `-linux_amd64`, `-linux_arm64`, `-windows_amd64.exe`
 
     In the yaml example above, on an x86_64 architecture Linux machine, we would download from
-    `https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.2.0/hello-world-linux_amd64`
+    `https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.3.1/hello-world-linux_amd64`
 
 4. An http/https URL from which the plugin can be downloaded.
 
