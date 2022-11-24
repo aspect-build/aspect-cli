@@ -83,25 +83,6 @@ func (m *GRPCServer) Setup(
 	return &proto.SetupRes{}, m.Impl.Setup(config)
 }
 
-// PostBuildHook translates the gRPC call to the Plugin PostBuildHook
-// implementation. It starts a prompt runner that is passed to the Plugin
-// instance to be able to perform prompt actions to the CLI user.
-func (m *GRPCServer) PostBuildHook(
-	ctx context.Context,
-	req *proto.PostBuildHookReq,
-) (*proto.PostBuildHookRes, error) {
-	conn, err := m.broker.Dial(req.BrokerId)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	client := proto.NewPrompterClient(conn)
-	prompter := &PrompterGRPCClient{client: client}
-	return &proto.PostBuildHookRes{},
-		m.Impl.PostBuildHook(req.IsInteractiveMode, prompter)
-}
-
 // CustomCommands translates the gRPC call to the Plugin CustomCommands
 // implementation. It returns a list of commands that the plugin implements.
 func (m *GRPCServer) CustomCommands(
@@ -138,6 +119,25 @@ func (m *GRPCServer) ExecuteCustomCommand(
 
 	return &proto.ExecuteCustomCommandRes{},
 		m.commandManager.Execute(req.CustomCommand, ctx, req.Args)
+}
+
+// PostBuildHook translates the gRPC call to the Plugin PostBuildHook
+// implementation. It starts a prompt runner that is passed to the Plugin
+// instance to be able to perform prompt actions to the CLI user.
+func (m *GRPCServer) PostBuildHook(
+	ctx context.Context,
+	req *proto.PostBuildHookReq,
+) (*proto.PostBuildHookRes, error) {
+	conn, err := m.broker.Dial(req.BrokerId)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	client := proto.NewPrompterClient(conn)
+	prompter := &PrompterGRPCClient{client: client}
+	return &proto.PostBuildHookRes{},
+		m.Impl.PostBuildHook(req.IsInteractiveMode, prompter)
 }
 
 // PostTestHook translates the gRPC call to the Plugin PostTestHook
@@ -206,31 +206,6 @@ func (m *GRPCClient) Setup(config *SetupConfig) error {
 	return err
 }
 
-// PostBuildHook is called from the Core to execute the Plugin PostBuildHook. It
-// starts the prompt runner server with the provided PromptRunner.
-func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
-	prompterServer := &PrompterGRPCServer{promptRunner: promptRunner}
-	var s *grpc.Server
-	var wg sync.WaitGroup
-	wg.Add(1)
-	serverFunc := func(opts []grpc.ServerOption) *grpc.Server {
-		s = grpc.NewServer(opts...)
-		proto.RegisterPrompterServer(s, prompterServer)
-		defer wg.Done()
-		return s
-	}
-	brokerID := m.broker.NextId()
-	go m.broker.AcceptAndServe(brokerID, serverFunc)
-	req := &proto.PostBuildHookReq{
-		BrokerId:          brokerID,
-		IsInteractiveMode: isInteractiveMode,
-	}
-	wg.Wait()
-	_, err := m.client.PostBuildHook(context.Background(), req)
-	s.Stop()
-	return err
-}
-
 // CustomCommands is called from the Core to execute the Plugin CustomCommands.
 // It returns a list of commands that the plugin implements.
 func (m *GRPCClient) CustomCommands() ([]*Command, error) {
@@ -259,34 +234,33 @@ func (m *GRPCClient) ExecuteCustomCommand(customCommand string, ctx context.Cont
 	return err
 }
 
+// PostBuildHook is called from the Core to execute the Plugin PostBuildHook. It
+// starts the prompt runner server with the provided PromptRunner.
+func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
+	return callClientHook(m.broker, m.client.PostBuildHook, isInteractiveMode, promptRunner)
+}
+
 // PostTestHook is called from the Core to execute the Plugin PostTestHook. It
 // starts the prompt runner server with the provided PromptRunner.
 func (m *GRPCClient) PostTestHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
-	prompterServer := &PrompterGRPCServer{promptRunner: promptRunner}
-	var s *grpc.Server
-	var wg sync.WaitGroup
-	wg.Add(1)
-	serverFunc := func(opts []grpc.ServerOption) *grpc.Server {
-		s = grpc.NewServer(opts...)
-		proto.RegisterPrompterServer(s, prompterServer)
-		defer wg.Done()
-		return s
-	}
-	brokerID := m.broker.NextId()
-	go m.broker.AcceptAndServe(brokerID, serverFunc)
-	req := &proto.PostTestHookReq{
-		BrokerId:          brokerID,
-		IsInteractiveMode: isInteractiveMode,
-	}
-	wg.Wait()
-	_, err := m.client.PostTestHook(context.Background(), req)
-	s.Stop()
-	return err
+	return callClientHook(m.broker, m.client.PostTestHook, isInteractiveMode, promptRunner)
 }
 
 // PostRunHook is called from the Core to execute the Plugin PostRunHook. It
 // starts the prompt runner server with the provided PromptRunner.
 func (m *GRPCClient) PostRunHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
+	return callClientHook(m.broker, m.client.PostRunHook, isInteractiveMode, promptRunner)
+}
+
+func callClientHook[
+	ReqT proto.PostBuildHookReq | proto.PostTestHookReq | proto.PostRunHookReq,
+	ResT proto.PostBuildHookRes | proto.PostTestHookRes | proto.PostRunHookRes,
+](
+	broker *goplugin.GRPCBroker,
+	callFn func(context.Context, *ReqT, ...grpc.CallOption) (*ResT, error),
+	isInteractiveMode bool,
+	promptRunner ioutils.PromptRunner,
+) error {
 	prompterServer := &PrompterGRPCServer{promptRunner: promptRunner}
 	var s *grpc.Server
 	var wg sync.WaitGroup
@@ -297,14 +271,14 @@ func (m *GRPCClient) PostRunHook(isInteractiveMode bool, promptRunner ioutils.Pr
 		defer wg.Done()
 		return s
 	}
-	brokerID := m.broker.NextId()
-	go m.broker.AcceptAndServe(brokerID, serverFunc)
-	req := &proto.PostRunHookReq{
+	brokerID := broker.NextId()
+	go broker.AcceptAndServe(brokerID, serverFunc)
+	req := &ReqT{
 		BrokerId:          brokerID,
 		IsInteractiveMode: isInteractiveMode,
 	}
 	wg.Wait()
-	_, err := m.client.PostRunHook(context.Background(), req)
+	_, err := callFn(context.Background(), req)
 	s.Stop()
 	return err
 }
