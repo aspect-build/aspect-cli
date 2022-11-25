@@ -2,7 +2,7 @@
   "$schema": "./plugins.schema.json",
   "plugins": [
     {
-      "ghrepo": "aspect-build/plugin-fix-visibility"
+      "github-repo": "aspect-build/plugin-fix-visibility"
     }
   ]
 }

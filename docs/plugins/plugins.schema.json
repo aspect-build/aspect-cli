@@ -9,13 +9,13 @@
       "items": {
         "type": "object",
         "properties": {
-          "ghrepo": {
+          "github-repo": {
             "description": "GitHub repository",
             "type": "string"
           }
         },
         "additionalProperties": false,
-        "required": ["ghrepo"]
+        "required": ["github-repo"]
       }
     }
   },
