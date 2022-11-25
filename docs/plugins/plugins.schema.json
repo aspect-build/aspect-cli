@@ -1,0 +1,24 @@
+{
+  "$id": "https://docs.aspect.build/plugins.schema.json",
+  "title": "Aspect CLI Plugins Catalog",
+  "type": "object",
+  "properties": {
+    "$schema": { "type": "string" },
+    "plugins": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "ghrepo": {
+            "description": "GitHub repository",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": ["ghrepo"]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": ["plugins"]
+}

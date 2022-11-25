@@ -1,0 +1,8 @@
+{
+  "$schema": "./plugins.schema.json",
+  "plugins": [
+    {
+      "ghrepo": "aspect-build/plugin-fix-visibility"
+    }
+  ]
+}

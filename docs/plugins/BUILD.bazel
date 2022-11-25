@@ -1,0 +1,16 @@
+load("@npm//docs/plugins:ajv-cli/package_json.bzl", "bin")
+
+bin.ajv_test(
+    name = "test",
+    args = [
+        "validate",
+        "-s",
+        "$(execpath plugins.schema.json)",
+        "-d",
+        "$(execpath plugins.json)",
+    ],
+    data = [
+        "plugins.json",
+        "plugins.schema.json",
+    ],
+)
