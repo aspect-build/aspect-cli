@@ -1,5 +1,6 @@
 {
   "devDependencies": {
-    "ajv-cli": "*"
+    "ajv-cli": "*",
+    "json-schema-to-typescript": "*"
   }
 }

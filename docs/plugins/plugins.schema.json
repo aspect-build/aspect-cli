@@ -12,10 +12,40 @@
           "github-repo": {
             "description": "GitHub repository",
             "type": "string"
+          },
+          "homepage": {
+            "description": "A website describing the plugin. If not present, we'll use the GitHub UI",
+            "type": "string"
+          },
+          "name": {
+            "description": "The value users of the plugin put in the 'name' field of their .aspect/cli/plugins.yaml when using this plugin",
+            "type": "string"
+          },
+          "maintainers": {
+            "description": "Who is responsible for keeping the plugin repo active and healthy",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "description": "Displayed name for the maintainer",
+                  "type": "string"
+                },
+                "email": {
+                  "description": "Email address to contact the maintainer",
+                  "type": "string"
+                },
+                "github": {
+                  "description": "GitHub handle or org for the maintainer",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
           }
         },
         "additionalProperties": false,
-        "required": ["github-repo"]
+        "required": ["github-repo", "maintainers", "name"]
       }
     }
   },
