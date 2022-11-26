@@ -1,6 +1,8 @@
-load("@npm//docs/plugins:ajv-cli/package_json.bzl", "bin")
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@npm//docs/plugins:ajv-cli/package_json.bzl", ajv = "bin")
+load("@npm//docs/plugins:json-schema-to-typescript/package_json.bzl", ts = "bin")
 
-bin.ajv_test(
+ajv.ajv_test(
     name = "test",
     args = [
         "validate",
@@ -13,4 +15,23 @@ bin.ajv_test(
         "plugins.json",
         "plugins.schema.json",
     ],
+)
+
+ts.json2ts(
+    name = "types",
+    srcs = ["plugins.schema.json"],
+    outs = ["out/plugins.d.ts"],
+    args = [
+        "--input",
+        "$(execpath plugins.schema.json)",
+        "--output",
+        package_name() + "/out/plugins.d.ts",
+    ],
+)
+
+write_source_files(
+    name = "dts",
+    files = {
+        "plugins.d.ts": ":types",
+    },
 )

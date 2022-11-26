@@ -2,7 +2,26 @@
   "$schema": "./plugins.schema.json",
   "plugins": [
     {
-      "github-repo": "aspect-build/plugin-fix-visibility"
+      "name": "fix-visibility",
+      "github-repo": "aspect-build/plugin-fix-visibility",
+      "maintainers": [
+        {
+          "email": "hello@aspect.dev",
+          "github": "aspect-build",
+          "name": "Aspect team"
+        }
+      ]
+    },
+    {
+      "name": "augment-error",
+      "github-repo": "aspect-build/plugin-augment-error",
+      "maintainers": [
+        {
+          "email": "hello@aspect.dev",
+          "github": "aspect-build",
+          "name": "Aspect team"
+        }
+      ]
     }
   ]
 }
