@@ -41,3 +41,35 @@ git checkout origin/main -- go.mod go.sum deps.bzl
 This will fetch go.mod, go.sum and deps.bzl from origin/main and replace your files with them.
 Then, go tidy and gazelle will be run over these files to update them.
 After this, you should be able to merge your changes without any conflicts in those files.
+
+## Releasing
+
+1. Push a `x.x.x` tag to the repository at the commit you want to release with the semver version
+   you want to use for the release:
+
+    ```
+    git tag x.x.x
+    git push origin x.x.x
+    ```
+
+    > A `v` version prefix is intentionally _not_ included in the release tag so that the GitHub root
+    > download archive `https://github.com/aspect-build/aspect-cli/releases/download` can be used for
+    > Bazelisk installs using `.bazeliskrc`:
+    >
+    > ```
+    > BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
+    > USE_BAZEL_VERSION=aspect/x.x.x
+    > ```
+
+2. For go module support, we also require a `v1.x.x` tag that corresponds to the `x.x.x` release
+   tag. We version the go module as `v1.x.x` since consuming `v2+` go modules downstream adds
+   undesirable complication. For now with CLI major releases as `5.x.x` the corresponding go module
+   version should be `v1.x.x` with the minor & patch versions matching. When the CLI major version
+   is bumped to 6, this mapping will need to be updated.
+
+    ```
+    git tag v1.x.x
+    git push origin v1.x.x
+    ```
+
+3. Watch the automation run on GitHub actions
