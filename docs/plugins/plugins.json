@@ -3,7 +3,7 @@
   "plugins": [
     {
       "name": "fix-visibility",
-      "github-repo": "aspect-build/plugin-fix-visibility",
+      "repository": "github:aspect-build/plugin-fix-visibility",
       "maintainers": [
         {
           "email": "hello@aspect.dev",
@@ -14,7 +14,7 @@
     },
     {
       "name": "augment-error",
-      "github-repo": "aspect-build/plugin-augment-error",
+      "repository": "github:aspect-build/plugin-augment-error",
       "maintainers": [
         {
           "email": "hello@aspect.dev",

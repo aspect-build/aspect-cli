@@ -9,9 +9,9 @@ export interface AspectCLIPluginsCatalog {
   $schema?: string;
   plugins: {
     /**
-     * GitHub repository
+     * Source code repository, starting with the host, e.g. github:my-org/some-repo
      */
-    "github-repo": string;
+    repository: string;
     /**
      * A website describing the plugin. If not present, we'll use the GitHub UI
      */

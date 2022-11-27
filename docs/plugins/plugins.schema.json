@@ -9,8 +9,8 @@
       "items": {
         "type": "object",
         "properties": {
-          "github-repo": {
-            "description": "GitHub repository",
+          "repository": {
+            "description": "Source code repository, starting with the host, e.g. github:my-org/some-repo",
             "type": "string"
           },
           "homepage": {
@@ -45,7 +45,7 @@
           }
         },
         "additionalProperties": false,
-        "required": ["github-repo", "maintainers", "name"]
+        "required": ["repository", "maintainers", "name"]
       }
     }
   },
