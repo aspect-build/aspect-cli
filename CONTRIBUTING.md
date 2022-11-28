@@ -49,7 +49,7 @@ After this, you should be able to merge your changes without any conflicts in th
 
     ```
     git tag x.x.x
-    git push origin x.x.x
+    git push origin $!
     ```
 
     > A `v` version prefix is intentionally _not_ included in the release tag so that the GitHub root
@@ -61,15 +61,17 @@ After this, you should be able to merge your changes without any conflicts in th
     > USE_BAZEL_VERSION=aspect/x.x.x
     > ```
 
-2. For go module support, we also require a `v1.x.x` tag that corresponds to the `x.x.x` release
+2. Watch the automation run on GitHub actions
+
+3. For go module support, we also require a `v1.x.x` tag that corresponds to the `x.x.x` release
    tag. We version the go module as `v1.x.x` since consuming `v2+` go modules downstream adds
    undesirable complication. For now with CLI major releases as `5.x.x` the corresponding go module
-   version should be `v1.x.x` with the minor & patch versions matching. When the CLI major version
-   is bumped to 6, this mapping will need to be updated.
+   version should be `v1.5xx.x` with the patch version matching and the minor zero-padded to two digits.
+   (e.g. `5.4.3` -> `v1.504.3`, `5.56.78` -> `v1.556.78`)
+   
+   When the CLI major version is bumped to 6, this mapping will need to be updated.
 
     ```
-    git tag v1.x.x
-    git push origin v1.x.x
+    git tag v1.5xx.x
+    git push origin $!
     ```
-
-3. Watch the automation run on GitHub actions
