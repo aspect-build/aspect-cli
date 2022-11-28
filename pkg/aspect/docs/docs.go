@@ -40,9 +40,10 @@ func (runner *Docs) Run(_ *cobra.Command, args []string) error {
 	// TODO: we should open the browser to the bazel version matching what is running
 	dest := "https://bazel.build/docs"
 
-	// Detect requests for docs on rules, which we host
+	// Detect requests for docs on rules, which we host.
+	// Also, special case `bazel-` as this is likely bazel-lib or bazel-skylib
 	if len(args) == 1 {
-		if strings.HasPrefix(args[0], "rules_") || args[0] == "bazel-lib" {
+		if strings.HasPrefix(args[0], "rules_") || strings.HasPrefix(args[0], "bazel-") {
 			dest = fmt.Sprintf("https://docs.aspect.build/%s", args[0])
 		} else {
 			dest = fmt.Sprintf("https://bazel.build/reference/%s.html", args[0])
