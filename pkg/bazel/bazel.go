@@ -315,7 +315,7 @@ func ParseOutputs(agc *analysis.ActionGraphContainer) []Output {
 		return segments
 	}
 
-	result := make([]Output, 10)
+	var result []Output
 	for _, a := range agc.Actions {
 		for _, i := range a.OutputIds {
 			artifact := arts[i]
