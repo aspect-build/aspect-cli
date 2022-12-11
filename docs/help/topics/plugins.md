@@ -6,10 +6,11 @@ Plugins can contribute custom commands like `lint` so developers can live in a s
 
 ## High-level design
 
-A plugin is any program with a gRPC server that implements our plugin protocol.
+A plugin is any program with a gRPC server that implements our [plugin protocol].
 
 We provide convenient support for writing plugins in Go, but this is not required.
-You can write a plugin in any language.
+You can write a plugin in any language. We plan to provide examples for Python and JavaScript plugins soon.
+
 Plugins are hosted and versioned independently from the aspect CLI.
 
 The aspect CLI process spawns the plugin as a subprocess, then connects as a
@@ -19,6 +20,8 @@ version compatibility and what capabilities the plugin provides.
 The plugin system is based on the excellent system developed by HashiCorp for the `terraform` CLI.
 You can read more about this archecture here:
 <https://github.com/hashicorp/go-plugin/blob/master/README.md>
+
+[plugin protocol](https://github.com/aspect-build/aspect-cli/blob/main/pkg/plugin/sdk/v1alpha3/proto/plugin.proto)
 
 ## Quickstart
 
