@@ -38,7 +38,11 @@ func NewCmd(streams ioutils.Streams) *cobra.Command {
 Prints each output file on a line, with the mnemonic of the action that produces it,
 followed by a path to the file, relative to the workspace root.
 
-You can optionally provide an extra argument, which is a filter on the mnemonic.`,
+You can optionally provide an extra argument, which is a filter on the mnemonic.
+
+'ExecutableHash' is a special value for the mnemonic. This combines the ExecutableSymlink and
+SourceSymlinkManifest mnemonics, then hashes the outputs of these two. This provides a good hash
+for an executable target to determine if it has changed.`,
 		Example: `# Show all outputs of the //cli/pro target, which is a go_binary:
 
 % aspect outputs //cli/pro

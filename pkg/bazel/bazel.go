@@ -274,6 +274,7 @@ func (b *bazel) AbsPathRelativeToWorkspace(relativePath string) (string, error) 
 }
 
 type Output struct {
+	Label    string
 	Mnemonic string
 	Path     string
 }
@@ -289,6 +290,10 @@ func ParseOutputs(agc *analysis.ActionGraphContainer) []Output {
 	arts := make(map[uint32]*analysis.Artifact)
 	for _, a := range agc.Artifacts {
 		arts[a.Id] = a
+	}
+	targets := make(map[uint32]*analysis.Target)
+	for _, t := range agc.Targets {
+		targets[t.Id] = t
 	}
 
 	// The paths in the proto data are organized as a trie
@@ -329,6 +334,7 @@ func ParseOutputs(agc *analysis.ActionGraphContainer) []Output {
 				}
 			}
 			result = append(result, Output{
+				targets[a.TargetId].Label,
 				a.Mnemonic,
 				path.String(),
 			})
