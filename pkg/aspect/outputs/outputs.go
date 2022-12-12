@@ -54,6 +54,20 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 		return err
 	}
 	outs := bazel.ParseOutputs(agc)
+
+	// Special case pseudo-mnemonic indicating we should compute an overall hash
+	// for any executables in the aquery result
+	if mnemonicFilter == "ExecutableHash" {
+		hashes, err := printExecutableHashes(outs)
+		if err != nil {
+			return err
+		}
+		for label, hash := range hashes {
+			fmt.Printf("%s %s\n", label, hash)
+		}
+		return nil
+	}
+
 	for _, a := range outs {
 		if len(mnemonicFilter) > 0 {
 			if a.Mnemonic == mnemonicFilter {

@@ -2,12 +2,16 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "outputs",
-    srcs = ["outputs.go"],
+    srcs = [
+        "hash.go",
+        "outputs.go",
+    ],
     importpath = "aspect.build/cli/pkg/aspect/outputs",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/bazel",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
+        "@org_golang_x_mod//sumdb/dirhash",
     ],
 )
