@@ -254,9 +254,10 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	//     the aspect running.
 	// (B) If bootstrapped by Bazelisk then ignore .bazeliskrc version & base_url (since it specifies
 	//     the Aspect version) and use the the env version to determine the Bazel version to download & run.
-	// (C) If not bootstrapped by Bazelisk or by Aspect & .bazeliskrc is configured to bootstrap
-	//     aspect & not running a development build & no version configured in aspect config, download & re-enter the
-	//     configured aspect if either the version or base url mismatch with the aspect running.
+	// (C) If not bootstrapped by Bazelisk or by Aspect & Aspect version is not configured in Aspect config.yaml
+	//     (or by USE_ASPECT_VERSION) & .bazeliskrc is configured to bootstrap Aspect & not running a development
+	//     build & no version configured in aspect config, download & re-enter the configured aspect if either the version
+	// 		 or base url mismatch with the aspect running.
 	// (D) If not bootstrapped by Bazelisk or by Aspect & .bazeliskrc is configured to bootstrap
 	//     aspect & we are not re-entering in (C), then ignore .bazeliskrc version & base_url (since it
 	//     specifies the Aspect version) and use the the env version to determine the Bazel version to download & run.
@@ -306,9 +307,10 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 		// base url from the env or the .bazelversion files below
 		bazelVersion = os.Getenv("USE_BAZEL_VERSION") // (B)
 		baseUrl = os.Getenv(core.BaseURLEnv)          // (B)
-	} else if !aspectRuntime.Reentrant {
-		// If we were not bootstrapped by bazelisk or aspect we must still check if .bazeliskrc
-		// has an aspect bootstrap configured
+	} else if !aspectRuntime.Reentrant && !aspectConfig.Configured {
+		// If we were not bootstrapped by bazelisk or aspect and the version is not configured
+		// in the aspect config.yaml (or via USE_ASPECT_VERSION) we must still check if .bazeliskrc
+		// has an aspect bootstrap configured.
 		bazeliskBazelVersion := bazelisk.GetConfig("USE_BAZEL_VERSION")
 		bazeliskAspectBaseUrl := bazelisk.GetConfig(core.BaseURLEnv)
 		bazeliskBootstrapConfigured := len(bazeliskAspectBaseUrl) != 0 && (strings.HasPrefix("aspect/", bazeliskBazelVersion) || strings.Contains(bazeliskAspectBaseUrl, "aspect.build/") || strings.Contains(bazeliskAspectBaseUrl, "github.com/aspect-build/"))

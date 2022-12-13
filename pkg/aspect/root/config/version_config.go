@@ -18,6 +18,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"aspect.build/cli/buildinfo"
@@ -71,6 +72,13 @@ type VersionConfig struct {
 
 func GetVersionConfig() (*VersionConfig, error) {
 	versionString := viper.GetString("version")
+
+	// If USE_ASPECT_VERSION is set on the environment then that takes precedence
+	useAspectVersion := os.Getenv("USE_ASPECT_VERSION")
+	if len(useAspectVersion) != 0 {
+		versionString = useAspectVersion
+	}
+
 	versionTuple, err := ParseConfigVersion(versionString)
 	if err != nil {
 		return nil, fmt.Errorf("Unrecognized Aspect CLI tier in version in configuration: '%s'. Version should be [<tier>/]<version> with an optional tier set to one of: %s. Please fix your Aspect CLI configuration and try again.", versionString, validTiersCommaList)
