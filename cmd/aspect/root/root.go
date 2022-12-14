@@ -36,6 +36,7 @@ import (
 	"aspect.build/cli/cmd/aspect/docs"
 	"aspect.build/cli/cmd/aspect/dump"
 	"aspect.build/cli/cmd/aspect/fetch"
+	"aspect.build/cli/cmd/aspect/help"
 	"aspect.build/cli/cmd/aspect/info"
 	"aspect.build/cli/cmd/aspect/license"
 	"aspect.build/cli/cmd/aspect/mobileinstall"
@@ -51,7 +52,6 @@ import (
 	"aspect.build/cli/cmd/aspect/sync"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
-	"aspect.build/cli/docs/help/topics"
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
@@ -123,6 +123,8 @@ func NewCmd(
 	cmd.AddCommand(test.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultCmd())
 	cmd.AddCommand(outputs.NewDefaultCmd())
+	cmd.SetHelpCommand(help.NewCmd())
+
 	if !buildinfo.Current().IsAspectPro {
 		// Aspect CLI only commands
 		cmd.AddCommand(license.NewDefaultCmd())
@@ -132,27 +134,5 @@ func NewCmd(
 		cmd.AddCommand(support.NewDefaultCmd())
 	}
 
-	// ### "Additional help topic commands" which are not runnable
-	// https://pkg.go.dev/github.com/spf13/cobra#Command.IsAdditionalHelpTopicCommand
-	cmd.AddCommand(&cobra.Command{
-		Use:   "target-syntax",
-		Short: "Explains the syntax for specifying targets.",
-		Long:  topics.MustAssetString("target-syntax.md"),
-	})
-	cmd.AddCommand(&cobra.Command{
-		Use:   "info-keys",
-		Short: "Displays a list of keys used by the info command.",
-		Long:  topics.MustAssetString("info-keys.md"),
-	})
-	cmd.AddCommand(&cobra.Command{
-		Use:   "tags",
-		Short: "Conventions for tags which are special.",
-		Long:  topics.MustAssetString("tags.md"),
-	})
-	cmd.AddCommand(&cobra.Command{
-		Use:   "plugins",
-		Short: "How to extend aspect with a custom plugin.",
-		Long:  topics.MustAssetString("plugins.md"),
-	})
 	return cmd
 }

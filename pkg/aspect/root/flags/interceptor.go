@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -39,6 +40,40 @@ func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 	cmd.PersistentFlags().Bool(AspectInteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
 }
 
+func extractUnknownArgs(flags *pflag.FlagSet, args []string) []string {
+	unknownArgs := []string{}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		var flag *pflag.Flag
+		if arg[0] == '-' {
+			if arg[1] == '-' {
+				// --; bail
+				if len(arg) == 2 {
+					unknownArgs = append(unknownArgs, args[i:]...)
+					break
+				}
+				flag = flags.Lookup(strings.SplitN(arg[2:], "=", 2)[0])
+			} else {
+				for _, s := range arg[1:] {
+					flag = flags.ShorthandLookup(string(s))
+					if flag == nil {
+						break
+					}
+				}
+			}
+		}
+		if flag != nil {
+			if flag.NoOptDefVal == "" && i+1 < len(args) && flag.Value.String() == args[i+1] {
+				i++
+			}
+			continue
+		}
+		unknownArgs = append(unknownArgs, arg)
+	}
+	return unknownArgs
+}
+
 // FlagsIntercepor will parse the incoming flags and remove any aspect specific flags or bazel
 // startup flags from the list of args.
 func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
@@ -46,22 +81,21 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 
 		if cmd.DisableFlagParsing {
 			cmd.DisableFlagParsing = false
-
+			args = extractUnknownArgs(cmd.InheritedFlags(), args)
 			if err := cmd.ParseFlags(args); err != nil {
 				return err
 			}
 		}
 
-		// Remove "--aspect:*" flags from the list of args. These should be accessed via cmd.Flags()
-		updatedArgs := make([]string, 0)
-		for i := 0; i < len(args); i++ {
-			if strings.HasPrefix(args[i], "--aspect:") {
-				continue
+		for _, arg := range args {
+			if arg == "--" {
+				break
 			}
-
-			updatedArgs = append(updatedArgs, args[i])
+			if strings.HasPrefix(arg, "--aspect:") {
+				return fmt.Errorf("unknown flag: %s", arg)
+			}
 		}
 
-		return next(ctx, cmd, updatedArgs)
+		return next(ctx, cmd, args)
 	}
 }

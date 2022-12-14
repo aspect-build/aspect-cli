@@ -1,6 +1,20 @@
-sh_test(
-    name = "can_pass_arguments",
-    srcs = ["can_pass_arguments.sh"],
-    data = ["//cmd/aspect"],
-    tags = ["manual"],
+load("//integration_tests:bats.bzl", "bats_test")
+
+# common env
+env = {
+    "BAZEL_BINARY": "$(location @bazel_6_0_0rc4//:bazel)",
+}
+
+# common data
+data = [
+    "//integration_tests/aspect:common.bats",
+    "//cmd/aspect",
+    "@bazel_6_0_0rc4//:bazel",
+]
+
+bats_test(
+    name = "info_test",
+    srcs = ["info_test.bats"],
+    data = data,
+    env = env,
 )
