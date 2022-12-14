@@ -1,13 +1,20 @@
-sh_test(
-    name = "long_preset_query_test",
-    srcs = ["long_preset_query_test.sh"],
-    data = ["//cmd/aspect"],
-    tags = ["manual"],
-)
+load("//integration_tests:bats.bzl", "bats_test")
 
-sh_test(
-    name = "passthrough_query_test",
-    srcs = ["passthrough_query_test.sh"],
-    data = ["//cmd/aspect"],
-    tags = ["manual"],
+# common env
+env = {
+    "BAZEL_BINARY": "$(location @bazel_6_0_0rc4//:bazel)",
+}
+
+# common data
+data = [
+    "//integration_tests/aspect:common.bats",
+    "//cmd/aspect",
+    "@bazel_6_0_0rc4//:bazel",
+]
+
+bats_test(
+    name = "query_test",
+    srcs = ["query_test.bats"],
+    data = data,
+    env = env,
 )

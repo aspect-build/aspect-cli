@@ -17,6 +17,7 @@
 package bazel
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -190,30 +191,35 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	if allFlags != nil {
 		return allFlags, nil
 	}
-
-	allFlags = make(map[string]*flags.FlagInfo)
-
-	r, w := io.Pipe()
+	var buffer bytes.Buffer
 	streams := ioutils.Streams{
 		Stdin:  os.Stdin,
-		Stdout: w,
+		Stdout: &buffer,
 		Stderr: nil,
 	}
-	decoder := base64.NewDecoder(base64.StdEncoding, r)
+	decoder := base64.NewDecoder(base64.StdEncoding, &buffer)
 	bazelErrs := make(chan error, 1)
+	bazelExitCode := make(chan int, 1)
 	defer close(bazelErrs)
+	defer close(bazelExitCode)
 	go func() {
-		defer w.Close()
-		_, err := b.RunCommand(streams, "help", "flags-as-proto")
+		// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
+		// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
+		exitCode, err := b.RunCommand(streams, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
 		bazelErrs <- err
+		bazelExitCode <- exitCode
 	}()
 
-	helpProtoBytes, err := io.ReadAll(decoder)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
+	if exitCode := <-bazelExitCode; exitCode != 0 {
+		return nil, fmt.Errorf("failed to get Bazel flags: %w", fmt.Errorf("bazel has quit with code %d", exitCode))
 	}
 
 	if err := <-bazelErrs; err != nil {
+		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
+	}
+
+	helpProtoBytes, err := io.ReadAll(decoder)
+	if err != nil {
 		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
 	}
 
@@ -221,6 +227,8 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	if err := proto.Unmarshal(helpProtoBytes, flagCollection); err != nil {
 		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
 	}
+
+	allFlags = make(map[string]*flags.FlagInfo)
 
 	for i := range flagCollection.FlagInfos {
 		allFlags[*flagCollection.FlagInfos[i].Name] = flagCollection.FlagInfos[i]

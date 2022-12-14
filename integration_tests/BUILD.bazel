@@ -1,0 +1,23 @@
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+
+exports_files(["runner.sh"])
+
+bzl_library(
+    name = "bats_deps",
+    srcs = ["bats_deps.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["@bazel_tools//tools/build_defs/repo:http.bzl"],
+)
+
+bzl_library(
+    name = "bazel_binary",
+    srcs = ["bazel_binary.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["@aspect_bazel_lib//lib:repo_utils"],
+)
+
+bzl_library(
+    name = "bats",
+    srcs = ["bats.bzl"],
+    visibility = ["//visibility:public"],
+)
