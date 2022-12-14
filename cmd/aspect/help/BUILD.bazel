@@ -1,0 +1,20 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "help",
+    srcs = [
+        "flags_as_proto.go",
+        "help.go",
+    ],
+    importpath = "aspect.build/cli/cmd/aspect/help",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//docs/help/topics",
+        "//pkg/aspect/root/flags",
+        "//pkg/aspecterrors",
+        "//pkg/bazel",
+        "//pkg/interceptors",
+        "//pkg/ioutils",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
