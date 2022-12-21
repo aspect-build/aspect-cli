@@ -125,3 +125,11 @@ npm_translate_lock(
 load("@npm//:repositories.bzl", "npm_repositories")
 
 npm_repositories()
+
+load("//integration_tests:bats_deps.bzl", "bats_dependencies")
+
+bats_dependencies()
+
+load("//integration_tests:bazel_binary.bzl", "bazel_binaries")
+
+bazel_binaries()
