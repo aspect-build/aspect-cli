@@ -45,11 +45,6 @@ func NewCmd() *cobra.Command {
 		Short: "Conventions for tags which are special.",
 		Long:  topics.MustAssetString("tags.md"),
 	})
-	cmd.AddCommand(&cobra.Command{
-		Use:   "plugins",
-		Short: "How to extend aspect with a custom plugin.",
-		Long:  topics.MustAssetString("plugins.md"),
-	})
 
 	return &cmd
 }
