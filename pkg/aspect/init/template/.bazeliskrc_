@@ -1,0 +1,9 @@
+# See https://github.com/bazelbuild/bazelisk#bazeliskrc-configuration-file
+# This file is used by developers who installed 'bazel' on their PATH using Bazelisk,
+# as the Bazel installation docs recommend.
+# We use it to register the Aspect CLI so that everyone has the same commands available.
+
+# TODO: point to Pro version if the init command was run in Aspect Pro
+BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
+# TODO: lookup most recent release
+USE_BAZEL_VERSION=aspect/5.0.3

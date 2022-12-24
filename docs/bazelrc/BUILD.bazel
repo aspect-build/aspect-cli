@@ -1,0 +1,18 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "bazelrc",
+    srcs = ["embed.go"],
+    embedsrcs = [
+        ".gitignore",
+        "bazel6.bazelrc",
+        "ci.bazelrc",
+        "convenience.bazelrc",
+        "correctness.bazelrc",
+        "debug.bazelrc",
+        "javascript.bazelrc",
+        "performance.bazelrc",
+    ],
+    importpath = "aspect.build/cli/docs/bazelrc",
+    visibility = ["//visibility:public"],
+)
