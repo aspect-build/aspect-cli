@@ -4,7 +4,7 @@ Build a single target and run it with the given arguments
 
 ### Synopsis
 
-Equivalent to 'aspect build <target>' followed by spawning the resulting executable.
+Equivalent to 'aspect build [target]' followed by spawning the resulting executable.
 
 Documentation: <https://bazel.build/docs/user-manual#running-executables>
 
