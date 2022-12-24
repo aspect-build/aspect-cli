@@ -38,6 +38,7 @@ import (
 	"aspect.build/cli/cmd/aspect/fetch"
 	"aspect.build/cli/cmd/aspect/help"
 	"aspect.build/cli/cmd/aspect/info"
+	init_ "aspect.build/cli/cmd/aspect/init"
 	"aspect.build/cli/cmd/aspect/license"
 	"aspect.build/cli/cmd/aspect/mobileinstall"
 	"aspect.build/cli/cmd/aspect/modquery"
@@ -112,6 +113,7 @@ func NewCmd(
 	cmd.AddCommand(fetch.NewDefaultCmd())
 	cmd.AddCommand(docs.NewDefaultCmd())
 	cmd.AddCommand(info.NewDefaultCmd())
+	cmd.AddCommand(init_.NewDefaultCmd())
 	cmd.AddCommand(mobileinstall.NewDefaultCmd())
 	cmd.AddCommand(modquery.NewDefaultCmd())
 	cmd.AddCommand(print.NewDefaultCmd())
