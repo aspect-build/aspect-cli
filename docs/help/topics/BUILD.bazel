@@ -1,20 +1,13 @@
-load("@io_bazel_rules_go//extras:bindata.bzl", "bindata")
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
-bindata(
-    name = "bindata",
-    srcs = [
+go_library(
+    name = "topics",
+    srcs = ["doc.go"],
+    embedsrcs = [
         "info-keys.md",
         "tags.md",
         "target-syntax.md",
     ],
-    package = "topics",
-    strip_external = True,
-)
-
-go_library(
-    name = "topics",
-    srcs = [":bindata"],  # keep
     importpath = "aspect.build/cli/docs/help/topics",
     visibility = ["//visibility:public"],
 )

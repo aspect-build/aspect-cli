@@ -14,5 +14,10 @@
  * limitations under the License.
  */
 
-// Package topics contains only generated files.
+// Package topics contains only embedded files.
 package topics
+
+import "embed"
+
+//go:embed *.md
+var Content embed.FS
