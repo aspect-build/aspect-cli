@@ -2,7 +2,10 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "bazelrc",
-    srcs = ["embed.go"],
+    srcs = [
+        "doc.go",
+        "embed.go",
+    ],
     embedsrcs = [
         ".gitignore",
         "bazel6.bazelrc",
