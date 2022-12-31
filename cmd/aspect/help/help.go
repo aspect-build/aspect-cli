@@ -1,9 +1,19 @@
 package help
 
 import (
+	"fmt"
+
 	"aspect.build/cli/docs/help/topics"
 	"github.com/spf13/cobra"
 )
+
+func mustReadFile(f string) string {
+	result, err := topics.Content.ReadFile(f)
+	if err != nil {
+		panic(fmt.Errorf("Internal error: embed data was not readable: %w", err))
+	}
+	return string(result)
+}
 
 func NewCmd() *cobra.Command {
 	cmd := cobra.Command{
@@ -33,17 +43,17 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(&cobra.Command{
 		Use:   "target-syntax",
 		Short: "Explains the syntax for specifying targets.",
-		Long:  topics.MustAssetString("target-syntax.md"),
+		Long:  mustReadFile("target-syntax.md"),
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use:   "info-keys",
 		Short: "Displays a list of keys used by the info command.",
-		Long:  topics.MustAssetString("info-keys.md"),
+		Long:  mustReadFile("info-keys.md"),
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use:   "tags",
 		Short: "Conventions for tags which are special.",
-		Long:  topics.MustAssetString("tags.md"),
+		Long:  mustReadFile("tags.md"),
 	})
 
 	return &cmd
