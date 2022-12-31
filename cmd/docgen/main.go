@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -95,14 +97,30 @@ func NewBzlCommandListCmd(aspectRootCmd *cobra.Command) *cobra.Command {
 	return cmd
 }
 
+const fmTemplate = `---
+sidebar_label: "%s"
+---
+`
+
 func NewGenMarkdownCmd(aspectRootCmd *cobra.Command) *cobra.Command {
 	var outputDir string
+
+	// Customized output, see
+	// https://github.com/spf13/cobra/blob/main/doc/md_docs.md#customize-the-output
+	filePrepender := func(filename string) string {
+		name := filepath.Base(filename)
+		base := strings.TrimSuffix(name, path.Ext(name))
+		return fmt.Sprintf(fmTemplate, strings.TrimPrefix(base, "aspect_"))
+	}
+	linkHandler := func(name string) string {
+		return name
+	}
 
 	cmd := &cobra.Command{
 		Use:   "gen-markdown",
 		Short: "Generates the markdown documentation.",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return doc.GenMarkdownTree(aspectRootCmd, outputDir)
+			return doc.GenMarkdownTreeCustom(aspectRootCmd, outputDir, filePrepender, linkHandler)
 		},
 	}
 
