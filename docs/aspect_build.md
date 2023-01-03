@@ -1,3 +1,6 @@
+---
+sidebar_label: "build"
+---
 ## aspect build
 
 Build the specified targets

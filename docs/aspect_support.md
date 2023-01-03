@@ -1,3 +1,6 @@
+---
+sidebar_label: "support"
+---
 ## aspect support
 
 Interactive, human-escalated support for Bazel problems

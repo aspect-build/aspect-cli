@@ -1,3 +1,6 @@
+---
+sidebar_label: "canonicalize-flags"
+---
 ## aspect canonicalize-flags
 
 Present a list of bazel options in a canonical form

@@ -1,3 +1,6 @@
+---
+sidebar_label: "version"
+---
 ## aspect version
 
 Print the versions of Aspect CLI and Bazel

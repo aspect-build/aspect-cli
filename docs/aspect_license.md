@@ -1,3 +1,6 @@
+---
+sidebar_label: "license"
+---
 ## aspect license
 
 Prints the license of this software.

@@ -1,3 +1,6 @@
+---
+sidebar_label: "fetch"
+---
 ## aspect fetch
 
 Fetch external repositories that are prerequisites to the targets

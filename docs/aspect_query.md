@@ -1,3 +1,6 @@
+---
+sidebar_label: "query"
+---
 ## aspect query
 
 Query the dependency graph, ignoring configuration flags

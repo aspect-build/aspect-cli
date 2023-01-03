@@ -1,3 +1,6 @@
+---
+sidebar_label: "cquery"
+---
 ## aspect cquery
 
 Query the dependency graph, honoring configuration flags

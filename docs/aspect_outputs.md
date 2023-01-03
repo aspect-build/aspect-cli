@@ -1,3 +1,6 @@
+---
+sidebar_label: "outputs"
+---
 ## aspect outputs
 
 Print paths to declared output files

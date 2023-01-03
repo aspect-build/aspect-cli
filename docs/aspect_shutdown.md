@@ -1,3 +1,6 @@
+---
+sidebar_label: "shutdown"
+---
 ## aspect shutdown
 
 Stop the bazel server

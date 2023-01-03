@@ -1,3 +1,6 @@
+---
+sidebar_label: "coverage"
+---
 ## aspect coverage
 
 Same as 'test', but also generates a code coverage report.
