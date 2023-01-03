@@ -1,10 +1,13 @@
+---
+sidebar_label: "run"
+---
 ## aspect run
 
 Build a single target and run it with the given arguments
 
 ### Synopsis
 
-Equivalent to 'aspect build [target]' followed by spawning the resulting executable.
+Equivalent to `aspect build <target>` followed by spawning the resulting executable.
 
 Documentation: <https://bazel.build/docs/user-manual#running-executables>
 
@@ -12,15 +15,15 @@ Two environment variables will be present that the program may reference:
 - `BUILD_WORKSPACE_DIRECTORY`: the root of the workspace where the build was run.
 - `BUILD_WORKING_DIRECTORY`: the current working directory where Bazel was run from.
 
-Note that the <target> may have an 'args' and 'env' attribute. The 'run' command honors these and
+Note that the `<target>`may have an `args` and `env`attribute. The `run` command honors these and
 sets the arguments and environment of the spawned executable, unlike if the binary is executed as
 an action during a build step, or is run directly outside of Bazel.
 See <https://bazel.build/reference/be/common-definitions#common-attributes-binaries>.
 
-'run' accepts any 'build' options, and will inherit any defaults provided by .bazelrc.
+`run` accepts any `build` options, and will inherit any defaults provided by `.bazelrc.`
 
 If your script needs stdin or execution not constrained by the bazel lock,
-use 'bazel run --script_path' to write a script and then execute it.
+use `bazel run --script_path` to write a script and then execute it.
 
 By default, the program is run with a working directory inside $(aspect info execution_root).
 Some programs expect to be run under a certain working directory, such as the workspace root.

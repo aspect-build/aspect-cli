@@ -1,3 +1,6 @@
+---
+sidebar_label: "test"
+---
 ## aspect test
 
 Build the specified targets and run all test targets among them

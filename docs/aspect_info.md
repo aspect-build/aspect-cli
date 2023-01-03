@@ -1,3 +1,6 @@
+---
+sidebar_label: "info"
+---
 ## aspect info
 
 Display runtime info about the bazel server

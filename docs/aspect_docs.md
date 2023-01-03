@@ -1,3 +1,6 @@
+---
+sidebar_label: "docs"
+---
 ## aspect docs
 
 Open documentation in the browser

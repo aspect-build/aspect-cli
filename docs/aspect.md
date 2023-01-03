@@ -1,3 +1,6 @@
+---
+sidebar_label: "aspect"
+---
 ## aspect
 
 Aspect CLI

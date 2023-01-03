@@ -1,3 +1,6 @@
+---
+sidebar_label: "clean"
+---
 ## aspect clean
 
 Remove the output tree

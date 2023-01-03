@@ -1,3 +1,6 @@
+---
+sidebar_label: "aquery"
+---
 ## aspect aquery
 
 Query the action graph

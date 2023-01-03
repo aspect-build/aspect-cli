@@ -1,3 +1,6 @@
+---
+sidebar_label: "init"
+---
 ## aspect init
 
 Create a new Bazel workspace

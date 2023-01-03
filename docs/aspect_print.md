@@ -1,3 +1,6 @@
+---
+sidebar_label: "print"
+---
 ## aspect print
 
 Print syntax elements from BUILD files

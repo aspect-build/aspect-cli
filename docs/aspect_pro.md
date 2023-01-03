@@ -1,3 +1,6 @@
+---
+sidebar_label: "pro"
+---
 ## aspect pro
 
 Enable Aspect CLI Pro features

@@ -1,3 +1,6 @@
+---
+sidebar_label: "configure"
+---
 ## aspect configure
 
 Update BUILD files for JavaScript, TypeScript, Go and Protobuf
