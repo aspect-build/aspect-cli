@@ -188,6 +188,18 @@ func (b *bazel) InitializeStartupFlags(args []string) ([]string, error) {
 
 // Flags fetches the metadata for Bazel's command line flag via `bazel help flags-as-proto`
 func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
+	flags, err := helpFlagsAsProto(b, false)
+	if err != nil {
+		// As a fallback, try calling with help flags-as-proto with --ignore_all_rc_files startup option
+		flags, err = helpFlagsAsProto(b, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return flags, nil
+}
+
+func helpFlagsAsProto(b *bazel, ignoreAllRcFiles bool) (map[string]*flags.FlagInfo, error) {
 	if allFlags != nil {
 		return allFlags, nil
 	}
@@ -205,7 +217,13 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	go func() {
 		// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
 		// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
-		exitCode, err := b.RunCommand(streams, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
+		args := make([]string, 0, 10)
+		args = append(args, "--nobatch")
+		if ignoreAllRcFiles {
+			args = append(args, "--ignore_all_rc_files")
+		}
+		args = append(args, "help", "flags-as-proto")
+		exitCode, err := b.RunCommand(streams, args...)
 		bazelErrs <- err
 		bazelExitCode <- exitCode
 	}()
