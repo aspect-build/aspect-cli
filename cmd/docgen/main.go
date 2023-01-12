@@ -34,8 +34,6 @@ import (
 )
 
 func main() {
-	cmd := &cobra.Command{Use: "docgen"}
-
 	bzl, err := bazel.FindFromWd()
 	if err != nil {
 		log.Fatal(err)
@@ -47,29 +45,40 @@ func main() {
 	}
 	os.Args = argsWithoutStartupFlags
 
-	pluginSystem := system.NewPluginSystem()
-	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
+	if err = command(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func command() error {
+	cmd := &cobra.Command{Use: "docgen"}
+
+	pluginSystem := system.NewPluginSystem()
+	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
+		return err
+	}
+
 	defer pluginSystem.TearDown()
 
 	aspectRootCmd := root.NewDefaultCmd(pluginSystem)
 
 	// Run this command after all bazel verbs have been added to "cmd".
 	if err := bazel.AddBazelFlags(cmd); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	if err := pluginSystem.RegisterCustomCommands(cmd); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	cmd.AddCommand(NewBzlCommandListCmd(aspectRootCmd))
 	cmd.AddCommand(NewGenMarkdownCmd(aspectRootCmd))
 
 	if err := cmd.Execute(); err != nil {
-		log.Fatal(err)
+		return err
 	}
+
+	return nil
 }
 
 func NewBzlCommandListCmd(aspectRootCmd *cobra.Command) *cobra.Command {

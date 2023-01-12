@@ -65,9 +65,15 @@ func main() {
 	}
 	os.Args = argsWithoutStartupFlags
 
+	if err = command(streams); err != nil {
+		aspecterrors.HandleError(err)
+	}
+}
+
+func command(streams ioutils.Streams) error {
 	pluginSystem := system.NewPluginSystem()
 	if err := pluginSystem.Configure(streams); err != nil {
-		aspecterrors.HandleError(err)
+		return err
 	}
 
 	defer pluginSystem.TearDown()
@@ -76,14 +82,16 @@ func main() {
 
 	// Run this command after all bazel verbs have been added to "cmd".
 	if err := bazel.AddBazelFlags(cmd); err != nil {
-		aspecterrors.HandleError(err)
+		return err
 	}
 
 	if err := pluginSystem.RegisterCustomCommands(cmd); err != nil {
-		aspecterrors.HandleError(err)
+		return err
 	}
 
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
-		aspecterrors.HandleError(err)
+		return err
 	}
+
+	return nil
 }
