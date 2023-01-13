@@ -24,7 +24,6 @@ import (
 
 	"aspect.build/cli/pkg/aspect/query/shared"
 	"aspect.build/cli/pkg/aspect/root/config"
-	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -71,9 +70,12 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 }
 
 func (runner *Query) Run(cmd *cobra.Command, args []string) error {
-	flags, args := flags.SeparateFlagsFromArgs(args)
+	nonFlags, flags, err := bazel.ParseOutBazelFlags(cmd.CalledAs(), args)
+	if err != nil {
+		return err
+	}
 
-	if len(args) == 0 {
+	if len(nonFlags) == 0 {
 		// Only check the query configuration if user calls the command with no arguments
 		// so we don't go interactive when a user runs `aspect [ac]query <expression>` after
 		// installing aspect
@@ -111,20 +113,20 @@ func (runner *Query) Run(cmd *cobra.Command, args []string) error {
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	command, query, runReplacements, err := shared.SelectQuery(command, presets, runner.Presets, presetNames, runner.Streams, args, runner.Select)
+	command, query, runReplacements, err := shared.SelectQuery(command, presets, runner.Presets, presetNames, runner.Streams, nonFlags, runner.Select)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
 
 	if runReplacements {
-		query, err = shared.ReplacePlaceholders(query, args, runner.Prompt)
+		query, err = shared.ReplacePlaceholders(query, nonFlags, runner.Prompt)
 		if err != nil {
 			return shared.GetPrettyError(cmd, err)
 		}
 
-		return shared.RunQuery(runner.Bzl, command, runner.Streams, flags, []string{query})
+		return shared.RunQuery(runner.Bzl, command, runner.Streams, append(flags, query))
 	} else {
-		return shared.RunQuery(runner.Bzl, command, runner.Streams, flags, args)
+		return shared.RunQuery(runner.Bzl, command, runner.Streams, args)
 	}
 }
 

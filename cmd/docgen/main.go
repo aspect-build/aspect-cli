@@ -39,18 +39,23 @@ func main() {
 		log.Fatal(err)
 	}
 
-	argsWithoutStartupFlags, err := bzl.InitializeStartupFlags(os.Args)
+	err = bzl.InitializeBazelFlags()
 	if err != nil {
 		log.Fatal(err)
 	}
-	os.Args = argsWithoutStartupFlags
 
-	if err = command(); err != nil {
+	argsWithoutStartupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
+	}
+	os.Args = append(os.Args[0:1], argsWithoutStartupFlags...)
+
+	if err = command(bzl); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func command() error {
+func command(bzl bazel.Bazel) error {
 	cmd := &cobra.Command{Use: "docgen"}
 
 	pluginSystem := system.NewPluginSystem()
@@ -63,7 +68,7 @@ func command() error {
 	aspectRootCmd := root.NewDefaultCmd(pluginSystem)
 
 	// Run this command after all bazel verbs have been added to "cmd".
-	if err := bazel.AddBazelFlags(cmd); err != nil {
+	if err := bzl.AddBazelFlags(cmd); err != nil {
 		return err
 	}
 

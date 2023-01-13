@@ -164,9 +164,8 @@ func ProcessQueries(presets []*PresetQuery) (map[string]*PresetQuery, []string, 
 	return processedPresets, presetNames, nil
 }
 
-func RunQuery(bzl bazel.Bazel, command string, streams ioutils.Streams, flags []string, args []string) error {
+func RunQuery(bzl bazel.Bazel, command string, streams ioutils.Streams, args []string) error {
 	bazelCmd := []string{command}
-	bazelCmd = append(bazelCmd, flags...)
 	bazelCmd = append(bazelCmd, args...)
 
 	if exitCode, err := bzl.RunCommand(streams, bazelCmd...); exitCode != 0 {

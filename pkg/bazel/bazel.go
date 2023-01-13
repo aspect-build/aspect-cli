@@ -28,9 +28,9 @@ import (
 
 	"aspect.build/cli/bazel/analysis"
 	"aspect.build/cli/bazel/flags"
-	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
+	"github.com/spf13/cobra"
 
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
@@ -57,9 +57,10 @@ type Bazel interface {
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
 	MaybeReenterAspect(streams ioutils.Streams, args []string) (bool, int, error)
 	RunCommand(streams ioutils.Streams, command ...string) (int, error)
-	InitializeStartupFlags(args []string) ([]string, error)
+	InitializeBazelFlags() error
 	Flags() (map[string]*flags.FlagInfo, error)
 	AbsPathRelativeToWorkspace(relativePath string) (string, error)
+	AddBazelFlags(cmd *cobra.Command) error
 }
 
 type bazel struct {
@@ -145,45 +146,14 @@ func (b *bazel) RunCommand(streams ioutils.Streams, command ...string) (int, err
 }
 
 // Initializes start-up flags from args and returns args without start-up flags
-func (b *bazel) InitializeStartupFlags(args []string) ([]string, error) {
-	// Ensure allFlags is initialized
-	_, err := b.Flags()
+func InitializeStartupFlags(args []string) ([]string, error) {
+	nonFlags, flags, err := ParseOutBazelFlags("startup", args)
 	if err != nil {
-		return args, err
+		return nil, err
 	}
 
-	argsWithoutStartupFlags := make([]string, 0, 1000)
-	argsWithoutStartupFlags = append(argsWithoutStartupFlags, args[0])
-
-	allStartupFlags := make([]string, 0, 1000)
-	for flagName, flagInfo := range allFlags {
-		for _, command := range flagInfo.Commands {
-			if command == "startup" {
-				allStartupFlags = append(allStartupFlags, flagName)
-				if flagInfo.GetHasNegativeFlag() {
-					allStartupFlags = append(allStartupFlags, rootFlags.NoFlagName(flagName))
-				}
-			}
-		}
-	}
-
-	startupFlags = make([]string, 0, 100)
-	for _, arg := range args[1:] {
-		isStartup := false
-		for _, availableStartupFlag := range allStartupFlags {
-			if arg == "--"+availableStartupFlag || strings.Contains(arg, "--"+availableStartupFlag+"=") {
-				isStartup = true
-				break
-			}
-		}
-		if isStartup {
-			startupFlags = append(startupFlags, arg)
-		} else {
-			argsWithoutStartupFlags = append(argsWithoutStartupFlags, arg)
-		}
-	}
-
-	return argsWithoutStartupFlags, nil
+	startupFlags = flags
+	return nonFlags, nil
 }
 
 // Flags fetches the metadata for Bazel's command line flag via `bazel help flags-as-proto`
