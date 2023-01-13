@@ -59,18 +59,23 @@ func main() {
 	// "commands" are fast and don't require download plugins before output the version.
 	root.MaybeAspectVersionFlag(streams, os.Args[1:])
 
-	argsWithoutStartupFlags, err := bzl.InitializeStartupFlags(os.Args)
+	err = bzl.InitializeBazelFlags()
 	if err != nil {
 		aspecterrors.HandleError(err)
 	}
-	os.Args = argsWithoutStartupFlags
 
-	if err = command(streams); err != nil {
+	argsWithoutStartupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
+	if err != nil {
+		aspecterrors.HandleError(err)
+	}
+	os.Args = append(os.Args[0:1], argsWithoutStartupFlags...)
+
+	if err = command(bzl, streams); err != nil {
 		aspecterrors.HandleError(err)
 	}
 }
 
-func command(streams ioutils.Streams) error {
+func command(bzl bazel.Bazel, streams ioutils.Streams) error {
 	pluginSystem := system.NewPluginSystem()
 	if err := pluginSystem.Configure(streams); err != nil {
 		return err
@@ -81,7 +86,7 @@ func command(streams ioutils.Streams) error {
 	cmd := root.NewDefaultCmd(pluginSystem)
 
 	// Run this command after all bazel verbs have been added to "cmd".
-	if err := bazel.AddBazelFlags(cmd); err != nil {
+	if err := bzl.AddBazelFlags(cmd); err != nil {
 		return err
 	}
 

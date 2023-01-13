@@ -66,10 +66,15 @@ EOF
     run aspect info
     refute_output --partial "BINDIR:" "COMPILATION_MODE:" "GENDIR:"
     echo "info --show_make_env" > .bazelrc
+
+    # --startup_flag=<value>
     run aspect --bazelrc=.bazelrc info
     assert_output --partial "BINDIR:" "COMPILATION_MODE:" "GENDIR:"
-}
 
+    # --startup_flag <value>
+    run aspect --bazelrc .bazelrc info
+    assert_output --partial "BINDIR:" "COMPILATION_MODE:" "GENDIR:"
+}
 
 @test 'run command should not process args after --' {
     cat > test.sh << 'EOF'

@@ -29,6 +29,16 @@ query:
 EOF
     run aspect query foo //foo
     assert_output --partial "//foo:foo"
+
+    # flags should work with preset queries
+    run aspect query --output location foo //foo
+    assert_output --partial "aspect_silo/foo/BUILD:1:8: genrule rule //foo:foo"
+    run aspect query --output=location foo //foo
+    assert_output --partial "aspect_silo/foo/BUILD:1:8: genrule rule //foo:foo"
+    run aspect query foo //foo --output location
+    assert_output --partial "aspect_silo/foo/BUILD:1:8: genrule rule //foo:foo"
+    run aspect query foo //foo --output=location
+    assert_output --partial "aspect_silo/foo/BUILD:1:8: genrule rule //foo:foo"
 }
 
 @test 'passthrough query' {
@@ -42,4 +52,60 @@ genrule(
 EOF
     run aspect query 'deps(//bar)'
     assert_output --partial "//bar:bar"
+
+    # flags should work with passthrough queries
+    run aspect query --output location 'deps(//bar)'
+    assert_output --partial "aspect_silo/bar/BUILD:1:8: genrule rule //bar:bar"
+    run aspect query --output=location 'deps(//bar)'
+    assert_output --partial "aspect_silo/bar/BUILD:1:8: genrule rule //bar:bar"
+    run aspect query 'deps(//bar)' --output location
+    assert_output --partial "aspect_silo/bar/BUILD:1:8: genrule rule //bar:bar"
+    run aspect query 'deps(//bar)' --output=location
+    assert_output --partial "aspect_silo/bar/BUILD:1:8: genrule rule //bar:bar"
+}
+
+@test 'passthrough cquery' {
+    mkdir -p bar
+    cat > bar/BUILD << 'EOF'
+genrule(
+    name = "bar",
+    outs = ["bar.txt"],
+    cmd = "touch $@",
+)
+EOF
+    run aspect cquery 'deps(//bar)'
+    assert_output --partial "//bar:bar"
+
+    # flags should work with passthrough queries
+    run aspect cquery --output label_kind 'deps(//bar)'
+    assert_output --partial "genrule rule //bar:bar"
+    run aspect cquery --output=label_kind 'deps(//bar)'
+    assert_output --partial "genrule rule //bar:bar"
+    run aspect cquery 'deps(//bar)' --output label_kind
+    assert_output --partial "genrule rule //bar:bar"
+    run aspect cquery 'deps(//bar)' --output=label_kind
+    assert_output --partial "genrule rule //bar:bar"
+}
+
+@test 'passthrough aquery' {
+    mkdir -p bar
+    cat > bar/BUILD << 'EOF'
+genrule(
+    name = "bar",
+    outs = ["bar.txt"],
+    cmd = "touch $@",
+)
+EOF
+    run aspect aquery 'deps(//bar)'
+    assert_output --partial "action 'Executing genrule //bar:bar'"
+
+    # flags should work with passthrough queries
+    run aspect aquery --output text 'deps(//bar)'
+    assert_output --partial "action 'Executing genrule //bar:bar'"
+    run aspect aquery --output=text 'deps(//bar)'
+    assert_output --partial "action 'Executing genrule //bar:bar'"
+    run aspect aquery 'deps(//bar)' --output text
+    assert_output --partial "action 'Executing genrule //bar:bar'"
+    run aspect aquery 'deps(//bar)' --output=text
+    assert_output --partial "action 'Executing genrule //bar:bar'"
 }
