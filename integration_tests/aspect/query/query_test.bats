@@ -32,13 +32,13 @@ EOF
 
     # flags should work with preset queries
     run aspect query --output location foo //foo
-    assert_output --partial "aspect_silo/foo/BUILD:1:8: genrule rule //foo:foo"
+    assert_output --partial "foo/BUILD:1:8: genrule rule //foo:foo"
     run aspect query --output=location foo //foo
-    assert_output --partial "aspect_silo/foo/BUILD:1:8: genrule rule //foo:foo"
+    assert_output --partial "foo/BUILD:1:8: genrule rule //foo:foo"
     run aspect query foo //foo --output location
-    assert_output --partial "aspect_silo/foo/BUILD:1:8: genrule rule //foo:foo"
+    assert_output --partial "foo/BUILD:1:8: genrule rule //foo:foo"
     run aspect query foo //foo --output=location
-    assert_output --partial "aspect_silo/foo/BUILD:1:8: genrule rule //foo:foo"
+    assert_output --partial "foo/BUILD:1:8: genrule rule //foo:foo"
 }
 
 @test 'passthrough query' {
@@ -55,13 +55,13 @@ EOF
 
     # flags should work with passthrough queries
     run aspect query --output location 'deps(//bar)'
-    assert_output --partial "aspect_silo/bar/BUILD:1:8: genrule rule //bar:bar"
+    assert_output --partial "bar/BUILD:1:8: genrule rule //bar:bar"
     run aspect query --output=location 'deps(//bar)'
-    assert_output --partial "aspect_silo/bar/BUILD:1:8: genrule rule //bar:bar"
+    assert_output --partial "bar/BUILD:1:8: genrule rule //bar:bar"
     run aspect query 'deps(//bar)' --output location
-    assert_output --partial "aspect_silo/bar/BUILD:1:8: genrule rule //bar:bar"
+    assert_output --partial "bar/BUILD:1:8: genrule rule //bar:bar"
     run aspect query 'deps(//bar)' --output=location
-    assert_output --partial "aspect_silo/bar/BUILD:1:8: genrule rule //bar:bar"
+    assert_output --partial "bar/BUILD:1:8: genrule rule //bar:bar"
 }
 
 @test 'passthrough cquery' {
