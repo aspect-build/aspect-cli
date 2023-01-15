@@ -153,6 +153,13 @@ func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
 		}
 	}
 
+	// Register startup flags to main command. We disable flag parsing such that the cobra completion
+	// triggers the ValidArgsFunction of the root command.
+	cmd.DisableFlagParsing = true
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return listBazelFlags("startup"), cobra.ShellCompDirectiveDefault
+	}
+
 	// Register custom ValidArgsFunction to add flag auto-completion for bazel defined flags.
 	for name, command := range bazelCommands {
 		command.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
