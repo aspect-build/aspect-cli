@@ -17,11 +17,18 @@
 package bazel
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"aspect.build/cli/bazel/flags"
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
+	"github.com/bazelbuild/buildtools/edit"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -62,6 +69,24 @@ var (
 		"remote_download_toplevel":                        {},
 		"short":                                           {},
 		"start_app":                                       {},
+	}
+
+	// List of all commands with label as inputs. To compile the list, you can
+	// use the following command:
+	//
+	//   bazel help completion | grep 'ARGUMENT="label"'
+	//
+	// In theory, we could make a query everytime we execute the completion.
+	// However, this introduces unnecessary overhead because the commands are
+	// rather static.
+	commandsWithLabelInput = map[string]struct{}{
+		"aquery":         {},
+		"build":          {},
+		"cquery":         {},
+		"fetch":          {},
+		"mobile-install": {},
+		"print-action":   {},
+		"query":          {},
 	}
 
 	bazelFlagSets = map[string]*pflag.FlagSet{}
@@ -157,17 +182,153 @@ func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
 	// triggers the ValidArgsFunction of the root command.
 	cmd.DisableFlagParsing = true
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if toComplete == "" {
+			return nil, cobra.ShellCompDirectiveDefault
+		}
 		return listBazelFlags("startup"), cobra.ShellCompDirectiveDefault
 	}
 
 	// Register custom ValidArgsFunction to add flag auto-completion for bazel defined flags.
 	for name, command := range bazelCommands {
-		command.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return listBazelFlags(name), cobra.ShellCompDirectiveDefault
+		if _, ok := commandsWithLabelInput[name]; ok {
+			command.ValidArgsFunction = b.validArgsWithLabelAndPackages(name)
+			continue
 		}
+		command.ValidArgsFunction = b.validArgsWithFlags(name)
 	}
 
 	return nil
+}
+
+// validArgsWithFlags creates a ValidArgsFunction that completes flags for the given command.
+func (b *bazel) validArgsWithFlags(name string) func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return func(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return listBazelFlags(name), cobra.ShellCompDirectiveDefault
+	}
+}
+
+// validArgsWithLabelAndPackages creates a ValidArgsFunction that completes both
+// flags and labels for the given command.
+func (b *bazel) validArgsWithLabelAndPackages(name string) func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		bzlPackage, _, completeLabels := strings.Cut(toComplete, ":")
+		switch {
+
+		// If completing a flag, use the bazel supported flags.
+		case strings.HasPrefix(toComplete, "-"):
+			return listBazelFlags(name), cobra.ShellCompDirectiveDefault
+
+		// Complete labels, if : is present
+		case completeLabels:
+			targets, err := listBazelRules(cmd.Context(), bzlPackage)
+			if err != nil {
+				return nil, cobra.ShellCompDirectiveError
+			}
+			return targets, cobra.ShellCompDirectiveDefault
+
+		// Complete packages relative to the workspace root.
+		case strings.HasPrefix(toComplete, "//"):
+			abs := filepath.Join(b.workspaceRoot, strings.TrimPrefix(bzlPackage, "//"))
+			bzlPackages, err := b.expandPackageNames(abs, true)
+			if err != nil {
+				return nil, cobra.ShellCompDirectiveError
+			}
+			for i, p := range bzlPackages {
+				bzlPackages[i] = strings.Replace(p, b.workspaceRoot+"/", "//", 1)
+			}
+			return bzlPackages, cobra.ShellCompDirectiveNoSpace
+
+		// Complete packages relative to pwd.
+		default:
+			bzlPackages, err := b.expandPackageNames(bzlPackage, true)
+			if err != nil {
+				return nil, cobra.ShellCompDirectiveError
+			}
+			return bzlPackages, cobra.ShellCompDirectiveNoSpace
+		}
+	}
+}
+
+func (b *bazel) expandPackageNames(bzlPackage string, recurse bool) ([]string, error) {
+	trailingSlash := strings.HasSuffix(bzlPackage, "/")
+
+	// Do not recurse if we are completing a package with trailing slash. The
+	// user has indicated they expect sub-packages in the provided package.
+	recurse = recurse && !trailingSlash
+
+	entries, err := os.ReadDir(bzlPackage)
+	if err != nil && (!errors.Is(err, os.ErrNotExist) || !recurse) {
+		return nil, err
+	}
+	// Directory does not exist, complete with help of the parent.
+	if err != nil {
+		return b.expandPackageNames(filepath.Dir(bzlPackage), false)
+	}
+
+	var (
+		hasBuildFile bool
+		bzlPackages  []string
+	)
+	for _, e := range entries {
+		name := e.Name()
+		// If build file exists, we will suggest "<package>:" for convenience.
+		if name == "BUILD" || name == "BUILD.bazel" {
+			hasBuildFile = true
+		}
+		// Only directories can be packages.
+		if !e.IsDir() {
+			continue
+		}
+		// Skip symlinks (e.g. bazel-bin)
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		// Skip dotted directories (e.g. .git)
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		bzlPackages = append(bzlPackages, filepath.Join(bzlPackage, name))
+	}
+	// Only create the the convenience "<package>:" if the user does not
+	// indicate that they want a sub-package.
+	if hasBuildFile && !trailingSlash {
+		bzlPackages = append(bzlPackages, func() string {
+			if bzlPackage == "." {
+				return ":"
+			}
+			return bzlPackage + ":"
+		}())
+	}
+	return bzlPackages, nil
+}
+
+func listBazelRules(ctx context.Context, bzlPackage string) ([]string, error) {
+	var stdout bytes.Buffer
+	var stderr strings.Builder
+	opts := &edit.Options{
+		OutWriter: &stdout,
+		ErrWriter: &stderr,
+		NumIO:     200,
+	}
+	if ret := edit.Buildozer(opts, []string{"print label", bzlPackage + ":all"}); ret != 0 {
+		return nil, fmt.Errorf("buildozer exit %d: %s", ret, stderr.String())
+	}
+
+	rules := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+
+	// Do post-processing on the rules. If the label is equal to the package,
+	// it is reported in the short form without colon. Make sure to use the same
+	// path as provided in bzlPackage, even if buildozer resolves to a fully
+	// qualified label in the workspace.
+	for i, t := range rules {
+		if _, label, ok := strings.Cut(t, ":"); ok {
+			rules[i] = bzlPackage + ":" + label
+			continue
+		}
+		rules[i] = bzlPackage + ":" + path.Base(t)
+	}
+
+	return rules, nil
 }
 
 func listBazelFlags(command string) []string {
