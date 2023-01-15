@@ -129,6 +129,7 @@ func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
 		return err
 	}
 
+	bazelCommands := make(map[string]*cobra.Command)
 	for flagName := range bzlFlags {
 		flag := bzlFlags[flagName]
 		documented := isDocumented(flagName)
@@ -145,11 +146,33 @@ func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
 					subcommand.DisableFlagParsing = true // only want to disable flag parsing on commands that call out to bazel
 					addFlagToFlagSet(flag, subcommand.Flags(), !documented)
 				}
+
+				// Collect all the bazel sub-commands that have at least one flag defined.
+				bazelCommands[command] = subcommand
 			}
 		}
 	}
 
+	// Register custom ValidArgsFunction to add flag auto-completion for bazel defined flags.
+	for name, command := range bazelCommands {
+		command.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			return listBazelFlags(name), cobra.ShellCompDirectiveDefault
+		}
+	}
+
 	return nil
+}
+
+func listBazelFlags(command string) []string {
+	bazelFlags, ok := bazelFlagSets[command]
+	if !ok {
+		return nil
+	}
+	var flags []string
+	bazelFlags.VisitAll(func(f *pflag.Flag) {
+		flags = append(flags, "--"+f.Name)
+	})
+	return flags
 }
 
 // Separates bazel flags from a list of arguments for the given bazel command.
