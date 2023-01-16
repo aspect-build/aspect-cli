@@ -168,7 +168,7 @@ func RunQuery(bzl bazel.Bazel, command string, streams ioutils.Streams, args []s
 	bazelCmd := []string{command}
 	bazelCmd = append(bazelCmd, args...)
 
-	if exitCode, err := bzl.RunCommand(streams, bazelCmd...); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(streams, nil, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

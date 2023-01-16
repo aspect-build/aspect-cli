@@ -51,7 +51,7 @@ func TestClean(t *testing.T) {
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			RunCommand(streams, "clean").
+			RunCommand(streams, nil, "clean").
 			Return(0, nil)
 
 		b := clean.New(streams, bzl)

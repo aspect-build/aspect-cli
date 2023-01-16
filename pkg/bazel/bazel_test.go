@@ -69,7 +69,7 @@ func TestBazel(t *testing.T) {
 		streams := ioutils.Streams{Stdout: &out, Stderr: &out}
 		// workspaceOverrideDir is an unconventional location that has a tools/bazel to be used.
 		// It must run the tools/bazel we placed under that location.
-		_, err = bzl.RunCommand(streams, "build")
+		_, err = bzl.RunCommand(streams, nil, "build")
 		g.Expect(err).To(Not(HaveOccurred()))
 		g.Expect(out.String()).To(Equal("wrapper called"))
 	})

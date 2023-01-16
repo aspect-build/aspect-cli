@@ -56,7 +56,7 @@ type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
 	MaybeReenterAspect(streams ioutils.Streams, args []string) (bool, int, error)
-	RunCommand(streams ioutils.Streams, command ...string) (int, error)
+	RunCommand(streams ioutils.Streams, wd *string, command ...string) (int, error)
 	InitializeBazelFlags() error
 	Flags() (map[string]*flags.FlagInfo, error)
 	AbsPathRelativeToWorkspace(relativePath string) (string, error)
@@ -127,21 +127,22 @@ func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string) (bool
 
 	if bazelisk.AspectShouldReenter {
 		repos := b.createRepositories()
-		exitCode, err := bazelisk.Run(args, repos, streams, b.env)
+		exitCode, err := bazelisk.Run(args, repos, streams, b.env, nil)
 		return true, exitCode, err
 	}
 
 	return false, 0, nil
 }
 
-func (b *bazel) RunCommand(streams ioutils.Streams, command ...string) (int, error) {
+func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...string) (int, error) {
 	// Prepend startup flags
 	command = append(startupFlags, command...)
 
 	repos := b.createRepositories()
 
 	bazelisk := NewBazelisk(b.workspaceRoot)
-	exitCode, err := bazelisk.Run(command, repos, streams, b.env)
+
+	exitCode, err := bazelisk.Run(command, repos, streams, b.env, wd)
 	return exitCode, err
 }
 
@@ -158,18 +159,6 @@ func InitializeStartupFlags(args []string) ([]string, error) {
 
 // Flags fetches the metadata for Bazel's command line flag via `bazel help flags-as-proto`
 func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
-	flags, err := helpFlagsAsProto(b, false)
-	if err != nil {
-		// As a fallback, try calling with help flags-as-proto with --ignore_all_rc_files startup option
-		flags, err = helpFlagsAsProto(b, true)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return flags, nil
-}
-
-func helpFlagsAsProto(b *bazel, ignoreAllRcFiles bool) (map[string]*flags.FlagInfo, error) {
 	if allFlags != nil {
 		return allFlags, nil
 	}
@@ -187,13 +176,8 @@ func helpFlagsAsProto(b *bazel, ignoreAllRcFiles bool) (map[string]*flags.FlagIn
 	go func() {
 		// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
 		// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
-		args := make([]string, 0, 10)
-		args = append(args, "--nobatch")
-		if ignoreAllRcFiles {
-			args = append(args, "--ignore_all_rc_files")
-		}
-		args = append(args, "help", "flags-as-proto")
-		exitCode, err := b.RunCommand(streams, args...)
+		tmpdir := os.TempDir()
+		exitCode, err := b.RunCommand(streams, &tmpdir, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
 		bazelErrs <- err
 		bazelExitCode <- exitCode
 	}()
@@ -239,7 +223,7 @@ func (b *bazel) AQuery(query string) (*analysis.ActionGraphContainer, error) {
 	defer close(bazelErrs)
 	go func() {
 		defer w.Close()
-		_, err := b.RunCommand(streams, "aquery", "--output=proto", query)
+		_, err := b.RunCommand(streams, nil, "aquery", "--output=proto", query)
 		bazelErrs <- err
 	}()
 

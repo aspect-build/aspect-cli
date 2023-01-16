@@ -42,7 +42,7 @@ func (runner *Test) Run(args []string, besBackend bep.BESBackend) (exitErr error
 	bazelCmd := []string{"test", besBackendFlag}
 	bazelCmd = append(bazelCmd, args...)
 
-	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, bazelCmd...)
+	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 
 	// Process the subscribers errors before the Bazel one.
 	subscriberErrors := besBackend.Errors()

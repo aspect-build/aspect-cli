@@ -44,7 +44,7 @@ func (runner *AnalyzeProfile) Run(ctx context.Context, _ *cobra.Command, args []
 		return err
 	}
 
-	if exitCode, err := bzl.RunCommand(runner.Streams, bazelCmd...); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,
