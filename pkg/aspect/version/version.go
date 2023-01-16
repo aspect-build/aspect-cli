@@ -65,7 +65,7 @@ func (runner *Version) Run(cmd *cobra.Command, bzl bazel.Bazel, args []string) e
 
 	bazelCmd := []string{"version"}
 	bazelCmd = append(bazelCmd, args...)
-	if exitCode, err := bzl.RunCommand(runner.Streams, bazelCmd...); exitCode != 0 {
+	if exitCode, err := bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

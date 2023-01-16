@@ -46,7 +46,7 @@ func New(
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
 func (runner *Build) Run(args []string, besBackend bep.BESBackend) (exitErr error) {
 	besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
-	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, append([]string{"build", besBackendFlag}, args...)...)
+	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, nil, append([]string{"build", besBackendFlag}, args...)...)
 
 	// Process the subscribers errors before the Bazel one.
 	subscriberErrors := besBackend.Errors()

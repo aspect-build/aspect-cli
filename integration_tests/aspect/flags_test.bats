@@ -110,3 +110,16 @@ EOF
     run aspect query --aspect:unknownflag=2 --aspect:interactive=false
     assert_output --partial "Error: unknown flag: --aspect:unknownflag"
 }
+
+@test 'startup flags in .bazelrc should not permanently kill bazel server' {
+    run aspect info
+    refute_output --partial "WARNING: Running Bazel server needs to be killed, because the startup options are different."
+
+    echo "startup --noidle_server_tasks" > .bazelrc
+
+    run aspect info
+    assert_output --partial "WARNING: Running Bazel server needs to be killed, because the startup options are different."
+
+    run aspect info
+    refute_output --partial "WARNING: Running Bazel server needs to be killed, because the startup options are different."
+}

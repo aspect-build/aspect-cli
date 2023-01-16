@@ -39,7 +39,7 @@ func TestTest(t *testing.T) {
 		bzl := mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			RunCommand(streams, "test", "--bes_backend=grpc://127.0.0.1:12345").
+			RunCommand(streams, nil, "test", "--bes_backend=grpc://127.0.0.1:12345").
 			Return(0, nil)
 
 		besBackend := bep_mock.NewMockBESBackend(ctrl)

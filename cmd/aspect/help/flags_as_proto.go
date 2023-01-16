@@ -32,7 +32,7 @@ func NewFlagsAsProtoCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider
 				return err
 			}
 
-			if exitCode, err := bzl.RunCommand(streams, bazelCmd...); exitCode != 0 {
+			if exitCode, err := bzl.RunCommand(streams, nil, bazelCmd...); exitCode != 0 {
 				err = &aspecterrors.ExitError{
 					Err:      err,
 					ExitCode: exitCode,

@@ -107,7 +107,7 @@ func (runner *Clean) Run(cmd *cobra.Command, args []string) error {
 
 	bazelCmd := []string{"clean"}
 	bazelCmd = append(bazelCmd, flags...)
-	if exitCode, err := runner.bzl.RunCommand(runner.Streams, bazelCmd...); exitCode != 0 {
+	if exitCode, err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,
@@ -261,6 +261,7 @@ func (runner *Clean) findDiskCaches(
 	// This will ensure it returns quickly and allows us to easily access said flag.
 	runner.bzl.RunCommand(
 		streams,
+		nil,
 		"query",
 		"//",
 		"--build_event_json_file="+bepLocation,

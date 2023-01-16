@@ -68,7 +68,7 @@ func NewBazelisk(workspaceRoot string) *Bazelisk {
 }
 
 // Run runs the main Bazelisk logic for the given arguments and Bazel repositories.
-func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams, env []string) (int, error) {
+func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams, env []string, wd *string) (int, error) {
 	httputil.UserAgent = bazelisk.getUserAgent()
 
 	bazeliskHome := bazelisk.GetEnvOrConfig("BAZELISK_HOME")
@@ -132,7 +132,7 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 		}
 	}
 
-	exitCode, err := bazelisk.runBazel(bazelPath, args, streams, env)
+	exitCode, err := bazelisk.runBazel(bazelPath, args, streams, env, wd)
 	if err != nil {
 		return -1, fmt.Errorf("could not run Bazel: %v", err)
 	}
@@ -488,7 +488,7 @@ func prependDirToPathList(cmd *exec.Cmd, dir string) {
 	}
 }
 
-func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams ioutils.Streams, env []string) *exec.Cmd {
+func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams ioutils.Streams, env []string, wd *string) *exec.Cmd {
 	execPath := bazelisk.maybeDelegateToWrapper(bazel)
 
 	cmd := exec.Command(execPath, args...)
@@ -500,6 +500,9 @@ func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams iout
 	if execPath != bazel {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", bazelReal, bazel))
 	}
+	if wd != nil {
+		cmd.Dir = *wd
+	}
 	prependDirToPathList(cmd, filepath.Dir(execPath))
 	cmd.Stdin = streams.Stdin
 	cmd.Stdout = streams.Stdout
@@ -507,8 +510,8 @@ func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams iout
 	return cmd
 }
 
-func (bazelisk *Bazelisk) runBazel(bazel string, args []string, streams ioutils.Streams, env []string) (int, error) {
-	cmd := bazelisk.makeBazelCmd(bazel, args, streams, env)
+func (bazelisk *Bazelisk) runBazel(bazel string, args []string, streams ioutils.Streams, env []string, wd *string) (int, error) {
+	cmd := bazelisk.makeBazelCmd(bazel, args, streams, env, wd)
 
 	err := cmd.Start()
 	if err != nil {
