@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -162,6 +163,23 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	if allFlags != nil {
 		return allFlags, nil
 	}
+
+	// create a directory in the user cache dir with an empty WORKSPACE file to run
+	// `bazel help flags-as-proto` in so it doesn't affect the bazel server in the user's WORKSPACE
+	userCacheDir, err := UserCacheDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user cache dir: %w", err)
+	}
+	tmpdir := path.Join(userCacheDir, ".aspect/cli-flags-as-proto")
+	err = os.MkdirAll(tmpdir, os.ModePerm)
+	if err != nil {
+		return nil, fmt.Errorf("failed write create directory %s: %w", tmpdir, err)
+	}
+	err = os.WriteFile(path.Join(tmpdir, "WORKSPACE"), []byte{}, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed write WORKSPACE file in %s: %w", tmpdir, err)
+	}
+
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	streams := ioutils.Streams{
@@ -174,21 +192,21 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	bazelExitCode := make(chan int, 1)
 	defer close(bazelErrs)
 	defer close(bazelExitCode)
-	go func() {
+
+	go func(wd string) {
 		// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
 		// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
-		tmpdir := os.TempDir()
-		exitCode, err := b.RunCommand(streams, &tmpdir, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
+		exitCode, err := b.RunCommand(streams, &wd, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
 		bazelErrs <- err
 		bazelExitCode <- exitCode
-	}()
-
-	if exitCode := <-bazelExitCode; exitCode != 0 {
-		return nil, fmt.Errorf("failed to get bazel flags: %w", fmt.Errorf("bazel has quit with code %d\nstderr:\n%s", exitCode, stderr.String()))
-	}
+	}(tmpdir)
 
 	if err := <-bazelErrs; err != nil {
 		return nil, fmt.Errorf("failed to get bazel flags: %w", err)
+	}
+
+	if exitCode := <-bazelExitCode; exitCode != 0 {
+		return nil, fmt.Errorf("failed to get bazel flags running in %s: %w", tmpdir, fmt.Errorf("bazel has quit with code %d\nstderr:\n%s", exitCode, stderr.String()))
 	}
 
 	helpProtoBytes, err := io.ReadAll(stdoutDecoder)
