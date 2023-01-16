@@ -162,13 +162,14 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	if allFlags != nil {
 		return allFlags, nil
 	}
-	var buffer bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
 	streams := ioutils.Streams{
 		Stdin:  os.Stdin,
-		Stdout: &buffer,
-		Stderr: nil,
+		Stdout: &stdout,
+		Stderr: &stderr,
 	}
-	decoder := base64.NewDecoder(base64.StdEncoding, &buffer)
+	stdoutDecoder := base64.NewDecoder(base64.StdEncoding, &stdout)
 	bazelErrs := make(chan error, 1)
 	bazelExitCode := make(chan int, 1)
 	defer close(bazelErrs)
@@ -183,21 +184,21 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	}()
 
 	if exitCode := <-bazelExitCode; exitCode != 0 {
-		return nil, fmt.Errorf("failed to get Bazel flags: %w", fmt.Errorf("bazel has quit with code %d", exitCode))
+		return nil, fmt.Errorf("failed to get bazel flags: %w", fmt.Errorf("bazel has quit with code %d\nstderr:\n%s", exitCode, stderr.String()))
 	}
 
 	if err := <-bazelErrs; err != nil {
-		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
+		return nil, fmt.Errorf("failed to get bazel flags: %w", err)
 	}
 
-	helpProtoBytes, err := io.ReadAll(decoder)
+	helpProtoBytes, err := io.ReadAll(stdoutDecoder)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
+		return nil, fmt.Errorf("failed to get bazel flags: %w", err)
 	}
 
 	flagCollection := &flags.FlagCollection{}
 	if err := proto.Unmarshal(helpProtoBytes, flagCollection); err != nil {
-		return nil, fmt.Errorf("failed to get Bazel flags: %w", err)
+		return nil, fmt.Errorf("failed to get bazel flags: %w", err)
 	}
 
 	allFlags = make(map[string]*flags.FlagInfo)
