@@ -67,15 +67,31 @@ func NewBazelisk(workspaceRoot string) *Bazelisk {
 	return &Bazelisk{workspaceRoot: workspaceRoot}
 }
 
+func UserCacheDir() (string, error) {
+	userCacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("could not get the user's cache directory: %v", err)
+	}
+
+	// We hit a case in a bazel-in-bazel test where os.UserCacheDir() return a path starting with '~'.
+	// Run it through homedir.Expand to turn it into an absolute path incase that happens.
+	userCacheDir, err = homedir.Expand(userCacheDir)
+	if err != nil {
+		return "", fmt.Errorf("could not expand home directory in path: %v", err)
+	}
+
+	return userCacheDir, err
+}
+
 // Run runs the main Bazelisk logic for the given arguments and Bazel repositories.
 func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams, env []string, wd *string) (int, error) {
 	httputil.UserAgent = bazelisk.getUserAgent()
 
 	bazeliskHome := bazelisk.GetEnvOrConfig("BAZELISK_HOME")
 	if len(bazeliskHome) == 0 {
-		userCacheDir, err := os.UserCacheDir()
+		userCacheDir, err := UserCacheDir()
 		if err != nil {
-			return -1, fmt.Errorf("could not get the user's cache directory: %v", err)
+			return -1, err
 		}
 
 		bazeliskHome = filepath.Join(userCacheDir, "bazelisk")
@@ -128,7 +144,7 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 		baseDirectory := filepath.Join(bazeliskHome, "local")
 		bazelPath, err = linkLocalBazel(baseDirectory, bazelPath)
 		if err != nil {
-			return -1, fmt.Errorf("cound not link local Bazel: %v", err)
+			return -1, fmt.Errorf("could not link local Bazel: %v", err)
 		}
 	}
 
