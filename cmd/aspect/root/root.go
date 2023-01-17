@@ -53,6 +53,7 @@ import (
 	"aspect.build/cli/cmd/aspect/sync"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
+	"aspect.build/cli/docs/help/topics"
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
@@ -136,5 +137,31 @@ func NewCmd(
 		cmd.AddCommand(support.NewDefaultCmd())
 	}
 
+	// ### "Additional help topic commands" which are not runnable
+	// https://pkg.go.dev/github.com/spf13/cobra#Command.IsAdditionalHelpTopicCommand
+	cmd.AddCommand(&cobra.Command{
+		Use:   "target-syntax",
+		Short: "Explains the syntax for specifying targets.",
+		Long:  mustReadFile("target-syntax.md"),
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "info-keys",
+		Short: "Displays a list of keys used by the info command.",
+		Long:  mustReadFile("info-keys.md"),
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "tags",
+		Short: "Conventions for tags which are special.",
+		Long:  mustReadFile("tags.md"),
+	})
+
 	return cmd
+}
+
+func mustReadFile(f string) string {
+	result, err := topics.Content.ReadFile(f)
+	if err != nil {
+		panic(fmt.Errorf("Internal error: embed data was not readable: %w", err))
+	}
+	return string(result)
 }
