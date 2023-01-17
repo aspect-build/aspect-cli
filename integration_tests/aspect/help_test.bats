@@ -15,9 +15,14 @@ setup() {
     assert_output --partial "aspect build <target patterns> [flags]"
 }
 
-@test 'aspect help' {
+@test 'aspect with no args should display root help' {
+    run aspect
+    assert_output --partial "Aspect CLI is a better frontend for running bazel" "Common Bazel Commands" "Commands only in Aspect CLI" "Other Bazel Built-in Commands" "Additional Commands" "Additional help topics"
+}
+
+@test 'aspect help with no args should display root help' {
     run aspect help
-    assert_output --partial "Available Commands:" "flags-as-proto"
+    assert_output --partial "Aspect CLI is a better frontend for running bazel" "Common Bazel Commands" "Commands only in Aspect CLI" "Other Bazel Built-in Commands" "Additional Commands" "Additional help topics"
 }
 
 @test 'aspect help target-syntax' {
@@ -30,7 +35,6 @@ setup() {
     assert_output --partial "bazel-bin"
 }
 
-
 @test 'aspect help tags' {
     run aspect help tags
     assert_output --partial "exclusive"
@@ -39,6 +43,6 @@ setup() {
 @test 'aspect help flags-as-proto' {
     run --separate-stderr aspect help flags-as-proto
     aspect_output=$output
-    run --separate-stderr $BAZEL_BINARY --nosystem_rc --nohome_rc help flags-as-proto
+    run --separate-stderr "$BAZEL_BINARY" --nosystem_rc --nohome_rc help flags-as-proto
     assert_equal "$output" "$aspect_output"
 }

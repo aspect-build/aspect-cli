@@ -9,7 +9,6 @@ go_library(
     importpath = "aspect.build/cli/cmd/aspect/help",
     visibility = ["//visibility:public"],
     deps = [
-        "//docs/help/topics",
         "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",
         "//pkg/bazel",
