@@ -23,7 +23,7 @@ import (
 	"path"
 	"path/filepath"
 
-	yaml "gopkg.in/yaml.v2"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -99,7 +99,7 @@ type Parser interface {
 
 type parser struct {
 	ioutilReadFile      func(filename string) ([]byte, error)
-	yamlUnmarshalStrict func(in []byte, out interface{}) (err error)
+	yamlUnmarshalStrict func(y []byte, o interface{}, opts ...yaml.JSONOpt) error
 	yamlMarshal         func(in interface{}) (out []byte, err error)
 }
 
