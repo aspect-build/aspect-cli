@@ -328,7 +328,7 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 		// If we were not bootstrapped by bazelisk we must still check if .bazeliskrc has an aspect bootstrap configured.
 		bazeliskBazelVersion := bazelisk.GetConfig(useBazelVersionEnv)
 		bazeliskAspectBaseUrl := bazelisk.GetConfig(core.BaseURLEnv)
-		bazeliskBootstrapConfigured := len(bazeliskAspectBaseUrl) != 0 && (strings.HasPrefix("aspect/", bazeliskBazelVersion) || strings.Contains(bazeliskAspectBaseUrl, "aspect.build/"))
+		bazeliskBootstrapConfigured := len(bazeliskAspectBaseUrl) != 0 && (strings.HasPrefix(bazeliskBazelVersion, "aspect/") || strings.HasPrefix(bazeliskBazelVersion, "aspect-cli/") || strings.Contains(bazeliskAspectBaseUrl, "aspect.build/") || strings.Contains(bazeliskAspectBaseUrl, "/aspect-build/"))
 		if bazeliskBootstrapConfigured {
 			splits := strings.Split(bazeliskBazelVersion, "/")
 			bazeliskAspectVersion := splits[len(splits)-1]
