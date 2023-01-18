@@ -21,7 +21,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspect/version"
 	"aspect.build/cli/pkg/bazel"
@@ -35,7 +34,6 @@ func NewDefaultCmd() *cobra.Command {
 
 func NewCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
 	v := version.New(streams)
-	v.BuildInfo = *buildinfo.Current()
 
 	cmd := &cobra.Command{
 		Use:     "version",

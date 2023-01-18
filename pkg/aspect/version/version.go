@@ -34,7 +34,8 @@ type Version struct {
 
 func New(streams ioutils.Streams) *Version {
 	return &Version{
-		Streams: streams,
+		Streams:   streams,
+		BuildInfo: *buildinfo.Current(),
 	}
 }
 

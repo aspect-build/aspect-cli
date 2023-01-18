@@ -109,11 +109,10 @@ func (b *bazel) WithEnv(env []string) Bazel {
 	return b
 }
 
-func (*bazel) createRepositories() *core.Repositories {
+func createRepositories() *core.Repositories {
 	gcs := &repositories.GCSRepo{}
 	gitHub := repositories.CreateGitHubRepo(core.GetEnvOrConfig("BAZELISK_GITHUB_TOKEN"))
-	// Fetch LTS releases, release candidates and Bazel-at-commits from GCS, forks and rolling releases from GitHub.
-	// TODO(https://github.com/bazelbuild/bazelisk/issues/228): get rolling releases from GCS, too.
+	// Fetch LTS releases, release candidates, rolling releases and Bazel-at-commits from GCS, forks from GitHub.
 	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
 }
 
@@ -127,7 +126,7 @@ func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string) (bool
 	bazelisk.getBazelVersion()
 
 	if bazelisk.AspectShouldReenter {
-		repos := b.createRepositories()
+		repos := createRepositories()
 		exitCode, err := bazelisk.Run(args, repos, streams, b.env, nil)
 		return true, exitCode, err
 	}
@@ -135,11 +134,27 @@ func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string) (bool
 	return false, 0, nil
 }
 
+func GetAspectVersions() ([]string, error) {
+	return GetBazelVersions("aspect-build/aspect-cli")
+}
+
+func GetBazelVersions(bazelFork string) ([]string, error) {
+	repos := createRepositories()
+
+	userCacheDir, err := UserCacheDir()
+	if err != nil {
+		return nil, err
+	}
+	aspectCacheDir := filepath.Join(userCacheDir, "aspect")
+
+	return repos.Fork.GetVersions(aspectCacheDir, bazelFork)
+}
+
 func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...string) (int, error) {
 	// Prepend startup flags
 	command = append(startupFlags, command...)
 
-	repos := b.createRepositories()
+	repos := createRepositories()
 
 	bazelisk := NewBazelisk(b.workspaceRoot)
 
@@ -170,7 +185,7 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user cache dir: %w", err)
 	}
-	tmpdir := path.Join(userCacheDir, ".aspect/cli-flags-as-proto")
+	tmpdir := path.Join(userCacheDir, "aspect", "cli-flags-as-proto")
 	err = os.MkdirAll(tmpdir, os.ModePerm)
 	if err != nil {
 		return nil, fmt.Errorf("failed write create directory %s: %w", tmpdir, err)
