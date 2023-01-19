@@ -1,12 +1,5 @@
 "Declare dependencies for bzlmod, see https://bazel.build/build/bzlmod"
 
-module(
-    name = "__main__",
-    # Placeholder version number.
-    # If you don't have other Bazel projects which depend on this one, you can leave this alone.
-    version = "0.0.0",
-)
-
 # Example bazel dependency:
 # bazel_dep(name = "aspect_bazel_lib",   version = "1.18.0")
 
