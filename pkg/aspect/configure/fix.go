@@ -18,7 +18,6 @@ package configure
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -35,7 +34,7 @@ func fixFile(c *config.Config, f *rule.File) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o777); err != nil {
 		return false, err
 	}
-	if err := ioutil.WriteFile(outPath, newContent, 0o666); err != nil {
+	if err := os.WriteFile(outPath, newContent, 0o666); err != nil {
 		return false, err
 	}
 	f.Content = newContent

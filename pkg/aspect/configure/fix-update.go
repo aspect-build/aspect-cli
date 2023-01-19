@@ -19,7 +19,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -406,7 +406,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		}
 	}
 	if uc.patchPath != "" {
-		if err := ioutil.WriteFile(uc.patchPath, uc.patchBuffer.Bytes(), 0o666); err != nil {
+		if err := os.WriteFile(uc.patchPath, uc.patchBuffer.Bytes(), 0o666); err != nil {
 			return nil, err
 		}
 	}
@@ -521,12 +521,17 @@ func findOutputPath(c *config.Config, f *rule.File) string {
 	}
 	outputDir := filepath.Join(baseDir, filepath.FromSlash(f.Pkg))
 	defaultOutputPath := filepath.Join(outputDir, c.DefaultBuildFileName())
-	files, err := ioutil.ReadDir(outputDir)
+	files, err := os.ReadDir(outputDir)
 	if err != nil {
 		// Ignore error. Directory probably doesn't exist.
 		return defaultOutputPath
 	}
-	outputPath := rule.MatchBuildFileName(outputDir, c.ValidBuildFileNames, files)
+	infos := make([]fs.FileInfo, 0, len(files))
+	for _, f := range files {
+		info, _ := f.Info() // We ignore the error here because we know the file exists.
+		infos = append(infos, info)
+	}
+	outputPath := rule.MatchBuildFileName(outputDir, c.ValidBuildFileNames, infos)
 	if outputPath == "" {
 		return defaultOutputPath
 	}
