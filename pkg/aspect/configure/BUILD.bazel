@@ -1,7 +1,5 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
-# gazelle:resolve go github.com/bazelbuild/bazel-gazelle/internal/wspace @bazel_gazelle//internal/wspace
-
 go_library(
     name = "configure",
     srcs = [
@@ -20,7 +18,6 @@ go_library(
         "//pkg/ioutils",
         "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//flag:go_default_library",
-        "@bazel_gazelle//internal/wspace",
         "@bazel_gazelle//label:go_default_library",
         "@bazel_gazelle//language:go_default_library",
         "@bazel_gazelle//language/go:go_default_library",

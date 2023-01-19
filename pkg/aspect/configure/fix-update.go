@@ -28,7 +28,6 @@ import (
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	gzflag "github.com/bazelbuild/bazel-gazelle/flag"
-	"github.com/bazelbuild/bazel-gazelle/internal/wspace"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/merger"
@@ -137,7 +136,7 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 	// dependency resolution for Go.
 	// TODO(jayconrod): Go-specific code should be moved to language/go.
 	if ucr.repoConfigPath == "" {
-		ucr.repoConfigPath = wspace.FindWORKSPACEFile(c.RepoRoot)
+		ucr.repoConfigPath = findWORKSPACEFile(c.RepoRoot)
 	}
 	repoConfigFile, err := rule.LoadWorkspaceFile(ucr.repoConfigPath, "")
 	if err != nil && !os.IsNotExist(err) {
@@ -165,7 +164,7 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 
 	// If the repo configuration file is not WORKSPACE, also load WORKSPACE
 	// and any declared macro files so we can apply fixes.
-	workspacePath := wspace.FindWORKSPACEFile(c.RepoRoot)
+	workspacePath := findWORKSPACEFile(c.RepoRoot)
 	var workspace *rule.File
 	if ucr.repoConfigPath == workspacePath {
 		workspace = repoConfigFile
@@ -455,7 +454,7 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 
 	for _, f := range uc.workspaceFiles {
 		merger.FixLoads(f, loads)
-		workspaceFile := wspace.FindWORKSPACEFile(c.RepoRoot)
+		workspaceFile := findWORKSPACEFile(c.RepoRoot)
 
 		if f.Path == workspaceFile {
 			removeLegacyGoRepository(f)
@@ -580,4 +579,12 @@ func appendOrMergeKindMapping(mappedLoads []rule.LoadInfo, mappedKind config.Map
 		Name:    mappedKind.KindLoad,
 		Symbols: []string{mappedKind.KindName},
 	})
+}
+
+func findWORKSPACEFile(root string) string {
+	pathWithExt := filepath.Join(root, "WORKSPACE.bazel")
+	if _, err := os.Stat(pathWithExt); err == nil {
+		return pathWithExt
+	}
+	return filepath.Join(root, "WORKSPACE")
 }
