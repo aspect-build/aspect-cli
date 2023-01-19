@@ -20,14 +20,14 @@ package client
 
 import (
 	"fmt"
-	"github.com/fatih/color"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/fatih/color"
 )
 
 var (
@@ -101,7 +101,7 @@ func downloadFile(originURL, destDir, destFile string, mode fs.FileMode) (string
 	destinationPath := filepath.Join(destDir, destFile)
 
 	if _, err := os.Stat(destinationPath); err != nil {
-		tmpfile, err := ioutil.TempFile(destDir, "download")
+		tmpfile, err := os.CreateTemp(destDir, "download")
 		if err != nil {
 			return "", fmt.Errorf("could not create temporary file: %v", err)
 		}
