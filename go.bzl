@@ -417,10 +417,10 @@ def deps():
         version = "v0.9.0",
     )
     go_repository(
-        name = "com_github_masterminds_semver",
-        importpath = "github.com/Masterminds/semver",
-        sum = "h1:H65muMkzWKEuNDnfl9d70GUjFniHKHRbFPGBuZ3QEww=",
-        version = "v1.5.0",
+        name = "com_github_masterminds_semver_v3",
+        importpath = "github.com/Masterminds/semver/v3",
+        sum = "h1:3MEsd0SM6jqZojhjLWWeBY+Kcjy9i6MQAeY7YgDP83g=",
+        version = "v3.2.0",
     )
 
     go_repository(
