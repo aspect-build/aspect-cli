@@ -9,7 +9,6 @@ go_library(
         ".bazelrc_",
         ".bazelversion_",
         "BUILD.bazel_",
-        "MODULE.bazel_",
         "WORKSPACE.bazel_",
     ],
     importpath = "aspect.build/cli/pkg/aspect/init/template",
