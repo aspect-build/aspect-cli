@@ -23,13 +23,13 @@ import (
 	"path"
 	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/docs/bazelrc"
 	"aspect.build/cli/pkg/aspect/init/template"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
-	"github.com/Masterminds/semver"
 	"github.com/fatih/color"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
@@ -62,13 +62,13 @@ func (runner *Init) lookupAspectVersion() (string, error) {
 	}
 
 	// if we fail to get the latest release of Aspect CLI then fallback to stamping the current version
-	versionMeta, err := semver.NewVersion(bi.Release)
+	versionWithMeta, err := semver.NewVersion(bi.Release)
 	if err != nil {
 		return "", fmt.Errorf("Could not determine latest aspect release and failed to parse current version '%s' semver: %w", bi.Release, err)
 	}
 
 	// throw away metadata
-	version, err := versionMeta.SetMetadata("")
+	version, err := versionWithMeta.SetMetadata("")
 	if err != nil {
 		return "", fmt.Errorf("Could not determine latest aspect release and failed to parse current version '%s' semver: %w", bi.Release, err)
 	}
