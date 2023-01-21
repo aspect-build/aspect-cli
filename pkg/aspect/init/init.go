@@ -29,6 +29,7 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
+
 	semver "github.com/Masterminds/semver/v3"
 	"github.com/fatih/color"
 	"github.com/manifoldco/promptui"
