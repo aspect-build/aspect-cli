@@ -154,6 +154,11 @@ func NewCmd(
 		Short: "Conventions for tags which are special.",
 		Long:  mustReadFile("tags.md"),
 	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "directives",
+		Short: "Special comments in BUILD files which instruct Aspect CLI behaviors",
+		Long:  mustReadFile("directives.md"),
+	})
 
 	return cmd
 }
