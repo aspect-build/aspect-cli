@@ -34,9 +34,26 @@ func NewCmd(streams ioutils.Streams, languages map[string]language.Language) *co
 	v := configure.New(streams, languages)
 
 	cmd := &cobra.Command{
-		Use:     "configure",
-		Short:   "Update BUILD files for JavaScript, TypeScript, Go and Protobuf",
-		Long:    "Generates and updates BUILD files from sources for JavaScript, TypeScript, Go and Protobuf.",
+		Use:   "configure",
+		Short: "Auto-configure Bazel by updating BUILD files",
+		Long: `configure generates and updates BUILD files from source code.
+
+It is named after the "make configure" workflow which is typical in C++ projects, using
+[autoconf](https://www.gnu.org/software/autoconf/).
+
+configure is non-destructive: hand-edits to BUILD files are generally preserved.
+You can use a ` + "`#keep`" + ` directive to force the tool to leave existing BUILD contents alone.
+Run 'aspect help directives' for more documentation on directives.
+
+So far these languages are supported:
+- Go and Protocol Buffers, thanks to code from [gazelle]
+- JavaScript (including TypeScript)
+
+configure is based on [gazelle]. We are very grateful to the authors of that software.
+The advantage of configure in Aspect CLI is that you don't need to compile the tooling before running it.
+
+[gazelle]: https://github.com/bazelbuild/bazel-gazelle
+`,
 		GroupID: "aspect",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{

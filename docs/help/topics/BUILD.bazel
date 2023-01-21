@@ -4,6 +4,7 @@ go_library(
     name = "topics",
     srcs = ["doc.go"],
     embedsrcs = [
+        "directives.md",
         "info-keys.md",
         "tags.md",
         "target-syntax.md",
