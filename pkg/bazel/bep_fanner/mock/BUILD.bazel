@@ -1,0 +1,32 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_file")
+load("@bazel_gomock//:gomock.bzl", "gomock")
+
+gomock(
+    name = "mock_bep_fanner",
+    out = "mock_bep_fanner_go",
+    interfaces = ["BEPFanner"],
+    library = "//pkg/bazel/bep_fanner",
+    package = "mock",
+    visibility = ["//visibility:private"],
+)
+
+write_source_file(
+    name = "write_mock_bep_fanner",
+    in_file = ":mock_bep_fanner",
+    out_file = "mock_bep_fanner.go",
+    visibility = ["//visibility:private"],
+)
+
+go_library(
+    name = "mock",
+    srcs = ["mock_bep_fanner.go"],
+    importpath = "aspect.build/cli/pkg/bazel/bep_fanner/mock",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/bazel/bep_fanner",
+        "//third_party/googleapis/google/devtools/build/v1:build",
+        "@com_github_golang_mock//gomock",
+        "@org_golang_google_protobuf//types/known/emptypb",
+    ],
+)

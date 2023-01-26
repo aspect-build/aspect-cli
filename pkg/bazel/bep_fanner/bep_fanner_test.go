@@ -50,7 +50,7 @@ var _ = Describe("BEP Collector", func() {
 	})
 
 	It("should forward PublishLifecycleEvent to the configured streams", func() {
-		bepFanner := NewBEPFanner()
+		bepFanner := NewBEPFanner().(*bepFanner)
 		configStreams := []*ConfigStream{
 			NewConfigStream("foo", nil),
 			NewConfigStream("bar", nil),
@@ -75,7 +75,7 @@ var _ = Describe("BEP Collector", func() {
 	})
 
 	It("should forward three build events to the configured streams", func() {
-		bepFanner := NewBEPFanner()
+		bepFanner := NewBEPFanner().(*bepFanner)
 		configStreams := []*ConfigStream{
 			NewConfigStream("foo", nil),
 			NewConfigStream("bar", nil),
