@@ -1,6 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
-load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_file")
 
 go_library(
     name = "license",
@@ -27,7 +27,8 @@ copy_file(
     out = "_LICENSE",
 )
 
-write_source_files(
+write_source_file(
     name = "write_license_file",
-    files = {"LICENSE": ":_LICENSE"},
+    in_file = ":_LICENSE",
+    out_file = "LICENSE",
 )
