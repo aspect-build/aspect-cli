@@ -33,25 +33,28 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// BEPFanner satisfies the PublishBuildEventServer interface and fans out the build events to the
+// BEPFanner is the interface for the Build Event Protocol fanner.
+type BEPFanner interface {
+	buildv1.PublishBuildEventServer
+	Configure(configStreams []*ConfigStream) error
+}
+
+// bepFanner satisfies the PublishBuildEventServer interface and fans out the build events to the
 // upstream servers.
-type BEPFanner struct {
+type bepFanner struct {
 	logStreams ioutils.Streams
 	bepClients []bepClient
 }
 
 // NewBEPFanner creates a new BEPFanner.
-func NewBEPFanner() *BEPFanner {
-	return &BEPFanner{
+func NewBEPFanner() BEPFanner {
+	return &bepFanner{
 		logStreams: ioutils.DefaultStreams,
 	}
 }
 
-// Ensure that BEPFanner satisfies the PublishBuildEventServer interface.
-var _ buildv1.PublishBuildEventServer = (*BEPFanner)(nil)
-
 // Configure sets up the BEPFanner to fan out the build events to the provided upstream servers.
-func (s *BEPFanner) Configure(configStreams []*ConfigStream) error {
+func (s *bepFanner) Configure(configStreams []*ConfigStream) error {
 	bepClients := make([]bepClient, len(configStreams))
 	for i, configStream := range configStreams {
 		if err := configStream.setup(); err != nil {
@@ -77,7 +80,7 @@ func (s *BEPFanner) Configure(configStreams []*ConfigStream) error {
 
 // PublishLifecycleEvent implements the gRPC PublishLifecycleEvent service. It forwards the events
 // to the upstream servers and returns the responses to the client.
-func (s *BEPFanner) PublishLifecycleEvent(
+func (s *bepFanner) PublishLifecycleEvent(
 	ctx context.Context,
 	req *buildv1.PublishLifecycleEventRequest,
 ) (*empty.Empty, error) {
@@ -104,7 +107,7 @@ func (s *BEPFanner) PublishLifecycleEvent(
 
 // PublishBuildToolEventStream implements the gRPC PublishBuildToolEventStream service. It forwards
 // the events to the upstream servers and returns the responses to the client.
-func (s *BEPFanner) PublishBuildToolEventStream(
+func (s *bepFanner) PublishBuildToolEventStream(
 	stream buildv1.PublishBuildEvent_PublishBuildToolEventStreamServer,
 ) error {
 	ctx := stream.Context()
@@ -157,7 +160,7 @@ func (s *BEPFanner) PublishBuildToolEventStream(
 
 // publishBuildToolEventStream_connectStreams connects to all upstream servers and starts the stream
 // forwarding.
-func (s *BEPFanner) publishBuildToolEventStream_connectStreams(ctx context.Context, errors chan<- error) []streamClient {
+func (s *bepFanner) publishBuildToolEventStream_connectStreams(ctx context.Context, errors chan<- error) []streamClient {
 	streams := make([]streamClient, len(s.bepClients))
 	for i, client := range s.bepClients {
 		clientStream, err := client.PublishBuildToolEventStream(ctx)
