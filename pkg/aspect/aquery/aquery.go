@@ -17,6 +17,8 @@
 package aquery
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -56,7 +58,7 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *AQuery {
 	}
 }
 
-func (runner *AQuery) Run(cmd *cobra.Command, args []string) error {
+func (runner *AQuery) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 	nonFlags, flags, err := bazel.ParseOutBazelFlags(cmd.CalledAs(), args)
 	if err != nil {
 		return err

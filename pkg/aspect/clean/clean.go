@@ -18,6 +18,7 @@ package clean
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -88,7 +89,7 @@ func NewDefault(streams ioutils.Streams, bzl bazel.Bazel) *Clean {
 }
 
 // Run runs the aspect build command.
-func (runner *Clean) Run(cmd *cobra.Command, args []string) error {
+func (runner *Clean) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 	cleanAll := false
 
 	// TODO: move separation of flags and arguments to a high level of abstraction

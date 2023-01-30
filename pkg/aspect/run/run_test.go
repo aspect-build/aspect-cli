@@ -17,6 +17,7 @@
 package run_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -28,6 +29,7 @@ import (
 	"aspect.build/cli/pkg/aspecterrors"
 	bazel_mock "aspect.build/cli/pkg/bazel/mock"
 	"aspect.build/cli/pkg/ioutils"
+	"aspect.build/cli/pkg/plugin/system/bep"
 	bep_mock "aspect.build/cli/pkg/plugin/system/bep/mock"
 )
 
@@ -58,8 +60,10 @@ func TestRun(t *testing.T) {
 			Errors().
 			Times(1)
 
+		ctx := bep.InjectBESBackend(context.Background(), besBackend)
+
 		b := run.New(streams, bzl)
-		err := b.Run([]string{"//..."}, besBackend)
+		err := b.Run(ctx, nil, []string{"//..."})
 
 		g.Expect(err).To(MatchError(expectErr))
 	})
@@ -91,8 +95,10 @@ func TestRun(t *testing.T) {
 			}).
 			Times(1)
 
+		ctx := bep.InjectBESBackend(context.Background(), besBackend)
+
 		b := run.New(streams, bzl)
-		err := b.Run([]string{"//..."}, besBackend)
+		err := b.Run(ctx, nil, []string{"//..."})
 
 		g.Expect(err).To(MatchError(&aspecterrors.ExitError{ExitCode: 1}))
 		g.Expect(stderr.String()).To(Equal("Error: failed to run 'aspect run' command: error 1\nError: failed to run 'aspect run' command: error 2\n"))
@@ -120,8 +126,10 @@ func TestRun(t *testing.T) {
 			Errors().
 			Times(1)
 
+		ctx := bep.InjectBESBackend(context.Background(), besBackend)
+
 		b := run.New(streams, bzl)
-		err := b.Run([]string{"//..."}, besBackend)
+		err := b.Run(ctx, nil, []string{"//..."})
 
 		g.Expect(err).To(BeNil())
 	})

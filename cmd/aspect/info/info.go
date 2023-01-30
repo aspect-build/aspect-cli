@@ -21,17 +21,16 @@ import (
 
 	"aspect.build/cli/pkg/aspect/info"
 	"aspect.build/cli/pkg/aspect/root/flags"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams)
+	return NewCmd(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
 }
 
-func NewCmd(streams ioutils.Streams) *cobra.Command {
-	v := info.New(streams)
-
+func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "info [keys]",
 		Short: "Display runtime info about the bazel server",
@@ -59,7 +58,7 @@ See also 'aspect version' for more detailed version information about the tool.`
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			v.Run,
+			info.New(streams, bzl).Run,
 		),
 	}
 	return cmd

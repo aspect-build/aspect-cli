@@ -17,6 +17,7 @@
 package version
 
 import (
+	"context"
 	"fmt"
 
 	"aspect.build/cli/buildinfo"
@@ -28,28 +29,27 @@ import (
 
 type Version struct {
 	ioutils.Streams
-
+	bzl       bazel.Bazel
 	BuildInfo buildinfo.BuildInfo
 }
 
-func New(streams ioutils.Streams) *Version {
+func New(streams ioutils.Streams, bzl bazel.Bazel) *Version {
 	return &Version{
 		Streams:   streams,
+		bzl:       bzl,
 		BuildInfo: *buildinfo.Current(),
 	}
 }
 
-func (runner *Version) Run(cmd *cobra.Command, bzl bazel.Bazel, args []string) error {
+func (runner *Version) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
 	// Determine the format
 	format := buildinfo.ConventionalFormat
-	if cmd != nil {
-		gnuFormat, err := cmd.Flags().GetBool("gnu_format")
-		if err != nil {
-			return fmt.Errorf("failed to get value of --gnu_format flag: %w", err)
-		}
-		if gnuFormat {
-			format = buildinfo.GNUFormat
-		}
+	gnuFormat, err := cmd.Flags().GetBool("gnu_format")
+	if err != nil {
+		return fmt.Errorf("failed to get value of --gnu_format flag: %w", err)
+	}
+	if gnuFormat {
+		format = buildinfo.GNUFormat
 	}
 
 	// Write the version
@@ -58,15 +58,9 @@ func (runner *Version) Run(cmd *cobra.Command, bzl bazel.Bazel, args []string) e
 		return err
 	}
 
-	// If we do not have a Bazel workspace, do not bother trying to get additional version
-	// information.
-	if bzl == nil {
-		return nil
-	}
-
 	bazelCmd := []string{"version"}
 	bazelCmd = append(bazelCmd, args...)
-	if exitCode, err := bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
+	if exitCode, err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

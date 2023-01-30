@@ -17,12 +17,14 @@
 package coverage
 
 import (
+	"context"
 	"fmt"
 
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system/bep"
+	"github.com/spf13/cobra"
 )
 
 type Coverage struct {
@@ -37,11 +39,11 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *Coverage {
 	}
 }
 
-func (runner *Coverage) Run(args []string, besBackend bep.BESBackend) (exitErr error) {
+func (runner *Coverage) Run(ctx context.Context, _ *cobra.Command, args []string) (exitErr error) {
+	besBackend := bep.BESBackendFromContext(ctx)
 	besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
 	bazelCmd := []string{"coverage", besBackendFlag}
 	bazelCmd = append(bazelCmd, args...)
-
 	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 
 	// Process the subscribers errors before the Bazel one.

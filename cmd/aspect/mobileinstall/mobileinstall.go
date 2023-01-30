@@ -21,15 +21,16 @@ import (
 
 	"aspect.build/cli/pkg/aspect/mobileinstall"
 	"aspect.build/cli/pkg/aspect/root/flags"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams)
+	return NewCmd(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
 }
 
-func NewCmd(streams ioutils.Streams) *cobra.Command {
+func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mobile-install",
 		Short: "Install targets to mobile devices",
@@ -42,7 +43,7 @@ Documentation: <https://bazel.build/docs/user-manual#mobile-install>`,
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			mobileinstall.New(streams).Run,
+			mobileinstall.New(streams, bzl).Run,
 		),
 	}
 

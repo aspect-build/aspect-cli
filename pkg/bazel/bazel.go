@@ -38,6 +38,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+var workingDirectory string
+
+func init() {
+	wd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	workingDirectory = wd
+}
+
 // Global mutable state!
 // This is for performance, avoiding a lookup of the possible startup flags for every
 // instance of a bazel struct.
@@ -50,8 +60,6 @@ var allFlags map[string]*flags.FlagInfo
 // We know the specified startup flags will be constant for the lifetime of an `aspect`
 // cli execution.
 var startupFlags []string
-
-type BazelProvider func() (Bazel, error)
 
 type Bazel interface {
 	WithEnv(env []string) Bazel
@@ -69,39 +77,32 @@ type bazel struct {
 	env           []string
 }
 
-func New(workspaceRoot string) (Bazel, error) {
+func New(workspaceRoot string) Bazel {
 	// If we are given a non-empty workspace root, make sure that it is an absolute path. We support
 	// an empty workspace root for Bazel commands that support being run outside of a workspace
 	// (e.g. version).
 	absWkspRoot, err := filepath.Abs(workspaceRoot)
 	if err != nil {
-		return nil, err
+		// If we can't get the absolute path, it's a programming logic error.
+		panic(err)
 	}
 	return &bazel{
 		workspaceRoot: absWkspRoot,
-	}, nil
+	}
 }
 
-func NoWorkspaceRoot() Bazel {
-	// This is a special case where we run Bazel without a workspace (e.g., version).
-	return &bazel{}
-}
+// This is a special case where we run Bazel without a workspace (e.g., version).
+var NoWorkspaceRoot Bazel = &bazel{}
 
-func Find(startDir string) (Bazel, error) {
+var WorkspaceFromWd Bazel = findWorkspace(workingDirectory)
+
+func findWorkspace(startDir string) Bazel {
 	finder := workspace.DefaultFinder
 	wr, err := finder.Find(startDir)
 	if err != nil {
-		return NoWorkspaceRoot(), nil
+		return NoWorkspaceRoot
 	}
 	return New(wr)
-}
-
-func FindFromWd() (Bazel, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-	return Find(wd)
 }
 
 func (b *bazel) WithEnv(env []string) Bazel {

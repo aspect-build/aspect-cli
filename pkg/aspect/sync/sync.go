@@ -28,23 +28,21 @@ import (
 
 type Sync struct {
 	ioutils.Streams
+	bzl bazel.Bazel
 }
 
-func New(streams ioutils.Streams) *Sync {
+func New(streams ioutils.Streams, bzl bazel.Bazel) *Sync {
 	return &Sync{
 		Streams: streams,
+		bzl:     bzl,
 	}
 }
 
 func (runner *Sync) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"sync"}
 	bazelCmd = append(bazelCmd, args...)
-	bzl, err := bazel.FindFromWd()
-	if err != nil {
-		return err
-	}
 
-	if exitCode, err := bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
+	if exitCode, err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

@@ -17,8 +17,6 @@
 package cquery
 
 import (
-	"context"
-
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/cquery"
@@ -29,10 +27,10 @@ import (
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCQueryCommand(ioutils.DefaultStreams, bazel.FindFromWd)
+	return NewCQueryCommand(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
 }
 
-func NewCQueryCommand(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
+func NewCQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cquery [expression |  <preset name> [arg ...]]",
 		Short: "Query the dependency graph, honoring configuration flags",
@@ -57,14 +55,7 @@ Documentation: <https://bazel.build/query/cquery>
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				bzl, err := bzlProvider()
-				if err != nil {
-					return err
-				}
-				q := cquery.New(streams, bzl, true)
-				return q.Run(cmd, args)
-			},
+			cquery.New(streams, bzl, true).Run,
 		),
 	}
 

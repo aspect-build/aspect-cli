@@ -17,6 +17,7 @@
 package query_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -66,7 +67,7 @@ func TestQuery(t *testing.T) {
 		q.Prefs = viper
 
 		cmd := &cobra.Command{Use: "query"}
-		g.Expect(q.Run(cmd, []string{"why", "//cmd/aspect/query:query", "@com_github_bazelbuild_bazelisk//core:go_default_library"})).Should(Succeed())
+		g.Expect(q.Run(context.Background(), cmd, []string{"why", "//cmd/aspect/query:query", "@com_github_bazelbuild_bazelisk//core:go_default_library"})).Should(Succeed())
 	})
 
 	// TODO: fix this test
@@ -139,7 +140,7 @@ func TestQuery(t *testing.T) {
 		viper.SetConfigFile(cfg.Name())
 		q.Prefs = viper
 		cmd := &cobra.Command{Use: "query"}
-		err = q.Run(cmd, []string{"why"})
+		err = q.Run(context.Background(), cmd, []string{"why"})
 		g.Expect(err).To(BeNil())
 	})
 
@@ -211,7 +212,7 @@ func TestQuery(t *testing.T) {
 		q.Prefs = viper
 
 		cmd := &cobra.Command{Use: "query"}
-		err = q.Run(cmd, []string{"why"})
+		err = q.Run(context.Background(), cmd, []string{"why"})
 		g.Expect(err).To(MatchError(expectedError))
 	})
 
@@ -307,7 +308,7 @@ func TestQuery(t *testing.T) {
 		viper.SetConfigFile(cfg.Name())
 		q.Prefs = viper
 		cmd := &cobra.Command{Use: "query"}
-		err = q.Run(cmd, []string{})
+		err = q.Run(context.Background(), cmd, []string{})
 		g.Expect(err).To(BeNil())
 	})
 

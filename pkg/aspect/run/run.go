@@ -17,12 +17,14 @@
 package run
 
 import (
+	"context"
 	"fmt"
 
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system/bep"
+	"github.com/spf13/cobra"
 )
 
 // Run represents the aspect run command.
@@ -44,7 +46,8 @@ func New(
 
 // Run runs the aspect run command, calling `bazel run` with a local Build
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
-func (runner *Run) Run(args []string, besBackend bep.BESBackend) (exitErr error) {
+func (runner *Run) Run(ctx context.Context, _ *cobra.Command, args []string) (exitErr error) {
+	besBackend := bep.BESBackendFromContext(ctx)
 	besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
 	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, nil, append([]string{"run", besBackendFlag}, args...)...)
 
