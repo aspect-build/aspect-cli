@@ -30,8 +30,6 @@ func NewDefaultCmd() *cobra.Command {
 }
 
 func NewCmd(streams ioutils.Streams) *cobra.Command {
-	v := pro.New(streams)
-
 	cmd := &cobra.Command{
 		Use:     "pro",
 		Short:   "Enable Aspect CLI Pro features",
@@ -41,7 +39,7 @@ func NewCmd(streams ioutils.Streams) *cobra.Command {
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			v.Run,
+			pro.New(streams).Run,
 		),
 	}
 	return cmd

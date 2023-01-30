@@ -21,15 +21,16 @@ import (
 
 	"aspect.build/cli/pkg/aspect/printaction"
 	"aspect.build/cli/pkg/aspect/root/flags"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams)
+	return NewCmd(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
 }
 
-func NewCmd(streams ioutils.Streams) *cobra.Command {
+func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "print_action <targets>",
 		Short: "Print the command line args for compiling a file",
@@ -49,7 +50,7 @@ specify targets.`,
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			printaction.New(streams).Run,
+			printaction.New(streams, bzl).Run,
 		),
 	}
 

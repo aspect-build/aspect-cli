@@ -21,15 +21,16 @@ import (
 
 	"aspect.build/cli/pkg/aspect/modquery"
 	"aspect.build/cli/pkg/aspect/root/flags"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams)
+	return NewCmd(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
 }
 
-func NewCmd(streams ioutils.Streams) *cobra.Command {
+func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "modquery <query_type> [<args> ...]",
 		Short: "Query the Bzlmod external dependency graph",
@@ -66,7 +67,7 @@ will change in the near future.`,
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			modquery.New(streams).Run,
+			modquery.New(streams, bzl).Run,
 		),
 	}
 

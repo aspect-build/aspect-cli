@@ -21,17 +21,16 @@ import (
 
 	"aspect.build/cli/pkg/aspect/license"
 	"aspect.build/cli/pkg/aspect/root/flags"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, "")
+	return NewCmd(ioutils.DefaultStreams, bazel.WorkspaceFromWd, "")
 }
 
-func NewCmd(streams ioutils.Streams, licenseText string) *cobra.Command {
-	v := license.New(streams, licenseText)
-
+func NewCmd(streams ioutils.Streams, bzl bazel.Bazel, licenseText string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "license",
 		Short:   "Prints the license of this software.",
@@ -41,7 +40,7 @@ func NewCmd(streams ioutils.Streams, licenseText string) *cobra.Command {
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			v.Run,
+			license.New(streams, bzl, licenseText).Run,
 		),
 	}
 	return cmd

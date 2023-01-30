@@ -17,8 +17,6 @@
 package run
 
 import (
-	"context"
-
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
@@ -27,7 +25,6 @@ import (
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
-	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
 // NewDefaultCmd creates a new run cobra command with the default
@@ -36,14 +33,14 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewCmd(
 		ioutils.DefaultStreams,
 		pluginSystem,
-		bazel.FindFromWd,
+		bazel.WorkspaceFromWd,
 	)
 }
 
 func NewCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
-	bzlProvider bazel.BazelProvider,
+	bzl bazel.Bazel,
 ) *cobra.Command {
 	return &cobra.Command{
 		Use:   "run [--run_under=command-prefix] <target> -- [args for program ...]",
@@ -83,15 +80,7 @@ directory of the process. You'd typically do this at the very beginning of the p
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.RunHooksInterceptor(streams),
 			},
-			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				bzl, err := bzlProvider()
-				if err != nil {
-					return err
-				}
-				r := run.New(streams, bzl)
-				besBackend := bep.BESBackendFromContext(ctx)
-				return r.Run(args, besBackend)
-			},
+			run.New(streams, bzl).Run,
 		),
 	}
 }

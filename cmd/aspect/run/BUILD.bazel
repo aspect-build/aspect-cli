@@ -12,7 +12,6 @@ go_library(
         "//pkg/interceptors",
         "//pkg/ioutils",
         "//pkg/plugin/system",
-        "//pkg/plugin/system/bep",
         "@com_github_spf13_cobra//:cobra",
     ],
 )

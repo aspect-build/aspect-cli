@@ -28,11 +28,13 @@ import (
 
 type Outputs struct {
 	ioutils.Streams
+	bzl bazel.Bazel
 }
 
-func New(streams ioutils.Streams) *Outputs {
+func New(streams ioutils.Streams, bzl bazel.Bazel) *Outputs {
 	return &Outputs{
 		Streams: streams,
+		bzl:     bzl,
 	}
 }
 
@@ -45,11 +47,7 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 	if len(args) > 1 {
 		mnemonicFilter = args[1]
 	}
-	bzl, err := bazel.FindFromWd()
-	if err != nil {
-		return err
-	}
-	agc, err := bzl.AQuery(query)
+	agc, err := runner.bzl.AQuery(query)
 	if err != nil {
 		return err
 	}

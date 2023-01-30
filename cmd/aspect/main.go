@@ -35,10 +35,7 @@ func main() {
 		_ = os.Chdir(wd)
 	}
 
-	bzl, err := bazel.FindFromWd()
-	if err != nil {
-		aspecterrors.HandleError(err)
-	}
+	bzl := bazel.WorkspaceFromWd
 
 	if err := config.Load(os.Args); err != nil {
 		aspecterrors.HandleError(err)

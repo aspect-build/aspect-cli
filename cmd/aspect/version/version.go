@@ -17,8 +17,6 @@
 package version
 
 import (
-	"context"
-
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
@@ -29,12 +27,10 @@ import (
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, bazel.FindFromWd)
+	return NewCmd(ioutils.DefaultStreams, bazel.NoWorkspaceRoot)
 }
 
-func NewCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
-	v := version.New(streams)
-
+func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "version",
 		Short:   "Print the versions of Aspect CLI and Bazel",
@@ -44,13 +40,7 @@ func NewCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Com
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				bzl, err := bzlProvider()
-				if err != nil {
-					return err
-				}
-				return v.Run(cmd, bzl, args)
-			},
+			version.New(streams, bzl).Run,
 		),
 	}
 	return cmd

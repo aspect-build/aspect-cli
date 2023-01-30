@@ -28,23 +28,21 @@ import (
 
 type AnalyzeProfile struct {
 	ioutils.Streams
+	bzl bazel.Bazel
 }
 
-func New(streams ioutils.Streams) *AnalyzeProfile {
+func New(streams ioutils.Streams, bzl bazel.Bazel) *AnalyzeProfile {
 	return &AnalyzeProfile{
 		Streams: streams,
+		bzl:     bzl,
 	}
 }
 
 func (runner *AnalyzeProfile) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"analyze-profile"}
 	bazelCmd = append(bazelCmd, args...)
-	bzl, err := bazel.FindFromWd()
-	if err != nil {
-		return err
-	}
 
-	if exitCode, err := bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
+	if exitCode, err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

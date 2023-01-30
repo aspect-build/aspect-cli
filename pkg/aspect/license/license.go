@@ -31,20 +31,21 @@ import (
 
 type License struct {
 	ioutils.Streams
-
+	bzl         bazel.Bazel
 	licenseText string
 }
 
 //go:embed LICENSE
 var defaultLicense string
 
-func New(streams ioutils.Streams, licenseText string) *License {
+func New(streams ioutils.Streams, bzl bazel.Bazel, licenseText string) *License {
 	if len(licenseText) == 0 {
 		licenseText = defaultLicense
 	}
 
 	return &License{
 		Streams:     streams,
+		bzl:         bzl,
 		licenseText: licenseText,
 	}
 }
@@ -97,12 +98,8 @@ func (runner *License) Run(ctx context.Context, _ *cobra.Command, args []string)
 
 	bazelCmd := []string{"license"}
 	bazelCmd = append(bazelCmd, args...)
-	bzl, err := bazel.FindFromWd()
-	if err != nil {
-		return err
-	}
 
-	if exitCode, err := bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
+	if exitCode, err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
 		err = &aspecterrors.ExitError{
 			Err:      err,
 			ExitCode: exitCode,

@@ -17,6 +17,7 @@
 package clean_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -55,6 +56,6 @@ func TestClean(t *testing.T) {
 			Return(0, nil)
 
 		b := clean.New(streams, bzl)
-		g.Expect(b.Run(nil, []string{})).Should(Succeed())
+		g.Expect(b.Run(context.Background(), nil, []string{})).Should(Succeed())
 	})
 }

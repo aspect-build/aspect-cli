@@ -16,21 +16,17 @@ import (
 func NewDefaultFlagsAsProtoCmd() *cobra.Command {
 	return NewFlagsAsProtoCmd(
 		ioutils.DefaultStreams,
-		bazel.FindFromWd,
+		bazel.WorkspaceFromWd,
 	)
 }
 
-func NewFlagsAsProtoCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
+func NewFlagsAsProtoCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := cobra.Command{
 		Use: "flags-as-proto",
 		RunE: interceptors.Run([]interceptors.Interceptor{
 			flags.FlagsInterceptor(streams),
 		}, func(ctx context.Context, cmd *cobra.Command, args []string) error {
 			bazelCmd := []string{"help", "flags-as-proto"}
-			bzl, err := bazel.FindFromWd()
-			if err != nil {
-				return err
-			}
 
 			if exitCode, err := bzl.RunCommand(streams, nil, bazelCmd...); exitCode != 0 {
 				err = &aspecterrors.ExitError{

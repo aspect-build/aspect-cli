@@ -17,8 +17,6 @@
 package test
 
 import (
-	"context"
-
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
@@ -27,7 +25,6 @@ import (
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
-	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
 // NewDefaultCmd creates a new test cobra command with the default
@@ -36,14 +33,14 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewCmd(
 		ioutils.DefaultStreams,
 		pluginSystem,
-		bazel.FindFromWd,
+		bazel.WorkspaceFromWd,
 	)
 }
 
 func NewCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
-	bzlProvider bazel.BazelProvider,
+	bzl bazel.Bazel,
 ) *cobra.Command {
 	return &cobra.Command{
 		Use:   "test [--build_tests_only] <target pattern> [<target pattern> ...]",
@@ -80,15 +77,7 @@ See 'aspect help target-syntax' for details and examples on how to specify targe
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.TestHooksInterceptor(streams),
 			},
-			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				bzl, err := bzlProvider()
-				if err != nil {
-					return err
-				}
-				t := test.New(streams, bzl)
-				besBackend := bep.BESBackendFromContext(ctx)
-				return t.Run(args, besBackend)
-			},
+			test.New(streams, bzl).Run,
 		),
 	}
 }

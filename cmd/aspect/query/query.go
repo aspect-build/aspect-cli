@@ -17,8 +17,6 @@
 package query
 
 import (
-	"context"
-
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/query"
@@ -29,10 +27,10 @@ import (
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewQueryCommand(ioutils.DefaultStreams, bazel.FindFromWd)
+	return NewQueryCommand(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
 }
 
-func NewQueryCommand(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
+func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query [expression |  <preset name> [arg ...]]",
 		Short: "Query the dependency graph, ignoring configuration flags",
@@ -49,14 +47,7 @@ Documentation: <https://bazel.build/query/quickstart>`,
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				bzl, err := bzlProvider()
-				if err != nil {
-					return err
-				}
-				q := query.New(streams, bzl, true)
-				return q.Run(cmd, args)
-			},
+			query.New(streams, bzl, true).Run,
 		),
 	}
 

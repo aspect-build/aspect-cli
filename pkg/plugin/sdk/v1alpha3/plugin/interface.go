@@ -153,6 +153,7 @@ type CommandManager interface {
 // are provided by plugins.
 type PluginCommandManager struct {
 	commands map[string]CustomCommandFn
+	bzl      bazel.Bazel
 }
 
 // Save satisfies CommandManager.
@@ -170,11 +171,7 @@ func (cm *PluginCommandManager) Save(commands []*Command) error {
 
 // Execute satisfies CommandManager.
 func (cm *PluginCommandManager) Execute(command string, ctx context.Context, args []string) error {
-	bzl, err := bazel.FindFromWd()
-	if err != nil {
-		return err
-	}
-	return cm.commands[command](ctx, args, bzl)
+	return cm.commands[command](ctx, args, cm.bzl)
 }
 
 var _ CommandManager = (*PluginCommandManager)(nil)

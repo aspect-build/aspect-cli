@@ -17,6 +17,7 @@
 package aquery_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -57,7 +58,7 @@ func TestQuery(t *testing.T) {
 		}
 
 		cmd := &cobra.Command{Use: "aquery"}
-		g.Expect(q.Run(cmd, []string{"why", "//cmd/aspect/query:query", "@com_github_bazelbuild_bazelisk//core:go_default_library"})).Should(Succeed())
+		g.Expect(q.Run(context.Background(), cmd, []string{"why", "//cmd/aspect/query:query", "@com_github_bazelbuild_bazelisk//core:go_default_library"})).Should(Succeed())
 	})
 
 	t.Run("query can be selected by default and will prompt for inputs", func(t *testing.T) {
@@ -105,7 +106,7 @@ func TestQuery(t *testing.T) {
 			},
 		}
 		cmd := &cobra.Command{Use: "aquery"}
-		err := q.Run(cmd, []string{"why"})
+		err := q.Run(context.Background(), cmd, []string{"why"})
 		g.Expect(err).To(BeNil())
 	})
 
@@ -152,7 +153,7 @@ func TestQuery(t *testing.T) {
 			},
 		}
 		cmd := &cobra.Command{Use: "aquery"}
-		err := q.Run(cmd, []string{"why"})
+		err := q.Run(context.Background(), cmd, []string{"why"})
 		g.Expect(err).To(MatchError(expectedError))
 	})
 
@@ -224,7 +225,7 @@ func TestQuery(t *testing.T) {
 			},
 		}
 		cmd := &cobra.Command{Use: "aquery"}
-		err := q.Run(cmd, []string{})
+		err := q.Run(context.Background(), cmd, []string{})
 		g.Expect(err).To(BeNil())
 	})
 }

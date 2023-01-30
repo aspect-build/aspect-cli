@@ -17,8 +17,6 @@
 package aquery
 
 import (
-	"context"
-
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/aquery"
@@ -29,10 +27,10 @@ import (
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewAQueryCommand(ioutils.DefaultStreams, bazel.FindFromWd)
+	return NewAQueryCommand(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
 }
 
-func NewAQueryCommand(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
+func NewAQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "aquery [expression |  <preset name> [arg ...]]",
 		Short: "Query the action graph",
@@ -57,14 +55,7 @@ $ aspect aquery 'inputs(".*cpp", deps(//src/target_a))'`,
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				bzl, err := bzlProvider()
-				if err != nil {
-					return err
-				}
-				q := aquery.New(streams, bzl, true)
-				return q.Run(cmd, args)
-			},
+			aquery.New(streams, bzl, true).Run,
 		),
 	}
 

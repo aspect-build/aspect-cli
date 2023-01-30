@@ -17,8 +17,6 @@
 package clean
 
 import (
-	"context"
-
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/clean"
@@ -30,11 +28,11 @@ import (
 
 // NewDefaultCmd creates a new default clean cobra command.
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, bazel.FindFromWd)
+	return NewCmd(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
 }
 
 // NewCmd creates a new clean cobra command.
-func NewCmd(streams ioutils.Streams, bzlProvider bazel.BazelProvider) *cobra.Command {
+func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clean [--expunge] [all]",
 		Short: "Remove the output tree",
@@ -78,14 +76,7 @@ Workaround inconistent state:
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				bzl, err := bzlProvider()
-				if err != nil {
-					return err
-				}
-				c := clean.NewDefault(streams, bzl)
-				return c.Run(cmd, args)
-			},
+			clean.NewDefault(streams, bzl).Run,
 		),
 	}
 

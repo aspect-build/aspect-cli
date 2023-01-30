@@ -28,7 +28,7 @@ import (
 )
 
 func ProOnly(ctx context.Context, cmd *cobra.Command, args []string) error {
-	return fmt.Errorf("The support command is available in Aspect CLI Pro.. Run 'aspect pro' to enable Pro features.")
+	return fmt.Errorf("The support command is available in Aspect CLI Pro. Run 'aspect pro' to enable Pro features.")
 }
 
 func NewDefaultCmd() *cobra.Command {

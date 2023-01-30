@@ -17,8 +17,6 @@
 package build
 
 import (
-	"context"
-
 	"github.com/spf13/cobra"
 
 	"aspect.build/cli/pkg/aspect/build"
@@ -27,7 +25,6 @@ import (
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
-	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
 // NewDefaultCmd creates a new build cobra command with the default
@@ -36,7 +33,7 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewCmd(
 		ioutils.DefaultStreams,
 		pluginSystem,
-		bazel.FindFromWd,
+		bazel.WorkspaceFromWd,
 	)
 }
 
@@ -44,7 +41,7 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 func NewCmd(
 	streams ioutils.Streams,
 	pluginSystem system.PluginSystem,
-	bzlProvider bazel.BazelProvider,
+	bzl bazel.Bazel,
 ) *cobra.Command {
 	return &cobra.Command{
 		Use:   "build <target patterns>",
@@ -83,15 +80,7 @@ The target pattern may be further filtered using the flag
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.BuildHooksInterceptor(streams),
 			},
-			func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-				bzl, err := bzlProvider()
-				if err != nil {
-					return err
-				}
-				b := build.New(streams, bzl)
-				besBackend := bep.BESBackendFromContext(ctx)
-				return b.Run(args, besBackend)
-			},
+			build.New(streams, bzl).Run,
 		),
 	}
 }

@@ -34,13 +34,9 @@ import (
 )
 
 func main() {
-	bzl, err := bazel.FindFromWd()
-	if err != nil {
-		log.Fatal(err)
-	}
+	bzl := bazel.WorkspaceFromWd
 
-	err = bzl.InitializeBazelFlags()
-	if err != nil {
+	if err := bzl.InitializeBazelFlags(); err != nil {
 		log.Fatal(err)
 	}
 
