@@ -13,5 +13,3 @@ build --reuse_sandbox_directories
 # Avoid this flag being enabled by remote_download_minimal or remote_download_toplevel
 # See https://meroton.com/blog/bazel-6-errors-build-without-the-bytes/
 build --noexperimental_action_cache_store_output_metadata
-fetch --noexperimental_action_cache_store_output_metadata
-query --noexperimental_action_cache_store_output_metadata
