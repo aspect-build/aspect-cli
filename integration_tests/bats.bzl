@@ -9,15 +9,15 @@ def bats_test(srcs = [], **kwargs):
     """
     data = kwargs.pop("data", [])
     args = kwargs.pop("args", [])
-    tests = ["$(locations %s)" % src for src in srcs]
+    tests = ["$(execpaths %s)" % src for src in srcs]
     helpers_dirs = [
         "@bats_assert//:dir",
         "@bats_support//:dir",
     ]
     env = kwargs.pop("env", {})
 
-    env["BATS_LIB_PATH"] = ":".join(["$(locations %s)/.." % helper_dir for helper_dir in helpers_dirs])
-    env["BIN"] = "$(location @bats_core//:bin)"
+    env["BATS_LIB_PATH"] = ":".join(["$(execpaths %s)/.." % helper_dir for helper_dir in helpers_dirs])
+    env["BIN"] = "$(execpath @bats_core//:bin)"
 
     native.sh_test(
         srcs = [
