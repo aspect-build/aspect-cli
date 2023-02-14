@@ -41,7 +41,7 @@ message PromptRunReq {
   // depending on the options.
   string default = 2;
   // AllowEdit lets the user edit the default value. If false, any key press
-	// other than <Enter> automatically clears the default value.
+  // other than <Enter> automatically clears the default value.
   bool allow_edit = 3;
   // Mask is an optional rune that sets which character to display instead of
   // the entered characters. This allows hiding private information like
