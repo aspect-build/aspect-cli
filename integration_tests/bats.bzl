@@ -13,6 +13,7 @@ def bats_test(srcs = [], **kwargs):
     helpers_dirs = [
         "@bats_assert//:dir",
         "@bats_support//:dir",
+        "@bats_detik//:dir",
     ]
     env = kwargs.pop("env", {})
 
@@ -24,10 +25,11 @@ def bats_test(srcs = [], **kwargs):
             "//integration_tests:runner.sh",
         ],
         deps = [
-            "@bats_core//:bats_core",
             "@bats_assert//:bats_assert",
-            "@bats_support//:bats_support",
+            "@bats_core//:bats_core",
             "@bats_core//:bin",
+            "@bats_detik//:bats_detik",
+            "@bats_support//:bats_support",
         ] + helpers_dirs,
         env = env,
         args = tests + args,
