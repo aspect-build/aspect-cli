@@ -1,4 +1,20 @@
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+# keep up-to-date with Aspect recommended .bazelrc settings
+write_source_files(
+    name = "aspect_recommended_bazel_options",
+    files = {
+        "bazel5.bazelrc": "@aspect_bazel_lib//.aspect/bazelrc:bazel5.bazelrc",
+        "bazel6.bazelrc": "@aspect_bazel_lib//.aspect/bazelrc:bazel6.bazelrc",
+        "ci.bazelrc": "@aspect_bazel_lib//.aspect/bazelrc:ci.bazelrc",
+        "convenience.bazelrc": "@aspect_bazel_lib//.aspect/bazelrc:convenience.bazelrc",
+        "correctness.bazelrc": "@aspect_bazel_lib//.aspect/bazelrc:correctness.bazelrc",
+        "debug.bazelrc": "@aspect_bazel_lib//.aspect/bazelrc:debug.bazelrc",
+        "javascript.bazelrc": "@aspect_bazel_lib//.aspect/bazelrc:javascript.bazelrc",
+        "performance.bazelrc": "@aspect_bazel_lib//.aspect/bazelrc:performance.bazelrc",
+    },
+)
 
 go_library(
     name = "bazelrc",
@@ -8,6 +24,7 @@ go_library(
     ],
     embedsrcs = [
         ".gitignore",
+        "bazel5.bazelrc",
         "bazel6.bazelrc",
         "ci.bazelrc",
         "convenience.bazelrc",
@@ -15,7 +32,6 @@ go_library(
         "debug.bazelrc",
         "javascript.bazelrc",
         "performance.bazelrc",
-        "bazel5.bazelrc",
     ],
     importpath = "aspect.build/cli/docs/bazelrc",
     visibility = ["//visibility:public"],
