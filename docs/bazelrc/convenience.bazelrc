@@ -19,10 +19,7 @@ build --show_result=20
 # identifiers are `linux`, `macos`, `windows`, `freebsd`, and `openbsd`. Enabling this flag is
 # equivalent to using `--config=linux` on Linux, `--config=windows` on Windows, etc.
 # Docs: https://bazel.build/reference/command-line-reference#flag--enable_platform_specific_config
-build --enable_platform_specific_config
-fetch --enable_platform_specific_config
-test --enable_platform_specific_config
-query --enable_platform_specific_config
+common --enable_platform_specific_config
 
 # Output a heap dump if an OOM is thrown during a Bazel invocation
 # (including OOMs due to `--experimental_oom_more_eagerly_threshold`).
