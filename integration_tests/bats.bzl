@@ -17,8 +17,8 @@ def bats_test(srcs = [], **kwargs):
     ]
     env = kwargs.pop("env", {})
 
-    env["BATS_LIB_PATH"] = ":".join(["$(execpaths %s)/.." % helper_dir for helper_dir in helpers_dirs])
-    env["BIN"] = "$(execpath @bats_core//:bin)"
+    env["BATS_LIB_PATH"] = ":".join(["$(rootpaths %s)/.." % helper_dir for helper_dir in helpers_dirs])
+    env["BIN"] = "$(rootpath @bats_core//:bin)"
 
     native.sh_test(
         srcs = [
