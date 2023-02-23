@@ -19,6 +19,8 @@ bats_test(
     srcs = ["flags_test.bats"],
     data = data,
     env = env,
+    # Bazel-in-bazel requires network
+    tags = ["requires-network"],
 )
 
 bats_test(

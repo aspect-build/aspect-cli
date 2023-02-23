@@ -33,6 +33,7 @@ go_test(
     name = "bazel_test",
     srcs = ["bazel_test.go"],
     embed = [":bazel"],
+    # Reaches out to https://www.googleapis.com/storage/v1/b/bazel/o?delimiter=/
     tags = ["requires-network"],
     deps = [
         "//pkg/ioutils",
