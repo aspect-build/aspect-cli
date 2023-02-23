@@ -33,6 +33,7 @@ go_test(
     name = "bazel_test",
     srcs = ["bazel_test.go"],
     embed = [":bazel"],
+    tags = ["requires-network"],
     deps = [
         "//pkg/ioutils",
         "@com_github_onsi_gomega//:gomega",
