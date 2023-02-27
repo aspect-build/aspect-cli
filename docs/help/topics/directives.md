@@ -22,6 +22,7 @@ Directives specific to JavaScript (and TypeScript) are as follows:
 | `js_tests_naming_convention`    | `{dirname}_tests`           | _name_              |
 | `js_files`                      | `**/*.{ts,tsx}`             | _glob_              |
 | `js_test_files`                 | `**/*.{spec,test}.{ts,tsx}` | _glob_              |
+| `js_npm_package_target_name`    | `{dirname}`                 | ...                 |
 
 All JavaScript directives are specified via `gazelle` such as:
 
