@@ -18,8 +18,8 @@ Directives specific to JavaScript (and TypeScript) are as follows:
 | `js_ignore_imports`             |                             | _glob_              |
 | `js_resolve`                    |                             | _glob_ _target_     |
 | `js_validate_import_statements` | `true`                      | `true\|false`       |
-| `js_project_naming_convention`  | `$package_name$`            | _name_              |
-| `js_tests_naming_convention`    | `$package_name$_tests`      | _name_              |
+| `js_project_naming_convention`  | `{dirname}`                 | _name_              |
+| `js_tests_naming_convention`    | `{dirname}_tests`           | _name_              |
 | `js_files`                      | `**/*.{ts,tsx}`             | _glob_              |
 | `js_test_files`                 | `**/*.{spec,test}.{ts,tsx}` | _glob_              |
 
