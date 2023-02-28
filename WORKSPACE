@@ -6,10 +6,7 @@ http_archive(
     name = "com_google_protobuf",
     sha256 = "d0f5f605d0d656007ce6c8b5a82df3037e1d8fe8b121ed42e536f569dec16113",
     strip_prefix = "protobuf-3.14.0",
-    urls = [
-        "https://mirror.bazel.build/github.com/protocolbuffers/protobuf/archive/v3.14.0.tar.gz",
-        "https://github.com/protocolbuffers/protobuf/archive/v3.14.0.tar.gz",
-    ],
+    urls = ["https://mirror.bazel.build/github.com/protocolbuffers/protobuf/archive/v3.14.0.tar.gz"],
 )
 
 load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
@@ -18,17 +15,17 @@ protobuf_deps()
 
 http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "695d319362b227725e4daa60d863b4d1969b167889902511f1fd3051cea1071f",
-    strip_prefix = "bazel-lib-1.16.3",
-    url = "https://github.com/aspect-build/bazel-lib/archive/refs/tags/v1.16.3.tar.gz",
+    sha256 = "b4cd1114874ab15f794134eefbc254eb89d3e1de640bf4a11f2f402e886ad29e",
+    strip_prefix = "bazel-lib-1.27.2",
+    url = "https://github.com/aspect-build/bazel-lib/releases/download/v1.27.2/bazel-lib-v1.27.2.tar.gz",
 )
 
 # Needed in //release/version_file.bzl for @aspect_rules_js//js/private:expand_template.bzl
 http_archive(
     name = "aspect_rules_js",
-    sha256 = "f58d7be1bb0e4b7edb7a0085f969900345f5914e4e647b4f0d2650d5252aa87d",
-    strip_prefix = "rules_js-1.8.0",
-    url = "https://github.com/aspect-build/rules_js/archive/refs/tags/v1.8.0.tar.gz",
+    sha256 = "1aa0ab76d1f9520bb8993e2d84f82da2a9c87da1e6e8d121dbb4c857a292c2cd",
+    strip_prefix = "rules_js-1.20.1",
+    url = "https://github.com/aspect-build/rules_js/archive/refs/tags/v1.20.1.tar.gz",
 )
 
 http_archive(
@@ -45,10 +42,7 @@ http_archive(
     patch_args = ["-p1"],
     patches = ["//patches:rules_go.patch"],
     sha256 = "16e9fca53ed6bd4ff4ad76facc9b7b651a89db1689a2877d6fd7b82aa824e366",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.34.0/rules_go-v0.34.0.zip",
-        "https://github.com/bazelbuild/rules_go/releases/download/v0.34.0/rules_go-v0.34.0.zip",
-    ],
+    urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.34.0/rules_go-v0.34.0.zip"],
 )
 
 load("@io_bazel_rules_go//extras:embed_data_deps.bzl", "go_embed_data_dependencies")
@@ -61,16 +55,16 @@ go_embed_data_dependencies()
 go_register_toolchains(
     # TODO: re-enable no-go once versions are synced with silo
     # nogo = "@//:nogo",
-    version = "1.19.1",
+    version = "1.19.3",
 )
 
 http_archive(
     name = "bazel_gazelle",
-    sha256 = "501deb3d5695ab658e82f6f6f549ba681ea3ca2a5fb7911154b5aa45596183fa",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/bazel-gazelle/releases/download/v0.26.0/bazel-gazelle-v0.26.0.tar.gz",
-        "https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.26.0/bazel-gazelle-v0.26.0.tar.gz",
-    ],
+    sha256 = "ecba0f04f96b4960a5b250c8e8eeec42281035970aa8852dda73098274d14a1d",
+    # Ensure this version always matches the version of @com_github_bazelbuild_bazel_gazelle set in go.bzl.
+    # :notice: Care should be taken when upgrading gazelle since we have vendored & modified the gazelle main
+    # package in the configure command.
+    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.29.0/bazel-gazelle-v0.29.0.tar.gz"],
 )
 
 http_archive(
