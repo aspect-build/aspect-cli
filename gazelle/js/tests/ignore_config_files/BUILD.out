@@ -1,0 +1,33 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_generation_mode none
+
+# Generated .ts
+genrule(
+    name = "gen-1",
+    outs = ["subdir/nested/generated.ts"],
+    cmd = "echo 'export const subbuild = 4' > $@",
+)
+
+genrule(
+    name = "gen-2",
+    outs = ["subdir/generated.ts"],
+    cmd = "echo 'export const subbuild = 4' > $@",
+)
+
+ts_project(
+    name = "ignore_config_files",
+    srcs = [
+        "main.ts",
+        "r2.ts",
+        "subdir/index.ts",
+        "subdir/nested/index.ts",
+        "subdir/not.nested-ig.ts",
+        "subdir2/direct-ig.ts",
+        "subdir2/not.nested-ig.ts",
+    ],
+    deps = [
+        ":subdir/generated.ts",
+        ":subdir/nested/generated.ts",
+    ],
+)

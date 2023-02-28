@@ -1,0 +1,21 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "pnpm",
+    srcs = [
+        "parser.go",
+        "workspace.go",
+    ],
+    importpath = "aspect.build/cli/gazelle/js/pnpm",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@bazel_gazelle//label:go_default_library",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "pnpm_test",
+    srcs = ["parser_test.go"],
+    embed = [":pnpm"],
+)

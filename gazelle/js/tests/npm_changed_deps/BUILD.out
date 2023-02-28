@@ -1,0 +1,16 @@
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "npm_changed_deps",
+    srcs = [
+        "lib.ts",
+        "main.ts",
+    ],
+    deps = [
+        ":node_modules/jquery",
+        ":node_modules/lodash",
+    ],
+)
+
+npm_link_all_packages(name = "node_modules")

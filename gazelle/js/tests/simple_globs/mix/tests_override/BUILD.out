@@ -1,0 +1,22 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_test_files **/*.test.ts
+
+ts_project(
+    name = "tests_override",
+    srcs = [
+        "b.ts",
+        "no.mock.ts",
+    ],
+)
+
+ts_project(
+    name = "tests_override_tests",
+    testonly = True,
+    srcs = [
+        "b.test.ts",
+        "no.test.ts",
+        "sub/c.test.ts",
+    ],
+    deps = [":tests_override"],
+)

@@ -23,15 +23,14 @@ import (
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-	"github.com/bazelbuild/bazel-gazelle/language"
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, map[string]language.Language{})
+	return NewCmd(ioutils.DefaultStreams)
 }
 
-func NewCmd(streams ioutils.Streams, languages map[string]language.Language) *cobra.Command {
-	v := configure.New(streams, languages)
+func NewCmd(streams ioutils.Streams) *cobra.Command {
+	v := configure.New(streams)
 
 	cmd := &cobra.Command{
 		Use:   "configure",

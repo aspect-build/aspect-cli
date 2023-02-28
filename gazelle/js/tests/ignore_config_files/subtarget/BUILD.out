@@ -1,0 +1,21 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# Generated .ts
+genrule(
+    name = "gen-1",
+    outs = ["generated.ts"],
+    cmd = "echo 'export const subtarget = 3' > $@",
+)
+
+ts_project(
+    name = "subtarget",
+    srcs = [
+        "index.ts",
+        "r2.ts",
+    ],
+    deps = [
+        ":generated.ts",
+        "//:ignore_config_files",
+        "//:subdir/generated.ts",
+    ],
+)

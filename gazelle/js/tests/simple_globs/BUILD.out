@@ -1,0 +1,18 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_generation_mode none
+
+# gazelle:js_files srcs/**/*.ts
+# gazelle:js_test_files tests/**/*.ts
+
+ts_project(
+    name = "simple_globs",
+    srcs = ["srcs/main.ts"],
+)
+
+ts_project(
+    name = "simple_globs_tests",
+    testonly = True,
+    srcs = ["tests/main.ts"],
+    deps = [":simple_globs"],
+)

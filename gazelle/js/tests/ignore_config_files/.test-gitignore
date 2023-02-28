@@ -1,0 +1,15 @@
+# A file by name only in root
+r1.ts
+
+# A file within a subdir ignored by the root
+subdir/direct-ig.ts
+subdir/generated.ts
+
+# Within a sub-BUILD ignored by the root
+subtarget/generated.ts
+
+# Files within any sub
+*/star-ig.ts
+
+# A global glob configured from the root
+**/*.starstar-ig.ts

@@ -1,0 +1,13 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "subproject-index",
+    srcs = ["index.ts"],
+)
+
+ts_project(
+    name = "subproject-index_tests",
+    testonly = True,
+    srcs = ["subdir.spec.ts"],
+    deps = [":subproject-index"],
+)

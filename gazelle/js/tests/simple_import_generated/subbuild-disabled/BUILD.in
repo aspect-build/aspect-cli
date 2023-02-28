@@ -1,0 +1,8 @@
+# gazelle:js disabled
+
+# Generated .ts
+genrule(
+    name = "gen-d",
+    outs = ["d.ts"],
+    cmd = "echo 'export const subbuildDisabled = 5' > $@",
+)

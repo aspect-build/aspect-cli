@@ -1,0 +1,4 @@
+# gazelle:js_generation_mode none
+
+# gazelle:js_ignore_imports jquery
+# gazelle:js_ignore_imports **/*.scss

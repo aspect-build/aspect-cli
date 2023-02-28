@@ -1,0 +1,28 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# Generated .ts
+genrule(
+    name = "gen-ab",
+    outs = [
+        "a.ts",
+        "subdir/b.ts",
+        "subdir/index.ts",
+    ],
+    cmd = "\n".join([
+        "echo 'export const a = 1;' > $(location a.ts)",
+        "echo 'export const b = 2;' > $(location subdir/b.ts)",
+        "echo 'export const index = 3;' > $(location subdir/index.ts)",
+    ]),
+)
+
+ts_project(
+    name = "simple_import_generated",
+    srcs = ["main.ts"],
+    deps = [
+        ":a.ts",
+        ":subdir/b.ts",
+        ":subdir/index.ts",
+        "//subbuild:c.ts",
+        "//subbuild-disabled:d.ts",
+    ],
+)

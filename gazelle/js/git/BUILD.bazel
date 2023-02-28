@@ -1,0 +1,17 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "git",
+    srcs = ["gitignore.go"],
+    importpath = "aspect.build/cli/gazelle/js/git",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_sabhiram_go_gitignore//:go-gitignore",
+    ],
+)
+
+go_test(
+    name = "git_test",
+    srcs = ["gitignore_test.go"],
+    embed = [":git"],
+)

@@ -1,0 +1,13 @@
+# gazelle:js_generation_mode none
+
+# Generated .ts
+genrule(
+    name = "gen-1",
+    outs = ["subdir/nested/generated.ts"],
+    cmd = "echo 'export const subbuild = 4' > $@",
+)
+genrule(
+    name = "gen-2",
+    outs = ["subdir/generated.ts"],
+    cmd = "echo 'export const subbuild = 4' > $@",
+)

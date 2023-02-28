@@ -1,0 +1,16 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_generation_mode none
+
+ts_project(
+    name = "simple_json_import",
+    srcs = [
+        "data.json",
+        "main.ts",
+        "subdir/data.json",
+        "subdir/data2.json",
+        "subdir/oddpaths.ts",
+        "subdir/sub.ts",
+    ],
+    deps = ["//subproject"],
+)

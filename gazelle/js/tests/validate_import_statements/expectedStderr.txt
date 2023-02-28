@@ -1,0 +1,11 @@
+gazelle: Failed to validate dependencies for target "//:validate_import_statements":
+
+Import "bad-import" from "main.ts" is an unknown dependency. Possible solutions:
+	1. Instruct Gazelle to resolve to a known dependency using the gazelle:resolve directive.
+	2. Ignore the dependency using the '# gazelle:js_ignore_imports bad-import' directive.
+	3. Disable Gazelle resolution validation using '# gazelle:js_validate_import_statements false'
+
+Import "bad-import2" from "main.ts" is an unknown dependency. Possible solutions:
+	1. Instruct Gazelle to resolve to a known dependency using the gazelle:resolve directive.
+	2. Ignore the dependency using the '# gazelle:js_ignore_imports bad-import2' directive.
+	3. Disable Gazelle resolution validation using '# gazelle:js_validate_import_statements false'
