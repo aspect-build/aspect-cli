@@ -14,7 +14,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/configure",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/aspect/root/config",
+        "//gazelle/js",
         "//pkg/ioutils",
         "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//flag:go_default_library",

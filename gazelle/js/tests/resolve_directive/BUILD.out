@@ -1,0 +1,21 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_resolve sassy.* :sass_lib
+# gazelle:js_resolve **/*.scss //deep:deep_scss_lib
+
+filegroup(
+    name = "sass_lib",
+)
+
+filegroup(
+    name = "deep_scss_lib",
+)
+
+ts_project(
+    name = "resolve_directive",
+    srcs = ["main.ts"],
+    deps = [
+        ":sass_lib",
+        "//deep:deep_scss_lib",
+    ],
+)

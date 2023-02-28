@@ -1,0 +1,20 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_generation_mode none
+
+ts_project(
+    name = "simple_imports",
+    srcs = [
+        "lib.ts",
+        "main.ts",
+        "subdir/index.ts",
+        "subdir/lib.ts",
+        "subdir/parent-ref.ts",
+        "subdir/self-ref.ts",
+    ],
+    deps = [
+        "//subproject",
+        "//subproject-backref",
+        "//subproject-index",
+    ],
+)

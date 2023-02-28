@@ -1,0 +1,15 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_generation_mode none
+
+# gazelle:js_ignore_imports jquery
+# gazelle:js_ignore_imports **/*.scss
+
+ts_project(
+    name = "ignore_import_directive",
+    srcs = [
+        "main.ts",
+        "subdir/other.ts",
+    ],
+    deps = ["//subproject"],
+)

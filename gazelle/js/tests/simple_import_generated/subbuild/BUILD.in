@@ -1,0 +1,6 @@
+# Generated .ts
+genrule(
+    name = "gen-c",
+    outs = ["c.ts"],
+    cmd = "echo 'export const subbuild = 4' > $@",
+)

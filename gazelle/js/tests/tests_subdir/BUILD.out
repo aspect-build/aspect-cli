@@ -1,0 +1,15 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_generation_mode none
+
+ts_project(
+    name = "tests_subdir",
+    srcs = ["main.ts"],
+)
+
+ts_project(
+    name = "tests_subdir_tests",
+    testonly = True,
+    srcs = ["tests/main.spec.ts"],
+    deps = [":tests_subdir"],
+)

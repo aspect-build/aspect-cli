@@ -1,0 +1,16 @@
+# gazelle:js_generation_mode none
+
+# Simple
+# gazelle:exclude **/*.ig.ts
+
+# Should support sub-directories
+# gazelle:exclude subdir/ignored.ts
+# gazelle:exclude **/sub-ignored.ts
+
+# Sub-directories must be relative to BUILD
+# gazelle:exclude sub-not-ignored.ts
+
+# Should not be able to exclude for a different BUILD
+# gazelle:exclude sub-ignored.ts
+# gazelle:exclude subproject/*
+# gazelle:exclude subproject-included/*

@@ -126,6 +126,7 @@ func NewCmd(
 	cmd.AddCommand(test.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultCmd())
 	cmd.AddCommand(outputs.NewDefaultCmd())
+	cmd.AddCommand(configure.NewDefaultCmd())
 	cmd.SetHelpCommand(help.NewCmd())
 
 	if !buildinfo.Current().IsAspectPro {
@@ -133,7 +134,6 @@ func NewCmd(
 		cmd.AddCommand(license.NewDefaultCmd())
 		cmd.AddCommand(pro.NewDefaultCmd())
 		// Aspect CLI Pro command stubs
-		cmd.AddCommand(configure.NewDefaultCmd())
 		cmd.AddCommand(support.NewDefaultCmd())
 	}
 

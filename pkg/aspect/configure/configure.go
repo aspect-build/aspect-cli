@@ -23,7 +23,7 @@ import (
 	"os"
 	"strings"
 
-	"aspect.build/cli/pkg/aspect/root/config"
+	js "aspect.build/cli/gazelle/js"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
@@ -34,14 +34,11 @@ import (
 
 type Configure struct {
 	ioutils.Streams
-
-	additionalLanguages map[string]language.Language
 }
 
-func New(streams ioutils.Streams, additionalLanguages map[string]language.Language) *Configure {
+func New(streams ioutils.Streams) *Configure {
 	return &Configure{
-		Streams:             streams,
-		additionalLanguages: additionalLanguages,
+		Streams: streams,
 	}
 }
 
@@ -70,34 +67,14 @@ func (runner *Configure) Run(_ context.Context, _ *cobra.Command, args []string)
 		languageKeys = append(languageKeys, "go")
 	}
 
-	for key, language := range runner.additionalLanguages {
-		languages = append(languages, language)
-		languageKeys = append(languageKeys, key)
+	viper.SetDefault("configure.languages.javascript", true)
+	if viper.GetBool("configure.languages.javascript") {
+		languages = append(languages, js.NewLanguage())
+		languageKeys = append(languageKeys, "javascript")
 	}
 
 	if len(languageKeys) != 0 {
 		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(languageKeys, ", "))
-	}
-
-	viper.SetDefault("configure.languages.javascript", true)
-	if viper.GetBool("configure.languages.javascript") && runner.additionalLanguages["javascript"] == nil {
-		// Let the user know that this language is available in Pro
-		workspaceConfigFile, err := config.WorkspaceConfigFile()
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(runner.Streams.Stderr, `
-===============================================================================
-JavaScript and TypeScript BUILD file generation is available in Aspect CLI Pro.
-Run 'aspect pro' to enable Pro features -or- to turn off this message add the
-following lines to %s:
-
-configure:
-  languages:
-    javascript: false
-===============================================================================
-
-`, workspaceConfigFile)
 	}
 
 	if len(languageKeys) == 0 {

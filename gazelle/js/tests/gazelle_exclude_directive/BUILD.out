@@ -1,0 +1,27 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_generation_mode none
+
+# Simple
+# gazelle:exclude **/*.ig.ts
+
+# Should support sub-directories
+# gazelle:exclude subdir/ignored.ts
+# gazelle:exclude **/sub-ignored.ts
+
+# Sub-directories must be relative to BUILD
+# gazelle:exclude sub-not-ignored.ts
+
+# Should not be able to exclude for a different BUILD
+# gazelle:exclude sub-ignored.ts
+# gazelle:exclude subproject/*
+# gazelle:exclude subproject-included/*
+
+ts_project(
+    name = "gazelle_exclude_directive",
+    srcs = [
+        "main.ts",
+        "subdir-included/included-lib.ts",
+        "subdir/sub-not-ignored.ts",
+    ],
+)

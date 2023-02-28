@@ -1,0 +1,18 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "simple_file_exts",
+    srcs = [
+        "typed.ts",
+        "typed.tsx",
+    ],
+)
+
+ts_project(
+    name = "simple_file_exts_tests",
+    testonly = True,
+    srcs = [
+        "typed.spec.ts",
+        "typed.spec.tsx",
+    ],
+)
