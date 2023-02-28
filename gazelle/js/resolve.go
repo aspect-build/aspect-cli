@@ -101,7 +101,23 @@ func (ts *TypeScript) Imports(c *config.Config, r *rule.Rule, f *rule.File) []re
 func (ts *TypeScript) Embeds(r *rule.Rule, from label.Label) []label.Label {
 	BazelLog.Debugf("Embeds '%s' rules", from.String())
 
-	// TODO(jbedard): implement.
+	switch r.Kind() {
+	case TsProjectKind:
+		srcs := r.AttrStrings("srcs")
+		tsEmbeds := make([]label.Label, 0, len(srcs))
+
+		// The compiled .d.ts and .js are accessible as embedded rules
+		for _, src := range srcs {
+			if strings.HasSuffix(src, ".ts") && !strings.HasSuffix(src, "d.ts") {
+				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, strings.ReplaceAll(src, ".ts", ".js")))
+				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, strings.ReplaceAll(src, ".ts", ".d.ts")))
+			}
+		}
+
+		return tsEmbeds
+	}
+
+	// TODO(jbedard): implement other rule kinds
 	return make([]label.Label, 0)
 }
 
