@@ -23,7 +23,7 @@ aspect docs [topic] [flags]
 % aspect docs glossary
 
 # Open the docs for the aspect-build/rules_js ruleset
-% aspect docs rules_js
+% aspect docs aspect_rules_js
 ```
 
 ### Options

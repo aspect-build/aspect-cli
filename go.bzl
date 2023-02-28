@@ -141,6 +141,13 @@ def deps():
         version = "v1.1.1",
     )
     go_repository(
+        name = "com_github_emirpasic_gods",
+        importpath = "github.com/emirpasic/gods",
+        sum = "h1:FXtiHYKDGKCW2KzwZKx0iC0PQmdlorYgdFG9jPXJ1Bc=",
+        version = "v1.18.1",
+    )
+
+    go_repository(
         name = "com_github_envoyproxy_go_control_plane",
         importpath = "github.com/envoyproxy/go-control-plane",
         sum = "h1:xvqufLtNVwAhN8NMyWklVgxnWohi+wtMGQMhtxexlm0=",
@@ -152,6 +159,13 @@ def deps():
         sum = "h1:EQciDnbrYxy13PgWoY8AqoxGiPrpgBZ1R8UNe3ddc+A=",
         version = "v0.1.0",
     )
+    go_repository(
+        name = "com_github_evanw_esbuild",
+        importpath = "github.com/evanw/esbuild",
+        sum = "h1:RMwM8ehohA6RSgWVirjnsZ+u9ttNt0gWfRLYCxUbAoc=",
+        version = "v0.17.10",
+    )
+
     go_repository(
         name = "com_github_fatih_color",
         importpath = "github.com/fatih/color",
@@ -544,11 +558,25 @@ def deps():
         version = "v2.1.0",
     )
     go_repository(
+        name = "com_github_sabhiram_go_gitignore",
+        importpath = "github.com/sabhiram/go-gitignore",
+        sum = "h1:OkMGxebDjyw0ULyrTYWeN0UNCCkmCWfjPnIA2W6oviI=",
+        version = "v0.0.0-20210923224102-525f6e181f06",
+    )
+
+    go_repository(
         name = "com_github_sagikazarmark_crypt",
         importpath = "github.com/sagikazarmark/crypt",
         sum = "h1:REOEXCs/NFY/1jOCEouMuT4zEniE5YoXbvpC5X/TLF8=",
         version = "v0.6.0",
     )
+    go_repository(
+        name = "com_github_sirupsen_logrus",
+        importpath = "github.com/sirupsen/logrus",
+        sum = "h1:trlNQbNUG3OdDrDil03MCb1H2o9nJ1x4/5LYw7byDE0=",
+        version = "v1.9.0",
+    )
+
     go_repository(
         name = "com_github_spf13_afero",
         importpath = "github.com/spf13/afero",
