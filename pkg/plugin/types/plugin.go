@@ -14,5 +14,13 @@
  * limitations under the License.
  */
 
-// Package mock contains generated files.
-package mock
+package types
+
+// PluginConfig represents a plugin entry in the config file.
+type PluginConfig struct {
+	Name       string
+	From       string
+	Version    string
+	LogLevel   string
+	Properties map[string]interface{}
+}

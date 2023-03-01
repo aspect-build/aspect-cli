@@ -25,7 +25,7 @@ message BEPEventCallbackRes {}
 
 message SetupReq {
   bytes properties = 1;
-  File file = 2;
+  File file = 2; // DEPRECATED; plugins should not be aware of the config file path; should be removed in a future SDK version
 }
 
 message File {

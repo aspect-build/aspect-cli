@@ -25,6 +25,7 @@ import (
 
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel/workspace"
+	"aspect.build/cli/pkg/plugin/types"
 	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -262,6 +263,51 @@ func LoadConfigFile(f string) (*viper.Viper, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+func UnmarshalPluginConfig(pluginsConfig interface{}) ([]types.PluginConfig, error) {
+	if pluginsConfig == nil {
+		return []types.PluginConfig{}, nil
+	}
+
+	pluginsList, ok := pluginsConfig.([]interface{})
+
+	if !ok {
+		return nil, fmt.Errorf("expected plugins config to be a list")
+	}
+
+	plugins := []types.PluginConfig{}
+
+	for i, p := range pluginsList {
+		pluginsMap, ok := p.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("expected plugins config entry %v to be a map", i)
+		}
+
+		name, ok := pluginsMap["name"].(string)
+		if !ok {
+			return nil, fmt.Errorf("expected plugins config entry %v to have a 'name' attribute", i)
+		}
+
+		from, ok := pluginsMap["from"].(string)
+		if !ok {
+			return nil, fmt.Errorf("expected plugins config entry '%v' to have a 'from' attribute", name)
+		}
+
+		version, _ := pluginsMap["version"].(string)
+		logLevel, _ := pluginsMap["log_level"].(string)
+		properties, _ := pluginsMap["properties"].(map[string]interface{})
+
+		plugins = append(plugins, types.PluginConfig{
+			Name:       name,
+			From:       from,
+			Version:    version,
+			LogLevel:   logLevel,
+			Properties: properties,
+		})
+	}
+
+	return plugins, nil
 }
 
 func exists(name string) (bool, error) {

@@ -31,12 +31,12 @@ import (
 	"google.golang.org/grpc"
 	"sigs.k8s.io/yaml"
 
+	"aspect.build/cli/pkg/aspect/root/config"
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/client"
-	"aspect.build/cli/pkg/plugin/loader"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
@@ -44,7 +44,7 @@ import (
 // PluginSystem is the interface that defines all the methods for the aspect CLI
 // plugin system intended to be used by the Core.
 type PluginSystem interface {
-	Configure(streams ioutils.Streams) error
+	Configure(streams ioutils.Streams, pluginsConfig interface{}) error
 	TearDown()
 	RegisterCustomCommands(cmd *cobra.Command) error
 	BESBackendInterceptor() interceptors.Interceptor
@@ -54,8 +54,6 @@ type PluginSystem interface {
 }
 
 type pluginSystem struct {
-	finder        loader.Finder
-	parser        loader.Parser
 	clientFactory client.Factory
 	plugins       *PluginList
 	promptRunner  ioutils.PromptRunner
@@ -65,8 +63,6 @@ type pluginSystem struct {
 // PluginSystem interface.
 func NewPluginSystem() PluginSystem {
 	return &pluginSystem{
-		finder:        loader.NewFinder(),
-		parser:        loader.NewParser(),
 		clientFactory: client.NewFactory(),
 		plugins:       &PluginList{},
 		promptRunner:  ioutils.NewPromptRunner(),
@@ -74,20 +70,16 @@ func NewPluginSystem() PluginSystem {
 }
 
 // Configure configures the plugin system.
-func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
-	aspectpluginsPath, err := ps.finder.Find()
+func (ps *pluginSystem) Configure(streams ioutils.Streams, pluginsConfig interface{}) error {
+	plugins, err := config.UnmarshalPluginConfig(pluginsConfig)
 	if err != nil {
-		return fmt.Errorf("failed to find plugin: %w", err)
-	}
-	aspectplugins, err := ps.parser.Parse(aspectpluginsPath)
-	if err != nil {
-		return fmt.Errorf("failed to parse plugin: %w", err)
+		return fmt.Errorf("failed to configure plugin system: %w", err)
 	}
 
 	g := new(errgroup.Group)
 	var mutex sync.Mutex
 
-	for _, p := range aspectplugins {
+	for _, p := range plugins {
 		p := p
 
 		g.Go(func() error {
@@ -104,8 +96,7 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 				return err
 			}
 
-			aspectPluginFile := plugin.NewAspectPluginFile(aspectpluginsPath)
-			setupConfig := plugin.NewSetupConfig(aspectPluginFile, properties)
+			setupConfig := plugin.NewSetupConfig(properties)
 			if err := aspectplugin.Setup(setupConfig); err != nil {
 				return err
 			}

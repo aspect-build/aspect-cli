@@ -55,7 +55,7 @@ func command(bzl bazel.Bazel) error {
 	cmd := &cobra.Command{Use: "docgen"}
 
 	pluginSystem := system.NewPluginSystem()
-	if err := pluginSystem.Configure(ioutils.DefaultStreams); err != nil {
+	if err := pluginSystem.Configure(ioutils.DefaultStreams, nil); err != nil {
 		return err
 	}
 
