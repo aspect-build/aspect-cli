@@ -51,24 +51,27 @@ func Load(args []string) error {
 		return err
 	}
 
-	workspaceConfig, err := LoadWorkspaceConfig()
-	if err != nil {
-		// Ignore err if it is a workspace.NotFoundError
-		if _, ok := err.(*workspace.NotFoundError); !ok {
-			return err
+	if configFlagValues.WorkspaceConfig {
+		workspaceConfig, err := LoadWorkspaceConfig()
+		if err != nil {
+			// Ignore err if it is a workspace.NotFoundError
+			if _, ok := err.(*workspace.NotFoundError); !ok {
+				return fmt.Errorf("failed to load workspace config file: %w", err)
+			}
 		}
-	}
-	if workspaceConfig != nil && configFlagValues.WorkspaceConfig {
-		if err := viper.MergeConfigMap(workspaceConfig.AllSettings()); err != nil {
-			return err
+		// Might be nil if err was workspace.NotFoundError
+		if workspaceConfig != nil {
+			if err := viper.MergeConfigMap(workspaceConfig.AllSettings()); err != nil {
+				return err
+			}
 		}
 	}
 
-	homeConfig, err := LoadHomeConfig()
-	if err != nil {
-		return err
-	}
 	if configFlagValues.HomeConfig {
+		homeConfig, err := LoadHomeConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load home config file: %w", err)
+		}
 		if err := viper.MergeConfigMap(homeConfig.AllSettings()); err != nil {
 			return err
 		}
@@ -82,7 +85,7 @@ func Load(args []string) error {
 		}
 		userConfig, err := LoadConfigFile(f)
 		if err != nil {
-			return fmt.Errorf("Failed to load Aspect CLI config file '%s' specified with --aspect:config flag: %w", f, err)
+			return fmt.Errorf("failed to load --aspect:config file %q: %w", f, err)
 		}
 		if err := viper.MergeConfigMap(userConfig.AllSettings()); err != nil {
 			return err
@@ -248,7 +251,7 @@ func MaybeLoadConfigFile(f string) (*viper.Viper, error) {
 	if err := v.ReadInConfig(); err != nil {
 		// Ignore "file not found" error for repo config file (it may not exist)
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, err
+			return nil, fmt.Errorf("failed to load config file %q: %w", f, err)
 		}
 	}
 	return v, nil

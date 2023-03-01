@@ -100,7 +100,7 @@ EOF
     assert_output --partial "-p from_starlark --aspect:config=/devil/config.yaml"
 
     run aspect run :bin --aspect:config="/absent-config.yaml" -- --aspect:config=/devil/config.yaml
-    assert_output --partial "Error: Failed to load Aspect CLI config file '/absent-config.yaml' specified with --aspect:config flag: open /absent-config.yaml: no such file or directory"
+    assert_output --partial "Error: failed to load --aspect:config file \"/absent-config.yaml\": open /absent-config.yaml: no such file or directory"
 }
 
 @test 'should warn about unknown flags that start with --aspect:' {
