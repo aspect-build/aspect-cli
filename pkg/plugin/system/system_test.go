@@ -33,10 +33,9 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/client"
 	client_mock "aspect.build/cli/pkg/plugin/client/mock"
-	"aspect.build/cli/pkg/plugin/loader"
-	loader_mock "aspect.build/cli/pkg/plugin/loader/mock"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
 	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin/mock"
+	"aspect.build/cli/pkg/plugin/types"
 )
 
 func createInterceptorCommand() *cobra.Command {
@@ -295,51 +294,6 @@ func TestPluginSystemInterceptors(t *testing.T) {
 }
 
 func TestConfigure(t *testing.T) {
-	t.Run("fails when Finder fails to find plugin config file", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
-
-		finder := loader_mock.NewMockFinder(ctrl)
-		finder.EXPECT().Find().Return("", errors.New("finder"))
-
-		ps := &pluginSystem{finder: finder}
-
-		err := ps.Configure(streams)
-
-		g.Expect(err).To(MatchError("failed to find plugin: finder"))
-	})
-
-	t.Run("fails when Parser fails to parse plugin config file", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
-		var stdout strings.Builder
-		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
-
-		finder := loader_mock.NewMockFinder(ctrl)
-		finder.EXPECT().Find().Return("/foo/bar", nil)
-
-		parser := loader_mock.NewMockParser(ctrl)
-		parser.EXPECT().Parse("/foo/bar").Return(
-			[]loader.AspectPlugin{},
-			errors.New("parser"),
-		)
-
-		ps := &pluginSystem{
-			finder: finder,
-			parser: parser,
-		}
-
-		err := ps.Configure(streams)
-
-		g.Expect(err).To(MatchError("failed to parse plugin: parser"))
-	})
-
 	t.Run("works when 0 plugins are found in config file", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		ctrl := gomock.NewController(t)
@@ -348,18 +302,9 @@ func TestConfigure(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
 
-		finder := loader_mock.NewMockFinder(ctrl)
-		finder.EXPECT().Find().Return("/foo/bar", nil)
+		ps := &pluginSystem{}
 
-		parser := loader_mock.NewMockParser(ctrl)
-		parser.EXPECT().Parse("/foo/bar").Return([]loader.AspectPlugin{}, nil)
-
-		ps := &pluginSystem{
-			finder: finder,
-			parser: parser,
-		}
-
-		err := ps.Configure(streams)
+		err := ps.Configure(streams, nil)
 
 		g.Expect(err).To(BeNil())
 	})
@@ -372,14 +317,16 @@ func TestConfigure(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
 
-		testPlugin := loader.AspectPlugin{
+		testPlugin := types.PluginConfig{
 			Name:     "test plugin",
 			From:     "...",
+			Version:  "1.2.3",
 			LogLevel: "debug",
 		}
-		testPlugin2 := loader.AspectPlugin{
+		testPlugin2 := types.PluginConfig{
 			Name:     "test plugin2",
 			From:     "...",
+			Version:  "1.2.3",
 			LogLevel: "debug",
 		}
 
@@ -387,15 +334,6 @@ func TestConfigure(t *testing.T) {
 		p1.EXPECT().Setup(gomock.Any())
 		p2 := plugin_mock.NewMockPlugin(ctrl)
 		p2.EXPECT().Setup(gomock.Any())
-
-		finder := loader_mock.NewMockFinder(ctrl)
-		finder.EXPECT().Find().Return("/foo/bar", nil)
-
-		parser := loader_mock.NewMockParser(ctrl)
-		parser.EXPECT().Parse("/foo/bar").Return(
-			[]loader.AspectPlugin{testPlugin, testPlugin2},
-			nil,
-		)
 
 		factory := client_mock.NewMockFactory(ctrl)
 		factory.EXPECT().New(testPlugin, streams).Return(
@@ -414,13 +352,26 @@ func TestConfigure(t *testing.T) {
 		)
 
 		ps := &pluginSystem{
-			finder:        finder,
-			parser:        parser,
 			clientFactory: factory,
 			plugins:       &PluginList{},
 		}
 
-		err := ps.Configure(streams)
+		pluginConfig := []interface{}{
+			map[string]interface{}{
+				"name":      "test plugin",
+				"from":      "...",
+				"version":   "1.2.3",
+				"log_level": "debug",
+			},
+			map[string]interface{}{
+				"name":      "test plugin2",
+				"from":      "...",
+				"version":   "1.2.3",
+				"log_level": "debug",
+			},
+		}
+
+		err := ps.Configure(streams, pluginConfig)
 
 		g.Expect(err).To(BeNil())
 		g.Expect(ps.plugins.head.payload.Plugin).To(Equal(p1))
@@ -435,28 +386,21 @@ func TestConfigure(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
 
-		testPlugin := loader.AspectPlugin{
+		testPlugin := types.PluginConfig{
 			Name:     "test plugin",
 			From:     "...",
+			Version:  "1.2.3",
 			LogLevel: "debug",
 		}
-		testPlugin2 := loader.AspectPlugin{
+		testPlugin2 := types.PluginConfig{
 			Name:     "test plugin2",
 			From:     "...",
+			Version:  "1.2.3",
 			LogLevel: "debug",
 		}
 
 		p1 := plugin_mock.NewMockPlugin(ctrl)
 		p1.EXPECT().Setup(gomock.Any())
-
-		finder := loader_mock.NewMockFinder(ctrl)
-		finder.EXPECT().Find().Return("/foo/bar", nil)
-
-		parser := loader_mock.NewMockParser(ctrl)
-		parser.EXPECT().Parse("/foo/bar").Return(
-			[]loader.AspectPlugin{testPlugin, testPlugin2},
-			nil,
-		)
 
 		factory := client_mock.NewMockFactory(ctrl)
 		factory.EXPECT().New(testPlugin, streams).Return(
@@ -472,13 +416,26 @@ func TestConfigure(t *testing.T) {
 		)
 
 		ps := &pluginSystem{
-			finder:        finder,
-			parser:        parser,
 			clientFactory: factory,
 			plugins:       &PluginList{},
 		}
 
-		err := ps.Configure(streams)
+		pluginConfig := []interface{}{
+			map[string]interface{}{
+				"name":      "test plugin",
+				"from":      "...",
+				"version":   "1.2.3",
+				"log_level": "debug",
+			},
+			map[string]interface{}{
+				"name":      "test plugin2",
+				"from":      "...",
+				"version":   "1.2.3",
+				"log_level": "debug",
+			},
+		}
+
+		err := ps.Configure(streams, pluginConfig)
 
 		g.Expect(err).To(MatchError("failed to configure plugin system: plugin New() error"))
 	})
@@ -491,14 +448,16 @@ func TestConfigure(t *testing.T) {
 		var stdout strings.Builder
 		streams := ioutils.Streams{Stdout: &stdout, Stderr: &stdout}
 
-		testPlugin := loader.AspectPlugin{
+		testPlugin := types.PluginConfig{
 			Name:     "test plugin",
 			From:     "...",
+			Version:  "1.2.3",
 			LogLevel: "debug",
 		}
-		testPlugin2 := loader.AspectPlugin{
+		testPlugin2 := types.PluginConfig{
 			Name:     "test plugin2",
 			From:     "...",
+			Version:  "1.2.3",
 			LogLevel: "debug",
 		}
 
@@ -506,15 +465,6 @@ func TestConfigure(t *testing.T) {
 		p1.EXPECT().Setup(gomock.Any())
 		p2 := plugin_mock.NewMockPlugin(ctrl)
 		p2.EXPECT().Setup(gomock.Any()).Return(errors.New("setup error"))
-
-		finder := loader_mock.NewMockFinder(ctrl)
-		finder.EXPECT().Find().Return("/foo/bar", nil)
-
-		parser := loader_mock.NewMockParser(ctrl)
-		parser.EXPECT().Parse("/foo/bar").Return(
-			[]loader.AspectPlugin{testPlugin, testPlugin2},
-			nil,
-		)
 
 		factory := client_mock.NewMockFactory(ctrl)
 		factory.EXPECT().New(testPlugin, streams).Return(
@@ -533,13 +483,26 @@ func TestConfigure(t *testing.T) {
 		)
 
 		ps := &pluginSystem{
-			finder:        finder,
-			parser:        parser,
 			clientFactory: factory,
 			plugins:       &PluginList{},
 		}
 
-		err := ps.Configure(streams)
+		pluginConfig := []interface{}{
+			map[string]interface{}{
+				"name":      "test plugin",
+				"from":      "...",
+				"version":   "1.2.3",
+				"log_level": "debug",
+			},
+			map[string]interface{}{
+				"name":      "test plugin2",
+				"from":      "...",
+				"version":   "1.2.3",
+				"log_level": "debug",
+			},
+		}
+
+		err := ps.Configure(streams, pluginConfig)
 
 		g.Expect(err).To(MatchError("failed to configure plugin system: setup error"))
 	})
@@ -554,24 +517,18 @@ func TestConfigure(t *testing.T) {
 
 		propertiesMap := make(map[string]interface{})
 		propertiesBytes, _ := yaml.Marshal(propertiesMap)
-		file := plugin.NewAspectPluginFile("/foo/bar")
-		setupConfig := plugin.NewSetupConfig(file, propertiesBytes)
+		setupConfig := plugin.NewSetupConfig(propertiesBytes)
 
-		testPlugin := loader.AspectPlugin{
+		testPlugin := types.PluginConfig{
 			Name:       "test plugin",
 			From:       "...",
+			Version:    "1.2.3",
 			LogLevel:   "debug",
 			Properties: propertiesMap,
 		}
 
 		p1 := plugin_mock.NewMockPlugin(ctrl)
 		p1.EXPECT().Setup(setupConfig)
-
-		finder := loader_mock.NewMockFinder(ctrl)
-		finder.EXPECT().Find().Return("/foo/bar", nil)
-
-		parser := loader_mock.NewMockParser(ctrl)
-		parser.EXPECT().Parse("/foo/bar").Return([]loader.AspectPlugin{testPlugin}, nil)
 
 		factory := client_mock.NewMockFactory(ctrl)
 		factory.EXPECT().New(testPlugin, streams).Return(
@@ -583,13 +540,21 @@ func TestConfigure(t *testing.T) {
 		)
 
 		ps := &pluginSystem{
-			finder:        finder,
-			parser:        parser,
 			clientFactory: factory,
 			plugins:       &PluginList{},
 		}
 
-		err := ps.Configure(streams)
+		pluginConfig := []interface{}{
+			map[string]interface{}{
+				"name":       "test plugin",
+				"from":       "...",
+				"version":    "1.2.3",
+				"log_level":  "debug",
+				"properties": propertiesMap,
+			},
+		}
+
+		err := ps.Configure(streams, pluginConfig)
 
 		g.Expect(err).To(BeNil())
 	})

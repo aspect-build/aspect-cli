@@ -1,9 +1,0 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
-
-go_library(
-    name = "loader",
-    srcs = ["loader.go"],
-    importpath = "aspect.build/cli/pkg/plugin/loader",
-    visibility = ["//visibility:public"],
-    deps = ["@io_k8s_sigs_yaml//:yaml"],
-)

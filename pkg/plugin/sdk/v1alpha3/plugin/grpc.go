@@ -78,8 +78,7 @@ func (m *GRPCServer) Setup(
 	ctx context.Context,
 	req *proto.SetupReq,
 ) (*proto.SetupRes, error) {
-	file := NewAspectPluginFile(req.File.Path)
-	config := NewSetupConfig(file, req.Properties)
+	config := NewSetupConfig(req.Properties)
 	return &proto.SetupRes{}, m.Impl.Setup(config)
 }
 
@@ -196,11 +195,15 @@ func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error 
 
 // Setup is called from the Core to execute the Plugin Setup.
 func (m *GRPCClient) Setup(config *SetupConfig) error {
+	file := &proto.File{Path: ""}
+	if config.File != nil {
+		file = &proto.File{
+			Path: config.File.Path,
+		}
+	}
 	req := &proto.SetupReq{
 		Properties: config.Properties,
-		File: &proto.File{
-			Path: config.File.Path,
-		},
+		File:       file,
 	}
 	_, err := m.client.Setup(context.Background(), req)
 	return err

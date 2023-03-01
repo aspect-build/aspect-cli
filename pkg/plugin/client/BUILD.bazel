@@ -10,9 +10,9 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/ioutils",
-        "//pkg/plugin/loader",
         "//pkg/plugin/sdk/v1alpha3/config",
         "//pkg/plugin/sdk/v1alpha3/plugin",
+        "//pkg/plugin/types",
         "@com_github_fatih_color//:color",
         "@com_github_hashicorp_go_hclog//:go-hclog",
         "@com_github_hashicorp_go_plugin//:go-plugin",

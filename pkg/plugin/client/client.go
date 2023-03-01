@@ -30,14 +30,14 @@ import (
 	goplugin "github.com/hashicorp/go-plugin"
 
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/loader"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/config"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
+	"aspect.build/cli/pkg/plugin/types"
 )
 
 // A Factory class for constructing plugin instances.
 type Factory interface {
-	New(config loader.AspectPlugin, streams ioutils.Streams) (*PluginInstance, error)
+	New(config types.PluginConfig, streams ioutils.Streams) (*PluginInstance, error)
 }
 
 func NewFactory() Factory {
@@ -55,7 +55,7 @@ type clientFactory struct {
 }
 
 // New calls the goplugin.NewClient with the given config.
-func (c *clientFactory) New(aspectplugin loader.AspectPlugin, streams ioutils.Streams) (*PluginInstance, error) {
+func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Streams) (*PluginInstance, error) {
 	logLevel := hclog.LevelFromString(aspectplugin.LogLevel)
 	if logLevel == hclog.NoLevel {
 		logLevel = hclog.Warn

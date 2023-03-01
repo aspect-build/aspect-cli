@@ -55,11 +55,10 @@ type SetupConfig struct {
 
 // NewSetupConfig creates a new SetupConfig.
 func NewSetupConfig(
-	file *AspectPluginFile,
 	properties []byte,
 ) *SetupConfig {
 	return &SetupConfig{
-		File:       file,
+		File:       &AspectPluginFile{Path: ""},
 		Properties: properties,
 	}
 }

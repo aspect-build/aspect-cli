@@ -26,6 +26,7 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
+	"github.com/spf13/viper"
 )
 
 func main() {
@@ -73,8 +74,9 @@ func main() {
 }
 
 func command(bzl bazel.Bazel, streams ioutils.Streams) error {
+	pluginsConfig := viper.Get("plugins")
 	pluginSystem := system.NewPluginSystem()
-	if err := pluginSystem.Configure(streams); err != nil {
+	if err := pluginSystem.Configure(streams, pluginsConfig); err != nil {
 		return err
 	}
 
