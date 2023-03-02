@@ -25,8 +25,8 @@ go_library(
 go_test(
     name = "config_test",
     srcs = [
+        "config_test.go",
         "version_config_test.go",
-        "write_test.go",
     ],
     deps = [
         ":config",

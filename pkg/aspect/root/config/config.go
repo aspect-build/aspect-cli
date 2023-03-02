@@ -37,7 +37,24 @@ type ConfigFlagValues struct {
 	HomeConfig      bool
 }
 
-func Load(args []string) error {
+func AddPlugins(plugins []types.PluginConfig, new []types.PluginConfig) ([]types.PluginConfig, error) {
+	for _, n := range new {
+		override := false
+		for i, p := range plugins {
+			if n.Name == p.Name {
+				override = true
+				plugins[i] = n
+				break
+			}
+		}
+		if !override {
+			plugins = append(plugins, n)
+		}
+	}
+	return plugins, nil
+}
+
+func Load(v *viper.Viper, args []string) error {
 	// Load configs in increasing preference. Options in later files can override a value form an
 	// earlier file if a conflict arises. Inspired by where Bazel looks for .bazelrc and how this is
 	// configured: https://bazel.build/run/bazelrc. Viper merge pattern from
@@ -51,6 +68,8 @@ func Load(args []string) error {
 		return err
 	}
 
+	plugins := []types.PluginConfig{}
+
 	if configFlagValues.WorkspaceConfig {
 		workspaceConfig, err := LoadWorkspaceConfig()
 		if err != nil {
@@ -61,7 +80,15 @@ func Load(args []string) error {
 		}
 		// Might be nil if err was workspace.NotFoundError
 		if workspaceConfig != nil {
-			if err := viper.MergeConfigMap(workspaceConfig.AllSettings()); err != nil {
+			workspacePlugins, err := UnmarshalPluginConfig(workspaceConfig.Get("plugins"))
+			if err != nil {
+				return fmt.Errorf("failed to load workspace config file: %w", err)
+			}
+			plugins, err = AddPlugins(plugins, workspacePlugins)
+			if err != nil {
+				return fmt.Errorf("failed to load workspace config file: %w", err)
+			}
+			if err := v.MergeConfigMap(workspaceConfig.AllSettings()); err != nil {
 				return err
 			}
 		}
@@ -72,7 +99,15 @@ func Load(args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to load home config file: %w", err)
 		}
-		if err := viper.MergeConfigMap(homeConfig.AllSettings()); err != nil {
+		homePlugins, err := UnmarshalPluginConfig(homeConfig.Get("plugins"))
+		if err != nil {
+			return fmt.Errorf("failed to load home config file: %w", err)
+		}
+		plugins, err = AddPlugins(plugins, homePlugins)
+		if err != nil {
+			return fmt.Errorf("failed to load home config file: %w", err)
+		}
+		if err := v.MergeConfigMap(homeConfig.AllSettings()); err != nil {
 			return err
 		}
 	}
@@ -87,10 +122,21 @@ func Load(args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to load --aspect:config file %q: %w", f, err)
 		}
-		if err := viper.MergeConfigMap(userConfig.AllSettings()); err != nil {
+		userPlugins, err := UnmarshalPluginConfig(userConfig.Get("plugins"))
+		if err != nil {
+			return fmt.Errorf("failed to load --aspect:config file %q: %w", f, err)
+		}
+		plugins, err = AddPlugins(plugins, userPlugins)
+		if err != nil {
+			return fmt.Errorf("failed to load --aspect:config file %q: %w", f, err)
+		}
+		if err := v.MergeConfigMap(userConfig.AllSettings()); err != nil {
 			return err
 		}
 	}
+
+	// Set merged plugins lists
+	v.Set("plugins", MarshalPluginConfig(plugins))
 
 	return nil
 }
@@ -266,6 +312,27 @@ func LoadConfigFile(f string) (*viper.Viper, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+func MarshalPluginConfig(plugins []types.PluginConfig) interface{} {
+	l := []interface{}{}
+	for _, p := range plugins {
+		i := map[string]interface{}{
+			"name": p.Name,
+			"from": p.From,
+		}
+		if p.Version != "" {
+			i["version"] = p.Version
+		}
+		if p.LogLevel != "" {
+			i["log_level"] = p.Version
+		}
+		if p.Properties != nil {
+			i["properties"] = p.Properties
+		}
+		l = append(l, i)
+	}
+	return l
 }
 
 func UnmarshalPluginConfig(pluginsConfig interface{}) ([]types.PluginConfig, error) {
