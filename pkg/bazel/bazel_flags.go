@@ -194,6 +194,9 @@ func ParseOutBazelFlags(command string, args []string) ([]string, []string, erro
 			if name == "version" || name == "help" {
 				// --version and --help special cases
 				nonFlags = append(nonFlags, s)
+			} else if strings.HasPrefix(name, "aspect:") {
+				// --aspect:* special case
+				nonFlags = append(nonFlags, s)
 			} else if flag == nil {
 				return nil, nil, fmt.Errorf("unknown %s flag: --%s", command, name)
 			} else if len(split) == 2 {

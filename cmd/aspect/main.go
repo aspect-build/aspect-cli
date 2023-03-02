@@ -38,7 +38,7 @@ func main() {
 
 	bzl := bazel.WorkspaceFromWd
 
-	if err := config.Load(os.Args); err != nil {
+	if err := config.Load(viper.GetViper(), os.Args); err != nil {
 		aspecterrors.HandleError(err)
 	}
 
