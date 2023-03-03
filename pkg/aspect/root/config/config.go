@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
@@ -33,6 +34,7 @@ import (
 
 type ConfigFlagValues struct {
 	UserConfigs     []string
+	SystemConfig    bool
 	WorkspaceConfig bool
 	HomeConfig      bool
 }
@@ -57,8 +59,28 @@ func AddPlugins(plugins []types.PluginConfig, new []types.PluginConfig) ([]types
 func Load(v *viper.Viper, args []string) error {
 	// Load configs in increasing preference. Options in later files can override a value form an
 	// earlier file if a conflict arises. Inspired by where Bazel looks for .bazelrc and how this is
-	// configured: https://bazel.build/run/bazelrc. Viper merge pattern from
-	// https://github.com/spf13/viper/issues/181.
+	// configured (https://bazel.build/run/bazelrc#bazelrc-file-locations):
+	//
+	// 1. The system Aspect CLI config file, unless --aspect:nosystem_config is present:
+	//
+	//    Path: /etc/aspect/cli/config.yaml
+	//
+	// 2. The workspace Aspect CLI config file, unless --aspect:noworkspace_config is present:
+	//
+	//    Path: <WORKSPACE>/.aspect/cli/config.yaml
+	//
+	// 3. The home Aspect CLI config file, unless --aspect:nohome_config is present:
+	//
+	//    Path: $HOME/.aspect/cli/config.yaml
+	//
+	// 4. The user-specified Aspect CLI config file, if specified with --aspect:config=<file>
+	//
+	//    This flag is optional but can also be specified multiple times
+	//
+	//    /dev/null indicates that all further --aspect:config will be ignored, which is useful to
+	//    disable the search for a user rc file, such as in release builds.
+	//
+	// Viper MergeConfigMap inspired by https://github.com/spf13/viper/issues/181.
 
 	// Parse flags that affect how config files are loaded first. These are a specials flag that must
 	// be parsed before we initialize cobra flags since there are some configuration settings such as
@@ -70,6 +92,26 @@ func Load(v *viper.Viper, args []string) error {
 
 	plugins := []types.PluginConfig{}
 
+	if configFlagValues.SystemConfig {
+		systemConfig, err := LoadSystemConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load system config file: %w", err)
+		}
+		if systemConfig != nil {
+			systemPlugins, err := UnmarshalPluginConfig(systemConfig.Get("plugins"))
+			if err != nil {
+				return fmt.Errorf("failed to load system config file: %w", err)
+			}
+			plugins, err = AddPlugins(plugins, systemPlugins)
+			if err != nil {
+				return fmt.Errorf("failed to load system config file: %w", err)
+			}
+			if err := v.MergeConfigMap(systemConfig.AllSettings()); err != nil {
+				return err
+			}
+		}
+	}
+
 	if configFlagValues.WorkspaceConfig {
 		workspaceConfig, err := LoadWorkspaceConfig()
 		if err != nil {
@@ -78,7 +120,6 @@ func Load(v *viper.Viper, args []string) error {
 				return fmt.Errorf("failed to load workspace config file: %w", err)
 			}
 		}
-		// Might be nil if err was workspace.NotFoundError
 		if workspaceConfig != nil {
 			workspacePlugins, err := UnmarshalPluginConfig(workspaceConfig.Get("plugins"))
 			if err != nil {
@@ -99,16 +140,18 @@ func Load(v *viper.Viper, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to load home config file: %w", err)
 		}
-		homePlugins, err := UnmarshalPluginConfig(homeConfig.Get("plugins"))
-		if err != nil {
-			return fmt.Errorf("failed to load home config file: %w", err)
-		}
-		plugins, err = AddPlugins(plugins, homePlugins)
-		if err != nil {
-			return fmt.Errorf("failed to load home config file: %w", err)
-		}
-		if err := v.MergeConfigMap(homeConfig.AllSettings()); err != nil {
-			return err
+		if homeConfig != nil {
+			homePlugins, err := UnmarshalPluginConfig(homeConfig.Get("plugins"))
+			if err != nil {
+				return fmt.Errorf("failed to load home config file: %w", err)
+			}
+			plugins, err = AddPlugins(plugins, homePlugins)
+			if err != nil {
+				return fmt.Errorf("failed to load home config file: %w", err)
+			}
+			if err := v.MergeConfigMap(homeConfig.AllSettings()); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -153,6 +196,7 @@ func ParseConfigFlags(args []string) (*ConfigFlagValues, error) {
 	var userConfigs = flags.MultiString{}
 	configFlagSet.Var(&userConfigs, flags.AspectConfigFlagName, "")
 
+	systemConfig := flags.RegisterNoableBool(configFlagSet, flags.AspectSystemConfigFlagName, true, "")
 	workspaceConfig := flags.RegisterNoableBool(configFlagSet, flags.AspectWorkspaceConfigFlagName, true, "")
 	homeConfig := flags.RegisterNoableBool(configFlagSet, flags.AspectHomeConfigFlagName, true, "")
 
@@ -165,6 +209,7 @@ func ParseConfigFlags(args []string) (*ConfigFlagValues, error) {
 
 	return &ConfigFlagValues{
 		UserConfigs:     userConfigs.Get(),
+		SystemConfig:    *systemConfig,
 		WorkspaceConfig: *workspaceConfig,
 		HomeConfig:      *homeConfig,
 	}, nil
@@ -258,6 +303,24 @@ func LoadHomeConfig() (*viper.Viper, error) {
 	return MaybeLoadConfigFile(configFile)
 }
 
+func SystemConfigFile() string {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		return path.Join(AspectSystemConfigFolder, AspectConfigFile)
+	}
+
+	return ""
+}
+
+func LoadSystemConfig() (*viper.Viper, error) {
+	configFile := SystemConfigFile()
+	if configFile == "" {
+		// no system config file on this OS; this is not an error
+		return nil, nil
+	}
+
+	return MaybeLoadConfigFile(configFile)
+}
+
 // Sets a value in the Aspect CLI $HOME configuration.
 // Returns the path of the config file written to & true if the configuration file is newly created.
 func SetInHomeConfig(key string, value interface{}) (string, bool, error) {
@@ -295,7 +358,7 @@ func MaybeLoadConfigFile(f string) (*viper.Viper, error) {
 	v.SetConfigName(strings.TrimSuffix(path.Base(f), path.Ext(f))) // the config file name with extension
 	v.SetConfigType(path.Ext(f)[1:])                               // the config file extension without leading dot
 	if err := v.ReadInConfig(); err != nil {
-		// Ignore "file not found" error for repo config file (it may not exist)
+		// Ignore "file not found" error for config file (it may not exist)
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return nil, fmt.Errorf("failed to load config file %q: %w", f, err)
 		}

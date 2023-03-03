@@ -19,6 +19,7 @@ package flags
 const (
 	AspectFlagPrefix              = "aspect:"
 	AspectConfigFlagName          = AspectFlagPrefix + "config"
+	AspectSystemConfigFlagName    = AspectFlagPrefix + "system_config"
 	AspectWorkspaceConfigFlagName = AspectFlagPrefix + "workspace_config"
 	AspectHomeConfigFlagName      = AspectFlagPrefix + "home_config"
 	AspectInteractiveFlagName     = AspectFlagPrefix + "interactive"

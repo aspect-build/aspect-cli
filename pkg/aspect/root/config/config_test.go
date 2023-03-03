@@ -150,7 +150,7 @@ plugins:
 
 	v := viper.New()
 
-	err = config.Load(v, []string{"cmd", "--aspect:config", "myconfig.yaml", "--aspect:nohome_config"})
+	err = config.Load(v, []string{"cmd", "--aspect:config", "myconfig.yaml", "--aspect:nosystem_config", "--aspect:nohome_config"})
 	g.Expect(err).ToNot(HaveOccurred())
 
 	g.Expect(v.Get("something")).To(Equal("from_workspace_config"))
