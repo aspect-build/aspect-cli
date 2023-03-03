@@ -17,6 +17,7 @@
 package config
 
 const (
-	AspectConfigFolder = ".aspect/cli"
-	AspectConfigFile   = "config.yaml"
+	AspectSystemConfigFolder = "/etc/aspect/cli" // for linux & darwin
+	AspectConfigFolder       = ".aspect/cli"
+	AspectConfigFile         = "config.yaml"
 )
