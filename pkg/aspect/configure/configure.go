@@ -55,19 +55,19 @@ func (runner *Configure) Run(_ context.Context, _ *cobra.Command, args []string)
 	languageKeys := make([]string, 0, 32)
 
 	// Order matters for gazelle languages. Proto should be run before golang.
-	viper.SetDefault("configure.languages.protobuf", true)
+	viper.SetDefault("configure.languages.protobuf", false)
 	if viper.GetBool("configure.languages.protobuf") {
 		languages = append(languages, proto.NewLanguage())
 		languageKeys = append(languageKeys, "protobuf")
 	}
 
-	viper.SetDefault("configure.languages.go", true)
+	viper.SetDefault("configure.languages.go", false)
 	if viper.GetBool("configure.languages.go") {
 		languages = append(languages, golang.NewLanguage())
 		languageKeys = append(languageKeys, "go")
 	}
 
-	viper.SetDefault("configure.languages.javascript", true)
+	viper.SetDefault("configure.languages.javascript", false)
 	if viper.GetBool("configure.languages.javascript") {
 		languages = append(languages, js.NewLanguage())
 		languageKeys = append(languageKeys, "javascript")
@@ -78,7 +78,16 @@ func (runner *Configure) Run(_ context.Context, _ *cobra.Command, args []string)
 	}
 
 	if len(languageKeys) == 0 {
-		fmt.Fprintln(runner.Streams.Stderr, "No languages configured for BUILD file generation")
+		fmt.Fprintln(runner.Streams.Stderr, `No languages enabled for BUILD file generation.
+
+To enable one or more languages, add the following to the .aspect/cli/config.yaml
+file in your WORKSPACE or home directory and enable/disable languages as needed:
+
+configure:
+  languages:
+    javascript: true
+    go: true
+    protobuf: true`)
 		return nil
 	}
 
