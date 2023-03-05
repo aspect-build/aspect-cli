@@ -45,11 +45,9 @@ import (
 	"aspect.build/cli/cmd/aspect/outputs"
 	"aspect.build/cli/cmd/aspect/print"
 	"aspect.build/cli/cmd/aspect/printaction"
-	"aspect.build/cli/cmd/aspect/pro"
 	"aspect.build/cli/cmd/aspect/query"
 	"aspect.build/cli/cmd/aspect/run"
 	"aspect.build/cli/cmd/aspect/shutdown"
-	"aspect.build/cli/cmd/aspect/support"
 	"aspect.build/cli/cmd/aspect/sync"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
@@ -132,9 +130,6 @@ func NewCmd(
 	if !buildinfo.Current().IsAspectPro {
 		// Aspect CLI only commands
 		cmd.AddCommand(license.NewDefaultCmd())
-		cmd.AddCommand(pro.NewDefaultCmd())
-		// Aspect CLI Pro command stubs
-		cmd.AddCommand(support.NewDefaultCmd())
 	}
 
 	// ### "Additional help topic commands" which are not runnable
