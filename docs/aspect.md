@@ -34,11 +34,9 @@ Aspect CLI is a better frontend for running bazel
 * [aspect license](aspect_license.md)	 - Prints the license of this software.
 * [aspect outputs](aspect_outputs.md)	 - Print paths to declared output files
 * [aspect print](aspect_print.md)	 - Print syntax elements from BUILD files
-* [aspect pro](aspect_pro.md)	 - Enable Aspect CLI Pro features
 * [aspect query](aspect_query.md)	 - Query the dependency graph, ignoring configuration flags
 * [aspect run](aspect_run.md)	 - Build a single target and run it with the given arguments
 * [aspect shutdown](aspect_shutdown.md)	 - Stop the bazel server
-* [aspect support](aspect_support.md)	 - Interactive, human-escalated support for Bazel problems
 * [aspect test](aspect_test.md)	 - Build the specified targets and run all test targets among them
 * [aspect version](aspect_version.md)	 - Print the versions of Aspect CLI and Bazel
 
