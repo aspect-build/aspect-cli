@@ -27,7 +27,7 @@ import (
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, bazel.NoWorkspaceRoot)
+	return NewCmd(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
 }
 
 func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {

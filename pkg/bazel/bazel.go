@@ -40,14 +40,6 @@ import (
 
 var workingDirectory string
 
-func init() {
-	wd, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	workingDirectory = wd
-}
-
 // Global mutable state!
 // This is for performance, avoiding a lookup of the possible startup flags for every
 // instance of a bazel struct.
@@ -94,11 +86,18 @@ func New(workspaceRoot string) Bazel {
 // This is a special case where we run Bazel without a workspace (e.g., version).
 var NoWorkspaceRoot Bazel = &bazel{}
 
-var WorkspaceFromWd Bazel = findWorkspace(workingDirectory)
+var WorkspaceFromWd Bazel = findWorkspace()
 
-func findWorkspace(startDir string) Bazel {
+func findWorkspace() Bazel {
+	if workingDirectory == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			panic(err)
+		}
+		workingDirectory = wd
+	}
 	finder := workspace.DefaultFinder
-	wr, err := finder.Find(startDir)
+	wr, err := finder.Find(workingDirectory)
 	if err != nil {
 		return NoWorkspaceRoot
 	}
