@@ -465,7 +465,11 @@ func addLinkAllPackagesRule(cfg *JsGazelleConfig, args language.GenerateArgs, re
 // so, we have to throw an error since Gazelle won't generate it correctly.
 func checkCollisionErrors(tsProjectTargetName string, args language.GenerateArgs) error {
 	for _, t := range args.File.Rules {
-		if t.Name() == tsProjectTargetName && t.Kind() != TsProjectKind {
+		kind := t.Kind()
+		if mappedKind, ok := args.Config.KindMap[TsProjectKind]; ok {
+			kind = mappedKind.KindName
+		}
+		if t.Name() == tsProjectTargetName && kind != t.Kind() {
 			fqTarget := label.New("", args.Rel, tsProjectTargetName)
 			return fmt.Errorf("failed to generate target %q of kind %q: "+
 				"a target of kind %q with the same name already exists. "+
