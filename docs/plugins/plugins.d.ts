@@ -17,7 +17,7 @@ export interface AspectCLIPluginsCatalog {
      */
     homepage?: string;
     /**
-     * The value users of the plugin put in the 'name' field of their .aspect/cli/plugins.yaml when using this plugin
+     * The value users of the plugin put in the 'name' field in .aspect/cli/config.yaml when using this plugin
      */
     name: string;
     /**

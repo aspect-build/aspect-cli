@@ -18,7 +18,7 @@
             "type": "string"
           },
           "name": {
-            "description": "The value users of the plugin put in the 'name' field of their .aspect/cli/plugins.yaml when using this plugin",
+            "description": "The value users of the plugin put in the 'name' field in .aspect/cli/config.yaml when using this plugin",
             "type": "string"
           },
           "maintainers": {
