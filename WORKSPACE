@@ -15,9 +15,9 @@ protobuf_deps()
 
 http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "2518c757715d4f5fc7cc7e0a68742dd1155eaafc78fb9196b8a18e13a738cea2",
-    strip_prefix = "bazel-lib-1.28.0",
-    url = "https://github.com/aspect-build/bazel-lib/releases/download/v1.28.0/bazel-lib-v1.28.0.tar.gz",
+    sha256 = "087f347a1725b299915f8ab81887c61e1911ed482a56c5d8985a0e190f080326",
+    strip_prefix = "bazel-lib-1.29.1",
+    url = "https://github.com/aspect-build/bazel-lib/releases/download/v1.29.1/bazel-lib-v1.29.1.tar.gz",
 )
 
 # Needed in //release/version_file.bzl for @aspect_rules_js//js/private:expand_template.bzl
