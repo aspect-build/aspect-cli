@@ -1,6 +1,6 @@
 # Directives
 
-You can configure Aspect CLI using directives, which are just specially-formatted
+You can configure Aspect CLI using directives, which are specially-formatted
 comments in `BUILD` files that govern behavior of the tool when visiting files
 within the Bazel package rooted at that file.
 
