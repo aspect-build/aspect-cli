@@ -1,6 +1,13 @@
 # Generated .ts
 genrule(
-    name = "gen-c",
-    outs = ["c.ts"],
-    cmd = "echo 'export const subbuild = 4' > $@",
+    name = "gen-1",
+    outs = ["sb1.ts"],
+    cmd = "echo 'export const sb1 = 4' > $@",
+)
+
+# Generated .d.ts
+genrule(
+    name = "gen-2",
+    outs = ["sb2.d.ts"],
+    cmd = "echo 'export const sb2: 2' > $@",
 )

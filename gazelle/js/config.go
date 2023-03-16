@@ -96,6 +96,9 @@ var (
 	// Array of sourceFileExtensions.
 	sourceFileExtensionsArray = []string{"ts", "tsx"}
 
+	// Importable declaration files that are not compiled
+	declarationFileExtensionsArray = []string{"d.ts"}
+
 	// Supported data file extensions that typescript can reference.
 	dataFileExtensions = treeset.NewWithStringComparator("json")
 )

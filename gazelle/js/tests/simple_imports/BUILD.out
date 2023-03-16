@@ -10,7 +10,9 @@ ts_project(
         "subdir/index.ts",
         "subdir/lib.ts",
         "subdir/parent-ref.ts",
+        "subdir/sd.d.ts",
         "subdir/self-ref.ts",
+        "t.d.ts",
     ],
     deps = [
         "//subproject",

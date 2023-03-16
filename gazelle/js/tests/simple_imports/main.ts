@@ -16,6 +16,11 @@ import { subproject_lib } from './subproject/lib';
 // Import of a project with indirect deps
 import { backref_subproject_lib } from './subproject-backref/lib';
 
+// DTS
+import { t } from './t';
+import { sd } from './subdir/sd';
+import { sp } from './subproject/sp';
+
 console.log(
     lib,
     subdir_index,
@@ -23,5 +28,8 @@ console.log(
     subdir_parent_ref,
     subproject_index,
     subproject_lib,
-    backref_subproject_lib
+    backref_subproject_lib,
+    t,
+    sd,
+    sp
 );

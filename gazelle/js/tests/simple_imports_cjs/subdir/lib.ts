@@ -1,1 +1,1 @@
-export const subdir_lib = 'import me';
+exports.subdir_lib = 'import me';

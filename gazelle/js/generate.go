@@ -360,32 +360,46 @@ func (ts *TypeScript) addFileLabel(importPath string, label *label.Label) {
 	ts.fileLabels[importPath] = label
 }
 
+// Find names/paths that the given path can be imported as.
+func toImportPaths(p string) []string {
+	paths := make([]string, 0, 1)
+
+	if isDeclarationFileType(p) {
+		s := stripDeclarationExtensions(p)
+
+		paths = append(paths, s)
+		if path.Base(s) == IndexFileName {
+			paths = append(paths, path.Dir(s))
+		}
+	} else if isSourceFileType(p) {
+		s := stripSourceFileExtension(p)
+
+		paths = append(paths, s)
+		if path.Base(s) == IndexFileName {
+			paths = append(paths, path.Dir(s))
+		}
+	} else if isDataFileType(p) {
+		paths = append(paths, p)
+	}
+
+	return paths
+}
+
 // Collect and persist all possible references to files that can be imported
 func (ts *TypeScript) collectFileLabels(args language.GenerateArgs) map[string]*label.Label {
 	generators := make(map[string]*label.Label)
 
 	// Generated files from rules such as genrule()
 	for _, f := range args.GenFiles {
-		if isSourceFileType(f) || isDataFileType(f) {
-			// Full path to the generated file
-			genFile := path.Join(args.Rel, f)
+		// Label referencing that generated file
+		genLabel := label.Label{
+			Name: f,
+			Repo: args.Config.RepoName,
+			Pkg:  args.Rel,
+		}
 
-			// Label referencing that generated file
-			genLabel := label.Label{
-				Name:     f,
-				Repo:     args.Config.RepoName,
-				Pkg:      args.Rel,
-				Relative: false,
-			}
-
-			importPath := stripImportExtensions(genFile)
-
+		for _, importPath := range toImportPaths(path.Join(args.Rel, f)) {
 			ts.addFileLabel(importPath, &genLabel)
-
-			// Index files can also be imported using only the directory
-			if isIndexFile(f) {
-				ts.addFileLabel(path.Dir(importPath), &genLabel)
-			}
 		}
 	}
 
@@ -492,18 +506,28 @@ func isSourceFileType(f string) bool {
 	return len(ext) > 0 && sourceFileExtensions.Contains(ext[1:])
 }
 
+func isDeclarationFileType(f string) bool {
+	for _, ex := range declarationFileExtensionsArray {
+		if strings.HasSuffix(f, "."+ex) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func isDataFileType(f string) bool {
 	ext := path.Ext(f)
 	return len(ext) > 0 && dataFileExtensions.Contains(ext[1:])
 }
 
 // Strip extensions off of a path if it can be imported without the extension
-func stripImportExtensions(f string) string {
-	if !isSourceFileType(f) {
-		return f
-	}
-
+func stripSourceFileExtension(f string) string {
 	return f[:len(f)-len(path.Ext(f))]
+}
+
+func stripDeclarationExtensions(f string) string {
+	return stripSourceFileExtension(stripSourceFileExtension(f))
 }
 
 // Normalize the given import statement from a relative path
@@ -516,16 +540,4 @@ func toWorkspacePath(pkg, importFrom, importPath string) string {
 
 	// Clean any extra . / .. etc
 	return path.Clean(importPath)
-}
-
-// If the file is an index it can be imported with the directory name
-func isIndexFile(f string) bool {
-	if !isSourceFileType(f) {
-		return false
-	}
-
-	f = path.Base(f)
-	f = stripImportExtensions(f)
-
-	return f == IndexFileName
 }
