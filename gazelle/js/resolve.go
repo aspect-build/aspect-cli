@@ -108,9 +108,10 @@ func (ts *TypeScript) Embeds(r *rule.Rule, from label.Label) []label.Label {
 
 		// The compiled .d.ts and .js are accessible as embedded rules
 		for _, src := range srcs {
-			if strings.HasSuffix(src, ".ts") && !strings.HasSuffix(src, "d.ts") {
-				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, strings.ReplaceAll(src, ".ts", ".js")))
-				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, strings.ReplaceAll(src, ".ts", ".d.ts")))
+			if strings.HasSuffix(src, ".ts") && !strings.HasSuffix(src, ".d.ts") {
+				base := strings.TrimSuffix(src, ".ts")
+				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, base+".js"))
+				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, base+".d.ts"))
 			}
 		}
 

@@ -3,6 +3,12 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 ts_project(
     name = "simple_file_exts",
     srcs = [
+        "suffix.a.ts",
+        "suffix.ad.ts",
+        "suffix.spec.not.ts",
+        "suffix.spec.ts.ts",
+        "suffix.ts.ts",
+        "typed.d.ts",
         "typed.ts",
         "typed.tsx",
     ],
@@ -12,6 +18,9 @@ ts_project(
     name = "simple_file_exts_tests",
     testonly = True,
     srcs = [
+        "suffix.a.spec.ts",
+        "suffix.spec.ts.spec.ts",
+        "suffix.ts.spec.ts",
         "typed.spec.ts",
         "typed.spec.tsx",
     ],
