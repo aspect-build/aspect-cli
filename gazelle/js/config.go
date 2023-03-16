@@ -288,17 +288,21 @@ func (c *JsGazelleConfig) AddResolve(imprt string, label *label.Label) {
 }
 
 func (c *JsGazelleConfig) GetResolution(imprt string) *label.Label {
-	for _, glob := range c.resolves.Keys() {
-		m, e := doublestar.Match(glob.(string), imprt)
-		if e != nil {
-			fmt.Println("Resolve import glob error: ", e)
-			return nil
-		}
+	config := c
+	for config != nil {
+		for _, glob := range config.resolves.Keys() {
+			m, e := doublestar.Match(glob.(string), imprt)
+			if e != nil {
+				fmt.Println("Resolve import glob error: ", e)
+				return nil
+			}
 
-		if m {
-			resolveLabel, _ := c.resolves.Get(glob)
-			return resolveLabel.(*label.Label)
+			if m {
+				resolveLabel, _ := config.resolves.Get(glob)
+				return resolveLabel.(*label.Label)
+			}
 		}
+		config = config.parent
 	}
 
 	return nil
