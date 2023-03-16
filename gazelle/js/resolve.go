@@ -71,18 +71,11 @@ func (ts *TypeScript) Imports(c *config.Config, r *rule.Rule, f *rule.File) []re
 
 	for _, src := range srcs {
 		src = path.Clean(path.Join(f.Pkg, src))
-		impt := stripImportExtensions(src)
 
-		provides = append(provides, resolve.ImportSpec{
-			Lang: LanguageName,
-			Imp:  impt,
-		})
-
-		// Index files can also be imported using only the directory
-		if isIndexFile(src) {
+		for _, impt := range toImportPaths(src) {
 			provides = append(provides, resolve.ImportSpec{
 				Lang: LanguageName,
-				Imp:  path.Dir(impt),
+				Imp:  impt,
 			})
 		}
 	}

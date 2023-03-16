@@ -16,6 +16,11 @@ const { subproject_lib } = require('./subproject/lib');
 // Import of a project with indirect deps
 const { backref_subproject_lib } = require('./subproject-backref/lib');
 
+// DTS
+const { t } = require('./t');
+const { sd } = require('./subdir/sd');
+const { sp } = require('./subproject/sp');
+
 console.log(
     lib,
     subdir_index,
@@ -23,5 +28,8 @@ console.log(
     subdir_parent_ref,
     subproject_index,
     subproject_lib,
-    backref_subproject_lib
+    backref_subproject_lib,
+    t,
+    sd,
+    sp
 );

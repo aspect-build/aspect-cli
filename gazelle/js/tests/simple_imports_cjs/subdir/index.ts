@@ -1,1 +1,1 @@
-export const subdir_index = 'import me the index';
+exports.subdir_index = 'import me the index';

@@ -1,1 +1,1 @@
-export const subproject_lib = 'import me';
+exports.subproject_lib = 'import me';
