@@ -1,0 +1,12 @@
+load("//:defs.bzl", "ts_my_project")
+
+ts_my_project(
+    name = "exists",
+    srcs = ["e.ts"],
+)
+
+ts_my_project(
+    name = "exists_tests",
+    testonly = True,
+    srcs = ["e.spec.ts"],
+)
