@@ -173,7 +173,10 @@ func (ts *TypeScript) resolveModuleDeps(
 			if cfg.ValidateImportStatements() {
 				notFound := fmt.Errorf(
 					"Import %[1]q from %[2]q is an unknown dependency. Possible solutions:\n"+
-						"\t1. Instruct Gazelle to resolve to a known dependency using the gazelle:resolve directive.\n"+
+						"\t1. Instruct Gazelle to resolve to a known dependency using a directive:\n"+
+						"\t\t# gazelle:resolve [src-lang] js import-string label\n"+
+						"\t\t   or\n"+
+						"\t\t# gazelle:js_resolve import-string-glob label\n"+
 						"\t2. Ignore the dependency using the '# gazelle:%[3]s %[1]s' directive.\n"+
 						"\t3. Disable Gazelle resolution validation using '# gazelle:%[4]s false'",
 					mod.ImportPath, mod.SourcePath, Directive_IgnoreImports, Directive_ValidateImportStatements,
