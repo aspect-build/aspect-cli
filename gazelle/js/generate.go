@@ -25,6 +25,8 @@ const (
 	IndexFileName = "index"
 
 	NpmPackageFilename = "package.json"
+
+	DefaultRootTargetName = "root"
 )
 
 func (ts *TypeScript) GetImportLabel(imp string) *label.Label {
@@ -99,14 +101,15 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 	// If exposed as an npm package make the npm package the primary target.
 	isNpmPackage := ts.pnpmProjects.IsProject(args.Rel) && ts.pnpmProjects.IsReferenced(args.Rel)
 
-	dirName := path.Base(args.Dir)
+	// Make the package rule the default target for this BUILD.
+	packageName := toTargetPackageName(args)
 
 	// Build the GenerateResult with src and test rules.
 	srcRuleSrcs, _ := sourceFileGroups.Get(DefaultLibraryName)
 	srcRule, srcGenErr := addProjectRule(
 		cfg,
 		args,
-		cfg.RenderTargetName(cfg.libraryNamingConvention, dirName),
+		cfg.RenderTargetName(cfg.libraryNamingConvention, packageName),
 		srcRuleSrcs.(*treeset.Set),
 		dataFiles,
 		false,
@@ -122,7 +125,7 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 	_, testGenErr := addProjectRule(
 		cfg,
 		args,
-		cfg.RenderTargetName(cfg.testsNamingConvention, dirName),
+		cfg.RenderTargetName(cfg.testsNamingConvention, packageName),
 		testRuleSrcs.(*treeset.Set),
 		dataFiles,
 		true,
@@ -136,7 +139,7 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 
 	// If this is a package wrap the main ts_project() rule with npm_package()
 	if isNpmPackage {
-		npmPackageName := cfg.RenderTargetName(cfg.npmPackageNamingConvention, dirName)
+		npmPackageName := cfg.RenderTargetName(cfg.npmPackageNamingConvention, packageName)
 		npmPackageSourceFiles := treeset.NewWithStringComparator()
 
 		if srcRule != nil {
@@ -570,4 +573,17 @@ func toWorkspacePath(pkg, importFrom, importPath string) string {
 
 	// Clean any extra . / .. etc
 	return path.Clean(importPath)
+}
+
+func toTargetPackageName(args language.GenerateArgs) string {
+	// The workspace root may be the version control root and non-deterministic
+	if args.Rel == "" {
+		if args.Config.RepoName != "" {
+			return args.Config.RepoName
+		} else {
+			return DefaultRootTargetName
+		}
+	}
+
+	return path.Base(args.Dir)
 }

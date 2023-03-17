@@ -7,3 +7,5 @@ npm_translate_lock(
     npm_package_target_name = "{dirname}_pkg",
     pnpm_lock = "//:pnpm-lock.yaml",
 )
+
+workspace(name = "npm_package_target_name")

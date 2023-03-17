@@ -3,3 +3,4 @@
 # with the .js renamed to .ts
 
 # IF CHANGING: also changing ../pnpm_workspace_rerooted
+workspace(name = "pnpm_workspace")
