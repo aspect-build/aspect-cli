@@ -365,18 +365,30 @@ func toImportPaths(p string) []string {
 	paths := make([]string, 0, 1)
 
 	if isDeclarationFileType(p) {
-		s := stripDeclarationExtensions(p)
+		// With the js extension
+		paths = append(paths, swapDeclarationExtension(p))
 
-		paths = append(paths, s)
-		if path.Base(s) == IndexFileName {
-			paths = append(paths, path.Dir(s))
+		// Without the js extension
+		if isImplicitSourceFileType(p) {
+			paths = append(paths, stripDeclarationExtensions(p))
+		}
+
+		// Directory without the filename
+		if path.Base(stripDeclarationExtensions(p)) == IndexFileName {
+			paths = append(paths, path.Dir(p))
 		}
 	} else if isSourceFileType(p) {
-		s := stripSourceFileExtension(p)
+		// With the js extension
+		paths = append(paths, swapSourceExtension(p))
 
-		paths = append(paths, s)
-		if path.Base(s) == IndexFileName {
-			paths = append(paths, path.Dir(s))
+		// Without the js extension
+		if isImplicitSourceFileType(p) {
+			paths = append(paths, stripSourceFileExtension(p))
+		}
+
+		// Directory without the filename
+		if path.Base(stripSourceFileExtension(p)) == IndexFileName {
+			paths = append(paths, path.Dir(p))
 		}
 	} else if isDataFileType(p) {
 		paths = append(paths, p)
@@ -506,6 +518,13 @@ func isSourceFileType(f string) bool {
 	return len(ext) > 0 && sourceFileExtensions.Contains(ext[1:])
 }
 
+// A source file that does not explicitly declare itself as cjs or mjs so
+// it can be imported as if it is either. Node will decide how to interpret
+// it at runtime based on other factors.
+func isImplicitSourceFileType(f string) bool {
+	return path.Ext(f) == ".ts"
+}
+
 func isDeclarationFileType(f string) bool {
 	for _, ex := range declarationFileExtensionsArray {
 		if strings.HasSuffix(f, "."+ex) {
@@ -521,13 +540,24 @@ func isDataFileType(f string) bool {
 	return len(ext) > 0 && dataFileExtensions.Contains(ext[1:])
 }
 
-// Strip extensions off of a path if it can be imported without the extension
+// Strip extensions off of a path, assuming it isSourceFileType()
 func stripSourceFileExtension(f string) string {
 	return f[:len(f)-len(path.Ext(f))]
 }
 
+// Swap compile to runtime extensions of of a path, assuming it isSourceFileType()
+func swapSourceExtension(f string) string {
+	return stripSourceFileExtension(f) + strings.Replace(path.Ext(f), "ts", "js", 1)
+}
+
+// Strip extensions off of a path, assuming it isDeclarationFileType()
 func stripDeclarationExtensions(f string) string {
 	return stripSourceFileExtension(stripSourceFileExtension(f))
+}
+
+// Swap compile to runtime extensions of of a path, assuming it isDeclarationFileType()
+func swapDeclarationExtension(f string) string {
+	return stripDeclarationExtensions(f) + strings.Replace(path.Ext(f), "ts", "js", 1)
 }
 
 // Normalize the given import statement from a relative path

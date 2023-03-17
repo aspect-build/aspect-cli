@@ -1,0 +1,13 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "exts",
+    srcs = [
+        "both-ts.cts",
+        "both-ts.mts",
+        "both-ts.ts",
+        "common-ts.cts",
+        "either-ts.ts",
+        "module-ts.mts",
+    ],
+)
