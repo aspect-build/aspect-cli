@@ -14,6 +14,7 @@ ts_project(
         "t.d.ts",
     ],
     deps = [
+        "//exts",
         "//subproject",
         "//subproject-backref",
         "//subproject-index",

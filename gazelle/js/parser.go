@@ -20,8 +20,6 @@ func NewParser() *Parser {
 func filenameToLoader(filename string) api.Loader {
 	ext := path.Ext(filename)
 	switch ext {
-	case ".ts":
-		return api.LoaderTS
 	case ".tsx":
 		return api.LoaderTSX
 	case ".js":

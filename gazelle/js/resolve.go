@@ -99,12 +99,13 @@ func (ts *TypeScript) Embeds(r *rule.Rule, from label.Label) []label.Label {
 		srcs := r.AttrStrings("srcs")
 		tsEmbeds := make([]label.Label, 0, len(srcs))
 
-		// The compiled .d.ts and .js are accessible as embedded rules
+		// The compiled dts and js files are accessible as embedded rules
 		for _, src := range srcs {
-			if strings.HasSuffix(src, ".ts") && !strings.HasSuffix(src, ".d.ts") {
-				base := strings.TrimSuffix(src, ".ts")
-				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, base+".js"))
-				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, base+".d.ts"))
+			if isSourceFileType(src) && !isDeclarationFileType(src) {
+				js := swapSourceExtension(src)
+				dts := path.Base(js) + ".d" + path.Ext(js)
+				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, js))
+				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, dts))
 			}
 		}
 

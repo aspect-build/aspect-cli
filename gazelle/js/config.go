@@ -91,13 +91,13 @@ var (
 	bazelIgnoreFiles = []string{".bazelignore", ".gitignore"}
 
 	// Set of supported source file extensions.
-	sourceFileExtensions = treeset.NewWithStringComparator("ts", "tsx")
+	sourceFileExtensions = treeset.NewWithStringComparator("ts", "tsx", "mts", "cts")
 
 	// Array of sourceFileExtensions.
-	sourceFileExtensionsArray = []string{"ts", "tsx"}
+	sourceFileExtensionsArray = []string{"ts", "tsx", "mts", "cts"}
 
 	// Importable declaration files that are not compiled
-	declarationFileExtensionsArray = []string{"d.ts"}
+	declarationFileExtensionsArray = []string{"d.ts", "d.mts", "d.cts"}
 
 	// Supported data file extensions that typescript can reference.
 	dataFileExtensions = treeset.NewWithStringComparator("json")
