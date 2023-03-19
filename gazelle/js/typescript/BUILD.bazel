@@ -1,0 +1,18 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "typescript",
+    srcs = [
+        "config.go",
+        "tsconfig.go",
+    ],
+    importpath = "aspect.build/cli/gazelle/js/typescript",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "typescript_test",
+    srcs = ["tsconfig_test.go"],
+    data = glob(["tests/*.json"]),
+    embed = [":typescript"],
+)

@@ -35,7 +35,7 @@ func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc filepath.
 		}
 
 		walkErr := walkFunc(f, info, infoErr)
-		if walkErr != nil {
+		if walkErr != nil && walkErr != filepath.SkipDir {
 			return walkErr
 		}
 	}
@@ -73,7 +73,7 @@ func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc filepath.
 			},
 		)
 
-		if err != nil {
+		if err != nil && err != filepath.SkipDir {
 			return err
 		}
 	}
