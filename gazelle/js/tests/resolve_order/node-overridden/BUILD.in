@@ -1,0 +1,8 @@
+# See ../all
+# -----------------------------------------------------------------------
+
+# 1: 'resolve' directive
+# gazelle:resolve js js fs :directive-resolve
+
+# 4: package name (listed in pnpm-lock.yaml)
+npm_link_all_packages(name = "node_modules")

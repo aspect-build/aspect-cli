@@ -224,11 +224,18 @@ func (ts *TypeScript) resolveModuleDep(
 	mod ImportStatement,
 	from label.Label,
 ) (ResolutionType, *label.Label, error) {
+	cfgs := c.Exts[LanguageName].(Configs)
+
 	imp := mod.ImportSpec
 
 	// Overrides
 	if override, ok := resolve.FindRuleWithOverride(c, imp, LanguageName); ok {
 		return Resolution_Other, &override, nil
+	}
+
+	// JS Overrides (js_resolve)
+	if res := cfgs.Get(from.Pkg).GetResolution(imp.Imp); res != nil {
+		return Resolution_Label, res, nil
 	}
 
 	// Gazelle rule index
@@ -266,17 +273,14 @@ func (ts *TypeScript) resolveModuleDep(
 		return Resolution_Label, &relImport, nil
 	}
 
+	// References to an npm package, pnpm workspace projects etc.
 	if pkg := ts.resolvePackage(from, mod.Imp); pkg != nil {
 		return Resolution_Package, pkg, nil
 	}
 
+	// Native node imports
 	if node.IsNodeImport(imp.Imp) {
 		return Resolution_NativeNode, nil, nil
-	}
-
-	cfgs := c.Exts[LanguageName].(Configs)
-	if res := cfgs.Get(from.Pkg).GetResolution(imp.Imp); res != nil {
-		return Resolution_Label, res, nil
 	}
 
 	return Resolution_NotFound, nil, nil
