@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
@@ -68,7 +69,7 @@ func (ts *TypeScript) GenerateRules(args language.GenerateArgs) language.Generat
 
 func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
 	// Collect all source files.
-	sourceFiles, dataFiles, collectErr := collectSourceFiles(cfg, args)
+	sourceFiles, dataFiles, collectErr := ts.collectSourceFiles(cfg, args)
 	if collectErr != nil {
 		log.Printf("Source collection error: %v\n", collectErr)
 		return
@@ -317,7 +318,7 @@ func isBuildFile(filename string) bool {
 	return false
 }
 
-func collectSourceFiles(cfg *JsGazelleConfig, args language.GenerateArgs) (*treeset.Set, *treeset.Set, error) {
+func (ts *TypeScript) collectSourceFiles(cfg *JsGazelleConfig, args language.GenerateArgs) (*treeset.Set, *treeset.Set, error) {
 	sourceFiles := treeset.NewWithStringComparator()
 	dataFiles := treeset.NewWithStringComparator()
 
@@ -332,6 +333,12 @@ func collectSourceFiles(cfg *JsGazelleConfig, args language.GenerateArgs) (*tree
 
 		if info.IsDir() {
 			return nil
+		}
+
+		// Excluded due to being outside the ts root
+		if !ts.tsconfig.IsWithinTsRoot(f) {
+			BazelLog.Debugf("Skip %q outside rootDir\n", f)
+			return filepath.SkipDir
 		}
 
 		// Excluded files. Must be done manually for additional cfg exclusions

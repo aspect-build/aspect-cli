@@ -73,11 +73,12 @@ func (ts *TypeScript) Configure(c *config.Config, rel string, f *rule.File) {
 
 	if f != nil {
 		ts.readDirectives(c, rel, f)
+
+		// Read configurations relative to the current BUILD file.
+		ts.readConfigurations(c, rel)
 	}
 
 	ts.collectIgnoreFiles(c, rel)
-
-	ts.readWorkspaces(c, rel)
 }
 
 func (ts *TypeScript) collectIgnoreFiles(c *config.Config, rel string) {
@@ -99,13 +100,20 @@ func (ts *TypeScript) collectIgnoreFiles(c *config.Config, rel string) {
 	}
 }
 
-func (ts *TypeScript) readWorkspaces(c *config.Config, rel string) {
+func (ts *TypeScript) readConfigurations(c *config.Config, rel string) {
 	configs := c.Exts[LanguageName].(Configs)
 	config := configs.Get(rel)
 
+	// pnpm
 	lockfilePath := path.Join(c.RepoRoot, rel, config.PnpmLockfile())
 	if _, err := os.Stat(lockfilePath); err == nil {
 		ts.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, config.PnpmLockfile()))
+	}
+
+	// tsconfig
+	configPath := path.Join(c.RepoRoot, rel, config.tsconfigName)
+	if _, err := os.Stat(configPath); err == nil {
+		ts.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.tsconfigName)
 	}
 }
 

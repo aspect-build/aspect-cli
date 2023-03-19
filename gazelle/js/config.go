@@ -51,6 +51,8 @@ const (
 	Directive_LibraryFiles = "js_files"
 	// The glob for test files.
 	Directive_TestFiles = "js_test_files"
+	// A TypeScript tsconfig.json file path for typescript compilation config.
+	Directive_JsGazelleConfigJson = "js_tsconfig"
 )
 
 // GenerationModeType represents one of the generation modes.
@@ -101,6 +103,9 @@ var (
 
 	// Supported data file extensions that typescript can reference.
 	dataFileExtensions = treeset.NewWithStringComparator("json")
+
+	// The default TypeScript config file name
+	defaultTsConfig = "tsconfig.json"
 )
 
 // Basic struct to manage JsGazelleConfig for a collection of packages
@@ -162,6 +167,9 @@ type JsGazelleConfig struct {
 	libraryNamingConvention    string
 	testsNamingConvention      string
 	npmPackageNamingConvention string
+
+	// Name/location of tsconfig files relative to BUILDs
+	tsconfigName string
 }
 
 // New creates a new JsGazelleConfig.
@@ -181,6 +189,7 @@ func newRootConfig(configs *Configs) *JsGazelleConfig {
 		libraryNamingConvention:    DefaultLibraryName,
 		testsNamingConvention:      DefaultTestsName,
 		fileTypeGlobs:              make(map[string][]string),
+		tsconfigName:               defaultTsConfig,
 	}
 }
 
@@ -203,6 +212,7 @@ func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
 		npmPackageNamingConvention: c.npmPackageNamingConvention,
 		testsNamingConvention:      c.testsNamingConvention,
 		fileTypeGlobs:              make(map[string][]string),
+		tsconfigName:               c.tsconfigName,
 	}
 }
 
@@ -437,4 +447,8 @@ func (c *JsGazelleConfig) filePathMatches(srcType, filePath string) bool {
 	}
 
 	return false
+}
+
+func (c *JsGazelleConfig) SetTsconfigName(tsconfigName string) {
+	c.tsconfigName = tsconfigName
 }

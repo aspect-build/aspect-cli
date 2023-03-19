@@ -25,6 +25,7 @@ go_library(
         "//gazelle/js/git",
         "//gazelle/js/node",
         "//gazelle/js/pnpm",
+        "//gazelle/js/typescript",
         "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//label:go_default_library",
         "@bazel_gazelle//language:go_default_library",
