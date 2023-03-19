@@ -19,6 +19,7 @@ export * as b1 from './exts/both-ts.cjs';
 export * as b2 from './exts/both-ts.mjs';
 export * as b3 from './exts/both-ts.js';
 export * as b4 from './exts/both-ts';
+export * as btsx from './exts/both-tsx';
 export * as b5 from './exts/both-dts.cjs';
 export * as b6 from './exts/both-dts.mjs';
 export * as b7 from './exts/both-dts.js';
