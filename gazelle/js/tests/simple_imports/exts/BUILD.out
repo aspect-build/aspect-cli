@@ -9,6 +9,7 @@ ts_project(
         "both-ts.cts",
         "both-ts.mts",
         "both-ts.ts",
+        "both-tsx.tsx",
         "common-dts.d.cts",
         "common-ts.cts",
         "either-dts.d.ts",

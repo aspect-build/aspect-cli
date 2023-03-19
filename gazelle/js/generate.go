@@ -532,7 +532,7 @@ func isSourceFileType(f string) bool {
 // it can be imported as if it is either. Node will decide how to interpret
 // it at runtime based on other factors.
 func isImplicitSourceFileType(f string) bool {
-	return path.Ext(f) == ".ts"
+	return path.Ext(f) == ".ts" || path.Ext(f) == ".tsx"
 }
 
 func isDeclarationFileType(f string) bool {
@@ -557,7 +557,7 @@ func stripSourceFileExtension(f string) string {
 
 // Swap compile to runtime extensions of of a path, assuming it isSourceFileType()
 func swapSourceExtension(f string) string {
-	return stripSourceFileExtension(f) + strings.Replace(path.Ext(f), "ts", "js", 1)
+	return stripSourceFileExtension(f) + toJsExt(f)
 }
 
 // Strip extensions off of a path, assuming it isDeclarationFileType()
@@ -567,7 +567,14 @@ func stripDeclarationExtensions(f string) string {
 
 // Swap compile to runtime extensions of of a path, assuming it isDeclarationFileType()
 func swapDeclarationExtension(f string) string {
-	return stripDeclarationExtensions(f) + strings.Replace(path.Ext(f), "ts", "js", 1)
+	return stripDeclarationExtensions(f) + toJsExt(f)
+}
+
+func toJsExt(f string) string {
+	e := path.Ext(f)
+	e = strings.Replace(e, "tsx", "js", 1)
+	e = strings.Replace(e, "ts", "js", 1)
+	return e
 }
 
 // Normalize the given import statement from a relative path
