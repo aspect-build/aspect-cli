@@ -1,0 +1,22 @@
+lockfileVersion: 5.4
+
+specifiers:
+  '@types/node': ^18.11.11
+  '@types/the-import': 1
+  'the-import': 1
+
+dependencies:
+  '@types/node': 18.11.11
+  '@types/the-import': 1.0.0
+  'the-import': 1.0.0
+
+packages:
+
+  /@types/node/18.11.11:
+    resolution: {integrity: fake}
+
+  /@types/the-import/1.0.0:
+    resolution: {integrity: fake}
+
+  /the-import/1.0.0::
+    resolution: {integrity: fake}

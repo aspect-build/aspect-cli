@@ -1,0 +1,32 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+# -----------------------------------------------------------------------
+# This is the base test-case containing all possible resolution types.
+#
+# This should be copied + edited to create more test cases.
+#
+# If adding test cases review all other tests.
+# -----------------------------------------------------------------------
+
+# 1: 'resolve' directive
+# gazelle:resolve js js the-import :directive-resolve
+
+# 2: 'js_resolve' directive
+# gazelle:js_resolve the-import :directive-js-resolve
+
+# 3: genrule outputs
+genrule(
+    name = "genrule-generated",
+    outs = ["the-import.ts"],
+    cmd = "echo 'export const c1 = 1' > $@",
+)
+
+# 4: package name (listed in pnpm-lock.yaml)
+npm_link_all_packages(name = "node_modules")
+
+ts_project(
+    name = "base",
+    srcs = ["test.ts"],
+    deps = ["//base:directive-resolve"],
+)
