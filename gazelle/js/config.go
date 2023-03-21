@@ -2,12 +2,10 @@ package gazelle
 
 import (
 	"fmt"
-	"path"
 	"strings"
 	"sync"
 	_ "unsafe"
 
-	git "aspect.build/cli/gazelle/js/git"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	_ "github.com/bazelbuild/bazel-gazelle/walk"
 	"github.com/bmatcuk/doublestar/v4"
@@ -108,46 +106,8 @@ var (
 	defaultTsConfig = "tsconfig.json"
 )
 
-// Basic struct to manage JsGazelleConfig for a collection of packages
-type Configs struct {
-	Root *JsGazelleConfig
-
-	// Ignore configurations for the workspace.
-	gitignore *git.GitIgnore
-
-	// Configuration for directories of the workspace.
-	all map[string]*JsGazelleConfig
-}
-
-func NewConfigs() Configs {
-	c := Configs{}
-	c.Root = newRootConfig(&c)
-	c.gitignore = git.NewGitIgnore()
-	c.all = make(map[string]*JsGazelleConfig)
-	c.all[""] = c.Root
-	return c
-}
-
-func (c *Configs) Get(pkg string) *JsGazelleConfig {
-	if c.all[pkg] == nil {
-		dir := pkg
-		for dir != "" && c.all[dir] == nil {
-			dir = path.Dir(dir)
-			if dir == "." {
-				dir = ""
-			}
-		}
-
-		c.all[pkg] = c.all[dir].NewChild(pkg)
-	}
-
-	return c.all[pkg]
-}
-
 // JsGazelleConfig represents a config extension for a specific Bazel package.
 type JsGazelleConfig struct {
-	configs *Configs
-
 	rel    string
 	parent *JsGazelleConfig
 
@@ -157,7 +117,7 @@ type JsGazelleConfig struct {
 	pnpmLockPath string
 
 	excludes                 []string
-	ignoreDependencies       *treeset.Set
+	ignoreDependencies       []string
 	resolves                 *linkedhashmap.Map
 	validateImportStatements bool
 	fileTypeGlobs            map[string][]string
@@ -173,15 +133,14 @@ type JsGazelleConfig struct {
 }
 
 // New creates a new JsGazelleConfig.
-func newRootConfig(configs *Configs) *JsGazelleConfig {
+func newRootConfig() *JsGazelleConfig {
 	return &JsGazelleConfig{
 		rel:                        "",
-		configs:                    configs,
 		generationEnabled:          true,
 		generationMode:             GenerationModeDirectory,
 		pnpmLockPath:               "pnpm-lock.yaml",
 		excludes:                   make([]string, 0),
-		ignoreDependencies:         treeset.NewWithStringComparator(),
+		ignoreDependencies:         make([]string, 0),
 		resolves:                   linkedhashmap.New(),
 		validateImportStatements:   true,
 		npmLinkAllTargetName:       DefaultNpmLinkAllTargetName,
@@ -196,24 +155,14 @@ func newRootConfig(configs *Configs) *JsGazelleConfig {
 // NewChild creates a new child JsGazelleConfig. It inherits desired values from the
 // current JsGazelleConfig and sets itself as the parent to the child.
 func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
-	return &JsGazelleConfig{
-		rel:                        childPath,
-		parent:                     c,
-		configs:                    c.configs,
-		generationEnabled:          c.generationEnabled,
-		generationMode:             c.generationMode,
-		pnpmLockPath:               c.pnpmLockPath,
-		excludes:                   make([]string, 0),
-		ignoreDependencies:         treeset.NewWithStringComparator(),
-		resolves:                   linkedhashmap.New(),
-		validateImportStatements:   c.validateImportStatements,
-		npmLinkAllTargetName:       c.npmLinkAllTargetName,
-		libraryNamingConvention:    c.libraryNamingConvention,
-		npmPackageNamingConvention: c.npmPackageNamingConvention,
-		testsNamingConvention:      c.testsNamingConvention,
-		fileTypeGlobs:              make(map[string][]string),
-		tsconfigName:               c.tsconfigName,
-	}
+	cCopy := *c
+	cCopy.rel = childPath
+	cCopy.parent = c
+	cCopy.excludes = make([]string, 0)
+	cCopy.ignoreDependencies = make([]string, 0)
+	cCopy.resolves = linkedhashmap.New()
+	cCopy.fileTypeGlobs = make(map[string][]string)
+	return &cCopy
 }
 
 // AddExcludedPattern adds a glob pattern parsed from the standard gazelle:exclude directive.
@@ -225,12 +174,8 @@ func (c *JsGazelleConfig) AddExcludedPattern(pattern string) {
 func (c *JsGazelleConfig) IsFileExcluded(fileRelPath string) bool {
 	// Gazelle exclude directive.
 	wc := &walkConfig{excludes: c.excludes}
-	if isExcluded(wc, c.rel, fileRelPath) {
-		return true
-	}
 
-	// Globally managed file ignores.
-	return c.configs.gitignore.Matches(path.Join(c.rel, fileRelPath))
+	return isExcluded(wc, c.rel, fileRelPath)
 }
 
 // Required for using go:linkname below for using the private isExcluded.
@@ -269,7 +214,7 @@ func (c *JsGazelleConfig) PnpmLockfile() string {
 // a given package. Adding an ignored dependency to a package also makes it
 // ignored on a subpackage.
 func (c *JsGazelleConfig) AddIgnoredImport(impGlob string) {
-	c.ignoreDependencies.Add(impGlob)
+	c.ignoreDependencies = append(c.ignoreDependencies, impGlob)
 }
 
 // Checks if a import is ignored in the given package or
@@ -277,8 +222,8 @@ func (c *JsGazelleConfig) AddIgnoredImport(impGlob string) {
 func (c *JsGazelleConfig) IsImportIgnored(impt string) bool {
 	config := c
 	for config != nil {
-		for _, glob := range config.ignoreDependencies.Values() {
-			m, e := doublestar.Match(glob.(string), impt)
+		for _, glob := range config.ignoreDependencies {
+			m, e := doublestar.Match(glob, impt)
 
 			if e != nil {
 				fmt.Println("Ignore import glob error: ", e)
@@ -376,7 +321,7 @@ func (c *JsGazelleConfig) AddLibraryFileGlob(srcsFileGlob string) {
 	c.addFilePathGlob(DefaultLibraryName, srcsFileGlob)
 }
 
-// IsSourceFile determins if a given file path is considered a source file.
+// IsSourceFile determines if a given file path is considered a source file.
 // See AddLibraryFileGlob().
 func (c *JsGazelleConfig) IsSourceFile(filePath string) bool {
 	if !isSourceFileType(filePath) {
@@ -391,7 +336,7 @@ func (c *JsGazelleConfig) AddTestFileGlob(testsFileGlob string) {
 	c.addFilePathGlob(DefaultTestsName, testsFileGlob)
 }
 
-// IsTestFile determins if a given file path is considered a test source file.
+// IsTestFile determines if a given file path is considered a test source file.
 // See AddTestFileGlob().
 func (c *JsGazelleConfig) IsTestFile(filePath string) bool {
 	if !isSourceFileType(filePath) {

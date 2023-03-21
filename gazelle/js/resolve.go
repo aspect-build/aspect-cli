@@ -152,8 +152,7 @@ func (ts *TypeScript) resolveModuleDeps(
 	modules *treeset.Set,
 	from label.Label,
 ) (*treeset.Set, error) {
-	cfgs := c.Exts[LanguageName].(Configs)
-	cfg := cfgs.Get(from.Pkg)
+	cfg := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	deps := NewLabelSet(from)
 	resolutionErrors := []error{}
@@ -224,7 +223,7 @@ func (ts *TypeScript) resolveModuleDep(
 	mod ImportStatement,
 	from label.Label,
 ) (ResolutionType, *label.Label, error) {
-	cfgs := c.Exts[LanguageName].(Configs)
+	cfg := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	imp := mod.ImportSpec
 
@@ -234,7 +233,7 @@ func (ts *TypeScript) resolveModuleDep(
 	}
 
 	// JS Overrides (js_resolve)
-	if res := cfgs.Get(from.Pkg).GetResolution(imp.Imp); res != nil {
+	if res := cfg.GetResolution(imp.Imp); res != nil {
 		return Resolution_Label, res, nil
 	}
 

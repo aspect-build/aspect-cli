@@ -67,8 +67,10 @@ func (ts *TypeScript) Configure(c *config.Config, rel string, f *rule.File) {
 	BazelLog.Tracef("Configure %s", rel)
 
 	// Create the root config.
-	if _, exists := c.Exts[LanguageName]; !exists {
-		c.Exts[LanguageName] = NewConfigs()
+	if cfg, exists := c.Exts[LanguageName]; !exists {
+		c.Exts[LanguageName] = newRootConfig()
+	} else {
+		c.Exts[LanguageName] = cfg.(*JsGazelleConfig).NewChild(rel)
 	}
 
 	if f != nil {
@@ -82,8 +84,6 @@ func (ts *TypeScript) Configure(c *config.Config, rel string, f *rule.File) {
 }
 
 func (ts *TypeScript) collectIgnoreFiles(c *config.Config, rel string) {
-	cfgs := c.Exts[LanguageName].(Configs)
-
 	// Collect gitignore style ignore files in this directory.
 	for _, ignoreFileName := range bazelIgnoreFiles {
 		ignoreRelPath := path.Join(rel, ignoreFileName)
@@ -92,7 +92,7 @@ func (ts *TypeScript) collectIgnoreFiles(c *config.Config, rel string) {
 		if _, ignoreErr := os.Stat(ignoreFilePath); ignoreErr == nil {
 			BazelLog.Tracef("Add ignore file %s", ignoreRelPath)
 
-			ignoreErr := cfgs.gitignore.AddIgnoreFile(rel, ignoreFilePath)
+			ignoreErr := ts.gitignore.AddIgnoreFile(rel, ignoreFilePath)
 			if ignoreErr != nil {
 				log.Fatalf("Failed to add ignore file %s: %v", ignoreRelPath, ignoreErr)
 			}
@@ -101,8 +101,7 @@ func (ts *TypeScript) collectIgnoreFiles(c *config.Config, rel string) {
 }
 
 func (ts *TypeScript) readConfigurations(c *config.Config, rel string) {
-	configs := c.Exts[LanguageName].(Configs)
-	config := configs.Get(rel)
+	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	// pnpm
 	lockfilePath := path.Join(c.RepoRoot, rel, config.PnpmLockfile())
@@ -118,8 +117,7 @@ func (ts *TypeScript) readConfigurations(c *config.Config, rel string) {
 }
 
 func (ts *TypeScript) readDirectives(c *config.Config, rel string, f *rule.File) {
-	configs := c.Exts[LanguageName].(Configs)
-	config := configs.Get(rel)
+	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	for _, d := range f.Directives {
 		value := strings.TrimSpace(d.Value)
