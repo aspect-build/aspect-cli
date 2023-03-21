@@ -1,6 +1,7 @@
 package gazelle
 
 import (
+	git "aspect.build/cli/gazelle/js/git"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	"aspect.build/cli/gazelle/js/typescript"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -28,6 +29,9 @@ type TypeScript struct {
 
 	// TypeScript configuration across the workspace
 	tsconfig *typescript.TsWorkspace
+
+	// Ignore configurations for the workspace.
+	gitignore *git.GitIgnore
 }
 
 // NewLanguage initializes a new TypeScript that satisfies the language.Language
@@ -37,5 +41,6 @@ func NewLanguage() language.Language {
 		fileLabels:   make(map[string]*label.Label),
 		pnpmProjects: pnpm.NewPnpmProjectMap(),
 		tsconfig:     typescript.NewTsWorkspace(),
+		gitignore:    git.NewGitIgnore(),
 	}
 }

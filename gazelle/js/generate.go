@@ -38,8 +38,7 @@ func (ts *TypeScript) GetImportLabel(imp string) *label.Label {
 // GenerateRules is called in each directory where an update is requested
 // in depth-first post-order.
 func (ts *TypeScript) GenerateRules(args language.GenerateArgs) language.GenerateResult {
-	cfgs := args.Config.Exts[LanguageName].(Configs)
-	cfg := cfgs.Get(args.Rel)
+	cfg := args.Config.Exts[LanguageName].(*JsGazelleConfig)
 
 	// Collect any labels that could be imported
 	ts.collectFileLabels(args)
@@ -345,6 +344,13 @@ func (ts *TypeScript) collectSourceFiles(cfg *JsGazelleConfig, args language.Gen
 		// such as git/bazelignore support.
 		if cfg.IsFileExcluded(f) {
 			BazelLog.Tracef("File excluded: %s / %s", args.Rel, f)
+
+			return nil
+		}
+
+		// Globally managed file ignores.
+		if ts.gitignore.Matches(path.Join(args.Rel, f)) {
+			BazelLog.Tracef("File git ignored: %s / %s", args.Rel, f)
 
 			return nil
 		}
