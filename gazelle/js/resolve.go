@@ -237,32 +237,36 @@ func (ts *TypeScript) resolveModuleDep(
 		return Resolution_Label, res, nil
 	}
 
-	// Gazelle rule index
-	if matches := ix.FindRulesByImportWithConfig(c, imp, LanguageName); len(matches) > 0 {
-		filteredMatches := make([]label.Label, 0, len(matches))
-		for _, match := range matches {
-			// Prevent from adding itself as a dependency.
-			if !match.IsSelfImport(from) {
-				filteredMatches = append(filteredMatches, match.Label)
+	// Gazelle rule index. Try each potential expanded path
+	for _, expandedImp := range ts.tsconfig.ExpandPaths(imp.Imp) {
+		eImp := resolve.ImportSpec{Lang: imp.Lang, Imp: expandedImp}
+
+		if matches := ix.FindRulesByImportWithConfig(c, eImp, LanguageName); len(matches) > 0 {
+			filteredMatches := make([]label.Label, 0, len(matches))
+			for _, match := range matches {
+				// Prevent from adding itself as a dependency.
+				if !match.IsSelfImport(from) {
+					filteredMatches = append(filteredMatches, match.Label)
+				}
 			}
+
+			// Too many results, don't know which is correct
+			if len(filteredMatches) > 1 {
+				return Resolution_Error, nil, fmt.Errorf(
+					"Import %q from %q resolved to multiple targets (%s)"+
+						" - this must be fixed using the \"gazelle:resolve\" directive",
+					mod.ImportPath, mod.SourcePath, targetListFromResults(matches))
+			}
+
+			// The matches were self imports, no dependency is needed
+			if len(filteredMatches) == 0 {
+				return Resolution_None, nil, nil
+			}
+
+			relMatch := filteredMatches[0].Rel(from.Repo, from.Pkg)
+
+			return Resolution_Other, &relMatch, nil
 		}
-
-		// Too many results, don't know which is correct
-		if len(filteredMatches) > 1 {
-			return Resolution_Error, nil, fmt.Errorf(
-				"Import %q from %q resolved to multiple targets (%s)"+
-					" - this must be fixed using the \"gazelle:resolve\" directive",
-				mod.ImportPath, mod.SourcePath, targetListFromResults(matches))
-		}
-
-		// The matches were self imports, no dependency is needed
-		if len(filteredMatches) == 0 {
-			return Resolution_None, nil, nil
-		}
-
-		relMatch := filteredMatches[0].Rel(from.Repo, from.Pkg)
-
-		return Resolution_Other, &relMatch, nil
 	}
 
 	// References to a label such as a file or file-generating rule
