@@ -1,3 +1,19 @@
+/*
+ * Copyright 2022 Aspect Build Systems, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package outputs
 
 import (
@@ -11,8 +27,8 @@ import (
 	"golang.org/x/mod/sumdb/dirhash"
 )
 
-// addExecutableHash appends the exePath to hashFiles entry of the label
-func addExecutableHash(hashFiles map[string][]string, label string, exePath string) {
+// AddExecutableHash appends the exePath to hashFiles entry of the label
+func AddExecutableHash(hashFiles map[string][]string, label string, exePath string) {
 	_, err := os.Stat(exePath)
 	if os.IsNotExist(err) {
 		fmt.Printf("%s output %s is not on disk, did you build it? Skipping...\n", label, exePath)
@@ -22,9 +38,9 @@ func addExecutableHash(hashFiles map[string][]string, label string, exePath stri
 	hashFiles[label] = append(hashFiles[label], exePath)
 }
 
-// addRunfilesHash iterates through the runfiles entries of the manifest, appending all files
+// AddRunfilesHash iterates through the runfiles entries of the manifest, appending all files
 // contained (or files inside directories) to the hashFiles entry of the label
-func addRunfilesHash(hashFiles map[string][]string, label string, manifestPath string) error {
+func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath string) error {
 	_, err := os.Stat(manifestPath)
 	if os.IsNotExist(err) {
 		fmt.Printf("%s manifest %s is not on disk, did you build it? Skipping...\n", label, manifestPath)
@@ -72,9 +88,9 @@ func printExecutableHashes(outs []bazel.Output) (map[string]string, error) {
 
 	for _, a := range outs {
 		if a.Mnemonic == "ExecutableSymlink" {
-			addExecutableHash(hashFiles, a.Label, a.Path)
+			AddExecutableHash(hashFiles, a.Label, a.Path)
 		} else if a.Mnemonic == "SourceSymlinkManifest" {
-			if err := addRunfilesHash(hashFiles, a.Label, a.Path); err != nil {
+			if err := AddRunfilesHash(hashFiles, a.Label, a.Path); err != nil {
 				return nil, err
 			}
 		}
