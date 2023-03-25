@@ -166,23 +166,20 @@ func (ts *TypeScript) resolveModuleDeps(
 			return nil, err
 		}
 
-		if resolutionType == Resolution_NotFound {
+		if resolutionType == Resolution_NotFound && cfg.ValidateImportStatements() != ValidationOff {
 			BazelLog.Debugf("import '%s' for target '%s' not found", mod.ImportPath, from.String())
 
-			if cfg.ValidateImportStatements() {
-				notFound := fmt.Errorf(
-					"Import %[1]q from %[2]q is an unknown dependency. Possible solutions:\n"+
-						"\t1. Instruct Gazelle to resolve to a known dependency using a directive:\n"+
-						"\t\t# gazelle:resolve [src-lang] js import-string label\n"+
-						"\t\t   or\n"+
-						"\t\t# gazelle:js_resolve import-string-glob label\n"+
-						"\t2. Ignore the dependency using the '# gazelle:%[3]s %[1]s' directive.\n"+
-						"\t3. Disable Gazelle resolution validation using '# gazelle:%[4]s false'",
-					mod.ImportPath, mod.SourcePath, Directive_IgnoreImports, Directive_ValidateImportStatements,
-				)
-
-				resolutionErrors = append(resolutionErrors, notFound)
-			}
+			notFound := fmt.Errorf(
+				"Import %[1]q from %[2]q is an unknown dependency. Possible solutions:\n"+
+					"\t1. Instruct Gazelle to resolve to a known dependency using a directive:\n"+
+					"\t\t# gazelle:resolve [src-lang] js import-string label\n"+
+					"\t\t   or\n"+
+					"\t\t# gazelle:js_resolve import-string-glob label\n"+
+					"\t2. Ignore the dependency using the '# gazelle:%[3]s %[1]s' directive.\n"+
+					"\t3. Disable Gazelle resolution validation using '# gazelle:%[4]s off'",
+				mod.ImportPath, mod.SourcePath, Directive_IgnoreImports, Directive_ValidateImportStatements,
+			)
+			resolutionErrors = append(resolutionErrors, notFound)
 
 			continue
 		}
@@ -210,8 +207,13 @@ func (ts *TypeScript) resolveModuleDeps(
 			joinedErrs = fmt.Sprintf("%s\n\n%s", joinedErrs, err)
 		}
 
-		log.Printf("Failed to validate dependencies for target %q:%v", from.String(), joinedErrs)
-		os.Exit(1)
+		switch cfg.ValidateImportStatements() {
+		case ValidationError:
+			log.Printf("Failed to validate dependencies for target %q:%v", from.String(), joinedErrs)
+			os.Exit(1)
+		case ValidationWarn:
+			log.Printf("Warning: Failed to validate dependencies for target %q:%v", from.String(), joinedErrs)
+		}
 	}
 
 	return deps.labels, nil
