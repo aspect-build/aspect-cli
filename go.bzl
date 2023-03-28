@@ -480,6 +480,13 @@ def deps():
         version = "v1.0.2",
     )
     go_repository(
+        name = "com_github_msolo_jsonr",
+        importpath = "github.com/msolo/jsonr",
+        sum = "h1:0Sp4veJAXi8l4LqzEzEZRovLnEHKuo6L0pYa6b23BJ8=",
+        version = "v0.0.0-20230325054138-b14a608f43e2",
+    )
+
+    go_repository(
         name = "com_github_nxadm_tail",
         importpath = "github.com/nxadm/tail",
         sum = "h1:nPr65rt6Y5JFSKQO7qToXr7pePgD6Gwiw05lkbyAQTE=",
