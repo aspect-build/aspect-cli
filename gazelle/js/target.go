@@ -12,6 +12,9 @@ import (
 type ImportStatement struct {
 	resolve.ImportSpec
 
+	// Alternative paths this statement may resolve to
+	Alt []string
+
 	// The path of the file containing the import
 	SourcePath string
 

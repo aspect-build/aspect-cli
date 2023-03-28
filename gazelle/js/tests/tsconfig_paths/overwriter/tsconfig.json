@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "overwritten/*": ["../lib/*"],
+      "star/*": ["../lib/c/first/*"]
+    }
+  }
+}

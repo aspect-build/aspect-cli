@@ -237,10 +237,14 @@ func (ts *TypeScript) resolveModuleDep(
 		return Resolution_Label, res, nil
 	}
 
-	// Gazelle rule index. Try each potential expanded path
-	for _, expandedImp := range ts.tsconfig.ExpandPaths(imp.Imp) {
-		eImp := resolve.ImportSpec{Lang: imp.Lang, Imp: expandedImp}
+	possible := make([]resolve.ImportSpec, 0, 1)
+	possible = append(possible, mod.ImportSpec)
+	for _, expandedImp := range mod.Alt {
+		possible = append(possible, resolve.ImportSpec{Lang: mod.Lang, Imp: expandedImp})
+	}
 
+	// Gazelle rule index. Try each potential expanded path
+	for _, eImp := range possible {
 		if matches := ix.FindRulesByImportWithConfig(c, eImp, LanguageName); len(matches) > 0 {
 			filteredMatches := make([]label.Label, 0, len(matches))
 			for _, match := range matches {

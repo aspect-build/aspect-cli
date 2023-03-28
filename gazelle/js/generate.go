@@ -106,7 +106,7 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 
 	// Build the GenerateResult with src and test rules.
 	srcRuleSrcs, _ := sourceFileGroups.Get(DefaultLibraryName)
-	srcRule, srcGenErr := addProjectRule(
+	srcRule, srcGenErr := ts.addProjectRule(
 		cfg,
 		args,
 		cfg.RenderTargetName(cfg.libraryNamingConvention, packageName),
@@ -122,7 +122,7 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 	}
 
 	testRuleSrcs, _ := sourceFileGroups.Get(DefaultTestsName)
-	_, testGenErr := addProjectRule(
+	_, testGenErr := ts.addProjectRule(
 		cfg,
 		args,
 		cfg.RenderTargetName(cfg.testsNamingConvention, packageName),
@@ -160,7 +160,7 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 			npmPackageSourceFiles.Add(NpmPackageFilename)
 		}
 
-		addNpmPackageRule(
+		ts.addNpmPackageRule(
 			cfg,
 			args,
 			npmPackageName,
@@ -170,7 +170,7 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 	}
 }
 
-func addNpmPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, npmPackageName string, srcs *treeset.Set, result *language.GenerateResult) {
+func (ts *TypeScript) addNpmPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, npmPackageName string, srcs *treeset.Set, result *language.GenerateResult) {
 	npmPackage := rule.NewRule(NpmPackageKind, npmPackageName)
 	npmPackage.SetAttr("srcs", srcs.Values())
 
@@ -180,7 +180,7 @@ func addNpmPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, npmPack
 	BazelLog.Infof("add rule '%s' '%s:%s'", npmPackage.Kind(), args.Rel, npmPackage.Name())
 }
 
-func addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule, isNpmPackage bool, result *language.GenerateResult) (*rule.Rule, error) {
+func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule, isNpmPackage bool, result *language.GenerateResult) (*rule.Rule, error) {
 	if isNpmPackage {
 		targetName = cfg.RenderNpmSourceLibraryName(targetName)
 	}
@@ -226,16 +226,17 @@ func addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName
 	sourceFileIt := sourceFiles.Iterator()
 	for sourceFileIt.Next() {
 		filePath := sourceFileIt.Value().(string)
+		relFilePath := path.Join(args.Rel, filePath)
 
 		// Don't parse non-source files such as json
 		if !isSourceFileType(filePath) {
 			continue
 		}
 
-		fileImports, errs := parseImports(args.Config.RepoRoot, path.Join(args.Rel, filePath))
+		fileImports, errs := parseImports(args.Config.RepoRoot, relFilePath)
 
 		if len(errs) > 0 {
-			fmt.Println(path.Join(args.Rel, filePath), "parse error(s):")
+			fmt.Println(relFilePath, "parse error(s):")
 			for _, err := range errs {
 				fmt.Println("    ", err)
 			}
@@ -255,14 +256,20 @@ func addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName
 					dataFiles.Remove(dataFile)
 				}
 
+				alternates := make([]string, 0)
+				for _, alt := range ts.tsconfig.ExpandPaths(relFilePath, importPath) {
+					alternates = append(alternates, toWorkspacePath(args.Rel, filePath, alt))
+				}
+
 				// Record all imports. Maybe local, maybe data, maybe in other BUILD etc.
 				imports.Add(ImportStatement{
 					ImportSpec: resolve.ImportSpec{
 						Lang: LanguageName,
 						Imp:  workspacePath,
 					},
+					Alt:        alternates,
 					ImportPath: importPath,
-					SourcePath: path.Join(args.Rel, filePath),
+					SourcePath: relFilePath,
 				})
 			}
 		}
