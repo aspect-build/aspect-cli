@@ -6,6 +6,7 @@ ts_project(
     name = "tsconfig_rootdir",
     srcs = ["src/main.ts"],
     deps = [
+        "//fallback",
         "//lib/a",
         "//lib/b",
         "//lib/c",

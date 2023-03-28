@@ -1,6 +1,9 @@
 // Import just about everything for various test cases.
 // Individual imports may also have test cases.
 
+// Side-effects only imports
+import './side-effects';
+
 // Local
 import { lib } from './lib';
 
