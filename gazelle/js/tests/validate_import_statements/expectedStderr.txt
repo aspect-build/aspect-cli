@@ -6,7 +6,7 @@ Import "bad-import" from "main.ts" is an unknown dependency. Possible solutions:
 		   or
 		# gazelle:js_resolve import-string-glob label
 	2. Ignore the dependency using the '# gazelle:js_ignore_imports bad-import' directive.
-	3. Disable Gazelle resolution validation using '# gazelle:js_validate_import_statements false'
+	3. Disable Gazelle resolution validation using '# gazelle:js_validate_import_statements off'
 
 Import "bad-import2" from "main.ts" is an unknown dependency. Possible solutions:
 	1. Instruct Gazelle to resolve to a known dependency using a directive:
@@ -14,4 +14,4 @@ Import "bad-import2" from "main.ts" is an unknown dependency. Possible solutions
 		   or
 		# gazelle:js_resolve import-string-glob label
 	2. Ignore the dependency using the '# gazelle:js_ignore_imports bad-import2' directive.
-	3. Disable Gazelle resolution validation using '# gazelle:js_validate_import_statements false'
+	3. Disable Gazelle resolution validation using '# gazelle:js_validate_import_statements off'

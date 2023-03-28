@@ -106,6 +106,18 @@ var (
 	defaultTsConfig = "tsconfig.json"
 )
 
+// ValidationMode represents what should happen when validation errors are found.
+type ValidationMode int
+
+const (
+	// ValidationError has gazelle produce an error when validation errors are found.
+	ValidationError ValidationMode = iota
+	// ValidationWarn has gazelle print warnings when validation errors are found.
+	ValidationWarn
+	// ValidationOff has gazelle swallow validation errors silently.
+	ValidationOff
+)
+
 // JsGazelleConfig represents a config extension for a specific Bazel package.
 type JsGazelleConfig struct {
 	rel    string
@@ -119,7 +131,7 @@ type JsGazelleConfig struct {
 	excludes                 []string
 	ignoreDependencies       []string
 	resolves                 *linkedhashmap.Map
-	validateImportStatements bool
+	validateImportStatements ValidationMode
 	fileTypeGlobs            map[string][]string
 
 	// Generated rule names
@@ -142,7 +154,7 @@ func newRootConfig() *JsGazelleConfig {
 		excludes:                   make([]string, 0),
 		ignoreDependencies:         make([]string, 0),
 		resolves:                   linkedhashmap.New(),
-		validateImportStatements:   true,
+		validateImportStatements:   ValidationError,
 		npmLinkAllTargetName:       DefaultNpmLinkAllTargetName,
 		npmPackageNamingConvention: DefaultNpmPackageTargetName,
 		libraryNamingConvention:    DefaultLibraryName,
@@ -266,17 +278,17 @@ func (c *JsGazelleConfig) GetResolution(imprt string) *label.Label {
 	return nil
 }
 
-// SetValidateImportStatements sets whether TypeScript import statements should be
-// validated or not. It throws an error if this is set multiple times, i.e. if
-// the directive is specified multiple times in the Bazel workspace.
-func (c *JsGazelleConfig) SetValidateImportStatements(validate bool) {
-	c.validateImportStatements = validate
+// SetValidateImportStatements sets the ValidationMode for TypeScript import
+// statements. It throws an error if this is set multiple times, i.e. if the
+// directive is specified multiple times in the Bazel workspace.
+func (c *JsGazelleConfig) SetValidateImportStatements(mode ValidationMode) {
+	c.validateImportStatements = mode
 }
 
 // ValidateImportStatements returns whether the TypeScript import statements should
 // be validated or not. If this option was not explicitly specified by the user,
 // it defaults to true.
-func (c *JsGazelleConfig) ValidateImportStatements() bool {
+func (c *JsGazelleConfig) ValidateImportStatements() ValidationMode {
 	return c.validateImportStatements
 }
 

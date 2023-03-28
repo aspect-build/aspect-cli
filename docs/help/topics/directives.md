@@ -25,7 +25,7 @@ JavaScript directives for generating BUILD files follow the same format as [gaze
 | Imports matching the glob will be ignored when generating BUILD files in the specifying directory and descendants. |
 | `# gazelle:js_resolve _glob_ _target_`                  |                             |
 | Imports matching the glob will be resolved to the specified target within the specifying directory and descendants.<br />This directive is an extension of the standard `resolve` directive with added glob support and only applying to JavaScript rules. |
-| `# gazelle:js_validate_import_statements true\|false`   | `true`                      | 
+| `# gazelle:js_validate_import_statements error\|warn\|off`   | `error`                      | 
 | Ensure all import statements map to a known dependency. |
 | `# gazelle:js_project_naming_convention _name_`         | `{dirname}`                 |
 | The format used to generate the name of the main `ts_project` rule. |
