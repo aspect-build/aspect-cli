@@ -1,11 +1,12 @@
 package typescript
 
 import (
-	"encoding/json"
 	"os"
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/msolo/jsonr"
 )
 
 type tsCompilerOptionsJSON struct {
@@ -36,11 +37,8 @@ func parseTsConfigJSONFile(root, dir, tsconfig string) (*TsConfig, error) {
 }
 
 func parseTsConfigJSON(configDir string, tsconfigJSON []byte) (*TsConfig, error) {
-	// TODO: support relaxed json syntax such as trailing commas
-	// See https://github.com/tailscale/hujson
-
 	var c tsConfigJSON
-	if err := json.Unmarshal(tsconfigJSON, &c); err != nil {
+	if err := jsonr.Unmarshal(tsconfigJSON, &c); err != nil {
 		return nil, err
 	}
 

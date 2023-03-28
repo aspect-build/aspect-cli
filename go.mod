@@ -18,6 +18,7 @@ require (
 	github.com/manifoldco/promptui v0.9.0
 	github.com/mattn/go-isatty v0.0.16
 	github.com/mitchellh/go-homedir v1.1.0
+	github.com/msolo/jsonr v0.0.0-20230325054138-b14a608f43e2
 	github.com/onsi/gomega v1.16.0
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
 	github.com/pmezard/go-difflib v1.0.0
