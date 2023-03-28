@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -168,11 +167,16 @@ func (ts *TypeScript) readDirectives(c *config.Config, rel string, f *rule.File)
 
 			config.AddResolve(strings.TrimSpace(globTarget[0]), &label)
 		case Directive_ValidateImportStatements:
-			v, err := strconv.ParseBool(value)
-			if err != nil {
-				log.Fatal(err)
+			switch value {
+			case "error":
+				config.SetValidateImportStatements(ValidationError)
+			case "warn":
+				config.SetValidateImportStatements(ValidationWarn)
+			case "off":
+				config.SetValidateImportStatements(ValidationOff)
+			default:
+				log.Fatalf("invalid value for directive %q: %s", Directive_ValidateImportStatements, d.Value)
 			}
-			config.SetValidateImportStatements(v)
 		case Directive_LibraryNamingConvention:
 			config.SetLibraryNamingConvention(value)
 		case Directive_TestsNamingConvention:
