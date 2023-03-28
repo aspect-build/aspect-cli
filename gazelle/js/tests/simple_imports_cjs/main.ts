@@ -1,6 +1,9 @@
 // Import just about everything for various test cases.
 // Individual imports may also have test cases.
 
+// Side-effects only imports
+require('./side-effects');
+
 // Local
 const { lib } = require('./lib');
 
