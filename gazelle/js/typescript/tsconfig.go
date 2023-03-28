@@ -61,10 +61,8 @@ func parseTsConfigJSON(configDir string, tsconfigJSON []byte) (*TsConfig, error)
 //
 // Path matching algorithm based on ESBuild implementation
 // Inspired by: https://github.com/evanw/esbuild/blob/deb93e92267a96575a6e434ff18421f4ef0605e4/internal/resolver/resolver.go#L1831-L1945
-func (c TsConfig) ExpandPaths(p string) []string {
-	possible := make([]string, 0, 1)
-
-	possible = append(possible, p)
+func (c TsConfig) ExpandPaths(from, p string) []string {
+	possible := make([]string, 0)
 
 	// Check for exact matches first
 	exact := c.Paths[p]

@@ -69,11 +69,11 @@ func (tc *TsWorkspace) IsWithinTsRoot(f string) bool {
 	return relErr == nil && !strings.Contains(rootRelative, "..")
 }
 
-func (tc *TsWorkspace) ExpandPaths(f string) []string {
-	_, c := tc.getConfig(f)
+func (tc *TsWorkspace) ExpandPaths(from, f string) []string {
+	_, c := tc.getConfig(from)
 	if c == nil {
-		return []string{f}
+		return []string{}
 	}
 
-	return c.ExpandPaths(f)
+	return c.ExpandPaths(from, f)
 }
