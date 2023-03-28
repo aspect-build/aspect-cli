@@ -27,7 +27,7 @@ func NewTsWorkspace() *TsWorkspace {
 }
 
 func (tc *TsWorkspace) AddTsConfigFile(root, rel, fileName string) error {
-	tsconfigJSON, err := parseTsConfigJSONFile(root, rel, fileName)
+	tsconfigJSON, err := parseTsConfigJSONFile(tc.cm, root, rel, fileName)
 	if err != nil {
 		fmt.Printf("Failed to parse tsconfig file %s: %v\n", path.Join(rel, fileName), err)
 		return err

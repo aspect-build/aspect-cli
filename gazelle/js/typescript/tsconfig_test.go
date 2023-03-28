@@ -6,7 +6,11 @@ import (
 )
 
 func parseTest(t *testing.T, tsconfigJSON string) *TsConfig {
-	options, err := parseTsConfigJSON("tsconfig_test", []byte(tsconfigJSON))
+	cm := &TsConfigMap{
+		configs: make(map[string]*TsConfig),
+	}
+
+	options, err := parseTsConfigJSON(cm, ".", "tsconfig_test", []byte(tsconfigJSON))
 	if err != nil {
 		t.Fatalf("failed to parse options: %v\n\n%s", err, tsconfigJSON)
 	}
