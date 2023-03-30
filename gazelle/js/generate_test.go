@@ -2,6 +2,7 @@ package gazelle
 
 import (
 	"fmt"
+	"path"
 	"reflect"
 	"sort"
 	"testing"
@@ -104,7 +105,7 @@ func TestGenerate(t *testing.T) {
 		desc := fmt.Sprintf("toWorkspacePath(%s, %s, %s)", tc.pkg, tc.from, tc.impt)
 
 		t.Run(desc, func(t *testing.T) {
-			importPath := toWorkspacePath(tc.pkg, tc.from, tc.impt)
+			importPath := toWorkspacePath(path.Join(tc.pkg, tc.from), tc.impt)
 
 			if !reflect.DeepEqual(importPath, tc.expected) {
 				t.Errorf("toWorkspacePath('%s', '%s', '%s'): \nactual:   %s\nexpected:  %s\n", tc.pkg, tc.from, tc.impt, importPath, tc.expected)

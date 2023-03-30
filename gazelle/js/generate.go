@@ -101,19 +101,25 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 	// If exposed as an npm package make the npm package the primary target.
 	isNpmPackage := ts.pnpmProjects.IsProject(args.Rel) && ts.pnpmProjects.IsReferenced(args.Rel)
 
-	// Make the package rule the default target for this BUILD.
+	// The package/directory name variable value used to render the target names.
 	packageName := toTargetPackageName(args)
+
+	srcRuleName := cfg.RenderTargetName(cfg.libraryNamingConvention, packageName)
+	if isNpmPackage {
+		srcRuleName = cfg.RenderNpmSourceLibraryName(srcRuleName)
+	}
+
+	testRuleName := cfg.RenderTargetName(cfg.testsNamingConvention, packageName)
 
 	// Build the GenerateResult with src and test rules.
 	srcRuleSrcs, _ := sourceFileGroups.Get(DefaultLibraryName)
 	srcRule, srcGenErr := ts.addProjectRule(
 		cfg,
 		args,
-		cfg.RenderTargetName(cfg.libraryNamingConvention, packageName),
+		srcRuleName,
 		srcRuleSrcs.(*treeset.Set),
 		dataFiles,
 		false,
-		isNpmPackage,
 		result,
 	)
 	if srcGenErr != nil {
@@ -125,11 +131,10 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 	_, testGenErr := ts.addProjectRule(
 		cfg,
 		args,
-		cfg.RenderTargetName(cfg.testsNamingConvention, packageName),
+		testRuleName,
 		testRuleSrcs.(*treeset.Set),
 		dataFiles,
 		true,
-		false,
 		result,
 	)
 	if testGenErr != nil {
@@ -180,11 +185,7 @@ func (ts *TypeScript) addNpmPackageRule(cfg *JsGazelleConfig, args language.Gene
 	BazelLog.Infof("add rule '%s' '%s:%s'", npmPackage.Kind(), args.Rel, npmPackage.Name())
 }
 
-func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule, isNpmPackage bool, result *language.GenerateResult) (*rule.Rule, error) {
-	if isNpmPackage {
-		targetName = cfg.RenderNpmSourceLibraryName(targetName)
-	}
-
+func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule bool, result *language.GenerateResult) (*rule.Rule, error) {
 	// Generate nothing if there are no source files. Remove any existing rules.
 	if sourceFiles.Empty() {
 		if args.File == nil {
@@ -210,73 +211,48 @@ func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.Generat
 		}
 	}
 
-	// Data file lookup map. Workspace path => local path
-	dataFileWorkspacePaths := treemap.NewWithStringComparator()
-	for _, dataFile := range dataFiles.Values() {
-		dataFileWorkspacePaths.Put(path.Join(args.Rel, dataFile.(string)), dataFile)
-	}
-
-	// Data files imported by sourceFiles.
-	importedDataFiles := treeset.NewWithStringComparator()
-
 	// Collect import statements from source.
 	imports := newTsProjectImports()
 
 	// TODO(jbedard): parse files concurrently
 	sourceFileIt := sourceFiles.Iterator()
 	for sourceFileIt.Next() {
-		filePath := sourceFileIt.Value().(string)
-		relFilePath := path.Join(args.Rel, filePath)
-
-		// Don't parse non-source files such as json
-		if !isSourceFileType(filePath) {
-			continue
-		}
-
-		fileImports, errs := parseImports(args.Config.RepoRoot, relFilePath)
+		sourcePath := path.Join(args.Rel, sourceFileIt.Value().(string))
+		sourceImports, errs := ts.collectImports(cfg, args.Config.RepoRoot, sourcePath)
 
 		if len(errs) > 0 {
-			fmt.Println(relFilePath, "parse error(s):")
+			fmt.Println(sourcePath, "parse error(s):")
 			for _, err := range errs {
 				fmt.Println("    ", err)
 			}
 		}
 
-		for _, importPath := range fileImports {
-			if !cfg.IsImportIgnored(importPath) {
-				// The path from the root
-				workspacePath := toWorkspacePath(args.Rel, filePath, importPath)
-
-				// If the imported path is a file that can be compiled as ts source
-				// then add it to the importedDataFiles to be included in the srcs.
-				// Remove it from the dataFiles to signify that it is now a "source" file
-				// owned by this target.
-				if dataFile, _ := dataFileWorkspacePaths.Get(workspacePath); dataFile != nil {
-					importedDataFiles.Add(dataFile)
-					dataFiles.Remove(dataFile)
-				}
-
-				alternates := make([]string, 0)
-				for _, alt := range ts.tsconfig.ExpandPaths(relFilePath, importPath) {
-					alternates = append(alternates, toWorkspacePath(args.Rel, filePath, alt))
-				}
-
-				// Record all imports. Maybe local, maybe data, maybe in other BUILD etc.
-				imports.Add(ImportStatement{
-					ImportSpec: resolve.ImportSpec{
-						Lang: LanguageName,
-						Imp:  workspacePath,
-					},
-					Alt:        alternates,
-					ImportPath: importPath,
-					SourcePath: relFilePath,
-				})
+		if sourceImports != nil {
+			for _, imp := range sourceImports {
+				imports.Add(imp)
 			}
 		}
 	}
 
+	// Data file lookup map. Workspace path => local path
+	dataFileWorkspacePaths := treemap.NewWithStringComparator()
+	for _, dataFile := range dataFiles.Values() {
+		dataFileWorkspacePaths.Put(path.Join(args.Rel, dataFile.(string)), dataFile)
+	}
+
 	// Add any imported data files as sources.
-	sourceFiles.Add(importedDataFiles.Values()...)
+	for _, importStatement := range imports.imports.Values() {
+		workspacePath := importStatement.(ImportStatement).Imp
+
+		// If the imported path is a file that can be compiled as ts source
+		// then add it to the importedDataFiles to be included in the srcs.
+		// Remove it from the dataFiles to signify that it is now a "source" file
+		// owned by this target.
+		if dataFile, _ := dataFileWorkspacePaths.Get(workspacePath); dataFile != nil {
+			sourceFiles.Add(dataFile)
+			dataFiles.Remove(dataFile)
+		}
+	}
 
 	tsProject := rule.NewRule(TsProjectKind, targetName)
 	tsProject.SetAttr("srcs", sourceFiles.Values())
@@ -291,6 +267,41 @@ func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.Generat
 	BazelLog.Infof("add rule '%s' '%s:%s'", tsProject.Kind(), args.Rel, tsProject.Name())
 
 	return tsProject, nil
+}
+
+func (ts *TypeScript) collectImports(cfg *JsGazelleConfig, rootDir, sourcePath string) ([]ImportStatement, []error) {
+	fileImports, errs := parseImports(rootDir, sourcePath)
+
+	if fileImports == nil {
+		return nil, errs
+	}
+
+	imports := make([]ImportStatement, 0, len(fileImports))
+
+	for _, importPath := range fileImports {
+		if !cfg.IsImportIgnored(importPath) {
+			// The path from the root
+			workspacePath := toWorkspacePath(sourcePath, importPath)
+
+			alternates := make([]string, 0)
+			for _, alt := range ts.tsconfig.ExpandPaths(sourcePath, importPath) {
+				alternates = append(alternates, toWorkspacePath(sourcePath, alt))
+			}
+
+			// Record all imports. Maybe local, maybe data, maybe in other BUILD etc.
+			imports = append(imports, ImportStatement{
+				ImportSpec: resolve.ImportSpec{
+					Lang: LanguageName,
+					Imp:  workspacePath,
+				},
+				Alt:        alternates,
+				ImportPath: importPath,
+				SourcePath: sourcePath,
+			})
+		}
+	}
+
+	return imports, errs
 }
 
 // Parse the passed file for import statements.
@@ -592,10 +603,10 @@ func toJsExt(f string) string {
 
 // Normalize the given import statement from a relative path
 // to a path relative to the workspace.
-func toWorkspacePath(pkg, importFrom, importPath string) string {
+func toWorkspacePath(importFrom, importPath string) string {
 	// Convert relative to workspace-relative
 	if importPath[0] == '.' {
-		importPath = path.Join(pkg, path.Dir(importFrom), importPath)
+		importPath = path.Join(path.Dir(importFrom), importPath)
 	}
 
 	// Clean any extra . / .. etc
