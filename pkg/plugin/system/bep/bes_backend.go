@@ -62,6 +62,17 @@ func BESBackendFromContext(ctx context.Context) BESBackend {
 	return ctx.Value(besBackendInterceptorKey).(BESBackend)
 }
 
+func HasBESBackend(ctx context.Context) bool {
+	return ctx.Value(besBackendInterceptorKey) != nil
+}
+
+func BESErrors(ctx context.Context) []error {
+	if !HasBESBackend(ctx) {
+		return []error{}
+	}
+	return BESBackendFromContext(ctx).Errors()
+}
+
 // InjectBESBackend injects the given BESBackend into the context.
 func InjectBESBackend(ctx context.Context, besBackend BESBackend) context.Context {
 	return context.WithValue(ctx, besBackendInterceptorKey, besBackend)

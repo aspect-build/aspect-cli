@@ -166,6 +166,13 @@ func (ps *pluginSystem) TearDown() {
 // BESBackendInterceptor starts a BES backend and injects it into the context.
 // It gracefully stops the  server after the main command is executed.
 func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
+	// noop if there are no plugins
+	if ps.plugins.head == nil {
+		return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
+			return next(ctx, cmd, args)
+		}
+	}
+
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 		besBackend := bep.NewBESBackend()
 		for node := ps.plugins.head; node != nil; node = node.next {
