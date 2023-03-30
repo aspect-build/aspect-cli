@@ -3,10 +3,12 @@ package gazelle
 import (
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -28,6 +30,8 @@ const (
 	NpmPackageFilename = "package.json"
 
 	DefaultRootTargetName = "root"
+
+	MaxWorkerCount = 12
 )
 
 func (ts *TypeScript) GetImportLabel(imp string) *label.Label {
@@ -211,26 +215,19 @@ func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.Generat
 		}
 	}
 
-	// Collect import statements from source.
+	// Import statements from the parsed files.
 	imports := newTsProjectImports()
 
-	// TODO(jbedard): parse files concurrently
-	sourceFileIt := sourceFiles.Iterator()
-	for sourceFileIt.Next() {
-		sourcePath := path.Join(args.Rel, sourceFileIt.Value().(string))
-		sourceImports, errs := ts.collectImports(cfg, args.Config.RepoRoot, sourcePath)
-
-		if len(errs) > 0 {
-			fmt.Println(sourcePath, "parse error(s):")
-			for _, err := range errs {
+	for result := range ts.collectAllImports(cfg, args, sourceFiles) {
+		if len(result.Errors) > 0 {
+			fmt.Println(result.SourcePath, "parse error(s):")
+			for _, err := range result.Errors {
 				fmt.Println("    ", err)
 			}
 		}
 
-		if sourceImports != nil {
-			for _, imp := range sourceImports {
-				imports.Add(imp)
-			}
+		for _, sourceImport := range result.Imports {
+			imports.Add(sourceImport)
 		}
 	}
 
@@ -269,14 +266,62 @@ func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.Generat
 	return tsProject, nil
 }
 
-func (ts *TypeScript) collectImports(cfg *JsGazelleConfig, rootDir, sourcePath string) ([]ImportStatement, []error) {
-	fileImports, errs := parseImports(rootDir, sourcePath)
+type parseResult struct {
+	SourcePath string
+	Imports    []ImportStatement
+	Errors     []error
+}
 
-	if fileImports == nil {
-		return nil, errs
+func (ts *TypeScript) collectAllImports(cfg *JsGazelleConfig, args language.GenerateArgs, sourceFiles *treeset.Set) chan parseResult {
+	// The channel of all files to parse.
+	sourcePathChannel := make(chan string)
+
+	// The channel of parse results.
+	resultsChannel := make(chan parseResult)
+
+	// The number of workers. Don't create more workers than necessary.
+	workerCount := int(math.Min(MaxWorkerCount, float64(1+sourceFiles.Size()/2)))
+
+	// Start the worker goroutines.
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for sourcePath := range sourcePathChannel {
+				resultsChannel <- ts.collectImports(cfg, args.Config.RepoRoot, sourcePath)
+			}
+		}()
 	}
 
-	imports := make([]ImportStatement, 0, len(fileImports))
+	// Send files to the workers.
+	go func() {
+		sourceFileChannelIt := sourceFiles.Iterator()
+		for sourceFileChannelIt.Next() {
+			sourcePathChannel <- path.Join(args.Rel, sourceFileChannelIt.Value().(string))
+		}
+
+		close(sourcePathChannel)
+	}()
+
+	// Wait for all workers to finish.
+	go func() {
+		wg.Wait()
+		close(resultsChannel)
+	}()
+
+	return resultsChannel
+}
+
+func (ts *TypeScript) collectImports(cfg *JsGazelleConfig, rootDir, sourcePath string) parseResult {
+	fileImports, errs := parseImports(rootDir, sourcePath)
+
+	result := parseResult{
+		SourcePath: sourcePath,
+		Errors:     errs,
+		Imports:    make([]ImportStatement, 0, len(fileImports)),
+	}
 
 	for _, importPath := range fileImports {
 		if !cfg.IsImportIgnored(importPath) {
@@ -289,7 +334,7 @@ func (ts *TypeScript) collectImports(cfg *JsGazelleConfig, rootDir, sourcePath s
 			}
 
 			// Record all imports. Maybe local, maybe data, maybe in other BUILD etc.
-			imports = append(imports, ImportStatement{
+			result.Imports = append(result.Imports, ImportStatement{
 				ImportSpec: resolve.ImportSpec{
 					Lang: LanguageName,
 					Imp:  workspacePath,
@@ -301,14 +346,14 @@ func (ts *TypeScript) collectImports(cfg *JsGazelleConfig, rootDir, sourcePath s
 		}
 	}
 
-	return imports, errs
+	return result
 }
 
 // Parse the passed file for import statements.
 func parseImports(rootDir, filePath string) ([]string, []error) {
 	content, err := os.ReadFile(path.Join(rootDir, filePath))
 	if err != nil {
-		return nil, []error{err}
+		return []string{}, []error{err}
 	}
 
 	return NewParser().ParseImports(filePath, string(content))
