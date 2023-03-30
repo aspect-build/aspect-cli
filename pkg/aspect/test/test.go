@@ -40,14 +40,19 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *Test {
 }
 
 func (runner *Test) Run(ctx context.Context, _ *cobra.Command, args []string) (exitErr error) {
-	besBackend := bep.BESBackendFromContext(ctx)
-	besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
-	bazelCmd := []string{"test", besBackendFlag}
+	bazelCmd := []string{"test"}
+
+	if bep.HasBESBackend(ctx) {
+		besBackend := bep.BESBackendFromContext(ctx)
+		besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
+		bazelCmd = append(bazelCmd, besBackendFlag)
+	}
+
 	bazelCmd = append(bazelCmd, args...)
 	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 
 	// Process the subscribers errors before the Bazel one.
-	subscriberErrors := besBackend.Errors()
+	subscriberErrors := bep.BESErrors(ctx)
 	if len(subscriberErrors) > 0 {
 		for _, err := range subscriberErrors {
 			fmt.Fprintf(runner.Streams.Stderr, "Error: failed to run test command: %v\n", err)
