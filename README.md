@@ -78,8 +78,6 @@ You can also find us on [Bazel Slack](https://slack.bazel.build/) on the #aspect
 If your organization needs more help to make your Bazel migration a success,
 come find us at [aspect.dev](https://aspect.dev)
 
-We also offer a Professional edition of the Aspect CLI.
-This adds features that big codebases rely on, like BUILD file generation.
 See our website at <http://aspect.build> to learn more about our offerings.
 
 [bazel]: http://bazel.build
