@@ -12,9 +12,10 @@ import (
 )
 
 type tsCompilerOptionsJSON struct {
-	RootDir *string              `json:"rootDir"`
-	BaseUrl *string              `json:"baseUrl"`
-	Paths   *map[string][]string `json:"paths"`
+	RootDir  *string              `json:"rootDir"`
+	RootDirs *[]string            `json:"rootDirs"`
+	BaseUrl  *string              `json:"baseUrl"`
+	Paths    *map[string][]string `json:"paths"`
 }
 
 type tsConfigJSON struct {
@@ -28,6 +29,8 @@ type TsConfig struct {
 	RootDir string
 	BaseUrl string
 
+	VirtualRootDirs []string
+
 	Paths *TsConfigPaths
 }
 
@@ -38,7 +41,7 @@ type TsConfigPaths struct {
 
 var DefaultConfigPaths = TsConfigPaths{
 	Rel: ".",
-	Map: nil,
+	Map: &map[string][]string{},
 }
 
 var Log = logrus.New()
@@ -76,6 +79,16 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir string, tsconfigContent 
 		baseConfig = base
 	}
 
+	var baseConfigRel = "."
+	if baseConfig != nil {
+		rel, relErr := filepath.Rel(configDir, baseConfig.ConfigDir)
+		if relErr != nil {
+			Log.Warnf("Failed to resolve relative path from %s to %s: %v", configDir, baseConfig.ConfigDir, relErr)
+		} else {
+			baseConfigRel = rel
+		}
+	}
+
 	var RootDir string
 	if c.CompilerOptions.RootDir != nil {
 		RootDir = path.Clean(*c.CompilerOptions.RootDir)
@@ -97,26 +110,31 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir string, tsconfigContent 
 			Map: c.CompilerOptions.Paths,
 		}
 	} else if baseConfig != nil {
-		rel, relErr := filepath.Rel(configDir, baseConfig.ConfigDir)
-		if relErr != nil {
-			Log.Warnf("Failed to resolve relative path from %s to %s: %v", configDir, baseConfig.ConfigDir, relErr)
-
-			Paths = nil
-		} else {
-			Paths = &TsConfigPaths{
-				Rel: path.Join(baseConfig.Paths.Rel, rel),
-				Map: baseConfig.Paths.Map,
-			}
+		Paths = &TsConfigPaths{
+			Rel: path.Join(baseConfig.Paths.Rel, baseConfigRel),
+			Map: baseConfig.Paths.Map,
 		}
 	} else {
 		Paths = &DefaultConfigPaths
 	}
 
+	var VirtualRootDirs = make([]string, 0)
+	if c.CompilerOptions.RootDirs != nil {
+		for _, d := range *c.CompilerOptions.RootDirs {
+			VirtualRootDirs = append(VirtualRootDirs, path.Clean(d))
+		}
+	} else if baseConfig != nil {
+		for _, d := range baseConfig.VirtualRootDirs {
+			VirtualRootDirs = append(VirtualRootDirs, path.Join(baseConfigRel, d))
+		}
+	}
+
 	config := TsConfig{
-		ConfigDir: configDir,
-		RootDir:   RootDir,
-		BaseUrl:   BaseUrl,
-		Paths:     Paths,
+		ConfigDir:       configDir,
+		RootDir:         RootDir,
+		BaseUrl:         BaseUrl,
+		Paths:           Paths,
+		VirtualRootDirs: VirtualRootDirs,
 	}
 
 	return &config, nil
@@ -128,13 +146,10 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir string, tsconfigContent 
 // Inspired by: https://github.com/evanw/esbuild/blob/deb93e92267a96575a6e434ff18421f4ef0605e4/internal/resolver/resolver.go#L1831-L1945
 func (c TsConfig) ExpandPaths(from, p string) []string {
 	pathMap := c.Paths.Map
-	if pathMap == nil {
-		return []string{}
-	}
 
 	possible := make([]string, 0)
 
-	// Check for exact matches first
+	// Check for exact 'paths' matches first
 	exact := (*pathMap)[p]
 	if exact != nil {
 		for _, m := range exact {
@@ -158,7 +173,7 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 		}
 	}
 
-	// Sort the pattern matches by priority
+	// Sort the 'paths' pattern matches by priority
 	sort.Sort(possibleMatches)
 
 	// Expand and add the pattern matches
@@ -172,6 +187,12 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 
 			possible = append(possible, path.Join(c.Paths.Rel, mappedPath))
 		}
+	}
+
+	// Add 'rootDirs' as alternate directories for relative imports
+	// https://www.typescriptlang.org/tsconfig#rootDirs
+	for _, v := range c.VirtualRootDirs {
+		possible = append(possible, path.Join(v, p))
 	}
 
 	return possible
