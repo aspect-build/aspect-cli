@@ -1,14 +1,17 @@
-package gazelle
+package tests
 
 import (
 	"testing"
+
+	"aspect.build/cli/gazelle/js/parser"
 )
 
 var testCases = []struct {
 	desc, ts string
 	// Specify a filename so esbuild knows how to load the file.
-	filename string
-	expected []string
+	filename  string
+	expected  []string
+	typeOnly bool
 }{
 	{
 		desc:     "empty",
@@ -116,8 +119,10 @@ var testCases = []struct {
 	},
 	{
 		desc: "full import",
-		ts: `import "mypolyfill";
-import "mypolyfill2";`,
+		ts: `
+			import "mypolyfill";
+			import "mypolyfill2";
+		`,
 		filename: "full.ts",
 		expected: []string{"mypolyfill", "mypolyfill2"},
 	},
@@ -202,13 +207,82 @@ import "mypolyfill2";`,
 		filename: "ExampleWithKeys.tsx",
 		expected: []string{"react", "react-i18next"},
 	},
+	{
+		desc: "tsx that once crashed with ts parser",
+		ts: `
+			import React from "react";
+			export const a: React.FunctionComponent<React.PropsWithChildren<X>> = ({y}) => (
+				<>
+					{authProviders && (
+						<ul className="list-group">
+						</ul>
+					)}
+				</>
+			})
+		`,
+		filename:  "sg-example-once-crashed.tsx",
+		expected:  []string{"react"},
+		typeOnly: true,
+	},
+	{
+		desc: "ts type import",
+		ts: `
+			import type React from "react"
+			import type { X } from "y"
+		`,
+		filename:  "types.ts",
+		expected:  []string{"react", "y"},
+		typeOnly: true,
+	},
+	{
+		desc: "include imports only used as types",
+		ts: `
+			import { Foo } from "my/types";
+			export const foo: Foo = 1
+		`,
+		filename:  "typeImport.ts",
+		expected:  []string{"my/types"},
+		typeOnly: true,
+	},
+	{
+		desc: "include require()s only used as types",
+		ts: `
+			const { Foo } = require("my/types");
+			export const foo: Foo = 1
+		`,
+		filename:  "typeRequire.ts",
+		expected:  []string{"my/types"},
+		typeOnly: true,
+	},
+	{
+		desc: "include type-only imports",
+		ts: `
+			import type { Foo } from "my/types";
+			export const foo: Foo = 1
+		`,
+		filename:  "typeImport.ts",
+		expected:  []string{"my/types"},
+		typeOnly: true,
+	},
+	{
+		desc: "include unused type-only imports",
+		ts: `
+			import type { Foo } from "my/types";
+		`,
+		filename:  "typeImport-unused.ts",
+		expected:  []string{"my/types"},
+		typeOnly: true,
+	},
 }
 
-func TestParser(t *testing.T) {
+func RunParserTests(t *testing.T, parser parser.Parser, includeTypeOnly bool, parserPost string) {
 	for _, tc := range testCases {
-		t.Run(tc.desc, func(t *testing.T) {
-			p := NewParser()
-			actualImports, _ := p.ParseImports(tc.filename, tc.ts)
+		if !includeTypeOnly && tc.typeOnly {
+			continue
+		}
+
+		t.Run(tc.desc+parserPost, func(t *testing.T) {
+			actualImports, _ := parser.ParseImports(tc.filename, tc.ts)
 
 			if !equal(actualImports, tc.expected) {
 				t.Errorf("Inequality.\nactual:  %#v;\nexpected: %#v\ntypescript code:\n%v", actualImports, tc.expected, tc.ts)
@@ -216,9 +290,8 @@ func TestParser(t *testing.T) {
 		})
 	}
 
-	t.Run("invalid syntax", func(t *testing.T) {
-		p := NewParser()
-		_, errs := p.ParseImports("bad-syntax.ts", "bad syntax")
+	t.Run("invalid syntax"+parserPost, func(t *testing.T) {
+		_, errs := parser.ParseImports("bad-syntax.ts", "bad syntax")
 
 		if len(errs) == 0 {
 			t.Error("Invalid syntax should return errors")

@@ -24,6 +24,11 @@ import { t } from './t';
 import { sd } from './subdir/sd';
 import { sp } from './subproject/sp';
 
+// Type-only imports
+import { Foo } from './types';
+
+const fooVal: Foo = 123;
+
 console.log(
     lib,
     subdir_index,
@@ -34,5 +39,6 @@ console.log(
     backref_subproject_lib,
     t,
     sd,
-    sp
+    sp,
+    fooVal
 );

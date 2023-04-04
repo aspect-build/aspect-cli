@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	parser "aspect.build/cli/gazelle/js/parser/esbuild"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
@@ -222,7 +223,7 @@ func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.Generat
 		if len(result.Errors) > 0 {
 			fmt.Println(result.SourcePath, "parse error(s):")
 			for _, err := range result.Errors {
-				fmt.Println("    ", err)
+				fmt.Println(err)
 			}
 		}
 
@@ -351,12 +352,15 @@ func (ts *TypeScript) collectImports(cfg *JsGazelleConfig, rootDir, sourcePath s
 
 // Parse the passed file for import statements.
 func parseImports(rootDir, filePath string) ([]string, []error) {
+	BazelLog.Debug("ParseImports: %s", filePath)
+
 	content, err := os.ReadFile(path.Join(rootDir, filePath))
 	if err != nil {
 		return []string{}, []error{err}
 	}
 
-	return NewParser().ParseImports(filePath, string(content))
+	p := parser.NewParser()
+	return p.ParseImports(filePath, string(content))
 }
 
 // isBazelPackage determines if the directory is a Bazel package by probing for
