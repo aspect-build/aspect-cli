@@ -1,0 +1,19 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "esbuild",
+    srcs = ["parser_esbuild.go"],
+    importpath = "aspect.build/cli/gazelle/js/parser/esbuild",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//gazelle/js/parser",
+        "@com_github_evanw_esbuild//pkg/api",
+    ],
+)
+
+go_test(
+    name = "esbuild_test",
+    srcs = ["parser_esbuild_test.go"],
+    embed = [":esbuild"],
+    deps = ["//gazelle/js/parser/tests"],
+)

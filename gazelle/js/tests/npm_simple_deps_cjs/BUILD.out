@@ -1,0 +1,20 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+# gazelle:js_generation_mode none
+
+npm_link_all_packages(name = "node_modules")
+
+ts_project(
+    name = "npm_simple_deps_cjs",
+    srcs = [
+        "deep-import.ts",
+        "main.ts",
+        "subdir/subdir.ts",
+    ],
+    deps = [
+        ":node_modules/@aspect-test/a",
+        ":node_modules/@aspect-test/c",
+        ":node_modules/jquery",
+    ],
+)
