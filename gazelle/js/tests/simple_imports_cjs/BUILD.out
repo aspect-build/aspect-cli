@@ -19,5 +19,6 @@ ts_project(
         "//subproject",
         "//subproject-backref",
         "//subproject-index",
+        "//types",
     ],
 )

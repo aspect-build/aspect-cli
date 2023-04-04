@@ -24,6 +24,11 @@ const { t } = require('./t');
 const { sd } = require('./subdir/sd');
 const { sp } = require('./subproject/sp');
 
+// Type-only imports
+const { Foo } = require('./types');
+
+const fooVal: typeof Foo = 123;
+
 console.log(
     lib,
     subdir_index,
@@ -34,5 +39,6 @@ console.log(
     backref_subproject_lib,
     t,
     sd,
-    sp
+    sp,
+    fooVal
 );

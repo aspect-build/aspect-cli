@@ -1,9 +1,6 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
-# gazelle:js_generation_mode none
-
 ts_project(
-    name = "side-effects",
+    name = "types",
     srcs = ["index.ts"],
-    deps = ["//types"],
 )
