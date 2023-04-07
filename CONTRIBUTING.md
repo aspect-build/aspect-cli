@@ -68,10 +68,61 @@ After this, you should be able to merge your changes without any conflicts in th
    undesirable complication. For now with CLI major releases as `5.x.x` the corresponding go module
    version should be `v1.5xx.x` with the patch version matching and the minor zero-padded to two digits.
    (e.g. `5.4.3` -> `v1.504.3`, `5.56.78` -> `v1.556.78`)
-   
-   When the CLI major version is bumped to 6, this mapping will need to be updated.
+
+    When the CLI major version is bumped to 6, this mapping will need to be updated.
 
     ```
     git tag v1.5xx.x
     git push origin $!
     ```
+
+4. Update Homebrew Formula
+
+    Once the GitHub release is complete and Aspect CLI release artifacts are available for download,
+    follow the [instructions](https://github.com/aspect-build/homebrew-aspect#updating-formulas-to-the-latest-release)
+    in our [homebrew-aspect](https://github.com/aspect-build/homebrew-aspect) repository to update the
+    Homebrew Formulas in the `aspect-build/aspect` tap.
+
+## Test Homebrew Formula and Bottles
+
+### Install and Configure `nginx`
+
+Install `nginx`. On MacOS, run `brew install nginx`.
+
+Change the `nginx` config so that it listens on part `8090`. By default, `nginx` will listen on
+`localhost:8080`.
+
+-   Find the location of your `nginx` config, run `nginx -t`.
+-   Update the default server stanza to listen on `8090`. It should look like the following:
+
+```
+    server {
+        listen       8090;
+        server_name  localhost;
+```
+
+-   Restart `nginx`. Run `brew services restart nginx`.
+
+### Build, Stage, and Install Aspect CLI with Homebrew
+
+To verify that the built Homebrew formula and bottles build and install properly,
+please run the following:
+
+```sh
+$ bazel run //release:verify_homebrew_artifacts
+```
+
+This will build the artifacts, copy the bottles to your local `nginx` webserver's
+serving directory, create an `aspect-build/aspect` tap, copy the formula to the
+tap, install the bottle for your system, and verify that the version from the
+CLI matches the expected version.
+
+NOTE: This is not a test target, because it will copy files to various locations on your local
+machine. The default permissions for a test target do not allow this.
+
+If you would like to perform the set up for this verification step without the assertions, you can
+run the following (with or without the `--stamp` flag):
+
+```sh
+$ bazel run //release:stage_for_dev
+```

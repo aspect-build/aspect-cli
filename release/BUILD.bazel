@@ -66,3 +66,28 @@ bzl_library(
 )
 
 exports_files(["version.tmpl"])
+
+# TODO: this is out-of-date and no longer working. Leaving here for future use.
+sh_binary(
+    name = "stage_for_dev",
+    srcs = ["stage_for_dev.sh"],
+    data = [
+        ":aspect_brew_artifacts_dev",
+    ],
+)
+
+# This is not a test target because it will copy files to your local
+# system. However, it will fail if any steps fail or if the assertions are not
+# met.
+sh_binary(
+    name = "verify_homebrew_artifacts",
+    testonly = True,
+    srcs = ["verify_homebrew_artifacts.sh"],
+    data = [
+        ":aspect_version",
+        ":stage_for_dev",
+    ],
+    deps = [
+        "@aspect_bazel_lib//shlib/lib:assertions",
+    ],
+)

@@ -17,18 +17,18 @@ brew_platforms_test_suite()
 
 # Setup for Tests
 
-_SILO_VERSION_NO_STAMP_NAME = "version_file_no_stamp"
+_VERSION_FILE_NO_STAMP_NAME = "version_file_no_stamp"
 
-_SILO_VERSION_WITH_STAMP_NAME = "version_file_with_stamp"
+_VERSION_FILE_WITH_STAMP_NAME = "version_file_with_stamp"
 
 version_file(
-    name = _SILO_VERSION_NO_STAMP_NAME,
+    name = _VERSION_FILE_NO_STAMP_NAME,
     stamp = 0,
     version_var = "STABLE_BUILD_SCM_TAG",
 )
 
 version_file(
-    name = _SILO_VERSION_WITH_STAMP_NAME,
+    name = _VERSION_FILE_WITH_STAMP_NAME,
     stamp = 1,
     version_var = "STABLE_BUILD_SCM_TAG",
 )
@@ -142,14 +142,14 @@ brew_artifacts(
 # Tests
 
 assert_contains(
-    name = "{}_test".format(_SILO_VERSION_NO_STAMP_NAME),
-    actual = _SILO_VERSION_NO_STAMP_NAME,
+    name = "{}_test".format(_VERSION_FILE_NO_STAMP_NAME),
+    actual = _VERSION_FILE_NO_STAMP_NAME,
     expected = "0.0.0-VERSION-PLACEHOLDER",
 )
 
 assert_contains(
-    name = "{}_test".format(_SILO_VERSION_WITH_STAMP_NAME),
-    actual = _SILO_VERSION_WITH_STAMP_NAME,
+    name = "{}_test".format(_VERSION_FILE_WITH_STAMP_NAME),
+    actual = _VERSION_FILE_WITH_STAMP_NAME,
     expected = "5",  # this will need to change to 6. when we bump major
 )
 

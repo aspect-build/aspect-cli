@@ -5,6 +5,7 @@ load("//release:platforms.bzl", "platforms")
 # MacOS version names are listed here:
 # https://github.com/Homebrew/brew/blob/74e933caa3a778213ba33ff932c7e03e8ab8b329/Library/Homebrew/macos_versions.rb#L10
 _NAMES = struct(
+    # homebrew CI requires arm bottles to be listed before intel bottles
     MONTEREY_X86_64 = "monterey",
     MONTEREY_ARM64 = "arm64_monterey",
     BIG_SUR_X86_64 = "big_sur",
