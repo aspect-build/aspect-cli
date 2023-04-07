@@ -583,6 +583,12 @@ def deps():
         sum = "h1:trlNQbNUG3OdDrDil03MCb1H2o9nJ1x4/5LYw7byDE0=",
         version = "v1.9.0",
     )
+    go_repository(
+        name = "com_github_smacker_go_tree_sitter",
+        importpath = "github.com/smacker/go-tree-sitter",
+        sum = "h1:FX6rwoAcx8JXrO9WHbV2yxBCgH9LlGT2LYWPi/4jtOE=",
+        version = "v0.0.0-20230113054119-af7e2ef5fed6",
+    )
 
     go_repository(
         name = "com_github_spf13_afero",
