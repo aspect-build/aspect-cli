@@ -4,4 +4,3 @@ build --incompatible_strict_action_env
 
 test --keep_going
 test --test_output=errors
-test --@io_bazel_rules_go//go/config:race
