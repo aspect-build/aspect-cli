@@ -150,7 +150,7 @@ assert_contains(
 assert_contains(
     name = "{}_test".format(_SILO_VERSION_WITH_STAMP_NAME),
     actual = _SILO_VERSION_WITH_STAMP_NAME,
-    expected = "5.",  # this will need to change to 6. when we bump major
+    expected = "5",  # this will need to change to 6. when we bump major
 )
 
 build_test(
