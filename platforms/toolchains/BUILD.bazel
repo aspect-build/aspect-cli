@@ -1,0 +1,86 @@
+toolchain(
+    name = "macos_aarch64_macos_aarch64_llvm",
+    exec_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+    toolchain = "@llvm_toolchain//:cc-clang-arm64-darwin",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "macos_aarch64_linux_aarch64_llvm",
+    exec_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+    toolchain = "@llvm_toolchain//:cc-clang-aarch64-linux",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "macos_x86_64_macos_x86_64_llvm",
+    exec_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+    toolchain = "@llvm_toolchain//:cc-clang-x86_64-darwin",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "macos_x86_64_linux_x86_64_llvm",
+    exec_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    toolchain = "@llvm_toolchain//:cc-clang-x86_64-linux",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "macos_x86_64_windows_x86_64_llvm",
+    exec_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+    toolchain = "@llvm_toolchain//:cc-clang-x86_64-windows",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "llvm",
+    actual = select({
+        "//platforms/config:linux_aarch64": ":macos_aarch64_linux_aarch64_llvm",
+        "//platforms/config:linux_x86_64": ":macos_x86_64_linux_x86_64_llvm",
+        "//platforms/config:macos_aarch64": ":macos_aarch64_macos_aarch64_llvm",
+        "//platforms/config:macos_x86_64": ":macos_x86_64_macos_x86_64_llvm",
+        "//platforms/config:windows_x86_64": ":macos_x86_64_windows_x86_64_llvm",
+    }),
+    visibility = ["//visibility:public"],
+)

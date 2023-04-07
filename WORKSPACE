@@ -38,11 +38,42 @@ http_archive(
 )
 
 http_archive(
+    name = "com_grail_bazel_toolchain",
+    patch_args = ["-p1"],
+    patches = ["//patches:com_grail_bazel_toolchain.patch"],
+    sha256 = "b54aa3b00a64a3dea06d30f0ff423e91bcea43019c5ff1c319f726f1666c3ff2",
+    strip_prefix = "bazel-toolchain-2f6e6adf93f4bf34d7bce7ad797f53c82d998ba8",
+    urls = ["https://github.com/grailbio/bazel-toolchain/archive/2f6e6adf93f4bf34d7bce7ad797f53c82d998ba8.tar.gz"],
+)
+
+_SYSROOT_BUILD_FILE = """
+filegroup(
+    name = "sysroot",
+    srcs = glob(["*/**"]),
+    visibility = ["//visibility:public"],
+)
+"""
+
+http_archive(
+    name = "org_chromium_sysroot_linux_arm64",
+    build_file_content = _SYSROOT_BUILD_FILE,
+    sha256 = "e39b700d8858d18868544c8c84922f6adfa8419f3f42471b92024ba38eff7aca",
+    urls = ["https://commondatastorage.googleapis.com/chrome-linux-sysroot/toolchain/2202c161310ffde63729f29d27fe7bb24a0bc540/debian_stretch_arm64_sysroot.tar.xz"],
+)
+
+http_archive(
+    name = "org_chromium_sysroot_linux_x86_64",
+    build_file_content = _SYSROOT_BUILD_FILE,
+    sha256 = "84656a6df544ecef62169cfe3ab6e41bb4346a62d3ba2a045dc5a0a2ecea94a3",
+    urls = ["https://commondatastorage.googleapis.com/chrome-linux-sysroot/toolchain/2202c161310ffde63729f29d27fe7bb24a0bc540/debian_stretch_amd64_sysroot.tar.xz"],
+)
+
+http_archive(
     name = "io_bazel_rules_go",
     patch_args = ["-p1"],
     patches = ["//patches:rules_go.patch"],
-    sha256 = "16e9fca53ed6bd4ff4ad76facc9b7b651a89db1689a2877d6fd7b82aa824e366",
-    urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.34.0/rules_go-v0.34.0.zip"],
+    sha256 = "19ef30b21eae581177e0028f6f4b1f54c66467017be33d211ab6fc81da01ea4d",
+    urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.38.0/rules_go-v0.38.0.zip"],
 )
 
 http_archive(
@@ -61,7 +92,7 @@ go_embed_data_dependencies()
 go_register_toolchains(
     # TODO: re-enable no-go once versions are synced with silo
     # nogo = "@//:nogo",
-    version = "1.19.3",
+    version = "1.20.1",
 )
 
 http_archive(
@@ -137,3 +168,28 @@ bazel_binaries()
 load("@bazel_skylib//:workspace.bzl", "bazel_skylib_workspace")
 
 bazel_skylib_workspace()
+
+load("@com_grail_bazel_toolchain//toolchain:rules.bzl", "llvm_toolchain")
+
+llvm_toolchain(
+    name = "llvm_toolchain",
+    llvm_version = "15.0.7",
+    sha256 = {
+        "darwin-arm64": "867c6afd41158c132ef05a8f1ddaecf476a26b91c85def8e124414f9a9ba188d",
+        "darwin-x86_64": "d16b6d536364c5bec6583d12dd7e6cf841b9f508c4430d9ee886726bd9983f1c",
+    },
+    strip_prefix = {
+        "darwin-arm64": "clang+llvm-15.0.7-arm64-apple-darwin22.0",
+        "darwin-x86_64": "clang+llvm-15.0.7-x86_64-apple-darwin21.0",
+    },
+    sysroot = {
+        "linux-aarch64": "@org_chromium_sysroot_linux_arm64//:sysroot",
+        "linux-x86_64": "@org_chromium_sysroot_linux_x86_64//:sysroot",
+    },
+    urls = {
+        "darwin-arm64": ["https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/clang+llvm-15.0.7-arm64-apple-darwin22.0.tar.xz"],
+        "darwin-x86_64": ["https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/clang+llvm-15.0.7-x86_64-apple-darwin21.0.tar.xz"],
+    },
+)
+
+register_toolchains("//platforms/toolchains:llvm")
