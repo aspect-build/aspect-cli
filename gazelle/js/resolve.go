@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	node "aspect.build/cli/gazelle/js/node"
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -130,6 +131,7 @@ func (ts *TypeScript) Resolve(
 	importData interface{},
 	from label.Label,
 ) {
+	start := time.Now()
 	BazelLog.Infof("Resolve '%s' dependencies", from.String())
 
 	// TsProject imports are resolved as deps
@@ -144,6 +146,8 @@ func (ts *TypeScript) Resolve(
 			r.SetAttr("deps", convertDependencySetToExpr(deps))
 		}
 	}
+
+	BazelLog.Infof("Resolve '%s' DONE in %s", from.String(), time.Since(start).String())
 }
 
 func (ts *TypeScript) resolveModuleDeps(

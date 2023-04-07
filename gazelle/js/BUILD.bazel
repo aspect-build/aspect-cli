@@ -14,7 +14,6 @@ go_library(
         "kinds.go",
         "language.go",
         "log.go",
-        "parser.go",
         "resolve.go",
         "target.go",
         "walk.go",
@@ -24,6 +23,7 @@ go_library(
     deps = [
         "//gazelle/js/git",
         "//gazelle/js/node",
+        "//gazelle/js/parser/esbuild",
         "//gazelle/js/pnpm",
         "//gazelle/js/typescript",
         "@bazel_gazelle//config:go_default_library",
@@ -39,17 +39,13 @@ go_library(
         "@com_github_emirpasic_gods//maps/treemap",
         "@com_github_emirpasic_gods//sets/treeset",
         "@com_github_emirpasic_gods//utils",
-        "@com_github_evanw_esbuild//pkg/api",
         "@com_github_sirupsen_logrus//:logrus",
     ],
 )
 
 go_test(
     name = "js_test",
-    srcs = [
-        "generate_test.go",
-        "parser_test.go",
-    ],
+    srcs = ["generate_test.go"],
     embed = [":js"],
 )
 

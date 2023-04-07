@@ -5,14 +5,17 @@ import (
 	"path"
 
 	"github.com/evanw/esbuild/pkg/api"
+
+	"aspect.build/cli/gazelle/js/parser"
 )
 
-type Parser struct {
+type EsbuildParser struct {
+	parser.Parser
 }
 
-func NewParser() *Parser {
-	p := &Parser{}
-	return p
+func NewParser() parser.Parser {
+	p := EsbuildParser{}
+	return &p
 }
 
 // filenameToLoader takes in a filename, e.g. myFile.ts,
@@ -32,9 +35,7 @@ func filenameToLoader(filename string) api.Loader {
 }
 
 // ParseImports returns all the imports from a file after parsing it.
-func (p *Parser) ParseImports(filePath, source string) ([]string, []error) {
-	BazelLog.Tracef("ParseImports %s", filePath)
-
+func (p *EsbuildParser) ParseImports(filePath, source string) ([]string, []error) {
 	imports := []string{}
 
 	// Construct an esbuild plugin that pulls out all the imports.

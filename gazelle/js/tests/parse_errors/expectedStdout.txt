@@ -1,6 +1,6 @@
 subbuild/subbuild-bad.ts parse error(s):
-     4: Expected ";" but found "1"
+4: Expected ";" but found "1"
 subdir/subdir-bad.ts parse error(s):
-     3: Expected "}" but found "SyntaxError"
+3: Expected "}" but found "SyntaxError"
 bad.ts parse error(s):
-     2: Expected ";" but found "like"
+2: Expected ";" but found "like"
