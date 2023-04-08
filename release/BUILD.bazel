@@ -1,4 +1,6 @@
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load(":bazelisk_artifacts.bzl", "bazelisk_artifacts")
+load(":cli_brew_artifacts.bzl", "cli_brew_artifacts")
 load(":release.bzl", "multi_platform_binaries", "release")
 load(":version_file.bzl", "version_file")
 
@@ -24,11 +26,68 @@ bazelisk_artifacts(
     windows_x86_64 = ":aspect-windows-amd64",
 )
 
+cli_brew_artifacts(
+    name = "aspect_brew_artifacts",
+    additional_bins = [":bazel"],
+    # Based on Bazelisk brew formula:
+    # https://github.com/Homebrew/homebrew-core/blob/7ee2ad3624ac2364aabf28c8d8ee5efaf8592ef1/Formula/bazelisk.rb
+    additional_content = """
+  conflicts_with "bazel", because: "aspect replaces the bazel binary"
+  conflicts_with "bazelisk", because: "aspect replaces the bazel binary"
+""",
+    binary_name = "aspect",
+    bottle_root_url = "https://github.com/aspect-build/aspect-cli/releases/download/0.0.0-PLACEHOLDER",
+    desc = "Correct, fast, usable: choose three",
+    formula_name = "aspect",
+    homepage = "https://aspect.build/cli",
+    license = "Apache-2.0",
+    root_files = [
+        "//:LICENSE",
+        "//:README.md",
+    ],
+    url = "https://github.com/aspect-build/aspect-cli",
+    version_file = ":aspect_version",
+)
+
 release(
     name = "release",
     tags = ["manual"],
     targets = [
         ":aspect",
         ":aspect_bazelisk_artifacts",
+        ":aspect_brew_artifacts",
+    ],
+)
+
+bzl_library(
+    name = "platforms",
+    srcs = ["platforms.bzl"],
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["version.tmpl"])
+
+# TODO: this is out-of-date and no longer working. Leaving here for future use.
+sh_binary(
+    name = "stage_for_dev",
+    srcs = ["stage_for_dev.sh"],
+    data = [
+        ":aspect_brew_artifacts_dev",
+    ],
+)
+
+# This is not a test target because it will copy files to your local
+# system. However, it will fail if any steps fail or if the assertions are not
+# met.
+sh_binary(
+    name = "verify_homebrew_artifacts",
+    testonly = True,
+    srcs = ["verify_homebrew_artifacts.sh"],
+    data = [
+        ":aspect_version",
+        ":stage_for_dev",
+    ],
+    deps = [
+        "@aspect_bazel_lib//shlib/lib:assertions",
     ],
 )

@@ -4,4 +4,8 @@ build --incompatible_strict_action_env
 
 test --keep_going
 test --test_output=errors
-test --@io_bazel_rules_go//go/config:race
+
+# Don't try and auto detect the cc toolchain, as we use our own gcc toolchains.
+build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+build --incompatible_strict_action_env=true
+build --incompatible_enable_cc_toolchain_resolution
