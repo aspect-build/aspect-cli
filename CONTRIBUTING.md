@@ -49,7 +49,7 @@ After this, you should be able to merge your changes without any conflicts in th
 
     ```
     git tag x.x.x
-    git push origin $!
+    git push origin $_
     ```
 
     > A `v` version prefix is intentionally _not_ included in the release tag so that the GitHub root
@@ -73,7 +73,7 @@ After this, you should be able to merge your changes without any conflicts in th
 
     ```
     git tag v1.5xx.x
-    git push origin $!
+    git push origin $_
     ```
 
 4. Update Homebrew Formula
