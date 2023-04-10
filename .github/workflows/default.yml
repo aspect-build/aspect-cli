@@ -14,12 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-        with:
-          # Number of commits to fetch. 0 indicates all history for all branches and tags. This is
-          # needed since if we don't fetch tags then the workspace status command fails to set
-          # STABLE_BUILD_SCM_TAG which causes the //release/brew/tests:version_file_with_stamp_test
-          # test to fail as it depends on that stamp value. See https://github.com/actions/checkout.
-          fetch-depth: 0
       - name: Validate changed files
         if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'allow sdk change')
         run: ./.github/workflows/validate_changed_files.sh
