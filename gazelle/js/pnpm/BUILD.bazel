@@ -4,12 +4,15 @@ go_library(
     name = "pnpm",
     srcs = [
         "parser.go",
+        "parser_v5.go",
+        "parser_v6.go",
         "workspace.go",
     ],
     importpath = "aspect.build/cli/gazelle/js/pnpm",
     visibility = ["//visibility:public"],
     deps = [
         "@bazel_gazelle//label:go_default_library",
+        "@com_github_masterminds_semver_v3//:semver",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
