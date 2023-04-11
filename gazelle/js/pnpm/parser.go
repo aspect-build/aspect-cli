@@ -1,117 +1,63 @@
 package gazelle
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"regexp"
 
-	"gopkg.in/yaml.v3"
+	semver "github.com/Masterminds/semver/v3"
 )
 
-func ParsePnpmLockFileDependencies(lockfilePath string) map[string]map[string]string {
-	yamlFile, readErr := os.ReadFile(lockfilePath)
+type WorkspacePackageVersionMap map[string]map[string]string
+
+/* Parse a lockfile and return a map of workspace projects to a map of dependency name to version.
+ */
+func ParsePnpmLockFileDependencies(lockfilePath string) WorkspacePackageVersionMap {
+	yamlFileContent, readErr := os.ReadFile(lockfilePath)
 	if readErr != nil {
-		log.Fatalf("failed to read pnpm '%s': %s", lockfilePath, readErr.Error())
-		os.Exit(1)
+		log.Fatalf("failed to read lockfile '%s': %s", lockfilePath, readErr.Error())
 	}
 
-	return parsePnpmLockDependencies(yamlFile)
+	deps, err := parsePnpmLockDependencies(yamlFileContent)
+	if err != nil {
+		log.Fatalf("pnpm parse - %v\n", err)
+	}
+	return deps
 }
 
-func parsePnpmLockDependencies(yamlFileContent []byte) map[string]map[string]string {
-	lockfile := PnpmLockfile{}
+var lockVersionRegex = regexp.MustCompile(`^\s*lockfileVersion: '?(?P<Version>\d\.\d)'?`)
 
-	unmarchalErr := yaml.Unmarshal(yamlFileContent, &lockfile)
-	if unmarchalErr != nil {
-		log.Fatalln("Failed parse pnpm lockfile: ", unmarchalErr)
-		os.Exit(1)
+func parsePnpmLockVersion(yamlFileContent []byte) (string, error) {
+	match := lockVersionRegex.FindStringSubmatch(string(yamlFileContent))
+
+	if len(match) != 2 {
+		return "", fmt.Errorf("failed to find lockfile version in: %q", string(yamlFileContent))
 	}
 
-	result := make(map[string]map[string]string)
-
-	// Pnpm workspace lockfiles contain a list of projects under Importers, including
-	// the root project as the "." importer.
-	if lockfile.Importers != nil {
-		for pkg, pkgDeps := range lockfile.Importers {
-
-			if result[pkg] != nil {
-				log.Fatalln("Invalid pnpm lockfile, duplicate importer: ", pkg)
-			}
-
-			result[pkg] = mergeDependencies(pkgDeps.Dependencies, pkgDeps.DevDependencies, pkgDeps.PeerDependencies, pkgDeps.OptionalDependencies)
-		}
-	} else {
-		// Non-workspace lockfiles have one set of dependencies at the root
-		result["."] = mergeDependencies(lockfile.Dependencies, lockfile.DevDependencies, lockfile.PeerDependencies, lockfile.OptionalDependencies)
-	}
-
-	return result
+	return match[1], nil
 }
 
-/*
-	  Example pnpm-lock.yaml with workspaces
-
-	  ```
-		lockfileVersion: 5.4
-		specifiers:
-			'@aspect-test/c': ^2.0.2
-	  		jquery: 3.6.1
-		dependencies:
-			'@aspect-test/c': 2.0.2
-		devDependencies:
-			jquery: 3.6.1
-		packages:
-			/@aspect-test/c/2.0.2:
-				...
-			...
-		...
-	  ```
-
-	  or with pnpm-workspaces.yaml:
-
-	  ```
-		lockfileVersion: 5.4
-		importers:
-			.:
-				specifiers:
-					'@aspect-test/a': ^2.0.2
-				dependencies:
-					'@aspect-test/a': ^2.0.2
-			gazelle/ts/tests/simple_json_import:
-				specifiers: {}
-			infrastructure/cdn:
-				specifiers:
-					'@aspect-test/c': ^2.0.2
-				dependencies:
-					'@aspect-test/c': ^2.0.2
-		packages:
-			/@aspect-test/c/2.0.2:
-				...
-			...
-		...
-	  ```
-*/
-type PnpmLockfile struct {
-	Dependencies         map[string]string
-	DevDependencies      map[string]string `yaml:"devDependencies"`
-	PeerDependencies     map[string]string `yaml:"peerDependencies"`
-	OptionalDependencies map[string]string `yaml:"optionalDependencies"`
-
-	Importers map[string]struct {
-		Dependencies         map[string]string
-		DevDependencies      map[string]string `yaml:"devDependencies"`
-		PeerDependencies     map[string]string `yaml:"peerDependencies"`
-		OptionalDependencies map[string]string `yaml:"optionalDependencies"`
-	}
-}
-
-func mergeDependencies(d ...map[string]string) map[string]string {
-	result := make(map[string]string)
-
-	for _, m := range d {
-		for k, v := range m {
-			result[k] = v
-		}
+func parsePnpmLockDependencies(yamlFileContent []byte) (WorkspacePackageVersionMap, error) {
+	if len(yamlFileContent) == 0 {
+		return WorkspacePackageVersionMap{}, nil
 	}
 
-	return result
+	versionStr, versionErr := parsePnpmLockVersion(yamlFileContent)
+	if versionErr != nil {
+		return nil, versionErr
+	}
+
+	version, versionErr := semver.NewVersion(versionStr)
+	if versionErr != nil {
+		return nil, fmt.Errorf("failed to parse semver %q: %v", versionStr, versionErr)
+	}
+
+	if version.Major() == 5 {
+		return parsePnpmLockDependenciesV5(yamlFileContent)
+	} else if version.Major() == 6 {
+		return parsePnpmLockDependenciesV6(yamlFileContent)
+	}
+
+	return nil, fmt.Errorf("unsupported version: %v", versionStr)
 }
