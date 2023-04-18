@@ -9,8 +9,8 @@ import (
 var testCases = []struct {
 	desc, ts string
 	// Specify a filename so esbuild knows how to load the file.
-	filename  string
-	expected  []string
+	filename string
+	expected []string
 	typeOnly bool
 }{
 	{
@@ -220,8 +220,8 @@ var testCases = []struct {
 				</>
 			})
 		`,
-		filename:  "sg-example-once-crashed.tsx",
-		expected:  []string{"react"},
+		filename: "sg-example-once-crashed.tsx",
+		expected: []string{"react"},
 		typeOnly: true,
 	},
 	{
@@ -230,8 +230,8 @@ var testCases = []struct {
 			import type React from "react"
 			import type { X } from "y"
 		`,
-		filename:  "types.ts",
-		expected:  []string{"react", "y"},
+		filename: "types.ts",
+		expected: []string{"react", "y"},
 		typeOnly: true,
 	},
 	{
@@ -240,8 +240,8 @@ var testCases = []struct {
 			import { Foo } from "my/types";
 			export const foo: Foo = 1
 		`,
-		filename:  "typeImport.ts",
-		expected:  []string{"my/types"},
+		filename: "typeImport.ts",
+		expected: []string{"my/types"},
 		typeOnly: true,
 	},
 	{
@@ -250,8 +250,8 @@ var testCases = []struct {
 			const { Foo } = require("my/types");
 			export const foo: Foo = 1
 		`,
-		filename:  "typeRequire.ts",
-		expected:  []string{"my/types"},
+		filename: "typeRequire.ts",
+		expected: []string{"my/types"},
 		typeOnly: true,
 	},
 	{
@@ -260,8 +260,8 @@ var testCases = []struct {
 			import type { Foo } from "my/types";
 			export const foo: Foo = 1
 		`,
-		filename:  "typeImport.ts",
-		expected:  []string{"my/types"},
+		filename: "typeImport.ts",
+		expected: []string{"my/types"},
 		typeOnly: true,
 	},
 	{
@@ -269,8 +269,8 @@ var testCases = []struct {
 		ts: `
 			import type { Foo } from "my/types";
 		`,
-		filename:  "typeImport-unused.ts",
-		expected:  []string{"my/types"},
+		filename: "typeImport-unused.ts",
+		expected: []string{"my/types"},
 		typeOnly: true,
 	},
 }
