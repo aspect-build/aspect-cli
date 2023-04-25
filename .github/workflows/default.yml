@@ -1,4 +1,4 @@
-name: Default
+name: CI/CD
 
 on:
   push:
@@ -10,6 +10,10 @@ on:
   workflow_dispatch:
 
 jobs:
+  aspect-workflows:
+    name: Aspect Workflows
+    uses: aspect-build/workflows-action/.github/workflows/aspect-workflows.yaml@5.3.4
+
   test:
     runs-on: ubuntu-latest
     steps:
