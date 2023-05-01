@@ -140,6 +140,7 @@ plugins:
   - name: foo
     from: https://static.plugins.com/foo
     version: 3.2.1
+    log_level: debug
 `)
 
 	err = os.WriteFile(userConfigPath, userConfigContents, 0644)
@@ -160,5 +161,5 @@ plugins:
 	g.Expect(fmt.Sprintf("%v", v.Get("configure"))).To(Equal("map[languages:map[go:false javascript:true protobuf:false]]"))
 
 	// Plugin lists should be merged with plugins that have the same name being overrides
-	g.Expect(fmt.Sprintf("%v", v.Get("plugins"))).To(Equal("[map[from:https://static.plugins.com/foo name:foo version:3.2.1] map[from:https://static.plugins.com/fum name:fum version:1.2.3] map[from:https://static.plugins.com/bar name:bar version:1.2.3]]"))
+	g.Expect(fmt.Sprintf("%v", v.Get("plugins"))).To(Equal("[map[from:https://static.plugins.com/foo log_level:debug name:foo version:3.2.1] map[from:https://static.plugins.com/fum name:fum version:1.2.3] map[from:https://static.plugins.com/bar name:bar version:1.2.3]]"))
 }

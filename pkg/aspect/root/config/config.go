@@ -388,7 +388,7 @@ func MarshalPluginConfig(plugins []types.PluginConfig) interface{} {
 			i["version"] = p.Version
 		}
 		if p.LogLevel != "" {
-			i["log_level"] = p.Version
+			i["log_level"] = p.LogLevel
 		}
 		if p.Properties != nil {
 			i["properties"] = p.Properties
