@@ -96,7 +96,7 @@ go_rules_dependencies()
 
 go_embed_data_dependencies()
 
-go_register_toolchains(version = "1.20.1")
+go_register_toolchains(version = "1.20.4")
 
 http_archive(
     name = "bazel_gazelle",
