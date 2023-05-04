@@ -23,7 +23,7 @@ orbs:
   # CCI doesn't allow us to use a relative path in the monorepo, so we have to refer to an
   # already-published orb in their registry.
   # Run `bazel run --stamp //rosetta/cci-orb:publish` to produce a new version.
-  bazel: aspect-build/workflows@dev:5.3.6-dev.29.gfeba3ad
+  bazel: aspect-build/workflows@dev:5.4.3
 
 workflows:
   bazel-setup:

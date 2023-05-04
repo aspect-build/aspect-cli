@@ -1,5 +1,6 @@
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 load("@bazel_gazelle//:def.bzl", "gazelle")
+load("@buildifier_prebuilt//:rules.bzl", "buildifier")
 load("@io_bazel_rules_go//go:def.bzl", "nogo")
 load("@npm//:defs.bzl", "npm_link_all_packages")
 
@@ -119,4 +120,18 @@ sh_binary(
 alias(
     name = "go",
     actual = "@go_sdk//:bin/go",
+)
+
+buildifier(
+    name = "buildifier.check",
+    # By default the diffs appear on stdout,
+    # but the rest of Buildifier appears on
+    # stderr making it harder to capture in Workflows,
+    # so we do a cheeky redirect here in the diff_command.
+    diff_command = "diff -U 5 >&2",
+    exclude_patterns = [
+        "./.git/*",
+    ],
+    lint_mode = "warn",
+    mode = "diff",
 )

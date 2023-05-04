@@ -1,4 +1,7 @@
 # See https://docs.aspect.build/v/workflows/config
 ---
 tasks:
+  branch_freshness:
+    update_strategy: rebase
+  buildifier:
   test:
