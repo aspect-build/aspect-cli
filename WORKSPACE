@@ -89,6 +89,17 @@ http_archive(
     urls = ["https://github.com/bazelbuild/rules_pkg/releases/download/0.8.1/rules_pkg-0.8.1.tar.gz"],
 )
 
+http_archive(
+    name = "buildifier_prebuilt",
+    sha256 = "95387c9dded7f8e3bdd4c598bc2ca4fbb6366cb214fa52e7d7b689eb2f421e01",
+    strip_prefix = "buildifier-prebuilt-6.0.0",
+    urls = ["https://github.com/keith/buildifier-prebuilt/archive/6.0.0.tar.gz"],
+)
+
+load("@buildifier_prebuilt//:deps.bzl", "buildifier_prebuilt_deps")
+
+buildifier_prebuilt_deps()
+
 load("@io_bazel_rules_go//extras:embed_data_deps.bzl", "go_embed_data_dependencies")
 load("@io_bazel_rules_go//go:deps.bzl", "go_register_toolchains", "go_rules_dependencies")
 
@@ -212,3 +223,7 @@ gcc_register_toolchain(
     name = "gcc_toolchain_x86_64",
     target_arch = ARCHS.x86_64,
 )
+
+load("@buildifier_prebuilt//:defs.bzl", "buildifier_prebuilt_register_toolchains")
+
+buildifier_prebuilt_register_toolchains()
