@@ -74,11 +74,12 @@ You can also find us on [Bazel Slack](https://slack.bazel.build/) on the #aspect
 
 # For Enterprise
 
-`aspect` is sponsored by Aspect Development, a Bazel consulting company.
+Aspect CLI is built by [Aspect](http://aspect.build).
+
 If your organization needs more help to make your Bazel migration a success,
 come find us at [aspect.dev](https://aspect.dev)
 
-See our website at <http://aspect.build> to learn more about our offerings.
+See our website at <http://aspect.build> to learn more about our product offerings.
 
 [bazel]: http://bazel.build
 [github releases]: https://github.com/aspect-dev/aspect-cli/releases
