@@ -15,17 +15,16 @@ protobuf_deps()
 
 http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "087f347a1725b299915f8ab81887c61e1911ed482a56c5d8985a0e190f080326",
-    strip_prefix = "bazel-lib-1.29.1",
-    url = "https://github.com/aspect-build/bazel-lib/releases/download/v1.29.1/bazel-lib-v1.29.1.tar.gz",
+    sha256 = "f1c181b910f821072f38ee45bb87db6b56275458c7f832c54c54ba6334119eca",
+    strip_prefix = "bazel-lib-1.32.0",
+    url = "https://github.com/aspect-build/bazel-lib/releases/download/v1.32.0/bazel-lib-v1.32.0.tar.gz",
 )
 
-# Needed in //release/version_file.bzl for @aspect_rules_js//js/private:expand_template.bzl
 http_archive(
     name = "aspect_rules_js",
-    sha256 = "1aa0ab76d1f9520bb8993e2d84f82da2a9c87da1e6e8d121dbb4c857a292c2cd",
-    strip_prefix = "rules_js-1.20.1",
-    url = "https://github.com/aspect-build/rules_js/archive/refs/tags/v1.20.1.tar.gz",
+    sha256 = "08061ba5e5e7f4b1074538323576dac819f9337a0c7d75aee43afc8ae7cb6e18",
+    strip_prefix = "rules_js-1.26.1",
+    url = "https://github.com/aspect-build/rules_js/releases/download/v1.26.1/rules_js-v1.26.1.tar.gz",
 )
 
 http_archive(
@@ -99,6 +98,10 @@ http_archive(
 load("@buildifier_prebuilt//:deps.bzl", "buildifier_prebuilt_deps")
 
 buildifier_prebuilt_deps()
+
+load("@aspect_bazel_lib//lib:repositories.bzl", "aspect_bazel_lib_dependencies")
+
+aspect_bazel_lib_dependencies()
 
 load("@io_bazel_rules_go//extras:embed_data_deps.bzl", "go_embed_data_dependencies")
 load("@io_bazel_rules_go//go:deps.bzl", "go_register_toolchains", "go_rules_dependencies")
