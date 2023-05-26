@@ -18,90 +18,18 @@ parameters:
 setup: true
 
 orbs:
+  continuation: circleci/continuation@0.3.1
   slack: circleci/slack@4.12.1
-
-jobs:
-  # Vendored rosetta output for Aspect Workflows
-  test:
-    resource_class: aspect-build/aspect-cli
-    machine: true
-    working_directory: /mnt/ephemeral/circle/workdir/workflows
-    environment:
-      XDG_CACHE_HOME: /mnt/ephemeral/caches
-      ROSETTA_CONFIGURATION: .aspect/workflows/config.yaml
-    steps:
-      - run:
-          name: Configure Workflows
-          command: configure_workflows_env
-      - checkout
-      - run:
-          name: Check runner health (before run)
-          command: agent_health_check
-      - run:
-          name: Branch Freshness
-          command: rosetta run branch_freshness
-      - run:
-          name: Prepare archive directories
-          command: rm -rf /tmp/aspect/artifacts /tmp/aspect/testlogs
-      - run:
-          name: Bazel test
-          command: rosetta run test --workspace .
-          no_output_timeout: 2.5m
-      - store_artifacts:
-          path: /tmp/aspect/artifacts
-      - store_test_results:
-          path: /tmp/aspect/testlogs
-      - run:
-          name: Finalization
-          command: rosetta run finalization
-            --workspace .
-          when: always
-
-  # Prepare archives that speed up boot time of fresh Bazel servers on cold instances
-  aspect-workflows-warming:
-    resource_class: aspect-build/aspect-cli_warming
-    machine: true
-    working_directory: /mnt/ephemeral/circle/workdir/workflows
-    environment:
-      XDG_CACHE_HOME: /mnt/ephemeral/caches
-      ROSETTA_CONFIGURATION: .aspect/workflows/config.yaml
-    steps:
-      - run:
-          name: Configure Workflows
-          command: configure_workflows_env
-      - checkout
-      - run:
-          name: Check runner health (before run)
-          command: agent_health_check
-      - run:
-          name: Create warming archive
-          command: rosetta run warming --workspace .
-      - run:
-          name: Archive warming tars
-          command: warming_archive
+  # CCI doesn't allow us to use a relative path in the monorepo, so we have to refer to an
+  # already-published orb in their registry.
+  # Run `bazel run --stamp //rosetta/cci-orb:publish` to produce a new version.
+  bazel: aspect-build/workflows@dev:5.4.11-dev.56.g77f1f53
 
 workflows:
-  version: 2
-
-  default_workflows:
+  bazel-setup:
     jobs:
-      - test:
+      - bazel/setup:
+          aspect-config: .aspect/workflows/config_cci.yaml
+          resource_class: aspect-build/aspect-cli
           context:
             - slack
-
-  bazel-warming:
-    triggers:
-      - schedule:
-          # Every 4 hours on weekdays
-          # M-F 8:05, 13:05, 16:05 PDT
-          cron: '5 15,20,23 * * 1-5'
-          filters:
-            branches:
-              only:
-                - main
-    jobs:
-      - aspect-workflows-warming:
-          filters:
-            branches:
-              only:
-                - main
