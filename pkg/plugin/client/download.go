@@ -108,7 +108,7 @@ func downloadFile(originURL, destDir, destFile string, mode fs.FileMode) (string
 		defer os.Remove(tmpfile.Name())
 		defer tmpfile.Close()
 
-		faint.Println("Downloading", originURL)
+		faint.Fprintf(os.Stderr, "Downloading %s...\n", originURL)
 
 		resp, err := http.Get(originURL)
 		if err != nil {
