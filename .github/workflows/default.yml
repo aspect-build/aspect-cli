@@ -12,7 +12,9 @@ on:
 jobs:
   aspect-workflows:
     name: Aspect Workflows
-    uses: aspect-build/workflows-action/.github/workflows/aspect-workflows.yaml@5.3.4
+    with:
+      queue: aspect-cli
+    uses: aspect-build/workflows-action/.github/workflows/aspect-workflows.yaml@5.4.12-dev.23.g1efd33a
 
   test:
     runs-on: ubuntu-latest

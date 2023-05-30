@@ -29,7 +29,7 @@ workflows:
   bazel-setup:
     jobs:
       - bazel/setup:
-          aspect-config: .aspect/workflows/config_cci.yaml
+          aspect-config: .aspect/workflows/config.yaml
           resource_class: aspect-build/aspect-cli
           context:
             - slack

@@ -1,5 +1,6 @@
 # See https://docs.aspect.build/v/workflows/config
 ---
+queue: aspect-cli
 tasks:
   branch_freshness:
     update_strategy: rebase
