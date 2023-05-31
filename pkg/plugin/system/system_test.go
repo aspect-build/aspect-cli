@@ -33,8 +33,8 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/client"
 	client_mock "aspect.build/cli/pkg/plugin/client/mock"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
-	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin/mock"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/plugin"
+	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha4/plugin/mock"
 	"aspect.build/cli/pkg/plugin/types"
 )
 

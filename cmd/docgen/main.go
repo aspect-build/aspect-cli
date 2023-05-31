@@ -40,18 +40,18 @@ func main() {
 		log.Fatal(err)
 	}
 
-	argsWithoutStartupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
+	restArgs, startupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
+
 	if err != nil {
 		log.Fatal(err)
 	}
-	os.Args = append(os.Args[0:1], argsWithoutStartupFlags...)
 
-	if err = command(bzl); err != nil {
+	if err = command(bzl, restArgs, startupFlags); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func command(bzl bazel.Bazel) error {
+func command(bzl bazel.Bazel, restArgs, startupFlags []string) error {
 	cmd := &cobra.Command{Use: "docgen"}
 
 	pluginSystem := system.NewPluginSystem()
@@ -68,7 +68,7 @@ func command(bzl bazel.Bazel) error {
 		return err
 	}
 
-	if err := pluginSystem.RegisterCustomCommands(cmd); err != nil {
+	if err := pluginSystem.RegisterCustomCommands(cmd, startupFlags); err != nil {
 		return err
 	}
 
