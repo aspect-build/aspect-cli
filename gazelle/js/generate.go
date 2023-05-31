@@ -221,10 +221,11 @@ func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.Generat
 
 	for result := range ts.collectAllImports(cfg, args, sourceFiles) {
 		if len(result.Errors) > 0 {
-			fmt.Println(result.SourcePath, "parse error(s):")
+			fmt.Printf("%s:\n", result.SourcePath)
 			for _, err := range result.Errors {
-				fmt.Println(err)
+				fmt.Printf("\t%s\n", err)
 			}
+			fmt.Println()
 		}
 
 		for _, sourceImport := range result.Imports {
