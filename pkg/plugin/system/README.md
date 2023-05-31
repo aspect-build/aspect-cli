@@ -38,4 +38,4 @@ on which hooks are exposed.
 
 ## Current SDK
 
-See [the current SDK README](/pkg/plugin/sdk/v1alpha3/README.md).
+See [the current SDK README](/pkg/plugin/sdk/v1alpha4/README.md).

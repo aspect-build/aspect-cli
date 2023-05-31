@@ -37,7 +37,7 @@ import (
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/client"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha3/plugin"
+	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/plugin"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
@@ -46,7 +46,7 @@ import (
 type PluginSystem interface {
 	Configure(streams ioutils.Streams, pluginsConfig interface{}) error
 	TearDown()
-	RegisterCustomCommands(cmd *cobra.Command) error
+	RegisterCustomCommands(cmd *cobra.Command, bazelStartupArgs []string) error
 	BESBackendInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
@@ -117,7 +117,7 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams, pluginsConfig interfa
 
 // RegisterCustomCommands processes custom commands provided by plugins and adds
 // them as commands to the core whilst setting up callbacks for the those commands.
-func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
+func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command, bazelStartupArgs []string) error {
 	internalCommands := make(map[string]struct{})
 	for _, command := range cmd.Commands() {
 		cmdName := strings.SplitN(command.Use, " ", 2)[0]
@@ -139,14 +139,15 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command) error {
 			callback := node.payload.CustomCommandExecutor
 
 			cmd.AddCommand(&cobra.Command{
-				Use:     command.Use,
-				Short:   command.ShortDesc,
-				Long:    command.LongDesc,
-				GroupID: "plugin",
+				Use:                command.Use,
+				Short:              command.ShortDesc,
+				Long:               command.LongDesc,
+				GroupID:            "plugin",
+				DisableFlagParsing: true,
 				RunE: interceptors.Run(
 					[]interceptors.Interceptor{},
 					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-						return callback.ExecuteCustomCommand(cmdName, ctx, args)
+						return callback.ExecuteCustomCommand(cmdName, ctx, args, bazelStartupArgs)
 					},
 				),
 			})

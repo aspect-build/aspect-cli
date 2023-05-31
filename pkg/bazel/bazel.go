@@ -163,14 +163,14 @@ func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...strin
 }
 
 // Initializes start-up flags from args and returns args without start-up flags
-func InitializeStartupFlags(args []string) ([]string, error) {
+func InitializeStartupFlags(args []string) ([]string, []string, error) {
 	nonFlags, flags, err := ParseOutBazelFlags("startup", args)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	startupFlags = flags
-	return nonFlags, nil
+	return nonFlags, flags, nil
 }
 
 // Flags fetches the metadata for Bazel's command line flag via `bazel help flags-as-proto`
