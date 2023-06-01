@@ -104,6 +104,7 @@ write_source_files(
         "//pkg/plugin/sdk/v1alpha1/proto:proto_go_proto.update_go_pb",
         "//pkg/plugin/sdk/v1alpha2/proto:proto_go_proto.update_go_pb",
         "//pkg/plugin/sdk/v1alpha3/proto:proto_go_proto.update_go_pb",
+        "//pkg/plugin/sdk/v1alpha4/proto:proto_go_proto.update_go_pb",
     ],
 )
 
