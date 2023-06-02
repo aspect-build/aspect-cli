@@ -48,6 +48,8 @@ func (ts *Configurer) KnownDirectives() []string {
 		Directive_NpmPackageNameConvention,
 		Directive_LibraryFiles,
 		Directive_TestFiles,
+		Directive_CustomTargetFiles,
+		Directive_CustomTargetTestFiles,
 	}
 }
 
@@ -184,9 +186,27 @@ func (ts *TypeScript) readDirectives(c *config.Config, rel string, f *rule.File)
 		case Directive_NpmPackageNameConvention:
 			config.SetNpmPackageNamingConvention(value)
 		case Directive_LibraryFiles:
-			config.AddLibraryFileGlob(value)
+			config.AddTargetGlob(DefaultLibraryName, value, false)
 		case Directive_TestFiles:
-			config.AddTestFileGlob(value)
+			config.AddTargetGlob(DefaultTestsName, value, true)
+		case Directive_CustomTargetFiles:
+			groupGlob := strings.Split(value, " ")
+			if len(groupGlob) != 2 {
+				err := fmt.Errorf("invalid value for directive %q: %s: value must be group + glob",
+					Directive_CustomTargetFiles, d.Value)
+				log.Fatal(err)
+			}
+
+			config.AddTargetGlob(groupGlob[0], groupGlob[1], false)
+		case Directive_CustomTargetTestFiles:
+			groupGlob := strings.Split(value, " ")
+			if len(groupGlob) != 2 {
+				err := fmt.Errorf("invalid value for directive %q: %s: value must be group + glob",
+					Directive_CustomTargetTestFiles, d.Value)
+				log.Fatal(err)
+			}
+
+			config.AddTargetGlob(groupGlob[0], groupGlob[1], true)
 		}
 	}
 }

@@ -79,24 +79,20 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 		return
 	}
 
-	// Divide src vs test files.
+	// Create a set of source files per target.
 	sourceFileGroups := treemap.NewWithStringComparator()
-	for _, group := range cfg.GetSourceGroups() {
-		sourceFileGroups.Put(group, treeset.NewWithStringComparator())
+	for _, group := range cfg.GetSourceTargets() {
+		sourceFileGroups.Put(group.name, treeset.NewWithStringComparator())
 	}
 
+	// A src files into target groups (lib, test, ...custom).
 	for _, f := range sourceFiles.Values() {
 		file := f.(string)
-		if cfg.IsTestFile(file) {
-			BazelLog.Tracef("Add test src '%s'", file)
+		if target := cfg.GetSourceTarget(file); target != nil {
+			BazelLog.Tracef("add '%s' src '%s/%s'", target.name, args.Rel, file)
 
-			group, _ := sourceFileGroups.Get(DefaultTestsName)
-			group.(*treeset.Set).Add(file)
-		} else if cfg.IsSourceFile(file) {
-			BazelLog.Tracef("Add src '%s'", file)
-
-			group, _ := sourceFileGroups.Get(DefaultLibraryName)
-			group.(*treeset.Set).Add(file)
+			groupFiles, _ := sourceFileGroups.Get(target.name)
+			groupFiles.(*treeset.Set).Add(file)
 		} else {
 			BazelLog.Tracef("Skip src '%s'", file)
 		}
@@ -109,42 +105,34 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 	// The package/directory name variable value used to render the target names.
 	packageName := toTargetPackageName(args)
 
-	srcRuleName := cfg.RenderTargetName(cfg.libraryNamingConvention, packageName)
-	if isNpmPackage {
-		srcRuleName = cfg.RenderNpmSourceLibraryName(srcRuleName)
-	}
+	// Create rules for each target group.
+	sourceRules := treemap.NewWithStringComparator()
+	for _, group := range cfg.GetSourceTargets() {
+		// The project rule name. Can be configured to map to a different name.
+		ruleName := cfg.RenderTargetName(cfg.MapTargetName(group.name), packageName)
+		ruleSrcs, _ := sourceFileGroups.Get(group.name)
 
-	testRuleName := cfg.RenderTargetName(cfg.testsNamingConvention, packageName)
+		if isNpmPackage && group.name == DefaultLibraryName {
+			ruleName = cfg.RenderNpmSourceLibraryName(ruleName)
+		}
 
-	// Build the GenerateResult with src and test rules.
-	srcRuleSrcs, _ := sourceFileGroups.Get(DefaultLibraryName)
-	srcRule, srcGenErr := ts.addProjectRule(
-		cfg,
-		args,
-		srcRuleName,
-		srcRuleSrcs.(*treeset.Set),
-		dataFiles,
-		false,
-		result,
-	)
-	if srcGenErr != nil {
-		log.Printf("Source rule generation error: %v\n", srcGenErr)
-		os.Exit(1)
-	}
+		srcRule, srcGenErr := ts.addProjectRule(
+			cfg,
+			args,
+			ruleName,
+			ruleSrcs.(*treeset.Set),
+			dataFiles,
+			group.testonly,
+			result,
+		)
+		if srcGenErr != nil {
+			log.Printf("Source rule generation error: %v\n", srcGenErr)
+			os.Exit(1)
+		}
 
-	testRuleSrcs, _ := sourceFileGroups.Get(DefaultTestsName)
-	_, testGenErr := ts.addProjectRule(
-		cfg,
-		args,
-		testRuleName,
-		testRuleSrcs.(*treeset.Set),
-		dataFiles,
-		true,
-		result,
-	)
-	if testGenErr != nil {
-		log.Printf("Test rule generation error: %v\n", testGenErr)
-		os.Exit(1)
+		if srcRule != nil {
+			sourceRules.Put(group.name, srcRule)
+		}
 	}
 
 	// If this is a package wrap the main ts_project() rule with npm_package()
@@ -152,9 +140,9 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 		npmPackageName := cfg.RenderTargetName(cfg.npmPackageNamingConvention, packageName)
 		npmPackageSourceFiles := treeset.NewWithStringComparator()
 
-		if srcRule != nil {
+		if srcRule, _ := sourceRules.Get(DefaultLibraryName); srcRule != nil {
 			srcProjectLabel := label.Label{
-				Name:     srcRule.Name(),
+				Name:     srcRule.(*rule.Rule).Name(),
 				Repo:     args.Config.RepoName,
 				Pkg:      args.Rel,
 				Relative: true,
