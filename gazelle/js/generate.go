@@ -190,9 +190,19 @@ func (ts *TypeScript) addNpmPackageRule(cfg *JsGazelleConfig, args language.Gene
 	BazelLog.Infof("add rule '%s' '%s:%s'", npmPackage.Kind(), args.Rel, npmPackage.Name())
 }
 
+func hasTranspiledSources(sourceFiles *treeset.Set) bool {
+	for _, f := range sourceFiles.Values() {
+		if isSourceFileType(f.(string)) && !isDeclarationFileType(f.(string)) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule bool, result *language.GenerateResult) (*rule.Rule, error) {
 	// Generate nothing if there are no source files. Remove any existing rules.
-	if sourceFiles.Empty() {
+	if !hasTranspiledSources(sourceFiles) {
 		if args.File == nil {
 			return nil, nil
 		}

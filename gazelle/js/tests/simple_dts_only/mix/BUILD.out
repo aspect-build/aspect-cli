@@ -1,0 +1,9 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "mix",
+    srcs = [
+        "a.ts",
+        "lib.d.ts",
+    ],
+)
