@@ -4,17 +4,16 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
 ts_project(
     name = "tests_override",
-    srcs = [
-        "b.ts",
-        "no.mock.ts",
-    ],
+    srcs = ["b.ts"],
 )
 
 ts_project(
     name = "tests_override_tests",
     testonly = True,
     srcs = [
+        "b.spec.ts",
         "b.test.ts",
+        "no.mock.ts",
         "no.test.ts",
         "sub/c.test.ts",
     ],

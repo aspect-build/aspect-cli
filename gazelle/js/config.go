@@ -2,6 +2,8 @@ package gazelle
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"strings"
 	"sync"
 	_ "unsafe"
@@ -49,6 +51,10 @@ const (
 	Directive_LibraryFiles = "js_files"
 	// The glob for test files.
 	Directive_TestFiles = "js_test_files"
+	// Add a glob to a custom library type
+	Directive_CustomTargetFiles = "js_custom_files"
+	// Add a glob to a custom library type
+	Directive_CustomTargetTestFiles = "js_custom_test_files"
 	// A TypeScript tsconfig.json file path for typescript compilation config.
 	Directive_JsGazelleConfigJson = "js_tsconfig"
 )
@@ -78,9 +84,34 @@ const (
 	DefaultNpmPackageTargetName = TargetNameDirectoryVar
 )
 
-var DefaultSourceGlobs = map[string][]string{
-	DefaultLibraryName: {fmt.Sprintf("**/*.{%s}", strings.Join(sourceFileExtensionsArray, ","))},
-	DefaultTestsName:   {fmt.Sprintf("**/*.{spec,test}.{%s}", strings.Join(sourceFileExtensionsArray, ","))},
+type TargetGroup struct {
+	// The target name template of the target group.
+	// Supports {dirname} variable.
+	name string
+
+	// Custom glob patterns for sources.
+	customSources []string
+
+	// Default glob patterns for sources. Only set for pre-configured targets.
+	defaultSources []string
+
+	// If the targets are always testonly
+	testonly bool
+}
+
+var DefaultSourceGlobs = []*TargetGroup{
+	&TargetGroup{
+		name:           DefaultLibraryName,
+		customSources:  []string{},
+		defaultSources: []string{fmt.Sprintf("**/*.{%s}", strings.Join(sourceFileExtensionsArray, ","))},
+		testonly:       false,
+	},
+	&TargetGroup{
+		name:           DefaultTestsName,
+		customSources:  []string{},
+		defaultSources: []string{fmt.Sprintf("**/*.{spec,test}.{%s}", strings.Join(sourceFileExtensionsArray, ","))},
+		testonly:       true,
+	},
 }
 
 var (
@@ -132,12 +163,11 @@ type JsGazelleConfig struct {
 	ignoreDependencies       []string
 	resolves                 *linkedhashmap.Map
 	validateImportStatements ValidationMode
-	fileTypeGlobs            map[string][]string
+	targets                  []*TargetGroup
 
 	// Generated rule names
 	npmLinkAllTargetName       string
-	libraryNamingConvention    string
-	testsNamingConvention      string
+	targetNamingOverrides      map[string]string
 	npmPackageNamingConvention string
 
 	// Name/location of tsconfig files relative to BUILDs
@@ -157,9 +187,8 @@ func newRootConfig() *JsGazelleConfig {
 		validateImportStatements:   ValidationError,
 		npmLinkAllTargetName:       DefaultNpmLinkAllTargetName,
 		npmPackageNamingConvention: DefaultNpmPackageTargetName,
-		libraryNamingConvention:    DefaultLibraryName,
-		testsNamingConvention:      DefaultTestsName,
-		fileTypeGlobs:              make(map[string][]string),
+		targetNamingOverrides:      make(map[string]string),
+		targets:                    DefaultSourceGlobs[:],
 		tsconfigName:               defaultTsConfig,
 	}
 }
@@ -173,7 +202,13 @@ func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
 	cCopy.excludes = make([]string, 0)
 	cCopy.ignoreDependencies = make([]string, 0)
 	cCopy.resolves = linkedhashmap.New()
-	cCopy.fileTypeGlobs = make(map[string][]string)
+	cCopy.targets = c.targets[:]
+
+	cCopy.targetNamingOverrides = make(map[string]string)
+	for k, v := range c.targetNamingOverrides {
+		cCopy.targetNamingOverrides[k] = v
+	}
+
 	return &cCopy
 }
 
@@ -306,12 +341,19 @@ func (c *JsGazelleConfig) GenerationMode() GenerationModeType {
 
 // SetLibraryNamingConvention sets the ts_project target naming convention.
 func (c *JsGazelleConfig) SetLibraryNamingConvention(libraryNamingConvention string) {
-	c.libraryNamingConvention = libraryNamingConvention
+	c.targetNamingOverrides[DefaultLibraryName] = libraryNamingConvention
 }
 
 // SetTestsNamingLibraryConvention sets the ts_project test target naming convention.
 func (c *JsGazelleConfig) SetTestsNamingLibraryConvention(testsNamingConvention string) {
-	c.testsNamingConvention = testsNamingConvention
+	c.targetNamingOverrides[DefaultTestsName] = testsNamingConvention
+}
+
+func (c *JsGazelleConfig) MapTargetName(name string) string {
+	if c.targetNamingOverrides[name] != "" {
+		return c.targetNamingOverrides[name]
+	}
+	return name
 }
 
 func (c *JsGazelleConfig) SetNpmPackageNamingConvention(testsNamingConvention string) {
@@ -328,82 +370,74 @@ func (c *JsGazelleConfig) RenderTargetName(name, packageName string) string {
 	return strings.ReplaceAll(name, TargetNameDirectoryVar, packageName)
 }
 
-// AddLibraryFileGlob sets the glob used to find source files.
-func (c *JsGazelleConfig) AddLibraryFileGlob(srcsFileGlob string) {
-	c.addFilePathGlob(DefaultLibraryName, srcsFileGlob)
+// AddTargetGlob sets the glob used to find source files for the specified target
+func (c *JsGazelleConfig) AddTargetGlob(target, fileGlob string, isTestOnly bool) {
+	c.addTargetGlob(target, fileGlob, isTestOnly)
 }
 
-// IsSourceFile determines if a given file path is considered a source file.
-// See AddLibraryFileGlob().
-func (c *JsGazelleConfig) IsSourceFile(filePath string) bool {
+// Determine if and which target the passed file belongs in.
+func (c *JsGazelleConfig) GetSourceTarget(filePath string) *TargetGroup {
 	if !isSourceFileType(filePath) {
-		return false
+		return nil
 	}
 
-	return c.filePathMatches(DefaultLibraryName, filePath)
-}
+	// Rules are evaluated in reverse order, so we want to
+	for i := len(c.targets) - 1; i >= 0; i-- {
+		target := c.targets[i]
+		sources := target.customSources
 
-// AddTestFileGlob sets the glob used to find test source files.
-func (c *JsGazelleConfig) AddTestFileGlob(testsFileGlob string) {
-	c.addFilePathGlob(DefaultTestsName, testsFileGlob)
-}
-
-// IsTestFile determines if a given file path is considered a test source file.
-// See AddTestFileGlob().
-func (c *JsGazelleConfig) IsTestFile(filePath string) bool {
-	if !isSourceFileType(filePath) {
-		return false
-	}
-
-	return c.filePathMatches(DefaultTestsName, filePath)
-}
-
-func (c *JsGazelleConfig) GetSourceGroups() []string {
-	return []string{DefaultLibraryName, DefaultTestsName}
-}
-
-func (c *JsGazelleConfig) addFilePathGlob(srcType, glob string) {
-	if c.fileTypeGlobs[srcType] == nil {
-		c.fileTypeGlobs[srcType] = make([]string, 1)
-	}
-	c.fileTypeGlobs[srcType] = append(c.fileTypeGlobs[srcType], glob)
-}
-
-func (c *JsGazelleConfig) filePathMatches(srcType, filePath string) bool {
-	// Find the first config containing globs for srcType
-	globConfig := c
-	for globConfig != nil && globConfig.fileTypeGlobs[srcType] == nil {
-		globConfig = globConfig.parent
-	}
-
-	// Extract the globs or use the defaults
-	var globs []string
-	if globConfig == nil {
-		globs = DefaultSourceGlobs[srcType]
-	} else {
-		globs = globConfig.fileTypeGlobs[srcType]
-	}
-
-	// This type has no globs or defaults
-	if globs == nil {
-		BazelLog.Debugf("Source type '%s' has no globs", srcType)
-		return false
-	}
-
-	// Test for any match
-	for _, g := range globs {
-		m, e := doublestar.Match(g, filePath)
-		if e != nil {
-			fmt.Printf("Source glob '%s' error: %v", g, e)
-			return false
+		// Fallback to default sources if no sources are specified
+		if len(sources) == 0 {
+			sources = target.defaultSources
 		}
 
-		if m {
-			return true
+		for _, glob := range sources {
+			m, e := doublestar.Match(glob, filePath)
+			if e != nil {
+				log.Fatalf("Target (%s) glob error: %v", target.name, e)
+				os.Exit(1)
+			}
+
+			if m {
+				return target
+			}
 		}
 	}
 
-	return false
+	return nil
+}
+
+// Return a list of all source groups for this config, including primary library + tests.
+// The list is the source of truth for the order of groups
+func (c *JsGazelleConfig) GetSourceTargets() []*TargetGroup {
+	return c.targets
+}
+
+func (c *JsGazelleConfig) addTargetGlob(targetName, glob string, isTestOnly bool) {
+	// Update existing target with the same name
+	for _, target := range c.targets {
+		if target.name == targetName {
+			if target.testonly != isTestOnly {
+				targetWord := "non-test"
+				overrideWord := "test"
+				if target.testonly {
+					targetWord = "test"
+					overrideWord = "non-test"
+				}
+				log.Fatalf("Custom %s target %s:%s can not override %s target", targetWord, c.rel, targetName, overrideWord)
+				os.Exit(1)
+			}
+			target.customSources = append(target.customSources, glob)
+			return
+		}
+	}
+
+	// ... otherwise create a new target
+	c.targets = append(c.targets, &TargetGroup{
+		name:          targetName,
+		customSources: []string{glob},
+		testonly:      isTestOnly,
+	})
 }
 
 func (c *JsGazelleConfig) SetTsconfigName(tsconfigName string) {
