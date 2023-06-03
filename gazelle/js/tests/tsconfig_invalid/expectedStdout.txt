@@ -1,1 +1,1 @@
-Failed to parse tsconfig file tsconfig.json: itemError: "invalid element: this is ba"
+Failed to parse tsconfig file tsconfig.json: ERR: position:0 invalid element: this is ba
