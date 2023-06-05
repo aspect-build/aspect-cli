@@ -16,7 +16,13 @@ import (
 // Configurer satisfies the config.Configurer interface. It's the
 // language-specific configuration extension.
 type Configurer struct {
-	config.Configurer
+	lang *typeScriptLang
+}
+
+func NewConfigurer(lang *typeScriptLang) config.Configurer {
+	return &Configurer{
+		lang: lang,
+	}
 }
 
 // RegisterFlags registers command-line flags used by the extension. This
@@ -64,7 +70,7 @@ func (ts *Configurer) KnownDirectives() []string {
 //
 // f is the build file for the current directory or nil if there is no
 // existing build file.
-func (ts *TypeScript) Configure(c *config.Config, rel string, f *rule.File) {
+func (ts *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 	BazelLog.Tracef("Configure %s", rel)
 
 	// Create the root config.
@@ -84,7 +90,7 @@ func (ts *TypeScript) Configure(c *config.Config, rel string, f *rule.File) {
 	ts.collectIgnoreFiles(c, rel)
 }
 
-func (ts *TypeScript) collectIgnoreFiles(c *config.Config, rel string) {
+func (ts *Configurer) collectIgnoreFiles(c *config.Config, rel string) {
 	// Collect gitignore style ignore files in this directory.
 	for _, ignoreFileName := range bazelIgnoreFiles {
 		ignoreRelPath := path.Join(rel, ignoreFileName)
@@ -93,7 +99,7 @@ func (ts *TypeScript) collectIgnoreFiles(c *config.Config, rel string) {
 		if _, ignoreErr := os.Stat(ignoreFilePath); ignoreErr == nil {
 			BazelLog.Tracef("Add ignore file %s", ignoreRelPath)
 
-			ignoreErr := ts.gitignore.AddIgnoreFile(rel, ignoreFilePath)
+			ignoreErr := ts.lang.gitignore.AddIgnoreFile(rel, ignoreFilePath)
 			if ignoreErr != nil {
 				log.Fatalf("Failed to add ignore file %s: %v", ignoreRelPath, ignoreErr)
 			}
@@ -101,23 +107,23 @@ func (ts *TypeScript) collectIgnoreFiles(c *config.Config, rel string) {
 	}
 }
 
-func (ts *TypeScript) readConfigurations(c *config.Config, rel string) {
+func (ts *Configurer) readConfigurations(c *config.Config, rel string) {
 	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	// pnpm
 	lockfilePath := path.Join(c.RepoRoot, rel, config.PnpmLockfile())
 	if _, err := os.Stat(lockfilePath); err == nil {
-		ts.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, config.PnpmLockfile()))
+		ts.lang.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, config.PnpmLockfile()))
 	}
 
 	// tsconfig
 	configPath := path.Join(c.RepoRoot, rel, config.tsconfigName)
 	if _, err := os.Stat(configPath); err == nil {
-		ts.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.tsconfigName)
+		ts.lang.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.tsconfigName)
 	}
 }
 
-func (ts *TypeScript) readDirectives(c *config.Config, rel string, f *rule.File) {
+func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File) {
 	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	for _, d := range f.Directives {

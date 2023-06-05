@@ -20,10 +20,6 @@ import (
 	"github.com/emirpasic/gods/sets/treeset"
 )
 
-type Language struct {
-	language.Language
-}
-
 const (
 	// The filename (with any of the TS extensions) imported when importing a directory.
 	IndexFileName = "index"
@@ -35,14 +31,14 @@ const (
 	MaxWorkerCount = 12
 )
 
-func (ts *TypeScript) GetImportLabel(imp string) *label.Label {
+func (ts *typeScriptLang) GetImportLabel(imp string) *label.Label {
 	return ts.fileLabels[imp]
 }
 
 // GenerateRules extracts build metadata from source files in a directory.
 // GenerateRules is called in each directory where an update is requested
 // in depth-first post-order.
-func (ts *TypeScript) GenerateRules(args language.GenerateArgs) language.GenerateResult {
+func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
 	cfg := args.Config.Exts[LanguageName].(*JsGazelleConfig)
 
 	// Collect any labels that could be imported
@@ -71,7 +67,7 @@ func (ts *TypeScript) GenerateRules(args language.GenerateArgs) language.Generat
 	return result
 }
 
-func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
+func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
 	// Collect all source files.
 	sourceFiles, dataFiles, collectErr := ts.collectSourceFiles(cfg, args)
 	if collectErr != nil {
@@ -168,7 +164,7 @@ func (ts *TypeScript) addSourceRules(cfg *JsGazelleConfig, args language.Generat
 	}
 }
 
-func (ts *TypeScript) addNpmPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, npmPackageName string, srcs *treeset.Set, result *language.GenerateResult) {
+func (ts *typeScriptLang) addNpmPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, npmPackageName string, srcs *treeset.Set, result *language.GenerateResult) {
 	npmPackage := rule.NewRule(NpmPackageKind, npmPackageName)
 	npmPackage.SetAttr("srcs", srcs.Values())
 
@@ -188,7 +184,7 @@ func hasTranspiledSources(sourceFiles *treeset.Set) bool {
 	return false
 }
 
-func (ts *TypeScript) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule bool, result *language.GenerateResult) (*rule.Rule, error) {
+func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule bool, result *language.GenerateResult) (*rule.Rule, error) {
 	// Generate nothing if there are no source files. Remove any existing rules.
 	if !hasTranspiledSources(sourceFiles) {
 		if args.File == nil {
@@ -272,7 +268,7 @@ type parseResult struct {
 	Errors     []error
 }
 
-func (ts *TypeScript) collectAllImports(cfg *JsGazelleConfig, args language.GenerateArgs, sourceFiles *treeset.Set) chan parseResult {
+func (ts *typeScriptLang) collectAllImports(cfg *JsGazelleConfig, args language.GenerateArgs, sourceFiles *treeset.Set) chan parseResult {
 	// The channel of all files to parse.
 	sourcePathChannel := make(chan string)
 
@@ -314,7 +310,7 @@ func (ts *TypeScript) collectAllImports(cfg *JsGazelleConfig, args language.Gene
 	return resultsChannel
 }
 
-func (ts *TypeScript) collectImports(cfg *JsGazelleConfig, rootDir, sourcePath string) parseResult {
+func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePath string) parseResult {
 	fileImports, errs := parseImports(rootDir, sourcePath)
 
 	result := parseResult{
@@ -383,7 +379,7 @@ func isBuildFile(filename string) bool {
 	return false
 }
 
-func (ts *TypeScript) collectSourceFiles(cfg *JsGazelleConfig, args language.GenerateArgs) (*treeset.Set, *treeset.Set, error) {
+func (ts *typeScriptLang) collectSourceFiles(cfg *JsGazelleConfig, args language.GenerateArgs) (*treeset.Set, *treeset.Set, error) {
 	sourceFiles := treeset.NewWithStringComparator()
 	dataFiles := treeset.NewWithStringComparator()
 
@@ -434,7 +430,7 @@ func (ts *TypeScript) collectSourceFiles(cfg *JsGazelleConfig, args language.Gen
 	return sourceFiles, dataFiles, err
 }
 
-func (ts *TypeScript) addFileLabel(importPath string, label *label.Label) {
+func (ts *typeScriptLang) addFileLabel(importPath string, label *label.Label) {
 	if existing := ts.fileLabels[importPath]; existing != nil {
 		log.Fatalln("Duplicate file label ", importPath, " from ", existing.String(), " and ", label.String())
 	}
@@ -480,7 +476,7 @@ func toImportPaths(p string) []string {
 }
 
 // Collect and persist all possible references to files that can be imported
-func (ts *TypeScript) collectFileLabels(args language.GenerateArgs) map[string]*label.Label {
+func (ts *typeScriptLang) collectFileLabels(args language.GenerateArgs) map[string]*label.Label {
 	generators := make(map[string]*label.Label)
 
 	// Generated files from rules such as genrule()
@@ -503,7 +499,7 @@ func (ts *TypeScript) collectFileLabels(args language.GenerateArgs) map[string]*
 }
 
 // Add rules representing packages, node_modules etc
-func (ts *TypeScript) addPackageRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
+func (ts *typeScriptLang) addPackageRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
 	if ts.pnpmProjects.IsProject(args.Rel) {
 		addLinkAllPackagesRule(cfg, args, result)
 	}
@@ -511,7 +507,7 @@ func (ts *TypeScript) addPackageRules(cfg *JsGazelleConfig, args language.Genera
 
 // Add pnpm rules for a pnpm lockfile.
 // Collect pnpm projects and project dependencies from the lockfile.
-func (ts *TypeScript) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRoot, lockfile string) {
+func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRoot, lockfile string) {
 	BazelLog.Infof("add workspace '%s'", lockfile)
 
 	lockfilePath := path.Join(repoRoot, lockfile)
