@@ -1,0 +1,10 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "ts-js",
+    srcs = [
+        "c.d.ts",
+        "d.ts",
+    ],
+    deps = ["//dts-js"],
+)

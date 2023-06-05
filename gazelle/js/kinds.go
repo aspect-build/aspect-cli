@@ -6,6 +6,7 @@ import (
 
 const (
 	TsProjectKind         = "ts_project"
+	JsLibraryKind         = "js_library"
 	NpmPackageKind        = "npm_package"
 	NpmLinkAllKind        = "npm_link_all_packages"
 	RulesJsRepositoryName = "aspect_rules_js"
@@ -32,6 +33,13 @@ var tsKinds = map[string]rule.KindInfo{
 		ResolveAttrs: map[string]bool{
 			"deps": true,
 		},
+	},
+	JsLibraryKind: {
+		MatchAny:        false,
+		NonEmptyAttrs:   map[string]bool{},
+		SubstituteAttrs: map[string]bool{},
+		MergeableAttrs:  map[string]bool{},
+		ResolveAttrs:    map[string]bool{},
 	},
 	NpmLinkAllKind: {
 		MatchAny: true,
