@@ -14,7 +14,7 @@ jobs:
     name: Aspect Workflows
     with:
       queue: aspect-cli
-    uses: aspect-build/workflows-action/.github/workflows/aspect-workflows.yaml@5.4.12-dev.23.g1efd33a
+    uses: aspect-build/workflows-action/.github/workflows/aspect-workflows.yaml@5.5.0-rc0
 
   test:
     runs-on: ubuntu-latest
