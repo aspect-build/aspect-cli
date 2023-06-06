@@ -2,6 +2,7 @@
 ---
 queue: aspect-cli
 tasks:
+  warming:
   branch_freshness:
     update_strategy: rebase
   buildifier:
