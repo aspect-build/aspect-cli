@@ -2,16 +2,15 @@ package gazelle
 
 import (
 	"context"
-	"fmt"
 	"path"
 	"strings"
-	"sync"
 
 	"github.com/sirupsen/logrus"
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 
+	treeutils "aspect.build/cli/gazelle/common/treesitter"
 	"aspect.build/cli/gazelle/js/parser"
 )
 
@@ -68,8 +67,6 @@ var ImportQueries = []string{
 	`,
 }
 
-var ErrorsQuery = `(ERROR) @error`
-
 // Supported languages by key
 var Languages = map[string]*sitter.Language{
 	"tsx":        tsx.GetLanguage(),
@@ -81,7 +78,8 @@ func (p *TreeSitterParser) ParseImports(filePath, sourceCodeStr string) ([]strin
 	errs := make([]error, 0)
 
 	sourceCode := []byte(sourceCodeStr)
-	sourceLang := filenameToLanguage(filePath)
+	sourceLangName := filenameToLanguage(filePath)
+	sourceLang := Languages[sourceLangName]
 
 	// Parse the source code
 	tree, err := p.parseTypeScript(sourceLang, sourceCode)
@@ -93,8 +91,8 @@ func (p *TreeSitterParser) ParseImports(filePath, sourceCodeStr string) ([]strin
 		rootNode := tree.RootNode()
 
 		// Quick pass over root nodes to find top level imports.
-		for i := 0; i < int(rootNode.ChildCount()); i++ {
-			rootImport := getRootImport(rootNode.Child(i), sourceCode)
+		for i := 0; i < int(rootNode.NamedChildCount()); i++ {
+			rootImport := getRootImport(rootNode.NamedChild(i), sourceCode)
 
 			if rootImport != nil {
 				imports = append(imports, rootImport.Content(sourceCode))
@@ -103,14 +101,13 @@ func (p *TreeSitterParser) ParseImports(filePath, sourceCodeStr string) ([]strin
 
 		// Extra queries for harder to find imports.
 		for _, q := range ImportQueries {
-			queryResults := queryImports(getQuery(sourceLang, q), sourceCode, rootNode)
+			queryResults := queryImports(treeutils.ParseQuery(sourceLangName, sourceLang, q), sourceCode, rootNode)
 
 			imports = append(imports, queryResults...)
 		}
 
-		if rootNode.HasError() {
-			treeErrors := queryErrors(getQuery(sourceLang, ErrorsQuery), sourceCode, rootNode)
-
+		treeErrors := treeutils.QueryErrors(sourceLangName, sourceLang, sourceCode, rootNode)
+		if treeErrors != nil {
 			errs = append(errs, treeErrors...)
 		}
 	}
@@ -135,10 +132,10 @@ func getRootImport(node *sitter.Node, sourceCode []byte) *sitter.Node {
 	return nil
 }
 
-func (p *TreeSitterParser) parseTypeScript(lang string, sourceCode []byte) (*sitter.Tree, error) {
+func (p *TreeSitterParser) parseTypeScript(lang *sitter.Language, sourceCode []byte) (*sitter.Tree, error) {
 	ctx := context.Background()
 
-	p.parser.SetLanguage(Languages[lang])
+	p.parser.SetLanguage(lang)
 
 	return p.parser.ParseCtx(ctx, nil, sourceCode)
 }
@@ -200,50 +197,6 @@ func readFromQueryMatch(query *sitter.Query, m *sitter.QueryMatch, sourceCode []
 	return from
 }
 
-// Create an error for each parse error.
-func queryErrors(query *sitter.Query, sourceCode []byte, rootNode *sitter.Node) []error {
-	errors := make([]error, 0)
-
-	// Execute the import query
-	qc := sitter.NewQueryCursor()
-	defer qc.Close()
-	qc.Exec(query, rootNode)
-
-	// Collect import statements from the query results
-	for {
-		m, ok := qc.NextMatch()
-		if !ok {
-			break
-		}
-
-		for _, c := range m.Captures {
-			at := c.Node
-			atStart := at.StartPoint()
-			show := c.Node
-
-			// Navigate up the AST to include the full source line
-			if atStart.Column > 0 {
-				for show.StartPoint().Row > 0 && show.StartPoint().Row == atStart.Row {
-					show = show.Parent()
-				}
-			}
-
-			// Extract only that line from the parent Node
-			lineI := int(atStart.Row - show.StartPoint().Row)
-			colI := int(atStart.Column)
-			line := strings.Split(show.Content(sourceCode), "\n")[lineI]
-
-			pre := fmt.Sprintf("     %d: ", atStart.Row+1)
-			msg := pre + line
-			arw := strings.Repeat(" ", len(pre)+colI) + "^"
-
-			errors = append(errors, fmt.Errorf(msg+"\n"+arw))
-		}
-	}
-
-	return errors
-}
-
 // File extension to language key
 func filenameToLanguage(filename string) string {
 	ext := path.Ext(filename)[1:]
@@ -255,30 +208,4 @@ func filenameToLanguage(filename string) string {
 	}
 
 	return "typescript"
-}
-
-// A cache of parsed queries per language
-var queryCache = make(map[string]map[string]*sitter.Query)
-var queryMutex sync.Mutex
-
-func getQuery(lang, queryStr string) *sitter.Query {
-	queryMutex.Lock()
-	defer queryMutex.Unlock()
-
-	if queryCache[queryStr] == nil {
-		queryCache[queryStr] = make(map[string]*sitter.Query)
-	}
-	if queryCache[queryStr][lang] == nil {
-		queryCache[queryStr][lang] = mustNewQuery(Languages[lang], queryStr)
-	}
-
-	return queryCache[queryStr][lang]
-}
-
-func mustNewQuery(lang *sitter.Language, queryStr string) *sitter.Query {
-	q, err := sitter.NewQuery([]byte(queryStr), lang)
-	if err != nil {
-		panic(err)
-	}
-	return q
 }

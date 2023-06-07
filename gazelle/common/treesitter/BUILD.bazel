@@ -1,0 +1,9 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "treesitter",
+    srcs = ["queries.go"],
+    importpath = "aspect.build/cli/gazelle/common/treesitter",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_smacker_go_tree_sitter//:go-tree-sitter"],
+)

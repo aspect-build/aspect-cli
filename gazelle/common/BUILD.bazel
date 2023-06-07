@@ -1,0 +1,21 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "common",
+    srcs = [
+        "bazel.go",
+        "excludes.go",
+        "rules.go",
+        "set.go",
+        "walk.go",
+    ],
+    importpath = "aspect.build/cli/gazelle/common",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//gazelle/common/log",
+        "@bazel_gazelle//label:go_default_library",
+        "@bazel_gazelle//language:go_default_library",
+        "@bazel_gazelle//walk:go_default_library",
+        "@com_github_emirpasic_gods//sets/treeset",
+    ],
+)

@@ -1,5 +1,6 @@
-load("@bazel_gazelle//:def.bzl", "gazelle_binary", "gazelle_generation_test")
+load("@bazel_gazelle//:def.bzl", "gazelle_binary")
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("//gazelle:gazelle.bzl", "gazelle_generation_test")
 
 # Disable the JS extension
 # gazelle:js disabled
@@ -14,15 +15,15 @@ go_library(
         "generate.go",
         "kinds.go",
         "language.go",
-        "log.go",
         "resolve.go",
         "target.go",
-        "walk.go",
     ],
     importpath = "aspect.build/cli/gazelle/js",
     visibility = ["//visibility:public"],
     deps = [
-        "//gazelle/js/git",
+        "//gazelle/common",
+        "//gazelle/common/git",
+        "//gazelle/common/log",
         "//gazelle/js/node",
         "//gazelle/js/parser/esbuild",
         "//gazelle/js/pnpm",
@@ -33,14 +34,11 @@ go_library(
         "@bazel_gazelle//repo:go_default_library",
         "@bazel_gazelle//resolve:go_default_library",
         "@bazel_gazelle//rule:go_default_library",
-        "@bazel_gazelle//walk:go_default_library",
-        "@com_github_bazelbuild_buildtools//build:go_default_library",
         "@com_github_bmatcuk_doublestar_v4//:doublestar",
         "@com_github_emirpasic_gods//maps/linkedhashmap",
         "@com_github_emirpasic_gods//maps/treemap",
         "@com_github_emirpasic_gods//sets/treeset",
         "@com_github_emirpasic_gods//utils",
-        "@com_github_sirupsen_logrus//:logrus",
     ],
 )
 
@@ -61,35 +59,8 @@ gazelle_binary(
 [
     gazelle_generation_test(
         name = "%s_test" % test_workspace.replace("/WORKSPACE", "").replace("tests/", ""),
-        size = "small",
+        dir = test_workspace.replace("/WORKSPACE", ""),
         gazelle_binary = "gazelle_js_binary",
-        test_data = [
-            ":_%s-data" % test_workspace.replace("/WORKSPACE", "").replace("tests/", ""),
-        ],
     )
     for test_workspace in glob(["tests/**/WORKSPACE"])
-]
-
-# Data for each generation test
-[
-    filegroup(
-        name = "_%s-data" % test_workspace.replace("/WORKSPACE", "").replace("tests/", ""),
-        srcs = glob(
-            ["%s/**" % test_workspace.replace("/WORKSPACE", "")],
-            exclude = ["%s/**/.test-*"],
-        ) + [s.replace(".test-", ".") for s in glob(["**/.test-*"])],
-        visibility = ["//visibility:private"],
-    )
-    for test_workspace in glob(["tests/**/WORKSPACE"])
-]
-
-[
-    genrule(
-        name = s.replace("/", "_").replace(".", "_"),
-        srcs = [s],
-        outs = [s.replace(".test-", ".")],
-        cmd = "cat $(location %s) > $@" % s,
-        visibility = ["//visibility:private"],
-    )
-    for s in glob(["**/.test-*"])
 ]

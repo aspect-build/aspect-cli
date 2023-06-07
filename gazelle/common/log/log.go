@@ -1,4 +1,4 @@
-package gazelle
+package log
 
 import (
 	"fmt"

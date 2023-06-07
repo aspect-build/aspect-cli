@@ -1,12 +1,17 @@
-package gazelle
+package git
 
 import (
 	"os"
 	"path"
 	"strings"
 
+	. "aspect.build/cli/gazelle/common/log"
+	"github.com/bazelbuild/bazel-gazelle/config"
 	gitignore "github.com/sabhiram/go-gitignore"
 )
+
+// Ignore files following .gitignore syntax for files gazelle will ignore.
+var bazelIgnoreFiles = []string{".bazelignore", ".gitignore"}
 
 type GitIgnore struct {
 	ignores map[string][]*gitignore.GitIgnore
@@ -15,6 +20,23 @@ type GitIgnore struct {
 func NewGitIgnore() *GitIgnore {
 	return &GitIgnore{
 		ignores: make(map[string][]*gitignore.GitIgnore),
+	}
+}
+
+func (i *GitIgnore) CollectIgnoreFiles(c *config.Config, rel string) {
+	// Collect gitignore style ignore files in this directory.
+	for _, ignoreFileName := range bazelIgnoreFiles {
+		ignoreRelPath := path.Join(rel, ignoreFileName)
+		ignoreFilePath := path.Join(c.RepoRoot, ignoreRelPath)
+
+		if _, ignoreErr := os.Stat(ignoreFilePath); ignoreErr == nil {
+			BazelLog.Tracef("Add ignore file %s", ignoreRelPath)
+
+			ignoreErr := i.AddIgnoreFile(rel, ignoreFilePath)
+			if ignoreErr != nil {
+				BazelLog.Fatalf("Failed to add ignore file %s: %v", ignoreRelPath, ignoreErr)
+			}
+		}
 	}
 }
 

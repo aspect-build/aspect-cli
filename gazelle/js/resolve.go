@@ -8,13 +8,14 @@ import (
 	"strings"
 	"time"
 
+	common "aspect.build/cli/gazelle/common"
+	. "aspect.build/cli/gazelle/common/log"
 	node "aspect.build/cli/gazelle/js/node"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/repo"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
-	bzl "github.com/bazelbuild/buildtools/build"
 	"github.com/emirpasic/gods/sets/treeset"
 )
 
@@ -41,28 +42,6 @@ const (
 )
 
 type ResolutionType = int
-
-// A basic set of label.Labels with logging of set modifications.
-type LabelSet struct {
-	from   label.Label
-	labels *treeset.Set
-}
-
-func NewLabelSet(from label.Label) *LabelSet {
-	return &LabelSet{
-		from:   from,
-		labels: treeset.NewWithStringComparator(),
-	}
-}
-
-func (s *LabelSet) Add(l *label.Label) {
-	d := l.String()
-	if !s.labels.Contains(d) {
-		BazelLog.Debugf("add dependency '%s' to '%s'", d, s.from.String())
-
-		s.labels.Add(d)
-	}
-}
 
 // Name returns the name of the language. This is the prefix of the kinds of
 // rules generated. E.g. ts_project
@@ -149,7 +128,7 @@ func (ts *Resolver) Resolve(
 		}
 
 		if !deps.Empty() {
-			r.SetAttr("deps", convertDependencySetToExpr(deps))
+			r.SetAttr("deps", deps.Labels())
 		}
 	}
 
@@ -161,10 +140,10 @@ func (ts *Resolver) resolveModuleDeps(
 	ix *resolve.RuleIndex,
 	modules *treeset.Set,
 	from label.Label,
-) (*treeset.Set, error) {
+) (*common.LabelSet, error) {
 	cfg := c.Exts[LanguageName].(*JsGazelleConfig)
 
-	deps := NewLabelSet(from)
+	deps := common.NewLabelSet(from)
 	resolutionErrors := []error{}
 
 	it := modules.Iterator()
@@ -226,7 +205,7 @@ func (ts *Resolver) resolveModuleDeps(
 		}
 	}
 
-	return deps.labels, nil
+	return deps, nil
 }
 
 func (ts *Resolver) resolveModuleDep(
@@ -374,16 +353,4 @@ func targetListFromResults(results []resolve.FindResult) string {
 		list[i] = result.Label.String()
 	}
 	return strings.Join(list, ", ")
-}
-
-// convertDependencySetToExpr converts the given set of dependencies to an
-// expression to be used in the deps attribute.
-func convertDependencySetToExpr(set *treeset.Set) bzl.Expr {
-	deps := make([]bzl.Expr, set.Size())
-	it := set.Iterator()
-	for it.Next() {
-		dep := it.Value().(string)
-		deps[it.Index()] = &bzl.StringExpr{Value: dep}
-	}
-	return &bzl.ListExpr{List: deps}
 }
