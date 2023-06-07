@@ -1,0 +1,10 @@
+# All types of ignores on *.nested-ig, but should only apply to this nested directory,
+# not parent directories, not nested directories elsewhere etc.
+
+x.nested-ig.kt
+*.nested-ig.kt
+*/*.nested-ig.kt
+**/*.nested-ig.kt
+
+# Random ignore of a filename used elsewhere, should be a noop
+r2.kt

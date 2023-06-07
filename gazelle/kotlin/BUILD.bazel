@@ -1,0 +1,53 @@
+load("@bazel_gazelle//:def.bzl", "gazelle_binary")
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("//gazelle:gazelle.bzl", "gazelle_generation_test")
+
+# Disable the kotlin extension
+# gazelle:kotlin disabled
+
+go_library(
+    name = "kotlin",
+    srcs = [
+        "configure.go",
+        "generate.go",
+        "imports.go",
+        "kotlin.go",
+        "language.go",
+        "resolver.go",
+    ],
+    importpath = "aspect.build/cli/gazelle/kotlin",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//gazelle/common",
+        "//gazelle/common/git",
+        "//gazelle/common/log",
+        "//gazelle/kotlin/kotlinconfig",
+        "//gazelle/kotlin/parser",
+        "@bazel_gazelle//config:go_default_library",
+        "@bazel_gazelle//label:go_default_library",
+        "@bazel_gazelle//language:go_default_library",
+        "@bazel_gazelle//repo:go_default_library",
+        "@bazel_gazelle//resolve:go_default_library",
+        "@bazel_gazelle//rule:go_default_library",
+        "@com_github_bazel_contrib_rules_jvm//java/gazelle/javaconfig",
+        "@com_github_emirpasic_gods//sets/treeset",
+        "@com_github_emirpasic_gods//utils",
+    ],
+)
+
+# Internal only for tests
+gazelle_binary(
+    name = "gazelle_kotlin_binary",
+    languages = [":kotlin"],
+    visibility = ["//visibility:private"],
+)
+
+# A separate generation test for each tests/* test case
+[
+    gazelle_generation_test(
+        name = "%s_test" % test_workspace.replace("/WORKSPACE", "").replace("tests/", ""),
+        dir = test_workspace.replace("/WORKSPACE", ""),
+        gazelle_binary = "gazelle_kotlin_binary",
+    )
+    for test_workspace in glob(["tests/**/WORKSPACE"])
+]
