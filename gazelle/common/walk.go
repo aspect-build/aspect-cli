@@ -5,36 +5,22 @@ import (
 	"path"
 	"path/filepath"
 
+	. "aspect.build/cli/gazelle/common/log"
 	"github.com/bazelbuild/bazel-gazelle/language"
 )
 
+type GazelleWalkFunc func(path string) error
+
 // Walk the directory of the language.GenerateArgs, optionally recursing into
 // subdirectories unlike the files provided in GenerateArgs.RegularFiles.
-func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc filepath.WalkFunc) error {
+func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc GazelleWalkFunc) error {
 	BazelLog.Tracef("GazelleWalkDir: %s", args.Rel)
-
-	// Stat the directory
-	rootInfo, rootInfoErr := os.Stat(args.Dir)
-	if rootInfoErr != nil {
-		return rootInfoErr
-	}
-
-	// Callback on the directory itself
-	rootWalkErr := walkFunc(".", rootInfo, nil)
-	if rootWalkErr != nil {
-		return rootWalkErr
-	}
 
 	// Source files in the primary directory
 	for _, f := range args.RegularFiles {
 		BazelLog.Tracef("GazelleWalkDir RegularFile: %s", f)
 
-		info, infoErr := os.Stat(filepath.Join(args.Dir, f))
-		if infoErr != nil {
-			return infoErr
-		}
-
-		walkErr := walkFunc(f, info, infoErr)
+		walkErr := walkFunc(f)
 		if walkErr != nil && walkErr != filepath.SkipDir {
 			return walkErr
 		}
@@ -55,7 +41,7 @@ func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc filepath.
 				}
 
 				// If we are visiting a directory recurse if it is not a bazel package.
-				if info.IsDir() && isBazelPackage(filePath) {
+				if info.IsDir() && IsBazelPackage(filePath) {
 					return filepath.SkipDir
 				}
 
@@ -69,7 +55,7 @@ func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc filepath.
 
 				BazelLog.Tracef("GazelleWalkDir Subdir file: %s", f)
 
-				return walkFunc(f, info, nil)
+				return walkFunc(f)
 			},
 		)
 

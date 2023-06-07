@@ -5,11 +5,9 @@ import (
 	"log"
 	"os"
 	"strings"
-	"sync"
-	_ "unsafe"
 
+	gazelle "aspect.build/cli/gazelle/common"
 	"github.com/bazelbuild/bazel-gazelle/label"
-	_ "github.com/bazelbuild/bazel-gazelle/walk"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/emirpasic/gods/maps/linkedhashmap"
 	"github.com/emirpasic/gods/sets/treeset"
@@ -115,12 +113,6 @@ var DefaultSourceGlobs = []*TargetGroup{
 }
 
 var (
-	// BUILD file names.
-	buildFileNames = []string{"BUILD", "BUILD.bazel"}
-
-	// Ignore files following .gitignore syntax for files gazelle will ignore.
-	bazelIgnoreFiles = []string{".bazelignore", ".gitignore"}
-
 	// Set of supported source file extensions.
 	sourceFileExtensions = treeset.NewWithStringComparator("ts", "tsx", "mts", "cts")
 
@@ -219,25 +211,8 @@ func (c *JsGazelleConfig) AddExcludedPattern(pattern string) {
 
 // Determine if the file path is ignored based on the current configuration.
 func (c *JsGazelleConfig) IsFileExcluded(fileRelPath string) bool {
-	// Gazelle exclude directive.
-	wc := &walkConfig{excludes: c.excludes}
-
-	return isExcluded(wc, c.rel, fileRelPath)
+	return gazelle.IsFileExcluded(c.rel, fileRelPath, c.excludes)
 }
-
-// Required for using go:linkname below for using the private isExcluded.
-// https://github.com/bazelbuild/bazel-gazelle/blob/v0.28.0/walk/config.go#L54-L73
-type walkConfig struct {
-	excludes []string
-	// Below are fields that are not used by the isExcluded function but match the walkConfig
-	// upstream walk.(*walkConfig).
-	_ bool      // ignore bool
-	_ []string  // follow []string
-	_ sync.Once // loadOnce sync.Once
-}
-
-//go:linkname isExcluded github.com/bazelbuild/bazel-gazelle/walk.(*walkConfig).isExcluded
-func isExcluded(wc *walkConfig, rel, base string) bool
 
 // SetGenerationEnabled sets whether the extension is enabled or not.
 func (c *JsGazelleConfig) SetGenerationEnabled(enabled bool) {

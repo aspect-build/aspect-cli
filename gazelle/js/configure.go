@@ -8,6 +8,7 @@ import (
 	"path"
 	"strings"
 
+	. "aspect.build/cli/gazelle/common/log"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/rule"
@@ -87,24 +88,7 @@ func (ts *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 		ts.readConfigurations(c, rel)
 	}
 
-	ts.collectIgnoreFiles(c, rel)
-}
-
-func (ts *Configurer) collectIgnoreFiles(c *config.Config, rel string) {
-	// Collect gitignore style ignore files in this directory.
-	for _, ignoreFileName := range bazelIgnoreFiles {
-		ignoreRelPath := path.Join(rel, ignoreFileName)
-		ignoreFilePath := path.Join(c.RepoRoot, ignoreRelPath)
-
-		if _, ignoreErr := os.Stat(ignoreFilePath); ignoreErr == nil {
-			BazelLog.Tracef("Add ignore file %s", ignoreRelPath)
-
-			ignoreErr := ts.lang.gitignore.AddIgnoreFile(rel, ignoreFilePath)
-			if ignoreErr != nil {
-				log.Fatalf("Failed to add ignore file %s: %v", ignoreRelPath, ignoreErr)
-			}
-		}
-	}
+	ts.lang.gitignore.CollectIgnoreFiles(c, rel)
 }
 
 func (ts *Configurer) readConfigurations(c *config.Config, rel string) {

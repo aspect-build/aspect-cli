@@ -3,9 +3,11 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "git",
     srcs = ["gitignore.go"],
-    importpath = "aspect.build/cli/gazelle/js/git",
+    importpath = "aspect.build/cli/gazelle/common/git",
     visibility = ["//visibility:public"],
     deps = [
+        "//gazelle/common/log",
+        "@bazel_gazelle//config:go_default_library",
         "@com_github_sabhiram_go_gitignore//:go-gitignore",
     ],
 )

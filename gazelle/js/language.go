@@ -1,7 +1,7 @@
 package gazelle
 
 import (
-	git "aspect.build/cli/gazelle/js/git"
+	git "aspect.build/cli/gazelle/common/git"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	"aspect.build/cli/gazelle/js/typescript"
 	"github.com/bazelbuild/bazel-gazelle/config"

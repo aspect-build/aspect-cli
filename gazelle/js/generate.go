@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	gazelle "aspect.build/cli/gazelle/common"
+	. "aspect.build/cli/gazelle/common/log"
 	parser "aspect.build/cli/gazelle/js/parser/esbuild"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -53,7 +55,7 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 
 	// If this directory has not been declared as a bazel package only continue
 	// if generating new BUILD files is enabled.
-	if cfg.GenerationMode() == GenerationModeNone && !isBazelPackage(args.Dir) {
+	if cfg.GenerationMode() == GenerationModeNone && !gazelle.IsBazelPackage(args.Dir) {
 		return language.GenerateResult{}
 	}
 
@@ -99,7 +101,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 	isNpmPackage := ts.pnpmProjects.IsProject(args.Rel) && ts.pnpmProjects.IsReferenced(args.Rel)
 
 	// The package/directory name variable value used to render the target names.
-	packageName := toTargetPackageName(args)
+	packageName := gazelle.ToDefaultTargetName(args, DefaultRootTargetName)
 
 	// Create rules for each target group.
 	sourceRules := treemap.NewWithStringComparator()
@@ -358,27 +360,6 @@ func parseImports(rootDir, filePath string) ([]string, []error) {
 	return p.ParseImports(filePath, string(content))
 }
 
-// isBazelPackage determines if the directory is a Bazel package by probing for
-// the existence of a known BUILD file name.
-func isBazelPackage(dir string) bool {
-	for _, buildFilename := range buildFileNames {
-		buildPath := path.Join(dir, buildFilename)
-		if _, err := os.Stat(buildPath); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-func isBuildFile(filename string) bool {
-	for _, buildFilename := range buildFileNames {
-		if filename == buildFilename {
-			return true
-		}
-	}
-	return false
-}
-
 func (ts *typeScriptLang) collectSourceFiles(cfg *JsGazelleConfig, args language.GenerateArgs) (*treeset.Set, *treeset.Set, error) {
 	sourceFiles := treeset.NewWithStringComparator()
 	dataFiles := treeset.NewWithStringComparator()
@@ -386,16 +367,7 @@ func (ts *typeScriptLang) collectSourceFiles(cfg *JsGazelleConfig, args language
 	// Do not recurse into sub-directories if generating a BUILD per directory
 	recurse := cfg.GenerationMode() != GenerationModeDirectory
 
-	err := GazelleWalkDir(args, recurse, func(f string, info os.FileInfo, err error) error {
-		// Propagate errors.
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
+	err := gazelle.GazelleWalkDir(args, recurse, func(f string) error {
 		// Excluded due to being outside the ts root
 		if !ts.tsconfig.IsWithinTsRoot(f) {
 			BazelLog.Debugf("Skip %q outside rootDir\n", f)
@@ -655,17 +627,4 @@ func toWorkspacePath(importFrom, importPath string) string {
 
 	// Clean any extra . / .. etc
 	return path.Clean(importPath)
-}
-
-func toTargetPackageName(args language.GenerateArgs) string {
-	// The workspace root may be the version control root and non-deterministic
-	if args.Rel == "" {
-		if args.Config.RepoName != "" {
-			return args.Config.RepoName
-		} else {
-			return DefaultRootTargetName
-		}
-	}
-
-	return path.Base(args.Dir)
 }
