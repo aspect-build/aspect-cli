@@ -1,0 +1,9 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "kotlinconfig",
+    srcs = ["config.go"],
+    importpath = "aspect.build/cli/gazelle/kotlin/kotlinconfig",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_bazel_contrib_rules_jvm//java/gazelle/javaconfig"],
+)

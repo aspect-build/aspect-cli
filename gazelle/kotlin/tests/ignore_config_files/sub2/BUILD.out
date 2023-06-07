@@ -1,0 +1,10 @@
+load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
+
+kt_jvm_library(
+    name = "sub2",
+    srcs = [
+        "direct-ig.kt",
+        "index.kt",
+        "not.nested-ig.kt",
+    ],
+)
