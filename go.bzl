@@ -614,8 +614,8 @@ def deps():
     go_repository(
         name = "com_github_smacker_go_tree_sitter",
         importpath = "github.com/smacker/go-tree-sitter",
-        sum = "h1:FX6rwoAcx8JXrO9WHbV2yxBCgH9LlGT2LYWPi/4jtOE=",
-        version = "v0.0.0-20230113054119-af7e2ef5fed6",
+        sum = "h1:exZ0FwfhblsYbgfqYH+W/3sFye821WD02NjBmc+ENhE=",
+        version = "v0.0.0-20230501083651-a7d92773b3aa",
     )
 
     go_repository(
