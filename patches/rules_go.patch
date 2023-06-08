@@ -71,3 +71,21 @@ index b4188837..ae66b8d1 100644
  def go_grpc_library(**kwargs):
      # TODO: Deprecate once gazelle generates just go_proto_library
      go_proto_library(compilers = [Label("//proto:go_grpc")], **kwargs)
+diff --git a/proto/wkt/BUILD.bazel b/proto/wkt/BUILD.bazel
+index a26ce507..e4c6b9ca 100644
+--- a/proto/wkt/BUILD.bazel
++++ b/proto/wkt/BUILD.bazel
+@@ -71,11 +71,9 @@ go_proto_wrapper(
+     visibility = ["//visibility:private"],
+ )
+ 
+-go_proto_library(
++alias(
+     name = "empty_go_proto",
+-    compilers = [":empty_wrapper"],
+-    importpath = "github.com/golang/protobuf/ptypes/empty",
+-    protos = ["@com_google_protobuf//:empty_proto"],
++    actual = "@com_github_golang_protobuf//ptypes/empty:empty",
+     visibility = ["//visibility:public"],
+ )
+ 
