@@ -1,38 +1,91 @@
 diff --git a/toolchain/cc_toolchain_config.bzl b/toolchain/cc_toolchain_config.bzl
-index 8785a8e..5e84644 100644
+index da1e330..379d7ee 100644
 --- a/toolchain/cc_toolchain_config.bzl
 +++ b/toolchain/cc_toolchain_config.bzl
-@@ -60,6 +60,15 @@ def cc_toolchain_config(
-         abi_version,
-         abi_libc_version,
-     ) = {
-+        "darwin-arm64": (
-+            "clang-arm64-darwin",
-+            "arm64-apple-macosx",
-+            "darwin",
-+            "macosx",
-+            "clang",
-+            "darwin_arm64",
-+            "darwin_arm64",
-+        ),
-         "darwin-x86_64": (
-             "clang-x86_64-darwin",
-             "x86_64-apple-macosx",
-diff --git a/toolchain/internal/common.bzl b/toolchain/internal/common.bzl
-index 7493c64..eefb7d3 100644
---- a/toolchain/internal/common.bzl
-+++ b/toolchain/internal/common.bzl
-@@ -12,7 +12,12 @@
- # See the License for the specific language governing permissions and
- # limitations under the License.
+@@ -112,8 +112,6 @@ def cc_toolchain_config(
+         "-fdebug-prefix-map={}=__bazel_toolchain_llvm_repo__/".format(toolchain_path_prefix),
+     ]
  
--SUPPORTED_TARGETS = [("linux", "x86_64"), ("linux", "aarch64"), ("darwin", "x86_64")]
-+SUPPORTED_TARGETS = [
-+    ("darwin", "arm64"),
-+    ("darwin", "x86_64"),
-+    ("linux", "aarch64"),
-+    ("linux", "x86_64"),
-+]
+-    is_xcompile = not (host_os == target_os and host_arch == target_arch)
+-
+     # Default compiler flags:
+     compile_flags = [
+         "--target=" + target_system_name,
+@@ -149,12 +147,13 @@ def cc_toolchain_config(
+     # unused symbols are not stripped.
+     link_libs = []
  
- host_tool_features = struct(
-     SUPPORTS_ARG_FILE = "supports_arg_file",
++    use_lld = True
++    link_flags.append("-fuse-ld=lld")
++
+     # Linker flags:
+-    if host_os == "darwin" and not is_xcompile:
+-        # lld is experimental for Mach-O, so we use the native ld64 linker.
+-        # TODO: How do we cross-compile from Linux to Darwin?
+-        use_lld = False
++    if target_os == "darwin":
+         link_flags.extend([
++            "-mmacosx-version-min=11.0",
+             "-headerpad_max_install_names",
+             # This will issue a warning on macOS ventura; see:
+             #  https://github.com/python/cpython/issues/97524
+@@ -163,12 +162,7 @@ def cc_toolchain_config(
+             "dynamic_lookup",
+         ])
+     else:
+-        # Note that for xcompiling from darwin to linux, the native ld64 is
+-        # not an option because it is not a cross-linker, so lld is the
+-        # only option.
+-        use_lld = True
+         link_flags.extend([
+-            "-fuse-ld=lld",
+             "-Wl,--build-id=md5",
+             "-Wl,--hash-style=gnu",
+             "-Wl,-z,relro,-z,now",
+@@ -179,8 +173,6 @@ def cc_toolchain_config(
+     # always link C++ libraries.
+     cxx_standard = compiler_configuration["cxx_standard"]
+     stdlib = compiler_configuration["stdlib"]
+-    if stdlib == "builtin-libc++" and is_xcompile:
+-        stdlib = "stdc++"
+     if stdlib == "builtin-libc++":
+         cxx_flags = [
+             "-std=" + cxx_standard,
+@@ -190,14 +182,9 @@ def cc_toolchain_config(
+             # For single-platform builds, we can statically link the bundled
+             # libraries.
+             link_flags.extend([
+-                "-l:libc++.a",
+-                "-l:libc++abi.a",
+-                "-l:libunwind.a",
+-                # Compiler runtime features.
+-                "-rtlib=compiler-rt",
+-                # To support libunwind.
+-                "-lpthread",
++                "-pthread",
+                 "-ldl",
++                "-lc++",
+             ])
+         else:
+             # The only known mechanism to static link libraries in ld64 is to
+@@ -211,7 +198,6 @@ def cc_toolchain_config(
+             # have the sysroot directory on the search path and then add the
+             # toolchain directory back after we are done.
+             link_flags.extend([
+-                "-L{}/usr/lib".format(compiler_configuration["sysroot_path"]),
+                 "-lc++",
+                 "-lc++abi",
+             ])
+diff --git a/toolchain/internal/configure.bzl b/toolchain/internal/configure.bzl
+index e66db3d..ed69f2c 100644
+--- a/toolchain/internal/configure.bzl
++++ b/toolchain/internal/configure.bzl
+@@ -167,7 +167,7 @@ def llvm_register_toolchains():
+             ("strip", "/usr/bin/strip", []),
+             # This is used when lld doesn't support the target platform (i.e.
+             # Mach-O for macOS):
+-            ("ld", "/usr/bin/ld", []),
++            # ("ld", "/usr/bin/ld", []),
+         ]
+         for pair in _host_tools.get_tool_info(rctx, tool_path, features, key).items()
+     ])
