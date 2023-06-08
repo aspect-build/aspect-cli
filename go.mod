@@ -5,9 +5,9 @@ go 1.20
 require (
 	github.com/Masterminds/semver/v3 v3.2.0
 	github.com/bazel-contrib/rules_jvm v0.13.0
-	github.com/bazelbuild/bazel-gazelle v0.29.0
+	github.com/bazelbuild/bazel-gazelle v0.31.0
 	github.com/bazelbuild/bazelisk v1.13.2
-	github.com/bazelbuild/buildtools v0.0.0-20230111132423-06e8e2436a75
+	github.com/bazelbuild/buildtools v0.0.0-20230510134650-37bd1811516d
 	github.com/bmatcuk/doublestar/v4 v4.6.0
 	github.com/emirpasic/gods v1.18.1
 	github.com/evanw/esbuild v0.17.10
@@ -30,8 +30,8 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.13.0
 	golang.org/x/exp v0.0.0-20221114191408-850992195362
-	golang.org/x/mod v0.7.0
-	golang.org/x/sync v0.1.0
+	golang.org/x/mod v0.10.0
+	golang.org/x/sync v0.2.0
 	google.golang.org/genproto v0.0.0-20220902135211-223410557253
 	google.golang.org/grpc v1.50.0
 	google.golang.org/protobuf v1.28.1
@@ -60,10 +60,10 @@ require (
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/subosito/gotenv v1.4.1 // indirect
-	golang.org/x/net v0.5.0 // indirect
-	golang.org/x/sys v0.4.0 // indirect
-	golang.org/x/text v0.6.0 // indirect
-	golang.org/x/tools v0.5.0 // indirect
+	golang.org/x/net v0.10.0 // indirect
+	golang.org/x/sys v0.8.0 // indirect
+	golang.org/x/text v0.9.0 // indirect
+	golang.org/x/tools v0.9.1 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect

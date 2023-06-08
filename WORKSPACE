@@ -103,11 +103,11 @@ go_register_toolchains(version = "1.20.4")
 
 http_archive(
     name = "bazel_gazelle",
-    sha256 = "ecba0f04f96b4960a5b250c8e8eeec42281035970aa8852dda73098274d14a1d",
-    # Ensure this version always matches the version of @com_github_bazelbuild_bazel_gazelle set in go.bzl.
-    # :notice: Care should be taken when upgrading gazelle since we have vendored & modified the gazelle main
-    # package in the configure command.
-    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.29.0/bazel-gazelle-v0.29.0.tar.gz"],
+    sha256 = "29d5dafc2a5582995488c6735115d1d366fcd6a0fc2e2a153f02988706349825",
+    # Ensure this version always matches the version of @com_github_bazelbuild_bazel_gazelle set in deps.bzl.
+    # :notice: Care should be taken when upgrading gazelle since we have vendored & modified parts of gazelle
+    # in the CLI configure command (cli/core/pkg/aspect/configure).
+    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.31.0/bazel-gazelle-v0.31.0.tar.gz"],
 )
 
 http_archive(
