@@ -41,7 +41,7 @@ It is named after the "make configure" workflow which is typical in C++ projects
 [autoconf](https://www.gnu.org/software/autoconf/).
 
 configure is non-destructive: hand-edits to BUILD files are generally preserved.
-You can use a ` + "`#keep`" + ` directive to force the tool to leave existing BUILD contents alone.
+You can use a ` + "`# keep`" + ` directive to force the tool to leave existing BUILD contents alone.
 Run 'aspect help directives' for more documentation on directives.
 
 So far these languages are supported:

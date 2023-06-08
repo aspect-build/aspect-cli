@@ -1,9 +1,12 @@
 subbuild/subbuild-bad.ts:
-	4: Expected ";" but found "1"
+	     4: bad
+        ^
 
 subdir/subdir-bad.ts:
-	3: Expected "}" but found "SyntaxError"
+	     3:     bad SyntaxError on line 3()
+            ^
 
 bad.ts:
-	2: Expected ";" but found "like"
+	     2:     looks like some bad syntax here
+            ^
 
