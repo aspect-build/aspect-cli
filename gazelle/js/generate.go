@@ -12,7 +12,7 @@ import (
 
 	gazelle "aspect.build/cli/gazelle/common"
 	. "aspect.build/cli/gazelle/common/log"
-	parser "aspect.build/cli/gazelle/js/parser/esbuild"
+	parser "aspect.build/cli/gazelle/js/parser/treesitter"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
