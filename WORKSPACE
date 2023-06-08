@@ -3,17 +3,6 @@ workspace(name = "build_aspect_cli")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
-    name = "com_google_protobuf",
-    sha256 = "d0f5f605d0d656007ce6c8b5a82df3037e1d8fe8b121ed42e536f569dec16113",
-    strip_prefix = "protobuf-3.14.0",
-    urls = ["https://mirror.bazel.build/github.com/protocolbuffers/protobuf/archive/v3.14.0.tar.gz"],
-)
-
-load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
-
-protobuf_deps()
-
-http_archive(
     name = "aspect_bazel_lib",
     sha256 = "f1c181b910f821072f38ee45bb87db6b56275458c7f832c54c54ba6334119eca",
     strip_prefix = "bazel-lib-1.32.0",
@@ -123,9 +112,9 @@ http_archive(
 
 http_archive(
     name = "rules_proto",
-    sha256 = "9fc210a34f0f9e7cc31598d109b5d069ef44911a82f507d5a88716db171615a8",
-    strip_prefix = "rules_proto-f7a30f6f80006b591fa7c437fe5a951eb10bcbcf",
-    urls = ["https://github.com/bazelbuild/rules_proto/archive/f7a30f6f80006b591fa7c437fe5a951eb10bcbcf.tar.gz"],
+    sha256 = "dc3fb206a2cb3441b485eb1e423165b231235a1ea9b031b4433cf7bc1fa460dd",
+    strip_prefix = "rules_proto-5.3.0-21.7",
+    urls = ["https://github.com/bazelbuild/rules_proto/archive/refs/tags/5.3.0-21.7.tar.gz"],
 )
 
 load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_proto_toolchains")
@@ -133,6 +122,10 @@ load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_
 rules_proto_dependencies()
 
 rules_proto_toolchains()
+
+load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
+
+protobuf_deps()
 
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
 load("//:go.bzl", _go_repositories = "deps")
