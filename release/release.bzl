@@ -1,16 +1,10 @@
 """This module provides the macros for performing a release.
 """
 
+load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@io_bazel_rules_go//go:def.bzl", "go_binary")
 load(":hashes.bzl", "hashes")
-
-PLATFORMS = [
-    struct(os = "darwin", arch = "amd64", ext = "", gc_linkopts = ["-s", "-w"]),
-    struct(os = "darwin", arch = "arm64", ext = "", gc_linkopts = ["-s", "-w"]),
-    struct(os = "linux", arch = "amd64", ext = "", gc_linkopts = ["-s", "-w"]),
-    struct(os = "linux", arch = "arm64", ext = "", gc_linkopts = ["-s", "-w"]),
-    struct(os = "windows", arch = "amd64", ext = ".exe", gc_linkopts = []),
-]
+load(":platforms.bzl", "platforms")
 
 def multi_platform_binaries(name, embed, prefix = "", **kwargs):
     """The multi_platform_binaries macro creates a go_binary for each platform.
@@ -23,19 +17,31 @@ def multi_platform_binaries(name, embed, prefix = "", **kwargs):
         prefix: an optional prefix added to the output Go binary file name.
         **kwargs: extra arguments.
     """
+    go_binary(
+        name = "_{}".format(name),
+        # NB: This rule is used to create Aspect CLI releases and Aspect CLI plugin releases.
+        # The Aspect CLI assumes that the platforms names are `<os>_arm64` and `<os>_amd64`.
+        # This naming convention cannot be changed for releases without it being a BREAKING CHANGE.
+        out = select({
+            "//platforms/config:linux_aarch64": "{}{}-linux_arm64".format(prefix, name),
+            "//platforms/config:linux_x86_64": "{}{}-linux_amd64".format(prefix, name),
+            "//platforms/config:macos_aarch64": "{}{}-darwin_arm64".format(prefix, name),
+            "//platforms/config:macos_x86_64": "{}{}-darwin_amd64".format(prefix, name),
+        }),
+        gc_linkopts = ["-s", "-w"],
+        embed = embed,
+        cgo = True,
+        visibility = ["//visibility:public"],
+        **kwargs
+    )
     targets = []
-    for platform in PLATFORMS:
-        target_name = "{}-{}-{}".format(name, platform.os, platform.arch)
+    for platform in platforms.all:
+        target_name = platforms.go_binary_target_name(name, platform)
         target_label = Label("//{}:{}".format(native.package_name(), target_name))
-        go_binary(
+        platform_transition_filegroup(
             name = target_name,
-            out = "{}{}-{}_{}{}".format(prefix, name, platform.os, platform.arch, platform.ext),
-            embed = embed,
-            gc_linkopts = platform.gc_linkopts,
-            goarch = platform.arch,
-            goos = platform.os,
-            pure = "on",
-            visibility = ["//visibility:public"],
+            srcs = [":_{}".format(name)],
+            target_platform = "//platforms:{}_{}".format(platform.os, platform.arch),
             **kwargs
         )
         hashes_name = "{}_hashes".format(target_name)
