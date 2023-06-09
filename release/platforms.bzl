@@ -1,36 +1,22 @@
 """Module for managing Go release platforms"""
 
 _OSS = struct(
-    MACOS = "darwin",
+    MACOS = "macos",
     LINUX = "linux",
-    WINDOWS = "windows",
 )
 
 _ARCHS = struct(
-    AMD64 = "amd64",  # x86_64
-    ARM64 = "arm64",
+    AMD64 = "x86_64",
+    ARM64 = "aarch64",
 )
-
-_GC_LINKOPTS = struct(
-    NIX = ["-s", "-w"],
-    WINDOWS = [],
-)
-
-_GC_LINKOPTS_LOOKUP = {
-    _OSS.MACOS: _GC_LINKOPTS.NIX,
-    _OSS.LINUX: _GC_LINKOPTS.NIX,
-    _OSS.WINDOWS: _GC_LINKOPTS.WINDOWS,
-}
 
 _EXTENSIONS = struct(
     NIX = "",
-    WINDOWS = ".exe",
 )
 
 _EXTENSIONS_LOOKUP = {
     _OSS.MACOS: _EXTENSIONS.NIX,
     _OSS.LINUX: _EXTENSIONS.NIX,
-    _OSS.WINDOWS: _EXTENSIONS.WINDOWS,
 }
 
 def _key(os, arch):
@@ -61,7 +47,6 @@ def _new(os, arch):
         arch = arch,
         key = _key(os, arch),
         ext = _EXTENSIONS_LOOKUP[os],
-        gc_linkopts = _GC_LINKOPTS_LOOKUP[os],
     )
 
 _PLATFORMS = [
@@ -69,7 +54,6 @@ _PLATFORMS = [
     _new(os = _OSS.MACOS, arch = _ARCHS.ARM64),
     _new(os = _OSS.LINUX, arch = _ARCHS.AMD64),
     _new(os = _OSS.LINUX, arch = _ARCHS.ARM64),
-    _new(os = _OSS.WINDOWS, arch = _ARCHS.AMD64),
 ]
 
 _PLATFORMS_LOOKUP = {p.key: p for p in _PLATFORMS}
@@ -106,7 +90,6 @@ platforms = struct(
     all = _PLATFORMS,
     archs = _ARCHS,
     extensions = _EXTENSIONS,
-    gc_linkopts = _GC_LINKOPTS,
     oss = _OSS,
     # Functions
     get = _get,

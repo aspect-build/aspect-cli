@@ -39,7 +39,7 @@ http_archive(
     urls = ["https://github.com/grailbio/bazel-toolchain/archive/ceeedcc4464322e05fe5b8df3749cc02273ee083.tar.gz"],
 )
 
-_SYSROOT_BUILD_FILE = """
+_SYSROOT_LINUX_BUILD_FILE = """
 filegroup(
     name = "sysroot",
     srcs = glob(["*/**"]),
@@ -47,18 +47,39 @@ filegroup(
 )
 """
 
+_SYSROOT_DARWIN_BUILD_FILE = """
+filegroup(
+    name = "sysroot",
+    srcs = glob(
+        include = ["**"],
+        exclude = ["**/*:*"],
+    ),
+    visibility = ["//visibility:public"],
+)
+"""
+
 http_archive(
     name = "org_chromium_sysroot_linux_arm64",
-    build_file_content = _SYSROOT_BUILD_FILE,
-    sha256 = "e39b700d8858d18868544c8c84922f6adfa8419f3f42471b92024ba38eff7aca",
-    urls = ["https://commondatastorage.googleapis.com/chrome-linux-sysroot/toolchain/2202c161310ffde63729f29d27fe7bb24a0bc540/debian_stretch_arm64_sysroot.tar.xz"],
+    build_file_content = _SYSROOT_LINUX_BUILD_FILE,
+    sha256 = "cf2fefded0449f06d3cf634bfa94ffed60dbe47f2a14d2900b00eb9bcfb104b8",
+    urls = ["https://commondatastorage.googleapis.com/chrome-linux-sysroot/toolchain/80fc74e431f37f590d0c85f16a9d8709088929e8/debian_bullseye_arm64_sysroot.tar.xz"],
 )
 
 http_archive(
     name = "org_chromium_sysroot_linux_x86_64",
-    build_file_content = _SYSROOT_BUILD_FILE,
-    sha256 = "84656a6df544ecef62169cfe3ab6e41bb4346a62d3ba2a045dc5a0a2ecea94a3",
-    urls = ["https://commondatastorage.googleapis.com/chrome-linux-sysroot/toolchain/2202c161310ffde63729f29d27fe7bb24a0bc540/debian_stretch_amd64_sysroot.tar.xz"],
+    build_file_content = _SYSROOT_LINUX_BUILD_FILE,
+    sha256 = "04b94ba1098b71f8543cb0ba6c36a6ea2890d4d417b04a08b907d96b38a48574",
+    urls = ["https://commondatastorage.googleapis.com/chrome-linux-sysroot/toolchain/f5f68713249b52b35db9e08f67184cac392369ab/debian_bullseye_amd64_sysroot.tar.xz"],
+)
+
+http_archive(
+    name = "sysroot_darwin_universal",
+    build_file_content = _SYSROOT_DARWIN_BUILD_FILE,
+    # The ruby header has an infinite symlink that we need to remove.
+    patch_cmds = ["rm System/Library/Frameworks/Ruby.framework/Versions/Current/Headers/ruby/ruby"],
+    sha256 = "71ae00a90be7a8c382179014969cec30d50e6e627570af283fbe52132958daaf",
+    strip_prefix = "MacOSX11.3.sdk",
+    urls = ["https://s3.us-east-2.amazonaws.com/static.aspect.build/sysroots/MacOSX11.3.sdk.tar.xz"],
 )
 
 http_archive(
@@ -181,26 +202,30 @@ load("@com_grail_bazel_toolchain//toolchain:rules.bzl", "llvm_toolchain")
 
 llvm_toolchain(
     name = "llvm_toolchain",
-    llvm_version = "15.0.7",
+    llvm_version = "14.0.0",
     sha256 = {
-        "darwin-arm64": "867c6afd41158c132ef05a8f1ddaecf476a26b91c85def8e124414f9a9ba188d",
-        "darwin-x86_64": "d16b6d536364c5bec6583d12dd7e6cf841b9f508c4430d9ee886726bd9983f1c",
+        "darwin-aarch64": "1b8975db6b638b308c1ee437291f44cf8f67a2fb926eb2e6464efd180e843368",
+        "linux-x86_64": "564fcbd79c991e93fdf75f262fa7ac6553ec1dd04622f5d7db2a764c5dc7fac6",
     },
     strip_prefix = {
-        "darwin-arm64": "clang+llvm-15.0.7-arm64-apple-darwin22.0",
-        "darwin-x86_64": "clang+llvm-15.0.7-x86_64-apple-darwin21.0",
+        "darwin-aarch64": "clang+llvm-14.0.0-arm64-apple-darwin",
+        "linux-x86_64": "clang+llvm-14.0.0-x86_64-linux-gnu",
     },
     sysroot = {
+        "darwin-aarch64": "@sysroot_darwin_universal//:sysroot",
+        "darwin-x86_64": "@sysroot_darwin_universal//:sysroot",
         "linux-aarch64": "@org_chromium_sysroot_linux_arm64//:sysroot",
         "linux-x86_64": "@org_chromium_sysroot_linux_x86_64//:sysroot",
     },
     urls = {
-        "darwin-arm64": ["https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/clang+llvm-15.0.7-arm64-apple-darwin22.0.tar.xz"],
-        "darwin-x86_64": ["https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/clang+llvm-15.0.7-x86_64-apple-darwin21.0.tar.xz"],
+        "darwin-aarch64": ["https://github.com/aspect-forks/llvm-project/releases/download/aspect-release-14.0.0/clang+llvm-14.0.0-arm64-apple-darwin.tar.xz"],
+        "linux-x86_64": ["https://github.com/aspect-forks/llvm-project/releases/download/aspect-release-14.0.0/clang+llvm-14.0.0-x86_64-linux-gnu.tar.xz"],
     },
 )
 
-register_toolchains("//platforms/toolchains:llvm")
+load("//platforms/toolchains:defs.bzl", "register_llvm_toolchains")
+
+register_llvm_toolchains()
 
 load("@aspect_gcc_toolchain//toolchain:repositories.bzl", "gcc_toolchain_dependencies")
 
