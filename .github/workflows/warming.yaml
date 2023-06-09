@@ -21,7 +21,7 @@ jobs:
       - name: Agent health checks
         run: agent_health_check
       - name: Create warming archive for .
-        uses: aspect-build/workflows-action@5.5.0-rc4
+        uses: aspect-build/workflows-action@5.5.0-rc5
         with:
           task: warming
           workspace: .
