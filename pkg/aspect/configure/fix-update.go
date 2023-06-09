@@ -17,6 +17,7 @@ package configure
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -26,6 +27,8 @@ import (
 	"sort"
 	"strings"
 
+	module "aspect.build/cli/pkg/aspect/configure/internal/module"
+	wspace "aspect.build/cli/pkg/aspect/configure/internal/wspace"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	gzflag "github.com/bazelbuild/bazel-gazelle/flag"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -136,7 +139,7 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 	// dependency resolution for Go.
 	// TODO(jayconrod): Go-specific code should be moved to language/go.
 	if ucr.repoConfigPath == "" {
-		ucr.repoConfigPath = findWORKSPACEFile(c.RepoRoot)
+		ucr.repoConfigPath = wspace.FindWORKSPACEFile(c.RepoRoot)
 	}
 	repoConfigFile, err := rule.LoadWorkspaceFile(ucr.repoConfigPath, "")
 	if err != nil && !os.IsNotExist(err) {
@@ -153,10 +156,22 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 			GoPrefix: imp,
 		})
 	}
+
+	moduleToApparentName, err := module.ExtractModuleToApparentNameMapping(c.RepoRoot)
+	if err != nil {
+		return err
+	}
+
 	for _, r := range c.Repos {
 		if r.Kind() == "go_repository" {
+			var name string
+			if apparentName := moduleToApparentName(r.AttrString("module_name")); apparentName != "" {
+				name = apparentName
+			} else {
+				name = r.Name()
+			}
 			uc.repos = append(uc.repos, repo.Repo{
-				Name:     r.Name(),
+				Name:     name,
 				GoPrefix: r.AttrString("importpath"),
 			})
 		}
@@ -164,7 +179,7 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 
 	// If the repo configuration file is not WORKSPACE, also load WORKSPACE
 	// and any declared macro files so we can apply fixes.
-	workspacePath := findWORKSPACEFile(c.RepoRoot)
+	workspacePath := wspace.FindWORKSPACEFile(c.RepoRoot)
 	var workspace *rule.File
 	if ucr.repoConfigPath == workspacePath {
 		workspace = repoConfigFile
@@ -257,6 +272,11 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		return nil, err
 	}
 
+	moduleToApparentName, err := module.ExtractModuleToApparentNameMapping(c.RepoRoot)
+	if err != nil {
+		return nil, err
+	}
+
 	mrslv := newMetaResolver()
 	kinds := make(map[string]rule.KindInfo)
 	loads := genericLoads
@@ -266,7 +286,11 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			mrslv.AddBuiltin(kind, lang)
 			kinds[kind] = info
 		}
-		loads = append(loads, lang.Loads()...)
+		if moduleAwareLang, ok := lang.(language.ModuleAwareLanguage); ok {
+			loads = append(loads, moduleAwareLang.ApparentLoads(moduleToApparentName)...)
+		} else {
+			loads = append(loads, lang.Loads()...)
+		}
 		exts = append(exts, lang)
 	}
 	ruleIndex := resolve.NewRuleIndex(mrslv.Resolver, exts...)
@@ -275,9 +299,18 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		return nil, err
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, lang := range languages {
+		if life, ok := lang.(language.LifecycleManager); ok {
+			life.Before(ctx)
+		}
+	}
+
 	// Visit all directories in the repository.
 	var visits []visitRecord
 	uc := getUpdateConfig(c)
+	var errorsFromWalk []error
 	walk.Walk(c, cexts, uc.dirs, uc.walkMode, func(dir, rel string, c *config.Config, update bool, f *rule.File, subdirs, regularFiles, genFiles []string) {
 		// If this file is ignored or if Gazelle was not asked to update this
 		// directory, just index the build file and move on.
@@ -328,11 +361,22 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			mappedKinds    []config.MappedKind
 			mappedKindInfo = make(map[string]rule.KindInfo)
 		)
-		for _, r := range gen {
-			if repl, ok := c.KindMap[r.Kind()]; ok {
+		// We apply map_kind to all rules, including pre-existing ones.
+		var allRules []*rule.Rule
+		allRules = append(allRules, gen...)
+		if f != nil {
+			allRules = append(allRules, f.Rules...)
+		}
+		for _, r := range allRules {
+			repl, err := lookupMapKindReplacement(c.KindMap, r.Kind())
+			if err != nil {
+				errorsFromWalk = append(errorsFromWalk, fmt.Errorf("looking up mapped kind: %w", err))
+				continue
+			}
+			if repl != nil {
 				mappedKindInfo[repl.KindName] = kinds[r.Kind()]
-				mappedKinds = append(mappedKinds, repl)
-				mrslv.MappedKind(rel, repl)
+				mappedKinds = append(mappedKinds, *repl)
+				mrslv.MappedKind(rel, *repl)
 				r.SetKind(repl.KindName)
 			}
 		}
@@ -366,6 +410,25 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		}
 	})
 
+	for _, lang := range languages {
+		if finishable, ok := lang.(language.FinishableLanguage); ok {
+			finishable.DoneGeneratingRules()
+		}
+	}
+
+	if len(errorsFromWalk) == 1 {
+		return nil, errorsFromWalk[0]
+	}
+
+	if len(errorsFromWalk) > 1 {
+		var additionalErrors []string
+		for _, error := range errorsFromWalk[1:] {
+			additionalErrors = append(additionalErrors, error.Error())
+		}
+
+		return nil, fmt.Errorf("encountered multiple errors: %w, %v", errorsFromWalk[0], strings.Join(additionalErrors, ", "))
+	}
+
 	// Finish building the index for dependency resolution.
 	ruleIndex.Finish()
 
@@ -385,6 +448,11 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		}
 		merger.MergeFile(v.file, v.empty, v.rules, merger.PostResolve,
 			unionKindInfoMaps(kinds, v.mappedKindInfo))
+	}
+	for _, lang := range languages {
+		if life, ok := lang.(language.LifecycleManager); ok {
+			life.AfterResolvingDeps(ctx)
+		}
 	}
 
 	stats.NumBuildFilesVisited = len(visits)
@@ -412,6 +480,37 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 	}
 
 	return &stats, exit
+}
+
+// lookupMapKindReplacement finds a mapped replacement for rule kind `kind`, resolving transitively.
+// i.e. if go_library is mapped to custom_go_library, and custom_go_library is mapped to other_go_library,
+// looking up go_library will return other_go_library.
+// It returns an error on a loop, and may return nil if no remapping should be performed.
+func lookupMapKindReplacement(kindMap map[string]config.MappedKind, kind string) (*config.MappedKind, error) {
+	var mapped *config.MappedKind
+	seenKinds := make(map[string]struct{})
+	seenKindPath := []string{kind}
+	for {
+		replacement, ok := kindMap[kind]
+		if !ok {
+			break
+		}
+
+		seenKindPath = append(seenKindPath, replacement.KindName)
+		if _, alreadySeen := seenKinds[replacement.KindName]; alreadySeen {
+			return nil, fmt.Errorf("found loop of map_kind replacements: %s", strings.Join(seenKindPath, " -> "))
+		}
+
+		seenKinds[replacement.KindName] = struct{}{}
+		mapped = &replacement
+		if kind == replacement.KindName {
+			break
+		}
+
+		kind = replacement.KindName
+	}
+
+	return mapped, nil
 }
 
 func newFixUpdateConfiguration(wd string, cmd command, args []string, cexts []config.Configurer) (*config.Config, error) {
@@ -454,7 +553,7 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 
 	for _, f := range uc.workspaceFiles {
 		merger.FixLoads(f, loads)
-		workspaceFile := findWORKSPACEFile(c.RepoRoot)
+		workspaceFile := wspace.FindWORKSPACEFile(c.RepoRoot)
 
 		if f.Path == workspaceFile {
 			removeLegacyGoRepository(f)
@@ -584,12 +683,4 @@ func appendOrMergeKindMapping(mappedLoads []rule.LoadInfo, mappedKind config.Map
 		Name:    mappedKind.KindLoad,
 		Symbols: []string{mappedKind.KindName},
 	})
-}
-
-func findWORKSPACEFile(root string) string {
-	pathWithExt := filepath.Join(root, "WORKSPACE.bazel")
-	if _, err := os.Stat(pathWithExt); err == nil {
-		return pathWithExt
-	}
-	return filepath.Join(root, "WORKSPACE")
 }
