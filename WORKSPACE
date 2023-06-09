@@ -4,16 +4,16 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "f1c181b910f821072f38ee45bb87db6b56275458c7f832c54c54ba6334119eca",
-    strip_prefix = "bazel-lib-1.32.0",
-    url = "https://github.com/aspect-build/bazel-lib/releases/download/v1.32.0/bazel-lib-v1.32.0.tar.gz",
+    sha256 = "e3151d87910f69cf1fc88755392d7c878034a69d6499b287bcfc00b1cf9bb415",
+    strip_prefix = "bazel-lib-1.32.1",
+    url = "https://github.com/aspect-build/bazel-lib/releases/download/v1.32.1/bazel-lib-v1.32.1.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_js",
-    sha256 = "08061ba5e5e7f4b1074538323576dac819f9337a0c7d75aee43afc8ae7cb6e18",
-    strip_prefix = "rules_js-1.26.1",
-    url = "https://github.com/aspect-build/rules_js/releases/download/v1.26.1/rules_js-v1.26.1.tar.gz",
+    sha256 = "0b69e0967f8eb61de60801d6c8654843076bf7ef7512894a692a47f86e84a5c2",
+    strip_prefix = "rules_js-1.27.1",
+    url = "https://github.com/aspect-build/rules_js/releases/download/v1.27.1/rules_js-v1.27.1.tar.gz",
 )
 
 http_archive(
@@ -21,13 +21,6 @@ http_archive(
     sha256 = "de9d2cedea7103d20c93a5cc7763099728206bd5088342d0009315913a592cc0",
     strip_prefix = "bazel-skylib-1.4.2",
     urls = ["https://github.com/bazelbuild/bazel-skylib/archive/refs/tags/1.4.2.tar.gz"],
-)
-
-http_archive(
-    name = "aspect_gcc_toolchain",
-    sha256 = "3341394b1376fb96a87ac3ca01c582f7f18e7dc5e16e8cf40880a31dd7ac0e1e",
-    strip_prefix = "gcc-toolchain-0.4.2",
-    urls = ["https://github.com/aspect-build/gcc-toolchain/archive/refs/tags/0.4.2.tar.gz"],
 )
 
 http_archive(
@@ -92,15 +85,15 @@ http_archive(
 
 http_archive(
     name = "rules_pkg",
-    sha256 = "8c20f74bca25d2d442b327ae26768c02cf3c99e93fad0381f32be9aab1967675",
-    urls = ["https://github.com/bazelbuild/rules_pkg/releases/download/0.8.1/rules_pkg-0.8.1.tar.gz"],
+    sha256 = "8f9ee2dc10c1ae514ee599a8b42ed99fa262b757058f65ad3c384289ff70c4b8",
+    urls = ["https://github.com/bazelbuild/rules_pkg/releases/download/0.9.1/rules_pkg-0.9.1.tar.gz"],
 )
 
 http_archive(
     name = "buildifier_prebuilt",
-    sha256 = "95387c9dded7f8e3bdd4c598bc2ca4fbb6366cb214fa52e7d7b689eb2f421e01",
-    strip_prefix = "buildifier-prebuilt-6.0.0",
-    urls = ["https://github.com/keith/buildifier-prebuilt/archive/6.0.0.tar.gz"],
+    sha256 = "e46c16180bc49487bfd0f1ffa7345364718c57334fa0b5b67cb5f27eba10f309",
+    strip_prefix = "buildifier-prebuilt-6.1.0",
+    urls = ["https://github.com/keith/buildifier-prebuilt/archive/6.1.0.tar.gz"],
 )
 
 load("@buildifier_prebuilt//:deps.bzl", "buildifier_prebuilt_deps")
@@ -226,22 +219,6 @@ llvm_toolchain(
 load("//platforms/toolchains:defs.bzl", "register_llvm_toolchains")
 
 register_llvm_toolchains()
-
-load("@aspect_gcc_toolchain//toolchain:repositories.bzl", "gcc_toolchain_dependencies")
-
-gcc_toolchain_dependencies()
-
-load("@aspect_gcc_toolchain//toolchain:defs.bzl", "ARCHS", "gcc_register_toolchain")
-
-gcc_register_toolchain(
-    name = "gcc_toolchain_aarch64",
-    target_arch = ARCHS.aarch64,
-)
-
-gcc_register_toolchain(
-    name = "gcc_toolchain_x86_64",
-    target_arch = ARCHS.x86_64,
-)
 
 load("@buildifier_prebuilt//:defs.bzl", "buildifier_prebuilt_register_toolchains")
 
