@@ -30,10 +30,10 @@ _ATTRS = {
         mandatory = True,
         allow_single_file = True,
     ),
-    "windows_x86_64": attr.label(
-        doc = "The artifact for the linux-arm64 platform.",
-        mandatory = True,
-        allow_single_file = True,
+    "_sha256sum": attr.label(
+        executable = True,
+        cfg = "exec",
+        default = "//release/sha256sum",
     ),
 }
 
@@ -46,10 +46,10 @@ def _impl(ctx):
         ctx.file.darwin_x86_64,
         ctx.file.linux_arm64,
         ctx.file.linux_x86_64,
-        ctx.file.windows_x86_64,
     ]
 
     args = ctx.actions.args()
+    args.add(ctx.executable._sha256sum.path)
     args.add(outdir.path)
     args.add(ctx.file.version_file)
     args.add(ctx.file.darwin_arm64)
@@ -60,17 +60,16 @@ def _impl(ctx):
     args.add("linux-arm64")
     args.add(ctx.file.linux_x86_64)
     args.add("linux-x86_64")
-    args.add(ctx.file.windows_x86_64)
-    args.add("windows-x86_64.exe")
 
     ctx.actions.run_shell(
         outputs = [outdir],
         inputs = inputs,
         arguments = [args],
         command = """\
-output_dir="$1"
-version_file="$2"
-shift 2
+sha256sum="${PWD}/$1"
+output_dir="$2"
+version_file="$3"
+shift 3
 
 version="$(< "${version_file}")"
 
@@ -87,10 +86,11 @@ while (("$#")); do
     cp "${artifact_path}" "${output_dir}/bazel-${version}-${platform_suffix}"
     (
         cd "${output_dir}"
-        sha256sum "bazel-${version}-${platform_suffix}" > "bazel-${version}-${platform_suffix}.sha256"
+        "${sha256sum}" "bazel-${version}-${platform_suffix}" > "bazel-${version}-${platform_suffix}.sha256"
     )
 done
 """,
+        tools = [ctx.executable._sha256sum],
     )
 
     return [
