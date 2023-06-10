@@ -20,7 +20,7 @@ Link the [Aspect CLI](https://www.aspect.build/cli) as \`bazel\` just like the [
 % brew install aspect-build/aspect/aspect
 \`\`\`
 
-### Bazelisk (MacOS / Linux / Windows)
+### Bazelisk (MacOS / Linux)
 
 Configure [bazelisk](https://github.com/bazelbuild/bazelisk) to use the [Aspect CLI](https://www.aspect.build/cli) for all developers. Add this to \`.bazeliskrc\` in your project folder:
 
