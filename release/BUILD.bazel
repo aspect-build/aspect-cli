@@ -17,13 +17,12 @@ version_file(
 
 bazelisk_artifacts(
     name = "aspect_bazelisk_artifacts",
-    darwin_arm64 = ":aspect-darwin-arm64",
-    darwin_x86_64 = ":aspect-darwin-amd64",
-    linux_arm64 = ":aspect-linux-arm64",
-    linux_x86_64 = ":aspect-linux-amd64",
+    darwin_arm64 = ":aspect-macos-aarch64",
+    darwin_x86_64 = ":aspect-macos-x86_64",
+    linux_arm64 = ":aspect-linux-aarch64",
+    linux_x86_64 = ":aspect-linux-x86_64",
     tags = ["manual"],
     version_file = ":aspect_version",
-    windows_x86_64 = ":aspect-windows-amd64",
 )
 
 cli_brew_artifacts(
