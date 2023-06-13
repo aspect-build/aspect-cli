@@ -47,6 +47,7 @@ Run 'aspect help directives' for more documentation on directives.
 So far these languages are supported:
 - Go and Protocol Buffers, thanks to code from [gazelle]
 - JavaScript (including TypeScript)
+- Kotlin (experimental, see https://github.com/aspect-build/aspect-cli/issues/474)
 
 configure is based on [gazelle]. We are very grateful to the authors of that software.
 The advantage of configure in Aspect CLI is that you don't need to compile the tooling before running it.

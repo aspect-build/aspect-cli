@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	js "aspect.build/cli/gazelle/js"
+	kotlin "aspect.build/cli/gazelle/kotlin"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
@@ -73,6 +74,12 @@ func (runner *Configure) Run(_ context.Context, _ *cobra.Command, args []string)
 		languageKeys = append(languageKeys, "javascript")
 	}
 
+	viper.SetDefault("configure.languages.kotlin", false)
+	if viper.GetBool("configure.languages.kotlin") {
+		languages = append(languages, kotlin.NewLanguage())
+		languageKeys = append(languageKeys, "kotlin")
+	}
+
 	if len(languageKeys) != 0 {
 		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(languageKeys, ", "))
 	}
@@ -87,6 +94,7 @@ configure:
   languages:
     javascript: true
     go: true
+    kotlin: true
     protobuf: true`)
 		return nil
 	}

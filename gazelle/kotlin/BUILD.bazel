@@ -4,6 +4,7 @@ load("//gazelle:gazelle.bzl", "gazelle_generation_test")
 
 # Disable the kotlin extension
 # gazelle:kotlin disabled
+# gazelle:exclude tests/
 
 go_library(
     name = "kotlin",
