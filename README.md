@@ -30,7 +30,7 @@ This installs the `aspect` command and also links it to `bazel`, just like the [
 
 > We plan to have a standard "core" homebrew formula so this will just be `brew install aspect` in the future.
 
-## Bazelisk (MacOS / Linux)
+## Bazelisk (MacOS / Linux / Windows)
 
 On any platform, so long as you already have [bazelisk] installed, you can have [bazelisk]
 install the Aspect CLI just like it can install the standard Bazel CLI.
@@ -42,17 +42,13 @@ into your `.bazeliskrc` file to install Aspect for all developers in this reposi
 Note that in all cases, the `.bazelversion` file continues to indicate which version of the
 Bazel tool is fetched and run beneath the wrapper.
 
-## Manual (MacOS / Linux)
+## Manual (MacOS / Linux / Windows)
 
-On any supported platform, you can download the `aspect` binary for your platform on our
+On any platform, you can download the `aspect` binary for your platform on our
 [Releases](https://github.com/aspect-build/aspect-cli/releases) page and add it to your `PATH` manually.
 
 Note, if you manually install for MacOS, you can bypass the "Unknown Developer" dialog by running
 `xattr -c $(which aspect)` before launching `aspect`.
-
-## Windows
-
-Windows releases are no longer published as of [v5.5.0](https://github.com/aspect-build/aspect-cli/releases/tag/5.5.0). This is due to a new dependency on [go-tree-sitter](https://github.com/tree-sitter/tree-sitter-go) which has a CGO dependency that makes cross compiling to Windows difficult. To produce Windows releases will require some engineering work to resolve the CGO cross compilation issues. Please let us know if you require a Windows Aspect CLI binary. In the meantime, we recommend using WSL2 on Windows.
 
 # Usage
 
