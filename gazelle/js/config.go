@@ -185,6 +185,15 @@ func newRootConfig() *JsGazelleConfig {
 	}
 }
 
+func (g *TargetGroup) copy() *TargetGroup {
+	return &TargetGroup{
+		name:           g.name,
+		customSources:  g.customSources[:],
+		defaultSources: g.defaultSources,
+		testonly:       g.testonly,
+	}
+}
+
 // NewChild creates a new child JsGazelleConfig. It inherits desired values from the
 // current JsGazelleConfig and sets itself as the parent to the child.
 func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
@@ -194,8 +203,14 @@ func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
 	cCopy.excludes = make([]string, 0)
 	cCopy.ignoreDependencies = make([]string, 0)
 	cCopy.resolves = linkedhashmap.New()
-	cCopy.targets = c.targets[:]
 
+	// Copy the targets, any modifications will be local.
+	cCopy.targets = make([]*TargetGroup, 0, len(c.targets))
+	for _, target := range c.targets {
+		cCopy.targets = append(cCopy.targets, target.copy())
+	}
+
+	// Copy the overrides, any modifications will be local.
 	cCopy.targetNamingOverrides = make(map[string]string)
 	for k, v := range c.targetNamingOverrides {
 		cCopy.targetNamingOverrides[k] = v
