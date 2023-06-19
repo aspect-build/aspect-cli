@@ -185,11 +185,16 @@ func newRootConfig() *JsGazelleConfig {
 	}
 }
 
-func (g *TargetGroup) copy() *TargetGroup {
+func (g *TargetGroup) newChild() *TargetGroup {
+	sources := g.customSources
+	if len(sources) == 0 {
+		sources = g.defaultSources
+	}
+
 	return &TargetGroup{
 		name:           g.name,
-		customSources:  g.customSources[:],
-		defaultSources: g.defaultSources,
+		customSources:  make([]string, 0),
+		defaultSources: sources,
 		testonly:       g.testonly,
 	}
 }
@@ -207,7 +212,7 @@ func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
 	// Copy the targets, any modifications will be local.
 	cCopy.targets = make([]*TargetGroup, 0, len(c.targets))
 	for _, target := range c.targets {
-		cCopy.targets = append(cCopy.targets, target.copy())
+		cCopy.targets = append(cCopy.targets, target.newChild())
 	}
 
 	// Copy the overrides, any modifications will be local.
