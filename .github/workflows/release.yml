@@ -11,15 +11,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
-      - name: Bazel caches
-        uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cache/bazel
-            ~/.cache/bazel-repo
-          key: >-
-            bazel-cache-${{ hashFiles('**/*.go', '**/BUILD.bazel', '**/*.bzl', 'WORKSPACE') }}
-          restore-keys: bazel-cache-
       - uses: bazelbuild/setup-bazelisk@v1
       - name: Build release artifacts
         run: |
