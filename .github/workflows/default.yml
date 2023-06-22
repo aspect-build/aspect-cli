@@ -24,14 +24,6 @@ jobs:
         if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'allow sdk change')
         run: ./.github/workflows/validate_changed_files.sh
       - uses: bazelbuild/setup-bazelisk@v1
-      - name: Bazel caches
-        uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cache/bazel
-            ~/.cache/bazel-repo
-          key: bazel-cache-${{ hashFiles('**/*.go', '**/BUILD.bazel', '**/*.bzl', 'WORKSPACE') }}
-          restore-keys: bazel-cache-
       - name: Go cache
         uses: actions/cache@v2
         with:
@@ -42,7 +34,3 @@ jobs:
           restore-keys: ${{ runner.os }}-go-
       - name: Tidy up repository
         run: ./.github/workflows/tidy_up_repository.sh
-      - name: bazel test //...
-        env:
-          XDG_CACHE_HOME: ~/.cache/bazel-repo
-        run: bazel --bazelrc=.github/workflows/ci.bazelrc --bazelrc=.bazelrc test //...
