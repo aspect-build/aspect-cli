@@ -67,6 +67,15 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive)
 }
 
+func CheckAspectLockVersionFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--"+flags.AspectLockVersion {
+			return true
+		}
+	}
+	return false
+}
+
 func MaybeAspectVersionFlag(streams ioutils.Streams, args []string) {
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "-v") {
 		fmt.Fprintf(streams.Stdout, "%s %s\n", buildinfo.Current().GnuName(), buildinfo.Current().Version())

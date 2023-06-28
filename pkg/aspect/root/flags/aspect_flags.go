@@ -18,6 +18,7 @@ package flags
 
 const (
 	AspectFlagPrefix              = "aspect:"
+	AspectLockVersion             = AspectFlagPrefix + "lock_version"
 	AspectConfigFlagName          = AspectFlagPrefix + "config"
 	AspectSystemConfigFlagName    = AspectFlagPrefix + "system_config"
 	AspectWorkspaceConfigFlagName = AspectFlagPrefix + "workspace_config"

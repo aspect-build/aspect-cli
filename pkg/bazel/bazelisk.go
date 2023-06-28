@@ -58,13 +58,18 @@ var (
 type Bazelisk struct {
 	workspaceRoot string
 
+	allowReenter bool
+
 	// Set to true in getBazelVersion() if this aspect binary is not the user's configured
 	// version and should re-enter another aspect binary of a different version
 	AspectShouldReenter bool
 }
 
-func NewBazelisk(workspaceRoot string) *Bazelisk {
-	return &Bazelisk{workspaceRoot: workspaceRoot}
+func NewBazelisk(workspaceRoot string, allowReenter bool) *Bazelisk {
+	return &Bazelisk{
+		workspaceRoot: workspaceRoot,
+		allowReenter:  allowReenter,
+	}
 }
 
 func UserCacheDir() (string, error) {
@@ -305,12 +310,11 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	}
 
 	// If an aspect version is configured and we are not already re-entrant that takes precedence.
-	if !aspectRuntime.Reentrant && aspectConfig.Configured {
+	if bazelisk.allowReenter && !aspectRuntime.Reentrant && aspectConfig.Configured {
 		mismatchVersion := aspectConfig.Version != aspectRuntime.Version
 		mismatchBaseUrl := aspectConfig.BaseUrl != aspectRuntime.BaseUrl
-		if !aspectRuntime.DevBuild && (mismatchVersion || mismatchBaseUrl) {
+		if mismatchVersion || mismatchBaseUrl {
 			// Re-enter the configured version of aspect if there is a version or base url mismatch
-			// and this is not a development build
 			bazelisk.AspectShouldReenter = true                    // (A)
 			return aspectConfig.Version, aspectConfig.BaseUrl, nil // (A)
 		}
@@ -334,9 +338,9 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 			bazeliskAspectVersion := splits[len(splits)-1]
 			mismatchVersion := bazeliskAspectVersion != aspectRuntime.Version
 			mismatchBaseUrl := bazeliskAspectBaseUrl != aspectRuntime.BaseUrl
-			if !aspectRuntime.Reentrant && !aspectConfig.Configured && !aspectRuntime.DevBuild && (mismatchVersion || mismatchBaseUrl) {
+			if bazelisk.allowReenter && !aspectRuntime.Reentrant && !aspectConfig.Configured && (mismatchVersion || mismatchBaseUrl) {
 				// Re-enter the configured version of aspect if there is a version or base url mismatch
-				// and this is not a development build and no version configured in aspect config (or via USE_ASPECT_VERSION)
+				// and no version configured in aspect config (or via USE_ASPECT_VERSION)
 				// and we are not already re-entrant.
 				bazelisk.AspectShouldReenter = true                      // (C)
 				return bazeliskAspectVersion, bazeliskAspectBaseUrl, nil // (C)

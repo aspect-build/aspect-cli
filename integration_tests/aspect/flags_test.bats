@@ -33,6 +33,37 @@ EOF
     assert_output --partial "INFO: Build completed successfully"
 }
 
+@test 'lock_version flag should prevent downloading and running bazeliskrc version' {
+    cat > .bazeliskrc << 'EOF'
+BAZELISK_BASE_URL=https://static.aspect.build/aspect
+USE_BAZEL_VERSION=aspect/1.2.3
+EOF
+    run aspect --version
+    assert_failure
+    assert_output --partial "could not download Bazel"
+
+    run aspect --version --aspect:lock_version
+    assert_success
+    assert_output --partial "Locking Aspect CLI version to"
+
+    rm .bazeliskrc
+}
+
+@test 'lock_version flag should prevent downloading and running config version' {
+    cat > version-config.yaml << 'EOF'
+version: 1.2.3
+EOF
+    run aspect --aspect:config="version-config.yaml" --version
+    assert_failure
+    assert_output --partial "could not download Bazel"
+
+    run aspect --aspect:config="version-config.yaml" --version --aspect:lock_version
+    assert_success
+    assert_output --partial "Locking Aspect CLI version to"
+
+    rm version-config.yaml
+}
+
 @test '--[no]able flags should work' {
     cat > BUILD.bazel << 'EOF'
 genrule(
@@ -46,7 +77,7 @@ EOF
 }
 
 
-@test 'uknown flags should fail' {
+@test 'unknown flags should fail' {
     run aspect build :foo --noannounce_rcc
     assert_output --partial "ERROR: --noannounce_rcc :: Unrecognized option: --noannounce_rcc"
 }

@@ -28,8 +28,11 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-// AddGlobalFlags will add aspect specfic flags to all cobra commands.
+// AddGlobalFlags will add Aspect specific flags to all cobra commands.
 func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
+	cmd.PersistentFlags().Bool(AspectLockVersion, false, "Lock the version of the Aspect CLI. This prevents the Aspect CLI from downloading and running an different version of the Aspect CLI if one is specified in .bazeliskrc or the Aspect CLI config.")
+	cmd.PersistentFlags().MarkHidden(AspectLockVersion)
+
 	cmd.PersistentFlags().String(AspectConfigFlagName, "", fmt.Sprintf("User-specified Aspect CLI config file. /dev/null indicates that all further --%s flags will be ignored.", AspectConfigFlagName))
 
 	RegisterNoableBool(cmd.PersistentFlags(), AspectSystemConfigFlagName, true, "Whether or not to look for the system config file at /etc/aspect/cli/config.yaml")
