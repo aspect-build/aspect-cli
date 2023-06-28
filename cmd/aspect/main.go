@@ -45,7 +45,7 @@ func main() {
 	streams := ioutils.DefaultStreams
 
 	// Re-enter another aspect if version running is not the configured version
-	reentered, exitCode, err := bzl.MaybeReenterAspect(streams, os.Args[1:])
+	reentered, exitCode, err := bzl.MaybeReenterAspect(streams, os.Args[1:], root.CheckAspectLockVersionFlag(os.Args[1:]))
 	if reentered {
 		if err != nil {
 			aspecterrors.HandleError(err)

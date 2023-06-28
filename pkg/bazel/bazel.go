@@ -29,6 +29,7 @@ import (
 
 	"aspect.build/cli/bazel/analysis"
 	"aspect.build/cli/bazel/flags"
+	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/spf13/cobra"
@@ -56,7 +57,7 @@ var startupFlags []string
 type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string) (*analysis.ActionGraphContainer, error)
-	MaybeReenterAspect(streams ioutils.Streams, args []string) (bool, int, error)
+	MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, int, error)
 	RunCommand(streams ioutils.Streams, wd *string, command ...string) (int, error)
 	InitializeBazelFlags() error
 	Flags() (map[string]*flags.FlagInfo, error)
@@ -118,17 +119,21 @@ func createRepositories() *core.Repositories {
 
 // Check if we should re-enter a different version and/or tier of the Aspect CLI and re-enter if we should.
 // Error is returned if version and/or tier are misconfigured in the Aspect CLI config.
-func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string) (bool, int, error) {
-	bazelisk := NewBazelisk(b.workspaceRoot)
+func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, int, error) {
+	bazelisk := NewBazelisk(b.workspaceRoot, true)
 
 	// Calling bazelisk.getBazelVersion() has the side-effect of setting AspectShouldReenter.
 	// TODO: this pattern could get cleaned up so it does not rely on the side-effect
 	bazelisk.getBazelVersion()
 
 	if bazelisk.AspectShouldReenter {
-		repos := createRepositories()
-		exitCode, err := bazelisk.Run(args, repos, streams, b.env, nil)
-		return true, exitCode, err
+		if !aspectLockVersion {
+			repos := createRepositories()
+			exitCode, err := bazelisk.Run(args, repos, streams, b.env, nil)
+			return true, exitCode, err
+		} else {
+			fmt.Fprintf(streams.Stderr, "Locking Aspect CLI version to %s %s which differs from the version configured in .bazeliskrc or the Aspect CLI config file\n", buildinfo.Current().GnuName(), buildinfo.Current().Version())
+		}
 	}
 
 	return false, 0, nil
@@ -156,7 +161,7 @@ func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...strin
 
 	repos := createRepositories()
 
-	bazelisk := NewBazelisk(b.workspaceRoot)
+	bazelisk := NewBazelisk(b.workspaceRoot, false)
 
 	exitCode, err := bazelisk.Run(command, repos, streams, b.env, wd)
 	return exitCode, err
