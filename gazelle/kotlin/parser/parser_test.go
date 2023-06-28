@@ -19,34 +19,39 @@ var testCases = []struct {
 		imports:  []string{},
 	},
 	{
-		desc:     "simple",
-		kt:       "import a.b",
+		desc: "simple",
+		kt: `
+import a.B
+import c.D as E
+	`,
 		filename: "simple.kt",
 		pkg:      "",
-		imports:  []string{"a.b"},
-	},
-	{
-		desc: "comments",
-		kt: `
-/*dlfkj*/			package /*dlfkj*/ x // x
-//z
-import a.b // y
-//z
-
-/* asdf */ import /* asdf */ c./* asdf */d // w
-		`,
-		filename: "empty.kt",
-		pkg:      "x",
-		imports:  []string{"a.b", "c.d"},
+		imports:  []string{"a", "c"},
 	},
 	{
 		desc: "stars",
 		kt: `package a.b.c
-		
-		import d.y.*`,
+
+import  d.y.* 
+		`,
 		filename: "stars.kt",
 		pkg:      "a.b.c",
 		imports:  []string{"d.y"},
+	},
+	{
+		desc: "comments",
+		kt: `
+/*dlfkj*/package /*dlfkj*/ x // x
+//z
+import a.B // y
+//z
+
+/* asdf */ import /* asdf */ c./* asdf */D // w
+import /* fdsa */ d/* asdf */.* // w
+				`,
+		filename: "comments.kt",
+		pkg:      "x",
+		imports:  []string{"a", "c", "d"},
 	},
 }
 
@@ -57,7 +62,13 @@ func TestTreesitterParser(t *testing.T) {
 			actualImports, _ := NewParser().ParseImports(tc.filename, tc.kt)
 
 			if !equal(actualImports, tc.imports) {
-				t.Errorf("Inequality.\nactual:  %#v;\nimports: %#v\nkotlin code:\n%v", actualImports, tc.imports, tc.kt)
+				t.Errorf("Imports...\nactual:  %#v;\nexpected: %#v\nkotlin code:\n%v", actualImports, tc.imports, tc.kt)
+			}
+
+			actualPackage, _ := NewParser().ParsePackage(tc.filename, tc.kt)
+
+			if actualPackage != tc.pkg {
+				t.Errorf("Package....\nactual:  %#v;\nexpected: %#v\nkotlin code:\n%v", actualPackage, tc.pkg, tc.kt)
 			}
 		})
 	}

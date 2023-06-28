@@ -1,10 +1,6 @@
 load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
 
 kt_jvm_library(
-    name = "local_deps",
+    name = "simple_file",
     srcs = ["main.kt"],
-    deps = [
-        "//impt",
-        "//impt-star",
-    ],
 )
