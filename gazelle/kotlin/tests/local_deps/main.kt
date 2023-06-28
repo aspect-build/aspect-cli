@@ -1,10 +1,10 @@
 package test.root
 
 // Basic
-import test.A
-import test.B
+import test.impt.Rectangle
+import test.imptstar.*
 
 fun main() {
    A.f()
-   B.f()
+   Rectangle.f()
 }

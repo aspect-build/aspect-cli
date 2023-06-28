@@ -1,0 +1,4 @@
+Resolution error Import "foo" from "main.kt" is an unknown dependency. Possible solutions:
+	1. Instruct Gazelle to resolve to a known dependency using a directive:
+		# gazelle:resolve [src-lang] kotlin import-string label
+

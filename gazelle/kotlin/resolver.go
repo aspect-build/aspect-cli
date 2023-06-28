@@ -26,11 +26,11 @@ type Resolver struct {
 }
 
 const (
-	Resolution_Error      = -1
-	Resolution_None       = 0
-	Resolution_NotFound   = 1
-	Resolution_Label      = 2
-	Resolution_NativeNode = 3
+	Resolution_Error        = -1
+	Resolution_None         = 0
+	Resolution_NotFound     = 1
+	Resolution_Label        = 2
+	Resolution_NativeKotlin = 3
 )
 
 type ResolutionType = int
@@ -83,7 +83,7 @@ func (kt *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 	start := time.Now()
 	BazelLog.Infof("Resolve '%s' dependencies", from.String())
 
-	if r.Kind() != KtJvmLibrary {
+	if r.Kind() == KtJvmLibrary {
 		deps, err := kt.resolveImports(c, ix, importData.(*KotlinImports).imports, from)
 		if err != nil {
 			log.Fatal("Resolution Error: ", err)
@@ -115,12 +115,21 @@ func (kt *Resolver) resolveImports(
 			return nil, err
 		}
 
-		if resolutionType == Resolution_NativeNode || resolutionType == Resolution_None {
+		if resolutionType == Resolution_NotFound {
+			BazelLog.Debugf("import '%s' for target '%s' not found", mod.Imp, from.String())
+
+			notFound := fmt.Errorf(
+				"Import %[1]q from %[2]q is an unknown dependency. Possible solutions:\n"+
+					"\t1. Instruct Gazelle to resolve to a known dependency using a directive:\n"+
+					"\t\t# gazelle:resolve [src-lang] kotlin import-string label\n",
+				mod.Imp, mod.SourcePath,
+			)
+
+			fmt.Printf("Resolution error %v\n", notFound)
 			continue
 		}
 
-		if resolutionType == Resolution_NotFound {
-			// TODO: collect errors
+		if resolutionType == Resolution_NativeKotlin || resolutionType == Resolution_None {
 			continue
 		}
 
@@ -176,7 +185,7 @@ func (kt *Resolver) resolveImport(
 
 	// Native kotlin imports
 	if IsNativeImport(impt.Imp) {
-		return Resolution_NativeNode, nil, nil
+		return Resolution_NativeKotlin, nil, nil
 	}
 
 	// TODO: maven imports

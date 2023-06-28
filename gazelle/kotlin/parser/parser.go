@@ -63,7 +63,7 @@ func (p *treeSitterParser) ParsePackage(filePath, source string) (string, []erro
 					os.Exit(1)
 				}
 
-				pkg = readIdentifier(getLoneChild(nodeI, "identifier"), sourceCode)
+				pkg = readIdentifier(getLoneChild(nodeI, "identifier"), sourceCode, false)
 			}
 		}
 
@@ -104,10 +104,18 @@ func (p *treeSitterParser) ParseImports(filePath, source string) ([]string, []er
 				for j := 0; j < int(nodeI.NamedChildCount()); j++ {
 					nodeJ := nodeI.NamedChild(j)
 					if nodeJ.Type() == "import_header" {
-						for k := 0; k < int(nodeJ.NamedChildCount()); k++ {
-							nodeK := nodeJ.NamedChild(k)
+						for k := 0; k < int(nodeJ.ChildCount()); k++ {
+							nodeK := nodeJ.Child(k)
 							if nodeK.Type() == "identifier" {
-								imports.Add(readIdentifier(nodeK, sourceCode))
+								isStar := false
+								for l := k + 1; l < int(nodeJ.ChildCount()); l++ {
+									if nodeJ.Child(l).Type() == ".*" {
+										isStar = true
+										break
+									}
+								}
+
+								imports.Add(readIdentifier(nodeK, sourceCode, !isStar))
 							}
 						}
 					}
@@ -140,7 +148,7 @@ func getLoneChild(node *sitter.Node, name string) *sitter.Node {
 	return nil
 }
 
-func readIdentifier(node *sitter.Node, sourceCode []byte) string {
+func readIdentifier(node *sitter.Node, sourceCode []byte, ignoreLast bool) string {
 	if node.Type() != "identifier" {
 		fmt.Printf("Must be type 'identifier': %v - %s", node.Type(), node.Content(sourceCode))
 		os.Exit(1)
@@ -148,7 +156,12 @@ func readIdentifier(node *sitter.Node, sourceCode []byte) string {
 
 	var s strings.Builder
 
-	for c := 0; c < int(node.NamedChildCount()); c++ {
+	total := int(node.NamedChildCount())
+	if ignoreLast {
+		total = total - 1
+	}
+
+	for c := 0; c < total; c++ {
 		nodeC := node.NamedChild(c)
 
 		// TODO: are there any other node types under an "identifier"
