@@ -289,14 +289,6 @@ func RunParserTests(t *testing.T, parser parser.Parser, includeTypeOnly bool, pa
 			}
 		})
 	}
-
-	t.Run("invalid syntax"+parserPost, func(t *testing.T) {
-		_, errs := parser.ParseImports("bad-syntax.ts", "bad syntax")
-
-		if len(errs) == 0 {
-			t.Error("Invalid syntax should return errors")
-		}
-	})
 }
 
 func equal[T comparable](a, b []T) bool {

@@ -219,7 +219,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		if len(result.Errors) > 0 {
 			fmt.Printf("%s:\n", result.SourcePath)
 			for _, err := range result.Errors {
-				fmt.Printf("\t%s\n", err)
+				fmt.Printf("%s\n", err)
 			}
 			fmt.Println()
 		}
