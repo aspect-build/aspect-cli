@@ -106,9 +106,13 @@ func (p *TreeSitterParser) ParseImports(filePath, sourceCodeStr string) ([]strin
 			imports = append(imports, queryResults...)
 		}
 
-		treeErrors := treeutils.QueryErrors(sourceLangName, sourceLang, sourceCode, rootNode)
-		if treeErrors != nil {
-			errs = append(errs, treeErrors...)
+		// Parse errors. Only log them due to many false positives potentially caused by issues
+		// such as only parsing a single file at a time so type information from other files is missing.
+		if Log.IsLevelEnabled(logrus.TraceLevel) {
+			treeErrors := treeutils.QueryErrors(sourceLangName, sourceLang, sourceCode, rootNode)
+			if treeErrors != nil {
+				Log.Tracef("TreeSitter query errors: %v", treeErrors)
+			}
 		}
 	}
 

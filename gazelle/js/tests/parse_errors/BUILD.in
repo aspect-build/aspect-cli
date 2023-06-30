@@ -1,0 +1,2 @@
+# gazelle:js_ignore_imports mystery-module
+# gazelle:js_ignore_imports unknown-library
