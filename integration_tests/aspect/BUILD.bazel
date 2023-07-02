@@ -4,14 +4,14 @@ exports_files(["common.bats"])
 
 # common env
 env = {
-    "BAZEL_BINARY": "$(location @bazel_6_0_0//:bazel)",
+    "BAZEL_BINARY": "$(location @bazel_6_2_1//:bazel)",
 }
 
 # common data
 data = [
     "common.bats",
     "//cmd/aspect",
-    "@bazel_6_0_0//:bazel",
+    "@bazel_6_2_1//:bazel",
 ]
 
 bats_test(
