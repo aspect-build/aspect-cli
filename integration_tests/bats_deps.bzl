@@ -5,9 +5,12 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 CORE_VERSION = "1.8.2"
 ASSERT_VERSION = "2.1.0"
 SUPPORT_VERSION = "0.3.0"
+FILES_VERSION = "c0f822aceac6a70614c5a7c92fd9c5ddd97c7f83"  # May 25, 2023
 DETIK_VERSION = "0d71702f9016a955fc8197d562bb1bb88ddf63a8"  # Aug 8, 2022
 
 def bats_dependencies():
+    """Fetches the required dependencies to run bats_test"""
+
     http_archive(
         name = "bats_core",
         sha256 = "0f2df311a536e625a72bff64c838e67c7b5032e6ea9edcdf32758303062b2f3b",
@@ -53,6 +56,33 @@ sh_library(
     name = "dir",
     srcs = [
         "bats-assert",
+    ],
+    visibility = ["//visibility:public"]
+)
+        """,
+    )
+
+    http_archive(
+        name = "bats_file",
+        urls = [
+            "https://github.com/bats-core/bats-file/archive/{}.tar.gz".format(FILES_VERSION),
+        ],
+        sha256 = "76a19ead26c7cf666b9fbe659874b947392443de638f76802f057739f04a8d33",
+        strip_prefix = "bats-file-{}".format(FILES_VERSION),
+        add_prefix = "bats-file",
+        build_file_content = """
+sh_library(
+    name = "bats_file",
+    srcs = glob([
+        "bats-file/src/**",
+        "bats-file/load.bash",
+    ]),
+    visibility = ["//visibility:public"]
+)
+sh_library(
+    name = "dir",
+    srcs = [
+        "bats-file",
     ],
     visibility = ["//visibility:public"]
 )
