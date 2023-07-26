@@ -15,6 +15,7 @@ def bats_test(srcs = [], **kwargs):
         "@bats_support//:dir",
         "@bats_detik//:dir",
         "@bats_file//:dir",
+        "@bats_mock//:dir",
     ]
     env = kwargs.pop("env", {})
 
@@ -28,6 +29,7 @@ def bats_test(srcs = [], **kwargs):
         deps = [
             "@bats_assert//:bats_assert",
             "@bats_file//:bats_file",
+            "@bats_mock//:bats_mock",
             "@bats_core//:bats_core",
             "@bats_core//:bin",
             "@bats_detik//:bats_detik",
