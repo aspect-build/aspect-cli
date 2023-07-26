@@ -6,6 +6,7 @@ CORE_VERSION = "1.8.2"
 ASSERT_VERSION = "2.1.0"
 SUPPORT_VERSION = "0.3.0"
 FILES_VERSION = "c0f822aceac6a70614c5a7c92fd9c5ddd97c7f83"  # May 25, 2023
+MOCK_VERSION = "48fce74482a4d2bb879b904ccab31b6bc98e3224"  # May 3, 2021
 DETIK_VERSION = "0d71702f9016a955fc8197d562bb1bb88ddf63a8"  # Aug 8, 2022
 
 def bats_dependencies():
@@ -111,6 +112,30 @@ sh_library(
     srcs = [
         "bats-support",
     ],
+    visibility = ["//visibility:public"]
+)""",
+    )
+
+    http_archive(
+        name = "bats_mock",
+        urls = [
+            "https://github.com/grayhemp/bats-mock/archive/{}.tar.gz".format(MOCK_VERSION),
+        ],
+        sha256 = "1559fd3e6b63818f6ddf8652250dbbc9de47230f0c46b91dc84a73b5704cd3cd",
+        strip_prefix = "bats-mock-{}".format(MOCK_VERSION),
+        add_prefix = "bats-mock",
+        build_file_content = """
+sh_library(
+    name = "bats_mock",
+    srcs = glob([
+        "bats-support/src/**",
+        "bats-support/load.bash",
+    ]),
+    visibility = ["//visibility:public"]
+)
+sh_library(
+    name = "dir",
+    srcs = ["bats-mock"],
     visibility = ["//visibility:public"]
 )""",
     )
