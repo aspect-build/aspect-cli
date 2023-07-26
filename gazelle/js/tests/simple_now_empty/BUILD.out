@@ -1,8 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-ts_project(
-    name = "simple_now_empty",
-    srcs = [
-        ":generated-ts",  # keep
-    ],
-)

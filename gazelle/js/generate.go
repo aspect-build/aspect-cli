@@ -193,9 +193,11 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 			return nil, nil
 		}
 
+		tsProjectKind := mapKind(args, TsProjectKind)
+
 		for _, r := range args.File.Rules {
-			if r.Name() == targetName && r.Kind() == TsProjectKind {
-				emptyRule := rule.NewRule(TsProjectKind, targetName)
+			if r.Name() == targetName && r.Kind() == tsProjectKind {
+				emptyRule := rule.NewRule(tsProjectKind, targetName)
 				result.Empty = append(result.Empty, emptyRule)
 				return emptyRule, nil
 			}
@@ -536,16 +538,20 @@ func addLinkAllPackagesRule(cfg *JsGazelleConfig, args language.GenerateArgs, re
 	BazelLog.Infof("add rule '%s' '%s:%s'", npmLinkAll.Kind(), args.Rel, npmLinkAll.Name())
 }
 
+func mapKind(args language.GenerateArgs, kind string) string {
+	mappedKind := args.Config.KindMap[kind].KindName
+	if mappedKind != "" {
+		return mappedKind
+	}
+
+	return kind
+}
+
 // Check if a target with the same name we are generating alredy exists,
 // and if it is of a different kind from the one we are generating. If
 // so, we have to throw an error since Gazelle won't generate it correctly.
 func checkCollisionErrors(tsProjectTargetName string, args language.GenerateArgs) error {
-	tsProjectKind := TsProjectKind
-
-	tsProjectMappedKind := args.Config.KindMap[TsProjectKind].KindName
-	if tsProjectMappedKind != "" {
-		tsProjectKind = tsProjectMappedKind
-	}
+	tsProjectKind := mapKind(args, TsProjectKind)
 
 	for _, t := range args.File.Rules {
 		if t.Name() == tsProjectTargetName && t.Kind() != tsProjectKind {

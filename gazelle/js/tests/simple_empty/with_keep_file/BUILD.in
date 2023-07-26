@@ -1,7 +1,6 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
-# keep
 ts_project(
-    name = "with_keep",
-    srcs = ["oldfile.ts"],
+    name = "with_keep_rule",
+    srcs = ["oldfile.ts"],  # keep
 )
