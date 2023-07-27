@@ -31,29 +31,42 @@ func (kt *kotlinLang) GenerateRules(args language.GenerateArgs) language.Generat
 
 	// TODO: exit if configured to disable generation
 
+	// Collect all source files.
+	sourceFiles := kt.collectSourceFiles(cfg, args)
+
+	// TODO: multiple targets (lib, test, ...)
+	target := NewKotlinTarget()
+
+	// Parse all source files and group information into target(s)
+	for p := range kt.parseFiles(args, sourceFiles) {
+		target.Files.Add(p.File)
+		target.Packages.Add(p.Package)
+
+		for _, impt := range p.Imports {
+			target.Imports.Add(ImportStatement{
+				ImportSpec: resolve.ImportSpec{
+					Lang: LanguageName,
+					Imp:  impt,
+				},
+				SourcePath: p.File,
+			})
+		}
+	}
+
 	var result language.GenerateResult
 
-	kt.addSourceRules(cfg, args, &result)
+	targetName := gazelle.ToDefaultTargetName(args, "root")
+
+	kt.addLibraryRule(targetName, target, args, false, &result)
 
 	return result
 }
 
-func (kt *kotlinLang) addSourceRules(cfg *kotlinconfig.KotlinConfig, args language.GenerateArgs, result *language.GenerateResult) {
-	// Collect all source files.
-	sourceFiles := kt.collectSourceFiles(cfg, args)
-
-	targetName := gazelle.ToDefaultTargetName(args, "root")
-
-	kt.addLibraryRule(targetName, sourceFiles, args, false, result)
-
-	// TODO: test rules
-}
-
-func (kt *kotlinLang) addLibraryRule(targetName string, sourceFiles *treeset.Set, args language.GenerateArgs, isTestRule bool, result *language.GenerateResult) {
+func (kt *kotlinLang) addLibraryRule(targetName string, target *KotlinTarget, args language.GenerateArgs, isTestRule bool, result *language.GenerateResult) {
 	// TODO: check for rule collisions
 
 	// Generate nothing if there are no source files. Remove any existing rules.
-	if sourceFiles.Empty() {
+	if target.Files.Empty() {
 		if args.File == nil {
 			return
 		}
@@ -70,30 +83,26 @@ func (kt *kotlinLang) addLibraryRule(targetName string, sourceFiles *treeset.Set
 	}
 
 	ktLibrary := rule.NewRule(KtJvmLibrary, targetName)
-	ktLibrary.SetAttr("srcs", sourceFiles.Values())
+	ktLibrary.SetAttr("srcs", target.Files.Values())
+	ktLibrary.SetPrivateAttr(packagesKey, target)
 
 	if isTestRule {
 		ktLibrary.SetAttr("testonly", true)
 	}
 
-	imports := newKotlinImports()
-	for impt := range kt.findAllImports(args, sourceFiles) {
-		imports.Add(impt)
-	}
-
 	result.Gen = append(result.Gen, ktLibrary)
-	result.Imports = append(result.Imports, imports)
+	result.Imports = append(result.Imports, target)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", ktLibrary.Kind(), args.Rel, ktLibrary.Name())
 }
 
 // TODO: put in common?
-func (kt *kotlinLang) findAllImports(args language.GenerateArgs, sources *treeset.Set) chan ImportStatement {
+func (kt *kotlinLang) parseFiles(args language.GenerateArgs, sources *treeset.Set) chan *parser.ParseResult {
 	// The channel of all files to parse.
 	sourcePathChannel := make(chan string)
 
 	// The channel of parse results.
-	resultsChannel := make(chan ImportStatement)
+	resultsChannel := make(chan *parser.ParseResult)
 
 	// The number of workers. Don't create more workers than necessary.
 	workerCount := int(math.Min(MaxWorkerCount, float64(1+sources.Size()/2)))
@@ -106,7 +115,7 @@ func (kt *kotlinLang) findAllImports(args language.GenerateArgs, sources *treese
 			defer wg.Done()
 
 			for sourcePath := range sourcePathChannel {
-				fImports, errs := parseImports(args.Config.RepoRoot, sourcePath)
+				r, errs := parseFile(path.Join(args.Config.RepoRoot, args.Rel), sourcePath)
 
 				// Output errors to stdout
 				if len(errs) > 0 {
@@ -116,16 +125,7 @@ func (kt *kotlinLang) findAllImports(args language.GenerateArgs, sources *treese
 					}
 				}
 
-				// Emit import package + paths
-				for _, sourceImport := range fImports {
-					resultsChannel <- ImportStatement{
-						ImportSpec: resolve.ImportSpec{
-							Imp:  sourceImport,
-							Lang: LanguageName,
-						},
-						SourcePath: sourcePath,
-					}
-				}
+				resultsChannel <- r
 			}
 		}()
 	}
@@ -134,7 +134,7 @@ func (kt *kotlinLang) findAllImports(args language.GenerateArgs, sources *treese
 	go func() {
 		sourceFileChannelIt := sources.Iterator()
 		for sourceFileChannelIt.Next() {
-			sourcePathChannel <- path.Join(args.Rel, sourceFileChannelIt.Value().(string))
+			sourcePathChannel <- sourceFileChannelIt.Value().(string)
 		}
 
 		close(sourcePathChannel)
@@ -150,7 +150,7 @@ func (kt *kotlinLang) findAllImports(args language.GenerateArgs, sources *treese
 }
 
 // Parse the passed file for import statements.
-func parseImports(rootDir, filePath string) ([]string, []error) {
+func parseFile(rootDir, filePath string) (*parser.ParseResult, []error) {
 	BazelLog.Debugf("ParseImports: %s", filePath)
 
 	content, err := os.ReadFile(path.Join(rootDir, filePath))
@@ -159,7 +159,7 @@ func parseImports(rootDir, filePath string) ([]string, []error) {
 	}
 
 	p := parser.NewParser()
-	return p.ParseImports(filePath, string(content))
+	return p.Parse(filePath, string(content))
 }
 
 func (kt *kotlinLang) collectSourceFiles(cfg *kotlinconfig.KotlinConfig, args language.GenerateArgs) *treeset.Set {
