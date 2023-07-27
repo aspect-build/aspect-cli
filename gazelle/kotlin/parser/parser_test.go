@@ -59,16 +59,14 @@ func TestTreesitterParser(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			actualImports, _ := NewParser().ParseImports(tc.filename, tc.kt)
+			res, _ := NewParser().Parse(tc.filename, tc.kt)
 
-			if !equal(actualImports, tc.imports) {
-				t.Errorf("Imports...\nactual:  %#v;\nexpected: %#v\nkotlin code:\n%v", actualImports, tc.imports, tc.kt)
+			if !equal(res.Imports, tc.imports) {
+				t.Errorf("Imports...\nactual:  %#v;\nexpected: %#v\nkotlin code:\n%v", res.Imports, tc.imports, tc.kt)
 			}
 
-			actualPackage, _ := NewParser().ParsePackage(tc.filename, tc.kt)
-
-			if actualPackage != tc.pkg {
-				t.Errorf("Package....\nactual:  %#v;\nexpected: %#v\nkotlin code:\n%v", actualPackage, tc.pkg, tc.kt)
+			if res.Package != tc.pkg {
+				t.Errorf("Package....\nactual:  %#v;\nexpected: %#v\nkotlin code:\n%v", res.Package, tc.pkg, tc.kt)
 			}
 		})
 	}

@@ -12,9 +12,14 @@ import (
 	"github.com/smacker/go-tree-sitter/kotlin"
 )
 
+type ParseResult struct {
+	File    string
+	Imports []string
+	Package string
+}
+
 type Parser interface {
-	ParseImports(filePath, source string) ([]string, []error)
-	ParsePackage(filePath, source string) (string, []error)
+	Parse(filePath, source string) (*ParseResult, []error)
 }
 
 type treeSitterParser struct {
@@ -37,51 +42,12 @@ func NewParser() Parser {
 var KotlinTreeSitterName = "kotlin"
 var KotlinLang = kotlin.GetLanguage()
 
-func (p *treeSitterParser) ParsePackage(filePath, source string) (string, []error) {
-	var pkg string
-	errs := make([]error, 0)
-
-	ctx := context.Background()
-
-	sourceCode := []byte(source)
-
-	tree, err := p.parser.ParseCtx(ctx, nil, sourceCode)
-	if err != nil {
-		errs = append(errs, err)
+func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error) {
+	var result = &ParseResult{
+		File:    filePath,
+		Imports: make([]string, 0),
 	}
 
-	if tree != nil {
-		rootNode := tree.RootNode()
-
-		// Extract imports from the root nodes
-		for i := 0; i < int(rootNode.NamedChildCount()); i++ {
-			nodeI := rootNode.NamedChild(i)
-
-			if nodeI.Type() == "package_header" {
-				if pkg != "" {
-					fmt.Printf("Multiple package declarations found in %s\n", filePath)
-					os.Exit(1)
-				}
-
-				pkg = readIdentifier(getLoneChild(nodeI, "identifier"), sourceCode, false)
-			}
-		}
-
-		treeErrors := treeutils.QueryErrors(KotlinTreeSitterName, KotlinLang, sourceCode, rootNode)
-		if treeErrors != nil {
-			errs = append(errs, treeErrors...)
-		}
-	}
-
-	return pkg, errs
-}
-
-type KotlinImports struct {
-	imports *treeset.Set
-}
-
-func (p *treeSitterParser) ParseImports(filePath, source string) ([]string, []error) {
-	imports := treeset.NewWithStringComparator()
 	errs := make([]error, 0)
 
 	ctx := context.Background()
@@ -115,11 +81,18 @@ func (p *treeSitterParser) ParseImports(filePath, source string) ([]string, []er
 									}
 								}
 
-								imports.Add(readIdentifier(nodeK, sourceCode, !isStar))
+								result.Imports = append(result.Imports, readIdentifier(nodeK, sourceCode, !isStar))
 							}
 						}
 					}
 				}
+			} else if nodeI.Type() == "package_header" {
+				if result.Package != "" {
+					fmt.Printf("Multiple package declarations found in %s\n", filePath)
+					os.Exit(1)
+				}
+
+				result.Package = readIdentifier(getLoneChild(nodeI, "identifier"), sourceCode, false)
 			}
 		}
 
@@ -129,11 +102,11 @@ func (p *treeSitterParser) ParseImports(filePath, source string) ([]string, []er
 		}
 	}
 
-	res := make([]string, 0, imports.Size())
-	for _, v := range imports.Values() {
-		res = append(res, v.(string))
-	}
-	return res, errs
+	return result, errs
+}
+
+type KotlinImports struct {
+	imports *treeset.Set
 }
 
 func getLoneChild(node *sitter.Node, name string) *sitter.Node {

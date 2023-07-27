@@ -4,13 +4,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path"
 	"strings"
 	"time"
 
 	common "aspect.build/cli/gazelle/common"
 	. "aspect.build/cli/gazelle/common/log"
-	"aspect.build/cli/gazelle/kotlin/parser"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/repo"
@@ -49,22 +47,14 @@ func (*Resolver) Name() string {
 func (kt *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
 	BazelLog.Debugf("Imports: '%s:%s'", f.Pkg, r.Name())
 
-	srcs := r.AttrStrings("srcs")
-	provides := make([]resolve.ImportSpec, 0, len(srcs)+1)
+	target := r.PrivateAttr(packagesKey).(*KotlinTarget)
 
-	for _, src := range srcs {
-		impts, errs := toImportPaths(path.Join(f.Pkg, src))
-
-		for _, err := range errs {
-			BazelLog.Errorf("Failed to parse '%s': %s", src, err.Error())
-		}
-
-		for _, impt := range impts {
-			provides = append(provides, resolve.ImportSpec{
-				Lang: LanguageName,
-				Imp:  impt,
-			})
-		}
+	provides := make([]resolve.ImportSpec, 0, target.Packages.Size())
+	for _, pkg := range target.Packages.Values() {
+		provides = append(provides, resolve.ImportSpec{
+			Lang: LanguageName,
+			Imp:  pkg.(string),
+		})
 	}
 
 	// TODO: why nil instead of just returning empty?
@@ -84,7 +74,7 @@ func (kt *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 	BazelLog.Infof("Resolve '%s' dependencies", from.String())
 
 	if r.Kind() == KtJvmLibrary {
-		deps, err := kt.resolveImports(c, ix, importData.(*KotlinImports).imports, from)
+		deps, err := kt.resolveImports(c, ix, importData.(*KotlinTarget).Imports, from)
 		if err != nil {
 			log.Fatal("Resolution Error: ", err)
 			os.Exit(1)
@@ -191,25 +181,6 @@ func (kt *Resolver) resolveImport(
 	// TODO: maven imports
 
 	return Resolution_NotFound, nil, nil
-}
-
-// Parse the passed file for import statements.
-// TODO: return a struct like js plugin?
-func toImportPaths(filePath string) ([]string, []error) {
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, []error{err}
-	}
-
-	// TODO: don't parse in both Imports() + Resolve()
-	p := parser.NewParser()
-	pkg, errs := p.ParsePackage(filePath, string(content))
-
-	if pkg != "" {
-		return []string{pkg}, errs
-	}
-
-	return nil, errs
 }
 
 // targetListFromResults returns a string with the human-readable list of
