@@ -6,7 +6,6 @@ import (
 
 var testCases = []struct {
 	desc, kt string
-	// Specify a filename so esbuild knows how to load the file.
 	filename string
 	pkg      string
 	imports  []string
