@@ -8,7 +8,6 @@ import (
 
 var testCases = []struct {
 	desc, ts string
-	// Specify a filename so esbuild knows how to load the file.
 	filename string
 	expected []string
 	typeOnly bool
