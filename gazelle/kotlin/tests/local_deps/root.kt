@@ -4,7 +4,7 @@ package test.root
 import test.impt.Rectangle
 import test.imptstar.*
 
-fun main() {
-   A.f()
-   Rectangle.f()
+fun use_imports() {
+   Rectangle(1.0, 2.0)
+   Rectangle2(3.0, 4.0)
 }

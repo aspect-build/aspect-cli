@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"strings"
 	"sync"
 
 	gazelle "aspect.build/cli/gazelle/common"
@@ -14,6 +15,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/emirpasic/gods/maps/treemap"
 	"github.com/emirpasic/gods/sets/treeset"
 )
 
@@ -34,13 +36,25 @@ func (kt *kotlinLang) GenerateRules(args language.GenerateArgs) language.Generat
 	// Collect all source files.
 	sourceFiles := kt.collectSourceFiles(cfg, args)
 
-	// TODO: multiple targets (lib, test, ...)
-	target := NewKotlinTarget()
+	// TODO: multiple library targets (lib, test, ...)
+	libTarget := NewKotlinLibTarget()
+	binTargets := treemap.NewWithStringComparator()
 
 	// Parse all source files and group information into target(s)
 	for p := range kt.parseFiles(args, sourceFiles) {
-		target.Files.Add(p.File)
-		target.Packages.Add(p.Package)
+		var target *KotlinTarget
+
+		if p.HasMain {
+			binTarget := NewKotlinBinTarget(p.File, p.Package)
+			binTargets.Put(p.File, binTarget)
+
+			target = &binTarget.KotlinTarget
+		} else {
+			libTarget.Files.Add(p.File)
+			libTarget.Packages.Add(p.Package)
+
+			target = &libTarget.KotlinTarget
+		}
 
 		for _, impt := range p.Imports {
 			target.Imports.Add(ImportStatement{
@@ -55,14 +69,19 @@ func (kt *kotlinLang) GenerateRules(args language.GenerateArgs) language.Generat
 
 	var result language.GenerateResult
 
-	targetName := gazelle.ToDefaultTargetName(args, "root")
+	libTargetName := gazelle.ToDefaultTargetName(args, "root")
+	kt.addLibraryRule(libTargetName, libTarget, args, false, &result)
 
-	kt.addLibraryRule(targetName, target, args, false, &result)
+	for _, v := range binTargets.Values() {
+		binTarget := v.(*KotlinBinTarget)
+		binTargetName := toBinaryTargetName(binTarget.File)
+		kt.addBinaryRule(binTargetName, binTarget, args, &result)
+	}
 
 	return result
 }
 
-func (kt *kotlinLang) addLibraryRule(targetName string, target *KotlinTarget, args language.GenerateArgs, isTestRule bool, result *language.GenerateResult) {
+func (kt *kotlinLang) addLibraryRule(targetName string, target *KotlinLibTarget, args language.GenerateArgs, isTestRule bool, result *language.GenerateResult) {
 	// TODO: check for rule collisions
 
 	// Generate nothing if there are no source files. Remove any existing rules.
@@ -94,6 +113,23 @@ func (kt *kotlinLang) addLibraryRule(targetName string, target *KotlinTarget, ar
 	result.Imports = append(result.Imports, target)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", ktLibrary.Kind(), args.Rel, ktLibrary.Name())
+}
+
+func (kt *kotlinLang) addBinaryRule(targetName string, target *KotlinBinTarget, args language.GenerateArgs, result *language.GenerateResult) {
+	main_class := strings.TrimSuffix(target.File, ".kt")
+	if target.Package != "" {
+		main_class = target.Package + "." + main_class
+	}
+
+	ktBinary := rule.NewRule(KtJvmBinary, targetName)
+	ktBinary.SetAttr("srcs", []string{target.File})
+	ktBinary.SetAttr("main_class", main_class)
+	ktBinary.SetPrivateAttr(packagesKey, target)
+
+	result.Gen = append(result.Gen, ktBinary)
+	result.Imports = append(result.Imports, target)
+
+	BazelLog.Infof("add rule '%s' '%s:%s'", ktBinary.Kind(), args.Rel, ktBinary.Name())
 }
 
 // TODO: put in common?

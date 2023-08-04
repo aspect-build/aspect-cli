@@ -16,6 +16,7 @@ type ParseResult struct {
 	File    string
 	Imports []string
 	Package string
+	HasMain bool
 }
 
 type Parser interface {
@@ -93,6 +94,11 @@ func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error
 				}
 
 				result.Package = readIdentifier(getLoneChild(nodeI, "identifier"), sourceCode, false)
+			} else if nodeI.Type() == "function_declaration" {
+				nodeJ := getLoneChild(nodeI, "simple_identifier")
+				if nodeJ.Content(sourceCode) == "main" {
+					result.HasMain = true
+				}
 			}
 		}
 

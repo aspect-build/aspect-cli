@@ -1,5 +1,5 @@
 // Hello World Program
 
-fun main() {
+fun hello() {
     println("Hello world!")
 }

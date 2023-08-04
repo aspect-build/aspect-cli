@@ -1,39 +1,73 @@
 package gazelle
 
-import "strings"
+import (
+	"path"
+	"strings"
+)
+
 import "github.com/emirpasic/gods/sets/treeset"
 
 func IsNativeImport(impt string) bool {
 	return strings.HasPrefix(impt, "kotlin.") || strings.HasPrefix(impt, "kotlinx.") || strings.HasPrefix(impt, "java.") || strings.HasPrefix(impt, "javax.")
 }
 
-/**
- * Information for kotlin library target including:
- * - BUILD package name
- * - kotlin import statements from all files
- * - kotlin packages implemented
- * - kotlin files with main() methods
- */
 type KotlinTarget struct {
-	Name string
-
-	Imports  *treeset.Set
-	Packages *treeset.Set
-
-	Mains *treeset.Set
-
-	Files *treeset.Set
+	Imports *treeset.Set
 }
 
-func NewKotlinTarget() *KotlinTarget {
-	return &KotlinTarget{
-		Imports:  treeset.NewWith(importStatementComparator),
+/**
+ * Information for kotlin library target including:
+ * - kotlin files
+ * - kotlin import statements from all files
+ * - kotlin packages implemented
+ */
+type KotlinLibTarget struct {
+	KotlinTarget
+
+	Packages *treeset.Set
+	Files    *treeset.Set
+}
+
+func NewKotlinLibTarget() *KotlinLibTarget {
+	return &KotlinLibTarget{
+		KotlinTarget: KotlinTarget{
+			Imports: treeset.NewWith(importStatementComparator),
+		},
 		Packages: treeset.NewWithStringComparator(),
-		Mains:    treeset.NewWithStringComparator(),
 		Files:    treeset.NewWithStringComparator(),
+	}
+}
+
+/**
+ * Information for kotlin binary (main() method) including:
+ * - kotlin import statements from all files
+ * - the package
+ * - the file
+ */
+type KotlinBinTarget struct {
+	KotlinTarget
+
+	File    string
+	Package string
+}
+
+func NewKotlinBinTarget(file, pkg string) *KotlinBinTarget {
+	return &KotlinBinTarget{
+		KotlinTarget: KotlinTarget{
+			Imports: treeset.NewWith(importStatementComparator),
+		},
+		File:    file,
+		Package: pkg,
 	}
 }
 
 // packagesKey is the name of a private attribute set on generated kt_library
 // rules. This attribute contains the KotlinTarget for the target.
-const packagesKey = "_java_packages"
+const packagesKey = "_kotlin_package"
+
+func toBinaryTargetName(mainFile string) string {
+	base := strings.ToLower(strings.TrimSuffix(path.Base(mainFile), path.Ext(mainFile)))
+
+	// TODO: move target name template to directive
+	return base + "_bin"
+}
