@@ -51,10 +51,10 @@ import (
 	"aspect.build/cli/cmd/aspect/sync"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
-	"aspect.build/cli/docs/help/topics"
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
+	help_docs "github.com/aspect-build/silo/docs/help/topics"
 )
 
 var (
@@ -168,7 +168,7 @@ func NewCmd(
 }
 
 func mustReadFile(f string) string {
-	result, err := topics.Content.ReadFile(f)
+	result, err := help_docs.Content.ReadFile(f)
 	if err != nil {
 		panic(fmt.Errorf("Internal error: embed data was not readable: %w", err))
 	}
