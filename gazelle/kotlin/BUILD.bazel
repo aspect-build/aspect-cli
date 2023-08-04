@@ -31,6 +31,7 @@ go_library(
         "@bazel_gazelle//resolve:go_default_library",
         "@bazel_gazelle//rule:go_default_library",
         "@com_github_bazel_contrib_rules_jvm//java/gazelle/javaconfig",
+        "@com_github_emirpasic_gods//maps/treemap",
         "@com_github_emirpasic_gods//sets/treeset",
         "@com_github_emirpasic_gods//utils",
     ],

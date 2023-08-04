@@ -47,22 +47,24 @@ func (*Resolver) Name() string {
 func (kt *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
 	BazelLog.Debugf("Imports: '%s:%s'", f.Pkg, r.Name())
 
-	target := r.PrivateAttr(packagesKey).(*KotlinTarget)
+	if r.PrivateAttr(packagesKey) != nil {
+		target, isLib := r.PrivateAttr(packagesKey).(*KotlinLibTarget)
+		if isLib {
+			provides := make([]resolve.ImportSpec, 0, target.Packages.Size())
+			for _, pkg := range target.Packages.Values() {
+				provides = append(provides, resolve.ImportSpec{
+					Lang: LanguageName,
+					Imp:  pkg.(string),
+				})
+			}
 
-	provides := make([]resolve.ImportSpec, 0, target.Packages.Size())
-	for _, pkg := range target.Packages.Values() {
-		provides = append(provides, resolve.ImportSpec{
-			Lang: LanguageName,
-			Imp:  pkg.(string),
-		})
+			if len(provides) > 0 {
+				return provides
+			}
+		}
 	}
 
-	// TODO: why nil instead of just returning empty?
-	if len(provides) == 0 {
-		return nil
-	}
-
-	return provides
+	return nil
 }
 
 func (kt *Resolver) Embeds(r *rule.Rule, from label.Label) []label.Label {
@@ -73,8 +75,16 @@ func (kt *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 	start := time.Now()
 	BazelLog.Infof("Resolve '%s' dependencies", from.String())
 
-	if r.Kind() == KtJvmLibrary {
-		deps, err := kt.resolveImports(c, ix, importData.(*KotlinTarget).Imports, from)
+	if r.Kind() == KtJvmLibrary || r.Kind() == KtJvmBinary {
+		var target KotlinTarget
+
+		if r.Kind() == KtJvmLibrary {
+			target = importData.(*KotlinLibTarget).KotlinTarget
+		} else {
+			target = importData.(*KotlinBinTarget).KotlinTarget
+		}
+
+		deps, err := kt.resolveImports(c, ix, target.Imports, from)
 		if err != nil {
 			log.Fatal("Resolution Error: ", err)
 			os.Exit(1)

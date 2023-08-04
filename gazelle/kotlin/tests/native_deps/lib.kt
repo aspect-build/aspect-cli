@@ -13,6 +13,6 @@ import kotlinx.serialization.json.Json as Jason
 @Serializable
 data class Data(val a: Int, val b: String)
 
-fun main() {
+fun other() {
    val json = Jason.encodeToString(Data(42, "str"))
 }

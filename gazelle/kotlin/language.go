@@ -13,6 +13,7 @@ const LanguageName = "kotlin"
 
 const (
 	KtJvmLibrary              = "kt_jvm_library"
+	KtJvmBinary               = "kt_jvm_binary"
 	RulesKotlinRepositoryName = "io_bazel_rules_kotlin"
 )
 
@@ -61,6 +62,17 @@ var kotlinKinds = map[string]rule.KindInfo{
 			"deps": true,
 		},
 	},
+
+	KtJvmBinary: {
+		MatchAny: false,
+		NonEmptyAttrs: map[string]bool{
+			"srcs":       true,
+			"main_class": true,
+		},
+		SubstituteAttrs: map[string]bool{},
+		MergeableAttrs:  map[string]bool{},
+		ResolveAttrs:    map[string]bool{},
+	},
 }
 
 var kotlinLoads = []rule.LoadInfo{
@@ -68,6 +80,7 @@ var kotlinLoads = []rule.LoadInfo{
 		Name: "@" + RulesKotlinRepositoryName + "//kotlin:jvm.bzl",
 		Symbols: []string{
 			KtJvmLibrary,
+			KtJvmBinary,
 		},
 	},
 }

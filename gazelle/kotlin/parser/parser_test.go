@@ -69,6 +69,30 @@ func TestTreesitterParser(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("main detection", func(t *testing.T) {
+		res, _ := NewParser().Parse("main.kt", "fun main() {}")
+		if !res.HasMain {
+			t.Errorf("main method should be detected")
+		}
+
+		res, _ = NewParser().Parse("x.kt", `
+package my.demo
+fun main() {}
+		`)
+		if !res.HasMain {
+			t.Errorf("main method should be detected with package")
+		}
+
+		res, _ = NewParser().Parse("x.kt", `
+package my.demo
+import kotlin.text.*
+fun main() {}
+		`)
+		if !res.HasMain {
+			t.Errorf("main method should be detected with imports")
+		}
+	})
 }
 
 func equal[T comparable](a, b []T) bool {
