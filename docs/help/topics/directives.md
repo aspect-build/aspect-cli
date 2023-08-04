@@ -6,11 +6,39 @@ within the Bazel package rooted at that file.
 
 ## Go
 
-Go directives for generating BUILD files are from the standard [gazelle go plugin](https://github.com/bazelbuild/bazel-gazelle#directives).
+Go directives for generating BUILD files are from the standard [gazelle directives].
 
 ## JavaScript
 
-JavaScript directives for generating BUILD files follow the same format as [gazelle](https://github.com/bazelbuild/bazel-gazelle). In addition to the generic directives from the [standard gazelle directives](https://github.com/bazelbuild/bazel-gazelle#directives) JavaScript (and TypeScript) specific directives are as follows:
+JavaScript directives for generating BUILD files follow the same format as gazelle.
+You can use generic directives from the [gazelle directives], as well as the following JS/TS
+specific directives.
+
+TypeScript source files are those ending in `.ts`, `.tsx` as well as `.js`, `.mjs`.
+Test source files are source files ending with `.spec.ts` (and other ts extensions).
+The test file pattern can be configured with the 'js*test*\*' directives.
+
+By default `aspect configure` creates new BUILD files for each directory containing source files.
+This can be configured to only edit existing BUILD files using the `js_generation_mode` directive.
+
+Each BUILD file may have a `ts_project` rule for sources, another for tests,
+a `npm_package` rule for pnpm workspace projects, and `npm_link_all_packages` for linking node_modules.
+Which rules are configured depends on the source files and directives that apply.
+
+Next, all source files are collected into the `srcs` of the `ts_project`,
+either the primary rule or tests rule.
+
+Finally, the `import` statements in the source files are parsed, and
+dependencies are added to the `deps` attribute of the appropriate
+`ts_project` rule which the source file belongs to.
+
+Dependencies may also be found other ways such as from the CommonJS `require` function.
+
+If a `package.json` file exists declaring npm dependencies, a `npm_link_all_packages` rule
+is generated for declaring depending on individual NPM packages.
+
+If the `package.json` is a pnpm workspace project a `npm_package` rule may be generated to
+enable other projects to declare dependencies on the package.
 
 <!-- prettier-ignore-start -->
 | **Directive**                                           | **Default value**           |
@@ -40,3 +68,5 @@ JavaScript directives for generating BUILD files follow the same format as [gaze
 | `# gazelle:js_tsconfig _filename_`                      | `tsconfig.json`             |
 | Path to a `tsconfig.json` file used to help generate TypeScript rules.<br />This value is inherited by sub-directories and applied relative to each BUILD.<br />The `ts_project(tsconfig)` attribute is *NOT* set and must be done manually if necessary |
 <!-- prettier-ignore-end -->
+
+[gazelle directives]: https://github.com/bazelbuild/bazel-gazelle#directives
