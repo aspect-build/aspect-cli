@@ -1,3 +1,19 @@
+/*
+ * Copyright 2022 Aspect Build Systems, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package typescript
 
 import (
@@ -96,6 +112,22 @@ func TestTypescriptApi(t *testing.T) {
 		`)
 	})
 
+	t.Run("tsconfig paths inheritance", func(t *testing.T) {
+
+		// Mock a config manually to set a custom Rel path (like an external tsconfig was loaded)
+		config := &TsConfig{
+			ConfigDir: "tsconfig_test",
+			Paths: &TsConfigPaths{
+				Rel: "../libs/ts/liba",
+				Map: &map[string][]string{
+					"@org/liba/*": {"src/*"},
+				},
+			},
+		}
+
+		assertExpand(t, config, "@org/liba/test", "libs/ts/liba/src/test")
+	})
+
 	t.Run("tsconfig paths expansion basic", func(t *testing.T) {
 		// Initial request: https://github.com/aspect-build/aspect-cli/issues/396
 		config := parseTest(t, `{
@@ -110,7 +142,7 @@ func TestTypescriptApi(t *testing.T) {
 			}
 		  }`)
 
-		assertExpand(t, config, "@org/lib", "b/src/lib")
+		assertExpand(t, config, "@org/lib", "tsconfig_test/b/src/lib")
 	})
 
 	t.Run("tsconfig paths expansion", func(t *testing.T) {
@@ -128,17 +160,17 @@ func TestTypescriptApi(t *testing.T) {
 				}
 			}`)
 
-		assertExpand(t, config, "test0", "test0-success.ts")
-		assertExpand(t, config, "test1/bar", "test1-success.ts")
-		assertExpand(t, config, "test1/foo", "test1-success.ts")
-		assertExpand(t, config, "test2/foo", "test2-success/foo")
+		assertExpand(t, config, "test0", "tsconfig_test/test0-success.ts")
+		assertExpand(t, config, "test1/bar", "tsconfig_test/test1-success.ts")
+		assertExpand(t, config, "test1/foo", "tsconfig_test/test1-success.ts")
+		assertExpand(t, config, "test2/foo", "tsconfig_test/test2-success/foo")
 		assertExpand(t, config, "test3/x")
 
-		assertExpand(t, config, "tXt3/foo", "test3-succXs.ts")
-		assertExpand(t, config, "t123t3/foo", "test3-succ123s.ts")
-		assertExpand(t, config, "t-t3/foo", "test3-succ-s.ts")
+		assertExpand(t, config, "tXt3/foo", "tsconfig_test/test3-succXs.ts")
+		assertExpand(t, config, "t123t3/foo", "tsconfig_test/test3-succ123s.ts")
+		assertExpand(t, config, "t-t3/foo", "tsconfig_test/test3-succ-s.ts")
 
-		assertExpand(t, config, "test4/x", "test4-first/x", "test4-second/x")
+		assertExpand(t, config, "test4/x", "tsconfig_test/test4-first/x", "tsconfig_test/test4-second/x")
 	})
 
 	t.Run("tsconfig paths expansion star-length tie-breaker", func(t *testing.T) {
@@ -156,6 +188,6 @@ func TestTypescriptApi(t *testing.T) {
 				}
 			}`)
 
-		assertExpand(t, config, "lib/a", "a-direct", "fallback/a", "lib-star/a", "li-star/b/a", "l-star/ib/a")
+		assertExpand(t, config, "lib/a", "tsconfig_test/a-direct", "tsconfig_test/fallback/a", "tsconfig_test/lib-star/a", "tsconfig_test/li-star/b/a", "tsconfig_test/l-star/ib/a")
 	})
 }
