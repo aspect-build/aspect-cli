@@ -10,7 +10,6 @@ require (
 	github.com/bazelbuild/buildtools v0.0.0-20230510134650-37bd1811516d
 	github.com/bmatcuk/doublestar/v4 v4.6.0
 	github.com/emirpasic/gods v1.18.1
-	github.com/evanw/esbuild v0.17.19
 	github.com/fatih/color v1.15.0
 	github.com/golang/mock v1.6.0
 	github.com/golang/protobuf v1.5.3

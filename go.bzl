@@ -201,14 +201,6 @@ def deps():
         version = "v0.10.0",
     )
     go_repository(
-        name = "com_github_evanw_esbuild",
-        build_file_proto_mode = "disable_global",
-        importpath = "github.com/evanw/esbuild",
-        sum = "h1:JdzNCvfFEoUCXKHhdP326Vn2mhCu8PybXeBDHaSRyWo=",
-        version = "v0.17.19",
-    )
-
-    go_repository(
         name = "com_github_fatih_color",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/fatih/color",
