@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -59,6 +60,10 @@ var DefaultConfigPaths = TsConfigPaths{
 	Rel: ".",
 	Map: &map[string][]string{},
 }
+
+// Matches strings starting with ../, ./, @ or .
+// Used to detect if a path could possibly expanded using baseUrl
+var baseurl_validation_regex = regexp.MustCompile(`^(\.\.?\/|@|\.)`)
 
 // parseTsConfigJSONFile loads a tsconfig.json file and return the compilerOptions config
 func parseTsConfigJSONFile(cm *TsConfigMap, root, dir, tsconfig string) (*TsConfig, error) {
@@ -113,6 +118,8 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir string, tsconfigContent 
 	var BaseUrl string
 	if c.CompilerOptions.BaseUrl != nil {
 		BaseUrl = path.Clean(*c.CompilerOptions.BaseUrl)
+	} else if baseConfig != nil && baseConfig.BaseUrl != "" {
+		BaseUrl = path.Join(baseConfigRel, baseConfig.BaseUrl)
 	} else {
 		BaseUrl = "."
 	}
@@ -173,7 +180,6 @@ func (c TsConfig) getRelativeExpansionIfLocal(importPath string) string {
 // Inspired by: https://github.com/evanw/esbuild/blob/deb93e92267a96575a6e434ff18421f4ef0605e4/internal/resolver/resolver.go#L1831-L1945
 func (c TsConfig) ExpandPaths(from, p string) []string {
 	pathMap := c.Paths.Map
-
 	possible := make([]string, 0)
 
 	// Check for exact 'paths' matches first
@@ -210,6 +216,13 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 
 			possible = append(possible, path.Join(c.getRelativeExpansionIfLocal(mappedPath), c.Paths.Rel, mappedPath))
 		}
+	}
+
+	// Expand paths from baseUrl
+	// Must not to be absolute or relative to be expanded
+	// https://www.typescriptlang.org/tsconfig#baseUrl
+	if !baseurl_validation_regex.MatchString(p) && !path.IsAbs(p) {
+		possible = append(possible, path.Join(c.getRelativeExpansionIfLocal(p), c.BaseUrl, p))
 	}
 
 	BazelLog.Tracef("Found %d possible paths for %s: %v", len(possible), p, possible)

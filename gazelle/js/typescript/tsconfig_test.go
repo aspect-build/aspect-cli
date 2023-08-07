@@ -47,6 +47,45 @@ func assertExpand(t *testing.T, options *TsConfig, p string, expected ...string)
 	}
 }
 
+func TestBaseUrlRegex(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid strings", func(t *testing.T) {
+		t.Parallel()
+
+		shouldNotMatch := []string{
+			"example",
+			"valid",
+			"another",
+		}
+
+		for _, s := range shouldNotMatch {
+			if baseurl_validation_regex.MatchString(s) {
+				t.Errorf("Expected no match for '%s', but it matched", s)
+			}
+		}
+
+	})
+
+	t.Run("invalid strings", func(t *testing.T) {
+		t.Parallel()
+
+		shouldMatch := []string{
+			"./path",
+			"../parent",
+			"@username",
+			".invalid",
+		}
+
+		for _, s := range shouldMatch {
+			if !baseurl_validation_regex.MatchString(s) {
+				t.Errorf("Expected a match for '%s', but it didn't match", s)
+			}
+		}
+	})
+
+}
+
 func TestTypescriptApi(t *testing.T) {
 	t.Run("parse a tsconfig with empty config", func(t *testing.T) {
 		options := parseTest(t, "{}")
@@ -160,17 +199,17 @@ func TestTypescriptApi(t *testing.T) {
 				}
 			}`)
 
-		assertExpand(t, config, "test0", "tsconfig_test/test0-success.ts")
-		assertExpand(t, config, "test1/bar", "tsconfig_test/test1-success.ts")
-		assertExpand(t, config, "test1/foo", "tsconfig_test/test1-success.ts")
-		assertExpand(t, config, "test2/foo", "tsconfig_test/test2-success/foo")
-		assertExpand(t, config, "test3/x")
+		assertExpand(t, config, "test0", "tsconfig_test/test0-success.ts", "tsconfig_test/test0")
+		assertExpand(t, config, "test1/bar", "tsconfig_test/test1-success.ts", "tsconfig_test/test1/bar")
+		assertExpand(t, config, "test1/foo", "tsconfig_test/test1-success.ts", "tsconfig_test/test1/foo")
+		assertExpand(t, config, "test2/foo", "tsconfig_test/test2-success/foo", "tsconfig_test/test2/foo")
+		assertExpand(t, config, "test3/x", "tsconfig_test/test3/x")
 
-		assertExpand(t, config, "tXt3/foo", "tsconfig_test/test3-succXs.ts")
-		assertExpand(t, config, "t123t3/foo", "tsconfig_test/test3-succ123s.ts")
-		assertExpand(t, config, "t-t3/foo", "tsconfig_test/test3-succ-s.ts")
+		assertExpand(t, config, "tXt3/foo", "tsconfig_test/test3-succXs.ts", "tsconfig_test/tXt3/foo")
+		assertExpand(t, config, "t123t3/foo", "tsconfig_test/test3-succ123s.ts", "tsconfig_test/t123t3/foo")
+		assertExpand(t, config, "t-t3/foo", "tsconfig_test/test3-succ-s.ts", "tsconfig_test/t-t3/foo")
 
-		assertExpand(t, config, "test4/x", "tsconfig_test/test4-first/x", "tsconfig_test/test4-second/x")
+		assertExpand(t, config, "test4/x", "tsconfig_test/test4-first/x", "tsconfig_test/test4-second/x", "tsconfig_test/test4/x")
 	})
 
 	t.Run("tsconfig paths expansion star-length tie-breaker", func(t *testing.T) {
@@ -188,6 +227,6 @@ func TestTypescriptApi(t *testing.T) {
 				}
 			}`)
 
-		assertExpand(t, config, "lib/a", "tsconfig_test/a-direct", "tsconfig_test/fallback/a", "tsconfig_test/lib-star/a", "tsconfig_test/li-star/b/a", "tsconfig_test/l-star/ib/a")
+		assertExpand(t, config, "lib/a", "tsconfig_test/a-direct", "tsconfig_test/fallback/a", "tsconfig_test/lib-star/a", "tsconfig_test/li-star/b/a", "tsconfig_test/l-star/ib/a", "tsconfig_test/lib/a")
 	})
 }
