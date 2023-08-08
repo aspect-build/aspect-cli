@@ -1,0 +1,8 @@
+load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_binary")
+
+kt_jvm_binary(
+    name = "app_bin",
+    srcs = ["App.kt"],
+    main_class = "com.example.myproject.App",
+    deps = ["@maven//:com_google_guava_guava"],
+)

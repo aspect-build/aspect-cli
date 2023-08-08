@@ -2,6 +2,7 @@ package gazelle
 
 import (
 	"aspect.build/cli/gazelle/common/git"
+	jvm_maven "github.com/bazel-contrib/rules_jvm/java/gazelle/private/maven"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
@@ -33,6 +34,9 @@ type kotlinLang struct {
 
 	// Ignore configurations for the workspace.
 	gitignore *git.GitIgnore
+
+	// TODO: extend rules_jvm extension instead of duplicating?
+	mavenResolver *jvm_maven.Resolver
 }
 
 // NewLanguage initializes a new TypeScript that satisfies the language.Language

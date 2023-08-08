@@ -7,8 +7,24 @@ import (
 
 import "github.com/emirpasic/gods/sets/treeset"
 
+import (
+	jvm_java "github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
+	jvm_types "github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
+)
+
 func IsNativeImport(impt string) bool {
-	return strings.HasPrefix(impt, "kotlin.") || strings.HasPrefix(impt, "kotlinx.") || strings.HasPrefix(impt, "java.") || strings.HasPrefix(impt, "javax.")
+	if strings.HasPrefix(impt, "kotlin.") || strings.HasPrefix(impt, "kotlinx.") {
+		return true
+	}
+
+	jvm_import := jvm_types.NewPackageName(impt)
+
+	// Java native/standard libraries
+	if jvm_java.IsStdlib(jvm_import) {
+		return true
+	}
+
+	return false
 }
 
 type KotlinTarget struct {
