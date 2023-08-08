@@ -151,7 +151,7 @@ func readIdentifier(node *sitter.Node, sourceCode []byte, ignoreLast bool) strin
 			}
 			s.WriteString(nodeC.Content(sourceCode))
 		} else if nodeC.Type() != "comment" {
-			fmt.Printf("Unexpected node type: %v - %s", nodeC.Type(), nodeC.Content(sourceCode))
+			fmt.Printf("Unexpected node type '%v' within: %s", nodeC.Type(), node.Content(sourceCode))
 			os.Exit(1)
 		}
 	}

@@ -15,6 +15,8 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	"github.com/emirpasic/gods/sets/treeset"
+
+	jvm_types "github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 )
 
 type Resolver struct {
@@ -146,7 +148,7 @@ func (kt *Resolver) resolveImport(
 	ix *resolve.RuleIndex,
 	impt ImportStatement,
 	from label.Label,
-) (ResolutionType, *label.Label, error) {
+) (resType ResolutionType, resLabel *label.Label, err error) {
 	imptSpec := impt.ImportSpec
 
 	// Gazelle overrides
@@ -188,9 +190,20 @@ func (kt *Resolver) resolveImport(
 		return Resolution_NativeKotlin, nil, nil
 	}
 
-	// TODO: maven imports
+	jvm_import := jvm_types.NewPackageName(impt.Imp)
 
-	return Resolution_NotFound, nil, nil
+	// Maven imports
+	if mavenResolver := kt.lang.mavenResolver; mavenResolver != nil {
+		if l, err := (*mavenResolver).Resolve(jvm_import); err == nil {
+			return Resolution_Label, &l, nil
+		}
+	}
+
+	if err != nil {
+		BazelLog.Warn("Kotlin resolution error: ", err)
+	}
+
+	return Resolution_NotFound, nil, err
 }
 
 // targetListFromResults returns a string with the human-readable list of

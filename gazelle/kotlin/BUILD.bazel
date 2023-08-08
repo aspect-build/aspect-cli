@@ -1,5 +1,5 @@
 load("@bazel_gazelle//:def.bzl", "gazelle_binary")
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 load("//gazelle:gazelle.bzl", "gazelle_generation_test")
 
 # Disable the kotlin extension
@@ -31,9 +31,13 @@ go_library(
         "@bazel_gazelle//resolve:go_default_library",
         "@bazel_gazelle//rule:go_default_library",
         "@com_github_bazel_contrib_rules_jvm//java/gazelle/javaconfig",
+        "@com_github_bazel_contrib_rules_jvm//java/gazelle/private/java",
+        "@com_github_bazel_contrib_rules_jvm//java/gazelle/private/maven",
+        "@com_github_bazel_contrib_rules_jvm//java/gazelle/private/types",
         "@com_github_emirpasic_gods//maps/treemap",
         "@com_github_emirpasic_gods//sets/treeset",
         "@com_github_emirpasic_gods//utils",
+        "@com_github_rs_zerolog//:zerolog",
     ],
 )
 
@@ -53,3 +57,9 @@ gazelle_binary(
     )
     for test_workspace in glob(["tests/**/WORKSPACE"])
 ]
+
+go_test(
+    name = "kotlin_test",
+    srcs = ["kotlin_test.go"],
+    embed = [":kotlin"],
+)
