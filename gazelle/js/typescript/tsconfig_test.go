@@ -47,39 +47,33 @@ func assertExpand(t *testing.T, options *TsConfig, p string, expected ...string)
 	}
 }
 
-func TestBaseUrlRegex(t *testing.T) {
-	t.Parallel()
-
-	t.Run("valid strings", func(t *testing.T) {
-		t.Parallel()
+func TestIsRelativePath(t *testing.T) {
+	t.Run("relative path strings", func(t *testing.T) {
 
 		shouldNotMatch := []string{
-			"example",
-			"valid",
-			"another",
+			"example/test",
+			"/absolute/path",
+			"another/not/relative/path",
+			".dotfile",
 		}
 
 		for _, s := range shouldNotMatch {
-			if baseurl_validation_regex.MatchString(s) {
-				t.Errorf("Expected no match for '%s', but it matched", s)
+			if isRelativePath(s) {
+				t.Errorf("isRelativePath(%s) should not be relative but was matched as it would", s)
 			}
 		}
 
 	})
 
-	t.Run("invalid strings", func(t *testing.T) {
-		t.Parallel()
-
+	t.Run("not relative path strings", func(t *testing.T) {
 		shouldMatch := []string{
 			"./path",
 			"../parent",
-			"@username",
-			".invalid",
 		}
 
 		for _, s := range shouldMatch {
-			if !baseurl_validation_regex.MatchString(s) {
-				t.Errorf("Expected a match for '%s', but it didn't match", s)
+			if !isRelativePath(s) {
+				t.Errorf("isRelativePath(%s) should be relative but was NOT matched as it would", s)
 			}
 		}
 	})
@@ -164,7 +158,7 @@ func TestTypescriptApi(t *testing.T) {
 			},
 		}
 
-		assertExpand(t, config, "@org/liba/test", "libs/ts/liba/src/test")
+		assertExpand(t, config, "@org/liba/test", "libs/ts/liba/src/test", "tsconfig_test/@org/liba/test")
 	})
 
 	t.Run("tsconfig paths expansion basic", func(t *testing.T) {
@@ -181,7 +175,7 @@ func TestTypescriptApi(t *testing.T) {
 			}
 		  }`)
 
-		assertExpand(t, config, "@org/lib", "tsconfig_test/b/src/lib")
+		assertExpand(t, config, "@org/lib", "tsconfig_test/b/src/lib", "tsconfig_test/@org/lib")
 	})
 
 	t.Run("tsconfig paths expansion", func(t *testing.T) {
