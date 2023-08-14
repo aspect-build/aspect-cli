@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/Masterminds/semver/v3 v3.2.1
-	github.com/bazel-contrib/rules_jvm v0.13.0
+	github.com/bazel-contrib/rules_jvm v0.17.1-0.20230814153054-0ce5d051291b
 	github.com/bazelbuild/bazel-gazelle v0.31.0
 	github.com/bazelbuild/bazelisk v1.17.0
 	github.com/bazelbuild/buildtools v0.0.0-20230510134650-37bd1811516d
@@ -22,6 +22,7 @@ require (
 	github.com/onsi/gomega v1.27.7
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
 	github.com/pmezard/go-difflib v1.0.0
+	github.com/rs/zerolog v1.29.1
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
 	github.com/sirupsen/logrus v1.9.3
 	github.com/smacker/go-tree-sitter v0.0.0-20230501083651-a7d92773b3aa
@@ -39,10 +40,12 @@ require (
 )
 
 require (
+	github.com/bazelbuild/rules_go v0.39.1 // indirect
 	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
 	github.com/chzyer/readline v1.5.1 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
+	github.com/google/btree v1.1.2 // indirect
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/hashicorp/go-version v1.6.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect

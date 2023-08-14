@@ -30,8 +30,8 @@ def deps():
         name = "com_github_bazel_contrib_rules_jvm",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/bazel-contrib/rules_jvm",
-        sum = "h1:Sm5+nBadu14haQpSGejRXC3tMpAJI49RYbg93DfYVLo=",
-        version = "v0.13.0",
+        sum = "h1:oJxriPrBPGxugqkQiFceyzuBYgaFiUBTFM8xhrErPKs=",
+        version = "v0.17.1-0.20230814153054-0ce5d051291b",
     )
 
     go_repository(
@@ -161,8 +161,8 @@ def deps():
         name = "com_github_coreos_go_systemd_v22",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/coreos/go-systemd/v22",
-        sum = "h1:D9/bQk5vlXQFZ6Kwuu6zaiXJ9oTPe68++AzAJc1DzSI=",
-        version = "v22.3.2",
+        sum = "h1:RrqgGjYQKalulkV8NGVIfkXQf6YYmOyiJKk8iXXhfZs=",
+        version = "v22.5.0",
     )
     go_repository(
         name = "com_github_cpuguy83_go_md2man_v2",
@@ -250,6 +250,14 @@ def deps():
         sum = "h1:tfuBGBXKqDEevZMzYi5KSi8KkcZtzBcTgAUUtapy0OI=",
         version = "v0.0.0-20230315185526-52ccab3ef572",
     )
+    go_repository(
+        name = "com_github_godbus_dbus_v5",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/godbus/dbus/v5",
+        sum = "h1:9349emZab16e7zQvpmsbtjc18ykshndd8y2PG3sgJbA=",
+        version = "v5.0.4",
+    )
+
     go_repository(
         name = "com_github_gogo_protobuf",
         build_file_proto_mode = "disable_global",
@@ -664,11 +672,19 @@ def deps():
         version = "v1.9.0",
     )
     go_repository(
+        name = "com_github_rs_xid",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/rs/xid",
+        sum = "h1:qd7wPTDkN6KQx2VmMBLrpHkiyQwgFXRnkOLacUiaSNY=",
+        version = "v1.4.0",
+    )
+
+    go_repository(
         name = "com_github_rs_zerolog",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/rs/zerolog",
-        sum = "h1:/ihwxqH+4z8UxyI70wM1z9yCvkWcfz/a3mj48k/Zngc=",
-        version = "v1.26.1",
+        sum = "h1:cO+d60CHkknCbvzEWxP0S9K6KqyTjrCNUy1LdQLCGPc=",
+        version = "v1.29.1",
     )
 
     go_repository(
