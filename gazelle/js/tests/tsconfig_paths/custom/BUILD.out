@@ -1,0 +1,13 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "custom",
+    srcs = ["main.ts"],
+    deps = [
+        "//custom/nested",
+        "//fallback",
+        "//lib/a",
+        "//lib/b",
+        "//lib/c",
+    ],
+)

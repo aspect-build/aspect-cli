@@ -1,3 +1,19 @@
+/*
+ * Copyright 2022 Aspect Build Systems, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package typescript
 
 import (
@@ -7,8 +23,8 @@ import (
 	"sort"
 	"strings"
 
+	. "aspect.build/cli/gazelle/common/log"
 	"github.com/msolo/jsonr"
-	"github.com/sirupsen/logrus"
 )
 
 type tsCompilerOptionsJSON struct {
@@ -44,7 +60,13 @@ var DefaultConfigPaths = TsConfigPaths{
 	Map: &map[string][]string{},
 }
 
-var Log = logrus.New()
+func isRelativePath(p string) bool {
+	if path.IsAbs(p) {
+		return false
+	}
+
+	return strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../")
+}
 
 // parseTsConfigJSONFile loads a tsconfig.json file and return the compilerOptions config
 func parseTsConfigJSONFile(cm *TsConfigMap, root, dir, tsconfig string) (*TsConfig, error) {
@@ -73,7 +95,7 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir string, tsconfigContent 
 	if c.Extends != "" {
 		base, err := parseTsConfigJSONFile(cm, root, path.Join(configDir, path.Dir(c.Extends)), path.Base(c.Extends))
 		if err != nil {
-			Log.Warnf("Failed to load base tsconfig file %s: %v", path.Join(configDir, c.Extends), err)
+			BazelLog.Warnf("Failed to load base tsconfig file %s: %v", path.Join(configDir, c.Extends), err)
 		}
 
 		baseConfig = base
@@ -83,7 +105,7 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir string, tsconfigContent 
 	if baseConfig != nil {
 		rel, relErr := filepath.Rel(configDir, baseConfig.ConfigDir)
 		if relErr != nil {
-			Log.Warnf("Failed to resolve relative path from %s to %s: %v", configDir, baseConfig.ConfigDir, relErr)
+			BazelLog.Warnf("Failed to resolve relative path from %s to %s: %v", configDir, baseConfig.ConfigDir, relErr)
 		} else {
 			baseConfigRel = rel
 		}
@@ -140,21 +162,33 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir string, tsconfigContent 
 	return &config, nil
 }
 
+// Returns the path from the project base to the active tsconfig.json file
+// This is used to build the path from the project base to the file being imported
+// because gazelle seems to resolve files relative to the project base
+// if the passed path is not absolute.
+// Or an empty string if the path is absolute
+func (c TsConfig) expandRelativePath(importPath string) string {
+	// Absolute paths must never be expanded but everything else must be relative to the bazel-root
+	// and therefore expanded with the path to the current active tsconfig.json
+	if !path.IsAbs(importPath) {
+		BazelLog.Tracef("Found local path %s in tsconfig.json. Should be expanded with tsconfig dir: %s", importPath, c.ConfigDir)
+		return c.ConfigDir
+	}
+	return ""
+}
+
 // Expand the given path to all possible mapped paths for this config, in priority order.
 //
 // Path matching algorithm based on ESBuild implementation
 // Inspired by: https://github.com/evanw/esbuild/blob/deb93e92267a96575a6e434ff18421f4ef0605e4/internal/resolver/resolver.go#L1831-L1945
 func (c TsConfig) ExpandPaths(from, p string) []string {
 	pathMap := c.Paths.Map
-
 	possible := make([]string, 0)
 
 	// Check for exact 'paths' matches first
 	exact := (*pathMap)[p]
-	if exact != nil {
-		for _, m := range exact {
-			possible = append(possible, path.Clean(path.Join(c.Paths.Rel, m)))
-		}
+	for _, m := range exact {
+		possible = append(possible, path.Join(c.expandRelativePath(m), c.Paths.Rel, m))
 	}
 
 	// Check for pattern matches next
@@ -183,10 +217,15 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 			matchedText := p[len(m.prefix) : len(p)-len(m.suffix)]
 			mappedPath := strings.Replace(originalPath, "*", matchedText, 1)
 
-			mappedPath = path.Clean(mappedPath)
-
-			possible = append(possible, path.Join(c.Paths.Rel, mappedPath))
+			possible = append(possible, path.Join(c.expandRelativePath(mappedPath), c.Paths.Rel, mappedPath))
 		}
+	}
+
+	// Expand paths from baseUrl
+	// Must not to be absolute or relative to be expanded
+	// https://www.typescriptlang.org/tsconfig#baseUrl
+	if !isRelativePath(p) {
+		possible = append(possible, path.Join(c.expandRelativePath(p), c.BaseUrl, p))
 	}
 
 	// Add 'rootDirs' as alternate directories for relative imports
@@ -194,6 +233,8 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 	for _, v := range c.VirtualRootDirs {
 		possible = append(possible, path.Join(v, p))
 	}
+
+	BazelLog.Tracef("Found %d possible paths for %s: %v", len(possible), p, possible)
 
 	return possible
 }
