@@ -7,5 +7,6 @@
       "multi-c/*": ["./lib/c/first/*", "./lib/c/second/*"],
       "*": ["./fallback/*", "*"]
     }
-  }
+  },
+  "include": ["./src/**/*.ts"]
 }
