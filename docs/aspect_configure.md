@@ -26,6 +26,10 @@ The advantage of configure in Aspect CLI is that you don't need to compile the t
 
 [gazelle]: https://github.com/bazelbuild/bazel-gazelle
 
+To change the behavior of configure, you add "directives" to your BUILD files, which are comments
+in a special syntax.
+Run 'aspect help directives' or see https://docs.aspect.build/v/cli/help/directives for more info.
+
 
 ```
 aspect configure [flags]
