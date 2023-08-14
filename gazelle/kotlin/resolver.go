@@ -9,6 +9,7 @@ import (
 
 	common "aspect.build/cli/gazelle/common"
 	. "aspect.build/cli/gazelle/common/log"
+	"aspect.build/cli/gazelle/kotlin/kotlinconfig"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/repo"
@@ -192,9 +193,12 @@ func (kt *Resolver) resolveImport(
 
 	jvm_import := jvm_types.NewPackageName(impt.Imp)
 
+	cfgs := c.Exts[LanguageName].(kotlinconfig.Configs)
+	cfg, _ := cfgs[from.Pkg]
+
 	// Maven imports
 	if mavenResolver := kt.lang.mavenResolver; mavenResolver != nil {
-		if l, err := (*mavenResolver).Resolve(jvm_import); err == nil {
+		if l, err := (*mavenResolver).Resolve(jvm_import, cfg.ExcludedArtifacts(), cfg.MavenRepositoryName()); err == nil {
 			return Resolution_Label, &l, nil
 		}
 	}

@@ -77,7 +77,6 @@ func (kt *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 
 		resolver, err := jvm_maven.NewResolver(
 			cfg.MavenInstallFile(),
-			cfg.ExcludedArtifacts(),
 			logger,
 		)
 		if err != nil {
