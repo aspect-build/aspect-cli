@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"os/exec"
@@ -29,6 +30,8 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 
+	"aspect.build/cli/pkg/aspect/outputs"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/config"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/plugin"
@@ -65,20 +68,45 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 		Level: logLevel,
 	})
 
-	if strings.Contains(aspectplugin.From, "/") {
-		// Syntax sugar:
-		//   from: github.com/org/repo
-		// is the same as
-		//   from: https://github.com/org/repo/releases/download
-		// Example release URL:
-		//   https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.1.0/plugin-plugin-linux_amd64
-		if strings.HasPrefix(aspectplugin.From, "github.com/") {
-			aspectplugin.From = fmt.Sprintf("https://%s/releases/download", aspectplugin.From)
+	var checksum []byte
+	var hash hash.Hash
+	if strings.HasPrefix(aspectplugin.From, "//") || strings.HasPrefix(aspectplugin.From, "@") {
+		bzl := bazel.WorkspaceFromWd
+		buildStreams := ioutils.Streams{
+			Stdin:  os.Stdin,
+			Stdout: io.Discard, // TODO(f0rmiga): do something with stdout and stderr in case of error.
+			Stderr: io.Discard,
 		}
-		// Example release URL:
-		//   from:          https://static.aspect.build/aspect
-		//   versioned url: https://static.aspect.build/aspect/1.2.3/foo-darwin_amd64
-		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
+		if _, err := bzl.RunCommand(buildStreams, nil, "build", aspectplugin.From); err != nil {
+			return nil, fmt.Errorf("failed to build plugin %q with Bazel: %w", aspectplugin.From, err)
+		}
+
+		var stdout strings.Builder
+		outputsStreams := ioutils.Streams{
+			Stdin:  os.Stdin,
+			Stdout: &stdout,
+			Stderr: io.Discard, // TODO(f0rmiga): do something with stdout and stderr in case of error.
+		}
+		if err := outputs.New(outputsStreams, bzl).Run(context.Background(), nil, []string{aspectplugin.From, "GoLink"}); err != nil {
+			return nil, fmt.Errorf("failed to get plugin path for %q: %w", aspectplugin.From, err)
+		}
+		aspectplugin.From = strings.TrimSpace(stdout.String())
+		checksum = []byte{0}
+		hash = noOpHash
+	} else {
+		if strings.HasPrefix(aspectplugin.From, "github.com/") {
+			// Syntax sugar:
+			//   from: github.com/org/repo
+			// is the same as
+			//   from: https://github.com/org/repo/releases/download
+			// Example release URL:
+			//   https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.1.0/plugin-plugin-linux_amd64
+			aspectplugin.From = fmt.Sprintf("https://%s/releases/download", aspectplugin.From)
+
+		} else if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
+			// Example release URL:
+			//   from:          https://static.aspect.build/aspect
+			//   versioned url: https://static.aspect.build/aspect/1.2.3/foo-darwin_amd64
 			if len(aspectplugin.Version) < 1 {
 				return nil, fmt.Errorf("cannot download plugin %q: the version field is required", aspectplugin.Name)
 			}
@@ -91,41 +119,41 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 			pluginLogger.Warn(fmt.Sprintf("skipping install for plugin: does not exist at path %q.", aspectplugin.From))
 			return nil, nil
 		}
-	}
 
-	checksumFile := fmt.Sprintf("%s.sha256", aspectplugin.From)
+		checksumFile := fmt.Sprintf("%s.sha256", aspectplugin.From)
+		hash = sha256.New()
 
-	var checksum []byte
-	if _, err := os.Stat(checksumFile); err != nil {
-		// We calculate the hashsum in case it was not provided by the remote server.
-		hash := sha256.New()
-		f, err := os.Open(aspectplugin.From)
-		if err != nil {
-			return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
+		if _, err := os.Stat(checksumFile); err != nil {
+			// We calculate the hashsum in case it was not provided by the remote server.
+			f, err := os.Open(aspectplugin.From)
+			if err != nil {
+				return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
+			}
+			defer f.Close()
+			if _, err := io.Copy(hash, f); err != nil {
+				return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
+			}
+			checksum = hash.Sum(nil)
+			hash.Reset()
+			if err := os.WriteFile(checksumFile, []byte(hex.EncodeToString(checksum)), 0400); err != nil {
+				return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
+			}
+		} else {
+			b, err := os.ReadFile(checksumFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
+			}
+			decoded, err := hex.DecodeString(strings.Split(string(b), " ")[0])
+			if err != nil {
+				return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
+			}
+			checksum = decoded
 		}
-		defer f.Close()
-		if _, err := io.Copy(hash, f); err != nil {
-			return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
-		}
-		checksum = hash.Sum(nil)
-		if err := os.WriteFile(checksumFile, []byte(hex.EncodeToString(checksum)), 0400); err != nil {
-			return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
-		}
-	} else {
-		b, err := os.ReadFile(checksumFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
-		}
-		decoded, err := hex.DecodeString(strings.Split(string(b), " ")[0])
-		if err != nil {
-			return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
-		}
-		checksum = decoded
 	}
 
 	secureConfig := &goplugin.SecureConfig{
 		Checksum: checksum,
-		Hash:     sha256.New(),
+		Hash:     hash,
 	}
 	clientConfig := &goplugin.ClientConfig{
 		HandshakeConfig:  config.Handshake,
@@ -175,4 +203,34 @@ type PluginInstance struct {
 	plugin.Plugin
 	Provider
 	CustomCommandExecutor
+}
+
+// NoOpHash is a hash.Hash that does nothing. It's used for plugins that are
+// built from source and required to satisfy the upstream plugin system that
+// expects a hash.
+type NoOpHash struct{}
+
+var noOpHash hash.Hash = &NoOpHash{}
+
+func (h *NoOpHash) Write(p []byte) (n int, err error) {
+	return len(p), nil
+}
+
+func (h *NoOpHash) Sum(b []byte) []byte {
+	if len(b) == 0 {
+		return []byte{0}
+	} else {
+		b[0] = 0
+		return b[:1]
+	}
+}
+
+func (h *NoOpHash) Reset() {}
+
+func (h *NoOpHash) Size() int {
+	return 1
+}
+
+func (h *NoOpHash) BlockSize() int {
+	return 1
 }
