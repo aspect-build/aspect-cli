@@ -61,7 +61,7 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 			return err
 		}
 		for label, hash := range hashes {
-			fmt.Printf("%s %s\n", label, hash)
+			fmt.Fprintf(runner.Stdout, "%s %s\n", label, hash)
 		}
 		return nil
 	}
@@ -69,10 +69,10 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 	for _, a := range outs {
 		if len(mnemonicFilter) > 0 {
 			if a.Mnemonic == mnemonicFilter {
-				fmt.Printf("%s\n", a.Path)
+				fmt.Fprintf(runner.Stdout, "%s\n", a.Path)
 			}
 		} else {
-			fmt.Printf("%s %s\n", a.Mnemonic, a.Path)
+			fmt.Fprintf(runner.Stdout, "%s %s\n", a.Mnemonic, a.Path)
 		}
 	}
 	return nil
