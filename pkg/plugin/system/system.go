@@ -145,7 +145,9 @@ func (ps *pluginSystem) RegisterCustomCommands(cmd *cobra.Command, bazelStartupA
 				GroupID:            "plugin",
 				DisableFlagParsing: true,
 				RunE: interceptors.Run(
-					[]interceptors.Interceptor{},
+					[]interceptors.Interceptor{
+						rootFlags.FlagsInterceptorWithoutParser(ioutils.DefaultStreams),
+					},
 					func(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 						return callback.ExecuteCustomCommand(cmdName, ctx, args, bazelStartupArgs)
 					},

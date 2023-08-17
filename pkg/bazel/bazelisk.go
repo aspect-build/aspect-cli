@@ -538,7 +538,7 @@ func (bazelisk *Bazelisk) runBazel(bazel string, args []string, streams ioutils.
 		return 1, fmt.Errorf("could not start Bazel: %v", err)
 	}
 
-	c := make(chan os.Signal)
+	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		s := <-c
