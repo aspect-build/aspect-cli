@@ -87,14 +87,27 @@ func extractUnknownArgs(flags *pflag.FlagSet, args []string) []string {
 // FlagsIntercepor will parse the incoming flags and remove any aspect specific flags or bazel
 // startup flags from the list of args.
 func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
+	return flagsInterceptor(streams, true)
+}
+
+// FlagsIntercepor will remove any aspect specific flags or bazel startup flags from the list of args.
+func FlagsInterceptorWithoutParser(streams ioutils.Streams) interceptors.Interceptor {
+	return flagsInterceptor(streams, false)
+}
+
+func flagsInterceptor(streams ioutils.Streams, parse bool) interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 
 		if cmd.DisableFlagParsing {
-			cmd.DisableFlagParsing = false
 			args = extractUnknownArgs(cmd.InheritedFlags(), args)
-			if err := cmd.ParseFlags(args); err != nil {
-				return err
+
+			if parse {
+				cmd.DisableFlagParsing = false
+				if err := cmd.ParseFlags(args); err != nil {
+					return err
+				}
 			}
+
 		}
 
 		for _, arg := range args {

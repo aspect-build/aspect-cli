@@ -47,7 +47,7 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 	if len(args) > 1 {
 		mnemonicFilter = args[1]
 	}
-	agc, err := runner.bzl.AQuery(query)
+	agc, err := runner.bzl.AQuery(query, []string{})
 	if err != nil {
 		return err
 	}

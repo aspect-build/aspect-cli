@@ -56,7 +56,7 @@ var startupFlags []string
 
 type Bazel interface {
 	WithEnv(env []string) Bazel
-	AQuery(expr string) (*analysis.ActionGraphContainer, error)
+	AQuery(expr string, args []string) (*analysis.ActionGraphContainer, error)
 	MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, int, error)
 	RunCommand(streams ioutils.Streams, wd *string, command ...string) (int, error)
 	InitializeBazelFlags() error
@@ -167,14 +167,17 @@ func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...strin
 	return exitCode, err
 }
 
+func SetStartupFlags(args []string) {
+	startupFlags = args
+}
+
 // Initializes start-up flags from args and returns args without start-up flags
 func InitializeStartupFlags(args []string) ([]string, []string, error) {
 	nonFlags, flags, err := ParseOutBazelFlags("startup", args)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	startupFlags = flags
+	SetStartupFlags(flags)
 	return nonFlags, flags, nil
 }
 
@@ -249,30 +252,39 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 }
 
 // AQuery runs a `bazel aquery` command and returns the resulting parsed proto data.
-func (b *bazel) AQuery(query string) (*analysis.ActionGraphContainer, error) {
-	r, w := io.Pipe()
+func (b *bazel) AQuery(query string, args []string) (*analysis.ActionGraphContainer, error) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
 	streams := ioutils.Streams{
 		Stdin:  os.Stdin,
-		Stdout: w,
-		Stderr: nil,
+		Stdout: &stdout,
+		Stderr: &stderr,
 	}
-	agc := &analysis.ActionGraphContainer{}
 
 	bazelErrs := make(chan error, 1)
+	bazelExitCode := make(chan int, 1)
 	defer close(bazelErrs)
+	defer close(bazelExitCode)
+
 	go func() {
-		defer w.Close()
-		_, err := b.RunCommand(streams, nil, "aquery", "--output=proto", query)
+		exitCode, err := b.RunCommand(streams, nil, append([]string{"aquery", query, "--output=proto"}, args...)...)
 		bazelErrs <- err
+		bazelExitCode <- exitCode
 	}()
 
-	protoBytes, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to run Bazel aquery: %w", err)
+	if err := <-bazelErrs; err != nil {
+		return nil, fmt.Errorf("failed to run aquery: %w", err)
 	}
 
-	if err := <-bazelErrs; err != nil {
-		return nil, fmt.Errorf("failed to run Bazel aquery: %w", err)
+	if exitCode := <-bazelExitCode; exitCode != 0 {
+		return nil, fmt.Errorf("failed to run aquery (%d)\nstderr:\n%s", exitCode, stderr.String())
+	}
+
+	agc := &analysis.ActionGraphContainer{}
+
+	protoBytes, err := io.ReadAll(&stdout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run aquery: %w", err)
 	}
 
 	proto.Unmarshal(protoBytes, agc)
