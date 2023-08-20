@@ -103,7 +103,9 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 			//   https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.1.0/plugin-plugin-linux_amd64
 			aspectplugin.From = fmt.Sprintf("https://%s/releases/download", aspectplugin.From)
 
-		} else if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
+		}
+
+		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
 			// Example release URL:
 			//   from:          https://static.aspect.build/aspect
 			//   versioned url: https://static.aspect.build/aspect/1.2.3/foo-darwin_amd64
