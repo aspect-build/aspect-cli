@@ -66,7 +66,7 @@ func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath s
 	return nil
 }
 
-func printExecutableHashes(outs []bazel.Output) (map[string]string, error) {
+func gatherExecutableHashes(outs []bazel.Output) (map[string]string, error) {
 	// map from Label to the files/directories which should be hashed
 	hashFiles := make(map[string][]string)
 
