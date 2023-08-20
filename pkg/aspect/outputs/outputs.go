@@ -39,15 +39,30 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *Outputs {
 }
 
 func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("a label is required as the first argument to aspect outputs")
+	nonFlags, bazelFlags, err := bazel.ParseOutBazelFlags("aquery", args)
+	if err != nil {
+		return err
 	}
-	query := args[0]
+
+	// Strip any leading -- that can come from ParseOutBazelFlags
+	if len(nonFlags) > 0 && nonFlags[0] == "--" {
+		nonFlags = nonFlags[1:]
+	}
+
+	if len(nonFlags) < 1 {
+		return fmt.Errorf("a query expression is required as the first argument to outputs command")
+	}
+
+	query := nonFlags[0]
+
 	var mnemonicFilter string
-	if len(args) > 1 {
-		mnemonicFilter = args[1]
+	if len(nonFlags) == 2 {
+		mnemonicFilter = nonFlags[1]
+	} else if len(nonFlags) > 2 {
+		return fmt.Errorf("expecting a maximum of 2 arguments to outputs command but got %v", len(nonFlags))
 	}
-	agc, err := runner.bzl.AQuery(query, []string{})
+
+	agc, err := runner.bzl.AQuery(query, bazelFlags)
 	if err != nil {
 		return err
 	}
