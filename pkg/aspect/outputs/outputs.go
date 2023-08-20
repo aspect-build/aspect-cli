@@ -56,7 +56,7 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 	// Special case pseudo-mnemonic indicating we should compute an overall hash
 	// for any executables in the aquery result
 	if mnemonicFilter == "ExecutableHash" {
-		hashes, err := printExecutableHashes(outs)
+		hashes, err := gatherExecutableHashes(outs)
 		if err != nil {
 			return err
 		}
