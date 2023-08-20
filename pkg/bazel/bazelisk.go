@@ -157,6 +157,10 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 	if err != nil {
 		return -1, fmt.Errorf("could not run Bazel: %v", err)
 	}
+	if exitCode != 0 {
+		// set `err` if bazel exited non-zero incase the caller only checks `err` and not `exitCode`
+		return exitCode, fmt.Errorf("bazel exited with exit code: %v", exitCode)
+	}
 	return exitCode, nil
 }
 
