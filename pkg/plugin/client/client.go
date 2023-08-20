@@ -72,6 +72,8 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 	var checksum []byte
 	var hash hash.Hash
 	if strings.HasPrefix(aspectplugin.From, "//") || strings.HasPrefix(aspectplugin.From, "@") {
+		pluginLogger.Info(fmt.Sprintf("building %s plugin from target %s", aspectplugin.Name, aspectplugin.From))
+
 		bzl := bazel.WorkspaceFromWd
 
 		var stderr bytes.Buffer
@@ -126,6 +128,9 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 			if len(aspectplugin.Version) < 1 {
 				return nil, fmt.Errorf("cannot download plugin %q: the version field is required", aspectplugin.Name)
 			}
+
+			pluginLogger.Info(fmt.Sprintf("downloading %s plugin from %s", aspectplugin.Name, aspectplugin.From))
+
 			downloadedPath, err := DownloadPlugin(aspectplugin.From, aspectplugin.Name, aspectplugin.Version)
 			if err != nil {
 				return nil, err
@@ -166,6 +171,8 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 			checksum = decoded
 		}
 	}
+
+	pluginLogger.Info(fmt.Sprintf("running %s plugin from %s", aspectplugin.Name, aspectplugin.From))
 
 	secureConfig := &goplugin.SecureConfig{
 		Checksum: checksum,
