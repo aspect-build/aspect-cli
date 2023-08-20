@@ -15,7 +15,7 @@ import (
 func AddExecutableHash(hashFiles map[string][]string, label string, exePath string) {
 	_, err := os.Stat(exePath)
 	if os.IsNotExist(err) {
-		fmt.Printf("%s output %s is not on disk, did you build it? Skipping...\n", label, exePath)
+		fmt.Fprintf(os.Stderr, "%s output %s is not on disk, did you build it? Skipping...\n", label, exePath)
 		return
 	}
 
@@ -27,7 +27,7 @@ func AddExecutableHash(hashFiles map[string][]string, label string, exePath stri
 func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath string) error {
 	_, err := os.Stat(manifestPath)
 	if os.IsNotExist(err) {
-		fmt.Printf("%s manifest %s is not on disk, did you build it? Skipping...\n", label, manifestPath)
+		fmt.Fprintf(os.Stderr, "%s manifest %s is not on disk, did you build it? Skipping...\n", label, manifestPath)
 		return nil
 	}
 	runfiles, err := os.Open(manifestPath)
