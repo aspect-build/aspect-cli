@@ -56,7 +56,7 @@ var startupFlags []string
 
 type Bazel interface {
 	WithEnv(env []string) Bazel
-	AQuery(expr string, args []string) (*analysis.ActionGraphContainer, error)
+	AQuery(expr string, bazelFlags []string) (*analysis.ActionGraphContainer, error)
 	MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, int, error)
 	RunCommand(streams ioutils.Streams, wd *string, command ...string) (int, error)
 	InitializeBazelFlags() error
@@ -261,7 +261,7 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 }
 
 // AQuery runs a `bazel aquery` command and returns the resulting parsed proto data.
-func (b *bazel) AQuery(query string, args []string) (*analysis.ActionGraphContainer, error) {
+func (b *bazel) AQuery(query string, bazelFlags []string) (*analysis.ActionGraphContainer, error) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	streams := ioutils.Streams{
@@ -276,7 +276,12 @@ func (b *bazel) AQuery(query string, args []string) (*analysis.ActionGraphContai
 	defer close(bazelExitCode)
 
 	go func() {
-		exitCode, err := b.RunCommand(streams, nil, append([]string{"aquery", query, "--output=proto"}, args...)...)
+		cmd := []string{"aquery"}
+		cmd = append(cmd, bazelFlags...)
+		cmd = append(cmd, "--output=proto")
+		cmd = append(cmd, "--")
+		cmd = append(cmd, query)
+		exitCode, err := b.RunCommand(streams, nil, cmd...)
 		bazelErrs <- err
 		bazelExitCode <- exitCode
 	}()
