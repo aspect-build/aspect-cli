@@ -58,8 +58,7 @@ func extractUnknownArgs(flags *pflag.FlagSet, args []string) []string {
 		var flag *pflag.Flag
 		if arg[0] == '-' {
 			if arg[1] == '-' {
-				// --; bail
-				if len(arg) == 2 {
+				if len(arg) == 2 { // "--" terminates the flags
 					unknownArgs = append(unknownArgs, args[i:]...)
 					break
 				}
@@ -84,13 +83,13 @@ func extractUnknownArgs(flags *pflag.FlagSet, args []string) []string {
 	return unknownArgs
 }
 
-// FlagsIntercepor will parse the incoming flags and remove any aspect specific flags or bazel
+// FlagsInterceptor will parse the incoming flags and remove any aspect specific flags or bazel
 // startup flags from the list of args.
 func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 	return flagsInterceptor(streams, true)
 }
 
-// FlagsIntercepor will remove any aspect specific flags or bazel startup flags from the list of args.
+// FlagsInterceptorWithoutParser will remove any aspect specific flags or bazel startup flags from the list of args.
 func FlagsInterceptorWithoutParser(streams ioutils.Streams) interceptors.Interceptor {
 	return flagsInterceptor(streams, false)
 }
@@ -107,7 +106,6 @@ func flagsInterceptor(streams ioutils.Streams, parse bool) interceptors.Intercep
 					return err
 				}
 			}
-
 		}
 
 		for _, arg := range args {
