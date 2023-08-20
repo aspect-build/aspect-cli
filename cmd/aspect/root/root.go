@@ -105,6 +105,7 @@ func NewCmd(
 	flags.AddGlobalFlags(cmd, defaultInteractive)
 	cmd.AddGroup(&cobra.Group{ID: "common", Title: "Common Bazel Commands:"})
 	cmd.AddGroup(&cobra.Group{ID: "aspect", Title: "Commands only in Aspect CLI:"})
+	cmd.AddGroup(&cobra.Group{ID: "aspect-pro", Title: "Commands only in Aspect CLI Pro:"})
 	cmd.AddGroup(&cobra.Group{ID: "plugin", Title: "Custom Commands from Plugins:"})
 	cmd.AddGroup(&cobra.Group{ID: "built-in", Title: "Other Bazel Built-in Commands:"})
 
