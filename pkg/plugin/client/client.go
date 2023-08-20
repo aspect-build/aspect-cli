@@ -17,6 +17,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -72,20 +73,34 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 	var hash hash.Hash
 	if strings.HasPrefix(aspectplugin.From, "//") || strings.HasPrefix(aspectplugin.From, "@") {
 		bzl := bazel.WorkspaceFromWd
+
+		var stderr bytes.Buffer
 		buildStreams := ioutils.Streams{
 			Stdin:  os.Stdin,
-			Stdout: io.Discard, // TODO(f0rmiga): do something with stdout and stderr in case of error.
-			Stderr: io.Discard,
-		}
-		if _, err := bzl.RunCommand(buildStreams, nil, "build", aspectplugin.From); err != nil {
-			return nil, fmt.Errorf("failed to build plugin %q with Bazel: %w", aspectplugin.From, err)
+			Stdout: io.Discard,
+			Stderr: &stderr,
 		}
 
-		var stdout strings.Builder
+		// Check `exitCode` before `err` so we can dump the `stderr` when Bazel executed and exited non-zero
+		exitCode, err := bzl.RunCommand(buildStreams, nil, "build", aspectplugin.From)
+		if exitCode != 0 {
+			if exitCode != -1 {
+				return nil, fmt.Errorf("failed to build plugin: %w\nstderr:\n%s", err, stderr.String())
+			} else {
+				return nil, fmt.Errorf("failed to build plugin: %w", err)
+			}
+		}
+
+		if err != nil {
+			// Protect against the case where `err` is set but `exitCode` is 0
+			return nil, fmt.Errorf("failed to build plugin: %w", err)
+		}
+
+		var stdout bytes.Buffer
 		outputsStreams := ioutils.Streams{
 			Stdin:  os.Stdin,
 			Stdout: &stdout,
-			Stderr: io.Discard, // TODO(f0rmiga): do something with stdout and stderr in case of error.
+			Stderr: io.Discard, // unused
 		}
 		if err := outputs.New(outputsStreams, bzl).Run(context.Background(), nil, []string{aspectplugin.From, "GoLink"}); err != nil {
 			return nil, fmt.Errorf("failed to get plugin path for %q: %w", aspectplugin.From, err)
@@ -102,7 +117,6 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 			// Example release URL:
 			//   https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.1.0/plugin-plugin-linux_amd64
 			aspectplugin.From = fmt.Sprintf("https://%s/releases/download", aspectplugin.From)
-
 		}
 
 		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {

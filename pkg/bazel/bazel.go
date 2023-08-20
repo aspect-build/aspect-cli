@@ -224,12 +224,21 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 		bazelExitCode <- exitCode
 	}(tmpdir)
 
-	if err := <-bazelErrs; err != nil {
-		return nil, fmt.Errorf("failed to get bazel flags: %w", err)
+	exitCode := <-bazelExitCode
+	err = <-bazelErrs
+
+	// Check `exitCode` before `err` so we can dump the `stderr` when Bazel executed and exited non-zero
+	if exitCode != 0 {
+		if exitCode != -1 {
+			return nil, fmt.Errorf("failed to get bazel flags (running in %s): %w\nstderr:\n%s", tmpdir, err, stderr.String())
+		} else {
+			return nil, fmt.Errorf("failed to get bazel flags: %w", err)
+		}
 	}
 
-	if exitCode := <-bazelExitCode; exitCode != 0 {
-		return nil, fmt.Errorf("failed to get bazel flags running in %s: %w", tmpdir, fmt.Errorf("bazel has quit with code %d\nstderr:\n%s", exitCode, stderr.String()))
+	if err != nil {
+		// Protect against the case where `err` is set but `exitCode` is 0
+		return nil, fmt.Errorf("failed to get bazel flags: %w", err)
 	}
 
 	helpProtoBytes, err := io.ReadAll(stdoutDecoder)
@@ -272,12 +281,21 @@ func (b *bazel) AQuery(query string, args []string) (*analysis.ActionGraphContai
 		bazelExitCode <- exitCode
 	}()
 
-	if err := <-bazelErrs; err != nil {
-		return nil, fmt.Errorf("failed to run aquery: %w", err)
+	exitCode := <-bazelExitCode
+	err := <-bazelErrs
+
+	// Check `exitCode` before `err` so we can dump the `stderr` when Bazel executed and exited non-zero
+	if exitCode != 0 {
+		if exitCode != -1 {
+			return nil, fmt.Errorf("failed to run aquery: %w\nstderr:\n%s", err, stderr.String())
+		} else {
+			return nil, fmt.Errorf("failed to run aquery: %w", err)
+		}
 	}
 
-	if exitCode := <-bazelExitCode; exitCode != 0 {
-		return nil, fmt.Errorf("failed to run aquery (%d)\nstderr:\n%s", exitCode, stderr.String())
+	if err != nil {
+		// Protect against the case where `err` is set but `exitCode` is 0
+		return nil, fmt.Errorf("failed to run aquery: %w", err)
 	}
 
 	agc := &analysis.ActionGraphContainer{}
