@@ -131,12 +131,20 @@ func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
 		flag := bzlFlags[flagName]
 		documented := isDocumented(flagName)
 
-		for _, command := range flag.Commands {
-			if subcommand, ok := subCommands[command]; ok {
-				subcommand.DisableFlagParsing = true // only want to disable flag parsing on actual bazel verbs
-				subcommand.FParseErrWhitelist.UnknownFlags = true
-				if documented {
-					addFlagToFlagSet(flag, subcommand.Flags())
+		for _, flagCommand := range flag.Commands {
+			commands := []string{flagCommand}
+			if flagCommand == "aquery" {
+				// outputs & outputs-bbclientd call aquery under the hood and accept all aquery flags
+				commands = append(commands, "outputs")
+				commands = append(commands, "outputs-bbclientd")
+			}
+			for _, command := range commands {
+				if subcommand, ok := subCommands[command]; ok {
+					subcommand.DisableFlagParsing = true // only want to disable flag parsing on actual bazel verbs
+					subcommand.FParseErrWhitelist.UnknownFlags = true
+					if documented {
+						addFlagToFlagSet(flag, subcommand.Flags())
+					}
 				}
 			}
 		}
