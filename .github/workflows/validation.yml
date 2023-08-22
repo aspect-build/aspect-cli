@@ -1,4 +1,4 @@
-name: CI/CD
+name: Validation
 
 on:
   push:
@@ -10,13 +10,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  aspect-workflows:
-    name: Aspect Workflows
-    with:
-      queue: aspect-cli
-    uses: aspect-build/workflows-action/.github/workflows/aspect-workflows.yaml@5.5.0
-
-  test:
+  validation:
+    name: Validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
