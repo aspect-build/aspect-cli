@@ -166,17 +166,13 @@ func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...strin
 	return bazelisk.Run(command, repos, streams, b.env, wd)
 }
 
-func SetStartupFlags(args []string) {
-	startupFlags = args
-}
-
 // Initializes start-up flags from args and returns args without start-up flags
 func InitializeStartupFlags(args []string) ([]string, []string, error) {
 	nonFlags, flags, err := ParseOutBazelFlags("startup", args)
 	if err != nil {
 		return nil, nil, err
 	}
-	SetStartupFlags(flags)
+	startupFlags = flags
 	return nonFlags, flags, nil
 }
 
