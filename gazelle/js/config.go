@@ -19,6 +19,8 @@ const (
 	// this TypeScript generation is enabled or not. Sub-packages inherit this value.
 	// Can be either "enabled" or "disabled". Defaults to "enabled".
 	Directive_TypeScriptExtension = "js"
+	// En/disable ts_proto_library generation
+	Directive_TypeScriptProtoExtension = "js_proto"
 	// Directive_GenerationMode represents the directive that controls the BUILD generation
 	// mode. See below for the GenerationModeType constants.
 	Directive_GenerationMode = "js_generation_mode"
@@ -74,6 +76,10 @@ const (
 	DefaultLibraryName          = TargetNameDirectoryVar
 	DefaultTestsName            = TargetNameDirectoryVar + "_tests"
 	NpmPackageContentName       = TargetNameDirectoryVar + "_lib"
+
+	// The default name for ts_proto_library rules, where {proto_library} is the name of the proto target
+	ProtoNameVar            = "{proto_library}"
+	DefaultProtoLibraryName = ProtoNameVar + "_ts"
 
 	// The suffix added to the end of a target being wrapped in a package.
 	PackageSrcSuffix = "_lib"
@@ -149,6 +155,8 @@ type JsGazelleConfig struct {
 	generationEnabled bool
 	generationMode    GenerationModeType
 
+	protoGenerationEnabled bool
+
 	pnpmLockPath string
 
 	excludes                 []string
@@ -161,6 +169,7 @@ type JsGazelleConfig struct {
 	npmLinkAllTargetName       string
 	targetNamingOverrides      map[string]string
 	npmPackageNamingConvention string
+	tsProtoLibraryName         string
 
 	// Name/location of tsconfig files relative to BUILDs
 	tsconfigName string
@@ -171,6 +180,7 @@ func newRootConfig() *JsGazelleConfig {
 	return &JsGazelleConfig{
 		rel:                        "",
 		generationEnabled:          true,
+		protoGenerationEnabled:     true,
 		generationMode:             GenerationModeDirectory,
 		pnpmLockPath:               "pnpm-lock.yaml",
 		excludes:                   make([]string, 0),
@@ -180,6 +190,7 @@ func newRootConfig() *JsGazelleConfig {
 		npmLinkAllTargetName:       DefaultNpmLinkAllTargetName,
 		npmPackageNamingConvention: DefaultNpmPackageTargetName,
 		targetNamingOverrides:      make(map[string]string),
+		tsProtoLibraryName:         DefaultProtoLibraryName,
 		targets:                    DefaultSourceGlobs[:],
 		tsconfigName:               defaultTsConfig,
 	}
@@ -242,6 +253,15 @@ func (c *JsGazelleConfig) SetGenerationEnabled(enabled bool) {
 // GenerationEnabled returns whether the extension is enabled or not.
 func (c *JsGazelleConfig) GenerationEnabled() bool {
 	return c.generationEnabled
+}
+
+func (c *JsGazelleConfig) SetProtoGenerationEnabled(enabled bool) {
+	c.protoGenerationEnabled = enabled
+}
+
+// If ts_proto_library extension is enabled.
+func (c *JsGazelleConfig) ProtoGenerationEnabled() bool {
+	return c.generationEnabled && c.protoGenerationEnabled
 }
 
 // Set the pnpm-workspace.yaml file path.
@@ -358,6 +378,14 @@ func (c *JsGazelleConfig) SetNpmPackageNamingConvention(testsNamingConvention st
 // The library name when wrapped within an npm package.
 func (c *JsGazelleConfig) RenderNpmSourceLibraryName(npmPackageName string) string {
 	return npmPackageName + PackageSrcSuffix
+}
+
+func (c *JsGazelleConfig) SetTsProtoLibraryNamingConvention(tsProtoLibraryName string) {
+	c.tsProtoLibraryName = tsProtoLibraryName
+}
+
+func (c *JsGazelleConfig) RenderTsProtoLibraryName(protoLibraryName string) string {
+	return strings.ReplaceAll(c.tsProtoLibraryName, ProtoNameVar, protoLibraryName)
 }
 
 // renderTargetName returns the ts_project target name by performing all substitutions.

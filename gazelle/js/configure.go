@@ -45,6 +45,7 @@ func (ts *Configurer) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 func (ts *Configurer) KnownDirectives() []string {
 	return []string{
 		Directive_TypeScriptExtension,
+		Directive_TypeScriptProtoExtension,
 		Directive_GenerationMode,
 		Directive_Lockfile,
 		Directive_IgnoreImports,
@@ -126,6 +127,17 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 			default:
 				err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
 					Directive_TypeScriptExtension, d.Value)
+				log.Fatal(err)
+			}
+		case Directive_TypeScriptProtoExtension:
+			switch d.Value {
+			case "enabled":
+				config.SetProtoGenerationEnabled(true)
+			case "disabled":
+				config.SetProtoGenerationEnabled(false)
+			default:
+				err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
+					Directive_TypeScriptProtoExtension, d.Value)
 				log.Fatal(err)
 			}
 		case Directive_GenerationMode:

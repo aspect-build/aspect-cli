@@ -1,0 +1,14 @@
+load("@aspect_rules_ts//ts:proto.bzl", "ts_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+ts_proto_library(
+    name = "connectrpc_eliza_v1_proto_ts",
+    node_modules = "//:node_modules",
+    proto = ":connectrpc_eliza_v1_proto",
+)
+
+proto_library(
+    name = "connectrpc_eliza_v1_proto",
+    srcs = ["eliza.proto"],
+    visibility = ["//visibility:public"],
+)

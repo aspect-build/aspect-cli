@@ -14,6 +14,7 @@ import (
 	. "aspect.build/cli/gazelle/common/log"
 	parser "aspect.build/cli/gazelle/js/parser/treesitter"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
+	proto "aspect.build/cli/gazelle/js/proto"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
@@ -65,6 +66,10 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 
 	ts.addPackageRules(cfg, args, &result)
 	ts.addSourceRules(cfg, args, &result)
+
+	if cfg.ProtoGenerationEnabled() {
+		ts.addTsProtoRules(cfg, args, &result)
+	}
 
 	return result
 }
@@ -176,6 +181,47 @@ func (ts *typeScriptLang) addNpmPackageRule(cfg *JsGazelleConfig, args language.
 	BazelLog.Infof("add rule '%s' '%s:%s'", npmPackage.Kind(), args.Rel, npmPackage.Name())
 }
 
+func (ts *typeScriptLang) addTsProtoRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
+	protoLibraries := proto.GetProtoLibraries(args, result)
+	if len(protoLibraries) == 0 {
+		return
+	}
+
+	tsProtoLibraryKind := mapKind(args, TsProtoLibraryKind)
+
+	// Generate one ts_proto_library() per proto_library()
+	for _, protoLibrary := range protoLibraries {
+		ruleName := cfg.RenderTsProtoLibraryName(protoLibrary.Name())
+
+		protoRuleLabel := label.New("", args.Rel, protoLibrary.Name())
+		protoRuleLabelStr := protoRuleLabel.Rel("", args.Rel)
+
+		tsProtoLibrary := rule.NewRule(tsProtoLibraryKind, ruleName)
+		tsProtoLibrary.SetAttr("proto", protoRuleLabelStr.String())
+
+		node_modules := ts.pnpmProjects.GetProject(args.Rel)
+		if node_modules != nil {
+			node_modulesLabel := label.New("", node_modules.Pkg(), cfg.npmLinkAllTargetName)
+			node_modulesLabelStr := node_modulesLabel.Rel("", args.Rel)
+			tsProtoLibrary.SetAttr("node_modules", node_modulesLabelStr.String())
+		}
+
+		sourceFiles := protoLibrary.AttrStrings("srcs")
+
+		// Persist the proto_library(srcs)
+		tsProtoLibrary.SetPrivateAttr("proto_library_srcs", sourceFiles)
+
+		imports := newTsProjectImports()
+
+		for _, impt := range ts.collectProtoImports(cfg, args, sourceFiles) {
+			imports.Add(impt)
+		}
+
+		result.Gen = append(result.Gen, tsProtoLibrary)
+		result.Imports = append(result.Imports, imports)
+	}
+}
+
 func hasTranspiledSources(sourceFiles *treeset.Set) bool {
 	for _, f := range sourceFiles.Values() {
 		if isSourceFileType(f.(string)) && !isDeclarationFileType(f.(string)) {
@@ -270,6 +316,35 @@ type parseResult struct {
 	SourcePath string
 	Imports    []ImportStatement
 	Errors     []error
+}
+
+func (ts *typeScriptLang) collectProtoImports(cfg *JsGazelleConfig, args language.GenerateArgs, sourceFiles []string) []ImportStatement {
+	results := make([]ImportStatement, 0)
+
+	for _, sourceFile := range sourceFiles {
+		imports, err := proto.GetProtoImports(path.Join(args.Rel, sourceFile))
+		if err != nil {
+			fmt.Printf("%s:\n", sourceFile)
+			fmt.Printf("%s\n", err)
+			fmt.Println()
+		}
+
+		for _, imp := range imports {
+			for _, dts := range proto.ToTsImports(imp) {
+				results = append(results, ImportStatement{
+					ImportSpec: resolve.ImportSpec{
+						Lang: LanguageName,
+						Imp:  dts,
+					},
+					Alt:        []string{},
+					ImportPath: imp,
+					SourcePath: sourceFile,
+				})
+			}
+		}
+	}
+
+	return results
 }
 
 func (ts *typeScriptLang) collectAllImports(cfg *JsGazelleConfig, args language.GenerateArgs, sourceFiles *treeset.Set) chan parseResult {
