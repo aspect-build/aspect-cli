@@ -6,6 +6,7 @@ import (
 
 const (
 	TsProjectKind         = "ts_project"
+	TsProtoLibraryKind    = "ts_proto_library"
 	JsLibraryKind         = "js_library"
 	NpmPackageKind        = "npm_package"
 	NpmLinkAllKind        = "npm_link_all_packages"
@@ -41,6 +42,16 @@ var tsKinds = map[string]rule.KindInfo{
 		MergeableAttrs:  map[string]bool{},
 		ResolveAttrs:    map[string]bool{},
 	},
+	TsProtoLibraryKind: {
+		MatchAny: false,
+		NonEmptyAttrs: map[string]bool{
+			"proto": true,
+		},
+		ResolveAttrs: map[string]bool{
+			"deps":  true,
+			"proto": true,
+		},
+	},
 	NpmLinkAllKind: {
 		MatchAny: true,
 	},
@@ -68,6 +79,13 @@ var tsLoads = []rule.LoadInfo{
 		Name: "@" + RulesTsRepositoryName + "//ts:defs.bzl",
 		Symbols: []string{
 			TsProjectKind,
+		},
+	},
+
+	{
+		Name: "@" + RulesTsRepositoryName + "//ts:proto.bzl",
+		Symbols: []string{
+			TsProtoLibraryKind,
 		},
 	},
 

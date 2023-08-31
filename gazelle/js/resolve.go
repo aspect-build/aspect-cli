@@ -11,6 +11,7 @@ import (
 	common "aspect.build/cli/gazelle/common"
 	. "aspect.build/cli/gazelle/common/log"
 	node "aspect.build/cli/gazelle/js/node"
+	proto "aspect.build/cli/gazelle/js/proto"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/repo"
@@ -52,7 +53,16 @@ func (*Resolver) Name() string { return LanguageName }
 func (ts *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
 	BazelLog.Debugf("Imports '%s:%s'", f.Pkg, r.Name())
 
-	srcs := r.AttrStrings("srcs")
+	switch r.Kind() {
+	case TsProtoLibraryKind:
+		return ts.protoLibraryImports(r, f)
+	default:
+		return ts.sourceFileImports(r.AttrStrings("srcs"), f)
+	}
+}
+
+// TypeScript-importable ImportSpecs from a set of source files.
+func (ts *Resolver) sourceFileImports(srcs []string, f *rule.File) []resolve.ImportSpec {
 	provides := make([]resolve.ImportSpec, 0, len(srcs)+1)
 
 	for _, src := range srcs {
@@ -63,6 +73,31 @@ func (ts *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []reso
 				Lang: LanguageName,
 				Imp:  impt,
 			})
+		}
+	}
+
+	if len(provides) == 0 {
+		return nil
+	}
+
+	return provides
+}
+
+// TypeScript-importable ImportSpecs from a TsProtoLibrary rule.
+func (ts *Resolver) protoLibraryImports(r *rule.Rule, f *rule.File) []resolve.ImportSpec {
+	protoSrcs := r.PrivateAttr("proto_library_srcs").([]string)
+	provides := make([]resolve.ImportSpec, 0, len(protoSrcs)+1)
+
+	for _, src := range protoSrcs {
+		src = path.Clean(path.Join(f.Pkg, src))
+
+		for _, dts := range proto.ToTsPaths(src) {
+			for _, impt := range toImportPaths(dts) {
+				provides = append(provides, resolve.ImportSpec{
+					Lang: LanguageName,
+					Imp:  impt,
+				})
+			}
 		}
 	}
 
@@ -98,6 +133,8 @@ func (ts *Resolver) Embeds(r *rule.Rule, from label.Label) []label.Label {
 		return tsEmbeds
 	}
 
+	// TODO(jbedard): ts_proto_library() embeds
+
 	// TODO(jbedard): implement other rule kinds
 	return make([]label.Label, 0)
 }
@@ -120,7 +157,7 @@ func (ts *Resolver) Resolve(
 	BazelLog.Infof("Resolve '%s' dependencies", from.String())
 
 	// TsProject imports are resolved as deps
-	if r.Kind() == TsProjectKind {
+	if r.Kind() == TsProjectKind || r.Kind() == TsProtoLibraryKind {
 		deps, err := ts.resolveModuleDeps(c, ix, importData.(*TsProjectImports).imports, from)
 		if err != nil {
 			log.Fatal("Resolution Error: ", err)
