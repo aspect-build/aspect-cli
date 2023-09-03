@@ -1,4 +1,5 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 
 go_library(
     name = "outputs",
@@ -11,7 +12,31 @@ go_library(
     deps = [
         "//pkg/bazel",
         "//pkg/ioutils",
+        "@com_github_alphadose_haxmap//:haxmap",
+        "@com_github_rogpeppe_go_internal//dirhash",
         "@com_github_spf13_cobra//:cobra",
-        "@org_golang_x_mod//sumdb/dirhash",
+        "@com_github_tejzpr_ordered_concurrently_v3//:ordered-concurrently",
+        "@com_github_twmb_murmur3//:murmur3",
     ],
 )
+
+TEST_FIXTURES = list(range(9))
+
+go_test(
+    name = "outputs_test",
+    srcs = ["hash_test.go"],
+    data = ["test_fixture_{}".format(fixture) for fixture in TEST_FIXTURES],
+    deps = [
+        ":outputs",
+        "@com_github_onsi_gomega//:gomega",
+    ],
+)
+
+[
+    write_file(
+        name = "test_fixture_{}".format(fixture),
+        out = "test-fixture-{}".format(fixture),
+        content = ["{}".format(fixture)],
+    )
+    for fixture in TEST_FIXTURES
+]

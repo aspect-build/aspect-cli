@@ -2,14 +2,23 @@ package outputs
 
 import (
 	"bufio"
+	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
+	"github.com/alphadose/haxmap"
 	"aspect.build/cli/pkg/bazel"
-	"golang.org/x/mod/sumdb/dirhash"
+	"github.com/rogpeppe/go-internal/dirhash"
+	concurrently "github.com/tejzpr/ordered-concurrently/v3"
+	"github.com/twmb/murmur3"
 )
+
+const numConcurrentHashingThreads = 4
 
 // AddExecutableHash appends the exePath to hashFiles entry of the label
 func AddExecutableHash(hashFiles map[string][]string, label string, exePath string) {
@@ -66,6 +75,7 @@ func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath s
 	return nil
 }
 
+// =================================================================================================
 func gatherExecutableHashes(outs []bazel.Output) (map[string]string, error) {
 	// map from Label to the files/directories which should be hashed
 	hashFiles := make(map[string][]string)
@@ -80,16 +90,166 @@ func gatherExecutableHashes(outs []bazel.Output) (map[string]string, error) {
 		}
 	}
 
-	osOpen := func(name string) (io.ReadCloser, error) {
-		return os.Open(name)
-	}
+	return HashLabelFiles(hashFiles, numConcurrentHashingThreads)
+}
+
+func HashLabelFiles(labelFiles map[string][]string, concurrency int) (map[string]string, error) {
+	// cache of file hashes so we don't hash the same file twice for different targets
+	mep := haxmap.New[string, string]()
 	result := make(map[string]string)
-	for label, files := range hashFiles {
-		overallhash, err := dirhash.Hash1(files, osOpen)
+	for label, files := range labelFiles {
+		var hash string
+		var err error
+		if concurrency == 0 {
+			// Fully synchronous hash implementation is used for testing to ensure that the faster
+			// concurrent implementation generates an identical hash to the slower sync implementation.
+			hash, err = hashMurmur3Sync(files, mep)
+		} else {
+			hash, err = hashMurmur3Concurrent(files, mep, concurrency)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to compute runfiles hash for manifest: %w\n", err)
 		}
-		result[label] = overallhash
+		result[label] = hash
 	}
 	return result, nil
+}
+
+// =================================================================================================
+// https://github.com/twmb/murmur3
+// =================================================================================================
+func hashMurmur3Sync(files []string, mep *haxmap.Map[string, string]) (string, error) {
+	h := murmur3.New128()
+	files = append([]string(nil), files...)
+	sort.Strings(files)
+	for _, file := range files {
+		s, ok := mep.Get(file)
+		if ok {
+			h.Write([]byte(s))
+			continue
+		}
+		if strings.Contains(file, "\n") {
+			return "", errors.New("filenames with newlines are not supported")
+		}
+		r, err := os.Open(file)
+		if err != nil {
+			return "", err
+		}
+		hf := murmur3.New128()
+		_, err = io.Copy(hf, r)
+		r.Close()
+		if err != nil {
+			return "", err
+		}
+		s = fmt.Sprintf("%x  %s\n", hf.Sum(nil), file)
+		mep.Set(file, s)
+		h.Write([]byte(s))
+	}
+	return "m3:" + base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
+}
+
+// =================================================================================================
+// https://github.com/twmb/murmur3 + https://github.com/tejzpr/ordered-concurrently
+// =================================================================================================
+type cachedHashResult struct {
+	file   string
+	result string
+}
+
+type hashResult struct {
+	file   string
+	result string
+	err    error
+}
+
+func hashMurmur3Concurrent(files []string, mep *haxmap.Map[string, string], numThreads int) (string, error) {
+	h := murmur3.New128()
+	files = append([]string(nil), files...)
+	sort.Strings(files)
+	// https://github.com/tejzpr/ordered-concurrently#example---1
+	inputChan := make(chan concurrently.WorkFunction)
+	ctx := context.Background()
+	output := concurrently.Process(ctx, inputChan, &concurrently.Options{PoolSize: numThreads, OutChannelBuffer: len(files)})
+	maybeCached := make([]cachedHashResult, 0, len(files))
+	for _, file := range files {
+		s, ok := mep.Get(file)
+		if ok {
+			maybeCached = append(maybeCached, cachedHashResult{
+				file:   file,
+				result: s,
+			})
+		} else {
+			maybeCached = append(maybeCached, cachedHashResult{
+				file: file,
+			})
+		}
+	}
+	go func() {
+		for _, m := range maybeCached {
+			if m.result != "" {
+				inputChan <- cachedPassThrough(cachedHashResult{
+					file:   m.file,
+					result: m.result,
+				})
+			} else {
+				inputChan <- hashWorker(m.file)
+			}
+		}
+		close(inputChan)
+	}()
+	for out := range output {
+		if chr, ok := out.Value.(cachedHashResult); ok {
+			h.Write([]byte(chr.result))
+		} else if chr, ok := out.Value.(hashResult); ok {
+			if chr.err != nil {
+				return "", fmt.Errorf("error concurrently hashing file %v: %w", chr.file, chr.err)
+			}
+			mep.Set(chr.file, chr.result)
+			h.Write([]byte(chr.result))
+		} else {
+			return "", fmt.Errorf("expected go routine to return a cachedHashResult or hashResult")
+		}
+	}
+	return "m3:" + base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
+}
+
+type cachedPassThrough cachedHashResult
+
+func (i cachedPassThrough) Run(ctx context.Context) interface{} {
+	return cachedHashResult{
+		file:   i.file,
+		result: i.result,
+	}
+}
+
+type hashWorker string
+
+func (i hashWorker) Run(ctx context.Context) interface{} {
+	file := string(i)
+	if strings.Contains(file, "\n") {
+		return hashResult{
+			file: file,
+			err:  fmt.Errorf("filenames with newlines are not supported"),
+		}
+	}
+	r, err := os.Open(file)
+	if err != nil {
+		return hashResult{
+			file: file,
+			err:  fmt.Errorf("failed to open file %v for hashing: %w", file, err),
+		}
+	}
+	hf := murmur3.New128()
+	_, err = io.Copy(hf, r)
+	r.Close()
+	if err != nil {
+		return hashResult{
+			file: file,
+			err:  fmt.Errorf("failed to stream file %v for hashing: %w", file, err),
+		}
+	}
+	return hashResult{
+		file:   file,
+		result: fmt.Sprintf("%x  %s\n", hf.Sum(nil), file),
+	}
 }
