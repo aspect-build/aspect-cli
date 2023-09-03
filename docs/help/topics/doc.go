@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-// Package topics contains only embedded files.
-package topics
+// Package help contains only embedded files.
+package help
 
 import "embed"
 
