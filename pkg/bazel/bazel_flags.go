@@ -67,7 +67,7 @@ var (
 	bazelFlagSets = map[string]*pflag.FlagSet{}
 )
 
-func addFlagToFlagSet(flag *flags.FlagInfo, flagSet *pflag.FlagSet) {
+func addFlagToFlagSet(flag *flags.FlagInfo, flagSet *pflag.FlagSet, hidden bool) {
 	flagName := flag.GetName()
 	flagAbbreviation := flag.GetAbbreviation()
 	flagDoc := flag.GetDocumentation()
@@ -84,7 +84,9 @@ func addFlagToFlagSet(flag *flags.FlagInfo, flagSet *pflag.FlagSet) {
 			flagSet.StringP(flagName, flagAbbreviation, "", flagDoc)
 		}
 	}
-
+	if hidden {
+		flagSet.MarkHidden(flagName)
+	}
 }
 
 // InitializeBazelFlags will create FlagSets for each bazel command (including
@@ -106,7 +108,7 @@ func (b *bazel) InitializeBazelFlags() error {
 				flagSet = pflag.NewFlagSet(command, pflag.ContinueOnError)
 				bazelFlagSets[command] = flagSet
 			}
-			addFlagToFlagSet(flag, flagSet)
+			addFlagToFlagSet(flag, flagSet, true)
 		}
 	}
 	return nil
@@ -140,11 +142,8 @@ func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
 			}
 			for _, command := range commands {
 				if subcommand, ok := subCommands[command]; ok {
-					subcommand.DisableFlagParsing = true // only want to disable flag parsing on actual bazel verbs
-					subcommand.FParseErrWhitelist.UnknownFlags = true
-					if documented {
-						addFlagToFlagSet(flag, subcommand.Flags())
-					}
+					subcommand.DisableFlagParsing = true // only want to disable flag parsing on commands that call out to bazel
+					addFlagToFlagSet(flag, subcommand.Flags(), !documented)
 				}
 			}
 		}
@@ -187,7 +186,6 @@ func ParseOutBazelFlags(command string, args []string) ([]string, []string, erro
 
 		if s[1] == '-' {
 			if len(s) == 2 { // "--" terminates the flags
-				nonFlags = append(nonFlags, s)
 				nonFlags = append(nonFlags, args...)
 				break
 			}

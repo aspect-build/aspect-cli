@@ -79,7 +79,7 @@ EOF
 
 @test 'unknown flags should fail' {
     run aspect build :foo --noannounce_rcc
-    assert_output --partial "ERROR: --noannounce_rcc :: Unrecognized option: --noannounce_rcc"
+    assert_output --partial "Error: unknown flag: --noannounce_rcc"
 }
 
 @test '--[no]able flags should be hidden in help' {
