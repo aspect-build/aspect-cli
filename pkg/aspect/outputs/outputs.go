@@ -44,11 +44,6 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 		return err
 	}
 
-	// Strip any leading -- that can come from ParseOutBazelFlags
-	if len(nonFlags) > 0 && nonFlags[0] == "--" {
-		nonFlags = nonFlags[1:]
-	}
-
 	if len(nonFlags) < 1 {
 		return fmt.Errorf("a query expression is required as the first argument to outputs command")
 	}
