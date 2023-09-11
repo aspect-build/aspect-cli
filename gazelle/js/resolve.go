@@ -57,12 +57,23 @@ func (ts *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []reso
 	case TsProtoLibraryKind:
 		return ts.protoLibraryImports(r, f)
 	default:
-		return ts.sourceFileImports(r.AttrStrings("srcs"), f)
+		return ts.sourceFileImports(r, f)
 	}
 }
 
 // TypeScript-importable ImportSpecs from a set of source files.
-func (ts *Resolver) sourceFileImports(srcs []string, f *rule.File) []resolve.ImportSpec {
+func (ts *Resolver) sourceFileImports(r *rule.Rule, f *rule.File) []resolve.ImportSpec {
+	var projectImports *TsProjectInfo
+
+	if r.Kind() == TsProjectKind {
+		// Rules such as empty rules may not have info.
+		if impts := r.PrivateAttr("ts_project_info"); impts != nil {
+			projectImports = impts.(*TsProjectInfo)
+		}
+	}
+
+	srcs := r.AttrStrings("srcs")
+
 	provides := make([]resolve.ImportSpec, 0, len(srcs)+1)
 
 	for _, src := range srcs {
@@ -72,6 +83,15 @@ func (ts *Resolver) sourceFileImports(srcs []string, f *rule.File) []resolve.Imp
 			provides = append(provides, resolve.ImportSpec{
 				Lang: LanguageName,
 				Imp:  impt,
+			})
+		}
+	}
+
+	if projectImports != nil {
+		for _, mod := range projectImports.modules.Values() {
+			provides = append(provides, resolve.ImportSpec{
+				Lang: LanguageName,
+				Imp:  mod.(string),
 			})
 		}
 	}
@@ -158,7 +178,7 @@ func (ts *Resolver) Resolve(
 
 	// TsProject imports are resolved as deps
 	if r.Kind() == TsProjectKind || r.Kind() == TsProtoLibraryKind {
-		deps, err := ts.resolveModuleDeps(c, ix, importData.(*TsProjectImports).imports, from)
+		deps, err := ts.resolveModuleDeps(c, ix, importData.(*TsProjectInfo).imports, from)
 		if err != nil {
 			log.Fatal("Resolution Error: ", err)
 			os.Exit(1)
