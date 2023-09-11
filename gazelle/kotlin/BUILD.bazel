@@ -21,9 +21,9 @@ go_library(
     deps = [
         "//gazelle/common",
         "//gazelle/common/git",
-        "//gazelle/common/log",
         "//gazelle/kotlin/kotlinconfig",
         "//gazelle/kotlin/parser",
+        "//pkg/logger",
         "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//label:go_default_library",
         "@bazel_gazelle//language:go_default_library",

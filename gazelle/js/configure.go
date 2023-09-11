@@ -8,7 +8,7 @@ import (
 	"path"
 	"strings"
 
-	. "aspect.build/cli/gazelle/common/log"
+	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/rule"
