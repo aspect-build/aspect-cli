@@ -1,7 +1,7 @@
 package gazelle
 
 import (
-	. "aspect.build/cli/gazelle/common/log"
+	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/emirpasic/gods/sets/treeset"
 )

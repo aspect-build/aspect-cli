@@ -9,9 +9,9 @@ import (
 	"sync"
 
 	gazelle "aspect.build/cli/gazelle/common"
-	. "aspect.build/cli/gazelle/common/log"
 	"aspect.build/cli/gazelle/kotlin/kotlinconfig"
 	"aspect.build/cli/gazelle/kotlin/parser"
+	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"

@@ -5,7 +5,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/sirupsen/logrus"
+	Log "aspect.build/cli/pkg/logger"
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
@@ -13,8 +13,6 @@ import (
 	treeutils "aspect.build/cli/gazelle/common/treesitter"
 	"aspect.build/cli/gazelle/js/parser"
 )
-
-var Log = logrus.New()
 
 // Parse and find imports using TreeSitter (https://tree-sitter.github.io/).
 // ESM imports which are always at the root of the AST can be easily found.
@@ -111,7 +109,7 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 
 		// Parse errors. Only log them due to many false positives potentially caused by issues
 		// such as only parsing a single file at a time so type information from other files is missing.
-		if Log.IsLevelEnabled(logrus.TraceLevel) {
+		if Log.IsLevelEnabled(Log.TraceLevel) {
 			treeErrors := treeutils.QueryErrors(sourceLangName, sourceLang, sourceCode, rootNode)
 			if treeErrors != nil {
 				Log.Tracef("TreeSitter query errors: %v", treeErrors)

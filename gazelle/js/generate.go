@@ -2,7 +2,6 @@ package gazelle
 
 import (
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"path"
@@ -11,11 +10,11 @@ import (
 	"sync"
 
 	gazelle "aspect.build/cli/gazelle/common"
-	. "aspect.build/cli/gazelle/common/log"
 	"aspect.build/cli/gazelle/js/parser"
 	treesitter_parser "aspect.build/cli/gazelle/js/parser/treesitter"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	proto "aspect.build/cli/gazelle/js/proto"
+	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
@@ -79,7 +78,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 	// Collect all source files.
 	sourceFiles, dataFiles, collectErr := ts.collectSourceFiles(cfg, args)
 	if collectErr != nil {
-		log.Printf("Source collection error: %v\n", collectErr)
+		BazelLog.Errorf("Source collection error: %v\n", collectErr)
 		return
 	}
 
@@ -130,7 +129,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 			result,
 		)
 		if srcGenErr != nil {
-			log.Printf("Source rule generation error: %v\n", srcGenErr)
+			fmt.Fprintf(os.Stderr, "Source rule generation error: %v\n", srcGenErr)
 			os.Exit(1)
 		}
 
@@ -434,7 +433,7 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePa
 
 // Parse the passed file for import statements.
 func parseSourceFile(rootDir, filePath string) (parser.ParseResult, []error) {
-	BazelLog.Debug("ParseImports: %s", filePath)
+	BazelLog.Debugf("ParseImports: %s", filePath)
 
 	content, err := os.ReadFile(path.Join(rootDir, filePath))
 	if err != nil {
@@ -489,7 +488,7 @@ func (ts *typeScriptLang) collectSourceFiles(cfg *JsGazelleConfig, args language
 
 func (ts *typeScriptLang) addFileLabel(importPath string, label *label.Label) {
 	if existing := ts.fileLabels[importPath]; existing != nil {
-		log.Fatalln("Duplicate file label ", importPath, " from ", existing.String(), " and ", label.String())
+		BazelLog.Fatalf("Duplicate file label ", importPath, " from ", existing.String(), " and ", label.String())
 	}
 
 	ts.fileLabels[importPath] = label
