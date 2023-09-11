@@ -37,17 +37,22 @@ func newLinkAllPackagesImports() *LinkAllPackagesImports {
 }
 
 // TsProject rule import data
-type TsProjectImports struct {
+type TsProjectInfo struct {
 	imports *treeset.Set
+	modules *treeset.Set
 }
 
-func newTsProjectImports() *TsProjectImports {
-	return &TsProjectImports{
+func newTsProjectInfo() *TsProjectInfo {
+	return &TsProjectInfo{
 		imports: treeset.NewWith(importStatementComparator),
+		modules: treeset.NewWithStringComparator(),
 	}
 }
-func (i *TsProjectImports) Add(impt ImportStatement) {
+func (i *TsProjectInfo) AddImport(impt ImportStatement) {
 	i.imports.Add(impt)
+}
+func (i *TsProjectInfo) AddModule(mod string) {
+	i.modules.Add(mod)
 }
 
 // importStatementComparator compares modules by name.

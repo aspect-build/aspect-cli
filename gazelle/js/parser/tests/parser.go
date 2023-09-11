@@ -7,16 +7,16 @@ import (
 )
 
 var testCases = []struct {
-	desc, ts string
-	filename string
-	expected []string
-	typeOnly bool
+	desc, ts        string
+	filename        string
+	expectedImports []string
+	expectedModules []string
+	typeOnly        bool
 }{
 	{
 		desc:     "empty",
 		ts:       "",
 		filename: "empty.ts",
-		expected: []string{},
 	}, {
 		desc: "import single quote",
 		ts: `
@@ -24,8 +24,8 @@ var testCases = []struct {
 			// Make sure import is used. Esbuild ignores unused imports.
 			const myDateFns = dateFns;
 		`,
-		filename: "single.ts",
-		expected: []string{"date-fns"},
+		filename:        "single.ts",
+		expectedImports: []string{"date-fns"},
 	}, {
 		desc: "import double quote",
 		ts: `
@@ -33,8 +33,8 @@ var testCases = []struct {
 			// Make sure import is used. Esbuild ignores unused imports.
 			const myDateFns = dateFns;
 		`,
-		filename: "double.ts",
-		expected: []string{"date-fns"},
+		filename:        "double.ts",
+		expectedImports: []string{"date-fns"},
 	}, {
 		desc: "import two",
 		ts: `
@@ -45,8 +45,8 @@ var testCases = []struct {
 				format(new Puppy());
 			}
 		`,
-		filename: "two.ts",
-		expected: []string{"date-fns", "@/components/Puppy"},
+		filename:        "two.ts",
+		expectedImports: []string{"date-fns", "@/components/Puppy"},
 	}, {
 		desc: "import depth",
 		ts: `
@@ -55,8 +55,8 @@ var testCases = []struct {
 			// Use the import.
 			export default package;
 		`,
-		filename: "depth.ts",
-		expected: []string{"from/internal/package"},
+		filename:        "depth.ts",
+		expectedImports: []string{"from/internal/package"},
 	}, {
 		desc: "import multiline",
 		ts: `
@@ -70,20 +70,19 @@ var testCases = []struct {
 			// Use the imports.
 			format(CONST1, CONST2, CONST3);
 		`,
-		filename: "multiline.ts",
-		expected: []string{"date-fns", "~/constants"},
+		filename:        "multiline.ts",
+		expectedImports: []string{"date-fns", "~/constants"},
 	},
 	{
-		desc:     "simple require",
-		ts:       `const a = require("date-fns");`,
-		filename: "require.ts",
-		expected: []string{"date-fns"},
+		desc:            "simple require",
+		ts:              `const a = require("date-fns");`,
+		filename:        "require.ts",
+		expectedImports: []string{"date-fns"},
 	},
 	{
 		desc:     "incorrect imports",
 		ts:       `@import "~mapbox.js/dist/mapbox.css";`,
 		filename: "actuallyScss.ts",
-		expected: []string{},
 	},
 	{
 		desc: "ignores commented out imports",
@@ -101,7 +100,6 @@ var testCases = []struct {
 			*/
 		`,
 		filename: "comments.ts",
-		expected: []string{},
 	},
 	{
 		desc: "ignores imports inside of strings - both multi-line template strings and literal strings",
@@ -113,8 +111,8 @@ var testCases = []struct {
 			import * as React from 'react';
 			const path = require('path');
 						` + "`;",
-		filename: "strings.ts",
-		expected: []string{},
+		filename:        "strings.ts",
+		expectedImports: []string{},
 	},
 	{
 		desc: "full import",
@@ -122,14 +120,14 @@ var testCases = []struct {
 			import "mypolyfill";
 			import "mypolyfill2";
 		`,
-		filename: "full.ts",
-		expected: []string{"mypolyfill", "mypolyfill2"},
+		filename:        "full.ts",
+		expectedImports: []string{"mypolyfill", "mypolyfill2"},
 	},
 	{
-		desc:     "full require",
-		ts:       `require("mypolyfill2");`,
-		filename: "fullRequire.ts",
-		expected: []string{"mypolyfill2"},
+		desc:            "full require",
+		ts:              `require("mypolyfill2");`,
+		filename:        "fullRequire.ts",
+		expectedImports: []string{"mypolyfill2"},
 	},
 	{
 		desc: "imports and full imports",
@@ -143,8 +141,8 @@ var testCases = []struct {
 			// Use the imports.
 			export default { Store, shallowMount, ClaimsSection};
 		`,
-		filename: "mixedImports.ts",
-		expected: []string{"vuex", "@vue/test-utils", "~/plugins/intersection-observer-polyfill", "~/plugins/intersect-directive", "./claims-section"},
+		filename:        "mixedImports.ts",
+		expectedImports: []string{"vuex", "@vue/test-utils", "~/plugins/intersection-observer-polyfill", "~/plugins/intersect-directive", "./claims-section"},
 	},
 	{
 		desc: "dynamic require",
@@ -154,16 +152,16 @@ var testCases = []struct {
 				const leaflet = require('mapbox.js');
 			}
 		`,
-		filename: "dynamic.ts",
-		expected: []string{"mapbox.js"},
+		filename:        "dynamic.ts",
+		expectedImports: []string{"mapbox.js"},
 	},
 	{
 		desc: "regex require",
 		ts: `
 			var myRegexp = /import x from "y/;
 		`,
-		filename: "regex.ts",
-		expected: []string{},
+		filename:        "regex.ts",
+		expectedImports: []string{},
 	},
 	{
 		desc: "tsx later in file",
@@ -176,16 +174,16 @@ var testCases = []struct {
 				return <div>hello</div>;
 			}
 		`,
-		filename: "myComponent.tsx",
-		expected: []string{"react"},
+		filename:        "myComponent.tsx",
+		expectedImports: []string{"react"},
 	},
 	{
 		desc: "include unused imports",
 		ts: `
 			import "my/unused/package";
 		`,
-		filename: "unusedImports.ts",
-		expected: []string{"my/unused/package"},
+		filename:        "unusedImports.ts",
+		expectedImports: []string{"my/unused/package"},
 	},
 	{
 		desc: "tsx later in file 2",
@@ -203,8 +201,8 @@ var testCases = []struct {
 
 			export default ExampleWithKeys;
 		`,
-		filename: "ExampleWithKeys.tsx",
-		expected: []string{"react", "react-i18next"},
+		filename:        "ExampleWithKeys.tsx",
+		expectedImports: []string{"react", "react-i18next"},
 	},
 	{
 		desc: "tsx that once crashed with ts parser",
@@ -219,9 +217,9 @@ var testCases = []struct {
 				</>
 			})
 		`,
-		filename: "sg-example-once-crashed.tsx",
-		expected: []string{"react"},
-		typeOnly: true,
+		filename:        "sg-example-once-crashed.tsx",
+		expectedImports: []string{"react"},
+		typeOnly:        true,
 	},
 	{
 		desc: "ts type import",
@@ -229,9 +227,9 @@ var testCases = []struct {
 			import type React from "react"
 			import type { X } from "y"
 		`,
-		filename: "types.ts",
-		expected: []string{"react", "y"},
-		typeOnly: true,
+		filename:        "types.ts",
+		expectedImports: []string{"react", "y"},
+		typeOnly:        true,
 	},
 	{
 		desc: "include imports only used as types",
@@ -239,9 +237,9 @@ var testCases = []struct {
 			import { Foo } from "my/types";
 			export const foo: Foo = 1
 		`,
-		filename: "typeImport.ts",
-		expected: []string{"my/types"},
-		typeOnly: true,
+		filename:        "typeImport.ts",
+		expectedImports: []string{"my/types"},
+		typeOnly:        true,
 	},
 	{
 		desc: "include require()s only used as types",
@@ -249,9 +247,9 @@ var testCases = []struct {
 			const { Foo } = require("my/types");
 			export const foo: Foo = 1
 		`,
-		filename: "typeRequire.ts",
-		expected: []string{"my/types"},
-		typeOnly: true,
+		filename:        "typeRequire.ts",
+		expectedImports: []string{"my/types"},
+		typeOnly:        true,
 	},
 	{
 		desc: "include type-only imports",
@@ -259,18 +257,38 @@ var testCases = []struct {
 			import type { Foo } from "my/types";
 			export const foo: Foo = 1
 		`,
-		filename: "typeImport.ts",
-		expected: []string{"my/types"},
-		typeOnly: true,
+		filename:        "typeImport.ts",
+		expectedImports: []string{"my/types"},
+		typeOnly:        true,
 	},
 	{
 		desc: "include unused type-only imports",
 		ts: `
 			import type { Foo } from "my/types";
 		`,
-		filename: "typeImport-unused.ts",
-		expected: []string{"my/types"},
-		typeOnly: true,
+		filename:        "typeImport-unused.ts",
+		expectedImports: []string{"my/types"},
+		typeOnly:        true,
+	},
+	{
+		desc: "module declaration",
+		ts: `
+			// https://www.typescriptlang.org/docs/handbook/modules.html#ambient-modules
+			declare module 'module-x' {
+				export var s: string;
+			}
+
+			// https://www.typescriptlang.org/docs/handbook/modules.html#shorthand-ambient-modules
+			declare module 'module-with-no-body';
+
+
+			declare /* 1 */ module /* 2 */ 'comments-2' /* 3 */;
+			/* 1 */ declare module /* 2 */ 'comments-3'; /* 3 */
+			declare module "module-quotes-1"
+		`,
+		filename:        "declare-module.ts",
+		expectedModules: []string{"module-x", "module-with-no-body", "comments-2", "comments-3", "module-quotes-1"},
+		typeOnly:        true,
 	},
 }
 
@@ -281,10 +299,14 @@ func RunParserTests(t *testing.T, parser parser.Parser, includeTypeOnly bool, pa
 		}
 
 		t.Run(tc.desc+parserPost, func(t *testing.T) {
-			actualImports, _ := parser.ParseImports(tc.filename, tc.ts)
+			res, _ := parser.ParseSource(tc.filename, tc.ts)
 
-			if !equal(actualImports, tc.expected) {
-				t.Errorf("Inequality.\nactual:  %#v;\nexpected: %#v\ntypescript code:\n%v", actualImports, tc.expected, tc.ts)
+			if !equal(res.Imports, tc.expectedImports) {
+				t.Errorf("Unexpected import results\nactual:  %#v;\nexpected: %#v\ntypescript code:\n%v", res.Imports, tc.expectedImports, tc.ts)
+			}
+
+			if !equal(res.Modules, tc.expectedModules) {
+				t.Errorf("Unexpected module results\nactual:  %#v;\nexpected: %#v\ntypescript code:\n%v", res.Modules, tc.expectedModules, tc.ts)
 			}
 		})
 	}

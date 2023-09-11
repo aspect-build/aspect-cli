@@ -1,5 +1,10 @@
 package parser
 
+type ParseResult struct {
+	Imports []string
+	Modules []string
+}
+
 type Parser interface {
-	ParseImports(filePath, source string) ([]string, []error)
+	ParseSource(filePath, source string) (ParseResult, []error)
 }

@@ -73,8 +73,9 @@ var Languages = map[string]*sitter.Language{
 	"typescript": typescript.GetLanguage(),
 }
 
-func (p *TreeSitterParser) ParseImports(filePath, sourceCodeStr string) ([]string, []error) {
+func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.ParseResult, []error) {
 	imports := make([]string, 0, 5)
+	modules := make([]string, 0)
 	errs := make([]error, 0)
 
 	sourceCode := []byte(sourceCodeStr)
@@ -90,16 +91,18 @@ func (p *TreeSitterParser) ParseImports(filePath, sourceCodeStr string) ([]strin
 	if tree != nil {
 		rootNode := tree.RootNode()
 
-		// Quick pass over root nodes to find top level imports.
+		// Quick pass over root nodes to find top level imports and modules
 		for i := 0; i < int(rootNode.NamedChildCount()); i++ {
-			rootImport := getRootImport(rootNode.NamedChild(i), sourceCode)
+			node := rootNode.NamedChild(i)
 
-			if rootImport != nil {
+			if rootImport := getRootImport(node, sourceCode); rootImport != nil {
 				imports = append(imports, rootImport.Content(sourceCode))
+			} else if rootModule := getRootModuleDeclaration(node, sourceCode); rootModule != nil {
+				modules = append(modules, rootModule.Content(sourceCode))
 			}
 		}
 
-		// Extra queries for harder to find imports.
+		// Extra queries for more complex import statements.
 		for _, q := range ImportQueries {
 			queryResults := queryImports(treeutils.ParseQuery(sourceLangName, sourceLang, q), sourceCode, rootNode)
 
@@ -116,7 +119,12 @@ func (p *TreeSitterParser) ParseImports(filePath, sourceCodeStr string) ([]strin
 		}
 	}
 
-	return imports, errs
+	result := parser.ParseResult{
+		Imports: imports,
+		Modules: modules,
+	}
+
+	return result, errs
 }
 
 // Return a Node representing the `from` value of an import statement within the given root node.
@@ -131,6 +139,29 @@ func getRootImport(node *sitter.Node, sourceCode []byte) *sitter.Node {
 			return from.Child(1)
 		}
 		return nil
+	}
+
+	return nil
+}
+
+func getRootModuleDeclaration(node *sitter.Node, sourceCode []byte) *sitter.Node {
+	nodeType := node.Type()
+
+	// Top level `declare module "..." [{ ... }]` statement.
+	// See: https://www.typescriptlang.org/docs/handbook/modules.html#ambient-modules
+	//
+	// Example node: (ambient_declaration (module name: (string (string_fragment)) body: (statement_block)))
+	if nodeType == "ambient_declaration" {
+		for i := 0; i < int(node.NamedChildCount()); i++ {
+			child := node.NamedChild(i)
+			if child.Type() == "module" {
+				for j := 0; j < int(child.NamedChildCount()); j++ {
+					if child.NamedChild(j).Type() == "string" {
+						return child.NamedChild(j).NamedChild(0)
+					}
+				}
+			}
+		}
 	}
 
 	return nil

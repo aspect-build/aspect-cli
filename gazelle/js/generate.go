@@ -12,7 +12,8 @@ import (
 
 	gazelle "aspect.build/cli/gazelle/common"
 	. "aspect.build/cli/gazelle/common/log"
-	parser "aspect.build/cli/gazelle/js/parser/treesitter"
+	"aspect.build/cli/gazelle/js/parser"
+	treesitter_parser "aspect.build/cli/gazelle/js/parser/treesitter"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	proto "aspect.build/cli/gazelle/js/proto"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -211,10 +212,10 @@ func (ts *typeScriptLang) addTsProtoRules(cfg *JsGazelleConfig, args language.Ge
 		// Persist the proto_library(srcs)
 		tsProtoLibrary.SetPrivateAttr("proto_library_srcs", sourceFiles)
 
-		imports := newTsProjectImports()
+		imports := newTsProjectInfo()
 
 		for _, impt := range ts.collectProtoImports(cfg, args, sourceFiles) {
-			imports.Add(impt)
+			imports.AddImport(impt)
 		}
 
 		result.Gen = append(result.Gen, tsProtoLibrary)
@@ -260,10 +261,10 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		}
 	}
 
-	// Import statements from the parsed files.
-	imports := newTsProjectImports()
+	// Project data combined from all files.
+	info := newTsProjectInfo()
 
-	for result := range ts.collectAllImports(cfg, args, sourceFiles) {
+	for result := range ts.parseFiles(cfg, args, sourceFiles) {
 		if len(result.Errors) > 0 {
 			fmt.Printf("%s:\n", result.SourcePath)
 			for _, err := range result.Errors {
@@ -273,7 +274,11 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		}
 
 		for _, sourceImport := range result.Imports {
-			imports.Add(sourceImport)
+			info.AddImport(sourceImport)
+		}
+
+		for _, sourceModule := range result.Modules {
+			info.AddModule(sourceModule)
 		}
 	}
 
@@ -284,7 +289,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 	}
 
 	// Add any imported data files as sources.
-	for _, importStatement := range imports.imports.Values() {
+	for _, importStatement := range info.imports.Values() {
 		workspacePath := importStatement.(ImportStatement).Imp
 
 		// If the imported path is a file that can be compiled as ts source
@@ -298,6 +303,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 	}
 
 	tsProject := rule.NewRule(TsProjectKind, targetName)
+	tsProject.SetPrivateAttr("ts_project_info", info)
 	tsProject.SetAttr("srcs", sourceFiles.Values())
 
 	if isTestRule {
@@ -305,7 +311,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 	}
 
 	result.Gen = append(result.Gen, tsProject)
-	result.Imports = append(result.Imports, imports)
+	result.Imports = append(result.Imports, info)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", tsProject.Kind(), args.Rel, tsProject.Name())
 
@@ -315,6 +321,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 type parseResult struct {
 	SourcePath string
 	Imports    []ImportStatement
+	Modules    []string
 	Errors     []error
 }
 
@@ -347,7 +354,7 @@ func (ts *typeScriptLang) collectProtoImports(cfg *JsGazelleConfig, args languag
 	return results
 }
 
-func (ts *typeScriptLang) collectAllImports(cfg *JsGazelleConfig, args language.GenerateArgs, sourceFiles *treeset.Set) chan parseResult {
+func (ts *typeScriptLang) parseFiles(cfg *JsGazelleConfig, args language.GenerateArgs, sourceFiles *treeset.Set) chan parseResult {
 	// The channel of all files to parse.
 	sourcePathChannel := make(chan string)
 
@@ -390,15 +397,16 @@ func (ts *typeScriptLang) collectAllImports(cfg *JsGazelleConfig, args language.
 }
 
 func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePath string) parseResult {
-	fileImports, errs := parseImports(rootDir, sourcePath)
+	parseResults, errs := parseSourceFile(rootDir, sourcePath)
 
 	result := parseResult{
 		SourcePath: sourcePath,
 		Errors:     errs,
-		Imports:    make([]ImportStatement, 0, len(fileImports)),
+		Imports:    make([]ImportStatement, 0, len(parseResults.Imports)),
+		Modules:    parseResults.Modules,
 	}
 
-	for _, importPath := range fileImports {
+	for _, importPath := range parseResults.Imports {
 		if !cfg.IsImportIgnored(importPath) {
 			// The path from the root
 			workspacePath := toWorkspacePath(sourcePath, importPath)
@@ -425,16 +433,16 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePa
 }
 
 // Parse the passed file for import statements.
-func parseImports(rootDir, filePath string) ([]string, []error) {
+func parseSourceFile(rootDir, filePath string) (parser.ParseResult, []error) {
 	BazelLog.Debug("ParseImports: %s", filePath)
 
 	content, err := os.ReadFile(path.Join(rootDir, filePath))
 	if err != nil {
-		return []string{}, []error{err}
+		return parser.ParseResult{}, []error{err}
 	}
 
-	p := parser.NewParser()
-	return p.ParseImports(filePath, string(content))
+	p := treesitter_parser.NewParser()
+	return p.ParseSource(filePath, string(content))
 }
 
 func (ts *typeScriptLang) collectSourceFiles(cfg *JsGazelleConfig, args language.GenerateArgs) (*treeset.Set, *treeset.Set, error) {
