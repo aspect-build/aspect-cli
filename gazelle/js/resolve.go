@@ -2,16 +2,15 @@ package gazelle
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path"
 	"strings"
 	"time"
 
 	common "aspect.build/cli/gazelle/common"
-	. "aspect.build/cli/gazelle/common/log"
 	node "aspect.build/cli/gazelle/js/node"
 	proto "aspect.build/cli/gazelle/js/proto"
+	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/repo"
@@ -180,7 +179,7 @@ func (ts *Resolver) Resolve(
 	if r.Kind() == TsProjectKind || r.Kind() == TsProtoLibraryKind {
 		deps, err := ts.resolveModuleDeps(c, ix, importData.(*TsProjectInfo).imports, from)
 		if err != nil {
-			log.Fatal("Resolution Error: ", err)
+			BazelLog.Fatalf("Resolution Error: ", err)
 			os.Exit(1)
 		}
 
@@ -255,10 +254,10 @@ func (ts *Resolver) resolveModuleDeps(
 
 		switch cfg.ValidateImportStatements() {
 		case ValidationError:
-			log.Printf("Failed to validate dependencies for target %q:%v", from.String(), joinedErrs)
+			fmt.Fprintf(os.Stderr, "Failed to validate dependencies for target %q:%v\n", from.String(), joinedErrs)
 			os.Exit(1)
 		case ValidationWarn:
-			log.Printf("Warning: Failed to validate dependencies for target %q:%v", from.String(), joinedErrs)
+			fmt.Fprintf(os.Stderr, "Warning: Failed to validate dependencies for target %q:%v\n", from.String(), joinedErrs)
 		}
 	}
 

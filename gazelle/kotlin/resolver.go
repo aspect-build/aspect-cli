@@ -8,8 +8,8 @@ import (
 	"time"
 
 	common "aspect.build/cli/gazelle/common"
-	. "aspect.build/cli/gazelle/common/log"
 	"aspect.build/cli/gazelle/kotlin/kotlinconfig"
+	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/repo"
@@ -204,7 +204,7 @@ func (kt *Resolver) resolveImport(
 	}
 
 	if err != nil {
-		BazelLog.Warn("Kotlin resolution error: ", err)
+		BazelLog.Warnf("Kotlin resolution error: ", err)
 	}
 
 	return Resolution_NotFound, nil, err

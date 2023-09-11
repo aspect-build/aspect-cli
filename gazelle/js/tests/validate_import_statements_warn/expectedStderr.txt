@@ -1,4 +1,4 @@
-gazelle: Warning: Failed to validate dependencies for target "@validate_import_statements_warn//:validate_import_statements_warn":
+Warning: Failed to validate dependencies for target "@validate_import_statements_warn//:validate_import_statements_warn":
 
 Import "bad-import" from "main.ts" is an unknown dependency. Possible solutions:
 	1. Instruct Gazelle to resolve to a known dependency using a directive:

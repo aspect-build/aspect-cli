@@ -3,8 +3,8 @@ package gazelle
 import (
 	"flag"
 
-	. "aspect.build/cli/gazelle/common/log"
 	"aspect.build/cli/gazelle/kotlin/kotlinconfig"
+	BazelLog "aspect.build/cli/pkg/logger"
 	jvm_javaconfig "github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
 	jvm_maven "github.com/bazel-contrib/rules_jvm/java/gazelle/private/maven"
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -73,14 +73,14 @@ func (kt *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 		BazelLog.Tracef("Creating Maven resolver: %s", cfg.MavenInstallFile())
 
 		// TODO: better zerolog configuration
-		logger := zerolog.New(BazelLog.Out).Level(zerolog.TraceLevel)
+		logger := zerolog.New(BazelLog.GetOutput()).Level(zerolog.TraceLevel)
 
 		resolver, err := jvm_maven.NewResolver(
 			cfg.MavenInstallFile(),
 			logger,
 		)
 		if err != nil {
-			BazelLog.Fatalln("error creating Maven resolver: %s", err.Error())
+			BazelLog.Fatalf("error creating Maven resolver: %s", err.Error())
 		}
 		kt.lang.mavenResolver = &resolver
 	}

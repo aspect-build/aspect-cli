@@ -23,7 +23,7 @@ import (
 	"sort"
 	"strings"
 
-	. "aspect.build/cli/gazelle/common/log"
+	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/msolo/jsonr"
 )
 
