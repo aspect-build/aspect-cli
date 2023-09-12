@@ -51,7 +51,7 @@ var testCases = []struct {
 		desc: "import depth",
 		ts: `
 			import package from "from/internal/package";
-			
+
 			// Use the import.
 			export default package;
 		`,
@@ -281,13 +281,29 @@ var testCases = []struct {
 			// https://www.typescriptlang.org/docs/handbook/modules.html#shorthand-ambient-modules
 			declare module 'module-with-no-body';
 
-
 			declare /* 1 */ module /* 2 */ 'comments-2' /* 3 */;
 			/* 1 */ declare module /* 2 */ 'comments-3'; /* 3 */
 			declare module "module-quotes-1"
 		`,
 		filename:        "declare-module.ts",
 		expectedModules: []string{"module-x", "module-with-no-body", "comments-2", "comments-3", "module-quotes-1"},
+		typeOnly:        true,
+	},
+	{
+		desc: "declare module sub-imports",
+		ts: `
+			declare module 'lib-imports' {
+				export * from 'lib-export-star';
+				export * as foo from 'lib-export-star-as';
+				import f /*c*/ from 'lib-from-default';
+
+				import { x /*c*/  } /*c*/  from /*c*/ 'lib-impt'
+				export { x } /*c*/
+			}
+		`,
+		filename:        "declare-module-sub.ts",
+		expectedModules: []string{"lib-imports"},
+		expectedImports: []string{"lib-export-star", "lib-export-star-as", "lib-from-default", "lib-impt"},
 		typeOnly:        true,
 	},
 }
