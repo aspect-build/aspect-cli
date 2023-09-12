@@ -93,10 +93,27 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 		for i := 0; i < int(rootNode.NamedChildCount()); i++ {
 			node := rootNode.NamedChild(i)
 
-			if rootImport := getRootImport(node, sourceCode); rootImport != nil {
-				imports = append(imports, rootImport.Content(sourceCode))
-			} else if rootModule := getRootModuleDeclaration(node, sourceCode); rootModule != nil {
-				modules = append(modules, rootModule.Content(sourceCode))
+			if isImportStatement(node) {
+				if rootImport := getImportStatementName(node); rootImport != nil {
+					imports = append(imports, rootImport.Content(sourceCode))
+				}
+			} else if isModuleDeclaration(node) {
+				if modDeclName := getModuleDeclarationName(node); modDeclName != nil {
+					modules = append(modules, modDeclName.Content(sourceCode))
+				}
+
+				// Import/export statements within a module declaration.
+				if moduleRootNode := treeutils.GetNodeChildByTypePath(node, "module", "statement_block"); moduleRootNode != nil {
+					for j := 0; j < int(moduleRootNode.NamedChildCount()); j++ {
+						moduleNode := moduleRootNode.NamedChild(j)
+
+						if isImportStatement(moduleNode) {
+							if moduleImport := getImportStatementName(moduleNode); moduleImport != nil {
+								imports = append(imports, moduleImport.Content(sourceCode))
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -125,41 +142,39 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 	return result, errs
 }
 
-// Return a Node representing the `from` value of an import statement within the given root node.
-func getRootImport(node *sitter.Node, sourceCode []byte) *sitter.Node {
+// Determine if a node is an import/export statement that may contain a `from` value.
+func isImportStatement(node *sitter.Node) bool {
 	nodeType := node.Type()
 
 	// Top level `import ... from "..."` statement.
 	// Top level `export ... from "..."` statement.
-	if nodeType == "import_statement" || nodeType == "export_statement" {
-		from := node.ChildByFieldName("source")
-		if from != nil {
-			return from.Child(1)
-		}
-		return nil
-	}
+	return nodeType == "import_statement" || nodeType == "export_statement"
+}
 
+// Return a Node representing the `from` value of an import/export statement.
+func getImportStatementName(importStatement *sitter.Node) *sitter.Node {
+	from := importStatement.ChildByFieldName("source")
+	if from != nil {
+		return from.Child(1)
+	}
 	return nil
 }
 
-func getRootModuleDeclaration(node *sitter.Node, sourceCode []byte) *sitter.Node {
+// Determine if a node is a module declaration.
+func isModuleDeclaration(node *sitter.Node) bool {
 	nodeType := node.Type()
 
-	// Top level `declare module "..." [{ ... }]` statement.
+	// `declare module "..." [{ ... }]` statement.
 	// See: https://www.typescriptlang.org/docs/handbook/modules.html#ambient-modules
 	//
 	// Example node: (ambient_declaration (module name: (string (string_fragment)) body: (statement_block)))
-	if nodeType == "ambient_declaration" {
-		for i := 0; i < int(node.NamedChildCount()); i++ {
-			child := node.NamedChild(i)
-			if child.Type() == "module" {
-				for j := 0; j < int(child.NamedChildCount()); j++ {
-					if child.NamedChild(j).Type() == "string" {
-						return child.NamedChild(j).NamedChild(0)
-					}
-				}
-			}
-		}
+	return nodeType == "ambient_declaration"
+}
+
+// Return a Node representing the module declaration name
+func getModuleDeclarationName(node *sitter.Node) *sitter.Node {
+	if module := treeutils.GetNodeChildByType(node, "module"); module != nil {
+		return treeutils.GetNodeStringField(module, "name")
 	}
 
 	return nil
