@@ -74,6 +74,23 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 	return result
 }
 
+func removeRule(args language.GenerateArgs, ruleName string, result *language.GenerateResult) {
+	existing := getFileRuleByName(args, ruleName)
+	if existing == nil {
+		return
+	}
+
+	mappedSourceKinds := treeset.NewWithStringComparator()
+	for _, kind := range sourceRuleKinds.Values() {
+		mappedSourceKinds.Add(mapKind(args, kind.(string)))
+	}
+
+	if mappedSourceKinds.Contains(existing.Kind()) {
+		emptyRule := rule.NewRule(existing.Kind(), ruleName)
+		result.Empty = append(result.Empty, emptyRule)
+	}
+}
+
 func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
 	// Collect all source files.
 	sourceFiles, dataFiles, collectErr := ts.collectSourceFiles(cfg, args)
@@ -119,21 +136,25 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 			ruleName = cfg.RenderNpmSourceLibraryName(ruleName)
 		}
 
-		srcRule, srcGenErr := ts.addProjectRule(
-			cfg,
-			args,
-			ruleName,
-			ruleSrcs.(*treeset.Set),
-			dataFiles,
-			group.testonly,
-			result,
-		)
-		if srcGenErr != nil {
-			fmt.Fprintf(os.Stderr, "Source rule generation error: %v\n", srcGenErr)
-			os.Exit(1)
-		}
+		if ruleSrcs.(*treeset.Set).Empty() {
+			// No sources for this source group. Remove the rule if it exists.
+			removeRule(args, ruleName, result)
+		} else {
+			// Add or edit/merge a rule for this source group.
+			srcRule, srcGenErr := ts.addProjectRule(
+				cfg,
+				args,
+				ruleName,
+				ruleSrcs.(*treeset.Set),
+				dataFiles,
+				group.testonly,
+				result,
+			)
+			if srcGenErr != nil {
+				fmt.Fprintf(os.Stderr, "Source rule generation error: %v\n", srcGenErr)
+				os.Exit(1)
+			}
 
-		if srcRule != nil {
 			sourceRules.Put(group.name, srcRule)
 		}
 	}
@@ -224,7 +245,7 @@ func (ts *typeScriptLang) addTsProtoRules(cfg *JsGazelleConfig, args language.Ge
 
 func hasTranspiledSources(sourceFiles *treeset.Set) bool {
 	for _, f := range sourceFiles.Values() {
-		if isSourceFileType(f.(string)) && !isDeclarationFileType(f.(string)) {
+		if isTranspiledSourceFileType(f.(string)) {
 			return true
 		}
 	}
@@ -233,25 +254,6 @@ func hasTranspiledSources(sourceFiles *treeset.Set) bool {
 }
 
 func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule bool, result *language.GenerateResult) (*rule.Rule, error) {
-	// Generate nothing if there are no source files. Remove any existing rules.
-	if !hasTranspiledSources(sourceFiles) {
-		if args.File == nil {
-			return nil, nil
-		}
-
-		tsProjectKind := mapKind(args, TsProjectKind)
-
-		for _, r := range args.File.Rules {
-			if r.Name() == targetName && r.Kind() == tsProjectKind {
-				emptyRule := rule.NewRule(tsProjectKind, targetName)
-				result.Empty = append(result.Empty, emptyRule)
-				return emptyRule, nil
-			}
-		}
-
-		return nil, nil
-	}
-
 	// If a build already exists check for name-collisions with the rule being generated.
 	if args.File != nil {
 		colError := checkCollisionErrors(targetName, args)
@@ -301,20 +303,26 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		}
 	}
 
-	tsProject := rule.NewRule(TsProjectKind, targetName)
-	tsProject.SetPrivateAttr("ts_project_info", info)
-	tsProject.SetAttr("srcs", sourceFiles.Values())
+	ruleKind := TsProjectKind
+	if !hasTranspiledSources(sourceFiles) {
+		ruleKind = JsLibraryKind
+	}
+	sourceRule := rule.NewRule(ruleKind, targetName)
+	sourceRule.SetPrivateAttr("ts_project_info", info)
+	sourceRule.SetAttr("srcs", sourceFiles.Values())
 
 	if isTestRule {
-		tsProject.SetAttr("testonly", true)
+		sourceRule.SetAttr("testonly", true)
 	}
 
-	result.Gen = append(result.Gen, tsProject)
+	adaptExistingRule(args, sourceRule)
+
+	result.Gen = append(result.Gen, sourceRule)
 	result.Imports = append(result.Imports, info)
 
-	BazelLog.Infof("add rule '%s' '%s:%s'", tsProject.Kind(), args.Rel, tsProject.Name())
+	BazelLog.Infof("add rule '%s' '%s:%s'", sourceRule.Kind(), args.Rel, sourceRule.Name())
 
-	return tsProject, nil
+	return sourceRule, nil
 }
 
 type parseResult struct {
@@ -487,8 +495,20 @@ func (ts *typeScriptLang) collectSourceFiles(cfg *JsGazelleConfig, args language
 }
 
 func (ts *typeScriptLang) addFileLabel(importPath string, label *label.Label) {
-	if existing := ts.fileLabels[importPath]; existing != nil {
-		BazelLog.Fatalf("Duplicate file label ", importPath, " from ", existing.String(), " and ", label.String())
+	existing := ts.fileLabels[importPath]
+
+	if existing != nil {
+		// Can not have two imports (such as .js and .d.ts) from different labels
+		if isDeclarationFileType(existing.Name) == isDeclarationFileType(label.Name) && !existing.Equal(*label) {
+			BazelLog.Fatalf("Duplicate file label ", importPath, " from ", existing.String(), " and ", label.String())
+		}
+
+		// Prefer the non-declaration file
+		if isDeclarationFileType(existing.Name) {
+			return
+		}
+
+		// Otherwise overwrite the existing non-declaration version
 	}
 
 	ts.fileLabels[importPath] = label
@@ -512,8 +532,11 @@ func toImportPaths(p string) []string {
 			paths = append(paths, path.Dir(p))
 		}
 	} else if isSourceFileType(p) {
-		// With the js extension
-		paths = append(paths, swapSourceExtension(p))
+		// With the transpiled .js extension
+		if isTranspiledSourceFileType(p) {
+			// With the js extension
+			paths = append(paths, swapSourceExtension(p))
+		}
 
 		// Without the js extension
 		if isImplicitSourceFileType(p) {
@@ -629,38 +652,83 @@ func mapKind(args language.GenerateArgs, kind string) string {
 	return kind
 }
 
-// Check if a target with the same name we are generating alredy exists,
-// and if it is of a different kind from the one we are generating. If
-// so, we have to throw an error since Gazelle won't generate it correctly.
-func checkCollisionErrors(tsProjectTargetName string, args language.GenerateArgs) error {
-	tsProjectKind := mapKind(args, TsProjectKind)
+func getFileRuleByName(args language.GenerateArgs, ruleName string) *rule.Rule {
+	if args.File == nil {
+		return nil
+	}
 
-	for _, t := range args.File.Rules {
-		if t.Name() == tsProjectTargetName && t.Kind() != tsProjectKind {
-			fqTarget := label.New("", args.Rel, tsProjectTargetName)
-			return fmt.Errorf("failed to generate target %q of kind %q: "+
-				"a target of kind %q with the same name already exists. "+
-				"Use the '# gazelle:%s' directive to change the naming convention.",
-				fqTarget.String(), tsProjectKind, t.Kind(), Directive_LibraryNamingConvention)
+	for _, r := range args.File.Rules {
+		if r.Name() == ruleName {
+			return r
 		}
 	}
 
 	return nil
 }
 
-// If the file is ts-compatible source code that may contain typescript imports
-func isSourceFileType(f string) bool {
-	ext := path.Ext(f)
+// Adapted an existing rule to a new rule of the same name.
+func adaptExistingRule(args language.GenerateArgs, rule *rule.Rule) {
+	existing := getFileRuleByName(args, rule.Name())
+	if existing == nil {
+		return
+	}
 
-	// Currently any source files may be parsed as ts and may contain imports
-	return len(ext) > 0 && sourceFileExtensions.Contains(ext[1:])
+	// TODO: this seems like a hack...
+	// Gazelle should support new rules changing the type of existing rules?
+	if existing.Kind() != rule.Kind() {
+		existing.SetKind(rule.Kind())
+	}
+}
+
+// Check if a target with the same name we are generating already exists,
+// and that rule type is unknown or can not be adapted to the new rule kind.
+// If an existing rule can not be adapted (maybe due to Gazelle bugs/limitations) an
+// error explaining the case is returned.
+func checkCollisionErrors(tsProjectTargetName string, args language.GenerateArgs) error {
+	existing := getFileRuleByName(args, tsProjectTargetName)
+	if existing == nil {
+		return nil
+	}
+
+	mappedSourceKinds := treeset.NewWithStringComparator()
+	for _, kind := range sourceRuleKinds.Values() {
+		mappedSourceKinds.Add(mapKind(args, kind.(string)))
+	}
+
+	if !mappedSourceKinds.Contains(existing.Kind()) {
+		tsProjectKind := mapKind(args, TsProjectKind)
+
+		fqTarget := label.New("", args.Rel, tsProjectTargetName)
+		return fmt.Errorf("failed to generate target %q of kind %q: "+
+			"a target of kind %q with the same name already exists. "+
+			"Use the '# gazelle:%s' directive to change the naming convention.",
+			fqTarget.String(), tsProjectKind, existing.Kind(), Directive_LibraryNamingConvention)
+	}
+
+	return nil
+}
+
+// If the file is ts-compatible transpiled source code that may contain imports
+func isTranspiledSourceFileType(f string) bool {
+	ext := path.Ext(f)
+	return len(ext) > 0 && typescriptFileExtensions.Contains(ext[1:]) && !isDeclarationFileType(f)
+}
+
+// If the file is ts-compatible source code that may contain imports
+func isSourceFileType(f string) bool {
+	if isTranspiledSourceFileType(f) || isDeclarationFileType(f) {
+		return true
+	}
+
+	ext := path.Ext(f)
+	return len(ext) > 0 && javascriptFileExtensions.Contains(ext[1:])
 }
 
 // A source file that does not explicitly declare itself as cjs or mjs so
 // it can be imported as if it is either. Node will decide how to interpret
 // it at runtime based on other factors.
 func isImplicitSourceFileType(f string) bool {
-	return path.Ext(f) == ".ts" || path.Ext(f) == ".tsx"
+	return path.Ext(f) == ".ts" || path.Ext(f) == ".tsx" || path.Ext(f) == ".js" || path.Ext(f) == ".jsx"
 }
 
 func isDeclarationFileType(f string) bool {

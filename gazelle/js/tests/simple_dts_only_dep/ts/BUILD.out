@@ -1,12 +1,13 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
 ts_project(
-    name = "simple_dts_only_dep",
-    srcs = ["main.ts"],
+    name = "ts",
+    srcs = [
+        "g.ts",
+        "h.d.ts",
+    ],
     deps = [
         "//dts-js",
         "//dts-ts-js",
-        "//js",
-        "//ts",
     ],
 )

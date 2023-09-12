@@ -1,0 +1,13 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+
+# gazelle:js_files **/*.{js,ts}
+
+js_library(
+    name = "simple_dts_only",
+    srcs = ["lib.d.ts"],
+    deps = [
+        "//mix",
+        "//now_dts_only",
+        "//was_dts_only",
+    ],
+)
