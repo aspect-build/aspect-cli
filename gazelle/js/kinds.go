@@ -2,6 +2,7 @@ package gazelle
 
 import (
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/emirpasic/gods/sets/treeset"
 )
 
 const (
@@ -14,6 +15,8 @@ const (
 	RulesTsRepositoryName = "aspect_rules_ts"
 	NpmRepositoryName     = "npm"
 )
+
+var sourceRuleKinds = treeset.NewWithStringComparator(TsProjectKind, JsLibraryKind)
 
 // Kinds returns a map that maps rule names (kinds) and information on how to
 // match and merge attributes that may be found in rules of those kinds.
@@ -36,11 +39,17 @@ var tsKinds = map[string]rule.KindInfo{
 		},
 	},
 	JsLibraryKind: {
-		MatchAny:        false,
-		NonEmptyAttrs:   map[string]bool{},
+		MatchAny: false,
+		NonEmptyAttrs: map[string]bool{
+			"srcs": true,
+		},
 		SubstituteAttrs: map[string]bool{},
-		MergeableAttrs:  map[string]bool{},
-		ResolveAttrs:    map[string]bool{},
+		MergeableAttrs: map[string]bool{
+			"srcs": true,
+		},
+		ResolveAttrs: map[string]bool{
+			"deps": true,
+		},
 	},
 	TsProtoLibraryKind: {
 		MatchAny: false,
@@ -93,6 +102,13 @@ var tsLoads = []rule.LoadInfo{
 		Name: "@" + RulesJsRepositoryName + "//npm:defs.bzl",
 		Symbols: []string{
 			NpmPackageKind,
+		},
+	},
+
+	{
+		Name: "@" + RulesJsRepositoryName + "//js:defs.bzl",
+		Symbols: []string{
+			JsLibraryKind,
 		},
 	},
 

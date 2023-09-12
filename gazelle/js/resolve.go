@@ -141,7 +141,7 @@ func (ts *Resolver) Embeds(r *rule.Rule, from label.Label) []label.Label {
 
 		// The compiled dts and js files are accessible as embedded rules
 		for _, src := range srcs {
-			if isSourceFileType(src) && !isDeclarationFileType(src) {
+			if isTranspiledSourceFileType(src) {
 				js := swapSourceExtension(src)
 				dts := path.Base(js) + ".d" + path.Ext(js)
 				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, js))
@@ -176,7 +176,7 @@ func (ts *Resolver) Resolve(
 	BazelLog.Infof("Resolve '%s' dependencies", from.String())
 
 	// TsProject imports are resolved as deps
-	if r.Kind() == TsProjectKind || r.Kind() == TsProtoLibraryKind {
+	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsProtoLibraryKind {
 		deps, err := ts.resolveModuleDeps(c, ix, importData.(*TsProjectInfo).imports, from)
 		if err != nil {
 			BazelLog.Fatalf("Resolution Error: ", err)
