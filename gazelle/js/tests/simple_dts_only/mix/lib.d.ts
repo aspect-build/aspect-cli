@@ -1,1 +1,1 @@
-console.log('No Imports!');
+export const b = 2;

@@ -107,26 +107,29 @@ var DefaultSourceGlobs = []*TargetGroup{
 	&TargetGroup{
 		name:           DefaultLibraryName,
 		customSources:  []string{},
-		defaultSources: []string{fmt.Sprintf("**/*.{%s}", strings.Join(sourceFileExtensionsArray, ","))},
+		defaultSources: []string{fmt.Sprintf("**/*.{%s}", strings.Join(typescriptFileExtensionsArray, ","))},
 		testonly:       false,
 	},
 	&TargetGroup{
 		name:           DefaultTestsName,
 		customSources:  []string{},
-		defaultSources: []string{fmt.Sprintf("**/*.{spec,test}.{%s}", strings.Join(sourceFileExtensionsArray, ","))},
+		defaultSources: []string{fmt.Sprintf("**/*.{spec,test}.{%s}", strings.Join(typescriptFileExtensionsArray, ","))},
 		testonly:       true,
 	},
 }
 
 var (
 	// Set of supported source file extensions.
-	sourceFileExtensions = treeset.NewWithStringComparator("ts", "tsx", "mts", "cts")
+	typescriptFileExtensions = treeset.NewWithStringComparator("ts", "tsx", "mts", "cts")
 
-	// Array of sourceFileExtensions.
-	sourceFileExtensionsArray = []string{"ts", "tsx", "mts", "cts"}
+	// Array of typescriptFileExtensions.
+	typescriptFileExtensionsArray = []string{"ts", "tsx", "mts", "cts"}
 
 	// Importable declaration files that are not compiled
 	declarationFileExtensionsArray = []string{"d.ts", "d.mts", "d.cts"}
+
+	// Supported javascript file extensions that can be sources along with dts files.
+	javascriptFileExtensions = treeset.NewWithStringComparator("js")
 
 	// Supported data file extensions that typescript can reference.
 	dataFileExtensions = treeset.NewWithStringComparator("json")
@@ -400,10 +403,6 @@ func (c *JsGazelleConfig) AddTargetGlob(target, fileGlob string, isTestOnly bool
 
 // Determine if and which target the passed file belongs in.
 func (c *JsGazelleConfig) GetSourceTarget(filePath string) *TargetGroup {
-	if !isSourceFileType(filePath) {
-		return nil
-	}
-
 	// Rules are evaluated in reverse order, so we want to
 	for i := len(c.targets) - 1; i >= 0; i-- {
 		target := c.targets[i]

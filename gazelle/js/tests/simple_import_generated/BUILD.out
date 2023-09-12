@@ -30,6 +30,8 @@ ts_project(
         ":subdir/sd2.d.ts",
         "//subbuild:sb1.ts",
         "//subbuild:sb2.d.ts",
+        "//subbuild:sb3.d.ts",
+        "//subbuild:sb4.d.ts",
         "//subbuild-disabled:d1.ts",
     ],
 )

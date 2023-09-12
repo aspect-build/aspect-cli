@@ -1,5 +1,7 @@
 load("@aspect_rules_js//js:defs.bzl", "js_library")
 
+# gazelle:js_files **/*.{ts,js}
+
 js_library(
     name = "dts-js",
     srcs = [
