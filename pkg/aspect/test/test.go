@@ -41,14 +41,20 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *Test {
 
 func (runner *Test) Run(ctx context.Context, _ *cobra.Command, args []string) (exitErr error) {
 	bazelCmd := []string{"test"}
+	bazelCmd = append(bazelCmd, args...)
 
+	// Currently Bazel only supports a single --bes_backend so adding ours after
+	// any user supplied value will result in our bes_backend taking precedence.
+	// There is a very old & stale issue to add support for multiple BES
+	// backends https://github.com/bazelbuild/bazel/issues/10908. In the future,
+	// we could build this support into the Aspect CLI and post on that issue
+	// that using the Aspect CLI resolves it.
 	if bep.HasBESBackend(ctx) {
 		besBackend := bep.BESBackendFromContext(ctx)
 		besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
 		bazelCmd = append(bazelCmd, besBackendFlag)
 	}
 
-	bazelCmd = append(bazelCmd, args...)
 	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 
 	// Process the subscribers errors before the Bazel one.

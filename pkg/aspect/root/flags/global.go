@@ -31,6 +31,9 @@ func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 	cmd.PersistentFlags().Bool(AspectLockVersion, false, "Lock the version of the Aspect CLI. This prevents the Aspect CLI from downloading and running an different version of the Aspect CLI if one is specified in .bazeliskrc or the Aspect CLI config.")
 	cmd.PersistentFlags().MarkHidden(AspectLockVersion)
 
+	cmd.PersistentFlags().Bool(AspectForceBesBackendFlagName, false, "Force the creation of a BES backend even if there are no plugins loaded")
+	cmd.PersistentFlags().MarkHidden(AspectForceBesBackendFlagName)
+
 	RegisterNoableBool(cmd.PersistentFlags(), AspectSystemConfigFlagName, true, "Whether or not to look for the system config file at /etc/aspect/cli/config.yaml")
 	cmd.PersistentFlags().MarkHidden(AspectSystemConfigFlagName)
 	cmd.PersistentFlags().MarkHidden(NoFlagName(AspectSystemConfigFlagName))

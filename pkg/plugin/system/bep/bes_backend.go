@@ -23,15 +23,20 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
+	"sync"
 
 	"github.com/golang/protobuf/ptypes/empty"
+	"golang.org/x/sync/errgroup"
 	buildv1 "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/aspectgrpc"
+	"aspect.build/cli/pkg/plugin/system/besproxy"
 )
 
 // besBackendInterceptorKeyType is a type for the BESBackendInterceptorKey that
@@ -45,13 +50,12 @@ const besBackendInterceptorKey besBackendInterceptorKeyType = 0x00
 // BESBackend implements a Build Event Protocol backend to be passed to the
 // `bazel build` command so that the Aspect plugins can register as subscribers
 // to the build events.
-// TODO(f0rmiga): implement a forwarding client to an upstream BES backend if
-// the user provides one to the `aspect build` command.
 type BESBackend interface {
 	Setup(opts ...grpc.ServerOption) error
 	ServeWait(ctx context.Context) error
 	GracefulStop()
 	Addr() string
+	RegisterBesProxy(p besproxy.BESProxy)
 	RegisterSubscriber(callback CallbackFn)
 	Errors() []error
 }
@@ -79,23 +83,28 @@ func InjectBESBackend(ctx context.Context, besBackend BESBackend) context.Contex
 }
 
 type besBackend struct {
-	subscribers *subscriberList
+	besProxies  []besproxy.BESProxy
+	closeOnce   sync.Once
+	ctx         context.Context
 	errors      *aspecterrors.ErrorList
-	listener    net.Listener
-	grpcServer  aspectgrpc.Server
-	startServe  chan struct{}
-	netListen   func(network, address string) (net.Listener, error)
 	grpcDialer  aspectgrpc.Dialer
+	grpcServer  aspectgrpc.Server
+	listener    net.Listener
+	netListen   func(network, address string) (net.Listener, error)
+	startServe  chan struct{}
+	subscribers *subscriberList
 }
 
 // NewBESBackend creates a new Build Event Protocol backend.
-func NewBESBackend() BESBackend {
+func NewBESBackend(ctx context.Context) BESBackend {
 	return &besBackend{
-		subscribers: &subscriberList{},
+		besProxies:  []besproxy.BESProxy{},
+		ctx:         ctx,
 		errors:      &aspecterrors.ErrorList{},
-		startServe:  make(chan struct{}, 1),
-		netListen:   net.Listen,
 		grpcDialer:  aspectgrpc.NewDialer(),
+		netListen:   net.Listen,
+		startServe:  make(chan struct{}, 1),
+		subscribers: &subscriberList{},
 	}
 }
 
@@ -170,6 +179,12 @@ func (bb *besBackend) Errors() []error {
 	return bb.errors.Errors()
 }
 
+// RegisterBesProxy registers a new build even stream proxy to send
+// Build Event Protocol events to.
+func (bb *besBackend) RegisterBesProxy(p besproxy.BESProxy) {
+	bb.besProxies = append(bb.besProxies, p)
+}
+
 // CallbackFn is the signature for the callback function used by the subscribers
 // of the Build Event Protocol events.
 type CallbackFn func(*buildeventstream.BuildEvent) error
@@ -181,11 +196,20 @@ func (bb *besBackend) RegisterSubscriber(callback CallbackFn) {
 }
 
 // PublishLifecycleEvent implements the gRPC PublishLifecycleEvent service.
-func (*besBackend) PublishLifecycleEvent(
+func (bb *besBackend) PublishLifecycleEvent(
 	ctx context.Context,
 	req *buildv1.PublishLifecycleEventRequest,
 ) (*empty.Empty, error) {
-	return &empty.Empty{}, nil
+	// Forward to proxy clients
+	eg, ctx := errgroup.WithContext(ctx)
+	for _, c := range bb.besProxies {
+		client := c
+		eg.Go(func() error {
+			_, err := client.PublishLifecycleEvent(ctx, req)
+			return err
+		})
+	}
+	return &emptypb.Empty{}, eg.Wait()
 }
 
 // PublishBuildToolEventStream implements the gRPC PublishBuildToolEventStream
@@ -193,14 +217,52 @@ func (*besBackend) PublishLifecycleEvent(
 func (bb *besBackend) PublishBuildToolEventStream(
 	stream buildv1.PublishBuildEvent_PublishBuildToolEventStreamServer,
 ) error {
+	ctx := stream.Context()
+
+	// Setup forwarding proxy streams
+	eg, ctx := errgroup.WithContext(ctx)
+	for _, bp := range bb.besProxies {
+		err := bp.PublishBuildToolEventStream(ctx, grpc.WaitForReady(false))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating build event stream to %v: %s\n", bp.Host(), err.Error())
+			continue
+		}
+		eg.Go(func() error {
+			for {
+				_, err := bp.Recv()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return fmt.Errorf("error receiving build event stream ack %v: %s\n", bp.Host(), err.Error())
+				}
+			}
+			return nil
+		})
+	}
+	defer bb.closeBesProxies()
+
 	for {
+		// Wait for a build event
 		req, err := stream.Recv()
 		if err == io.EOF {
-			return nil
+			// Close BES proxy streams and wait for acks
+			bb.closeBesProxies()
+			return eg.Wait()
 		}
 		if err != nil {
 			return err
 		}
+
+		// Forward the build event to grpc outStreams
+		for _, bp := range bb.besProxies {
+			err := bp.Send(req)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error sending build event to %v: %s\n", bp.Host(), err.Error())
+			}
+		}
+
+		// Forward the build event to subscribers
 		event := req.OrderedBuildEvent.Event
 		if event != nil {
 			bazelEvent := event.GetBazelEvent()
@@ -219,6 +281,8 @@ func (bb *besBackend) PublishBuildToolEventStream(
 				}
 			}
 		}
+
+		// Ack the message
 		res := &buildv1.PublishBuildToolEventStreamResponse{
 			StreamId:       req.OrderedBuildEvent.StreamId,
 			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
@@ -227,6 +291,14 @@ func (bb *besBackend) PublishBuildToolEventStream(
 			return err
 		}
 	}
+}
+
+func (bb *besBackend) closeBesProxies() {
+	bb.closeOnce.Do(func() {
+		for _, bp := range bb.besProxies {
+			bp.CloseSend()
+		}
+	})
 }
 
 // SubscriberList is a linked list for the Build Event Protocol event
