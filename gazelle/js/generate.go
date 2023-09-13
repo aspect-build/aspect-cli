@@ -86,6 +86,12 @@ func removeRule(args language.GenerateArgs, ruleName string, result *language.Ge
 	}
 
 	if mappedSourceKinds.Contains(existing.Kind()) {
+		// TODO(gazelle): result.Empty seems to not work as expected when the kind is mapped
+		// See https://github.com/bazelbuild/bazel-gazelle/issues/1440
+		if !existing.ShouldKeep() {
+			existing.Delete()
+		}
+
 		emptyRule := rule.NewRule(existing.Kind(), ruleName)
 		result.Empty = append(result.Empty, emptyRule)
 	}
@@ -208,8 +214,6 @@ func (ts *typeScriptLang) addTsProtoRules(cfg *JsGazelleConfig, args language.Ge
 		return
 	}
 
-	tsProtoLibraryKind := mapKind(args, TsProtoLibraryKind)
-
 	// Generate one ts_proto_library() per proto_library()
 	for _, protoLibrary := range protoLibraries {
 		ruleName := cfg.RenderTsProtoLibraryName(protoLibrary.Name())
@@ -217,7 +221,7 @@ func (ts *typeScriptLang) addTsProtoRules(cfg *JsGazelleConfig, args language.Ge
 		protoRuleLabel := label.New("", args.Rel, protoLibrary.Name())
 		protoRuleLabelStr := protoRuleLabel.Rel("", args.Rel)
 
-		tsProtoLibrary := rule.NewRule(tsProtoLibraryKind, ruleName)
+		tsProtoLibrary := rule.NewRule(TsProtoLibraryKind, ruleName)
 		tsProtoLibrary.SetAttr("proto", protoRuleLabelStr.String())
 
 		node_modules := ts.pnpmProjects.GetProject(args.Rel)
