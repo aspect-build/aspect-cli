@@ -7,9 +7,6 @@ import (
 	"strings"
 )
 
-// TODO(jbedard): rootDirs, baseUrl, paths etc to resolve imports
-// TODO(jbedard): support multi-file configs (extends)
-
 type TsConfigMap struct {
 	configs map[string]*TsConfig
 }
@@ -35,6 +32,10 @@ func (tc *TsWorkspace) AddTsConfigFile(root, rel, fileName string) error {
 
 	tc.cm.configs[rel] = tsconfigJSON
 	return nil
+}
+
+func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
+	return tc.cm.configs[rel]
 }
 
 func (tc *TsWorkspace) getConfig(f string) (string, *TsConfig) {

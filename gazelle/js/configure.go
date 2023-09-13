@@ -46,6 +46,7 @@ func (ts *Configurer) KnownDirectives() []string {
 	return []string{
 		Directive_TypeScriptExtension,
 		Directive_TypeScriptProtoExtension,
+		Directive_TypeScriptConfigExtension,
 		Directive_GenerationMode,
 		Directive_Lockfile,
 		Directive_IgnoreImports,
@@ -127,6 +128,17 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 			default:
 				err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
 					Directive_TypeScriptExtension, d.Value)
+				log.Fatal(err)
+			}
+		case Directive_TypeScriptConfigExtension:
+			switch d.Value {
+			case "enabled":
+				config.SetTsConfigGenerationEnabled(true)
+			case "disabled":
+				config.SetTsConfigGenerationEnabled(false)
+			default:
+				err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
+					Directive_TypeScriptConfigExtension, d.Value)
 				log.Fatal(err)
 			}
 		case Directive_TypeScriptProtoExtension:

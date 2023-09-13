@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"strings"
 
 	gazelle "aspect.build/cli/gazelle/common"
@@ -21,6 +22,8 @@ const (
 	Directive_TypeScriptExtension = "js"
 	// En/disable ts_proto_library generation
 	Directive_TypeScriptProtoExtension = "js_proto"
+	// En/disable ts_config generation
+	Directive_TypeScriptConfigExtension = "js_tsconfig"
 	// Directive_GenerationMode represents the directive that controls the BUILD generation
 	// mode. See below for the GenerationModeType constants.
 	Directive_GenerationMode = "js_generation_mode"
@@ -156,7 +159,8 @@ type JsGazelleConfig struct {
 	generationEnabled bool
 	generationMode    GenerationModeType
 
-	protoGenerationEnabled bool
+	protoGenerationEnabled    bool
+	tsconfigGenerationEnabled bool
 
 	pnpmLockPath string
 
@@ -182,6 +186,7 @@ func newRootConfig() *JsGazelleConfig {
 		rel:                        "",
 		generationEnabled:          true,
 		protoGenerationEnabled:     true,
+		tsconfigGenerationEnabled:  false,
 		generationMode:             GenerationModeDirectory,
 		pnpmLockPath:               "pnpm-lock.yaml",
 		excludes:                   make([]string, 0),
@@ -254,6 +259,15 @@ func (c *JsGazelleConfig) SetGenerationEnabled(enabled bool) {
 // GenerationEnabled returns whether the extension is enabled or not.
 func (c *JsGazelleConfig) GenerationEnabled() bool {
 	return c.generationEnabled
+}
+
+func (c *JsGazelleConfig) SetTsConfigGenerationEnabled(enabled bool) {
+	c.tsconfigGenerationEnabled = enabled
+}
+
+// If ts_config extension is enabled.
+func (c *JsGazelleConfig) GetTsConfigGenerationEnabled() bool {
+	return c.tsconfigGenerationEnabled
 }
 
 func (c *JsGazelleConfig) SetProtoGenerationEnabled(enabled bool) {
@@ -387,6 +401,10 @@ func (c *JsGazelleConfig) SetTsProtoLibraryNamingConvention(tsProtoLibraryName s
 
 func (c *JsGazelleConfig) RenderTsProtoLibraryName(protoLibraryName string) string {
 	return strings.ReplaceAll(c.tsProtoLibraryName, ProtoNameVar, protoLibraryName)
+}
+
+func (c *JsGazelleConfig) RenderTsConfigName(tsconfigName string) string {
+	return strings.ReplaceAll(strings.TrimRight(path.Base(tsconfigName), ".json"), ".", "_")
 }
 
 // renderTargetName returns the ts_project target name by performing all substitutions.

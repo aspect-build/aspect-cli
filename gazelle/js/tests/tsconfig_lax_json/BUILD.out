@@ -1,8 +1,14 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
 # gazelle:js_generation_mode none
+# gazelle:js_tsconfig enabled
 
 ts_project(
     name = "tsconfig_lax_json",
     srcs = ["src/main.ts"],
+)
+
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.json",
 )
