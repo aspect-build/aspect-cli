@@ -21,12 +21,22 @@ import (
 	"testing"
 )
 
+func assertTrue(t *testing.T, b bool, msg string) {
+	if !b {
+		t.Error(msg)
+	}
+}
+
+func assertEqual(t *testing.T, a, b string, msg string) {
+	assertTrue(t, a == b, msg)
+}
+
 func parseTest(t *testing.T, tsconfigJSON string) *TsConfig {
 	cm := &TsConfigMap{
 		configs: make(map[string]*TsConfig),
 	}
 
-	options, err := parseTsConfigJSON(cm, ".", "tsconfig_test", []byte(tsconfigJSON))
+	options, err := parseTsConfigJSON(cm, ".", "tsconfig_test", "tsconfig.json", []byte(tsconfigJSON))
 	if err != nil {
 		t.Fatalf("failed to parse options: %v\n\n%s", err, tsconfigJSON)
 	}
@@ -48,6 +58,16 @@ func assertExpand(t *testing.T, options *TsConfig, p string, expected ...string)
 }
 
 func TestIsRelativePath(t *testing.T) {
+	t.Run("config metadata", func(t *testing.T) {
+		cm := &TsConfigMap{
+			configs: make(map[string]*TsConfig),
+		}
+
+		subdirOptions, _ := parseTsConfigJSON(cm, ".", "sub/dir", "tsconfig.json", []byte("{}"))
+		assertEqual(t, subdirOptions.ConfigDir, "sub/dir", "ConfigDir")
+		assertEqual(t, subdirOptions.ConfigName, "tsconfig.json", "ConfigDir")
+	})
+
 	t.Run("relative path strings", func(t *testing.T) {
 
 		shouldNotMatch := []string{

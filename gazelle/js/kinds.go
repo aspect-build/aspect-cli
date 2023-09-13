@@ -9,6 +9,7 @@ const (
 	TsProjectKind         = "ts_project"
 	TsProtoLibraryKind    = "ts_proto_library"
 	JsLibraryKind         = "js_library"
+	TsConfigKind          = "ts_config"
 	NpmPackageKind        = "npm_package"
 	NpmLinkAllKind        = "npm_link_all_packages"
 	RulesJsRepositoryName = "aspect_rules_js"
@@ -51,6 +52,16 @@ var tsKinds = map[string]rule.KindInfo{
 			"deps": true,
 		},
 	},
+	TsConfigKind: {
+		NonEmptyAttrs: map[string]bool{
+			"src": true,
+		},
+		SubstituteAttrs: map[string]bool{},
+		MergeableAttrs:  map[string]bool{},
+		ResolveAttrs: map[string]bool{
+			"deps": true,
+		},
+	},
 	TsProtoLibraryKind: {
 		MatchAny: false,
 		NonEmptyAttrs: map[string]bool{
@@ -88,6 +99,7 @@ var tsLoads = []rule.LoadInfo{
 		Name: "@" + RulesTsRepositoryName + "//ts:defs.bzl",
 		Symbols: []string{
 			TsProjectKind,
+			TsConfigKind,
 		},
 	},
 

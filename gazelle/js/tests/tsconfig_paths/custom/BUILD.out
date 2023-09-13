@@ -1,4 +1,4 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
 ts_project(
     name = "custom",
@@ -10,4 +10,9 @@ ts_project(
         "//lib/b",
         "//lib/c",
     ],
+)
+
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.json",
 )
