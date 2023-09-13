@@ -14,15 +14,5 @@
  * limitations under the License.
  */
 
-package flags
-
-const (
-	AspectFlagPrefix              = "aspect:"
-	AspectLockVersion             = AspectFlagPrefix + "lock_version"
-	AspectConfigFlagName          = AspectFlagPrefix + "config"
-	AspectSystemConfigFlagName    = AspectFlagPrefix + "system_config"
-	AspectWorkspaceConfigFlagName = AspectFlagPrefix + "workspace_config"
-	AspectHomeConfigFlagName      = AspectFlagPrefix + "home_config"
-	AspectInteractiveFlagName     = AspectFlagPrefix + "interactive"
-	AspectForceBesBackendFlagName = AspectFlagPrefix + "force_bes_backend"
-)
+// Package mock contains generated files.
+package mock

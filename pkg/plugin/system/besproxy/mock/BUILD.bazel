@@ -1,13 +1,13 @@
 load("@bazel_gomock//:gomock.bzl", "gomock")
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
-# gazelle:exclude mock_bep_test.go
+# gazelle:exclude mock_besproxy_test.go
 
 gomock(
-    name = "mock_bep_source",
-    out = "mock_bep_test.go",
-    interfaces = ["BESBackend"],
-    library = "//pkg/plugin/system/bep",
+    name = "mock_besproxy_source",
+    out = "mock_besproxy_test.go",
+    interfaces = ["BESProxy"],
+    library = "//pkg/plugin/system/besproxy",
     package = "mock",
     visibility = ["//visibility:private"],
 )
@@ -16,14 +16,15 @@ go_library(
     name = "mock",
     srcs = [
         "doc.go",
-        ":mock_bep_source",  # keep
+        ":mock_besproxy_source",  # keep
     ],
-    importpath = "aspect.build/cli/pkg/plugin/system/bep/mock",
+    importpath = "aspect.build/cli/pkg/plugin/system/besproxy/mock",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//pkg/plugin/system/bep",  # keep
         "//pkg/plugin/system/besproxy",  # keep
         "@com_github_golang_mock//gomock",  # keep
+        "@go_googleapis//google/devtools/build/v1:build_go_proto",  # keep
         "@org_golang_google_grpc//:grpc",  # keep
+        "@org_golang_google_protobuf//types/known/emptypb",  # keep
     ],
 )

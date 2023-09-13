@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"aspect.build/cli/pkg/aspect/root/config"
+	"aspect.build/cli/pkg/aspect/root/flags"
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/interceptors"
@@ -39,6 +41,7 @@ import (
 	"aspect.build/cli/pkg/plugin/client"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/plugin"
 	"aspect.build/cli/pkg/plugin/system/bep"
+	"aspect.build/cli/pkg/plugin/system/besproxy"
 )
 
 // PluginSystem is the interface that defines all the methods for the aspect CLI
@@ -164,17 +167,27 @@ func (ps *pluginSystem) TearDown() {
 }
 
 // BESBackendInterceptor starts a BES backend and injects it into the context.
-// It gracefully stops the  server after the main command is executed.
+// It gracefully stops the server after the main command is executed.
 func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
-	// noop if there are no plugins
-	if ps.plugins.head == nil {
-		return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
+	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
+		// Check if --aspect:force_bes_backend is set. This is primarily used for testing.
+		forceBesBackend, err := cmd.Root().Flags().GetBool(rootFlags.AspectForceBesBackendFlagName)
+		if err != nil {
+			return fmt.Errorf("failed to get value of --aspect:force_bes_backend: %w", err)
+		}
+
+		// If there are no plugins configured and --aspect:force_bes_backend is not set then short
+		// circuit here since we don't have any need to create a grpc server to consume the build event
+		// stream.
+		if ps.plugins.head == nil && forceBesBackend == false {
 			return next(ctx, cmd, args)
 		}
-	}
+		if forceBesBackend {
+			fmt.Fprintf(os.Stderr, "Forcing creation of BES backend\n")
+		}
 
-	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
-		besBackend := bep.NewBESBackend()
+		// Create the BES backend
+		besBackend := bep.NewBESBackend(ctx)
 		for node := ps.plugins.head; node != nil; node = node.next {
 			besBackend.RegisterSubscriber(node.payload.BEPEventCallback)
 		}
@@ -187,9 +200,46 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 			// also set the receive message size.
 			grpc.MaxSendMsgSize(math.MaxInt32),
 		}
+
+		// Check if user has specified --bes_backend
+		// https://bazel.build/reference/command-line-reference#flag--bes_backend
+		userBesBackend, err := cmd.Flags().GetString("bes_backend")
+		if err != nil {
+			return fmt.Errorf("expected --bes_backend flag to be registered with cobra as a String: %w", err)
+		}
+
+		// Check if user has specified any --remote_header values
+		// https://bazel.build/reference/command-line-reference#flag--remote_header
+		userRemoteHeaders := make(map[string]string)
+		userRemoteHeader, ok := cmd.Flag("remote_header").Value.(*flags.MultiString)
+		if !ok {
+			return fmt.Errorf("expected --remote_header flag to be registered with cobra as a MultiString")
+		}
+		for _, header := range userRemoteHeader.Get() {
+			s := strings.Split(header, "=")
+			if len(s) != 2 {
+				return fmt.Errorf("invalid ---remote_header flag value '%v'; value must be in the form of a 'name=value' assignment", header)
+			}
+			userRemoteHeaders[s[0]] = s[1]
+		}
+
+		// Configure a BES proxy if `--bes_backend` is set by the user
+		if userBesBackend != "" {
+			besProxy := besproxy.NewBesProxy(userBesBackend, userRemoteHeaders)
+			if err := besProxy.Connect(); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to connect to build even stream backend %s: %s", userBesBackend, err.Error())
+			} else {
+				fmt.Fprintf(os.Stderr, "Forwarding build even stream to %v\n", userBesBackend)
+				besBackend.RegisterBesProxy(besProxy)
+			}
+		}
+
+		// Setup the BES backend grpc server
 		if err := besBackend.Setup(opts...); err != nil {
 			return fmt.Errorf("failed to run BES backend: %w", err)
 		}
+
+		// Start the BES backend
 		ctx, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
 		if err := besBackend.ServeWait(ctx); err != nil {
