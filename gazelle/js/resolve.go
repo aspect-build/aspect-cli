@@ -55,6 +55,8 @@ func (ts *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []reso
 	switch r.Kind() {
 	case TsProtoLibraryKind:
 		return ts.protoLibraryImports(r, f)
+	case TsConfigKind:
+		return ts.tsconfigImports(r, f)
 	default:
 		return ts.sourceFileImports(r, f)
 	}
@@ -100,6 +102,17 @@ func (ts *Resolver) sourceFileImports(r *rule.Rule, f *rule.File) []resolve.Impo
 	}
 
 	return provides
+}
+
+func (ts *Resolver) tsconfigImports(r *rule.Rule, f *rule.File) []resolve.ImportSpec {
+	// Only the tsconfig file itself is exposed.
+	// The output is the same as the ts_config(src) input.
+	return []resolve.ImportSpec{
+		{
+			Lang: LanguageName,
+			Imp:  path.Join(f.Pkg, r.AttrString("src")),
+		},
+	}
 }
 
 // TypeScript-importable ImportSpecs from a TsProtoLibrary rule.
@@ -176,7 +189,7 @@ func (ts *Resolver) Resolve(
 	BazelLog.Infof("Resolve '%s' dependencies", from.String())
 
 	// TsProject imports are resolved as deps
-	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsProtoLibraryKind {
+	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsConfigKind || r.Kind() == TsProtoLibraryKind {
 		deps, err := ts.resolveModuleDeps(c, ix, importData.(*TsProjectInfo).imports, from)
 		if err != nil {
 			BazelLog.Fatalf("Resolution Error: ", err)
@@ -371,14 +384,13 @@ func (ts *Resolver) resolvePackage(from label.Label, imp string) *label.Label {
 	return &relPkgLabel
 }
 
-// Find and resolve any @types package for an import
-func (ts *Resolver) resolveAtTypes(from label.Label, imp string) *label.Label {
+func toAtTypesPackage(imp string) string {
 	pkgParts := strings.Split(imp, "/")
 
 	if imp[0] == '@' {
 		if len(pkgParts) < 2 {
 			BazelLog.Errorf("Invalid scoped package: '%s'", imp)
-			return nil
+			return ""
 		}
 
 		pkgParts = []string{pkgParts[0][1:], pkgParts[1]}
@@ -386,12 +398,17 @@ func (ts *Resolver) resolveAtTypes(from label.Label, imp string) *label.Label {
 		pkgParts = []string{pkgParts[0]}
 	}
 
+	return path.Join("@types", strings.Join(pkgParts, "__"))
+}
+
+// Find and resolve any @types package for an import
+func (ts *Resolver) resolveAtTypes(from label.Label, imp string) *label.Label {
 	fromProject := ts.lang.pnpmProjects.GetProject(from.Pkg)
 	if fromProject == nil {
 		return nil
 	}
 
-	typesPkg := path.Join("@types", strings.Join(pkgParts, "__"))
+	typesPkg := toAtTypesPackage(imp)
 	typesPkgLabel := fromProject.Get(typesPkg)
 	if typesPkgLabel == nil {
 		return nil

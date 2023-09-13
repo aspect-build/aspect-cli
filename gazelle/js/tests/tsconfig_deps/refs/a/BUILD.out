@@ -1,14 +1,12 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
-# gazelle:js_generation_mode none
-
 ts_project(
-    name = "p1",
+    name = "a",
     srcs = ["index.ts"],
-    deps = ["//projects/p1/nested_lib/a"],
 )
 
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
+    deps = ["//:tsconfig"],
 )

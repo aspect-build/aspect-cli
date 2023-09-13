@@ -32,15 +32,25 @@ type tsCompilerOptionsJSON struct {
 	RootDirs *[]string            `json:"rootDirs"`
 	BaseUrl  *string              `json:"baseUrl"`
 	Paths    *map[string][]string `json:"paths"`
+	Types    *[]string            `json:"types"`
+}
+
+type tsReferenceJSON struct {
+	Path string `json:"path"`
 }
 
 type tsConfigJSON struct {
 	Extends         string                `json:"extends"`
 	CompilerOptions tsCompilerOptionsJSON `json:"compilerOptions"`
+	References      *[]tsReferenceJSON    `json:"references"`
 }
 
 type TsConfig struct {
+	// Directory of the tsconfig file
 	ConfigDir string
+
+	// Name of the tsconfig file relative to ConfigDir
+	ConfigName string
 
 	RootDir string
 	BaseUrl string
@@ -48,6 +58,13 @@ type TsConfig struct {
 	VirtualRootDirs []string
 
 	Paths *TsConfigPaths
+
+	// References to other tsconfig or packages that must be resolved.
+	Types   []string
+	Extends string
+
+	// TODO: drop references? Not supported by rules_ts?
+	References []string
 }
 
 type TsConfigPaths struct {
@@ -80,25 +97,43 @@ func parseTsConfigJSONFile(cm *TsConfigMap, root, dir, tsconfig string) (*TsConf
 		return nil, readErr
 	}
 
-	config, err := parseTsConfigJSON(cm, root, dir, content)
+	config, err := parseTsConfigJSON(cm, root, dir, tsconfig, content)
 	cm.configs[dir] = config
 	return config, err
 }
 
-func parseTsConfigJSON(cm *TsConfigMap, root, configDir string, tsconfigContent []byte) (*TsConfig, error) {
+func parseTsConfigJSON(cm *TsConfigMap, root, configDir, configName string, tsconfigContent []byte) (*TsConfig, error) {
 	var c tsConfigJSON
 	if err := jsonr.Unmarshal(tsconfigContent, &c); err != nil {
 		return nil, err
 	}
 
 	var baseConfig *TsConfig
+	var extends string
 	if c.Extends != "" {
 		base, err := parseTsConfigJSONFile(cm, root, path.Join(configDir, path.Dir(c.Extends)), path.Base(c.Extends))
 		if err != nil {
 			BazelLog.Warnf("Failed to load base tsconfig file %s: %v", path.Join(configDir, c.Extends), err)
 		}
 
+		extends = path.Join(configDir, c.Extends)
 		baseConfig = base
+	}
+
+	var types []string
+	if c.CompilerOptions.Types != nil && len(*c.CompilerOptions.Types) > 0 {
+		types = *c.CompilerOptions.Types
+	}
+
+	var references []string
+	if c.References != nil && len(*c.References) > 0 {
+		references = make([]string, 0, len(*c.References))
+
+		for _, r := range *c.References {
+			if r.Path != "" {
+				references = append(references, path.Join(configDir, r.Path))
+			}
+		}
 	}
 
 	var baseConfigRel = "."
@@ -153,10 +188,14 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir string, tsconfigContent 
 
 	config := TsConfig{
 		ConfigDir:       configDir,
+		ConfigName:      configName,
 		RootDir:         RootDir,
 		BaseUrl:         BaseUrl,
 		Paths:           Paths,
 		VirtualRootDirs: VirtualRootDirs,
+		Extends:         extends,
+		Types:           types,
+		References:      references,
 	}
 
 	return &config, nil

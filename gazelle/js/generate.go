@@ -14,6 +14,7 @@ import (
 	treesitter_parser "aspect.build/cli/gazelle/js/parser/treesitter"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	proto "aspect.build/cli/gazelle/js/proto"
+	"aspect.build/cli/gazelle/js/typescript"
 	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
@@ -66,6 +67,10 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 
 	ts.addPackageRules(cfg, args, &result)
 	ts.addSourceRules(cfg, args, &result)
+
+	if cfg.GetTsConfigGenerationEnabled() {
+		ts.addTsConfigRules(cfg, args, &result)
+	}
 
 	if cfg.ProtoGenerationEnabled() {
 		ts.addTsProtoRules(cfg, args, &result)
@@ -206,6 +211,69 @@ func (ts *typeScriptLang) addNpmPackageRule(cfg *JsGazelleConfig, args language.
 	result.Imports = append(result.Imports, newNpmPackageImports())
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", npmPackage.Kind(), args.Rel, npmPackage.Name())
+}
+
+func (ts *typeScriptLang) addTsConfigRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
+	tsconfig := ts.tsconfig.GetTsConfigFile(args.Rel)
+	if tsconfig == nil {
+		return
+	}
+
+	imports := newTsProjectInfo()
+	for _, impt := range ts.collectTsConfigImports(cfg, args, tsconfig) {
+		imports.AddImport(impt)
+	}
+
+	tsconfigName := cfg.RenderTsConfigName(tsconfig.ConfigName)
+	tsconfigRule := rule.NewRule(TsConfigKind, tsconfigName)
+	tsconfigRule.SetAttr("src", tsconfig.ConfigName)
+
+	result.Gen = append(result.Gen, tsconfigRule)
+	result.Imports = append(result.Imports, imports)
+}
+
+func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args language.GenerateArgs, tsconfig *typescript.TsConfig) []ImportStatement {
+	imports := make([]ImportStatement, 0)
+
+	SourcePath := path.Join(tsconfig.ConfigDir, tsconfig.ConfigName)
+
+	if tsconfig.Extends != "" {
+		imports = append(imports, ImportStatement{
+			ImportSpec: resolve.ImportSpec{
+				Lang: LanguageName,
+				Imp:  tsconfig.Extends,
+			},
+			ImportPath: tsconfig.Extends,
+			SourcePath: SourcePath,
+		})
+	}
+
+	for _, t := range tsconfig.Types {
+		imports = append(imports, ImportStatement{
+			ImportSpec: resolve.ImportSpec{
+				Lang: LanguageName,
+				Imp:  toAtTypesPackage(t),
+			},
+			ImportPath: t,
+			SourcePath: SourcePath,
+		})
+	}
+
+	for _, reference := range tsconfig.References {
+		// TODO: how do we know the referenced tsconfig filename?
+		referenceFile := cfg.tsconfigName
+
+		imports = append(imports, ImportStatement{
+			ImportSpec: resolve.ImportSpec{
+				Lang: LanguageName,
+				Imp:  path.Join(reference, referenceFile),
+			},
+			ImportPath: reference,
+			SourcePath: SourcePath,
+		})
+	}
+
+	return imports
 }
 
 func (ts *typeScriptLang) addTsProtoRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {

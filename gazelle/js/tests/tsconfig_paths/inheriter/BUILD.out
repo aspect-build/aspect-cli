@@ -1,4 +1,4 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
 ts_project(
     name = "inheriter",
@@ -7,4 +7,10 @@ ts_project(
         "//lib/a",
         "//lib/c",
     ],
+)
+
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.json",
+    deps = ["//:tsconfig"],
 )
