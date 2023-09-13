@@ -25,24 +25,30 @@ import (
 
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
+	"golang.org/x/sync/errgroup"
 	buildv1 "google.golang.org/genproto/googleapis/devtools/build/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	buildeventstream "aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/aspecterrors"
 	grpc_mock "aspect.build/cli/pkg/aspectgrpc/mock"
+	"aspect.build/cli/pkg/plugin/system/besproxy"
+	besproxy_mock "aspect.build/cli/pkg/plugin/system/besproxy/mock"
 	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
 )
 
 func TestSetup(t *testing.T) {
 	t.Run("fails when netListen fails", func(t *testing.T) {
 		g := NewGomegaWithT(t)
+		ctx := context.Background()
 
 		listenErr := fmt.Errorf("failed listen")
 		besBackend := &besBackend{
 			netListen: func(network, address string) (net.Listener, error) {
 				return nil, listenErr
 			},
+			ctx: ctx,
 		}
 		err := besBackend.Setup()
 
@@ -51,11 +57,13 @@ func TestSetup(t *testing.T) {
 
 	t.Run("succeeds when netListen succeeds", func(t *testing.T) {
 		g := NewGomegaWithT(t)
+		ctx := context.Background()
 
 		besBackend := &besBackend{
 			netListen: func(network, address string) (net.Listener, error) {
 				return nil, nil // It's fine to return nil for net.Listener as it doesn't get called in Setup.
 			},
+			ctx: ctx,
 		}
 		err := besBackend.Setup()
 
@@ -231,6 +239,11 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Return(nil, expectedErr).
 			Times(1)
 
+		eventStream.
+			EXPECT().
+			Context().
+			Return(context.Background()).
+			Times(1)
 		besBackend := &besBackend{}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
@@ -268,6 +281,11 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Times(1).
 			After(recv)
 
+		eventStream.
+			EXPECT().
+			Context().
+			Return(context.Background()).
+			Times(1)
 		besBackend := &besBackend{subscribers: &subscriberList{}}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
@@ -310,6 +328,11 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Times(1).
 			After(send)
 
+		eventStream.
+			EXPECT().
+			Context().
+			Return(context.Background()).
+			Times(1)
 		besBackend := &besBackend{subscribers: &subscriberList{}}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
@@ -377,6 +400,12 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			calledSubscriber3 = true
 			return expectedSubscriber3Err
 		})
+
+		eventStream.
+			EXPECT().
+			Context().
+			Return(context.Background()).
+			Times(1)
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
 		g.Expect(err).To(Not(HaveOccurred()))
@@ -387,5 +416,90 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 		subscriberErrs := besBackend.Errors()
 		g.Expect(subscriberErrs[0]).To(MatchError(expectedSubscriber2Err))
 		g.Expect(subscriberErrs[1]).To(MatchError(expectedSubscriber3Err))
+	})
+
+	t.Run("succeeds with proxies", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ctx := context.Background()
+		eventStream := grpc_mock.NewMockPublishBuildEvent_PublishBuildToolEventStreamServer(ctrl)
+		buildEvent := &buildeventstream.BuildEvent{}
+		var anyBuildEvent anypb.Any
+		anyBuildEvent.MarshalFrom(buildEvent)
+		event := &buildv1.BuildEvent{Event: &buildv1.BuildEvent_BazelEvent{BazelEvent: &anyBuildEvent}}
+		streamId := &buildv1.StreamId{BuildId: "1"}
+		orderedBuildEvent := &buildv1.OrderedBuildEvent{
+			StreamId:       streamId,
+			SequenceNumber: 1,
+			Event:          event,
+		}
+		req := &buildv1.PublishBuildToolEventStreamRequest{OrderedBuildEvent: orderedBuildEvent}
+		recv := eventStream.
+			EXPECT().
+			Recv().
+			Return(req, nil).
+			Times(1)
+		res := &buildv1.PublishBuildToolEventStreamResponse{
+			StreamId:       req.OrderedBuildEvent.StreamId,
+			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
+		}
+		send := eventStream.
+			EXPECT().
+			Send(res).
+			Return(nil).
+			Times(1).
+			After(recv)
+		eventStream.
+			EXPECT().
+			Recv().
+			Return(nil, io.EOF).
+			Times(1).
+			After(send)
+
+		besBackend := &besBackend{
+			besProxies:  []besproxy.BESProxy{},
+			subscribers: &subscriberList{},
+			errors:      &aspecterrors.ErrorList{},
+		}
+
+		_, egCtx := errgroup.WithContext(ctx)
+		besProxy := besproxy_mock.NewMockBESProxy(ctrl)
+		besBackend.RegisterBesProxy(besProxy)
+
+		besProxy.
+			EXPECT().
+			PublishBuildToolEventStream(egCtx, grpc.WaitForReady(false)).
+			Return(nil).
+			Times(1)
+		besProxy.
+			EXPECT().
+			Send(req).
+			Return(nil).
+			Times(1)
+		besProxy.
+			EXPECT().
+			CloseSend().
+			Return(nil).
+			Times(1)
+		besProxy.
+			EXPECT().
+			Recv().
+			Return(nil, nil).
+			Times(1)
+		besProxy.
+			EXPECT().
+			Recv().
+			Return(nil, io.EOF).
+			Times(1)
+		eventStream.
+			EXPECT().
+			Context().
+			Return(ctx).
+			Times(1)
+		err := besBackend.PublishBuildToolEventStream(eventStream)
+
+		g.Expect(err).To(Not(HaveOccurred()))
 	})
 }
