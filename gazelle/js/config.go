@@ -55,8 +55,6 @@ const (
 	Directive_CustomTargetFiles = "js_custom_files"
 	// Add a glob to a custom library type
 	Directive_CustomTargetTestFiles = "js_custom_test_files"
-	// A TypeScript tsconfig.json file path for typescript compilation config.
-	Directive_JsGazelleConfigJson = "js_tsconfig"
 )
 
 // GenerationModeType represents one of the generation modes.
@@ -460,8 +458,4 @@ func (c *JsGazelleConfig) addTargetGlob(targetName, glob string, isTestOnly bool
 		customSources: []string{glob},
 		testonly:      isTestOnly,
 	})
-}
-
-func (c *JsGazelleConfig) SetTsconfigName(tsconfigName string) {
-	c.tsconfigName = tsconfigName
 }
