@@ -1,9 +1,6 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@aspect_rules_js//js:defs.bzl", "js_library")
 
-ts_project(
+js_library(
     name = "types",
-    srcs = [
-        "lib-a.d.ts",
-        "x.ts",
-    ],
+    srcs = ["lib-a.d.ts"],
 )

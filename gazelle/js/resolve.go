@@ -64,19 +64,11 @@ func (ts *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []reso
 
 // TypeScript-importable ImportSpecs from a set of source files.
 func (ts *Resolver) sourceFileImports(r *rule.Rule, f *rule.File) []resolve.ImportSpec {
-	var projectImports *TsProjectInfo
-
-	if r.Kind() == TsProjectKind {
-		// Rules such as empty rules may not have info.
-		if impts := r.PrivateAttr("ts_project_info"); impts != nil {
-			projectImports = impts.(*TsProjectInfo)
-		}
-	}
-
 	srcs := r.AttrStrings("srcs")
 
 	provides := make([]resolve.ImportSpec, 0, len(srcs)+1)
 
+	// Sources that produce importable paths.
 	for _, src := range srcs {
 		src = path.Clean(path.Join(f.Pkg, src))
 
@@ -88,8 +80,11 @@ func (ts *Resolver) sourceFileImports(r *rule.Rule, f *rule.File) []resolve.Impo
 		}
 	}
 
-	if projectImports != nil {
-		for _, mod := range projectImports.modules.Values() {
+	// Rules that produce modules.
+	if projectInfo := r.PrivateAttr("ts_project_info"); projectInfo != nil {
+		projectModules := projectInfo.(*TsProjectInfo).modules
+
+		for _, mod := range projectModules.Values() {
 			provides = append(provides, resolve.ImportSpec{
 				Lang: LanguageName,
 				Imp:  mod.(string),
