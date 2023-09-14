@@ -21,10 +21,25 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
 )
+
+func isFlagInFlagSet(flags *pflag.FlagSet, arg string) bool {
+	var flag *pflag.Flag
+	if arg[0] == '-' {
+		if arg[1] == '-' {
+			flag = flags.Lookup(strings.SplitN(arg[2:], "=", 2)[0])
+		} else {
+			for _, s := range arg[1:] {
+				flag = flags.ShorthandLookup(string(s))
+			}
+		}
+	}
+	return flag != nil
+}
 
 func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
@@ -42,11 +57,23 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 				if !doubleDash {
 					parseArgs = append(parseArgs, arg)
 				}
-				if doubleDash || !strings.HasPrefix(arg, "--aspect:") {
+				// Forward all flags to the bazel command except valid --aspect: flags that come before any
+				// double dash (--). The valid --aspect: are all in rootCmd.PersistentFlags() so we can check
+				// against that.
+				rootCmd := cmd
+				for rootCmd.Parent() != nil {
+					rootCmd = rootCmd.Parent()
+				}
+				if doubleDash || !isFlagInFlagSet(rootCmd.PersistentFlags(), arg) {
 					forwardArgs = append(forwardArgs, arg)
 				}
 			}
 			cmd.DisableFlagParsing = false
+			// Be tolerant of unknown flags since Bazel doesn't let us know what "alternate" flag names it
+			// accepts and we don't want to error out if a user passes a valid "alternate" flag such as
+			// --experimental_remote_grpc_log when the Bazel version being used reports only
+			// --remote_grpc_log as a valid flag.
+			cmd.FParseErrWhitelist = cobra.FParseErrWhitelist{UnknownFlags: true}
 			if err := cmd.ParseFlags(parseArgs); err != nil {
 				return err
 			}
