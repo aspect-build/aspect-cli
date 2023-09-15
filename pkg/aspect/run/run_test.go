@@ -113,7 +113,7 @@ func TestRun(t *testing.T) {
 		bzl := bazel_mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			RunCommand(streams, nil, "run", "//...", "--bes_backend=grpc://127.0.0.1:12345").
+			RunCommand(streams, nil, "run", "//my/runable:target", "--bes_backend=grpc://127.0.0.1:12345", "--", "myarg").
 			Return(0, nil)
 		besBackend := bep_mock.NewMockBESBackend(ctrl)
 		besBackend.
@@ -129,7 +129,7 @@ func TestRun(t *testing.T) {
 		ctx := bep.InjectBESBackend(context.Background(), besBackend)
 
 		b := run.New(streams, bzl)
-		err := b.Run(ctx, nil, []string{"//..."})
+		err := b.Run(ctx, nil, []string{"//my/runable:target", "--", "myarg"})
 
 		g.Expect(err).To(BeNil())
 	})
