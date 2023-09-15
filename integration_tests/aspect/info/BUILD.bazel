@@ -2,14 +2,14 @@ load("//integration_tests:bats.bzl", "bats_test")
 
 # common env
 env = {
-    "BAZEL_BINARY": "$(location @bazel_6_2_1//:bazel)",
+    "BAZEL_BINARY": "$(location @bazel_6_3_2//:bazel)",
 }
 
 # common data
 data = [
     "//integration_tests/aspect:common.bats",
     "//cmd/aspect",
-    "@bazel_6_2_1//:bazel",
+    "@bazel_6_3_2//:bazel",
 ]
 
 bats_test(
