@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
@@ -59,7 +60,7 @@ func (runner *Run) Run(ctx context.Context, _ *cobra.Command, args []string) (ex
 	if bep.HasBESBackend(ctx) {
 		besBackend := bep.BESBackendFromContext(ctx)
 		besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
-		bazelCmd = append(bazelCmd, besBackendFlag)
+		bazelCmd = flags.AddFlagToCommand(bazelCmd, besBackendFlag)
 	}
 
 	exitCode, bazelErr := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)

@@ -8,6 +8,7 @@ go_library(
         "interceptor.go",
         "multi_string.go",
         "noable_bool.go",
+        "utils.go",
     ],
     importpath = "aspect.build/cli/pkg/aspect/root/flags",
     visibility = ["//visibility:public"],
