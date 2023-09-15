@@ -29,12 +29,18 @@ BAZEL_VERSIONS = {
         "linux-arm64": "ac70546fd207a98d500f118f621c6e15f918786cb5f0a5bb9ca709b433fb5a9b",
         "linux-x86_64": "81130d324e145dcf3192338b875669fe5f410fef26344985dd4cdcdb1c7cab5b",
     },
+    "6.3.2": {
+        "darwin-arm64": "c3e8a47b9926adc305cacf64e6d17964dfa08c570c139a734e00c381bf38ba49",
+        "darwin-x86_64": "78f7417b4dd9193dba7b753d5a7069497185a020d87e9076a577871994b59ead",
+        "linux-arm64": "9d88a0b206e22cceb4afe0060be7f294b423f5f49b18750fbbd7abd47cea4054",
+        "linux-x86_64": "e78fc3394deae5408d6f49a15c7b1e615901969ecf6e50d55ef899996b0b8458",
+    },
 }
 
 def _bazel_binary_impl(rctx):
     # TODO: make this configurable if needed in the future.
-    version = "6.3.1"
-    version_without_rc = "6.3.1"
+    version = "6.3.2"
+    version_without_rc = "6.3.2"
     release_type = "release"
     platform = repo_utils.platform(rctx).replace("_", "-").replace("amd64", "x86_64")
 
@@ -67,4 +73,4 @@ bazel_binary = repository_rule(
 )
 
 def bazel_binaries():
-    bazel_binary(name = "bazel_6_2_1")
+    bazel_binary(name = "bazel_6_3_2")
