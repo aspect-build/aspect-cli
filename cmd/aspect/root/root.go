@@ -76,6 +76,15 @@ func CheckAspectLockVersionFlag(args []string) bool {
 	return false
 }
 
+func CheckAspectDisablePluginsFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--"+flags.AspectDisablePluginsFlagName {
+			return true
+		}
+	}
+	return false
+}
+
 func MaybeAspectVersionFlag(streams ioutils.Streams, args []string) {
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "-v") {
 		fmt.Fprintf(streams.Stdout, "%s %s\n", buildinfo.Current().GnuName(), buildinfo.Current().Version())

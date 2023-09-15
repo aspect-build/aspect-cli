@@ -62,23 +62,26 @@ func main() {
 		aspecterrors.HandleError(err)
 	}
 
-	restArgs, startupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
+	args, startupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
 
 	if err != nil {
 		aspecterrors.HandleError(err)
 	}
 
-	if err = command(bzl, streams, restArgs, startupFlags); err != nil {
+	if err = command(bzl, streams, args, startupFlags); err != nil {
 		aspecterrors.HandleError(err)
 	}
 }
 
-func command(bzl bazel.Bazel, streams ioutils.Streams, restArgs, startupFlags []string) error {
+func command(bzl bazel.Bazel, streams ioutils.Streams, args []string, startupFlags []string) error {
 
 	pluginsConfig := viper.Get("plugins")
 	pluginSystem := system.NewPluginSystem()
-	if err := pluginSystem.Configure(streams, pluginsConfig); err != nil {
-		return err
+
+	if !root.CheckAspectDisablePluginsFlag(args) {
+		if err := pluginSystem.Configure(streams, pluginsConfig); err != nil {
+			return err
+		}
 	}
 
 	defer pluginSystem.TearDown()
@@ -94,7 +97,7 @@ func command(bzl bazel.Bazel, streams ioutils.Streams, restArgs, startupFlags []
 		return err
 	}
 
-	os.Args = append(os.Args[0:1], restArgs...)
+	os.Args = append(os.Args[0:1], args...)
 
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		return err

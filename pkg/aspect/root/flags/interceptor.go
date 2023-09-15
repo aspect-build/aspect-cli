@@ -60,11 +60,7 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 				// Forward all flags to the bazel command except valid --aspect: flags that come before any
 				// double dash (--). The valid --aspect: are all in rootCmd.PersistentFlags() so we can check
 				// against that.
-				rootCmd := cmd
-				for rootCmd.Parent() != nil {
-					rootCmd = rootCmd.Parent()
-				}
-				if doubleDash || !isFlagInFlagSet(rootCmd.PersistentFlags(), arg) {
+				if doubleDash || !isFlagInFlagSet(cmd.Root().PersistentFlags(), arg) {
 					forwardArgs = append(forwardArgs, arg)
 				}
 			}
