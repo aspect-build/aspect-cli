@@ -40,23 +40,26 @@ func main() {
 		log.Fatal(err)
 	}
 
-	restArgs, startupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
+	args, startupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
 
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if err = command(bzl, restArgs, startupFlags); err != nil {
+	if err = command(bzl, args, startupFlags); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func command(bzl bazel.Bazel, restArgs, startupFlags []string) error {
+func command(bzl bazel.Bazel, args []string, startupFlags []string) error {
 	cmd := &cobra.Command{Use: "docgen"}
 
 	pluginSystem := system.NewPluginSystem()
-	if err := pluginSystem.Configure(ioutils.DefaultStreams, nil); err != nil {
-		return err
+
+	if !root.CheckAspectDisablePluginsFlag(args) {
+		if err := pluginSystem.Configure(ioutils.DefaultStreams, nil); err != nil {
+			return err
+		}
 	}
 
 	defer pluginSystem.TearDown()
