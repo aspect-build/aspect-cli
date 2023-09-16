@@ -80,18 +80,6 @@ func (ts *Resolver) sourceFileImports(r *rule.Rule, f *rule.File) []resolve.Impo
 		}
 	}
 
-	// Rules that produce modules.
-	if projectInfo := r.PrivateAttr("ts_project_info"); projectInfo != nil {
-		projectModules := projectInfo.(*TsProjectInfo).modules
-
-		for _, mod := range projectModules.Values() {
-			provides = append(provides, resolve.ImportSpec{
-				Lang: LanguageName,
-				Imp:  mod.(string),
-			})
-		}
-	}
-
 	if len(provides) == 0 {
 		return nil
 	}
@@ -219,20 +207,30 @@ func (ts *Resolver) resolveModuleDeps(
 			return nil, err
 		}
 
-		if resolutionType == Resolution_NotFound && cfg.ValidateImportStatements() != ValidationOff {
-			BazelLog.Debugf("import '%s' for target '%s' not found", mod.ImportPath, from.String())
+		if resolutionType == Resolution_NotFound {
+			// The import itself was not found, but a type definition was found for it
+			if types := ts.resolveImportTypes(from, mod.Imp); len(types) > 0 {
+				for _, typesDep := range types {
+					deps.Add(typesDep)
+				}
+				continue
+			}
 
-			notFound := fmt.Errorf(
-				"Import %[1]q from %[2]q is an unknown dependency. Possible solutions:\n"+
-					"\t1. Instruct Gazelle to resolve to a known dependency using a directive:\n"+
-					"\t\t# gazelle:resolve [src-lang] js import-string label\n"+
-					"\t\t   or\n"+
-					"\t\t# gazelle:js_resolve import-string-glob label\n"+
-					"\t2. Ignore the dependency using the '# gazelle:%[3]s %[1]s' directive.\n"+
-					"\t3. Disable Gazelle resolution validation using '# gazelle:%[4]s off'",
-				mod.ImportPath, mod.SourcePath, Directive_IgnoreImports, Directive_ValidateImportStatements,
-			)
-			resolutionErrors = append(resolutionErrors, notFound)
+			if cfg.ValidateImportStatements() != ValidationOff {
+				BazelLog.Debugf("import '%s' for target '%s' not found", mod.ImportPath, from.String())
+
+				notFound := fmt.Errorf(
+					"Import %[1]q from %[2]q is an unknown dependency. Possible solutions:\n"+
+						"\t1. Instruct Gazelle to resolve to a known dependency using a directive:\n"+
+						"\t\t# gazelle:resolve [src-lang] js import-string label\n"+
+						"\t\t   or\n"+
+						"\t\t# gazelle:js_resolve import-string-glob label\n"+
+						"\t2. Ignore the dependency using the '# gazelle:%[3]s %[1]s' directive.\n"+
+						"\t3. Disable Gazelle resolution validation using '# gazelle:%[4]s off'",
+					mod.ImportPath, mod.SourcePath, Directive_IgnoreImports, Directive_ValidateImportStatements,
+				)
+				resolutionErrors = append(resolutionErrors, notFound)
+			}
 
 			continue
 		}
@@ -241,14 +239,14 @@ func (ts *Resolver) resolveModuleDeps(
 			deps.Add(dep)
 		}
 
-		// Add any relevant @types packages
+		// Add any relevant type definitions such as @types packages
 		if resolutionType == Resolution_NativeNode {
 			if typesNode := ts.resolveAtTypes(from, "node"); typesNode != nil {
 				deps.Add(typesNode)
 			}
 		} else if resolutionType == Resolution_Package {
-			if typesPkg := ts.resolveAtTypes(from, mod.Imp); typesPkg != nil {
-				deps.Add(typesPkg)
+			for _, typesDep := range ts.resolveImportTypes(from, mod.Imp) {
+				deps.Add(typesDep)
 			}
 		}
 	}
@@ -377,6 +375,25 @@ func (ts *Resolver) resolvePackage(from label.Label, imp string) *label.Label {
 	BazelLog.Tracef("resolve '%s' (project '%s') import '%s' to '%s'", from.String(), from.Pkg, impPkg, relPkgLabel)
 
 	return &relPkgLabel
+}
+
+func (ts *Resolver) resolveImportTypes(from label.Label, imp string) []*label.Label {
+	deps := make([]*label.Label, 0)
+
+	// @types packages for the import
+	if typesPkg := ts.resolveAtTypes(from, imp); typesPkg != nil {
+		deps = append(deps, typesPkg)
+	}
+
+	// Additional module definitions for the import
+	if typeModules := ts.lang.moduleTypes[imp]; typeModules != nil {
+		for _, mod := range typeModules {
+			relMode := mod.Rel(from.Repo, from.Pkg)
+			deps = append(deps, &relMode)
+		}
+	}
+
+	return deps
 }
 
 func toAtTypesPackage(imp string) string {
