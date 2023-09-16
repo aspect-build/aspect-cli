@@ -351,7 +351,12 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		}
 
 		for _, sourceModule := range result.Modules {
-			info.AddModule(sourceModule)
+			ts.addModuleDeclaration(sourceModule, &label.Label{
+				Name:     targetName,
+				Repo:     args.Config.RepoName,
+				Pkg:      args.Rel,
+				Relative: false,
+			})
 		}
 	}
 
@@ -584,6 +589,14 @@ func (ts *typeScriptLang) addFileLabel(importPath string, label *label.Label) {
 	}
 
 	ts.fileLabels[importPath] = label
+}
+
+func (ts *typeScriptLang) addModuleDeclaration(module string, moduleLabel *label.Label) {
+	if ts.moduleTypes[module] == nil {
+		ts.moduleTypes[module] = make([]*label.Label, 0, 1)
+	}
+
+	ts.moduleTypes[module] = append(ts.moduleTypes[module], moduleLabel)
 }
 
 // Find names/paths that the given path can be imported as.
