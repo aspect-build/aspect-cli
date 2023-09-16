@@ -4,21 +4,12 @@ load("@npm//:defs.bzl", "npm_link_all_packages")
 npm_link_all_packages(name = "node_modules")
 
 ts_project(
-    name = "npm_types_package",
+    name = "declare_module_types",
     srcs = ["main.ts"],
     deps = [
         ":node_modules/@types/jquery",
         ":node_modules/jquery",
-    ],
-)
-
-ts_project(
-    name = "npm_types_package_tests",
-    testonly = True,
-    srcs = ["main.test.ts"],
-    deps = [
-        ":node_modules/@types/jquery",
-        ":node_modules/jquery",
-        ":npm_types_package",
+        "//addon",
+        "//lib/b",
     ],
 )

@@ -22,6 +22,10 @@ type typeScriptLang struct {
 	// Importable files and the generating label.
 	fileLabels map[string]*label.Label
 
+	// Importable type definitions and the generating labels.
+	// Multiple labels may define/extend the same type definition, potentially also extending packages.
+	moduleTypes map[string][]*label.Label
+
 	// Importable npm-like packages. Each pnpm project has its own set
 	// of importable npm packages.
 	// BUILDs alongside pnpm project roots have a map. BUILDs within a project contain a reference
@@ -40,6 +44,7 @@ type typeScriptLang struct {
 func NewLanguage() language.Language {
 	l := typeScriptLang{
 		fileLabels:   make(map[string]*label.Label),
+		moduleTypes:  make(map[string][]*label.Label),
 		pnpmProjects: pnpm.NewPnpmProjectMap(),
 		tsconfig:     typescript.NewTsWorkspace(),
 		gitignore:    git.NewGitIgnore(),
