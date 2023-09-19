@@ -31,12 +31,12 @@ func assertEqual(t *testing.T, a, b string, msg string) {
 	assertTrue(t, a == b, msg)
 }
 
-func parseTest(t *testing.T, tsconfigJSON string) *TsConfig {
+func parseTest(t *testing.T, configDir, tsconfigJSON string) *TsConfig {
 	cm := &TsConfigMap{
 		configs: make(map[string]*TsConfig),
 	}
 
-	options, err := parseTsConfigJSON(cm, ".", "tsconfig_test", "tsconfig.json", []byte(tsconfigJSON))
+	options, err := parseTsConfigJSON(cm, ".", configDir, "tsconfig.json", []byte(tsconfigJSON))
 	if err != nil {
 		t.Fatalf("failed to parse options: %v\n\n%s", err, tsconfigJSON)
 	}
@@ -102,7 +102,7 @@ func TestIsRelativePath(t *testing.T) {
 
 func TestTypescriptApi(t *testing.T) {
 	t.Run("parse a tsconfig with empty config", func(t *testing.T) {
-		options := parseTest(t, "{}")
+		options := parseTest(t, ".", "{}")
 
 		if options.RootDir != "." {
 			t.Errorf("ParseTsConfigOptions: RootDir\nactual:   %s\nexpected:  %s\n", options.RootDir, ".")
@@ -110,7 +110,7 @@ func TestTypescriptApi(t *testing.T) {
 	})
 
 	t.Run("parse a tsconfig with empty compilerOptions", func(t *testing.T) {
-		options := parseTest(t, `{"compilerOptions": {}}`)
+		options := parseTest(t, ".", `{"compilerOptions": {}}`)
 
 		if options.RootDir != "." {
 			t.Errorf("ParseTsConfigOptions: RootDir\nactual:   %s\nexpected:  %s\n", options.RootDir, ".")
@@ -118,7 +118,7 @@ func TestTypescriptApi(t *testing.T) {
 	})
 
 	t.Run("parse a tsconfig with rootDir", func(t *testing.T) {
-		options := parseTest(t, `{"compilerOptions": {"rootDir": "src"}}`)
+		options := parseTest(t, ".", `{"compilerOptions": {"rootDir": "src"}}`)
 
 		if options.RootDir != "src" {
 			t.Errorf("ParseTsConfigOptions: RootDir\nactual:   %s\nexpected:  %s\n", options.RootDir, "src")
@@ -126,7 +126,7 @@ func TestTypescriptApi(t *testing.T) {
 	})
 
 	t.Run("parse a tsconfig with rootDir relative", func(t *testing.T) {
-		options := parseTest(t, `{"compilerOptions": {"rootDir": "./src"}}`)
+		options := parseTest(t, ".", `{"compilerOptions": {"rootDir": "./src"}}`)
 
 		if options.RootDir != "src" {
 			t.Errorf("ParseTsConfigOptions: RootDir\nactual:   %s\nexpected:  %s\n", options.RootDir, "src")
@@ -134,7 +134,7 @@ func TestTypescriptApi(t *testing.T) {
 	})
 
 	t.Run("parse a tsconfig with rootDir relative extra dots", func(t *testing.T) {
-		options := parseTest(t, `{"compilerOptions": {"rootDir": "./src/./foo/../"}}`)
+		options := parseTest(t, ".", `{"compilerOptions": {"rootDir": "./src/./foo/../"}}`)
 
 		if options.RootDir != "src" {
 			t.Errorf("ParseTsConfigOptions: RootDir\nactual:   %s\nexpected:  %s\n", options.RootDir, "src")
@@ -142,9 +142,9 @@ func TestTypescriptApi(t *testing.T) {
 	})
 
 	t.Run("parse tsconfig files with relaxed json", func(t *testing.T) {
-		parseTest(t, `{}`)
-		parseTest(t, `{"compilerOptions": {}}`)
-		parseTest(t, `
+		parseTest(t, ".", `{}`)
+		parseTest(t, ".", `{"compilerOptions": {}}`)
+		parseTest(t, ".", `
 			{
 				"compilerOptions": {
 					"rootDir": "src",
@@ -152,7 +152,7 @@ func TestTypescriptApi(t *testing.T) {
 				},
 			}
 		`)
-		parseTest(t, `
+		parseTest(t, ".", `
 			{
 				"compilerOptions": {
 					// line comment
@@ -183,7 +183,7 @@ func TestTypescriptApi(t *testing.T) {
 
 	t.Run("tsconfig paths expansion basic", func(t *testing.T) {
 		// Initial request: https://github.com/aspect-build/aspect-cli/issues/396
-		config := parseTest(t, `{
+		config := parseTest(t, "tsconfig_test", `{
 			"compilerOptions": {
 			  "declaration": true,
 			  "baseUrl": ".",
@@ -198,8 +198,58 @@ func TestTypescriptApi(t *testing.T) {
 		assertExpand(t, config, "@org/lib", "tsconfig_test/b/src/lib", "tsconfig_test/@org/lib")
 	})
 
+	t.Run("tsconfig paths jquery example", func(t *testing.T) {
+		// jQuery examples from
+		// https://www.typescriptlang.org/docs/handbook/module-resolution.html#path-mapping
+
+		config1 := parseTest(t, ".", `{
+			"compilerOptions": {
+			  "baseUrl": ".",
+			  "paths": {
+				"jquery": ["node_modules/jquery/dist/jquery"]
+			  }
+			}
+		  }`)
+		assertExpand(t, config1, "jquery", "node_modules/jquery/dist/jquery", "jquery")
+
+		config2 := parseTest(t, ".", `{
+			"compilerOptions": {
+			  "baseUrl": "src",
+			  "paths": {
+				"jquery": ["../node_modules/jquery/dist/jquery"]
+			  }
+			}
+		  }`)
+		assertExpand(t, config2, "jquery", "node_modules/jquery/dist/jquery", "src/jquery")
+	})
+
+	t.Run("tsconfig paths generated example", func(t *testing.T) {
+		// 'generated' example from
+		// https://www.typescriptlang.org/docs/handbook/module-resolution.html#path-mapping
+
+		config1 := parseTest(t, ".", `{
+			"compilerOptions": {
+			  "baseUrl": ".",
+			  "paths": {
+				"*": ["*", "generated/*"]
+			  }
+			}
+		  }`)
+		assertExpand(t, config1, "x", "x", "generated/x", "x")
+
+		config2 := parseTest(t, ".", `{
+			"compilerOptions": {
+			  "baseUrl": "foo",
+			  "paths": {
+				"*": ["*", "../generated/*"]
+			  }
+			}
+		  }`)
+		assertExpand(t, config2, "x", "foo/x", "generated/x", "foo/x")
+	})
+
 	t.Run("tsconfig paths expansion", func(t *testing.T) {
-		config := parseTest(t, `{
+		config := parseTest(t, "tsconfig_test", `{
 				"compilerOptions": {
 					"baseUrl": ".",
 					"paths": {
@@ -227,7 +277,7 @@ func TestTypescriptApi(t *testing.T) {
 	})
 
 	t.Run("tsconfig paths expansion star-length tie-breaker", func(t *testing.T) {
-		config := parseTest(t, `{
+		config := parseTest(t, "tsconfig_test", `{
 				"compilerOptions": {
 					"baseUrl": ".",
 					"paths": {
@@ -242,5 +292,18 @@ func TestTypescriptApi(t *testing.T) {
 			}`)
 
 		assertExpand(t, config, "lib/a", "tsconfig_test/a-direct", "tsconfig_test/fallback/a", "tsconfig_test/lib-star/a", "tsconfig_test/li-star/b/a", "tsconfig_test/l-star/ib/a", "tsconfig_test/lib/a")
+	})
+
+	t.Run("tsconfig * paths", func(t *testing.T) {
+		config := parseTest(t, ".", `{
+			"compilerOptions": {
+			  "baseUrl": ".",
+			  "paths": {
+				"*": ["sub/*", "*"]
+			  }
+			}
+		  }`)
+
+		assertExpand(t, config, "a", "sub/a", "a", "a")
 	})
 }

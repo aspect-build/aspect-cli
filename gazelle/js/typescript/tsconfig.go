@@ -163,7 +163,7 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir, configName string, tsco
 	var Paths *TsConfigPaths
 	if c.CompilerOptions.Paths != nil {
 		Paths = &TsConfigPaths{
-			Rel: ".",
+			Rel: BaseUrl,
 			Map: c.CompilerOptions.Paths,
 		}
 	} else if baseConfig != nil {

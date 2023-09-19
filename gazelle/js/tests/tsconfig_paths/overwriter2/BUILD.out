@@ -1,20 +1,22 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
 """
-Extend and overwrite some of a parent tsconfig
+Replace a parent tsconfig (without extending)
 """
 
 ts_project(
-    name = "overwriter",
-    srcs = ["main.ts"],
+    name = "overwriter2",
+    srcs = [
+        "src/main.ts",
+        "src/overlib/o.ts",
+    ],
     deps = [
         "//lib/a",
-        "//lib/c",
+        "//lib/b",
     ],
 )
 
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
-    deps = ["//:tsconfig"],
 )
