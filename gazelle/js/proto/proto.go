@@ -21,7 +21,7 @@ func GetProtoLibraries(args language.GenerateArgs, result *language.GenerateResu
 	var rules []*rule.Rule
 
 	pc := proto_config.GetProtoConfig(args.Config)
-	if pc.Mode.ShouldGenerateRules() {
+	if pc != nil && pc.Mode.ShouldGenerateRules() {
 		// proto_library rules managed by the proto language gazelle plugin
 		rules = args.OtherGen
 	} else {
