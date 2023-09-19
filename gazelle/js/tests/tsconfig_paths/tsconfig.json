@@ -5,7 +5,7 @@
       "alias-a": ["./lib/a"],
       "star/*": ["./lib/*"],
       "multi-c/*": ["./lib/c/first/*", "./lib/c/second/*"],
-      "*": ["./fallback/*", "*"]
+      "*": ["./fallback/*", "root-404", "*"]
     }
   },
   "include": ["./src/**/*.ts"]
