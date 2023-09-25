@@ -82,9 +82,11 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 func removeRule(args language.GenerateArgs, ruleName string, result *language.GenerateResult) {
 	existing := getFileRuleByName(args, ruleName)
 	if existing == nil {
+		BazelLog.Tracef("remove rule '%s' '%s:%s' not found, %v", TsProjectKind, args.Rel, ruleName, args)
 		return
 	}
 
+	// Only remove rules controlled by this gazelle plugin
 	mappedSourceKinds := treeset.NewWithStringComparator()
 	for _, kind := range sourceRuleKinds.Values() {
 		mappedSourceKinds.Add(mapKind(args, kind.(string)))
@@ -96,6 +98,8 @@ func removeRule(args language.GenerateArgs, ruleName string, result *language.Ge
 		if !existing.ShouldKeep() {
 			existing.Delete()
 		}
+
+		BazelLog.Infof("remove rule '%s' '%s:%s'", existing.Kind(), args.Rel, existing.Name())
 
 		emptyRule := rule.NewRule(existing.Kind(), ruleName)
 		result.Empty = append(result.Empty, emptyRule)
@@ -277,42 +281,50 @@ func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args lang
 }
 
 func (ts *typeScriptLang) addTsProtoRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
-	protoLibraries := proto.GetProtoLibraries(args, result)
-	if len(protoLibraries) == 0 {
-		return
-	}
+	protoLibraries, emptyLibraries := proto.GetProtoLibraries(args, result)
 
 	// Generate one ts_proto_library() per proto_library()
 	for _, protoLibrary := range protoLibraries {
 		ruleName := cfg.RenderTsProtoLibraryName(protoLibrary.Name())
-
-		protoRuleLabel := label.New("", args.Rel, protoLibrary.Name())
-		protoRuleLabelStr := protoRuleLabel.Rel("", args.Rel)
-
-		tsProtoLibrary := rule.NewRule(TsProtoLibraryKind, ruleName)
-		tsProtoLibrary.SetAttr("proto", protoRuleLabelStr.String())
-
-		node_modules := ts.pnpmProjects.GetProject(args.Rel)
-		if node_modules != nil {
-			node_modulesLabel := label.New("", node_modules.Pkg(), cfg.npmLinkAllTargetName)
-			node_modulesLabelStr := node_modulesLabel.Rel("", args.Rel)
-			tsProtoLibrary.SetAttr("node_modules", node_modulesLabelStr.String())
-		}
-
-		sourceFiles := protoLibrary.AttrStrings("srcs")
-
-		// Persist the proto_library(srcs)
-		tsProtoLibrary.SetPrivateAttr("proto_library_srcs", sourceFiles)
-
-		imports := newTsProjectInfo()
-
-		for _, impt := range ts.collectProtoImports(cfg, args, sourceFiles) {
-			imports.AddImport(impt)
-		}
-
-		result.Gen = append(result.Gen, tsProtoLibrary)
-		result.Imports = append(result.Imports, imports)
+		ts.addTsProtoRule(cfg, args, protoLibrary, ruleName, result)
 	}
+
+	// Remove any ts_proto_library() targets associated with now-empty proto_library() targets
+	for _, emptyLibrary := range emptyLibraries {
+		ruleName := cfg.RenderTsProtoLibraryName(emptyLibrary.Name())
+		removeRule(args, ruleName, result)
+	}
+}
+
+func (ts *typeScriptLang) addTsProtoRule(cfg *JsGazelleConfig, args language.GenerateArgs, protoLibrary *rule.Rule, ruleName string, result *language.GenerateResult) {
+	protoRuleLabel := label.New("", args.Rel, protoLibrary.Name())
+	protoRuleLabelStr := protoRuleLabel.Rel("", args.Rel)
+
+	tsProtoLibrary := rule.NewRule(TsProtoLibraryKind, ruleName)
+	tsProtoLibrary.SetAttr("proto", protoRuleLabelStr.String())
+
+	node_modules := ts.pnpmProjects.GetProject(args.Rel)
+	if node_modules != nil {
+		node_modulesLabel := label.New("", node_modules.Pkg(), cfg.npmLinkAllTargetName)
+		node_modulesLabelStr := node_modulesLabel.Rel("", args.Rel)
+		tsProtoLibrary.SetAttr("node_modules", node_modulesLabelStr.String())
+	}
+
+	sourceFiles := protoLibrary.AttrStrings("srcs")
+
+	// Persist the proto_library(srcs)
+	tsProtoLibrary.SetPrivateAttr("proto_library_srcs", sourceFiles)
+
+	imports := newTsProjectInfo()
+
+	for _, impt := range ts.collectProtoImports(cfg, args, sourceFiles) {
+		imports.AddImport(impt)
+	}
+
+	result.Gen = append(result.Gen, tsProtoLibrary)
+	result.Imports = append(result.Imports, imports)
+
+	BazelLog.Infof("add rule '%s' '%s:%s'", tsProtoLibrary.Kind(), args.Rel, tsProtoLibrary.Name())
 }
 
 func hasTranspiledSources(sourceFiles *treeset.Set) bool {

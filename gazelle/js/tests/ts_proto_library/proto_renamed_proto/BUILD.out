@@ -2,13 +2,13 @@ load("@aspect_rules_ts//ts:proto.bzl", "ts_proto_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 
 proto_library(
-    name = "connectrpc_eliza_v1_proto",
-    srcs = ["eliza.proto"],
+    name = "bar_proto",
+    srcs = ["bar.proto"],
     visibility = ["//visibility:public"],
 )
 
 ts_proto_library(
-    name = "connectrpc_eliza_v1_proto_ts",
+    name = "bar_proto_ts",
     node_modules = "//:node_modules",
-    proto = ":connectrpc_eliza_v1_proto",
+    proto = ":bar_proto",
 )
