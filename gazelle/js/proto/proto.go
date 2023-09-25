@@ -17,7 +17,7 @@ import (
 
 var protoRe = buildProtoRegexp()
 
-func GetProtoLibraries(args language.GenerateArgs, result *language.GenerateResult) []*rule.Rule {
+func GetProtoLibraries(args language.GenerateArgs, result *language.GenerateResult) ([]*rule.Rule, []*rule.Rule) {
 	var rules []*rule.Rule
 
 	pc := proto_config.GetProtoConfig(args.Config)
@@ -32,6 +32,7 @@ func GetProtoLibraries(args language.GenerateArgs, result *language.GenerateResu
 	}
 
 	protos := make([]*rule.Rule, 0, len(rules))
+	emptyProtos := make([]*rule.Rule, 0)
 
 	for _, r := range rules {
 		if r.Kind() == "proto_library" {
@@ -39,7 +40,13 @@ func GetProtoLibraries(args language.GenerateArgs, result *language.GenerateResu
 		}
 	}
 
-	return protos
+	for _, r := range args.OtherEmpty {
+		if r.Kind() == "proto_library" {
+			emptyProtos = append(emptyProtos, r)
+		}
+	}
+
+	return protos, emptyProtos
 }
 
 func ToTsImports(src string) []string {

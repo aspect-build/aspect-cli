@@ -17,7 +17,7 @@ const (
 	NpmRepositoryName     = "npm"
 )
 
-var sourceRuleKinds = treeset.NewWithStringComparator(TsProjectKind, JsLibraryKind)
+var sourceRuleKinds = treeset.NewWithStringComparator(TsProjectKind, JsLibraryKind, TsProtoLibraryKind)
 
 // Kinds returns a map that maps rule names (kinds) and information on how to
 // match and merge attributes that may be found in rules of those kinds.
