@@ -60,10 +60,10 @@ module "aspect_workflows" {
 
   # Kubernetes remote cache properties
   experimental_remote = {
-    cache_size_gb          = 256
     cache_shards           = 3
-    replicate_cache        = true
+    cache_size_gb          = 384
     load_balancer_replicas = 2
+    replicate_cache        = true
   }
 
   # Kubernetes cluster properties
