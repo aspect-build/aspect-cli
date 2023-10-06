@@ -4,6 +4,7 @@ go 1.19
 
 require (
 	github.com/Masterminds/semver/v3 v3.2.0
+	github.com/alphadose/haxmap v1.3.0
 	github.com/bazelbuild/bazel-gazelle v0.29.0
 	github.com/bazelbuild/bazelisk v1.13.2
 	github.com/bazelbuild/buildtools v0.0.0-20230111132423-06e8e2436a75

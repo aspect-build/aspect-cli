@@ -193,7 +193,7 @@ func ParseConfigFlags(args []string) (*ConfigFlagValues, error) {
 	// Silence usage output
 	configFlagSet.Usage = func() {}
 
-	var userConfigs = flags.MultiString{}
+	userConfigs := flags.MultiString{}
 	configFlagSet.Var(&userConfigs, flags.AspectConfigFlagName, "")
 
 	systemConfig := flags.RegisterNoableBool(configFlagSet, flags.AspectSystemConfigFlagName, true, "")
