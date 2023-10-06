@@ -44,6 +44,8 @@ import (
 	"aspect.build/cli/pkg/plugin/system/besproxy"
 )
 
+const remoteCacheAddressFile = "/etc/aspect/workflows/platform/remote_cache_address"
+
 // PluginSystem is the interface that defines all the methods for the aspect CLI
 // plugin system intended to be used by the Core.
 type PluginSystem interface {
@@ -225,7 +227,16 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 
 		// Configure a BES proxy if `--bes_backend` is set by the user
 		if userBesBackend != "" {
-			besProxy := besproxy.NewBesProxy(userBesBackend, userRemoteHeaders)
+			var remoteCacheAddress string
+			if _, err := os.Stat(remoteCacheAddressFile); err == nil {
+				c, err := os.ReadFile(remoteCacheAddressFile)
+				if err != nil {
+					return fmt.Errorf("failed to read %v: %w", remoteCacheAddressFile, err)
+				}
+				remoteCacheAddress = strings.TrimSpace(string(c))
+			}
+
+			besProxy := besproxy.NewBesProxy(userBesBackend, userRemoteHeaders, remoteCacheAddress)
 			if err := besProxy.Connect(); err != nil {
 				fmt.Fprintf(os.Stderr, "Failed to connect to build even stream backend %s: %s", userBesBackend, err.Error())
 			} else {
