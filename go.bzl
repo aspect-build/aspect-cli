@@ -12,6 +12,14 @@ def deps():
         version = "v0.0.1-2020.1.4",
     )
     go_repository(
+        name = "com_github_alphadose_haxmap",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/alphadose/haxmap",
+        sum = "h1:C/2LboOnPCZP27GmmSXOcwx360st0P8N0fTJ3voefKc=",
+        version = "v1.3.0",
+    )
+
+    go_repository(
         name = "com_github_aristanetworks_goarista",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/aristanetworks/goarista",
@@ -637,6 +645,14 @@ def deps():
         version = "v0.0.0-20210911075715-681adbf594b8",
     )
     go_repository(
+        name = "com_github_pkg_diff",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/pkg/diff",
+        sum = "h1:aoZm08cpOy4WuID//EZDgcC4zIxODThtZNPirFr42+A=",
+        version = "v0.0.0-20210226163009-20ebb0f2a09e",
+    )
+
+    go_repository(
         name = "com_github_pkg_errors",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/pkg/errors",
@@ -718,13 +734,6 @@ def deps():
     )
 
     go_repository(
-        name = "com_github_sirupsen_logrus",
-        build_file_proto_mode = "disable_global",
-        importpath = "github.com/sirupsen/logrus",
-        sum = "h1:dueUQJ1C2q9oE3F7wvmSGAaVtTmUizReu6fjN8uqzbQ=",
-        version = "v1.9.3",
-    )
-    go_repository(
         name = "com_github_smacker_go_tree_sitter",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/smacker/go-tree-sitter",
@@ -795,6 +804,21 @@ def deps():
         sum = "h1:X1TuBLAMDFbaTAChgCBLu3DU3UPyELpnF2jjJ2cz/S8=",
         version = "v1.4.2",
     )
+    go_repository(
+        name = "com_github_tejzpr_ordered_concurrently_v3",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/tejzpr/ordered-concurrently/v3",
+        sum = "h1:TLHtzlQEDshbmGveS8S+hxLw4s5u67aoJw5LLf+X2xY=",
+        version = "v3.0.1",
+    )
+    go_repository(
+        name = "com_github_twmb_murmur3",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/twmb/murmur3",
+        sum = "h1:8Yt9taO/WN3l08xErzjeschgZU2QSrwm1kclYq+0aRg=",
+        version = "v1.1.8",
+    )
+
     go_repository(
         name = "com_github_yuin_goldmark",
         build_file_proto_mode = "disable_global",
