@@ -1,7 +1,7 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
-    name = "help",
+    name = "topics",
     srcs = ["doc.go"],
     embedsrcs = [
         "directives.md",
@@ -9,6 +9,6 @@ go_library(
         "tags.md",
         "target-syntax.md",
     ],
-    importpath = "aspect.build/docs/help",
+    importpath = "aspect.build/cli/docs/help/topics",
     visibility = ["//visibility:public"],
 )
