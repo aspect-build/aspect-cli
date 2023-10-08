@@ -30,7 +30,7 @@ module "aspect_workflows" {
   }
 
   # Aspect Workflows terraform module
-  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.8.0-rc12/workflows/terraform-aws-aspect-workflows.zip"
+  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.8.0-rc14/workflows/terraform-aws-aspect-workflows.zip"
 
   # Non-terraform Aspect Workflows release artifacts are pulled from the region specific
   # aspect-artifacts bucket during apply. Aspect will grant your AWS account access to this bucket
@@ -75,8 +75,6 @@ module "aspect_workflows" {
     instance_types  = ["t3.large"],
     # The audit log is very chatty, turn 'er down for a bit.
     cluster_enabled_log_types = ["api", "authenticator"]
-    # endpoint public access is necessary for local terraform applies.
-    cluster_endpoint_public_access = true
   }
 
   # Monitoring properties
