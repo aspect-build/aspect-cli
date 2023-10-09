@@ -728,10 +728,10 @@ def deps():
         name = "com_github_smacker_go_tree_sitter",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/smacker/go-tree-sitter",
-        sum = "h1:exZ0FwfhblsYbgfqYH+W/3sFye821WD02NjBmc+ENhE=",
-        version = "v0.0.0-20230501083651-a7d92773b3aa",
+        commit = "0e314ace747f49b293ec3a5ec9d7df8395269b53",
+        vcs = "git",
+        remote = "git@github.com:reddaly/go-tree-sitter.git",
     )
-
     go_repository(
         name = "com_github_spf13_afero",
         build_file_proto_mode = "disable_global",
