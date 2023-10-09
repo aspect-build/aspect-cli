@@ -1,5 +1,8 @@
-package gazelle.kotlin.tests.simple_file2// Hello World Program
+package xyz.example.gcsutil
 
-fun hello() {
+import com.google.cloud.storage.contrib.nio.CloudStoragePath
+
+fun hello(): CloudStoragePath? {
     println("Hello world!")
+    return null
 }
