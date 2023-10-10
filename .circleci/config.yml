@@ -20,7 +20,7 @@ setup: true
 orbs:
   continuation: circleci/continuation@0.3.1
   slack: circleci/slack@4.12.1
-  aspect-workflows: aspect-build/workflows@dev:5.8.0-rc14-cci-orb2
+  aspect-workflows: aspect-build/workflows@5.8.0
 
 jobs:
   legacy:
@@ -28,10 +28,10 @@ jobs:
       - image: cimg/base:2023.03
     steps:
       - checkout
-      - run: echo "this is some legacy non-workflows job"
+      - run: echo "this is an example of legacy non-workflows job"
 
 workflows:
-  default:
+  default-workflow:
     jobs:
       - legacy
       - aspect-workflows/setup:
