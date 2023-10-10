@@ -1,10 +1,6 @@
 # See https://docs.aspect.build/v/workflows/config
 ---
 queue: aspect-cli
-bazel:
-  flags:
-    - --remote_download_minimal
-    - --nobuild_runfile_links
 tasks:
   buildifier:
   test:
