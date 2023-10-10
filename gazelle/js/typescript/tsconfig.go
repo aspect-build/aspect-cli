@@ -77,6 +77,10 @@ var DefaultConfigPaths = TsConfigPaths{
 	Map: &map[string][]string{},
 }
 
+var InvalidTsconfig = TsConfig{
+	Paths: &DefaultConfigPaths,
+}
+
 func isRelativePath(p string) bool {
 	if path.IsAbs(p) {
 		return false
@@ -85,12 +89,15 @@ func isRelativePath(p string) bool {
 	return strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../")
 }
 
-// parseTsConfigJSONFile loads a tsconfig.json file and return the compilerOptions config
+// Load a tsconfig.json file and return the compilerOptions config
 func parseTsConfigJSONFile(cm *TsConfigMap, root, dir, tsconfig string) (*TsConfig, error) {
 	existing := cm.configs[dir]
 	if existing != nil {
 		return existing, nil
 	}
+
+	// Start with invalid to prevent recursing into the same file
+	cm.configs[dir] = &InvalidTsconfig
 
 	content, readErr := os.ReadFile(path.Join(root, dir, tsconfig))
 	if readErr != nil {
@@ -98,8 +105,13 @@ func parseTsConfigJSONFile(cm *TsConfigMap, root, dir, tsconfig string) (*TsConf
 	}
 
 	config, err := parseTsConfigJSON(cm, root, dir, tsconfig, content)
+	if err != nil {
+		return nil, err
+	}
+
+	// Persist the result on success
 	cm.configs[dir] = config
-	return config, err
+	return config, nil
 }
 
 func parseTsConfigJSON(cm *TsConfigMap, root, configDir, configName string, tsconfigContent []byte) (*TsConfig, error) {
@@ -114,10 +126,10 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir, configName string, tsco
 		base, err := parseTsConfigJSONFile(cm, root, path.Join(configDir, path.Dir(c.Extends)), path.Base(c.Extends))
 		if err != nil {
 			BazelLog.Warnf("Failed to load base tsconfig file %s: %v", path.Join(configDir, c.Extends), err)
+		} else if base != nil {
+			extends = path.Join(configDir, c.Extends)
+			baseConfig = base
 		}
-
-		extends = path.Join(configDir, c.Extends)
-		baseConfig = base
 	}
 
 	var types []string

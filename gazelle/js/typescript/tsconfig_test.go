@@ -59,11 +59,7 @@ func assertExpand(t *testing.T, options *TsConfig, p string, expected ...string)
 
 func TestIsRelativePath(t *testing.T) {
 	t.Run("config metadata", func(t *testing.T) {
-		cm := &TsConfigMap{
-			configs: make(map[string]*TsConfig),
-		}
-
-		subdirOptions, _ := parseTsConfigJSON(cm, ".", "sub/dir", "tsconfig.json", []byte("{}"))
+		subdirOptions := parseTest(t, "sub/dir", "{}")
 		assertEqual(t, subdirOptions.ConfigDir, "sub/dir", "ConfigDir")
 		assertEqual(t, subdirOptions.ConfigName, "tsconfig.json", "ConfigDir")
 	})
@@ -100,7 +96,39 @@ func TestIsRelativePath(t *testing.T) {
 
 }
 
-func TestTypescriptApi(t *testing.T) {
+func TestTsconfigLoad(t *testing.T) {
+	t.Run("parse a tsconfig file extending itself", func(t *testing.T) {
+		cm := &TsConfigMap{
+			configs: make(map[string]*TsConfig),
+		}
+
+		recursive, _ := parseTsConfigJSONFile(cm, ".", "tests", "extends-recursive.json")
+
+		assertEqual(t, recursive.Extends, "tests/extends-recursive.json", "should not fail extending itself")
+	})
+
+	t.Run("parse a tsconfig file extending an unknown file", func(t *testing.T) {
+		cm := &TsConfigMap{
+			configs: make(map[string]*TsConfig),
+		}
+
+		recursive, _ := parseTsConfigJSONFile(cm, ".", "tests", "extends-404.json")
+
+		assertEqual(t, recursive.Extends, "tests/does-not-exist.json", "should not fail extending unknown")
+	})
+
+	t.Run("parse a tsconfig file extending a blank string", func(t *testing.T) {
+		cm := &TsConfigMap{
+			configs: make(map[string]*TsConfig),
+		}
+
+		recursive, _ := parseTsConfigJSONFile(cm, ".", "tests", "extends-empty.json")
+
+		assertEqual(t, recursive.Extends, "", "should not fail extending an empty str")
+	})
+}
+
+func TestTsconfigParse(t *testing.T) {
 	t.Run("parse a tsconfig with empty config", func(t *testing.T) {
 		options := parseTest(t, ".", "{}")
 

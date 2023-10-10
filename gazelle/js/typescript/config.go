@@ -23,19 +23,19 @@ func NewTsWorkspace() *TsWorkspace {
 	}
 }
 
-func (tc *TsWorkspace) AddTsConfigFile(root, rel, fileName string) error {
-	tsconfigJSON, err := parseTsConfigJSONFile(tc.cm, root, rel, fileName)
+func (tc *TsWorkspace) AddTsConfigFile(root, rel, fileName string) {
+	_, err := parseTsConfigJSONFile(tc.cm, root, rel, fileName)
 	if err != nil {
 		fmt.Printf("Failed to parse tsconfig file %s: %v\n", path.Join(rel, fileName), err)
-		return err
 	}
-
-	tc.cm.configs[rel] = tsconfigJSON
-	return nil
 }
 
 func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
-	return tc.cm.configs[rel]
+	c := tc.cm.configs[rel]
+	if c == &InvalidTsconfig {
+		return nil
+	}
+	return c
 }
 
 func (tc *TsWorkspace) getConfig(f string) (string, *TsConfig) {
@@ -47,7 +47,7 @@ func (tc *TsWorkspace) getConfig(f string) (string, *TsConfig) {
 			dir = ""
 		}
 
-		if c, exists := tc.cm.configs[dir]; exists {
+		if c, exists := tc.cm.configs[dir]; exists && c != &InvalidTsconfig {
 			return dir, c
 		}
 	}
