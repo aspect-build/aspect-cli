@@ -22,9 +22,18 @@ orbs:
   slack: circleci/slack@4.12.1
   bazel: aspect-build/workflows@dev:5.8.0-rc14
 
+jobs:
+  legacy:
+    docker:
+      - image: cimg/base:2023.03
+    steps:
+      - checkout
+      - run: echo "this is some legacy non-workflows job"
+
 workflows:
-  bazel-setup:
+  default:
     jobs:
+      - legacy
       - bazel/setup:
           aspect-config: .aspect/workflows/config.yaml
           resource_class: aspect-build/aspect-cli
