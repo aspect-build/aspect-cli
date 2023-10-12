@@ -14,7 +14,7 @@ import (
 	"github.com/emirpasic/gods/sets/treeset"
 )
 
-// Directives. Keep in sync with documentation in /docs/versioned/cli/help/directives.md
+// Directives. Keep in sync with documentation in /docs/cli/help/directives.md
 const (
 	// Directive_TypeScriptExtension represents the directive that controls whether
 	// this TypeScript generation is enabled or not. Sub-packages inherit this value.
