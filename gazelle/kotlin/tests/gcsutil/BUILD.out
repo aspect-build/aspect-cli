@@ -3,7 +3,7 @@ load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
 # gazelle:resolve kotlin com.google.cloud.storage.contrib.nio @maven//:com_google_cloud_google_cloud_nio
 
 kt_jvm_library(
-    name = "gcsutil",
+    name = "simple_file",
     srcs = ["gcsutil.kt"],
     deps = ["@maven//:com_google_cloud_google_cloud_nio"],
 )
