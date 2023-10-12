@@ -1,6 +1,8 @@
 ---
-title: Aspect CLI
+title: Overview
 ---
+
+# Aspect CLI
 
 The `aspect` CLI is a drop-in replacement for the `bazel` CLI that comes with Bazel.
 
