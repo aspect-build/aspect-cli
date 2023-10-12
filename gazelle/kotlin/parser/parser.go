@@ -76,6 +76,7 @@ func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error
 			} else if nodeI.Type() == "package_header" {
 				if result.Package != "" {
 					fmt.Printf("Multiple package declarations found in %s\n", filePath)
+					// TODO: Don't exit here and return an error instead?
 					os.Exit(1)
 				}
 
