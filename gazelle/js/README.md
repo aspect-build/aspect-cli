@@ -4,7 +4,7 @@ This package automates the creation and maintenance of BUILD files for JavaScrip
 
 ## Usage
 
-This feature is included in the [Aspect CLI](https://github.com/aspect-build/aspect-cli), accessed with the [`configure` command](https://docs.aspect.build/v/cli/commands/aspect_configure).
+This feature is included in the [Aspect CLI](https://github.com/aspect-build/aspect-cli), accessed with the [`configure` command](https://docs.aspect.build/cli/commands/aspect_configure).
 It's also possible to build into your own Gazelle binary.
 
 ## Rules
