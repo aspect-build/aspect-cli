@@ -51,10 +51,10 @@ import (
 	"aspect.build/cli/cmd/aspect/sync"
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
+	help_docs "aspect.build/cli/docs/help/topics"
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
-	help_docs "aspect.build/cli/docs/help"
 )
 
 var (
