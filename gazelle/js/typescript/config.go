@@ -7,7 +7,15 @@ import (
 	"strings"
 )
 
+type workspacePath struct {
+	root     string
+	rel      string
+	fileName string
+}
+
 type TsConfigMap struct {
+	configFiles map[string]*workspacePath
+
 	configs map[string]*TsConfig
 }
 
@@ -18,24 +26,51 @@ type TsWorkspace struct {
 func NewTsWorkspace() *TsWorkspace {
 	return &TsWorkspace{
 		cm: &TsConfigMap{
-			configs: make(map[string]*TsConfig),
+			configFiles: make(map[string]*workspacePath),
+			configs:     make(map[string]*TsConfig),
 		},
 	}
 }
 
 func (tc *TsWorkspace) AddTsConfigFile(root, rel, fileName string) {
-	_, err := parseTsConfigJSONFile(tc.cm, root, rel, fileName)
-	if err != nil {
-		fmt.Printf("Failed to parse tsconfig file %s: %v\n", path.Join(rel, fileName), err)
+	if c := tc.cm.configFiles[rel]; c != nil {
+		fmt.Printf("Duplicate tsconfig file %s: %s and %s", path.Join(rel, fileName), c.rel, c.fileName)
+		return
+	}
+
+	tc.cm.configFiles[rel] = &workspacePath{
+		root:     root,
+		rel:      rel,
+		fileName: fileName,
 	}
 }
 
 func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
-	c := tc.cm.configs[rel]
-	if c == &InvalidTsconfig {
+	// Previously parsed
+	if c := tc.cm.configs[rel]; c != nil {
+		if c == &InvalidTsconfig {
+			return nil
+		}
+		return c
+	}
+
+	// Does not exist
+	p := tc.cm.configFiles[rel]
+	if p == nil {
 		return nil
 	}
+
+	c, err := parseTsConfigJSONFile(tc.cm, p.root, p.rel, p.fileName)
+	if err != nil {
+		fmt.Printf("Failed to parse tsconfig file %s: %v\n", path.Join(p.rel, p.fileName), err)
+		return nil
+	}
+
 	return c
+}
+
+func (tc *TsWorkspace) hasConfig(rel string) bool {
+	return tc.cm.configFiles[rel] != nil && tc.cm.configs[rel] != &InvalidTsconfig
 }
 
 func (tc *TsWorkspace) getConfig(f string) (string, *TsConfig) {
@@ -47,8 +82,8 @@ func (tc *TsWorkspace) getConfig(f string) (string, *TsConfig) {
 			dir = ""
 		}
 
-		if c, exists := tc.cm.configs[dir]; exists && c != &InvalidTsconfig {
-			return dir, c
+		if tc.hasConfig(dir) {
+			return dir, tc.GetTsConfigFile(dir)
 		}
 	}
 
