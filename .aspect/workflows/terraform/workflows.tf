@@ -30,7 +30,7 @@ module "aspect_workflows" {
   }
 
   # Aspect Workflows terraform module
-  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.8.1/workflows/terraform-aws-aspect-workflows.zip"
+  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.8.2/workflows/terraform-aws-aspect-workflows.zip"
 
   # Non-terraform Aspect Workflows release artifacts are pulled from the region specific
   # aspect-artifacts bucket during apply. Aspect will grant your AWS account access to this bucket
@@ -110,6 +110,7 @@ module "aspect_workflows" {
       max_runners               = 10
       min_runners               = 0
       resource_type             = "default"
+      scale_out_factor          = 2
       scaling_polling_frequency = 3  # check for queued jobs every 20s
       warming                   = true
     }
