@@ -21,11 +21,11 @@ def gazelle_generation_test(name, gazelle_binary, dir, **kwargs):
         srcs = native.glob(
             ["%s/**" % dir],
             exclude = ["%s/**/.test-*" % dir],
-        ) + [s.replace(".test-", ".") for s in native.glob(["%s/**/.test-*" % dir])],
+        ) + [s.replace(".test-", ".") for s in native.glob(["%s/**/.test-*" % dir], allow_empty = True)],
         visibility = ["//visibility:private"],
     )
 
-    for s in native.glob(["%s/**/.test-*" % dir]):
+    for s in native.glob(["%s/**/.test-*" % dir], allow_empty = True):
         native.genrule(
             name = s.replace("/", "_").replace(".", "_"),
             srcs = [s],

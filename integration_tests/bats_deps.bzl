@@ -127,10 +127,9 @@ sh_library(
         build_file_content = """
 sh_library(
     name = "bats_mock",
-    srcs = glob([
-        "bats-support/src/**",
-        "bats-support/load.bash",
-    ]),
+    srcs = [
+        "bats-mock/load.bash",
+    ],
     visibility = ["//visibility:public"]
 )
 sh_library(
