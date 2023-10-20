@@ -205,28 +205,24 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 
 		// Check if user has specified --bes_backend
 		// https://bazel.build/reference/command-line-reference#flag--bes_backend
-		userBesBackend, err := cmd.Flags().GetString("bes_backend")
-		if err != nil {
-			return fmt.Errorf("expected --bes_backend flag to be registered with cobra as a String: %w", err)
-		}
-
-		// Check if user has specified any --remote_header values
-		// https://bazel.build/reference/command-line-reference#flag--remote_header
-		userRemoteHeaders := make(map[string]string)
-		userRemoteHeader, ok := cmd.Flag("remote_header").Value.(*flags.MultiString)
-		if !ok {
-			return fmt.Errorf("expected --remote_header flag to be registered with cobra as a MultiString")
-		}
-		for _, header := range userRemoteHeader.Get() {
-			s := strings.Split(header, "=")
-			if len(s) != 2 {
-				return fmt.Errorf("invalid ---remote_header flag value '%v'; value must be in the form of a 'name=value' assignment", header)
-			}
-			userRemoteHeaders[s[0]] = s[1]
-		}
-
+		userBesBackend, _ := cmd.Flags().GetString("bes_backend")
+		
 		// Configure a BES proxy if `--bes_backend` is set by the user
 		if userBesBackend != "" {
+			// Check if user has specified any --remote_header values
+			// https://bazel.build/reference/command-line-reference#flag--remote_header
+			userRemoteHeaders := make(map[string]string)
+			userRemoteHeader, ok := cmd.Flag("remote_header").Value.(*flags.MultiString)
+			if !ok {
+				return fmt.Errorf("expected --remote_header flag to be registered with cobra as a MultiString")
+			}
+			for _, header := range userRemoteHeader.Get() {
+				s := strings.Split(header, "=")
+				if len(s) != 2 {
+					return fmt.Errorf("invalid ---remote_header flag value '%v'; value must be in the form of a 'name=value' assignment", header)
+				}
+				userRemoteHeaders[s[0]] = s[1]
+			}
 			var remoteCacheAddress string
 			if _, err := os.Stat(remoteCacheAddressFile); err == nil {
 				c, err := os.ReadFile(remoteCacheAddressFile)
