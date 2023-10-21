@@ -19,11 +19,8 @@ package lint
 import (
 	"context"
 	"fmt"
-	"strings"
 	"os"
-	"path/filepath"
-	
-	"github.com/fatih/color"
+	"strings"
 
 	"aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/aspect/root/flags"
@@ -31,15 +28,17 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system/bep"
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 type Linter struct {
 	ioutils.Streams
-	bzl bazel.Bazel
-	bazelBin string
+	bzl           bazel.Bazel
+	bazelBin      string
 	executionRoot string
+	reports       map[string]*buildeventstream.NamedSetOfFiles
 }
 
 func New(
@@ -49,6 +48,7 @@ func New(
 	return &Linter{
 		Streams: streams,
 		bzl:     bzl,
+		reports: make(map[string]*buildeventstream.NamedSetOfFiles),
 	}
 }
 
@@ -110,35 +110,74 @@ func (runner *Linter) BEPEventCallback(event *buildeventstream.BuildEvent) error
 	switch event.Payload.(type) {
 
 	case *buildeventstream.BuildEvent_WorkspaceInfo:
+		// Record workspace information
 		runner.executionRoot = event.GetWorkspaceInfo().GetLocalExecRoot()
 
 	case *buildeventstream.BuildEvent_Configuration:
+		// Record configuration information
 		runner.bazelBin = event.GetConfiguration().GetMakeVariable()["BINDIR"]
 
-	// TODO: are we printing too much? Don't we need to filter on the "report" output group?
 	case *buildeventstream.BuildEvent_NamedSetOfFiles:
-		for _, f := range event.GetNamedSetOfFiles().GetFiles() {
-			// TODO: what about Build Without the Bytes
-			if strings.HasPrefix(f.GetUri(), "file://") {
-				localFilePath := strings.TrimPrefix(f.GetUri(), "file://")
-				lintResultBuf, err := os.ReadFile(localFilePath)
-				if err != nil {
-					err = &aspecterrors.ExitError{
-						Err:      err,
-						ExitCode: 1,
-					}
-					return err
-				}
+		// Assert no collisions
+		namedSetId := event.Id.GetNamedSet().GetId()
+		if runner.reports[namedSetId] != nil {
+			return fmt.Errorf("duplicate file set id: %s", namedSetId)
+		}
 
-				lineResult := strings.TrimSpace(string(lintResultBuf))
-				if len(lineResult) > 0 {
-					relpath, _ := filepath.Rel(filepath.Join(runner.executionRoot, runner.bazelBin), localFilePath)
-					color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "From %s:\n", relpath)
-					fmt.Fprintln(runner.Streams.Stdout, lineResult)
-					fmt.Fprintln(runner.Streams.Stdout, "")
+		// Record report file sets
+		// TODO: are we collecting too much? Don't we need to filter on the "report" output group?
+		runner.reports[namedSetId] = event.GetNamedSetOfFiles()
+
+	case *buildeventstream.BuildEvent_Completed:
+		label := event.Id.GetTargetCompleted().GetLabel()
+
+		for _, outputGroup := range event.GetCompleted().OutputGroup {
+			for _, fileSetId := range outputGroup.FileSets {
+				if fileSet := runner.reports[fileSetId.Id]; fileSet != nil {
+					for _, f := range fileSet.GetFiles() {
+						err := runner.outputLintResult(label, f)
+						if err != nil {
+							return err
+						}
+					}
+
+					runner.reports[fileSetId.Id] = nil
 				}
 			}
 		}
 	}
+
 	return nil
+}
+
+func (runner *Linter) outputLintResult(label string, f *buildeventstream.File) error {
+	lineResult, err := runner.readLintResultFile(f)
+	if err != nil {
+		return err
+	}
+
+	lineResult = strings.TrimSpace(lineResult)
+	if len(lineResult) > 0 {
+		color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "From %s:\n", label)
+		fmt.Fprintf(runner.Streams.Stdout, "%s\n", lineResult)
+	}
+
+	return nil
+}
+
+func (runner *Linter) readLintResultFile(f *buildeventstream.File) (string, error) {
+	// TODO: use f.GetContents()?
+
+	if strings.HasPrefix(f.GetUri(), "file://") {
+		localFilePath := strings.TrimPrefix(f.GetUri(), "file://")
+		lintResultBuf, err := os.ReadFile(localFilePath)
+		if err != nil {
+			return "", err
+		}
+		return string(lintResultBuf), nil
+	}
+
+	// TODO: support bytestream://
+
+	return "", fmt.Errorf("failed to extract lint result file")
 }
