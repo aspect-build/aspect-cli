@@ -44,8 +44,11 @@ After this, you should be able to merge your changes without any conflicts in th
 
 ## Releasing
 
-1. Push a `x.x.x` tag to the repository at the commit you want to release with the semver version
-   you want to use for the release:
+1. Check with release engineer in silo about which release version of Aspect Pro should be used to
+   determine the version here.
+
+2. Push a `x.x.x` tag to the repository at the commit you want to release with the semver version
+   from the prior step:
 
     ```
     git tag x.x.x
@@ -61,9 +64,9 @@ After this, you should be able to merge your changes without any conflicts in th
     > USE_BAZEL_VERSION=aspect/x.x.x
     > ```
 
-2. Watch the automation run on GitHub actions
+3. Watch the automation run on GitHub actions (it's very slow, be prepared to wait)
 
-3. For go module support, we also require a `v1.x.x` tag that corresponds to the `x.x.x` release
+4. For go module support, we also require a `v1.x.x` tag that corresponds to the `x.x.x` release
    tag. We version the go module as `v1.x.x` since consuming `v2+` go modules downstream adds
    undesirable complication. For now with CLI major releases as `5.x.x` the corresponding go module
    version should be `v1.5xx.x` with the patch version matching and the minor zero-padded to two digits.
@@ -76,7 +79,7 @@ After this, you should be able to merge your changes without any conflicts in th
     git push origin $_
     ```
 
-4. Update Homebrew Formula
+5. Update Homebrew Formula
 
     Once the GitHub release is complete and Aspect CLI release artifacts are available for download,
     follow the [instructions](https://github.com/aspect-build/homebrew-aspect#updating-formulas-to-the-latest-release)
