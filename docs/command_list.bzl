@@ -15,6 +15,7 @@ COMMAND_LIST = [
     "info",
     "init",
     "license",
+    "lint",
     "outputs",
     "print",
     "query",
