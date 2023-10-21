@@ -19,10 +19,10 @@ package lint
 import (
 	"context"
 	"fmt"
+	"strings"
 	"os"
 	"path/filepath"
-	"strings"
-
+	
 	"github.com/fatih/color"
 
 	"aspect.build/cli/bazel/buildeventstream"
@@ -37,8 +37,8 @@ import (
 
 type Linter struct {
 	ioutils.Streams
-	bzl           bazel.Bazel
-	bazelBin      string
+	bzl bazel.Bazel
+	bazelBin string
 	executionRoot string
 }
 
