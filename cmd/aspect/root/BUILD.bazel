@@ -22,6 +22,7 @@ go_library(
         "//cmd/aspect/info",
         "//cmd/aspect/init",
         "//cmd/aspect/license",
+        "//cmd/aspect/lint",
         "//cmd/aspect/mobileinstall",
         "//cmd/aspect/modquery",
         "//cmd/aspect/outputs",
