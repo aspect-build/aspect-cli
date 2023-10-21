@@ -53,6 +53,7 @@ type PluginSystem interface {
 	TearDown()
 	RegisterCustomCommands(cmd *cobra.Command, bazelStartupArgs []string) error
 	BESBackendInterceptor() interceptors.Interceptor
+	BESBackendSubscriberInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	RunHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
@@ -168,7 +169,17 @@ func (ps *pluginSystem) TearDown() {
 	}
 }
 
-// BESBackendInterceptor starts a BES backend and injects it into the context.
+// BESBackendSubscriberInterceptor always starts a BES backend and injects it into the context.
+// Use BESBackendInterceptor to only create the grpc service when there is a known subscriber.
+func (ps *pluginSystem) BESBackendSubscriberInterceptor() interceptors.Interceptor {
+	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
+		return ps.createBesBackend(ctx, cmd, args, next)
+	}
+}
+
+// BESBackendInterceptor sometimes starts a BES backend and injects it into the context.
+// It short-circuits and does nothing in cases where we think there is no subscriber.
+// Use BESBackendSubscriberInterceptor if you always know there will be a subscriber.
 // It gracefully stops the server after the main command is executed.
 func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
@@ -181,81 +192,85 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 		// If there are no plugins configured and --aspect:force_bes_backend is not set then short
 		// circuit here since we don't have any need to create a grpc server to consume the build event
 		// stream.
-		if ps.plugins.head == nil && forceBesBackend == false {
+		if ps.plugins.head == nil && !forceBesBackend {
 			return next(ctx, cmd, args)
 		}
 		if forceBesBackend {
 			fmt.Fprintf(os.Stderr, "Forcing creation of BES backend\n")
 		}
 
-		// Create the BES backend
-		besBackend := bep.NewBESBackend(ctx)
-		for node := ps.plugins.head; node != nil; node = node.next {
-			besBackend.RegisterSubscriber(node.payload.BEPEventCallback)
-		}
-		opts := []grpc.ServerOption{
-			// Bazel doesn't seem to set a maximum send message size, therefore
-			// we match the default send message for Go, which should be enough
-			// for all messages sent by Bazel (roughly 2.14GB).
-			grpc.MaxRecvMsgSize(math.MaxInt32),
-			// Here we are just being explicit with the default value since we
-			// also set the receive message size.
-			grpc.MaxSendMsgSize(math.MaxInt32),
-		}
-
-		// Check if user has specified --bes_backend
-		// https://bazel.build/reference/command-line-reference#flag--bes_backend
-		userBesBackend, _ := cmd.Flags().GetString("bes_backend")
-		
-		// Configure a BES proxy if `--bes_backend` is set by the user
-		if userBesBackend != "" {
-			// Check if user has specified any --remote_header values
-			// https://bazel.build/reference/command-line-reference#flag--remote_header
-			userRemoteHeaders := make(map[string]string)
-			userRemoteHeader, ok := cmd.Flag("remote_header").Value.(*flags.MultiString)
-			if !ok {
-				return fmt.Errorf("expected --remote_header flag to be registered with cobra as a MultiString")
-			}
-			for _, header := range userRemoteHeader.Get() {
-				s := strings.Split(header, "=")
-				if len(s) != 2 {
-					return fmt.Errorf("invalid ---remote_header flag value '%v'; value must be in the form of a 'name=value' assignment", header)
-				}
-				userRemoteHeaders[s[0]] = s[1]
-			}
-			var remoteCacheAddress string
-			if _, err := os.Stat(remoteCacheAddressFile); err == nil {
-				c, err := os.ReadFile(remoteCacheAddressFile)
-				if err != nil {
-					return fmt.Errorf("failed to read %v: %w", remoteCacheAddressFile, err)
-				}
-				remoteCacheAddress = strings.TrimSpace(string(c))
-			}
-
-			besProxy := besproxy.NewBesProxy(userBesBackend, userRemoteHeaders, remoteCacheAddress)
-			if err := besProxy.Connect(); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to connect to build even stream backend %s: %s", userBesBackend, err.Error())
-			} else {
-				fmt.Fprintf(os.Stderr, "Forwarding build even stream to %v\n", userBesBackend)
-				besBackend.RegisterBesProxy(besProxy)
-			}
-		}
-
-		// Setup the BES backend grpc server
-		if err := besBackend.Setup(opts...); err != nil {
-			return fmt.Errorf("failed to run BES backend: %w", err)
-		}
-
-		// Start the BES backend
-		ctx, cancel := context.WithTimeout(ctx, time.Second)
-		defer cancel()
-		if err := besBackend.ServeWait(ctx); err != nil {
-			return fmt.Errorf("failed to run BES backend: %w", err)
-		}
-		defer besBackend.GracefulStop()
-		ctx = bep.InjectBESBackend(ctx, besBackend)
-		return next(ctx, cmd, args)
+		return ps.createBesBackend(ctx, cmd, args, next)
 	}
+}
+
+func (ps *pluginSystem) createBesBackend(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
+	// Create the BES backend
+	besBackend := bep.NewBESBackend(ctx)
+	for node := ps.plugins.head; node != nil; node = node.next {
+		besBackend.RegisterSubscriber(node.payload.BEPEventCallback)
+	}
+	opts := []grpc.ServerOption{
+		// Bazel doesn't seem to set a maximum send message size, therefore
+		// we match the default send message for Go, which should be enough
+		// for all messages sent by Bazel (roughly 2.14GB).
+		grpc.MaxRecvMsgSize(math.MaxInt32),
+		// Here we are just being explicit with the default value since we
+		// also set the receive message size.
+		grpc.MaxSendMsgSize(math.MaxInt32),
+	}
+
+	// Check if user has specified --bes_backend
+	// https://bazel.build/reference/command-line-reference#flag--bes_backend
+	userBesBackend, _ := cmd.Flags().GetString("bes_backend")
+	
+	// Configure a BES proxy if `--bes_backend` is set by the user
+	if userBesBackend != "" {
+		// Check if user has specified any --remote_header values
+		// https://bazel.build/reference/command-line-reference#flag--remote_header
+		userRemoteHeaders := make(map[string]string)
+		userRemoteHeader, ok := cmd.Flag("remote_header").Value.(*flags.MultiString)
+		if !ok {
+			return fmt.Errorf("expected --remote_header flag to be registered with cobra as a MultiString")
+		}
+		for _, header := range userRemoteHeader.Get() {
+			s := strings.Split(header, "=")
+			if len(s) != 2 {
+				return fmt.Errorf("invalid ---remote_header flag value '%v'; value must be in the form of a 'name=value' assignment", header)
+			}
+			userRemoteHeaders[s[0]] = s[1]
+		}
+		var remoteCacheAddress string
+		if _, err := os.Stat(remoteCacheAddressFile); err == nil {
+			c, err := os.ReadFile(remoteCacheAddressFile)
+			if err != nil {
+				return fmt.Errorf("failed to read %v: %w", remoteCacheAddressFile, err)
+			}
+			remoteCacheAddress = strings.TrimSpace(string(c))
+		}
+
+		besProxy := besproxy.NewBesProxy(userBesBackend, userRemoteHeaders, remoteCacheAddress)
+		if err := besProxy.Connect(); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to connect to build even stream backend %s: %s", userBesBackend, err.Error())
+		} else {
+			fmt.Fprintf(os.Stderr, "Forwarding build even stream to %v\n", userBesBackend)
+			besBackend.RegisterBesProxy(besProxy)
+		}
+	}
+
+	// Setup the BES backend grpc server
+	if err := besBackend.Setup(opts...); err != nil {
+		return fmt.Errorf("failed to run BES backend: %w", err)
+	}
+
+	// Start the BES backend
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := besBackend.ServeWait(ctx); err != nil {
+		return fmt.Errorf("failed to run BES backend: %w", err)
+	}
+	defer besBackend.GracefulStop()
+	ctx = bep.InjectBESBackend(ctx, besBackend)
+	return next(ctx, cmd, args)
 }
 
 // BuildHooksInterceptor returns an interceptor that runs the pre and post-build

@@ -1,0 +1,17 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "lint",
+    srcs = ["lint.go"],
+    importpath = "aspect.build/cli/cmd/aspect/lint",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/aspect/lint",
+        "//pkg/aspect/root/flags",
+        "//pkg/bazel",
+        "//pkg/interceptors",
+        "//pkg/ioutils",
+        "//pkg/plugin/system",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

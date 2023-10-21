@@ -40,6 +40,7 @@ import (
 	"aspect.build/cli/cmd/aspect/info"
 	init_ "aspect.build/cli/cmd/aspect/init"
 	"aspect.build/cli/cmd/aspect/license"
+	"aspect.build/cli/cmd/aspect/lint"
 	"aspect.build/cli/cmd/aspect/mobileinstall"
 	"aspect.build/cli/cmd/aspect/modquery"
 	"aspect.build/cli/cmd/aspect/outputs"
@@ -144,6 +145,7 @@ func NewCmd(
 	cmd.AddCommand(version.NewDefaultCmd())
 	cmd.AddCommand(outputs.NewDefaultCmd())
 	cmd.AddCommand(configure.NewDefaultCmd())
+	cmd.AddCommand(lint.NewDefaultCmd(pluginSystem))
 	cmd.SetHelpCommand(help.NewCmd())
 
 	if !buildinfo.Current().IsAspectPro {
