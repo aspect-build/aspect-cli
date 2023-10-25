@@ -126,6 +126,20 @@ func TestTsconfigLoad(t *testing.T) {
 
 		assertEqual(t, recursive.Extends, "", "should not fail extending an empty str")
 	})
+
+	t.Run("parse example tsconfig file with comments, trialing commas", func(t *testing.T) {
+		// See https://github.com/msolo/jsonr/issues/1#event-10736439202
+		cm := &TsConfigMap{
+			configs: make(map[string]*TsConfig),
+		}
+
+		recursive, err := parseTsConfigJSONFile(cm, ".", "tests", "sourcegraph-svelt.json")
+		if err != nil {
+			t.Errorf("parseTsConfigJSONFile: %v", err)
+		}
+
+		assertEqual(t, recursive.Extends, "", "should not fail extending unknown")
+	})
 }
 
 func TestTsconfigParse(t *testing.T) {
