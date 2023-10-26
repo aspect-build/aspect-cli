@@ -119,7 +119,7 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 
 		// Extra queries for more complex import statements.
 		for _, q := range ImportQueries {
-			queryResults := queryImports(treeutils.ParseQuery(sourceLangName, sourceLang, q), sourceCode, rootNode)
+			queryResults := queryImports(treeutils.ParseQuery(sourceLangName, sourceLang, q), filePath, sourceCode, rootNode)
 
 			imports = append(imports, queryResults...)
 		}
@@ -189,7 +189,7 @@ func (p *TreeSitterParser) parseTypeScript(lang *sitter.Language, sourceCode []b
 }
 
 // Run a query finding import query matches.
-func queryImports(query *sitter.Query, sourceCode []byte, rootNode *sitter.Node) []string {
+func queryImports(query *sitter.Query, sourcePath string, sourceCode []byte, rootNode *sitter.Node) []string {
 	imports := make([]string, 0, 5)
 
 	// Execute the import query.
@@ -206,7 +206,10 @@ func queryImports(query *sitter.Query, sourceCode []byte, rootNode *sitter.Node)
 
 		from := readFromQueryMatch(query, m, sourceCode)
 		if from != nil {
-			imports = append(imports, from.Node.Content(sourceCode))
+			fromCode := from.Node.Content(sourceCode)
+			imports = append(imports, fromCode)
+
+			Log.Tracef("Import %q => %q", sourcePath, fromCode)
 		}
 	}
 
@@ -224,14 +227,12 @@ func readFromQueryMatch(query *sitter.Query, m *sitter.QueryMatch, sourceCode []
 		// Filters where a capture must equal a specific value.
 		if strings.HasPrefix(cn, "equals-") {
 			if c.Node.Content(sourceCode) != cn[len("equals-"):] {
-				Log.Tracef("Skipping query match because %q != %q", c.Node.Content(sourceCode), cn[len("equals-"):])
 				return nil
 			}
 			continue
 		}
 
 		if cn == "from" {
-			Log.Tracef("Found import query 'from' %q", c.Node.Content(sourceCode))
 			from = &c
 		}
 	}

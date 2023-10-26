@@ -20,9 +20,16 @@ func NewLabelSet(from label.Label) *LabelSet {
 }
 
 func (s *LabelSet) Add(l *label.Label) {
-	d := l.String()
-	if !s.labels.Contains(d) {
-		BazelLog.Debugf("add dependency '%s' to '%s'", d, s.from.String())
+	if s.from.Equal(*l) {
+		BazelLog.Debugf("ignore %q dependency on self", s.from.String())
+		return
+	}
+
+	// Convert to a relative label for simpler labels in BUILD files
+	relL := l.Rel(s.from.Repo, s.from.Pkg)
+
+	if d := relL.String(); !s.labels.Contains(d) {
+		BazelLog.Debugf("add %q dependency: %q", s.from.String(), d)
 
 		s.labels.Add(d)
 	}

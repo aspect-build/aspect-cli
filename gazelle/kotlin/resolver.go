@@ -181,9 +181,9 @@ func (kt *Resolver) resolveImport(
 			return Resolution_None, nil, nil
 		}
 
-		relMatch := filteredMatches[0].Rel(from.Repo, from.Pkg)
+		match := filteredMatches[0]
 
-		return Resolution_Label, &relMatch, nil
+		return Resolution_Label, &match, nil
 	}
 
 	// Native kotlin imports
