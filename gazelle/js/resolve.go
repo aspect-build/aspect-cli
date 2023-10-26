@@ -38,7 +38,7 @@ const (
 	Resolution_Package    = 2
 	Resolution_Label      = 3
 	Resolution_NativeNode = 4
-	Resolution_Other      = 5
+	Resolution_Override   = 5
 )
 
 type ResolutionType = int
@@ -128,7 +128,7 @@ func (ts *Resolver) protoLibraryImports(r *rule.Rule, f *rule.File) []resolve.Im
 // the embedding rule will be indexed. The embedding rule will inherit
 // the imports of the embedded rule.
 func (ts *Resolver) Embeds(r *rule.Rule, from label.Label) []label.Label {
-	BazelLog.Debugf("Embeds '%s' rules", from.String())
+	BazelLog.Debugf("Embeds %q rules", from.String())
 
 	switch r.Kind() {
 	case TsProjectKind:
@@ -169,7 +169,7 @@ func (ts *Resolver) Resolve(
 	from label.Label,
 ) {
 	start := time.Now()
-	BazelLog.Infof("Resolve '%s' dependencies", from.String())
+	BazelLog.Infof("Resolve %q dependencies", from.String())
 
 	// TsProject imports are resolved as deps
 	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsConfigKind || r.Kind() == TsProtoLibraryKind {
@@ -184,7 +184,7 @@ func (ts *Resolver) Resolve(
 		}
 	}
 
-	BazelLog.Infof("Resolve '%s' DONE in %s", from.String(), time.Since(start).String())
+	BazelLog.Infof("Resolve %q DONE in %s", from.String(), time.Since(start).String())
 }
 
 func (ts *Resolver) resolveModuleDeps(
@@ -207,17 +207,19 @@ func (ts *Resolver) resolveModuleDeps(
 			return nil, err
 		}
 
-		if resolutionType == Resolution_NotFound {
-			// The import itself was not found, but a type definition was found for it
-			if types := ts.resolveImportTypes(from, mod.Imp); len(types) > 0 {
-				for _, typesDep := range types {
-					deps.Add(typesDep)
-				}
-				continue
-			}
+		types := ts.resolveImportTypes(resolutionType, from, mod.Imp)
+		for _, typesDep := range types {
+			deps.Add(typesDep)
+		}
 
+		if dep != nil {
+			deps.Add(dep)
+		}
+
+		// Neither the import or a type definition was found.
+		if resolutionType == Resolution_NotFound && len(types) == 0 {
 			if cfg.ValidateImportStatements() != ValidationOff {
-				BazelLog.Debugf("import '%s' for target '%s' not found", mod.ImportPath, from.String())
+				BazelLog.Debugf("import %q for target %q not found", mod.ImportPath, from.String())
 
 				notFound := fmt.Errorf(
 					"Import %[1]q from %[2]q is an unknown dependency. Possible solutions:\n"+
@@ -233,21 +235,6 @@ func (ts *Resolver) resolveModuleDeps(
 			}
 
 			continue
-		}
-
-		if dep != nil {
-			deps.Add(dep)
-		}
-
-		// Add any relevant type definitions such as @types packages
-		if resolutionType == Resolution_NativeNode {
-			if typesNode := ts.resolveAtTypes(from, "node"); typesNode != nil {
-				deps.Add(typesNode)
-			}
-		} else if resolutionType == Resolution_Package {
-			for _, typesDep := range ts.resolveImportTypes(from, mod.Imp) {
-				deps.Add(typesDep)
-			}
 		}
 	}
 
@@ -282,12 +269,12 @@ func (ts *Resolver) resolveModuleDep(
 
 	// Overrides
 	if override, ok := resolve.FindRuleWithOverride(c, imp, LanguageName); ok {
-		return Resolution_Other, &override, nil
+		return Resolution_Override, &override, nil
 	}
 
 	// JS Overrides (js_resolve)
 	if res := cfg.GetResolution(imp.Imp); res != nil {
-		return Resolution_Label, res, nil
+		return Resolution_Override, res, nil
 	}
 
 	possible := make([]resolve.ImportSpec, 0, 1)
@@ -320,17 +307,17 @@ func (ts *Resolver) resolveModuleDep(
 				return Resolution_None, nil, nil
 			}
 
-			relMatch := filteredMatches[0].Rel(from.Repo, from.Pkg)
+			match := filteredMatches[0]
 
-			return Resolution_Other, &relMatch, nil
+			BazelLog.Tracef("resolve %q import %q as %q", mod.Imp, match)
+
+			return Resolution_Override, &match, nil
 		}
 	}
 
 	// References to a label such as a file or file-generating rule
 	if importLabel := ts.lang.GetImportLabel(imp.Imp); importLabel != nil {
-		relImport := importLabel.Rel(from.Repo, from.Pkg)
-
-		return Resolution_Label, &relImport, nil
+		return Resolution_Label, importLabel, nil
 	}
 
 	// References to an npm package, pnpm workspace projects etc.
@@ -360,37 +347,45 @@ func (ts *Resolver) resolvePackage(from label.Label, imp string) *label.Label {
 
 	fromProject := ts.lang.pnpmProjects.GetProject(from.Pkg)
 	if fromProject == nil {
-		BazelLog.Tracef("resolve '%s' import '%s' project not found", from.String(), impPkg)
+		BazelLog.Tracef("resolve %q import %q project not found", from.String(), impPkg)
 		return nil
 	}
 
 	impPkgLabel := fromProject.Get(impPkg)
 	if impPkgLabel == nil {
-		BazelLog.Tracef("resolve '%s' (project '%s') import '%s' not found", from.String(), from.Pkg, impPkg)
+		BazelLog.Tracef("resolve %q import %q not found", from.String(), impPkg)
 		return nil
 	}
 
-	relPkgLabel := impPkgLabel.Rel(from.Repo, from.Pkg)
+	BazelLog.Tracef("resolve %q import %q to %q", from.String(), impPkg, impPkgLabel)
 
-	BazelLog.Tracef("resolve '%s' (project '%s') import '%s' to '%s'", from.String(), from.Pkg, impPkg, relPkgLabel)
-
-	return &relPkgLabel
+	return impPkgLabel
 }
 
-func (ts *Resolver) resolveImportTypes(from label.Label, imp string) []*label.Label {
+func (ts *Resolver) resolveImportTypes(resolutionType ResolutionType, from label.Label, imp string) []*label.Label {
 	deps := make([]*label.Label, 0)
 
-	// @types packages for the import
-	if typesPkg := ts.resolveAtTypes(from, imp); typesPkg != nil {
-		deps = append(deps, typesPkg)
+	// Overrides are not extended with additional types
+	if resolutionType == Resolution_Override {
+		return deps
+	}
+
+	if resolutionType == Resolution_NativeNode {
+		// The @types package for native node
+		if typesNode := ts.resolveAtTypes(from, "node"); typesNode != nil {
+			deps = append(deps, typesNode)
+		}
+	} else {
+		// @types packages for any named imports
+		// The import may be a package, may be an unresolved import with only @types
+		if typesPkg := ts.resolveAtTypes(from, imp); typesPkg != nil {
+			deps = append(deps, typesPkg)
+		}
 	}
 
 	// Additional module definitions for the import
 	if typeModules := ts.lang.moduleTypes[imp]; typeModules != nil {
-		for _, mod := range typeModules {
-			relMode := mod.Rel(from.Repo, from.Pkg)
-			deps = append(deps, &relMode)
-		}
+		deps = append(deps, typeModules...)
 	}
 
 	return deps
@@ -401,7 +396,7 @@ func toAtTypesPackage(imp string) string {
 
 	if imp[0] == '@' {
 		if len(pkgParts) < 2 {
-			BazelLog.Errorf("Invalid scoped package: '%s'", imp)
+			BazelLog.Errorf("Invalid scoped package: %q", imp)
 			return ""
 		}
 
@@ -421,13 +416,8 @@ func (ts *Resolver) resolveAtTypes(from label.Label, imp string) *label.Label {
 	}
 
 	typesPkg := toAtTypesPackage(imp)
-	typesPkgLabel := fromProject.Get(typesPkg)
-	if typesPkgLabel == nil {
-		return nil
-	}
 
-	relImpPkgLabel := typesPkgLabel.Rel(from.Repo, from.Pkg)
-	return &relImpPkgLabel
+	return fromProject.Get(typesPkg)
 }
 
 // targetListFromResults returns a string with the human-readable list of

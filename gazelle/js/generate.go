@@ -51,13 +51,14 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 	// When we return empty, we mean that we don't generate anything, but this
 	// still triggers the indexing for all the TypeScript targets in this package.
 	if !cfg.GenerationEnabled() {
-		BazelLog.Tracef("GenerateRules disabled %s", args.Rel)
+		BazelLog.Tracef("GenerateRules disabled '%s'", args.Rel)
 		return language.GenerateResult{}
 	}
 
 	// If this directory has not been declared as a bazel package only continue
 	// if generating new BUILD files is enabled.
 	if cfg.GenerationMode() == GenerationModeNone && !gazelle.IsBazelPackage(args.Dir) {
+		BazelLog.Tracef("GenerateRules '%s' BUILD creation disabled", args.Rel)
 		return language.GenerateResult{}
 	}
 
@@ -82,7 +83,7 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 func removeRule(args language.GenerateArgs, ruleName string, result *language.GenerateResult) {
 	existing := getFileRuleByName(args, ruleName)
 	if existing == nil {
-		BazelLog.Tracef("remove rule '%s' '%s:%s' not found, %v", TsProjectKind, args.Rel, ruleName, args)
+		BazelLog.Tracef("remove rule '%s:%s' (%q) not found", args.Rel, ruleName, TsProjectKind)
 		return
 	}
 
@@ -99,7 +100,7 @@ func removeRule(args language.GenerateArgs, ruleName string, result *language.Ge
 			existing.Delete()
 		}
 
-		BazelLog.Infof("remove rule '%s' '%s:%s'", existing.Kind(), args.Rel, existing.Name())
+		BazelLog.Infof("remove rule '%s:%s' (%q)", args.Rel, existing.Name(), existing.Kind())
 
 		emptyRule := rule.NewRule(existing.Kind(), ruleName)
 		result.Empty = append(result.Empty, emptyRule)
@@ -503,10 +504,10 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePa
 	}
 
 	for _, importPath := range parseResults.Imports {
-		if !cfg.IsImportIgnored(importPath) {
-			// The path from the root
-			workspacePath := toWorkspacePath(sourcePath, importPath)
+		// The path from the root
+		workspacePath := toWorkspacePath(sourcePath, importPath)
 
+		if !cfg.IsImportIgnored(importPath) {
 			alternates := make([]string, 0)
 			for _, alt := range ts.tsconfig.ExpandPaths(sourcePath, importPath) {
 				alternates = append(alternates, toWorkspacePath(sourcePath, alt))
@@ -522,6 +523,10 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePa
 				ImportPath: importPath,
 				SourcePath: sourcePath,
 			})
+
+			BazelLog.Tracef("Import: %q -> %q (alias: %v)", workspacePath, importPath, alternates)
+		} else {
+			BazelLog.Tracef("Import ignored: %q -> %q", workspacePath, importPath)
 		}
 	}
 
@@ -684,7 +689,7 @@ func (ts *typeScriptLang) addPackageRules(cfg *JsGazelleConfig, args language.Ge
 // Add pnpm rules for a pnpm lockfile.
 // Collect pnpm projects and project dependencies from the lockfile.
 func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRoot, lockfile string) {
-	BazelLog.Infof("add workspace '%s'", lockfile)
+	BazelLog.Infof("add workspace %q", lockfile)
 
 	lockfilePath := path.Join(repoRoot, lockfile)
 
@@ -692,12 +697,12 @@ func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRo
 	pnpmRefs := make(map[string]string)
 
 	for project, packages := range pnpm.ParsePnpmLockFileDependencies(lockfilePath) {
-		BazelLog.Debugf("add project '%s' from '%s'", project, lockfile)
+		BazelLog.Debugf("add %q project %q ", lockfile, project)
 
 		pnpmProject := pnpmWorkspace.AddProject(project)
 
 		for pkg, version := range packages {
-			BazelLog.Tracef("add dependency to '%s': '%s'", project, pkg)
+			BazelLog.Tracef("add %q npm package: %q", project, pkg)
 
 			pnpmProject.AddPackage(pkg, &label.Label{
 				Repo:     repoName,
@@ -710,14 +715,14 @@ func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRo
 			if strings.Index(version, "link:") == 0 {
 				link := version[len("link:"):]
 
-				BazelLog.Tracef("add project '%s' reference to project '%s' as '%s'", project, link, pkg)
+				BazelLog.Tracef("add %q project reference to project %q as %q", project, link, pkg)
 
 				// Pnpm "link" references are relative to the package defining the link
 				pnpmRefs[pkg] = path.Join(pnpmProject.Pkg(), link)
 			} else if strings.Index(version, "file:") == 0 {
 				file := version[len("file:"):]
 
-				BazelLog.Tracef("add project '%s' reference to file '%s' as '%s'", project, file, pkg)
+				BazelLog.Tracef("add %q project reference to file %q as %q", project, file, pkg)
 
 				// Pnpm "file" references are relative to the pnpm workspace root.
 				pnpmRefs[pkg] = path.Join(path.Dir(lockfile), file)

@@ -222,7 +222,6 @@ func (c TsConfig) expandRelativePath(importPath string) string {
 	// Absolute paths must never be expanded but everything else must be relative to the bazel-root
 	// and therefore expanded with the path to the current active tsconfig.json
 	if !path.IsAbs(importPath) {
-		BazelLog.Tracef("Found local path %s in tsconfig.json. Should be expanded with tsconfig dir: %s", importPath, c.ConfigDir)
 		return c.ConfigDir
 	}
 	return ""
@@ -237,9 +236,12 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 	possible := make([]string, 0)
 
 	// Check for exact 'paths' matches first
-	exact := (*pathMap)[p]
-	for _, m := range exact {
-		possible = append(possible, path.Join(c.expandRelativePath(m), c.Paths.Rel, m))
+	if exact := (*pathMap)[p]; len(exact) > 0 {
+		BazelLog.Tracef("TsConfig.paths exact matches for %q: %v", p, exact)
+
+		for _, m := range exact {
+			possible = append(possible, path.Join(c.expandRelativePath(m), c.Paths.Rel, m))
+		}
 	}
 
 	// Check for pattern matches next
@@ -258,17 +260,21 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 		}
 	}
 
-	// Sort the 'paths' pattern matches by priority
-	sort.Sort(possibleMatches)
+	if len(possibleMatches) > 0 {
+		// Sort the 'paths' pattern matches by priority
+		sort.Sort(possibleMatches)
 
-	// Expand and add the pattern matches
-	for _, m := range possibleMatches {
-		for _, originalPath := range m.originalPaths {
-			// Swap out the "*" in the original path for whatever the "*" matched
-			matchedText := p[len(m.prefix) : len(p)-len(m.suffix)]
-			mappedPath := strings.Replace(originalPath, "*", matchedText, 1)
+		BazelLog.Tracef("TsConfig.paths glob matches for %q: %v", p, possibleMatches)
 
-			possible = append(possible, path.Join(c.expandRelativePath(mappedPath), c.Paths.Rel, mappedPath))
+		// Expand and add the pattern matches
+		for _, m := range possibleMatches {
+			for _, originalPath := range m.originalPaths {
+				// Swap out the "*" in the original path for whatever the "*" matched
+				matchedText := p[len(m.prefix) : len(p)-len(m.suffix)]
+				mappedPath := strings.Replace(originalPath, "*", matchedText, 1)
+
+				possible = append(possible, path.Join(c.expandRelativePath(mappedPath), c.Paths.Rel, mappedPath))
+			}
 		}
 	}
 
@@ -276,7 +282,11 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 	// Must not to be absolute or relative to be expanded
 	// https://www.typescriptlang.org/tsconfig#baseUrl
 	if !isRelativePath(p) {
-		possible = append(possible, path.Join(c.expandRelativePath(p), c.BaseUrl, p))
+		baseUrlPath := path.Join(c.expandRelativePath(p), c.BaseUrl, p)
+
+		BazelLog.Tracef("TsConfig.baseUrl match for %q: %v", p, baseUrlPath)
+
+		possible = append(possible, baseUrlPath)
 	}
 
 	// Add 'rootDirs' as alternate directories for relative imports
@@ -284,8 +294,6 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 	for _, v := range c.VirtualRootDirs {
 		possible = append(possible, path.Join(v, p))
 	}
-
-	BazelLog.Tracef("Found %d possible paths for %s: %v", len(possible), p, possible)
 
 	return possible
 }
