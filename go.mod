@@ -6,9 +6,9 @@ require (
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/alphadose/haxmap v1.3.0
 	github.com/bazel-contrib/rules_jvm v0.17.1-0.20230814153054-0ce5d051291b
-	github.com/bazelbuild/bazel-gazelle v0.31.0
+	github.com/bazelbuild/bazel-gazelle v0.33.0
 	github.com/bazelbuild/bazelisk v1.17.0
-	github.com/bazelbuild/buildtools v0.0.0-20230510134650-37bd1811516d
+	github.com/bazelbuild/buildtools v0.0.0-20230831140646-386244e73fc4
 	github.com/bmatcuk/doublestar/v4 v4.6.0
 	github.com/emirpasic/gods v1.18.1
 	github.com/fatih/color v1.15.0
@@ -33,7 +33,7 @@ require (
 	github.com/tejzpr/ordered-concurrently/v3 v3.0.1
 	github.com/twmb/murmur3 v1.1.8
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1
-	golang.org/x/sync v0.2.0
+	golang.org/x/sync v0.3.0
 	google.golang.org/genproto v0.0.0-20230530153820-e85fd2cbaebc
 	google.golang.org/grpc v1.55.0
 	google.golang.org/protobuf v1.30.0
@@ -42,7 +42,7 @@ require (
 )
 
 require (
-	github.com/bazelbuild/rules_go v0.39.1 // indirect
+	github.com/bazelbuild/rules_go v0.41.0 // indirect
 	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
 	github.com/chzyer/readline v1.5.1 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
@@ -64,9 +64,9 @@ require (
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
-	golang.org/x/mod v0.10.0 // indirect
+	golang.org/x/mod v0.12.0 // indirect
 	golang.org/x/net v0.10.0 // indirect
-	golang.org/x/sys v0.8.0 // indirect
+	golang.org/x/sys v0.12.0 // indirect
 	golang.org/x/text v0.9.0 // indirect
 	golang.org/x/tools v0.9.1 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20230526203410-71b5a4ffd15e // indirect
