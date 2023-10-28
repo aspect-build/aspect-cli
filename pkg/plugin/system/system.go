@@ -222,7 +222,7 @@ func (ps *pluginSystem) createBesBackend(ctx context.Context, cmd *cobra.Command
 	// Check if user has specified --bes_backend
 	// https://bazel.build/reference/command-line-reference#flag--bes_backend
 	userBesBackend, _ := cmd.Flags().GetString("bes_backend")
-	
+
 	// Configure a BES proxy if `--bes_backend` is set by the user
 	if userBesBackend != "" {
 		// Check if user has specified any --remote_header values
