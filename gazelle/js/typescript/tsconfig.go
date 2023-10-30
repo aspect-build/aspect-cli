@@ -89,32 +89,34 @@ func isRelativePath(p string) bool {
 	return strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../")
 }
 
-// Load a tsconfig.json file and return the compilerOptions config
-func parseTsConfigJSONFile(cm *TsConfigMap, root, dir, tsconfig string) (*TsConfig, error) {
-	existing := cm.configs[dir]
+// Load a tsconfig.json file and return the compilerOptions config with
+// recursive protected via a parsed map that is passed in
+func parseTsConfigJSONFile(parsed map[string]*TsConfig, root, dir, tsconfig string) (*TsConfig, error) {
+	existing := parsed[dir]
 	if existing != nil {
 		return existing, nil
 	}
 
 	// Start with invalid to prevent recursing into the same file
-	cm.configs[dir] = &InvalidTsconfig
+	parsed[dir] = &InvalidTsconfig
 
-	content, readErr := os.ReadFile(path.Join(root, dir, tsconfig))
-	if readErr != nil {
-		return nil, readErr
-	}
-
-	config, err := parseTsConfigJSON(cm, root, dir, tsconfig, content)
+	content, err := os.ReadFile(path.Join(root, dir, tsconfig))
 	if err != nil {
 		return nil, err
 	}
 
-	// Persist the result on success
-	cm.configs[dir] = config
+	config, err := parseTsConfigJSON(parsed, root, dir, tsconfig, content)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add to parsed map on success
+	parsed[dir] = config
+
 	return config, nil
 }
 
-func parseTsConfigJSON(cm *TsConfigMap, root, configDir, configName string, tsconfigContent []byte) (*TsConfig, error) {
+func parseTsConfigJSON(parsed map[string]*TsConfig, root, configDir, configName string, tsconfigContent []byte) (*TsConfig, error) {
 	var c tsConfigJSON
 	if err := jsonr.Unmarshal(tsconfigContent, &c); err != nil {
 		return nil, err
@@ -123,7 +125,7 @@ func parseTsConfigJSON(cm *TsConfigMap, root, configDir, configName string, tsco
 	var baseConfig *TsConfig
 	var extends string
 	if c.Extends != "" {
-		base, err := parseTsConfigJSONFile(cm, root, path.Join(configDir, path.Dir(c.Extends)), path.Base(c.Extends))
+		base, err := parseTsConfigJSONFile(parsed, root, path.Join(configDir, path.Dir(c.Extends)), path.Base(c.Extends))
 		if err != nil {
 			BazelLog.Warnf("Failed to load base tsconfig file %s: %v", path.Join(configDir, c.Extends), err)
 		} else if base != nil {
