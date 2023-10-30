@@ -32,11 +32,7 @@ func assertEqual(t *testing.T, a, b string, msg string) {
 }
 
 func parseTest(t *testing.T, configDir, tsconfigJSON string) *TsConfig {
-	cm := &TsConfigMap{
-		configs: make(map[string]*TsConfig),
-	}
-
-	options, err := parseTsConfigJSON(cm, ".", configDir, "tsconfig.json", []byte(tsconfigJSON))
+	options, err := parseTsConfigJSON(make(map[string]*TsConfig), ".", configDir, "tsconfig.json", []byte(tsconfigJSON))
 	if err != nil {
 		t.Fatalf("failed to parse options: %v\n\n%s", err, tsconfigJSON)
 	}
@@ -98,42 +94,26 @@ func TestIsRelativePath(t *testing.T) {
 
 func TestTsconfigLoad(t *testing.T) {
 	t.Run("parse a tsconfig file extending itself", func(t *testing.T) {
-		cm := &TsConfigMap{
-			configs: make(map[string]*TsConfig),
-		}
-
-		recursive, _ := parseTsConfigJSONFile(cm, ".", "tests", "extends-recursive.json")
+		recursive, _ := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-recursive.json")
 
 		assertEqual(t, recursive.Extends, "tests/extends-recursive.json", "should not fail extending itself")
 	})
 
 	t.Run("parse a tsconfig file extending an unknown file", func(t *testing.T) {
-		cm := &TsConfigMap{
-			configs: make(map[string]*TsConfig),
-		}
-
-		recursive, _ := parseTsConfigJSONFile(cm, ".", "tests", "extends-404.json")
+		recursive, _ := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-404.json")
 
 		assertEqual(t, recursive.Extends, "tests/does-not-exist.json", "should not fail extending unknown")
 	})
 
 	t.Run("parse a tsconfig file extending a blank string", func(t *testing.T) {
-		cm := &TsConfigMap{
-			configs: make(map[string]*TsConfig),
-		}
-
-		recursive, _ := parseTsConfigJSONFile(cm, ".", "tests", "extends-empty.json")
+		recursive, _ := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-empty.json")
 
 		assertEqual(t, recursive.Extends, "", "should not fail extending an empty str")
 	})
 
 	t.Run("parse example tsconfig file with comments, trialing commas", func(t *testing.T) {
 		// See https://github.com/msolo/jsonr/issues/1#event-10736439202
-		cm := &TsConfigMap{
-			configs: make(map[string]*TsConfig),
-		}
-
-		recursive, err := parseTsConfigJSONFile(cm, ".", "tests", "sourcegraph-svelt.json")
+		recursive, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "sourcegraph-svelt.json")
 		if err != nil {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}

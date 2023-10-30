@@ -5,6 +5,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type workspacePath struct {
@@ -14,9 +15,12 @@ type workspacePath struct {
 }
 
 type TsConfigMap struct {
-	configFiles map[string]*workspacePath
-
-	configs map[string]*TsConfig
+	// `configFiles` is created during the gazelle configure phase which is single threaded so doesn't
+	// require mutex projection. Just `configs` has concurrency considerations since it is lazy
+	// loading on multiple threads in the generate phase.
+	configFiles  map[string]*workspacePath
+	configs      map[string]*TsConfig
+	configsMutex sync.RWMutex
 }
 
 type TsWorkspace struct {
@@ -26,8 +30,9 @@ type TsWorkspace struct {
 func NewTsWorkspace() *TsWorkspace {
 	return &TsWorkspace{
 		cm: &TsConfigMap{
-			configFiles: make(map[string]*workspacePath),
-			configs:     make(map[string]*TsConfig),
+			configFiles:  make(map[string]*workspacePath),
+			configs:      make(map[string]*TsConfig),
+			configsMutex: sync.RWMutex{},
 		},
 	}
 }
@@ -46,7 +51,17 @@ func (tc *TsWorkspace) AddTsConfigFile(root, rel, fileName string) {
 }
 
 func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
-	// Previously parsed
+	// No file exists
+	p := tc.cm.configFiles[rel]
+	if p == nil {
+		return nil
+	}
+
+	// Lock the configs mutex
+	tc.cm.configsMutex.Lock()
+	defer tc.cm.configsMutex.Unlock()
+
+	// Check for previously parsed
 	if c := tc.cm.configs[rel]; c != nil {
 		if c == &InvalidTsconfig {
 			return nil
@@ -54,23 +69,13 @@ func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
 		return c
 	}
 
-	// Does not exist
-	p := tc.cm.configFiles[rel]
-	if p == nil {
-		return nil
-	}
-
-	c, err := parseTsConfigJSONFile(tc.cm, p.root, p.rel, p.fileName)
+	c, err := parseTsConfigJSONFile(tc.cm.configs, p.root, p.rel, p.fileName)
 	if err != nil {
 		fmt.Printf("Failed to parse tsconfig file %s: %v\n", path.Join(p.rel, p.fileName), err)
 		return nil
 	}
 
 	return c
-}
-
-func (tc *TsWorkspace) hasConfig(rel string) bool {
-	return tc.cm.configFiles[rel] != nil && tc.cm.configs[rel] != &InvalidTsconfig
 }
 
 func (tc *TsWorkspace) getConfig(f string) (string, *TsConfig) {
@@ -82,7 +87,7 @@ func (tc *TsWorkspace) getConfig(f string) (string, *TsConfig) {
 			dir = ""
 		}
 
-		if tc.hasConfig(dir) {
+		if tc.cm.configFiles[dir] != nil {
 			return dir, tc.GetTsConfigFile(dir)
 		}
 	}
