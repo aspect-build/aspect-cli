@@ -74,7 +74,7 @@ var (
 	// List of all commands with label as inputs. To compile the list, you can
 	// use the following command:
 	//
-	//   bazel help completion | grep 'ARGUMENT="label"'
+	//   bazel help completion | grep 'ARGUMENT="label'
 	//
 	// In theory, we could make a query everytime we execute the completion.
 	// However, this introduces unnecessary overhead because the commands are
@@ -82,11 +82,14 @@ var (
 	commandsWithLabelInput = map[string]struct{}{
 		"aquery":         {},
 		"build":          {},
+		"coverage":       {},
 		"cquery":         {},
 		"fetch":          {},
 		"mobile-install": {},
 		"print-action":   {},
 		"query":          {},
+		"run":            {},
+		"test":           {},
 	}
 
 	bazelFlagSets = map[string]*pflag.FlagSet{}
