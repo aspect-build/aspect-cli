@@ -170,10 +170,10 @@ func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
 				if subcommand, ok := subCommands[command]; ok {
 					subcommand.DisableFlagParsing = true // only want to disable flag parsing on commands that call out to bazel
 					addFlagToFlagSet(flag, subcommand.Flags(), !documented)
-				}
 
-				// Collect all the bazel sub-commands that have at least one flag defined.
-				bazelCommands[command] = subcommand
+					// Collect all the bazel sub-commands that have at least one flag defined.
+					bazelCommands[command] = subcommand
+				}
 			}
 		}
 	}
