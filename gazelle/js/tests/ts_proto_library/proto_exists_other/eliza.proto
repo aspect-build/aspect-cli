@@ -1,0 +1,6 @@
+syntax = "proto3";
+
+package connectrpc.eliza.v1;
+
+service ElizaService {
+}
