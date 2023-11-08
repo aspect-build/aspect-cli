@@ -803,8 +803,11 @@ func checkCollisionErrors(tsProjectTargetName string, args language.GenerateArgs
 		fqTarget := label.New("", args.Rel, tsProjectTargetName)
 		return fmt.Errorf("failed to generate target %q of kind %q: "+
 			"a target of kind %q with the same name already exists. "+
-			"Use the '# gazelle:%s' directive to change the naming convention.",
-			fqTarget.String(), tsProjectKind, existing.Kind(), Directive_LibraryNamingConvention)
+			"Use the '# gazelle:%s' directive to change the naming convention.\n\n"+
+			"For example:\n"+
+			"	# gazelle:%s {dirname}_js\n"+
+			"	# gazelle:%s {dirname}_js_tests",
+			fqTarget.String(), tsProjectKind, existing.Kind(), Directive_LibraryNamingConvention, Directive_LibraryNamingConvention, Directive_TestsNamingConvention)
 	}
 
 	return nil
