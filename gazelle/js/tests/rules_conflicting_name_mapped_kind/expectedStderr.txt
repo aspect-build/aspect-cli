@@ -1,1 +1,6 @@
 Source rule generation error: failed to generate target "//:rules_conflicting_name_mapped_kind" of kind "ts_override": a target of kind "asdf" with the same name already exists. Use the '# gazelle:js_project_naming_convention' directive to change the naming convention.
+
+For example:
+	# gazelle:js_project_naming_convention {dirname}_js
+	# gazelle:js_tests_naming_convention {dirname}_js_tests
+
