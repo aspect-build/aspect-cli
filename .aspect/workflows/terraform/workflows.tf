@@ -30,7 +30,7 @@ module "aspect_workflows" {
   }
 
   # Aspect Workflows terraform module
-  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.8.3/workflows/terraform-aws-aspect-workflows.zip"
+  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.8.7/workflows/terraform-aws-aspect-workflows.zip"
 
   # Non-terraform Aspect Workflows release artifacts are pulled from the region specific
   # aspect-artifacts bucket during apply. Aspect will grant your AWS account access to this bucket
@@ -51,31 +51,6 @@ module "aspect_workflows" {
 
   # Whether or not to allow SSM access to runners
   enable_ssm_access  = true
-
-  # Opt-in to k8s high availabilty (HA) remote cache; this will be default in future releases
-  experiments = {
-    k8s_remote        = true
-    k8s_observability = true
-  }
-
-  # Kubernetes remote cache properties
-  experimental_remote = {
-    cache_shards           = 3
-    cache_size_gb          = 384
-    load_balancer_replicas = 2
-    replicate_cache        = true
-  }
-
-  # Kubernetes cluster properties
-  k8s_cluster = {
-    cluster_version = "1.27"
-    min_size        = 1
-    max_size        = 10
-    desired_size    = 3
-    instance_types  = ["t3.large"],
-    # The audit log is very chatty, turn 'er down for a bit.
-    cluster_enabled_log_types = ["api", "authenticator"]
-  }
 
   # Monitoring properties
   monitoring_enabled = true
