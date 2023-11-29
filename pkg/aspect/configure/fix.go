@@ -29,7 +29,7 @@ import (
 func fixFile(c *config.Config, f *rule.File) error {
 	newContent := f.Format()
 	if bytes.Equal(f.Content, newContent) {
-		return errUnchanged // NOTE: aspect-cli "unchanged" result
+		return nil
 	}
 	outPath := findOutputPath(c, f)
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o777); err != nil {
@@ -42,5 +42,5 @@ func fixFile(c *config.Config, f *rule.File) error {
 	if getUpdateConfig(c).print0 {
 		fmt.Printf("%s\x00", outPath)
 	}
-	return nil
+	return resultFileChanged // NOTE: aspect-cli "unchanged" result
 }
