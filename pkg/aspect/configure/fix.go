@@ -18,6 +18,7 @@ package configure
 import (
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -25,21 +26,21 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
 
-func fixFile(c *config.Config, f *rule.File) (bool, error) {
+func fixFile(c *config.Config, f *rule.File) error {
 	newContent := f.Format()
 	if bytes.Equal(f.Content, newContent) {
-		return false, nil
+		return nil
 	}
 	outPath := findOutputPath(c, f)
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o777); err != nil {
-		return false, err
+		return err
 	}
-	if err := os.WriteFile(outPath, newContent, 0o666); err != nil {
-		return false, err
+	if err := ioutil.WriteFile(outPath, newContent, 0o666); err != nil {
+		return err
 	}
 	f.Content = newContent
 	if getUpdateConfig(c).print0 {
 		fmt.Printf("%s\x00", outPath)
 	}
-	return true, nil
+	return nil
 }

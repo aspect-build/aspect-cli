@@ -1,4 +1,4 @@
-// Copy of gazelle internal https://github.com/bazelbuild/bazel-gazelle/blob/7feffe17f56e2b76eae8a4f2933215d6c5924176/internal/module/module.go
+// Copy of gazelle internal https://github.com/bazelbuild/bazel-gazelle/blob/b62589672b5c32264ddf40585247d684c29bdd15/internal/module/module.go
 
 // Package module provides functions to read information out of MODULE.bazel files.
 
