@@ -26,6 +26,7 @@ jobs:
     docker:
       - image: cimg/base:2023.03
     steps:
+      - run: echo "No-op step since CCI requires one step for the job to be valid"
       - when:
           condition:
             and:
@@ -33,7 +34,7 @@ jobs:
                   equal: [scheduled_pipeline, << pipeline.trigger_source >>]
           steps:
             - checkout
-            - run: echo "this is an example of legacy non-workflows job"
+            - run: echo "This is an example of legacy non-workflows job"
 
 workflows:
   default-workflow:
