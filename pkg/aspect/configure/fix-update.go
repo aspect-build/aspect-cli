@@ -56,8 +56,8 @@ type updateConfig struct {
 	print0         bool
 }
 
-// NOTE: addition aspect-cli "unchanged" result
-var errUnchanged = fmt.Errorf("no changes while running diff")
+// NOTE: addition aspect-cli "changed" result
+var resultFileChanged = fmt.Errorf("changes detected")
 
 type emitFunc func(c *config.Config, f *rule.File) error
 
@@ -253,6 +253,7 @@ var genericLoads = []rule.LoadInfo{
 	},
 }
 
+// NOTE: additional aspect-cli update result status
 type FixUpdateStatus struct {
 	NumBuildFilesVisited int
 	NumBuildFilesUpdated int
@@ -477,13 +478,12 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		if err := uc.emit(v.c, v.file); err != nil {
 			if err == errExit {
 				exit = err
-			} else if err == errUnchanged {
-				// NOTE: aspect-cli "unchanged" result. Ignore
+			} else if err == resultFileChanged {
+				// NOTE: aspect-cli "changed" result, increment counter
+				stats.NumBuildFilesUpdated++
 			} else {
 				log.Print(err)
 			}
-		} else {
-			stats.NumBuildFilesUpdated++
 		}
 	}
 	if uc.patchPath != "" {
@@ -574,7 +574,7 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 				return err
 			}
 		}
-		if err := uc.emit(c, f); err != nil {
+		if err := uc.emit(c, f); err != nil && err != resultFileChanged { // NOTE: aspect-cli "changed" result
 			return err
 		}
 	}
