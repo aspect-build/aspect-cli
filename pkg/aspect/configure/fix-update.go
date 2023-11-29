@@ -21,7 +21,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
+	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -56,7 +56,7 @@ type updateConfig struct {
 	print0         bool
 }
 
-type emitFunc func(c *config.Config, f *rule.File) (bool, error)
+type emitFunc func(c *config.Config, f *rule.File) error
 
 var modeFromName = map[string]emitFunc{
 	"print": printFile,
@@ -382,6 +382,14 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 				r.SetKind(repl.KindName)
 			}
 		}
+		for _, r := range empty {
+			if repl, ok := c.KindMap[r.Kind()]; ok {
+				mappedKindInfo[repl.KindName] = kinds[r.Kind()]
+				mappedKinds = append(mappedKinds, repl)
+				mrslv.MappedKind(rel, repl)
+				r.SetKind(repl.KindName)
+			}
+		}
 
 		// Insert or merge rules into the build file.
 		if f == nil {
@@ -463,20 +471,18 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 	var exit error
 	for _, v := range visits {
 		merger.FixLoads(v.file, applyKindMappings(v.mappedKinds, loads))
-		updated, err := uc.emit(v.c, v.file)
-		if err != nil {
+		if err := uc.emit(v.c, v.file); err != nil {
 			if err == errExit {
 				exit = err
 			} else {
 				log.Print(err)
 			}
-		}
-		if updated {
+		} else {
 			stats.NumBuildFilesUpdated++
 		}
 	}
 	if uc.patchPath != "" {
-		if err := os.WriteFile(uc.patchPath, uc.patchBuffer.Bytes(), 0o666); err != nil {
+		if err := ioutil.WriteFile(uc.patchPath, uc.patchBuffer.Bytes(), 0o666); err != nil {
 			return nil, err
 		}
 	}
@@ -563,7 +569,7 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 				return err
 			}
 		}
-		if _, err := uc.emit(c, f); err != nil {
+		if err := uc.emit(c, f); err != nil {
 			return err
 		}
 	}
@@ -622,17 +628,12 @@ func findOutputPath(c *config.Config, f *rule.File) string {
 	}
 	outputDir := filepath.Join(baseDir, filepath.FromSlash(f.Pkg))
 	defaultOutputPath := filepath.Join(outputDir, c.DefaultBuildFileName())
-	files, err := os.ReadDir(outputDir)
+	files, err := ioutil.ReadDir(outputDir)
 	if err != nil {
 		// Ignore error. Directory probably doesn't exist.
 		return defaultOutputPath
 	}
-	infos := make([]fs.FileInfo, 0, len(files))
-	for _, f := range files {
-		info, _ := f.Info() // We ignore the error here because we know the file exists.
-		infos = append(infos, info)
-	}
-	outputPath := rule.MatchBuildFileName(outputDir, c.ValidBuildFileNames, infos)
+	outputPath := rule.MatchBuildFileName(outputDir, c.ValidBuildFileNames, files)
 	if outputPath == "" {
 		return defaultOutputPath
 	}

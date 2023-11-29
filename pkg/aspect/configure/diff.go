@@ -29,10 +29,10 @@ import (
 
 var errExit = fmt.Errorf("encountered changes while running diff")
 
-func diffFile(c *config.Config, f *rule.File) (bool, error) {
+func diffFile(c *config.Config, f *rule.File) error {
 	rel, err := filepath.Rel(c.RepoRoot, f.Path)
 	if err != nil {
-		return false, fmt.Errorf("error getting old path for file %q: %v", f.Path, err)
+		return fmt.Errorf("error getting old path for file %q: %v", f.Path, err)
 	}
 	rel = filepath.ToSlash(rel)
 
@@ -50,13 +50,13 @@ func diffFile(c *config.Config, f *rule.File) (bool, error) {
 	newContent := f.Format()
 	if bytes.Equal(newContent, f.Content) {
 		// No change.
-		return false, nil
+		return nil
 	}
 
 	if _, err := os.Stat(f.Path); os.IsNotExist(err) {
 		diff.FromFile = "/dev/null"
 	} else if err != nil {
-		return false, fmt.Errorf("error reading original file: %v", err)
+		return fmt.Errorf("error reading original file: %v", err)
 	} else if c.ReadBuildFilesDir == "" {
 		diff.FromFile = rel
 	} else {
@@ -81,11 +81,11 @@ func diffFile(c *config.Config, f *rule.File) (bool, error) {
 		out = &uc.patchBuffer
 	}
 	if err := difflib.WriteUnifiedDiff(out, diff); err != nil {
-		return false, fmt.Errorf("error diffing %s: %v", f.Path, err)
+		return fmt.Errorf("error diffing %s: %v", f.Path, err)
 	}
 	if ds, _ := difflib.GetUnifiedDiffString(diff); ds != "" {
-		return false, errExit
+		return errExit
 	}
 
-	return true, nil
+	return nil
 }

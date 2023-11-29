@@ -23,9 +23,9 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
 
-func printFile(c *config.Config, f *rule.File) (bool, error) {
+func printFile(c *config.Config, f *rule.File) error {
 	fmt.Printf(">>> %s\n", f.Path)
 	content := f.Format()
 	_, err := os.Stdout.Write(content)
-	return false, err
+	return err
 }
