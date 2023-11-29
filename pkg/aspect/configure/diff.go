@@ -50,7 +50,7 @@ func diffFile(c *config.Config, f *rule.File) error {
 	newContent := f.Format()
 	if bytes.Equal(newContent, f.Content) {
 		// No change.
-		return nil
+		return errUnchanged // NOTE: aspect-cli "unchanged" result
 	}
 
 	if _, err := os.Stat(f.Path); os.IsNotExist(err) {

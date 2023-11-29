@@ -56,6 +56,9 @@ type updateConfig struct {
 	print0         bool
 }
 
+// NOTE: addition aspect-cli "unchanged" result
+var errUnchanged = fmt.Errorf("no changes while running diff")
+
 type emitFunc func(c *config.Config, f *rule.File) error
 
 var modeFromName = map[string]emitFunc{
@@ -474,6 +477,8 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		if err := uc.emit(v.c, v.file); err != nil {
 			if err == errExit {
 				exit = err
+			} else if err == errUnchanged {
+				// NOTE: aspect-cli "unchanged" result. Ignore
 			} else {
 				log.Print(err)
 			}
