@@ -19,7 +19,7 @@ setup: true
 
 orbs:
   slack: circleci/slack@4.12.1
-  aspect-workflows: aspect-build/workflows@5.8.7
+  aspect-workflows: aspect-build/workflows@5.8.10
 
 jobs:
   legacy:
