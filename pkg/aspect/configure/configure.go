@@ -51,7 +51,7 @@ func pluralize(s string, num int) string {
 	}
 }
 
-func (runner *Configure) Run(_ context.Context, _ *cobra.Command, args []string) error {
+func (runner *Configure) Run(_ context.Context, cmd *cobra.Command, args []string) error {
 	languages := make([]language.Language, 0, 32)
 	languageKeys := make([]string, 0, 32)
 
@@ -105,12 +105,18 @@ configure:
 		log.Fatal(err)
 	}
 
-	stats, err := runFixUpdate(wd, languages, updateCmd, args)
+	// Append the aspect-cli mode flag to the args parsed by gazelle.
+	mode, _ := cmd.Flags().GetString("mode")
+
+	stats, err := runFixUpdate(wd, languages, updateCmd, []string{"--mode=" + mode})
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s visited\n", stats.NumBuildFilesVisited, pluralize("file", stats.NumBuildFilesVisited))
-	fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s updated\n", stats.NumBuildFilesUpdated, pluralize("file", stats.NumBuildFilesUpdated))
+	if mode == "fix" {
+		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s visited\n", stats.NumBuildFilesVisited, pluralize("file", stats.NumBuildFilesVisited))
+		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s updated\n", stats.NumBuildFilesUpdated, pluralize("file", stats.NumBuildFilesUpdated))
+	}
+
 	return nil
 }

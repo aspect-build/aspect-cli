@@ -536,9 +536,14 @@ func newFixUpdateConfiguration(wd string, cmd command, args []string, cexts []co
 		cext.RegisterFlags(fs, cmd.String(), c)
 	}
 
-	// NB: We don't call fs.Parse() on the flags since we are opinionated in the aspect cli and we don't allow plugins to
-	// use cli flags for configuration. All configuration must be done via directives. We use RegisterFlags for default
-	// configuration values only.
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			fixUpdateUsage(fs)
+			return nil, err
+		}
+		// flag already prints the error; don't print it again.
+		log.Fatal("Try -help for more information.")
+	}
 
 	for _, cext := range cexts {
 		if err := cext.CheckFlags(fs, c); err != nil {
@@ -547,6 +552,10 @@ func newFixUpdateConfiguration(wd string, cmd command, args []string, cexts []co
 	}
 
 	return c, nil
+}
+
+func fixUpdateUsage(fs *flag.FlagSet) {
+	// NOTE: aspect-cli noop-ed
 }
 
 func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
