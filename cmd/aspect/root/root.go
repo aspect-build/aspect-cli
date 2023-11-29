@@ -30,6 +30,7 @@ import (
 	"aspect.build/cli/cmd/aspect/build"
 	"aspect.build/cli/cmd/aspect/canonicalizeflags"
 	"aspect.build/cli/cmd/aspect/clean"
+	"aspect.build/cli/cmd/aspect/config"
 	"aspect.build/cli/cmd/aspect/configure"
 	"aspect.build/cli/cmd/aspect/coverage"
 	"aspect.build/cli/cmd/aspect/cquery"
@@ -126,6 +127,7 @@ func NewCmd(
 	cmd.AddCommand(build.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(canonicalizeflags.NewDefaultCmd())
 	cmd.AddCommand(clean.NewDefaultCmd())
+	cmd.AddCommand(config.NewDefaultCmd())
 	cmd.AddCommand(coverage.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(cquery.NewDefaultCmd())
 	cmd.AddCommand(dump.NewDefaultCmd())
