@@ -66,5 +66,9 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 			v.Run,
 		),
 	}
+
+	// TODO: restrict to only valid values (see https://github.com/spf13/pflag/issues/236)
+	cmd.Flags().String("mode", "fix", "Method for emitting merged BUILD files.\n\tfix: write generated and merged files to disk\n\tprint: print files to stdout\n\tdiff: print a unified diff")
+
 	return cmd
 }
