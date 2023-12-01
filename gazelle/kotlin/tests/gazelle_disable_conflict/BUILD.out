@@ -1,0 +1,6 @@
+#gazelle:kotlin disabled
+
+filegroup(
+    name = "gazelle_disable_conflict",
+    srcs = [],
+)

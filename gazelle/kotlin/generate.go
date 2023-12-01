@@ -31,7 +31,12 @@ func (kt *kotlinLang) GenerateRules(args language.GenerateArgs) language.Generat
 
 	cfg := args.Config.Exts[LanguageName].(kotlinconfig.Configs)[args.Rel]
 
-	// TODO: exit if configured to disable generation
+	// When we return empty, we mean that we don't generate anything, but this
+	// still triggers the indexing for all the TypeScript targets in this package.
+	if !cfg.GenerationEnabled() {
+		BazelLog.Tracef("GenerateRules disabled '%s'", args.Rel)
+		return language.GenerateResult{}
+	}
 
 	// Collect all source files.
 	sourceFiles := kt.collectSourceFiles(cfg, args)
