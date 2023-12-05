@@ -30,7 +30,7 @@ module "aspect_workflows" {
   }
 
   # Aspect Workflows terraform module
-  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.8.15/workflows/terraform-aws-aspect-workflows.zip"
+  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.9.0-beta.2/workflows/terraform-aws-aspect-workflows.zip"
 
   # Non-terraform Aspect Workflows release artifacts are pulled from the region specific
   # aspect-artifacts bucket during apply. Aspect will grant your AWS account access to this bucket
@@ -41,19 +41,20 @@ module "aspect_workflows" {
   # Name of the deployment
   customer_id = "aspect-build/aspect-cli"
 
-  # PagerDuty key for this deployment
-  pagerduty_integration_key = "51f08be2e7764903d07252bdc0e65acf"
-
   # VPC properties
   vpc_id             = module.vpc.vpc_id
   vpc_subnets        = module.vpc.private_subnets
   vpc_subnets_public = []
 
-  # Whether or not to allow SSM access to runners
-  enable_ssm_access  = true
+  support = {
+    # PagerDuty key for this deployment
+    pagerduty_integration_key = "51f08be2e7764903d07252bdc0e65acf"
+    # Whether or not to allow SSM access to runners
+    enable_ssm_access  = true
+  }
 
-  # Monitoring properties
-  monitoring_enabled = true
+  # Remote cache properties
+  remote_cache = {}
 
   # Delivery properties
   delivery_enabled = false
