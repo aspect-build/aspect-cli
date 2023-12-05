@@ -38,7 +38,11 @@ aspect configure [flags]
 ### Options
 
 ```
-  -h, --help   help for configure
+  -h, --help          help for configure
+      --mode string   Method for emitting merged BUILD files.
+                      	fix: write generated and merged files to disk
+                      	print: print files to stdout
+                      	diff: print a unified diff (default "fix")
 ```
 
 ### Options inherited from parent commands
