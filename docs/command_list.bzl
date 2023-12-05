@@ -7,6 +7,7 @@ COMMAND_LIST = [
     "build",
     "canonicalize-flags",
     "clean",
+    "config",
     "configure",
     "coverage",
     "cquery",
