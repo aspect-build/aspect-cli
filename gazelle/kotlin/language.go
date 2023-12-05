@@ -8,6 +8,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/emirpasic/gods/sets/treeset"
 )
 
 const LanguageName = "kotlin"
@@ -17,6 +18,8 @@ const (
 	KtJvmBinary               = "kt_jvm_binary"
 	RulesKotlinRepositoryName = "io_bazel_rules_kotlin"
 )
+
+var sourceRuleKinds = treeset.NewWithStringComparator(KtJvmLibrary)
 
 type Java_PackageName struct {
 	Name string

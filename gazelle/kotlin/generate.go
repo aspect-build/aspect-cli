@@ -75,7 +75,12 @@ func (kt *kotlinLang) GenerateRules(args language.GenerateArgs) language.Generat
 	var result language.GenerateResult
 
 	libTargetName := gazelle.ToDefaultTargetName(args, "root")
-	kt.addLibraryRule(libTargetName, libTarget, args, false, &result)
+
+	srcGenErr := kt.addLibraryRule(libTargetName, libTarget, args, false, &result)
+	if srcGenErr != nil {
+		fmt.Fprintf(os.Stderr, "Source rule generation error: %v\n", srcGenErr)
+		os.Exit(1)
+	}
 
 	for _, v := range binTargets.Values() {
 		binTarget := v.(*KotlinBinTarget)
@@ -86,24 +91,28 @@ func (kt *kotlinLang) GenerateRules(args language.GenerateArgs) language.Generat
 	return result
 }
 
-func (kt *kotlinLang) addLibraryRule(targetName string, target *KotlinLibTarget, args language.GenerateArgs, isTestRule bool, result *language.GenerateResult) {
-	// TODO: check for rule collisions
+func (kt *kotlinLang) addLibraryRule(targetName string, target *KotlinLibTarget, args language.GenerateArgs, isTestRule bool, result *language.GenerateResult) error {
+	// Check for name-collisions with the rule being generated.
+	colError := gazelle.CheckCollisionErrors(targetName, KtJvmLibrary, sourceRuleKinds, args)
+	if colError != nil {
+		return colError
+	}
 
 	// Generate nothing if there are no source files. Remove any existing rules.
 	if target.Files.Empty() {
 		if args.File == nil {
-			return
+			return nil
 		}
 
 		for _, r := range args.File.Rules {
 			if r.Name() == targetName && r.Kind() == KtJvmLibrary {
 				emptyRule := rule.NewRule(KtJvmLibrary, targetName)
 				result.Empty = append(result.Empty, emptyRule)
-				return
+				return nil
 			}
 		}
 
-		return
+		return nil
 	}
 
 	ktLibrary := rule.NewRule(KtJvmLibrary, targetName)
@@ -118,6 +127,7 @@ func (kt *kotlinLang) addLibraryRule(targetName string, target *KotlinLibTarget,
 	result.Imports = append(result.Imports, target)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", ktLibrary.Kind(), args.Rel, ktLibrary.Name())
+	return nil
 }
 
 func (kt *kotlinLang) addBinaryRule(targetName string, target *KotlinBinTarget, args language.GenerateArgs, result *language.GenerateResult) {
