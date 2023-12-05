@@ -1,0 +1,5 @@
+# gazelle:map_kind kt_jvm_library kt_jvm_library //:defs-override.bzl
+
+asdf(
+    name = "rules_conflicting_name_mapped_kind",
+)

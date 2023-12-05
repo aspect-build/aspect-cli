@@ -80,33 +80,6 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 	return result
 }
 
-func removeRule(args language.GenerateArgs, ruleName string, result *language.GenerateResult) {
-	existing := getFileRuleByName(args, ruleName)
-	if existing == nil {
-		BazelLog.Tracef("remove rule '%s:%s' (%q) not found", args.Rel, ruleName, TsProjectKind)
-		return
-	}
-
-	// Only remove rules controlled by this gazelle plugin
-	mappedSourceKinds := treeset.NewWithStringComparator()
-	for _, kind := range sourceRuleKinds.Values() {
-		mappedSourceKinds.Add(mapKind(args, kind.(string)))
-	}
-
-	if mappedSourceKinds.Contains(existing.Kind()) {
-		// TODO(gazelle): result.Empty seems to not work as expected when the kind is mapped
-		// See https://github.com/bazelbuild/bazel-gazelle/issues/1440
-		if !existing.ShouldKeep() {
-			existing.Delete()
-		}
-
-		BazelLog.Infof("remove rule '%s:%s' (%q)", args.Rel, existing.Name(), existing.Kind())
-
-		emptyRule := rule.NewRule(existing.Kind(), ruleName)
-		result.Empty = append(result.Empty, emptyRule)
-	}
-}
-
 func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
 	// Collect all source files.
 	sourceFiles, dataFiles, collectErr := ts.collectSourceFiles(cfg, args)
@@ -154,7 +127,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 
 		if ruleSrcs.(*treeset.Set).Empty() {
 			// No sources for this source group. Remove the rule if it exists.
-			removeRule(args, ruleName, result)
+			gazelle.RemoveRule(args, ruleName, sourceRuleKinds, result)
 		} else {
 			// Add or edit/merge a rule for this source group.
 			srcRule, srcGenErr := ts.addProjectRule(
@@ -293,7 +266,7 @@ func (ts *typeScriptLang) addTsProtoRules(cfg *JsGazelleConfig, args language.Ge
 	// Remove any ts_proto_library() targets associated with now-empty proto_library() targets
 	for _, emptyLibrary := range emptyLibraries {
 		ruleName := cfg.RenderTsProtoLibraryName(emptyLibrary.Name())
-		removeRule(args, ruleName, result)
+		gazelle.RemoveRule(args, ruleName, sourceRuleKinds, result)
 	}
 }
 
@@ -339,12 +312,18 @@ func hasTranspiledSources(sourceFiles *treeset.Set) bool {
 }
 
 func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule bool, result *language.GenerateResult) (*rule.Rule, error) {
-	// If a build already exists check for name-collisions with the rule being generated.
-	if args.File != nil {
-		colError := checkCollisionErrors(targetName, args)
-		if colError != nil {
-			return nil, colError
-		}
+	// Check for name-collisions with the rule being generated.
+	colError := gazelle.CheckCollisionErrors(targetName, TsProjectKind, sourceRuleKinds, args)
+	if colError != nil {
+		return nil, fmt.Errorf(colError.Error()+" "+
+			"Use the '# gazelle:%s' directive to change the naming convention.\n\n"+
+			"For example:\n"+
+			"\t# gazelle:%s {dirname}_js\n"+
+			"\t# gazelle:%s {dirname}_js_tests",
+			Directive_LibraryNamingConvention,
+			Directive_LibraryNamingConvention,
+			Directive_TestsNamingConvention,
+		)
 	}
 
 	// Project data combined from all files.
@@ -745,32 +724,9 @@ func addLinkAllPackagesRule(cfg *JsGazelleConfig, args language.GenerateArgs, re
 	BazelLog.Infof("add rule '%s' '%s:%s'", npmLinkAll.Kind(), args.Rel, npmLinkAll.Name())
 }
 
-func mapKind(args language.GenerateArgs, kind string) string {
-	mappedKind := args.Config.KindMap[kind].KindName
-	if mappedKind != "" {
-		return mappedKind
-	}
-
-	return kind
-}
-
-func getFileRuleByName(args language.GenerateArgs, ruleName string) *rule.Rule {
-	if args.File == nil {
-		return nil
-	}
-
-	for _, r := range args.File.Rules {
-		if r.Name() == ruleName {
-			return r
-		}
-	}
-
-	return nil
-}
-
 // Adapted an existing rule to a new rule of the same name.
 func adaptExistingRule(args language.GenerateArgs, rule *rule.Rule) {
-	existing := getFileRuleByName(args, rule.Name())
+	existing := gazelle.GetFileRuleByName(args, rule.Name())
 	if existing == nil {
 		return
 	}
@@ -780,37 +736,6 @@ func adaptExistingRule(args language.GenerateArgs, rule *rule.Rule) {
 	if existing.Kind() != rule.Kind() {
 		existing.SetKind(rule.Kind())
 	}
-}
-
-// Check if a target with the same name we are generating already exists,
-// and that rule type is unknown or can not be adapted to the new rule kind.
-// If an existing rule can not be adapted (maybe due to Gazelle bugs/limitations) an
-// error explaining the case is returned.
-func checkCollisionErrors(tsProjectTargetName string, args language.GenerateArgs) error {
-	existing := getFileRuleByName(args, tsProjectTargetName)
-	if existing == nil {
-		return nil
-	}
-
-	mappedSourceKinds := treeset.NewWithStringComparator()
-	for _, kind := range sourceRuleKinds.Values() {
-		mappedSourceKinds.Add(mapKind(args, kind.(string)))
-	}
-
-	if !mappedSourceKinds.Contains(existing.Kind()) {
-		tsProjectKind := mapKind(args, TsProjectKind)
-
-		fqTarget := label.New("", args.Rel, tsProjectTargetName)
-		return fmt.Errorf("failed to generate target %q of kind %q: "+
-			"a target of kind %q with the same name already exists. "+
-			"Use the '# gazelle:%s' directive to change the naming convention.\n\n"+
-			"For example:\n"+
-			"	# gazelle:%s {dirname}_js\n"+
-			"	# gazelle:%s {dirname}_js_tests",
-			fqTarget.String(), tsProjectKind, existing.Kind(), Directive_LibraryNamingConvention, Directive_LibraryNamingConvention, Directive_TestsNamingConvention)
-	}
-
-	return nil
 }
 
 // If the file is ts-compatible transpiled source code that may contain imports

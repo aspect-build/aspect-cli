@@ -11,6 +11,7 @@ go_library(
     ],
     embedsrcs = [
         ".gitignore",
+        "bazel5.bazelrc",
         "bazel6.bazelrc",
         "ci.bazelrc",
         "convenience.bazelrc",
