@@ -140,6 +140,10 @@ func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
 				commands = append(commands, "outputs")
 				commands = append(commands, "outputs-bbclientd")
 			}
+			if flagCommand == "build" {
+				// lint calls build under the hood and accepts all build flags
+				commands = append(commands, "lint")
+			}
 			for _, command := range commands {
 				if subcommand, ok := subCommands[command]; ok {
 					subcommand.DisableFlagParsing = true // only want to disable flag parsing on commands that call out to bazel
