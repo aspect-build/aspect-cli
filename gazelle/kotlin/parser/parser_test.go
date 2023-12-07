@@ -52,6 +52,17 @@ import /* fdsa */ d/* asdf */.* // w
 		pkg:      "x",
 		imports:  []string{"a", "c", "d"},
 	},
+	// Value classes: https://github.com/fwcd/tree-sitter-kotlin/commit/80834a15154448cfa795bfa6b8be3559af1753fc
+	{
+		desc: "value-classes",
+		kt: `
+@JvmInline
+value class Password(private val s: String)
+	`,
+		filename: "simple.kt",
+		pkg:      "",
+		imports:  []string{},
+	},
 }
 
 func TestTreesitterParser(t *testing.T) {
