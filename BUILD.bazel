@@ -137,3 +137,8 @@ buildifier(
     lint_mode = "warn",
     mode = "diff",
 )
+
+alias(
+    name = "format",
+    actual = "//tools:format",
+)

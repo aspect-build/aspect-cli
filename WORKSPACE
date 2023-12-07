@@ -17,6 +17,13 @@ http_archive(
 )
 
 http_archive(
+    name = "aspect_rules_lint",
+    sha256 = "604666ec7ffd4f5f2636001ae892a0fbc29c77401bb33dd10601504e3ba6e9a7",
+    strip_prefix = "rules_lint-0.6.1",
+    url = "https://github.com/aspect-build/rules_lint/releases/download/v0.6.1/rules_lint-v0.6.1.tar.gz",
+)
+
+http_archive(
     name = "bazel_skylib",
     sha256 = "66ffd9315665bfaafc96b52278f57c7e2dd09f5ede279ea6d39b2be471e7e3aa",
     urls = ["https://github.com/bazelbuild/bazel-skylib/releases/download/1.4.2/bazel-skylib-1.4.2.tar.gz"],
@@ -234,3 +241,14 @@ register_llvm_toolchains()
 load("@buildifier_prebuilt//:defs.bzl", "buildifier_prebuilt_register_toolchains")
 
 buildifier_prebuilt_register_toolchains()
+
+# Use whichever formatter binaries you need:
+load(
+    "@aspect_rules_lint//format:repositories.bzl",
+    "fetch_shfmt",
+    "fetch_terraform",
+)
+
+fetch_shfmt()
+
+fetch_terraform()
