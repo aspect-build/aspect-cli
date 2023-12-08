@@ -50,7 +50,7 @@ module "aspect_workflows" {
     # PagerDuty key for this deployment
     pagerduty_integration_key = "51f08be2e7764903d07252bdc0e65acf"
     # Whether or not to allow SSM access to runners
-    enable_ssm_access  = true
+    enable_ssm_access = true
   }
 
   # Remote cache properties
@@ -64,7 +64,7 @@ module "aspect_workflows" {
 
   # Warming set definitions
   warming_sets = {
-    default  = {}
+    default = {}
   }
 
   # Resource types for use by runner groups
@@ -87,7 +87,7 @@ module "aspect_workflows" {
       min_runners               = 0
       resource_type             = "default"
       scale_out_factor          = 2
-      scaling_polling_frequency = 3  # check for queued jobs every 20s
+      scaling_polling_frequency = 3 # check for queued jobs every 20s
       warming                   = true
     }
     # The warming runner group is used for the periodic warming job that creates

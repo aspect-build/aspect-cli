@@ -2,9 +2,9 @@ terraform {
   required_version = "~> 1.4.0"
 
   backend "s3" {
-    bucket   = "aw-deployment-terraform-state-aspect-cli"
-    key      = "global/s3/terraform.tfstate"
-    region   = "us-west-2"
+    bucket = "aw-deployment-terraform-state-aspect-cli"
+    key    = "global/s3/terraform.tfstate"
+    region = "us-west-2"
   }
 
   required_providers {
@@ -16,7 +16,7 @@ terraform {
 }
 
 provider "aws" {
-  region  = "us-west-2"
+  region = "us-west-2"
 }
 
 resource "aws_s3_bucket" "terraform_state" {
