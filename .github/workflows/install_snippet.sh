@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -o errexit -o nounset -o pipefail
 
@@ -6,8 +6,7 @@ set -o errexit -o nounset -o pipefail
 # https://docs.github.com/en/actions/learn-github-actions/environment-variables#default-environment-variables
 TAG=${GITHUB_REF_NAME}
 
-
-cat << EOF
+cat <<EOF
 ## Install [Aspect CLI](https://www.aspect.build/cli)
 
 See full install instructions in [README.md](https://github.com/aspect-build/aspect-cli/blob/${TAG}/README.md).

@@ -7,7 +7,7 @@ output="$(bazel 2>/dev/null run -- @go_sdk//:bin/gofmt -l "$@")"
 
 echo >&2 "Go files must be formatted with gofmt. Please run:"
 for f in $output; do
-  echo >&2 "  bazel run -- @go_sdk//:bin/gofmt -w $PWD/$f"
+	echo >&2 "  bazel run -- @go_sdk//:bin/gofmt -w $PWD/$f"
 done
 
 exit 1
