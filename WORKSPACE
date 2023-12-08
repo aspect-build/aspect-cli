@@ -100,9 +100,9 @@ http_archive(
 
 http_archive(
     name = "buildifier_prebuilt",
-    sha256 = "e46c16180bc49487bfd0f1ffa7345364718c57334fa0b5b67cb5f27eba10f309",
-    strip_prefix = "buildifier-prebuilt-6.1.0",
-    urls = ["https://github.com/keith/buildifier-prebuilt/archive/6.1.0.tar.gz"],
+    sha256 = "72b5bb0853aac597cce6482ee6c62513318e7f2c0050bc7c319d75d03d8a3875",
+    strip_prefix = "buildifier-prebuilt-6.3.3",
+    urls = ["https://github.com/keith/buildifier-prebuilt/archive/6.3.3.tar.gz"],
 )
 
 load("@buildifier_prebuilt//:deps.bzl", "buildifier_prebuilt_deps")
