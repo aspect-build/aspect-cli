@@ -3,5 +3,7 @@
 tasks:
   format:
     soft_fail: false
+    queue: aspect-small
   buildifier:
+    queue: aspect-small
   test:
