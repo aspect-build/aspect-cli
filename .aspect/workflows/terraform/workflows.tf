@@ -20,7 +20,7 @@ data "aws_ami" "runner_ami" {
   most_recent = true
   filter {
     name   = "name"
-    values = ["aspect-workflows-al2-minimal-*"]
+    values = ["aspect-workflows-al2-minimal-amd64-*"]
   }
 }
 
@@ -75,6 +75,13 @@ module "aspect_workflows" {
       instance_types = ["c5ad.xlarge"]
       image_id       = data.aws_ami.runner_ami.id
     }
+    "small" = {
+      # Aspect Workflows requires instance types that have nvme drives. See
+      # https://aws.amazon.com/ec2/instance-types/ for full list of instance types available on AWS.
+      # TODO: switch to Graviton processor when 5.9.0-beta.3 or rc.0 is out
+      instance_types = ["c5ad.large"]
+      image_id       = data.aws_ami.runner_ami.id
+    }
   }
 
   # CircleCI runner group definitions
@@ -86,9 +93,17 @@ module "aspect_workflows" {
       max_runners               = 10
       min_runners               = 0
       resource_type             = "default"
-      scale_out_factor          = 2
       scaling_polling_frequency = 3 # check for queued jobs every 20s
       warming                   = true
+    }
+    small = {
+      agent_idle_timeout_min    = 1
+      job_max_run_time_min      = 5 * 60
+      max_runners               = 10
+      min_runners               = 0
+      resource_type             = "small"
+      scaling_polling_frequency = 3     # check for queued jobs every 20s
+      warming                   = false # don't warm for faster bootstrap; these runners won't be running large builds
     }
     # The warming runner group is used for the periodic warming job that creates
     # warming archives for use by other runner groups.
