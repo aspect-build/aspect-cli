@@ -1,0 +1,15 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_generation_mode none
+
+ts_project(
+    name = "simple_globs_keep",
+    srcs = glob(["srcs/**/*.ts"]),  #keep
+)
+
+ts_project(
+    name = "simple_globs_keep_tests",
+    testonly = True,
+    srcs = glob(["tests/**/*.ts"]),  #keep
+    deps = [":simple_globs_keep"],
+)

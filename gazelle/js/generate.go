@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	gazelle "aspect.build/cli/gazelle/common"
+	starlark "aspect.build/cli/gazelle/common/starlark"
 	"aspect.build/cli/gazelle/js/parser"
 	treesitter_parser "aspect.build/cli/gazelle/js/parser/treesitter"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
@@ -96,6 +97,8 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 
 	// A src files into target groups (lib, test, ...custom).
 	for _, f := range sourceFiles.Values() {
+		// TODO: exclude files which are included in custom targets via #keep
+
 		file := f.(string)
 		if target := cfg.GetSourceTarget(file); target != nil {
 			BazelLog.Tracef("add '%s' src '%s/%s'", target.name, args.Rel, file)
@@ -119,13 +122,30 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 	for _, group := range cfg.GetSourceTargets() {
 		// The project rule name. Can be configured to map to a different name.
 		ruleName := cfg.RenderTargetName(cfg.MapTargetName(group.name), packageName)
-		ruleSrcs, _ := sourceFileGroups.Get(group.name)
-
 		if isNpmPackage && group.name == DefaultLibraryName {
 			ruleName = cfg.RenderNpmSourceLibraryName(ruleName)
 		}
 
-		if ruleSrcs.(*treeset.Set).Empty() {
+		var ruleSrcs *treeset.Set
+
+		// If the rule has it's own custom list of sources then parse and use that list.
+		if existing := gazelle.GetFileRuleByName(args, ruleName); existing != nil && sourceRuleKinds.Contains(existing.Kind()) && starlark.IsCustomSrcs(existing.Attr("srcs")) {
+			customSrcs, err := starlark.ExpandSrcs(args.Config.RepoRoot, args.Rel, existing.Attr("srcs"))
+			if err != nil {
+				BazelLog.Warnf("Failed to expand custom srcs %s:%s - %v", args.Rel, existing.Name(), err)
+			}
+
+			if customSrcs != nil {
+				ruleSrcs = treeset.NewWithStringComparator()
+				for _, src := range customSrcs {
+					ruleSrcs.Add(src)
+				}
+			}
+		} else if srcs, hasSrcs := sourceFileGroups.Get(group.name); hasSrcs {
+			ruleSrcs = srcs.(*treeset.Set)
+		}
+
+		if ruleSrcs == nil || ruleSrcs.Empty() {
 			// No sources for this source group. Remove the rule if it exists.
 			gazelle.RemoveRule(args, ruleName, sourceRuleKinds, result)
 		} else {
@@ -134,7 +154,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 				cfg,
 				args,
 				ruleName,
-				ruleSrcs.(*treeset.Set),
+				ruleSrcs,
 				dataFiles,
 				group.testonly,
 				result,

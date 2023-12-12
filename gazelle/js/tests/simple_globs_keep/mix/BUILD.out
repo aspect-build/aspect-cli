@@ -1,0 +1,22 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "mix",
+    srcs = glob(
+        ["**/*.ts"],
+        exclude = [
+            "**/*.spec.ts",
+            "**/*.mock.ts",
+        ],
+    ),  #keep
+)
+
+ts_project(
+    name = "mix_tests",
+    testonly = True,
+    srcs = glob([
+        "**/*.mock.ts",
+        "**/*.spec.ts",
+    ]),  #keep
+    deps = [":mix"],
+)
