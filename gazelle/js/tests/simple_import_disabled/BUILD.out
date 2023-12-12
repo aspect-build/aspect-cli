@@ -1,0 +1,7 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "simple_import_disabled",
+    srcs = ["main.ts"],
+    deps = ["//disabled:lib"],
+)
