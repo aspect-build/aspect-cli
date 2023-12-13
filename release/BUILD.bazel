@@ -90,3 +90,16 @@ sh_binary(
         "@aspect_bazel_lib//shlib/lib:assertions",
     ],
 )
+
+# Demonstration delivery target for Aspect Workflows.
+# In the future this could be wired up to push dev releases to an S3 bucket.
+sh_binary(
+    name = "aspect_cli_delivery",
+    srcs = ["delivery.sh"],
+    data = [
+        ":aspect",
+        ":aspect_bazelisk_artifacts",
+        ":aspect_brew_artifacts",
+    ],
+    tags = ["deliverable"],
+)

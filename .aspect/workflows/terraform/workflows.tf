@@ -71,7 +71,7 @@ module "aspect_workflows" {
   remote_cache = {}
 
   # Delivery properties
-  delivery_enabled = false
+  delivery_enabled = true
 
   # CI properties
   hosts = ["cci"]
