@@ -1,3 +1,4 @@
 # build without the bytes
-common --remote_download_minimal
-common --nobuild_runfile_links
+# TODO: fix issue with "build without the bytes" with delivery manifest generation step
+# common --remote_download_minimal
+# common --nobuild_runfile_links
