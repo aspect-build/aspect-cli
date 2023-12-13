@@ -57,8 +57,6 @@ func init() {
 			log.Fatalf("CLI failed to create log file: %v\n", err)
 		}
 
-		log.Printf("CLI log file: %v\n", logfile.Name())
-
 		logger.SetOutput(bufio.NewWriter(logfile))
 	}
 
@@ -79,8 +77,6 @@ func init() {
 		default:
 			log.Fatalf("Invalid CLI log level: %s\n", envLevel)
 		}
-
-		log.Printf("CLI log level: %s\n", envLevel)
 	}
 }
 
