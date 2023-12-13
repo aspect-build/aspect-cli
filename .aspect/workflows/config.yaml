@@ -1,9 +1,8 @@
 # See https://docs.aspect.build/v/workflows/config
 ---
 tasks:
-  format:
-    soft_fail: false
-    queue: aspect-small
-  buildifier:
-    queue: aspect-small
-  test:
+  - format:
+      queue: aspect-small
+  - buildifier:
+      queue: aspect-small
+  - test:
