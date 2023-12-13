@@ -2,7 +2,7 @@
 ---
 tasks:
   - format:
-      queue: aspect-small
+      queue: aspect-small-amd64
   - buildifier:
-      queue: aspect-small
+      queue: aspect-small-arm64
   - test:
