@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
+	"regexp"
 
 	"aspect.build/cli/bazel/buildeventstream"
 	"google.golang.org/grpc"
@@ -15,11 +15,8 @@ import (
 
 const proxyChannelBufferSize = 10000
 
-// The path here comes from the path of the Aspect Workflows bb_clientd unix socket to the
-// buildbarn, remote cache:
-// https://github.com/aspect-build/silo/blob/f4bd43ce3098345ac7b30a3fae8ddbb1860b814b/infrastructure/modules/workflows/runners/bootstrap/bb_clientd.sh#L53.
-// The two must be kept in sync.
-const workflowsBbclientdUnixSocketPrefix = "bytestream://///mnt/ephemeral/buildbarn/.cache/bb_clientd/grpc/"
+// The path here comes from the path of the Aspect Workflows bb_clientd unix socket to the buildbarn.
+const bytestreamUriReg = "^bytestream:(?:.*?)/grpc/(.*)$"
 
 // BESProxy implements a Build Event Protocol backend to be passed to the
 // `bazel build` command so that the Aspect plugins can register as subscribers
@@ -211,12 +208,13 @@ func MutateWorkflowsUris(req *buildv1.PublishBuildToolEventStreamRequest, remote
 func MutateWorkflowsUri(f *buildeventstream.File, remoteCacheAddress string) bool {
 	switch t := f.File.(type) {
 	case *buildeventstream.File_Uri:
-		if strings.HasPrefix(t.Uri, workflowsBbclientdUnixSocketPrefix) {
+		r := regexp.MustCompile(bytestreamUriReg)
+		if r.MatchString(t.Uri) {
 			// Mutate from a URI such as,
-			// bytestream://///mnt/ephemeral/buildbarn/.cache/bb_clientd/grpc/blobs/f9c5cd4a9f458cf3d801640f6f69eb7523bc590b92d4e7b7b9fa5c7ffa4813cb/194
+			// bytestream:////some/path/on/the/local/filesystem/grpc/blobs/f9c5cd4a9f458cf3d801640f6f69eb7523bc590b92d4e7b7b9fa5c7ffa4813cb/194
 			// to,
 			// bytestream://10.2.0.110:8980/blobs/f9c5cd4a9f458cf3d801640f6f69eb7523bc590b92d4e7b7b9fa5c7ffa4813cb/194
-			t.Uri = "bytestream://" + remoteCacheAddress + "/" + t.Uri[len(workflowsBbclientdUnixSocketPrefix):]
+			t.Uri = r.ReplaceAllString(t.Uri, "bytestream://" + remoteCacheAddress + "/$1")
 			return true
 		}
 
