@@ -481,6 +481,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			} else if err == resultFileChanged {
 				// NOTE: aspect-cli "changed" result, increment counter
 				stats.NumBuildFilesUpdated++
+				exit = err
 			} else {
 				log.Print(err)
 			}
