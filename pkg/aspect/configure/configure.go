@@ -25,6 +25,7 @@ import (
 
 	js "aspect.build/cli/gazelle/js"
 	kotlin "aspect.build/cli/gazelle/kotlin"
+	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
@@ -96,7 +97,9 @@ configure:
     go: true
     kotlin: true
     protobuf: true`)
-		return nil
+		return &aspecterrors.ExitError{
+			ExitCode: aspecterrors.ConfigureNoConfig,
+		}
 	}
 
 	var err error
@@ -109,8 +112,18 @@ configure:
 	mode, _ := cmd.Flags().GetString("mode")
 
 	stats, err := runFixUpdate(wd, languages, updateCmd, []string{"--mode=" + mode})
-	if err != nil {
-		return err
+
+	exitCode := aspecterrors.OK
+
+	// Unique error codes for changes fixed vs diffs, otherwise fallback to bazel unhandled error code.
+	if err == errExit {
+		exitCode = aspecterrors.ConfigureDiff
+		err = nil
+	} else if err == resultFileChanged {
+		exitCode = aspecterrors.ConfigureFixed
+		err = nil
+	} else if err != nil {
+		exitCode = aspecterrors.UnhandledOrInternalError
 	}
 
 	if mode == "fix" {
@@ -118,5 +131,8 @@ configure:
 		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s updated\n", stats.NumBuildFilesUpdated, pluralize("file", stats.NumBuildFilesUpdated))
 	}
 
-	return nil
+	return &aspecterrors.ExitError{
+		ExitCode: exitCode,
+		Err:      err,
+	}
 }
