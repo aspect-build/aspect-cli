@@ -81,10 +81,6 @@ func (runner *Configure) Run(_ context.Context, cmd *cobra.Command, args []strin
 		languageKeys = append(languageKeys, "kotlin")
 	}
 
-	if len(languageKeys) != 0 {
-		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(languageKeys, ", "))
-	}
-
 	if len(languageKeys) == 0 {
 		fmt.Fprintln(runner.Streams.Stderr, `No languages enabled for BUILD file generation.
 
@@ -110,6 +106,10 @@ configure:
 
 	// Append the aspect-cli mode flag to the args parsed by gazelle.
 	mode, _ := cmd.Flags().GetString("mode")
+
+	if mode == "fix" {
+		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(languageKeys, ", "))
+	}
 
 	stats, err := runFixUpdate(wd, languages, updateCmd, []string{"--mode=" + mode})
 
