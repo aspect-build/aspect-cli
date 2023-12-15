@@ -67,7 +67,7 @@ func (ts *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []reso
 func (ts *Resolver) sourceFileImports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
 	srcs, err := starlark.ExpandSrcs(c.RepoRoot, f.Pkg, r.Attr("srcs"))
 	if err != nil {
-		BazelLog.Warnf("Failed to expand srcs of %s:%s - %v", f.Pkg, r.Name(), err)
+		BazelLog.Debugf("Failed to expand srcs of %s:%s - %v", f.Pkg, r.Name(), err)
 		return []resolve.ImportSpec{}
 	}
 
