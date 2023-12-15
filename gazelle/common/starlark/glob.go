@@ -40,7 +40,7 @@ func ExpandSrcs(repoRoot, pkg string, expr bzl.Expr) ([]string, error) {
 			if str, ok := e.(*bzl.StringExpr); ok {
 				srcs = append(srcs, str.Value)
 			} else {
-				BazelLog.Warnf("skipping non-string src %s", e)
+				BazelLog.Tracef("skipping non-string src %s", e)
 			}
 		}
 		return srcs, nil
@@ -55,11 +55,11 @@ func ExpandSrcs(repoRoot, pkg string, expr bzl.Expr) ([]string, error) {
 	env := starlark.StringDict{"glob": starlark.NewBuiltin("glob", globber.Glob)}
 	srcsSyntaxExpr, err := syntax.ParseExpr("", bzl.FormatString(expr), syntax.RetainComments)
 	if err != nil {
-		return nil, fmt.Errorf("failed to eval srcs expression: %w", err)
+		return nil, fmt.Errorf("Expression parse error: %w", err)
 	}
 	srcsVal, err := starlark.EvalExpr(thread, srcsSyntaxExpr, env)
 	if err != nil {
-		return nil, fmt.Errorf("failed to eval srcs expression: %w", err)
+		return nil, fmt.Errorf("Expression evaluation error: %w", err)
 	}
 	srcsValList := srcsVal.(*starlark.List)
 	srcs := make([]string, 0, srcsValList.Len())

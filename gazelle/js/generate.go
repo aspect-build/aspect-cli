@@ -132,7 +132,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 		if existing := gazelle.GetFileRuleByName(args, ruleName); existing != nil && sourceRuleKinds.Contains(existing.Kind()) && starlark.IsCustomSrcs(existing.Attr("srcs")) {
 			customSrcs, err := starlark.ExpandSrcs(args.Config.RepoRoot, args.Rel, existing.Attr("srcs"))
 			if err != nil {
-				BazelLog.Warnf("Failed to expand custom srcs %s:%s - %v", args.Rel, existing.Name(), err)
+				BazelLog.Infof("Failed to expand custom srcs %s:%s - %v", args.Rel, existing.Name(), err)
 			}
 
 			if customSrcs != nil {
