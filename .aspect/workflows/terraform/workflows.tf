@@ -99,6 +99,11 @@ module "aspect_workflows" {
       image_id            = data.aws_ami.runner_arm64_ami.id
       root_volume_size_gb = 32
     }
+    "nano" = {
+      instance_types      = ["t4g.nano"]
+      image_id            = data.aws_ami.runner_arm64_ami.id
+      root_volume_size_gb = 16
+    }
   }
 
   # CircleCI runner group definitions
@@ -125,6 +130,14 @@ module "aspect_workflows" {
       max_runners               = 10
       min_runners               = 0
       resource_type             = "small-arm64"
+      scaling_polling_frequency = 3     # check for queued jobs every 20s
+      warming                   = false # don't warm for faster bootstrap; these runners won't be running large builds
+    }
+    nano = {
+      agent_idle_timeout_min    = 60 * 12
+      max_runners               = 10
+      min_runners               = 0
+      resource_type             = "nano-arm64"
       scaling_polling_frequency = 3     # check for queued jobs every 20s
       warming                   = false # don't warm for faster bootstrap; these runners won't be running large builds
     }
