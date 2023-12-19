@@ -137,7 +137,7 @@ module "aspect_workflows" {
       agent_idle_timeout_min    = 60 * 12
       max_runners               = 10
       min_runners               = 0
-      resource_type             = "nano-arm64"
+      resource_type             = "nano"
       scaling_polling_frequency = 3     # check for queued jobs every 20s
       warming                   = false # don't warm for faster bootstrap; these runners won't be running large builds
     }
