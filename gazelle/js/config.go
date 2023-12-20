@@ -241,6 +241,11 @@ func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
 	return &cCopy
 }
 
+// Render a target name by applying target name tmeplate vars
+func (c *JsGazelleConfig) renderTargetName(baseName, packageName string) string {
+	return strings.ReplaceAll(baseName, TargetNameDirectoryVar, packageName)
+}
+
 // AddExcludedPattern adds a glob pattern parsed from the standard gazelle:exclude directive.
 func (c *JsGazelleConfig) AddExcludedPattern(pattern string) {
 	c.excludes = append(c.excludes, pattern)
@@ -390,6 +395,10 @@ func (c *JsGazelleConfig) SetNpmPackageNamingConvention(testsNamingConvention st
 	c.npmPackageNamingConvention = testsNamingConvention
 }
 
+func (c *JsGazelleConfig) RenderNpmPackageTargetName(packageName string) string {
+	return c.renderTargetName(c.npmPackageNamingConvention, packageName)
+}
+
 // The library name when wrapped within an npm package.
 func (c *JsGazelleConfig) RenderNpmSourceLibraryName(npmPackageName string) string {
 	return npmPackageName + PackageSrcSuffix
@@ -407,9 +416,16 @@ func (c *JsGazelleConfig) RenderTsConfigName(tsconfigName string) string {
 	return strings.ReplaceAll(strings.TrimRight(path.Base(tsconfigName), ".json"), ".", "_")
 }
 
-// renderTargetName returns the ts_project target name by performing all substitutions.
-func (c *JsGazelleConfig) RenderTargetName(name, packageName string) string {
-	return strings.ReplaceAll(name, TargetNameDirectoryVar, packageName)
+// Returns the ts_project target name by performing all substitutions.
+func (c *JsGazelleConfig) RenderSourceTargetName(groupName, packageName string, isNpmPackage bool) string {
+	ruleName := c.renderTargetName(c.MapTargetName(groupName), packageName)
+
+	// The default library name changes when alongside an npm_package rule
+	if isNpmPackage && groupName == DefaultLibraryName {
+		ruleName = c.RenderNpmSourceLibraryName(ruleName)
+	}
+
+	return ruleName
 }
 
 // AddTargetGlob sets the glob used to find source files for the specified target

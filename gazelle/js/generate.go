@@ -121,10 +121,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 	sourceRules := treemap.NewWithStringComparator()
 	for _, group := range cfg.GetSourceTargets() {
 		// The project rule name. Can be configured to map to a different name.
-		ruleName := cfg.RenderTargetName(cfg.MapTargetName(group.name), packageName)
-		if isNpmPackage && group.name == DefaultLibraryName {
-			ruleName = cfg.RenderNpmSourceLibraryName(ruleName)
-		}
+		ruleName := cfg.RenderSourceTargetName(group.name, packageName, isNpmPackage)
 
 		var ruleSrcs *treeset.Set
 
@@ -170,7 +167,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 
 	// If this is a package wrap the main ts_project() rule with npm_package()
 	if isNpmPackage {
-		npmPackageName := cfg.RenderTargetName(cfg.npmPackageNamingConvention, packageName)
+		npmPackageName := cfg.RenderNpmPackageTargetName(packageName)
 		npmPackageSourceFiles := treeset.NewWithStringComparator()
 
 		if srcRule, _ := sourceRules.Get(DefaultLibraryName); srcRule != nil {
