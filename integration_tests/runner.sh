@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-IFS=':' read -ra LIBS <<<"$BATS_LIB_PATH"
+IFS=':' read -ra LIBS <<< "$BATS_LIB_PATH"
 
 NEW_LIBS=()
 for RAW_LIB_PATH in "${LIBS[@]}"; do
-	NEW_PATH=$(cd "${RAW_LIB_PATH}" && pwd)
-	NEW_LIBS+=("$NEW_PATH")
+    NEW_PATH=$(cd "${RAW_LIB_PATH}" && pwd)
+    NEW_LIBS+=("$NEW_PATH")
 done
 
 BATS_LIB_PATH=$(
-	IFS=:
-	echo "${NEW_LIBS[*]}"
+    IFS=:
+    echo "${NEW_LIBS[*]}"
 )
 export BATS_LIB_PATH
 export BATS_TEST_TIMEOUT="$TEST_TIMEOUT"
