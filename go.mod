@@ -33,7 +33,7 @@ require (
 	github.com/tejzpr/ordered-concurrently/v3 v3.0.1
 	github.com/twmb/murmur3 v1.1.8
 	github.com/yargevad/filepathx v1.0.0
-	go.starlark.net v0.0.0-20210223155950-e043a3d3c984
+	go.starlark.net v0.0.0-20211203141949-70c0e40ae128
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1
 	golang.org/x/sync v0.4.0
 	google.golang.org/genproto v0.0.0-20231120223509-83a465c0220f
