@@ -716,8 +716,9 @@ def deps():
         name = "com_github_smacker_go_tree_sitter",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/smacker/go-tree-sitter",
-        sum = "h1:exZ0FwfhblsYbgfqYH+W/3sFye821WD02NjBmc+ENhE=",
-        version = "v0.0.0-20230501083651-a7d92773b3aa",
+        replace = "github.com/aspect-forks/go-tree-sitter",
+        sum = "h1:d138UtNf2MywcFxxOrX4c5i5kg0OCfVFBe2UPjBKNh4=",
+        version = "v0.0.0-20230720070738-0d0a9f78d8f8",
     )
     go_repository(
         name = "com_github_spf13_afero",
@@ -795,6 +796,13 @@ def deps():
         importpath = "github.com/twmb/murmur3",
         sum = "h1:8Yt9taO/WN3l08xErzjeschgZU2QSrwm1kclYq+0aRg=",
         version = "v1.1.8",
+    )
+    go_repository(
+        name = "com_github_yargevad_filepathx",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/yargevad/filepathx",
+        sum = "h1:SYcT+N3tYGi+NvazubCNlvgIPbzAk7i7y2dwg3I5FYc=",
+        version = "v1.0.0",
     )
     go_repository(
         name = "com_github_yuin_goldmark",
