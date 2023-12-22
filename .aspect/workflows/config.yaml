@@ -5,6 +5,8 @@ tasks:
       queue: aspect-small-amd64
   - buildifier:
       queue: aspect-small-arm64
+  # - configure:
+  #     queue: aspect-small-arm64
   - test:
   - delivery:
       always_deliver: true
