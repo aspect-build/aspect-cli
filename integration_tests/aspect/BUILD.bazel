@@ -31,6 +31,15 @@ bats_test(
 )
 
 bats_test(
+    name = "reenter_test",
+    srcs = ["reenter_test.bats"],
+    data = data,
+    env = env,
+    # Bazel-in-bazel requires network
+    tags = ["requires-network"],
+)
+
+bats_test(
     name = "version_test",
     srcs = ["version_test.bats"],
     data = data,

@@ -29,7 +29,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -167,16 +166,7 @@ func ProcessQueries(presets []*PresetQuery) (map[string]*PresetQuery, []string, 
 func RunQuery(bzl bazel.Bazel, command string, streams ioutils.Streams, args []string) error {
 	bazelCmd := []string{command}
 	bazelCmd = append(bazelCmd, args...)
-
-	if exitCode, err := bzl.RunCommand(streams, nil, bazelCmd...); exitCode != 0 {
-		err = &aspecterrors.ExitError{
-			Err:      err,
-			ExitCode: exitCode,
-		}
-		return err
-	}
-
-	return nil
+	return bzl.RunCommand(streams, nil, bazelCmd...)
 }
 
 func ReplacePlaceholders(query string, args []string, p func(label string) PromptRunner) (string, error) {

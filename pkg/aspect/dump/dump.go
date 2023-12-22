@@ -22,8 +22,6 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/spf13/cobra"
-
-	"aspect.build/cli/pkg/aspecterrors"
 )
 
 type Dump struct {
@@ -41,14 +39,5 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *Dump {
 func (runner *Dump) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"dump"}
 	bazelCmd = append(bazelCmd, args...)
-
-	if exitCode, err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
-		err = &aspecterrors.ExitError{
-			Err:      err,
-			ExitCode: exitCode,
-		}
-		return err
-	}
-
-	return nil
+	return runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 }

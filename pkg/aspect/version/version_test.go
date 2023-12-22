@@ -51,7 +51,7 @@ func TestVersion(t *testing.T) {
 		bzl.
 			EXPECT().
 			RunCommand(streams, nil, "version").
-			Return(0, nil)
+			Return(nil)
 
 		v := version.New(streams, bzl)
 		v.BuildInfo = *buildinfo.New(
@@ -80,7 +80,7 @@ func TestVersion(t *testing.T) {
 		bzl.
 			EXPECT().
 			RunCommand(streams, nil, "version", "--gnu_format").
-			Return(0, nil)
+			Return(nil)
 
 		v := version.New(streams, bzl)
 		v.BuildInfo = *buildinfo.New(
@@ -109,7 +109,7 @@ func TestVersion(t *testing.T) {
 		bzl.
 			EXPECT().
 			RunCommand(streams, nil, "version").
-			Return(0, nil)
+			Return(nil)
 		v := version.New(streams, bzl)
 		v.BuildInfo = *buildinfo.New(
 			buildTime,
@@ -136,7 +136,7 @@ func TestVersion(t *testing.T) {
 		bzl.
 			EXPECT().
 			RunCommand(streams, nil, "version").
-			Return(0, nil)
+			Return(nil)
 		v := version.New(streams, bzl)
 		v.BuildInfo = *buildinfo.New(
 			buildTime,

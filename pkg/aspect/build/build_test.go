@@ -48,7 +48,7 @@ func TestBuild(t *testing.T) {
 		bzl.
 			EXPECT().
 			RunCommand(streams, nil, "build", "//...", "--bes_backend=grpc://127.0.0.1:12345").
-			Return(expectErr.ExitCode, expectErr.Err)
+			Return(expectErr)
 		besBackend := bep_mock.NewMockBESBackend(ctrl)
 		besBackend.
 			EXPECT().
@@ -79,7 +79,7 @@ func TestBuild(t *testing.T) {
 		bzl.
 			EXPECT().
 			RunCommand(streams, nil, "build", "//...", "--bes_backend=grpc://127.0.0.1:12345").
-			Return(0, nil)
+			Return(nil)
 		besBackend := bep_mock.NewMockBESBackend(ctrl)
 		besBackend.
 			EXPECT().
@@ -100,7 +100,9 @@ func TestBuild(t *testing.T) {
 		b := build.New(streams, bzl)
 		err := b.Run(ctx, nil, []string{"//..."})
 
-		g.Expect(err).To(MatchError(&aspecterrors.ExitError{ExitCode: 1}))
+		expectedError := fmt.Errorf("2 BES subscriber error(s)")
+
+		g.Expect(err).To(MatchError(expectedError))
 		g.Expect(stderr.String()).To(Equal("Error: failed to run build command: error 1\nError: failed to run build command: error 2\n"))
 	})
 
@@ -114,7 +116,7 @@ func TestBuild(t *testing.T) {
 		bzl.
 			EXPECT().
 			RunCommand(streams, nil, "build", "--bes_backend=grpc://127.0.0.1:12345", "--", "//...").
-			Return(0, nil)
+			Return(nil)
 		besBackend := bep_mock.NewMockBESBackend(ctrl)
 		besBackend.
 			EXPECT().

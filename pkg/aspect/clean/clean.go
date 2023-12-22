@@ -31,7 +31,6 @@ import (
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/osutils/filesystem"
@@ -89,7 +88,7 @@ func NewDefault(streams ioutils.Streams, bzl bazel.Bazel) *Clean {
 }
 
 // Run runs the aspect build command.
-func (runner *Clean) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
+func (runner *Clean) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
 	cleanAll := false
 
 	// TODO: move separation of flags and arguments to a high level of abstraction
@@ -108,15 +107,7 @@ func (runner *Clean) Run(ctx context.Context, cmd *cobra.Command, args []string)
 
 	bazelCmd := []string{"clean"}
 	bazelCmd = append(bazelCmd, flags...)
-	if exitCode, err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
-		err = &aspecterrors.ExitError{
-			Err:      err,
-			ExitCode: exitCode,
-		}
-		return err
-	}
-
-	return nil
+	return runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 }
 
 func (runner *Clean) reclaimAll() error {

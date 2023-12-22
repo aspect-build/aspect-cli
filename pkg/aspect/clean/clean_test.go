@@ -53,7 +53,7 @@ func TestClean(t *testing.T) {
 		bzl.
 			EXPECT().
 			RunCommand(streams, nil, "clean").
-			Return(0, nil)
+			Return(nil)
 
 		b := clean.New(streams, bzl)
 		g.Expect(b.Run(context.Background(), nil, []string{})).Should(Succeed())

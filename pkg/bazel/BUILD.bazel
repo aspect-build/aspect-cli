@@ -15,6 +15,7 @@ go_library(
         "//buildinfo",
         "//pkg/aspect/root/config",
         "//pkg/aspect/root/flags",
+        "//pkg/aspecterrors",
         "//pkg/bazel/workspace",
         "//pkg/ioutils",
         "@com_github_bazelbuild_bazelisk//core",
