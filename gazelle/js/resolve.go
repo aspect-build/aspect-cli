@@ -321,7 +321,7 @@ func (ts *Resolver) resolveModuleDep(
 
 			match := filteredMatches[0]
 
-			BazelLog.Tracef("resolve %q import %q as %q", mod.Imp, match)
+			BazelLog.Tracef("resolve %q import %q as %q", from, mod.Imp, match)
 
 			return Resolution_Override, &match, nil
 		}
