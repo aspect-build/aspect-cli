@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
-	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
@@ -27,16 +26,7 @@ func NewFlagsAsProtoCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command
 			flags.FlagsInterceptor(streams),
 		}, func(ctx context.Context, cmd *cobra.Command, args []string) error {
 			bazelCmd := []string{"help", "flags-as-proto"}
-
-			if exitCode, err := bzl.RunCommand(streams, nil, bazelCmd...); exitCode != 0 {
-				err = &aspecterrors.ExitError{
-					Err:      err,
-					ExitCode: exitCode,
-				}
-				return err
-			}
-
-			return nil
+			return bzl.RunCommand(streams, nil, bazelCmd...)
 		}),
 	}
 	return &cmd

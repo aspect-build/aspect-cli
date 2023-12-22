@@ -6,7 +6,6 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/query/shared",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/aspecterrors",
         "//pkg/bazel",
         "//pkg/ioutils",
         "@com_github_manifoldco_promptui//:promptui",

@@ -30,6 +30,7 @@ import (
 	"aspect.build/cli/bazel/analysis"
 	"aspect.build/cli/bazel/flags"
 	"aspect.build/cli/buildinfo"
+	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/spf13/cobra"
@@ -57,8 +58,8 @@ var startupFlags []string
 type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string, bazelFlags []string) (*analysis.ActionGraphContainer, error)
-	MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, int, error)
-	RunCommand(streams ioutils.Streams, wd *string, command ...string) (int, error)
+	MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error)
+	RunCommand(streams ioutils.Streams, wd *string, command ...string) error
 	InitializeBazelFlags() error
 	Flags() (map[string]*flags.FlagInfo, error)
 	AbsPathRelativeToWorkspace(relativePath string) (string, error)
@@ -119,7 +120,7 @@ func createRepositories() *core.Repositories {
 
 // Check if we should re-enter a different version and/or tier of the Aspect CLI and re-enter if we should.
 // Error is returned if version and/or tier are misconfigured in the Aspect CLI config.
-func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, int, error) {
+func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error) {
 	bazelisk := NewBazelisk(b.workspaceRoot, true)
 
 	// Calling bazelisk.getBazelVersion() has the side-effect of setting AspectShouldReenter.
@@ -129,14 +130,14 @@ func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string, aspec
 	if bazelisk.AspectShouldReenter {
 		if !aspectLockVersion {
 			repos := createRepositories()
-			exitCode, err := bazelisk.Run(args, repos, streams, b.env, nil)
-			return true, exitCode, err
+			err := bazelisk.Run(args, repos, streams, b.env, nil)
+			return true, err
 		} else {
 			fmt.Fprintf(streams.Stderr, "Locking Aspect CLI version to %s %s which differs from the version configured in .bazeliskrc or the Aspect CLI config file\n", buildinfo.Current().GnuName(), buildinfo.Current().Version())
 		}
 	}
 
-	return false, 0, nil
+	return false, nil
 }
 
 func GetAspectVersions() ([]string, error) {
@@ -155,7 +156,7 @@ func GetBazelVersions(bazelFork string) ([]string, error) {
 	return repos.Fork.GetVersions(aspectCacheDir, bazelFork)
 }
 
-func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...string) (int, error) {
+func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...string) error {
 	// Prepend startup flags
 	command = append(startupFlags, command...)
 
@@ -208,33 +209,25 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	stdoutDecoder := base64.NewDecoder(base64.StdEncoding, &stdout)
 
 	bazelErrs := make(chan error, 1)
-	bazelExitCode := make(chan int, 1)
 	defer close(bazelErrs)
-	defer close(bazelExitCode)
 
 	go func(wd string) {
 		// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
 		// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
-		exitCode, err := b.RunCommand(streams, &wd, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
+		err := b.RunCommand(streams, &wd, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
 		bazelErrs <- err
-		bazelExitCode <- exitCode
 	}(tmpdir)
 
-	exitCode := <-bazelExitCode
 	err = <-bazelErrs
 
-	// Check `exitCode` before `err` so we can dump the `stderr` when Bazel executed and exited non-zero
-	if exitCode != 0 {
-		if exitCode != -1 {
+	if err != nil {
+		var exitErr *aspecterrors.ExitError
+		if errors.As(err, &exitErr) {
+			// Dump the `stderr` when Bazel executed and exited non-zero
 			return nil, fmt.Errorf("failed to get bazel flags (running in %s): %w\nstderr:\n%s", tmpdir, err, stderr.String())
 		} else {
 			return nil, fmt.Errorf("failed to get bazel flags: %w", err)
 		}
-	}
-
-	if err != nil {
-		// Protect against the case where `err` is set but `exitCode` is 0
-		return nil, fmt.Errorf("failed to get bazel flags: %w", err)
 	}
 
 	helpProtoBytes, err := io.ReadAll(stdoutDecoder)
@@ -267,9 +260,7 @@ func (b *bazel) AQuery(query string, bazelFlags []string) (*analysis.ActionGraph
 	}
 
 	bazelErrs := make(chan error, 1)
-	bazelExitCode := make(chan int, 1)
 	defer close(bazelErrs)
-	defer close(bazelExitCode)
 
 	go func() {
 		cmd := []string{"aquery"}
@@ -277,26 +268,20 @@ func (b *bazel) AQuery(query string, bazelFlags []string) (*analysis.ActionGraph
 		cmd = append(cmd, "--output=proto")
 		cmd = append(cmd, "--")
 		cmd = append(cmd, query)
-		exitCode, err := b.RunCommand(streams, nil, cmd...)
+		err := b.RunCommand(streams, nil, cmd...)
 		bazelErrs <- err
-		bazelExitCode <- exitCode
 	}()
 
-	exitCode := <-bazelExitCode
 	err := <-bazelErrs
 
-	// Check `exitCode` before `err` so we can dump the `stderr` when Bazel executed and exited non-zero
-	if exitCode != 0 {
-		if exitCode != -1 {
+	if err != nil {
+		var exitErr *aspecterrors.ExitError
+		if errors.As(err, &exitErr) {
+			// Dump the `stderr` when Bazel executed and exited non-zero
 			return nil, fmt.Errorf("failed to run aquery: %w\nstderr:\n%s", err, stderr.String())
 		} else {
 			return nil, fmt.Errorf("failed to run aquery: %w", err)
 		}
-	}
-
-	if err != nil {
-		// Protect against the case where `err` is set but `exitCode` is 0
-		return nil, fmt.Errorf("failed to run aquery: %w", err)
 	}
 
 	agc := &analysis.ActionGraphContainer{}

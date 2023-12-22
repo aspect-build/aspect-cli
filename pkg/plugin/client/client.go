@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -32,6 +33,7 @@ import (
 	goplugin "github.com/hashicorp/go-plugin"
 
 	"aspect.build/cli/pkg/aspect/outputs"
+	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/config"
@@ -83,19 +85,15 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 			Stderr: &stderr,
 		}
 
-		// Check `exitCode` before `err` so we can dump the `stderr` when Bazel executed and exited non-zero
-		exitCode, err := bzl.RunCommand(buildStreams, nil, "build", aspectplugin.From)
-		if exitCode != 0 {
-			if exitCode != -1 {
+		err := bzl.RunCommand(buildStreams, nil, "build", aspectplugin.From)
+		if err != nil {
+			var exitErr *aspecterrors.ExitError
+			if errors.As(err, &exitErr) {
+				// Dump the `stderr` when Bazel executed and exited non-zero
 				return nil, fmt.Errorf("failed to build plugin: %w\nstderr:\n%s", err, stderr.String())
 			} else {
 				return nil, fmt.Errorf("failed to build plugin: %w", err)
 			}
-		}
-
-		if err != nil {
-			// Protect against the case where `err` is set but `exitCode` is 0
-			return nil, fmt.Errorf("failed to build plugin: %w", err)
 		}
 
 		var stdout bytes.Buffer

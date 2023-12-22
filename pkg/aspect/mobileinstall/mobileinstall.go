@@ -21,7 +21,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 )
@@ -41,14 +40,5 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *MobileInstall {
 func (runner *MobileInstall) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"mobile-install"}
 	bazelCmd = append(bazelCmd, args...)
-
-	if exitCode, err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...); exitCode != 0 {
-		err = &aspecterrors.ExitError{
-			Err:      err,
-			ExitCode: exitCode,
-		}
-		return err
-	}
-
-	return nil
+	return runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 }

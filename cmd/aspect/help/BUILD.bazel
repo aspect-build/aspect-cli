@@ -10,7 +10,6 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/root/flags",
-        "//pkg/aspecterrors",
         "//pkg/bazel",
         "//pkg/interceptors",
         "//pkg/ioutils",

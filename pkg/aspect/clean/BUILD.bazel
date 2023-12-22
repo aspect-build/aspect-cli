@@ -6,7 +6,6 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/clean",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/aspecterrors",
         "//pkg/bazel",
         "//pkg/ioutils",
         "//pkg/osutils/filesystem",

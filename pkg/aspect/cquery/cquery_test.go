@@ -45,7 +45,7 @@ func TestQuery(t *testing.T) {
 		spawner.
 			EXPECT().
 			RunCommand(streams, nil, "cquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)").
-			Return(0, nil)
+			Return(nil)
 
 		q := cquery.New(streams, spawner, true)
 		q.Presets = []*shared.PresetQuery{
@@ -73,7 +73,7 @@ func TestQuery(t *testing.T) {
 		spawner.
 			EXPECT().
 			RunCommand(streams, nil, "cquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)").
-			Return(0, nil)
+			Return(nil)
 
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)
 		gomock.InOrder(
@@ -169,7 +169,7 @@ func TestQuery(t *testing.T) {
 		spawner.
 			EXPECT().
 			RunCommand(streams, nil, "cquery", "somepath(//cmd/aspect/query:query, @com_github_bazelbuild_bazelisk//core:go_default_library)").
-			Return(0, nil)
+			Return(nil)
 
 		promptRunner := query_mock.NewMockPromptRunner(ctrl)
 		gomock.InOrder(
