@@ -10,3 +10,5 @@ tasks:
   - test:
   - delivery:
       always_deliver: true
+      branches:
+        - main
