@@ -28,7 +28,13 @@ def _impl(ctx):
     ctx.actions.run_shell(
         outputs = [sha256out],
         inputs = [ctx.file.src],
-        command = "ROOT=$PWD && cd {} && sha256sum {} > $ROOT/{}".format(ctx.file.src.dirname, ctx.file.src.basename, sha256out.path),
+        command = "ROOT=$PWD && cd {dirname} && $ROOT/{sha256sum} {basename} > $ROOT/{path}".format(
+            dirname = ctx.file.src.dirname,
+            sha256sum = ctx.executable._sha256sum.path,
+            basename = ctx.file.src.basename,
+            path = sha256out.path,
+        ),
+        tools = [ctx.executable._sha256sum],
     )
 
     # By default (if you run `bazel build` on this target, or if you use it as a
@@ -47,7 +53,15 @@ def _impl(ctx):
 _hashes = rule(
     implementation = _impl,
     attrs = {
-        "src": attr.label(mandatory = True, allow_single_file = True),
+        "src": attr.label(
+            allow_single_file = True,
+            mandatory = True,
+        ),
+        "_sha256sum": attr.label(
+            executable = True,
+            cfg = "exec",
+            default = "//release/sha256sum",
+        ),
     },
 )
 
