@@ -1,11 +1,27 @@
-build --workspace_status_command "${PWD}/workspace_status.sh"
-build:release -c opt --stamp
-build --incompatible_strict_action_env
+# Import Aspect bazelrc presets
 
-test --keep_going
-test --test_output=errors
+import %workspace%/.aspect/bazelrc/bazel7.bazelrc
+import %workspace%/.aspect/bazelrc/convenience.bazelrc
+import %workspace%/.aspect/bazelrc/correctness.bazelrc
+import %workspace%/.aspect/bazelrc/debug.bazelrc
+import %workspace%/.aspect/bazelrc/javascript.bazelrc
+import %workspace%/.aspect/bazelrc/performance.bazelrc
+
+### YOUR PROJECT SPECIFIC SETTINGS GO HERE ###
+
+common --workspace_status_command "${PWD}/workspace_status.sh"
+
+common:release -c opt --stamp
+
+# --incompatible_disallow_empty_glob setting from .aspect/bazelrc/correctness.bazelrc causes issues with LLVM toolchain
+common --noincompatible_disallow_empty_glob
 
 # Don't try and auto detect the cc toolchain, as we use our own gcc toolchains.
-build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
-build --incompatible_strict_action_env=true
-build --incompatible_enable_cc_toolchain_resolution
+common --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+common --incompatible_enable_cc_toolchain_resolution
+
+# Load any settings & overrides specific to the current user from `.aspect/bazelrc/user.bazelrc`.
+# This file should appear in `.gitignore` so that settings are not shared with team members. This
+# should be last statement in this config so the user configuration is able to overwrite flags from
+# this file. See https://bazel.build/configure/best-practices#bazelrc-file.
+try-import %workspace%/.aspect/bazelrc/user.bazelrc

@@ -15,6 +15,8 @@ genrule(
     ],
     outs = ["command_list.bzl"],
     cmd = "export HOME=$$(pwd); touch WORKSPACE; $(execpath //cmd/docgen) bzl-command-list > $@",
+    # Downloads bazel from https://releases.bazel.build/1.2.3/release/bazel-1.2.3-<platform>-<arch>
+    tags = ["requires-network"],
     tools = ["//cmd/docgen"],
 )
 
@@ -43,6 +45,8 @@ genrule(
     ],
     outs = ["gen/" + d for d in _DOCS],
     cmd = "export HOME=$$(pwd); touch WORKSPACE; $(execpath //cmd/docgen) gen-markdown --output-dir $(@D)/gen",
+    # Downloads bazel from https://releases.bazel.build/1.2.3/release/bazel-1.2.3-<platform>-<arch>
+    tags = ["requires-network"],
     tools = ["//cmd/docgen"],
 )
 

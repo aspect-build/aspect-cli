@@ -4,9 +4,9 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "4b32cf6feab38b887941db022020eea5a49b848e11e3d6d4d18433594951717a",
-    strip_prefix = "bazel-lib-2.0.1",
-    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.0.1/bazel-lib-v2.0.1.tar.gz",
+    sha256 = "fc8bd670380eaba5314769abbe9fee21d641e3da06d9d26b8073a301f6d62332",
+    strip_prefix = "bazel-lib-2.1.0",
+    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.1.0/bazel-lib-v2.1.0.tar.gz",
 )
 
 http_archive(
@@ -18,15 +18,15 @@ http_archive(
 
 http_archive(
     name = "aspect_rules_lint",
-    sha256 = "604666ec7ffd4f5f2636001ae892a0fbc29c77401bb33dd10601504e3ba6e9a7",
-    strip_prefix = "rules_lint-0.6.1",
-    url = "https://github.com/aspect-build/rules_lint/releases/download/v0.6.1/rules_lint-v0.6.1.tar.gz",
+    sha256 = "6e32df708b40ea8c6d4482eeaf8fd6afaa8798d0028654ba25b667b5aee5707c",
+    strip_prefix = "rules_lint-0.7.0",
+    url = "https://github.com/aspect-build/rules_lint/releases/download/v0.7.0/rules_lint-v0.7.0.tar.gz",
 )
 
 http_archive(
     name = "bazel_skylib",
-    sha256 = "66ffd9315665bfaafc96b52278f57c7e2dd09f5ede279ea6d39b2be471e7e3aa",
-    urls = ["https://github.com/bazelbuild/bazel-skylib/releases/download/1.4.2/bazel-skylib-1.4.2.tar.gz"],
+    sha256 = "cd55a062e763b9349921f0f5db8c3933288dc8ba4f76dd9416aac68acee3cb94",
+    urls = ["https://github.com/bazelbuild/bazel-skylib/releases/download/1.5.0/bazel-skylib-1.5.0.tar.gz"],
 )
 
 http_archive(
@@ -100,9 +100,9 @@ http_archive(
 
 http_archive(
     name = "buildifier_prebuilt",
-    sha256 = "72b5bb0853aac597cce6482ee6c62513318e7f2c0050bc7c319d75d03d8a3875",
-    strip_prefix = "buildifier-prebuilt-6.3.3",
-    urls = ["https://github.com/keith/buildifier-prebuilt/archive/6.3.3.tar.gz"],
+    sha256 = "8ada9d88e51ebf5a1fdff37d75ed41d51f5e677cdbeafb0a22dda54747d6e07e",
+    strip_prefix = "buildifier-prebuilt-6.4.0",
+    urls = ["http://github.com/keith/buildifier-prebuilt/archive/6.4.0.tar.gz"],
 )
 
 load("@buildifier_prebuilt//:deps.bzl", "buildifier_prebuilt_deps")

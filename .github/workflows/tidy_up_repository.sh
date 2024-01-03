@@ -20,6 +20,7 @@ commands=(
 )
 
 for cmd in "${commands[@]}"; do
+	echo "+ ${cmd}"
 	/bin/bash -c "${cmd}"
 	if ! git diff --exit-code; then
 		error_msg="ERROR: Please run '${cmd}' and commit the changes."
