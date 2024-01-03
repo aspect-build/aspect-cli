@@ -12,3 +12,4 @@ tasks:
       always_deliver: true
       branches:
         - main
+        - delivery_tests
