@@ -41,6 +41,6 @@ workflows:
     jobs:
       - legacy
       - aspect-workflows/setup:
-          resource_class: aspect-build/aspect-small-amd64
+          resource_class: aspect-build/aspect-small-arm64
           context:
             - slack
