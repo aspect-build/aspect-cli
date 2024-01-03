@@ -44,7 +44,7 @@ module "aspect_workflows" {
   }
 
   # Aspect Workflows terraform module
-  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.9.0-rc.10/workflows/terraform-aws-aspect-workflows.zip"
+  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.9.0-rc.11/workflows/terraform-aws-aspect-workflows.zip"
 
   # Non-terraform Aspect Workflows release artifacts are pulled from the region specific
   # aspect-artifacts bucket during apply. Aspect will grant your AWS account access to this bucket
@@ -112,7 +112,6 @@ module "aspect_workflows" {
     default = {
       agent_idle_timeout_min    = 1
       max_runners               = 10
-      min_runners               = 0
       resource_type             = "default"
       scaling_polling_frequency = 3 # check for queued jobs every 20s
       warming                   = true
@@ -120,7 +119,6 @@ module "aspect_workflows" {
     small-amd64 = {
       agent_idle_timeout_min    = 30
       max_runners               = 10
-      min_runners               = 0
       resource_type             = "small-amd64"
       scaling_polling_frequency = 3     # check for queued jobs every 20s
       warming                   = false # don't warm for faster bootstrap; these runners won't be running large builds
@@ -128,7 +126,6 @@ module "aspect_workflows" {
     small-arm64 = {
       agent_idle_timeout_min    = 30
       max_runners               = 10
-      min_runners               = 0
       resource_type             = "small-arm64"
       scaling_polling_frequency = 3     # check for queued jobs every 20s
       warming                   = false # don't warm for faster bootstrap; these runners won't be running large builds
@@ -136,7 +133,6 @@ module "aspect_workflows" {
     nano = {
       agent_idle_timeout_min    = 60 * 12
       max_runners               = 10
-      min_runners               = 0
       resource_type             = "nano"
       scaling_polling_frequency = 3     # check for queued jobs every 20s
       warming                   = false # don't warm for faster bootstrap; these runners won't be running large builds
@@ -146,7 +142,6 @@ module "aspect_workflows" {
     warming = {
       agent_idle_timeout_min = 1
       max_runners            = 1
-      min_runners            = 0
       policies               = { warming_manage : module.aspect_workflows.warming_management_policies["default"].arn }
       resource_type          = "default"
     }
