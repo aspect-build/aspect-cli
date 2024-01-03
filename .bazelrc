@@ -13,6 +13,9 @@ common --workspace_status_command "${PWD}/workspace_status.sh"
 
 common:release -c opt --stamp
 
+# bzlmod causes issues with LLVM toolchain
+common --noenable_bzlmod
+
 # --incompatible_disallow_empty_glob setting from .aspect/bazelrc/correctness.bazelrc causes issues with LLVM toolchain
 common --noincompatible_disallow_empty_glob
 
