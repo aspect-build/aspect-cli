@@ -13,6 +13,9 @@ common --workspace_status_command "${PWD}/workspace_status.sh"
 
 common:release -c opt --stamp
 
+# DNL: testing testing
+build --experimental_action_cache_store_output_metadata
+
 # --noexperimental_check_output_files setting from .aspect/bazelrc/performance.bazelrc breaks "build without the bytes" with Bazel 7
 # NB: these can't be common since since performance.bazel uses {build,fetch,query} and these will stop over any common settings
 build --experimental_check_output_files
