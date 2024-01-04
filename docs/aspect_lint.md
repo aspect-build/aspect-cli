@@ -16,7 +16,10 @@ aspect lint <target patterns> [flags]
 ### Options
 
 ```
-  -h, --help   help for lint
+      --diff     Output patch fixes for lint errors
+      --fix      Apply patch fixes for lint errors
+  -h, --help     help for lint
+      --report   Output lint reports (default true)
 ```
 
 ### Options inherited from parent commands

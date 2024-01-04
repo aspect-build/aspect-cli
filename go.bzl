@@ -76,6 +76,13 @@ def deps():
         version = "v0.0.0-20140422174119-9fd32a8b3d3d",
     )
     go_repository(
+        name = "com_github_bluekeyes_go_gitdiff",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/bluekeyes/go-gitdiff",
+        sum = "h1:graP4ElLRshr8ecu0UtqfNTCHrtSyZd3DABQm/DWesQ=",
+        version = "v0.7.1",
+    )
+    go_repository(
         name = "com_github_bmatcuk_doublestar_v4",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/bmatcuk/doublestar/v4",

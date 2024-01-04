@@ -9,6 +9,7 @@ require (
 	github.com/bazelbuild/bazel-gazelle v0.34.0
 	github.com/bazelbuild/bazelisk v1.17.0
 	github.com/bazelbuild/buildtools v0.0.0-20231017121127-23aa65d4e117
+	github.com/bluekeyes/go-gitdiff v0.7.1
 	github.com/bmatcuk/doublestar/v4 v4.6.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/fatih/color v1.16.0
