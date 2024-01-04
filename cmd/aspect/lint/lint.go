@@ -32,7 +32,7 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 }
 
 func NewCmd(streams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel.Bazel) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:     "lint <target patterns>",
 		Args:    cobra.MinimumNArgs(1),
 		Short:   "Run configured linters over the dependency graph.",
@@ -46,4 +46,10 @@ func NewCmd(streams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel
 			lint.New(streams, bzl).Run,
 		),
 	}
+
+	cmd.Flags().Bool("fix", false, "Apply patch fixes for lint errors")
+	cmd.Flags().Bool("diff", false, "Output patch fixes for lint errors")
+	cmd.Flags().Bool("report", true, "Output lint reports")
+
+	return cmd
 }
