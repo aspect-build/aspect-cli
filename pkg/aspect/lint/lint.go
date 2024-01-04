@@ -17,6 +17,7 @@
 package lint
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system/bep"
+	"github.com/bluekeyes/go-gitdiff/gitdiff"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -34,10 +36,32 @@ import (
 
 type Linter struct {
 	ioutils.Streams
-	bzl           bazel.Bazel
-	bazelBin      string
-	executionRoot string
-	reports       map[string]*buildeventstream.NamedSetOfFiles
+	bzl bazel.Bazel
+}
+
+type LintBEPHandler struct {
+	ioutils.Streams
+	report  bool
+	fix     bool
+	diff    bool
+	reports map[string]*buildeventstream.NamedSetOfFiles
+}
+
+// Align with rules_lint
+const (
+	LINT_REPORT_GROUP = "rules_lint_report"
+	LINT_PATCH_GROUP  = "rules_lint_patch"
+	LINT_RESULT_REGEX = ".*aspect_rules_lint.*"
+)
+
+func newLintBEPHandler(streams ioutils.Streams, printReport, applyFix, printDiff bool) *LintBEPHandler {
+	return &LintBEPHandler{
+		Streams: streams,
+		report:  printReport,
+		fix:     applyFix,
+		diff:    printDiff,
+		reports: make(map[string]*buildeventstream.NamedSetOfFiles),
+	}
 }
 
 func New(
@@ -47,11 +71,10 @@ func New(
 	return &Linter{
 		Streams: streams,
 		bzl:     bzl,
-		reports: make(map[string]*buildeventstream.NamedSetOfFiles),
 	}
 }
 
-func (runner *Linter) Run(ctx context.Context, _ *cobra.Command, args []string) error {
+func (runner *Linter) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
 	linters := viper.GetStringSlice("lint.aspects")
 
 	if len(linters) == 0 {
@@ -66,9 +89,23 @@ lint:
 		return nil
 	}
 
+	applyFix, _ := cmd.Flags().GetBool("fix")
+	printDiff, _ := cmd.Flags().GetBool("diff")
+	printReport, _ := cmd.Flags().GetBool("report")
+
 	bazelCmd := []string{"build"}
-	bazelCmd = append(bazelCmd, fmt.Sprintf("--aspects=%s", strings.Join(linters, ",")), "--output_groups=rules_lint_report")
-	bazelCmd = append(bazelCmd, args...)
+	bazelCmd = append(bazelCmd, fmt.Sprintf("--aspects=%s", strings.Join(linters, ",")))
+	bazelCmd = append(bazelCmd, cmd.Flags().Args()...)
+
+	outputGroups := []string{}
+	if applyFix || printDiff {
+		outputGroups = append(outputGroups, LINT_PATCH_GROUP)
+	}
+	if printReport {
+		outputGroups = append(outputGroups, LINT_REPORT_GROUP)
+	}
+	bazelCmd = append(bazelCmd, fmt.Sprintf("--output_groups=%s", strings.Join(outputGroups, ",")))
+	bazelCmd = append(bazelCmd, fmt.Sprintf("--experimental_remote_download_regex='%s'", LINT_RESULT_REGEX))
 
 	// Currently Bazel only supports a single --bes_backend so adding ours after
 	// any user supplied value will result in our bes_backend taking precedence.
@@ -78,9 +115,11 @@ lint:
 	// that using the Aspect CLI resolves it.
 	if bep.HasBESBackend(ctx) {
 		besBackend := bep.BESBackendFromContext(ctx)
-		besBackend.RegisterSubscriber(runner.BEPEventCallback)
 		besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
 		bazelCmd = flags.AddFlagToCommand(bazelCmd, besBackendFlag)
+
+		lintBEPHandler := newLintBEPHandler(runner.Streams, printReport, applyFix, printDiff)
+		besBackend.RegisterSubscriber(lintBEPHandler.BEPEventCallback)
 	}
 
 	err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
@@ -99,16 +138,8 @@ lint:
 	return err
 }
 
-func (runner *Linter) BEPEventCallback(event *buildeventstream.BuildEvent) error {
+func (runner *LintBEPHandler) BEPEventCallback(event *buildeventstream.BuildEvent) error {
 	switch event.Payload.(type) {
-
-	case *buildeventstream.BuildEvent_WorkspaceInfo:
-		// Record workspace information
-		runner.executionRoot = event.GetWorkspaceInfo().GetLocalExecRoot()
-
-	case *buildeventstream.BuildEvent_Configuration:
-		// Record configuration information
-		runner.bazelBin = event.GetConfiguration().GetMakeVariable()["BINDIR"]
 
 	case *buildeventstream.BuildEvent_NamedSetOfFiles:
 		// Assert no collisions
@@ -128,7 +159,14 @@ func (runner *Linter) BEPEventCallback(event *buildeventstream.BuildEvent) error
 			for _, fileSetId := range outputGroup.FileSets {
 				if fileSet := runner.reports[fileSetId.Id]; fileSet != nil {
 					for _, f := range fileSet.GetFiles() {
-						err := runner.outputLintResult(label, f)
+
+						var err error
+						if outputGroup.Name == LINT_PATCH_GROUP {
+							err = runner.patchLintResult(label, f, runner.fix, runner.diff)
+						} else if outputGroup.Name == LINT_REPORT_GROUP && runner.report {
+							err = runner.outputLintResult(label, f)
+						}
+
 						if err != nil {
 							return err
 						}
@@ -143,8 +181,50 @@ func (runner *Linter) BEPEventCallback(event *buildeventstream.BuildEvent) error
 	return nil
 }
 
-func (runner *Linter) outputLintResult(label string, f *buildeventstream.File) error {
-	lineResult, err := runner.readLintResultFile(f)
+func (runner *LintBEPHandler) patchLintResult(label string, f *buildeventstream.File, applyDiff, printDiff bool) error {
+	lintPatch, err := runner.readBEPFile(f)
+	if err != nil {
+		return err
+	}
+
+	if printDiff {
+		color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "From %s:\n", label)
+		fmt.Fprintf(runner.Streams.Stdout, "%s\n", lintPatch)
+	}
+
+	if applyDiff {
+		files, _, err := gitdiff.Parse(strings.NewReader(lintPatch))
+		if err != nil {
+			return err
+		}
+
+		for _, file := range files {
+			// TODO: file.IsNew|IsDeleted|IsRename|IsCopy
+
+			oldSrc, openErr := os.OpenFile(file.OldName[2:], os.O_RDONLY, 0)
+			if openErr != nil {
+				return openErr
+			}
+			defer oldSrc.Close()
+
+			var output bytes.Buffer
+			applyErr := gitdiff.Apply(&output, oldSrc, file)
+			if applyErr != nil {
+				return applyErr
+			}
+
+			writeErr := os.WriteFile(file.NewName[2:], output.Bytes(), file.NewMode.Perm())
+			if writeErr != nil {
+				return writeErr
+			}
+		}
+	}
+
+	return nil
+}
+
+func (runner *LintBEPHandler) outputLintResult(label string, f *buildeventstream.File) error {
+	lineResult, err := runner.readBEPFile(f)
 	if err != nil {
 		return err
 	}
@@ -158,7 +238,7 @@ func (runner *Linter) outputLintResult(label string, f *buildeventstream.File) e
 	return nil
 }
 
-func (runner *Linter) readLintResultFile(f *buildeventstream.File) (string, error) {
+func (runner *LintBEPHandler) readBEPFile(f *buildeventstream.File) (string, error) {
 	// TODO: use f.GetContents()?
 
 	if strings.HasPrefix(f.GetUri(), "file://") {
