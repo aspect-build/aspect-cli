@@ -3,6 +3,6 @@
   "private": true,
   "dependencies": {
     "@lib/b": "workspace:*",
-    "typescript": "4.9.3"
+    "typescript": "4.9.5"
   }
 }
