@@ -7,10 +7,10 @@ importers:
       '@aspect-test/a': 5.0.2
       '@aspect-test/b': 5.0.2
       '@aspect-test/c': 2.0.2
-      typescript: 4.9.3
+      typescript: 4.9.5
     dependencies:
       '@aspect-test/a': 5.0.2
-      typescript: 4.9.3
+      typescript: 4.9.5
     optionalDependencies:
       '@aspect-test/c': 2.0.2
     devDependencies:
@@ -69,10 +69,10 @@ importers:
   lib/no-direct:
     specifiers:
       '@lib/b': workspace:*
-      typescript: 4.9.3
+      typescript: 4.9.5
     dependencies:
       '@lib/b': link:../b
-      typescript: 4.9.3
+      typescript: 4.9.5
 
 packages:
 
@@ -125,8 +125,8 @@ packages:
     hasBin: true
     dev: false
 
-  /typescript/4.9.3:
-    resolution: {integrity: sha512-CIfGzTelbKNEnLpLdGFgdyKhG23CKdKgQPOBc+OUNrkJ2vr+KSzsSV5kq5iWhEQbok+quxgGzrAtGWCyU7tHnA==}
+  /typescript/4.9.5:
+    resolution: {integrity: sha512-1FXk9E2Hm+QzZQ7z+McJiHL4NW1F2EzMu9Nq9i3zAaGqibafqYwCVU6WyWAuyQRRzOlxou8xZSyXLEN8oKj24g==}
     engines: {node: '>=4.2.0'}
     hasBin: true
     dev: false
