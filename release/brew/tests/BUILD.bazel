@@ -149,7 +149,7 @@ assert_contains(
 
 # TODO: fix on GitHub actions where the workspace status command's `git describe --tags`
 # fails with `fatal: No tags can describe 'e5ac90b62d1801a5fa8f846b5be869a21bf5a14b'` on
-# GitHub actions (even when fetch-depth is set to 0 on actions/checkout@v3 step) which
+# GitHub actions (even when fetch-depth is set to 0 on actions/checkout@v4 step) which
 # leave STABLE_BUILD_SCM_TAG unset and this test fails.
 # assert_contains(
 #     name = "{}_test".format(_VERSION_FILE_WITH_STAMP_NAME),
