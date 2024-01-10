@@ -13,6 +13,7 @@ go_library(
         ".gitignore",
         "bazel5.bazelrc",
         "bazel6.bazelrc",
+        "bazel7.bazelrc",
         "ci.bazelrc",
         "convenience.bazelrc",
         "correctness.bazelrc",
