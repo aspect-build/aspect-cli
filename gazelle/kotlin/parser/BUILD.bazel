@@ -9,7 +9,6 @@ go_library(
         "//gazelle/common/treesitter",
         "@com_github_emirpasic_gods//sets/treeset",
         "@com_github_smacker_go_tree_sitter//:go-tree-sitter",
-        "@com_github_smacker_go_tree_sitter//kotlin",
     ],
 )
 

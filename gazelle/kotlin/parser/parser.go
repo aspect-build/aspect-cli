@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -9,7 +8,6 @@ import (
 	treeutils "aspect.build/cli/gazelle/common/treesitter"
 	"github.com/emirpasic/gods/sets/treeset"
 	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/kotlin"
 )
 
 type ParseResult struct {
@@ -25,23 +23,13 @@ type Parser interface {
 
 type treeSitterParser struct {
 	Parser
-
-	parser *sitter.Parser
 }
 
 func NewParser() Parser {
-	sitter := sitter.NewParser()
-	sitter.SetLanguage(kotlin.GetLanguage())
-
-	p := treeSitterParser{
-		parser: sitter,
-	}
+	p := treeSitterParser{}
 
 	return &p
 }
-
-var KotlinTreeSitterName = "kotlin"
-var KotlinLang = kotlin.GetLanguage()
 
 func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error) {
 	var result = &ParseResult{
@@ -51,11 +39,9 @@ func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error
 
 	errs := make([]error, 0)
 
-	ctx := context.Background()
-
 	sourceCode := []byte(source)
 
-	tree, err := p.parser.ParseCtx(ctx, nil, sourceCode)
+	tree, err := treeutils.ParseSourceCode(treeutils.Kotlin, sourceCode)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -102,7 +88,7 @@ func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error
 			}
 		}
 
-		treeErrors := treeutils.QueryErrors(KotlinTreeSitterName, KotlinLang, sourceCode, rootNode)
+		treeErrors := treeutils.QueryErrors(treeutils.Kotlin, sourceCode, rootNode)
 		if treeErrors != nil {
 			errs = append(errs, treeErrors...)
 		}

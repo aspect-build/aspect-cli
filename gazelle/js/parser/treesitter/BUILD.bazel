@@ -10,8 +10,6 @@ go_library(
         "//gazelle/js/parser",
         "//pkg/logger",
         "@com_github_smacker_go_tree_sitter//:go-tree-sitter",
-        "@com_github_smacker_go_tree_sitter//typescript/tsx",
-        "@com_github_smacker_go_tree_sitter//typescript/typescript",
     ],
 )
 

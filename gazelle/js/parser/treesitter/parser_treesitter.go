@@ -1,14 +1,10 @@
 package gazelle
 
 import (
-	"context"
 	"path"
-	"strings"
 
 	Log "aspect.build/cli/pkg/logger"
 	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/typescript/tsx"
-	"github.com/smacker/go-tree-sitter/typescript/typescript"
 
 	treeutils "aspect.build/cli/gazelle/common/treesitter"
 	"aspect.build/cli/gazelle/js/parser"
@@ -23,16 +19,10 @@ import (
 
 type TreeSitterParser struct {
 	parser.Parser
-
-	parser *sitter.Parser
 }
 
 func NewParser() parser.Parser {
-	p := TreeSitterParser{
-		parser: sitter.NewParser(),
-	}
-
-	return &p
+	return &TreeSitterParser{}
 }
 
 // Queries finding import statements, tagging such Nodes as 'from' captures.
@@ -65,23 +55,16 @@ var ImportQueries = []string{
 	`,
 }
 
-// Supported languages by key
-var Languages = map[string]*sitter.Language{
-	"tsx":        tsx.GetLanguage(),
-	"typescript": typescript.GetLanguage(),
-}
-
 func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.ParseResult, []error) {
 	imports := make([]string, 0, 5)
 	modules := make([]string, 0)
 	errs := make([]error, 0)
 
 	sourceCode := []byte(sourceCodeStr)
-	sourceLangName := filenameToLanguage(filePath)
-	sourceLang := Languages[sourceLangName]
+	lang := filenameToLanguage(filePath)
 
 	// Parse the source code
-	tree, err := p.parseTypeScript(sourceLang, sourceCode)
+	tree, err := treeutils.ParseSourceCode(lang, sourceCode)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -119,7 +102,7 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 
 		// Extra queries for more complex import statements.
 		for _, q := range ImportQueries {
-			queryResults := queryImports(treeutils.ParseQuery(sourceLangName, sourceLang, q), filePath, sourceCode, rootNode)
+			queryResults := treeutils.QueryImports(treeutils.ParseQuery(lang, q), filePath, sourceCode, rootNode)
 
 			imports = append(imports, queryResults...)
 		}
@@ -127,7 +110,7 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 		// Parse errors. Only log them due to many false positives potentially caused by issues
 		// such as only parsing a single file at a time so type information from other files is missing.
 		if Log.IsLevelEnabled(Log.TraceLevel) {
-			treeErrors := treeutils.QueryErrors(sourceLangName, sourceLang, sourceCode, rootNode)
+			treeErrors := treeutils.QueryErrors(lang, sourceCode, rootNode)
 			if treeErrors != nil {
 				Log.Tracef("TreeSitter query errors: %v", treeErrors)
 			}
@@ -180,81 +163,15 @@ func getModuleDeclarationName(node *sitter.Node) *sitter.Node {
 	return nil
 }
 
-func (p *TreeSitterParser) parseTypeScript(lang *sitter.Language, sourceCode []byte) (*sitter.Tree, error) {
-	ctx := context.Background()
-
-	p.parser.SetLanguage(lang)
-
-	return p.parser.ParseCtx(ctx, nil, sourceCode)
-}
-
-// Run a query finding import query matches.
-func queryImports(query *sitter.Query, sourcePath string, sourceCode []byte, rootNode *sitter.Node) []string {
-	imports := make([]string, 0, 5)
-
-	// Execute the import query.
-	qc := sitter.NewQueryCursor()
-	defer qc.Close()
-	qc.Exec(query, rootNode)
-
-	// Collect import statements from the query results.
-	for {
-		m, ok := qc.NextMatch()
-		if !ok {
-			break
-		}
-
-		from := readFromQueryMatch(query, m, sourceCode)
-		if from != nil {
-			fromCode := from.Node.Content(sourceCode)
-			imports = append(imports, fromCode)
-
-			Log.Tracef("Import %q => %q", sourcePath, fromCode)
-		}
-	}
-
-	return imports
-}
-
-// Find and read the `from` QueryCapture from a QueryMatch.
-// Filter matches based on captures value using "equals-{name}" vars.
-func readFromQueryMatch(query *sitter.Query, m *sitter.QueryMatch, sourceCode []byte) *sitter.QueryCapture {
-	var from *sitter.QueryCapture
-
-	for ci, c := range m.Captures {
-		cn := query.CaptureNameForId(uint32(ci))
-
-		// Filters where a capture must equal a specific value.
-		if strings.HasPrefix(cn, "equals-") {
-			if c.Node.Content(sourceCode) != cn[len("equals-"):] {
-				return nil
-			}
-			continue
-		}
-
-		if cn == "from" {
-			from = &c
-		}
-	}
-
-	// Should never happen. All queries should have a `from` capture.
-	if from == nil {
-		Log.Fatalf("No import query 'from' found in query %q", query)
-		return nil
-	}
-
-	return from
-}
-
 // File extension to language key
-func filenameToLanguage(filename string) string {
+func filenameToLanguage(filename string) treeutils.Language {
 	ext := path.Ext(filename)[1:]
 	switch ext {
 	case "tsx":
-		return "tsx"
+		return treeutils.TypescriptX
 	case "jsx":
-		return "tsx"
+		return treeutils.TypescriptX
 	}
 
-	return "typescript"
+	return treeutils.Typescript
 }

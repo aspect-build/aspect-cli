@@ -3,10 +3,17 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "treesitter",
     srcs = [
+        "parser.go",
         "queries.go",
         "traversal.go",
     ],
     importpath = "aspect.build/cli/gazelle/common/treesitter",
     visibility = ["//visibility:public"],
-    deps = ["@com_github_smacker_go_tree_sitter//:go-tree-sitter"],
+    deps = [
+        "//pkg/logger",
+        "@com_github_smacker_go_tree_sitter//:go-tree-sitter",
+        "@com_github_smacker_go_tree_sitter//kotlin",
+        "@com_github_smacker_go_tree_sitter//typescript/tsx",
+        "@com_github_smacker_go_tree_sitter//typescript/typescript",
+    ],
 )
