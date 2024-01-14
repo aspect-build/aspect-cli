@@ -400,8 +400,13 @@ func (c *JsGazelleConfig) RenderNpmPackageTargetName(packageName string) string 
 }
 
 // The library name when wrapped within an npm package.
-func (c *JsGazelleConfig) RenderNpmSourceLibraryName(npmPackageName string) string {
-	return npmPackageName + PackageSrcSuffix
+func (c *JsGazelleConfig) RenderNpmSourceLibraryName(sourceTargetName string) string {
+	// In the case where js_project_naming_convention was set to
+	// '{dirname}_lib', don't add the suffix twice.
+	if strings.HasSuffix(sourceTargetName, PackageSrcSuffix) {
+		return sourceTargetName
+	}
+	return sourceTargetName + PackageSrcSuffix
 }
 
 func (c *JsGazelleConfig) SetTsProtoLibraryNamingConvention(tsProtoLibraryName string) {

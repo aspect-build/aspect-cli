@@ -1,0 +1,16 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+# Force ts_project to be named with _lib suffix even though no targets depend on
+# it yet, and this package has no npm_package rule.
+# gazelle:js_project_naming_convention {dirname}_lib
+
+npm_link_all_packages(name = "node_modules")
+
+ts_project(
+    name = "b_lib",
+    srcs = [
+        "index.ts",
+        "package.json",
+    ],
+)
