@@ -68,7 +68,17 @@ module "aspect_workflows" {
   }
 
   # Remote cache properties
-  remote_cache = {}
+  remote_cache = {
+    buildbarn = {
+      cache_shards = 1
+      frontend = {
+        cpu         = 2048
+        memory      = 4096
+        max_scaling = 5
+        min_scaling = 1
+      }
+    }
+  }
 
   # Delivery properties
   delivery_enabled = true
