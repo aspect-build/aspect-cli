@@ -28,8 +28,8 @@
 # - aw-test
 # - aw-warming
 #
-# If you user CircleCI configuration you should avoid workflows prefixed with
-# `aspect-workflows-` and jobs prefixed with `aw-`. Conflicting workflow or
+# In your user CircleCI configuration, avoid workflow names prefixed with
+# `aspect-workflows-` and job names prefixed with `aw-`. Conflicting workflow or
 # job names will result in a bad configuration merge.
 version: 2.1
 
