@@ -1,13 +1,16 @@
 load "common.bats"
 
 setup() {
-    touch WORKSPACE
+    cd "$TEST_REPO" || exit 1
 }
 
 teardown() {
     rm -f .bazelrc
+    rm -f .bazeliskrc
+    rm -f BUILD.bazel
+    rm -f version-config.yaml
+    rm -rf "$HOME/.aspect/cli/config.yaml"
 }
-
 
 @test 'flags should work' {
     cat > BUILD.bazel << 'EOF'
@@ -17,6 +20,7 @@ genrule(
     cmd = "touch $@",
 )
 EOF
+
     run aspect build :foo --announce_rc
     assert_success
     assert_output --partial "INFO: Build completed successfully"
@@ -30,6 +34,7 @@ genrule(
     cmd = "touch $@",
 )
 EOF
+
     run aspect build :foo --announce_rc --keep_going --aspect:interactive=false --nocheck_up_to_date --experimental_use_sandboxfs=false --keep_going
     assert_success
     assert_output --partial "INFO: Build completed successfully"
@@ -40,6 +45,7 @@ EOF
 BAZELISK_BASE_URL=https://static.aspect.build/aspect
 USE_BAZEL_VERSION=aspect/1.2.3
 EOF
+
     run aspect --version
     assert_failure
     assert_output --partial "could not download Bazel"
@@ -47,14 +53,13 @@ EOF
     run aspect --version --aspect:lock_version
     assert_success
     assert_output --partial "Locking Aspect CLI version to"
-
-    rm .bazeliskrc
 }
 
 @test 'lock_version flag should prevent downloading and running config version' {
     cat > version-config.yaml << 'EOF'
 version: 1.2.3
 EOF
+
     run aspect --aspect:config="version-config.yaml" --version
     assert_failure
     assert_output --partial "could not download Bazel"
@@ -62,8 +67,6 @@ EOF
     run aspect --aspect:config="version-config.yaml" --version --aspect:lock_version
     assert_success
     assert_output --partial "Locking Aspect CLI version to"
-
-    rm version-config.yaml
 }
 
 @test '--[no]able flags should work' {
@@ -74,11 +77,11 @@ genrule(
     cmd = "touch $@",
 )
 EOF
+
     run aspect build :foo --noannounce_rc
     assert_success
     assert_output --partial "INFO: Build completed successfully"
 }
-
 
 @test 'unknown flags should fail' {
     run aspect build :foo --noannounce_rcc
@@ -119,6 +122,7 @@ EOF
 }
 
 @test 'run command should not process args after --' {
+    touch "$HOME/.aspect/cli/config.yaml"
     cat > test.sh << 'EOF'
 echo $@
 EOF
@@ -132,6 +136,7 @@ sh_binary(
     ]
 )
 EOF
+
     run aspect run :bin -- -p from_commandline
     assert_success
     assert_output --partial "-p from_starlark -p from_commandline"
@@ -150,6 +155,8 @@ EOF
 }
 
 @test 'should warn about unknown flags that start with --aspect:' {
+    touch BUILD.bazel
+
     run aspect query --aspect:nounknownflag=1 --aspect:interactive=false //...
     assert_failure
     assert_output --partial "ERROR: --aspect:nounknownflag=1 :: Unrecognized option: --aspect:nounknownflag=1"

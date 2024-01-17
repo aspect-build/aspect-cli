@@ -58,7 +58,8 @@ var startupFlags []string
 type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string, bazelFlags []string) (*analysis.ActionGraphContainer, error)
-	MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error)
+	BazelDashDashVersion() (string, error)
+	HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error)
 	RunCommand(streams ioutils.Streams, wd *string, command ...string) error
 	InitializeBazelFlags() error
 	Flags() (map[string]*flags.FlagInfo, error)
@@ -118,14 +119,28 @@ func createRepositories() *core.Repositories {
 	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
 }
 
+func scrubEnvOfBazeliskAspectBootstrap() {
+	bazeliskConfig := &bazeliskVersionConfig{
+		UseBazelVersion: os.Getenv(useBazelVersionEnv),
+		BazeliskBaseUrl: os.Getenv(core.BaseURLEnv),
+	}
+	if isBazeliskAspectBootstrap(bazeliskConfig) {
+		os.Setenv(useBazelVersionEnv, "")
+		os.Setenv(core.BaseURLEnv, "")
+	}
+}
+
 // Check if we should re-enter a different version and/or tier of the Aspect CLI and re-enter if we should.
 // Error is returned if version and/or tier are misconfigured in the Aspect CLI config.
-func (b *bazel) MaybeReenterAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error) {
+func (b *bazel) HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error) {
 	bazelisk := NewBazelisk(b.workspaceRoot, true)
 
 	// Calling bazelisk.getBazelVersion() has the side-effect of setting AspectShouldReenter.
 	// TODO: this pattern could get cleaned up so it does not rely on the side-effect
-	bazelisk.getBazelVersion()
+	_, _, err := bazelisk.getBazelVersion()
+	if err != nil {
+		return false, err
+	}
 
 	if bazelisk.AspectShouldReenter {
 		if !aspectLockVersion {
@@ -300,6 +315,45 @@ func (b *bazel) AQuery(query string, bazelFlags []string) (*analysis.ActionGraph
 		return nil, fmt.Errorf("failed to run Bazel aquery: parsing ActionGraphContainer: %w", err)
 	}
 	return agc, nil
+}
+
+// Calls `bazel --version` and returns the result
+func (b *bazel) BazelDashDashVersion() (string, error) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	streams := ioutils.Streams{
+		Stdin:  os.Stdin,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
+
+	bazelErrs := make(chan error, 1)
+	defer close(bazelErrs)
+
+	go func() {
+		cmd := []string{"--version"}
+		err := b.RunCommand(streams, nil, cmd...)
+		bazelErrs <- err
+	}()
+
+	err := <-bazelErrs
+
+	if err != nil {
+		var exitErr *aspecterrors.ExitError
+		if errors.As(err, &exitErr) {
+			// Dump the `stderr` when Bazel executed and exited non-zero
+			return "", fmt.Errorf("failed to run bazel --version: %w\nstderr:\n%s", err, stderr.String())
+		} else {
+			return "", fmt.Errorf("failed to run bazel --version: %w", err)
+		}
+	}
+
+	version, err := io.ReadAll(&stdout)
+	if err != nil {
+		return "", fmt.Errorf("failed to run bazel --version: %w", err)
+	}
+
+	return string(version[:]), nil
 }
 
 func (b *bazel) AbsPathRelativeToWorkspace(relativePath string) (string, error) {

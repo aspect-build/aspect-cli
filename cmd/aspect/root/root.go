@@ -54,6 +54,8 @@ import (
 	"aspect.build/cli/cmd/aspect/test"
 	"aspect.build/cli/cmd/aspect/version"
 	"aspect.build/cli/pkg/aspect/root/flags"
+	"aspect.build/cli/pkg/aspecterrors"
+	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system"
 	help_docs "aspect.build/cli/docs/help"
@@ -87,9 +89,17 @@ func CheckAspectDisablePluginsFlag(args []string) bool {
 	return false
 }
 
-func MaybeAspectVersionFlag(streams ioutils.Streams, args []string) {
+func HandleVersionFlags(streams ioutils.Streams, args []string, bzl bazel.Bazel) {
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "-v") {
 		fmt.Fprintf(streams.Stdout, "%s %s\n", buildinfo.Current().GnuName(), buildinfo.Current().Version())
+		os.Exit(0)
+	}
+	if len(args) == 1 && args[0] == "--bazel-version" {
+		version, err := bzl.BazelDashDashVersion()
+		if err != nil {
+			aspecterrors.HandleError(err)
+		}
+		fmt.Fprintf(streams.Stdout, version)
 		os.Exit(0)
 	}
 }
@@ -110,7 +120,7 @@ func NewCmd(
 		Version:           buildinfo.Current().Version(),
 	}
 
-	// Fallback version template incase it is not handled by MaybeAspectVersionFlag
+	// Fallback version template incase it is not handled by HandleVersionFlags
 	cmd.SetVersionTemplate(fmt.Sprintf("%s %s\n", buildinfo.Current().GnuName(), buildinfo.Current().Version()))
 
 	flags.AddGlobalFlags(cmd, defaultInteractive)

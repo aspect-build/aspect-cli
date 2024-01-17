@@ -1,7 +1,7 @@
 load "../common.bats"
 
 setup() {
-    touch WORKSPACE
+    cd "$TEST_REPO" || exit 1
 }
 
 @test 'aspect info bazel-bin should work' {
