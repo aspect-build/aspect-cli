@@ -36,6 +36,8 @@ go_library(
         "//cmd/aspect/test",
         "//cmd/aspect/version",
         "//pkg/aspect/root/flags",
+        "//pkg/aspecterrors",
+        "//pkg/bazel",
         "//pkg/ioutils",
         "//pkg/plugin/system",
         "//docs/cli/help",

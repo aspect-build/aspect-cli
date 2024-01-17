@@ -201,8 +201,8 @@ func ParseOutBazelFlags(command string, args []string) ([]string, []string, erro
 			split := strings.SplitN(name, "=", 2)
 			name = split[0]
 			flag := bazelFlags.Lookup(name)
-			if name == "version" || name == "help" {
-				// --version and --help special cases
+			if name == "version" || name == "bazel-version" || name == "help" {
+				// --version, --bazel-version and --help special cases
 				nonFlags = append(nonFlags, s)
 			} else if strings.HasPrefix(name, "aspect:") {
 				// --aspect:* special case

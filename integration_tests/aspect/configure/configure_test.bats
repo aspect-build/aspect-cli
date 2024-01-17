@@ -1,6 +1,8 @@
 load "../common.bats"
 
 setup() {
+    cd "$TEST_REPO" || exit 1
+
     touch BUILD.bazel WORKSPACE
 
     # js

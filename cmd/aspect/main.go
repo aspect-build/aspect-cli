@@ -44,18 +44,19 @@ func main() {
 
 	streams := ioutils.DefaultStreams
 
+	// Handle --version, -v and --bazel-version before re-entering and before initializing the
+	// plugin system so these special "commands" are fast and don't require downloading a re-entrant
+	// aspect or plugins before outputting their results.
+	root.HandleVersionFlags(streams, os.Args[1:], bzl)
+
 	// Re-enter another aspect if version running is not the configured version
-	reentered, err := bzl.MaybeReenterAspect(streams, os.Args[1:], root.CheckAspectLockVersionFlag(os.Args[1:]))
+	reentered, err := bzl.HandleReenteringAspect(streams, os.Args[1:], root.CheckAspectLockVersionFlag(os.Args[1:]))
 	if reentered {
 		if err != nil {
 			aspecterrors.HandleError(err)
 		}
 		os.Exit(0)
 	}
-
-	// Handle --version and -v before initializing the plugin system so these special
-	// "commands" are fast and don't require download plugins before output the version.
-	root.MaybeAspectVersionFlag(streams, os.Args[1:])
 
 	err = bzl.InitializeBazelFlags()
 	if err != nil {

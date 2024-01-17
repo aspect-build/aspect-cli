@@ -113,6 +113,12 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 		return fmt.Errorf("could not get Bazel version: %v", err)
 	}
 
+	if bazelisk.AspectShouldReenter {
+		// Work-around for re-entering older versions of the Aspect CLI that didn't handle
+		// env boostrap correctly.
+		scrubEnvOfBazeliskAspectBootstrap()
+	}
+
 	bazelPath, err := homedir.Expand(bazelVersionString)
 	if err != nil {
 		return fmt.Errorf("could not expand home directory in path: %v", err)
@@ -268,42 +274,44 @@ type aspectRuntimeInfo struct {
 	BaseUrl   string
 }
 
+type bazeliskVersionConfig struct {
+	UseBazelVersion string
+	BazeliskBaseUrl string
+}
+
+func isBazeliskAspectBootstrap(bazeliskConfig *bazeliskVersionConfig) bool {
+	if strings.HasPrefix(bazeliskConfig.UseBazelVersion, "aspect-cli/") {
+		// aspect-cli/ org is reserved for future use so that we can bootstrap Aspect CLI with
+		// bazelisk without a BAZELISK_BASE_URL from the releases in this repository
+		// https://github.com/aspect-cli/bazel; a fix in bazelisk is required for this to work,
+		// however.
+		return true
+	}
+	if strings.HasPrefix(bazeliskConfig.UseBazelVersion, "aspect/") {
+		// aspect/ org is a special case incase a user has a fork of the aspect-cli repo and has a
+		// custom BAZELISK_BASE_URL we can't detect; we generally have it set in all of our
+		// .bazeliskrc examples as best practice even tho it is not strictly needed if you set the
+		// BAZELISK_BASE_URL to https://github.com/aspect-build/aspect-cli/releases/download.
+		return true
+	}
+	if bazeliskConfig.BazeliskBaseUrl == "https://github.com/aspect-build/aspect-cli/releases/download" {
+		// GitHub aspect-cli OSS releases
+		return true
+	}
+	return false
+}
+
+func isAspectVersionMismatch(aspectRuntime *aspectRuntimeInfo, version string, baseUrl string) bool {
+	return aspectRuntime.Version != version || aspectRuntime.BaseUrl != baseUrl
+}
+
 func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	// The logic in upstream Bazelisk v1.15.0
 	// (https://github.com/bazelbuild/bazelisk/blob/c9081741bc1420d601140a4232b5c48872370fdc/core/core.go#L318)
 	// has been updated here to support bootstrapping and reentering a different version and/or tier
-	// of Aspect CLI -or- ignoring .bazeliskrc config version & base URL in cases where we were bootstrapped
-	// bazel Bazelisk or by Aspect or are running a locally install Aspect that matches the version in the
-	// Aspect configuration and thus need to determine the Bazel version to run from .bazelversion or from the env.
-	//
-	// Additional logic to re-enter Aspect or ignore .bazeliskrc config runs in this order:
-	//
-	// (A) If not bootstrapped by Aspect & an aspect version is configured & not running a
-	//     development build, download & re-enter the configured aspect if either the version or base url mismatch with
-	//     the aspect running.
-	// (B) If bootstrapped by Bazelisk then ignore .bazeliskrc version & base_url (since it specifies
-	//     the Aspect version) and use the the env version to determine the Bazel version to download & run.
-	// (C) If not bootstrapped by Bazelisk or by Aspect & Aspect version is not configured in Aspect config.yaml
-	//     (or by USE_ASPECT_VERSION) & .bazeliskrc is configured to bootstrap Aspect & not running a development
-	//     build & no version configured in aspect config, download & re-enter the configured aspect if either the version
-	// 		 or base url mismatch with the aspect running.
-	// (D) If not bootstrapped by Bazelisk or by Aspect & .bazeliskrc is configured to bootstrap
-	//     aspect & we are not re-entering in (C), then ignore .bazeliskrc version & base_url (since it
-	//     specifies the Aspect version) and use the the env version to determine the Bazel version to download & run.
-	// (E) If not bootstrapped by Bazelisk or by Aspect and .bazeliskrc is NOT configured to bootstrap aspect,
-	//     continue with the upstream logic of using GetEnvOrConfig for the bazelVersion and baseUrl.
-	//
-	// Modified upstream logic to determine what Bazel version to download & use runs in this order:
-	//
-	// (F) If bazelVersion is set from either .bazeliskrc config or env in the above logic use that version of Bazel
-	//     & download from the baseUrl from either .bazeliskrc config or env in the above logic
-	// (G) If there is a .bazelversion file with a version specified used that version & download from the baseUrl from
-	//     either .bazeliskrc config or env in the above logic
-	// (H) If "USE_BAZEL_FALLBACK_VERSION" is set in config or env use that version:
-	//     - env var "USE_BAZEL_FALLBACK_VERSION" is set to a fallback version format.
-	//     - workspace_root/.bazeliskrc exists -> read contents, in contents:
-	//       var "USE_BAZEL_FALLBACK_VERSION" is set to a fallback version format.
-	//     - fallback version format "silent:latest"
+	// of Aspect CLI.
+
+	// Gather info on the Aspect CLI version running
 	aspectRuntime := &aspectRuntimeInfo{
 		Reentrant: len(os.Getenv(aspectReentrantEnv)) != 0,
 		Version:   buildinfo.Current().Version(),
@@ -311,64 +319,56 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 		BaseUrl:   config.AspectBaseUrl(buildinfo.Current().IsAspectPro),
 	}
 
+	// Get the Aspect CLI version configuration from the Aspect CLI config.yaml or from
+	// USE_ASPECT_VERSION
 	aspectConfig, err := config.GetVersionConfig()
 	if err != nil {
 		return "", "", fmt.Errorf("could not get aspect config: %w", err)
 	}
 
-	// If an aspect version is configured and we are not already re-entrant that takes precedence.
-	if bazelisk.allowReenter && !aspectRuntime.Reentrant && aspectConfig.Configured {
-		mismatchVersion := aspectConfig.Version != aspectRuntime.Version
-		mismatchBaseUrl := aspectConfig.BaseUrl != aspectRuntime.BaseUrl
-		if mismatchVersion || mismatchBaseUrl {
-			// Re-enter the configured version of aspect if there is a version or base url mismatch
-			bazelisk.AspectShouldReenter = true                    // (A)
-			return aspectConfig.Version, aspectConfig.BaseUrl, nil // (A)
-		}
+	// If an Aspect CLI version is configured and does not match the running version then re-enter
+	// that version if we are allowed to re-enter and have not already re-entered.
+	if bazelisk.allowReenter && !aspectRuntime.Reentrant && aspectConfig.Configured && isAspectVersionMismatch(aspectRuntime, aspectConfig.Version, aspectConfig.BaseUrl) {
+		bazelisk.AspectShouldReenter = true
+		return aspectConfig.Version, aspectConfig.BaseUrl, nil
 	}
 
-	bazelVersion := ""
-	baseUrl := ""
-	bazeliskReentrant := len(os.Getenv(skipWrapperEnv)) != 0
-	if bazeliskReentrant {
-		// If we were bootstrapped by bazelisk then we can only use the bazel version &
-		// base url from the env or the .bazelversion files below
-		bazelVersion = os.Getenv(useBazelVersionEnv) // (B)
-		baseUrl = os.Getenv(core.BaseURLEnv)         // (B)
-	} else {
-		// If we were not bootstrapped by bazelisk we must still check if .bazeliskrc has an aspect bootstrap configured.
-		bazeliskBazelVersion := bazelisk.GetConfig(useBazelVersionEnv)
-		bazeliskAspectBaseUrl := bazelisk.GetConfig(core.BaseURLEnv)
-		bazeliskBootstrapConfigured := len(bazeliskAspectBaseUrl) != 0 && (strings.HasPrefix(bazeliskBazelVersion, "aspect/") || strings.HasPrefix(bazeliskBazelVersion, "aspect-cli/") || strings.Contains(bazeliskAspectBaseUrl, "aspect.build/") || strings.Contains(bazeliskAspectBaseUrl, "/aspect-build/"))
-		if bazeliskBootstrapConfigured {
-			splits := strings.Split(bazeliskBazelVersion, "/")
-			bazeliskAspectVersion := splits[len(splits)-1]
-			mismatchVersion := bazeliskAspectVersion != aspectRuntime.Version
-			mismatchBaseUrl := bazeliskAspectBaseUrl != aspectRuntime.BaseUrl
-			if bazelisk.allowReenter && !aspectRuntime.Reentrant && !aspectConfig.Configured && (mismatchVersion || mismatchBaseUrl) {
-				// Re-enter the configured version of aspect if there is a version or base url mismatch
-				// and no version configured in aspect config (or via USE_ASPECT_VERSION)
-				// and we are not already re-entrant.
-				bazelisk.AspectShouldReenter = true                      // (C)
-				return bazeliskAspectVersion, bazeliskAspectBaseUrl, nil // (C)
-			} else {
-				// Since bazelisk bootstrap is configured, we can only use the bazel version &
-				// base url from the env or the .bazelversion files below
-				bazelVersion = os.Getenv(useBazelVersionEnv) // (D)
-				baseUrl = os.Getenv(core.BaseURLEnv)         // (D)
-			}
+	// Get the bazelisk version config from the USE_BAZEL_VERSION and BAZELISK_BASE_URL env vars
+	// and/or the .bazeliskrc file
+	bazeliskConfig := &bazeliskVersionConfig{
+		UseBazelVersion: bazelisk.GetEnvOrConfig(useBazelVersionEnv),
+		BazeliskBaseUrl: bazelisk.GetEnvOrConfig(core.BaseURLEnv),
+	}
+
+	// If bazelisk is configured to bootstrap the Aspect CLI and the version configured does not
+	// match the running version then re-enter that version if we are allowed to re-enter, have not
+	// already re-entered
+	if isBazeliskAspectBootstrap(bazeliskConfig) {
+		// Remove the org from the version string if it is set.
+		// For example, "aspect/1.2.3" => "1.2.3".
+		s := strings.Split(bazeliskConfig.UseBazelVersion, "/")
+		sanitizedUseBazelVersion := s[len(s)-1]
+		if bazelisk.allowReenter && !aspectRuntime.Reentrant && !aspectConfig.Configured && isAspectVersionMismatch(aspectRuntime, sanitizedUseBazelVersion, bazeliskConfig.BazeliskBaseUrl) {
+			// If bazelisk is configured to bootstrap the CLI and the Aspect CLI config is not then
+			// re-enter that version if we are allowed to re-enter and have not already re-entered.
+			bazelisk.AspectShouldReenter = true
+			return sanitizedUseBazelVersion, bazeliskConfig.BazeliskBaseUrl, nil
 		} else {
-			// Bazelisk bootstrap is _not_ configured so we can use the .bazeliskrc or env configuration
-			// to determine the bazel version to use
-			bazelVersion = bazelisk.GetEnvOrConfig(useBazelVersionEnv) // (E)
-			baseUrl = bazelisk.GetEnvOrConfig(core.BaseURLEnv)         // (E)
+			// If we decided not to re-enter then scrub the bazelisk configured Aspect CLI version
+			// so the logic below falls through to the Bazel version specified in .bazelversion.
+			bazeliskConfig = &bazeliskVersionConfig{}
 		}
 	}
 
-	if len(bazelVersion) != 0 {
-		return bazelVersion, baseUrl, nil // (F)
+	// If there is bazelisk configured bazel version then we are done
+	if len(bazeliskConfig.UseBazelVersion) != 0 {
+		return bazeliskConfig.UseBazelVersion, bazeliskConfig.BazeliskBaseUrl, nil
 	}
 
+	// Same as upstream bazelisk at this point:
+	// https://github.com/bazelbuild/bazelisk/blob/c9081741bc1420d601140a4232b5c48872370fdc/core/core.go#L344
+
+	// Load the version from the .bazelversion file if we know the workspace root and it exists
 	if len(bazelisk.workspaceRoot) != 0 {
 		bazelVersionPath := filepath.Join(bazelisk.workspaceRoot, ".bazelversion")
 		if _, err := os.Stat(bazelVersionPath); err == nil {
@@ -386,11 +386,12 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 			}
 
 			if len(bazelVersion) != 0 {
-				return bazelVersion, baseUrl, nil // (G)
+				return bazelVersion, bazeliskConfig.BazeliskBaseUrl, nil
 			}
 		}
 	}
 
+	// If we still don't have a Bazel version then check for a USE_BAZEL_FALLBACK_VERSION
 	fallbackVersionFormat := bazelisk.GetEnvOrConfig("USE_BAZEL_FALLBACK_VERSION")
 	fallbackVersionMode, fallbackVersion, hasFallbackVersionMode := strings.Cut(fallbackVersionFormat, ":")
 	if !hasFallbackVersionMode {
@@ -404,10 +405,10 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	}
 	if fallbackVersionMode == "warn" {
 		log.Printf("Warning: used fallback version %q\n", fallbackVersion)
-		return fallbackVersion, baseUrl, nil // (H)
+		return fallbackVersion, bazeliskConfig.BazeliskBaseUrl, nil
 	}
 	if fallbackVersionMode == "silent" {
-		return fallbackVersion, baseUrl, nil // (H)
+		return fallbackVersion, bazeliskConfig.BazeliskBaseUrl, nil
 	}
 	return "", "", fmt.Errorf("invalid fallback version format %q (effectively %q)", fallbackVersionFormat, fmt.Sprintf("%s:%s", fallbackVersionMode, fallbackVersion))
 }
