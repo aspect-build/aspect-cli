@@ -198,6 +198,10 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed write WORKSPACE file in %s: %w", tmpdir, err)
 	}
+	err = os.WriteFile(path.Join(tmpdir, "MODULE.bazel"), []byte{}, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed write MODULE.bazel file in %s: %w", tmpdir, err)
+	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
