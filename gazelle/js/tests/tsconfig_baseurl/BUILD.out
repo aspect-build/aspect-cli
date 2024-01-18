@@ -7,9 +7,9 @@ ts_project(
     name = "tsconfig_rootdir",
     srcs = ["src/index.ts"],
     deps = [
-        "//lib/a",
-        "//lib/b",
-        "//lib/c",
+        "//src/lib/a",
+        "//src/lib/b",
+        "//src/lib/c",
     ],
 )
 
