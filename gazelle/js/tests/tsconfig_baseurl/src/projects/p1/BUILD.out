@@ -5,7 +5,7 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 ts_project(
     name = "p1",
     srcs = ["index.ts"],
-    deps = ["//projects/p1/nested_lib/a"],
+    deps = ["//src/projects/p1/nested_lib/a"],
 )
 
 ts_config(
