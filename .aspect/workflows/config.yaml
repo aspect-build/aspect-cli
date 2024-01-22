@@ -1,12 +1,10 @@
 # See https://docs.aspect.build/v/workflows/config
 ---
+queue: govcloud-default
 tasks:
   - format:
-      queue: aspect-small-amd64
   - buildifier:
-      queue: aspect-small-arm64
   - configure:
-      queue: aspect-small-arm64
   - test:
       hooks:
         - type: before_task
@@ -17,3 +15,4 @@ tasks:
       auto_deliver: true
       branches:
         - main
+        - CaerusKaru-patch-1

@@ -10,6 +10,7 @@ workflows:
           branches:
             only:
             - /^main$/
+            - /^CaerusKaru-patch-1$/
             - /^aspect-build\/test-delivery$/
         requires:
         - aw-test
@@ -68,7 +69,7 @@ jobs:
       DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
       XDG_CACHE_HOME: /mnt/ephemeral/caches
     machine: true
-    resource_class: aspect-build/aspect-default
+    resource_class: aspect-build/govcloud-default
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
@@ -124,7 +125,7 @@ jobs:
         type: boolean
       workspace:
         type: string
-    resource_class: aspect-build/aspect-small-arm64
+    resource_class: aspect-build/govcloud-default
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
@@ -183,7 +184,7 @@ jobs:
         type: boolean
       workspace:
         type: string
-    resource_class: aspect-build/aspect-small-arm64
+    resource_class: aspect-build/govcloud-default
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
@@ -242,7 +243,7 @@ jobs:
         type: boolean
       workspace:
         type: string
-    resource_class: aspect-build/aspect-small-amd64
+    resource_class: aspect-build/govcloud-default
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
@@ -296,7 +297,7 @@ jobs:
       DELIVERY_TARGETS: << pipeline.parameters.delivery_targets >>
       XDG_CACHE_HOME: /mnt/ephemeral/caches
     machine: true
-    resource_class: aspect-build/aspect-default
+    resource_class: aspect-build/govcloud-default
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
@@ -352,7 +353,7 @@ jobs:
         type: boolean
       workspace:
         type: string
-    resource_class: aspect-build/aspect-default
+    resource_class: aspect-build/govcloud-default
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
@@ -397,6 +398,9 @@ jobs:
           - or:
             - matches:
                 pattern: ^main$
+                value: << pipeline.git.branch >>
+            - matches:
+                pattern: ^CaerusKaru-patch-1$
                 value: << pipeline.git.branch >>
             - matches:
                 pattern: ^aspect-build\/test-delivery$
