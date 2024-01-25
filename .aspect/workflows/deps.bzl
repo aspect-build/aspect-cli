@@ -35,7 +35,7 @@ def fetch_workflows_deps():
             name = "rosetta_{}".format(platform_arch),
             downloaded_file_path = "rosetta",
             executable = True,
-            # integrity = rosetta_integrity[platform_arch],
+            integrity = rosetta_integrity[platform_arch],
             urls = ["https://static.aspect.build/aspect/{0}/rosetta_real_{1}".format(rosetta_version, platform_arch.replace("aarch64", "arm64"))],
         )
 
