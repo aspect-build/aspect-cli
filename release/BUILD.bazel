@@ -1,4 +1,5 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_push")
 load(":bazelisk_artifacts.bzl", "bazelisk_artifacts")
 load(":cli_brew_artifacts.bzl", "cli_brew_artifacts")
 load(":release.bzl", "multi_platform_binaries", "release")
@@ -101,5 +102,20 @@ sh_binary(
         ":aspect_bazelisk_artifacts",
         ":aspect_brew_artifacts",
     ],
+    tags = ["deliverable"],
+)
+
+oci_image(
+    name = "image",
+    base = "@debian",
+    entrypoint = ["bash"],
+    tars = [],
+    visibility = ["//visibility:public"],
+)
+
+oci_push(
+    name = "push_image",
+    image = ":image",
+    repository = "111111111111.dkr.ecr.us-west-2.amazonaws.com/foo/bar",
     tags = ["deliverable"],
 )
