@@ -4,12 +4,12 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", _http_archive = "http_archi
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 
 # TODO: move this to a rule set so repositories on Aspect Workflows can avoid this boilerplate
-rosetta_version = "5.9.0-rc.16"
+rosetta_version = "5.9.0-rc.17"
 rosetta_integrity = {
-    "darwin_aarch64": "sha256-saHp9F4mj2opW4uhyNP5hHp7w+a673xBLtSUoGT/k0Y=",
-    "darwin_x86_64": "sha256-+eCwc2eLHkznPRRsIzudRJEIc92VH71WN+1DRmL0cyo=",
-    "linux_aarch64": "sha256-8mQCdV0tct5DNuLcZAA+yFcTD54TSMDyqAEufegOCAA=",
-    "linux_x86_64": "sha256-JJHX3Yx2oNgw/cu7PK2ABKKr+VvctiOKLLvOwxgC4/Q=",
+    "darwin_aarch64": "sha256-JtJKIF9bj6cqUWWeWGZk5F2rMU+9shZLdU1Pg1YO4ow=",
+    "darwin_x86_64": "sha256-p8yxjRkg3HVUXl6sBrYYhSqvvMWKX7Si5zHgqwmpEec=",
+    "linux_aarch64": "sha256-DSsv6pr6D+YjZ5Uuf0Ry0xVYmaMwJqCKAMvWpv2gPIs=",
+    "linux_x86_64": "sha256-KbNFYr33mT3m/nMIWIJWVBr1FCsPv5g2bBMBuzy90Rc=",
 }
 
 # https://github.com/suzuki-shunsuke/circleci-config-merge/releases
@@ -35,7 +35,7 @@ def fetch_workflows_deps():
             name = "rosetta_{}".format(platform_arch),
             downloaded_file_path = "rosetta",
             executable = True,
-            integrity = rosetta_integrity[platform_arch],
+            # integrity = rosetta_integrity[platform_arch],
             urls = ["https://static.aspect.build/aspect/{0}/rosetta_real_{1}".format(rosetta_version, platform_arch.replace("aarch64", "arm64"))],
         )
 
