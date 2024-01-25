@@ -68,7 +68,19 @@ module "aspect_workflows" {
   }
 
   # Remote cache properties
-  remote_cache = {}
+  remote_cache = {
+    # The remote cache in this deployment is tuned for cost. In a deployment that requires a large
+    # high-performance cache we recommend 3+ shards and i4i instances. The remote cache uses NVMe
+    # storage under the hood so the instance type selected must have NVMe storage available. The
+    # total size of the remote cache will be size of the NVMe drives available on the selected
+    # instance type multiplied by the number of cache shards.
+    cache_shards = 1
+    frontend = {
+      max_scaling = 5
+      min_scaling = 1
+    }
+    storage_instance_type = "c5ad.large"
+  }
 
   # Delivery properties
   delivery_enabled = true
