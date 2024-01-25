@@ -10,6 +10,7 @@ workflows:
           branches:
             only:
             - main
+            - delivery_bwotb_test
             - aspect-build/test-delivery
         requires:
         - aw-test
@@ -397,6 +398,9 @@ jobs:
           - or:
             - equal:
               - main
+              - << pipeline.git.branch >>
+            - equal:
+              - delivery_bwotb_test
               - << pipeline.git.branch >>
             - equal:
               - aspect-build/test-delivery

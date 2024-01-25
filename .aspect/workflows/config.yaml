@@ -10,5 +10,9 @@ tasks:
   - test:
   - delivery:
       always_deliver: true
+      bazel:
+        flags:
+          - --remote_download_outputs=toplevel
       branches:
         - main
+        - delivery_bwotb_test
