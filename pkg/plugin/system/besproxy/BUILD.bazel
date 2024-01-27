@@ -2,7 +2,6 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 # Ensure that Aspect silo gets the same result as aspect-cli repo so this is gazelle-stable in both.
 # Silo has a /third_party directory with the same thing vendored in.
-# gazelle:resolve go google.golang.org/genproto/googleapis/devtools/build/v1 @go_googleapis//google/devtools/build/v1:build_go_proto
 
 go_library(
     name = "besproxy",
@@ -14,7 +13,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//bazel/buildeventstream",
-        "@go_googleapis//google/devtools/build/v1:build_go_proto",
+        "@org_golang_google_genproto//googleapis/devtools/build/v1:build",
         "@org_golang_google_grpc//:go_default_library",
         "@org_golang_google_grpc//credentials",
         "@org_golang_google_grpc//credentials/insecure",

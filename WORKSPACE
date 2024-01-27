@@ -85,11 +85,11 @@ http_archive(
     name = "io_bazel_rules_go",
     patch_args = ["-p1"],
     patches = [
-        "//patches:rules_go.patch",
-        "//patches:rules_go.pr3617.patch",
+        # "//patches:rules_go.patch",
+        # "//patches:rules_go.pr3617.patch",
     ],
-    sha256 = "6dc2da7ab4cf5d7bfc7c949776b1b7c733f05e56edc4bcd9022bb249d2e2a996",
-    urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.39.1/rules_go-v0.39.1.zip"],
+    sha256 = "278b7ff5a826f3dc10f04feaf0b70d48b68748ccd512d7f98bf442077f043fe3",
+    urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.41.0/rules_go-v0.41.0.zip"],
 )
 
 http_archive(
@@ -128,7 +128,7 @@ go_rules_dependencies()
 
 go_embed_data_dependencies()
 
-go_register_toolchains(version = "1.20.4")
+go_register_toolchains(version = "1.21.6")
 
 http_archive(
     name = "bazel_gazelle",
