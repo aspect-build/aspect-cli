@@ -1,3 +1,1 @@
-package test.bad
-
-bad syntax
+// within a /nested and should be included
