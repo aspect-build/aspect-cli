@@ -11,6 +11,7 @@ ts_project(
     name = "subtarget",
     srcs = [
         "index.ts",
+        "nested/star-ig.ts",
         "r2.ts",
     ],
     deps = [

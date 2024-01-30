@@ -1,1 +1,1 @@
-import 'bad-import-but-this-file-is-ignored';
+// within a /nested and should be included
