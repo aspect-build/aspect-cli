@@ -19,10 +19,7 @@ package besproxy
 import (
 	"context"
 	"fmt"
-	"log"
-	"regexp"
 
-	"aspect.build/cli/bazel/buildeventstream"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -30,9 +27,6 @@ import (
 )
 
 const proxyChannelBufferSize = 10000
-
-// The path here comes from the path of the Aspect Workflows bb_clientd unix socket to the buildbarn.
-const bytestreamUriReg = "^bytestream:(?:.*?)/grpc/(.*)$"
 
 // BESProxy implements a Build Event Protocol backend to be passed to the
 // `bazel build` command so that the Aspect plugins can register as subscribers
@@ -47,20 +41,18 @@ type BESProxy interface {
 	Send(req *buildv1.PublishBuildToolEventStreamRequest) error
 }
 
-func NewBesProxy(host string, headers map[string]string, remoteCacheAddress string) *besProxy {
+func NewBesProxy(host string, headers map[string]string) *besProxy {
 	return &besProxy{
-		host:               host,
-		headers:            headers,
-		remoteCacheAddress: remoteCacheAddress,
+		host:    host,
+		headers: headers,
 	}
 }
 
 type besProxy struct {
-	client             buildv1.PublishBuildEventClient
-	stream             buildv1.PublishBuildEvent_PublishBuildToolEventStreamClient
-	host               string
-	remoteCacheAddress string
-	headers            map[string]string
+	client  buildv1.PublishBuildEventClient
+	stream  buildv1.PublishBuildEvent_PublishBuildToolEventStreamClient
+	host    string
+	headers map[string]string
 }
 
 func (bp *besProxy) Connect() error {
@@ -100,7 +92,9 @@ func (bp *besProxy) Send(req *buildv1.PublishBuildToolEventStreamRequest) error 
 		return nil
 	}
 
-	MutateWorkflowsUris(req, bp.remoteCacheAddress)
+	// If we want to mutate the BES events in the future before they are sent out to external consumers, this is the place
+	// to do it. See https://github.com/aspect-build/silo/blob/7f13ab16fa10ffcec71b09737f0370f22a508823/cli/core/pkg/plugin/system/besproxy/bes_proxy.go#L103
+	// as an example.
 
 	return bp.stream.Send(req)
 }
@@ -117,125 +111,4 @@ func (bp *besProxy) CloseSend() error {
 		return nil
 	}
 	return bp.stream.CloseSend()
-}
-
-// Mutate file URIs in the BES on the way out of the CLI to point to the remote cache grpc address
-// instead of the Aspect Workflows runner's remote cache unix socket. this allows external BES
-// consumers that have network access to the remove cache to access test logs from the remote cache.
-func MutateWorkflowsUris(req *buildv1.PublishBuildToolEventStreamRequest, remoteCacheAddress string) error {
-	event := req.OrderedBuildEvent.Event
-	if event != nil && remoteCacheAddress != "" {
-		bazelEvent := event.GetBazelEvent()
-		if bazelEvent != nil {
-			var buildEvent buildeventstream.BuildEvent
-			if err := bazelEvent.UnmarshalTo(&buildEvent); err != nil {
-				return err
-			}
-			mutated := false
-			switch buildEvent.Payload.(type) {
-			// TestResult
-			case *buildeventstream.BuildEvent_TestResult:
-				for _, f := range buildEvent.GetTestResult().TestActionOutput {
-					if MutateWorkflowsUri(f, remoteCacheAddress) {
-						mutated = true
-					}
-				}
-
-			// TestSummary
-			case *buildeventstream.BuildEvent_TestSummary:
-				summary := buildEvent.GetTestSummary()
-				if summary.Passed != nil {
-					for _, f := range summary.Passed {
-						if MutateWorkflowsUri(f, remoteCacheAddress) {
-							mutated = true
-						}
-					}
-				}
-				if summary.Failed != nil {
-					for _, f := range summary.Failed {
-						if MutateWorkflowsUri(f, remoteCacheAddress) {
-							mutated = true
-						}
-					}
-				}
-
-			// NamedSetOfFiles
-			case *buildeventstream.BuildEvent_NamedSetOfFiles:
-				for _, f := range buildEvent.GetNamedSetOfFiles().Files {
-					if MutateWorkflowsUri(f, remoteCacheAddress) {
-						mutated = true
-					}
-				}
-
-			// Action
-			case *buildeventstream.BuildEvent_Action:
-				if buildEvent.GetAction().Stdout != nil && MutateWorkflowsUri(buildEvent.GetAction().Stdout, remoteCacheAddress) {
-					mutated = true
-				}
-				if buildEvent.GetAction().Stderr != nil && MutateWorkflowsUri(buildEvent.GetAction().Stderr, remoteCacheAddress) {
-					mutated = true
-				}
-				if buildEvent.GetAction().PrimaryOutput != nil && MutateWorkflowsUri(buildEvent.GetAction().PrimaryOutput, remoteCacheAddress) {
-					mutated = true
-				}
-				for _, f := range buildEvent.GetAction().ActionMetadataLogs {
-					if MutateWorkflowsUri(f, remoteCacheAddress) {
-						mutated = true
-					}
-				}
-
-			// BuildToolLogs
-			case *buildeventstream.BuildEvent_BuildToolLogs:
-				for _, f := range buildEvent.GetBuildToolLogs().Log {
-					if MutateWorkflowsUri(f, remoteCacheAddress) {
-						mutated = true
-					}
-				}
-
-			// Completed
-			case *buildeventstream.BuildEvent_Completed:
-				for _, f := range buildEvent.GetCompleted().ImportantOutput {
-					if MutateWorkflowsUri(f, remoteCacheAddress) {
-						mutated = true
-					}
-				}
-				for _, f := range buildEvent.GetCompleted().DirectoryOutput {
-					if MutateWorkflowsUri(f, remoteCacheAddress) {
-						mutated = true
-					}
-				}
-
-			case nil:
-				log.Printf("illegal state: got a BuildEvent with no payload")
-
-			default:
-				// Ignore events we don't care about
-			}
-			if mutated {
-				if err := bazelEvent.MarshalFrom(&buildEvent); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func MutateWorkflowsUri(f *buildeventstream.File, remoteCacheAddress string) bool {
-	switch t := f.File.(type) {
-	case *buildeventstream.File_Uri:
-		r := regexp.MustCompile(bytestreamUriReg)
-		if r.MatchString(t.Uri) {
-			// Mutate from a URI such as,
-			// bytestream:////some/path/on/the/local/filesystem/grpc/blobs/f9c5cd4a9f458cf3d801640f6f69eb7523bc590b92d4e7b7b9fa5c7ffa4813cb/194
-			// to,
-			// bytestream://10.2.0.110:8980/blobs/f9c5cd4a9f458cf3d801640f6f69eb7523bc590b92d4e7b7b9fa5c7ffa4813cb/194
-			t.Uri = r.ReplaceAllString(t.Uri, "bytestream://"+remoteCacheAddress+"/$1")
-			return true
-		}
-
-	default:
-		// Ignore other types we don't care about
-	}
-	return false
 }
