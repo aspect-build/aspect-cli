@@ -197,3 +197,9 @@ module "aspect_workflows_grafana_dashboards" {
   grafana_url                 = module.managed_grafana.grafana_endpoint
   managed_prometheus_endpoint = module.aspect_workflows.managed_prometheus_endpoint
 }
+
+resource "aws_ssm_parameter" "external_cache_endpoint" {
+  name  = "aw_external_cache_endpoint"
+  type  = "String"
+  value = module.aspect_workflows.external_remote_cache_endpoint
+}
