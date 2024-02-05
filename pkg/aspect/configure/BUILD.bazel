@@ -14,6 +14,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/configure",
     visibility = ["//visibility:public"],
     deps = [
+        "//gazelle/bzl",
         "//gazelle/js",
         "//gazelle/kotlin",
         "//pkg/aspect/configure/internal/module",
