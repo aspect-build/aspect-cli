@@ -188,11 +188,25 @@ def deps():
         version = "v2.0.2",
     )
     go_repository(
+        name = "com_github_danwakefield_fnmatch",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/danwakefield/fnmatch",
+        sum = "h1:y5HC9v93H5EPKqaS1UYVg1uYah5Xf51mBfIoWehClUQ=",
+        version = "v0.0.0-20160403171240-cbb64ac3d964",
+    )
+    go_repository(
         name = "com_github_davecgh_go_spew",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/davecgh/go-spew",
         sum = "h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=",
         version = "v1.1.1",
+    )
+    go_repository(
+        name = "com_github_denormal_go_gitignore",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/denormal/go-gitignore",
+        sum = "h1:0nsrg//Dc7xC74H/TZ5sYR8uk4UQRNjsw8zejqH5a4Q=",
+        version = "v0.0.0-20180930084346-ae8ad1d07817",
     )
     go_repository(
         name = "com_github_emirpasic_gods",
@@ -697,13 +711,6 @@ def deps():
         importpath = "github.com/russross/blackfriday/v2",
         sum = "h1:JIOH55/0cWyOuilr9/qlrm0BSXldqnqwMsf35Ld67mk=",
         version = "v2.1.0",
-    )
-    go_repository(
-        name = "com_github_sabhiram_go_gitignore",
-        build_file_proto_mode = "disable_global",
-        importpath = "github.com/sabhiram/go-gitignore",
-        sum = "h1:OkMGxebDjyw0ULyrTYWeN0UNCCkmCWfjPnIA2W6oviI=",
-        version = "v0.0.0-20210923224102-525f6e181f06",
     )
     go_repository(
         name = "com_github_sagikazarmark_crypt",
