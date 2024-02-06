@@ -11,6 +11,7 @@ require (
 	github.com/bazelbuild/buildtools v0.0.0-20231017121127-23aa65d4e117
 	github.com/bluekeyes/go-gitdiff v0.7.1
 	github.com/bmatcuk/doublestar/v4 v4.6.1
+	github.com/denormal/go-gitignore v0.0.0-20180930084346-ae8ad1d07817
 	github.com/emirpasic/gods v1.18.1
 	github.com/fatih/color v1.16.0
 	github.com/golang/mock v1.6.0
@@ -26,7 +27,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.0
 	github.com/rogpeppe/go-internal v1.10.0
 	github.com/rs/zerolog v1.29.1
-	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
 	github.com/smacker/go-tree-sitter v0.0.0-20230501083651-a7d92773b3aa
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
@@ -51,6 +51,7 @@ require (
 	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
 	github.com/chzyer/readline v1.5.1 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
+	github.com/danwakefield/fnmatch v0.0.0-20160403171240-cbb64ac3d964 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
