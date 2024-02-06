@@ -5,6 +5,7 @@ import (
 	"path"
 	"path/filepath"
 
+	"aspect.build/cli/gazelle/common/git"
 	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/language"
 )
@@ -13,13 +14,17 @@ type GazelleWalkFunc func(path string) error
 
 // Walk the directory of the language.GenerateArgs, optionally recursing into
 // subdirectories unlike the files provided in GenerateArgs.RegularFiles.
-func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc GazelleWalkFunc) error {
+func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, recurse bool, walkFunc GazelleWalkFunc) error {
 	BazelLog.Tracef("GazelleWalkDir: %s", args.Rel)
 
 	// Source files in the primary directory
 	for _, f := range args.RegularFiles {
 		// Skip BUILD files
 		if isBuildFile(f) {
+			continue
+		}
+
+		if ignore.Matches(path.Join(args.Rel, f)) {
 			continue
 		}
 
@@ -60,6 +65,10 @@ func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc GazelleWa
 
 				// The filePath relative to the BUILD
 				f, _ := filepath.Rel(args.Dir, filePath)
+
+				if ignore.Matches(path.Join(args.Rel, f)) {
+					return nil
+				}
 
 				BazelLog.Tracef("GazelleWalkDir Subdir file: %s", f)
 
