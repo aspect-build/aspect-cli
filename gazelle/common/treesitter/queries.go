@@ -25,45 +25,41 @@ func ParseQuery(lang Language, queryStr string) *sitter.Query {
 		queryCache[queryStr] = make(map[Language]*sitter.Query)
 	}
 	if queryCache[queryStr][lang] == nil {
-		queryCache[queryStr][lang] = mustNewQuery(getSitterLanguage(lang), queryStr)
+		queryCache[queryStr][lang] = mustNewQuery(toSitterLanguage(lang), queryStr)
 	}
 
 	return queryCache[queryStr][lang]
 }
 
 // Run a query finding import query matches.
-func QueryImports(query *sitter.Query, sourcePath string, sourceCode []byte, rootNode *sitter.Node) []string {
-	imports := make([]string, 0, 5)
+func QueryStrings(query *sitter.Query, name string, sourcePath string, sourceCode []byte, rootNode *sitter.Node) []string {
+	results := make([]string, 0, 5)
 
 	// Execute the import query.
 	qc := sitter.NewQueryCursor()
 	defer qc.Close()
 	qc.Exec(query, rootNode)
 
-	// Collect import statements from the query results.
+	// Collect string from the query results.
 	for {
 		m, ok := qc.NextMatch()
 		if !ok {
 			break
 		}
 
-		from := readFromQueryMatch(query, m, sourceCode)
-		if from != nil {
-			fromCode := from.Node.Content(sourceCode)
-			imports = append(imports, fromCode)
-
-			Log.Tracef("Import %q => %q", sourcePath, fromCode)
+		result := fetchFirstQueryMatch(query, name, m, sourceCode)
+		if result != nil {
+			resultCode := result.Node.Content(sourceCode)
+			results = append(results, resultCode)
 		}
 	}
 
-	return imports
+	return results
 }
 
 // Find and read the `from` QueryCapture from a QueryMatch.
 // Filter matches based on captures value using "equals-{name}" vars.
-func readFromQueryMatch(query *sitter.Query, m *sitter.QueryMatch, sourceCode []byte) *sitter.QueryCapture {
-	var from *sitter.QueryCapture
-
+func fetchFirstQueryMatch(query *sitter.Query, name string, m *sitter.QueryMatch, sourceCode []byte) *sitter.QueryCapture {
 	for ci, c := range m.Captures {
 		cn := query.CaptureNameForId(uint32(ci))
 
@@ -75,18 +71,14 @@ func readFromQueryMatch(query *sitter.Query, m *sitter.QueryMatch, sourceCode []
 			continue
 		}
 
-		if cn == "from" {
-			from = &c
+		if cn == name {
+			return &c
 		}
 	}
 
-	// Should never happen. All queries should have a `from` capture.
-	if from == nil {
-		Log.Fatalf("No import query 'from' found in query %q", query)
-		return nil
-	}
-
-	return from
+	// Should never happen. All queries should have a `name` capture.
+	Log.Fatalf("No result %q found in query %q", name, query)
+	return nil
 }
 
 func mustNewQuery(lang *sitter.Language, queryStr string) *sitter.Query {

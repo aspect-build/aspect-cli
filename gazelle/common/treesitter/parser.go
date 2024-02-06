@@ -19,7 +19,7 @@ const (
 )
 
 // TODO: cache?
-func getSitterLanguage(lang Language) *sitter.Language {
+func toSitterLanguage(lang Language) *sitter.Language {
 	switch lang {
 	case Kotlin:
 		return kotlin.GetLanguage()
@@ -38,7 +38,7 @@ func ParseSourceCode(lang Language, sourceCode []byte) (*sitter.Tree, error) {
 
 	// TODO: cache?
 	parser := sitter.NewParser()
-	parser.SetLanguage(getSitterLanguage(lang))
+	parser.SetLanguage(toSitterLanguage(lang))
 
 	return parser.ParseCtx(ctx, nil, sourceCode)
 }
