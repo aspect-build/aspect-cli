@@ -18,6 +18,11 @@ func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc GazelleWa
 
 	// Source files in the primary directory
 	for _, f := range args.RegularFiles {
+		// Skip BUILD files
+		if isBuildFile(f) {
+			continue
+		}
+
 		BazelLog.Tracef("GazelleWalkDir RegularFile: %s", f)
 
 		walkErr := walkFunc(f)
