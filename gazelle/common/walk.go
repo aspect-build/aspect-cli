@@ -38,16 +38,19 @@ func GazelleWalkDir(args language.GenerateArgs, recurse bool, walkFunc GazelleWa
 
 	// Source files throughout the sub-directories of this BUILD.
 	for _, d := range args.Subdirs {
-		err := filepath.Walk(
+		err := filepath.WalkDir(
 			path.Join(args.Dir, d),
-			func(filePath string, info os.FileInfo, err error) error {
+			func(filePath string, info os.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
 
 				// If we are visiting a directory recurse if it is not a bazel package.
-				if info.IsDir() && IsBazelPackage(filePath) {
-					return filepath.SkipDir
+				if info.IsDir() {
+					if IsBazelPackage(filePath) {
+						return filepath.SkipDir
+					}
+					return nil
 				}
 
 				// Skip BUILD files
