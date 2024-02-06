@@ -102,7 +102,9 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 
 		// Extra queries for more complex import statements.
 		for _, q := range ImportQueries {
-			queryResults := treeutils.QueryImports(treeutils.ParseQuery(lang, q), filePath, sourceCode, rootNode)
+			queryResults := treeutils.QueryStrings(treeutils.ParseQuery(lang, q), "from", filePath, sourceCode, rootNode)
+
+			Log.Tracef("Query result %q => %v", filePath, queryResults)
 
 			imports = append(imports, queryResults...)
 		}
