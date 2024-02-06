@@ -24,6 +24,13 @@ http_archive(
 )
 
 http_archive(
+    name = "aspect_rules_workflows",
+    sha256 = "0168f77fef0917b00f223d1e19db4f4bd5f205d5a97eb0626d6fe1e0ba109c3b",
+    strip_prefix = "rules_workflows-0.1.0",
+    url = "https://github.com/aspect-build/rules_workflows/releases/download/v0.1.0/rules_workflows-v0.1.0.tar.gz",
+)
+
+http_archive(
     name = "bazel_skylib",
     sha256 = "cd55a062e763b9349921f0f5db8c3933288dc8ba4f76dd9416aac68acee3cb94",
     urls = ["https://github.com/bazelbuild/bazel-skylib/releases/download/1.5.0/bazel-skylib-1.5.0.tar.gz"],
@@ -253,6 +260,10 @@ fetch_shfmt()
 
 fetch_terraform()
 
-load("//.aspect/workflows:deps.bzl", "fetch_workflows_deps")
+load("@aspect_rules_workflows//workflows:dependencies.bzl", "rules_workflows_dependencies")
 
-fetch_workflows_deps()
+rules_workflows_dependencies()
+
+load("@aspect_rules_workflows//workflows:repositories.bzl", "fetch_workflows_tools")
+
+fetch_workflows_tools(workflows_version = "5.9.2")

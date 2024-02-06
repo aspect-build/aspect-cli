@@ -1,5 +1,5 @@
 # GENERATED FILE - DO NOT EDIT!
-# Update with: bazel run //.circleci:write_merged_config
+# Update with: bazel run //.circleci:config
 version: 2.1
 workflows:
   aspect-workflows:
@@ -134,7 +134,7 @@ jobs:
         name: Configure Workflows
     - checkout
     - run:
-        command: rm -rf /some/path/artifacts /some/path/testlogs
+        command: rm -rf /workflows/artifacts /workflows/testlogs
         environment:
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
@@ -161,7 +161,7 @@ jobs:
         name: Buildifier
         no_output_timeout: 180m
     - store_artifacts:
-        path: /some/path/artifacts
+        path: /workflows/artifacts
     - run:
         command: rosetta run finalization
         environment:
@@ -193,7 +193,7 @@ jobs:
         name: Configure Workflows
     - checkout
     - run:
-        command: rm -rf /some/path/artifacts /some/path/testlogs
+        command: rm -rf /workflows/artifacts /workflows/testlogs
         environment:
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
@@ -220,7 +220,7 @@ jobs:
         name: Configure
         no_output_timeout: 180m
     - store_artifacts:
-        path: /some/path/artifacts
+        path: /workflows/artifacts
     - run:
         command: rosetta run finalization
         environment:
@@ -252,7 +252,7 @@ jobs:
         name: Configure Workflows
     - checkout
     - run:
-        command: rm -rf /some/path/artifacts /some/path/testlogs
+        command: rm -rf /workflows/artifacts /workflows/testlogs
         environment:
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
@@ -279,7 +279,7 @@ jobs:
         name: Format
         no_output_timeout: 180m
     - store_artifacts:
-        path: /some/path/artifacts
+        path: /workflows/artifacts
     - run:
         command: rosetta run finalization
         environment:
@@ -362,7 +362,7 @@ jobs:
         name: Configure Workflows
     - checkout
     - run:
-        command: rm -rf /some/path/artifacts /some/path/testlogs
+        command: rm -rf /workflows/artifacts /workflows/testlogs
         environment:
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
@@ -389,7 +389,7 @@ jobs:
         name: Test
         no_output_timeout: 180m
     - store_test_results:
-        path: /some/path/testlogs
+        path: /workflows/testlogs
     - when:
         condition:
           and:
@@ -411,9 +411,9 @@ jobs:
             name: Delivery Manifest
             no_output_timeout: 180m
     - store_artifacts:
-        path: /some/path/testlogs
+        path: /workflows/testlogs
     - store_artifacts:
-        path: /some/path/artifacts
+        path: /workflows/artifacts
     - run:
         command: rosetta run finalization
         environment:
