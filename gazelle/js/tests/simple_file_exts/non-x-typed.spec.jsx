@@ -1,1 +1,1 @@
-console.log('non-typed-xjs')
+console.log('non-typed-xjs');
