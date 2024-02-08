@@ -5,13 +5,13 @@ load("//bazel/go:write_go_generated_source_files.bzl", "write_go_generated_sourc
 
 proto_library(
     name = "bazel_proto",
-    srcs = ["flags.proto"],
+    srcs = ["action_cache.proto"],
     visibility = ["//visibility:public"],
 )
 
 go_proto_library(
     name = "bazel_go_proto",
-    importpath = "aspect.build/cli/bazel/flags",
+    importpath = "aspect.build/cli/bazel/action_cache",
     proto = ":bazel_proto",
     visibility = ["//visibility:public"],
 )
@@ -20,14 +20,14 @@ write_go_generated_source_files(
     name = "write_pb_go",
     src = ":bazel_go_proto",
     output_files = [
-        "flags.pb.go",
+        "action_cache.pb.go",
     ],
     visibility = ["//bazel:__pkg__"],
 )
 
 go_library(
-    name = "flags",
+    name = "action_cache",
     embed = [":bazel_go_proto"],
-    importpath = "aspect.build/cli/bazel/flags",
+    importpath = "aspect.build/cli/bazel/action_cache",
     visibility = ["//visibility:public"],
 )

@@ -80,6 +80,11 @@ message Action {
   // input discovery, the contents of this set might change during execution.
   repeated uint32 input_dep_set_ids = 8;
 
+  // The set of scheduling dependency dep sets the action depends on.
+  // Only set of both --include_artifacts and --include_scheduling_dependencies
+  // is set to true.
+  repeated uint32 scheduling_dep_dep_set_ids = 20;
+
   // The list of Artifact IDs that represent the output files that this action
   // will generate.
   repeated uint32 output_ids = 9;
@@ -109,6 +114,18 @@ message Action {
   // the string to be substituted and the value is the string to be substituted
   // to.
   repeated KeyValuePair substitutions = 16;
+
+  // The contents of the file for the ctx.actions.write() action
+  // (guarded by the --include_file_write_contents flag).
+  string file_contents = 17;
+
+  // The target of the symlink created by UnresolvedSymlink actions.
+  // For regular Symlink actions, the target is represented as an input.
+  string unresolved_symlink_target = 18;
+
+  // If FileWrite actions should make their output executable.
+  // (ctx.actions.write(is_executable=True))
+  bool is_executable = 19;
 }
 
 // Represents a single target (without configuration information) that is
@@ -176,6 +193,9 @@ message Configuration {
 
   // The checksum representation of the configuration options;
   string checksum = 4;
+
+  // Whether this configuration is used for building tools.
+  bool is_tool = 5;
 }
 
 message KeyValuePair {
@@ -187,20 +207,28 @@ message KeyValuePair {
 }
 
 message ConfiguredTarget {
-  // The target. We use blaze_query_aspect_mirror.Target defined in build.proto instead of
-  // the Target defined in this file because blaze_query_aspect_mirror.Target is much heavier
+  // The target. We use blaze_query.Target defined in build.proto instead of
+  // the Target defined in this file because blaze_query.Target is much heavier
   // and will output proto results similar to what users are familiar with from
   // regular blaze query.
   blaze_query_aspect_mirror.Target target = 1;
 
-  // The configuration
-  Configuration configuration = 2;
+  // DEPRECATED. Use configuration_id instead.
+  Configuration configuration = 2 [deprecated = true];
+
+  // The id of the configuration this target is configured for. The actual
+  // Configuration message can be found in CqueryResults. If the target doesn't
+  // have a configuration, the value will be 0.
+  uint32 configuration_id = 3;
 }
 
 // Container for cquery results
 message CqueryResult {
   // All the configuredtargets returns by cquery
   repeated ConfiguredTarget results = 1;
+
+  // All the Configurations referenced by results.
+  repeated Configuration configurations = 2;
 }
 
 // Content of a param file.

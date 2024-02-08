@@ -1,15 +1,21 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
+load("//bazel/go:write_go_generated_source_files.bzl", "write_go_generated_source_files")
 
 proto_library(
     name = "buildeventstream_proto",
     srcs = ["build_event_stream.proto"],
     visibility = ["//visibility:public"],
     deps = [
+        "//bazel/action_cache:bazel_proto",
         "//bazel/command_line:command_line_proto",
         "//bazel/failure_details:failure_details_proto",
         "//bazel/invocation_policy:invocation_policy_proto",
+        "//bazel/packages_metrics:devtools_build_lib_packages_metrics_proto",
+        "@com_google_protobuf//:any_proto",
+        "@com_google_protobuf//:duration_proto",
+        "@com_google_protobuf//:timestamp_proto",
     ],
 )
 
@@ -19,10 +25,21 @@ go_proto_library(
     proto = ":buildeventstream_proto",
     visibility = ["//visibility:public"],
     deps = [
+        "//bazel/action_cache",
         "//bazel/command_line",
         "//bazel/failure_details",
         "//bazel/invocation_policy",
+        "//bazel/packages_metrics",
     ],
+)
+
+write_go_generated_source_files(
+    name = "write_pb_go",
+    src = ":buildeventstream_go_proto",
+    output_files = [
+        "build_event_stream.pb.go",
+    ],
+    visibility = ["//bazel:__pkg__"],
 )
 
 go_library(
