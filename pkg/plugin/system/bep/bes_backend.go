@@ -222,19 +222,21 @@ func (bb *besBackend) PublishBuildToolEventStream(
 	// Setup forwarding proxy streams
 	eg, ctx := errgroup.WithContext(ctx)
 	for _, bp := range bb.besProxies {
+		// Make a copy of the BESProxy before passing into the go-routine below.
+		proxy := bp
 		err := bp.PublishBuildToolEventStream(ctx, grpc.WaitForReady(false))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating build event stream to %v: %s\n", bp.Host(), err.Error())
+			fmt.Fprintf(os.Stderr, "Error creating build event stream to %v: %s\n", proxy.Host(), err.Error())
 			continue
 		}
 		eg.Go(func() error {
 			for {
-				_, err := bp.Recv()
+				_, err := proxy.Recv()
 				if err == io.EOF {
 					break
 				}
 				if err != nil {
-					return fmt.Errorf("error receiving build event stream ack %v: %s\n", bp.Host(), err.Error())
+					return fmt.Errorf("error receiving build event stream ack %v: %s\n", proxy.Host(), err.Error())
 				}
 			}
 			return nil
