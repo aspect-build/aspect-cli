@@ -23,7 +23,7 @@ go_library(
     deps = [
         "//pkg/plugin/system/besproxy",  # keep
         "@com_github_golang_mock//gomock",  # keep
-        "@go_googleapis//google/devtools/build/v1:build_go_proto",  # keep
+        "@org_golang_google_genproto//googleapis/devtools/build/v1:build",  # keep
         "@org_golang_google_grpc//:grpc",  # keep
         "@org_golang_google_protobuf//types/known/emptypb",  # keep
     ],
