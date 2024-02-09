@@ -149,7 +149,7 @@ func (kt *Resolver) resolveImport(
 	ix *resolve.RuleIndex,
 	impt ImportStatement,
 	from label.Label,
-) (resType ResolutionType, resLabel *label.Label, err error) {
+) (ResolutionType, *label.Label, error) {
 	imptSpec := impt.ImportSpec
 
 	// Gazelle overrides
@@ -198,16 +198,14 @@ func (kt *Resolver) resolveImport(
 
 	// Maven imports
 	if mavenResolver := kt.lang.mavenResolver; mavenResolver != nil {
-		if l, err := (*mavenResolver).Resolve(jvm_import, cfg.ExcludedArtifacts(), cfg.MavenRepositoryName()); err == nil {
+		if l, mavenError := (*mavenResolver).Resolve(jvm_import, cfg.ExcludedArtifacts(), cfg.MavenRepositoryName()); mavenError == nil {
 			return Resolution_Label, &l, nil
+		} else {
+			BazelLog.Debugf("Maven resolution error: %v", mavenError)
 		}
 	}
 
-	if err != nil {
-		BazelLog.Warnf("Kotlin resolution error: ", err)
-	}
-
-	return Resolution_NotFound, nil, err
+	return Resolution_NotFound, nil, nil
 }
 
 // targetListFromResults returns a string with the human-readable list of
