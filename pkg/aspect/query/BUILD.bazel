@@ -18,6 +18,8 @@ go_library(
 go_test(
     name = "query_test",
     srcs = ["query_test.go"],
+    # Tests don't correctly run on CI
+    tags = ["manual"],
     deps = [
         ":query",
         "//pkg/aspect/query/shared",

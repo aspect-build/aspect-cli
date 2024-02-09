@@ -71,7 +71,7 @@ func TestQuery(t *testing.T) {
 	})
 
 	// TODO: fix this test
-	t.Skip("query can be selected by default and will prompt for inputs", func(t *testing.T) {
+	t.Run("query can be selected by default and will prompt for inputs", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
