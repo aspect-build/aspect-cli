@@ -20,7 +20,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"aspect.build/cli/bazel/buildeventstream"
@@ -30,6 +32,9 @@ import (
 	"aspect.build/cli/pkg/plugin/system/bep"
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 	"github.com/fatih/color"
+	"github.com/reviewdog/errorformat"
+	"github.com/reviewdog/errorformat/fmts"
+	"github.com/reviewdog/errorformat/writer"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -44,6 +49,7 @@ type LintBEPHandler struct {
 	report  bool
 	fix     bool
 	diff    bool
+	output  string
 	reports map[string]*buildeventstream.NamedSetOfFiles
 }
 
@@ -54,12 +60,13 @@ const (
 	LINT_RESULT_REGEX = ".*aspect_rules_lint.*"
 )
 
-func newLintBEPHandler(streams ioutils.Streams, printReport, applyFix, printDiff bool) *LintBEPHandler {
+func newLintBEPHandler(streams ioutils.Streams, printReport, applyFix, printDiff bool, output string) *LintBEPHandler {
 	return &LintBEPHandler{
 		Streams: streams,
 		report:  printReport,
 		fix:     applyFix,
 		diff:    printDiff,
+		output:  output,
 		reports: make(map[string]*buildeventstream.NamedSetOfFiles),
 	}
 }
@@ -92,6 +99,7 @@ lint:
 	applyFix, _ := cmd.Flags().GetBool("fix")
 	printDiff, _ := cmd.Flags().GetBool("diff")
 	printReport, _ := cmd.Flags().GetBool("report")
+	output, _ := cmd.Flags().GetString("output")
 
 	bazelCmd := []string{"build"}
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--aspects=%s", strings.Join(linters, ",")))
@@ -105,6 +113,7 @@ lint:
 		outputGroups = append(outputGroups, LINT_REPORT_GROUP)
 	}
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--output_groups=%s", strings.Join(outputGroups, ",")))
+	// TODO: in Bazel 7 this was renamed without the --experimental_ prefix
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--experimental_remote_download_regex='%s'", LINT_RESULT_REGEX))
 
 	// Currently Bazel only supports a single --bes_backend so adding ours after
@@ -118,7 +127,7 @@ lint:
 		besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
 		bazelCmd = flags.AddFlagToCommand(bazelCmd, besBackendFlag)
 
-		lintBEPHandler := newLintBEPHandler(runner.Streams, printReport, applyFix, printDiff)
+		lintBEPHandler := newLintBEPHandler(runner.Streams, printReport, applyFix, printDiff, output)
 		besBackend.RegisterSubscriber(lintBEPHandler.BEPEventCallback)
 	}
 
@@ -164,7 +173,15 @@ func (runner *LintBEPHandler) BEPEventCallback(event *buildeventstream.BuildEven
 						if outputGroup.Name == LINT_PATCH_GROUP {
 							err = runner.patchLintResult(label, f, runner.fix, runner.diff)
 						} else if outputGroup.Name == LINT_REPORT_GROUP && runner.report {
-							err = runner.outputLintResult(label, f)
+							switch runner.output {
+							case "text":
+								err = runner.outputLintResultText(label, f)
+							case "sarif":
+								// FIXME: print one serif document, not one per report file
+								err = runner.outputLintResultSarif(label, f)
+							default:
+								err = fmt.Errorf("Unsupported output kind %s", runner.output)
+							}
 						}
 
 						if err != nil {
@@ -223,7 +240,7 @@ func (runner *LintBEPHandler) patchLintResult(label string, f *buildeventstream.
 	return nil
 }
 
-func (runner *LintBEPHandler) outputLintResult(label string, f *buildeventstream.File) error {
+func (runner *LintBEPHandler) outputLintResultText(label string, f *buildeventstream.File) error {
 	lineResult, err := runner.readBEPFile(f)
 	if err != nil {
 		return err
@@ -233,6 +250,70 @@ func (runner *LintBEPHandler) outputLintResult(label string, f *buildeventstream
 	if len(lineResult) > 0 {
 		color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "From %s:\n", label)
 		fmt.Fprintf(runner.Streams.Stdout, "%s\n", lineResult)
+	}
+
+	return nil
+}
+
+func (runner *LintBEPHandler) outputLintResultSarif(label string, f *buildeventstream.File) error {
+	lineResult, err := runner.readBEPFile(f)
+	if err != nil {
+		return err
+	}
+
+	// Parse the filename convention that rules_lint has for report files.
+	// path/to/linter.target_name.aspect_rules_lint.report -> linter
+	linter := strings.SplitN(filepath.Base(f.Name), ".", 2)[0]
+	var fm []string
+	switch linter {
+	// TODO: ESLint
+	case "flake8":
+		fm = fmts.DefinedFmts()["flake8"].Errorformat
+	case "PMD":
+		// TODO: upstream to https://github.com/reviewdog/errorformat/issues/62
+		fm = []string{`%f:%l:\\t%m`}
+	case "ruff":
+		fm = []string{
+				`%f:%l:%c: %t%n %m`,
+				`%-GFound %n error%.%#`,
+				`%-G[*] %n fixable%.%#`,
+			}
+	case "buf":
+		fm = []string{
+			`--buf-plugin_out: %f:%l:%c:%m`,
+		}		
+	default:
+		fmt.Fprintf(runner.Streams.Stderr, "No format string for linter %s\n", linter)
+	}
+
+	if fm == nil {
+		return nil
+	}
+	efm, err := errorformat.NewErrorformat(fm)
+	if err != nil {
+		return err
+	}
+	
+	var ewriter writer.Writer
+	var sarifOpt writer.SarifOption
+	sarifOpt.ToolName = linter
+	ewriter, err = writer.NewSarif(runner.Streams.Stdout, sarifOpt)
+	if err != nil {
+		return err
+	}
+	if ewriter, ok := ewriter.(writer.BufWriter); ok {
+		defer func() {
+			if err := ewriter.Flush(); err != nil {
+				log.Println(err)
+			}
+		}()
+	}
+	
+	s := efm.NewScanner(strings.NewReader(lineResult))
+	for s.Scan() {
+		if err := ewriter.Write(s.Entry()); err != nil {
+			return err
+		}
 	}
 
 	return nil
