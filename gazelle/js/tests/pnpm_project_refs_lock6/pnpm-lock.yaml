@@ -9,6 +9,9 @@ importers:
       lib-a:
         specifier: workspace:*
         version: link:../lib
+      lib-b:
+        specifier: ../lib-non-wksp
+        version: link:../lib-non-wksp
       main-lib:
         specifier: workspace:*
         version: link:..
