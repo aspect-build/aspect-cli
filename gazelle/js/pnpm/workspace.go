@@ -112,11 +112,9 @@ func (w *PnpmWorkspace) IsReferenced(project string) bool {
 func (w *PnpmWorkspace) AddReference(pkg, linkTo string) {
 	to := normalizeProject(linkTo)
 
-	if w.pm.projects[to] == nil {
-		log.Fatalf("Unknown link '%s' to package '%s' in workspace '%s'\n", linkTo, pkg, w.lockfile)
+	if w.pm.projects[to] != nil {
+		w.referenced[to] = true
 	}
-
-	w.referenced[to] = true
 }
 
 // PnpmProject ----------------------------------------------------------

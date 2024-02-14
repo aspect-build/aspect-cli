@@ -9,5 +9,6 @@ ts_project(
     deps = [
         ":node_modules/lib-a",
         ":node_modules/main-lib",
+        "//lib-non-wksp",
     ],
 )
