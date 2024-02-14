@@ -14,7 +14,7 @@ type GazelleWalkFunc func(path string) error
 
 // Walk the directory of the language.GenerateArgs, optionally recursing into
 // subdirectories unlike the files provided in GenerateArgs.RegularFiles.
-func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, recurse bool, walkFunc GazelleWalkFunc) error {
+func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes []string, recurse bool, walkFunc GazelleWalkFunc) error {
 	BazelLog.Tracef("GazelleWalkDir: %s", args.Rel)
 
 	// Source files in the primary directory
@@ -67,6 +67,13 @@ func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, recurse b
 				f, _ := filepath.Rel(args.Dir, filePath)
 
 				if ignore.Matches(path.Join(args.Rel, f)) {
+					return nil
+				}
+
+				// Excluded files. Must be done manually for subdirs.
+				if IsFileExcluded(args.Rel, f, excludes) {
+					BazelLog.Tracef("File excluded: %s / %s", args.Rel, f)
+
 					return nil
 				}
 
