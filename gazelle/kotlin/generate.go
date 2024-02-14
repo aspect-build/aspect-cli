@@ -218,7 +218,7 @@ func (kt *kotlinLang) collectSourceFiles(cfg *kotlinconfig.KotlinConfig, args la
 
 	// TODO: "module" targets similar to java?
 
-	gazelle.GazelleWalkDir(args, kt.gitignore, false, func(f string) error {
+	gazelle.GazelleWalkDir(args, kt.gitignore, []string{}, false, func(f string) error {
 		// Otherwise the file is either source or potentially importable.
 		if isSourceFileType(f) {
 			BazelLog.Tracef("SourceFile: %s", f)
