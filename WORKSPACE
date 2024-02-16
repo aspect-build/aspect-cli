@@ -33,9 +33,9 @@ http_archive(
     name = "com_grail_bazel_toolchain",
     patch_args = ["-p1"],
     patches = ["//patches:com_grail_bazel_toolchain.patch"],
-    sha256 = "f6fd877e6f48092383e3dae80c28564450125e11fca31f35fba3ba599c9fd10d",
-    strip_prefix = "bazel-toolchain-ceeedcc4464322e05fe5b8df3749cc02273ee083",
-    urls = ["https://github.com/grailbio/bazel-toolchain/archive/ceeedcc4464322e05fe5b8df3749cc02273ee083.tar.gz"],
+    sha256 = "7d847d4f807797269a6389f1072233b58e66c7786477ce7b8c28b6f7293251d5",
+    strip_prefix = "toolchains_llvm-ceeedcc4464322e05fe5b8df3749cc02273ee083",
+    urls = ["https://github.com/bazel-contrib/toolchains_llvm/archive/ceeedcc4464322e05fe5b8df3749cc02273ee083.tar.gz"],
 )
 
 _SYSROOT_LINUX_BUILD_FILE = """
