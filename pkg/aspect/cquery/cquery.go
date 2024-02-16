@@ -59,7 +59,7 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *CQuery {
 }
 
 func (runner *CQuery) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
-	nonFlags, flags, err := bazel.ParseOutBazelFlags(cmd.CalledAs(), args)
+	nonFlags, flags, err := bazel.SeparateBazelFlags(cmd.CalledAs(), args)
 	if err != nil {
 		return err
 	}

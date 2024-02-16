@@ -17,18 +17,25 @@
 package bazel
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"aspect.build/cli/bazel/flags"
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
+	"github.com/bazelbuild/buildtools/edit"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
 var (
 	// Bazel flags specified here will be shown when running "aspect help".
-	// By default bazel flags are hidden.
+	// All other flags are hidden by default so that "help" is not overwhelming for users.
 	documentedBazelFlags = []string{
 		"keep_going",
 		"expunge",
@@ -64,6 +71,22 @@ var (
 		"start_app":                                       {},
 	}
 
+	// List of all commands with label as inputs
+	commandsWithLabelInput = map[string]struct{}{
+		"aquery":         {},
+		"build":          {},
+		"coverage":       {},
+		"cquery":         {},
+		"fetch":          {},
+		"lint":           {},
+		"mobile-install": {},
+		"outputs":        {},
+		"print-action":   {},
+		"query":          {},
+		"run":            {},
+		"test":           {},
+	}
+
 	bazelFlagSets = map[string]*pflag.FlagSet{}
 )
 
@@ -90,18 +113,16 @@ func addFlagToFlagSet(flag *flags.FlagInfo, flagSet *pflag.FlagSet, hidden bool)
 }
 
 // InitializeBazelFlags will create FlagSets for each bazel command (including
-// the special startup "command" set). These are used later by ParseOutBazelFlags
+// the special startup "command" set). These are used later by SeparateBazelFlags
 // which is called by InitializeStartUp flags and some special-case commands
 // such as query, cquery and aquery.
 func (b *bazel) InitializeBazelFlags() error {
-	bzlFlags, err := b.Flags()
+	flags, err := b.Flags()
 	if err != nil {
 		return err
 	}
 
-	for flagName := range bzlFlags {
-		flag := bzlFlags[flagName]
-
+	for _, flag := range flags {
 		for _, command := range flag.Commands {
 			flagSet := bazelFlagSets[command]
 			if flagSet == nil {
@@ -117,50 +138,228 @@ func (b *bazel) InitializeBazelFlags() error {
 // AddBazelFlags will process the configured cobra commands and add bazel
 // flags to those commands.
 func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
-	subCommands := make(map[string]*cobra.Command)
+	completionCommands := make(map[string]*cobra.Command)
 
-	for _, subCmd := range cmd.Commands() {
-		subCmdName := strings.SplitN(subCmd.Use, " ", 2)[0]
-		subCommands[subCmdName] = subCmd
+	commands := make(map[string]*cobra.Command)
+	for _, c := range cmd.Commands() {
+		name := strings.SplitN(c.Use, " ", 2)[0]
+		commands[name] = c
 	}
 
-	bzlFlags, err := b.Flags()
+	flags, err := b.Flags()
 	if err != nil {
 		return err
 	}
 
-	for flagName := range bzlFlags {
-		flag := bzlFlags[flagName]
+	for flagName, flag := range flags {
 		documented := isDocumented(flagName)
 
-		for _, flagCommand := range flag.Commands {
-			commands := []string{flagCommand}
-			if flagCommand == "aquery" {
-				// outputs & outputs-bbclientd call aquery under the hood and accept all aquery flags
-				commands = append(commands, "outputs")
-				commands = append(commands, "outputs-bbclientd")
+		for _, commandName := range flag.Commands {
+			commandNames := []string{commandName}
+			if commandName == "aquery" {
+				// outputs call aquery under the hood and accept all aquery flags
+				commandNames = append(commandNames, "outputs")
 			}
-			if flagCommand == "build" {
+			if commandName == "build" {
 				// lint calls build under the hood and accepts all build flags
-				commands = append(commands, "lint")
+				commandNames = append(commandNames, "lint")
 			}
-			for _, command := range commands {
-				if subcommand, ok := subCommands[command]; ok {
-					subcommand.DisableFlagParsing = true // only want to disable flag parsing on commands that call out to bazel
-					addFlagToFlagSet(flag, subcommand.Flags(), !documented)
+			for _, n := range commandNames {
+				if c, ok := commands[n]; ok {
+					c.DisableFlagParsing = true // only want to disable flag parsing on commands that call out to bazel
+					addFlagToFlagSet(flag, c.Flags(), !documented)
+
+					// Collect all the commands that have at least one flag defined for completion.
+					// The subset of commands with label inputs (commandsWithLabelInput) for
+					// completion all have at least one flag defined so are captured in this list.
+					completionCommands[n] = c
 				}
 			}
 		}
 	}
 
+	// Register startup flags to main command. We disable flag parsing such that the cobra completion
+	// triggers the ValidArgsFunction of the root command.
+	cmd.DisableFlagParsing = true
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if toComplete == "" {
+			return nil, cobra.ShellCompDirectiveDefault
+		}
+		return listBazelFlags("startup"), cobra.ShellCompDirectiveDefault
+	}
+
+	// Register custom ValidArgsFunction to add flag auto-completion for bazel defined flags.
+	for n, c := range completionCommands {
+		if _, ok := commandsWithLabelInput[n]; ok {
+			c.ValidArgsFunction = b.validArgsWithLabelAndPackages(n)
+			continue
+		}
+		c.ValidArgsFunction = b.validArgsWithFlags(n)
+	}
+
 	return nil
 }
 
+// validArgsWithFlags creates a ValidArgsFunction that completes flags for the given command.
+func (b *bazel) validArgsWithFlags(name string) func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return func(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return listBazelFlags(name), cobra.ShellCompDirectiveDefault
+	}
+}
+
+// validArgsWithLabelAndPackages creates a ValidArgsFunction that completes both
+// flags and labels for the given command.
+func (b *bazel) validArgsWithLabelAndPackages(name string) func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		// Complete flags
+		if strings.HasPrefix(toComplete, "-") {
+			return listBazelFlags(name), cobra.ShellCompDirectiveDefault
+		}
+
+		// Complete labels
+		var labels []string
+		workspaceRegex := regexp.MustCompile(`^@@?\/?`)
+		workspaceLabel := toComplete == "@" || toComplete == "@@" || workspaceRegex.MatchString(toComplete)
+		workspacePrefix := ""
+		if workspaceLabel {
+			workspacePrefix = "@"
+			if strings.HasPrefix(toComplete, "@@") {
+				workspacePrefix = "@@"
+			}
+			toComplete = strings.TrimLeft(toComplete, "@")
+		}
+		labelRegex := regexp.MustCompile(`^\/\/[^\/]+`)
+		absLabel := workspaceLabel || toComplete == "/" || toComplete == "//" || labelRegex.MatchString(toComplete)
+		searchPkg, _, _ := strings.Cut(toComplete, ":")
+		searchPkg = strings.TrimLeft(searchPkg, "/")
+		searchPkg = strings.TrimSuffix(searchPkg, "/")
+		trailingSlash := strings.HasSuffix(toComplete, "/")
+		rootDir := b.workspaceRoot
+		workspaceCwd := ""
+
+		if !absLabel {
+			// Look for packages and labels relative to the current working directory
+			cwd, err := os.Getwd()
+			if err != nil {
+				return nil, cobra.ShellCompDirectiveError
+			}
+			rootDir = cwd
+			workspaceCwd = strings.TrimSuffix(strings.TrimPrefix(cwd, b.workspaceRoot), "/")
+		}
+
+		if !trailingSlash {
+			targets, _ := listBazelRules(workspaceCwd, searchPkg)
+			if absLabel {
+				for i, l := range targets {
+					targets[i] = workspacePrefix + "//" + l
+				}
+			}
+			labels = append(labels, targets...)
+		}
+
+		// If there is not a trailing slash on the completion string then
+		// the search package is the parent package
+		if searchPkg != "" && !trailingSlash {
+			segments := strings.Split(searchPkg, "/")
+			searchPkg = strings.Join(segments[0:len(segments)-1], "/")
+		}
+
+		packages, _ := b.expandPackageNames(rootDir, searchPkg)
+		if absLabel {
+			for i, p := range packages {
+				packages[i] = workspacePrefix + "//" + p
+			}
+		}
+		return append(labels, packages...), cobra.ShellCompDirectiveNoSpace
+	}
+}
+
+func (b *bazel) expandPackageNames(rootDir string, searchPkg string) ([]string, error) {
+	pkgDir := filepath.Join(rootDir, searchPkg)
+
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		// Directory does not exist
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var result []string
+	for _, e := range entries {
+		name := e.Name()
+		// If build file exists, we will suggest this package and not recurse any further
+		if searchPkg != "" && (name == "BUILD" || name == "BUILD.bazel") {
+			result = append(result, searchPkg)
+			continue
+		}
+		// Only directories can be packages.
+		if !e.IsDir() {
+			continue
+		}
+		// Skip symlinks (e.g. bazel-bin)
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		// Skip .git
+		if name == ".git" {
+			continue
+		}
+		// Recurse into the directory to look for Bazel packages
+		recursive, _ := b.expandPackageNames(rootDir, filepath.Join(searchPkg, name))
+		result = append(result, recursive...)
+	}
+
+	return result, nil
+}
+
+func listBazelRules(workspaceCwd string, completionPkg string) ([]string, error) {
+	pkg := path.Join(workspaceCwd, completionPkg)
+
+	var stdout bytes.Buffer
+	var stderr strings.Builder
+	opts := &edit.Options{
+		OutWriter: &stdout,
+		ErrWriter: &stderr,
+		NumIO:     200,
+	}
+	if ret := edit.Buildozer(opts, []string{"print label", "//" + pkg + ":all"}); ret != 0 {
+		return nil, fmt.Errorf("buildozer exit %d: %s", ret, stderr.String())
+	}
+
+	rules := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+
+	// Do post-processing on the labels so that results start with completionPkg
+	for i, t := range rules {
+		if _, label, ok := strings.Cut(t, ":"); ok {
+			rules[i] = completionPkg + ":" + label
+			continue
+		}
+		rules[i] = completionPkg + ":" + path.Base(t)
+	}
+
+	return rules, nil
+}
+
+// List all bazel flags for a command
+func listBazelFlags(command string) []string {
+	flags, ok := bazelFlagSets[command]
+	if !ok {
+		return nil
+	}
+	var result []string
+	flags.VisitAll(func(outFile *pflag.Flag) {
+		result = append(result, "--"+outFile.Name)
+	})
+	return result
+}
+
 // Separates bazel flags from a list of arguments for the given bazel command.
-// Returns the non-flag arguments & flag arguments as separate lists
-func ParseOutBazelFlags(command string, args []string) ([]string, []string, error) {
-	bazelFlags := bazelFlagSets[command]
-	if bazelFlags == nil {
+// Returns bazel flags and other arguments as separate lists.
+func SeparateBazelFlags(command string, args []string) ([]string, []string, error) {
+	flags := bazelFlagSets[command]
+	if flags == nil {
 		for _, s := range args {
 			if len(s) > 1 && s[1] == '-' {
 				// there are args to parse but we don't know the flags for this bazel command
@@ -172,17 +371,17 @@ func ParseOutBazelFlags(command string, args []string) ([]string, []string, erro
 		return args, []string{}, nil
 	}
 
-	flags := make([]string, 0, len(args))
-	nonFlags := make([]string, 0, len(args))
+	otherArgs := make([]string, 0, len(args))
+	flagsArgs := make([]string, 0, len(args))
 
 	for len(args) > 0 {
 		s := args[0]
 		args = args[1:]
 		if len(s) == 0 || s[0] != '-' || len(s) == 1 {
-			nonFlags = append(nonFlags, s)
+			otherArgs = append(otherArgs, s)
 			if command == "startup" {
 				// special case startup flags which must come before the first command
-				nonFlags = append(nonFlags, args...)
+				otherArgs = append(otherArgs, args...)
 				break
 			}
 			continue
@@ -190,7 +389,7 @@ func ParseOutBazelFlags(command string, args []string) ([]string, []string, erro
 
 		if s[1] == '-' {
 			if len(s) == 2 { // "--" terminates the flags
-				nonFlags = append(nonFlags, args...)
+				otherArgs = append(otherArgs, args...)
 				break
 			}
 			// long arg
@@ -200,25 +399,25 @@ func ParseOutBazelFlags(command string, args []string) ([]string, []string, erro
 			}
 			split := strings.SplitN(name, "=", 2)
 			name = split[0]
-			flag := bazelFlags.Lookup(name)
+			flag := flags.Lookup(name)
 			if name == "version" || name == "bazel-version" || name == "help" {
 				// --version, --bazel-version and --help special cases
-				nonFlags = append(nonFlags, s)
+				otherArgs = append(otherArgs, s)
 			} else if strings.HasPrefix(name, "aspect:") {
 				// --aspect:* special case
-				nonFlags = append(nonFlags, s)
+				otherArgs = append(otherArgs, s)
 			} else if flag == nil {
 				return nil, nil, fmt.Errorf("unknown %s flag: --%s", command, name)
 			} else if len(split) == 2 {
 				// '--flag=arg'
-				flags = append(flags, s)
+				flagsArgs = append(flagsArgs, s)
 			} else if flag.NoOptDefVal != "" {
 				// '--flag' (arg was optional)
-				flags = append(flags, s)
+				flagsArgs = append(flagsArgs, s)
 			} else if len(args) > 0 {
 				// '--flag arg'
-				flags = append(flags, s)
-				flags = append(flags, args[0])
+				flagsArgs = append(flagsArgs, s)
+				flagsArgs = append(flagsArgs, args[0])
 				args = args[1:]
 			} else {
 				// '--flag' (arg was required)
@@ -228,13 +427,13 @@ func ParseOutBazelFlags(command string, args []string) ([]string, []string, erro
 			// short arg
 			if s == "-v" || s == "-h" {
 				// -v and -h special cases
-				nonFlags = append(nonFlags, s)
+				otherArgs = append(otherArgs, s)
 			}
-			flags = append(flags, s)
+			flagsArgs = append(flagsArgs, s)
 		}
 	}
 
-	return nonFlags, flags, nil
+	return otherArgs, flagsArgs, nil
 }
 
 func isExpando(flag string) bool {

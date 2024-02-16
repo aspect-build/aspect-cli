@@ -71,7 +71,7 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *Query {
 }
 
 func (runner *Query) Run(ctx context.Context, cmd *cobra.Command, args []string) (errExit error) {
-	nonFlags, flags, err := bazel.ParseOutBazelFlags(cmd.CalledAs(), args)
+	nonFlags, flags, err := bazel.SeparateBazelFlags(cmd.CalledAs(), args)
 	if err != nil {
 		return err
 	}

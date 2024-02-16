@@ -39,7 +39,7 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *Outputs {
 }
 
 func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) error {
-	nonFlags, bazelFlags, err := bazel.ParseOutBazelFlags("aquery", args)
+	nonFlags, bazelFlags, err := bazel.SeparateBazelFlags("aquery", args)
 	if err != nil {
 		return err
 	}
