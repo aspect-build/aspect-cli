@@ -27,8 +27,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/alphadose/haxmap"
 	"aspect.build/cli/pkg/bazel"
+	"github.com/alphadose/haxmap"
 	"github.com/rogpeppe/go-internal/dirhash"
 	concurrently "github.com/tejzpr/ordered-concurrently/v3"
 	"github.com/twmb/murmur3"

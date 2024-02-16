@@ -1,7 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
-load("//bazel/go:write_go_generated_source_files.bzl", "write_go_generated_source_files")
 
 proto_library(
     name = "failure_details_proto",
@@ -15,15 +14,6 @@ go_proto_library(
     importpath = "aspect.build/cli/bazel/failure_details",
     proto = ":failure_details_proto",
     visibility = ["//visibility:public"],
-)
-
-write_go_generated_source_files(
-    name = "write_pb_go",
-    src = ":failure_details_go_proto",
-    output_files = [
-        "failure_details.pb.go",
-    ],
-    visibility = ["//bazel:__pkg__"],
 )
 
 go_library(
