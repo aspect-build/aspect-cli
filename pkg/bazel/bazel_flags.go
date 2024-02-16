@@ -217,7 +217,7 @@ func (b *bazel) validArgsWithLabelAndPackages(name string) func(*cobra.Command, 
 		}
 
 		// Complete labels
-		var labels []string
+		var results []string
 		workspaceRegex := regexp.MustCompile(`^@@?\/?`)
 		workspaceLabel := toComplete == "@" || toComplete == "@@" || workspaceRegex.MatchString(toComplete)
 		workspacePrefix := ""
@@ -237,8 +237,9 @@ func (b *bazel) validArgsWithLabelAndPackages(name string) func(*cobra.Command, 
 		rootDir := b.workspaceRoot
 		workspaceCwd := ""
 
+		// If the completion string is not an absolute label then look for packages and labels
+		// relative to the current working directory
 		if !absLabel {
-			// Look for packages and labels relative to the current working directory
 			cwd, err := os.Getwd()
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveError
@@ -247,14 +248,15 @@ func (b *bazel) validArgsWithLabelAndPackages(name string) func(*cobra.Command, 
 			workspaceCwd = strings.TrimSuffix(strings.TrimPrefix(cwd, b.workspaceRoot), "/")
 		}
 
+		// Search for labels if there is not a trailing slash on the completion string
 		if !trailingSlash {
 			targets, _ := listBazelRules(workspaceCwd, searchPkg)
-			if absLabel {
-				for i, l := range targets {
-					targets[i] = workspacePrefix + "//" + l
+			for _, l := range targets {
+				if absLabel {
+					l = workspacePrefix + "//" + l
 				}
+				results = append(results, l)
 			}
-			labels = append(labels, targets...)
 		}
 
 		// If there is not a trailing slash on the completion string then
@@ -264,18 +266,41 @@ func (b *bazel) validArgsWithLabelAndPackages(name string) func(*cobra.Command, 
 			searchPkg = strings.Join(segments[0:len(segments)-1], "/")
 		}
 
-		packages, _ := b.expandPackageNames(rootDir, searchPkg)
-		if absLabel {
-			for i, p := range packages {
-				packages[i] = workspacePrefix + "//" + p
+		// Search for bazel packages
+		packages, _ := b.expandPackageNames(rootDir, searchPkg, true)
+		for _, p := range packages {
+			if absLabel {
+				p = workspacePrefix + "//" + p
 			}
+			if p == toComplete {
+				// if the suggested package matches toComplete then suggest to recurse into
+				// the package for sub-packages
+				p = p + "/"
+			}
+			results = append(results, p)
 		}
-		return append(labels, packages...), cobra.ShellCompDirectiveNoSpace
+
+		return results, cobra.ShellCompDirectiveNoSpace
 	}
 }
 
-func (b *bazel) expandPackageNames(rootDir string, searchPkg string) ([]string, error) {
+// Helper function to check if file exists
+func fileExists(f string) bool {
+	_, err := os.Stat(f)
+	return err == nil
+}
+
+func (b *bazel) expandPackageNames(rootDir string, searchPkg string, recurse bool) ([]string, error) {
 	pkgDir := filepath.Join(rootDir, searchPkg)
+
+	var results []string
+
+	if searchPkg != "" && (fileExists(filepath.Join(pkgDir, "BUILD")) || fileExists(filepath.Join(pkgDir, "BUILD.bazel"))) {
+		results = append(results, searchPkg)
+		if !recurse {
+			return results, nil
+		}
+	}
 
 	entries, err := os.ReadDir(pkgDir)
 	if err != nil && errors.Is(err, os.ErrNotExist) {
@@ -286,14 +311,7 @@ func (b *bazel) expandPackageNames(rootDir string, searchPkg string) ([]string, 
 		return nil, err
 	}
 
-	var result []string
 	for _, e := range entries {
-		name := e.Name()
-		// If build file exists, we will suggest this package and not recurse any further
-		if searchPkg != "" && (name == "BUILD" || name == "BUILD.bazel") {
-			result = append(result, searchPkg)
-			continue
-		}
 		// Only directories can be packages.
 		if !e.IsDir() {
 			continue
@@ -303,15 +321,15 @@ func (b *bazel) expandPackageNames(rootDir string, searchPkg string) ([]string, 
 			continue
 		}
 		// Skip .git
-		if name == ".git" {
+		if e.Name() == ".git" {
 			continue
 		}
 		// Recurse into the directory to look for Bazel packages
-		recursive, _ := b.expandPackageNames(rootDir, filepath.Join(searchPkg, name))
-		result = append(result, recursive...)
+		recursive, _ := b.expandPackageNames(rootDir, filepath.Join(searchPkg, e.Name()), false)
+		results = append(results, recursive...)
 	}
 
-	return result, nil
+	return results, nil
 }
 
 func listBazelRules(workspaceCwd string, completionPkg string) ([]string, error) {
@@ -328,18 +346,23 @@ func listBazelRules(workspaceCwd string, completionPkg string) ([]string, error)
 		return nil, fmt.Errorf("buildozer exit %d: %s", ret, stderr.String())
 	}
 
+	var results []string
+
 	rules := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 
 	// Do post-processing on the labels so that results start with completionPkg
-	for i, t := range rules {
-		if _, label, ok := strings.Cut(t, ":"); ok {
-			rules[i] = completionPkg + ":" + label
+	for _, t := range rules {
+		if t == "" {
 			continue
 		}
-		rules[i] = completionPkg + ":" + path.Base(t)
+		if _, label, ok := strings.Cut(t, ":"); ok {
+			results = append(results, completionPkg+":"+label)
+		} else {
+			results = append(results, completionPkg+":"+path.Base(t))
+		}
 	}
 
-	return rules, nil
+	return results, nil
 }
 
 // List all bazel flags for a command
