@@ -265,6 +265,8 @@ func (runner *LintBEPHandler) outputLintResultSarif(label string, f *buildevents
 	// path/to/linter.target_name.aspect_rules_lint.report -> linter
 	linter := strings.SplitN(filepath.Base(f.Name), ".", 2)[0]
 	var fm []string
+
+	// Switch is on the MNEMONIC declared in rules_lint
 	switch linter {
 	// TODO: ESLint
 	case "flake8":
@@ -281,7 +283,9 @@ func (runner *LintBEPHandler) outputLintResultSarif(label string, f *buildevents
 	case "buf":
 		fm = []string{
 			`--buf-plugin_out: %f:%l:%c:%m`,
-		}		
+		}
+	case "Vale":
+		fm = []string{`%f:%l:%c:%m`}
 	default:
 		fmt.Fprintf(runner.Streams.Stderr, "No format string for linter %s\n", linter)
 	}
