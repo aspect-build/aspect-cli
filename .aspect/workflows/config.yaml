@@ -15,5 +15,8 @@ tasks:
           command: cat /tmp/vmstat_out
   - delivery:
       auto_deliver: true
+      redis_url: redis://aspect-workflows-deliverydb.fs8kee.clustercfg.usw2.cache.amazonaws.com:6379
+      redis_use_tls: false
       branches:
         - main
+        - elasticache_redis

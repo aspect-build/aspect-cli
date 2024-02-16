@@ -10,6 +10,7 @@ workflows:
           branches:
             only:
             - /^main$/
+            - /^elasticache_redis$/
             - /^aspect-build\/test-delivery$/
         requires:
         - aw-test
@@ -397,6 +398,9 @@ jobs:
           - or:
             - matches:
                 pattern: ^main$
+                value: << pipeline.git.branch >>
+            - matches:
+                pattern: ^elasticache_redis$
                 value: << pipeline.git.branch >>
             - matches:
                 pattern: ^aspect-build\/test-delivery$
