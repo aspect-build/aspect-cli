@@ -23,6 +23,7 @@ go_library(
         "@com_github_bazelbuild_bazelisk//platforms",
         "@com_github_bazelbuild_bazelisk//repositories",
         "@com_github_bazelbuild_bazelisk//versions",
+        "@com_github_bazelbuild_buildtools//edit:go_default_library",
         "@com_github_mitchellh_go_homedir//:go-homedir",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_pflag//:pflag",
