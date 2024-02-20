@@ -13,6 +13,7 @@ tasks:
           command: cat /tmp/vmstat_out
   - delivery:
       auto_deliver: true
+      redis_use_tls: false
       branches:
         - main
         - CaerusKaru-patch-1
