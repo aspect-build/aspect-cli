@@ -17,3 +17,9 @@ tasks:
       auto_deliver: true
       branches:
         - main
+  - branch_freshness:
+      hooks:
+        - type: before_task
+          command: if [ -e .git/rebase-apply ]; then rm -rf .git/rebase-apply && echo "Cleaning up .git/rebase-apply!"; fi && git status
+        - type: after_task
+          command: git status
