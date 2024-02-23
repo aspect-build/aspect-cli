@@ -401,6 +401,14 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		sourceRule.SetAttr("testonly", true)
 	}
 
+	if cfg.GetTsConfigGenerationEnabled() {
+		if rel, tsconfig := ts.tsconfig.ResolveConfig(args.Rel); tsconfig != nil {
+			tsconfigLabel := label.New("", rel, cfg.RenderTsConfigName(tsconfig.ConfigName))
+			tsconfigLabel = tsconfigLabel.Rel("", args.Rel)
+			sourceRule.SetAttr("tsconfig", tsconfigLabel.String())
+		}
+	}
+
 	adaptExistingRule(args, sourceRule)
 
 	result.Gen = append(result.Gen, sourceRule)

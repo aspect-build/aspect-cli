@@ -6,4 +6,5 @@ ts_project(
         "first/c1.ts",
         "second/c2.ts",
     ],
+    tsconfig = "//:tsconfig",
 )
