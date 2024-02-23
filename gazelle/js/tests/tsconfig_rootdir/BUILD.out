@@ -6,6 +6,7 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 ts_project(
     name = "tsconfig_rootdir",
     srcs = ["src/main.ts"],
+    tsconfig = ":tsconfig",
 )
 
 ts_config(

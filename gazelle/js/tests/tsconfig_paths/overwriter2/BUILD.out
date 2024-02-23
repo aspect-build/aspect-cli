@@ -10,6 +10,7 @@ ts_project(
         "src/main.ts",
         "src/overlib/o.ts",
     ],
+    tsconfig = ":tsconfig",
     deps = [
         "//lib/a",
         "//lib/b",

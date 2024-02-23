@@ -78,11 +78,8 @@ func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
 	return c
 }
 
-func (tc *TsWorkspace) getConfig(f string) (string, *TsConfig) {
-	dir := f
-
-	for dir = f; dir != ""; {
-		dir = path.Dir(dir)
+func (tc *TsWorkspace) ResolveConfig(dir string) (string, *TsConfig) {
+	for {
 		if dir == "." {
 			dir = ""
 		}
@@ -90,13 +87,19 @@ func (tc *TsWorkspace) getConfig(f string) (string, *TsConfig) {
 		if tc.cm.configFiles[dir] != nil {
 			return dir, tc.GetTsConfigFile(dir)
 		}
+
+		if dir == "" {
+			break
+		}
+
+		dir = path.Dir(dir)
 	}
 
 	return "", nil
 }
 
 func (tc *TsWorkspace) IsWithinTsRoot(f string) bool {
-	dir, c := tc.getConfig(f)
+	dir, c := tc.ResolveConfig(path.Dir(f))
 	if c == nil {
 		return true
 	}
@@ -111,7 +114,7 @@ func (tc *TsWorkspace) IsWithinTsRoot(f string) bool {
 }
 
 func (tc *TsWorkspace) ExpandPaths(from, f string) []string {
-	_, c := tc.getConfig(from)
+	_, c := tc.ResolveConfig(path.Dir(from))
 	if c == nil {
 		return []string{}
 	}

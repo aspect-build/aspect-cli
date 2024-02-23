@@ -6,5 +6,6 @@ ts_project(
         "f1.ts",
         "f2/a.ts",
     ],
+    tsconfig = "//:tsconfig",
     deps = ["//lib/a"],
 )
