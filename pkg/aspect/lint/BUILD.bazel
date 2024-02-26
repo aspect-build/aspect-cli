@@ -9,6 +9,7 @@ go_library(
         "//bazel/buildeventstream",
         "//pkg/aspect/root/flags",
         "//pkg/bazel",
+        "//pkg/bazel/workspace",
         "//pkg/ioutils",
         "//pkg/plugin/system/bep",
         "@com_github_bluekeyes_go_gitdiff//gitdiff",

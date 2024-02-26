@@ -225,6 +225,7 @@ func (ps *pluginSystem) createBesBackend(ctx context.Context, cmd *cobra.Command
 	if userBesBackend != "" {
 		// Check if user has specified any --remote_header values
 		// https://bazel.build/reference/command-line-reference#flag--remote_header
+		// TODO: parse the --remote_header values from the .bazelrc files in use instead
 		userRemoteHeaders := make(map[string]string)
 		userRemoteHeader, ok := cmd.Flag("remote_header").Value.(*flags.MultiString)
 		if !ok {
