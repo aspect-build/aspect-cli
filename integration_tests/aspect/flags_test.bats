@@ -84,7 +84,27 @@ EOF
 }
 
 @test 'unknown flags should fail' {
+    run aspect info :foo --noannounce_rcc
+    assert_failure
+    assert_output --partial "ERROR: --noannounce_rcc :: Unrecognized option: --noannounce_rcc"
+
     run aspect build :foo --noannounce_rcc
+    assert_failure
+    assert_output --partial "ERROR: --noannounce_rcc :: Unrecognized option: --noannounce_rcc"
+
+    run aspect test :foo --noannounce_rcc
+    assert_failure
+    assert_output --partial "ERROR: --noannounce_rcc :: Unrecognized option: --noannounce_rcc"
+
+    run aspect query :foo --noannounce_rcc
+    assert_failure
+    assert_output --partial "ERROR: --noannounce_rcc :: Unrecognized option: --noannounce_rcc"
+
+    run aspect cquery :foo --noannounce_rcc
+    assert_failure
+    assert_output --partial "ERROR: --noannounce_rcc :: Unrecognized option: --noannounce_rcc"
+
+    run aspect aquery :foo --noannounce_rcc
     assert_failure
     assert_output --partial "ERROR: --noannounce_rcc :: Unrecognized option: --noannounce_rcc"
 }
