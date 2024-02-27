@@ -430,7 +430,10 @@ func SeparateBazelFlags(command string, args []string) ([]string, []string, erro
 				// --aspect:* special case
 				otherArgs = append(otherArgs, s)
 			} else if flag == nil {
-				return nil, nil, fmt.Errorf("unknown %s flag: --%s", command, name)
+				// --unknown_flag special case
+				// This could be a dynamically flag such as --@io_bazel_rules_go//go/config:pure.
+				// We can only assume that this flag we don't recognize does not take a value.
+				otherArgs = append(otherArgs, s)
 			} else if len(split) == 2 {
 				// '--flag=arg'
 				flagsArgs = append(flagsArgs, s)
