@@ -23,7 +23,7 @@ import (
 	"os"
 	"strings"
 
-	bzl "aspect.build/cli/gazelle/bzl" 
+	bzl "aspect.build/cli/gazelle/bzl"
 	js "aspect.build/cli/gazelle/js"
 	kotlin "aspect.build/cli/gazelle/kotlin"
 	"aspect.build/cli/pkg/aspecterrors"
