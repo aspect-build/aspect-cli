@@ -350,6 +350,10 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) (string, 
 		if uri.Scheme == "file" {
 			resultsFile = filepath.Clean(uri.Path)
 		} else if uri.Scheme == "bytestream" {
+			if strings.HasSuffix(uri.Path, "/0") {
+				// No reason to read an empty results file from disk
+				return "", nil
+			}
 			// Because we set --experimental_remote_download_regex, we can depend on the results file being
 			// in the output tree even when using a remote cache with build without the bytes.
 			resultsFile = path.Join(runner.workspaceRoot, path.Join(file.PathPrefix...), file.Name)
