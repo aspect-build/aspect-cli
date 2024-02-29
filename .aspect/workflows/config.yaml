@@ -15,5 +15,14 @@ tasks:
           command: cat /tmp/vmstat_out
   - delivery:
       auto_deliver: true
-      branches:
-        - main
+      rules:
+        - deliverable: 'attr("tags", "\bdeliverable\b", //...)'
+          condition:
+            branches:
+              - main
+        - deliverable:
+            - //release:aspect_cli_delivery
+          condition:
+            only_on_change: false
+            branches:
+              - main
