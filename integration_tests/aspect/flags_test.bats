@@ -46,13 +46,13 @@ BAZELISK_BASE_URL=https://static.aspect.build/aspect
 USE_BAZEL_VERSION=aspect/1.2.3
 EOF
 
-    run aspect --version
+    run aspect
     assert_failure
     assert_output --partial "could not download Bazel"
 
-    run aspect --version --aspect:lock_version
+    run aspect --aspect:lock_version
     assert_success
-    assert_output --partial "Locking Aspect CLI version to"
+    assert_output --partial "Aspect CLI is a better frontend for running bazel"
 }
 
 @test 'lock_version flag should prevent downloading and running config version' {
@@ -60,13 +60,13 @@ EOF
 version: 1.2.3
 EOF
 
-    run aspect --aspect:config="version-config.yaml" --version
+    run aspect --aspect:config="version-config.yaml"
     assert_failure
     assert_output --partial "could not download Bazel"
 
-    run aspect --aspect:config="version-config.yaml" --version --aspect:lock_version
+    run aspect --aspect:config="version-config.yaml" --aspect:lock_version
     assert_success
-    assert_output --partial "Locking Aspect CLI version to"
+    assert_output --partial "Aspect CLI is a better frontend for running bazel"
 }
 
 @test '--[no]able flags should work' {
