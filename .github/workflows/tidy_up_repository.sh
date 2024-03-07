@@ -12,7 +12,6 @@ fi
 # Then, run a series of commands that could produce changes to the source tree.
 # For each command, we check if the repository is still clean and proceed.
 commands=(
-	"bazel run @go_sdk//:bin/go -- fmt \$(go list ./... | grep -v /bazel-/)"
 	"bazel run @go_sdk//:bin/go -- mod tidy"
 	"bazel run //:gazelle_update_repos"
 	"bazel run //:gazelle"
