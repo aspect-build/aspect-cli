@@ -165,8 +165,11 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 		return fmt.Errorf("could not run Bazel: %v", err)
 	}
 	if exitCode != 0 {
+		// Just bubble up the exit code so the Aspect CLI exits with the same code; don't specify any error
+		// message since Bazel should have already printed the error to stderr if appropriate and we don't
+		// want to print any additional error messages to stderr.
 		return &aspecterrors.ExitError{
-			Err:      fmt.Errorf("bazel exited with exit code: %v", exitCode),
+			Err:      nil,
 			ExitCode: exitCode,
 		}
 	}
