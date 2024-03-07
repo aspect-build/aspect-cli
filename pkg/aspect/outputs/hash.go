@@ -16,6 +16,11 @@
 
 package outputs
 
+// For copybara, this import comes alphabetically before aspect.build
+// and causes the line ordering in the import to change.
+// So we just import it in a separate block.
+import "github.com/alphadose/haxmap"
+
 import (
 	"bufio"
 	"context"
@@ -28,7 +33,6 @@ import (
 	"strings"
 
 	"aspect.build/cli/pkg/bazel"
-	"github.com/alphadose/haxmap"
 	"github.com/rogpeppe/go-internal/dirhash"
 	concurrently "github.com/tejzpr/ordered-concurrently/v3"
 	"github.com/twmb/murmur3"
