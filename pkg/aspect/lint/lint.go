@@ -26,6 +26,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/aspect/root/flags"
@@ -40,6 +41,7 @@ import (
 	"github.com/reviewdog/errorformat/writer"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/sync/errgroup"
 )
 
 type Linter struct {
@@ -49,12 +51,14 @@ type Linter struct {
 
 type LintBEPHandler struct {
 	ioutils.Streams
-	report        bool
-	fix           bool
-	diff          bool
-	output        string
-	reports       map[string]*buildeventstream.NamedSetOfFiles
-	workspaceRoot string
+	ctx                   context.Context
+	report                bool
+	fix                   bool
+	diff                  bool
+	output                string
+	reports               map[string]*buildeventstream.NamedSetOfFiles
+	workspaceRoot         string
+	handleResultsErrgroup *errgroup.Group
 }
 
 // Align with rules_lint
@@ -64,15 +68,17 @@ const (
 	LINT_RESULT_REGEX = ".*aspect_rules_lint.*"
 )
 
-func newLintBEPHandler(streams ioutils.Streams, printReport, applyFix, printDiff bool, output string, workspaceRoot string) *LintBEPHandler {
+func newLintBEPHandler(ctx context.Context, streams ioutils.Streams, printReport, applyFix, printDiff bool, output string, workspaceRoot string, handleResultsErrgroup *errgroup.Group) *LintBEPHandler {
 	return &LintBEPHandler{
-		Streams:       streams,
-		report:        printReport,
-		fix:           applyFix,
-		diff:          printDiff,
-		output:        output,
-		reports:       make(map[string]*buildeventstream.NamedSetOfFiles),
-		workspaceRoot: workspaceRoot,
+		Streams:               streams,
+		ctx:                   ctx,
+		report:                printReport,
+		fix:                   applyFix,
+		diff:                  printDiff,
+		output:                output,
+		reports:               make(map[string]*buildeventstream.NamedSetOfFiles),
+		workspaceRoot:         workspaceRoot,
+		handleResultsErrgroup: handleResultsErrgroup,
 	}
 }
 
@@ -121,6 +127,8 @@ lint:
 	// TODO: in Bazel 7 this was renamed without the --experimental_ prefix
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--experimental_remote_download_regex='%s'", LINT_RESULT_REGEX))
 
+	handleResultsErrgroup, handleResultsCtx := errgroup.WithContext(context.Background())
+
 	// Currently Bazel only supports a single --bes_backend so adding ours after
 	// any user supplied value will result in our bes_backend taking precedence.
 	// There is a very old & stale issue to add support for multiple BES
@@ -142,11 +150,17 @@ lint:
 			return fmt.Errorf("failed to find workspace root: %w", err)
 		}
 
-		lintBEPHandler := newLintBEPHandler(runner.Streams, printReport, applyFix, printDiff, output, workspaceRoot)
+		lintBEPHandler := newLintBEPHandler(handleResultsCtx, runner.Streams, printReport, applyFix, printDiff, output, workspaceRoot, handleResultsErrgroup)
 		besBackend.RegisterSubscriber(lintBEPHandler.BEPEventCallback)
 	}
 
 	err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
+
+	// Wait for completion and return the first error (if any)
+	wgErr := handleResultsErrgroup.Wait()
+	if wgErr != nil && err == nil {
+		err = wgErr
+	}
 
 	// Check for subscriber errors
 	subscriberErrors := bep.BESErrors(ctx)
@@ -182,29 +196,30 @@ func (runner *LintBEPHandler) BEPEventCallback(event *buildeventstream.BuildEven
 		for _, outputGroup := range event.GetCompleted().OutputGroup {
 			for _, fileSetId := range outputGroup.FileSets {
 				if fileSet := runner.reports[fileSetId.Id]; fileSet != nil {
-					for _, f := range fileSet.GetFiles() {
+					runner.reports[fileSetId.Id] = nil
 
-						var err error
+					for _, file := range fileSet.GetFiles() {
+						l := label
+						f := file
 						if outputGroup.Name == LINT_PATCH_GROUP {
-							err = runner.patchLintResult(label, f, runner.fix, runner.diff)
+							runner.handleResultsErrgroup.Go(func() error {
+								return runner.patchLintResult(l, f, runner.fix, runner.diff)
+							})
 						} else if outputGroup.Name == LINT_REPORT_GROUP && runner.report {
 							switch runner.output {
 							case "text":
-								err = runner.outputLintResultText(label, f)
+								runner.handleResultsErrgroup.Go(func() error {
+									return runner.outputLintResultText(l, f)
+								})
 							case "sarif":
-								// FIXME: print one serif document, not one per report file
-								err = runner.outputLintResultSarif(label, f)
+								runner.handleResultsErrgroup.Go(func() error {
+									return runner.outputLintResultSarif(l, f)
+								})
 							default:
-								err = fmt.Errorf("Unsupported output kind %s", runner.output)
+								return fmt.Errorf("unsupported output kind %s", runner.output)
 							}
 						}
-
-						if err != nil {
-							return err
-						}
 					}
-
-					runner.reports[fileSetId.Id] = nil
 				}
 			}
 		}
@@ -364,10 +379,33 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) (string, 
 		return "", fmt.Errorf("unsupported BES file type")
 	}
 
-	buf, err := os.ReadFile(resultsFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
+	start := time.Now()
+	for {
+		// TODO: also check that the bazel remote cache downloader is not still writing
+		// to the results file
+		_, err := os.Stat(resultsFile)
+		if err != nil {
+			// if more than 60s has passed then give up
+			// TODO: make this timeout configurable
+			if time.Since(start) > 60*time.Second {
+				return "", fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
+			}
+		} else {
+			buf, err := os.ReadFile(resultsFile)
+			if err != nil {
+				return "", fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
+			}
+			return string(buf), nil
+		}
+		// we're in a go routine so yield for 100ms and try again
+		// TODO: watch the file system for the file creation instead of polling
+		t := time.NewTimer(time.Millisecond * 100)
+		select {
+		case <-runner.ctx.Done():
+			t.Stop()
+			return "", fmt.Errorf("failed to read lint results file %s: interrupted", resultsFile)
+		case <-t.C:
+		}
 	}
 
-	return string(buf), nil
 }

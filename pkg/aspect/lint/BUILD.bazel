@@ -19,5 +19,6 @@ go_library(
         "@com_github_reviewdog_errorformat//writer",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",
+        "@org_golang_x_sync//errgroup",
     ],
 )
