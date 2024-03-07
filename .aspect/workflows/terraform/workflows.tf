@@ -59,7 +59,7 @@ module "aspect_workflows" {
   }
 
   # Aspect Workflows terraform module
-  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.9.18/terraform-aws-aspect-workflows.zip"
+  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.9.20/terraform-aws-aspect-workflows.zip"
 
   # Non-terraform Aspect Workflows release artifacts are pulled from the region specific
   # aspect-artifacts bucket during apply. Aspect will grant your AWS account access to this bucket
@@ -191,7 +191,7 @@ module "managed_grafana" {
 
 module "aspect_workflows_grafana_dashboards" {
   # Aspect Workflows grafana dashboard nested terraform module
-  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.9.18/terraform-aws-aspect-workflows.zip//monitoring/dashboards"
+  source = "https://s3.us-east-2.amazonaws.com/static.aspect.build/aspect/5.9.20/terraform-aws-aspect-workflows.zip//monitoring/dashboards"
 
   grafana_auth                = module.managed_grafana.grafana_admin_api_key
   grafana_url                 = module.managed_grafana.grafana_endpoint
