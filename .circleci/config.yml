@@ -10,6 +10,7 @@ workflows:
           branches:
             only:
             - /^main$/
+            - /^testing_delivery$/
         requires:
         - aw-test
     - aw-buildifier:
@@ -396,6 +397,9 @@ jobs:
           - or:
             - matches:
                 pattern: ^main$
+                value: << pipeline.git.branch >>
+            - matches:
+                pattern: ^testing_delivery$
                 value: << pipeline.git.branch >>
         steps:
         - run:
