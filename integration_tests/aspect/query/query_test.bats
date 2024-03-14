@@ -6,20 +6,20 @@ setup() {
 
 teardown() {
     rm -rf foo
-    rm -rf bar 
+    rm -rf bar
     rm -f "$HOME/.aspect/cli/config.yaml"
 }
 
 @test 'preset query' {
     mkdir -p foo
-    cat > foo/BUILD << 'EOF'
+    cat >foo/BUILD <<'EOF'
 genrule(
     name = "foo",
     outs = ["foo.txt"],
     cmd = "touch $@",
 )
 EOF
-    cat > "$HOME/.aspect/cli/config.yaml" << 'EOF'
+    cat >"$HOME/.aspect/cli/config.yaml" <<'EOF'
 query:
   presets:
     foo:
@@ -43,7 +43,7 @@ EOF
 
 @test 'passthrough query' {
     mkdir -p bar
-    cat > bar/BUILD << 'EOF'
+    cat >bar/BUILD <<'EOF'
 genrule(
     name = "bar",
     outs = ["bar.txt"],
@@ -66,7 +66,7 @@ EOF
 
 @test 'passthrough cquery' {
     mkdir -p bar
-    cat > bar/BUILD << 'EOF'
+    cat >bar/BUILD <<'EOF'
 genrule(
     name = "bar",
     outs = ["bar.txt"],
@@ -89,7 +89,7 @@ EOF
 
 @test 'passthrough aquery' {
     mkdir -p bar
-    cat > bar/BUILD << 'EOF'
+    cat >bar/BUILD <<'EOF'
 genrule(
     name = "bar",
     outs = ["bar.txt"],
