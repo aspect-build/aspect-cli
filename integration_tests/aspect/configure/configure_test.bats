@@ -40,7 +40,7 @@ teardown() {
 }
 
 @test 'aspect configure js' {
-    cat > "$HOME/.aspect/cli/config.yaml" << 'EOF'
+    cat >"$HOME/.aspect/cli/config.yaml" <<'EOF'
 configure:
   languages:
     javascript: true
@@ -59,7 +59,7 @@ EOF
 }
 
 @test 'aspect configure js --mode=diff' {
-    cat > "$HOME/.aspect/cli/config.yaml" << 'EOF'
+    cat >"$HOME/.aspect/cli/config.yaml" <<'EOF'
 configure:
   languages:
     javascript: true
@@ -77,7 +77,7 @@ EOF
 }
 
 @test 'aspect configure enable go' {
-    cat > "$HOME/.aspect/cli/config.yaml" << 'EOF'
+    cat >"$HOME/.aspect/cli/config.yaml" <<'EOF'
 configure:
   languages:
     go: true
@@ -91,7 +91,7 @@ EOF
 }
 
 @test 'aspect configure enable kotlin' {
-    cat > "$HOME/.aspect/cli/config.yaml" << 'EOF'
+    cat >"$HOME/.aspect/cli/config.yaml" <<'EOF'
 configure:
   languages:
     kotlin: true
@@ -105,7 +105,7 @@ EOF
 }
 
 @test 'aspect configure enable protobuf' {
-    cat > "$HOME/.aspect/cli/config.yaml" << 'EOF'
+    cat >"$HOME/.aspect/cli/config.yaml" <<'EOF'
 configure:
   languages:
     protobuf: true

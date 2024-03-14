@@ -11,7 +11,7 @@ teardown() {
 }
 
 @test 'should download and reenter aspect cli version specified in bazeliskrc' {
-    cat > .bazeliskrc << 'EOF'
+    cat >.bazeliskrc <<'EOF'
 BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
 USE_BAZEL_VERSION=aspect/5.8.19
 EOF
@@ -33,7 +33,7 @@ EOF
 }
 
 @test 'exit code from reentrant aspect cli should be progated to parent' {
-    cat > .bazeliskrc << 'EOF'
+    cat >.bazeliskrc <<'EOF'
 BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
 USE_BAZEL_VERSION=aspect/5.8.19
 EOF
@@ -44,7 +44,7 @@ EOF
 }
 
 @test 'non-one exit code from reentrant aspect cli should be progated to parent' {
-    cat > .bazeliskrc << 'EOF'
+    cat >.bazeliskrc <<'EOF'
 BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
 USE_BAZEL_VERSION=aspect/5.8.19
 EOF

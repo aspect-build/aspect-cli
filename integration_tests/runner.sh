@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-IFS=':' read -ra LIBS <<< "$BATS_LIB_PATH"
+IFS=':' read -ra LIBS <<<"$BATS_LIB_PATH"
 
 NEW_LIBS=()
 for RAW_LIB_PATH in "${LIBS[@]}"; do

@@ -13,7 +13,7 @@ teardown() {
 }
 
 @test 'flags should work' {
-    cat > BUILD.bazel << 'EOF'
+    cat >BUILD.bazel <<'EOF'
 genrule(
     name = "foo",
     outs = ["foo.txt"],
@@ -27,7 +27,7 @@ EOF
 }
 
 @test 'mixing flags with --aspect: should work' {
-    cat > BUILD.bazel << 'EOF'
+    cat >BUILD.bazel <<'EOF'
 genrule(
     name = "foo",
     outs = ["foo.txt"],
@@ -41,7 +41,7 @@ EOF
 }
 
 @test 'lock_version flag should prevent downloading and running bazeliskrc version' {
-    cat > .bazeliskrc << 'EOF'
+    cat >.bazeliskrc <<'EOF'
 BAZELISK_BASE_URL=https://static.aspect.build/aspect
 USE_BAZEL_VERSION=aspect/1.2.3
 EOF
@@ -56,7 +56,7 @@ EOF
 }
 
 @test 'lock_version flag should prevent downloading and running config version' {
-    cat > version-config.yaml << 'EOF'
+    cat >version-config.yaml <<'EOF'
 version: 1.2.3
 EOF
 
@@ -70,7 +70,7 @@ EOF
 }
 
 @test '--[no]able flags should work' {
-    cat > BUILD.bazel << 'EOF'
+    cat >BUILD.bazel <<'EOF'
 genrule(
     name = "foo",
     outs = ["foo.txt"],
@@ -128,7 +128,7 @@ EOF
     run aspect info
     assert_success
     refute_output --partial "BINDIR:" "COMPILATION_MODE:" "GENDIR:"
-    echo "info --show_make_env" > .bazelrc
+    echo "info --show_make_env" >.bazelrc
 
     # --startup_flag=<value>
     run aspect --bazelrc=.bazelrc info
@@ -143,11 +143,11 @@ EOF
 
 @test 'run command should not process args after --' {
     touch "$HOME/.aspect/cli/config.yaml"
-    cat > test.sh << 'EOF'
+    cat >test.sh <<'EOF'
 echo $@
 EOF
     chmod +x test.sh
-    cat > BUILD.bazel << 'EOF'
+    cat >BUILD.bazel <<'EOF'
 sh_binary(
     name = "bin",
     srcs = ["test.sh"],
@@ -194,7 +194,7 @@ EOF
     assert_success
     refute_output --partial "WARNING: Running Bazel server needs to be killed, because the startup options are different."
 
-    echo "startup --noidle_server_tasks" > .bazelrc
+    echo "startup --noidle_server_tasks" >.bazelrc
 
     run aspect info
     assert_success

@@ -31,7 +31,7 @@ setup() {
 }
 
 @test 'aspect help info-keys' {
-    run aspect help info-keys 
+    run aspect help info-keys
     assert_output --partial "bazel-bin"
 }
 
