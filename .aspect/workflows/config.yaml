@@ -1,12 +1,13 @@
 # See https://docs.aspect.build/v/workflows/config
 ---
+queue: aspect-cli-default
 tasks:
   - format:
-      queue: aspect-small-amd64
+      queue: aspect-cli-small
   - buildifier:
-      queue: aspect-small-arm64
+      queue: aspect-cli-small-graviton
   - configure:
-      queue: aspect-small-arm64
+      queue: aspect-cli-small-graviton
   - test:
       hooks:
         - type: before_task
@@ -26,3 +27,5 @@ tasks:
             only_on_change: false
             branches:
               - main
+  - warming:
+      queue: aspect-cli-warming
