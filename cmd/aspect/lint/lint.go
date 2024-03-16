@@ -46,11 +46,7 @@ func NewCmd(streams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel
 			lint.New(streams, bzl).Run,
 		),
 	}
-
-	cmd.Flags().Bool("fix", false, "Apply patch fixes for lint errors")
-	cmd.Flags().Bool("diff", false, "Output patch fixes for lint errors")
-	cmd.Flags().Bool("report", true, "Output lint reports")
-	cmd.Flags().String("output", "text", "Format for output of lint reports, either 'text' or 'sarif'")
+	lint.AddFlags(cmd.Flags())
 
 	return cmd
 }

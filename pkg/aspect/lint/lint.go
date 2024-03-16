@@ -40,6 +40,7 @@ import (
 	"github.com/reviewdog/errorformat/fmts"
 	"github.com/reviewdog/errorformat/writer"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"golang.org/x/sync/errgroup"
 )
@@ -92,6 +93,63 @@ func New(
 	}
 }
 
+func AddFlags(flags *pflag.FlagSet) {
+	flags.Bool("fix", false, "Apply patch fixes for lint errors")
+	flags.Bool("diff", false, "Output patch fixes for lint errors")
+	flags.Bool("report", true, "Output lint reports")
+	flags.String("output", "text", "Format for output of lint reports, either 'text' or 'sarif'")
+}
+
+// TODO: hoist this to a flags package so it can be used by other commands that require this functionality
+func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, error) {
+	flagsArgs := make([]string, 0, len(args))
+	otherArgs := make([]string, 0, len(args))
+
+	for len(args) > 0 {
+		s := args[0]
+		args = args[1:]
+		if len(s) == 0 || s[0] != '-' || len(s) == 1 {
+			otherArgs = append(otherArgs, s)
+			continue
+		}
+
+		name := s[1:]
+		if s[1] == '-' {
+			if len(s) == 2 { // "--" terminates the flags
+				otherArgs = append(otherArgs, args...)
+				break
+			}
+			// long arg with double dash
+			name = s[2:]
+		}
+		if len(name) == 0 || name[0] == '-' || name[0] == '=' {
+			return nil, nil, fmt.Errorf("bad flag syntax: %s", s)
+		}
+		split := strings.SplitN(name, "=", 2)
+		name = split[0]
+		flag := flags.Lookup(name)
+		if flag == nil {
+			otherArgs = append(otherArgs, s)
+		} else if len(split) == 2 {
+			// '-f=arg' or '--flag=arg'
+			flagsArgs = append(flagsArgs, s)
+		} else if flag.NoOptDefVal != "" {
+			// '-f' or '--flag' (arg was optional)
+			flagsArgs = append(flagsArgs, s)
+		} else if len(args) > 0 {
+			// '-f arg' or '--flag arg'
+			flagsArgs = append(flagsArgs, s)
+			flagsArgs = append(flagsArgs, args[0])
+			args = args[1:]
+		} else {
+			// '-f' or '--flag' (arg was required)
+			return nil, nil, fmt.Errorf("flag needs an argument: %s", s)
+		}
+	}
+
+	return flagsArgs, otherArgs, nil
+}
+
 func (runner *Linter) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
 	linters := viper.GetStringSlice("lint.aspects")
 
@@ -107,13 +165,24 @@ lint:
 		return nil
 	}
 
+	// Get values of lint command specific flags
 	applyFix, _ := cmd.Flags().GetBool("fix")
 	printDiff, _ := cmd.Flags().GetBool("diff")
 	printReport, _ := cmd.Flags().GetBool("report")
 	output, _ := cmd.Flags().GetString("output")
 
+	// Separate out the lint command specific flags from the list of args to
+	// pass to `bazel build`
+	lintFlagSet := pflag.NewFlagSet("lint", pflag.ContinueOnError)
+	AddFlags(lintFlagSet)
+	_, bazelArgs, err := separateFlags(lintFlagSet, args)
+	if err != nil {
+		return fmt.Errorf("failed to parse lint flags: %w", err)
+	}
+
+	// Construct the `bazel build` command
 	bazelCmd := []string{"build"}
-	bazelCmd = append(bazelCmd, args...)
+	bazelCmd = append(bazelCmd, bazelArgs...)
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--aspects=%s", strings.Join(linters, ",")))
 
 	outputGroups := []string{}
@@ -154,7 +223,7 @@ lint:
 		besBackend.RegisterSubscriber(lintBEPHandler.BEPEventCallback)
 	}
 
-	err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
+	err = runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 
 	// Wait for completion and return the first error (if any)
 	wgErr := handleResultsErrgroup.Wait()
