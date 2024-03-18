@@ -18,9 +18,9 @@ http_archive(
 
 http_archive(
     name = "aspect_rules_lint",
-    sha256 = "6e32df708b40ea8c6d4482eeaf8fd6afaa8798d0028654ba25b667b5aee5707c",
-    strip_prefix = "rules_lint-0.7.0",
-    url = "https://github.com/aspect-build/rules_lint/releases/download/v0.7.0/rules_lint-v0.7.0.tar.gz",
+    sha256 = "07dd6258894757e44db1a5dd3650731c1432cad7795afdaa6d945d4ba3b84f68",
+    strip_prefix = "rules_lint-0.14.2",
+    url = "https://github.com/aspect-build/rules_lint/releases/download/v0.14.2/rules_lint-v0.14.2.tar.gz",
 )
 
 http_archive(
@@ -242,16 +242,16 @@ load("@buildifier_prebuilt//:defs.bzl", "buildifier_prebuilt_register_toolchains
 
 buildifier_prebuilt_register_toolchains()
 
-# Use whichever formatter binaries you need:
-load(
-    "@aspect_rules_lint//format:repositories.bzl",
-    "fetch_shfmt",
-    "fetch_terraform",
+load("@aspect_rules_lint//format:repositories.bzl", "rules_lint_dependencies")
+
+rules_lint_dependencies()
+
+load("@rules_multitool//multitool:multitool.bzl", "multitool")
+
+multitool(
+    name = "multitool",
+    lockfile = "@aspect_rules_lint//format:multitool.lock.json",
 )
-
-fetch_shfmt()
-
-fetch_terraform()
 
 load("//.aspect/workflows:deps.bzl", "fetch_workflows_deps")
 
