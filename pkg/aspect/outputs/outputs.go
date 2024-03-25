@@ -19,6 +19,7 @@ package outputs
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -44,17 +45,42 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 		return err
 	}
 
-	if len(nonFlags) < 1 {
-		return fmt.Errorf("a query expression is required as the first argument to outputs command")
+	// Test to see if the command has been passed the `--query_file` Bazel flag.
+	// There is no short hand version of this flag, so the single check is fine.
+	hasQueryFileBazelFlag := false
+	for _, bazelFlag := range bazelFlags {
+		if strings.HasPrefix(bazelFlag, "--query_file") {
+			hasQueryFileBazelFlag = true
+			break
+		}
 	}
 
-	query := nonFlags[0]
-
+	// Query will be empty string when supplying a query via a query file.
+	// The code in `bzl.Aquery` will filter that.
+	var query string
 	var mnemonicFilter string
-	if len(nonFlags) == 2 {
-		mnemonicFilter = nonFlags[1]
-	} else if len(nonFlags) > 2 {
-		return fmt.Errorf("expecting a maximum of 2 arguments to outputs command but got %v", len(nonFlags))
+	numNonFlags := len(nonFlags)
+
+	if hasQueryFileBazelFlag {
+		// We may have a single arg that is the mnemonic filter, or none.
+		if numNonFlags == 1 {
+			// The first should be the mnemonic
+			mnemonicFilter = nonFlags[0]
+		} else if numNonFlags > 1 {
+			return fmt.Errorf("expecting a maximum of 1 argument to outputs when using --query_file, got %v", numNonFlags)
+		}
+	} else {
+		// No use of `--query_file`, see what args we do have.
+		if numNonFlags < 1 {
+			return fmt.Errorf("a query expression is required as the first argument to outputs command")
+		}
+		query = nonFlags[0]
+
+		if numNonFlags == 2 {
+			mnemonicFilter = nonFlags[1]
+		} else if numNonFlags > 2 {
+			return fmt.Errorf("expecting a maximum of 2 arguments to outputs command but got %v", numNonFlags)
+		}
 	}
 
 	agc, err := runner.bzl.AQuery(query, bazelFlags)

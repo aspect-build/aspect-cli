@@ -280,8 +280,11 @@ func (b *bazel) AQuery(query string, bazelFlags []string) (*analysis.ActionGraph
 		cmd := []string{"aquery"}
 		cmd = append(cmd, bazelFlags...)
 		cmd = append(cmd, "--output=proto")
-		cmd = append(cmd, "--")
-		cmd = append(cmd, query)
+
+		if query != "" {
+			cmd = append(cmd, "--")
+			cmd = append(cmd, query)
+		}
 		err := b.RunCommand(streams, nil, cmd...)
 		bazelErrs <- err
 	}()
