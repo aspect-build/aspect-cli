@@ -116,8 +116,8 @@ func addFlagToFlagSet(flag *flags.FlagInfo, flagSet *pflag.FlagSet, hidden bool)
 // the special startup "command" set). These are used later by SeparateBazelFlags
 // which is called by InitializeStartUp flags and some special-case commands
 // such as query, cquery and aquery.
-func (b *bazel) InitializeBazelFlags() error {
-	flags, err := b.Flags()
+func (b *bazel) InitializeBazelFlags(version string) error {
+	flags, err := b.Flags(version)
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func (b *bazel) InitializeBazelFlags() error {
 
 // AddBazelFlags will process the configured cobra commands and add bazel
 // flags to those commands.
-func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
+func (b *bazel) AddBazelFlags(cmd *cobra.Command, version string) error {
 	completionCommands := make(map[string]*cobra.Command)
 
 	commands := make(map[string]*cobra.Command)
@@ -146,7 +146,7 @@ func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
 		commands[name] = c
 	}
 
-	flags, err := b.Flags()
+	flags, err := b.Flags(version)
 	if err != nil {
 		return err
 	}

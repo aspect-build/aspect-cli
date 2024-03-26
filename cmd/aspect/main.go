@@ -50,7 +50,7 @@ func main() {
 	root.HandleVersionFlags(streams, os.Args[1:], bzl)
 
 	// Re-enter another aspect if version running is not the configured version
-	reentered, err := bzl.HandleReenteringAspect(streams, os.Args[1:], root.CheckAspectLockVersionFlag(os.Args[1:]))
+	bazelVersion, reentered, err := bzl.HandleReenteringAspect(streams, os.Args[1:], root.CheckAspectLockVersionFlag(os.Args[1:]))
 	if reentered {
 		if err != nil {
 			aspecterrors.HandleError(err)
@@ -58,7 +58,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	err = bzl.InitializeBazelFlags()
+	err = bzl.InitializeBazelFlags(bazelVersion)
 	if err != nil {
 		aspecterrors.HandleError(err)
 	}
@@ -69,12 +69,12 @@ func main() {
 		aspecterrors.HandleError(err)
 	}
 
-	if err = command(bzl, streams, args, startupFlags); err != nil {
+	if err = command(bzl, bazelVersion, streams, args, startupFlags); err != nil {
 		aspecterrors.HandleError(err)
 	}
 }
 
-func command(bzl bazel.Bazel, streams ioutils.Streams, args []string, startupFlags []string) error {
+func command(bzl bazel.Bazel, version string, streams ioutils.Streams, args []string, startupFlags []string) error {
 
 	pluginsConfig := viper.Get("plugins")
 	pluginSystem := system.NewPluginSystem()
@@ -90,7 +90,7 @@ func command(bzl bazel.Bazel, streams ioutils.Streams, args []string, startupFla
 	cmd := root.NewDefaultCmd(pluginSystem)
 
 	// Run this command after all bazel verbs have been added to "cmd".
-	if err := bzl.AddBazelFlags(cmd); err != nil {
+	if err := bzl.AddBazelFlags(cmd, version); err != nil {
 		return err
 	}
 

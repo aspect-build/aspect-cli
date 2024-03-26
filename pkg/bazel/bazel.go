@@ -58,12 +58,12 @@ type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string, bazelFlags []string) (*analysis.ActionGraphContainer, error)
 	BazelDashDashVersion() (string, error)
-	HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error)
+	HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (string, bool, error)
 	RunCommand(streams ioutils.Streams, wd *string, command ...string) error
-	InitializeBazelFlags() error
-	Flags() (map[string]*flags.FlagInfo, error)
+	InitializeBazelFlags(version string) error
+	Flags(version string) (map[string]*flags.FlagInfo, error)
 	AbsPathRelativeToWorkspace(relativePath string) (string, error)
-	AddBazelFlags(cmd *cobra.Command) error
+	AddBazelFlags(cmd *cobra.Command, version string) error
 }
 
 type bazel struct {
@@ -131,23 +131,23 @@ func scrubEnvOfBazeliskAspectBootstrap() {
 
 // Check if we should re-enter a different version and/or tier of the Aspect CLI and re-enter if we should.
 // Error is returned if version and/or tier are misconfigured in the Aspect CLI config.
-func (b *bazel) HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error) {
+func (b *bazel) HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (string, bool, error) {
 	bazelisk := NewBazelisk(b.workspaceRoot, true)
 
 	// Calling bazelisk.getBazelVersion() has the side-effect of setting AspectShouldReenter.
 	// TODO: this pattern could get cleaned up so it does not rely on the side-effect
-	_, _, err := bazelisk.getBazelVersion()
+	version, _, err := bazelisk.getBazelVersion()
 	if err != nil {
-		return false, err
+		return version, false, err
 	}
 
 	if bazelisk.AspectShouldReenter && !aspectLockVersion {
 		repos := createRepositories()
 		err := bazelisk.Run(args, repos, streams, b.env, nil)
-		return true, err
+		return version, true, err
 	}
 
-	return false, nil
+	return version, false, nil
 }
 
 func GetAspectVersions() ([]string, error) {
@@ -188,7 +188,7 @@ func InitializeStartupFlags(args []string) ([]string, []string, error) {
 }
 
 // Flags fetches the metadata for Bazel's command line flag via `bazel help flags-as-proto`
-func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
+func (b *bazel) Flags(version string) (map[string]*flags.FlagInfo, error) {
 	if allFlags != nil {
 		return allFlags, nil
 	}
@@ -199,54 +199,72 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user cache dir: %w", err)
 	}
-	tmpdir := path.Join(userCacheDir, "aspect", "cli-flags-as-proto")
-	err = os.MkdirAll(tmpdir, os.ModePerm)
+
+	helpProtoDir := path.Join(userCacheDir, "aspect", version)
+	err = os.MkdirAll(helpProtoDir, os.ModePerm)
 	if err != nil {
-		return nil, fmt.Errorf("failed write create directory %s: %w", tmpdir, err)
-	}
-	err = os.WriteFile(path.Join(tmpdir, "WORKSPACE"), []byte{}, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed write WORKSPACE file in %s: %w", tmpdir, err)
-	}
-	err = os.WriteFile(path.Join(tmpdir, "MODULE.bazel"), []byte{}, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed write MODULE.bazel file in %s: %w", tmpdir, err)
+		return nil, fmt.Errorf("failed write create directory %s: %w", helpProtoDir, err)
 	}
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	streams := ioutils.Streams{
-		Stdin:  os.Stdin,
-		Stdout: &stdout,
-		Stderr: &stderr,
-	}
-	stdoutDecoder := base64.NewDecoder(base64.StdEncoding, &stdout)
-
-	bazelErrs := make(chan error, 1)
-	defer close(bazelErrs)
-
-	go func(wd string) {
-		// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
-		// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
-		err := b.RunCommand(streams, &wd, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
-		bazelErrs <- err
-	}(tmpdir)
-
-	err = <-bazelErrs
-
-	if err != nil {
-		var exitErr *aspecterrors.ExitError
-		if errors.As(err, &exitErr) {
-			// Dump the `stderr` when Bazel executed and exited non-zero
-			return nil, fmt.Errorf("failed to get bazel flags (running in %s): %w\nstderr:\n%s", tmpdir, err, stderr.String())
-		} else {
-			return nil, fmt.Errorf("failed to get bazel flags: %w", err)
+	helpProtoFile := path.Join(helpProtoDir, "flags.pb")
+	helpProtoBytes, err := os.ReadFile(helpProtoFile)
+	if os.IsNotExist(err) {
+		tmpdir := path.Join(userCacheDir, "aspect", "cli-flags-as-proto")
+		err = os.MkdirAll(tmpdir, os.ModePerm)
+		if err != nil {
+			return nil, fmt.Errorf("failed write create directory %s: %w", tmpdir, err)
 		}
-	}
+		err = os.WriteFile(path.Join(tmpdir, "WORKSPACE"), []byte{}, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("failed write WORKSPACE file in %s: %w", tmpdir, err)
+		}
+		err = os.WriteFile(path.Join(tmpdir, "MODULE.bazel"), []byte{}, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("failed write MODULE.bazel file in %s: %w", tmpdir, err)
+		}
 
-	helpProtoBytes, err := io.ReadAll(stdoutDecoder)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read bazel flags: %w", err)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		streams := ioutils.Streams{
+			Stdin:  os.Stdin,
+			Stdout: &stdout,
+			Stderr: &stderr,
+		}
+		stdoutDecoder := base64.NewDecoder(base64.StdEncoding, &stdout)
+
+		bazelErrs := make(chan error, 1)
+		defer close(bazelErrs)
+
+		go func(wd string) {
+			// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
+			// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
+			err := b.RunCommand(streams, &wd, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
+			bazelErrs <- err
+		}(tmpdir)
+
+		err = <-bazelErrs
+
+		if err != nil {
+			var exitErr *aspecterrors.ExitError
+			if errors.As(err, &exitErr) {
+				// Dump the `stderr` when Bazel executed and exited non-zero
+				return nil, fmt.Errorf("failed to get bazel flags (running in %s): %w\nstderr:\n%s", tmpdir, err, stderr.String())
+			} else {
+				return nil, fmt.Errorf("failed to get bazel flags: %w", err)
+			}
+		}
+
+		helpProtoBytes, err = io.ReadAll(stdoutDecoder)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read bazel flags: %w", err)
+		}
+		// "latest" is not deterministic; do not cache.
+		if version != "latest" {
+			err = os.WriteFile(helpProtoFile, helpProtoBytes, 0644)
+			if err != nil {
+				return nil, fmt.Errorf("failed to cache bazel flags: %w", err)
+			}
+		}
 	}
 
 	flagCollection := &flags.FlagCollection{}
