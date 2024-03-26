@@ -258,9 +258,12 @@ func (b *bazel) Flags(version string) (map[string]*flags.FlagInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read bazel flags: %w", err)
 		}
-		err = os.WriteFile(helpProtoFile, helpProtoBytes, 0644)
-		if err != nil {
-			return nil, fmt.Errorf("failed to cache bazel flags: %w", err)
+		// "latest" is not deterministic; do not cache.
+		if version != "latest" {
+			err = os.WriteFile(helpProtoFile, helpProtoBytes, 0644)
+			if err != nil {
+				return nil, fmt.Errorf("failed to cache bazel flags: %w", err)
+			}
 		}
 	}
 
