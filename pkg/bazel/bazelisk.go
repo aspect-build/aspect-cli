@@ -308,6 +308,7 @@ func isAspectVersionMismatch(aspectRuntime *aspectRuntimeInfo, version string, b
 	return aspectRuntime.Version != version || aspectRuntime.BaseUrl != baseUrl
 }
 
+// getBazelVersion returns the version and the base URL to download from.
 func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	// The logic in upstream Bazelisk v1.15.0
 	// (https://github.com/bazelbuild/bazelisk/blob/c9081741bc1420d601140a4232b5c48872370fdc/core/core.go#L318)

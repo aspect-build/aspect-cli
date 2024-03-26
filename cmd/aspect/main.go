@@ -18,7 +18,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"time"
 
 	"aspect.build/cli/cmd/aspect/root"
 	"aspect.build/cli/pkg/aspect/root/config"
@@ -30,6 +32,7 @@ import (
 )
 
 func main() {
+	start := time.Now()
 	// Convenience for local development: under `bazel run <aspect binary target>` respect the
 	// users working directory, don't run in the execroot
 	if wd, exists := os.LookupEnv("BUILD_WORKING_DIRECTORY"); exists {
@@ -50,31 +53,38 @@ func main() {
 	root.HandleVersionFlags(streams, os.Args[1:], bzl)
 
 	// Re-enter another aspect if version running is not the configured version
-	reentered, err := bzl.HandleReenteringAspect(streams, os.Args[1:], root.CheckAspectLockVersionFlag(os.Args[1:]))
+	bazelVersion, reentered, err := bzl.HandleReenteringAspect(streams, os.Args[1:], root.CheckAspectLockVersionFlag(os.Args[1:]))
 	if reentered {
+		fmt.Println("REENTER")
 		if err != nil {
 			aspecterrors.HandleError(err)
 		}
 		os.Exit(0)
 	}
 
-	err = bzl.InitializeBazelFlags()
+	fmt.Println("0 ELAPSED", time.Since(start))
+
+	err = bzl.InitializeBazelFlags(bazelVersion)
 	if err != nil {
 		aspecterrors.HandleError(err)
 	}
 
+	fmt.Println("A ELAPSED", time.Since(start))
 	args, startupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
 
 	if err != nil {
 		aspecterrors.HandleError(err)
 	}
 
-	if err = command(bzl, streams, args, startupFlags); err != nil {
+	fmt.Println("AA ELAPSED", time.Since(start))
+	if err = command(bzl, bazelVersion, streams, args, startupFlags); err != nil {
 		aspecterrors.HandleError(err)
 	}
+
+	fmt.Println("BB ELAPSED", time.Since(start))
 }
 
-func command(bzl bazel.Bazel, streams ioutils.Streams, args []string, startupFlags []string) error {
+func command(bzl bazel.Bazel, version string, streams ioutils.Streams, args []string, startupFlags []string) error {
 
 	pluginsConfig := viper.Get("plugins")
 	pluginSystem := system.NewPluginSystem()
@@ -90,7 +100,7 @@ func command(bzl bazel.Bazel, streams ioutils.Streams, args []string, startupFla
 	cmd := root.NewDefaultCmd(pluginSystem)
 
 	// Run this command after all bazel verbs have been added to "cmd".
-	if err := bzl.AddBazelFlags(cmd); err != nil {
+	if err := bzl.AddBazelFlags(cmd, version); err != nil {
 		return err
 	}
 
