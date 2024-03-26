@@ -26,7 +26,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"aspect.build/cli/bazel/analysis"
 	"aspect.build/cli/bazel/flags"
@@ -190,8 +189,6 @@ func InitializeStartupFlags(args []string) ([]string, []string, error) {
 
 // Flags fetches the metadata for Bazel's command line flag via `bazel help flags-as-proto`
 func (b *bazel) Flags(version string) (map[string]*flags.FlagInfo, error) {
-	start := time.Now()
-
 	if allFlags != nil {
 		return allFlags, nil
 	}
@@ -225,7 +222,6 @@ func (b *bazel) Flags(version string) (map[string]*flags.FlagInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed write MODULE.bazel file in %s: %w", tmpdir, err)
 		}
-		fmt.Println("Flags elapsed 1", time.Since(start))
 
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
@@ -247,7 +243,6 @@ func (b *bazel) Flags(version string) (map[string]*flags.FlagInfo, error) {
 		}(tmpdir)
 
 		err = <-bazelErrs
-		fmt.Println("Flags elapsed 2", time.Since(start))
 
 		if err != nil {
 			var exitErr *aspecterrors.ExitError
@@ -269,20 +264,16 @@ func (b *bazel) Flags(version string) (map[string]*flags.FlagInfo, error) {
 		}
 	}
 
-	fmt.Println("Flags elapsed 3", time.Since(start))
-
 	flagCollection := &flags.FlagCollection{}
 	if err := proto.Unmarshal(helpProtoBytes, flagCollection); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal bazel flags: %w", err)
 	}
-	fmt.Println("Flags elapsed 4", time.Since(start))
 
 	allFlags = make(map[string]*flags.FlagInfo)
 
 	for i := range flagCollection.FlagInfos {
 		allFlags[*flagCollection.FlagInfos[i].Name] = flagCollection.FlagInfos[i]
 	}
-	fmt.Println("Flags elapsed 5", time.Since(start))
 
 	return allFlags, nil
 }

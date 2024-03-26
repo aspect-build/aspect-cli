@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"aspect.build/cli/bazel/flags"
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
@@ -118,7 +117,6 @@ func addFlagToFlagSet(flag *flags.FlagInfo, flagSet *pflag.FlagSet, hidden bool)
 // which is called by InitializeStartUp flags and some special-case commands
 // such as query, cquery and aquery.
 func (b *bazel) InitializeBazelFlags(version string) error {
-	start := time.Now()
 	flags, err := b.Flags(version)
 	if err != nil {
 		return err
@@ -134,7 +132,6 @@ func (b *bazel) InitializeBazelFlags(version string) error {
 			addFlagToFlagSet(flag, flagSet, true)
 		}
 	}
-	fmt.Println("Flags added", time.Since(start))
 	return nil
 }
 
