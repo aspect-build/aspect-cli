@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package modquery
+package mod
 
 import (
 	"context"
@@ -25,20 +25,20 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 )
 
-type ModQuery struct {
+type Mod struct {
 	ioutils.Streams
 	bzl bazel.Bazel
 }
 
-func New(streams ioutils.Streams, bzl bazel.Bazel) *ModQuery {
-	return &ModQuery{
+func New(streams ioutils.Streams, bzl bazel.Bazel) *Mod {
+	return &Mod{
 		Streams: streams,
 		bzl:     bzl,
 	}
 }
 
-func (runner *ModQuery) Run(ctx context.Context, _ *cobra.Command, args []string) error {
-	bazelCmd := []string{"modquery"}
+func (runner *Mod) Run(ctx context.Context, _ *cobra.Command, args []string) error {
+	bazelCmd := []string{"mod"}
 	bazelCmd = append(bazelCmd, args...)
 	return runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 }
