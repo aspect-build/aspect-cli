@@ -43,7 +43,7 @@ import (
 	"aspect.build/cli/cmd/aspect/license"
 	"aspect.build/cli/cmd/aspect/lint"
 	"aspect.build/cli/cmd/aspect/mobileinstall"
-	"aspect.build/cli/cmd/aspect/modquery"
+	"aspect.build/cli/cmd/aspect/mod"
 	"aspect.build/cli/cmd/aspect/outputs"
 	"aspect.build/cli/cmd/aspect/print"
 	"aspect.build/cli/cmd/aspect/printaction"
@@ -146,7 +146,7 @@ func NewCmd(
 	cmd.AddCommand(info.NewDefaultCmd())
 	cmd.AddCommand(init_.NewDefaultCmd())
 	cmd.AddCommand(mobileinstall.NewDefaultCmd())
-	cmd.AddCommand(modquery.NewDefaultCmd())
+	cmd.AddCommand(mod.NewDefaultCmd())
 	cmd.AddCommand(print.NewDefaultCmd())
 	cmd.AddCommand(printaction.NewDefaultCmd())
 	cmd.AddCommand(query.NewDefaultCmd())
