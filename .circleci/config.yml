@@ -128,6 +128,10 @@ jobs:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Configure Workflows
@@ -135,12 +139,20 @@ jobs:
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Prepare archive directories
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health checks
@@ -148,6 +160,10 @@ jobs:
     - run:
         command: rosetta run branch_freshness
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Branch Freshness
@@ -155,6 +171,10 @@ jobs:
     - run:
         command: rosetta run buildifier --workspace << parameters.workspace >>
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Buildifier
@@ -164,6 +184,10 @@ jobs:
     - run:
         command: rosetta run finalization
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Finalization
@@ -187,6 +211,10 @@ jobs:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Configure Workflows
@@ -194,12 +222,20 @@ jobs:
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Prepare archive directories
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health checks
@@ -207,6 +243,10 @@ jobs:
     - run:
         command: rosetta run branch_freshness
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Branch Freshness
@@ -214,6 +254,10 @@ jobs:
     - run:
         command: rosetta run configure --workspace << parameters.workspace >>
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Configure
@@ -223,6 +267,10 @@ jobs:
     - run:
         command: rosetta run finalization
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Finalization
@@ -246,6 +294,10 @@ jobs:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Configure Workflows
@@ -253,12 +305,20 @@ jobs:
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Prepare archive directories
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health checks
@@ -266,6 +326,10 @@ jobs:
     - run:
         command: rosetta run branch_freshness
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Branch Freshness
@@ -273,6 +337,10 @@ jobs:
     - run:
         command: rosetta run format --workspace << parameters.workspace >>
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Format
@@ -282,6 +350,10 @@ jobs:
     - run:
         command: rosetta run finalization
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Finalization
@@ -356,6 +428,10 @@ jobs:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Configure Workflows
@@ -363,12 +439,20 @@ jobs:
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Prepare archive directories
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health checks
@@ -376,6 +460,10 @@ jobs:
     - run:
         command: rosetta run branch_freshness
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Branch Freshness
@@ -383,6 +471,10 @@ jobs:
     - run:
         command: rosetta run test --workspace << parameters.workspace >>
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Test
@@ -402,6 +494,10 @@ jobs:
             command: rosetta run delivery_manifest --workspace << parameters.workspace
               >> --data TARGETS_SOURCE=test
             environment:
+              ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+              ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+                >>
+              ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
               ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
               XDG_CACHE_HOME: /mnt/ephemeral/caches
             name: Delivery Manifest
@@ -415,6 +511,10 @@ jobs:
     - run:
         command: rosetta run finalization
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Finalization
@@ -445,6 +545,10 @@ jobs:
     - run:
         command: rosetta run warming --workspace .
         environment:
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
+            >>
+          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Create warming archive for root
