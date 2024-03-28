@@ -34,6 +34,7 @@ Aspect CLI is a better frontend for running bazel
 * [aspect init](aspect_init.md)	 - Create a new Bazel workspace
 * [aspect license](aspect_license.md)	 - Prints the license of this software.
 * [aspect lint](aspect_lint.md)	 - Run configured linters over the dependency graph.
+* [aspect mod](aspect_mod.md)	 - Tools to work with the bzlmod external dependency graph
 * [aspect outputs](aspect_outputs.md)	 - Print paths to declared output files
 * [aspect print](aspect_print.md)	 - Print syntax elements from BUILD files
 * [aspect query](aspect_query.md)	 - Query the dependency graph, ignoring configuration flags
