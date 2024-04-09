@@ -1,4 +1,4 @@
-load "../common.bats"
+load "common.bats"
 
 setup() {
     cd "$TEST_REPO" || exit 1

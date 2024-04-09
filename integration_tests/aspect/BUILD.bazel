@@ -14,34 +14,33 @@ data = [
     "@bazel_6_4_0//:bazel",
 ]
 
-bats_test(
-    name = "flags_test",
-    srcs = ["flags_test.bats"],
-    data = data,
-    env = env,
-    # Bazel-in-bazel requires network
-    tags = ["requires-network"],
-)
+# Tests that call bazel underneath require network for bazel-in-bazel
+[
+    bats_test(
+        name = test + "_test",
+        srcs = [test + "_test.bats"],
+        data = data,
+        env = env,
+        # Bazel-in-bazel requires network
+        tags = ["requires-network"],
+    )
+    for test in [
+        "flags",
+        "lint",
+        "reenter",
+    ]
+]
 
-bats_test(
-    name = "help_test",
-    srcs = ["help_test.bats"],
-    data = data,
-    env = env,
-)
-
-bats_test(
-    name = "reenter_test",
-    srcs = ["reenter_test.bats"],
-    data = data,
-    env = env,
-    # Bazel-in-bazel requires network
-    tags = ["requires-network"],
-)
-
-bats_test(
-    name = "version_test",
-    srcs = ["version_test.bats"],
-    data = data,
-    env = env,
-)
+[
+    bats_test(
+        name = test + "_test",
+        srcs = [test + "_test.bats"],
+        data = data,
+        env = env,
+    )
+    for test in [
+        "configure",
+        "info",
+        "version",
+    ]
+]

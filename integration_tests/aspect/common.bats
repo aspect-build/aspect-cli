@@ -22,6 +22,7 @@ setup_file() {
     echo "$BAZEL_BINARY" >"$TEST_REPO/.bazelversion"
     touch "$TEST_REPO/WORKSPACE"
     touch "$TEST_REPO/MODULE.bazel"
+    echo "common --enable_bzlmod" >>"$TEST_REPO/.bazelrc"
 
     export HOME="${TEST_TMPDIR}/mock-home"
     mkdir "$HOME"
