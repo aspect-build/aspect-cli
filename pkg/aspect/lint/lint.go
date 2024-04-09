@@ -21,14 +21,9 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
-	"path"
-	"path/filepath"
 	"strings"
-	"time"
 
-	"aspect.build/cli/bazel/buildeventstream"
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/bazel/workspace"
@@ -36,6 +31,7 @@ import (
 	"aspect.build/cli/pkg/plugin/system/bep"
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 	"github.com/fatih/color"
+	"github.com/manifoldco/promptui"
 	"github.com/reviewdog/errorformat"
 	"github.com/reviewdog/errorformat/fmts"
 	"github.com/reviewdog/errorformat/writer"
@@ -50,38 +46,12 @@ type Linter struct {
 	bzl bazel.Bazel
 }
 
-type LintBEPHandler struct {
-	ioutils.Streams
-	ctx                   context.Context
-	report                bool
-	fix                   bool
-	diff                  bool
-	output                string
-	reports               map[string]*buildeventstream.NamedSetOfFiles
-	workspaceRoot         string
-	handleResultsErrgroup *errgroup.Group
-}
-
 // Align with rules_lint
 const (
 	LINT_REPORT_GROUP = "rules_lint_report"
 	LINT_PATCH_GROUP  = "rules_lint_patch"
 	LINT_RESULT_REGEX = ".*aspect_rules_lint.*"
 )
-
-func newLintBEPHandler(ctx context.Context, streams ioutils.Streams, printReport, applyFix, printDiff bool, output string, workspaceRoot string, handleResultsErrgroup *errgroup.Group) *LintBEPHandler {
-	return &LintBEPHandler{
-		Streams:               streams,
-		ctx:                   ctx,
-		report:                printReport,
-		fix:                   applyFix,
-		diff:                  printDiff,
-		output:                output,
-		reports:               make(map[string]*buildeventstream.NamedSetOfFiles),
-		workspaceRoot:         workspaceRoot,
-		handleResultsErrgroup: handleResultsErrgroup,
-	}
-}
 
 func New(
 	streams ioutils.Streams,
@@ -151,6 +121,7 @@ func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, err
 }
 
 func (runner *Linter) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
+	isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(flags.AspectInteractiveFlagName)
 	linters := viper.GetStringSlice("lint.aspects")
 
 	if len(linters) == 0 {
@@ -185,13 +156,15 @@ lint:
 	bazelCmd = append(bazelCmd, bazelArgs...)
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--aspects=%s", strings.Join(linters, ",")))
 
+	// optimization: don't request report files in a mode where we don't print them
 	outputGroups := []string{}
-	if applyFix || printDiff {
+	if applyFix || printDiff || isInteractiveMode {
 		outputGroups = append(outputGroups, LINT_PATCH_GROUP)
 	}
 	if printReport {
 		outputGroups = append(outputGroups, LINT_REPORT_GROUP)
 	}
+
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--output_groups=%s", strings.Join(outputGroups, ",")))
 	// TODO: in Bazel 7 this was renamed without the --experimental_ prefix
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--experimental_remote_download_regex='%s'", LINT_RESULT_REGEX))
@@ -204,6 +177,7 @@ lint:
 	// backends https://github.com/bazelbuild/bazel/issues/10908. In the future,
 	// we could build this support into the Aspect CLI and post on that issue
 	// that using the Aspect CLI resolves it.
+	var lintBEPHandler *LintBEPHandler
 	if bep.HasBESBackend(ctx) {
 		besBackend := bep.BESBackendFromContext(ctx)
 		besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
@@ -219,7 +193,7 @@ lint:
 			return fmt.Errorf("failed to find workspace root: %w", err)
 		}
 
-		lintBEPHandler := newLintBEPHandler(handleResultsCtx, runner.Streams, printReport, applyFix, printDiff, output, workspaceRoot, handleResultsErrgroup)
+		lintBEPHandler = newLintBEPHandler(handleResultsCtx, workspaceRoot, handleResultsErrgroup)
 		besBackend.RegisterSubscriber(lintBEPHandler.BEPEventCallback)
 	}
 
@@ -242,67 +216,64 @@ lint:
 		}
 	}
 
-	return err
-}
-
-func (runner *LintBEPHandler) BEPEventCallback(event *buildeventstream.BuildEvent) error {
-	switch event.Payload.(type) {
-
-	case *buildeventstream.BuildEvent_NamedSetOfFiles:
-		// Assert no collisions
-		namedSetId := event.Id.GetNamedSet().GetId()
-		if runner.reports[namedSetId] != nil {
-			return fmt.Errorf("duplicate file set id: %s", namedSetId)
+	// Bazel is done running, so stdout is now safe for us to print the results
+	applyAll := false
+	applyNone := false
+	for label, result := range lintBEPHandler.resultsByLabel {
+		l := label
+		f := result.reportFile
+		content, err := lintBEPHandler.readBEPFile(f)
+		if err != nil {
+			return err
 		}
+		if applyFix || printDiff {
+			runner.patchLintResult(label, content, applyFix, printDiff)
+		}
+		if printReport {
+			switch output {
+			case "text":
+				runner.outputLintResultText(l, content)
+			case "sarif":
+				runner.outputLintResultSarif(l, content, result.linter)
+			default:
+				return fmt.Errorf("unsupported output kind %s", output)
+			}
 
-		// Record report file sets
-		// TODO: are we collecting too much? Don't we need to filter on the "report" output group?
-		runner.reports[namedSetId] = event.GetNamedSetOfFiles()
-
-	case *buildeventstream.BuildEvent_Completed:
-		label := event.Id.GetTargetCompleted().GetLabel()
-
-		for _, outputGroup := range event.GetCompleted().OutputGroup {
-			for _, fileSetId := range outputGroup.FileSets {
-				if fileSet := runner.reports[fileSetId.Id]; fileSet != nil {
-					runner.reports[fileSetId.Id] = nil
-
-					for _, file := range fileSet.GetFiles() {
-						l := label
-						f := file
-						if outputGroup.Name == LINT_PATCH_GROUP {
-							runner.handleResultsErrgroup.Go(func() error {
-								return runner.patchLintResult(l, f, runner.fix, runner.diff)
-							})
-						} else if outputGroup.Name == LINT_REPORT_GROUP && runner.report {
-							switch runner.output {
-							case "text":
-								runner.handleResultsErrgroup.Go(func() error {
-									return runner.outputLintResultText(l, f)
-								})
-							case "sarif":
-								runner.handleResultsErrgroup.Go(func() error {
-									return runner.outputLintResultSarif(l, f)
-								})
-							default:
-								return fmt.Errorf("unsupported output kind %s", runner.output)
-							}
-						}
+			if isInteractiveMode && result.patchFile != nil && !applyNone {
+				var choice string
+				if applyAll {
+					choice = "y"
+				} else {
+					applyFixPrompt := promptui.Prompt{
+						Label:   "Apply fixes? [y]es / [n]o / [A]ll / [N]one",
+						Default: "y",
 					}
+					choice, err = applyFixPrompt.Run()
+					if err != nil {
+						return fmt.Errorf("prompt failed: %v\n", err)
+					}
+				}
+				if strings.HasPrefix(choice, "A") {
+					applyAll = true
+				}
+				if strings.HasPrefix(choice, "N") {
+					applyNone = true
+				}
+				if applyAll || strings.HasPrefix(choice, "y") {
+					patchResult, err := lintBEPHandler.readBEPFile(result.patchFile)
+					if err != nil {
+						return err
+					}
+					runner.patchLintResult(label, patchResult, true, false)
 				}
 			}
 		}
 	}
 
-	return nil
+	return err
 }
 
-func (runner *LintBEPHandler) patchLintResult(label string, f *buildeventstream.File, applyDiff, printDiff bool) error {
-	lintPatch, err := runner.readBEPFile(f)
-	if err != nil {
-		return err
-	}
-
+func (runner *Linter) patchLintResult(label string, lintPatch string, applyDiff, printDiff bool) error {
 	if printDiff {
 		color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "From %s:\n", label)
 		fmt.Fprintf(runner.Streams.Stdout, "%s\n", lintPatch)
@@ -333,41 +304,30 @@ func (runner *LintBEPHandler) patchLintResult(label string, f *buildeventstream.
 			if writeErr != nil {
 				return writeErr
 			}
+			color.New(color.Faint).Fprintf(runner.Streams.Stdout, "Patched %s\n", file.NewName[2:])
 		}
 	}
 
 	return nil
 }
 
-func (runner *LintBEPHandler) outputLintResultText(label string, f *buildeventstream.File) error {
-	lineResult, err := runner.readBEPFile(f)
-	if err != nil {
-		return err
-	}
-
+func (runner *Linter) outputLintResultText(label string, lineResult string) error {
 	lineResult = strings.TrimSpace(lineResult)
 	if len(lineResult) > 0 {
 		color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "From %s:\n", label)
 		fmt.Fprintf(runner.Streams.Stdout, "%s\n", lineResult)
+		fmt.Fprintln(runner.Streams.Stdout, "")
 	}
-
 	return nil
 }
 
-func (runner *LintBEPHandler) outputLintResultSarif(label string, f *buildeventstream.File) error {
-	lineResult, err := runner.readBEPFile(f)
-	if err != nil {
-		return err
-	}
-
-	// Parse the filename convention that rules_lint has for report files.
-	// path/to/linter.target_name.aspect_rules_lint.report -> linter
-	linter := strings.SplitN(filepath.Base(f.Name), ".", 2)[0]
+func (runner *Linter) outputLintResultSarif(label string, lineResult string, linter string) error {
 	var fm []string
 
-	// Switch is on the MNEMONIC declared in rules_lint
+	// NB: Switch is on the MNEMONIC declared in rules_lint
 	switch linter {
-	// TODO: ESLint
+	case "ESLint":
+		fm = fmts.DefinedFmts()["eslint-compact"].Errorformat
 	case "flake8":
 		fm = fmts.DefinedFmts()["flake8"].Errorformat
 	case "PMD":
@@ -420,61 +380,4 @@ func (runner *LintBEPHandler) outputLintResultSarif(label string, f *buildevents
 	}
 
 	return nil
-}
-
-func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) (string, error) {
-	resultsFile := ""
-
-	switch f := file.File.(type) {
-	case *buildeventstream.File_Uri:
-		uri, err := url.Parse(f.Uri)
-		if err != nil {
-			return "", fmt.Errorf("unable to parse URI %s: %v", f.Uri, err)
-		}
-		if uri.Scheme == "file" {
-			resultsFile = filepath.Clean(uri.Path)
-		} else if uri.Scheme == "bytestream" {
-			if strings.HasSuffix(uri.Path, "/0") {
-				// No reason to read an empty results file from disk
-				return "", nil
-			}
-			// Because we set --experimental_remote_download_regex, we can depend on the results file being
-			// in the output tree even when using a remote cache with build without the bytes.
-			resultsFile = path.Join(runner.workspaceRoot, path.Join(file.PathPrefix...), file.Name)
-		} else {
-			return "", fmt.Errorf("unsupported BES file uri %v", f.Uri)
-		}
-	default:
-		return "", fmt.Errorf("unsupported BES file type")
-	}
-
-	start := time.Now()
-	for {
-		// TODO: also check that the bazel remote cache downloader is not still writing
-		// to the results file
-		_, err := os.Stat(resultsFile)
-		if err != nil {
-			// if more than 60s has passed then give up
-			// TODO: make this timeout configurable
-			if time.Since(start) > 60*time.Second {
-				return "", fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
-			}
-		} else {
-			buf, err := os.ReadFile(resultsFile)
-			if err != nil {
-				return "", fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
-			}
-			return string(buf), nil
-		}
-		// we're in a go routine so yield for 100ms and try again
-		// TODO: watch the file system for the file creation instead of polling
-		t := time.NewTimer(time.Millisecond * 100)
-		select {
-		case <-runner.ctx.Done():
-			t.Stop()
-			return "", fmt.Errorf("failed to read lint results file %s: interrupted", resultsFile)
-		case <-t.C:
-		}
-	}
-
 }
