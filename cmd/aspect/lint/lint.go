@@ -33,10 +33,15 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 
 func NewCmd(streams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "lint <target patterns>",
-		Args:    cobra.MinimumNArgs(1),
-		Short:   "Run configured linters over the dependency graph.",
-		Long:    "Run linters and collect the reports they produce. See documentation on https://github.com/aspect-build/rules_lint",
+		Use:   "lint <target patterns>",
+		Args:  cobra.MinimumNArgs(1),
+		Short: "Run configured linters over the dependency graph.",
+		Long: `Run linters and collect the reports they produce.
+
+To setup linters, see the documentation on https://github.com/aspect-build/rules_lint
+
+In addition to flags listed below, flags accepted by the 'bazel build' command are also accepted.
+`,
 		GroupID: "aspect",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{

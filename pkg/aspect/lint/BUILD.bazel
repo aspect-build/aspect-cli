@@ -2,7 +2,10 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "lint",
-    srcs = ["lint.go"],
+    srcs = [
+        "bep.go",
+        "lint.go",
+    ],
     importpath = "aspect.build/cli/pkg/aspect/lint",
     visibility = ["//visibility:public"],
     deps = [
@@ -14,6 +17,7 @@ go_library(
         "//pkg/plugin/system/bep",
         "@com_github_bluekeyes_go_gitdiff//gitdiff",
         "@com_github_fatih_color//:color",
+        "@com_github_manifoldco_promptui//:promptui",
         "@com_github_reviewdog_errorformat//:errorformat",
         "@com_github_reviewdog_errorformat//fmts",
         "@com_github_reviewdog_errorformat//writer",
