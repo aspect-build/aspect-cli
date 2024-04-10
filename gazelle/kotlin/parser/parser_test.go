@@ -45,7 +45,7 @@ import  d.y.*
 import a.B // y
 //z
 
-/* asdf */ import /* asdf */ c./* asdf */D // w
+/* asdf */ import /* asdf */ c.D // w
 import /* fdsa */ d/* asdf */.* // w
 				`,
 		filename: "comments.kt",
