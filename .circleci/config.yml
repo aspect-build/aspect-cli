@@ -158,17 +158,6 @@ jobs:
         name: Agent health checks
         no_output_timeout: 180m
     - run:
-        command: rosetta run branch_freshness
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Branch Freshness
-        no_output_timeout: 180m
-    - run:
         command: rosetta run buildifier --workspace << parameters.workspace >>
         environment:
           ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
@@ -241,17 +230,6 @@ jobs:
         name: Agent health checks
         no_output_timeout: 180m
     - run:
-        command: rosetta run branch_freshness
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Branch Freshness
-        no_output_timeout: 180m
-    - run:
         command: rosetta run configure --workspace << parameters.workspace >>
         environment:
           ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
@@ -322,17 +300,6 @@ jobs:
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health checks
-        no_output_timeout: 180m
-    - run:
-        command: rosetta run branch_freshness
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Branch Freshness
         no_output_timeout: 180m
     - run:
         command: rosetta run format --workspace << parameters.workspace >>
@@ -456,17 +423,6 @@ jobs:
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health checks
-        no_output_timeout: 180m
-    - run:
-        command: rosetta run branch_freshness
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Branch Freshness
         no_output_timeout: 180m
     - run:
         command: rosetta run test --workspace << parameters.workspace >>
