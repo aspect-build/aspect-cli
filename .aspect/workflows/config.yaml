@@ -31,3 +31,5 @@ tasks:
               - main
   - warming:
       queue: aspect-cli-warming
+notifications:
+  github: {}
