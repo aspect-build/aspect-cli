@@ -3,6 +3,8 @@
     "baseUrl": ".",
     "paths": {
       "alias-a": ["../lib/a"],
+      "@badly-scoped-a": ["../lib/a"],
+      "@scoped/*": ["../lib/*"],
       "star/*": ["../lib/*"],
       "multi-c/*": ["../lib/c/first/*", "../lib/c/second/*"],
       "@/*": ["*"],
