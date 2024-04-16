@@ -198,7 +198,85 @@ lockfileVersion: 5.4
 		}
 	})
 
-	t.Run("workspace deps", func(t *testing.T) {
+	t.Run("deps to workspace pkgs (lockfile v5)", func(t *testing.T) {
+		wksps, err := parsePnpmLockDependencies([]byte(`
+lockfileVersion: 5.3
+importers:
+  a:
+    specifiers:
+      '@lib/a': workspace:*
+      '@lib/b': ./lib/a
+      '@lib/c': file:./lib/a
+      '@lib/d': link:./lib/a
+      '@lib/e': workspace:@lib/a@*
+      '@lib/f': workspace:./lib/a
+      '@lib/g': npm:@lib/b@*
+    dependencies:
+      '@lib/a': link:./lib/a
+      '@lib/b': link:./lib/a
+      '@lib/c': link:./lib/a
+      '@lib/d': link:./lib/a
+      '@lib/e': link:./lib/a
+      '@lib/f': link:./lib/a
+      '@lib/g': link:./lib/a
+`,
+		))
+
+		if err != nil {
+			t.Error("Parse failure: ", err)
+		}
+
+		if len(wksps) != 1 || wksps["a"] == nil {
+			t.Error("expected 1 importers, found: ", len(wksps))
+		}
+
+		for _, lib := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+			if wksps["a"]["@lib/"+lib] != "link:./lib/a" {
+				t.Error("expected '@lib/a' dep, found: ", wksps["a"]) //["@lib/"+lib])
+			}
+		}
+	})
+
+	t.Run("deps to workspace pkgs (lockfile v6)", func(t *testing.T) {
+		wksps, err := parsePnpmLockDependencies([]byte(`
+lockfileVersion: '6.1'
+importers:
+  a:
+    dependencies:
+      '@lib/a':
+        specifier: workspace:*
+        version: link:./lib/a
+      '@lib/b':
+        specifier: workspace:*
+        version: link:./lib/a
+      '@lib/c':
+        specifier: link:./lib/a
+        version: link:./lib/a
+      '@lib/d':
+        specifier: ./lib/a
+        version: link:./lib/a
+      '@lib/e':
+        specifier: npm:@lib/a@*
+        version: link:./lib/a
+`,
+		))
+
+		if err != nil {
+			t.Error("Parse failure: ", err)
+		}
+
+		if len(wksps) != 1 || wksps["a"] == nil {
+			t.Error("expected 1 importers, found: ", len(wksps))
+		}
+
+		for _, lib := range []string{"a", "b", "c", "d", "e"} {
+			if wksps["a"]["@lib/"+lib] != "link:./lib/a" {
+				t.Error("expected '@lib/a' dep, found: ", wksps["a"]["@lib/"+lib])
+			}
+		}
+	})
+
+	t.Run("workspace deps (lockfile v5)", func(t *testing.T) {
 		wksps, err := parsePnpmLockDependencies([]byte(`
 lockfileVersion: 5.4
 importers:
