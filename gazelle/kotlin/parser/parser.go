@@ -41,13 +41,13 @@ func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error
 
 	sourceCode := []byte(source)
 
-	tree, err := treeutils.ParseSourceCode(treeutils.Kotlin, sourceCode)
+	tree, err := treeutils.ParseSourceCode(treeutils.Kotlin, filePath, sourceCode)
 	if err != nil {
 		errs = append(errs, err)
 	}
 
 	if tree != nil {
-		rootNode := tree.RootNode()
+		rootNode := tree.(treeutils.TreeAst).SitterTree.RootNode()
 
 		// Extract imports from the root nodes
 		for i := 0; i < int(rootNode.NamedChildCount()); i++ {
@@ -88,7 +88,7 @@ func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error
 			}
 		}
 
-		treeErrors := treeutils.QueryErrors(treeutils.Kotlin, sourceCode, rootNode)
+		treeErrors := tree.QueryErrors()
 		if treeErrors != nil {
 			errs = append(errs, treeErrors...)
 		}

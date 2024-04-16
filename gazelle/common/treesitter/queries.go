@@ -5,40 +5,39 @@ import (
 	"strings"
 	"sync"
 
-	Log "aspect.build/cli/pkg/logger"
 	sitter "github.com/smacker/go-tree-sitter"
 )
 
 var ErrorsQuery = `(ERROR) @error`
 
 // A cache of parsed queries per language
-var queryCache = make(map[string]map[Language]*sitter.Query)
+var queryCache = make(map[LanguageGrammar]map[string]*sitter.Query)
 var queryMutex sync.Mutex
 
-func ParseQuery(lang Language, queryStr string) *sitter.Query {
+func parseQuery(lang LanguageGrammar, queryStr string) *sitter.Query {
 	queryMutex.Lock()
 	defer queryMutex.Unlock()
 
-	// TODO: extract langName from sitter.Language?
-
-	if queryCache[queryStr] == nil {
-		queryCache[queryStr] = make(map[Language]*sitter.Query)
+	if queryCache[lang] == nil {
+		queryCache[lang] = make(map[string]*sitter.Query)
 	}
-	if queryCache[queryStr][lang] == nil {
-		queryCache[queryStr][lang] = mustNewQuery(toSitterLanguage(lang), queryStr)
+	if queryCache[lang][queryStr] == nil {
+		queryCache[lang][queryStr] = mustNewQuery(lang, queryStr)
 	}
 
-	return queryCache[queryStr][lang]
+	return queryCache[lang][queryStr]
 }
 
-// Run a query finding import query matches.
-func QueryStrings(query *sitter.Query, name string, sourcePath string, sourceCode []byte, rootNode *sitter.Node) []string {
+// Run a query finding string query matches.
+func (tree TreeAst) QueryStrings(query, returnVar string) []string {
+	rootNode := tree.SitterTree.RootNode()
 	results := make([]string, 0, 5)
 
-	// Execute the import query.
+	sitterQuery := parseQuery(tree.lang, query)
+
+	// Execute the query.
 	qc := sitter.NewQueryCursor()
-	defer qc.Close()
-	qc.Exec(query, rootNode)
+	qc.Exec(sitterQuery, rootNode)
 
 	// Collect string from the query results.
 	for {
@@ -47,9 +46,9 @@ func QueryStrings(query *sitter.Query, name string, sourcePath string, sourceCod
 			break
 		}
 
-		result := fetchFirstQueryMatch(query, name, m, sourceCode)
+		result := fetchQueryMatch(sitterQuery, returnVar, m, tree.sourceCode)
 		if result != nil {
-			resultCode := result.Node.Content(sourceCode)
+			resultCode := result.Node.Content(tree.sourceCode)
 			results = append(results, resultCode)
 		}
 	}
@@ -59,7 +58,9 @@ func QueryStrings(query *sitter.Query, name string, sourcePath string, sourceCod
 
 // Find and read the `from` QueryCapture from a QueryMatch.
 // Filter matches based on captures value using "equals-{name}" vars.
-func fetchFirstQueryMatch(query *sitter.Query, name string, m *sitter.QueryMatch, sourceCode []byte) *sitter.QueryCapture {
+func fetchQueryMatch(query *sitter.Query, name string, m *sitter.QueryMatch, sourceCode []byte) *sitter.QueryCapture {
+	var result *sitter.QueryCapture
+
 	for ci, c := range m.Captures {
 		cn := query.CaptureNameForId(uint32(ci))
 
@@ -72,36 +73,34 @@ func fetchFirstQueryMatch(query *sitter.Query, name string, m *sitter.QueryMatch
 		}
 
 		if cn == name {
-			return &c
+			result = &c
 		}
 	}
 
-	// Should never happen. All queries should have a `name` capture.
-	Log.Fatalf("No result %q found in query %q", name, query)
-	return nil
+	return result
 }
 
-func mustNewQuery(lang *sitter.Language, queryStr string) *sitter.Query {
-	q, err := sitter.NewQuery([]byte(queryStr), lang)
+func mustNewQuery(lang LanguageGrammar, queryStr string) *sitter.Query {
+	treeQ, err := sitter.NewQuery([]byte(queryStr), toSitterLanguage(lang))
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("Failed to create query for %q: %v", queryStr, err))
 	}
-	return q
+	return treeQ
 }
 
 // Create an error for each parse error.
-func QueryErrors(lang Language, sourceCode []byte, node *sitter.Node) []error {
+func (tree TreeAst) QueryErrors() []error {
+	node := tree.SitterTree.RootNode()
 	if !node.HasError() {
 		return nil
 	}
 
 	errors := make([]error, 0)
 
-	query := ParseQuery(lang, ErrorsQuery)
+	query := parseQuery(tree.lang, ErrorsQuery)
 
 	// Execute the import query
 	qc := sitter.NewQueryCursor()
-	defer qc.Close()
 	qc.Exec(query, node)
 
 	// Collect import statements from the query results
@@ -110,6 +109,9 @@ func QueryErrors(lang Language, sourceCode []byte, node *sitter.Node) []error {
 		if !ok {
 			break
 		}
+
+		// Apply predicates to filter results.
+		m = qc.FilterPredicates(m, tree.sourceCode)
 
 		for _, c := range m.Captures {
 			at := c.Node
@@ -126,7 +128,7 @@ func QueryErrors(lang Language, sourceCode []byte, node *sitter.Node) []error {
 			// Extract only that line from the parent Node
 			lineI := int(atStart.Row - show.StartPoint().Row)
 			colI := int(atStart.Column)
-			line := strings.Split(show.Content(sourceCode), "\n")[lineI]
+			line := strings.Split(show.Content(tree.sourceCode), "\n")[lineI]
 
 			pre := fmt.Sprintf("     %d: ", atStart.Row+1)
 			msg := pre + line
