@@ -64,13 +64,13 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 	lang := filenameToLanguage(filePath)
 
 	// Parse the source code
-	tree, err := treeutils.ParseSourceCode(lang, sourceCode)
+	tree, err := treeutils.ParseSourceCode(lang, filePath, sourceCode)
 	if err != nil {
 		errs = append(errs, err)
 	}
 
 	if tree != nil {
-		rootNode := tree.RootNode()
+		rootNode := tree.(treeutils.TreeAst).SitterTree.RootNode()
 
 		// Quick pass over root nodes to find top level imports and modules
 		for i := 0; i < int(rootNode.NamedChildCount()); i++ {
@@ -102,7 +102,7 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 
 		// Extra queries for more complex import statements.
 		for _, q := range ImportQueries {
-			queryResults := treeutils.QueryStrings(treeutils.ParseQuery(lang, q), "from", filePath, sourceCode, rootNode)
+			queryResults := tree.QueryStrings(q, "from")
 
 			Log.Tracef("Query result %q => %v", filePath, queryResults)
 
@@ -112,7 +112,7 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 		// Parse errors. Only log them due to many false positives potentially caused by issues
 		// such as only parsing a single file at a time so type information from other files is missing.
 		if Log.IsLevelEnabled(Log.TraceLevel) {
-			treeErrors := treeutils.QueryErrors(lang, sourceCode, rootNode)
+			treeErrors := tree.QueryErrors()
 			if treeErrors != nil {
 				Log.Tracef("TreeSitter query errors: %v", treeErrors)
 			}
@@ -166,7 +166,7 @@ func getModuleDeclarationName(node *sitter.Node) *sitter.Node {
 }
 
 // File extension to language key
-func filenameToLanguage(filename string) treeutils.Language {
+func filenameToLanguage(filename string) treeutils.LanguageGrammar {
 	ext := path.Ext(filename)[1:]
 	switch ext {
 	case "tsx":
