@@ -114,6 +114,71 @@ func TestGitIgnore(t *testing.T) {
 		shouldMatch("all within", i, "all-within/x.ts", "all-within/subdir/x.ts", "all-within/a/b/c/x.ts")
 		shouldNotMatch("all within", i, "x/all-within/x.tsx", "y/all-within/subdir/x.tsx")
 	})
+
+	t.Run("subdir matches", func(t *testing.T) {
+		i := NewGitIgnore()
+		addIgnoreFileContent(i, "subdir", `
+			node_modules
+			dir_slash/
+			dir_slash_star/*
+			dir_slash_doublestar/**
+		`)
+
+		shouldMatch("no slash", i, "subdir/node_modules", "subdir/node_modules/x.ts", "subdir/node_modules/m/x.ts")
+
+		shouldMatch("slash", i, "subdir/dir_slash/", "subdir/dir_slash/x.ts", "subdir/dir_slash/m/x.ts")
+		shouldMatch("slash star", i, "subdir/dir_slash_star/x.ts", "subdir/dir_slash_star/m/x.ts")
+
+		shouldNotMatch("slash star must have star content", i, "subdir/dir_slash_star")
+
+		shouldMatch("slash double star", i, "subdir/dir_slash_doublestar/x.ts", "subdir/dir_slash_doublestar/m/x.ts")
+		shouldMatch("slash double star does not require content", i, "subdir/dir_slash_doublestar")
+	})
+
+	t.Run("subdir matches all", func(t *testing.T) {
+		i := NewGitIgnore()
+		addIgnoreFileContent(i, "subdir", "*")
+
+		shouldMatch("all", i, "subdir/x", "subdir/x/y", "subdir/a.b", "subdir/a/b.c")
+		shouldNotMatch("other dirs", i, "x", "x.y", "b/subdir", "b/subdir/x")
+	})
+
+	t.Run("subdir matches exact name", func(t *testing.T) {
+		i := NewGitIgnore()
+		addIgnoreFileContent(i, "subdir", `
+			r1.ts
+			sub2/r2.ts
+		`)
+
+		shouldMatch("exact name abs", i, "subdir/r1.ts", "subdir/deeper/sub/dir/r1.ts", "subdir/sub2/r2.ts")
+		shouldNotMatch("different dirs", i, "r1.ts", "othersub/r1.ts", "r2.ts", "othersub/r2.ts", "subdir/r2.ts", "subdir/other/r2.ts")
+	})
+
+	t.Run("stars subdir", func(t *testing.T) {
+		i := NewGitIgnore()
+		addIgnoreFileContent(i, "subdir", `
+			*/star.ts
+			**/starstarslash.ts
+		`)
+
+		shouldMatch("star", i, "subdir/x/star.ts")
+		shouldNotMatch("start different dirs", i, "star.ts", "a/b/c/x/star.ts")
+		shouldNotMatch("start different subdirs", i, "subdir/x/y/star.ts")
+
+		shouldMatch("double wildcard slash", i, "subdir/starstarslash.ts", "subdir/a/starstarslash.ts", "subdir/a/b/c/starstarslash.ts")
+		shouldNotMatch("double wildcard slash different name pre", i, "subdir/x.starstarslash.ts", "subdir/.starstarslash.ts")
+		shouldNotMatch("double wildcard slash different subdir", i, "a/x.starstarslash.ts", "a/b/c/starstarslash.ts")
+	})
+
+	t.Run("doublestar no slash", func(t *testing.T) {
+		i := NewGitIgnore()
+		addIgnoreFileContent(i, "subdir", `
+			**starstar.ts
+		`)
+
+		shouldMatch("double wildcard", i, "subdir/x.starstar.ts", "subdir/a/b/c/x.starstar.ts", "subdir/a/.starstar.ts")
+		shouldNotMatch("double wildcard different subdir", i, "startstar.ts", ".startstar.ts", "a/starstar.ts")
+	})
 }
 
 // Util method to invoke GitIgnore.AddIgnore() with the trimmed string

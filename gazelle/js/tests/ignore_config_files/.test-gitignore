@@ -13,3 +13,6 @@ subtarget/generated.ts
 
 # A global glob configured from the root
 **/*.starstar-ig.ts
+
+# A global glob configured from the root with no slash
+**-wild.ts
