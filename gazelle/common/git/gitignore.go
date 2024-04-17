@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bufio"
 	"io"
 	"os"
 	"path"
@@ -8,7 +9,7 @@ import (
 
 	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
-	gitignore "github.com/denormal/go-gitignore"
+	gitignore "github.com/go-git/go-git/plumbing/format/gitignore"
 )
 
 // Ignore files following .gitignore syntax for files gazelle will ignore.
@@ -17,7 +18,7 @@ var bazelIgnoreFiles = []string{".bazelignore", ".gitignore"}
 // Wrap the ignore files along with the relative path they were loaded from
 // to enable quick-exit checks.
 type ignoreEntry struct {
-	i    gitignore.GitIgnore
+	i    gitignore.Matcher
 	base string
 }
 
@@ -52,10 +53,20 @@ func (i *GitIgnore) addIgnore(rel string, ignoreReader io.Reader) {
 		base = ""
 	}
 
-	ignore := gitignore.New(ignoreReader, base, func(err gitignore.Error) bool {
-		BazelLog.Warnf("Failed to parse ignore file: %v at %v", err, err.Position())
-		return true
-	})
+	domain := []string{}
+	if base != "" {
+		domain = strings.Split(base, "/")
+	}
+
+	matcherPatterns := make([]gitignore.Pattern, 0)
+
+	reader := bufio.NewScanner(ignoreReader)
+	for reader.Scan() {
+		p := gitignore.ParsePattern(reader.Text(), domain)
+		matcherPatterns = append(matcherPatterns, p)
+	}
+
+	ignore := gitignore.NewMatcher(matcherPatterns)
 
 	// Add a trailing slash to the base path to ensure the ignore file only
 	// processes paths within that directory.
@@ -71,12 +82,12 @@ func (i *GitIgnore) addIgnore(rel string, ignoreReader io.Reader) {
 
 func (i *GitIgnore) Matches(p string) bool {
 	for _, ignore := range i.ignores {
-		// Quick check to see if the ignore file could possibly match the path.
+		// Ensure the path is within the base path of the ignore file
+		// to avoid strings.Split unless necessary.
 		if !strings.HasPrefix(p, ignore.base) {
 			continue
 		}
-
-		if m := ignore.i.Relative(p, false); m != nil && m.Ignore() {
+		if ignore.i.Match(strings.Split(p, "/"), false) {
 			return true
 		}
 	}
