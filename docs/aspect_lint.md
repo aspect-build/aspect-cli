@@ -7,7 +7,12 @@ Run configured linters over the dependency graph.
 
 ### Synopsis
 
-Run linters and collect the reports they produce. See documentation on https://github.com/aspect-build/rules_lint
+Run linters and collect the reports they produce.
+
+To setup linters, see the documentation on https://github.com/aspect-build/rules_lint
+
+In addition to flags listed below, flags accepted by the 'bazel build' command are also accepted.
+
 
 ```
 aspect lint <target patterns> [flags]
