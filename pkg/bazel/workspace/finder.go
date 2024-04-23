@@ -23,8 +23,8 @@ import (
 	"path/filepath"
 )
 
-// https://github.com/bazelbuild/bazel/blob/8346ea4c/src/main/cpp/workspace_layout.cc#L37
-var validWorkspaceFiles = []string{"WORKSPACE", "WORKSPACE.bazel"}
+// https://github.com/bazelbuild/bazel/blob/8105bc053ffba1b37a8c2bbf6b278fc8556e2f69/src/main/cpp/workspace_layout.cc#L36
+var validWorkspaceBoundaries = []string{"MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"}
 
 // Finder wraps the Find method that performs the finding of the WORKSPACE file
 // in the user's Bazel project.
@@ -44,7 +44,7 @@ var DefaultFinder = &finder{
 // Find tries to find the root of a Bazel workspace.
 func (f *finder) Find(startDir string) (string, error) {
 	for maybeDir := startDir; maybeDir != "." && maybeDir != filepath.Dir(maybeDir); maybeDir = filepath.Dir(maybeDir) {
-		for _, wf := range validWorkspaceFiles {
+		for _, wf := range validWorkspaceBoundaries {
 			maybeWorkspaceFile := path.Join(maybeDir, wf)
 			stat, err := f.osStat(maybeWorkspaceFile)
 			if err != nil {
