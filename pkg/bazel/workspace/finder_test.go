@@ -136,11 +136,8 @@ func TestWorkspaceFinder(t *testing.T) {
 				fsFileInfo.EXPECT().
 					IsDir().
 					Return(true).
-					Times(1),
-				fsFileInfo.EXPECT().
-					IsDir().
-					Return(true).
-					Times(1),
+					// Return true for isDir() for every workspace marker file until loop walks up
+					Times(len(validWorkspaceBoundaries)),
 				fsFileInfo.EXPECT().
 					IsDir().
 					Return(false).
@@ -149,6 +146,7 @@ func TestWorkspaceFinder(t *testing.T) {
 
 			finder := &finder{
 				osStat: func(s string) (fs.FileInfo, error) {
+					t.Log(s)
 					return fsFileInfo, nil
 				},
 			}
@@ -166,15 +164,8 @@ func TestWorkspaceFinder(t *testing.T) {
 				fsFileInfo.EXPECT().
 					IsDir().
 					Return(true).
-					Times(1),
-				fsFileInfo.EXPECT().
-					IsDir().
-					Return(true).
-					Times(1),
-				fsFileInfo.EXPECT().
-					IsDir().
-					Return(true).
-					Times(1),
+					// Return true for isDir() for every workspace marker file until loop walks up
+					Times(len(validWorkspaceBoundaries)),
 				fsFileInfo.EXPECT().
 					IsDir().
 					Return(false).
