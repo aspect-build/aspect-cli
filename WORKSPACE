@@ -31,8 +31,6 @@ http_archive(
 
 http_archive(
     name = "com_grail_bazel_toolchain",
-    patch_args = ["-p1"],
-    patches = ["//patches:com_grail_bazel_toolchain.patch"],
     sha256 = "7d847d4f807797269a6389f1072233b58e66c7786477ce7b8c28b6f7293251d5",
     strip_prefix = "toolchains_llvm-ceeedcc4464322e05fe5b8df3749cc02273ee083",
     urls = ["https://github.com/bazel-contrib/toolchains_llvm/archive/ceeedcc4464322e05fe5b8df3749cc02273ee083.tar.gz"],
