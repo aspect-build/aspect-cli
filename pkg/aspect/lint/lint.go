@@ -166,6 +166,13 @@ lint:
 	}
 
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--output_groups=%s", strings.Join(outputGroups, ",")))
+
+	// Don't trigger Validation Actions along with lint reports.
+	// > The validations output group "is special in that its outputs are always requested, regardless of the value of the
+	// > --output_groups flag, and regardless of how the target is depended upon"
+	// https://bazel.build/extending/rules#validations_output_group
+	bazelCmd = append(bazelCmd, "--run_validations=false")
+
 	// TODO: in Bazel 7 this was renamed without the --experimental_ prefix
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--experimental_remote_download_regex='%s'", LINT_RESULT_REGEX))
 
