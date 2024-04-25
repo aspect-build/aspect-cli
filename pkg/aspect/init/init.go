@@ -18,14 +18,15 @@ package init
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"strings"
 
 	"aspect.build/cli/buildinfo"
 	"aspect.build/cli/docs/bazelrc"
-	"aspect.build/cli/pkg/aspect/init/template"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
@@ -35,6 +36,9 @@ import (
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 )
+
+//go:embed template/** template/**/_*
+var Content embed.FS
 
 var (
 	boldCyan = color.New(color.FgCyan, color.Bold)
@@ -160,26 +164,39 @@ func initNewWorkspace(folder string, aspectVersion string) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	tmpls, err := template.Content.ReadDir(".")
-	if err != nil {
-		return fmt.Errorf("unable to list embed files: %w", err)
-	}
-	for _, f := range tmpls {
-		content, err := template.Content.ReadFile(f.Name())
+	err := fs.WalkDir(Content, ".", func(tmpl string, f fs.DirEntry, err error) error {
 		if err != nil {
-			return fmt.Errorf("unable to read embed file %s: %w", f.Name(), err)
+			return fmt.Errorf("unable to list embedded files: %w", err)
 		}
-		out := strings.TrimSuffix(f.Name(), "_")
-		if path.Base(out) == ".bazeliskrc" {
-			// replace the {{aspect_version}} token in the bazeliskrc template to the desired aspect version
-			// TODO: use https://pkg.go.dev/text/template instead
-			content = []byte(strings.Replace(string(content), "{{aspect_version}}", aspectVersion, 1))
-		}
-		if err = os.WriteFile(out, content, 0644); err != nil {
-			return fmt.Errorf("failed to write file: %w", err)
+		out := strings.TrimPrefix(tmpl, "template/")
+		if f.IsDir() {
+			os.Mkdir(out, 0755)
 		} else {
-			fmt.Printf("wrote %s\n", out)
+			content, err := Content.ReadFile(tmpl)
+			if err != nil {
+				return fmt.Errorf("unable to read template file %s: %w", tmpl, err)
+			}
+			if f.Name() == ".bazeliskrc" {
+				// replace the {{aspect_version}} token in the bazeliskrc template to the desired aspect version
+				// TODO: use https://pkg.go.dev/text/template instead
+				content = []byte(strings.Replace(string(content), "{{aspect_version}}", aspectVersion, 1))
+			}
+			var mode fs.FileMode
+			if strings.HasSuffix(out, ".sh") {
+				mode = 0755
+			} else {
+				mode = 0644
+			}
+			if err = os.WriteFile(out, content, mode); err != nil {
+				return fmt.Errorf("failed to write file: %w", err)
+			} else {
+				fmt.Printf("wrote %s\n", out)
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("unable to walk embed folder: %w", err)
 	}
 
 	rcs, err := bazelrc.Content.ReadDir(".")

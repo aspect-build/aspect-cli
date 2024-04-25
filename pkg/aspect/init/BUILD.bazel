@@ -2,13 +2,18 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "init",
-    srcs = ["init.go"],
+    srcs = [
+        "init.go",
+    ],
+    embedsrcs = glob([
+        "template/*",
+        "template/**/*",
+    ]),
     importpath = "aspect.build/cli/pkg/aspect/init",
     visibility = ["//visibility:public"],
     deps = [
         "//buildinfo",
         "//docs/bazelrc",
-        "//pkg/aspect/init/template",
         "//pkg/bazel",
         "//pkg/bazel/workspace",
         "//pkg/ioutils",
