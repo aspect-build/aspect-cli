@@ -26,6 +26,7 @@ data = [
     )
     for test in [
         "flags",
+        "init",
         "lint",
         "reenter",
     ]

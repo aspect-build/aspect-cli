@@ -1,13 +1,15 @@
 # Settings for Bazel, see https://docs.aspect.build/guides/bazelrc
 
 # Import Aspect recommended Bazel settings for all projects
-import %workspace%/.aspect/bazelrc/bazel6.bazelrc
+import %workspace%/.aspect/bazelrc/bazel7.bazelrc
 import %workspace%/.aspect/bazelrc/convenience.bazelrc
 import %workspace%/.aspect/bazelrc/correctness.bazelrc
 import %workspace%/.aspect/bazelrc/debug.bazelrc
 import %workspace%/.aspect/bazelrc/performance.bazelrc
 
 ### YOUR PROJECT SPECIFIC SETTINGS GO HERE ###
+# See https://github.com/aspect-build/aspect-cli/issues/679
+build --noincompatible_enable_cc_toolchain_resolution
 
 # Load any settings & overrides specific to the current user from `.aspect/bazelrc/user.bazelrc`.
 # This file should appear in `.gitignore` so that settings are not shared with team members. This

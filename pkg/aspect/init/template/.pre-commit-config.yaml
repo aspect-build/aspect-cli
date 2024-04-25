@@ -1,0 +1,18 @@
+# See CONTRIBUTING.md for instructions.
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+
+repos:
+  # Check formatting and lint for starlark code
+  - repo: https://github.com/keith/pre-commit-buildifier
+    rev: 6.4.0
+    hooks:
+      - id: buildifier
+      - id: buildifier-lint
+  - repo: local
+    hooks:
+      - id: aspect_rules_lint
+        name: Format
+        language: system
+        entry: bazel run //:format
+        files: .*
