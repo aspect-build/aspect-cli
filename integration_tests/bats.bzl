@@ -9,6 +9,7 @@ def bats_test(srcs = [], **kwargs):
     """
     data = kwargs.pop("data", [])
     args = kwargs.pop("args", [])
+    tags = kwargs.pop("tags", [])
     tests = ["$(execpaths %s)" % src for src in srcs]
     helpers_dirs = [
         "@bats_assert//:dir",
@@ -38,5 +39,7 @@ def bats_test(srcs = [], **kwargs):
         env = env,
         args = tests + args,
         data = data + srcs,
+        # TODO(alex): remove when we green it up on RBE
+        tags = tags + ["no-remote-exec"],
         **kwargs
     )
