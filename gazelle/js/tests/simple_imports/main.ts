@@ -3,27 +3,21 @@
 
 // Side-effects only imports
 import './side-effects';
-
 // Local
 import { lib } from './lib';
-
 // Subdirectory within same BUILD including implicit index.ts import
 import { subdir_index } from './subdir';
 import { subdir_lib } from './subdir/lib';
 import { subdir_parent_ref } from './subdir/parent-ref';
-
+import { sd } from './subdir/sd';
 // Sub-project imports, including implicit index.ts import
 import { subproject_index } from './subproject';
-import { subproject_lib } from './subproject/lib';
-
 // Import of a project with indirect deps
 import { backref_subproject_lib } from './subproject-backref/lib';
-
+import { subproject_lib } from './subproject/lib';
+import { sp } from './subproject/sp';
 // DTS
 import { t } from './t';
-import { sd } from './subdir/sd';
-import { sp } from './subproject/sp';
-
 // Type-only imports
 import { Foo } from './types';
 
