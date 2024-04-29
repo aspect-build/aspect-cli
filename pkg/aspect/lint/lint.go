@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -32,9 +31,6 @@ import (
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 	"github.com/fatih/color"
 	"github.com/manifoldco/promptui"
-	"github.com/reviewdog/errorformat"
-	"github.com/reviewdog/errorformat/fmts"
-	"github.com/reviewdog/errorformat/writer"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -67,7 +63,6 @@ func AddFlags(flags *pflag.FlagSet) {
 	flags.Bool("fix", false, "Apply patch fixes for lint errors")
 	flags.Bool("diff", false, "Output patch fixes for lint errors")
 	flags.Bool("report", true, "Output lint reports")
-	flags.String("output", "text", "Format for output of lint reports, either 'text' or 'sarif'")
 }
 
 // TODO: hoist this to a flags package so it can be used by other commands that require this functionality
@@ -140,7 +135,6 @@ lint:
 	applyFix, _ := cmd.Flags().GetBool("fix")
 	printDiff, _ := cmd.Flags().GetBool("diff")
 	printReport, _ := cmd.Flags().GetBool("report")
-	output, _ := cmd.Flags().GetString("output")
 
 	// Separate out the lint command specific flags from the list of args to
 	// pass to `bazel build`
@@ -237,14 +231,7 @@ lint:
 			runner.patchLintResult(label, content, applyFix, printDiff)
 		}
 		if printReport {
-			switch output {
-			case "text":
-				runner.outputLintResultText(l, content)
-			case "sarif":
-				runner.outputLintResultSarif(l, content, result.linter)
-			default:
-				return fmt.Errorf("unsupported output kind %s", output)
-			}
+			runner.outputLintResultText(l, content)
 
 			if isInteractiveMode && result.patchFile != nil && !applyNone {
 				var choice string
@@ -325,66 +312,5 @@ func (runner *Linter) outputLintResultText(label string, lineResult string) erro
 		fmt.Fprintf(runner.Streams.Stdout, "%s\n", lineResult)
 		fmt.Fprintln(runner.Streams.Stdout, "")
 	}
-	return nil
-}
-
-func (runner *Linter) outputLintResultSarif(label string, lineResult string, linter string) error {
-	var fm []string
-
-	// NB: Switch is on the MNEMONIC declared in rules_lint
-	switch linter {
-	case "ESLint":
-		fm = fmts.DefinedFmts()["eslint-compact"].Errorformat
-	case "flake8":
-		fm = fmts.DefinedFmts()["flake8"].Errorformat
-	case "PMD":
-		// TODO: upstream to https://github.com/reviewdog/errorformat/issues/62
-		fm = []string{`%f:%l:\\t%m`}
-	case "ruff":
-		fm = []string{
-			`%f:%l:%c: %t%n %m`,
-			`%-GFound %n error%.%#`,
-			`%-G[*] %n fixable%.%#`,
-		}
-	case "buf":
-		fm = []string{
-			`--buf-plugin_out: %f:%l:%c:%m`,
-		}
-	case "Vale":
-		fm = []string{`%f:%l:%c:%m`}
-	default:
-		fmt.Fprintf(runner.Streams.Stderr, "No format string for linter %s\n", linter)
-	}
-
-	if fm == nil {
-		return nil
-	}
-	efm, err := errorformat.NewErrorformat(fm)
-	if err != nil {
-		return err
-	}
-
-	var ewriter writer.Writer
-	var sarifOpt writer.SarifOption
-	sarifOpt.ToolName = linter
-	ewriter, err = writer.NewSarif(runner.Streams.Stdout, sarifOpt)
-	if err != nil {
-		return err
-	}
-	if ewriter, ok := ewriter.(writer.BufWriter); ok {
-		defer func() {
-			if err := ewriter.Flush(); err != nil {
-				log.Println(err)
-			}
-		}()
-	}
-
-	s := efm.NewScanner(strings.NewReader(lineResult))
-	for s.Scan() {
-		if err := ewriter.Write(s.Entry()); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
