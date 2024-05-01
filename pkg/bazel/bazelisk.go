@@ -89,15 +89,14 @@ func UserCacheDir() (string, error) {
 	return userCacheDir, err
 }
 
-// Run runs the main Bazelisk logic for the given arguments and Bazel repositories.
-func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams, env []string, wd *string) error {
+func (bazelisk *Bazelisk) GetBazelPath(repos *core.Repositories) (string, error) {
 	httputil.UserAgent = bazelisk.getUserAgent()
 
 	bazeliskHome := bazelisk.GetEnvOrConfig("BAZELISK_HOME")
 	if len(bazeliskHome) == 0 {
 		userCacheDir, err := UserCacheDir()
 		if err != nil {
-			return err
+			return "", err
 		}
 
 		bazeliskHome = filepath.Join(userCacheDir, "bazelisk")
@@ -105,12 +104,12 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 
 	err := os.MkdirAll(bazeliskHome, 0755)
 	if err != nil {
-		return fmt.Errorf("could not create directory %s: %v", bazeliskHome, err)
+		return "", fmt.Errorf("could not create directory %s: %v", bazeliskHome, err)
 	}
 
 	bazelVersionString, baseUrl, err := bazelisk.getBazelVersion()
 	if err != nil {
-		return fmt.Errorf("could not get Bazel version: %v", err)
+		return "", fmt.Errorf("could not get Bazel version: %v", err)
 	}
 
 	if bazelisk.AspectShouldReenter {
@@ -121,7 +120,7 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 
 	bazelPath, err := homedir.Expand(bazelVersionString)
 	if err != nil {
-		return fmt.Errorf("could not expand home directory in path: %v", err)
+		return "", fmt.Errorf("could not expand home directory in path: %v", err)
 	}
 
 	// If the Bazel version is an absolute path to a Bazel binary in the filesystem, we can
@@ -133,13 +132,13 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 	if !filepath.IsAbs(bazelPath) {
 		bazelFork, bazelVersion, err := parseBazelForkAndVersion(bazelVersionString)
 		if err != nil {
-			return fmt.Errorf("could not parse Bazel fork and version: %v", err)
+			return "", fmt.Errorf("could not parse Bazel fork and version: %v", err)
 		}
 
 		var downloader core.DownloadFunc
 		resolvedBazelVersion, downloader, err = repos.ResolveVersion(bazeliskHome, bazelFork, bazelVersion)
 		if err != nil {
-			return fmt.Errorf("could not resolve the version '%s' to an actual version number: %v", bazelVersion, err)
+			return "", fmt.Errorf("could not resolve the version '%s' to an actual version number: %v", bazelVersion, err)
 		}
 
 		bazelForkOrURL := dirForURL(baseUrl)
@@ -150,14 +149,24 @@ func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams i
 		baseDirectory := filepath.Join(bazeliskHome, "downloads", bazelForkOrURL)
 		bazelPath, err = bazelisk.downloadBazel(resolvedBazelVersion, baseDirectory, repos, baseUrl, downloader)
 		if err != nil {
-			return fmt.Errorf("could not download Bazel: %v", err)
+			return "", fmt.Errorf("could not download Bazel: %v", err)
 		}
 	} else {
 		baseDirectory := filepath.Join(bazeliskHome, "local")
 		bazelPath, err = linkLocalBazel(baseDirectory, bazelPath)
 		if err != nil {
-			return fmt.Errorf("could not link local Bazel: %v", err)
+			return "", fmt.Errorf("could not link local Bazel: %v", err)
 		}
+	}
+
+	return bazelPath, nil
+}
+
+// Run runs the main Bazelisk logic for the given arguments and Bazel repositories.
+func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams, env []string, wd *string) error {
+	bazelPath, err := bazelisk.GetBazelPath(repos)
+	if err != nil {
+		return fmt.Errorf("could not get path to Bazel: %v", err)
 	}
 
 	exitCode, err := bazelisk.runBazel(bazelPath, args, streams, env, wd)
