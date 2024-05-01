@@ -510,20 +510,6 @@ def deps():
         version = "v0.1.1",
     )
     go_repository(
-        name = "com_github_haya14busa_go_checkstyle",
-        build_file_proto_mode = "disable_global",
-        importpath = "github.com/haya14busa/go-checkstyle",
-        sum = "h1:biVg9rs1Vl8LAwrkjlssTaEn2csIl3LKoQVEJrWGmJ8=",
-        version = "v0.0.0-20170303121022-5e9d09f51fa1",
-    )
-    go_repository(
-        name = "com_github_haya14busa_go_sarif",
-        build_file_proto_mode = "disable_global",
-        importpath = "github.com/haya14busa/go-sarif",
-        sum = "h1:2uCbyMhWNFYI+HkRqXfIeTq5pTPxQM68yG+INJ2gvq8=",
-        version = "v0.0.0-20210102043135-e2c5fed2fa3d",
-    )
-    go_repository(
         name = "com_github_ianlancetaylor_demangle",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/ianlancetaylor/demangle",
@@ -760,13 +746,6 @@ def deps():
         importpath = "github.com/prometheus/client_model",
         sum = "h1:gQz4mCbXsO+nc9n1hCxHcGA3Zx3Eo+UHZoInFGUIXNM=",
         version = "v0.0.0-20190812154241-14fe0d1b01d4",
-    )
-    go_repository(
-        name = "com_github_reviewdog_errorformat",
-        build_file_proto_mode = "disable_global",
-        importpath = "github.com/reviewdog/errorformat",
-        sum = "h1:y9BDlVuHOxSJK4PQNGhxtcZyAtK9TLcPy5kKbcIezDA=",
-        version = "v0.0.0-20231214114315-6dd01ea41b1f",
     )
     go_repository(
         name = "com_github_rogpeppe_go_internal",
