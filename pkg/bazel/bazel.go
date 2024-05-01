@@ -18,13 +18,16 @@ package bazel
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"aspect.build/cli/bazel/analysis"
@@ -58,6 +61,7 @@ type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string, bazelFlags []string) (*analysis.ActionGraphContainer, error)
 	BazelDashDashVersion() (string, error)
+	BazelFlagsAsProto() ([]byte, error)
 	HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error)
 	RunCommand(streams ioutils.Streams, wd *string, command ...string) error
 	InitializeBazelFlags() error
@@ -193,65 +197,73 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 		return allFlags, nil
 	}
 
-	// create a directory in the user cache dir with an empty WORKSPACE file to run
-	// `bazel help flags-as-proto` in so it doesn't affect the bazel server in the user's WORKSPACE
 	userCacheDir, err := UserCacheDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user cache dir: %w", err)
 	}
-	tmpdir := path.Join(userCacheDir, "aspect", "cli-flags-as-proto")
-	err = os.MkdirAll(tmpdir, os.ModePerm)
+
+	flagsAsProtoCacheDir := path.Join(userCacheDir, "aspect", "cli-flags-proto-cache")
+	err = os.MkdirAll(flagsAsProtoCacheDir, os.ModePerm)
 	if err != nil {
-		return nil, fmt.Errorf("failed write create directory %s: %w", tmpdir, err)
-	}
-	err = os.WriteFile(path.Join(tmpdir, "WORKSPACE"), []byte{}, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed write WORKSPACE file in %s: %w", tmpdir, err)
-	}
-	err = os.WriteFile(path.Join(tmpdir, "MODULE.bazel"), []byte{}, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed write MODULE.bazel file in %s: %w", tmpdir, err)
+		return nil, fmt.Errorf("failed write create directory %s: %w", flagsAsProtoCacheDir, err)
 	}
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	streams := ioutils.Streams{
-		Stdin:  os.Stdin,
-		Stdout: &stdout,
-		Stderr: &stderr,
-	}
-	stdoutDecoder := base64.NewDecoder(base64.StdEncoding, &stdout)
-
-	bazelErrs := make(chan error, 1)
-	defer close(bazelErrs)
-
-	go func(wd string) {
-		// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
-		// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
-		err := b.RunCommand(streams, &wd, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
-		bazelErrs <- err
-	}(tmpdir)
-
-	err = <-bazelErrs
-
+	repos := createRepositories()
+	bazelisk := NewBazelisk(b.workspaceRoot, false)
+	bazelPath, err := bazelisk.GetBazelPath(repos)
 	if err != nil {
-		var exitErr *aspecterrors.ExitError
-		if errors.As(err, &exitErr) {
-			// Dump the `stderr` when Bazel executed and exited non-zero
-			return nil, fmt.Errorf("failed to get bazel flags (running in %s): %w\nstderr:\n%s", tmpdir, err, stderr.String())
-		} else {
-			return nil, fmt.Errorf("failed to get bazel flags: %w", err)
+		return nil, fmt.Errorf("failed to get path to Bazel: %w", err)
+	}
+
+	// If bazelPath ends in local/something/bin/bazel then don't cache since it is a local bazel
+	// that could change versions. Search for "linkLocalBazel" function in the code to find where
+	// that is set.
+	localBazelRegex := regexp.MustCompile(`\/local\/[^\/]+\/bin\/bazel$`)
+	localBazel := localBazelRegex.MatchString(bazelPath)
+
+	var flagsProtoCache string
+	var flagsProtoBytes []byte
+	flagCollection := &flags.FlagCollection{}
+
+	// Read flagsProtoBytes from the flagsProtoCache if bazel is not configured to a local path
+	if !localBazel {
+		h := sha1.New()
+		h.Write([]byte(bazelPath))
+		bazelPathHash := hex.EncodeToString(h.Sum(nil))
+
+		flagsProtoCache = path.Join(flagsAsProtoCacheDir, bazelPathHash)
+		flagsProtoBytes, err = os.ReadFile(flagsProtoCache)
+		if err == nil {
+			err = proto.Unmarshal(flagsProtoBytes, flagCollection)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to parse flags proto cache file %s: %v\n", flagsProtoCache, err)
+				os.Remove(flagsProtoCache)
+				flagsProtoBytes = nil
+			}
+		} else if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "failed to read flags proto cache file %s: %v\n", flagsProtoCache, err)
+			os.Remove(flagsProtoCache)
+			flagsProtoBytes = nil
 		}
 	}
 
-	helpProtoBytes, err := io.ReadAll(stdoutDecoder)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read bazel flags: %w", err)
-	}
-
-	flagCollection := &flags.FlagCollection{}
-	if err := proto.Unmarshal(helpProtoBytes, flagCollection); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal bazel flags: %w", err)
+	// If we have not read the flagsProtoBytes from the flagsProtoCache file then we fetch the
+	// data from bazel
+	if flagsProtoBytes == nil {
+		flagsProtoBytes, err = b.BazelFlagsAsProto()
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch bazel flags: %w", err)
+		}
+		if err = proto.Unmarshal(flagsProtoBytes, flagCollection); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal bazel flags: %w", err)
+		}
+		// Write to the flagsProtoCache if bazel is not configured to a local path
+		if !localBazel {
+			err = os.WriteFile(flagsProtoCache, flagsProtoBytes, 0644)
+			if err != nil {
+				return nil, fmt.Errorf("failed write flags proto cache file : %w", err)
+			}
+		}
 	}
 
 	allFlags = make(map[string]*flags.FlagInfo)
@@ -362,6 +374,68 @@ func (b *bazel) AbsPathRelativeToWorkspace(relativePath string) (string, error) 
 		return relativePath, nil
 	}
 	return filepath.Join(b.workspaceRoot, relativePath), nil
+}
+
+// Calls `bazel help flags-as-proto` in a sandboxed WORKSPACE and returns the result
+func (b *bazel) BazelFlagsAsProto() ([]byte, error) {
+	// create a directory in the user cache dir with an empty WORKSPACE file to run
+	// `bazel help flags-as-proto` in so it doesn't affect the bazel server in the user's WORKSPACE
+	userCacheDir, err := UserCacheDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user cache dir: %w", err)
+	}
+
+	tmpdir := path.Join(userCacheDir, "aspect", "cli-flags-proto-wksp")
+	err = os.MkdirAll(tmpdir, os.ModePerm)
+	if err != nil {
+		return nil, fmt.Errorf("failed write create directory %s: %w", tmpdir, err)
+	}
+	err = os.WriteFile(path.Join(tmpdir, "WORKSPACE"), []byte{}, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed write WORKSPACE file in %s: %w", tmpdir, err)
+	}
+	err = os.WriteFile(path.Join(tmpdir, "MODULE.bazel"), []byte{}, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed write MODULE.bazel file in %s: %w", tmpdir, err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	streams := ioutils.Streams{
+		Stdin:  os.Stdin,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
+	stdoutDecoder := base64.NewDecoder(base64.StdEncoding, &stdout)
+
+	bazelErrs := make(chan error, 1)
+	defer close(bazelErrs)
+
+	go func(wd string) {
+		// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
+		// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
+		err := b.RunCommand(streams, &wd, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
+		bazelErrs <- err
+	}(tmpdir)
+
+	err = <-bazelErrs
+
+	if err != nil {
+		var exitErr *aspecterrors.ExitError
+		if errors.As(err, &exitErr) {
+			// Dump the `stderr` when Bazel executed and exited non-zero
+			return nil, fmt.Errorf("failed to get bazel flags (running in %s): %w\nstderr:\n%s", tmpdir, err, stderr.String())
+		} else {
+			return nil, fmt.Errorf("failed to get bazel flags: %w", err)
+		}
+	}
+
+	flagsProtoBytes, err := io.ReadAll(stdoutDecoder)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bazel flags: %w", err)
+	}
+
+	return flagsProtoBytes, nil
 }
 
 type Output struct {
