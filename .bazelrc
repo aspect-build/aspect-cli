@@ -9,6 +9,12 @@ import %workspace%/.aspect/bazelrc/performance.bazelrc
 
 ### YOUR PROJECT SPECIFIC SETTINGS GO HERE ###
 
+# Allow our init template folders to contain BUILD.bazel without it being a subpackage
+# To update, run:
+#   find pkg/aspect/init/template -type d | paste -d, -s - | awk '{ print "common --deleted_packages="$1 }'
+common --deleted_packages=pkg/aspect/init/template,pkg/aspect/init/template/tools,pkg/aspect/init/template/tools/format
+
+
 common --workspace_status_command "${PWD}/workspace_status.sh"
 
 common:release -c opt --stamp
