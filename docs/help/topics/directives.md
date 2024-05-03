@@ -67,6 +67,8 @@ enable other projects to declare dependencies on the package.
 | The format used to generate the name of the `npm_package` rule. |
 | `# gazelle:js_tsconfig _filename_`                      | `tsconfig.json`             |
 | Path to a `tsconfig.json` file used to help generate TypeScript rules.<br />This value is inherited by sub-directories and applied relative to each BUILD.<br />The `ts_project(tsconfig)` attribute is *NOT* set and must be done manually if necessary |
+| `# gazelle:js_custom_files _name_ _glob_`               |                             | Generate additional custom `ts_project` targets |
+| `# gazelle:js_custom_test_files _name_ _glob_`          |                             | Generate additional custom `ts_project` testonly targets |
 <!-- prettier-ignore-end -->
 
 [gazelle directives]: https://github.com/bazelbuild/bazel-gazelle#directives
