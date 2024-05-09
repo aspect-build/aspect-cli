@@ -4,10 +4,10 @@ import (
 	"context"
 	"log"
 
+	"aspect.build/cli/gazelle/common/treesitter/grammars/kotlin"
+	"aspect.build/cli/gazelle/common/treesitter/grammars/tsx"
+	"aspect.build/cli/gazelle/common/treesitter/grammars/typescript"
 	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/kotlin"
-	"github.com/smacker/go-tree-sitter/typescript/tsx"
-	"github.com/smacker/go-tree-sitter/typescript/typescript"
 )
 
 type LanguageGrammar = int
