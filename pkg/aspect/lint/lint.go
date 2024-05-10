@@ -21,9 +21,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
+	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
@@ -153,6 +155,7 @@ lint:
 	// optimization: don't request report files in a mode where we don't print them
 	outputGroups := []string{}
 	if applyFix || printDiff || isInteractiveMode {
+		bazelCmd = append(bazelCmd, "--@aspect_rules_lint//lint:fix")
 		outputGroups = append(outputGroups, LINT_PATCH_GROUP)
 	}
 	if printReport {
@@ -203,7 +206,7 @@ lint:
 	// Wait for completion and return the first error (if any)
 	wgErr := handleResultsErrgroup.Wait()
 	if wgErr != nil && err == nil {
-		err = wgErr
+		return wgErr
 	}
 
 	// Check for subscriber errors
@@ -213,15 +216,29 @@ lint:
 			fmt.Fprintf(runner.Streams.Stderr, "Error: failed to run lint command: %v\n", err)
 		}
 		if err == nil {
-			err = fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))
+			return fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))
 		}
 	}
 
 	// Bazel is done running, so stdout is now safe for us to print the results
 	applyAll := false
 	applyNone := false
+	exitCode := 0
 	for label, result := range lintBEPHandler.resultsByLabel {
 		l := label
+		if result.exitCodeFile != nil {
+			exitCodeStr, err := lintBEPHandler.readBEPFile(result.exitCodeFile)
+			if err != nil {
+				return err
+			}
+			targetExitCode, err := strconv.Atoi(strings.TrimSpace(exitCodeStr))
+			if err != nil {
+				return fmt.Errorf("failed parse read exit code as integer: %v", err)
+			}
+			if targetExitCode > 0 {
+				exitCode = 1
+			}
+		}
 		f := result.reportFile
 		content, err := lintBEPHandler.readBEPFile(f)
 		if err != nil {
@@ -244,7 +261,7 @@ lint:
 					}
 					choice, err = applyFixPrompt.Run()
 					if err != nil {
-						return fmt.Errorf("prompt failed: %v\n", err)
+						return fmt.Errorf("prompt failed: %v", err)
 					}
 				}
 				if strings.HasPrefix(choice, "A") {
@@ -264,7 +281,7 @@ lint:
 		}
 	}
 
-	return err
+	return &aspecterrors.ExitError{ExitCode: exitCode}
 }
 
 func (runner *Linter) patchLintResult(label string, lintPatch string, applyDiff, printDiff bool) error {

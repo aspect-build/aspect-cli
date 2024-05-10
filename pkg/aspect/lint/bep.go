@@ -16,9 +16,10 @@ import (
 
 // ResultForLabel aggregates the relevant files we find in the BEP for
 type ResultForLabel struct {
-	reportFile *buildeventstream.File
-	patchFile  *buildeventstream.File
-	linter     string
+	exitCodeFile *buildeventstream.File
+	reportFile   *buildeventstream.File
+	patchFile    *buildeventstream.File
+	linter       string
 }
 
 type LintBEPHandler struct {
@@ -129,9 +130,10 @@ func (runner *LintBEPHandler) BEPEventCallback(event *buildeventstream.BuildEven
 							// Parse the filename convention that rules_lint has for report files.
 							// path/to/linter.target_name.aspect_rules_lint.report -> linter
 							result.linter = strings.SplitN(filepath.Base(file.Name), ".", 2)[0]
-						} else if outputGroup.Name == LINT_REPORT_GROUP {
+						} else if outputGroup.Name == LINT_REPORT_GROUP && strings.HasSuffix(file.Name, ".report") {
 							result.reportFile = file
-
+						} else if outputGroup.Name == LINT_REPORT_GROUP && strings.HasSuffix(file.Name, ".exit_code") {
+							result.exitCodeFile = file
 						}
 					}
 				}
