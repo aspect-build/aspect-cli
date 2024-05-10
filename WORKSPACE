@@ -256,3 +256,7 @@ multitool(
 load("//.aspect/workflows:deps.bzl", "fetch_workflows_deps")
 
 fetch_workflows_deps()
+
+load("//gazelle/common/treesitter/grammars:grammars.bzl", "fetch_grammars")
+
+fetch_grammars()
