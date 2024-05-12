@@ -41,3 +41,9 @@ try-import %workspace%/.aspect/bazelrc/remote-cache.bazelrc
 # should be last statement in this config so the user configuration is able to overwrite flags from
 # this file. See https://bazel.build/configure/best-practices#bazelrc-file.
 try-import %workspace%/.aspect/bazelrc/user.bazelrc
+
+
+# Tell Bazel to pass the right flags for llvm-ar, not libtool, only needed on linux.
+# See https://github.com/bazelbuild/bazel/blob/5c75d0acec21459bbb13520817e3806e1507e907/tools/cpp/unix_cc_toolchain_config.bzl#L1000-L1024
+# TODO: maybe drop once we upgrade llvm toolchain, https://github.com/bazel-contrib/toolchains_llvm/pull/229
+build:linux --features=-libtool
