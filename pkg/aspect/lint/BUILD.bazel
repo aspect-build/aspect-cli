@@ -11,6 +11,7 @@ go_library(
     deps = [
         "//bazel/buildeventstream",
         "//pkg/aspect/root/flags",
+        "//pkg/aspecterrors",
         "//pkg/bazel",
         "//pkg/bazel/workspace",
         "//pkg/ioutils",
