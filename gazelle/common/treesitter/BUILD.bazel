@@ -10,9 +10,9 @@ go_library(
     importpath = "aspect.build/cli/gazelle/common/treesitter",
     visibility = ["//visibility:public"],
     deps = [
+        "//gazelle/common/treesitter/grammars/kotlin",
+        "//gazelle/common/treesitter/grammars/tsx",
+        "//gazelle/common/treesitter/grammars/typescript",
         "@com_github_smacker_go_tree_sitter//:go-tree-sitter",
-        "@com_github_smacker_go_tree_sitter//kotlin",
-        "@com_github_smacker_go_tree_sitter//typescript/tsx",
-        "@com_github_smacker_go_tree_sitter//typescript/typescript",
     ],
 )

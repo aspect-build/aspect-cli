@@ -1,0 +1,19 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+go_library(
+    name = "typescript",
+    srcs = ["binding.go"],
+    cdeps = [":typescript_cc"],
+    cgo = True,
+    copts = ["-Iexternal/tree-sitter-typescript"],  #keep
+    importpath = "aspect.build/cli/gazelle/common/treesitter/grammars/typescript",
+    visibility = ["//gazelle/common/treesitter:__subpackages__"],
+    deps = ["@com_github_smacker_go_tree_sitter//:go-tree-sitter"],
+)
+
+cc_library(
+    name = "typescript_cc",
+    srcs = ["@tree-sitter-typescript//:typescript-srcs"],
+    copts = ["-Iexternal/tree-sitter-typescript/typescript/src"],
+)
