@@ -27,7 +27,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0
 	github.com/rogpeppe/go-internal v1.10.0
 	github.com/rs/zerolog v1.29.1
-	github.com/smacker/go-tree-sitter v0.0.0-20230501083651-a7d92773b3aa
+	github.com/smacker/go-tree-sitter v0.0.0-20240423010953-8ba036550382
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.16.0
@@ -43,8 +43,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	sigs.k8s.io/yaml v1.4.0
 )
-
-replace github.com/smacker/go-tree-sitter v0.0.0-20230501083651-a7d92773b3aa => github.com/aspect-forks/go-tree-sitter v0.0.0-20230720070738-0d0a9f78d8f8
 
 require (
 	github.com/bazelbuild/rules_go v0.42.0 // indirect
