@@ -57,8 +57,8 @@ def deps():
         name = "com_github_bazel_contrib_rules_jvm",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/bazel-contrib/rules_jvm",
-        sum = "h1:oJxriPrBPGxugqkQiFceyzuBYgaFiUBTFM8xhrErPKs=",
-        version = "v0.17.1-0.20230814153054-0ce5d051291b",
+        sum = "h1:L680/OahFk82wyoUKCifxV1br6FHmgyDZ+2+hvvOQ6Y=",
+        version = "v0.24.0",
     )
     go_repository(
         name = "com_github_bazelbuild_bazel_gazelle",
@@ -898,8 +898,8 @@ def deps():
         name = "com_github_yuin_goldmark",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/yuin/goldmark",
-        sum = "h1:/vn0k+RBvwlxEmP5E7SZMqNxPhfMVFEJiykr15/0XKM=",
-        version = "v1.4.1",
+        sum = "h1:fVcFKWvrslecOb/tg+Cc05dkeYx540o0FuFt3nUVDoE=",
+        version = "v1.4.13",
     )
     go_repository(
         name = "com_google_cloud_go",
@@ -1908,13 +1908,6 @@ def deps():
         importpath = "google.golang.org/grpc",
         sum = "h1:Z5Iec2pjwb+LEOqzpB2MR12/eKFhDPhuqW91O+4bwUk=",
         version = "v1.59.0",
-    )
-    go_repository(
-        name = "org_golang_google_grpc_cmd_protoc_gen_go_grpc",
-        build_file_proto_mode = "disable_global",
-        importpath = "google.golang.org/grpc/cmd/protoc-gen-go-grpc",
-        sum = "h1:rNBFJjBCOgVr9pWD7rs/knKL4FRTKgpZmsRfV214zcA=",
-        version = "v1.3.0",
     )
     go_repository(
         name = "org_golang_google_protobuf",

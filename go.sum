@@ -45,8 +45,8 @@ github.com/alphadose/haxmap v1.3.0 h1:C/2LboOnPCZP27GmmSXOcwx360st0P8N0fTJ3voefK
 github.com/alphadose/haxmap v1.3.0/go.mod h1:rjHw1IAqbxm0S3U5tD16GoKsiAd8FWx5BJ2IYqXwgmM=
 github.com/anmitsu/go-shlex v0.0.0-20161002113705-648efa622239/go.mod h1:2FmKhYUyUczH0OGQWaF5ceTx0UBShxjsH6f8oGKYe2c=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5/go.mod h1:wHh0iHkYZB8zMSxRWpUBQtwG5a7fFgvEO+odwuTv2gs=
-github.com/bazel-contrib/rules_jvm v0.17.1-0.20230814153054-0ce5d051291b h1:oJxriPrBPGxugqkQiFceyzuBYgaFiUBTFM8xhrErPKs=
-github.com/bazel-contrib/rules_jvm v0.17.1-0.20230814153054-0ce5d051291b/go.mod h1:tZ4zJRqWBNjRdaU+eE9ppdRZBrjWAYfaRYoe3bBwsCc=
+github.com/bazel-contrib/rules_jvm v0.24.0 h1:L680/OahFk82wyoUKCifxV1br6FHmgyDZ+2+hvvOQ6Y=
+github.com/bazel-contrib/rules_jvm v0.24.0/go.mod h1:5biFsRs+vKr9mRcHMKfV770Oir5KVvj4ajJltB9+62Y=
 github.com/bazelbuild/bazel-gazelle v0.35.0 h1:Bvg+zEHWYwWrhJT4WxyvcU3y1DEJpT/XlPYEfIn9lUI=
 github.com/bazelbuild/bazel-gazelle v0.35.0/go.mod h1:o2+s90f3w3U6jjw0gcdok0EJOfNK0AK/9RyVP7QkRDk=
 github.com/bazelbuild/bazelisk v1.17.0 h1:TDt+a1PYrnBF9on3WRJUisXXFhCMrhcNo8OebyS5Q34=
@@ -54,7 +54,6 @@ github.com/bazelbuild/bazelisk v1.17.0/go.mod h1:nWNmVF7yKsUt3EWCBCrqUeMNQpbB+DA
 github.com/bazelbuild/buildtools v0.0.0-20231115204819-d4c9dccdfbb1 h1:2Gc2Q6hVR1SJ8bBI9Ybzoggp8u/ED2WkM4MfvEIn9+c=
 github.com/bazelbuild/buildtools v0.0.0-20231115204819-d4c9dccdfbb1/go.mod h1:689QdV3hBP7Vo9dJMmzhoYIyo/9iMhEmHkJcnaPRCbo=
 github.com/bazelbuild/rules_go v0.44.0 h1:uJStI9o5obVWSwquy9WxKNWfZxf2sKA2rpEsX6x5RVM=
-github.com/bazelbuild/rules_go v0.44.0/go.mod h1:z7Y8GZ90V4mwgYizbNbEQKmOmx93Q3Btcel4vX7pXoc=
 github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d h1:xDfNPAt8lFiC1UJrqV3uuy861HCTo708pDMbjHHdCas=
 github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d/go.mod h1:6QX/PXZ00z/TKoufEY6K/a0k6AhaJrQKdFe6OfVXsa4=
 github.com/bluekeyes/go-gitdiff v0.7.1 h1:graP4ElLRshr8ecu0UtqfNTCHrtSyZd3DABQm/DWesQ=
@@ -524,6 +523,7 @@ golang.org/x/tools v0.0.0-20210108195828-e2f9c7f1fc8e/go.mod h1:emZCQorbCU4vsT4f
 golang.org/x/tools v0.1.0/go.mod h1:xkSsbof2nBLbhDlRMhhhyNLN/zl3eTqcnHD5viDpcZ0=
 golang.org/x/tools v0.1.8/go.mod h1:nABZi5QlRsZVlzPpHl034qft6wpY4eDcsTt5AaioBiU=
 golang.org/x/tools v0.15.0 h1:zdAyfUGbYmuVokhzVmghFl2ZJh5QhcfebBgmVPFYA+8=
+golang.org/x/tools v0.15.0/go.mod h1:hpksKq4dtpQWS1uQ61JkdqWM3LscIS6Slf+VVkm+wQk=
 golang.org/x/tools/go/vcs v0.1.0-deprecated h1:cOIJqWBl99H1dH5LWizPa+0ImeeJq3t3cJjaeOWUAL4=
 golang.org/x/tools/go/vcs v0.1.0-deprecated/go.mod h1:zUrvATBAvEI9535oC0yWYsLsHIV4Z7g63sNPVMtuBy8=
 golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
