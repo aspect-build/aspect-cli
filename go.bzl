@@ -793,9 +793,8 @@ def deps():
         name = "com_github_smacker_go_tree_sitter",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/smacker/go-tree-sitter",
-        replace = "github.com/aspect-forks/go-tree-sitter",
-        sum = "h1:d138UtNf2MywcFxxOrX4c5i5kg0OCfVFBe2UPjBKNh4=",
-        version = "v0.0.0-20230720070738-0d0a9f78d8f8",
+        sum = "h1:Cb8njhEbNgGk5lQMM/r1FWvrKT+ysH8H0WV9NAIKAu8=",
+        version = "v0.0.0-20240423010953-8ba036550382",
     )
     go_repository(
         name = "com_github_spf13_afero",
