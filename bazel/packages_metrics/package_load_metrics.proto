@@ -13,7 +13,7 @@
 // limitations under the License.
 syntax = "proto2";
 
-package devtools.build.lib.packages.metrics;
+package metrics;
 
 import "google/protobuf/duration.proto";
 

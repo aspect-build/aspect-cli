@@ -16,15 +16,14 @@ syntax = "proto3";
 
 package build_event_stream;
 
-import "google/protobuf/any.proto";
-import "google/protobuf/duration.proto";
-import "google/protobuf/timestamp.proto";
-
 import "bazel/action_cache/action_cache.proto";
-import "bazel/packages_metrics/package_load_metrics.proto";
 import "bazel/command_line/command_line.proto";
 import "bazel/failure_details/failure_details.proto";
 import "bazel/invocation_policy/invocation_policy.proto";
+import "bazel/packages_metrics/package_load_metrics.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 
 option go_package = "aspect.build/cli/bazel/buildeventstream";
 
@@ -407,7 +406,7 @@ message OptionsParsed {
   repeated string explicit_startup_options = 2;
   repeated string cmd_line = 3;
   repeated string explicit_cmd_line = 4;
-  blaze.invocation_policy.InvocationPolicy invocation_policy = 5;
+  invocation_policy.InvocationPolicy invocation_policy = 5;
   string tool_tag = 6;
 }
 
@@ -434,8 +433,7 @@ message WorkspaceStatus {
 // build.
 message BuildMetadata {
   // Custom metadata for the build.
-  map<string, string> metadata = 1
-      ;
+  map<string, string> metadata = 1;
 }
 
 // Payload of an event reporting details of a given configuration.
@@ -443,8 +441,7 @@ message Configuration {
   string mnemonic = 1;
   string platform_name = 2;
   string cpu = 3;
-  map<string, string> make_variable = 4
-      ;
+  map<string, string> make_variable = 4;
   // Whether this configuration is used for building tools.
   bool is_tool = 5;
 }
@@ -1008,8 +1005,7 @@ message BuildMetrics {
     int64 packages_loaded = 1;
 
     // Loading time metrics per package.
-    repeated devtools.build.lib.packages.metrics.PackageLoadMetrics
-        package_load_metrics = 2;
+    repeated metrics.PackageLoadMetrics package_load_metrics = 2;
   }
   PackageMetrics package_metrics = 4;
 
