@@ -1,5 +1,4 @@
 # Import Aspect bazelrc presets
-
 import %workspace%/.aspect/bazelrc/bazel7.bazelrc
 import %workspace%/.aspect/bazelrc/convenience.bazelrc
 import %workspace%/.aspect/bazelrc/correctness.bazelrc
@@ -7,13 +6,12 @@ import %workspace%/.aspect/bazelrc/debug.bazelrc
 import %workspace%/.aspect/bazelrc/javascript.bazelrc
 import %workspace%/.aspect/bazelrc/performance.bazelrc
 
-### YOUR PROJECT SPECIFIC SETTINGS GO HERE ###
+### YOUR PROJECT SPECIFIC OPTIONS GO HERE ###
 
 # Allow our init template folders to contain BUILD.bazel without it being a subpackage
 # To update, run:
 #   find pkg/aspect/init/template -type d | paste -d, -s - | awk '{ print "common --deleted_packages="$1 }'
 common --deleted_packages=pkg/aspect/init/template,pkg/aspect/init/template/tools,pkg/aspect/init/template/tools/format
-
 
 common --workspace_status_command "${PWD}/workspace_status.sh"
 
@@ -29,6 +27,11 @@ common --noincompatible_disallow_empty_glob
 common --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 common --incompatible_enable_cc_toolchain_resolution
 
+# Tell Bazel to pass the right flags for llvm-ar, not libtool, only needed on linux.
+# See https://github.com/bazelbuild/bazel/blob/5c75d0acec21459bbb13520817e3806e1507e907/tools/cpp/unix_cc_toolchain_config.bzl#L1000-L1024
+# TODO: maybe drop once we upgrade llvm toolchain, https://github.com/bazel-contrib/toolchains_llvm/pull/229
+build:linux --features=-libtool
+
 # Load any settings & overrides specific to the external remote cache from `.aspect/bazelrc/remote-cache.bazelrc`.
 # This file should appear in `.gitignore` so that settings are not shared with team members. This
 # should be last statement in this config so the user configuration is able to overwrite flags from
@@ -41,8 +44,3 @@ try-import %workspace%/.aspect/bazelrc/remote-cache.bazelrc
 # should be last statement in this config so the user configuration is able to overwrite flags from
 # this file. See https://bazel.build/configure/best-practices#bazelrc-file.
 try-import %workspace%/.aspect/bazelrc/user.bazelrc
-
-# Tell Bazel to pass the right flags for llvm-ar, not libtool, only needed on linux.
-# See https://github.com/bazelbuild/bazel/blob/5c75d0acec21459bbb13520817e3806e1507e907/tools/cpp/unix_cc_toolchain_config.bzl#L1000-L1024
-# TODO: maybe drop once we upgrade llvm toolchain, https://github.com/bazel-contrib/toolchains_llvm/pull/229
-build:linux --features=-libtool
