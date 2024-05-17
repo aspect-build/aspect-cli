@@ -26,8 +26,7 @@ data = [
     )
     for test in [
         "flags",
-        # FIXME(alex)
-        #"init",
+        "init",
         "lint",
         "reenter",
     ]
