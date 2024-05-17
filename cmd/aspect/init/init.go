@@ -33,14 +33,11 @@ func NewCmd(streams ioutils.Streams) *cobra.Command {
 	v := init_.New(streams)
 
 	cmd := &cobra.Command{
-		Use:   "init [folder]",
+		Use:   "init",
 		Short: "Create a new Bazel workspace",
 		Long: `Creates a Bazel workspace.
 
-It stamps out commonly needed files to get started more quickly with a brand-new project.
-
-Folder may be a new directory to create, or "." to use the current working directory.
-If omitted, the user is prompted to supply a value.`,
+It stamps out commonly needed files to get started more quickly with a brand-new project.`,
 		GroupID: "aspect",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
@@ -49,5 +46,7 @@ If omitted, the user is prompted to supply a value.`,
 			v.Run,
 		),
 	}
+	cmd.Flags().String("preset", "", "Use a named preset from the scaffold")
+
 	return cmd
 }

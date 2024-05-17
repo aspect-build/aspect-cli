@@ -1,6 +1,0 @@
-"Targets in the workspace root"
-
-alias(
-    name = "format",
-    actual = "//tools/format",
-)

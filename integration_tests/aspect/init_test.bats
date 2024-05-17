@@ -5,12 +5,8 @@ setup() {
 }
 
 @test 'aspect init should create functional workspace' {
-    NEW_WKSP="$(mktemp -d)"
-    (
-        cd "$NEW_WKSP"
-        run aspect init "."
-
-        aspect run format
-        aspect build //...
-    )
+    cd "$TEST_TMPDIR"
+    aspect init --preset=minimal
+    cd scaffold_test*
+    aspect build //...
 }
