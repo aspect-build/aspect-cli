@@ -2,11 +2,14 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "init",
-    srcs = ["init.go"],
+    srcs = [
+        "init.go",
+    ],
     importpath = "aspect.build/cli/pkg/aspect/init",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/root/flags",
+        "//pkg/bazel",
         "//pkg/bazel/workspace",
         "//pkg/ioutils",
         "@com_github_hay_kot_scaffold//app/commands",
@@ -15,5 +18,6 @@ go_library(
         "@com_github_rs_zerolog//:zerolog",
         "@com_github_rs_zerolog//log",
         "@com_github_spf13_cobra//:cobra",
+        "@com_github_urfave_cli_v2//:cli",
     ],
 )
