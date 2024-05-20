@@ -36,6 +36,7 @@ http_archive(
     patches = [
         "//patches:com_grail_bazel_toolchain.patch",
         "//patches:com_grail_bazel_toolchain.001.patch",
+        "//patches:com_grail_bazel_toolchain_cross_compile_fix.patch",
     ],
     sha256 = "a9fc7cf01d0ea0a935bd9e3674dd3103766db77dfc6aafcb447a7ddd6ca24a78",
     strip_prefix = "toolchains_llvm-c65ef7a45907016a754e5bf5bfabac76eb702fd3",
@@ -87,13 +88,9 @@ http_archive(
 
 http_archive(
     name = "io_bazel_rules_go",
-    patch_args = ["-p1"],
-    patches = [
-        "//patches:rules_go.patch",
-        "//patches:rules_go.pr3617.patch",
-    ],
-    sha256 = "6dc2da7ab4cf5d7bfc7c949776b1b7c733f05e56edc4bcd9022bb249d2e2a996",
-    urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.39.1/rules_go-v0.39.1.zip"],
+    integrity = "sha256-H8JC/qXQxagMD54qMWjjWBFg3QqMhJ5oOGc8OH5ZUlw=",
+    strip_prefix = "rules_go-a54fd5674f7184fe6e483fb5aee065a314994081",
+    urls = ["https://github.com/bazelbuild/rules_go/archive/a54fd5674f7184fe6e483fb5aee065a314994081.zip"],
 )
 
 http_archive(
@@ -125,14 +122,11 @@ register_jq_toolchains()
 
 register_yq_toolchains(version = "4.24.5")
 
-load("@io_bazel_rules_go//extras:embed_data_deps.bzl", "go_embed_data_dependencies")
 load("@io_bazel_rules_go//go:deps.bzl", "go_register_toolchains", "go_rules_dependencies")
 
 go_rules_dependencies()
 
-go_embed_data_dependencies()
-
-go_register_toolchains(version = "1.20.4")
+go_register_toolchains(version = "1.22.3")
 
 http_archive(
     name = "bazel_gazelle",
@@ -146,20 +140,29 @@ http_archive(
 
 http_archive(
     name = "rules_proto",
-    sha256 = "dc3fb206a2cb3441b485eb1e423165b231235a1ea9b031b4433cf7bc1fa460dd",
-    strip_prefix = "rules_proto-5.3.0-21.7",
-    urls = ["https://github.com/bazelbuild/rules_proto/archive/refs/tags/5.3.0-21.7.tar.gz"],
+    sha256 = "303e86e722a520f6f326a50b41cfc16b98fe6d1955ce46642a5b7a67c11c0f5d",
+    strip_prefix = "rules_proto-6.0.0",
+    url = "https://github.com/bazelbuild/rules_proto/releases/download/6.0.0/rules_proto-6.0.0.tar.gz",
 )
 
-load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_proto_toolchains")
+load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies")
 
 rules_proto_dependencies()
 
-rules_proto_toolchains()
+http_archive(
+    name = "toolchains_protoc",
+    sha256 = "1f3cd768bbb92164952301228bac5e5079743843488598f2b17fecd41163cadb",
+    strip_prefix = "toolchains_protoc-0.2.4",
+    url = "https://github.com/aspect-build/toolchains_protoc/releases/download/v0.2.4/toolchains_protoc-v0.2.4.tar.gz",
+)
 
-load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
+load("@toolchains_protoc//protoc:toolchain.bzl", "protoc_toolchains")
 
-protobuf_deps()
+protoc_toolchains(
+    name = "protoc_toolchains",
+    google_protobuf = "com_google_protobuf",
+    version = "v21.7",
+)
 
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
 load("//:go.bzl", _go_repositories = "deps")

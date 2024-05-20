@@ -1,4 +1,3 @@
-load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 load("@bazel_gazelle//:def.bzl", "gazelle")
 load("@buildifier_prebuilt//:rules.bzl", "buildifier")
 load("@io_bazel_rules_go//go:def.bzl", "nogo")
@@ -82,33 +81,6 @@ gazelle(
         "-prune",
     ],
     command = "update-repos",
-)
-
-# Run this target to update all the generated .pb.go files in the repo:
-# bazel run //:update_go_pb
-#
-# Note that each target also has a corresponding test asserting that the
-# generated files stay up-to-date.
-# Re-generate this list with:
-# bazel 2>/dev/null query 'kind(go_proto_library, //...)' | xargs -I {} buildozer 'add additional_update_targets {}.update_go_pb' //:update_go_pb
-write_source_files(
-    name = "update_go_pb",
-    additional_update_targets = [
-        "//bazel/action_cache:bazel_go_proto.update_go_pb",
-        "//bazel/analysis:bazel_go_proto.update_go_pb",
-        "//bazel/buildeventstream:buildeventstream_go_proto.update_go_pb",
-        "//bazel/command_line:command_line_go_proto.update_go_pb",
-        "//bazel/failure_details:failure_details_go_proto.update_go_pb",
-        "//bazel/flags:bazel_go_proto.update_go_pb",
-        "//bazel/invocation_policy:blaze_invocation_policy_go_proto.update_go_pb",
-        "//bazel/options:options_go_proto.update_go_pb",
-        "//bazel/packages_metrics:devtools_build_lib_packages_metrics_go_proto.update_go_pb",
-        "//bazel/query:blaze_query_aspect_mirror_go_proto.update_go_pb",
-        "//pkg/plugin/sdk/v1alpha1/proto:proto_go_proto.update_go_pb",
-        "//pkg/plugin/sdk/v1alpha2/proto:proto_go_proto.update_go_pb",
-        "//pkg/plugin/sdk/v1alpha3/proto:proto_go_proto.update_go_pb",
-        "//pkg/plugin/sdk/v1alpha4/proto:proto_go_proto.update_go_pb",
-    ],
 )
 
 alias(
