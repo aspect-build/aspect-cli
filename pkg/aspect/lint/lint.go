@@ -225,7 +225,6 @@ lint:
 	applyNone := false
 	exitCode := 0
 	for label, result := range lintBEPHandler.resultsByLabel {
-		l := label
 		if result.exitCodeFile != nil {
 			exitCodeStr, err := lintBEPHandler.readBEPFile(result.exitCodeFile)
 			if err != nil {
@@ -239,43 +238,44 @@ lint:
 				exitCode = 1
 			}
 		}
-		f := result.reportFile
-		content, err := lintBEPHandler.readBEPFile(f)
+		content, err := lintBEPHandler.readBEPFile(result.reportFile)
 		if err != nil {
 			return err
 		}
-		if applyFix || printDiff {
-			runner.patchLintResult(label, content, applyFix, printDiff)
-		}
 		if printReport {
-			runner.outputLintResultText(l, content)
-
-			if isInteractiveMode && result.patchFile != nil && !applyNone {
-				var choice string
-				if applyAll {
-					choice = "y"
-				} else {
-					applyFixPrompt := promptui.Prompt{
-						Label:   "Apply fixes? [y]es / [n]o / [A]ll / [N]one",
-						Default: "y",
+			runner.outputLintResultText(label, content)
+		}
+		if result.patchFile != nil && (applyFix || printDiff || isInteractiveMode) {
+			patchResult, err := lintBEPHandler.readBEPFile(result.patchFile)
+			if err != nil {
+				return err
+			}
+			if len(strings.TrimSpace(patchResult)) > 0 {
+				if applyFix || printDiff {
+					runner.patchLintResult(label, patchResult, applyFix, printDiff)
+				} else if !applyNone {
+					var choice string
+					if applyAll {
+						choice = "y"
+					} else {
+						applyFixPrompt := promptui.Prompt{
+							Label:   "Apply fixes? [y]es / [n]o / [A]ll / [N]one",
+							Default: "y",
+						}
+						choice, err = applyFixPrompt.Run()
+						if err != nil {
+							return fmt.Errorf("prompt failed: %v", err)
+						}
 					}
-					choice, err = applyFixPrompt.Run()
-					if err != nil {
-						return fmt.Errorf("prompt failed: %v", err)
+					if strings.HasPrefix(choice, "A") {
+						applyAll = true
 					}
-				}
-				if strings.HasPrefix(choice, "A") {
-					applyAll = true
-				}
-				if strings.HasPrefix(choice, "N") {
-					applyNone = true
-				}
-				if applyAll || strings.HasPrefix(choice, "y") {
-					patchResult, err := lintBEPHandler.readBEPFile(result.patchFile)
-					if err != nil {
-						return err
+					if strings.HasPrefix(choice, "N") {
+						applyNone = true
 					}
-					runner.patchLintResult(label, patchResult, true, false)
+					if applyAll || strings.HasPrefix(choice, "y") {
+						runner.patchLintResult(label, patchResult, true, false)
+					}
 				}
 			}
 		}
