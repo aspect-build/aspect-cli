@@ -11,17 +11,15 @@ Creates a Bazel workspace.
 
 It stamps out commonly needed files to get started more quickly with a brand-new project.
 
-Folder may be a new directory to create, or "." to use the current working directory.
-If omitted, the user is prompted to supply a value.
-
 ```
-aspect init [folder] [flags]
+aspect init [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for init
+  -h, --help            help for init
+      --preset string   Use a named preset from the scaffold
 ```
 
 ### Options inherited from parent commands
