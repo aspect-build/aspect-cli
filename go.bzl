@@ -303,6 +303,13 @@ def deps():
         name = "com_github_cloudflare_circl",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/cloudflare/circl",
+        # See https://github.com/bazelbuild/bazel-gazelle/issues/1421
+        patches = [
+            "//:patches/com_github_cloudflare_circl/fp25519.patch",
+            "//:patches/com_github_cloudflare_circl/fp448.patch",
+            "//:patches/com_github_cloudflare_circl/x25519.patch",
+            "//:patches/com_github_cloudflare_circl/x448.patch",
+        ],
         sum = "h1:qlCDlTPz2n9fu58M0Nh1J/JzcFpfgkFHHX3O35r5vcU=",
         version = "v1.3.7",
     )
