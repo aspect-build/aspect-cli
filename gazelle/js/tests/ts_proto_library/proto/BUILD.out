@@ -1,5 +1,5 @@
-load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@aspect_rules_ts//ts:proto.bzl", "ts_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
 
 proto_library(
     name = "connectrpc_eliza_v1_proto",

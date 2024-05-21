@@ -15,8 +15,8 @@ ts_project(
     name = "mix_tests",
     testonly = True,
     srcs = glob([
-        "**/*.mock.ts",
         "**/*.spec.ts",
+        "**/*.mock.ts",
     ]),  #keep
     deps = [":mix"],
 )
