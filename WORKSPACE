@@ -4,16 +4,16 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "f75d03783588e054899eb0729a97fb5b8973c1a26f30373fafd485c90bf207d1",
-    strip_prefix = "bazel-lib-2.4.2",
-    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.4.2/bazel-lib-v2.4.2.tar.gz",
+    sha256 = "87ab4ec479ebeb00d286266aca2068caeef1bb0b1765e8f71c7b6cfee6af4226",
+    strip_prefix = "bazel-lib-2.7.3",
+    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.7.3/bazel-lib-v2.7.3.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_js",
-    sha256 = "a2f941e27f02e84521c2d47fd530c66d57dd6d6e44b4a4f1496fe304851d8e48",
-    strip_prefix = "rules_js-1.35.0",
-    url = "https://github.com/aspect-build/rules_js/releases/download/v1.35.0/rules_js-v1.35.0.tar.gz",
+    sha256 = "2cfb3875e1231cefd3fada6774f2c0c5a99db0070e0e48ea398acbff7c6c765b",
+    strip_prefix = "rules_js-1.42.3",
+    url = "https://github.com/aspect-build/rules_js/releases/download/v1.42.3/rules_js-v1.42.3.tar.gz",
 )
 
 http_archive(
