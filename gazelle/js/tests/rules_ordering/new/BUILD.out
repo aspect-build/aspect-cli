@@ -6,11 +6,11 @@ load("@foo:baa.bz", "y")
 
 # Before
 
+load("@foo:bar.bz", "x")
+
 y(
     name = "e1",
 )
-
-load("@foo:bar.bz", "x")
 
 filegroup(
     name = "e2",

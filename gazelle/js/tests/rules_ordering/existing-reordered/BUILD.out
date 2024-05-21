@@ -4,6 +4,9 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
 # Comment before the tests
 
+load("@foo:baa.bz", "y")
+load("@foo:bar.bz", "x")
+
 ts_project(
     name = "existing-reordered_tests",
     testonly = True,
@@ -11,13 +14,9 @@ ts_project(
     deps = [":existing-reordered"],
 )
 
-load("@foo:baa.bz", "y")
-
 y(
     name = "e1",
 )
-
-load("@foo:bar.bz", "x")
 
 # Unrelated comment
 
