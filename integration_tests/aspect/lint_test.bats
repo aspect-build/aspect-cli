@@ -9,13 +9,13 @@ setup() {
 exec ./some-program $@
 EOF
 
-    cat >>BUILD.bazel <<'EOF'
+    cat >BUILD.bazel <<'EOF'
 exports_files([".shellcheckrc"])
 sh_library(name = "shell", srcs = ["hello.sh"])
 EOF
 
-    cat >>MODULE.bazel <<'EOF'
-bazel_dep(name = "aspect_rules_lint", version = "0.18.0")
+    cat >MODULE.bazel <<'EOF'
+bazel_dep(name = "aspect_rules_lint", version = "0.21.0")
 EOF
 
     cat >lint.bzl <<'EOF'
@@ -36,8 +36,12 @@ EOF
 
 }
 
-@test 'aspect lint should work' {
+@test 'aspect lint should report lint violations and exit non-zero' {
     run aspect lint //:all
-    # Should report a lint violation
+    assert_failure
+    assert_output --partial "SC2068"
+
+    run aspect lint //:all --@aspect_rules_lint//lint:fail_on_violation
+    assert_failure
     assert_output --partial "SC2068"
 }

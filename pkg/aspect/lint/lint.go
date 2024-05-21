@@ -202,10 +202,13 @@ lint:
 	}
 
 	err = runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
+	if err != nil {
+		return err
+	}
 
 	// Wait for completion and return the first error (if any)
 	wgErr := handleResultsErrgroup.Wait()
-	if wgErr != nil && err == nil {
+	if wgErr != nil {
 		return wgErr
 	}
 
@@ -215,9 +218,7 @@ lint:
 		for _, err := range subscriberErrors {
 			fmt.Fprintf(runner.Streams.Stderr, "Error: failed to run lint command: %v\n", err)
 		}
-		if err == nil {
-			return fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))
-		}
+		return fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))
 	}
 
 	// Bazel is done running, so stdout is now safe for us to print the results
