@@ -56,30 +56,30 @@ func newLintBEPHandler(ctx context.Context, workspaceRoot string, handleResultsE
 	}
 }
 
-func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) (string, error) {
+func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) ([]byte, error) {
 	resultsFile := ""
 
 	switch f := file.File.(type) {
 	case *buildeventstream.File_Uri:
 		uri, err := url.Parse(f.Uri)
 		if err != nil {
-			return "", fmt.Errorf("unable to parse URI %s: %v", f.Uri, err)
+			return nil, fmt.Errorf("unable to parse URI %s: %v", f.Uri, err)
 		}
 		if uri.Scheme == "file" {
 			resultsFile = filepath.Clean(uri.Path)
 		} else if uri.Scheme == "bytestream" {
 			if strings.HasSuffix(uri.Path, "/0") {
 				// No reason to read an empty results file from disk
-				return "", nil
+				return nil, nil
 			}
 			// Because we set --experimental_remote_download_regex, we can depend on the results file being
 			// in the output tree even when using a remote cache with build without the bytes.
 			resultsFile = path.Join(runner.workspaceRoot, path.Join(file.PathPrefix...), file.Name)
 		} else {
-			return "", fmt.Errorf("unsupported BES file uri %v", f.Uri)
+			return nil, fmt.Errorf("unsupported BES file uri %v", f.Uri)
 		}
 	default:
-		return "", fmt.Errorf("unsupported BES file type")
+		return nil, fmt.Errorf("unsupported BES file type")
 	}
 
 	start := time.Now()
@@ -91,14 +91,14 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) (string, 
 			// if more than 60s has passed then give up
 			// TODO: make this timeout configurable
 			if time.Since(start) > 60*time.Second {
-				return "", fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
+				return nil, fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
 			}
 		} else {
 			buf, err := os.ReadFile(resultsFile)
 			if err != nil {
-				return "", fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
+				return nil, fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
 			}
-			return string(buf), nil
+			return buf, nil
 		}
 		// we're in a go routine so yield for 100ms and try again
 		// TODO: watch the file system for the file creation instead of polling
@@ -106,7 +106,7 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) (string, 
 		select {
 		case <-runner.ctx.Done():
 			t.Stop()
-			return "", fmt.Errorf("failed to read lint results file %s: interrupted", resultsFile)
+			return nil, fmt.Errorf("failed to read lint results file %s: interrupted", resultsFile)
 		case <-t.C:
 		}
 	}
