@@ -36,7 +36,6 @@ http_archive(
     patches = [
         "//patches:com_grail_bazel_toolchain.patch",
         "//patches:com_grail_bazel_toolchain.001.patch",
-        "//patches:com_grail_bazel_toolchain_cross_compile_fix.patch",
     ],
     sha256 = "a9fc7cf01d0ea0a935bd9e3674dd3103766db77dfc6aafcb447a7ddd6ca24a78",
     strip_prefix = "toolchains_llvm-c65ef7a45907016a754e5bf5bfabac76eb702fd3",
@@ -130,12 +129,12 @@ go_register_toolchains(version = "1.22.3")
 
 http_archive(
     name = "bazel_gazelle",
-    sha256 = "32938bda16e6700063035479063d9d24c60eda8d79fd4739563f50d331cb3209",
+    sha256 = "75df288c4b31c81eb50f51e2e14f4763cb7548daae126817247064637fd9ea62",
     # Ensure this version always matches the version of @com_github_bazelbuild_bazel_gazelle set in deps.bzl.
     #
     # :notice: Care should be taken when upgrading gazelle since we have vendored & modified parts of gazelle
     # in the CLI configure command (pkg/aspect/configure).
-    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.35.0/bazel-gazelle-v0.35.0.tar.gz"],
+    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.36.0/bazel-gazelle-v0.36.0.tar.gz"],
 )
 
 http_archive(
