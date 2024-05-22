@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 	"github.com/fatih/color"
 	"github.com/manifoldco/promptui"
+	godiff "github.com/sourcegraph/go-diff/diff"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -46,9 +48,11 @@ type Linter struct {
 
 // Align with rules_lint
 const (
-	LINT_REPORT_GROUP = "rules_lint_report"
-	LINT_PATCH_GROUP  = "rules_lint_patch"
-	LINT_RESULT_REGEX = ".*aspect_rules_lint.*"
+	LINT_REPORT_GROUP  = "rules_lint_report"
+	LINT_PATCH_GROUP   = "rules_lint_patch"
+	LINT_RESULT_REGEX  = ".*aspect_rules_lint.*"
+	HISTOGRAM_CHARS    = 20
+	MAX_FILENAME_WIDTH = 80
 )
 
 func New(
@@ -62,9 +66,9 @@ func New(
 }
 
 func AddFlags(flags *pflag.FlagSet) {
-	flags.Bool("fix", false, "Apply patch fixes for lint errors")
-	flags.Bool("diff", false, "Output patch fixes for lint errors")
-	flags.Bool("report", true, "Output lint reports")
+	flags.Bool("fix", false, "Apply all patch fixes for lint violations")
+	flags.Bool("diff", false, "Show unified diff instead of diff stats for fixes")
+	flags.Bool("report", true, "Output lint report")
 }
 
 // TODO: hoist this to a flags package so it can be used by other commands that require this functionality
@@ -134,8 +138,8 @@ lint:
 	}
 
 	// Get values of lint command specific flags
-	applyFix, _ := cmd.Flags().GetBool("fix")
-	printDiff, _ := cmd.Flags().GetBool("diff")
+	applyAll, _ := cmd.Flags().GetBool("fix")
+	showDiff, _ := cmd.Flags().GetBool("diff")
 	printReport, _ := cmd.Flags().GetBool("report")
 
 	// Separate out the lint command specific flags from the list of args to
@@ -152,9 +156,9 @@ lint:
 	bazelCmd = append(bazelCmd, bazelArgs...)
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--aspects=%s", strings.Join(linters, ",")))
 
-	// optimization: don't request report files in a mode where we don't print them
+	// Don't request report and patch files in a mode where we don't need them
 	outputGroups := []string{}
-	if applyFix || printDiff || isInteractiveMode {
+	if printReport || applyAll || isInteractiveMode {
 		bazelCmd = append(bazelCmd, "--@aspect_rules_lint//lint:fix")
 		outputGroups = append(outputGroups, LINT_PATCH_GROUP)
 	}
@@ -222,16 +226,15 @@ lint:
 	}
 
 	// Bazel is done running, so stdout is now safe for us to print the results
-	applyAll := false
 	applyNone := false
 	exitCode := 0
 	for label, result := range lintBEPHandler.resultsByLabel {
 		if result.exitCodeFile != nil {
-			exitCodeStr, err := lintBEPHandler.readBEPFile(result.exitCodeFile)
+			exitCodeBytes, err := lintBEPHandler.readBEPFile(result.exitCodeFile)
 			if err != nil {
 				return err
 			}
-			targetExitCode, err := strconv.Atoi(strings.TrimSpace(exitCodeStr))
+			targetExitCode, err := strconv.Atoi(strings.TrimSpace(string(exitCodeBytes)))
 			if err != nil {
 				return fmt.Errorf("failed parse read exit code as integer: %v", err)
 			}
@@ -239,43 +242,64 @@ lint:
 				exitCode = 1
 			}
 		}
-		content, err := lintBEPHandler.readBEPFile(result.reportFile)
+		reportBytes, err := lintBEPHandler.readBEPFile(result.reportFile)
 		if err != nil {
 			return err
 		}
-		if printReport {
-			runner.outputLintResultText(label, content)
+		report := strings.TrimSpace(string(reportBytes))
+		if printReport && len(report) > 0 {
+			runner.printLintReport(label, report)
 		}
-		if result.patchFile != nil && (applyFix || printDiff || isInteractiveMode) {
-			patchResult, err := lintBEPHandler.readBEPFile(result.patchFile)
+		if result.patchFile != nil {
+			patch, err := lintBEPHandler.readBEPFile(result.patchFile)
 			if err != nil {
 				return err
 			}
-			if len(strings.TrimSpace(patchResult)) > 0 {
-				if applyFix || printDiff {
-					runner.patchLintResult(label, patchResult, applyFix, printDiff)
-				} else if !applyNone {
-					var choice string
-					if applyAll {
-						choice = "y"
-					} else {
-						applyFixPrompt := promptui.Prompt{
-							Label:   "Apply fixes? [y]es / [n]o / [A]ll / [N]one",
-							Default: "y",
+			if patch != nil && len(patch) > 0 {
+				if showDiff {
+					runner.printLintPatchDiff(label, patch)
+				} else {
+					err = runner.printLintPatchDiffStat(label, patch)
+					if err != nil {
+						return fmt.Errorf("failed to parse patch file %s: %v", result.patchFile, err)
+					}
+				}
+				apply := applyAll
+				if isInteractiveMode && !applyNone && !apply {
+					for {
+						var choice string
+						options := []string{"Yes", "No", "All", "None"}
+						if !showDiff {
+							options = append(options, "Show Diff")
 						}
-						choice, err = applyFixPrompt.Run()
+						applyFixPrompt := promptui.Select{
+							Label: "Apply fixes?",
+							Items: options,
+						}
+						_, choice, err = applyFixPrompt.Run()
 						if err != nil {
 							return fmt.Errorf("prompt failed: %v", err)
 						}
+						fmt.Fprintln(runner.Streams.Stdout, "")
+						switch choice {
+						case "Yes":
+							apply = true
+						case "All":
+							apply = true
+							applyAll = true
+						case "None":
+							applyNone = true
+						case "Show Diff":
+							runner.printLintPatchDiff("", patch)
+							continue
+						}
+						break
 					}
-					if strings.HasPrefix(choice, "A") {
-						applyAll = true
-					}
-					if strings.HasPrefix(choice, "N") {
-						applyNone = true
-					}
-					if applyAll || strings.HasPrefix(choice, "y") {
-						runner.patchLintResult(label, patchResult, true, false)
+				}
+				if apply {
+					err = runner.applyLintPatch(patch)
+					if err != nil {
+						return fmt.Errorf("failed to apply patch file %s: %v", result.patchFile, err)
 					}
 				}
 			}
@@ -285,50 +309,170 @@ lint:
 	return &aspecterrors.ExitError{ExitCode: exitCode}
 }
 
-func (runner *Linter) patchLintResult(label string, lintPatch string, applyDiff, printDiff bool) error {
-	if printDiff {
-		color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "From %s:\n", label)
-		fmt.Fprintf(runner.Streams.Stdout, "%s\n", lintPatch)
+func (runner *Linter) printLintReport(label string, lineResult string) {
+	color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Lint results for %s:\n", label)
+	fmt.Fprintf(runner.Streams.Stdout, "%s\n", lineResult)
+	fmt.Fprintln(runner.Streams.Stdout, "")
+}
+
+type diffSummary struct {
+	name    string
+	added   int
+	deleted int
+	changed int
+	total   int
+}
+
+// Prints an output similar to `git diff | diffstat -m -C`.
+// See https://invisible-island.net/diffstat/.
+//
+// For example,
+//
+// $ git diff | diffstat -m -C
+//
+//	e2e/pnpm_lockfiles/README.md                     |    2
+//	e2e/pnpm_lockfiles/base/package.json             |    5 !!
+//	e2e/pnpm_lockfiles/lockfile-test.bzl             |    3 !
+//	e2e/pnpm_lockfiles/setup.sh                      |    4 !
+//	e2e/pnpm_lockfiles/update-snapshots.sh           |    6 ++
+//	e2e/pnpm_lockfiles/v54/pnpm-lock.yaml            |   44 +++++++++++++++++!!
+//	e2e/pnpm_lockfiles/v54/snapshots/defs.bzl        |   78 ++++++++++++++++++++!!!!!!!!!!!!!!
+//	e2e/pnpm_lockfiles/v60/pnpm-lock.yaml            |   50 +++++++++++++++++++-!!
+//	e2e/pnpm_lockfiles/v60/snapshots/defs.bzl        |   81 ++++++++++++++++++++!!!!!!!!!!!!!!!
+//	e2e/pnpm_lockfiles/v61/pnpm-lock.yaml            |   50 +++++++++++++++++++-!!
+//	e2e/pnpm_lockfiles/v61/snapshots/defs.bzl        |   81 ++++++++++++++++++++!!!!!!!!!!!!!!!
+//	e2e/pnpm_lockfiles/v90/pnpm-lock.yaml            |   51 +++++++++++++++++--!!
+//	e2e/pnpm_lockfiles/v90/snapshots/defs.bzl        |   81 ++++++++++++++++++++++!!!!!!!!!!!!!
+//	npm/private/test/parse_pnpm_lock_tests.bzl       |  138 ++++++++++++++++++++++++++++++++++++++++-------------------
+//	npm/private/test/snapshots/wksp/repositories.bzl |    4 !
+//	npm/private/test/transitive_closure_tests.bzl    |    7 !!!
+//	npm/private/test/utils_tests.bzl                 |    6 !!
+//	npm/private/transitive_closure.bzl               |   89 --------------------------------!!!!!!!
+//	npm/private/utils.bzl                            |  301 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//	19 files changed, 664 insertions(+), 134 deletions(-), 283 modifications(!)
+func (runner *Linter) printLintPatchDiffStat(label string, patch []byte) error {
+	color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Lint fixes for %s:\n", label)
+	diffs, err := godiff.ParseMultiFileDiff(patch)
+	if err != nil {
+		return err
+	}
+	sumAdded := 0
+	sumDeleted := 0
+	sumChanged := 0
+	maxLines := 1
+	nameColumn := 1
+	summaries := make([]*diffSummary, 0, len(diffs))
+
+	for _, diff := range diffs {
+		stat := diff.Stat()
+
+		summary := new(diffSummary)
+		// strip the a/ and b/ from the names
+		summary.name = diff.OrigName[2:]
+		newName := diff.NewName[2:]
+		// we're not expecting linters to rename files but we can't be sure we won't
+		// get a diff with a rename so we handle that case properly
+		if summary.name != newName {
+			summary.name = summary.name + " => " + newName
+		}
+		newName = diff.NewName[2:]
+		summary.added = int(stat.Added)
+		summary.deleted = int(stat.Deleted)
+		summary.changed = int(stat.Changed)
+		summary.total = summary.added + summary.changed + summary.deleted
+		summaries = append(summaries, summary)
+
+		// add up totals and find maximums
+		sumAdded += summary.added
+		sumDeleted += summary.deleted
+		sumChanged += summary.changed
+		if summary.total > maxLines {
+			maxLines = summary.total
+		}
+		if len(summary.name) > nameColumn {
+			nameColumn = min(len(summary.name), MAX_FILENAME_WIDTH)
+		}
 	}
 
-	if applyDiff {
-		files, _, err := gitdiff.Parse(strings.NewReader(lintPatch))
-		if err != nil {
-			return err
+	linesColumn := len(fmt.Sprint(maxLines))
+	histChars := min(HISTOGRAM_CHARS, maxLines)
+	for _, summary := range summaries {
+		histAdded := int(math.Floor(float64(summary.added) / float64(maxLines) * float64(histChars)))
+		if summary.added > 0 && histAdded == 0 {
+			histAdded = 1
 		}
-
-		for _, file := range files {
-			// TODO: file.IsNew|IsDeleted|IsRename|IsCopy
-
-			oldSrc, openErr := os.OpenFile(file.OldName[2:], os.O_RDONLY, 0)
-			if openErr != nil {
-				return openErr
-			}
-			defer oldSrc.Close()
-
-			var output bytes.Buffer
-			applyErr := gitdiff.Apply(&output, oldSrc, file)
-			if applyErr != nil {
-				return applyErr
-			}
-
-			writeErr := os.WriteFile(file.NewName[2:], output.Bytes(), file.NewMode.Perm())
-			if writeErr != nil {
-				return writeErr
-			}
-			color.New(color.Faint).Fprintf(runner.Streams.Stdout, "Patched %s\n", file.NewName[2:])
+		histDeleted := int(math.Floor(float64(summary.deleted) / float64(maxLines) * float64(histChars)))
+		if summary.deleted > 0 && histDeleted == 0 {
+			histDeleted = 1
 		}
+		histChanged := int(math.Floor(float64(summary.changed) / float64(maxLines) * float64(histChars)))
+		if summary.changed > 0 && histChanged == 0 {
+			histChanged = 1
+		}
+		name := summary.name
+		if len(name) > nameColumn {
+			// truncate long filenames
+			name = "..." + name[len(name)-nameColumn+3:]
+		}
+		fmt.Fprintf(runner.Streams.Stdout, " %-*s | ", nameColumn, name)
+		fmt.Fprintf(runner.Streams.Stdout, "%*d ", linesColumn, summary.total)
+		color.New(color.FgGreen).Fprint(runner.Streams.Stdout, strings.Repeat("+", histAdded))
+		color.New(color.FgRed).Fprint(runner.Streams.Stdout, strings.Repeat("-", histDeleted))
+		color.New(color.FgCyan).Fprint(runner.Streams.Stdout, strings.Repeat("!", histChanged))
+		fmt.Fprintln(runner.Streams.Stdout, "")
 	}
 
+	// 1 file changed, 1 insertion(+), 5 deletions(-), 1 modification(!)
+	fmt.Fprintf(runner.Streams.Stdout, " %d file%s changed", len(summaries), strings.Repeat("s", min(1, len(summaries)-1)))
+	if sumAdded > 0 {
+		fmt.Fprintf(runner.Streams.Stdout, ", %d insertion%s(+)", sumAdded, strings.Repeat("s", min(1, sumAdded-1)))
+	}
+	if sumDeleted > 0 {
+		fmt.Fprintf(runner.Streams.Stdout, ", %d deletion%s(-)", sumDeleted, strings.Repeat("s", min(1, sumDeleted-1)))
+	}
+	if sumChanged > 0 {
+		fmt.Fprintf(runner.Streams.Stdout, ", %d modification%s(!)", sumChanged, strings.Repeat("s", min(1, sumChanged-1)))
+	}
+	fmt.Fprintln(runner.Streams.Stdout, "")
+	fmt.Fprintln(runner.Streams.Stdout, "")
 	return nil
 }
 
-func (runner *Linter) outputLintResultText(label string, lineResult string) error {
-	lineResult = strings.TrimSpace(lineResult)
-	if len(lineResult) > 0 {
-		color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "From %s:\n", label)
-		fmt.Fprintf(runner.Streams.Stdout, "%s\n", lineResult)
-		fmt.Fprintln(runner.Streams.Stdout, "")
+func (runner *Linter) printLintPatchDiff(label string, patch []byte) {
+	if label != "" {
+		color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Lint fixes for %s:\n", label)
 	}
+	fmt.Fprint(runner.Streams.Stdout, string(patch))
+	fmt.Fprintln(runner.Streams.Stdout, "")
+}
+
+func (runner *Linter) applyLintPatch(patch []byte) error {
+	files, _, err := gitdiff.Parse(bytes.NewBuffer(patch))
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		// TODO: file.IsNew|IsDeleted|IsRename|IsCopy
+
+		oldSrc, openErr := os.OpenFile(file.OldName[2:], os.O_RDONLY, 0)
+		if openErr != nil {
+			return openErr
+		}
+		defer oldSrc.Close()
+
+		var output bytes.Buffer
+		applyErr := gitdiff.Apply(&output, oldSrc, file)
+		if applyErr != nil {
+			return applyErr
+		}
+
+		writeErr := os.WriteFile(file.NewName[2:], output.Bytes(), file.NewMode.Perm())
+		if writeErr != nil {
+			return writeErr
+		}
+		color.New(color.Faint).Fprintf(runner.Streams.Stdout, "Patched %s\n\n", file.NewName[2:])
+	}
+
 	return nil
 }
