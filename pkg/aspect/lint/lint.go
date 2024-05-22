@@ -32,8 +32,8 @@ import (
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system/bep"
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
+	"github.com/charmbracelet/huh"
 	"github.com/fatih/color"
-	"github.com/manifoldco/promptui"
 	godiff "github.com/sourcegraph/go-diff/diff"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -268,28 +268,33 @@ lint:
 				if isInteractiveMode && !applyNone && !apply {
 					for {
 						var choice string
-						options := []string{"Yes", "No", "All", "None"}
+						options := []huh.Option[string]{
+							huh.NewOption("Yes", "yes"),
+							huh.NewOption("No", "no"),
+							huh.NewOption("All", "all"),
+							huh.NewOption("None", "none"),
+						}
 						if !showDiff {
-							options = append(options, "Show Diff")
+							options = append(options, huh.NewOption("Show Diff", "diff"))
 						}
-						applyFixPrompt := promptui.Select{
-							Label: "Apply fixes?",
-							Items: options,
-						}
-						_, choice, err = applyFixPrompt.Run()
+						applyFixPrompt := huh.NewSelect[string]().
+							Title("Apply fixes?").
+							Options(options...).
+							Value(&choice)
+						form := huh.NewForm(huh.NewGroup(applyFixPrompt))
+						err := form.Run()
 						if err != nil {
 							return fmt.Errorf("prompt failed: %v", err)
 						}
-						fmt.Fprintln(runner.Streams.Stdout, "")
 						switch choice {
-						case "Yes":
+						case "yes":
 							apply = true
-						case "All":
+						case "all":
 							apply = true
 							applyAll = true
-						case "None":
+						case "none":
 							applyNone = true
-						case "Show Diff":
+						case "diff":
 							runner.printLintPatchDiff("", patch)
 							continue
 						}
@@ -471,7 +476,11 @@ func (runner *Linter) applyLintPatch(patch []byte) error {
 		if writeErr != nil {
 			return writeErr
 		}
-		color.New(color.Faint).Fprintf(runner.Streams.Stdout, "Patched %s\n\n", file.NewName[2:])
+		color.New(color.Faint).Fprintf(runner.Streams.Stdout, "Patched %s\n", file.NewName[2:])
+	}
+
+	if len(files) > 0 {
+		fmt.Fprintln(runner.Streams.Stdout, "")
 	}
 
 	return nil
