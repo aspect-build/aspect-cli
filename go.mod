@@ -8,9 +8,9 @@ require (
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/alphadose/haxmap v1.3.1
 	github.com/bazel-contrib/rules_jvm v0.24.0
-	github.com/bazelbuild/bazel-gazelle v0.35.0 // NOTE: keep in sync with fetch.bzl
+	github.com/bazelbuild/bazel-gazelle v0.36.0 // NOTE: keep in sync with fetch.bzl
 	github.com/bazelbuild/bazelisk v1.17.0
-	github.com/bazelbuild/buildtools v0.0.0-20231115204819-d4c9dccdfbb1
+	github.com/bazelbuild/buildtools v0.0.0-20240313121412-66c605173954
 	github.com/bluekeyes/go-gitdiff v0.7.1
 	github.com/bmatcuk/doublestar/v4 v4.6.1
 	github.com/emirpasic/gods v1.18.1
@@ -46,7 +46,11 @@ require (
 	sigs.k8s.io/yaml v1.4.0
 )
 
-require github.com/hay-kot/scaffold v0.0.99
+require (
+	github.com/charmbracelet/huh v0.3.0
+	github.com/hay-kot/scaffold v0.0.99
+	github.com/sourcegraph/go-diff v0.7.0
+)
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
@@ -61,7 +65,6 @@ require (
 	github.com/charmbracelet/bubbles v0.17.2-0.20240108170749-ec883029c8e6 // indirect
 	github.com/charmbracelet/bubbletea v0.25.0 // indirect
 	github.com/charmbracelet/glamour v0.7.0 // indirect
-	github.com/charmbracelet/huh v0.3.0 // indirect
 	github.com/charmbracelet/lipgloss v0.10.0 // indirect
 	github.com/chzyer/readline v1.5.1 // indirect
 	github.com/cloudflare/circl v1.3.7 // indirect
@@ -121,7 +124,7 @@ require (
 	github.com/yuin/goldmark v1.6.0 // indirect
 	github.com/yuin/goldmark-emoji v1.0.2 // indirect
 	golang.org/x/crypto v0.21.0 // indirect
-	golang.org/x/mod v0.14.0 // indirect
+	golang.org/x/mod v0.16.0 // indirect
 	golang.org/x/net v0.22.0 // indirect
 	golang.org/x/sys v0.18.0 // indirect
 	golang.org/x/term v0.18.0 // indirect

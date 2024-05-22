@@ -4,7 +4,7 @@ go_library(
     name = "kotlin",
     srcs = [
         "binding.go",
-        "@tree-sitter-kotlin//:srcs",
+        "@tree-sitter-kotlin//:srcs",  #keep
     ],
     cgo = True,
     copts = ["-Iexternal/tree-sitter-kotlin"],  #keep
