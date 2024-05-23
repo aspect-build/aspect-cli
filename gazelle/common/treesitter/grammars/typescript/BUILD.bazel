@@ -4,7 +4,7 @@ go_library(
     name = "typescript",
     srcs = [
         "binding.go",
-        "@tree-sitter-typescript//:typescript-srcs",
+        "@tree-sitter-typescript//:typescript-srcs",  #keep
     ],
     cgo = True,
     copts = ["-Iexternal/tree-sitter-typescript"],  #keep
