@@ -390,9 +390,13 @@ func (b *bazel) BazelFlagsAsProto() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed write create directory %s: %w", tmpdir, err)
 	}
-	err = os.WriteFile(path.Join(tmpdir, "WORKSPACE"), []byte{}, 0644)
+	err = os.WriteFile(path.Join(tmpdir, "WORKSPACE.bazel"), []byte{}, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("failed write WORKSPACE file in %s: %w", tmpdir, err)
+		return nil, fmt.Errorf("failed write WORKSPACE.bazel file in %s: %w", tmpdir, err)
+	}
+	err = os.WriteFile(path.Join(tmpdir, "WORKSPACE.bzlmod"), []byte{}, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed write WORKSPACE.bzlmod file in %s: %w", tmpdir, err)
 	}
 	err = os.WriteFile(path.Join(tmpdir, "MODULE.bazel"), []byte{}, 0644)
 	if err != nil {
@@ -414,7 +418,7 @@ func (b *bazel) BazelFlagsAsProto() ([]byte, error) {
 	go func(wd string) {
 		// Running in batch mode will prevent bazel from spawning a daemon. Spawning a bazel daemon takes time which is something we don't want here.
 		// Also, instructing bazel to ignore all rc files will protect it from failing if any of the rc files is broken.
-		err := b.RunCommand(streams, &wd, "--nobatch", "--ignore_all_rc_files", "help", "flags-as-proto")
+		err := b.RunCommand(streams, &wd, "--batch", "--ignore_all_rc_files", "help", "flags-as-proto")
 		bazelErrs <- err
 	}(tmpdir)
 
