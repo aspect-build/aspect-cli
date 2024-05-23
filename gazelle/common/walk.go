@@ -25,6 +25,7 @@ func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes 
 		}
 
 		if ignore.Matches(path.Join(args.Rel, f)) {
+			BazelLog.Tracef("File ignored: %s / %s", args.Rel, f)
 			continue
 		}
 
@@ -50,14 +51,6 @@ func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes 
 					return err
 				}
 
-				// If we are visiting a directory recurse if it is not a bazel package.
-				if info.IsDir() {
-					if IsBazelPackage(filePath) {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-
 				// Skip BUILD files
 				if isBuildFile(filePath) {
 					return nil
@@ -66,14 +59,26 @@ func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes 
 				// The filePath relative to the BUILD
 				f, _ := filepath.Rel(args.Dir, filePath)
 
-				if ignore.Matches(path.Join(args.Rel, f)) {
-					return nil
+				var excludeResult error = nil
+				if info.IsDir() {
+					excludeResult = filepath.SkipDir
 				}
 
-				// Excluded files. Must be done manually for subdirs.
+				// Gazelle-excluded paths. Must be done manually for subdirs.
 				if IsFileExcluded(args.Rel, f, excludes) {
 					BazelLog.Tracef("File excluded: %s / %s", args.Rel, f)
+					return excludeResult
+				} else if ignore.Matches(path.Join(args.Rel, f)) {
+					// Ignored paths
+					BazelLog.Tracef("File ignored: %s / %s", args.Rel, f)
+					return excludeResult
+				}
 
+				// If visiting a directory recurse if it is not a bazel package.
+				if info.IsDir() {
+					if IsBazelPackage(filePath) {
+						return filepath.SkipDir
+					}
 					return nil
 				}
 
