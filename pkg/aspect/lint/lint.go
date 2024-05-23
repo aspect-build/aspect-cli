@@ -246,9 +246,14 @@ lint:
 		if err != nil {
 			return err
 		}
+		printHeader := true
 		report := strings.TrimSpace(string(reportBytes))
 		if printReport && len(report) > 0 {
-			runner.printLintReport(label, report)
+			if printHeader {
+				runner.printLintResultsHeader(label)
+				printHeader = false
+			}
+			runner.printLintReport(report)
 		}
 		if result.patchFile != nil {
 			patch, err := lintBEPHandler.readBEPFile(result.patchFile)
@@ -256,10 +261,15 @@ lint:
 				return err
 			}
 			if patch != nil && len(patch) > 0 {
+				if printHeader {
+					runner.printLintResultsHeader(label)
+					printHeader = false
+				}
+				color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Some problems have automated fixes available:\n\n")
 				if showDiff {
-					runner.printLintPatchDiff(label, patch)
+					runner.printLintPatchDiff(patch)
 				} else {
-					err = runner.printLintPatchDiffStat(label, patch)
+					err = runner.printLintPatchDiffStat(patch)
 					if err != nil {
 						return fmt.Errorf("failed to parse patch file %s: %v", result.patchFile, err)
 					}
@@ -295,7 +305,7 @@ lint:
 						case "none":
 							applyNone = true
 						case "diff":
-							runner.printLintPatchDiff("", patch)
+							runner.printLintPatchDiff(patch)
 							continue
 						}
 						break
@@ -314,9 +324,12 @@ lint:
 	return &aspecterrors.ExitError{ExitCode: exitCode}
 }
 
-func (runner *Linter) printLintReport(label string, lineResult string) {
-	color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Lint results for %s:\n", label)
-	fmt.Fprintf(runner.Streams.Stdout, "%s\n", lineResult)
+func (runner *Linter) printLintResultsHeader(label string) {
+	color.New(color.Bold).Fprintf(runner.Streams.Stdout, "Lint results for %s:\n\n", label)
+}
+
+func (runner *Linter) printLintReport(report string) {
+	fmt.Fprintf(runner.Streams.Stdout, "%s\n", report)
 	fmt.Fprintln(runner.Streams.Stdout, "")
 }
 
@@ -355,8 +368,7 @@ type diffSummary struct {
 //	npm/private/transitive_closure.bzl               |   89 --------------------------------!!!!!!!
 //	npm/private/utils.bzl                            |  301 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 //	19 files changed, 664 insertions(+), 134 deletions(-), 283 modifications(!)
-func (runner *Linter) printLintPatchDiffStat(label string, patch []byte) error {
-	color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Lint fixes for %s:\n", label)
+func (runner *Linter) printLintPatchDiffStat(patch []byte) error {
 	diffs, err := godiff.ParseMultiFileDiff(patch)
 	if err != nil {
 		return err
@@ -419,7 +431,7 @@ func (runner *Linter) printLintPatchDiffStat(label string, patch []byte) error {
 			// truncate long filenames
 			name = "..." + name[len(name)-nameColumn+3:]
 		}
-		fmt.Fprintf(runner.Streams.Stdout, " %-*s | ", nameColumn, name)
+		fmt.Fprintf(runner.Streams.Stdout, "  %-*s | ", nameColumn, name)
 		fmt.Fprintf(runner.Streams.Stdout, "%*d ", linesColumn, summary.total)
 		color.New(color.FgGreen).Fprint(runner.Streams.Stdout, strings.Repeat("+", histAdded))
 		color.New(color.FgRed).Fprint(runner.Streams.Stdout, strings.Repeat("-", histDeleted))
@@ -427,8 +439,8 @@ func (runner *Linter) printLintPatchDiffStat(label string, patch []byte) error {
 		fmt.Fprintln(runner.Streams.Stdout, "")
 	}
 
-	// 1 file changed, 1 insertion(+), 5 deletions(-), 1 modification(!)
-	fmt.Fprintf(runner.Streams.Stdout, " %d file%s changed", len(summaries), strings.Repeat("s", min(1, len(summaries)-1)))
+	// 1 file, 1 insertion(+), 5 deletions(-), 1 modification(!)
+	fmt.Fprintf(runner.Streams.Stdout, "  %d file%s", len(summaries), strings.Repeat("s", min(1, len(summaries)-1)))
 	if sumAdded > 0 {
 		fmt.Fprintf(runner.Streams.Stdout, ", %d insertion%s(+)", sumAdded, strings.Repeat("s", min(1, sumAdded-1)))
 	}
@@ -443,10 +455,7 @@ func (runner *Linter) printLintPatchDiffStat(label string, patch []byte) error {
 	return nil
 }
 
-func (runner *Linter) printLintPatchDiff(label string, patch []byte) {
-	if label != "" {
-		color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Lint fixes for %s:\n", label)
-	}
+func (runner *Linter) printLintPatchDiff(patch []byte) {
 	fmt.Fprint(runner.Streams.Stdout, string(patch))
 	fmt.Fprintln(runner.Streams.Stdout, "")
 }
