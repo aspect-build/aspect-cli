@@ -24,7 +24,7 @@ aspect lint <target patterns> [flags]
       --diff     Show unified diff instead of diff stats for fixes
       --fix      Apply all patch fixes for lint violations
   -h, --help     help for lint
-      --report   Output lint report (default true)
+      --report   Output lint reports (default true)
 ```
 
 ### Options inherited from parent commands
