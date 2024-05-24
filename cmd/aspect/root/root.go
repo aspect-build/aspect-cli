@@ -157,11 +157,11 @@ func NewCmd(
 	cmd.AddCommand(version.NewDefaultCmd())
 	cmd.AddCommand(outputs.NewDefaultCmd())
 	cmd.AddCommand(configure.NewDefaultCmd())
-	cmd.AddCommand(lint.NewDefaultCmd(pluginSystem))
 	cmd.SetHelpCommand(help.NewCmd())
 
 	if !buildinfo.Current().IsAspectPro {
 		// Aspect CLI only commands
+		cmd.AddCommand(lint.NewDefaultCmd(pluginSystem))
 		cmd.AddCommand(license.NewDefaultCmd())
 	}
 
