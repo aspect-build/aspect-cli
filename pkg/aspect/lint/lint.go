@@ -41,9 +41,15 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type LintHandler interface {
+	Report(label string, linter string, report []byte, exitCode int) error
+	Patch(label string, linter string, patch []byte) error
+}
+
 type Linter struct {
 	ioutils.Streams
-	bzl bazel.Bazel
+	bzl          bazel.Bazel
+	lintHandlers []LintHandler
 }
 
 // Align with rules_lint
@@ -58,17 +64,19 @@ const (
 func New(
 	streams ioutils.Streams,
 	bzl bazel.Bazel,
+	lintHandlers []LintHandler,
 ) *Linter {
 	return &Linter{
-		Streams: streams,
-		bzl:     bzl,
+		Streams:      streams,
+		bzl:          bzl,
+		lintHandlers: lintHandlers,
 	}
 }
 
 func AddFlags(flags *pflag.FlagSet) {
 	flags.Bool("fix", false, "Apply all patch fixes for lint violations")
 	flags.Bool("diff", false, "Show unified diff instead of diff stats for fixes")
-	flags.Bool("report", true, "Output lint report")
+	flags.Bool("report", true, "Output lint reports")
 }
 
 // TODO: hoist this to a flags package so it can be used by other commands that require this functionality
@@ -201,8 +209,8 @@ lint:
 			return fmt.Errorf("failed to find workspace root: %w", err)
 		}
 
-		lintBEPHandler = newLintBEPHandler(handleResultsCtx, workspaceRoot, handleResultsErrgroup)
-		besBackend.RegisterSubscriber(lintBEPHandler.BEPEventCallback)
+		lintBEPHandler = newLintBEPHandler(handleResultsCtx, workspaceRoot, handleResultsErrgroup, runner.lintHandlers)
+		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback)
 	}
 
 	err = runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)

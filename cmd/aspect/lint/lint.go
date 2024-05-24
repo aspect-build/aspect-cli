@@ -28,10 +28,10 @@ import (
 )
 
 func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, pluginSystem, bazel.WorkspaceFromWd)
+	return NewCmd(ioutils.DefaultStreams, pluginSystem, bazel.WorkspaceFromWd, []lint.LintHandler{})
 }
 
-func NewCmd(streams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel.Bazel) *cobra.Command {
+func NewCmd(streams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel.Bazel, lintHandlers []lint.LintHandler) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "lint <target patterns>",
 		Args:  cobra.MinimumNArgs(1),
@@ -48,7 +48,7 @@ In addition to flags listed below, flags accepted by the 'bazel build' command a
 				flags.FlagsInterceptor(streams),
 				pluginSystem.BESBackendSubscriberInterceptor(),
 			},
-			lint.New(streams, bzl).Run,
+			lint.New(streams, bzl, lintHandlers).Run,
 		),
 	}
 	lint.AddFlags(cmd.Flags())

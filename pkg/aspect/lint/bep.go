@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 
 // ResultForLabel aggregates the relevant files we find in the BEP for
 type ResultForLabel struct {
+	label        string
 	exitCodeFile *buildeventstream.File
 	reportFile   *buildeventstream.File
 	patchFile    *buildeventstream.File
@@ -40,19 +42,21 @@ type ResultForLabel struct {
 
 type LintBEPHandler struct {
 	ctx                   context.Context
-	reports               map[string]*buildeventstream.NamedSetOfFiles
+	namedSets             map[string]*buildeventstream.NamedSetOfFiles
 	workspaceRoot         string
 	handleResultsErrgroup *errgroup.Group
 	resultsByLabel        map[string]*ResultForLabel
+	lintHandlers          []LintHandler
 }
 
-func newLintBEPHandler(ctx context.Context, workspaceRoot string, handleResultsErrgroup *errgroup.Group) *LintBEPHandler {
+func newLintBEPHandler(ctx context.Context, workspaceRoot string, handleResultsErrgroup *errgroup.Group, lintHandlers []LintHandler) *LintBEPHandler {
 	return &LintBEPHandler{
 		ctx:                   ctx,
-		reports:               make(map[string]*buildeventstream.NamedSetOfFiles),
+		namedSets:             make(map[string]*buildeventstream.NamedSetOfFiles),
 		resultsByLabel:        make(map[string]*ResultForLabel),
 		workspaceRoot:         workspaceRoot,
 		handleResultsErrgroup: handleResultsErrgroup,
+		lintHandlers:          lintHandlers,
 	}
 }
 
@@ -112,45 +116,48 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) ([]byte, 
 	}
 }
 
-func (runner *LintBEPHandler) BEPEventCallback(event *buildeventstream.BuildEvent) error {
+func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEvent) error {
 	switch event.Payload.(type) {
 
 	case *buildeventstream.BuildEvent_NamedSetOfFiles:
-		// Assert no collisions
-		namedSetId := event.Id.GetNamedSet().GetId()
-		if runner.reports[namedSetId] != nil {
-			return fmt.Errorf("duplicate file set id: %s", namedSetId)
-		}
-
-		// Record report file sets
-		// TODO: are we collecting too much? Don't we need to filter on the "report" output group?
-		runner.reports[namedSetId] = event.GetNamedSetOfFiles()
+		runner.namedSets[event.Id.GetNamedSet().Id] = event.GetNamedSetOfFiles()
 
 	case *buildeventstream.BuildEvent_Completed:
 		label := event.Id.GetTargetCompleted().GetLabel()
 
 		for _, outputGroup := range event.GetCompleted().OutputGroup {
 			for _, fileSetId := range outputGroup.FileSets {
-				if fileSet := runner.reports[fileSetId.Id]; fileSet != nil {
-					runner.reports[fileSetId.Id] = nil
+				if fileSet := runner.namedSets[fileSetId.Id]; fileSet != nil {
+					runner.namedSets[fileSetId.Id] = nil
 					result := runner.resultsByLabel[label]
 					if result == nil {
-						result = &ResultForLabel{}
+						result = &ResultForLabel{label: label}
 						runner.resultsByLabel[label] = result
 					}
 
 					for _, file := range fileSet.GetFiles() {
 						if outputGroup.Name == LINT_PATCH_GROUP {
 							result.patchFile = file
+						} else if outputGroup.Name == LINT_REPORT_GROUP {
+							if strings.HasSuffix(file.Name, ".report") {
+								result.reportFile = file
 
-							// Parse the filename convention that rules_lint has for report files.
-							// path/to/linter.target_name.aspect_rules_lint.report -> linter
-							result.linter = strings.SplitN(filepath.Base(file.Name), ".", 2)[0]
-						} else if outputGroup.Name == LINT_REPORT_GROUP && strings.HasSuffix(file.Name, ".report") {
-							result.reportFile = file
-						} else if outputGroup.Name == LINT_REPORT_GROUP && strings.HasSuffix(file.Name, ".exit_code") {
-							result.exitCodeFile = file
+								// Parse the filename convention that rules_lint has for report files.
+								// path/to/linter.target_name.aspect_rules_lint.report -> linter
+								s := strings.Split(filepath.Base(file.Name), ".")
+								if len(s) > 2 {
+									result.linter = s[len(s)-2]
+								}
+							} else if strings.HasSuffix(file.Name, ".exit_code") {
+								result.exitCodeFile = file
+							}
 						}
+					}
+
+					if outputGroup.Name == LINT_PATCH_GROUP {
+						runner.lintHandlersPatch(result)
+					} else if outputGroup.Name == LINT_REPORT_GROUP {
+						runner.lintHandlersReport(result)
 					}
 				}
 			}
@@ -158,4 +165,70 @@ func (runner *LintBEPHandler) BEPEventCallback(event *buildeventstream.BuildEven
 	}
 
 	return nil
+}
+
+func (runner *LintBEPHandler) lintHandlersPatch(result *ResultForLabel) {
+	if len(runner.lintHandlers) == 0 {
+		return
+	}
+
+	if result.patchFile == nil {
+		return
+	}
+
+	// async handling of this lint patch
+	func(label string, linter string, patchFile *buildeventstream.File) {
+		runner.handleResultsErrgroup.Go(func() error {
+			patch, err := runner.readBEPFile(patchFile)
+			if err != nil {
+				return fmt.Errorf("failed to read patch file for target %s from linter %s: %v", label, linter, err)
+			}
+			for _, h := range runner.lintHandlers {
+				if err = h.Patch(label, linter, patch); err != nil {
+					return fmt.Errorf("failed to handle patch for target %s from linter %s: %v", label, linter, err)
+				}
+			}
+			return nil
+		})
+	}(result.label, result.linter, result.patchFile)
+}
+
+func (runner *LintBEPHandler) lintHandlersReport(result *ResultForLabel) {
+	if len(runner.lintHandlers) == 0 {
+		return
+	}
+
+	if result.reportFile == nil {
+		return
+	}
+
+	// async handling of this lint result
+	func(label string, linter string, reportFile *buildeventstream.File, exitCodeFile *buildeventstream.File) {
+		runner.handleResultsErrgroup.Go(func() error {
+			report, err := runner.readBEPFile(reportFile)
+			if err != nil {
+				return fmt.Errorf("failed to read report file for target %s from linter %s: %v", label, linter, err)
+			}
+			exitCode := 0
+			if exitCodeFile != nil {
+				exitCodeBytes, err := runner.readBEPFile(exitCodeFile)
+				if err != nil {
+					return fmt.Errorf("failed to read exit code file for target %s from linter %s: %v", label, linter, err)
+				}
+				targetExitCode, err := strconv.Atoi(strings.TrimSpace(string(exitCodeBytes)))
+				if err != nil {
+					return fmt.Errorf("failed to parse exit code as integer for target %s from linter %s: %v", label, linter, err)
+				}
+				if targetExitCode > 0 {
+					exitCode = 1
+				}
+			}
+			for _, h := range runner.lintHandlers {
+				if err = h.Report(label, linter, report, exitCode); err != nil {
+					return fmt.Errorf("failed to handle report for target %s from linter %s: %v", label, linter, err)
+				}
+			}
+			return nil
+		})
+	}(result.label, result.linter, result.reportFile, result.exitCodeFile)
 }
