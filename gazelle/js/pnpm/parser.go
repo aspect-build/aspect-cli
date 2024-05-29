@@ -57,6 +57,8 @@ func parsePnpmLockDependencies(yamlFileContent []byte) (WorkspacePackageVersionM
 		return parsePnpmLockDependenciesV5(yamlFileContent)
 	} else if version.Major() == 6 {
 		return parsePnpmLockDependenciesV6(yamlFileContent)
+	} else if version.Major() == 9 {
+		return parsePnpmLockDependenciesV9(yamlFileContent)
 	}
 
 	return nil, fmt.Errorf("unsupported version: %v", versionStr)
