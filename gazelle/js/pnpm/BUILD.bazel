@@ -6,6 +6,7 @@ go_library(
         "parser.go",
         "parser_v5.go",
         "parser_v6.go",
+        "parser_v9.go",
         "workspace.go",
     ],
     importpath = "aspect.build/cli/gazelle/js/pnpm",

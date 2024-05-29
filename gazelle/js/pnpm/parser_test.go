@@ -34,12 +34,17 @@ func TestPnpmLockParseDependencies(t *testing.T) {
 	t.Run("unsupported version", func(t *testing.T) {
 		_, err := parsePnpmLockDependencies([]byte("lockfileVersion: 4.0"))
 		if err == nil {
-			t.Error("Expected error for unsupported version")
+			t.Error("Expected error for unsupported version (4.0)")
 		}
 
 		_, err2 := parsePnpmLockDependencies([]byte("lockfileVersion: '4.0'"))
 		if err2 == nil {
-			t.Error("Expected error for unsupported version")
+			t.Error("Expected error for unsupported version ('4.0')")
+		}
+
+		_, err3 := parsePnpmLockDependencies([]byte("lockfileVersion: 10.0"))
+		if err3 == nil {
+			t.Error("Expected error for unsupported version (10)")
 		}
 	})
 
@@ -114,9 +119,80 @@ devDependencies:
 		}
 	})
 
+	t.Run("basic deps (lockfile v9)", func(t *testing.T) {
+		basic, err := parsePnpmLockDependencies([]byte(`
+lockfileVersion: '9.0'
+
+dependencies:
+  '@aspect-test/a':
+    specifier: 5.0.2
+    version: 5.0.2
+  jquery:
+    specifier: 3.6.1
+    version: 3.6.1
+
+devDependencies:
+  '@aspect-test/c':
+    specifier: 2.0.2
+    version: 2.0.2
+`))
+
+		if err != nil {
+			t.Error("Parse failure: ", err)
+		}
+
+		if len(basic) != 1 || basic["."] == nil {
+			t.Error("Simple deps parse error. Expected only '.' workspace, found ", len(basic))
+		}
+
+		if len(basic["."]) != 3 {
+			t.Error("Simple deps parse error. Expected 3 deps in 1 workspace entry, found ", len(basic["."]))
+		}
+
+		if basic["."]["jquery"] != "3.6.1" {
+			t.Errorf("Simple deps parse error. Expected 2.0.2 version for @aspect-test/c, found %q", basic["."]["@aspect-test/c"])
+		}
+	})
+
 	t.Run("basic deps in single project workspace (lockfile v6)", func(t *testing.T) {
 		basic, err := parsePnpmLockDependencies([]byte(`
 lockfileVersion: '6.0'
+
+importers:
+  .:
+    dependencies:
+      '@aspect-test/a':
+        specifier: 5.0.2
+        version: 5.0.2
+      jquery:
+        specifier: 3.6.1
+        version: 3.6.1
+    devDependencies:
+      '@aspect-test/c':
+        specifier: ^2.0.2
+        version: 2.0.2
+`))
+
+		if err != nil {
+			t.Error("Parse failure: ", err)
+		}
+
+		if len(basic) != 1 || basic["."] == nil {
+			t.Error("Simple deps parse error. Expected only '.' workspace, found ", len(basic))
+		}
+
+		if len(basic["."]) != 3 {
+			t.Error("Simple deps parse error. Expected 3 deps in 1 workspace entry, found ", len(basic["."]))
+		}
+
+		if basic["."]["jquery"] != "3.6.1" {
+			t.Errorf("Simple deps parse error. Expected 2.0.2 version for @aspect-test/c, found %q", basic["."]["@aspect-test/c"])
+		}
+	})
+
+	t.Run("basic deps in single project workspace (lockfile v9)", func(t *testing.T) {
+		basic, err := parsePnpmLockDependencies([]byte(`
+lockfileVersion: '9.0'
 
 importers:
   .:
