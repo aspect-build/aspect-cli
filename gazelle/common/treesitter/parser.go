@@ -20,7 +20,9 @@ import (
 	"context"
 	"log"
 
+	"aspect.build/cli/gazelle/common/treesitter/grammars/json"
 	"aspect.build/cli/gazelle/common/treesitter/grammars/kotlin"
+	"aspect.build/cli/gazelle/common/treesitter/grammars/starlark"
 	"aspect.build/cli/gazelle/common/treesitter/grammars/tsx"
 	"aspect.build/cli/gazelle/common/treesitter/grammars/typescript"
 	sitter "github.com/smacker/go-tree-sitter"
@@ -30,8 +32,10 @@ type LanguageGrammar = int
 
 const (
 	Kotlin LanguageGrammar = iota
+	Starlark
 	Typescript
 	TypescriptX
+	JSON
 )
 
 type AST interface {
@@ -52,8 +56,12 @@ type TreeAst struct {
 
 func toSitterLanguage(lang LanguageGrammar) *sitter.Language {
 	switch lang {
+	case JSON:
+		return json.GetLanguage()
 	case Kotlin:
 		return kotlin.GetLanguage()
+	case Starlark:
+		return starlark.GetLanguage()
 	case Typescript:
 		return typescript.GetLanguage()
 	case TypescriptX:
