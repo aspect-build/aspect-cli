@@ -135,6 +135,23 @@ func (b *bazel) InitializeBazelFlags() error {
 	return nil
 }
 
+// Returns true if a flag is part of a bazel command
+func (b *bazel) IsBazelFlag(command string, flag string) (bool, error) {
+	flags, err := b.Flags()
+	if err != nil {
+		return false, err
+	}
+
+	for flagName, f := range flags {
+		for _, cmd := range f.Commands {
+			if cmd == command && flagName == flag {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // AddBazelFlags will process the configured cobra commands and add bazel
 // flags to those commands.
 func (b *bazel) AddBazelFlags(cmd *cobra.Command) error {
