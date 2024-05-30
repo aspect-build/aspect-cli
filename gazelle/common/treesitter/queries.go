@@ -63,6 +63,61 @@ func (tree TreeAst) QueryStrings(query, returnVar string) []string {
 	return results
 }
 
+type queryResult struct {
+	captures map[string]string
+}
+
+var _ ASTQueryResult = (*queryResult)(nil)
+
+func (qr queryResult) Captures() map[string]string {
+	return qr.captures
+}
+
+func (tree TreeAst) Query(query string) <-chan ASTQueryResult {
+	q := parseQuery(tree.lang, query)
+	rootNode := tree.SitterTree.RootNode()
+
+	out := make(chan ASTQueryResult)
+
+	// Execute the query.
+	go func() {
+		qc := sitter.NewQueryCursor()
+		qc.Exec(q, rootNode)
+
+		for {
+			m, ok := qc.NextMatch()
+			if !ok {
+				break
+			}
+
+			// Filter the capture results
+			if !matchesAllPredicates(q, m, qc, tree.sourceCode) {
+				continue
+			}
+
+			out <- queryResult{captures: tree.mapQueryMatchCaptures(m, q)}
+		}
+
+		close(out)
+	}()
+
+	return out
+}
+
+func (tree TreeAst) mapQueryMatchCaptures(m *sitter.QueryMatch, q *sitter.Query) map[string]string {
+	captures := make(map[string]string, len(m.Captures))
+	for _, c := range m.Captures {
+		name := q.CaptureNameForId(c.Index)
+		if v, e := captures[name]; e {
+			panic(fmt.Sprintf("Multiple captures for %q: %q and %q", name, v, c.Node.Content(tree.sourceCode)))
+		}
+
+		captures[name] = c.Node.Content(tree.sourceCode)
+	}
+
+	return captures
+}
+
 // Find and read the `from` QueryCapture from a QueryMatch.
 // Filter matches based on captures value using "equals-{name}" vars.
 func fetchQueryMatch(query *sitter.Query, name string, m *sitter.QueryMatch, sourceCode []byte) *sitter.QueryCapture {

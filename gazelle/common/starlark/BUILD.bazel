@@ -1,17 +1,29 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "starlark",
-    srcs = ["glob.go"],
+    srcs = [
+        "eval.go",
+        "glob.go",
+    ],
     importpath = "aspect.build/cli/gazelle/common/starlark",
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common",
+        "//gazelle/common/starlark/stdlib",
         "//pkg/logger",
         "@com_github_bazelbuild_buildtools//build:go_default_library",
         "@com_github_yargevad_filepathx//:filepathx",
+        "@net_starlark_go//lib/json",
         "@net_starlark_go//repl",
         "@net_starlark_go//starlark",
         "@net_starlark_go//syntax",
     ],
+)
+
+go_test(
+    name = "starlark_test",
+    srcs = ["eval_test.go"],
+    embed = [":starlark"],
+    deps = ["@net_starlark_go//starlark"],
 )

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path"
 
 	"aspect.build/cli/gazelle/common/treesitter/grammars/json"
 	"aspect.build/cli/gazelle/common/treesitter/grammars/kotlin"
@@ -29,20 +30,27 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 )
 
-type LanguageGrammar = int
+type LanguageGrammar string
 
 const (
-	Kotlin LanguageGrammar = iota
-	Starlark
-	Typescript
-	TypescriptX
-	JSON
+	Kotlin      LanguageGrammar = "kotlin"
+	Starlark                    = "starlark"
+	Typescript                  = "typescript"
+	TypescriptX                 = "tsx"
+	JSON                        = "json"
 )
 
-type AST interface {
-	QueryStrings(query, returnVar string) []string
+type ASTQueryResult interface {
+	Captures() map[string]string
+}
 
+type AST interface {
+	Query(query string) <-chan ASTQueryResult
 	QueryErrors() []error
+
+	// Wrapper utils
+	// TODO: delete
+	QueryStrings(query, returnVar string) []string
 }
 type TreeAst struct {
 	AST
@@ -73,8 +81,44 @@ func toSitterLanguage(lang LanguageGrammar) *sitter.Language {
 		return tsx.GetLanguage()
 	}
 
-	log.Fatalf("Unknown LanguageGrammar %q", lang)
+	log.Panicf("Unknown LanguageGrammar %q", lang)
 	return nil
+}
+
+func PathToLanguage(p string) LanguageGrammar {
+	return extensionToLanguage(path.Ext(p))
+}
+
+var EXT_LANGUAGES = map[string]LanguageGrammar{
+	"kt":  Kotlin,
+	"kts": Kotlin,
+
+	"bzl": Starlark,
+
+	"ts":  Typescript,
+	"cts": Typescript,
+	"mts": Typescript,
+	"js":  Typescript,
+	"mjs": Typescript,
+	"cjs": Typescript,
+
+	"tsx": TypescriptX,
+	"jsx": TypescriptX,
+
+	"json": JSON,
+}
+
+// In theory, this is a mirror of
+// https://github.com/github-linguist/linguist/blob/master/lib/linguist/languages.yml
+func extensionToLanguage(ext string) LanguageGrammar {
+	var lang, found = EXT_LANGUAGES[ext[1:]]
+
+	// TODO: allow override or fallback language for files
+	if !found {
+		log.Panicf("Unknown source file extension %q", ext)
+	}
+
+	return lang
 }
 
 func ParseSourceCode(lang LanguageGrammar, filePath string, sourceCode []byte) (AST, error) {
