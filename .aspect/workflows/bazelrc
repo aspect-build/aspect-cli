@@ -8,5 +8,5 @@ build --extra_execution_platforms=@aspect_bazel_lib//platforms:x86_64_linux_remo
 build --remote_executor=unix:///mnt/ephemeral/buildbarn/.cache/bb_clientd/grpc
 build --jobs=8  # current max scaling for the OSS RBE cluster
 build --remote_timeout=3600
-build --genrule_strategy=remote
+build --genrule_strategy=remote,local
 common --action_env=CACHE=bust0
