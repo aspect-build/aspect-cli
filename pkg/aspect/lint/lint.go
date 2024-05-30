@@ -182,8 +182,20 @@ lint:
 	// https://bazel.build/extending/rules#validations_output_group
 	bazelCmd = append(bazelCmd, "--run_validations=false")
 
-	// TODO: in Bazel 7 this was renamed without the --experimental_ prefix
-	bazelCmd = append(bazelCmd, fmt.Sprintf("--experimental_remote_download_regex='%s'", LINT_RESULT_REGEX))
+	var downloadFlag = "--experimental_remote_download_regex"
+
+	// --experimental_remote_download_regex was deprecated in Bazel 7 in favor of
+	// --remote_download_regex. Use the latter if it is a valid flag so we don't see the warning:
+	// WARNING: Option 'experimental_remote_download_regex' is deprecated: Use --remote_download_regex instead
+	useShortDownloadFlag, err := runner.bzl.IsBazelFlag("build", "remote_download_regex")
+	if err != nil {
+		return fmt.Errorf("failed to check for bazel flag --remote_download_regex: %w", err)
+	}
+	if useShortDownloadFlag {
+		downloadFlag = "--remote_download_regex"
+	}
+
+	bazelCmd = append(bazelCmd, fmt.Sprintf("%s='%s'", downloadFlag, LINT_RESULT_REGEX))
 
 	handleResultsErrgroup, handleResultsCtx := errgroup.WithContext(context.Background())
 

@@ -65,6 +65,7 @@ type Bazel interface {
 	HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error)
 	RunCommand(streams ioutils.Streams, wd *string, command ...string) error
 	InitializeBazelFlags() error
+	IsBazelFlag(command string, flag string) (bool, error)
 	Flags() (map[string]*flags.FlagInfo, error)
 	AbsPathRelativeToWorkspace(relativePath string) (string, error)
 	AddBazelFlags(cmd *cobra.Command) error
