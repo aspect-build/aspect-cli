@@ -48,6 +48,11 @@ func (tree TreeAst) QueryStrings(query, returnVar string) []string {
 			break
 		}
 
+		// Apply predicates to filter results.
+		if !matchesAllPredicates(sitterQuery, m, qc, tree.sourceCode) {
+			continue
+		}
+
 		result := fetchQueryMatch(sitterQuery, returnVar, m, tree.sourceCode)
 		if result != nil {
 			resultCode := result.Node.Content(tree.sourceCode)
@@ -116,7 +121,9 @@ func (tree TreeAst) QueryErrors() []error {
 		}
 
 		// Apply predicates to filter results.
-		m = qc.FilterPredicates(m, tree.sourceCode)
+		if !matchesAllPredicates(query, m, qc, tree.sourceCode) {
+			continue
+		}
 
 		for _, c := range m.Captures {
 			at := c.Node
