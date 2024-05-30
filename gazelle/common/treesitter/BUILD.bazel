@@ -15,6 +15,7 @@ go_library(
         "//gazelle/common/treesitter/grammars/starlark",
         "//gazelle/common/treesitter/grammars/tsx",
         "//gazelle/common/treesitter/grammars/typescript",
+        "//pkg/logger",
         "@com_github_smacker_go_tree_sitter//:go-tree-sitter",
     ],
 )
