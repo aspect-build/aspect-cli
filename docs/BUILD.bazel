@@ -7,6 +7,13 @@ _DOCS = ["aspect.md"] + [
     for cmd in COMMAND_LIST
 ]
 
+_TAGS = [
+    # FATAL: '/build/root/b74fe67f587fccf2/root/.cache/bazel/_bazel_nobody' is not owned by me
+    "no-remote-exec",
+    # Downloads bazel from https://releases.bazel.build/1.2.3/release/bazel-1.2.3-<platform>-<arch>
+    "requires-network",
+]
+
 genrule(
     name = "command_list_bzl",
     # We need to be able to start bazel so that we can get the correct flags
@@ -15,8 +22,7 @@ genrule(
     ],
     outs = ["command_list.bzl"],
     cmd = "export HOME=$$(pwd); touch WORKSPACE; $(execpath //cmd/docgen) bzl-command-list > $@",
-    # Downloads bazel from https://releases.bazel.build/1.2.3/release/bazel-1.2.3-<platform>-<arch>
-    tags = ["requires-network"],
+    tags = _TAGS,
     tools = ["//cmd/docgen"],
 )
 
@@ -45,8 +51,7 @@ genrule(
     ],
     outs = ["gen/" + d for d in _DOCS],
     cmd = "export HOME=$$(pwd); touch WORKSPACE; $(execpath //cmd/docgen) gen-markdown --output-dir $(@D)/gen",
-    # Downloads bazel from https://releases.bazel.build/1.2.3/release/bazel-1.2.3-<platform>-<arch>
-    tags = ["requires-network"],
+    tags = _TAGS,
     tools = ["//cmd/docgen"],
 )
 
