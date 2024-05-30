@@ -23,6 +23,10 @@ type walkConfig struct {
 func isExcluded(wc *walkConfig, rel, base string) bool
 
 func IsFileExcluded(rel, fileRelPath string, excludes []string) bool {
+	if len(excludes) == 0 {
+		return false
+	}
+
 	// Gazelle exclude directive.
 	wc := &walkConfig{excludes: excludes}
 
