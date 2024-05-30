@@ -8,7 +8,7 @@ _DOCS = ["aspect.md"] + [
 ]
 
 _TAGS = [
-    # FATAL: '/build/root/b74fe67f587fccf2/root/.cache/bazel/_bazel_nobody' is not owned by me
+    # Fails on RBE with FATAL: '/build/root/b74fe67f587fccf2/root/.cache/bazel/_bazel_nobody' is not owned by me
     "no-remote-exec",
     # Downloads bazel from https://releases.bazel.build/1.2.3/release/bazel-1.2.3-<platform>-<arch>
     "requires-network",
