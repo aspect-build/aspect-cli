@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 
+	BazelLog "aspect.build/cli/pkg/logger"
+
 	sitter "github.com/smacker/go-tree-sitter"
 )
 
@@ -73,6 +75,9 @@ func fetchQueryMatch(query *sitter.Query, name string, m *sitter.QueryMatch, sou
 		}
 
 		if cn == name {
+			if result != nil {
+				BazelLog.Errorf("Multiple matches for %q", name)
+			}
 			result = &c
 		}
 	}
@@ -83,7 +88,7 @@ func fetchQueryMatch(query *sitter.Query, name string, m *sitter.QueryMatch, sou
 func mustNewQuery(lang LanguageGrammar, queryStr string) *sitter.Query {
 	treeQ, err := sitter.NewQuery([]byte(queryStr), toSitterLanguage(lang))
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create query for %q: %v", queryStr, err))
+		BazelLog.Fatalf("Failed to create query for %q: %v", queryStr, err)
 	}
 	return treeQ
 }

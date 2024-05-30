@@ -18,6 +18,7 @@ package treesitter
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"aspect.build/cli/gazelle/common/treesitter/grammars/json"
@@ -52,6 +53,10 @@ type TreeAst struct {
 
 	// TODO: don't make public
 	SitterTree *sitter.Tree
+}
+
+func (tree TreeAst) String() string {
+	return fmt.Sprintf("TreeAst{\n lang: %q,\n filePath: %q,\n AST:\n  %v\n}", tree.lang, tree.filePath, tree.SitterTree.RootNode().String())
 }
 
 func toSitterLanguage(lang LanguageGrammar) *sitter.Language {
