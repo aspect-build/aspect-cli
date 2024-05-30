@@ -8,6 +8,6 @@ go_library(
     deps = [
         "//pkg/plugin/sdk/v1alpha3/plugin",
         "@com_github_hashicorp_go_plugin//:go-plugin",
-        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//:go_default_library",
     ],
 )

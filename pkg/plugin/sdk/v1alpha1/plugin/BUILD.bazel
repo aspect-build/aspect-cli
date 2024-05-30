@@ -14,6 +14,6 @@ go_library(
         "//pkg/plugin/sdk/v1alpha1/proto",
         "@com_github_hashicorp_go_plugin//:go-plugin",
         "@com_github_manifoldco_promptui//:promptui",
-        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//:go_default_library",
     ],
 )
