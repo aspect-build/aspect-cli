@@ -1,0 +1,12 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "stdlib",
+    srcs = ["path.go"],
+    importpath = "aspect.build/cli/gazelle/common/starlark/stdlib",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//gazelle/common/starlark/utils",
+        "@net_starlark_go//starlark",
+    ],
+)
