@@ -41,22 +41,29 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type LintHandler interface {
-	Report(label string, linter string, report []byte, exitCode int) error
-	Patch(label string, linter string, patch []byte) error
+type LintResult struct {
+	Label    string
+	Mnemonic string
+	ExitCode int
+	Report   string
+	Patch    []byte
+}
+
+type LintResultsHandler interface {
+	Results(results []*LintResult) error
 }
 
 type Linter struct {
 	ioutils.Streams
-	bzl          bazel.Bazel
-	lintHandlers []LintHandler
+	bzl             bazel.Bazel
+	resultsHandlers []LintResultsHandler
 }
 
 // Align with rules_lint
 const (
 	LINT_REPORT_GROUP  = "rules_lint_report"
 	LINT_PATCH_GROUP   = "rules_lint_patch"
-	LINT_RESULT_REGEX  = ".*aspect_rules_lint.*"
+	LINT_RESULT_REGEX  = ".*AspectRulesLint.*"
 	HISTOGRAM_CHARS    = 20
 	MAX_FILENAME_WIDTH = 80
 )
@@ -64,12 +71,12 @@ const (
 func New(
 	streams ioutils.Streams,
 	bzl bazel.Bazel,
-	lintHandlers []LintHandler,
+	resultsHandlers []LintResultsHandler,
 ) *Linter {
 	return &Linter{
-		Streams:      streams,
-		bzl:          bzl,
-		lintHandlers: lintHandlers,
+		Streams:         streams,
+		bzl:             bzl,
+		resultsHandlers: resultsHandlers,
 	}
 }
 
@@ -221,7 +228,7 @@ lint:
 			return fmt.Errorf("failed to find workspace root: %w", err)
 		}
 
-		lintBEPHandler = newLintBEPHandler(handleResultsCtx, workspaceRoot, handleResultsErrgroup, runner.lintHandlers)
+		lintBEPHandler = newLintBEPHandler(handleResultsCtx, workspaceRoot, handleResultsErrgroup)
 		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback)
 	}
 
@@ -245,97 +252,127 @@ lint:
 		return fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))
 	}
 
-	// Bazel is done running, so stdout is now safe for us to print the results
-	applyNone := false
-	exitCode := 0
-	for label, result := range lintBEPHandler.resultsByLabel {
-		if result.exitCodeFile != nil {
-			exitCodeBytes, err := lintBEPHandler.readBEPFile(result.exitCodeFile)
+	// Convert raw results to list of LintResult structs
+	results := make([]*LintResult, 0, len(lintBEPHandler.resultsByLabel))
+	for _, r := range lintBEPHandler.resultsByLabel {
+		result := &LintResult{
+			Mnemonic: r.mnemonic,
+			Label:    r.label,
+		}
+		results = append(results, result)
+
+		// parse exit code file
+		if r.exitCodeFile != nil {
+			exitCodeBytes, err := lintBEPHandler.readBEPFile(r.exitCodeFile)
 			if err != nil {
 				return err
 			}
-			targetExitCode, err := strconv.Atoi(strings.TrimSpace(string(exitCodeBytes)))
+			exitCode, err := strconv.Atoi(strings.TrimSpace(string(exitCodeBytes)))
 			if err != nil {
 				return fmt.Errorf("failed parse read exit code as integer: %v", err)
 			}
-			if targetExitCode > 0 {
-				exitCode = 1
-			}
+			result.ExitCode = exitCode
 		}
-		reportBytes, err := lintBEPHandler.readBEPFile(result.reportFile)
+
+		// read the report file
+		reportBytes, err := lintBEPHandler.readBEPFile(r.reportFile)
 		if err != nil {
 			return err
 		}
-		printHeader := true
-		report := strings.TrimSpace(string(reportBytes))
-		if printReport && len(report) > 0 {
-			if printHeader {
-				runner.printLintResultsHeader(label)
-				printHeader = false
-			}
-			runner.printLintReport(report)
-		}
-		if result.patchFile != nil {
-			patch, err := lintBEPHandler.readBEPFile(result.patchFile)
+		result.Report = strings.TrimSpace(string(reportBytes))
+
+		// read the patch file
+		if r.patchFile != nil {
+			patch, err := lintBEPHandler.readBEPFile(r.patchFile)
 			if err != nil {
 				return err
 			}
 			if patch != nil && len(patch) > 0 {
-				if printHeader {
-					runner.printLintResultsHeader(label)
-					printHeader = false
+				result.Patch = patch
+			}
+		}
+	}
+
+	// Send the result to any lint handlers. Call the handlers even if results list
+	// is empty since no results is a success.
+	for _, h := range runner.resultsHandlers {
+		if err := h.Results(results); err != nil {
+			return fmt.Errorf("lint results handler failed: %w", err)
+		}
+	}
+
+	// Bazel is done running, so stdout is now safe for us to print the results
+	applyNone := false
+	exitCode := 0
+	for _, r := range results {
+		if r.ExitCode > 0 {
+			exitCode = 1
+		}
+
+		printHeader := true
+		if len(r.Report) > 0 {
+			if printHeader {
+				runner.printLintResultsHeader(r.Label)
+				printHeader = false
+			}
+			runner.printLintReport(r.Report)
+		}
+
+		if r.Patch != nil {
+			if printHeader {
+				runner.printLintResultsHeader(r.Label)
+				printHeader = false
+			}
+			color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Some problems have automated fixes available:\n\n")
+			if showDiff {
+				runner.printLintPatchDiff(r.Patch)
+			} else {
+				err = runner.printLintPatchDiffStat(r.Patch)
+				if err != nil {
+					return fmt.Errorf("failed to parse patch file for %s: %v", r.Label, err)
 				}
-				color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Some problems have automated fixes available:\n\n")
-				if showDiff {
-					runner.printLintPatchDiff(patch)
-				} else {
-					err = runner.printLintPatchDiffStat(patch)
+			}
+			apply := applyAll
+			if isInteractiveMode && !applyNone && !apply {
+				for {
+					var choice string
+					options := []huh.Option[string]{
+						huh.NewOption("Yes", "yes"),
+						huh.NewOption("No", "no"),
+						huh.NewOption("All", "all"),
+						huh.NewOption("None", "none"),
+					}
+					if !showDiff {
+						options = append(options, huh.NewOption("Show Diff", "diff"))
+					}
+					applyFixPrompt := huh.NewSelect[string]().
+						Title("Apply fixes?").
+						Options(options...).
+						Value(&choice)
+					form := huh.NewForm(huh.NewGroup(applyFixPrompt))
+					err := form.Run()
 					if err != nil {
-						return fmt.Errorf("failed to parse patch file %s: %v", result.patchFile, err)
+						return fmt.Errorf("prompt failed: %v", err)
 					}
+					switch choice {
+					case "yes":
+						apply = true
+					case "all":
+						apply = true
+						applyAll = true
+					case "none":
+						applyNone = true
+					case "diff":
+						runner.printLintPatchDiff(r.Patch)
+						continue
+					}
+					break
 				}
-				apply := applyAll
-				if isInteractiveMode && !applyNone && !apply {
-					for {
-						var choice string
-						options := []huh.Option[string]{
-							huh.NewOption("Yes", "yes"),
-							huh.NewOption("No", "no"),
-							huh.NewOption("All", "all"),
-							huh.NewOption("None", "none"),
-						}
-						if !showDiff {
-							options = append(options, huh.NewOption("Show Diff", "diff"))
-						}
-						applyFixPrompt := huh.NewSelect[string]().
-							Title("Apply fixes?").
-							Options(options...).
-							Value(&choice)
-						form := huh.NewForm(huh.NewGroup(applyFixPrompt))
-						err := form.Run()
-						if err != nil {
-							return fmt.Errorf("prompt failed: %v", err)
-						}
-						switch choice {
-						case "yes":
-							apply = true
-						case "all":
-							apply = true
-							applyAll = true
-						case "none":
-							applyNone = true
-						case "diff":
-							runner.printLintPatchDiff(patch)
-							continue
-						}
-						break
-					}
-				}
-				if apply {
-					err = runner.applyLintPatch(patch)
-					if err != nil {
-						return fmt.Errorf("failed to apply patch file %s: %v", result.patchFile, err)
-					}
+			}
+			if apply {
+				err = runner.applyLintPatch(r.Patch)
+				if err != nil {
+					return fmt.Errorf("failed to apply patch file for %s: %v", r.Label, err)
 				}
 			}
 		}

@@ -28,10 +28,10 @@ import (
 )
 
 func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, pluginSystem, bazel.WorkspaceFromWd, []lint.LintHandler{})
+	return NewCmd(ioutils.DefaultStreams, pluginSystem, bazel.WorkspaceFromWd, []lint.LintResultsHandler{})
 }
 
-func NewCmd(streams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel.Bazel, lintHandlers []lint.LintHandler) *cobra.Command {
+func NewCmd(streams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel.Bazel, lintHandlers []lint.LintResultsHandler) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "lint <target patterns>",
 		Args:  cobra.MinimumNArgs(1),
