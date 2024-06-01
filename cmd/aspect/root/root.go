@@ -156,13 +156,13 @@ func NewCmd(
 	cmd.AddCommand(test.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(version.NewDefaultCmd())
 	cmd.AddCommand(outputs.NewDefaultCmd())
-	cmd.AddCommand(configure.NewDefaultCmd())
 	cmd.SetHelpCommand(help.NewCmd())
 
 	if !buildinfo.Current().IsAspectPro {
 		// Aspect CLI only commands
 		cmd.AddCommand(lint.NewDefaultCmd(pluginSystem))
 		cmd.AddCommand(license.NewDefaultCmd())
+		cmd.AddCommand(configure.NewDefaultCmd())
 	}
 
 	// ### "Additional help topic commands" which are not runnable
