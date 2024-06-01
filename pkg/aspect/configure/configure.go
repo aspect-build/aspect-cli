@@ -37,12 +37,19 @@ import (
 
 type Configure struct {
 	ioutils.Streams
+
+	languageKeys []string
+	languages    []language.Language
 }
 
 func New(streams ioutils.Streams) *Configure {
-	return &Configure{
+	c := &Configure{
 		Streams: streams,
 	}
+
+	c.addDefaultLanguages()
+
+	return c
 }
 
 func pluralize(s string, num int) string {
@@ -53,42 +60,41 @@ func pluralize(s string, num int) string {
 	}
 }
 
-func (runner *Configure) Run(_ context.Context, cmd *cobra.Command, args []string) error {
-	languages := make([]language.Language, 0, 32)
-	languageKeys := make([]string, 0, 32)
+func (c *Configure) AddLanguage(lang string, l language.Language) {
+	c.languageKeys = append(c.languageKeys, lang)
+	c.languages = append(c.languages, l)
+}
 
+func (c *Configure) addDefaultLanguages() {
 	// Order matters for gazelle languages. Proto should be run before golang.
 	viper.SetDefault("configure.languages.protobuf", false)
 	if viper.GetBool("configure.languages.protobuf") {
-		languages = append(languages, proto.NewLanguage())
-		languageKeys = append(languageKeys, "protobuf")
+		c.AddLanguage("protobuf", proto.NewLanguage())
 	}
 
 	viper.SetDefault("configure.languages.go", false)
 	if viper.GetBool("configure.languages.go") {
-		languages = append(languages, golang.NewLanguage())
-		languageKeys = append(languageKeys, "go")
+		c.AddLanguage("go", golang.NewLanguage())
 	}
 
 	viper.SetDefault("configure.languages.javascript", false)
 	if viper.GetBool("configure.languages.javascript") {
-		languages = append(languages, js.NewLanguage())
-		languageKeys = append(languageKeys, "javascript")
+		c.AddLanguage("javascript", js.NewLanguage())
 	}
 
 	viper.SetDefault("configure.languages.kotlin", false)
 	if viper.GetBool("configure.languages.kotlin") {
-		languages = append(languages, kotlin.NewLanguage())
-		languageKeys = append(languageKeys, "kotlin")
+		c.AddLanguage("kotlin", kotlin.NewLanguage())
 	}
 
 	viper.SetDefault("configure.languages.bzl", false)
 	if viper.GetBool("configure.languages.bzl") {
-		languages = append(languages, bzl.NewLanguage())
-		languageKeys = append(languageKeys, "bzl")
+		c.AddLanguage("bzl", bzl.NewLanguage())
 	}
+}
 
-	if len(languageKeys) == 0 {
+func (runner *Configure) Run(_ context.Context, cmd *cobra.Command, args []string) error {
+	if len(runner.languageKeys) == 0 {
 		fmt.Fprintln(runner.Streams.Stderr, `No languages enabled for BUILD file generation.
 
 To enable one or more languages, add the following to the .aspect/cli/config.yaml
@@ -115,10 +121,10 @@ configure:
 	mode, _ := cmd.Flags().GetString("mode")
 
 	if mode == "fix" {
-		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(languageKeys, ", "))
+		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(runner.languageKeys, ", "))
 	}
 
-	stats, err := runFixUpdate(wd, languages, updateCmd, []string{"--mode=" + mode})
+	stats, err := runFixUpdate(wd, runner.languages, updateCmd, []string{"--mode=" + mode})
 
 	exitCode := aspecterrors.OK
 

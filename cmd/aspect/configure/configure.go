@@ -30,8 +30,9 @@ func NewDefaultCmd() *cobra.Command {
 }
 
 func NewCmd(streams ioutils.Streams) *cobra.Command {
-	v := configure.New(streams)
-
+	return NewCmdWithConfigure(streams, configure.New(streams))
+}
+func NewCmdWithConfigure(streams ioutils.Streams, v *configure.Configure) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "configure",
 		Short: "Auto-configure Bazel by updating BUILD files",
