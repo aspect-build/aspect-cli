@@ -82,7 +82,7 @@ jobs:
           ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
           DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Configure Workflows
+        name: Workflows environment
     - checkout
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
@@ -91,7 +91,7 @@ jobs:
           ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
           DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Agent health checks
+        name: Agent health check
         no_output_timeout: 180m
     - run:
         command: git fetch
@@ -145,7 +145,7 @@ jobs:
           ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Configure Workflows
+        name: Workflows environment
     - checkout
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
@@ -166,7 +166,7 @@ jobs:
           ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Agent health checks
+        name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run buildifier --workspace << parameters.workspace >>
@@ -217,7 +217,7 @@ jobs:
           ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Configure Workflows
+        name: Workflows environment
     - checkout
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
@@ -238,7 +238,7 @@ jobs:
           ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Agent health checks
+        name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run configure --workspace << parameters.workspace >>
@@ -289,7 +289,7 @@ jobs:
           ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Configure Workflows
+        name: Workflows environment
     - checkout
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
@@ -310,7 +310,7 @@ jobs:
           ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Agent health checks
+        name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run format --workspace << parameters.workspace >>
@@ -358,7 +358,7 @@ jobs:
           ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
           DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Configure Workflows
+        name: Workflows environment
     - checkout
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
@@ -367,7 +367,7 @@ jobs:
           ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
           DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Agent health checks
+        name: Agent health check
         no_output_timeout: 180m
     - run:
         command: git fetch
@@ -421,7 +421,7 @@ jobs:
           ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Configure Workflows
+        name: Workflows environment
     - checkout
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
@@ -442,7 +442,7 @@ jobs:
           ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Agent health checks
+        name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run test --workspace << parameters.workspace >>
@@ -476,7 +476,7 @@ jobs:
               ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
               ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
               XDG_CACHE_HOME: /mnt/ephemeral/caches
-            name: Delivery Manifest
+            name: Delivery manifest
             no_output_timeout: 180m
     - store_artifacts:
         path: /workflows/testlogs
@@ -509,14 +509,14 @@ jobs:
         environment:
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Configure Workflows
+        name: Workflows environment
     - checkout
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
         environment:
           ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
           XDG_CACHE_HOME: /mnt/ephemeral/caches
-        name: Agent health checks
+        name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run warming --workspace .
