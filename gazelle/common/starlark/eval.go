@@ -27,7 +27,7 @@ var thread = &starlark.Thread{
 	},
 }
 
-func Eval(starpath string, libs map[string]starlark.Value, locals map[string]interface{}) (starlark.StringDict, error) {
+func Eval(starpath string, libs starlark.StringDict, locals map[string]interface{}) (starlark.StringDict, error) {
 	// Predeclared libs in addition to the go.starlark.net/starlark standard library:
 	// * https://github.com/google/starlark-go/blob/f86470692795f8abcf9f837a3c53cf031c5a3d7e/starlark/library.go#L36-L73
 	// * https://github.com/google/starlark-go/blob/f86470692795f8abcf9f837a3c53cf031c5a3d7e/cmd/starlark/starlark.go#L96-L100
