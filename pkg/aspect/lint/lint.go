@@ -275,11 +275,13 @@ lint:
 		}
 
 		// read the report file
-		reportBytes, err := lintBEPHandler.readBEPFile(r.reportFile)
-		if err != nil {
-			return err
+		if r.reportFile != nil {
+			reportBytes, err := lintBEPHandler.readBEPFile(r.reportFile)
+			if err != nil {
+				return err
+			}
+			result.Report = strings.TrimSpace(string(reportBytes))
 		}
-		result.Report = strings.TrimSpace(string(reportBytes))
 
 		// read the patch file
 		if r.patchFile != nil {
