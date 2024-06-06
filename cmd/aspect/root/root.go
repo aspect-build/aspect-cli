@@ -73,11 +73,14 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 
 func CheckAspectLockVersionFlag(args []string) bool {
 	for _, arg := range args {
-		if arg == "--"+flags.AspectLockVersion {
+		if arg == "--"+flags.AspectLockVersion+"=false" {
+			return false
+		}
+		if arg == "--"+flags.AspectLockVersion+"=true" || arg == "--"+flags.AspectLockVersion {
 			return true
 		}
 	}
-	return false
+	return flags.AspectLockVersionDefault()
 }
 
 func CheckAspectDisablePluginsFlag(args []string) bool {
