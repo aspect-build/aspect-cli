@@ -139,7 +139,7 @@ configure:
 		exitCode = aspecterrors.UnhandledOrInternalError
 	}
 
-	if mode == "fix" {
+	if mode == "fix" && stats != nil {
 		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s visited\n", stats.NumBuildFilesVisited, pluralize("file", stats.NumBuildFilesVisited))
 		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s updated\n", stats.NumBuildFilesUpdated, pluralize("file", stats.NumBuildFilesUpdated))
 	}
