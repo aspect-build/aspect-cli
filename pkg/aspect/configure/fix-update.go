@@ -30,6 +30,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/bazelbuild/buildtools/build"
+
 	wspace "aspect.build/cli/pkg/aspect/configure/internal/wspace"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	gzflag "github.com/bazelbuild/bazel-gazelle/flag"
@@ -129,7 +131,7 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 		if !filepath.IsAbs(dir) {
 			dir = filepath.Join(c.WorkDir, dir)
 		}
-		dir, err := filepath.EvalSymlinks(dir)
+		dir, err = filepath.EvalSymlinks(dir)
 		if err != nil {
 			return fmt.Errorf("%s: failed to resolve symlinks: %v", arg, err)
 		}
@@ -224,7 +226,7 @@ func (ucr *updateConfigurer) KnownDirectives() []string { return nil }
 
 func (ucr *updateConfigurer) Configure(c *config.Config, rel string, f *rule.File) {}
 
-// visitRecord stores information about about a directory visited with
+// visitRecord stores information about a directory visited with
 // packages.Walk.
 type visitRecord struct {
 	// pkgRel is the slash-separated path to the visited directory, relative to
@@ -382,17 +384,48 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		if f != nil {
 			allRules = append(allRules, f.Rules...)
 		}
-		for _, r := range allRules {
-			repl, err := lookupMapKindReplacement(c.KindMap, r.Kind())
+
+		maybeRecordReplacement := func(ruleKind string) (*string, error) {
+			var repl *config.MappedKind
+			repl, err = lookupMapKindReplacement(c.KindMap, ruleKind)
 			if err != nil {
-				errorsFromWalk = append(errorsFromWalk, fmt.Errorf("looking up mapped kind: %w", err))
-				continue
+				return nil, err
 			}
 			if repl != nil {
-				mappedKindInfo[repl.KindName] = kinds[r.Kind()]
+				mappedKindInfo[repl.KindName] = kinds[ruleKind]
 				mappedKinds = append(mappedKinds, *repl)
 				mrslv.MappedKind(rel, *repl)
-				r.SetKind(repl.KindName)
+				return &repl.KindName, nil
+			}
+			return nil, nil
+		}
+
+		for _, r := range allRules {
+			if replacementName, err := maybeRecordReplacement(r.Kind()); err != nil {
+				errorsFromWalk = append(errorsFromWalk, fmt.Errorf("looking up mapped kind: %w", err))
+			} else if replacementName != nil {
+				r.SetKind(*replacementName)
+			}
+
+			for i, arg := range r.Args() {
+				// Only check the first arg - this supports the maybe(java_library, ...) pattern,
+				// but avoids potential false positives from other uses of symbols.
+				if i != 0 {
+					break
+				}
+				if ident, ok := arg.(*build.Ident); ok {
+					// Don't allow re-mapping symbols that aren't known loads of a plugin.
+					if _, knownKind := kinds[ident.Name]; !knownKind {
+						continue
+					}
+					if replacementName, err := maybeRecordReplacement(ident.Name); err != nil {
+						errorsFromWalk = append(errorsFromWalk, fmt.Errorf("looking up mapped kind: %w", err))
+					} else if replacementName != nil {
+						if err := r.UpdateArg(i, &build.Ident{Name: *replacementName}); err != nil {
+							log.Panicf("%s: %v", rel, err)
+						}
+					}
+				}
 			}
 		}
 		for _, r := range empty {
@@ -445,8 +478,8 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 
 	if len(errorsFromWalk) > 1 {
 		var additionalErrors []string
-		for _, error := range errorsFromWalk[1:] {
-			additionalErrors = append(additionalErrors, error.Error())
+		for _, err = range errorsFromWalk[1:] {
+			additionalErrors = append(additionalErrors, err.Error())
 		}
 
 		return nil, fmt.Errorf("encountered multiple errors: %w, %v", errorsFromWalk[0], strings.Join(additionalErrors, ", "))
@@ -462,7 +495,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			err = cerr
 		}
 	}()
-	if err := maybePopulateRemoteCacheFromGoMod(c, rc); err != nil {
+	if err = maybePopulateRemoteCacheFromGoMod(c, rc); err != nil {
 		log.Print(err)
 	}
 	for _, v := range visits {
