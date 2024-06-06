@@ -19,8 +19,22 @@ package flags
 import (
 	"fmt"
 
+	"aspect.build/cli/buildinfo"
+
 	"github.com/spf13/cobra"
 )
+
+func AspectLockVersionDefault() bool {
+	// We set the default `--aspect:lock_version`` depending on whether or not the CLI is a stamped
+	// release or unstamped development build. When unstamped we want to ignore the version of the
+	// CLI specified in `.bazeliskrc` or `.aspect/cli/config.yaml` and not re-enter that version
+	// when booting since during development that is more ergonomic. For stamped release builds, on
+	// the other hand, we want to CLI to honor the version specified in the repos `.bazeliskrc` or
+	// `.aspect/cli/config.yaml` since that is the version that developers are expecting to be run.
+	// In either case, the default behavior can be overridden by explicitly specifying the flag as
+	// either `--aspect:lock_version` or `--aspect:lock_version=false`.
+	return !buildinfo.Current().HasRelease()
+}
 
 func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 	// Documented global flags. These flags show up as "global flags" on the `help` command output.
@@ -28,7 +42,7 @@ func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 	cmd.PersistentFlags().Bool(AspectInteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
 
 	// Hidden global flags
-	cmd.PersistentFlags().Bool(AspectLockVersion, false, "Lock the version of the Aspect CLI. This prevents the Aspect CLI from downloading and running an different version of the Aspect CLI if one is specified in .bazeliskrc or the Aspect CLI config.")
+	cmd.PersistentFlags().Bool(AspectLockVersion, AspectLockVersionDefault(), "Lock the version of the Aspect CLI. This prevents the Aspect CLI from downloading and running an different version of the Aspect CLI if one is specified in .bazeliskrc or the Aspect CLI config.")
 	cmd.PersistentFlags().MarkHidden(AspectLockVersion)
 
 	cmd.PersistentFlags().Bool(AspectForceBesBackendFlagName, false, "Force the creation of a BES backend even if there are no plugins loaded")
