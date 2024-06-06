@@ -13,6 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// NOTE: synced from bazel-gazelle/cmd/gazelle/fix-update.go
+
 package configure
 
 import (
@@ -21,7 +23,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -29,7 +30,6 @@ import (
 	"strings"
 	"syscall"
 
-	module "aspect.build/cli/pkg/aspect/configure/internal/module"
 	wspace "aspect.build/cli/pkg/aspect/configure/internal/wspace"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	gzflag "github.com/bazelbuild/bazel-gazelle/flag"
@@ -54,6 +54,7 @@ type updateConfig struct {
 	patchPath      string
 	patchBuffer    bytes.Buffer
 	print0         bool
+	profile        profiler
 }
 
 // NOTE: addition aspect-cli "changed" result
@@ -78,6 +79,8 @@ type updateConfigurer struct {
 	recursive      bool
 	knownImports   []string
 	repoConfigPath string
+	cpuProfile     string
+	memProfile     string
 }
 
 func (ucr *updateConfigurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
@@ -90,6 +93,8 @@ func (ucr *updateConfigurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *conf
 	fs.BoolVar(&ucr.recursive, "r", true, "when true, gazelle will update subdirectories recursively")
 	fs.StringVar(&uc.patchPath, "patch", "", "when set with -mode=diff, gazelle will write to a file instead of stdout")
 	fs.BoolVar(&uc.print0, "print0", false, "when set with -mode=fix, gazelle will print the names of rewritten files separated with \\0 (NULL)")
+	fs.StringVar(&ucr.cpuProfile, "cpuprofile", "", "write cpu profile to `file`")
+	fs.StringVar(&ucr.memProfile, "memprofile", "", "write memory profile to `file`")
 	fs.Var(&gzflag.MultiFlag{Values: &ucr.knownImports}, "known_import", "import path for which external resolution is skipped (can specify multiple times)")
 	fs.StringVar(&ucr.repoConfigPath, "repo_config", "", "file where Gazelle should load repository configuration. Defaults to WORKSPACE.")
 }
@@ -108,6 +113,11 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 	if uc.patchPath != "" && !filepath.IsAbs(uc.patchPath) {
 		uc.patchPath = filepath.Join(c.WorkDir, uc.patchPath)
 	}
+	p, err := newProfiler(ucr.cpuProfile, ucr.memProfile)
+	if err != nil {
+		return err
+	}
+	uc.profile = p
 
 	dirs := fs.Args()
 	if len(dirs) == 0 {
@@ -162,15 +172,10 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 		})
 	}
 
-	moduleToApparentName, err := module.ExtractModuleToApparentNameMapping(c.RepoRoot)
-	if err != nil {
-		return err
-	}
-
 	for _, r := range c.Repos {
 		if r.Kind() == "go_repository" {
 			var name string
-			if apparentName := moduleToApparentName(r.AttrString("module_name")); apparentName != "" {
+			if apparentName := c.ModuleToApparentName(r.AttrString("module_name")); apparentName != "" {
 				name = apparentName
 			} else {
 				name = r.Name()
@@ -278,11 +283,6 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		return nil, err
 	}
 
-	moduleToApparentName, err := module.ExtractModuleToApparentNameMapping(c.RepoRoot)
-	if err != nil {
-		return nil, err
-	}
-
 	mrslv := newMetaResolver()
 	kinds := make(map[string]rule.KindInfo)
 	loads := genericLoads
@@ -293,7 +293,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			kinds[kind] = info
 		}
 		if moduleAwareLang, ok := lang.(language.ModuleAwareLanguage); ok {
-			loads = append(loads, moduleAwareLang.ApparentLoads(moduleToApparentName)...)
+			loads = append(loads, moduleAwareLang.ApparentLoads(c.ModuleToApparentName)...)
 		} else {
 			loads = append(loads, lang.Loads()...)
 		}
@@ -316,12 +316,21 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 	// Visit all directories in the repository.
 	var visits []visitRecord
 	uc := getUpdateConfig(c)
+	defer func() {
+		if err := uc.profile.stop(); err != nil {
+			log.Printf("stopping profiler: %v", err)
+		}
+	}()
+
 	var errorsFromWalk []error
 	walk.Walk(c, cexts, uc.dirs, uc.walkMode, func(dir, rel string, c *config.Config, update bool, f *rule.File, subdirs, regularFiles, genFiles []string) {
 		// If this file is ignored or if Gazelle was not asked to update this
 		// directory, just index the build file and move on.
 		if !update {
 			if c.IndexLibraries && f != nil {
+				for _, repl := range c.KindMap {
+					mrslv.MappedKind(rel, repl)
+				}
 				for _, r := range f.Rules {
 					ruleIndex.AddRule(c, r, f)
 				}
@@ -453,6 +462,9 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			err = cerr
 		}
 	}()
+	if err := maybePopulateRemoteCacheFromGoMod(c, rc); err != nil {
+		log.Print(err)
+	}
 	for _, v := range visits {
 		for i, r := range v.rules {
 			from := label.New(c.RepoName, v.pkgRel, r.Name())
@@ -488,7 +500,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		}
 	}
 	if uc.patchPath != "" {
-		if err := ioutil.WriteFile(uc.patchPath, uc.patchBuffer.Bytes(), 0o666); err != nil {
+		if err := os.WriteFile(uc.patchPath, uc.patchBuffer.Bytes(), 0o666); err != nil {
 			return nil, err
 		}
 	}
@@ -531,7 +543,11 @@ func newFixUpdateConfiguration(wd string, cmd command, args []string, cexts []co
 	c := config.New()
 	c.WorkDir = wd
 
+	// NOTE: aspect-cli renamed "gazelle" to "default_values" (TODO: why?)
 	fs := flag.NewFlagSet("default_values", flag.ContinueOnError)
+	// Flag will call this on any parse error. Don't print usage unless
+	// -h or -help were passed explicitly.
+	fs.Usage = func() {}
 
 	for _, cext := range cexts {
 		cext.RegisterFlags(fs, cmd.String(), c)
@@ -643,16 +659,51 @@ func findOutputPath(c *config.Config, f *rule.File) string {
 	}
 	outputDir := filepath.Join(baseDir, filepath.FromSlash(f.Pkg))
 	defaultOutputPath := filepath.Join(outputDir, c.DefaultBuildFileName())
-	files, err := ioutil.ReadDir(outputDir)
+	ents, err := os.ReadDir(outputDir)
 	if err != nil {
 		// Ignore error. Directory probably doesn't exist.
 		return defaultOutputPath
 	}
-	outputPath := rule.MatchBuildFileName(outputDir, c.ValidBuildFileNames, files)
+	outputPath := rule.MatchBuildFile(outputDir, c.ValidBuildFileNames, ents)
 	if outputPath == "" {
 		return defaultOutputPath
 	}
 	return outputPath
+}
+
+// maybePopulateRemoteCacheFromGoMod reads go.mod and adds a root to rc for each
+// module requirement. This lets the Go extension avoid a network lookup for
+// unknown imports with -external=external, and it lets dependency resolution
+// succeed with -external=static when it might not otherwise.
+//
+// This function does not override roots added from WORKSPACE (or some other
+// configuration file), but it's useful when there is no such file. In most
+// cases, a user of Gazelle with indirect Go dependencies does not need to add
+// '# gazelle:repository' or '# gazelle:repository_macro' directives to their
+// WORKSPACE file. This need was frustrating for developers in non-Go
+// repositories with go_repository dependencies declared in macros. It wasn't
+// obvious that Gazelle was missing these.
+//
+// This function is regrettably Go specific and does not belong here, but it
+// can't be moved to //language/go until //repo is broken up and moved there.
+func maybePopulateRemoteCacheFromGoMod(c *config.Config, rc *repo.RemoteCache) error {
+	haveGo := false
+	for name := range c.Exts {
+		if name == "go" {
+			haveGo = true
+			break
+		}
+	}
+	if !haveGo {
+		return nil
+	}
+
+	goModPath := filepath.Join(c.RepoRoot, "go.mod")
+	if _, err := os.Stat(goModPath); err != nil {
+		return nil
+	}
+
+	return rc.PopulateFromGoMod(goModPath)
 }
 
 func unionKindInfoMaps(a, b map[string]rule.KindInfo) map[string]rule.KindInfo {

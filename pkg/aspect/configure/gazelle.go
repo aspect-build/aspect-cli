@@ -13,6 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// NOTE: synced from bazel-gazelle/cmd/gazelle/gazelle.go
+
 // Command gazelle is a BUILD file generator for Go projects.
 // See "gazelle --help" for more details.
 package configure
@@ -32,17 +34,21 @@ const (
 var commandFromName = map[string]command{
 	"fix":    fixCmd,
 	"update": updateCmd,
+	// NOTE: aspect-cli removed --help,  --update-repos
 }
 
 var nameFromCommand = []string{
 	// keep in sync with definition above
 	"update",
 	"fix",
+	// NOTE: aspect-cli removed --help,  --update-repos
 }
 
 func (cmd command) String() string {
 	return nameFromCommand[cmd]
 }
+
+// NOTE: aspect-cli removed main()
 
 // filterLanguages returns the subset of input languages that pass the config's
 // filter, if any. Gazelle should not generate rules for languages not returned.
