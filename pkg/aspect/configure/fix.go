@@ -13,12 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// NOTE: synced from bazel-gazelle/cmd/gazelle/fix.go
+
 package configure
 
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -35,7 +36,7 @@ func fixFile(c *config.Config, f *rule.File) error {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o777); err != nil {
 		return err
 	}
-	if err := ioutil.WriteFile(outPath, newContent, 0o666); err != nil {
+	if err := os.WriteFile(outPath, newContent, 0o666); err != nil {
 		return err
 	}
 	f.Content = newContent
