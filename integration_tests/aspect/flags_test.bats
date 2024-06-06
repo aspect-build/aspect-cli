@@ -46,7 +46,7 @@ BAZELISK_BASE_URL=https://static.aspect.build/aspect
 USE_BAZEL_VERSION=aspect/1.2.3
 EOF
 
-    run aspect
+    run aspect --aspect:lock_version=false
     assert_failure
     assert_output --partial "could not download Bazel"
 
@@ -60,7 +60,7 @@ EOF
 version: 1.2.3
 EOF
 
-    run aspect --aspect:config="version-config.yaml"
+    run aspect --aspect:config="version-config.yaml" --aspect:lock_version=false
     assert_failure
     assert_output --partial "could not download Bazel"
 

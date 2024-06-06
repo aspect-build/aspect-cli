@@ -16,7 +16,7 @@ BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
 USE_BAZEL_VERSION=aspect/5.8.19
 EOF
 
-    run aspect version
+    run aspect --aspect:lock_version=false version
     assert_success
     assert_output --partial "Aspect CLI version: 5.8.19"
     assert_output --partial "Build label: 6.4.0"
@@ -26,7 +26,7 @@ EOF
     export BAZELISK_BASE_URL="https://github.com/aspect-build/aspect-cli/releases/download"
     export USE_BAZEL_VERSION="aspect/5.8.20"
 
-    run aspect version
+    run aspect --aspect:lock_version=false version
     assert_success
     assert_output --partial "Aspect CLI version: 5.8.20"
     assert_output --partial "Build label: 6.4.0"
@@ -38,9 +38,9 @@ BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
 USE_BAZEL_VERSION=aspect/5.8.19
 EOF
 
-    run aspect --versio
+    run aspect --aspect:lock_version=false --not_a_flag
     assert_failure
-    assert_output --partial "unknown startup flag: --versio"
+    assert_output --partial "unknown startup flag: --not_a_flag"
 }
 
 @test 'non-one exit code from reentrant aspect cli should be progated to parent' {
@@ -49,7 +49,7 @@ BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
 USE_BAZEL_VERSION=aspect/5.8.19
 EOF
 
-    run aspect configure --mode=diff
+    run aspect --aspect:lock_version=false configure --mode=diff
     assert_failure 112
     assert_output --partial "No languages enabled for BUILD file generation."
 }

@@ -13,6 +13,7 @@ go_library(
     importpath = "aspect.build/cli/pkg/aspect/root/flags",
     visibility = ["//visibility:public"],
     deps = [
+        "//buildinfo",
         "//pkg/interceptors",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",
