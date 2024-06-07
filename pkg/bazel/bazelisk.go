@@ -202,7 +202,7 @@ func (bazelisk *Bazelisk) GetConfig(name string) string {
 
 // GetEnvOrConfig reads a configuration value from the environment, but fall back to reading it from .bazeliskrc.
 func (bazelisk *Bazelisk) GetEnvOrConfig(name string) string {
-	if val := os.Getenv(name); val != "" {
+	if val, found := os.LookupEnv(name); found {
 		return val
 	}
 
