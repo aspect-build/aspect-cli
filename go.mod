@@ -8,7 +8,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/alphadose/haxmap v1.3.1
 	github.com/bazel-contrib/rules_jvm v0.24.0
-	github.com/bazelbuild/bazel-gazelle v0.36.0 // NOTE: keep in sync with fetch.bzl
+	github.com/bazelbuild/bazel-gazelle v0.37.0 // NOTE: keep in sync with fetch.bzl
 	github.com/bazelbuild/bazelisk v1.17.0
 	github.com/bazelbuild/buildtools v0.0.0-20240313121412-66c605173954
 	github.com/bluekeyes/go-gitdiff v0.7.1
@@ -28,15 +28,15 @@ require (
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
 	github.com/pmezard/go-difflib v1.0.0
 	github.com/rogpeppe/go-internal v1.11.0
-	github.com/rs/zerolog v1.32.0
-	github.com/smacker/go-tree-sitter v0.0.0-20240423010953-8ba036550382
+	github.com/rs/zerolog v1.33.0
+	github.com/smacker/go-tree-sitter v0.0.0-20240514083259-c5d1f3f5f99e
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.16.0
 	github.com/tejzpr/ordered-concurrently/v3 v3.0.1
 	github.com/twmb/murmur3 v1.1.8
 	github.com/yargevad/filepathx v1.0.0
-	go.starlark.net v0.0.0-20240123142251-f86470692795
+	go.starlark.net v0.0.0-20240520160348-046347dcd104
 	golang.org/x/exp v0.0.0-20240112132812-db7319d0e0e3
 	golang.org/x/sync v0.6.0
 	google.golang.org/genproto v0.0.0-20240116215550-a9fa1716bcac
