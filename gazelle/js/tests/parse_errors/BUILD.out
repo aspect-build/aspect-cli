@@ -1,7 +1,7 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
 # gazelle:js_ignore_imports mystery-module
-# gazelle:js_ignore_imports unknown-library
+# aspect:js_ignore_imports unknown-library
 
 ts_project(
     name = "parse_errors",

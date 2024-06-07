@@ -5,7 +5,7 @@ load("@npm//:defs.bzl", "npm_link_all_packages")
 # -----------------------------------------------------------------------
 
 # 1: 'resolve' directive
-# gazelle:resolve js js fs :directive-resolve
+# aspect:resolve js js fs :directive-resolve
 
 # 4: package name (listed in pnpm-lock.yaml)
 npm_link_all_packages(name = "node_modules")
