@@ -121,8 +121,15 @@ func ReadStringTuple(l starlark.Tuple) []string {
 }
 
 func ForEachMapEntry(v starlark.Value, f func(k string, v starlark.Value)) {
-	for _, item := range v.(*starlark.Dict).Items() {
-		f(ReadString(item[0]), item[1])
+	d := v.(*starlark.Dict)
+
+	iter := d.Iterate()
+	defer iter.Done()
+
+	var k starlark.Value
+	for iter.Next(&k) {
+		v, _, _ := d.Get(k)
+		f(ReadString(k), v)
 	}
 }
 
@@ -155,9 +162,14 @@ func ReadMap[K any](v starlark.Value, f func(k string, v starlark.Value) K) map[
 	d := v.(*starlark.Dict)
 	m := make(map[string]K)
 
-	for _, item := range d.Items() {
-		k := ReadString(item[0])
-		m[k] = f(k, item[1])
+	iter := d.Iterate()
+	defer iter.Done()
+
+	var kv starlark.Value
+	for iter.Next(&kv) {
+		k := ReadString(kv)
+		v, _, _ := d.Get(kv)
+		m[k] = f(k, v)
 	}
 
 	return m
@@ -167,8 +179,14 @@ func ReadMap2[K any](v starlark.Value, f func(v starlark.Value) K) map[string]K 
 	d := v.(*starlark.Dict)
 	m := make(map[string]K)
 
-	for _, item := range d.Items() {
-		m[ReadString(item[0])] = f(item[1])
+	iter := d.Iterate()
+	defer iter.Done()
+
+	var kv starlark.Value
+	for iter.Next(&kv) {
+		k := ReadString(kv)
+		v, _, _ := d.Get(kv)
+		m[k] = f(v)
 	}
 
 	return m
