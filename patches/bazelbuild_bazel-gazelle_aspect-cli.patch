@@ -1,0 +1,10 @@
+diff --git a/rule/directives.go b/rule/directives.go
+index f5ba580..067838f 100644
+--- a/rule/directives.go
++++ b/rule/directives.go
+@@ -72,4 +72,4 @@ func parseDirectives(stmt []bzl.Expr) []Directive {
+ 	return directives
+ }
+ 
+-var directiveRe = regexp.MustCompile(`^#\s*gazelle:(\w+)\s*(.*?)\s*$`)
++var directiveRe = regexp.MustCompile(`^#\s*(?:gazelle|aspect):(\w+)\s*(.*?)\s*$`)

@@ -13,7 +13,7 @@
 # gazelle:resolve js js the-import :directive-resolve
 
 # 2: 'js_resolve' directive
-# gazelle:js_resolve the-import :directive-js-resolve
+# aspect:js_resolve the-import :directive-js-resolve
 
 # 3: genrule outputs
 genrule(

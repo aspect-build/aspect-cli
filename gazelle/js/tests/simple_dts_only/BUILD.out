@@ -1,6 +1,6 @@
 load("@aspect_rules_js//js:defs.bzl", "js_library")
 
-# gazelle:js_files **/*.{js,ts}
+# aspect:js_files **/*.{js,ts}
 
 js_library(
     name = "simple_dts_only",
