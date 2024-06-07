@@ -120,11 +120,25 @@ configure:
 	// Append the aspect-cli mode flag to the args parsed by gazelle.
 	mode, _ := cmd.Flags().GetString("mode")
 
+	fixArgs := []string{"--mode=" + mode}
+
+	// gazelle --cpuprofile enabled via environment variable.
+	cpuprofile := os.Getenv("GAZELLE_CPUPROFILE")
+	if cpuprofile != "" {
+		fixArgs = append(fixArgs, "--cpuprofile="+cpuprofile)
+	}
+
+	// gazelle --memprofile enabled via environment variable.
+	memprofile := os.Getenv("GAZELLE_MEMPROFILE")
+	if memprofile != "" {
+		fixArgs = append(fixArgs, "--memprofile="+memprofile)
+	}
+
 	if mode == "fix" {
 		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(runner.languageKeys, ", "))
 	}
 
-	stats, err := runFixUpdate(wd, runner.languages, updateCmd, []string{"--mode=" + mode})
+	stats, err := runFixUpdate(wd, runner.languages, updateCmd, fixArgs)
 
 	exitCode := aspecterrors.OK
 
