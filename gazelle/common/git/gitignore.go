@@ -12,9 +12,6 @@ import (
 	gitignore "github.com/go-git/go-git/plumbing/format/gitignore"
 )
 
-// Ignore files following .gitignore syntax for files gazelle will ignore.
-var bazelIgnoreFiles = []string{".bazelignore", ".gitignore"}
-
 // Wrap the ignore files along with the relative path they were loaded from
 // to enable quick-exit checks.
 type ignoreEntry struct {
@@ -34,15 +31,12 @@ func NewGitIgnore() *GitIgnore {
 
 func (i *GitIgnore) CollectIgnoreFiles(c *config.Config, rel string) {
 	// Collect gitignore style ignore files in this directory.
-	for _, ignoreFileName := range bazelIgnoreFiles {
-		ignoreRelPath := path.Join(rel, ignoreFileName)
-		ignoreFilePath := path.Join(c.RepoRoot, ignoreRelPath)
+	ignoreFilePath := path.Join(c.RepoRoot, rel, ".gitignore")
 
-		if ignoreReader, ignoreErr := os.Open(ignoreFilePath); ignoreErr == nil {
-			BazelLog.Tracef("Add ignore file %s", ignoreRelPath)
+	if ignoreReader, ignoreErr := os.Open(ignoreFilePath); ignoreErr == nil {
+		BazelLog.Tracef("Add ignore file %s/.gitignore", rel)
 
-			i.addIgnore(rel, ignoreReader)
-		}
+		i.addIgnore(rel, ignoreReader)
 	}
 }
 
