@@ -12,6 +12,7 @@ go_library(
         "//gazelle/common",
         "//gazelle/common/starlark/stdlib",
         "//pkg/logger",
+        "@bazel_gazelle//config:go_default_library",
         "@com_github_bazelbuild_buildtools//build:go_default_library",
         "@com_github_yargevad_filepathx//:filepathx",
         "@net_starlark_go//lib/json",
