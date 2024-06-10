@@ -1,0 +1,25 @@
+--- BUILD.bazel
++++ BUILD.bazel
+@@ -1,5 +1,11 @@
+ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+ 
++cc_library(
++    name = "headers",
++    hdrs = ["alloc.h", "array.h"],
++    visibility  = ["//:__subpackages__"],
++)
++
+ go_library(
+     name = "go-tree-sitter",
+     srcs = [
+
+--- python/BUILD.bazel
++++ python/BUILD.bazel
+@@ -9,6 +9,7 @@
+         "scanner.c",
+     ],
+     cgo = True,
++    cdeps = ["//:headers"],
+     importpath = "github.com/smacker/go-tree-sitter/python",
+     visibility = ["//visibility:public"],
+     deps = ["//:go-tree-sitter"],

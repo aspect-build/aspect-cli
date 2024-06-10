@@ -18,13 +18,17 @@ Run 'aspect help directives' for more documentation on directives.
 
 So far these languages are supported:
 - Go and Protocol Buffers, thanks to code from [gazelle]
+- Python, thanks to code from [rules_python]
 - JavaScript (including TypeScript)
 - Kotlin (experimental, see https://github.com/aspect-build/aspect-cli/issues/474)
+- Starlark, thanks to code from [bazel-skylib]
 
 configure is based on [gazelle]. We are very grateful to the authors of that software.
 The advantage of configure in Aspect CLI is that you don't need to compile the tooling before running it.
 
 [gazelle]: https://github.com/bazelbuild/bazel-gazelle
+[rules_python]: https://github.com/bazelbuild/rules_python/tree/main/gazelle
+[bazel-skylib]: https://github.com/bazelbuild/bazel-skylib/tree/main/gazelle
 
 To change the behavior of configure, you add "directives" to your BUILD files, which are comments
 in a special syntax.
