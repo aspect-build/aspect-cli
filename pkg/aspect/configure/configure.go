@@ -31,6 +31,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
+	python "github.com/bazelbuild/rules_python/gazelle/python"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -90,6 +91,11 @@ func (c *Configure) addDefaultLanguages() {
 	viper.SetDefault("configure.languages.bzl", false)
 	if viper.GetBool("configure.languages.bzl") {
 		c.AddLanguage("bzl", bzl.NewLanguage())
+	}
+
+	viper.SetDefault("configure.languages.python", false)
+	if viper.GetBool("configure.languages.python") {
+		c.AddLanguage("python", python.NewLanguage())
 	}
 }
 
