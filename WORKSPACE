@@ -129,6 +129,10 @@ go_register_toolchains(version = "1.22.3")
 
 http_archive(
     name = "bazel_gazelle",
+    patch_args = ["-p1"],
+    patches = [
+        "//:patches/bazelbuild_bazel-gazelle_aspect-cli.patch",
+    ],
     sha256 = "d76bf7a60fd8b050444090dfa2837a4eaf9829e1165618ee35dceca5cbdf58d5",
     # Ensure this version always matches the version of @com_github_bazelbuild_bazel_gazelle set in deps.bzl.
     #
