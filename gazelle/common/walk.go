@@ -20,7 +20,7 @@ func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes 
 	// Source files in the primary directory
 	for _, f := range args.RegularFiles {
 		// Skip BUILD files
-		if isBuildFile(f) {
+		if args.Config.IsValidBuildFileName(f) {
 			continue
 		}
 
@@ -52,7 +52,7 @@ func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes 
 				}
 
 				// Skip BUILD files
-				if isBuildFile(filePath) {
+				if args.Config.IsValidBuildFileName(path.Base(filePath)) {
 					return nil
 				}
 
@@ -76,7 +76,7 @@ func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes 
 
 				// If visiting a directory recurse if it is not a bazel package.
 				if info.IsDir() {
-					if IsBazelPackage(filePath) {
+					if IsBazelPackage(args.Config, filePath) {
 						return filepath.SkipDir
 					}
 					return nil
