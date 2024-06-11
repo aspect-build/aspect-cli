@@ -1180,7 +1180,7 @@ def deps():
         name = "com_github_smacker_go_tree_sitter",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/smacker/go-tree-sitter",
-        patches = ["//patches:com_github_smacker_go_tree_sitter.patch"],  # keep
+        patches = ["//third_party:github.com/smacker/go-tree-sitter/cc_library.patch"],  # keep
         sum = "h1:nOtrYzQNgRipVsrOkYpVU/ZMDS3/+78It68cPBPKy8A=",
         version = "v0.0.0-20240514083259-c5d1f3f5f99e",
     )
