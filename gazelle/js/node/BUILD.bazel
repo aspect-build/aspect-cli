@@ -5,6 +5,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "node",
     srcs = [
+        "paths.go",
         "std_modules.go",
         "std_modules_list.go",
     ],

@@ -346,26 +346,12 @@ func (ts *Resolver) resolveModuleDep(
 }
 
 func (ts *Resolver) resolvePackage(from label.Label, imp string) *label.Label {
-	// Imports of local files are never packages
-	if imp[0] == '/' || imp[0] == '.' {
+	impPkg, _ := node.ParseImportPath(imp)
+
+	// Imports not in the form of a package
+	if impPkg == "" {
 		return nil
 	}
-
-	// Imports of npm-like packages
-	// Trim to only the package name or scoped package name
-	parts := strings.SplitN(imp, "/", 3)
-	if parts[0][0] == '@' {
-		// Scoped packages must have a second part, otherwise it is not a "package" import.
-		if len(parts) < 2 {
-			return nil
-		}
-
-		parts = parts[0:2]
-	} else {
-		parts = parts[0:1]
-	}
-
-	impPkg := path.Join(parts...)
 
 	fromProject := ts.lang.pnpmProjects.GetProject(from.Pkg)
 	if fromProject == nil {
