@@ -92,13 +92,23 @@ func isRelativePath(p string) bool {
 // Load a tsconfig.json file and return the compilerOptions config with
 // recursive protected via a parsed map that is passed in
 func parseTsConfigJSONFile(parsed map[string]*TsConfig, root, dir, tsconfig string) (*TsConfig, error) {
-	existing := parsed[dir]
+	key := path.Join(dir, tsconfig)
+
+	existing := parsed[key]
+
+	// Existing pointing to `InvalidTsconfig` implies recursion
+	if existing == &InvalidTsconfig {
+		BazelLog.Warnf("Recursive tsconfig file extension: %q", tsconfig)
+		return nil, nil
+	}
+
+	// Already parsed and cached
 	if existing != nil {
 		return existing, nil
 	}
 
 	// Start with invalid to prevent recursing into the same file
-	parsed[dir] = &InvalidTsconfig
+	parsed[key] = &InvalidTsconfig
 
 	content, err := os.ReadFile(path.Join(root, dir, tsconfig))
 	if err != nil {
@@ -111,7 +121,7 @@ func parseTsConfigJSONFile(parsed map[string]*TsConfig, root, dir, tsconfig stri
 	}
 
 	// Add to parsed map on success
-	parsed[dir] = config
+	parsed[key] = config
 
 	return config, nil
 }
