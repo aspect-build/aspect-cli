@@ -5,6 +5,8 @@
 import './side-effects';
 // Local
 import { lib } from './lib';
+// Local with post-transpilation file extension
+import { lib as lib2 } from './lib.js';
 // Subdirectory within same BUILD including implicit index.ts import
 import { subdir_index } from './subdir';
 import { subdir_lib } from './subdir/lib';
@@ -25,6 +27,7 @@ const fooVal: Foo = 123;
 
 console.log(
     lib,
+    lib2
     subdir_index,
     subdir_lib,
     subdir_parent_ref,

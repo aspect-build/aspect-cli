@@ -7,6 +7,9 @@ require('./side-effects');
 // Local
 const { lib } = require('./lib');
 
+// Local with post-transpilation file extension
+const { lib: lib2 } = require('./lib.js');
+
 // Subdirectory within same BUILD including implicit index.ts import
 const { subdir_index } = require('./subdir');
 const { subdir_lib } = require('./subdir/lib');
@@ -31,6 +34,7 @@ const fooVal: typeof Foo = 123;
 
 console.log(
     lib,
+    lib2,
     subdir_index,
     subdir_lib,
     subdir_parent_ref,

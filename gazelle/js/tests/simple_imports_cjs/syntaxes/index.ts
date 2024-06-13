@@ -5,6 +5,8 @@ require('../side-effects');
 
 // const =
 const s1 = require('../exts/both-ts');
+// const = with post-transpilation file extension
+const s1a = require('../exts/both-ts.js');
 
 // var = .sub
 var s2 = require('../subproject-index').subproject_index;
@@ -24,6 +26,7 @@ const {
 // avoid unused-var warnings
 console.log(
     s1,
+    s1a,
     subproject_index,
     foo,
     backref_subproject_index,
