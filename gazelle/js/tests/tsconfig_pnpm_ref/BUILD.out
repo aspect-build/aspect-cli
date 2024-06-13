@@ -1,0 +1,6 @@
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+# gazelle:js_generation_mode none
+# gazelle:js_tsconfig enabled
+
+npm_link_all_packages(name = "node_modules")

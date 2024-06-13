@@ -42,11 +42,13 @@ type typeScriptLang struct {
 // NewLanguage initializes a new TypeScript that satisfies the language.Language
 // interface. This is the entrypoint for the extension initialization.
 func NewLanguage() language.Language {
+	pnpmProjects := pnpm.NewPnpmProjectMap()
+
 	l := typeScriptLang{
 		fileLabels:   make(map[string]*label.Label),
 		moduleTypes:  make(map[string][]*label.Label),
-		pnpmProjects: pnpm.NewPnpmProjectMap(),
-		tsconfig:     typescript.NewTsWorkspace(),
+		pnpmProjects: pnpmProjects,
+		tsconfig:     typescript.NewTsWorkspace(pnpmProjects),
 		gitignore:    git.NewGitIgnore(),
 	}
 

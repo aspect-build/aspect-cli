@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	node "aspect.build/cli/gazelle/js/node"
+	pnpm "aspect.build/cli/gazelle/js/pnpm"
 )
 
 type workspacePath struct {
@@ -21,17 +24,19 @@ type TsConfigMap struct {
 	configFiles  map[string]*workspacePath
 	configs      map[string]*TsConfig
 	configsMutex sync.RWMutex
+	pnpmProjects *pnpm.PnpmProjectMap
 }
 
 type TsWorkspace struct {
 	cm *TsConfigMap
 }
 
-func NewTsWorkspace() *TsWorkspace {
+func NewTsWorkspace(pnpmProjects *pnpm.PnpmProjectMap) *TsWorkspace {
 	return &TsWorkspace{
 		cm: &TsConfigMap{
 			configFiles:  make(map[string]*workspacePath),
 			configs:      make(map[string]*TsConfig),
+			pnpmProjects: pnpmProjects,
 			configsMutex: sync.RWMutex{},
 		},
 	}
@@ -69,7 +74,7 @@ func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
 		return c
 	}
 
-	c, err := parseTsConfigJSONFile(tc.cm.configs, p.root, p.rel, p.fileName)
+	c, err := parseTsConfigJSONFile(tc.cm.configs, tc.tsConfigResolver, p.root, p.rel, p.fileName)
 	if err != nil {
 		fmt.Printf("Failed to parse tsconfig file %s: %v\n", path.Join(p.rel, p.fileName), err)
 		return nil
@@ -78,7 +83,25 @@ func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
 	return c
 }
 
-func (tc *TsWorkspace) ResolveConfig(dir string) (string, *TsConfig) {
+// A `TsConfigResolver` to resolve imports from *within* tsconfig files
+// to real paths such as resolved the tsconfig `extends`.
+func (tc *TsWorkspace) tsConfigResolver(dir, rel string) []string {
+	possible := []string{path.Join(dir, rel)}
+
+	if p := tc.cm.pnpmProjects.GetProject(dir); p != nil {
+		pkg, subFile := node.ParseImportPath(rel)
+		if pkg != "" {
+			localRef, found := p.GetLocalReference(pkg)
+			if found {
+				possible = append(possible, path.Join(localRef, subFile))
+			}
+		}
+	}
+
+	return possible
+}
+
+func (tc *TsWorkspace) FindConfig(dir string) (string, *TsConfig) {
 	for {
 		if dir == "." {
 			dir = ""
@@ -99,7 +122,7 @@ func (tc *TsWorkspace) ResolveConfig(dir string) (string, *TsConfig) {
 }
 
 func (tc *TsWorkspace) IsWithinTsRoot(f string) bool {
-	dir, c := tc.ResolveConfig(path.Dir(f))
+	dir, c := tc.FindConfig(path.Dir(f))
 	if c == nil {
 		return true
 	}
@@ -114,7 +137,7 @@ func (tc *TsWorkspace) IsWithinTsRoot(f string) bool {
 }
 
 func (tc *TsWorkspace) ExpandPaths(from, f string) []string {
-	_, c := tc.ResolveConfig(path.Dir(from))
+	_, c := tc.FindConfig(path.Dir(from))
 	if c == nil {
 		return []string{}
 	}

@@ -236,7 +236,7 @@ func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args lang
 		imports = append(imports, ImportStatement{
 			ImportSpec: resolve.ImportSpec{
 				Lang: LanguageName,
-				Imp:  tsconfig.Extends,
+				Imp:  toWorkspacePath(SourcePath, tsconfig.Extends),
 			},
 			ImportPath: tsconfig.Extends,
 			SourcePath: SourcePath,
@@ -402,7 +402,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 	}
 
 	if cfg.GetTsConfigGenerationEnabled() {
-		if rel, tsconfig := ts.tsconfig.ResolveConfig(args.Rel); tsconfig != nil {
+		if rel, tsconfig := ts.tsconfig.FindConfig(args.Rel); tsconfig != nil {
 			tsconfigLabel := label.New("", rel, cfg.RenderTsConfigName(tsconfig.ConfigName))
 			tsconfigLabel = tsconfigLabel.Rel("", args.Rel)
 			sourceRule.SetAttr("tsconfig", tsconfigLabel.String())
@@ -690,7 +690,6 @@ func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRo
 	lockfilePath := path.Join(repoRoot, lockfile)
 
 	pnpmWorkspace := ts.pnpmProjects.NewWorkspace(lockfile)
-	pnpmRefs := make(map[string]string)
 
 	for project, packages := range pnpm.ParsePnpmLockFileDependencies(lockfilePath) {
 		BazelLog.Debugf("add %q project %q ", lockfile, project)
@@ -700,35 +699,13 @@ func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRo
 		for pkg, version := range packages {
 			BazelLog.Tracef("add %q npm package: %q", project, pkg)
 
-			pnpmProject.AddPackage(pkg, &label.Label{
+			pnpmProject.AddPackage(pkg, version, &label.Label{
 				Repo:     repoName,
 				Pkg:      pnpmProject.Pkg(),
 				Name:     path.Join(cfg.npmLinkAllTargetName, pkg),
 				Relative: false,
 			})
-
-			// If this is a local workspace link or file reference normalize the path and collect the references
-			if strings.Index(version, "link:") == 0 {
-				link := version[len("link:"):]
-
-				BazelLog.Tracef("add %q project reference to project %q as %q", project, link, pkg)
-
-				// Pnpm "link" references are relative to the package defining the link
-				pnpmRefs[pkg] = path.Join(pnpmProject.Pkg(), link)
-			} else if strings.Index(version, "file:") == 0 {
-				file := version[len("file:"):]
-
-				BazelLog.Tracef("add %q project reference to file %q as %q", project, file, pkg)
-
-				// Pnpm "file" references are relative to the pnpm workspace root.
-				pnpmRefs[pkg] = path.Join(path.Dir(lockfile), file)
-			}
 		}
-	}
-
-	// Record the collected references
-	for pkg, ref := range pnpmRefs {
-		pnpmWorkspace.AddReference(pkg, ref)
 	}
 }
 
