@@ -58,6 +58,9 @@ const (
 	Directive_CustomTargetFiles = "js_custom_files"
 	// Add a glob to a custom library type
 	Directive_CustomTargetTestFiles = "js_custom_test_files"
+
+	// TODO: move to common
+	Directive_GitIgnore = "gitignore"
 )
 
 // GenerationModeType represents one of the generation modes.
@@ -159,6 +162,9 @@ type JsGazelleConfig struct {
 	generationEnabled bool
 	generationMode    GenerationModeType
 
+	// TODO: move to common util
+	gitignoreEnabled bool
+
 	protoGenerationEnabled    bool
 	tsconfigGenerationEnabled bool
 
@@ -199,6 +205,10 @@ func newRootConfig() *JsGazelleConfig {
 		tsProtoLibraryName:         DefaultProtoLibraryName,
 		targets:                    DefaultSourceGlobs[:],
 		tsconfigName:               defaultTsConfig,
+
+		// TODO: move to common
+		// TODO: switch default to false
+		gitignoreEnabled: true,
 	}
 }
 
@@ -254,6 +264,11 @@ func (c *JsGazelleConfig) AddExcludedPattern(pattern string) {
 // Determine if the file path is ignored based on the current configuration.
 func (c *JsGazelleConfig) IsFileExcluded(fileRelPath string) bool {
 	return gazelle.IsFileExcluded(c.rel, fileRelPath, c.excludes)
+}
+
+// TODO: move to common util
+func (c *JsGazelleConfig) SetGitIgnoreEnabled(enabled bool) {
+	c.gitignoreEnabled = enabled
 }
 
 // SetGenerationEnabled sets whether the extension is enabled or not.

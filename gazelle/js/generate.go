@@ -550,6 +550,8 @@ func parseSourceFile(rootDir, filePath string) (parser.ParseResult, []error) {
 	return p.ParseSource(filePath, string(content))
 }
 
+var ignoreNone = func(string) bool { return false }
+
 func (ts *typeScriptLang) collectSourceFiles(cfg *JsGazelleConfig, args language.GenerateArgs) (*treeset.Set, *treeset.Set, error) {
 	sourceFiles := treeset.NewWithStringComparator()
 	dataFiles := treeset.NewWithStringComparator()
@@ -557,7 +559,12 @@ func (ts *typeScriptLang) collectSourceFiles(cfg *JsGazelleConfig, args language
 	// Do not recurse into sub-directories if generating a BUILD per directory
 	recurse := cfg.GenerationMode() != GenerationModeDirectory
 
-	err := gazelle.GazelleWalkDir(args, ts.gitignore, cfg.excludes, recurse, func(f string) error {
+	ignoreMatch := ignoreNone
+	if cfg.gitignoreEnabled {
+		ignoreMatch = ts.gitignore.Matches
+	}
+
+	err := gazelle.GazelleWalkDir(args, ignoreMatch, cfg.excludes, recurse, func(f string) error {
 		// Excluded due to being outside the ts root
 		if !ts.tsconfig.IsWithinTsRoot(f) {
 			BazelLog.Debugf("Skip %q outside rootDir\n", f)
