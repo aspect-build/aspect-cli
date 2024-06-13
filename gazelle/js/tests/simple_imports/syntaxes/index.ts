@@ -4,6 +4,8 @@
 import '../side-effects';
 // * as (import)
 import * as s1 from '../exts/both-ts';
+// * as (import) with post-transpilation file extension
+import * as s1a from '../exts/both-ts.js';
 // { single }
 import { subproject_index } from '../subproject';
 // { multi }
@@ -20,6 +22,7 @@ export * as s2 from '../subproject-index';
 // avoid unused-var warnings
 console.log(
     s1,
+    s1a,
     subproject_index,
     foo,
     backref_subproject_index,
