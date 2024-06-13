@@ -9,6 +9,8 @@ go_library(
     importpath = "aspect.build/cli/gazelle/js/typescript",
     visibility = ["//visibility:public"],
     deps = [
+        "//gazelle/js/node",
+        "//gazelle/js/pnpm",
         "//pkg/logger",
         "@com_github_msolo_jsonr//:jsonr",
     ],

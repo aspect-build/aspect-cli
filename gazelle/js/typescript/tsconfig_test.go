@@ -17,6 +17,7 @@
 package typescript
 
 import (
+	"path"
 	"reflect"
 	"testing"
 )
@@ -32,7 +33,7 @@ func assertEqual(t *testing.T, a, b string, msg string) {
 }
 
 func parseTest(t *testing.T, configDir, tsconfigJSON string) *TsConfig {
-	options, err := parseTsConfigJSON(make(map[string]*TsConfig), ".", configDir, "tsconfig.json", []byte(tsconfigJSON))
+	options, err := parseTsConfigJSON(make(map[string]*TsConfig), identityResolver, ".", configDir, "tsconfig.json", []byte(tsconfigJSON))
 	if err != nil {
 		t.Fatalf("failed to parse options: %v\n\n%s", err, tsconfigJSON)
 	}
@@ -92,20 +93,35 @@ func TestIsRelativePath(t *testing.T) {
 
 }
 
+var _ TsConfigResolver = identityResolver
+
+func identityResolver(dir, conf string) []string {
+	return []string{path.Join(dir, conf)}
+}
+
+var _ TsConfigResolver = fooResolver
+
+func fooResolver(dir, conf string) []string {
+	return []string{
+		path.Join(dir, conf),
+		path.Join(dir, "base.tsconfig.json"),
+	}
+}
+
 func TestTsconfigLoad(t *testing.T) {
 	t.Run("parse a tsconfig extending other", func(t *testing.T) {
-		extender, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-base.json")
+		extender, err := parseTsConfigJSONFile(make(map[string]*TsConfig), identityResolver, ".", "tests", "extends-base.json")
 		if err != nil {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
 
 		assertEqual(t, extender.Paths.Rel, "src", "should inherit Paths.Rel from extended")
 		assertEqual(t, (*extender.Paths.Map)["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
-		assertEqual(t, extender.Extends, "tests/base.tsconfig.json", "should not fail extending")
+		assertEqual(t, extender.Extends, "base.tsconfig.json", "should not fail extending")
 	})
 
 	t.Run("parse a tsconfig file extending itself", func(t *testing.T) {
-		recursive, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-recursive.json")
+		recursive, err := parseTsConfigJSONFile(make(map[string]*TsConfig), identityResolver, ".", "tests", "extends-recursive.json")
 		if err != nil {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
@@ -114,7 +130,7 @@ func TestTsconfigLoad(t *testing.T) {
 	})
 
 	t.Run("parse a tsconfig file extending an unknown file", func(t *testing.T) {
-		notFound, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-404.json")
+		notFound, err := parseTsConfigJSONFile(make(map[string]*TsConfig), identityResolver, ".", "tests", "extends-404.json")
 		if err != nil {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
@@ -123,7 +139,7 @@ func TestTsconfigLoad(t *testing.T) {
 	})
 
 	t.Run("parse a tsconfig file extending a blank string", func(t *testing.T) {
-		extendsBlank, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-empty.json")
+		extendsBlank, err := parseTsConfigJSONFile(make(map[string]*TsConfig), identityResolver, ".", "tests", "extends-empty.json")
 		if err != nil {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
@@ -133,12 +149,23 @@ func TestTsconfigLoad(t *testing.T) {
 
 	t.Run("parse example tsconfig file with comments, trialing commas", func(t *testing.T) {
 		// See https://github.com/msolo/jsonr/issues/1#event-10736439202
-		unknown, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "sourcegraph-svelt.json")
+		unknown, err := parseTsConfigJSONFile(make(map[string]*TsConfig), identityResolver, ".", "tests", "sourcegraph-svelt.json")
 		if err != nil {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
 
 		assertEqual(t, unknown.Extends, "", "should set Extends to blank when not found")
+	})
+
+	t.Run("parse a tsconfig file extending a named-import", func(t *testing.T) {
+		extender, err := parseTsConfigJSONFile(make(map[string]*TsConfig), fooResolver, ".", "tests", "extends-foo.json")
+		if err != nil {
+			t.Errorf("parseTsConfigJSONFile: %v", err)
+		}
+
+		assertEqual(t, extender.Paths.Rel, "src", "should inherit Paths.Rel from extended")
+		assertEqual(t, (*extender.Paths.Map)["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
+		assertEqual(t, extender.Extends, "foo", "should not fail extending")
 	})
 }
 

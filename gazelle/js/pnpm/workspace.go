@@ -3,6 +3,7 @@ package gazelle
 import (
 	"log"
 	"path"
+	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/label"
 )
@@ -42,6 +43,10 @@ type PnpmProject struct {
 
 	// The project path relative to the root
 	project string
+
+	// Packages defined in this project which reference other content
+	// accessible in the workspace source.
+	references map[string]string
 
 	// Packages defined in this project and their associated labels
 	packages map[string]*label.Label
@@ -83,7 +88,7 @@ func (pm *PnpmProjectMap) IsProject(project string) bool {
 func (pm *PnpmProjectMap) IsReferenced(project string) bool {
 	p := pm.projects[normalizeProject(project)]
 
-	return p != nil && p.IsReferenced()
+	return p.workspace.IsReferenced(p.project)
 }
 
 // PnpmWorkspace ----------------------------------------------------------
@@ -109,20 +114,13 @@ func (w *PnpmWorkspace) IsReferenced(project string) bool {
 	return w.referenced[normalizeProject(project)]
 }
 
-func (w *PnpmWorkspace) AddReference(pkg, linkTo string) {
-	to := normalizeProject(linkTo)
-
-	if w.pm.projects[to] != nil {
-		w.referenced[to] = true
-	}
-}
-
 // PnpmProject ----------------------------------------------------------
 func newPnpmProject(workspace *PnpmWorkspace, project string) *PnpmProject {
 	p := &PnpmProject{}
 	p.workspace = workspace
 	p.project = normalizeProject(path.Join(workspace.Root(), project))
 	p.packages = make(map[string]*label.Label)
+	p.references = make(map[string]string)
 	return p
 }
 
@@ -130,8 +128,34 @@ func (p *PnpmProject) Pkg() string {
 	return p.project
 }
 
-func (p *PnpmProject) AddPackage(pkg string, label *label.Label) {
+func (p *PnpmProject) addLocalReference(pkg, dir string) {
+	// Persist the directory which this local package references
+	p.references[pkg] = dir
+
+	// Flag the directory as one that is referenced (assuming? it is also a project)
+	p.workspace.referenced[normalizeProject(dir)] = true
+}
+
+func (p *PnpmProject) GetLocalReference(pkg string) (string, bool) {
+	dir, found := p.references[pkg]
+	return dir, found
+}
+
+func (p *PnpmProject) AddPackage(pkg, version string, label *label.Label) {
 	p.packages[pkg] = label
+
+	// If this is a local workspace link or file reference normalize the path and collect the references
+	if strings.Index(version, "link:") == 0 {
+		link := version[len("link:"):]
+
+		// Pnpm "link" references are relative to the package defining the link
+		p.addLocalReference(pkg, path.Join(p.Pkg(), link))
+	} else if strings.Index(version, "file:") == 0 {
+		file := version[len("file:"):]
+
+		// Pnpm "file" references are relative to the pnpm workspace root.
+		p.addLocalReference(pkg, path.Join(path.Dir(p.workspace.lockfile), file))
+	}
 }
 
 func (p *PnpmProject) Parent() *PnpmProject {
@@ -154,8 +178,4 @@ func (p *PnpmProject) Get(pkg string) *label.Label {
 	}
 
 	return nil
-}
-
-func (p *PnpmProject) IsReferenced() bool {
-	return p.workspace.IsReferenced(p.project)
 }
