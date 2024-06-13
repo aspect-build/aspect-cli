@@ -28,7 +28,7 @@ func assertTrue(t *testing.T, b bool, msg string) {
 }
 
 func assertEqual(t *testing.T, a, b string, msg string) {
-	assertTrue(t, a == b, msg)
+	assertTrue(t, a == b, msg+"\n\tactual:   "+a+"\n\texpected: "+b)
 }
 
 func parseTest(t *testing.T, configDir, tsconfigJSON string) *TsConfig {
@@ -93,32 +93,52 @@ func TestIsRelativePath(t *testing.T) {
 }
 
 func TestTsconfigLoad(t *testing.T) {
-	t.Run("parse a tsconfig file extending itself", func(t *testing.T) {
-		recursive, _ := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-recursive.json")
-
-		assertEqual(t, recursive.Extends, "tests/extends-recursive.json", "should not fail extending itself")
-	})
-
-	t.Run("parse a tsconfig file extending an unknown file", func(t *testing.T) {
-		recursive, _ := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-404.json")
-
-		assertEqual(t, recursive.Extends, "tests/does-not-exist.json", "should not fail extending unknown")
-	})
-
-	t.Run("parse a tsconfig file extending a blank string", func(t *testing.T) {
-		recursive, _ := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-empty.json")
-
-		assertEqual(t, recursive.Extends, "", "should not fail extending an empty str")
-	})
-
-	t.Run("parse example tsconfig file with comments, trialing commas", func(t *testing.T) {
-		// See https://github.com/msolo/jsonr/issues/1#event-10736439202
-		recursive, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "sourcegraph-svelt.json")
+	t.Run("parse a tsconfig extending other", func(t *testing.T) {
+		extender, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-base.json")
 		if err != nil {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
 
-		assertEqual(t, recursive.Extends, "", "should not fail extending unknown")
+		assertEqual(t, extender.Paths.Rel, "src", "should inherit Paths.Rel from extended")
+		assertEqual(t, (*extender.Paths.Map)["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
+		assertEqual(t, extender.Extends, "tests/base.tsconfig.json", "should not fail extending")
+	})
+
+	t.Run("parse a tsconfig file extending itself", func(t *testing.T) {
+		recursive, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-recursive.json")
+		if err != nil {
+			t.Errorf("parseTsConfigJSONFile: %v", err)
+		}
+
+		assertEqual(t, recursive.Extends, "", "should not fail extending itself")
+	})
+
+	t.Run("parse a tsconfig file extending an unknown file", func(t *testing.T) {
+		notFound, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-404.json")
+		if err != nil {
+			t.Errorf("parseTsConfigJSONFile: %v", err)
+		}
+
+		assertEqual(t, notFound.Extends, "", "should not fail extending unknown")
+	})
+
+	t.Run("parse a tsconfig file extending a blank string", func(t *testing.T) {
+		extendsBlank, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "extends-empty.json")
+		if err != nil {
+			t.Errorf("parseTsConfigJSONFile: %v", err)
+		}
+
+		assertEqual(t, extendsBlank.Extends, "", "should not fail extending an empty str")
+	})
+
+	t.Run("parse example tsconfig file with comments, trialing commas", func(t *testing.T) {
+		// See https://github.com/msolo/jsonr/issues/1#event-10736439202
+		unknown, err := parseTsConfigJSONFile(make(map[string]*TsConfig), ".", "tests", "sourcegraph-svelt.json")
+		if err != nil {
+			t.Errorf("parseTsConfigJSONFile: %v", err)
+		}
+
+		assertEqual(t, unknown.Extends, "", "should set Extends to blank when not found")
 	})
 }
 
