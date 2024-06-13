@@ -5,16 +5,16 @@ import (
 	"path"
 	"path/filepath"
 
-	"aspect.build/cli/gazelle/common/git"
 	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/language"
 )
 
 type GazelleWalkFunc func(path string) error
+type GazelleWalkIgnoreFunc func(path string) bool
 
 // Walk the directory of the language.GenerateArgs, optionally recursing into
 // subdirectories unlike the files provided in GenerateArgs.RegularFiles.
-func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes []string, recurse bool, walkFunc GazelleWalkFunc) error {
+func GazelleWalkDir(args language.GenerateArgs, isIgnored GazelleWalkIgnoreFunc, excludes []string, recurse bool, walkFunc GazelleWalkFunc) error {
 	BazelLog.Tracef("GazelleWalkDir: %s", args.Rel)
 
 	// Source files in the primary directory
@@ -24,7 +24,7 @@ func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes 
 			continue
 		}
 
-		if ignore.Matches(path.Join(args.Rel, f)) {
+		if isIgnored(path.Join(args.Rel, f)) {
 			BazelLog.Tracef("File ignored: %s / %s", args.Rel, f)
 			continue
 		}
@@ -68,7 +68,7 @@ func GazelleWalkDir(args language.GenerateArgs, ignore *git.GitIgnore, excludes 
 				if IsFileExcluded(args.Rel, f, excludes) {
 					BazelLog.Tracef("File excluded: %s / %s", args.Rel, f)
 					return excludeResult
-				} else if ignore.Matches(path.Join(args.Rel, f)) {
+				} else if isIgnored(path.Join(args.Rel, f)) {
 					// Ignored paths
 					BazelLog.Tracef("File ignored: %s / %s", args.Rel, f)
 					return excludeResult

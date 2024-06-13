@@ -59,6 +59,9 @@ func (ts *Configurer) KnownDirectives() []string {
 		Directive_TestFiles,
 		Directive_CustomTargetFiles,
 		Directive_CustomTargetTestFiles,
+
+		// TODO: move to common
+		Directive_GitIgnore,
 	}
 }
 
@@ -116,6 +119,17 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 		value := strings.TrimSpace(d.Value)
 
 		switch d.Key {
+		case Directive_GitIgnore:
+			switch d.Value {
+			case "enabled":
+				config.SetGitIgnoreEnabled(true)
+			case "disabled":
+				config.SetGitIgnoreEnabled(false)
+			default:
+				err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
+					Directive_TypeScriptExtension, d.Value)
+				log.Fatal(err)
+			}
 		case "exclude":
 			// We record the exclude directive since we do manual tree traversal of subdirs.
 			config.AddExcludedPattern(value)
