@@ -29,20 +29,6 @@ On MacOS, you can run
 
 This installs the `aspect` command and also links it to `bazel`, just like the [bazelisk] installer does.
 
-> We plan to have a standard "core" homebrew formula so this will just be `brew install aspect` in the future.
-
-## Bazelisk (MacOS / Linux)
-
-On any platform, so long as you already have [bazelisk] installed, you can have [bazelisk]
-install the Aspect CLI just like it can install the standard Bazel CLI.
-Add this to your `.bazeliskrc` in your project folder to install Aspect for all developers:
-
-From the release you wish to use: https://github.com/aspect-build/aspect-cli/releases copy the `.bazeliskrc` snippet
-into your `.bazeliskrc` file to install Aspect for all developers in this repository.
-
-Note that in all cases, the `.bazelversion` file continues to indicate which version of the
-Bazel tool is fetched and run beneath the wrapper.
-
 ## Manual (MacOS / Linux)
 
 On any platform, you can download the `aspect` binary for your platform on our
@@ -50,6 +36,20 @@ On any platform, you can download the `aspect` binary for your platform on our
 
 Note, if you manually install for MacOS, you can bypass the "Unknown Developer" dialog by running
 `xattr -c $(which aspect)` before launching `aspect`.
+
+## Ensuring everyone on the team uses `aspect`
+
+In an already-existing Bazel workspace, you can have [bazelisk]
+install the Aspect CLI just like it can install the standard Bazel CLI.
+
+>[!NOTE]
+>This approach doesn't provide the `aspect init` command, which has to run outside a Bazel workspace.
+
+From the [releases page](https://github.com/aspect-build/aspect-cli/releases),
+copy the `.bazeliskrc` snippet into your `.bazeliskrc` file to install Aspect for all developers in this repository.
+
+Note that in all cases, the `.bazelversion` file continues to indicate which version of the
+Bazel tool is fetched and run beneath the wrapper.
 
 ## Windows
 
