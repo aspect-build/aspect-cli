@@ -4,6 +4,7 @@ go_library(
     name = "common",
     srcs = [
         "bazel.go",
+        "directives.go",
         "excludes.go",
         "rules.go",
         "set.go",
