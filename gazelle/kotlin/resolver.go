@@ -48,7 +48,7 @@ func (*Resolver) Name() string {
 
 // Determine what rule (r) outputs which can be imported.
 func (kt *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
-	BazelLog.Debugf("Imports: '%s:%s'", f.Pkg, r.Name())
+	BazelLog.Debugf("Imports(%s): '%s:%s'", LanguageName, f.Pkg, r.Name())
 
 	if r.PrivateAttr(packagesKey) != nil {
 		target, isLib := r.PrivateAttr(packagesKey).(*KotlinLibTarget)

@@ -25,8 +25,6 @@ const (
 )
 
 func (kt *kotlinLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
-	BazelLog.Tracef("GenerateRules '%s'", args.Rel)
-
 	// TODO: record args.GenFiles labels?
 
 	cfg := args.Config.Exts[LanguageName].(kotlinconfig.Configs)[args.Rel]
@@ -34,9 +32,11 @@ func (kt *kotlinLang) GenerateRules(args language.GenerateArgs) language.Generat
 	// When we return empty, we mean that we don't generate anything, but this
 	// still triggers the indexing for all the TypeScript targets in this package.
 	if !cfg.GenerationEnabled() {
-		BazelLog.Tracef("GenerateRules disabled '%s'", args.Rel)
+		BazelLog.Tracef("GenerateRules(%s) disabled: %s", LanguageName, args.Rel)
 		return language.GenerateResult{}
 	}
+
+	BazelLog.Tracef("GenerateRules(%s): %s", LanguageName, args.Rel)
 
 	// Collect all source files.
 	sourceFiles := kt.collectSourceFiles(cfg, args)

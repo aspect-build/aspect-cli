@@ -52,18 +52,18 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 	// When we return empty, we mean that we don't generate anything, but this
 	// still triggers the indexing for all the TypeScript targets in this package.
 	if !cfg.GenerationEnabled() {
-		BazelLog.Tracef("GenerateRules disabled '%s'", args.Rel)
+		BazelLog.Tracef("GenerateRules(%s) disabled: %s", LanguageName, args.Rel)
 		return language.GenerateResult{}
 	}
 
 	// If this directory has not been declared as a bazel package only continue
 	// if generating new BUILD files is enabled.
 	if cfg.GenerationMode() == GenerationModeNone && args.File == nil {
-		BazelLog.Tracef("GenerateRules '%s' BUILD creation disabled", args.Rel)
+		BazelLog.Tracef("GenerateRules(%s) BUILD creation disabled: %s", LanguageName, args.Rel)
 		return language.GenerateResult{}
 	}
 
-	BazelLog.Tracef("GenerateRules '%s'", args.Rel)
+	BazelLog.Tracef("GenerateRules(%s): %s", LanguageName, args.Rel)
 
 	var result language.GenerateResult
 
@@ -684,20 +684,20 @@ func (ts *typeScriptLang) addPackageRules(cfg *JsGazelleConfig, args language.Ge
 
 // Add pnpm rules for a pnpm lockfile.
 // Collect pnpm projects and project dependencies from the lockfile.
-func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRoot, lockfile string) {
-	BazelLog.Infof("add workspace %q", lockfile)
+func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRoot, lockfileRel string) {
+	BazelLog.Infof("pnpm add %q", lockfileRel)
 
-	lockfilePath := path.Join(repoRoot, lockfile)
+	lockfilePath := path.Join(repoRoot, lockfileRel)
 
-	pnpmWorkspace := ts.pnpmProjects.NewWorkspace(lockfile)
+	pnpmWorkspace := ts.pnpmProjects.NewWorkspace(lockfileRel)
 
 	for project, packages := range pnpm.ParsePnpmLockFileDependencies(lockfilePath) {
-		BazelLog.Debugf("add %q project %q ", lockfile, project)
+		BazelLog.Debugf("pnpm add %q: project %q ", lockfileRel, project)
 
 		pnpmProject := pnpmWorkspace.AddProject(project)
 
 		for pkg, version := range packages {
-			BazelLog.Tracef("add %q npm package: %q", project, pkg)
+			BazelLog.Tracef("pnpm add %q: project %q: package: %q", lockfileRel, project, pkg)
 
 			pnpmProject.AddPackage(pkg, version, &label.Label{
 				Repo:     repoName,

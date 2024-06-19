@@ -51,7 +51,7 @@ func (*Resolver) Name() string { return LanguageName }
 // Determine what rule (r) outputs which can be imported.
 // For TypeScript this is all the import-paths pointing to files within the rule.
 func (ts *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
-	BazelLog.Debugf("Imports '%s:%s'", f.Pkg, r.Name())
+	BazelLog.Debugf("Imports(%s) '%s:%s'", LanguageName, f.Pkg, r.Name())
 
 	switch r.Kind() {
 	case TsProtoLibraryKind:
@@ -181,7 +181,7 @@ func (ts *Resolver) Resolve(
 	from label.Label,
 ) {
 	start := time.Now()
-	BazelLog.Infof("Resolve %q dependencies", from.String())
+	BazelLog.Infof("Resolve(%s): %q dependencies", LanguageName, from.String())
 
 	// TsProject imports are resolved as deps
 	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsConfigKind || r.Kind() == TsProtoLibraryKind {
@@ -196,7 +196,7 @@ func (ts *Resolver) Resolve(
 		}
 	}
 
-	BazelLog.Infof("Resolve %q DONE in %s", from.String(), time.Since(start).String())
+	BazelLog.Infof("Resolve(%s): %q DONE in %s", LanguageName, from.String(), time.Since(start).String())
 }
 
 func (ts *Resolver) resolveModuleDeps(

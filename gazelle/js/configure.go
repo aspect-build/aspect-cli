@@ -77,7 +77,7 @@ func (ts *Configurer) KnownDirectives() []string {
 // f is the build file for the current directory or nil if there is no
 // existing build file.
 func (ts *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
-	BazelLog.Tracef("Configure %s", rel)
+	BazelLog.Tracef("Configure(%s): %s", LanguageName, rel)
 
 	// Create the root config.
 	if cfg, exists := c.Exts[LanguageName]; !exists {
