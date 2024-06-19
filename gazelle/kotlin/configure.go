@@ -45,7 +45,7 @@ func (kc *Configurer) initRootConfig(c *config.Config) kotlinconfig.Configs {
 }
 
 func (kt *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
-	BazelLog.Tracef("Configure %s", rel)
+	BazelLog.Tracef("Configure(%s): %s", LanguageName, rel)
 
 	// Create the KotlinConfig for this package
 	cfgs := kt.initRootConfig(c)
