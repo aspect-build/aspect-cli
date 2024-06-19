@@ -8,6 +8,7 @@ import (
 	"path"
 	"strings"
 
+	common "aspect.build/cli/gazelle/common"
 	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -59,6 +60,9 @@ func (ts *Configurer) KnownDirectives() []string {
 		Directive_TestFiles,
 		Directive_CustomTargetFiles,
 		Directive_CustomTargetTestFiles,
+
+		// Common directives supported by this language
+		common.Directive_GenerationMode,
 
 		// TODO: move to common
 		Directive_GitIgnore,
@@ -235,6 +239,22 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 			}
 
 			config.AddTargetGlob(groupGlob[0], groupGlob[1], true)
+
+		// Inherited aspect-cli common+pro values
+		case common.Directive_GenerationMode:
+			mode := common.GenerationModeType(strings.TrimSpace(d.Value))
+			switch mode {
+			case common.GenerationModeCreate:
+				config.SetGenerationEnabled(true)
+				config.SetGenerationMode(GenerationModeDirectory)
+			case common.GenerationModeNone:
+				config.SetGenerationEnabled(false)
+			case common.GenerationModeUpdate:
+				config.SetGenerationEnabled(true)
+				config.SetGenerationMode(GenerationModeNone)
+			default:
+				log.Fatalf("invalid value for directive %q: %s", common.Directive_GenerationMode, d.Value)
+			}
 		}
 	}
 }
