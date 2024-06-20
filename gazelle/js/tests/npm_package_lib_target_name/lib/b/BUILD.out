@@ -5,14 +5,15 @@ load("@npm//:defs.bzl", "npm_link_all_packages")
 npm_link_all_packages(name = "node_modules")
 
 ts_project(
-    name = "c",
+    name = "tsc",
     srcs = [
         "index.ts",
         "package.json",
     ],
+    deps = [":node_modules/@lib/c"],
 )
 
 npm_package(
-    name = "c_pkg",
-    srcs = [":c"],
+    name = "pkg",
+    srcs = [":tsc"],
 )
