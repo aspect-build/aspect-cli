@@ -33,6 +33,19 @@ func IsCustomSrcs(srcs bzl.Expr) bool {
 	return !ok
 }
 
+// FileOptions for evaluating glob expressions
+var expandSrcsFileOptions = &syntax.FileOptions{
+	Set:               false,
+	While:             false,
+	TopLevelControl:   false,
+	GlobalReassign:    false,
+	LoadBindsGlobally: false,
+	Recursion:         false,
+}
+
+// LoaderOptions for evaluating glob expressions
+var expandSrcsLoadOptions = repl.MakeLoadOptions(expandSrcsFileOptions)
+
 func ExpandSrcs(repoRoot, pkg string, expr bzl.Expr) ([]string, error) {
 	// Pure array of source paths.
 	if list, ok := expr.(*bzl.ListExpr); ok {
@@ -48,17 +61,17 @@ func ExpandSrcs(repoRoot, pkg string, expr bzl.Expr) ([]string, error) {
 	}
 
 	// Glob expression that must be evaluated
-	thread := &starlark.Thread{Load: repl.MakeLoad()}
+	thread := &starlark.Thread{Load: expandSrcsLoadOptions}
 	globber := Globber{
 		repoRoot: repoRoot,
 		pkg:      pkg,
 	}
 	env := starlark.StringDict{"glob": starlark.NewBuiltin("glob", globber.Glob)}
-	srcsSyntaxExpr, err := syntax.ParseExpr("", bzl.FormatString(expr), syntax.RetainComments)
+	srcsSyntaxExpr, err := expandSrcsFileOptions.ParseExpr("", bzl.FormatString(expr), 0)
 	if err != nil {
 		return nil, fmt.Errorf("Expression parse error: %w", err)
 	}
-	srcsVal, err := starlark.EvalExpr(thread, srcsSyntaxExpr, env)
+	srcsVal, err := starlark.EvalExprOptions(expandSrcsFileOptions, thread, srcsSyntaxExpr, env)
 	if err != nil {
 		return nil, fmt.Errorf("Expression evaluation error: %w", err)
 	}
