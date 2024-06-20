@@ -29,6 +29,7 @@ import (
 )
 
 type tsCompilerOptionsJSON struct {
+	OutDir   *string              `json:"outDir"`
 	RootDir  *string              `json:"rootDir"`
 	RootDirs *[]string            `json:"rootDirs"`
 	BaseUrl  *string              `json:"baseUrl"`
@@ -55,6 +56,7 @@ type TsConfig struct {
 	// Name of the tsconfig file relative to ConfigDir
 	ConfigName string
 
+	OutDir  string
 	RootDir string
 	BaseUrl string
 
@@ -186,6 +188,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		RootDir = "."
 	}
 
+	var OutDir string
+	if c.CompilerOptions.OutDir != nil {
+		OutDir = path.Clean(*c.CompilerOptions.OutDir)
+	} else {
+		OutDir = "."
+	}
+
 	var BaseUrl string
 	if c.CompilerOptions.BaseUrl != nil {
 		BaseUrl = path.Clean(*c.CompilerOptions.BaseUrl)
@@ -222,6 +231,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	config := TsConfig{
 		ConfigDir:       configDir,
 		ConfigName:      configName,
+		OutDir:          OutDir,
 		RootDir:         RootDir,
 		BaseUrl:         BaseUrl,
 		Paths:           Paths,
