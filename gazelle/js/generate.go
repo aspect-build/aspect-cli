@@ -401,11 +401,33 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		sourceRule.SetAttr("testonly", true)
 	}
 
+	// If generating ts_config() targets also set the ts_project(tsconfig) and related attributes
 	if cfg.GetTsConfigGenerationEnabled() {
 		if rel, tsconfig := ts.tsconfig.FindConfig(args.Rel); tsconfig != nil {
+			// Set the tsconfig and related attributes if a tsconfig file is found for this target
 			tsconfigLabel := label.New("", rel, cfg.RenderTsConfigName(tsconfig.ConfigName))
 			tsconfigLabel = tsconfigLabel.Rel("", args.Rel)
-			sourceRule.SetAttr("tsconfig", tsconfigLabel.String())
+
+			sourceRule.SetAttr("tsconfig", tsconfigLabel.BzlExpr())
+
+			// Reflect the tsconfig out_dir in the ts_project rule
+			if tsconfig.OutDir != "" && tsconfig.OutDir != "." {
+				sourceRule.SetAttr("out_dir", tsconfig.OutDir)
+			} else {
+				sourceRule.DelAttr("out_dir")
+			}
+
+			// Reflect the tsconfig root_dir in the ts_project rule
+			if tsconfig.RootDir != "" && tsconfig.RootDir != "." {
+				sourceRule.SetAttr("root_dir", tsconfig.RootDir)
+			} else {
+				sourceRule.DelAttr("root_dir")
+			}
+		} else {
+			// Clear tsconfig related attributes if no tsconfig is found
+			sourceRule.DelAttr("tsconfig")
+			sourceRule.DelAttr("out_dir")
+			sourceRule.DelAttr("root_dir")
 		}
 	}
 
