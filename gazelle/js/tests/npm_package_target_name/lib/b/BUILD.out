@@ -5,7 +5,7 @@ load("@npm//:defs.bzl", "npm_link_all_packages")
 npm_link_all_packages(name = "node_modules")
 
 ts_project(
-    name = "b_lib",
+    name = "b",
     srcs = [
         "index.ts",
         "package.json",
@@ -15,5 +15,5 @@ ts_project(
 
 npm_package(
     name = "b_pkg",
-    srcs = [":b_lib"],
+    srcs = [":b"],
 )

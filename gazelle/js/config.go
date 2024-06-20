@@ -79,7 +79,6 @@ const (
 	TargetNameDirectoryVar      = "{dirname}"
 	DefaultLibraryName          = TargetNameDirectoryVar
 	DefaultTestsName            = TargetNameDirectoryVar + "_tests"
-	NpmPackageContentName       = TargetNameDirectoryVar + "_lib"
 
 	// The default name for ts_proto_library rules, where {proto_library} is the name of the proto target
 	ProtoNameVar            = "{proto_library}"
@@ -414,11 +413,6 @@ func (c *JsGazelleConfig) RenderNpmPackageTargetName(packageName string) string 
 	return c.renderTargetName(c.npmPackageNamingConvention, packageName)
 }
 
-// The library name when wrapped within an npm package.
-func (c *JsGazelleConfig) RenderNpmSourceLibraryName(npmPackageName string) string {
-	return npmPackageName + PackageSrcSuffix
-}
-
 func (c *JsGazelleConfig) SetTsProtoLibraryNamingConvention(tsProtoLibraryName string) {
 	c.tsProtoLibraryName = tsProtoLibraryName
 }
@@ -433,11 +427,18 @@ func (c *JsGazelleConfig) RenderTsConfigName(tsconfigName string) string {
 
 // Returns the ts_project target name by performing all substitutions.
 func (c *JsGazelleConfig) RenderSourceTargetName(groupName, packageName string, isNpmPackage bool) string {
-	ruleName := c.renderTargetName(c.MapTargetName(groupName), packageName)
+	mappedGroupName := c.MapTargetName(groupName)
+	ruleName := c.renderTargetName(mappedGroupName, packageName)
 
-	// The default library name changes when alongside an npm_package rule
-	if isNpmPackage && groupName == DefaultLibraryName {
-		ruleName = c.RenderNpmSourceLibraryName(ruleName)
+	// If rendering the default library and both the library and npm_package
+	// names still have the default configuration then the npm_package takes
+	// that default name. The library name then gets the "npm source library"
+	// target name.
+	if isNpmPackage && groupName == DefaultLibraryName && mappedGroupName == DefaultLibraryName {
+		npmPackageRuleName := c.RenderNpmPackageTargetName(packageName)
+		if ruleName == npmPackageRuleName {
+			return ruleName + PackageSrcSuffix
+		}
 	}
 
 	return ruleName
