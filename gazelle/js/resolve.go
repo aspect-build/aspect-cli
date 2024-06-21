@@ -65,10 +65,23 @@ func (ts *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []reso
 
 // TypeScript-importable ImportSpecs from a set of source files.
 func (ts *Resolver) sourceFileImports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
-	srcs, err := starlark.ExpandSrcs(c.RepoRoot, f.Pkg, r.Attr("srcs"))
-	if err != nil {
-		BazelLog.Debugf("Failed to expand srcs of %s:%s - %v", f.Pkg, r.Name(), err)
-		return []resolve.ImportSpec{}
+	var srcs []string
+
+	infoAttr := r.PrivateAttr("ts_project_info")
+	if infoAttr != nil && infoAttr.(*TsProjectInfo).sources != nil {
+		srcsSet := infoAttr.(*TsProjectInfo).sources
+		srcs = make([]string, 0, srcsSet.Size())
+		for _, s := range srcsSet.Values() {
+			srcs = append(srcs, s.(string))
+		}
+	} else {
+		expandedSrcs, err := starlark.ExpandSrcs(c.RepoRoot, f.Pkg, r.Attr("srcs"))
+		if err != nil {
+			BazelLog.Debugf("Failed to expand srcs of %s:%s - %v", f.Pkg, r.Name(), err)
+			return []resolve.ImportSpec{}
+		}
+
+		srcs = expandedSrcs
 	}
 
 	provides := make([]resolve.ImportSpec, 0, len(srcs)+1)

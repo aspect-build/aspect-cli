@@ -345,8 +345,9 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 
 	// Project data combined from all files.
 	info := newTsProjectInfo()
+	info.sources = sourceFiles
 
-	for result := range ts.parseFiles(cfg, args, sourceFiles) {
+	for result := range ts.parseFiles(cfg, args, info.sources) {
 		if len(result.Errors) > 0 {
 			fmt.Printf("%s:\n", result.SourcePath)
 			for _, err := range result.Errors {
@@ -384,18 +385,18 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		// Remove it from the dataFiles to signify that it is now a "source" file
 		// owned by this target.
 		if dataFile, _ := dataFileWorkspacePaths.Get(workspacePath); dataFile != nil {
-			sourceFiles.Add(dataFile)
+			info.sources.Add(dataFile)
 			dataFiles.Remove(dataFile)
 		}
 	}
 
 	ruleKind := TsProjectKind
-	if !hasTranspiledSources(sourceFiles) {
+	if !hasTranspiledSources(info.sources) {
 		ruleKind = JsLibraryKind
 	}
 	sourceRule := rule.NewRule(ruleKind, targetName)
 	sourceRule.SetPrivateAttr("ts_project_info", info)
-	sourceRule.SetAttr("srcs", sourceFiles.Values())
+	sourceRule.SetAttr("srcs", info.sources.Values())
 
 	if isTestRule {
 		sourceRule.SetAttr("testonly", true)

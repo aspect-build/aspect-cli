@@ -38,12 +38,17 @@ func newLinkAllPackagesImports() *LinkAllPackagesImports {
 
 // TsProject rule import data
 type TsProjectInfo struct {
+	// `ImportStatement`s in ths project
 	imports *treeset.Set
+
+	// The 'srcs' of this project
+	sources *treeset.Set
 }
 
 func newTsProjectInfo() *TsProjectInfo {
 	return &TsProjectInfo{
 		imports: treeset.NewWith(importStatementComparator),
+		sources: nil,
 	}
 }
 func (i *TsProjectInfo) AddImport(impt ImportStatement) {
