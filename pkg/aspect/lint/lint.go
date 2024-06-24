@@ -50,7 +50,8 @@ type LintResult struct {
 }
 
 type LintResultsHandler interface {
-	Results(results []*LintResult) error
+	Results(cmd *cobra.Command, results []*LintResult) error
+	AddFlags(flags *pflag.FlagSet)
 }
 
 type Linter struct {
@@ -161,6 +162,9 @@ lint:
 	// pass to `bazel build`
 	lintFlagSet := pflag.NewFlagSet("lint", pflag.ContinueOnError)
 	AddFlags(lintFlagSet)
+	for _, h := range runner.resultsHandlers {
+		h.AddFlags(lintFlagSet)
+	}
 	_, bazelArgs, err := separateFlags(lintFlagSet, args)
 	if err != nil {
 		return fmt.Errorf("failed to parse lint flags: %w", err)
@@ -298,7 +302,7 @@ lint:
 	// Send the result to any lint handlers. Call the handlers even if results list
 	// is empty since no results is a success.
 	for _, h := range runner.resultsHandlers {
-		if err := h.Results(results); err != nil {
+		if err := h.Results(cmd, results); err != nil {
 			return fmt.Errorf("lint results handler failed: %w", err)
 		}
 	}

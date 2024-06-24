@@ -53,5 +53,9 @@ In addition to flags listed below, flags accepted by the 'bazel build' command a
 	}
 	lint.AddFlags(cmd.Flags())
 
+	for _, h := range lintHandlers {
+		h.AddFlags(cmd.Flags())
+	}
+
 	return cmd
 }
