@@ -97,6 +97,9 @@ func (ts *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 		ts.readConfigurations(c, rel)
 	}
 
+	// Enable the WALKSUBDIR gazelle patch, setting the flag depending on the js GenerationMode.
+	c.Exts[common.ASPECT_WALKSUBDIR] = c.Exts[LanguageName].(*JsGazelleConfig).generationMode == GenerationModeNone
+
 	ts.lang.gitignore.CollectIgnoreFiles(c, rel)
 }
 

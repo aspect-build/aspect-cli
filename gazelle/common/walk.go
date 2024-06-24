@@ -12,6 +12,10 @@ import (
 type GazelleWalkFunc func(path string) error
 type GazelleWalkIgnoreFunc func(path string) bool
 
+// Must align with patched bazel-gazelle
+const ASPECT_WALKSUBDIR_PATCHED = "__aspect:walksubdir.patched"
+const ASPECT_WALKSUBDIR = "__aspect:walksubdir"
+
 // Walk the directory of the language.GenerateArgs, optionally recursing into
 // subdirectories unlike the files provided in GenerateArgs.RegularFiles.
 func GazelleWalkDir(args language.GenerateArgs, isIgnored GazelleWalkIgnoreFunc, excludes []string, recurse bool, walkFunc GazelleWalkFunc) error {
@@ -41,6 +45,14 @@ func GazelleWalkDir(args language.GenerateArgs, isIgnored GazelleWalkIgnoreFunc,
 	if !recurse {
 		return nil
 	}
+
+	// If the aspect "walksubdir" patch has been applied to gazelle then no manual
+	// recursing into the subdirectories is required.
+	if _, hasWalksubdirPatch := args.Config.Exts[ASPECT_WALKSUBDIR_PATCHED]; hasWalksubdirPatch {
+		return nil
+	}
+
+	BazelLog.Warnf("WARNING: Aspect patches not applied, manual subdirectory traversal: %s", args.Rel)
 
 	// Source files throughout the sub-directories of this BUILD.
 	for _, d := range args.Subdirs {

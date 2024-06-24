@@ -1,0 +1,117 @@
+diff --git a/config/config.go b/config/config.go
+index 57c3d44..43ab575 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -120,10 +120,23 @@ type MappedKind struct {
+ 	FromKind, KindName, KindLoad string
+ }
+ 
++// PATCH ---
++// Must align with aspect-cli constants
++const ASPECT_WALKSUBDIR_PATCHED = "__aspect:walksubdir.patched"
++const ASPECT_WALKSUBDIR = "__aspect:walksubdir"
++
+ func New() *Config {
++	// PATCH ---
++	// Mark the config as patched, with an opt-out env var
++	exts := make(map[string]interface{})
++	if os.Getenv("__aspect_walksubdir_optout__") != "true" {
++		exts[ASPECT_WALKSUBDIR_PATCHED] = true
++	}
++	// END PATCH ---
++
+ 	return &Config{
+ 		ValidBuildFileNames: DefaultValidBuildFileNames,
+-		Exts:                make(map[string]interface{}),
++		Exts:                exts,
+ 	}
+ }
+ 
+diff --git a/walk/walk.go b/walk/walk.go
+index 7128d46..bcec468 100644
+--- a/walk/walk.go
++++ b/walk/walk.go
+@@ -117,8 +117,8 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
+ 
+ 	updateRels := buildUpdateRelMap(c.RepoRoot, dirs)
+ 
+-	var visit func(*config.Config, string, string, bool)
+-	visit = func(c *config.Config, dir, rel string, updateParent bool) {
++	var visit func(*config.Config, string, string, bool) ([]string, bool)
++	visit = func(c *config.Config, dir, rel string, updateParent bool) ([]string, bool) {
+ 		haveError := false
+ 
+ 		// TODO: OPT: ReadDir stats all the files, which is slow. We just care about
+@@ -127,7 +127,7 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
+ 		ents, err := os.ReadDir(dir)
+ 		if err != nil {
+ 			log.Print(err)
+-			return
++			return nil, false
+ 		}
+ 
+ 		f, err := loadBuildFile(c, rel, dir, ents)
+@@ -145,10 +145,10 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
+ 		wc := getWalkConfig(c)
+ 
+ 		if wc.isExcluded(rel, ".") {
+-			return
++			return nil, false
+ 		}
+ 
+-		var subdirs, regularFiles []string
++		var dirs, subdirs, regularFiles []string
+ 		for _, ent := range ents {
+ 			base := ent.Name()
+ 			ent := resolveFileInfo(wc, dir, rel, ent)
+@@ -156,24 +156,47 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
+ 			case ent == nil:
+ 				continue
+ 			case ent.IsDir():
+-				subdirs = append(subdirs, base)
++				dirs = append(dirs, base)
+ 			default:
+ 				regularFiles = append(regularFiles, base)
+ 			}
+ 		}
+ 
+ 		shouldUpdate := shouldUpdate(rel, mode, updateParent, updateRels)
+-		for _, sub := range subdirs {
++		for _, sub := range dirs {
+ 			if subRel := path.Join(rel, sub); shouldVisit(subRel, mode, shouldUpdate, updateRels) {
+-				visit(c, filepath.Join(dir, sub), subRel, shouldUpdate)
++				// PATCH ---
++				// Merge the returned 'subFiles' if 'mergeFiles' is true
++				subFiles, mergeFiles := visit(c, filepath.Join(dir, sub), subRel, shouldUpdate)
++				if mergeFiles {
++					for _, f := range subFiles {
++						regularFiles = append(regularFiles, path.Join(sub, f))
++					}
++				} else {
++					subdirs = append(subdirs, sub)
++				}
++				// END PATCH ---
++			}
++		}
++
++		// PATCH ---
++		// If there is no BUILD, no patch opt-out, and walking subdirs is enabled:
++		// return the regular files to be included in the parent 'wf' call.
++		if f == nil {
++			if aspectWalkSubdirs, aspectWalkSubdirsExists := c.Exts[config.ASPECT_WALKSUBDIR]; aspectWalkSubdirsExists {
++				if aspectWalkSubdirs.(bool) {
++					return regularFiles, true
++				}
+ 			}
+ 		}
++		// END PATCH ---
+ 
+ 		update := !haveError && !wc.ignore && shouldUpdate
+ 		if shouldCall(rel, mode, updateParent, updateRels) {
+ 			genFiles := findGenFiles(wc, f)
+ 			wf(dir, rel, c, update, f, subdirs, regularFiles, genFiles)
+ 		}
++		return nil, false
+ 	}
+ 	visit(c, c.RepoRoot, "", false)
+ }
