@@ -2,9 +2,8 @@ package gazelle
 
 import (
 	"flag"
-	"fmt"
-	"log"
 
+	common "aspect.build/cli/gazelle/common"
 	"aspect.build/cli/gazelle/kotlin/kotlinconfig"
 	BazelLog "aspect.build/cli/pkg/logger"
 	jvm_javaconfig "github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
@@ -64,16 +63,7 @@ func (kt *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 			switch d.Key {
 
 			case kotlinconfig.Directive_KotlinExtension:
-				switch d.Value {
-				case "enabled":
-					cfg.SetGenerationEnabled(true)
-				case "disabled":
-					cfg.SetGenerationEnabled(false)
-				default:
-					err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
-						kotlinconfig.Directive_KotlinExtension, d.Value)
-					log.Fatal(err)
-				}
+				cfg.SetGenerationEnabled(common.ReadEnabled(d))
 
 			// TODO: invoke java gazelle.Configure() to support all jvm directives?
 			// TODO: JavaMavenRepositoryName: https://github.com/bazel-contrib/rules_jvm/commit/e46bb11bedb2ead45309eae04619caca684f6243

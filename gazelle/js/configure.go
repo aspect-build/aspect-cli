@@ -127,52 +127,16 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 
 		switch d.Key {
 		case Directive_GitIgnore:
-			switch d.Value {
-			case "enabled":
-				config.SetGitIgnoreEnabled(true)
-			case "disabled":
-				config.SetGitIgnoreEnabled(false)
-			default:
-				err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
-					Directive_TypeScriptExtension, d.Value)
-				log.Fatal(err)
-			}
+			config.SetGitIgnoreEnabled(common.ReadEnabled(d))
 		case "exclude":
 			// We record the exclude directive since we do manual tree traversal of subdirs.
 			config.AddExcludedPattern(value)
 		case Directive_TypeScriptExtension:
-			switch d.Value {
-			case "enabled":
-				config.SetGenerationEnabled(true)
-			case "disabled":
-				config.SetGenerationEnabled(false)
-			default:
-				err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
-					Directive_TypeScriptExtension, d.Value)
-				log.Fatal(err)
-			}
+			config.SetGenerationEnabled(common.ReadEnabled(d))
 		case Directive_TypeScriptConfigExtension:
-			switch d.Value {
-			case "enabled":
-				config.SetTsConfigGenerationEnabled(true)
-			case "disabled":
-				config.SetTsConfigGenerationEnabled(false)
-			default:
-				err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
-					Directive_TypeScriptConfigExtension, d.Value)
-				log.Fatal(err)
-			}
+			config.SetTsConfigGenerationEnabled(common.ReadEnabled(d))
 		case Directive_TypeScriptProtoExtension:
-			switch d.Value {
-			case "enabled":
-				config.SetProtoGenerationEnabled(true)
-			case "disabled":
-				config.SetProtoGenerationEnabled(false)
-			default:
-				err := fmt.Errorf("invalid value for directive %q: %s: possible values are enabled/disabled",
-					Directive_TypeScriptProtoExtension, d.Value)
-				log.Fatal(err)
-			}
+			config.SetProtoGenerationEnabled(common.ReadEnabled(d))
 		case Directive_GenerationMode:
 			mode := GenerationModeType(strings.TrimSpace(d.Value))
 			switch mode {
