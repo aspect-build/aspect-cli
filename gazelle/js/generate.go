@@ -390,11 +390,21 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		}
 	}
 
+	// A rule of the same name might already exist
+	existing := gazelle.GetFileRuleByName(args, targetName)
+
 	ruleKind := TsProjectKind
 	if !hasTranspiledSources(info.sources) {
 		ruleKind = JsLibraryKind
 	}
 	sourceRule := rule.NewRule(ruleKind, targetName)
+
+	// TODO: this seems like a hack...
+	// Gazelle should support new rules changing the type of existing rules?
+	if existing != nil && existing.Kind() != ruleKind {
+		existing.SetKind(ruleKind)
+	}
+
 	sourceRule.SetPrivateAttr("ts_project_info", info)
 	sourceRule.SetAttr("srcs", info.sources.Values())
 
@@ -414,25 +424,23 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 			// Reflect the tsconfig out_dir in the ts_project rule
 			if tsconfig.OutDir != "" && tsconfig.OutDir != "." {
 				sourceRule.SetAttr("out_dir", tsconfig.OutDir)
-			} else {
-				sourceRule.DelAttr("out_dir")
+			} else if existing != nil {
+				existing.DelAttr("out_dir")
 			}
 
 			// Reflect the tsconfig root_dir in the ts_project rule
 			if tsconfig.RootDir != "" && tsconfig.RootDir != "." {
 				sourceRule.SetAttr("root_dir", tsconfig.RootDir)
-			} else {
-				sourceRule.DelAttr("root_dir")
+			} else if existing != nil {
+				existing.DelAttr("root_dir")
 			}
-		} else {
+		} else if existing != nil {
 			// Clear tsconfig related attributes if no tsconfig is found
-			sourceRule.DelAttr("tsconfig")
-			sourceRule.DelAttr("out_dir")
-			sourceRule.DelAttr("root_dir")
+			existing.DelAttr("tsconfig")
+			existing.DelAttr("out_dir")
+			existing.DelAttr("root_dir")
 		}
 	}
-
-	adaptExistingRule(args, sourceRule)
 
 	result.Gen = append(result.Gen, sourceRule)
 	result.Imports = append(result.Imports, info)
@@ -739,20 +747,6 @@ func addLinkAllPackagesRule(cfg *JsGazelleConfig, args language.GenerateArgs, re
 	result.Imports = append(result.Imports, newLinkAllPackagesImports())
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", npmLinkAll.Kind(), args.Rel, npmLinkAll.Name())
-}
-
-// Adapted an existing rule to a new rule of the same name.
-func adaptExistingRule(args language.GenerateArgs, rule *rule.Rule) {
-	existing := gazelle.GetFileRuleByName(args, rule.Name())
-	if existing == nil {
-		return
-	}
-
-	// TODO: this seems like a hack...
-	// Gazelle should support new rules changing the type of existing rules?
-	if existing.Kind() != rule.Kind() {
-		existing.SetKind(rule.Kind())
-	}
 }
 
 // If the file is ts-compatible transpiled source code that may contain imports
