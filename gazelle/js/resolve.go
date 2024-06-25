@@ -58,9 +58,12 @@ func (ts *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []reso
 		return ts.protoLibraryImports(r, f)
 	case TsConfigKind:
 		return ts.tsconfigImports(r, f)
-	default:
+	case TsProjectKind:
+		fallthrough
+	case JsLibraryKind:
 		return ts.sourceFileImports(c, r, f)
 	}
+	return nil
 }
 
 // TypeScript-importable ImportSpecs from a set of source files.
