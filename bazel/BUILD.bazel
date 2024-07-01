@@ -1,5 +1,7 @@
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 
+# gazelle:exclude **/*.d.ts
+
 write_source_files(
     name = "write_pb_go",
     additional_update_targets = [

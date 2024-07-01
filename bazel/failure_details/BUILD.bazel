@@ -1,3 +1,4 @@
+load("@aspect_rules_ts//ts:proto.bzl", "ts_proto_library")
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
@@ -30,5 +31,13 @@ go_library(
     name = "failure_details",
     embed = [":failure_details_go_proto"],
     importpath = "aspect.build/cli/bazel/failure_details",
+    visibility = ["//visibility:public"],
+)
+
+ts_proto_library(
+    name = "failure_details_proto_ts",
+    gen_connect_es = False,
+    node_modules = "//:node_modules",
+    proto = ":failure_details_proto",
     visibility = ["//visibility:public"],
 )
