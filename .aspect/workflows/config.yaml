@@ -2,6 +2,8 @@
 ---
 queue: aspect-cli-default
 tasks:
+  - branch_freshness:
+      update_strategy: none
   - format:
       queue: aspect-cli-small
   - buildifier:
