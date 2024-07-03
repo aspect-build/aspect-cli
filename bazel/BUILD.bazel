@@ -1,3 +1,4 @@
+load("@aspect_bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 
 # gazelle:exclude **/*.d.ts
@@ -16,4 +17,10 @@ write_source_files(
         "//bazel/packages_metrics:write_pb_go",
         "//bazel/query:write_pb_go",
     ],
+)
+
+copy_to_bin(
+    name = "package_json",
+    srcs = ["package.json"],
+    visibility = ["//visibility:public"],
 )
