@@ -9,7 +9,6 @@ ts_project(
     deps = [
         ":node_modules/@types/jquery",
         ":node_modules/jquery",
-        "//addon",
         "//lib/b",
     ],
 )
