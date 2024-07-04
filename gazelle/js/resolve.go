@@ -399,17 +399,15 @@ func (ts *Resolver) resolveImportTypes(resolutionType ResolutionType, from label
 		if typesNode := ts.resolveAtTypes(from, "node"); typesNode != nil {
 			deps = append(deps, typesNode)
 		}
-	} else {
+	} else if typesPkg := ts.resolveAtTypes(from, imp); typesPkg != nil {
 		// @types packages for any named imports
 		// The import may be a package, may be an unresolved import with only @types
-		if typesPkg := ts.resolveAtTypes(from, imp); typesPkg != nil {
-			deps = append(deps, typesPkg)
+		deps = append(deps, typesPkg)
+	} else if resolutionType == Resolution_NotFound {
+		// Custom module definitions for the import if there is no other resolution
+		if typeModules := ts.lang.moduleTypes[imp]; typeModules != nil {
+			deps = append(deps, typeModules...)
 		}
-	}
-
-	// Additional module definitions for the import
-	if typeModules := ts.lang.moduleTypes[imp]; typeModules != nil {
-		deps = append(deps, typeModules...)
 	}
 
 	return deps
