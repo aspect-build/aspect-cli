@@ -559,7 +559,7 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePa
 				SourcePath: sourcePath,
 			})
 
-			BazelLog.Tracef("Import: %q -> %q (alias: %v)", workspacePath, importPath, alternates)
+			BazelLog.Tracef("Import: %q -> %q (alt: %v)", workspacePath, importPath, alternates)
 		} else {
 			BazelLog.Tracef("Import ignored: %q -> %q", workspacePath, importPath)
 		}

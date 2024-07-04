@@ -27,9 +27,9 @@ func NewParser() parser.Parser {
 
 // Queries finding import statements, tagging such Nodes as 'from' captures.
 // Optionally filtering captures using 'equals-{name}' vars and #eq? statements.
-var ImportQueries = []string{
+var ImportQueries = map[string]string{
 	// Dynamic `import("...")` statement
-	`
+	"dynamic_esm_import": `
 		(call_expression
 			function: (import)
 			arguments: (
@@ -41,7 +41,7 @@ var ImportQueries = []string{
 	`,
 
 	// CJS `require("...")` statement
-	`
+	"require": `
 		(call_expression
 			function: (identifier) @equals-require
 			arguments: (
@@ -77,12 +77,20 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 			node := rootNode.NamedChild(i)
 
 			if isImportStatement(node) {
-				if rootImport := getImportStatementName(node); rootImport != nil {
-					imports = append(imports, rootImport.Content(sourceCode))
+				if rootImportNode := getImportStatementName(node); rootImportNode != nil {
+					rootImportPath := rootImportNode.Content(sourceCode)
+
+					Log.Tracef("ESM import %q: %v", filePath, rootImportPath)
+
+					imports = append(imports, rootImportPath)
 				}
 			} else if isModuleDeclaration(node) {
-				if modDeclName := getModuleDeclarationName(node); modDeclName != nil {
-					modules = append(modules, modDeclName.Content(sourceCode))
+				if modDeclNameNode := getModuleDeclarationName(node); modDeclNameNode != nil {
+					modDeclName := modDeclNameNode.Content(sourceCode)
+
+					Log.Tracef("Module declaration %q: %v", filePath, modDeclName)
+
+					modules = append(modules, modDeclName)
 				}
 
 				// Import/export statements within a module declaration.
@@ -91,8 +99,12 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 						moduleNode := moduleRootNode.NamedChild(j)
 
 						if isImportStatement(moduleNode) {
-							if moduleImport := getImportStatementName(moduleNode); moduleImport != nil {
-								imports = append(imports, moduleImport.Content(sourceCode))
+							if moduleImportNode := getImportStatementName(moduleNode); moduleImportNode != nil {
+								moduleImport := moduleImportNode.Content(sourceCode)
+
+								Log.Tracef("Module declaration import %q: %v", filePath, moduleImport)
+
+								imports = append(imports, moduleImport)
 							}
 						}
 					}
@@ -101,12 +113,14 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 		}
 
 		// Extra queries for more complex import statements.
-		for _, q := range ImportQueries {
+		for key, q := range ImportQueries {
 			queryResults := tree.QueryStrings(q, "from")
 
-			Log.Tracef("Query result %q => %v", filePath, queryResults)
+			if len(queryResults) > 0 {
+				Log.Tracef("Import Query (%s) result %q => %v", key, filePath, queryResults)
 
-			imports = append(imports, queryResults...)
+				imports = append(imports, queryResults...)
+			}
 		}
 
 		// Parse errors. Only log them due to many false positives potentially caused by issues
