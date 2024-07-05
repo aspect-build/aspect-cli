@@ -387,30 +387,38 @@ func (ts *Resolver) resolvePackage(from label.Label, imp string) *label.Label {
 }
 
 func (ts *Resolver) resolveImportTypes(resolutionType ResolutionType, from label.Label, imp string) []*label.Label {
-	deps := make([]*label.Label, 0)
-
 	// Overrides are not extended with additional types
 	if resolutionType == Resolution_Override {
-		return deps
+		return nil
 	}
 
+	// Types for native node imports are always resolved to @types/node
 	if resolutionType == Resolution_NativeNode {
-		// The @types package for native node
 		if typesNode := ts.resolveAtTypes(from, "node"); typesNode != nil {
-			deps = append(deps, typesNode)
+			return []*label.Label{typesNode}
 		}
-	} else if typesPkg := ts.resolveAtTypes(from, imp); typesPkg != nil {
+
+		return nil
+	}
+
+	// Packages with specific @types/* definitions
+	if typesPkg := ts.resolveAtTypes(from, imp); typesPkg != nil {
 		// @types packages for any named imports
 		// The import may be a package, may be an unresolved import with only @types
-		deps = append(deps, typesPkg)
-	} else if resolutionType == Resolution_NotFound {
+		return []*label.Label{typesPkg}
+	}
+
+	// If an import has not been found and has no designated package or @types package
+	// then fallback to any custom module definitions such as 'declare module' statements.
+	if resolutionType == Resolution_NotFound {
 		// Custom module definitions for the import if there is no other resolution
 		if typeModules := ts.lang.moduleTypes[imp]; typeModules != nil {
-			deps = append(deps, typeModules...)
+			return typeModules
 		}
 	}
 
-	return deps
+	// No types found
+	return nil
 }
 
 func toAtTypesPackage(imp string) string {
