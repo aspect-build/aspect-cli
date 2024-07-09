@@ -2,6 +2,8 @@ package gazelle
 
 import (
 	"path"
+	"regexp"
+	"strings"
 
 	Log "aspect.build/cli/pkg/logger"
 	sitter "github.com/smacker/go-tree-sitter"
@@ -54,6 +56,8 @@ var ImportQueries = map[string]string{
 		)
 	`,
 }
+
+var tripleSlashRe = regexp.MustCompile(`^///\s*<reference\s+(?:lib|path|types)\s*=\s*"(?P<lib>[^"]+)"`)
 
 func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.ParseResult, []error) {
 	imports := make([]string, 0, 5)
@@ -109,6 +113,11 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 						}
 					}
 				}
+			} else if isTripleSlashDirective(node, sourceCode) {
+				typesImport := getTripleSlashDirectiveModule(node, sourceCode)
+				if typesImport != "" {
+					imports = append(imports, typesImport)
+				}
 			}
 		}
 
@@ -139,6 +148,34 @@ func (p *TreeSitterParser) ParseSource(filePath, sourceCodeStr string) (parser.P
 	}
 
 	return result, errs
+}
+
+// Determine if a node is a triple slash directive.
+// See: https://www.typescriptlang.org/docs/handbook/triple-slash-directives.html
+func isTripleSlashDirective(node *sitter.Node, sourceCode []byte) bool {
+	nodeType := node.Type()
+	if nodeType != "comment" {
+		return false
+	}
+
+	comment := node.Content(sourceCode)
+
+	return strings.HasPrefix(comment, "/// <reference ")
+}
+
+// Extract a /// <reference> from a comment node
+// Note: could also potentially use a treesitter query such as:
+// /  `(program (comment) @result (#match? @c "^///\\s*<reference\\s+(lib|type)\\s*=\\s*\"[^\"]+\""))`
+func getTripleSlashDirectiveModule(node *sitter.Node, sourceCode []byte) string {
+	comment := node.Content(sourceCode)
+	submatches := tripleSlashRe.FindAllStringSubmatchIndex(comment, -1)
+	if len(submatches) != 1 {
+		Log.Errorf("Invalid triple slash directive: %q", comment)
+		return ""
+	}
+
+	lib := tripleSlashRe.ExpandString(make([]byte, 0), "$lib", comment, submatches[0])
+	return string(lib)
 }
 
 // Determine if a node is an import/export statement that may contain a `from` value.

@@ -1,0 +1,12 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "triple_slash",
+    srcs = ["ref.ts"],
+    deps = [
+        "//:node_modules/@types/jquery",
+        "//:node_modules/@types/testing-library__jest-dom",
+        "//:node_modules/jquery",
+        "//only_types",
+    ],
+)
