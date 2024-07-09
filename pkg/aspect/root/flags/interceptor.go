@@ -28,6 +28,11 @@ import (
 )
 
 func isFlagInFlagSet(flags *pflag.FlagSet, arg string) bool {
+	// We only handle flags that start with '-' or '--'
+	if len(arg) <= 1 {
+		return false
+	}
+
 	var flag *pflag.Flag
 	if arg[0] == '-' {
 		if arg[1] == '-' {
@@ -51,6 +56,9 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 			forwardArgs := make([]string, 0, len(args))
 			doubleDash := false
 			for _, arg := range args {
+				if arg == "" {
+					continue
+				}
 				if arg == "--" {
 					doubleDash = true
 				}
