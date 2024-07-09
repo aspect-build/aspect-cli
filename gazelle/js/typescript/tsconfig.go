@@ -29,12 +29,13 @@ import (
 )
 
 type tsCompilerOptionsJSON struct {
-	OutDir   *string              `json:"outDir"`
-	RootDir  *string              `json:"rootDir"`
-	RootDirs *[]string            `json:"rootDirs"`
-	BaseUrl  *string              `json:"baseUrl"`
-	Paths    *map[string][]string `json:"paths"`
-	Types    *[]string            `json:"types"`
+	OutDir        *string              `json:"outDir"`
+	RootDir       *string              `json:"rootDir"`
+	RootDirs      *[]string            `json:"rootDirs"`
+	BaseUrl       *string              `json:"baseUrl"`
+	Paths         *map[string][]string `json:"paths"`
+	Types         *[]string            `json:"types"`
+	ImportHelpers *bool                `json:"importHelpers"`
 }
 
 type tsReferenceJSON struct {
@@ -63,6 +64,8 @@ type TsConfig struct {
 	VirtualRootDirs []string
 
 	Paths *TsConfigPaths
+
+	ImportHelpers bool
 
 	// References to other tsconfig or packages that must be resolved.
 	Types   []string
@@ -228,6 +231,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		}
 	}
 
+	var importHelpers = false
+	if c.CompilerOptions.ImportHelpers != nil {
+		importHelpers = *c.CompilerOptions.ImportHelpers
+	} else if baseConfig != nil {
+		importHelpers = baseConfig.ImportHelpers
+	}
+
 	config := TsConfig{
 		ConfigDir:       configDir,
 		ConfigName:      configName,
@@ -237,6 +247,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		Paths:           Paths,
 		VirtualRootDirs: VirtualRootDirs,
 		Extends:         extends,
+		ImportHelpers:   importHelpers,
 		Types:           types,
 		References:      references,
 	}

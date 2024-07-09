@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "baseUrl": "src",
+    "importHelpers": true,
     "paths": {
       "alias-a": ["src/lib/a"]
     }

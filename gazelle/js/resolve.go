@@ -201,10 +201,16 @@ func (ts *Resolver) Resolve(
 
 	// TsProject imports are resolved as deps
 	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsConfigKind || r.Kind() == TsProtoLibraryKind {
-		deps, err := ts.resolveModuleDeps(c, ix, importData.(*TsProjectInfo).imports, from)
+		deps := common.NewLabelSet(from)
+
+		err := ts.resolveModuleDeps(c, ix, deps, importData.(*TsProjectInfo).imports, from)
 		if err != nil {
 			BazelLog.Fatalf("Resolution Error: ", err)
 			os.Exit(1)
+		}
+
+		if r.Kind() == TsProjectKind {
+			ts.addTsLib(c, ix, deps, from)
 		}
 
 		if !deps.Empty() {
@@ -214,16 +220,29 @@ func (ts *Resolver) Resolve(
 
 	BazelLog.Infof("Resolve(%s): %q DONE in %s", LanguageName, from.String(), time.Since(start).String())
 }
+func (ts *Resolver) addTsLib(
+	c *config.Config,
+	ix *resolve.RuleIndex,
+	deps *common.LabelSet,
+	from label.Label,
+) {
+	_, tsconfig := ts.lang.tsconfig.FindConfig(from.Pkg)
+	if tsconfig != nil && tsconfig.ImportHelpers {
+		if tslibLabel := ts.resolvePackage(from, "tslib"); tslibLabel != nil {
+			deps.Add(tslibLabel)
+		}
+	}
+}
 
 func (ts *Resolver) resolveModuleDeps(
 	c *config.Config,
 	ix *resolve.RuleIndex,
+	deps *common.LabelSet,
 	modules *treeset.Set,
 	from label.Label,
-) (*common.LabelSet, error) {
+) error {
 	cfg := c.Exts[LanguageName].(*JsGazelleConfig)
 
-	deps := common.NewLabelSet(from)
 	resolutionErrors := []error{}
 
 	it := modules.Iterator()
@@ -232,7 +251,7 @@ func (ts *Resolver) resolveModuleDeps(
 
 		resolutionType, dep, err := ts.resolveModuleDep(c, ix, mod, from)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		types := ts.resolveImportTypes(resolutionType, from, mod.Imp)
@@ -282,7 +301,7 @@ func (ts *Resolver) resolveModuleDeps(
 		}
 	}
 
-	return deps, nil
+	return nil
 }
 
 func (ts *Resolver) resolveModuleDep(
@@ -349,7 +368,7 @@ func (ts *Resolver) resolveModuleDep(
 	}
 
 	// References to an npm package, pnpm workspace projects etc.
-	if pkg := ts.resolvePackage(from, mod.Imp); pkg != nil {
+	if pkg := ts.resolvePackageImport(from, mod.Imp); pkg != nil {
 		return Resolution_Package, pkg, nil
 	}
 
@@ -361,7 +380,7 @@ func (ts *Resolver) resolveModuleDep(
 	return Resolution_NotFound, nil, nil
 }
 
-func (ts *Resolver) resolvePackage(from label.Label, imp string) *label.Label {
+func (ts *Resolver) resolvePackageImport(from label.Label, imp string) *label.Label {
 	impPkg, _ := node.ParseImportPath(imp)
 
 	// Imports not in the form of a package
@@ -369,6 +388,10 @@ func (ts *Resolver) resolvePackage(from label.Label, imp string) *label.Label {
 		return nil
 	}
 
+	return ts.resolvePackage(from, impPkg)
+}
+
+func (ts *Resolver) resolvePackage(from label.Label, impPkg string) *label.Label {
 	fromProject := ts.lang.pnpmProjects.GetProject(from.Pkg)
 	if fromProject == nil {
 		BazelLog.Tracef("resolve %q import %q project not found", from.String(), impPkg)
