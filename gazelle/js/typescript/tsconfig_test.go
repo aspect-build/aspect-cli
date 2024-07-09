@@ -115,6 +115,9 @@ func TestTsconfigLoad(t *testing.T) {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
 
+		if !extender.ImportHelpers {
+			t.Errorf("should inherit compilerOptions.importHelpers")
+		}
 		assertEqual(t, extender.Paths.Rel, "src", "should inherit Paths.Rel from extended")
 		assertEqual(t, (*extender.Paths.Map)["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
 		assertEqual(t, extender.Extends, "base.tsconfig.json", "should not fail extending")
@@ -374,5 +377,21 @@ func TestTsconfigParse(t *testing.T) {
 		  }`)
 
 		assertExpand(t, config, "a", "sub/a", "a", "a")
+	})
+
+	t.Run("tsconfig importHelpers", func(t *testing.T) {
+		if parseTest(t, ".", "{}").ImportHelpers {
+			t.Errorf("ImportHelpers should be false by default")
+		}
+
+		config := parseTest(t, ".", `{
+			"compilerOptions": {
+			  "importHelpers": true
+			}
+		  }`)
+
+		if !config.ImportHelpers {
+			t.Errorf("ParseTsConfigOptions: ImportHelpers\nactual:   %v\nexpected: %v\n", config.ImportHelpers, true)
+		}
 	})
 }
