@@ -16,6 +16,11 @@ bzl_library(
     deps = ["@aspect_bazel_lib//lib:repo_utils"],
 )
 
+sh_library(
+    name = "shell",
+    srcs = ["runner.sh"],
+)
+
 bzl_library(
     name = "bats",
     srcs = ["bats.bzl"],
