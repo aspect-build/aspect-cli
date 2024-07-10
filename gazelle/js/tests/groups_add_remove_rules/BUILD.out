@@ -1,7 +1,7 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
-# gazelle:js_custom_files pos *.po.ts
-# gazelle:js_custom_test_files e2e *.e2e.ts
+# gazelle:js_files pos *.po.ts
+# gazelle:js_test_files e2e *.e2e.ts
 
 ts_project(
     name = "groups_add_remove_rules",

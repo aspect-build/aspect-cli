@@ -1,6 +1,6 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
-# gazelle:js_custom_files alib *-alib.ts
+# gazelle:js_files alib *-alib.ts
 
 ts_project(
     name = "a",
