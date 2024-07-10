@@ -58,11 +58,13 @@ func (ts *Configurer) KnownDirectives() []string {
 		Directive_NpmPackageNameConvention,
 		Directive_LibraryFiles,
 		Directive_TestFiles,
-		Directive_CustomTargetFiles,
-		Directive_CustomTargetTestFiles,
 
 		// Common directives supported by this language
 		common.Directive_GenerationMode,
+
+		// TODO(deprecated): remove
+		Directive_CustomTargetFiles,
+		Directive_CustomTargetTestFiles,
 
 		// TODO: move to common
 		Directive_GitIgnore,
@@ -185,9 +187,25 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 		case Directive_NpmPackageNameConvention:
 			config.SetNpmPackageNamingConvention(value)
 		case Directive_LibraryFiles:
-			config.AddTargetGlob(DefaultLibraryName, value, false)
+			group := DefaultLibraryName
+			groupGlob := value
+
+			if i := strings.Index(value, " "); i != -1 {
+				group = value[:i]
+				groupGlob = strings.TrimSpace(value[i+1:])
+			}
+
+			config.addTargetGlob(group, groupGlob, false)
 		case Directive_TestFiles:
-			config.AddTargetGlob(DefaultTestsName, value, true)
+			group := DefaultTestsName
+			groupGlob := value
+
+			if i := strings.Index(value, " "); i != -1 {
+				group = value[:i]
+				groupGlob = strings.TrimSpace(value[i+1:])
+			}
+
+			config.addTargetGlob(group, groupGlob, true)
 		case Directive_CustomTargetFiles:
 			groupGlob := strings.Split(value, " ")
 			if len(groupGlob) != 2 {
@@ -196,7 +214,9 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 				log.Fatal(err)
 			}
 
-			config.AddTargetGlob(groupGlob[0], groupGlob[1], false)
+			fmt.Printf("DEPRECATED: %s is deprecated, use %s %s instead\n", Directive_CustomTargetFiles, Directive_LibraryFiles, groupGlob[0])
+
+			config.addTargetGlob(groupGlob[0], groupGlob[1], false)
 		case Directive_CustomTargetTestFiles:
 			groupGlob := strings.Split(value, " ")
 			if len(groupGlob) != 2 {
@@ -205,7 +225,9 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 				log.Fatal(err)
 			}
 
-			config.AddTargetGlob(groupGlob[0], groupGlob[1], true)
+			fmt.Printf("DEPRECATED: %s is deprecated, use %s %s instead\n", Directive_CustomTargetTestFiles, Directive_TestFiles, groupGlob[0])
+
+			config.addTargetGlob(groupGlob[0], groupGlob[1], true)
 
 		// Inherited aspect-cli common+pro values
 		case common.Directive_GenerationMode:

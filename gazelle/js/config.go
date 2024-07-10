@@ -54,9 +54,10 @@ const (
 	Directive_LibraryFiles = "js_files"
 	// The glob for test files.
 	Directive_TestFiles = "js_test_files"
-	// Add a glob to a custom library type
+
+	// TODO(deprecated): remove - replaced with js_files [group]
 	Directive_CustomTargetFiles = "js_custom_files"
-	// Add a glob to a custom library type
+	// TODO(deprecated): remove - replaced with js_test_files [group]
 	Directive_CustomTargetTestFiles = "js_custom_test_files"
 
 	// TODO: move to common
@@ -444,11 +445,6 @@ func (c *JsGazelleConfig) RenderSourceTargetName(groupName, packageName string, 
 	return ruleName
 }
 
-// AddTargetGlob sets the glob used to find source files for the specified target
-func (c *JsGazelleConfig) AddTargetGlob(target, fileGlob string, isTestOnly bool) {
-	c.addTargetGlob(target, fileGlob, isTestOnly)
-}
-
 // Determine if and which target the passed file belongs in.
 func (c *JsGazelleConfig) GetSourceTarget(filePath string) *TargetGroup {
 	// Rules are evaluated in reverse order, so we want to
@@ -483,6 +479,7 @@ func (c *JsGazelleConfig) GetSourceTargets() []*TargetGroup {
 	return c.targets
 }
 
+// AddTargetGlob sets the glob used to find source files for the specified target
 func (c *JsGazelleConfig) addTargetGlob(targetName, glob string, isTestOnly bool) {
 	// Update existing target with the same name
 	for _, target := range c.targets {

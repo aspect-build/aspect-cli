@@ -2,7 +2,7 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
 # Override *-root.ts and put it into different library
 
-# gazelle:js_custom_files croot *-root.ts
+# gazelle:js_files croot *-root.ts
 
 ts_project(
     name = "c",

@@ -1,2 +1,2 @@
-# gazelle:js_custom_files e2e *.e2e.ts
-# gazelle:js_custom_files pos *.po.ts
+# gazelle:js_files e2e *.e2e.ts
+# gazelle:js_files pos *.po.ts
