@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"aspect.build/cli/pkg/ioutils"
 	"github.com/fatih/color"
 )
 
@@ -35,12 +36,12 @@ var (
 )
 
 func DownloadPlugin(url string, name string, version string) (string, error) {
-	userCacheDir, err := os.UserCacheDir()
+	aspectCacheDir, err := ioutils.AspectCacheDir()
 	if err != nil {
-		return "", fmt.Errorf("could not get the user's cache directory: %v", err)
+		return "", err
 	}
 
-	pluginsCache := filepath.Join(userCacheDir, "aspect-cli", "plugins", name, version)
+	pluginsCache := filepath.Join(aspectCacheDir, "plugins", name, version)
 	err = os.MkdirAll(pluginsCache, 0755)
 	if err != nil {
 		return "", fmt.Errorf("could not create directory %s: %v", pluginsCache, err)
