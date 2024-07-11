@@ -73,28 +73,12 @@ func NewBazelisk(workspaceRoot string, allowReenter bool) *Bazelisk {
 	}
 }
 
-func UserCacheDir() (string, error) {
-	userCacheDir, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("could not get the user's cache directory: %v", err)
-	}
-
-	// We hit a case in a bazel-in-bazel test where os.UserCacheDir() return a path starting with '~'.
-	// Run it through homedir.Expand to turn it into an absolute path incase that happens.
-	userCacheDir, err = homedir.Expand(userCacheDir)
-	if err != nil {
-		return "", fmt.Errorf("could not expand home directory in path: %v", err)
-	}
-
-	return userCacheDir, err
-}
-
 func (bazelisk *Bazelisk) GetBazelPath(repos *core.Repositories) (string, error) {
 	httputil.UserAgent = bazelisk.getUserAgent()
 
 	bazeliskHome := bazelisk.GetEnvOrConfig("BAZELISK_HOME")
 	if len(bazeliskHome) == 0 {
-		userCacheDir, err := UserCacheDir()
+		userCacheDir, err := ioutils.UserCacheDir()
 		if err != nil {
 			return "", err
 		}

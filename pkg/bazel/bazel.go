@@ -162,11 +162,10 @@ func GetAspectVersions() ([]string, error) {
 func GetBazelVersions(bazelFork string) ([]string, error) {
 	repos := createRepositories()
 
-	userCacheDir, err := UserCacheDir()
+	aspectCacheDir, err := ioutils.AspectCacheDir()
 	if err != nil {
 		return nil, err
 	}
-	aspectCacheDir := filepath.Join(userCacheDir, "aspect")
 
 	return repos.Fork.GetVersions(aspectCacheDir, bazelFork)
 }
@@ -198,12 +197,12 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 		return allFlags, nil
 	}
 
-	userCacheDir, err := UserCacheDir()
+	aspectCacheDir, err := ioutils.AspectCacheDir()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user cache dir: %w", err)
+		return nil, err
 	}
 
-	flagsAsProtoCacheDir := path.Join(userCacheDir, "aspect", "cli-flags-proto-cache")
+	flagsAsProtoCacheDir := path.Join(aspectCacheDir, "cli-flags-proto-cache")
 	err = os.MkdirAll(flagsAsProtoCacheDir, os.ModePerm)
 	if err != nil {
 		return nil, fmt.Errorf("failed write create directory %s: %w", flagsAsProtoCacheDir, err)
@@ -379,14 +378,14 @@ func (b *bazel) AbsPathRelativeToWorkspace(relativePath string) (string, error) 
 
 // Calls `bazel help flags-as-proto` in a sandboxed WORKSPACE and returns the result
 func (b *bazel) BazelFlagsAsProto() ([]byte, error) {
-	// create a directory in the user cache dir with an empty WORKSPACE file to run
+	// create a directory in the aspect cache dir with an empty WORKSPACE file to run
 	// `bazel help flags-as-proto` in so it doesn't affect the bazel server in the user's WORKSPACE
-	userCacheDir, err := UserCacheDir()
+	aspectCacheDir, err := ioutils.AspectCacheDir()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user cache dir: %w", err)
+		return nil, err
 	}
 
-	tmpdir := path.Join(userCacheDir, "aspect", "cli-flags-proto-wksp")
+	tmpdir := path.Join(aspectCacheDir, "cli-flags-proto-wksp")
 	err = os.MkdirAll(tmpdir, os.ModePerm)
 	if err != nil {
 		return nil, fmt.Errorf("failed write create directory %s: %w", tmpdir, err)
