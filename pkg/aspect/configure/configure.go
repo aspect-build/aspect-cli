@@ -40,7 +40,7 @@ type Configure struct {
 	ioutils.Streams
 
 	languageKeys []string
-	languages    []language.Language
+	languages    []func() language.Language
 }
 
 func New(streams ioutils.Streams) *Configure {
@@ -61,41 +61,41 @@ func pluralize(s string, num int) string {
 	}
 }
 
-func (c *Configure) AddLanguage(lang string, l language.Language) {
+func (c *Configure) AddLanguage(lang string, langFactory func() language.Language) {
 	c.languageKeys = append(c.languageKeys, lang)
-	c.languages = append(c.languages, l)
+	c.languages = append(c.languages, langFactory)
 }
 
 func (c *Configure) addDefaultLanguages() {
 	// Order matters for gazelle languages. Proto should be run before golang.
 	viper.SetDefault("configure.languages.protobuf", false)
 	if viper.GetBool("configure.languages.protobuf") {
-		c.AddLanguage("protobuf", proto.NewLanguage())
+		c.AddLanguage("protobuf", proto.NewLanguage)
 	}
 
 	viper.SetDefault("configure.languages.go", false)
 	if viper.GetBool("configure.languages.go") {
-		c.AddLanguage("go", golang.NewLanguage())
+		c.AddLanguage("go", golang.NewLanguage)
 	}
 
 	viper.SetDefault("configure.languages.javascript", false)
 	if viper.GetBool("configure.languages.javascript") {
-		c.AddLanguage("javascript", js.NewLanguage())
+		c.AddLanguage("javascript", js.NewLanguage)
 	}
 
 	viper.SetDefault("configure.languages.kotlin", false)
 	if viper.GetBool("configure.languages.kotlin") {
-		c.AddLanguage("kotlin", kotlin.NewLanguage())
+		c.AddLanguage("kotlin", kotlin.NewLanguage)
 	}
 
 	viper.SetDefault("configure.languages.bzl", false)
 	if viper.GetBool("configure.languages.bzl") {
-		c.AddLanguage("bzl", bzl.NewLanguage())
+		c.AddLanguage("bzl", bzl.NewLanguage)
 	}
 
 	viper.SetDefault("configure.languages.python", false)
 	if viper.GetBool("configure.languages.python") {
-		c.AddLanguage("python", python.NewLanguage())
+		c.AddLanguage("python", python.NewLanguage)
 	}
 }
 
@@ -144,7 +144,13 @@ configure:
 		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(runner.languageKeys, ", "))
 	}
 
-	stats, err := runFixUpdate(wd, runner.languages, updateCmd, fixArgs)
+	// Instantiate all the languages
+	languages := make([]language.Language, 0, len(runner.languages))
+	for _, lang := range runner.languages {
+		languages = append(languages, lang())
+	}
+
+	stats, err := runFixUpdate(wd, languages, updateCmd, fixArgs)
 
 	exitCode := aspecterrors.OK
 
