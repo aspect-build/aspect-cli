@@ -50,6 +50,8 @@ const (
 	// naming convention. See js_project_naming_convention for more info on
 	// the package name interpolation.
 	Directive_TestsNamingConvention = "js_tests_naming_convention"
+	// Use of npm_package() vs js_library() for the linked npm package target
+	Directive_PackageRuleKind = "js_package_rule_kind"
 	// The glob for the main library files, excludes files matching Directive_TestFiles.
 	Directive_LibraryFiles = "js_files"
 	// The glob for test files.
@@ -154,6 +156,13 @@ const (
 	ValidationOff
 )
 
+type PackageTargetKind string
+
+const (
+	PackageTargetKind_Package PackageTargetKind = NpmPackageKind
+	PackageTargetKind_Library PackageTargetKind = JsLibraryKind
+)
+
 // JsGazelleConfig represents a config extension for a specific Bazel package.
 type JsGazelleConfig struct {
 	rel    string
@@ -161,6 +170,8 @@ type JsGazelleConfig struct {
 
 	generationEnabled bool
 	generationMode    GenerationModeType
+
+	packageTargetKind PackageTargetKind
 
 	// TODO: move to common util
 	gitignoreEnabled bool
@@ -194,6 +205,7 @@ func newRootConfig() *JsGazelleConfig {
 		protoGenerationEnabled:     true,
 		tsconfigGenerationEnabled:  false,
 		generationMode:             GenerationModeDirectory,
+		packageTargetKind:          PackageTargetKind_Package,
 		pnpmLockPath:               "pnpm-lock.yaml",
 		excludes:                   make([]string, 0),
 		ignoreDependencies:         make([]string, 0),

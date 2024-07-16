@@ -170,16 +170,14 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 		npmPackageName := cfg.RenderNpmPackageTargetName(packageName)
 		npmPackageSourceFiles := treeset.NewWithStringComparator()
 
+		var srcTarget *label.Label
 		if srcRule, _ := sourceRules.Get(DefaultLibraryName); srcRule != nil {
-			srcProjectLabel := label.Label{
+			srcTarget = &label.Label{
 				Name:     srcRule.(*rule.Rule).Name(),
 				Repo:     args.Config.RepoName,
 				Pkg:      args.Rel,
 				Relative: true,
 			}
-
-			// Add the src to the pkg
-			npmPackageSourceFiles.Add(srcProjectLabel.String())
 		}
 
 		// Add the package.json if not in the src
@@ -188,14 +186,48 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 			npmPackageSourceFiles.Add(NpmPackageFilename)
 		}
 
-		ts.addNpmPackageRule(
-			cfg,
-			args,
-			npmPackageName,
-			npmPackageSourceFiles,
-			result,
-		)
+		if cfg.packageTargetKind == PackageTargetKind_Package {
+			// Add the src to the npm_package(srcs)
+			if srcTarget != nil {
+				npmPackageSourceFiles.Add(srcTarget.String())
+			}
+
+			ts.addNpmPackageRule(
+				cfg,
+				args,
+				npmPackageName,
+				npmPackageSourceFiles,
+				result,
+			)
+		} else {
+			deps := make([]label.Label, 0, 1)
+
+			// Add the src to the js_library(deps)
+			if srcTarget != nil {
+				deps = append(deps, *srcTarget)
+			}
+
+			ts.addJsLibraryPackageRule(
+				cfg,
+				args,
+				npmPackageName,
+				npmPackageSourceFiles,
+				deps,
+				result,
+			)
+		}
 	}
+}
+
+func (ts *typeScriptLang) addJsLibraryPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, npmPackageName string, srcs *treeset.Set, deps []label.Label, result *language.GenerateResult) {
+	pkg := rule.NewRule(JsLibraryKind, npmPackageName)
+	pkg.SetAttr("srcs", srcs.Values())
+	pkg.SetAttr("deps", deps)
+
+	result.Gen = append(result.Gen, pkg)
+	result.Imports = append(result.Imports, newTsProjectInfo())
+
+	BazelLog.Infof("add rule '%s' '%s:%s'", pkg.Kind(), args.Rel, pkg.Name())
 }
 
 func (ts *typeScriptLang) addNpmPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, npmPackageName string, srcs *treeset.Set, result *language.GenerateResult) {

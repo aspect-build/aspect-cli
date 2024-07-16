@@ -56,6 +56,7 @@ func (ts *Configurer) KnownDirectives() []string {
 		Directive_LibraryNamingConvention,
 		Directive_TestsNamingConvention,
 		Directive_NpmPackageNameConvention,
+		Directive_PackageRuleKind,
 		Directive_LibraryFiles,
 		Directive_TestFiles,
 
@@ -186,6 +187,15 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 			config.SetTestsNamingLibraryConvention(value)
 		case Directive_NpmPackageNameConvention:
 			config.SetNpmPackageNamingConvention(value)
+		case Directive_PackageRuleKind:
+			switch value {
+			case JsLibraryKind:
+				config.packageTargetKind = JsLibraryKind
+			case NpmPackageKind:
+				config.packageTargetKind = NpmPackageKind
+			default:
+				log.Fatalf("invalid value for directive %q: %s", Directive_PackageRuleKind, d.Value)
+			}
 		case Directive_LibraryFiles:
 			group := DefaultLibraryName
 			groupGlob := value
