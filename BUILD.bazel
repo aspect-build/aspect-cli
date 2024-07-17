@@ -1,3 +1,4 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
 load("@bazel_gazelle//:def.bzl", "gazelle")
 load("@buildifier_prebuilt//:rules.bzl", "buildifier")
 load("@io_bazel_rules_go//go:def.bzl", "nogo")
@@ -12,6 +13,12 @@ exports_files([
     "LICENSE",
     "README.md",
 ])
+
+js_library(
+    name = "prettierrc",
+    srcs = [".prettierrc.cjs"],
+    visibility = ["//visibility:public"],
+)
 
 nogo(
     name = "nogo",

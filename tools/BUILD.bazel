@@ -5,12 +5,28 @@ we don't want to trigger eager fetches of these for builds that don't want to ru
 """
 
 load("@aspect_rules_lint//format:defs.bzl", "format_multirun")
+load("@npm//:prettier/package_json.bzl", prettier = "bin")
 
-package(default_visibility = ["//:__subpackages__"])
+package(default_visibility = ["//visibility:public"])
+
+prettier.prettier_binary(
+    name = "prettier",
+    data = [
+        "//:prettierrc",
+    ],
+    # Allow the binary to be run outside bazel
+    env = {"BAZEL_BINDIR": "."},
+)
 
 format_multirun(
     name = "format",
+    css = ":prettier",
     go = "@go_sdk//:bin/gofmt",
+    html = ":prettier",
+    javascript = ":prettier",
+    jsonnet = "@aspect_rules_lint//format:jsonnetfmt",
+    shell = "@aspect_rules_lint//format:shfmt",
     starlark = "@buildifier_prebuilt//:buildifier",
-    yaml = False,
+    terraform = "@aspect_rules_lint//format:terraform",
+    yaml = "@aspect_rules_lint//format:yamlfmt",
 )

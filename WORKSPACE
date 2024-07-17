@@ -3,24 +3,38 @@ workspace(name = "build_aspect_cli")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
+    name = "bazel_features",
+    sha256 = "2cd9e57d4c38675d321731d65c15258f3a66438ad531ae09cb8bb14217dc8572",
+    strip_prefix = "bazel_features-1.11.0",
+    url = "https://github.com/bazel-contrib/bazel_features/releases/download/v1.11.0/bazel_features-v1.11.0.tar.gz",
+)
+
+http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "87ab4ec479ebeb00d286266aca2068caeef1bb0b1765e8f71c7b6cfee6af4226",
-    strip_prefix = "bazel-lib-2.7.3",
-    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.7.3/bazel-lib-v2.7.3.tar.gz",
+    sha256 = "6d758a8f646ecee7a3e294fbe4386daafbe0e5966723009c290d493f227c390b",
+    strip_prefix = "bazel-lib-2.7.7",
+    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.7.7/bazel-lib-v2.7.7.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_js",
-    sha256 = "2cfb3875e1231cefd3fada6774f2c0c5a99db0070e0e48ea398acbff7c6c765b",
-    strip_prefix = "rules_js-1.42.3",
-    url = "https://github.com/aspect-build/rules_js/releases/download/v1.42.3/rules_js-v1.42.3.tar.gz",
+    sha256 = "389021e29b3aeed2f6fb3a7a1478f8fc52947a6500b198a7ec0f3358c2842415",
+    strip_prefix = "rules_js-2.0.0-rc0",
+    url = "https://github.com/aspect-build/rules_js/releases/download/v2.0.0-rc0/rules_js-v2.0.0-rc0.tar.gz",
+)
+
+http_archive(
+    name = "aspect_rules_ts",
+    sha256 = "3ea5cdb825d5dbffe286b3d9c5197a2648cf04b5e6bd8b913a45823cdf0ae960",
+    strip_prefix = "rules_ts-3.0.0-rc0",
+    url = "https://github.com/aspect-build/rules_ts/releases/download/v3.0.0-rc0/rules_ts-v3.0.0-rc0.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_lint",
-    sha256 = "07dd6258894757e44db1a5dd3650731c1432cad7795afdaa6d945d4ba3b84f68",
-    strip_prefix = "rules_lint-0.14.2",
-    url = "https://github.com/aspect-build/rules_lint/releases/download/v0.14.2/rules_lint-v0.14.2.tar.gz",
+    sha256 = "bd5a82b350cf20a662c45d6baa0f301a6a1a81833122e1d68a91a120e33a14dd",
+    strip_prefix = "rules_lint-37d0160469035e4ea0f1824135cb198cbdcc59e0",
+    url = "https://github.com/aspect-build/rules_lint/archive/37d0160469035e4ea0f1824135cb198cbdcc59e0.zip",
 )
 
 http_archive(
@@ -87,9 +101,8 @@ http_archive(
 
 http_archive(
     name = "io_bazel_rules_go",
-    integrity = "sha256-H8JC/qXQxagMD54qMWjjWBFg3QqMhJ5oOGc8OH5ZUlw=",
-    strip_prefix = "rules_go-a54fd5674f7184fe6e483fb5aee065a314994081",
-    urls = ["https://github.com/bazelbuild/rules_go/archive/a54fd5674f7184fe6e483fb5aee065a314994081.zip"],
+    sha256 = "33acc4ae0f70502db4b893c9fc1dd7a9bf998c23e7ff2c4517741d4049a976f8",
+    urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.48.0/rules_go-v0.48.0.zip"],
 )
 
 http_archive(
@@ -109,13 +122,23 @@ load("@buildifier_prebuilt//:deps.bzl", "buildifier_prebuilt_deps")
 
 buildifier_prebuilt_deps()
 
-load("@aspect_bazel_lib//lib:repositories.bzl", "aspect_bazel_lib_dependencies", "register_coreutils_toolchains", "register_expand_template_toolchains", "register_jq_toolchains", "register_yq_toolchains")
+load("@bazel_features//:deps.bzl", "bazel_features_deps")
+
+bazel_features_deps()
+
+load("@aspect_bazel_lib//lib:repositories.bzl", "aspect_bazel_lib_dependencies", "register_copy_directory_toolchains", "register_copy_to_directory_toolchains", "register_coreutils_toolchains", "register_expand_template_toolchains", "register_jq_toolchains", "register_tar_toolchains", "register_yq_toolchains")
 
 aspect_bazel_lib_dependencies()
+
+register_copy_directory_toolchains()
+
+register_copy_to_directory_toolchains()
 
 register_coreutils_toolchains()
 
 register_expand_template_toolchains()
+
+register_tar_toolchains()
 
 register_jq_toolchains()
 
@@ -132,12 +155,13 @@ http_archive(
     patch_args = ["-p1"],
     patches = [
         "//:patches/bazelbuild_bazel-gazelle_aspect-cli.patch",
+        "//:patches/bazelbuild_bazel-gazelle_aspect-walk-subdir.patch",
     ],
     sha256 = "d76bf7a60fd8b050444090dfa2837a4eaf9829e1165618ee35dceca5cbdf58d5",
-    # Ensure this version always matches the version of @com_github_bazelbuild_bazel_gazelle set in deps.bzl.
+    # Ensure this version always matches the go.mod version.
     #
     # :notice: Care should be taken when upgrading gazelle since we have vendored & modified parts of gazelle
-    # in the CLI configure command (pkg/aspect/configure).
+    # in the CLI configure command (cli/core/pkg/aspect/configure).
     urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.37.0/bazel-gazelle-v0.37.0.tar.gz"],
 )
 
@@ -215,7 +239,7 @@ nodejs_register_toolchains(
     node_version = "17.9.1",
 )
 
-load("@aspect_rules_js//npm:npm_import.bzl", "npm_translate_lock")
+load("@aspect_rules_js//npm:repositories.bzl", "npm_translate_lock")
 
 npm_translate_lock(
     name = "npm",
