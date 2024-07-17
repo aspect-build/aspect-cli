@@ -1,0 +1,4 @@
+pnpm-lock.yaml linguist-generated
+**/*.dbm linguist-generated
+**/*.lock linguist-generated
+bazel/**/*.d.ts linguist-generated
