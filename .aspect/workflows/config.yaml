@@ -1,5 +1,4 @@
 # See https://docs.aspect.build/v/workflows/config
----
 queue: aspect-cli-default
 tasks:
   - format:
