@@ -65,6 +65,9 @@ workflows:
 jobs:
   aw-auto-deliver:
     environment:
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type >>
+      ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
       ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
       ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
       DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
@@ -77,53 +80,31 @@ jobs:
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-          DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Workflows environment
     - checkout
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-          DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health check
         no_output_timeout: 180m
     - run:
         command: git fetch
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-          DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Git fetch
     - when:
         condition: << pipeline.parameters.delivery_commit >>
         steps:
         - run:
             command: git checkout << pipeline.parameters.delivery_commit >>
-            environment:
-              ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-              ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-              DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-              XDG_CACHE_HOME: /mnt/ephemeral/caches
             name: Checkout release commit
     - run:
         command: rosetta run delivery
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-          DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Delivery
         no_output_timeout: 180m
     working_directory: /mnt/ephemeral/workdir
   aw-buildifier:
     environment:
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type >>
+      ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
       ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
       ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
       XDG_CACHE_HOME: /mnt/ephemeral/caches
@@ -138,64 +119,32 @@ jobs:
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Workflows environment
     - checkout
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Prepare archive directories
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run buildifier --workspace << parameters.workspace >>
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Buildifier
         no_output_timeout: 180m
     - store_artifacts:
         path: /workflows/artifacts
     - run:
         command: rosetta run finalization
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Finalization
         no_output_timeout: 10m
         when: always
     working_directory: /mnt/ephemeral/workdir
   aw-configure:
     environment:
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type >>
+      ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
       ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
       ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
       XDG_CACHE_HOME: /mnt/ephemeral/caches
@@ -210,64 +159,32 @@ jobs:
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Workflows environment
     - checkout
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Prepare archive directories
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run configure --workspace << parameters.workspace >>
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Configure
         no_output_timeout: 180m
     - store_artifacts:
         path: /workflows/artifacts
     - run:
         command: rosetta run finalization
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Finalization
         no_output_timeout: 10m
         when: always
     working_directory: /mnt/ephemeral/workdir
   aw-format:
     environment:
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type >>
+      ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
       ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
       ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
       XDG_CACHE_HOME: /mnt/ephemeral/caches
@@ -282,64 +199,32 @@ jobs:
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Workflows environment
     - checkout
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Prepare archive directories
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run format --workspace << parameters.workspace >>
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Format
         no_output_timeout: 180m
     - store_artifacts:
         path: /workflows/artifacts
     - run:
         command: rosetta run finalization
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Finalization
         no_output_timeout: 10m
         when: always
     working_directory: /mnt/ephemeral/workdir
   aw-manual-deliver:
     environment:
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type >>
+      ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
       ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
       ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
       DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
@@ -353,53 +238,31 @@ jobs:
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-          DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Workflows environment
     - checkout
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-          DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health check
         no_output_timeout: 180m
     - run:
         command: git fetch
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-          DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Git fetch
     - when:
         condition: << pipeline.parameters.delivery_commit >>
         steps:
         - run:
             command: git checkout << pipeline.parameters.delivery_commit >>
-            environment:
-              ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-              ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-              DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-              XDG_CACHE_HOME: /mnt/ephemeral/caches
             name: Checkout release commit
     - run:
         command: rosetta run delivery
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
-          DELIVERY_COMMIT: << pipeline.parameters.delivery_commit >>
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Delivery
         no_output_timeout: 180m
     working_directory: /mnt/ephemeral/workdir
   aw-test:
     environment:
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type >>
+      ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
       ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
       ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
       XDG_CACHE_HOME: /mnt/ephemeral/caches
@@ -414,45 +277,17 @@ jobs:
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Workflows environment
     - checkout
     - run:
         command: rm -rf /workflows/artifacts /workflows/testlogs
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Prepare archive directories
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run test --workspace << parameters.workspace >>
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Test
         no_output_timeout: 180m
     - store_test_results:
@@ -469,13 +304,6 @@ jobs:
         - run:
             command: rosetta run delivery_manifest --workspace << parameters.workspace
               >> --data TARGETS_SOURCE=test
-            environment:
-              ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-              ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-                >>
-              ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-              ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-              XDG_CACHE_HOME: /mnt/ephemeral/caches
             name: Delivery manifest
             no_output_timeout: 180m
     - store_artifacts:
@@ -486,19 +314,15 @@ jobs:
         path: vmstat.out
     - run:
         command: rosetta run finalization
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Finalization
         no_output_timeout: 10m
         when: always
     working_directory: /mnt/ephemeral/workdir
   aw-warming:
     environment:
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type >>
+      ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
       ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
       XDG_CACHE_HOME: /mnt/ephemeral/caches
     machine: true
@@ -506,34 +330,18 @@ jobs:
     steps:
     - run:
         command: /etc/aspect/workflows/bin/configure_workflows_env
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Workflows environment
     - checkout
     - run:
         command: /etc/aspect/workflows/bin/agent_health_check
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Agent health check
         no_output_timeout: 180m
     - run:
         command: rosetta run warming --workspace .
-        environment:
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
-          ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type
-            >>
-          ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Create warming archive for root
         no_output_timeout: 180m
     - run:
         command: /etc/aspect/workflows/bin/warming_archive
-        environment:
-          ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
-          XDG_CACHE_HOME: /mnt/ephemeral/caches
         name: Archive warming tars
     working_directory: /mnt/ephemeral/workdir
   user-job:
