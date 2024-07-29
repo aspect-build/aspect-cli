@@ -402,6 +402,20 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		}
 	}
 
+	tsconfigRel, tsconfig := ts.tsconfig.FindConfig(args.Rel)
+
+	// tsconfig 'jsx' options implying a dependency on react
+	if tsconfig != nil && tsconfig.Jsx.IsReact() && info.HasTsx() {
+		info.AddImport(ImportStatement{
+			ImportSpec: resolve.ImportSpec{
+				Lang: LanguageName,
+				Imp:  "react",
+			},
+			ImportPath: string(tsconfig.Jsx),
+			SourcePath: path.Join(tsconfig.ConfigDir, tsconfig.ConfigName),
+		})
+	}
+
 	// Data file lookup map. Workspace path => local path
 	dataFileWorkspacePaths := treemap.NewWithStringComparator()
 	for _, dataFile := range dataFiles.Values() {
@@ -446,9 +460,9 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 
 	// If generating ts_config() targets also set the ts_project(tsconfig) and related attributes
 	if cfg.GetTsConfigGenerationEnabled() {
-		if rel, tsconfig := ts.tsconfig.FindConfig(args.Rel); tsconfig != nil {
+		if tsconfig != nil {
 			// Set the tsconfig and related attributes if a tsconfig file is found for this target
-			tsconfigLabel := label.New("", rel, cfg.RenderTsConfigName(tsconfig.ConfigName))
+			tsconfigLabel := label.New("", tsconfigRel, cfg.RenderTsConfigName(tsconfig.ConfigName))
 			tsconfigLabel = tsconfigLabel.Rel("", args.Rel)
 
 			sourceRule.SetAttr("tsconfig", tsconfigLabel.BzlExpr())
@@ -802,6 +816,10 @@ func isSourceFileType(f string) bool {
 // it at runtime based on other factors.
 func isImplicitSourceFileType(f string) bool {
 	return path.Ext(f) == ".ts" || path.Ext(f) == ".tsx" || path.Ext(f) == ".js" || path.Ext(f) == ".jsx"
+}
+
+func isTsxFileType(f string) bool {
+	return path.Ext(f) == ".tsx"
 }
 
 func isDeclarationFileType(f string) bool {
