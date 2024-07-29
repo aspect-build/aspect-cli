@@ -1,0 +1,8 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "sub",
+    srcs = ["s.tsx"],
+    tsconfig = "//react:tsconfig",
+    deps = ["//:node_modules/react"],
+)

@@ -55,6 +55,18 @@ func (i *TsProjectInfo) AddImport(impt ImportStatement) {
 	i.imports.Add(impt)
 }
 
+func (i *TsProjectInfo) HasTsx() bool {
+	if i.sources != nil {
+		for _, src := range i.sources.Values() {
+			if isTsxFileType(src.(string)) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // importStatementComparator compares modules by name.
 func importStatementComparator(a, b interface{}) int {
 	return godsutils.StringComparator(a.(ImportStatement).Imp, b.(ImportStatement).Imp)
