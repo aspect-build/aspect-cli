@@ -35,6 +35,7 @@ type tsCompilerOptionsJSON struct {
 	BaseUrl       *string              `json:"baseUrl"`
 	Paths         *map[string][]string `json:"paths"`
 	Types         *[]string            `json:"types"`
+	JSX           *TsConfigJsxType     `json:"jsx"`
 	ImportHelpers *bool                `json:"importHelpers"`
 }
 
@@ -49,6 +50,23 @@ type tsConfigJSON struct {
 }
 
 type TsConfigResolver = func(dir, conf string) []string
+
+// TsConfig JSX options: https://www.typescriptlang.org/tsconfig/#jsx
+type TsConfigJsxType string
+
+const (
+	JsxNone        TsConfigJsxType = "none"
+	JsxPreserve    TsConfigJsxType = "preserve"
+	JsxReact       TsConfigJsxType = "react"
+	JsxReactJsx    TsConfigJsxType = "react-jsx"
+	JsxReactJsxDev TsConfigJsxType = "react-jsxdev"
+	JsxReactNative TsConfigJsxType = "react-native"
+)
+
+func (j TsConfigJsxType) IsReact() bool {
+	s := string(j)
+	return s == "react" || strings.HasPrefix(s, "react-")
+}
 
 type TsConfig struct {
 	// Directory of the tsconfig file
@@ -66,6 +84,9 @@ type TsConfig struct {
 	Paths *TsConfigPaths
 
 	ImportHelpers bool
+
+	// How jsx/tsx files are handled
+	Jsx TsConfigJsxType
 
 	// References to other tsconfig or packages that must be resolved.
 	Types   []string
@@ -87,6 +108,7 @@ var DefaultConfigPaths = TsConfigPaths{
 
 var InvalidTsconfig = TsConfig{
 	Paths: &DefaultConfigPaths,
+	Jsx:   JsxNone,
 }
 
 func isRelativePath(p string) bool {
@@ -238,6 +260,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		importHelpers = baseConfig.ImportHelpers
 	}
 
+	var jsx = JsxNone
+	if c.CompilerOptions.JSX != nil {
+		jsx = *c.CompilerOptions.JSX
+	} else if baseConfig != nil {
+		jsx = baseConfig.Jsx
+	}
+
 	config := TsConfig{
 		ConfigDir:       configDir,
 		ConfigName:      configName,
@@ -248,6 +277,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		VirtualRootDirs: VirtualRootDirs,
 		Extends:         extends,
 		ImportHelpers:   importHelpers,
+		Jsx:             jsx,
 		Types:           types,
 		References:      references,
 	}
