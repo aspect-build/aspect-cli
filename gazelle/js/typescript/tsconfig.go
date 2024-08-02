@@ -29,6 +29,7 @@ import (
 )
 
 type tsCompilerOptionsJSON struct {
+	AllowJs       *bool                `json:"allowJs"`
 	OutDir        *string              `json:"outDir"`
 	RootDir       *string              `json:"rootDir"`
 	RootDirs      *[]string            `json:"rootDirs"`
@@ -75,6 +76,7 @@ type TsConfig struct {
 	// Name of the tsconfig file relative to ConfigDir
 	ConfigName string
 
+	AllowJs *bool
 	OutDir  string
 	RootDir string
 	BaseUrl string
@@ -206,6 +208,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		}
 	}
 
+	var allowJs *bool
+	if c.CompilerOptions.AllowJs != nil {
+		allowJs = c.CompilerOptions.AllowJs
+	} else if baseConfig != nil {
+		allowJs = baseConfig.AllowJs
+	}
+
 	var RootDir string
 	if c.CompilerOptions.RootDir != nil {
 		RootDir = path.Clean(*c.CompilerOptions.RootDir)
@@ -270,6 +279,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	config := TsConfig{
 		ConfigDir:       configDir,
 		ConfigName:      configName,
+		AllowJs:         allowJs,
 		OutDir:          OutDir,
 		RootDir:         RootDir,
 		BaseUrl:         BaseUrl,

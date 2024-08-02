@@ -1,0 +1,15 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
+
+# gazelle:js_tsconfig enabled
+
+ts_project(
+    name = "tsconfig_allowjs",
+    srcs = ["main.ts"],
+    allow_js = True,
+    tsconfig = ":tsconfig",
+)
+
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.json",
+)

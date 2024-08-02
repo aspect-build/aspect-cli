@@ -468,6 +468,12 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 
 			sourceRule.SetAttr("tsconfig", tsconfigLabel.BzlExpr())
 
+			if tsconfig.AllowJs != nil {
+				sourceRule.SetAttr("allow_js", *tsconfig.AllowJs)
+			} else if existing != nil {
+				existing.DelAttr("allow_js")
+			}
+
 			// Reflect the tsconfig out_dir in the ts_project rule
 			if tsconfig.OutDir != "" && tsconfig.OutDir != "." {
 				sourceRule.SetAttr("out_dir", tsconfig.OutDir)
@@ -484,6 +490,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 		} else if existing != nil {
 			// Clear tsconfig related attributes if no tsconfig is found
 			existing.DelAttr("tsconfig")
+			existing.DelAttr("allow_js")
 			existing.DelAttr("out_dir")
 			existing.DelAttr("root_dir")
 		}
