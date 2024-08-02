@@ -1,6 +1,6 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": {
-    "types": ["jquery", "@testing-library/jest-dom"]
+    "types": ["jquery", "@testing-library/jest-dom", "ignored", "@test/ignored"]
   }
 }

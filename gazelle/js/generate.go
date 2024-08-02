@@ -265,25 +265,29 @@ func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args lang
 	SourcePath := path.Join(tsconfig.ConfigDir, tsconfig.ConfigName)
 
 	if tsconfig.Extends != "" {
-		imports = append(imports, ImportStatement{
-			ImportSpec: resolve.ImportSpec{
-				Lang: LanguageName,
-				Imp:  toWorkspacePath(SourcePath, tsconfig.Extends),
-			},
-			ImportPath: tsconfig.Extends,
-			SourcePath: SourcePath,
-		})
+		if !cfg.IsImportIgnored(tsconfig.Extends) {
+			imports = append(imports, ImportStatement{
+				ImportSpec: resolve.ImportSpec{
+					Lang: LanguageName,
+					Imp:  toWorkspacePath(SourcePath, tsconfig.Extends),
+				},
+				ImportPath: tsconfig.Extends,
+				SourcePath: SourcePath,
+			})
+		}
 	}
 
 	for _, t := range tsconfig.Types {
-		imports = append(imports, ImportStatement{
-			ImportSpec: resolve.ImportSpec{
-				Lang: LanguageName,
-				Imp:  toAtTypesPackage(t),
-			},
-			ImportPath: t,
-			SourcePath: SourcePath,
-		})
+		if typesImport := toAtTypesPackage(t); !cfg.IsImportIgnored(typesImport) {
+			imports = append(imports, ImportStatement{
+				ImportSpec: resolve.ImportSpec{
+					Lang: LanguageName,
+					Imp:  typesImport,
+				},
+				ImportPath: t,
+				SourcePath: SourcePath,
+			})
+		}
 	}
 
 	for _, reference := range tsconfig.References {
