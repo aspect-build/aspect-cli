@@ -1,0 +1,3 @@
+# override with multiple targets
+# gazelle:js_visibility //visibility:private //a:__pkg__
+# gazelle:js_visibility {dirname}_tests :__subpackages__ //...

@@ -49,6 +49,7 @@ func (ts *Configurer) KnownDirectives() []string {
 		Directive_TypeScriptProtoExtension,
 		Directive_TypeScriptConfigExtension,
 		Directive_GenerationMode,
+		Directive_Visibility,
 		Directive_Lockfile,
 		Directive_IgnoreImports,
 		Directive_Resolve,
@@ -150,6 +151,26 @@ func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File)
 			default:
 				log.Fatalf("invalid value for directive %q: %s", Directive_GenerationMode, d.Value)
 			}
+		case Directive_Visibility:
+			group := DefaultLibraryName
+
+			// A list of all non-empty labels
+			visLabels := make([]string, 0, 1)
+			for _, visLabel := range strings.Split(value, " ") {
+				visLabel = strings.TrimSpace(visLabel)
+				if visLabel != "" {
+					visLabels = append(visLabels, visLabel)
+				}
+			}
+
+			// The first entry may be the group-key, not a label
+			if len(visLabels) > 0 && !(strings.HasPrefix(visLabels[0], ":") || strings.HasPrefix(visLabels[0], "//")) {
+				group = visLabels[0]
+				visLabels = visLabels[1:]
+			}
+
+			config.SetVisibility(group, visLabels)
+
 		case Directive_Lockfile:
 			config.SetPnpmLockfile(value)
 		case Directive_IgnoreImports:
