@@ -460,8 +460,9 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 
 	// If generating ts_config() targets also set the ts_project(tsconfig) and related attributes
 	if cfg.GetTsConfigGenerationEnabled() {
-		if tsconfig != nil {
+		if tsconfig != nil && ruleKind == TsProjectKind {
 			// Set the tsconfig and related attributes if a tsconfig file is found for this target
+			// and the target is a ts_project rule.
 			tsconfigLabel := label.New("", tsconfigRel, cfg.RenderTsConfigName(tsconfig.ConfigName))
 			tsconfigLabel = tsconfigLabel.Rel("", args.Rel)
 
