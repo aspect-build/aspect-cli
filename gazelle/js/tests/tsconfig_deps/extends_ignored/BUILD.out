@@ -1,0 +1,8 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config")
+
+# gazelle:js_ignore_imports bad
+
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.json",
+)
