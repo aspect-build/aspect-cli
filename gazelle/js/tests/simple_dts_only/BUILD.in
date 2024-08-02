@@ -1,1 +1,2 @@
 # aspect:js_files **/*.{js,ts}
+# gazelle:js_tsconfig enabled
