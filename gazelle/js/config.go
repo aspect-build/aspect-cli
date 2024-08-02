@@ -27,6 +27,8 @@ const (
 	// Directive_GenerationMode represents the directive that controls the BUILD generation
 	// mode. See below for the GenerationModeType constants.
 	Directive_GenerationMode = "js_generation_mode"
+	// Visibility of the primary library targets
+	Directive_Visibility = "js_visibility"
 	// The pnpm-lock.yaml file.
 	Directive_Lockfile = "js_pnpm_lockfile"
 	// Directive_IgnoreImports represents the directive that controls the
@@ -104,6 +106,9 @@ type TargetGroup struct {
 
 	// Default glob patterns for sources. Only set for pre-configured targets.
 	defaultSources []string
+
+	// The `visibility` of the target
+	visibility []label.Label
 
 	// If the targets are always testonly
 	testonly bool
@@ -235,6 +240,7 @@ func (g *TargetGroup) newChild() *TargetGroup {
 		customSources:  make([]string, 0),
 		defaultSources: sources,
 		testonly:       g.testonly,
+		visibility:     g.visibility,
 	}
 }
 
@@ -266,6 +272,26 @@ func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
 // Render a target name by applying target name tmeplate vars
 func (c *JsGazelleConfig) renderTargetName(baseName, packageName string) string {
 	return strings.ReplaceAll(baseName, TargetNameDirectoryVar, packageName)
+}
+
+func (c *JsGazelleConfig) SetVisibility(groupName string, visLabels []string) {
+	target := c.GetSourceTarget(groupName)
+	if target == nil {
+		log.Fatal(fmt.Errorf("Target %s not found in %s", groupName, c.rel))
+		os.Exit(1)
+	}
+
+	target.visibility = make([]label.Label, 0, len(visLabels))
+
+	for _, v := range visLabels {
+		l, labelErr := label.Parse(strings.TrimSpace(v))
+		if labelErr != nil {
+			log.Fatal(fmt.Errorf("invalid label for visibility: %s", l))
+			os.Exit(1)
+		}
+
+		target.visibility = append(target.visibility, l)
+	}
 }
 
 // AddExcludedPattern adds a glob pattern parsed from the standard gazelle:exclude directive.
@@ -458,7 +484,7 @@ func (c *JsGazelleConfig) RenderSourceTargetName(groupName, packageName string, 
 }
 
 // Determine if and which target the passed file belongs in.
-func (c *JsGazelleConfig) GetSourceTarget(filePath string) *TargetGroup {
+func (c *JsGazelleConfig) GetFileSourceTarget(filePath string) *TargetGroup {
 	// Rules are evaluated in reverse order, so we want to
 	for i := len(c.targets) - 1; i >= 0; i-- {
 		target := c.targets[i]
@@ -489,6 +515,16 @@ func (c *JsGazelleConfig) GetSourceTarget(filePath string) *TargetGroup {
 // The list is the source of truth for the order of groups
 func (c *JsGazelleConfig) GetSourceTargets() []*TargetGroup {
 	return c.targets
+}
+func (c *JsGazelleConfig) GetSourceTarget(targetName string) *TargetGroup {
+	// Update existing target with the same name
+	for _, target := range c.targets {
+		if target.name == targetName {
+			return target
+		}
+	}
+
+	return nil
 }
 
 // AddTargetGlob sets the glob used to find source files for the specified target
