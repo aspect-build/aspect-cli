@@ -100,7 +100,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 		// TODO: exclude files which are included in custom targets via #keep
 
 		file := f.(string)
-		if target := cfg.GetSourceTarget(file); target != nil {
+		if target := cfg.GetFileSourceTarget(file); target != nil {
 			BazelLog.Tracef("add '%s' src '%s/%s'", target.name, args.Rel, file)
 
 			groupFiles, _ := sourceFileGroups.Get(target.name)
@@ -150,10 +150,10 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 			srcRule, srcGenErr := ts.addProjectRule(
 				cfg,
 				args,
+				group,
 				ruleName,
 				ruleSrcs,
 				dataFiles,
-				group.testonly,
 				result,
 			)
 			if srcGenErr != nil {
@@ -360,7 +360,7 @@ func hasTranspiledSources(sourceFiles *treeset.Set) bool {
 	return false
 }
 
-func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, targetName string, sourceFiles, dataFiles *treeset.Set, isTestRule bool, result *language.GenerateResult) (*rule.Rule, error) {
+func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.GenerateArgs, group *TargetGroup, targetName string, sourceFiles, dataFiles *treeset.Set, result *language.GenerateResult) (*rule.Rule, error) {
 	// Check for name-collisions with the rule being generated.
 	colError := gazelle.CheckCollisionErrors(targetName, TsProjectKind, sourceRuleKinds, args)
 	if colError != nil {
@@ -454,8 +454,12 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 	sourceRule.SetPrivateAttr("ts_project_info", info)
 	sourceRule.SetAttr("srcs", info.sources.Values())
 
-	if isTestRule {
+	if group.testonly {
 		sourceRule.SetAttr("testonly", true)
+	}
+
+	if len(group.visibility) > 0 {
+		sourceRule.SetAttr("visibility", group.visibility)
 	}
 
 	// If generating ts_config() targets also set the ts_project(tsconfig) and related attributes
