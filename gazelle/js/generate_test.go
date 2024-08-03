@@ -101,14 +101,33 @@ func TestGenerate(t *testing.T) {
 			impt:     "baz/../bar",
 			expected: "bar",
 		},
+		// URLs
+		{
+			pkg:      "dont-use-me",
+			from:     "anywhere.ts",
+			impt:     "https://me.com",
+			expected: "https://me.com",
+		},
+		{
+			pkg:      "dont-use-me",
+			from:     "anywhere.ts",
+			impt:     "http://me.com",
+			expected: "http://me.com",
+		},
+		{
+			pkg:      "dont-use-me",
+			from:     "anywhere.ts",
+			impt:     "anything://me",
+			expected: "anything://me",
+		},
 	} {
-		desc := fmt.Sprintf("toWorkspacePath(%s, %s, %s)", tc.pkg, tc.from, tc.impt)
+		desc := fmt.Sprintf("toImportSpecPath(%s, %s, %s)", tc.pkg, tc.from, tc.impt)
 
 		t.Run(desc, func(t *testing.T) {
-			importPath := toWorkspacePath(path.Join(tc.pkg, tc.from), tc.impt)
+			importPath := toImportSpecPath(path.Join(tc.pkg, tc.from), tc.impt)
 
 			if !reflect.DeepEqual(importPath, tc.expected) {
-				t.Errorf("toWorkspacePath('%s', '%s', '%s'): \nactual:   %s\nexpected:  %s\n", tc.pkg, tc.from, tc.impt, importPath, tc.expected)
+				t.Errorf("toImportSpecPath('%s', '%s', '%s'): \nactual:   %s\nexpected:  %s\n", tc.pkg, tc.from, tc.impt, importPath, tc.expected)
 			}
 		})
 	}
