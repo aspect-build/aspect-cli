@@ -126,6 +126,10 @@ func ForEachMapEntry(v starlark.Value, f func(k string, v starlark.Value)) {
 }
 
 func Read(v starlark.Value) interface{} {
+	return ReadRecurse(v, Read)
+}
+
+func ReadRecurse(v starlark.Value, read func(v starlark.Value) interface{}) interface{} {
 	switch v := v.(type) {
 	case starlark.NoneType:
 		return nil
@@ -139,9 +143,9 @@ func Read(v starlark.Value) interface{} {
 	case starlark.Float:
 		return float64(v)
 	case *starlark.List:
-		return ReadList(v, Read)
+		return ReadList(v, read)
 	case *starlark.Dict:
-		return ReadMap2(v, Read)
+		return ReadMap2(v, read)
 	}
 
 	log.Panicf("Failed to read starlark value %v", v)
