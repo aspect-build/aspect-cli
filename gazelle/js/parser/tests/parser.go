@@ -306,6 +306,20 @@ var testCases = []struct {
 		expectedImports: []string{"lib-export-star", "lib-export-star-as", "lib-from-default", "lib-impt"},
 		typeOnly:        true,
 	},
+	{
+		desc: "declare module protocol",
+		ts: `
+			declare module 'https://mod.com' {
+				export * from 'ftp://ancient.com';
+
+				export const a = 1
+			}
+		`,
+		filename:        "declare-protocol-module.ts",
+		expectedModules: []string{"https://mod.com"},
+		expectedImports: []string{"ftp://ancient.com"},
+		typeOnly:        true,
+	},
 }
 
 func RunParserTests(t *testing.T, parser parser.Parser, includeTypeOnly bool, parserPost string) {
