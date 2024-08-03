@@ -2,6 +2,7 @@ package starlark
 
 import (
 	"log"
+	"reflect"
 
 	"go.starlark.net/starlark"
 )
@@ -13,6 +14,11 @@ var EmptyStringBoolMap = make(map[string]bool)
 var EmptyStringMap = make(map[string]string)
 
 func Write(v interface{}) starlark.Value {
+	if sv, isSV := v.(starlark.Value); isSV {
+		return sv
+	}
+
+	// Primitive types
 	switch v := v.(type) {
 	case nil:
 		return starlark.None
@@ -40,7 +46,7 @@ func Write(v interface{}) starlark.Value {
 		return d
 	}
 
-	log.Panicf("Failed to write value %v", v)
+	log.Panicf("Failed to write value %v of type %q", v, reflect.TypeOf(v))
 	return nil
 }
 

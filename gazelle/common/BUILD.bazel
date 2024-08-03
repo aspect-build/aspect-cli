@@ -6,6 +6,7 @@ go_library(
         "bazel.go",
         "directives.go",
         "excludes.go",
+        "regex.go",
         "rules.go",
         "set.go",
         "walk.go",
