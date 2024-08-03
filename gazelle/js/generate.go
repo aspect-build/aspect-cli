@@ -269,7 +269,7 @@ func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args lang
 			imports = append(imports, ImportStatement{
 				ImportSpec: resolve.ImportSpec{
 					Lang: LanguageName,
-					Imp:  toWorkspacePath(SourcePath, tsconfig.Extends),
+					Imp:  toImportSpecPath(SourcePath, tsconfig.Extends),
 				},
 				ImportPath: tsconfig.Extends,
 				SourcePath: SourcePath,
@@ -602,12 +602,12 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePa
 
 	for _, importPath := range parseResults.Imports {
 		// The path from the root
-		workspacePath := toWorkspacePath(sourcePath, importPath)
+		workspacePath := toImportSpecPath(sourcePath, importPath)
 
 		if !cfg.IsImportIgnored(importPath) {
 			alternates := make([]string, 0)
 			for _, alt := range ts.tsconfig.ExpandPaths(sourcePath, importPath) {
-				alternates = append(alternates, toWorkspacePath(sourcePath, alt))
+				alternates = append(alternates, toImportSpecPath(sourcePath, alt))
 			}
 
 			// Record all imports. Maybe local, maybe data, maybe in other BUILD etc.
@@ -882,12 +882,18 @@ func toJsExt(f string) string {
 
 // Normalize the given import statement from a relative path
 // to a path relative to the workspace.
-func toWorkspacePath(importFrom, importPath string) string {
-	// Convert relative to workspace-relative
+func toImportSpecPath(importFrom, importPath string) string {
+	// Relative paths
 	if importPath[0] == '.' {
-		importPath = path.Join(path.Dir(importFrom), importPath)
+		return path.Join(path.Dir(importFrom), importPath)
 	}
 
+	// URLs of any protocol
+	if strings.Contains(importPath, "://") {
+		return importPath
+	}
+
+	// Non-relative imports such as packages, paths depending on `rootDirs` etc.
 	// Clean any extra . / .. etc
 	return path.Clean(importPath)
 }
