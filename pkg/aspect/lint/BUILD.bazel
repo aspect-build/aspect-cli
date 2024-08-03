@@ -16,6 +16,7 @@ go_library(
         "//pkg/bazel/workspace",
         "//pkg/ioutils",
         "//pkg/plugin/system/bep",
+        "//workflows/haze/haze-go",
         "@com_github_bluekeyes_go_gitdiff//gitdiff",
         "@com_github_charmbracelet_huh//:huh",
         "@com_github_fatih_color//:color",
