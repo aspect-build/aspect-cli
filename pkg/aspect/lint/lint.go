@@ -532,8 +532,12 @@ func (runner *Linter) applyLintPatch(patch []byte) error {
 
 	for _, file := range files {
 		// TODO: file.IsNew|IsDeleted|IsRename|IsCopy
+		oldpath, err := runner.bzl.AbsPathRelativeToWorkspace(file.OldName[2:])
+		if err != nil {
+			return err
+		}
 
-		oldSrc, openErr := os.OpenFile(file.OldName[2:], os.O_RDONLY, 0)
+		oldSrc, openErr := os.OpenFile(oldpath, os.O_RDONLY, 0)
 		if openErr != nil {
 			return openErr
 		}
@@ -545,7 +549,11 @@ func (runner *Linter) applyLintPatch(patch []byte) error {
 			return applyErr
 		}
 
-		writeErr := os.WriteFile(file.NewName[2:], output.Bytes(), file.NewMode.Perm())
+		newpath, err := runner.bzl.AbsPathRelativeToWorkspace(file.NewName[2:])
+		if err != nil {
+			return err
+		}
+		writeErr := os.WriteFile(newpath, output.Bytes(), file.NewMode.Perm())
 		if writeErr != nil {
 			return writeErr
 		}
