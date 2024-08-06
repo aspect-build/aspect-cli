@@ -17,17 +17,24 @@ http_archive(
 )
 
 http_archive(
+    name = "aspect_rules_swc",
+    sha256 = "0c2e8912725a1d97a37bb751777c9846783758f5a0a8e996f1b9d21cad42e839",
+    strip_prefix = "rules_swc-2.0.0-rc1",
+    url = "https://github.com/aspect-build/rules_swc/releases/download/v2.0.0-rc1/rules_swc-v2.0.0-rc1.tar.gz",
+)
+
+http_archive(
     name = "aspect_rules_js",
-    sha256 = "389021e29b3aeed2f6fb3a7a1478f8fc52947a6500b198a7ec0f3358c2842415",
-    strip_prefix = "rules_js-2.0.0-rc0",
-    url = "https://github.com/aspect-build/rules_js/releases/download/v2.0.0-rc0/rules_js-v2.0.0-rc0.tar.gz",
+    sha256 = "dfd2c5494b43704ab33574ae701b31b68ca27333e5da1a76b5e39374cdd8dda4",
+    strip_prefix = "rules_js-2.0.0-rc7",
+    url = "https://github.com/aspect-build/rules_js/releases/download/v2.0.0-rc7/rules_js-v2.0.0-rc7.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_ts",
-    sha256 = "3ea5cdb825d5dbffe286b3d9c5197a2648cf04b5e6bd8b913a45823cdf0ae960",
-    strip_prefix = "rules_ts-3.0.0-rc0",
-    url = "https://github.com/aspect-build/rules_ts/releases/download/v3.0.0-rc0/rules_ts-v3.0.0-rc0.tar.gz",
+    sha256 = "1d745fd7a5ffdb5bb7c0b77b36b91409a5933c0cbe25af32b05d90e26b7d14a7",
+    strip_prefix = "rules_ts-3.0.0-rc2",
+    url = "https://github.com/aspect-build/rules_ts/releases/download/v3.0.0-rc2/rules_ts-v3.0.0-rc2.tar.gz",
 )
 
 http_archive(
