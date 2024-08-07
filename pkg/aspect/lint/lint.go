@@ -31,7 +31,6 @@ import (
 	"aspect.build/cli/pkg/bazel/workspace"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/system/bep"
-	"github.com/aspect-build/silo/workflows/haze/haze-go"
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 	"github.com/charmbracelet/huh"
 	"github.com/fatih/color"
@@ -194,7 +193,7 @@ lint:
 	// https://bazel.build/extending/rules#validations_output_group
 	bazelCmd = append(bazelCmd, "--run_validations=false")
 
-	var downloadFlag = "--experimental_remote_download_regex"
+	downloadFlag := "--experimental_remote_download_regex"
 
 	// --experimental_remote_download_regex was deprecated in Bazel 7 in favor of
 	// --remote_download_regex. Use the latter if it is a valid flag so we don't see the warning:
@@ -313,7 +312,7 @@ lint:
 	exitCode := 0
 	for _, r := range results {
 		if r.ExitCode > 0 {
-			exitCode = int(haze.BazelExitCode_LINTING_FAILURE)
+			exitCode = int(aspecterrors.LintFailure)
 		}
 
 		printHeader := true
