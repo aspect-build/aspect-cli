@@ -5,5 +5,4 @@ docs/*.md
 docs/plugins/*.d.ts
 
 # Test code with intentional syntax variations.
-gazelle/js/tests/**/tsconfig.json
-gazelle/js/tests/**/*.ts
+gazelle/js/tests/**/*
