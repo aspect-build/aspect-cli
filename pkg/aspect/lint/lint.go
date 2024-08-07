@@ -193,7 +193,7 @@ lint:
 	// https://bazel.build/extending/rules#validations_output_group
 	bazelCmd = append(bazelCmd, "--run_validations=false")
 
-	downloadFlag := "--experimental_remote_download_regex"
+	var downloadFlag = "--experimental_remote_download_regex"
 
 	// --experimental_remote_download_regex was deprecated in Bazel 7 in favor of
 	// --remote_download_regex. Use the latter if it is a valid flag so we don't see the warning:
