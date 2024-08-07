@@ -10,35 +10,35 @@ aspect_cli_brew_artifacts_dev_bottles="$PWD/cli/aspect-cli_brew_artifacts_dev_bo
 # Functions
 
 warn() {
-	local msg="${1:-}"
-	shift 1
-	while (("$#")); do
-		msg="${msg:-}"$'\n'"${1}"
-		shift 1
-	done
-	echo >&2 "${msg}"
+    local msg="${1:-}"
+    shift 1
+    while (("$#")); do
+        msg="${msg:-}"$'\n'"${1}"
+        shift 1
+    done
+    echo >&2 "${msg}"
 }
 
 # Echos the provided message to stderr and exits with an error (1).
 fail() {
-	warn "$@"
-	exit 1
+    warn "$@"
+    exit 1
 }
 
 # Print an error message and dump the usage/help for the utility.
 # This function expects a get_usage function to be defined.
 usage_error() {
-	local msg="${1:-}"
-	cmd=(fail)
-	[[ -z "${msg:-}" ]] || cmd+=("${msg}" "")
-	cmd+=("$(get_usage)")
-	"${cmd[@]}"
+    local msg="${1:-}"
+    cmd=(fail)
+    [[ -z "${msg:-}" ]] || cmd+=("${msg}" "")
+    cmd+=("$(get_usage)")
+    "${cmd[@]}"
 }
 
 get_usage() {
-	local utility
-	utility="$(basename "${BASH_SOURCE[0]}")"
-	cat <<-EOF
+    local utility
+    utility="$(basename "${BASH_SOURCE[0]}")"
+    cat <<-EOF
 		Builds, stages, and installs locally built Homebrew formula and bottles.
 
 		Usage:
@@ -67,22 +67,22 @@ aspect_tap_dir="${homebrew_taps_dir}/${brew_repo_user}/homebrew-${brew_repo_name
 formula_out_path="${aspect_tap_dir}/Formula/${formula}.rb"
 
 while (("$#")); do
-	case "${1}" in
-	"--help")
-		get_usage
-		exit 0
-		;;
-	*)
-		usage_error "Unrecognized argument. ${1}"
-		;;
-	esac
+    case "${1}" in
+    "--help")
+        get_usage
+        exit 0
+        ;;
+    *)
+        usage_error "Unrecognized argument. ${1}"
+        ;;
+    esac
 done
 
 # Check for external tool dependencies
 which >/dev/null brew ||
-	fail "Homebrew must be installed to proceed. For instructions, please see https://brew.sh/."
+    fail "Homebrew must be installed to proceed. For instructions, please see https://brew.sh/."
 which >/dev/null nginx ||
-	fail "nginx must be installed to proceed. Run 'brew install nginx'."
+    fail "nginx must be installed to proceed. Run 'brew install nginx'."
 
 # Copy the bottles to the local web server
 mkdir -p "${bottles_output_dir}"
@@ -91,12 +91,12 @@ cp -fv "${aspect_cli_brew_artifacts_dev_bottles}"/* "${bottles_output_dir}/"
 
 # Uninstall the Aspect CLI, if it is installed
 brew list --formula "${fully_qualified_formula}" >/dev/null 2>&1 &&
-	echo "Uninstall formula. ${fully_qualified_formula}" &&
-	brew uninstall "${fully_qualified_formula}"
+    echo "Uninstall formula. ${fully_qualified_formula}" &&
+    brew uninstall "${fully_qualified_formula}"
 
 # If the tap is not present, add it.
 (brew tap | grep "aspect-build/aspect") ||
-	(echo "Add tap. ${aspect_tap}" && brew tap "${aspect_tap}" "${brew_repo_url}")
+    (echo "Add tap. ${aspect_tap}" && brew tap "${aspect_tap}" "${brew_repo_url}")
 
 # Copy the formula
 echo "Update formula. ${formula_out_path}"

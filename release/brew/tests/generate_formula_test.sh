@@ -4,13 +4,13 @@
 
 assertions_sh_location=aspect_bazel_lib/shlib/lib/assertions.sh
 assertions_sh="$(rlocation "${assertions_sh_location}")" ||
-	(echo >&2 "Failed to locate ${assertions_sh_location}" && exit 1)
+    (echo >&2 "Failed to locate ${assertions_sh_location}" && exit 1)
 # shellcheck source=/dev/null
 source "${assertions_sh}"
 
 generate_formula_sh_location=build_aspect_cli/release/brew/generate_formula.sh
 generate_formula_sh="$(rlocation "${generate_formula_sh_location}")" ||
-	(echo >&2 "Failed to locate ${generate_formula_sh_location}" && exit 1)
+    (echo >&2 "Failed to locate ${generate_formula_sh_location}" && exit 1)
 
 # Setup
 
@@ -32,30 +32,30 @@ EOF
 # MARK - Functions
 
 assert_ml_match() {
-	local actual="${1}"
-	local errmsg="${2:-}"
-	local expected
-	expected="$(</dev/stdin)"
+    local actual="${1}"
+    local errmsg="${2:-}"
+    local expected
+    expected="$(</dev/stdin)"
 
-	local cmd=(assert_match "${expected}" "${actual}")
-	[[ -n "${errmsg:-}" ]] && cmd+=("${errmsg}")
-	"${cmd[@]}"
+    local cmd=(assert_match "${expected}" "${actual}")
+    [[ -n "${errmsg:-}" ]] && cmd+=("${errmsg}")
+    "${cmd[@]}"
 }
 
 do_generate() {
-	local cmd=("${generate_formula_sh}")
-	cmd+=(--ruby_class_name MyApp)
-	cmd+=(--desc "My awesome application")
-	cmd+=(--homepage "https://example.com/myapp")
-	cmd+=(--url "https://github.com/example/myapp.git")
-	cmd+=(--version_file "${version_file}")
-	cmd+=(--license "Apache-2.0")
-	cmd+=(--bottle_root_url "https://cdn.example.com/bottles")
-	cmd+=(--bottle_entry "${monterey_bottle_entry_path}")
-	cmd+=(--bottle_entry "${arm64_monterey_bottle_entry_path}")
-	[[ $# -gt 0 ]] && cmd+=("$@")
+    local cmd=("${generate_formula_sh}")
+    cmd+=(--ruby_class_name MyApp)
+    cmd+=(--desc "My awesome application")
+    cmd+=(--homepage "https://example.com/myapp")
+    cmd+=(--url "https://github.com/example/myapp.git")
+    cmd+=(--version_file "${version_file}")
+    cmd+=(--license "Apache-2.0")
+    cmd+=(--bottle_root_url "https://cdn.example.com/bottles")
+    cmd+=(--bottle_entry "${monterey_bottle_entry_path}")
+    cmd+=(--bottle_entry "${arm64_monterey_bottle_entry_path}")
+    [[ $# -gt 0 ]] && cmd+=("$@")
 
-	"${cmd[@]}"
+    "${cmd[@]}"
 }
 
 # MARK - Test

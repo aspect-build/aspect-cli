@@ -13,8 +13,6 @@ query:
       query: deps(?target)
       verb: query
     why:
-      description:
-        Override the default why verb. Determine why targetA depends on
-        targetB
+      description: Override the default why verb. Determine why targetA depends on targetB
       query: somepath(?targetA, ?targetB)
       verb: query

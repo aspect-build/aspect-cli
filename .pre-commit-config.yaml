@@ -6,7 +6,6 @@
 # but we don't want to run the other hooks on commit messages
 default_stages: [commit]
 exclude: \.pb.go$
-
 repos:
   # Locally-authored hooks for better hermeticity
   - repo: local
