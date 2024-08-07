@@ -1,10 +1,8 @@
 name: Release
-
 on:
   push:
     tags:
       - '5.*.*'
-
 jobs:
   build:
     runs-on: ubuntu-latest

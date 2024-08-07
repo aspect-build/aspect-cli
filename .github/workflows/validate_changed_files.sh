@@ -13,19 +13,19 @@ git fetch --depth 1 origin "${GITHUB_REF}"
 
 git diff --name-only "origin/${GITHUB_BASE_REF}..${GITHUB_SHA}" | while read -r file; do
 
-	# check if filepath matches a valid path. If so move to the next change
-	for valid_path in "${VALID_FILE_PATHS[@]}"; do
-		if [[ "${file}" == "${valid_path}"* ]]; then
-			continue 2
-		fi
-	done
+    # check if filepath matches a valid path. If so move to the next change
+    for valid_path in "${VALID_FILE_PATHS[@]}"; do
+        if [[ "${file}" == "${valid_path}"* ]]; then
+            continue 2
+        fi
+    done
 
-	# check if filepath matches an invalid path
-	for invalid_path in "${INVALID_FILE_PATHS[@]}"; do
-		if [[ "${file}" == "${invalid_path}"* ]]; then
-			echo "Branch contains changes to versioned SDK files."
-			echo "Add the 'allow sdk change' tag to the PR and re-trigger CI to bypass this check."
-			exit 1
-		fi
-	done
+    # check if filepath matches an invalid path
+    for invalid_path in "${INVALID_FILE_PATHS[@]}"; do
+        if [[ "${file}" == "${invalid_path}"* ]]; then
+            echo "Branch contains changes to versioned SDK files."
+            echo "Add the 'allow sdk change' tag to the PR and re-trigger CI to bypass this check."
+            exit 1
+        fi
+    done
 done
