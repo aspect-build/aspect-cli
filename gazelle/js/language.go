@@ -4,21 +4,18 @@ import (
 	git "aspect.build/cli/gazelle/common/git"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	"aspect.build/cli/gazelle/js/typescript"
-	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
-	"github.com/bazelbuild/bazel-gazelle/resolve"
 )
 
 const LanguageName = "js"
+
+var _ language.Language = (*typeScriptLang)(nil)
 
 // The Gazelle extension for TypeScript rules.
 // TypeScript satisfies the language.Language interface including the
 // Configurer and Resolver types.
 type typeScriptLang struct {
-	config.Configurer
-	resolve.Resolver
-
 	// Importable files and the generating label.
 	fileLabels map[string]*label.Label
 
@@ -44,16 +41,11 @@ type typeScriptLang struct {
 func NewLanguage() language.Language {
 	pnpmProjects := pnpm.NewPnpmProjectMap()
 
-	l := typeScriptLang{
+	return &typeScriptLang{
 		fileLabels:   make(map[string]*label.Label),
 		moduleTypes:  make(map[string][]*label.Label),
 		pnpmProjects: pnpmProjects,
 		tsconfig:     typescript.NewTsWorkspace(pnpmProjects),
 		gitignore:    git.NewGitIgnore(),
 	}
-
-	l.Configurer = NewConfigurer(&l)
-	l.Resolver = NewResolver(&l)
-
-	return &l
 }
