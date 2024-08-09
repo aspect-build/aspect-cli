@@ -195,7 +195,7 @@ func (ts *typeScriptLang) Resolve(
 	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsConfigKind || r.Kind() == TsProtoLibraryKind {
 		deps := common.NewLabelSet(from)
 
-		err := ts.resolveModuleDeps(c, ix, deps, importData.(*TsProjectInfo).imports, from)
+		err := ts.resolveImports(c, ix, deps, importData.(*TsProjectInfo).imports, from)
 		if err != nil {
 			BazelLog.Fatalf("Resolution Error: ", err)
 			os.Exit(1)
@@ -226,27 +226,27 @@ func (ts *typeScriptLang) addTsLib(
 	}
 }
 
-func (ts *typeScriptLang) resolveModuleDeps(
+func (ts *typeScriptLang) resolveImports(
 	c *config.Config,
 	ix *resolve.RuleIndex,
 	deps *common.LabelSet,
-	modules *treeset.Set,
+	imports *treeset.Set,
 	from label.Label,
 ) error {
 	cfg := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	resolutionErrors := []error{}
 
-	it := modules.Iterator()
+	it := imports.Iterator()
 	for it.Next() {
-		mod := it.Value().(ImportStatement)
+		imp := it.Value().(ImportStatement)
 
-		resolutionType, dep, err := ts.resolveModuleDep(c, ix, mod, from)
+		resolutionType, dep, err := ts.resolveImport(c, ix, from, imp)
 		if err != nil {
 			return err
 		}
 
-		types := ts.resolveImportTypes(resolutionType, from, mod.Imp)
+		types := ts.resolveImportTypes(resolutionType, from, imp)
 		for _, typesDep := range types {
 			deps.Add(typesDep)
 		}
@@ -258,7 +258,7 @@ func (ts *typeScriptLang) resolveModuleDeps(
 		// Neither the import or a type definition was found.
 		if resolutionType == Resolution_NotFound && len(types) == 0 {
 			if cfg.ValidateImportStatements() != ValidationOff {
-				BazelLog.Debugf("import %q for target %q not found", mod.ImportPath, from.String())
+				BazelLog.Debugf("import %q for target %q not found", imp.ImportPath, from.String())
 
 				notFound := fmt.Errorf(
 					"Import %[1]q from %[2]q is an unknown dependency. Possible solutions:\n"+
@@ -268,7 +268,7 @@ func (ts *typeScriptLang) resolveModuleDeps(
 						"\t\t# gazelle:js_resolve import-string-glob label\n"+
 						"\t2. Ignore the dependency using the '# gazelle:%[3]s %[1]s' directive.\n"+
 						"\t3. Disable Gazelle resolution validation using '# gazelle:%[4]s off'",
-					mod.ImportPath, mod.SourcePath, Directive_IgnoreImports, Directive_ValidateImportStatements,
+					imp.ImportPath, imp.SourcePath, Directive_IgnoreImports, Directive_ValidateImportStatements,
 				)
 				resolutionErrors = append(resolutionErrors, notFound)
 			}
@@ -296,15 +296,15 @@ func (ts *typeScriptLang) resolveModuleDeps(
 	return nil
 }
 
-func (ts *typeScriptLang) resolveModuleDep(
+func (ts *typeScriptLang) resolveImport(
 	c *config.Config,
 	ix *resolve.RuleIndex,
-	mod ImportStatement,
 	from label.Label,
+	impStm ImportStatement,
 ) (ResolutionType, *label.Label, error) {
 	cfg := c.Exts[LanguageName].(*JsGazelleConfig)
 
-	imp := mod.ImportSpec
+	imp := impStm.ImportSpec
 
 	// Overrides
 	if override, ok := resolve.FindRuleWithOverride(c, imp, LanguageName); ok {
@@ -317,9 +317,9 @@ func (ts *typeScriptLang) resolveModuleDep(
 	}
 
 	possible := make([]resolve.ImportSpec, 0, 1)
-	possible = append(possible, mod.ImportSpec)
-	for _, expandedImp := range mod.Alt {
-		possible = append(possible, resolve.ImportSpec{Lang: mod.Lang, Imp: expandedImp})
+	possible = append(possible, impStm.ImportSpec)
+	for _, expandedImp := range impStm.Alt {
+		possible = append(possible, resolve.ImportSpec{Lang: impStm.Lang, Imp: expandedImp})
 	}
 
 	// Gazelle rule index. Try each potential expanded path
@@ -338,7 +338,7 @@ func (ts *typeScriptLang) resolveModuleDep(
 				return Resolution_Error, nil, fmt.Errorf(
 					"Import %q from %q resolved to multiple targets (%s)"+
 						" - this must be fixed using the \"gazelle:resolve\" directive",
-					mod.ImportPath, mod.SourcePath, targetListFromResults(matches))
+					impStm.ImportPath, impStm.SourcePath, targetListFromResults(matches))
 			}
 
 			// The matches were self imports, no dependency is needed
@@ -348,19 +348,19 @@ func (ts *typeScriptLang) resolveModuleDep(
 
 			match := filteredMatches[0]
 
-			BazelLog.Tracef("resolve %q import %q as %q", from, mod.Imp, match)
+			BazelLog.Tracef("resolve %q import %q as %q", from, impStm.Imp, match)
 
 			return Resolution_Override, &match, nil
 		}
 	}
 
 	// References to a label such as a file or file-generating rule
-	if importLabel := ts.GetImportLabel(imp.Imp); importLabel != nil {
+	if importLabel := ts.getImportLabel(imp.Imp); importLabel != nil {
 		return Resolution_Label, importLabel, nil
 	}
 
 	// References to an npm package, pnpm workspace projects etc.
-	if pkg := ts.resolvePackageImport(from, mod.Imp); pkg != nil {
+	if pkg := ts.resolvePackageImport(from, impStm.Imp); pkg != nil {
 		return Resolution_Package, pkg, nil
 	}
 
@@ -401,7 +401,7 @@ func (ts *typeScriptLang) resolvePackage(from label.Label, impPkg string) *label
 	return impPkgLabel
 }
 
-func (ts *typeScriptLang) resolveImportTypes(resolutionType ResolutionType, from label.Label, imp string) []*label.Label {
+func (ts *typeScriptLang) resolveImportTypes(resolutionType ResolutionType, from label.Label, imp ImportStatement) []*label.Label {
 	// Overrides are not extended with additional types
 	if resolutionType == Resolution_Override {
 		return nil
@@ -417,7 +417,7 @@ func (ts *typeScriptLang) resolveImportTypes(resolutionType ResolutionType, from
 	}
 
 	// Packages with specific @types/* definitions
-	if typesPkg := ts.resolveAtTypes(from, imp); typesPkg != nil {
+	if typesPkg := ts.resolveAtTypes(from, imp.Imp); typesPkg != nil {
 		// @types packages for any named imports
 		// The import may be a package, may be an unresolved import with only @types
 		return []*label.Label{typesPkg}
@@ -427,7 +427,7 @@ func (ts *typeScriptLang) resolveImportTypes(resolutionType ResolutionType, from
 	// then fallback to any custom module definitions such as 'declare module' statements.
 	if resolutionType == Resolution_NotFound {
 		// Custom module definitions for the import if there is no other resolution
-		if typeModules := ts.moduleTypes[imp]; typeModules != nil {
+		if typeModules := ts.moduleTypes[imp.Imp]; typeModules != nil {
 			return typeModules
 		}
 	}

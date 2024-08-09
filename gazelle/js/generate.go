@@ -36,7 +36,7 @@ const (
 	MaxWorkerCount = 12
 )
 
-func (ts *typeScriptLang) GetImportLabel(imp string) *label.Label {
+func (ts *typeScriptLang) getImportLabel(imp string) *label.Label {
 	return ts.fileLabels[imp]
 }
 
@@ -779,9 +779,7 @@ func toImportPaths(p string) []string {
 }
 
 // Collect and persist all possible references to files that can be imported
-func (ts *typeScriptLang) collectFileLabels(args language.GenerateArgs) map[string]*label.Label {
-	generators := make(map[string]*label.Label)
-
+func (ts *typeScriptLang) collectFileLabels(args language.GenerateArgs) {
 	// Generated files from rules such as genrule()
 	for _, f := range args.GenFiles {
 		// Label referencing that generated file
@@ -797,8 +795,6 @@ func (ts *typeScriptLang) collectFileLabels(args language.GenerateArgs) map[stri
 	}
 
 	// TODO(jbedard): record other generated non-source files (args.OtherGen, ?)
-
-	return generators
 }
 
 // Add rules representing packages, node_modules etc
