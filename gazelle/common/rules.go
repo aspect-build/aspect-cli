@@ -58,16 +58,10 @@ func RemoveRule(args language.GenerateArgs, ruleName string, generatedKinds *tre
 	}
 
 	// Only remove rules controlled by this gazelle plugin
-	if containsMappedKind(args, generatedKinds, existing.Kind()) {
-		// TODO(gazelle): result.Empty seems to not work as expected when the kind is mapped
-		// See https://github.com/bazelbuild/bazel-gazelle/issues/1440
-		if !existing.ShouldKeep() {
-			existing.Delete()
-		}
+	if mappedKind, isMapped := getMappedKind(args, generatedKinds, existing.Kind()); isMapped {
+		BazelLog.Infof("remove rule '%s:%s' (%q mapped as %q)", args.Rel, existing.Name(), mappedKind, existing.Kind())
 
-		BazelLog.Infof("remove rule '%s:%s' (%q)", args.Rel, existing.Name(), existing.Kind())
-
-		emptyRule := rule.NewRule(existing.Kind(), ruleName)
+		emptyRule := rule.NewRule(mappedKind, ruleName)
 		result.Empty = append(result.Empty, emptyRule)
 	}
 }
@@ -102,11 +96,16 @@ func CheckCollisionErrors(targetName, expectedKind string, generatedKinds *trees
 }
 
 func containsMappedKind(args language.GenerateArgs, generatedKinds *treeset.Set, kind string) bool {
+	_, found := getMappedKind(args, generatedKinds, kind)
+	return found
+}
+
+func getMappedKind(args language.GenerateArgs, generatedKinds *treeset.Set, kind string) (string, bool) {
 	for _, generatedKind := range generatedKinds.Values() {
 		if MapKind(args, generatedKind.(string)) == kind {
-			return true
+			return generatedKind.(string), true
 		}
 	}
 
-	return false
+	return "", false
 }
