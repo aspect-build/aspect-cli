@@ -476,10 +476,39 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 
 			sourceRule.SetAttr("tsconfig", tsconfigLabel.BzlExpr())
 
+			// Reflect the tsconfig allow_js in the ts_project rule
 			if tsconfig.AllowJs != nil {
 				sourceRule.SetAttr("allow_js", *tsconfig.AllowJs)
 			} else if existing != nil {
 				existing.DelAttr("allow_js")
+			}
+
+			// Reflect the tsconfig declaration in the ts_project rule
+			if tsconfig.Declaration != nil {
+				sourceRule.SetAttr("declaration", *tsconfig.Declaration)
+			} else if existing != nil {
+				existing.DelAttr("declaration")
+			}
+
+			// Reflect the tsconfig declaration_map in the ts_project rule
+			if tsconfig.DeclarationMap != nil {
+				sourceRule.SetAttr("declaration_map", *tsconfig.DeclarationMap)
+			} else if existing != nil {
+				existing.DelAttr("declaration_map")
+			}
+
+			// Reflect the tsconfig declaration in the ts_project rule
+			if tsconfig.SourceMap != nil {
+				sourceRule.SetAttr("source_map", *tsconfig.SourceMap)
+			} else if existing != nil {
+				existing.DelAttr("source_map")
+			}
+
+			// Reflect the tsconfig resolve_json_module in the ts_project rule
+			if tsconfig.ResolveJsonModule != nil {
+				sourceRule.SetAttr("resolve_json_module", *tsconfig.ResolveJsonModule)
+			} else if existing != nil {
+				existing.DelAttr("resolve_json_module")
 			}
 
 			// Reflect the tsconfig out_dir in the ts_project rule
@@ -499,7 +528,11 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 			// Clear tsconfig related attributes if no tsconfig is found
 			existing.DelAttr("tsconfig")
 			existing.DelAttr("allow_js")
+			existing.DelAttr("declaration")
+			existing.DelAttr("declaration_map")
 			existing.DelAttr("out_dir")
+			existing.DelAttr("resolve_json_module")
+			existing.DelAttr("source_map")
 			existing.DelAttr("root_dir")
 		}
 	}

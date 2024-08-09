@@ -1,2 +1,2 @@
 # This is a Bazel workspace for the Gazelle test data.
-workspace(name = "tsconfig_allowjs")
+workspace(name = "tsconfig_attrs_inherited")

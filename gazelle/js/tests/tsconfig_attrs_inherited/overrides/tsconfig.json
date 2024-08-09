@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "allowJs": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "resolveJsonModule": true
+  }
+}
