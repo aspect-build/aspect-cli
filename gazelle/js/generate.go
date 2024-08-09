@@ -665,7 +665,7 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePa
 
 // Parse the passed file for import statements.
 func parseSourceFile(rootDir, filePath string) (parser.ParseResult, []error) {
-	BazelLog.Debugf("ParseImports: %s", filePath)
+	BazelLog.Tracef("ParseImports(%s): %s", LanguageName, filePath)
 
 	content, err := os.ReadFile(path.Join(rootDir, filePath))
 	if err != nil {

@@ -43,7 +43,7 @@ func (*typeScriptLang) Name() string { return LanguageName }
 // Determine what rule (r) outputs which can be imported.
 // For TypeScript this is all the import-paths pointing to files within the rule.
 func (ts *typeScriptLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
-	BazelLog.Debugf("Imports(%s) '%s:%s'", LanguageName, f.Pkg, r.Name())
+	BazelLog.Debugf("Imports(%s): //%s:%s", LanguageName, f.Pkg, r.Name())
 
 	switch r.Kind() {
 	case TsProtoLibraryKind:
@@ -148,7 +148,7 @@ func (ts *typeScriptLang) protoLibraryImports(r *rule.Rule, f *rule.File) []reso
 // the embedding rule will be indexed. The embedding rule will inherit
 // the imports of the embedded rule.
 func (ts *typeScriptLang) Embeds(r *rule.Rule, from label.Label) []label.Label {
-	BazelLog.Debugf("Embeds %q rules", from.String())
+	BazelLog.Debugf("Embeds(%s): '//%s:%s'", LanguageName, from.Pkg, r.Name())
 
 	switch r.Kind() {
 	case TsProjectKind:
@@ -189,7 +189,7 @@ func (ts *typeScriptLang) Resolve(
 	from label.Label,
 ) {
 	start := time.Now()
-	BazelLog.Infof("Resolve(%s): %q dependencies", LanguageName, from.String())
+	BazelLog.Infof("Resolve(%s): //%s:%s", LanguageName, from.Pkg, r.Name())
 
 	// TsProject imports are resolved as deps
 	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsConfigKind || r.Kind() == TsProtoLibraryKind {
@@ -210,7 +210,7 @@ func (ts *typeScriptLang) Resolve(
 		}
 	}
 
-	BazelLog.Infof("Resolve(%s): %q DONE in %s", LanguageName, from.String(), time.Since(start).String())
+	BazelLog.Infof("Resolve(%s): //%s:%s DONE in %s", LanguageName, from.Pkg, r.Name(), time.Since(start).String())
 }
 func (ts *typeScriptLang) addTsLib(
 	c *config.Config,
