@@ -1,14 +1,19 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
+# gazelle:js_tsconfig enabled
+
 ts_project(
-    name = "extends",
+    name = "tsconfig_attrs_inherited",
     srcs = ["main.ts"],
     allow_js = True,
+    declaration = True,
+    declaration_map = True,
+    resolve_json_module = False,
+    source_map = True,
     tsconfig = ":tsconfig",
 )
 
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
-    deps = ["//:tsconfig"],
 )

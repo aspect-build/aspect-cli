@@ -4,6 +4,10 @@ ts_project(
     name = "removed",
     srcs = ["main.ts"],
     allow_js = True,
+    source_map = False,
+    declaration = False,
+    declaration = True,
+    resolve_json_module = False,
     tsconfig = ":tsconfig",
 )
 

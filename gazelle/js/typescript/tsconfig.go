@@ -29,15 +29,19 @@ import (
 )
 
 type tsCompilerOptionsJSON struct {
-	AllowJs       *bool                `json:"allowJs"`
-	OutDir        *string              `json:"outDir"`
-	RootDir       *string              `json:"rootDir"`
-	RootDirs      *[]string            `json:"rootDirs"`
-	BaseUrl       *string              `json:"baseUrl"`
-	Paths         *map[string][]string `json:"paths"`
-	Types         *[]string            `json:"types"`
-	JSX           *TsConfigJsxType     `json:"jsx"`
-	ImportHelpers *bool                `json:"importHelpers"`
+	AllowJs           *bool                `json:"allowJs"`
+	Declaration       *bool                `json:"declaration"`
+	DeclarationMap    *bool                `json:"declarationMap"`
+	SourceMap         *bool                `json:"sourceMap"`
+	ResolveJsonModule *bool                `json:"resolveJsonModule"`
+	OutDir            *string              `json:"outDir"`
+	RootDir           *string              `json:"rootDir"`
+	RootDirs          *[]string            `json:"rootDirs"`
+	BaseUrl           *string              `json:"baseUrl"`
+	Paths             *map[string][]string `json:"paths"`
+	Types             *[]string            `json:"types"`
+	JSX               *TsConfigJsxType     `json:"jsx"`
+	ImportHelpers     *bool                `json:"importHelpers"`
 }
 
 type tsReferenceJSON struct {
@@ -76,10 +80,14 @@ type TsConfig struct {
 	// Name of the tsconfig file relative to ConfigDir
 	ConfigName string
 
-	AllowJs *bool
-	OutDir  string
-	RootDir string
-	BaseUrl string
+	AllowJs           *bool
+	ResolveJsonModule *bool
+	Declaration       *bool
+	DeclarationMap    *bool
+	SourceMap         *bool
+	OutDir            string
+	RootDir           string
+	BaseUrl           string
 
 	VirtualRootDirs []string
 
@@ -215,6 +223,34 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		allowJs = baseConfig.AllowJs
 	}
 
+	var declaration *bool
+	if c.CompilerOptions.Declaration != nil {
+		declaration = c.CompilerOptions.Declaration
+	} else if baseConfig != nil {
+		declaration = baseConfig.Declaration
+	}
+
+	var declarationMap *bool
+	if c.CompilerOptions.DeclarationMap != nil {
+		declarationMap = c.CompilerOptions.DeclarationMap
+	} else if baseConfig != nil {
+		declarationMap = baseConfig.DeclarationMap
+	}
+
+	var sourceMap *bool
+	if c.CompilerOptions.SourceMap != nil {
+		sourceMap = c.CompilerOptions.SourceMap
+	} else if baseConfig != nil {
+		sourceMap = baseConfig.SourceMap
+	}
+
+	var resolveJsonModule *bool
+	if c.CompilerOptions.ResolveJsonModule != nil {
+		resolveJsonModule = c.CompilerOptions.ResolveJsonModule
+	} else if baseConfig != nil {
+		resolveJsonModule = baseConfig.ResolveJsonModule
+	}
+
 	var RootDir string
 	if c.CompilerOptions.RootDir != nil {
 		RootDir = path.Clean(*c.CompilerOptions.RootDir)
@@ -277,19 +313,23 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	}
 
 	config := TsConfig{
-		ConfigDir:       configDir,
-		ConfigName:      configName,
-		AllowJs:         allowJs,
-		OutDir:          OutDir,
-		RootDir:         RootDir,
-		BaseUrl:         BaseUrl,
-		Paths:           Paths,
-		VirtualRootDirs: VirtualRootDirs,
-		Extends:         extends,
-		ImportHelpers:   importHelpers,
-		Jsx:             jsx,
-		Types:           types,
-		References:      references,
+		ConfigDir:         configDir,
+		ConfigName:        configName,
+		AllowJs:           allowJs,
+		Declaration:       declaration,
+		DeclarationMap:    declarationMap,
+		SourceMap:         sourceMap,
+		ResolveJsonModule: resolveJsonModule,
+		OutDir:            OutDir,
+		RootDir:           RootDir,
+		BaseUrl:           BaseUrl,
+		Paths:             Paths,
+		VirtualRootDirs:   VirtualRootDirs,
+		Extends:           extends,
+		ImportHelpers:     importHelpers,
+		Jsx:               jsx,
+		Types:             types,
+		References:        references,
 	}
 
 	return &config, nil

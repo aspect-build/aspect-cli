@@ -1,9 +1,13 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
 ts_project(
-    name = "overrides",
+    name = "extends",
     srcs = ["main.ts"],
-    allow_js = False,
+    allow_js = True,
+    declaration = True,
+    declaration_map = True,
+    resolve_json_module = False,
+    source_map = True,
     tsconfig = ":tsconfig",
 )
 
