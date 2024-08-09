@@ -17,33 +17,25 @@ import (
 
 // Configurer satisfies the config.Configurer interface. It's the
 // language-specific configuration extension.
-type Configurer struct {
-	lang *typeScriptLang
-}
-
-func NewConfigurer(lang *typeScriptLang) config.Configurer {
-	return &Configurer{
-		lang: lang,
-	}
-}
+var _ config.Configurer = (*typeScriptLang)(nil)
 
 // RegisterFlags registers command-line flags used by the extension. This
 // method is called once with the root configuration when Gazelle
 // starts. RegisterFlags may set an initial values in Config.Exts. When flags
 // are set, they should modify these values.
-func (ts *Configurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {}
+func (ts *typeScriptLang) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {}
 
 // CheckFlags validates the configuration after command line flags are parsed.
 // This is called once with the root configuration when Gazelle starts.
 // CheckFlags may set default values in flags or make implied changes.
-func (ts *Configurer) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
+func (ts *typeScriptLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	return nil
 }
 
 // KnownDirectives returns a list of directive keys that this Configurer can
 // interpret. Gazelle prints errors for directives that are not recoginized by
 // any Configurer.
-func (ts *Configurer) KnownDirectives() []string {
+func (ts *typeScriptLang) KnownDirectives() []string {
 	return []string{
 		Directive_TypeScriptExtension,
 		Directive_TypeScriptProtoExtension,
@@ -84,7 +76,7 @@ func (ts *Configurer) KnownDirectives() []string {
 //
 // f is the build file for the current directory or nil if there is no
 // existing build file.
-func (ts *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
+func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) {
 	BazelLog.Tracef("Configure(%s): %s", LanguageName, rel)
 
 	// Create the root config.
@@ -104,26 +96,26 @@ func (ts *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 	// Enable the WALKSUBDIR gazelle patch, setting the flag depending on the js GenerationMode.
 	c.Exts[common.ASPECT_WALKSUBDIR] = c.Exts[LanguageName].(*JsGazelleConfig).generationMode == GenerationModeNone
 
-	ts.lang.gitignore.CollectIgnoreFiles(c, rel)
+	ts.gitignore.CollectIgnoreFiles(c, rel)
 }
 
-func (ts *Configurer) readConfigurations(c *config.Config, rel string) {
+func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
 	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	// pnpm
 	lockfilePath := path.Join(c.RepoRoot, rel, config.PnpmLockfile())
 	if _, err := os.Stat(lockfilePath); err == nil {
-		ts.lang.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, config.PnpmLockfile()))
+		ts.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, config.PnpmLockfile()))
 	}
 
 	// tsconfig
 	configPath := path.Join(c.RepoRoot, rel, config.tsconfigName)
 	if _, err := os.Stat(configPath); err == nil {
-		ts.lang.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.tsconfigName)
+		ts.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.tsconfigName)
 	}
 }
 
-func (ts *Configurer) readDirectives(c *config.Config, rel string, f *rule.File) {
+func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.File) {
 	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	for _, d := range f.Directives {

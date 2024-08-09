@@ -20,11 +20,7 @@ import (
 	jvm_types "github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 )
 
-type Resolver struct {
-	resolve.Resolver
-
-	lang *kotlinLang
-}
+var _ resolve.Resolver = (*kotlinLang)(nil)
 
 const (
 	Resolution_Error        = -1
@@ -36,18 +32,12 @@ const (
 
 type ResolutionType = int
 
-func NewResolver(lang *kotlinLang) *Resolver {
-	return &Resolver{
-		lang: lang,
-	}
-}
-
-func (*Resolver) Name() string {
+func (*kotlinLang) Name() string {
 	return LanguageName
 }
 
 // Determine what rule (r) outputs which can be imported.
-func (kt *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
+func (kt *kotlinLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
 	BazelLog.Debugf("Imports(%s): '%s:%s'", LanguageName, f.Pkg, r.Name())
 
 	if r.PrivateAttr(packagesKey) != nil {
@@ -70,11 +60,11 @@ func (kt *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []reso
 	return nil
 }
 
-func (kt *Resolver) Embeds(r *rule.Rule, from label.Label) []label.Label {
+func (kt *kotlinLang) Embeds(r *rule.Rule, from label.Label) []label.Label {
 	return []label.Label{}
 }
 
-func (kt *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.RemoteCache, r *rule.Rule, importData interface{}, from label.Label) {
+func (kt *kotlinLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.RemoteCache, r *rule.Rule, importData interface{}, from label.Label) {
 	start := time.Now()
 	BazelLog.Infof("Resolve '%s' dependencies", from.String())
 
@@ -101,7 +91,7 @@ func (kt *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 	BazelLog.Infof("Resolve '%s' DONE in %s", from.String(), time.Since(start).String())
 }
 
-func (kt *Resolver) resolveImports(
+func (kt *kotlinLang) resolveImports(
 	c *config.Config,
 	ix *resolve.RuleIndex,
 	imports *treeset.Set,
@@ -144,7 +134,7 @@ func (kt *Resolver) resolveImports(
 	return deps, nil
 }
 
-func (kt *Resolver) resolveImport(
+func (kt *kotlinLang) resolveImport(
 	c *config.Config,
 	ix *resolve.RuleIndex,
 	impt ImportStatement,
@@ -197,7 +187,7 @@ func (kt *Resolver) resolveImport(
 	cfg, _ := cfgs[from.Pkg]
 
 	// Maven imports
-	if mavenResolver := kt.lang.mavenResolver; mavenResolver != nil {
+	if mavenResolver := kt.mavenResolver; mavenResolver != nil {
 		if l, mavenError := (*mavenResolver).Resolve(jvm_import, cfg.ExcludedArtifacts(), cfg.MavenRepositoryName()); mavenError == nil {
 			return Resolution_Label, &l, nil
 		} else {
