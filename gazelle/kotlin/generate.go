@@ -202,7 +202,7 @@ func (kt *kotlinLang) parseFiles(args language.GenerateArgs, sources *treeset.Se
 
 // Parse the passed file for import statements.
 func parseFile(rootDir, filePath string) (*parser.ParseResult, []error) {
-	BazelLog.Debugf("ParseImports: %s", filePath)
+	BazelLog.Tracef("ParseImports(%s): %s", LanguageName, filePath)
 
 	content, err := os.ReadFile(path.Join(rootDir, filePath))
 	if err != nil {
