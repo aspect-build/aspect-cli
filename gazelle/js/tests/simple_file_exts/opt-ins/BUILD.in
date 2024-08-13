@@ -1,0 +1,2 @@
+# gazelle:js_files **/*.{js,cjs,mjs,jsx,ts,tsx,mts,cts}
+# gazelle:js_test_files **/*.spec.{js,cjs,mjs,jsx,ts,tsx,mts,cts}

@@ -140,7 +140,7 @@ var (
 	declarationFileExtensionsArray = []string{"d.ts", "d.mts", "d.cts"}
 
 	// Supported javascript file extensions that can be sources along with dts files.
-	javascriptFileExtensions = treeset.NewWithStringComparator("js")
+	javascriptFileExtensions = treeset.NewWithStringComparator("js", "jsx", "cjs", "mjs")
 
 	// Supported data file extensions that typescript can reference.
 	dataFileExtensions = treeset.NewWithStringComparator("json")
