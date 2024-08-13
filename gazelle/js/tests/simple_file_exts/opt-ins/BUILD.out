@@ -1,0 +1,25 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+
+# gazelle:js_files **/*.{js,cjs,mjs,jsx,ts,tsx,mts,cts}
+# gazelle:js_test_files **/*.spec.{js,cjs,mjs,jsx,ts,tsx,mts,cts}
+
+js_library(
+    name = "opt-ins",
+    srcs = [
+        "non-typed.cjs",
+        "non-typed.js",
+        "non-typed.mjs",
+        "non-typed.ts.js",
+        "non-x-typed.jsx",
+    ],
+)
+
+js_library(
+    name = "opt-ins_tests",
+    testonly = True,
+    srcs = [
+        "non-typed.spec.js",
+        "non-typed.spec.mjs",
+        "non-x-typed.spec.jsx",
+    ],
+)
