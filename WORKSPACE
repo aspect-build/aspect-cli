@@ -164,12 +164,12 @@ http_archive(
         "//:patches/bazelbuild_bazel-gazelle_aspect-cli.patch",
         "//:patches/bazelbuild_bazel-gazelle_aspect-walk-subdir.patch",
     ],
-    sha256 = "d76bf7a60fd8b050444090dfa2837a4eaf9829e1165618ee35dceca5cbdf58d5",
+    sha256 = "8ad77552825b078a10ad960bec6ef77d2ff8ec70faef2fd038db713f410f5d87",
     # Ensure this version always matches the go.mod version.
     #
     # :notice: Care should be taken when upgrading gazelle since we have vendored & modified parts of gazelle
     # in the CLI configure command (cli/core/pkg/aspect/configure).
-    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.37.0/bazel-gazelle-v0.37.0.tar.gz"],
+    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.38.0/bazel-gazelle-v0.38.0.tar.gz"],
 )
 
 http_archive(
