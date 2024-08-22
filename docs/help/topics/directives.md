@@ -4,9 +4,23 @@ You can configure Aspect CLI using directives, which are specially-formatted
 comments in `BUILD` files that govern behavior of the tool when visiting files
 within the Bazel package rooted at that file.
 
+There are generic [gazelle directives] that apply to any language, Aspect directives
+supported by Aspect authored languages, and directives specific to individual languages.
+
+## Aspect CLI
+
+Directives supported by Aspect languages.
+
+<!-- prettier-ignore-start -->
+| **Directive**                                           | **Default value**           |
+| ------------------------------------------------------- | --------------------------- |
+| `# gazelle:generation_mode none\|update\|create`        | `create`                    | 
+| Traditionally gazelle generates new BUILD files in each and every directory.<br />This directive allows you to control whether gazelle should only update existing BUILD files or create new BUILD files, or neither.
+<!-- prettier-ignore-end -->
+
 ## Go
 
-Go directives for generating BUILD files are from the standard [gazelle directives].
+Go directives for generating BUILD files are from the standard [gazelle go directives].
 
 ## JavaScript
 
@@ -45,8 +59,10 @@ enable other projects to declare dependencies on the package.
 | ------------------------------------------------------- | --------------------------- |
 | `# gazelle:js enabled\|disabled`                        | `enabled`                   |
 | Enable the JavaScript directives. |
-| `# gazelle:js_generation_mode none\|directory`          | `directory`                 | 
-| Enable generation of new BUILD files within each directory, or do not generate and only modify existing BUILD files. |
+| `# gazelle:js_tsconfig enabled\|disabled`               | `enabled`                   |
+| Enable generation of `ts_config` rules.<br />This value is inherited by sub-directories and applied relative to each BUILD.<br />The `ts_project(tsconfig)` attribute is *NOT* set and must be done manually if necessary |
+| `# gazelle:js_npm_package enabled\|disabled\|referenced`| `referenced`                |
+| Enable generation of `npm_package` targets.<br />When set to `referenced` (DEPRECATED) `npm_package` targets will only be generated for packages that are referenced by other projects. |
 | `# gazelle:js_pnpm_lockfile _lockfile_`                 | `pnpm-lock.yaml`            |
 | Path to the `pnpm-lock.yaml` file containing available npm packages. <br />This value is inherited by sub-directories and applied relative to each BUILD. |
 | `# gazelle:js_ignore_imports _glob_`                    |                             |
@@ -65,10 +81,13 @@ enable other projects to declare dependencies on the package.
 | Equivalent to `js_files` but for the test `ts_project` rule. |
 | `# gazelle:js_npm_package_target_name _name_`           | `{dirname}`                 |
 | The format used to generate the name of the `npm_package` rule. |
-| `# gazelle:js_tsconfig enabled\|disabled`               | `enabled`                   |
-| Enable generation of `ts_config` rules.<br />This value is inherited by sub-directories and applied relative to each BUILD.<br />The `ts_project(tsconfig)` attribute is *NOT* set and must be done manually if necessary |
-| `# gazelle:js_custom_files _name_ _glob_`               |                             | Generate additional custom `ts_project` targets |
-| `# gazelle:js_custom_test_files _name_ _glob_`          |                             | Generate additional custom `ts_project` testonly targets |
+| `# gazelle:js_generation_mode none\|directory`          | `directory`                 | 
+| DEPRECATED: see `generation_mode` directive. |
+| `# gazelle:js_custom_files _name_ _glob_`               |                             |
+| DEPRECATED:Generate additional custom `ts_project` targets |
+| `# gazelle:js_custom_test_files _name_ _glob_`          |                             |
+| DEPRECATED:Generate additional custom `ts_project` testonly targets
 <!-- prettier-ignore-end -->
 
 [gazelle directives]: https://github.com/bazelbuild/bazel-gazelle#directives
+[[gazelle go directives]]: https://github.com/bazelbuild/bazel-gazelle#directives
