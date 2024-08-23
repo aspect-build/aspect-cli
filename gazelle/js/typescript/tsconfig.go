@@ -131,10 +131,8 @@ func isRelativePath(p string) bool {
 
 // Load a tsconfig.json file and return the compilerOptions config with
 // recursive protected via a parsed map that is passed in
-func parseTsConfigJSONFile(parsed map[string]*TsConfig, resolver TsConfigResolver, root, dir, tsconfig string) (*TsConfig, error) {
-	key := path.Join(dir, tsconfig)
-
-	existing := parsed[key]
+func parseTsConfigJSONFile(parsed map[string]*TsConfig, resolver TsConfigResolver, root, tsconfig string) (*TsConfig, error) {
+	existing := parsed[tsconfig]
 
 	// Existing pointing to `InvalidTsconfig` implies recursion
 	if existing == &InvalidTsconfig {
@@ -148,31 +146,21 @@ func parseTsConfigJSONFile(parsed map[string]*TsConfig, resolver TsConfigResolve
 	}
 
 	// Start with invalid to prevent recursing into the same file
-	parsed[key] = &InvalidTsconfig
+	parsed[tsconfig] = &InvalidTsconfig
 
-	potentialConfigs := resolver(dir, tsconfig)
-
-	for _, potentialTsConfig := range potentialConfigs {
-		content, err := os.ReadFile(path.Join(root, potentialTsConfig))
-		if err != nil {
-			BazelLog.Tracef("TsConfig lookup of %q from %q as %q not found: %v", tsconfig, dir, potentialTsConfig, err)
-			continue
-		}
-
-		config, err := parseTsConfigJSON(parsed, resolver, root, dir, tsconfig, content)
-		if err != nil {
-			return nil, err
-		}
-
-		// Add to parsed map on success
-		parsed[key] = config
-		return config, nil
+	content, err := os.ReadFile(path.Join(root, tsconfig))
+	if err != nil {
+		return nil, fmt.Errorf("tsconfig %q not found", tsconfig)
 	}
 
-	return nil, fmt.Errorf("tsconfig %q from %q not found", tsconfig, dir)
+	config, err := parseTsConfigJSON(parsed, resolver, root, tsconfig, content)
+	if config != nil {
+		parsed[tsconfig] = config
+	}
+	return config, err
 }
 
-func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, root, configDir, configName string, tsconfigContent []byte) (*TsConfig, error) {
+func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, root, tsconfig string, tsconfigContent []byte) (*TsConfig, error) {
 	var c tsConfigJSON
 	if err := jsonr.Unmarshal(tsconfigContent, &c); err != nil {
 		return nil, err
@@ -181,14 +169,24 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	var baseConfig *TsConfig
 	var extends string
 	if c.Extends != "" {
-		base, err := parseTsConfigJSONFile(parsed, resolver, root, configDir, c.Extends)
-		if err != nil {
-			BazelLog.Warnf("Failed to load base tsconfig file %q from %q: %v", c.Extends, path.Join(configDir, configName), err)
-		} else if base != nil {
-			extends = path.Clean(c.Extends)
-			baseConfig = base
+		for _, potential := range resolver(path.Dir(tsconfig), c.Extends) {
+			base, err := parseTsConfigJSONFile(parsed, resolver, root, potential)
+			if os.IsNotExist(err) {
+				continue
+			}
+
+			if err != nil {
+				BazelLog.Warnf("Failed to load base tsconfig file %q from %q: %v", c.Extends, tsconfig, err)
+			} else if base != nil {
+				extends = path.Clean(c.Extends)
+				baseConfig = base
+				break
+			}
 		}
 	}
+
+	configDir := path.Dir(tsconfig)
+	configName := path.Base(tsconfig)
 
 	var types []string
 	if c.CompilerOptions.Types != nil && len(*c.CompilerOptions.Types) > 0 {
@@ -280,7 +278,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		}
 	} else if baseConfig != nil {
 		Paths = &TsConfigPaths{
-			Rel: path.Join(baseConfig.Paths.Rel, baseConfigRel),
+			Rel: path.Join(baseConfigRel, baseConfig.Paths.Rel),
 			Map: baseConfig.Paths.Map,
 		}
 	} else {

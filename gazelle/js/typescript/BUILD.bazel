@@ -19,6 +19,6 @@ go_library(
 go_test(
     name = "typescript_test",
     srcs = ["tsconfig_test.go"],
-    data = glob(["tests/*.json"]),
+    data = glob(["tests/**/*.json"]),
     embed = [":typescript"],
 )

@@ -74,7 +74,7 @@ func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
 		return c
 	}
 
-	c, err := parseTsConfigJSONFile(tc.cm.configs, tc.tsConfigResolver, p.root, p.rel, p.fileName)
+	c, err := parseTsConfigJSONFile(tc.cm.configs, tc.tsConfigResolver, p.root, path.Join(p.rel, p.fileName))
 	if err != nil {
 		fmt.Printf("Failed to parse tsconfig file %s: %v\n", path.Join(p.rel, p.fileName), err)
 		return nil

@@ -1,0 +1,8 @@
+{
+  "extends": "../base.tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "alias-b": ["src/lib/b"]
+    }
+  }
+}
