@@ -63,6 +63,8 @@ enable other projects to declare dependencies on the package.
 | Enable generation of `ts_config` rules.<br />This value is inherited by sub-directories and applied relative to each BUILD.<br />The `ts_project(tsconfig)` attribute is *NOT* set and must be done manually if necessary |
 | `# gazelle:js_npm_package enabled\|disabled\|referenced`| `referenced`                |
 | Enable generation of `npm_package` targets.<br />When set to `referenced` (DEPRECATED) `npm_package` targets will only be generated for packages that are referenced by other projects. |
+| `# gazelle:js_npm_package enabled\|disabled\|referenced`| `referenced`                |
+| Enable generation of `npm_package` targets.<br />DEPRECATED: `referenced` will only generate `npm_package` targets for packages that are referenced by other projects. |
 | `# gazelle:js_pnpm_lockfile _lockfile_`                 | `pnpm-lock.yaml`            |
 | Path to the `pnpm-lock.yaml` file containing available npm packages. <br />This value is inherited by sub-directories and applied relative to each BUILD. |
 | `# gazelle:js_ignore_imports _glob_`                    |                             |

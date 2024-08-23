@@ -24,6 +24,8 @@ const (
 	Directive_TypeScriptProtoExtension = "js_proto"
 	// En/disable ts_config generation
 	Directive_TypeScriptConfigExtension = "js_tsconfig"
+	// En/disable npm_package generation and when generate
+	Directive_NpmPackageExtension = "js_npm_package"
 	// Directive_GenerationMode represents the directive that controls the BUILD generation
 	// mode. See below for the GenerationModeType constants.
 	Directive_GenerationMode = "js_generation_mode"
@@ -77,6 +79,14 @@ const (
 	// GenerationModeDirectory defines the mode in which a coarse-grained target will
 	// be generated for each sub-directory.
 	GenerationModeDirectory GenerationModeType = "directory"
+)
+
+type NpmPackageMode string
+
+const (
+	NpmPackageEnabledMode    NpmPackageMode = "enabled"
+	NpmPackageDisabledMode   NpmPackageMode = "disabled"
+	NpmPackageReferencedMode NpmPackageMode = "referenced"
 )
 
 const (
@@ -183,6 +193,7 @@ type JsGazelleConfig struct {
 
 	protoGenerationEnabled    bool
 	tsconfigGenerationEnabled bool
+	packageGenerationEnabled  NpmPackageMode
 
 	pnpmLockPath string
 
@@ -209,6 +220,7 @@ func newRootConfig() *JsGazelleConfig {
 		generationEnabled:          true,
 		protoGenerationEnabled:     true,
 		tsconfigGenerationEnabled:  false,
+		packageGenerationEnabled:   NpmPackageReferencedMode,
 		generationMode:             GenerationModeDirectory,
 		packageTargetKind:          PackageTargetKind_Package,
 		pnpmLockPath:               "pnpm-lock.yaml",
@@ -335,6 +347,14 @@ func (c *JsGazelleConfig) SetProtoGenerationEnabled(enabled bool) {
 // If ts_proto_library extension is enabled.
 func (c *JsGazelleConfig) ProtoGenerationEnabled() bool {
 	return c.generationEnabled && c.protoGenerationEnabled
+}
+
+func (c *JsGazelleConfig) SetNpmPackageGenerationMode(mode NpmPackageMode) {
+	c.packageGenerationEnabled = mode
+}
+
+func (c *JsGazelleConfig) GetNpmPackageGenerationMode() NpmPackageMode {
+	return c.packageGenerationEnabled
 }
 
 // Set the pnpm-workspace.yaml file path.
@@ -465,7 +485,7 @@ func (c *JsGazelleConfig) RenderTsConfigName(tsconfigName string) string {
 }
 
 // Returns the ts_project target name by performing all substitutions.
-func (c *JsGazelleConfig) RenderSourceTargetName(groupName, packageName string, isNpmPackage bool) string {
+func (c *JsGazelleConfig) RenderSourceTargetName(groupName, packageName string, hasPackageTarget bool) string {
 	mappedGroupName := c.MapTargetName(groupName)
 	ruleName := c.renderTargetName(mappedGroupName, packageName)
 
@@ -473,7 +493,7 @@ func (c *JsGazelleConfig) RenderSourceTargetName(groupName, packageName string, 
 	// names still have the default configuration then the npm_package takes
 	// that default name. The library name then gets the "npm source library"
 	// target name.
-	if isNpmPackage && groupName == DefaultLibraryName && mappedGroupName == DefaultLibraryName {
+	if hasPackageTarget && groupName == DefaultLibraryName && mappedGroupName == DefaultLibraryName {
 		npmPackageRuleName := c.RenderNpmPackageTargetName(packageName)
 		if ruleName == npmPackageRuleName {
 			return ruleName + PackageSrcSuffix
