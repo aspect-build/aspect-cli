@@ -109,9 +109,9 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 		}
 	}
 
-	// Determine if this project should be exposed as an npm package.
-	// If exposed as an npm package make the npm package the primary target.
-	isNpmPackage := ts.pnpmProjects.IsProject(args.Rel) && ts.pnpmProjects.IsReferenced(args.Rel)
+	// Determine if this is a pnpm project and if a package target should be generated.
+	isPnpmPackage := ts.pnpmProjects.IsProject(args.Rel)
+	hasPackageTarget := isPnpmPackage && (cfg.GetNpmPackageGenerationMode() == NpmPackageEnabledMode || cfg.GetNpmPackageGenerationMode() == NpmPackageReferencedMode && ts.pnpmProjects.IsReferenced(args.Rel))
 
 	// The package/directory name variable value used to render the target names.
 	packageName := gazelle.ToDefaultTargetName(args, DefaultRootTargetName)
@@ -120,7 +120,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 	sourceRules := treemap.NewWithStringComparator()
 	for _, group := range cfg.GetSourceTargets() {
 		// The project rule name. Can be configured to map to a different name.
-		ruleName := cfg.RenderSourceTargetName(group.name, packageName, isNpmPackage)
+		ruleName := cfg.RenderSourceTargetName(group.name, packageName, hasPackageTarget)
 
 		var ruleSrcs *treeset.Set
 
@@ -165,7 +165,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 	}
 
 	// If this is a package wrap the main ts_project() rule with npm_package()
-	if isNpmPackage {
+	if hasPackageTarget {
 		npmPackageName := cfg.RenderNpmPackageTargetName(packageName)
 		npmPackageSourceFiles := treeset.NewWithStringComparator()
 
