@@ -1,8 +1,9 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
-    name = "parser",
+    name = "tests",
     srcs = ["parser.go"],
-    importpath = "aspect.build/cli/gazelle/js/parser",
+    importpath = "aspect.build/cli/gazelle/js/parser/tests",
     visibility = ["//visibility:public"],
+    deps = ["//gazelle/js/parser"],
 )

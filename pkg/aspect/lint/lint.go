@@ -24,7 +24,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
@@ -39,6 +38,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"golang.org/x/sync/errgroup"
 )
 
 type LintResult struct {
@@ -62,12 +62,11 @@ type Linter struct {
 
 // Align with rules_lint
 const (
-	LINT_REPORT_GROUP_HUMAN   = "rules_lint_human"
-	LINT_REPORT_GROUP_MACHINE = "rules_lint_machine"
-	LINT_PATCH_GROUP          = "rules_lint_patch"
-	LINT_RESULT_REGEX         = ".*AspectRulesLint.*"
-	HISTOGRAM_CHARS           = 20
-	MAX_FILENAME_WIDTH        = 80
+	LINT_REPORT_GROUP  = "rules_lint_report"
+	LINT_PATCH_GROUP   = "rules_lint_patch"
+	LINT_RESULT_REGEX  = ".*AspectRulesLint.*"
+	HISTOGRAM_CHARS    = 20
+	MAX_FILENAME_WIDTH = 80
 )
 
 func New(
@@ -86,14 +85,12 @@ func AddFlags(flags *pflag.FlagSet) {
 	flags.Bool("fix", false, "Apply all patch fixes for lint violations")
 	flags.Bool("diff", false, "Show unified diff instead of diff stats for fixes")
 	flags.Bool("report", true, "Output lint reports")
-	flags.Bool("machine", false, "Request the machine readable output from linters")
 }
 
 // TODO: hoist this to a flags package so it can be used by other commands that require this functionality
-func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, []string, error) {
+func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, error) {
 	flagsArgs := make([]string, 0, len(args))
 	otherArgs := make([]string, 0, len(args))
-	var postTerminateArgs []string = nil
 
 	for len(args) > 0 {
 		s := args[0]
@@ -106,14 +103,14 @@ func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, []s
 		name := s[1:]
 		if s[1] == '-' {
 			if len(s) == 2 { // "--" terminates the flags
-				postTerminateArgs = args
+				otherArgs = append(otherArgs, args...)
 				break
 			}
 			// long arg with double dash
 			name = s[2:]
 		}
 		if len(name) == 0 || name[0] == '-' || name[0] == '=' {
-			return nil, nil, nil, fmt.Errorf("bad flag syntax: %s", s)
+			return nil, nil, fmt.Errorf("bad flag syntax: %s", s)
 		}
 		split := strings.SplitN(name, "=", 2)
 		name = split[0]
@@ -133,15 +130,15 @@ func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, []s
 			args = args[1:]
 		} else {
 			// '-f' or '--flag' (arg was required)
-			return nil, nil, nil, fmt.Errorf("flag needs an argument: %s", s)
+			return nil, nil, fmt.Errorf("flag needs an argument: %s", s)
 		}
 	}
 
-	return flagsArgs, otherArgs, postTerminateArgs, nil
+	return flagsArgs, otherArgs, nil
 }
 
 func (runner *Linter) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
-	isInteractiveMode, _ := cmd.Root().PersistentFlags().GetBool(flags.AspectInteractiveFlagName)
+	isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(flags.AspectInteractiveFlagName)
 	linters := viper.GetStringSlice("lint.aspects")
 
 	if len(linters) == 0 {
@@ -160,7 +157,6 @@ lint:
 	applyAll, _ := cmd.Flags().GetBool("fix")
 	showDiff, _ := cmd.Flags().GetBool("diff")
 	printReport, _ := cmd.Flags().GetBool("report")
-	machine, _ := cmd.Flags().GetBool("machine")
 
 	// Separate out the lint command specific flags from the list of args to
 	// pass to `bazel build`
@@ -169,7 +165,7 @@ lint:
 	for _, h := range runner.resultsHandlers {
 		h.AddFlags(lintFlagSet)
 	}
-	_, bazelArgs, postTerminateArgs, err := separateFlags(lintFlagSet, args)
+	_, bazelArgs, err := separateFlags(lintFlagSet, args)
 	if err != nil {
 		return fmt.Errorf("failed to parse lint flags: %w", err)
 	}
@@ -186,11 +182,7 @@ lint:
 		outputGroups = append(outputGroups, LINT_PATCH_GROUP)
 	}
 	if printReport {
-		if machine {
-			outputGroups = append(outputGroups, LINT_REPORT_GROUP_MACHINE)
-		} else {
-			outputGroups = append(outputGroups, LINT_REPORT_GROUP_HUMAN)
-		}
+		outputGroups = append(outputGroups, LINT_REPORT_GROUP)
 	}
 
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--output_groups=%s", strings.Join(outputGroups, ",")))
@@ -214,9 +206,9 @@ lint:
 		downloadFlag = "--remote_download_regex"
 	}
 
-	bazelCmd = append(bazelCmd, fmt.Sprintf("%s=%s", downloadFlag, LINT_RESULT_REGEX))
+	bazelCmd = append(bazelCmd, fmt.Sprintf("%s='%s'", downloadFlag, LINT_RESULT_REGEX))
 
-	besCompleted := make(chan struct{}, 1)
+	handleResultsErrgroup, handleResultsCtx := errgroup.WithContext(context.Background())
 
 	// Currently Bazel only supports a single --bes_backend so adding ours after
 	// any user supplied value will result in our bes_backend taking precedence.
@@ -240,13 +232,8 @@ lint:
 			return fmt.Errorf("failed to find workspace root: %w", err)
 		}
 
-		lintBEPHandler = newLintBEPHandler(workspaceRoot, besCompleted)
+		lintBEPHandler = newLintBEPHandler(handleResultsCtx, workspaceRoot, handleResultsErrgroup)
 		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback)
-	}
-
-	if postTerminateArgs != nil {
-		bazelCmd = append(bazelCmd, "--")
-		bazelCmd = append(bazelCmd, postTerminateArgs...)
 	}
 
 	err = runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
@@ -254,15 +241,10 @@ lint:
 		return err
 	}
 
-	if lintBEPHandler == nil {
-		return fmt.Errorf("BES should always be initiated when running lint")
-	}
-
-	// Wait for BES completion event for some maximum amount fo time
-	select {
-	case <-besCompleted:
-	case <-time.After(60 * time.Millisecond):
-		return fmt.Errorf("timed out waiting for build completed event")
+	// Wait for completion and return the first error (if any)
+	wgErr := handleResultsErrgroup.Wait()
+	if wgErr != nil {
+		return wgErr
 	}
 
 	// Check for subscriber errors

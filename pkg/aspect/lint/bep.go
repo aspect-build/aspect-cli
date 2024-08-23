@@ -17,6 +17,7 @@
 package lint
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"aspect.build/cli/bazel/buildeventstream"
+	"golang.org/x/sync/errgroup"
 )
 
 // ResultForLabel aggregates the relevant files we find in the BEP for
@@ -38,18 +40,20 @@ type ResultForLabel struct {
 }
 
 type LintBEPHandler struct {
-	namedSets      map[string]*buildeventstream.NamedSetOfFiles
-	workspaceRoot  string
-	besCompleted   chan<- struct{}
-	resultsByLabel map[string]*ResultForLabel
+	ctx                   context.Context
+	namedSets             map[string]*buildeventstream.NamedSetOfFiles
+	workspaceRoot         string
+	handleResultsErrgroup *errgroup.Group
+	resultsByLabel        map[string]*ResultForLabel
 }
 
-func newLintBEPHandler(workspaceRoot string, besCompleted chan<- struct{}) *LintBEPHandler {
+func newLintBEPHandler(ctx context.Context, workspaceRoot string, handleResultsErrgroup *errgroup.Group) *LintBEPHandler {
 	return &LintBEPHandler{
-		namedSets:      make(map[string]*buildeventstream.NamedSetOfFiles),
-		resultsByLabel: make(map[string]*ResultForLabel),
-		workspaceRoot:  workspaceRoot,
-		besCompleted:   besCompleted,
+		ctx:                   ctx,
+		namedSets:             make(map[string]*buildeventstream.NamedSetOfFiles),
+		resultsByLabel:        make(map[string]*ResultForLabel),
+		workspaceRoot:         workspaceRoot,
+		handleResultsErrgroup: handleResultsErrgroup,
 	}
 }
 
@@ -88,7 +92,7 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) ([]byte, 
 			// if more than 60s has passed then give up
 			// TODO: make this timeout configurable
 			if time.Since(start) > 60*time.Second {
-				return nil, fmt.Errorf("failed to find lint results file %s: %v", resultsFile, err)
+				return nil, fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
 			}
 		} else {
 			buf, err := os.ReadFile(resultsFile)
@@ -100,7 +104,12 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) ([]byte, 
 		// we're in a go routine so yield for 100ms and try again
 		// TODO: watch the file system for the file creation instead of polling
 		t := time.NewTimer(time.Millisecond * 100)
-		<-t.C
+		select {
+		case <-runner.ctx.Done():
+			t.Stop()
+			return nil, fmt.Errorf("failed to read lint results file %s: interrupted", resultsFile)
+		case <-t.C:
+		}
 	}
 }
 
@@ -144,7 +153,7 @@ func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEven
 								result.mnemonic = mnemonic
 							}
 							result.patchFile = file
-						} else if outputGroup.Name == LINT_REPORT_GROUP_MACHINE {
+						} else if outputGroup.Name == LINT_REPORT_GROUP {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
 								result.mnemonic = mnemonic
 							}
@@ -153,29 +162,10 @@ func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEven
 							} else if strings.HasSuffix(file.Name, ".exit_code") {
 								result.exitCodeFile = file
 							}
-						} else if outputGroup.Name == LINT_REPORT_GROUP_HUMAN {
-							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
-								result.mnemonic = mnemonic
-							}
-							if strings.HasSuffix(file.Name, ".out") {
-								result.reportFile = file
-							} else if strings.HasSuffix(file.Name, ".exit_code") {
-								result.exitCodeFile = file
-							}
 						}
 					}
 				}
 			}
-		}
-
-	case *buildeventstream.BuildEvent_Finished:
-		// signal that the BES build finished event has been received and we're done processing lint
-		// result files from the BEP; we should only receive this event once but clear the channel
-		// out to be safe
-		if runner.besCompleted != nil {
-			runner.besCompleted <- struct{}{}
-			close(runner.besCompleted)
-			runner.besCompleted = nil
 		}
 	}
 

@@ -1,0 +1,21 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "treesitter",
+    srcs = ["parser_treesitter.go"],
+    importpath = "aspect.build/cli/gazelle/js/parser/treesitter",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//gazelle/common/treesitter",
+        "//gazelle/js/parser",
+        "//pkg/logger",
+        "@com_github_smacker_go_tree_sitter//:go-tree-sitter",
+    ],
+)
+
+go_test(
+    name = "treesitter_test",
+    srcs = ["parser_treesitter_test.go"],
+    embed = [":treesitter"],
+    deps = ["//gazelle/js/parser/tests"],
+)

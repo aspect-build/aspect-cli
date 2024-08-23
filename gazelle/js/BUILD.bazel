@@ -26,6 +26,7 @@ go_library(
         "//gazelle/common/starlark",
         "//gazelle/js/node",
         "//gazelle/js/parser",
+        "//gazelle/js/parser/treesitter",
         "//gazelle/js/pnpm",
         "//gazelle/js/proto",
         "//gazelle/js/typescript",
