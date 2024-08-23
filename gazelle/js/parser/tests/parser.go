@@ -1,7 +1,9 @@
-package parser
+package tests
 
 import (
 	"testing"
+
+	"aspect.build/cli/gazelle/js/parser"
 )
 
 var testCases = []struct {
@@ -9,6 +11,7 @@ var testCases = []struct {
 	filename        string
 	expectedImports []string
 	expectedModules []string
+	typeOnly        bool
 }{
 	{
 		desc:     "empty",
@@ -216,6 +219,7 @@ var testCases = []struct {
 		`,
 		filename:        "sg-example-once-crashed.tsx",
 		expectedImports: []string{"react"},
+		typeOnly:        true,
 	},
 	{
 		desc: "ts type import",
@@ -225,6 +229,7 @@ var testCases = []struct {
 		`,
 		filename:        "types.ts",
 		expectedImports: []string{"react", "y"},
+		typeOnly:        true,
 	},
 	{
 		desc: "include imports only used as types",
@@ -234,6 +239,7 @@ var testCases = []struct {
 		`,
 		filename:        "typeImport.ts",
 		expectedImports: []string{"my/types"},
+		typeOnly:        true,
 	},
 	{
 		desc: "include require()s only used as types",
@@ -243,6 +249,7 @@ var testCases = []struct {
 		`,
 		filename:        "typeRequire.ts",
 		expectedImports: []string{"my/types"},
+		typeOnly:        true,
 	},
 	{
 		desc: "include type-only imports",
@@ -252,6 +259,7 @@ var testCases = []struct {
 		`,
 		filename:        "typeImport.ts",
 		expectedImports: []string{"my/types"},
+		typeOnly:        true,
 	},
 	{
 		desc: "include unused type-only imports",
@@ -260,6 +268,7 @@ var testCases = []struct {
 		`,
 		filename:        "typeImport-unused.ts",
 		expectedImports: []string{"my/types"},
+		typeOnly:        true,
 	},
 	{
 		desc: "module declaration",
@@ -278,6 +287,7 @@ var testCases = []struct {
 		`,
 		filename:        "declare-module.ts",
 		expectedModules: []string{"module-x", "module-with-no-body", "comments-2", "comments-3", "module-quotes-1"},
+		typeOnly:        true,
 	},
 	{
 		desc: "declare module sub-imports",
@@ -294,6 +304,7 @@ var testCases = []struct {
 		filename:        "declare-module-sub.ts",
 		expectedModules: []string{"lib-imports"},
 		expectedImports: []string{"lib-export-star", "lib-export-star-as", "lib-from-default", "lib-impt"},
+		typeOnly:        true,
 	},
 	{
 		desc: "declare module protocol",
@@ -307,10 +318,28 @@ var testCases = []struct {
 		filename:        "declare-protocol-module.ts",
 		expectedModules: []string{"https://mod.com"},
 		expectedImports: []string{"ftp://ancient.com"},
+		typeOnly:        true,
 	},
 }
 
-func RunParserTests(t *testing.T, parserPost string) {
+func RunParserTests(t *testing.T, parser parser.Parser, includeTypeOnly bool, parserPost string) {
+	for _, tc := range testCases {
+		if !includeTypeOnly && tc.typeOnly {
+			continue
+		}
+
+		t.Run(tc.desc+parserPost, func(t *testing.T) {
+			res, _ := parser.ParseSource(tc.filename, tc.ts)
+
+			if !equal(res.Imports, tc.expectedImports) {
+				t.Errorf("Unexpected import results\nactual:  %#v;\nexpected: %#v\ntypescript code:\n%v", res.Imports, tc.expectedImports, tc.ts)
+			}
+
+			if !equal(res.Modules, tc.expectedModules) {
+				t.Errorf("Unexpected module results\nactual:  %#v;\nexpected: %#v\ntypescript code:\n%v", res.Modules, tc.expectedModules, tc.ts)
+			}
+		})
+	}
 }
 
 func equal[T comparable](a, b []T) bool {
@@ -323,20 +352,4 @@ func equal[T comparable](a, b []T) bool {
 		}
 	}
 	return true
-}
-
-func TestTreesitterParser(t *testing.T) {
-	for _, tc := range testCases {
-		t.Run(tc.desc, func(t *testing.T) {
-			res, _ := ParseSource(tc.filename, tc.ts)
-
-			if !equal(res.Imports, tc.expectedImports) {
-				t.Errorf("Unexpected import results\nactual:  %#v;\nexpected: %#v\ntypescript code:\n%v", res.Imports, tc.expectedImports, tc.ts)
-			}
-
-			if !equal(res.Modules, tc.expectedModules) {
-				t.Errorf("Unexpected module results\nactual:  %#v;\nexpected: %#v\ntypescript code:\n%v", res.Modules, tc.expectedModules, tc.ts)
-			}
-		})
-	}
 }

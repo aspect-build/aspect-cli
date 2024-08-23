@@ -17,6 +17,7 @@
 package typescript
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -149,10 +150,7 @@ func parseTsConfigJSONFile(parsed map[string]*TsConfig, resolver TsConfigResolve
 
 	content, err := os.ReadFile(path.Join(root, tsconfig))
 	if err != nil {
-		if os.IsNotExist(err) {
-			err = nil
-		}
-		return nil, err
+		return nil, fmt.Errorf("tsconfig %q not found", tsconfig)
 	}
 
 	config, err := parseTsConfigJSON(parsed, resolver, root, tsconfig, content)
@@ -173,6 +171,9 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	if c.Extends != "" {
 		for _, potential := range resolver(path.Dir(tsconfig), c.Extends) {
 			base, err := parseTsConfigJSONFile(parsed, resolver, root, potential)
+			if os.IsNotExist(err) {
+				continue
+			}
 
 			if err != nil {
 				BazelLog.Warnf("Failed to load base tsconfig file %q from %q: %v", c.Extends, tsconfig, err)

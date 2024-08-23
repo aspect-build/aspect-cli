@@ -1,6 +1,8 @@
 package gazelle
 
 import (
+	"sync"
+
 	_ "unsafe"
 
 	_ "github.com/bazelbuild/bazel-gazelle/walk"
@@ -12,8 +14,9 @@ type walkConfig struct {
 	excludes []string
 	// Below are fields that are not used by the isExcluded function but match the walkConfig
 	// upstream walk.(*walkConfig).
-	_ bool     // ignore bool
-	_ []string // follow []string
+	_ bool      // ignore bool
+	_ []string  // follow []string
+	_ sync.Once // loadOnce sync.Once
 }
 
 // isExcluded: https://github.com/bazelbuild/bazel-gazelle/blob/v0.38.0/walk/config.go#L54-L59

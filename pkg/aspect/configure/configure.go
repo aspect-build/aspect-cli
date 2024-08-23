@@ -140,9 +140,6 @@ configure:
 		fixArgs = append(fixArgs, "--memprofile="+memprofile)
 	}
 
-	// Append additional args including specific directories to fix.
-	fixArgs = append(fixArgs, args...)
-
 	if mode == "fix" {
 		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(runner.languageKeys, ", "))
 	}

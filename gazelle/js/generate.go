@@ -11,7 +11,8 @@ import (
 
 	gazelle "aspect.build/cli/gazelle/common"
 	starlark "aspect.build/cli/gazelle/common/starlark"
-	parser "aspect.build/cli/gazelle/js/parser"
+	"aspect.build/cli/gazelle/js/parser"
+	treesitter_parser "aspect.build/cli/gazelle/js/parser/treesitter"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	proto "aspect.build/cli/gazelle/js/proto"
 	"aspect.build/cli/gazelle/js/typescript"
@@ -109,9 +110,9 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 		}
 	}
 
-	// Determine if this is a pnpm project and if a package target should be generated.
-	isPnpmPackage := ts.pnpmProjects.IsProject(args.Rel)
-	hasPackageTarget := isPnpmPackage && (cfg.GetNpmPackageGenerationMode() == NpmPackageEnabledMode || cfg.GetNpmPackageGenerationMode() == NpmPackageReferencedMode && ts.pnpmProjects.IsReferenced(args.Rel))
+	// Determine if this project should be exposed as an npm package.
+	// If exposed as an npm package make the npm package the primary target.
+	isNpmPackage := ts.pnpmProjects.IsProject(args.Rel) && ts.pnpmProjects.IsReferenced(args.Rel)
 
 	// The package/directory name variable value used to render the target names.
 	packageName := gazelle.ToDefaultTargetName(args, DefaultRootTargetName)
@@ -120,7 +121,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 	sourceRules := treemap.NewWithStringComparator()
 	for _, group := range cfg.GetSourceTargets() {
 		// The project rule name. Can be configured to map to a different name.
-		ruleName := cfg.RenderSourceTargetName(group.name, packageName, hasPackageTarget)
+		ruleName := cfg.RenderSourceTargetName(group.name, packageName, isNpmPackage)
 
 		var ruleSrcs *treeset.Set
 
@@ -165,7 +166,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 	}
 
 	// If this is a package wrap the main ts_project() rule with npm_package()
-	if hasPackageTarget {
+	if isNpmPackage {
 		npmPackageName := cfg.RenderNpmPackageTargetName(packageName)
 		npmPackageSourceFiles := treeset.NewWithStringComparator()
 
@@ -671,7 +672,8 @@ func parseSourceFile(rootDir, filePath string) (parser.ParseResult, []error) {
 		return parser.ParseResult{}, []error{err}
 	}
 
-	return parser.ParseSource(filePath, string(content))
+	p := treesitter_parser.NewParser()
+	return p.ParseSource(filePath, string(content))
 }
 
 var ignoreNone = func(string) bool { return false }
@@ -754,10 +756,13 @@ func toImportPaths(p string) []string {
 			paths = append(paths, path.Dir(p))
 		}
 	} else if isSourceFileType(p) {
-		// The import with the file extension
-		paths = append(paths, swapSourceExtension(p))
+		// With the transpiled .js extension
+		if isTranspiledSourceFileType(p) {
+			// With the js extension
+			paths = append(paths, swapSourceExtension(p))
+		}
 
-		// Without the extension if it is implicit
+		// Without the js extension
 		if isImplicitSourceFileType(p) {
 			paths = append(paths, stripSourceFileExtension(p))
 		}
@@ -768,8 +773,6 @@ func toImportPaths(p string) []string {
 		}
 	} else if isDataFileType(p) {
 		paths = append(paths, p)
-	} else {
-		BazelLog.Warnf("Unknown file type: %q\n", p)
 	}
 
 	return paths
@@ -901,21 +904,9 @@ func swapDeclarationExtension(f string) string {
 
 func toJsExt(f string) string {
 	e := path.Ext(f)
-	switch e {
-	case ".ts", ".tsx":
-		return ".js"
-	case ".cts":
-		return ".cjs"
-	case ".mts":
-		return ".mjs"
-	case ".jsx":
-		return ".js"
-	case ".js", ".cjs", ".mjs", ".json":
-		return e
-	default:
-		BazelLog.Errorf("Unknown extension %q", e)
-		return ".js"
-	}
+	e = strings.Replace(e, "tsx", "js", 1)
+	e = strings.Replace(e, "ts", "js", 1)
+	return e
 }
 
 // Normalize the given import statement from a relative path
