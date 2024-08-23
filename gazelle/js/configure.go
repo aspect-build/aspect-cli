@@ -40,6 +40,7 @@ func (ts *typeScriptLang) KnownDirectives() []string {
 		Directive_TypeScriptExtension,
 		Directive_TypeScriptProtoExtension,
 		Directive_TypeScriptConfigExtension,
+		Directive_NpmPackageExtension,
 		Directive_GenerationMode,
 		Directive_Visibility,
 		Directive_Lockfile,
@@ -133,6 +134,14 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 			config.SetTsConfigGenerationEnabled(common.ReadEnabled(d))
 		case Directive_TypeScriptProtoExtension:
 			config.SetProtoGenerationEnabled(common.ReadEnabled(d))
+		case Directive_NpmPackageExtension:
+			if strings.TrimSpace(d.Value) == string(NpmPackageReferencedMode) {
+				config.SetNpmPackageGenerationMode(NpmPackageReferencedMode)
+			} else if common.ReadEnabled(d) {
+				config.SetNpmPackageGenerationMode(NpmPackageEnabledMode)
+			} else {
+				config.SetNpmPackageGenerationMode(NpmPackageDisabledMode)
+			}
 		case Directive_GenerationMode:
 			mode := GenerationModeType(strings.TrimSpace(d.Value))
 			switch mode {
