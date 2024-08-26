@@ -208,7 +208,7 @@ lint:
 
 	bazelCmd = append(bazelCmd, fmt.Sprintf("%s='%s'", downloadFlag, LINT_RESULT_REGEX))
 
-	handleResultsErrgroup, handleResultsCtx := errgroup.WithContext(context.Background())
+	handleResultsErrgroup, handleResultsCtx := errgroup.WithContext(context.WithoutCancel(context.Background()))
 
 	// Currently Bazel only supports a single --bes_backend so adding ours after
 	// any user supplied value will result in our bes_backend taking precedence.
