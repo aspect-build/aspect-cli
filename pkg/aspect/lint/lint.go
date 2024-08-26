@@ -88,9 +88,10 @@ func AddFlags(flags *pflag.FlagSet) {
 }
 
 // TODO: hoist this to a flags package so it can be used by other commands that require this functionality
-func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, error) {
+func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, []string, error) {
 	flagsArgs := make([]string, 0, len(args))
 	otherArgs := make([]string, 0, len(args))
+	var postTerminateArgs []string = nil
 
 	for len(args) > 0 {
 		s := args[0]
@@ -103,14 +104,14 @@ func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, err
 		name := s[1:]
 		if s[1] == '-' {
 			if len(s) == 2 { // "--" terminates the flags
-				otherArgs = append(otherArgs, args...)
+				postTerminateArgs = args
 				break
 			}
 			// long arg with double dash
 			name = s[2:]
 		}
 		if len(name) == 0 || name[0] == '-' || name[0] == '=' {
-			return nil, nil, fmt.Errorf("bad flag syntax: %s", s)
+			return nil, nil, nil, fmt.Errorf("bad flag syntax: %s", s)
 		}
 		split := strings.SplitN(name, "=", 2)
 		name = split[0]
@@ -130,11 +131,11 @@ func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, err
 			args = args[1:]
 		} else {
 			// '-f' or '--flag' (arg was required)
-			return nil, nil, fmt.Errorf("flag needs an argument: %s", s)
+			return nil, nil, nil, fmt.Errorf("flag needs an argument: %s", s)
 		}
 	}
 
-	return flagsArgs, otherArgs, nil
+	return flagsArgs, otherArgs, postTerminateArgs, nil
 }
 
 func (runner *Linter) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
@@ -165,7 +166,7 @@ lint:
 	for _, h := range runner.resultsHandlers {
 		h.AddFlags(lintFlagSet)
 	}
-	_, bazelArgs, err := separateFlags(lintFlagSet, args)
+	_, bazelArgs, postTerminateArgs, err := separateFlags(lintFlagSet, args)
 	if err != nil {
 		return fmt.Errorf("failed to parse lint flags: %w", err)
 	}
@@ -236,6 +237,11 @@ lint:
 		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback)
 	}
 
+	if postTerminateArgs != nil {
+		bazelCmd = append(bazelCmd, "--")
+		bazelCmd = append(bazelCmd, postTerminateArgs...)
+	}
+
 	err = runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
 	if err != nil {
 		return err
@@ -254,6 +260,10 @@ lint:
 			fmt.Fprintf(runner.Streams.Stderr, "Error: failed to run lint command: %v\n", err)
 		}
 		return fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))
+	}
+
+	if lintBEPHandler == nil {
+		return fmt.Errorf("BES should always be initiated when running lint")
 	}
 
 	// Convert raw results to list of LintResult structs
