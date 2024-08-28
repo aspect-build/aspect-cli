@@ -207,7 +207,7 @@ lint:
 		downloadFlag = "--remote_download_regex"
 	}
 
-	bazelCmd = append(bazelCmd, fmt.Sprintf("%s='%s'", downloadFlag, LINT_RESULT_REGEX))
+	bazelCmd = append(bazelCmd, fmt.Sprintf("%s=%s", downloadFlag, LINT_RESULT_REGEX))
 
 	besCompleted := make(chan struct{}, 1)
 
@@ -233,7 +233,7 @@ lint:
 			return fmt.Errorf("failed to find workspace root: %w", err)
 		}
 
-		lintBEPHandler = newLintBEPHandler(ctx, workspaceRoot, besCompleted)
+		lintBEPHandler = newLintBEPHandler(workspaceRoot, besCompleted)
 		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback)
 	}
 
