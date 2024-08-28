@@ -17,7 +17,6 @@
 package lint
 
 import (
-	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -39,16 +38,14 @@ type ResultForLabel struct {
 }
 
 type LintBEPHandler struct {
-	ctx            context.Context
 	namedSets      map[string]*buildeventstream.NamedSetOfFiles
 	workspaceRoot  string
 	besCompleted   chan<- struct{}
 	resultsByLabel map[string]*ResultForLabel
 }
 
-func newLintBEPHandler(ctx context.Context, workspaceRoot string, besCompleted chan<- struct{}) *LintBEPHandler {
+func newLintBEPHandler(workspaceRoot string, besCompleted chan<- struct{}) *LintBEPHandler {
 	return &LintBEPHandler{
-		ctx:            ctx,
 		namedSets:      make(map[string]*buildeventstream.NamedSetOfFiles),
 		resultsByLabel: make(map[string]*ResultForLabel),
 		workspaceRoot:  workspaceRoot,
@@ -91,7 +88,7 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) ([]byte, 
 			// if more than 60s has passed then give up
 			// TODO: make this timeout configurable
 			if time.Since(start) > 60*time.Second {
-				return nil, fmt.Errorf("failed to read lint results file %s: %v", resultsFile, err)
+				return nil, fmt.Errorf("failed to find lint results file %s: %v", resultsFile, err)
 			}
 		} else {
 			buf, err := os.ReadFile(resultsFile)
@@ -103,12 +100,7 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) ([]byte, 
 		// we're in a go routine so yield for 100ms and try again
 		// TODO: watch the file system for the file creation instead of polling
 		t := time.NewTimer(time.Millisecond * 100)
-		select {
-		case <-runner.ctx.Done():
-			t.Stop()
-			return nil, fmt.Errorf("failed to read lint results file %s: interrupted", resultsFile)
-		case <-t.C:
-		}
+		<-t.C
 	}
 }
 
