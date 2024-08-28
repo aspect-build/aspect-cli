@@ -754,13 +754,10 @@ func toImportPaths(p string) []string {
 			paths = append(paths, path.Dir(p))
 		}
 	} else if isSourceFileType(p) {
-		// With the transpiled .js extension
-		if isTranspiledSourceFileType(p) {
-			// With the js extension
-			paths = append(paths, swapSourceExtension(p))
-		}
+		// The import with the file extension
+		paths = append(paths, swapSourceExtension(p))
 
-		// Without the js extension
+		// Without the extension if it is implicit
 		if isImplicitSourceFileType(p) {
 			paths = append(paths, stripSourceFileExtension(p))
 		}
@@ -771,6 +768,8 @@ func toImportPaths(p string) []string {
 		}
 	} else if isDataFileType(p) {
 		paths = append(paths, p)
+	} else {
+		BazelLog.Warnf("Unknown file type: %q\n", p)
 	}
 
 	return paths
@@ -902,9 +901,21 @@ func swapDeclarationExtension(f string) string {
 
 func toJsExt(f string) string {
 	e := path.Ext(f)
-	e = strings.Replace(e, "tsx", "js", 1)
-	e = strings.Replace(e, "ts", "js", 1)
-	return e
+	switch e {
+	case ".ts", ".tsx":
+		return ".js"
+	case ".cts":
+		return ".cjs"
+	case ".mts":
+		return ".mjs"
+	case ".jsx":
+		return ".js"
+	case ".js", ".cjs", ".mjs", ".json":
+		return e
+	default:
+		BazelLog.Errorf("Unknown extension %q", e)
+		return ".js"
+	}
 }
 
 // Normalize the given import statement from a relative path
