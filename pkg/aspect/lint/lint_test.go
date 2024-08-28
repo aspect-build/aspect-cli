@@ -104,7 +104,7 @@ func TestLint(t *testing.T) {
 		bzl := bazel_mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			RunCommand(streams, nil, "build", "--foo", "//...", "--bar", "--aspects=//tools/lint:linters.bzl%%buf,//tools/lint:linters.bzl%%eslint,//tools/lint:linters.bzl%%vale,//tools/lint:linters.bzl%%tfsec", "--output_groups=", "--run_validations=false", "--remote_download_regex='.*AspectRulesLint.*'").
+			RunCommand(streams, nil, "build", "--foo", "//...", "--bar", "--aspects=//tools/lint:linters.bzl%%buf,//tools/lint:linters.bzl%%eslint,//tools/lint:linters.bzl%%vale,//tools/lint:linters.bzl%%tfsec", "--output_groups=", "--run_validations=false", "--remote_download_regex=.*AspectRulesLint.*").
 			Return(nil)
 		bzl.
 			EXPECT().
@@ -138,7 +138,7 @@ func TestLint(t *testing.T) {
 		bzl := bazel_mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			RunCommand(streams, nil, "build", "--aspects=//tools/lint:linters.bzl%%buf,//tools/lint:linters.bzl%%eslint,//tools/lint:linters.bzl%%vale,//tools/lint:linters.bzl%%tfsec", "--output_groups=", "--run_validations=false", "--remote_download_regex='.*AspectRulesLint.*'", "--", "//...", "-//foo").
+			RunCommand(streams, nil, "build", "--aspects=//tools/lint:linters.bzl%%buf,//tools/lint:linters.bzl%%eslint,//tools/lint:linters.bzl%%vale,//tools/lint:linters.bzl%%tfsec", "--output_groups=", "--run_validations=false", "--remote_download_regex=.*AspectRulesLint.*", "--", "//...", "-//foo").
 			Return(nil)
 		bzl.
 			EXPECT().
@@ -172,7 +172,7 @@ func TestLint(t *testing.T) {
 		bzl := bazel_mock.NewMockBazel(ctrl)
 		bzl.
 			EXPECT().
-			RunCommand(streams, nil, "build", "--some_flag", "--run_validations=true", "--aspects=//tools/lint:linters.bzl%%buf,//tools/lint:linters.bzl%%eslint,//tools/lint:linters.bzl%%vale,//tools/lint:linters.bzl%%tfsec", "--output_groups=", "--run_validations=false", "--remote_download_regex='.*AspectRulesLint.*'", "--", "//...", "-//foo").
+			RunCommand(streams, nil, "build", "--some_flag", "--run_validations=true", "--aspects=//tools/lint:linters.bzl%%buf,//tools/lint:linters.bzl%%eslint,//tools/lint:linters.bzl%%vale,//tools/lint:linters.bzl%%tfsec", "--output_groups=", "--run_validations=false", "--remote_download_regex=.*AspectRulesLint.*", "--", "//...", "-//foo").
 			Return(nil)
 		bzl.
 			EXPECT().
