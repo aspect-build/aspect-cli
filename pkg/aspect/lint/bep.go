@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"aspect.build/cli/bazel/buildeventstream"
-	"golang.org/x/sync/errgroup"
 )
 
 // ResultForLabel aggregates the relevant files we find in the BEP for
@@ -40,20 +39,20 @@ type ResultForLabel struct {
 }
 
 type LintBEPHandler struct {
-	ctx                   context.Context
-	namedSets             map[string]*buildeventstream.NamedSetOfFiles
-	workspaceRoot         string
-	handleResultsErrgroup *errgroup.Group
-	resultsByLabel        map[string]*ResultForLabel
+	ctx            context.Context
+	namedSets      map[string]*buildeventstream.NamedSetOfFiles
+	workspaceRoot  string
+	besCompleted   chan<- struct{}
+	resultsByLabel map[string]*ResultForLabel
 }
 
-func newLintBEPHandler(ctx context.Context, workspaceRoot string, handleResultsErrgroup *errgroup.Group) *LintBEPHandler {
+func newLintBEPHandler(ctx context.Context, workspaceRoot string, besCompleted chan<- struct{}) *LintBEPHandler {
 	return &LintBEPHandler{
-		ctx:                   ctx,
-		namedSets:             make(map[string]*buildeventstream.NamedSetOfFiles),
-		resultsByLabel:        make(map[string]*ResultForLabel),
-		workspaceRoot:         workspaceRoot,
-		handleResultsErrgroup: handleResultsErrgroup,
+		ctx:            ctx,
+		namedSets:      make(map[string]*buildeventstream.NamedSetOfFiles),
+		resultsByLabel: make(map[string]*ResultForLabel),
+		workspaceRoot:  workspaceRoot,
+		besCompleted:   besCompleted,
 	}
 }
 
@@ -166,6 +165,16 @@ func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEven
 					}
 				}
 			}
+		}
+
+	case *buildeventstream.BuildEvent_Finished:
+		// signal that the BES build finished event has been received and we're done processing lint
+		// result files from the BEP; we should only receive this event once but clear the channel
+		// out to be safe
+		if runner.besCompleted != nil {
+			runner.besCompleted <- struct{}{}
+			close(runner.besCompleted)
+			runner.besCompleted = nil
 		}
 	}
 
