@@ -1,14 +1,16 @@
 load("@aspect_rules_js//js:defs.bzl", "js_library")
 
-# gazelle:js_files **/*.{js,cjs,mjs,jsx,ts,tsx,mts,cts}
-# gazelle:js_test_files **/*.spec.{js,cjs,mjs,jsx,ts,tsx,mts,cts}
+# gazelle:js_files **/*.{js,cjs,mjs,jsx}
+# gazelle:js_files m **/*.mjs
+# gazelle:js_files c **/*.cjs
+# gazelle:js_test_files **/*.spec.{js,cjs,mjs,jsx}
+# gazelle:js_test_files mtest **/*.spec.mjs
+# gazelle:js_test_files ctest **/*.spec.cjs
 
 js_library(
     name = "opt-ins",
     srcs = [
-        "non-typed.cjs",
         "non-typed.js",
-        "non-typed.mjs",
         "non-typed.ts.js",
         "non-x-typed.jsx",
     ],
@@ -19,7 +21,32 @@ js_library(
     testonly = True,
     srcs = [
         "non-typed.spec.js",
-        "non-typed.spec.mjs",
         "non-x-typed.spec.jsx",
     ],
+    deps = [":opt-ins"],
+)
+
+js_library(
+    name = "m",
+    srcs = ["non-typed.mjs"],
+    deps = [":opt-ins"],
+)
+
+js_library(
+    name = "c",
+    srcs = ["non-typed.cjs"],
+)
+
+js_library(
+    name = "mtest",
+    testonly = True,
+    srcs = ["non-typed.spec.mjs"],
+    deps = [":m"],
+)
+
+js_library(
+    name = "ctest",
+    testonly = True,
+    srcs = ["non-typed.spec.cjs"],
+    deps = [":c"],
 )
