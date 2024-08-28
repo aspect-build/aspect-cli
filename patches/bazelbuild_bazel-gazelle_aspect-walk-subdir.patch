@@ -1,5 +1,5 @@
 diff --git a/config/config.go b/config/config.go
-index 57c3d44..43ab575 100644
+index fed885d..30ce539 100644
 --- a/config/config.go
 +++ b/config/config.go
 @@ -120,10 +120,23 @@ type MappedKind struct {
@@ -28,90 +28,91 @@ index 57c3d44..43ab575 100644
  }
  
 diff --git a/walk/walk.go b/walk/walk.go
-index 7128d46..bcec468 100644
+index cfc088c..5abc5d7 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -117,8 +117,8 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
+@@ -125,9 +125,9 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
+ 	visit(c, cexts, isBazelIgnored, knownDirectives, updateRels, wf, c.RepoRoot, "", false)
+ }
  
- 	updateRels := buildUpdateRelMap(c.RepoRoot, dirs)
- 
--	var visit func(*config.Config, string, string, bool)
--	visit = func(c *config.Config, dir, rel string, updateParent bool) {
-+	var visit func(*config.Config, string, string, bool) ([]string, bool)
-+	visit = func(c *config.Config, dir, rel string, updateParent bool) ([]string, bool) {
- 		haveError := false
- 
- 		// TODO: OPT: ReadDir stats all the files, which is slow. We just care about
-@@ -127,7 +127,7 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
- 		ents, err := os.ReadDir(dir)
- 		if err != nil {
- 			log.Print(err)
--			return
-+			return nil, false
- 		}
- 
- 		f, err := loadBuildFile(c, rel, dir, ents)
-@@ -145,10 +145,10 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
- 		wc := getWalkConfig(c)
- 
- 		if wc.isExcluded(rel, ".") {
--			return
-+			return nil, false
- 		}
- 
--		var subdirs, regularFiles []string
-+		var dirs, subdirs, regularFiles []string
- 		for _, ent := range ents {
- 			base := ent.Name()
- 			ent := resolveFileInfo(wc, dir, rel, ent)
-@@ -156,24 +156,47 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
- 			case ent == nil:
- 				continue
- 			case ent.IsDir():
--				subdirs = append(subdirs, base)
-+				dirs = append(dirs, base)
- 			default:
- 				regularFiles = append(regularFiles, base)
- 			}
- 		}
- 
- 		shouldUpdate := shouldUpdate(rel, mode, updateParent, updateRels)
--		for _, sub := range subdirs {
-+		for _, sub := range dirs {
- 			if subRel := path.Join(rel, sub); shouldVisit(subRel, mode, shouldUpdate, updateRels) {
--				visit(c, filepath.Join(dir, sub), subRel, shouldUpdate)
-+				// PATCH ---
-+				// Merge the returned 'subFiles' if 'mergeFiles' is true
-+				subFiles, mergeFiles := visit(c, filepath.Join(dir, sub), subRel, shouldUpdate)
-+				if mergeFiles {
-+					for _, f := range subFiles {
-+						regularFiles = append(regularFiles, path.Join(sub, f))
-+					}
-+				} else {
-+					subdirs = append(subdirs, sub)
-+				}
-+				// END PATCH ---
-+			}
-+		}
-+
-+		// PATCH ---
-+		// If there is no BUILD, no patch opt-out, and walking subdirs is enabled:
-+		// return the regular files to be included in the parent 'wf' call.
-+		if f == nil {
-+			if aspectWalkSubdirs, aspectWalkSubdirsExists := c.Exts[config.ASPECT_WALKSUBDIR]; aspectWalkSubdirsExists {
-+				if aspectWalkSubdirs.(bool) {
-+					return regularFiles, true
-+				}
- 			}
- 		}
-+		// END PATCH ---
- 
- 		update := !haveError && !wc.ignore && shouldUpdate
- 		if shouldCall(rel, mode, updateParent, updateRels) {
- 			genFiles := findGenFiles(wc, f)
- 			wf(dir, rel, c, update, f, subdirs, regularFiles, genFiles)
- 		}
+-func visit(c *config.Config, cexts []config.Configurer, isBazelIgnored isIgnoredFunc, knownDirectives map[string]bool, updateRels *UpdateFilter, wf WalkFunc, dir, rel string, updateParent bool) {
++func visit(c *config.Config, cexts []config.Configurer, isBazelIgnored isIgnoredFunc, knownDirectives map[string]bool, updateRels *UpdateFilter, wf WalkFunc, dir, rel string, updateParent bool) ([]string, bool) {
+ 	if isBazelIgnored(rel) {
+-		return
 +		return nil, false
  	}
- 	visit(c, c.RepoRoot, "", false)
+ 
+ 	haveError := false
+@@ -138,7 +138,7 @@ func visit(c *config.Config, cexts []config.Configurer, isBazelIgnored isIgnored
+ 	ents, err := os.ReadDir(dir)
+ 	if err != nil {
+ 		log.Print(err)
+-		return
++		return nil, false
+ 	}
+ 
+ 	f, err := loadBuildFile(c, rel, dir, ents)
+@@ -156,10 +156,10 @@ func visit(c *config.Config, cexts []config.Configurer, isBazelIgnored isIgnored
+ 	wc := getWalkConfig(c)
+ 
+ 	if wc.isExcluded(rel, ".") {
+-		return
++		return nil, false
+ 	}
+ 
+-	var subdirs, regularFiles []string
++	var dirs, subdirs, regularFiles []string
+ 	for _, ent := range ents {
+ 		base := ent.Name()
+ 		if isBazelIgnored(path.Join(rel, base)) || wc.isExcluded(rel, base) {
+@@ -170,24 +170,47 @@ func visit(c *config.Config, cexts []config.Configurer, isBazelIgnored isIgnored
+ 		case ent == nil:
+ 			continue
+ 		case ent.IsDir():
+-			subdirs = append(subdirs, base)
++			dirs = append(dirs, base)
+ 		default:
+ 			regularFiles = append(regularFiles, base)
+ 		}
+ 	}
+ 
+ 	shouldUpdate := updateRels.shouldUpdate(rel, updateParent)
+-	for _, sub := range subdirs {
++	for _, sub := range dirs {
+ 		if subRel := path.Join(rel, sub); updateRels.shouldVisit(subRel, shouldUpdate) {
+-			visit(c, cexts, isBazelIgnored, knownDirectives, updateRels, wf, filepath.Join(dir, sub), subRel, shouldUpdate)
++			// PATCH ---
++			// Merge the returned 'subFiles' if 'mergeFiles' is true
++			subFiles, mergeFiles := visit(c, cexts, isBazelIgnored, knownDirectives, updateRels, wf, filepath.Join(dir, sub), subRel, shouldUpdate)
++			if mergeFiles {
++				for _, f := range subFiles {
++					regularFiles = append(regularFiles, path.Join(sub, f))
++				}
++			} else {
++				subdirs = append(subdirs, sub)
++			}
++			// END PATCH ---
++		}
++	}
++
++	// PATCH ---
++	// If there is no BUILD, no patch opt-out, and walking subdirs is enabled:
++	// return the regular files to be included in the parent 'wf' call.
++	if f == nil {
++		if aspectWalkSubdirs, aspectWalkSubdirsExists := c.Exts[config.ASPECT_WALKSUBDIR]; aspectWalkSubdirsExists {
++			if aspectWalkSubdirs.(bool) {
++				return regularFiles, true
++			}
+ 		}
+ 	}
++	// END PATCH ---
+ 
+ 	update := !haveError && !wc.ignore && shouldUpdate
+ 	if updateRels.shouldCall(rel, updateParent) {
+ 		genFiles := findGenFiles(wc, f)
+ 		wf(dir, rel, c, update, f, subdirs, regularFiles, genFiles)
+ 	}
++	return nil, false
  }
+ 
+ // An UpdateFilter tracks which directories need to be updated

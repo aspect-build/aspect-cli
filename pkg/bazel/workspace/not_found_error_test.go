@@ -14,25 +14,24 @@
  * limitations under the License.
  */
 
-package workspace_test
+package workspace
 
 import (
 	"errors"
 	"testing"
 
-	"aspect.build/cli/pkg/bazel/workspace"
 	. "github.com/onsi/gomega"
 )
 
 func TestIsNotFoundError(t *testing.T) {
 	t.Run("when it is a NotFoundError", func(t *testing.T) {
 		g := NewWithT(t)
-		err := &workspace.NotFoundError{StartDir: "path"}
-		g.Expect(workspace.IsNotFoundError(err)).To(BeTrue())
+		err := &NotFoundError{StartDir: "path"}
+		g.Expect(IsNotFoundError(err)).To(BeTrue())
 	})
 	t.Run("when it is not a NotFoundError", func(t *testing.T) {
 		g := NewWithT(t)
 		err := errors.New("not a NotFoundError")
-		g.Expect(workspace.IsNotFoundError(err)).To(BeFalse())
+		g.Expect(IsNotFoundError(err)).To(BeFalse())
 	})
 }

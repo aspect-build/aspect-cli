@@ -125,7 +125,7 @@ def deps():
     )
     go_repository(
         name = "com_github_bazelbuild_bazelisk",
-        build_file_generation = "on",
+        build_file_generation = "clean",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/bazelbuild/bazelisk",
         sum = "h1:TDt+a1PYrnBF9on3WRJUisXXFhCMrhcNo8OebyS5Q34=",

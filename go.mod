@@ -8,10 +8,10 @@ require (
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/alphadose/haxmap v1.4.0
 	github.com/bazel-contrib/rules_jvm v0.27.0
-	github.com/bazelbuild/bazel-gazelle v0.38.0 // NOTE: keep in sync with WORKSPACE
+	github.com/bazelbuild/bazel-gazelle v0.38.1-0.20240828161622-2d6805c8b74e // NOTE: keep in sync with WORKSPACE
 	github.com/bazelbuild/bazelisk v1.17.0
 	github.com/bazelbuild/buildtools v0.0.0-20240606140350-80f1f6802857
-	github.com/bazelbuild/rules_go v0.48.0 // indirect; NOTE: keep in sync with WORKSPACE
+	github.com/bazelbuild/rules_go v0.49.1-0.20240813120622-9d1456e778a3 // indirect; NOTE: keep in sync with WORKSPACE
 	github.com/bluekeyes/go-gitdiff v0.7.3
 	github.com/bmatcuk/doublestar/v4 v4.6.1
 	github.com/emirpasic/gods v1.18.1

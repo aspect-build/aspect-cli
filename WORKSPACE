@@ -108,8 +108,9 @@ http_archive(
 
 http_archive(
     name = "io_bazel_rules_go",
-    sha256 = "33acc4ae0f70502db4b893c9fc1dd7a9bf998c23e7ff2c4517741d4049a976f8",
-    urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.48.0/rules_go-v0.48.0.zip"],
+    sha256 = "6244c70a3102bacd9f823b666258d4d66550cd499f3cf957000b46bebf3a8c1f",
+    strip_prefix = "rules_go-9d1456e778a36dab6d5cab3f68af3060cc869e2f",
+    urls = ["https://github.com/bazelbuild/rules_go/archive/9d1456e778a36dab6d5cab3f68af3060cc869e2f.zip"],
 )
 
 http_archive(
@@ -164,12 +165,9 @@ http_archive(
         "//:patches/bazelbuild_bazel-gazelle_aspect-cli.patch",
         "//:patches/bazelbuild_bazel-gazelle_aspect-walk-subdir.patch",
     ],
-    sha256 = "8ad77552825b078a10ad960bec6ef77d2ff8ec70faef2fd038db713f410f5d87",
-    # Ensure this version always matches the go.mod version.
-    #
-    # :notice: Care should be taken when upgrading gazelle since we have vendored & modified parts of gazelle
-    # in the CLI configure command (cli/core/pkg/aspect/configure).
-    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.38.0/bazel-gazelle-v0.38.0.tar.gz"],
+    sha256 = "c6c87f08f3534612da5e1250c5f4dc7b8c0135b22f102fc6d1bfa76f3bdbd1fa",
+    strip_prefix = "bazel-gazelle-2d6805c8b74e44add398c5c70279648b36c11d58",
+    urls = ["https://github.com/bazelbuild/bazel-gazelle/archive/2d6805c8b74e44add398c5c70279648b36c11d58.tar.gz"],
 )
 
 http_archive(
