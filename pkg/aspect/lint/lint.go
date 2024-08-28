@@ -24,6 +24,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
@@ -38,7 +39,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"golang.org/x/sync/errgroup"
 )
 
 type LintResult struct {
@@ -139,7 +139,7 @@ func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, []s
 }
 
 func (runner *Linter) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
-	isInteractiveMode, err := cmd.Root().PersistentFlags().GetBool(flags.AspectInteractiveFlagName)
+	isInteractiveMode, _ := cmd.Root().PersistentFlags().GetBool(flags.AspectInteractiveFlagName)
 	linters := viper.GetStringSlice("lint.aspects")
 
 	if len(linters) == 0 {
@@ -209,7 +209,7 @@ lint:
 
 	bazelCmd = append(bazelCmd, fmt.Sprintf("%s='%s'", downloadFlag, LINT_RESULT_REGEX))
 
-	handleResultsErrgroup, handleResultsCtx := errgroup.WithContext(context.WithoutCancel(context.Background()))
+	besCompleted := make(chan struct{}, 1)
 
 	// Currently Bazel only supports a single --bes_backend so adding ours after
 	// any user supplied value will result in our bes_backend taking precedence.
@@ -233,7 +233,7 @@ lint:
 			return fmt.Errorf("failed to find workspace root: %w", err)
 		}
 
-		lintBEPHandler = newLintBEPHandler(handleResultsCtx, workspaceRoot, handleResultsErrgroup)
+		lintBEPHandler = newLintBEPHandler(ctx, workspaceRoot, besCompleted)
 		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback)
 	}
 
@@ -247,10 +247,15 @@ lint:
 		return err
 	}
 
-	// Wait for completion and return the first error (if any)
-	wgErr := handleResultsErrgroup.Wait()
-	if wgErr != nil {
-		return wgErr
+	if lintBEPHandler == nil {
+		return fmt.Errorf("BES should always be initiated when running lint")
+	}
+
+	// Wait for BES completion event for some maximum amount fo time
+	select {
+	case <-besCompleted:
+	case <-time.After(60 * time.Millisecond):
+		return fmt.Errorf("timed out waiting for build completed event")
 	}
 
 	// Check for subscriber errors
@@ -260,10 +265,6 @@ lint:
 			fmt.Fprintf(runner.Streams.Stderr, "Error: failed to run lint command: %v\n", err)
 		}
 		return fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))
-	}
-
-	if lintBEPHandler == nil {
-		return fmt.Errorf("BES should always be initiated when running lint")
 	}
 
 	// Convert raw results to list of LintResult structs
