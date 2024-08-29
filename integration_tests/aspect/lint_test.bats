@@ -15,7 +15,7 @@ sh_library(name = "shell", srcs = ["hello.sh"])
 EOF
 
     cat >MODULE.bazel <<'EOF'
-bazel_dep(name = "aspect_rules_lint", version = "0.21.0")
+bazel_dep(name = "aspect_rules_lint", version = "1.0.0-rc10")
 EOF
 
     cat >lint.bzl <<'EOF'

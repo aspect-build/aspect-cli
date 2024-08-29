@@ -144,7 +144,7 @@ func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEven
 								result.mnemonic = mnemonic
 							}
 							result.patchFile = file
-						} else if outputGroup.Name == LINT_REPORT_GROUP {
+						} else if outputGroup.Name == LINT_MACHINE_GROUP {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
 								result.mnemonic = mnemonic
 							}
