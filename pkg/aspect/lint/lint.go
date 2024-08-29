@@ -62,7 +62,7 @@ type Linter struct {
 
 // Align with rules_lint
 const (
-	LINT_REPORT_GROUP  = "rules_lint_report"
+	LINT_MACHINE_GROUP = "rules_lint_machine"
 	LINT_PATCH_GROUP   = "rules_lint_patch"
 	LINT_RESULT_REGEX  = ".*AspectRulesLint.*"
 	HISTOGRAM_CHARS    = 20
@@ -183,7 +183,7 @@ lint:
 		outputGroups = append(outputGroups, LINT_PATCH_GROUP)
 	}
 	if printReport {
-		outputGroups = append(outputGroups, LINT_REPORT_GROUP)
+		outputGroups = append(outputGroups, LINT_MACHINE_GROUP)
 	}
 
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--output_groups=%s", strings.Join(outputGroups, ",")))
