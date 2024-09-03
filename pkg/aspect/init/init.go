@@ -28,7 +28,7 @@ import (
 
 	"github.com/hay-kot/scaffold/app/commands"
 	"github.com/hay-kot/scaffold/app/core/engine"
-	"github.com/hay-kot/scaffold/app/scaffold"
+	"github.com/hay-kot/scaffold/app/scaffold/scaffoldrc"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
@@ -68,7 +68,7 @@ func (runner *Init) Run(ctx context.Context, cmd *cobra.Command, args []string) 
 
 	ctrl := &commands.Controller{}
 	// TODO: wire any relevant options from Aspect config.yaml
-	rc := &scaffold.ScaffoldRC{}
+	rc := scaffoldrc.Default()
 	ctrl.Prepare(engine.New(), rc)
 	// TODO: set log level to match our context
 	log.Logger = log.Level(zerolog.WarnLevel)

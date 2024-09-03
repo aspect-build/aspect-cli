@@ -11,7 +11,7 @@ go_library(
         "//pkg/ioutils",
         "@com_github_hay_kot_scaffold//app/commands",
         "@com_github_hay_kot_scaffold//app/core/engine",
-        "@com_github_hay_kot_scaffold//app/scaffold",
+        "@com_github_hay_kot_scaffold//app/scaffold/scaffoldrc",
         "@com_github_rs_zerolog//:zerolog",
         "@com_github_rs_zerolog//log",
         "@com_github_spf13_cobra//:cobra",
