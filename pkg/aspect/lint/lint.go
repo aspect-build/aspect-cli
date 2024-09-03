@@ -62,11 +62,12 @@ type Linter struct {
 
 // Align with rules_lint
 const (
-	LINT_MACHINE_GROUP = "rules_lint_machine"
-	LINT_PATCH_GROUP   = "rules_lint_patch"
-	LINT_RESULT_REGEX  = ".*AspectRulesLint.*"
-	HISTOGRAM_CHARS    = 20
-	MAX_FILENAME_WIDTH = 80
+	LINT_REPORT_GROUP_HUMAN   = "rules_lint_human"
+	LINT_REPORT_GROUP_MACHINE = "rules_lint_machine"
+	LINT_PATCH_GROUP          = "rules_lint_patch"
+	LINT_RESULT_REGEX         = ".*AspectRulesLint.*"
+	HISTOGRAM_CHARS           = 20
+	MAX_FILENAME_WIDTH        = 80
 )
 
 func New(
@@ -85,6 +86,7 @@ func AddFlags(flags *pflag.FlagSet) {
 	flags.Bool("fix", false, "Apply all patch fixes for lint violations")
 	flags.Bool("diff", false, "Show unified diff instead of diff stats for fixes")
 	flags.Bool("report", true, "Output lint reports")
+	flags.Bool("machine", false, "Request the machine readable output from linters")
 }
 
 // TODO: hoist this to a flags package so it can be used by other commands that require this functionality
@@ -158,6 +160,7 @@ lint:
 	applyAll, _ := cmd.Flags().GetBool("fix")
 	showDiff, _ := cmd.Flags().GetBool("diff")
 	printReport, _ := cmd.Flags().GetBool("report")
+	machine, _ := cmd.Flags().GetBool("machine")
 
 	// Separate out the lint command specific flags from the list of args to
 	// pass to `bazel build`
@@ -183,7 +186,11 @@ lint:
 		outputGroups = append(outputGroups, LINT_PATCH_GROUP)
 	}
 	if printReport {
-		outputGroups = append(outputGroups, LINT_MACHINE_GROUP)
+		if machine {
+			outputGroups = append(outputGroups, LINT_REPORT_GROUP_MACHINE)
+		} else {
+			outputGroups = append(outputGroups, LINT_REPORT_GROUP_HUMAN)
+		}
 	}
 
 	bazelCmd = append(bazelCmd, fmt.Sprintf("--output_groups=%s", strings.Join(outputGroups, ",")))
