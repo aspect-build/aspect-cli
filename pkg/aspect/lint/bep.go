@@ -144,11 +144,20 @@ func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEven
 								result.mnemonic = mnemonic
 							}
 							result.patchFile = file
-						} else if outputGroup.Name == LINT_MACHINE_GROUP {
+						} else if outputGroup.Name == LINT_REPORT_GROUP_MACHINE {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
 								result.mnemonic = mnemonic
 							}
 							if strings.HasSuffix(file.Name, ".report") {
+								result.reportFile = file
+							} else if strings.HasSuffix(file.Name, ".exit_code") {
+								result.exitCodeFile = file
+							}
+						} else if outputGroup.Name == LINT_REPORT_GROUP_HUMAN {
+							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
+								result.mnemonic = mnemonic
+							}
+							if strings.HasSuffix(file.Name, ".out") {
 								result.reportFile = file
 							} else if strings.HasSuffix(file.Name, ".exit_code") {
 								result.exitCodeFile = file
