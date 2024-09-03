@@ -197,7 +197,7 @@ func (ts *typeScriptLang) Resolve(
 
 		err := ts.resolveImports(c, ix, deps, importData.(*TsProjectInfo).imports, from)
 		if err != nil {
-			BazelLog.Fatalf("Resolution Error: ", err)
+			BazelLog.Fatalf("Resolution Error: %v", err)
 			os.Exit(1)
 		}
 
@@ -336,8 +336,7 @@ func (ts *typeScriptLang) resolveImport(
 			// Too many results, don't know which is correct
 			if len(filteredMatches) > 1 {
 				return Resolution_Error, nil, fmt.Errorf(
-					"Import %q from %q resolved to multiple targets (%s)"+
-						" - this must be fixed using the \"gazelle:resolve\" directive",
+					"Import %q from %q resolved to multiple targets (%s) - this must be fixed using the \"gazelle:resolve\" directive",
 					impStm.ImportPath, impStm.SourcePath, targetListFromResults(matches))
 			}
 
