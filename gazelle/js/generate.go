@@ -768,8 +768,6 @@ func toImportPaths(p string) []string {
 		}
 	} else if isDataFileType(p) {
 		paths = append(paths, p)
-	} else {
-		BazelLog.Warnf("Unknown file type: %q\n", p)
 	}
 
 	return paths
