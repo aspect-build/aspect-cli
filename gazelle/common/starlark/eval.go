@@ -17,14 +17,15 @@ var opts = &syntax.FileOptions{
 	GlobalReassign:  false,
 }
 
-var thread = &starlark.Thread{
-	Name: "AspectConfigure",
-	Load: repl.MakeLoadOptions(opts),
-
+func threadPrint(t *starlark.Thread, msg string) {
 	// TODO: stdout? log?
-	Print: func(t *starlark.Thread, msg string) {
-		fmt.Printf("%s: %s\n", t.Name, msg)
-	},
+	fmt.Printf("%s: %s\n", t.Name, msg)
+}
+
+var threadTemplate = starlark.Thread{
+	Name:  "AspectConfigure",
+	Load:  repl.MakeLoadOptions(opts),
+	Print: threadPrint,
 }
 
 func Eval(starpath string, libs starlark.StringDict, locals map[string]interface{}) (starlark.StringDict, error) {
@@ -40,13 +41,16 @@ func Eval(starpath string, libs starlark.StringDict, locals map[string]interface
 		predeclared[libName] = lib
 	}
 
+	thread := threadTemplate
 	for localName, local := range locals {
 		thread.SetLocal(localName, local)
 	}
 
-	return starlark.ExecFileOptions(opts, thread, starpath, nil, predeclared)
+	return starlark.ExecFileOptions(opts, &thread, starpath, nil, predeclared)
 }
 
 func Call(c starlark.Value, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	return starlark.Call(thread, c.(starlark.Callable), args, kwargs)
+	thread := threadTemplate
+
+	return starlark.Call(&thread, c.(starlark.Callable), args, kwargs)
 }
