@@ -110,9 +110,10 @@ func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
 	}
 
 	// tsconfig
-	configPath := path.Join(c.RepoRoot, rel, config.tsconfigName)
+	// TODO: add support for alternate tsconfig names
+	configPath := path.Join(c.RepoRoot, rel, config.defaultTsconfigName)
 	if _, err := os.Stat(configPath); err == nil {
-		ts.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.tsconfigName)
+		ts.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.defaultTsconfigName)
 	}
 }
 

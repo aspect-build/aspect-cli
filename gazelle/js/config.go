@@ -156,7 +156,7 @@ var (
 	dataFileExtensions = treeset.NewWithStringComparator("json")
 
 	// The default TypeScript config file name
-	defaultTsConfig = "tsconfig.json"
+	defaultTsconfigName = "tsconfig.json"
 )
 
 // ValidationMode represents what should happen when validation errors are found.
@@ -210,7 +210,7 @@ type JsGazelleConfig struct {
 	tsProtoLibraryName         string
 
 	// Name/location of tsconfig files relative to BUILDs
-	tsconfigName string
+	defaultTsconfigName string
 }
 
 // New creates a new JsGazelleConfig.
@@ -233,7 +233,7 @@ func newRootConfig() *JsGazelleConfig {
 		targetNamingOverrides:      make(map[string]string),
 		tsProtoLibraryName:         DefaultProtoLibraryName,
 		targets:                    DefaultSourceGlobs[:],
-		tsconfigName:               defaultTsConfig,
+		defaultTsconfigName:        defaultTsconfigName,
 
 		// TODO: move to common
 		// TODO: switch default to false

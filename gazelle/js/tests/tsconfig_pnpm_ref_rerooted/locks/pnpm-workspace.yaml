@@ -1,0 +1,5 @@
+packages:
+    - .
+    - ../extends
+    - ../extends2
+    - ../tools
