@@ -1,0 +1,14 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config")
+
+# gazelle:js_generation_mode none
+# gazelle:js_tsconfig disabled
+
+ts_config(
+    name = "t-node",
+    src = "tsconfig.node.json",
+)
+
+ts_config(
+    name = "t-web",
+    src = "tsconfig.web.json",
+)
