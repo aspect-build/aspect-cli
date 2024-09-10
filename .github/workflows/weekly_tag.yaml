@@ -1,0 +1,22 @@
+# Apply a tag to HEAD at the beginning of each week.
+# We can use this to create semver-looking tags for releases like
+# 2020.44.123+abc1234
+on:
+  schedule:
+    # Mondays at 5am UTC / midnight EST
+    - cron: '0 5 * * 1'
+jobs:
+  tagger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: tag HEAD with date +%Y.%V
+        run: |
+          curl --request POST \
+              --url https://api.github.com/repos/${{ github.repository }}/git/refs \
+              --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
+              --data @- << EOF
+          {
+              "ref": "refs/tags/$(date +%Y.%V)",
+              "sha": "${{ github.sha }}"
+          }
+          EOF

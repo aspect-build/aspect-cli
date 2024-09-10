@@ -7,7 +7,7 @@ _GO_STAMP_X_DEFS = {
     "GitCommit": "{STABLE_BUILD_SCM_SHA}",
     "GitStatus": "{STABLE_BUILD_SCM_LOCAL_CHANGES}",
     "HostName": "{BUILD_HOST}",
-    "Release": "{STABLE_BUILD_SCM_TAG}",
+    "Release": "{STABLE_ASPECT_CLI_VERSION}",
 }
 
 go_library(
