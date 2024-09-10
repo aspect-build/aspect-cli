@@ -23,5 +23,19 @@ echo "STABLE_BUILD_SCM_SHA $(git rev-parse HEAD)"
 echo "STABLE_BUILD_SCM_LOCAL_CHANGES $(has_local_changes)"
 
 if [ "$(git tag | wc -l)" -gt 0 ]; then
-    echo "STABLE_BUILD_SCM_TAG $(git describe --tags)"
+    # Follows https://blog.aspect.build/versioning-releases-from-a-monorepo
+    monorepo_version=$(
+        git describe --tags --long --match="[0-9][0-9][0-9][0-9].[0-9][0-9]" |
+            sed -e 's/-/./;s/-g/-/'
+    )
+
+    # Variant of monorepo_version that conforms with the version scheme Bazelisk supports.
+    # It assumes the upstream `bazel` binary releases are the only ones referenced,
+    # so we are forced to adopt a matching scheme.
+    # https://github.com/bazelbuild/bazelisk/blob/47f60477721681a117cbf905784ee5220100e68b/versions/versions.go#L20-L25
+    # shellcheck disable=SC2001
+    bazelisk_compat_version=$(sed 's/-.*//' <<<"$monorepo_version")
+
+    echo "STABLE_ASPECT_CLI_BAZELISK_COMPAT_VERSION ${bazelisk_compat_version}"
+    echo "STABLE_ASPECT_CLI_VERSION ${monorepo_version}"
 fi

@@ -3,9 +3,9 @@ title: Aspect CLI
 sidebar_label: Overview
 ---
 
-The `aspect` CLI is a drop-in replacement for the `bazel` CLI that comes with Bazel.
+Aspect CLI (`aspect`) is a drop-in replacement for the CLI that comes with [Bazel](http://bazel.build) that adds additional features and extensibility to the popular polyglot build system from Google.
 
-# Why Aspect CLI
+# Why Aspect CLI?
 
 Every organization has a different engineering culture and developer stack.
 Bazel was designed for Google's workflows, not yours.
@@ -15,13 +15,49 @@ untested Bash script living in `/tools/bazel` which Bazelisk understands as a wr
 
 Over time, the wrapper accumulates more code, and is a constant source of developer distress.
 
-See more on our product webpage: <https://aspect.build/cli>
+See more on our docsite: <https://docs.aspect.build/cli/>
+
+# Licenses
+
+# Aspect CLI OSS
+
+Aspect CLI OSS, the open-source, open-core portion of the Aspect CLI, is found in this repository and is [Apache 2](./LICENSE) licensed.
+
+# Aspect CLI
+
+The standard Aspect CLI is built on top of the open-source, open-core portion found is this repository and is licensed under the [Aspect Community License](./ASPECT_COMMUNITY_LICENSE). The parts of the Aspect CLI that are not found in this repository are closed source.
+
+We intend for Aspect CLI to remain free for individuals (only for personal use), Small Business (fewer than 50 employees), and non-profit or academic institutions. Please contact Aspect at https://aspect.build if you would like to use the Aspect CLI and fall outside of free use.
 
 # Installation
 
-## Homebrew (MacOS)
+## Aspect CLI OSS
 
-On MacOS, you can run
+### Bazelisk (MacOS / Linux)
+
+Aspect CLI OSS can be installed in an existing Bazel workspace using [bazelisk].
+
+> [!NOTE]
+> This approach doesn't provide the `aspect init` command, which has to run outside a Bazel workspace.
+
+From the [OSS releases page](https://github.com/aspect-build/aspect-cli/releases),
+copy the `.bazeliskrc` snippet into your `.bazeliskrc` file to install Aspect for all developers in the target repository.
+
+The underlying version of Bazel can be configured in your `.bazelversion` file or the `BAZEL_VERSION` environment variable.
+
+### Manual (MacOS / Linux)
+
+On any platform, you can download the Aspect CLI OSS `aspect` binary for your platform on our
+[Releases](https://github.com/aspect-build/aspect-cli/releases) page and add it to your `PATH` manually.
+
+Note, if you manually install for MacOS, you can bypass the "Unknown Developer" dialog by running
+`xattr -c $(which aspect)` before launching `aspect`.
+
+## Aspect CLI Standard
+
+### Homebrew (MacOS)
+
+To install the Aspect CLI on MacOS, you can run
 
 ```sh
 % brew install aspect-build/aspect/aspect
@@ -29,27 +65,28 @@ On MacOS, you can run
 
 This installs the `aspect` command and also links it to `bazel`, just like the [bazelisk] installer does.
 
-## Manual (MacOS / Linux)
+### Bazelisk (MacOS / Linux)
 
-On any platform, you can download the `aspect` binary for your platform on our
-[Releases](https://github.com/aspect-build/aspect-cli/releases) page and add it to your `PATH` manually.
+Aspect CLI can be installed in an existing Bazel workspace using [bazelisk].
 
-Note, if you manually install for MacOS, you can bypass the "Unknown Developer" dialog by running
-`xattr -c $(which aspect)` before launching `aspect`.
+> [!NOTE]
+> This approach doesn't provide the `aspect init` command, which has to run outside a Bazel workspace.
 
-## Ensuring everyone on the team uses `aspect`
+Configure [bazelisk](https://github.com/bazelbuild/bazelisk) to use the Aspect CLI for all developers in a repository
+by adding the following to \`.bazeliskrc\` in the repository root:
 
-In an already-existing Bazel workspace, you can have [bazelisk]
-install the Aspect CLI just like it can install the standard Bazel CLI.
+\`\`\`
+BAZELISK_BASE_URL=https://static.aspect.build/aspect
+USE_BAZEL_VERSION=aspect/xxxx.xx.xx
+\`\`\`
 
->[!NOTE]
->This approach doesn't provide the `aspect init` command, which has to run outside a Bazel workspace.
+Check the Aspect CLI [Homebrew formula](https://github.com/aspect-build/homebrew-aspect/blob/main/Formula/aspect.rb) for
+latest version of Aspect CLI.
 
-From the [releases page](https://github.com/aspect-build/aspect-cli/releases),
-copy the `.bazeliskrc` snippet into your `.bazeliskrc` file to install Aspect for all developers in this repository.
+> [!NOTE]
+> An Aspect CLI releases page with release notes and past releases is coming soon.
 
-Note that in all cases, the `.bazelversion` file continues to indicate which version of the
-Bazel tool is fetched and run beneath the wrapper.
+The underlying version of Bazel can be configured in your `.bazelversion` file or the `BAZEL_VERSION` environment variable.
 
 ## Windows
 
@@ -81,7 +118,7 @@ See the [Plugin Documentation](./plugins.md) for more information on how to writ
 
 If you think you've hit a bug please file a [Bug Report](https://github.com/aspect-build/aspect-cli/issues/new/choose).
 
-You can also find us on [Bazel Slack](https://slack.bazel.build/) on the #aspect-dev channel.
+You can also find us on [Bazel Slack](https://slack.bazel.build/) on the #aspect-build channel.
 
 # For Enterprise
 
@@ -89,6 +126,4 @@ Aspect CLI is built by [Aspect](http://aspect.build).
 
 See our website at <http://aspect.build> to learn more about our product offerings.
 
-[bazel]: http://bazel.build
-[github releases]: https://github.com/aspect-dev/aspect-cli/releases
 [bazelisk]: https://github.com/bazelbuild/bazelisk
