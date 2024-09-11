@@ -7,7 +7,6 @@ import (
 	"path"
 	"strings"
 
-	gazelle "aspect.build/cli/gazelle/common"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/emirpasic/gods/maps/linkedhashmap"
@@ -197,7 +196,6 @@ type JsGazelleConfig struct {
 
 	pnpmLockPath string
 
-	excludes                 []string
 	ignoreDependencies       []string
 	resolves                 *linkedhashmap.Map
 	validateImportStatements ValidationMode
@@ -224,7 +222,6 @@ func newRootConfig() *JsGazelleConfig {
 		generationMode:             GenerationModeDirectory,
 		packageTargetKind:          PackageTargetKind_Package,
 		pnpmLockPath:               "pnpm-lock.yaml",
-		excludes:                   make([]string, 0),
 		ignoreDependencies:         make([]string, 0),
 		resolves:                   linkedhashmap.New(),
 		validateImportStatements:   ValidationError,
@@ -262,7 +259,6 @@ func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
 	cCopy := *c
 	cCopy.rel = childPath
 	cCopy.parent = c
-	cCopy.excludes = make([]string, 0)
 	cCopy.ignoreDependencies = make([]string, 0)
 	cCopy.resolves = linkedhashmap.New()
 
@@ -304,16 +300,6 @@ func (c *JsGazelleConfig) SetVisibility(groupName string, visLabels []string) {
 
 		target.visibility = append(target.visibility, l)
 	}
-}
-
-// AddExcludedPattern adds a glob pattern parsed from the standard gazelle:exclude directive.
-func (c *JsGazelleConfig) AddExcludedPattern(pattern string) {
-	c.excludes = append(c.excludes, pattern)
-}
-
-// Determine if the file path is ignored based on the current configuration.
-func (c *JsGazelleConfig) IsFileExcluded(fileRelPath string) bool {
-	return gazelle.IsFileExcluded(c.rel, fileRelPath, c.excludes)
 }
 
 // TODO: move to common util

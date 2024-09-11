@@ -94,7 +94,8 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 		ts.readConfigurations(c, rel)
 	}
 
-	// Enable the WALKSUBDIR gazelle patch, setting the flag depending on the js GenerationMode.
+	// TODO: move to common global config.Configurer
+	// Enable the WALKSUBDIR gazelle patch, setting the flag depending on js the GenerationMode.
 	c.Exts[common.ASPECT_WALKSUBDIR] = c.Exts[LanguageName].(*JsGazelleConfig).generationMode == GenerationModeNone
 
 	ts.gitignore.CollectIgnoreFiles(c, rel)
@@ -126,9 +127,6 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 		switch d.Key {
 		case Directive_GitIgnore:
 			config.SetGitIgnoreEnabled(common.ReadEnabled(d))
-		case "exclude":
-			// We record the exclude directive since we do manual tree traversal of subdirs.
-			config.AddExcludedPattern(value)
 		case Directive_TypeScriptExtension:
 			config.SetGenerationEnabled(common.ReadEnabled(d))
 		case Directive_TypeScriptConfigExtension:
