@@ -70,25 +70,3 @@ gazelle_binary(
     )
     for test_workspace in glob(["tests/**/WORKSPACE"])
 ]
-
-# A subset of tests that are run with flags disabling some of the
-# gazelle patches provided by the aspect-cli that which may not be present in regular
-# gazelle_binary()s in other repos.
-[
-    gazelle_generation_test(
-        name = "%s_unpatched_test" % test_workspace.replace("/WORKSPACE", "").replace("tests/", ""),
-        dir = test_workspace.replace("/WORKSPACE", ""),
-        env = {
-            "__aspect_walksubdir_optout__": "true",
-        },
-        gazelle_binary = "gazelle_js_binary",
-    )
-    for test_workspace in [
-        "tests/gazelle_exclude_directive",
-        "tests/gazelle_generation_mode",
-        "tests/gazelle_generate_build",
-        "tests/tests_simple",
-        "tests/tests_subdir",
-        "tests/tests_subproject",
-    ]
-]

@@ -5,7 +5,6 @@ go_library(
     srcs = [
         "bazel.go",
         "directives.go",
-        "excludes.go",
         "regex.go",
         "rules.go",
         "set.go",
@@ -19,7 +18,6 @@ go_library(
         "@bazel_gazelle//label:go_default_library",
         "@bazel_gazelle//language:go_default_library",
         "@bazel_gazelle//rule:go_default_library",
-        "@bazel_gazelle//walk:go_default_library",
         "@com_github_emirpasic_gods//sets/treeset",
     ],
 )
