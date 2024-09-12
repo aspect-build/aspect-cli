@@ -19,5 +19,6 @@ go_library(
         "@bazel_gazelle//language:go_default_library",
         "@bazel_gazelle//rule:go_default_library",
         "@com_github_emirpasic_gods//sets/treeset",
+        "@com_github_emirpasic_gods//utils",
     ],
 )
