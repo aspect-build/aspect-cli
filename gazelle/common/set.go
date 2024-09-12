@@ -4,6 +4,7 @@ import (
 	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/emirpasic/gods/sets/treeset"
+	"github.com/emirpasic/gods/utils"
 )
 
 // A basic set of label.Labels with logging of set modifications.
@@ -12,10 +13,14 @@ type LabelSet struct {
 	labels *treeset.Set
 }
 
+func LabelComparator(a, b interface{}) int {
+	return utils.StringComparator(a.(label.Label).String(), b.(label.Label).String())
+}
+
 func NewLabelSet(from label.Label) *LabelSet {
 	return &LabelSet{
 		from:   from,
-		labels: treeset.NewWithStringComparator(),
+		labels: treeset.NewWith(LabelComparator),
 	}
 }
 
@@ -28,21 +33,17 @@ func (s *LabelSet) Add(l *label.Label) {
 	// Convert to a relative label for simpler labels in BUILD files
 	relL := l.Rel(s.from.Repo, s.from.Pkg)
 
-	if d := relL.String(); !s.labels.Contains(d) {
-		BazelLog.Debugf("add %q dependency: %q", s.from.String(), d)
-
-		s.labels.Add(d)
-	}
+	s.labels.Add(relL)
 }
 
 func (s *LabelSet) Empty() bool {
 	return s.labels.Empty()
 }
 
-func (s *LabelSet) Labels() []string {
-	labels := make([]string, 0, s.labels.Size())
+func (s *LabelSet) Labels() []label.Label {
+	labels := make([]label.Label, 0, s.labels.Size())
 	for _, l := range s.labels.Values() {
-		labels = append(labels, l.(string))
+		labels = append(labels, l.(label.Label))
 	}
 	return labels
 }
