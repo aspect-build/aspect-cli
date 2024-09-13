@@ -1,4 +1,4 @@
-# gazelle:js_generation_mode none
+# gazelle:generation_mode update
 
 # Generated .ts
 genrule(

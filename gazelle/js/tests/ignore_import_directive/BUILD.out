@@ -1,6 +1,6 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
-# gazelle:js_generation_mode none
+# gazelle:generation_mode update
 
 # gazelle:js_ignore_imports jquery
 # gazelle:js_ignore_imports **/*.scss
