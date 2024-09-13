@@ -76,6 +76,8 @@ func getUpdateConfig(c *config.Config) *updateConfig {
 	return c.Exts[updateName].(*updateConfig)
 }
 
+var _ config.Configurer = (*updateConfigurer)(nil)
+
 type updateConfigurer struct {
 	mode           string
 	recursive      bool
@@ -303,7 +305,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 	}
 	ruleIndex := resolve.NewRuleIndex(mrslv.Resolver, exts...)
 
-	if err := fixRepoFiles(c, loads); err != nil {
+	if err = fixRepoFiles(c, loads); err != nil {
 		return nil, err
 	}
 
@@ -329,10 +331,10 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		// If this file is ignored or if Gazelle was not asked to update this
 		// directory, just index the build file and move on.
 		if !update {
+			for _, repl := range c.KindMap {
+				mrslv.MappedKind(rel, repl)
+			}
 			if c.IndexLibraries && f != nil {
-				for _, repl := range c.KindMap {
-					mrslv.MappedKind(rel, repl)
-				}
 				for _, r := range f.Rules {
 					ruleIndex.AddRule(c, r, f)
 				}

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// NOTE: synced from bazel-gazelle/cmd/gazelle/gazelle.go
+// NOTE: synced from bazel-gazelle/cmd/gazelle/main.go
 
 // Command gazelle is a BUILD file generator for Go projects.
 // See "gazelle --help" for more details.
