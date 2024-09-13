@@ -39,9 +39,9 @@ http_archive(
 
 http_archive(
     name = "aspect_rules_lint",
-    sha256 = "bd5a82b350cf20a662c45d6baa0f301a6a1a81833122e1d68a91a120e33a14dd",
-    strip_prefix = "rules_lint-37d0160469035e4ea0f1824135cb198cbdcc59e0",
-    url = "https://github.com/aspect-build/rules_lint/archive/37d0160469035e4ea0f1824135cb198cbdcc59e0.zip",
+    sha256 = "fe2c8fc9419e5cd31ae63c1b8c3ae643b10a2befe810dcb8d142a7fe9554ec36",
+    strip_prefix = "rules_lint-1.0.1",
+    url = "https://github.com/aspect-build/rules_lint/releases/download/v1.0.1/rules_lint-v1.0.1.tar.gz",
 )
 
 http_archive(
@@ -309,7 +309,10 @@ load("@rules_multitool//multitool:multitool.bzl", "multitool")
 
 multitool(
     name = "multitool",
-    lockfile = "@aspect_rules_lint//format:multitool.lock.json",
+    lockfiles = [
+        "@aspect_rules_lint//format:multitool.lock.json",
+        "@aspect_rules_lint//lint:multitool.lock.json",
+    ],
 )
 
 load("//.aspect/workflows:deps.bzl", "fetch_workflows_deps")

@@ -22,6 +22,9 @@ workflows:
     - aw-format:
         context: []
         workspace: .
+    - aw-lint:
+        context: []
+        workspace: .
     - aw-test:
         context: []
         workspace: .
@@ -211,6 +214,46 @@ jobs:
     - run:
         command: rosetta run format --workspace << parameters.workspace >>
         name: Format
+        no_output_timeout: 180m
+    - store_artifacts:
+        path: /workflows/artifacts
+    - run:
+        command: rosetta run finalization
+        name: Finalization
+        no_output_timeout: 10m
+        when: always
+    working_directory: /mnt/ephemeral/workdir
+  aw-lint:
+    environment:
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_NUMBER: << pipeline.number >>
+      ASPECT_WORKFLOWS_CIRCLE_PIPELINE_PROJECT_TYPE: << pipeline.project.type >>
+      ASPECT_WORKFLOWS_CIRCLE_WORKFLOW_BASE_NAME: aspect-workflows
+      ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config.yaml
+      ASPECT_WORKFLOWS_WORKSPACE: << parameters.workspace >>
+      XDG_CACHE_HOME: /mnt/ephemeral/caches
+    machine: true
+    parameters:
+      delivery_manifest:
+        default: true
+        type: boolean
+      workspace:
+        type: string
+    resource_class: aspect-build/aspect-cli-default
+    steps:
+    - run:
+        command: /etc/aspect/workflows/bin/configure_workflows_env
+        name: Workflows environment
+    - checkout
+    - run:
+        command: rm -rf /workflows/artifacts /workflows/testlogs
+        name: Prepare archive directories
+    - run:
+        command: /etc/aspect/workflows/bin/agent_health_check
+        name: Agent health check
+        no_output_timeout: 180m
+    - run:
+        command: rosetta run lint --workspace << parameters.workspace >>
+        name: Lint
         no_output_timeout: 180m
     - store_artifacts:
         path: /workflows/artifacts
