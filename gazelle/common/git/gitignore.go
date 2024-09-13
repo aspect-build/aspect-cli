@@ -56,8 +56,12 @@ func (i *GitIgnore) addIgnore(rel string, ignoreReader io.Reader) {
 
 	reader := bufio.NewScanner(ignoreReader)
 	for reader.Scan() {
-		p := gitignore.ParsePattern(reader.Text(), domain)
-		matcherPatterns = append(matcherPatterns, p)
+		p := strings.TrimSpace(reader.Text())
+		if p == "" || strings.HasPrefix(p, "#") {
+			continue
+		}
+
+		matcherPatterns = append(matcherPatterns, gitignore.ParsePattern(p, domain))
 	}
 
 	ignore := gitignore.NewMatcher(matcherPatterns)
