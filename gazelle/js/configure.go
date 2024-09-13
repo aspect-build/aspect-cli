@@ -96,7 +96,7 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 
 	// TODO: move to common global config.Configurer
 	// Enable the WALKSUBDIR gazelle patch, setting the flag depending on js the GenerationMode.
-	c.Exts[common.ASPECT_WALKSUBDIR] = c.Exts[LanguageName].(*JsGazelleConfig).generationMode == GenerationModeNone
+	c.Exts[common.ASPECT_WALKSUBDIR] = c.Exts[LanguageName].(*JsGazelleConfig).generationMode == common.GenerationModeUpdate
 
 	ts.gitignore.CollectIgnoreFiles(c, rel)
 }
@@ -140,16 +140,6 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 				config.SetNpmPackageGenerationMode(NpmPackageEnabledMode)
 			} else {
 				config.SetNpmPackageGenerationMode(NpmPackageDisabledMode)
-			}
-		case Directive_GenerationMode:
-			mode := GenerationModeType(strings.TrimSpace(d.Value))
-			switch mode {
-			case GenerationModeDirectory:
-				config.SetGenerationMode(mode)
-			case GenerationModeNone:
-				config.SetGenerationMode(mode)
-			default:
-				log.Fatalf("invalid value for directive %q: %s", Directive_GenerationMode, d.Value)
 			}
 		case Directive_Visibility:
 			group := DefaultLibraryName
@@ -260,18 +250,28 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 
 			config.addTargetGlob(groupGlob[0], groupGlob[1], true)
 
+		case Directive_GenerationMode:
+			mode := strings.TrimSpace(d.Value)
+			switch mode {
+			case "directory":
+				config.SetGenerationMode(common.GenerationModeCreate)
+			case "none":
+				config.SetGenerationMode(common.GenerationModeUpdate)
+			default:
+				log.Fatalf("invalid value for directive %q: %s", Directive_GenerationMode, d.Value)
+			}
+
+			fmt.Printf("DEPRECATED: %s is deprecated, use %s %s|%s\n", Directive_GenerationMode, common.Directive_GenerationMode, common.GenerationModeUpdate, common.GenerationModeCreate)
+
 		// Inherited aspect-cli common+pro values
+		// TODO: move to common location
 		case common.Directive_GenerationMode:
 			mode := common.GenerationModeType(strings.TrimSpace(d.Value))
 			switch mode {
 			case common.GenerationModeCreate:
-				config.SetGenerationEnabled(true)
-				config.SetGenerationMode(GenerationModeDirectory)
-			case common.GenerationModeNone:
-				config.SetGenerationEnabled(false)
+				config.SetGenerationMode(common.GenerationModeCreate)
 			case common.GenerationModeUpdate:
-				config.SetGenerationEnabled(true)
-				config.SetGenerationMode(GenerationModeNone)
+				config.SetGenerationMode(common.GenerationModeUpdate)
 			default:
 				log.Fatalf("invalid value for directive %q: %s", common.Directive_GenerationMode, d.Value)
 			}

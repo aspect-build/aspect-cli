@@ -1,6 +1,6 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
-# gazelle:js_generation_mode none
+# gazelle:generation_mode update
 
 # gazelle:js_files srcs/**/*.ts
 # gazelle:js_test_files tests/**/*.ts

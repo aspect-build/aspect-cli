@@ -33,7 +33,7 @@ Test source files are source files ending with `.spec.ts` (and other ts extensio
 The test file pattern can be configured with the 'js*test*\*' directives.
 
 By default `aspect configure` creates new BUILD files for each directory containing source files.
-This can be configured to only edit existing BUILD files using the `js_generation_mode` directive.
+This can be configured to only edit existing BUILD files using the `generation_mode` directive.
 
 Each BUILD file may have a `ts_project` rule for sources, another for tests,
 a `npm_package` rule for pnpm workspace projects, and `npm_link_all_packages` for linking node_modules.
@@ -83,7 +83,7 @@ enable other projects to declare dependencies on the package.
 | Equivalent to `js_files` but for the test `ts_project` rule. |
 | `# gazelle:js_npm_package_target_name _name_`           | `{dirname}`                 |
 | The format used to generate the name of the `npm_package` rule. |
-| `# gazelle:js_generation_mode none\|directory`          | `directory`                 | 
+| `# gazelle:generation_mode update\|create`              | `create`                    |
 | DEPRECATED: see `generation_mode` directive. |
 | `# gazelle:js_custom_files _name_ _glob_`               |                             |
 | DEPRECATED:Generate additional custom `ts_project` targets |

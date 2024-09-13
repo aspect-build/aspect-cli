@@ -18,9 +18,6 @@ type GenerationModeType string
 
 // Generation modes
 const (
-	// None: do not update or create any BUILD files
-	GenerationModeNone GenerationModeType = "none"
-
 	// Update: update and maintain existing BUILD files
 	GenerationModeUpdate GenerationModeType = "update"
 

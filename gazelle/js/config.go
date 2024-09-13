@@ -7,6 +7,7 @@ import (
 	"path"
 	"strings"
 
+	common "aspect.build/cli/gazelle/common"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/emirpasic/gods/maps/linkedhashmap"
@@ -25,9 +26,6 @@ const (
 	Directive_TypeScriptConfigExtension = "js_tsconfig"
 	// En/disable npm_package generation and when generate
 	Directive_NpmPackageExtension = "js_npm_package"
-	// Directive_GenerationMode represents the directive that controls the BUILD generation
-	// mode. See below for the GenerationModeType constants.
-	Directive_GenerationMode = "js_generation_mode"
 	// Visibility of the primary library targets
 	Directive_Visibility = "js_visibility"
 	// The pnpm-lock.yaml file.
@@ -64,20 +62,11 @@ const (
 	Directive_CustomTargetFiles = "js_custom_files"
 	// TODO(deprecated): remove - replaced with js_test_files [group]
 	Directive_CustomTargetTestFiles = "js_custom_test_files"
+	// TODO(deprecated): remove - replaced with common generation_mode
+	Directive_GenerationMode = "js_generation_mode"
 
 	// TODO: move to common
 	Directive_GitIgnore = "gitignore"
-)
-
-// GenerationModeType represents one of the generation modes.
-type GenerationModeType string
-
-// Generation modes
-const (
-	GenerationModeNone GenerationModeType = "none"
-	// GenerationModeDirectory defines the mode in which a coarse-grained target will
-	// be generated for each sub-directory.
-	GenerationModeDirectory GenerationModeType = "directory"
 )
 
 type NpmPackageMode string
@@ -183,7 +172,7 @@ type JsGazelleConfig struct {
 	parent *JsGazelleConfig
 
 	generationEnabled bool
-	generationMode    GenerationModeType
+	generationMode    common.GenerationModeType
 
 	packageTargetKind PackageTargetKind
 
@@ -219,7 +208,7 @@ func newRootConfig() *JsGazelleConfig {
 		protoGenerationEnabled:     true,
 		tsconfigGenerationEnabled:  false,
 		packageGenerationEnabled:   NpmPackageReferencedMode,
-		generationMode:             GenerationModeDirectory,
+		generationMode:             common.GenerationModeCreate,
 		packageTargetKind:          PackageTargetKind_Package,
 		pnpmLockPath:               "pnpm-lock.yaml",
 		ignoreDependencies:         make([]string, 0),
@@ -423,13 +412,13 @@ func (c *JsGazelleConfig) ValidateImportStatements() ValidationMode {
 
 // SetGenerationMode sets whether coarse-grained targets should be
 // generated or not.
-func (c *JsGazelleConfig) SetGenerationMode(generationMode GenerationModeType) {
+func (c *JsGazelleConfig) SetGenerationMode(generationMode common.GenerationModeType) {
 	c.generationMode = generationMode
 }
 
 // GenerationMode returns whether coarse-grained targets should be
 // generated or not.
-func (c *JsGazelleConfig) GenerationMode() GenerationModeType {
+func (c *JsGazelleConfig) GenerationMode() common.GenerationModeType {
 	return c.generationMode
 }
 
