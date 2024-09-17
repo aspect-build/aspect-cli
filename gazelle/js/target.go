@@ -22,13 +22,6 @@ type ImportStatement struct {
 	ImportPath string
 }
 
-// NpmPackage rule import data
-type NpmPackageImports struct{}
-
-func newNpmPackageImports() *NpmPackageImports {
-	return &NpmPackageImports{}
-}
-
 // Npm link-all rule import data
 type LinkAllPackagesImports struct{}
 
@@ -48,7 +41,7 @@ type TsProjectInfo struct {
 func newTsProjectInfo() *TsProjectInfo {
 	return &TsProjectInfo{
 		imports: treeset.NewWith(importStatementComparator),
-		sources: nil,
+		sources: treeset.NewWithStringComparator(),
 	}
 }
 func (i *TsProjectInfo) AddImport(impt ImportStatement) {

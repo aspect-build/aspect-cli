@@ -1,0 +1,23 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  exports-gen: {}
+
+  exports-js: {}
+
+  exports-ts: {}
+
+  main-custom_ts: {}
+
+  main-js: {}
+
+  main-js-gen: {}
+
+  main-ts: {}

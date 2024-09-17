@@ -11,6 +11,7 @@ import (
 
 	gazelle "aspect.build/cli/gazelle/common"
 	starlark "aspect.build/cli/gazelle/common/starlark"
+	node "aspect.build/cli/gazelle/js/node"
 	parser "aspect.build/cli/gazelle/js/parser"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
 	proto "aspect.build/cli/gazelle/js/proto"
@@ -166,12 +167,10 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 
 	// If this is a package wrap the main ts_project() rule with npm_package()
 	if hasPackageTarget {
-		npmPackageName := cfg.RenderNpmPackageTargetName(packageName)
-		npmPackageSourceFiles := treeset.NewWithStringComparator()
-
-		var srcTarget *label.Label
+		// Add the primary source rule by default if it exists
+		var srcLabel *label.Label
 		if srcRule, _ := sourceRules.Get(DefaultLibraryName); srcRule != nil {
-			srcTarget = &label.Label{
+			srcLabel = &label.Label{
 				Name:     srcRule.(*rule.Rule).Name(),
 				Repo:     args.Config.RepoName,
 				Pkg:      args.Rel,
@@ -179,64 +178,68 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 			}
 		}
 
-		// Add the package.json if not in the src
-		if dataFiles.Contains(NpmPackageFilename) {
-			dataFiles.Remove(NpmPackageFilename)
-			npmPackageSourceFiles.Add(NpmPackageFilename)
-		}
-
-		if cfg.packageTargetKind == PackageTargetKind_Package {
-			// Add the src to the npm_package(srcs)
-			if srcTarget != nil {
-				npmPackageSourceFiles.Add(srcTarget.String())
-			}
-
-			ts.addNpmPackageRule(
-				cfg,
-				args,
-				npmPackageName,
-				npmPackageSourceFiles,
-				result,
-			)
-		} else {
-			deps := make([]label.Label, 0, 1)
-
-			// Add the src to the js_library(deps)
-			if srcTarget != nil {
-				deps = append(deps, *srcTarget)
-			}
-
-			ts.addJsLibraryPackageRule(
-				cfg,
-				args,
-				npmPackageName,
-				npmPackageSourceFiles,
-				deps,
-				result,
-			)
-		}
+		ts.addPackageRule(cfg, args, packageName, sourceFiles, dataFiles, srcLabel, result)
 	}
 }
 
-func (ts *typeScriptLang) addJsLibraryPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, npmPackageName string, srcs *treeset.Set, deps []label.Label, result *language.GenerateResult) {
-	pkg := rule.NewRule(JsLibraryKind, npmPackageName)
-	pkg.SetAttr("srcs", srcs.Values())
-	pkg.SetAttr("deps", deps)
+func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, packageName string, sourceFiles, dataFiles *treeset.Set, srcLabel *label.Label, result *language.GenerateResult) {
+	npmPackageInfo := newTsProjectInfo()
 
-	result.Gen = append(result.Gen, pkg)
-	result.Imports = append(result.Imports, newTsProjectInfo())
+	packageJsonPath := path.Join(args.Rel, NpmPackageFilename)
+	packageImports, err := node.ParsePackageJsonImportsFile(args.Config.RepoRoot, packageJsonPath)
+	if err != nil {
+		BazelLog.Errorf("Failed to parse package.json imports: %v", err)
+	}
 
-	BazelLog.Infof("add rule '%s' '%s:%s'", pkg.Kind(), args.Rel, pkg.Name())
-}
+	for _, impt := range packageImports {
+		if sourceFiles.Contains(impt) || dataFiles.Contains(impt) {
+			npmPackageInfo.sources.Add(impt)
+		} else {
+			if strings.Contains(impt, "*") {
+				BazelLog.Warnf("Wildcard import %q in %q not supported", impt, packageJsonPath)
+				continue
+			}
 
-func (ts *typeScriptLang) addNpmPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, npmPackageName string, srcs *treeset.Set, result *language.GenerateResult) {
-	npmPackage := rule.NewRule(NpmPackageKind, npmPackageName)
-	npmPackage.SetAttr("srcs", srcs.Values())
+			npmPackageInfo.imports.Add(ImportStatement{
+				ImportSpec: resolve.ImportSpec{
+					Lang: LanguageName,
+					Imp:  path.Join(args.Rel, impt),
+				},
+				ImportPath: impt,
+				SourcePath: packageJsonPath,
+			})
+		}
+	}
+
+	// Add the package.json if not in the src
+	// TODO: why not always add it?
+	// TODO: declare import on it instead if it's in another rule?
+	if dataFiles.Contains(NpmPackageFilename) {
+		dataFiles.Remove(NpmPackageFilename)
+		npmPackageInfo.sources.Add(NpmPackageFilename)
+	}
+
+	packageTargetName := cfg.RenderNpmPackageTargetName(packageName)
+	packageTargetKind := NpmPackageKind
+	if cfg.packageTargetKind == PackageTargetKind_Library {
+		packageTargetKind = JsLibraryKind
+	}
+
+	npmPackage := rule.NewRule(packageTargetKind, packageTargetName)
+	if srcLabel != nil {
+		if cfg.packageTargetKind == PackageTargetKind_Library {
+			npmPackage.SetAttr("deps", []label.Label{*srcLabel})
+		} else {
+			npmPackageInfo.sources.Add(srcLabel.String())
+		}
+	}
+
+	npmPackage.SetAttr("srcs", npmPackageInfo.sources.Values())
 
 	result.Gen = append(result.Gen, npmPackage)
-	result.Imports = append(result.Imports, newNpmPackageImports())
+	result.Imports = append(result.Imports, npmPackageInfo)
 
-	BazelLog.Infof("add rule '%s' '%s:%s'", npmPackage.Kind(), args.Rel, npmPackage.Name())
+	BazelLog.Infof("add rule '%s' '%s:%s'", cfg.packageTargetKind, args.Rel, packageTargetName)
 }
 
 func (ts *typeScriptLang) addTsConfigRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
@@ -380,7 +383,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, args language.Gen
 
 	// Project data combined from all files.
 	info := newTsProjectInfo()
-	info.sources = sourceFiles
+	info.sources.Add(sourceFiles.Values()...)
 
 	for result := range ts.parseFiles(cfg, args, info.sources) {
 		if len(result.Errors) > 0 {

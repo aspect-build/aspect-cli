@@ -192,7 +192,7 @@ func (ts *typeScriptLang) Resolve(
 	BazelLog.Infof("Resolve(%s): //%s:%s", LanguageName, from.Pkg, r.Name())
 
 	// TsProject imports are resolved as deps
-	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsConfigKind || r.Kind() == TsProtoLibraryKind {
+	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsConfigKind || r.Kind() == TsProtoLibraryKind || r.Kind() == NpmPackageKind {
 		deps := common.NewLabelSet(from)
 
 		err := ts.resolveImports(c, ix, deps, importData.(*TsProjectInfo).imports, from)
