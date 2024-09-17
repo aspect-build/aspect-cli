@@ -1,0 +1,60 @@
+name: build
+on:
+  # push:
+  #   branches: ['main']
+  # pull_request:
+  workflow_call:
+    outputs:
+      windows:
+        description: 'Windows binaries'
+        value: ${{jobs.build_windows.outputs.artifact}}
+      linux:
+        description: 'Linux and MacOS binaries'
+        value: ${{jobs.build.outputs.artifact}}
+jobs:
+  build:
+    name: darwin and linux
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{steps.upload.outputs.artifact-url}}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          bazel run --config=release //release -- /tmp/aspect/release
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: linux
+          retention-days: 1
+          path: /tmp/aspect/release
+  # Cross-compiling to Windows is too hard. Just build on a windows runner instead.
+  build_windows:
+    name: windows
+    runs-on: windows-2022
+    outputs:
+      artifact: ${{steps.upload.outputs.artifact-url}}
+    env:
+      USE_BAZEL_VERSION: 7.2.1
+      BAZELISK_BASE_URL: https://github.com/bazelbuild/bazel/releases/download
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.9.0
+        with:
+          # Avoid downloading Bazel every time.
+          bazelisk-cache: true
+          # Store build cache per workflow.
+          disk-cache: ${{ github.workflow }}
+          # Share repository cache between workflows.
+          repository-cache: true
+      # Bootstrap: the first time we release for windows, we don't have a windows version of Aspect CLI to build with
+      # So use environment variables to defeat the .bazeliskrc file.
+      - run: bazel build //release:aspect_windows_amd64
+      - run: cp $(bazel cquery //release:aspect_windows_amd64 --output=files) aspect_windows_amd64.exe
+      - name: smoke test
+        run: ./aspect_windows_amd64.exe --help
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: windows
+          retention-days: 1
+          path: aspect_windows_amd64.exe

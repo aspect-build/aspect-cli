@@ -1,34 +1,32 @@
 name: Release
 on:
+  pull_request:
   push:
     tags:
       - '202*.*.*'
 jobs:
-  build:
+  build_all:
+    uses: ./.github/workflows/build.yaml
+  release:
     runs-on: ubuntu-latest
+    needs: build_all
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
-      - name: Build release artifacts
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            >&2 echo "ERROR: the git state is not clean, aborting build..."
-            exit 1
-          fi
-          rm -rf /tmp/aspect/release
-          bazel run --config=release //release -- /tmp/aspect/release
-          if /tmp/aspect/release/aspect-linux_amd64 version | grep '(with local changes)'; then
-            >&2 echo "ERROR: the release contained changes in the git state and the release will not be produced"
-            exit 1
-          fi
+          merge-multiple: true
+      - run: shasum -a 256 aspect* > SHA256.txt
       - name: Prepare workspace snippet
         run: .github/workflows/install_snippet.sh > release_notes.txt
-      - name: Create GitHub draft release and upload artifacts
-        uses: softprops/action-gh-release@v1
+      - run: ls -alF .
+      # Disabled during testing
+      - if: false
+        name: Create GitHub draft release and upload artifacts
+        uses: softprops/action-gh-release@v2
         with:
           # Use GH feature to populate the changelog automatically
           generate_release_notes: true
           body_path: release_notes.txt
-          files: /tmp/aspect/release/*
+          files: |
+            aspect*
+            SHA256.txt

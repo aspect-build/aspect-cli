@@ -1,4 +1,4 @@
-load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
+load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load(":bazelisk_artifacts.bzl", "bazelisk_artifacts")
 load(":release.bzl", "multi_platform_binaries", "release")
@@ -9,13 +9,19 @@ multi_platform_binaries(
     tags = ["manual"],
 )
 
-expand_template(
-    name = "aspect_version_file",
-    out = "aspect_version",
-    stamp_substitutions = {
-        "0.0.0-PLACEHOLDER": "{{STABLE_ASPECT_CLI_BAZELISK_COMPAT_VERSION}}",
-    },
-    template = ["0.0.0-PLACEHOLDER"],
+platform_transition_filegroup(
+    name = "aspect_windows_amd64",
+    srcs = ["//cmd/aspect"],
+    target_compatible_with = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+    target_platform = "@zig_sdk//platform:windows_x86_64",
+)
+
+version_file(
+    name = "aspect_version",
+    version_var = "STABLE_BUILD_SCM_TAG",
 )
 
 bazelisk_artifacts(
