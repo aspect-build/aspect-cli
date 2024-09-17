@@ -1,0 +1,66 @@
+name: build
+on:
+  push:
+    branches: ['main']
+  pull_request:
+  workflow_call:
+    outputs:
+      windows:
+        description: 'Windows binaries'
+        value: ${{jobs.build_windows.outputs.artifact}}
+      linux:
+        description: 'Linux and MacOS binaries'
+        value: ${{jobs.build.outputs.artifact}}
+jobs:
+  build:
+    name: darwin and linux
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{steps.upload.outputs.artifact-url}}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed to see tags
+      - run: |
+          bazel run --config=release //release -- /tmp/aspect/release
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: linux
+          retention-days: 1
+          path: /tmp/aspect/release
+  # Cross-compiling to Windows is too hard. Just build on a windows runner instead.
+  build_windows:
+    name: windows
+    runs-on: windows-2022
+    outputs:
+      artifact: ${{steps.upload.outputs.artifact-url}}
+    env:
+      USE_BAZEL_VERSION: 7.2.1
+      BAZELISK_BASE_URL: https://github.com/bazelbuild/bazel/releases/download
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed to see tags
+      - uses: bazel-contrib/setup-bazel@0.9.0
+        with:
+          # Avoid downloading Bazel every time.
+          bazelisk-cache: true
+          # Store build cache per workflow.
+          disk-cache: ${{ github.workflow }}
+          # Share repository cache between workflows.
+          repository-cache: true
+      - run: bazel build --config=release //release:release.windows
+      - run: bazel-bin/release/release.windows.sh "C:\Temp\release"
+        shell: bash
+      # Verify that we built a functional executable
+      - name: smoke test
+        run: |
+          cp $(bazel cquery --config=release --output=files //release:aspect-windows-x86_64.exe) aspect.exe
+          ./aspect.exe --help
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: windows
+          retention-days: 1
+          path: C:\Temp\release
