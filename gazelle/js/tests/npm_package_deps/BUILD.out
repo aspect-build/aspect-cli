@@ -1,0 +1,14 @@
+load("@aspect_rules_js//npm:defs.bzl", "npm_package")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+# aspect:js_files **/*.{js,ts}
+# gazelle:js_npm_package_target_name pkg
+# gazelle:js_project_naming_convention tsc
+# gazelle:js_npm_package enabled
+
+npm_link_all_packages(name = "node_modules")
+
+npm_package(
+    name = "pkg",
+    srcs = ["package.json"],
+)

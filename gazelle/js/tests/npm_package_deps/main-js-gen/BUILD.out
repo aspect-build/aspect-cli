@@ -1,0 +1,17 @@
+load("@aspect_rules_js//npm:defs.bzl", "npm_package")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+genrule(
+    name = "foo",
+    srcs = [],
+    outs = ["start.js"],
+    cmd = "echo \"console.log(42)\" > \"$@\"",
+)
+
+npm_link_all_packages(name = "node_modules")
+
+npm_package(
+    name = "pkg",
+    srcs = ["package.json"],
+    deps = [":start.js"],
+)
