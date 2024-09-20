@@ -1,0 +1,5 @@
+{
+  "name": "pkg-with-exports-string",
+  "private": true,
+  "exports": "./bin/main.js"
+}

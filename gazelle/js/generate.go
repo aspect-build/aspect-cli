@@ -188,7 +188,7 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 	packageJsonPath := path.Join(args.Rel, NpmPackageFilename)
 	packageImports, err := node.ParsePackageJsonImportsFile(args.Config.RepoRoot, packageJsonPath)
 	if err != nil {
-		BazelLog.Errorf("Failed to parse package.json imports: %v", err)
+		BazelLog.Warnf("Failed to parse %q imports: %e", packageJsonPath, err)
 	}
 
 	for _, impt := range packageImports {
