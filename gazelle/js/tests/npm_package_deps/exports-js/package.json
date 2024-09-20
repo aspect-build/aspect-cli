@@ -2,7 +2,11 @@
   "name": "pkg-with-exports",
   "private": true,
   "exports": {
-    ".": "./src/main.js",
+    ".": {
+        "node": "./lib/lib.js",
+        "default": "./lib2/lib2.js"
+    },
+    "./bin": "./bin/main.js",
     "./stars/*": "./other/*.js"
   }
 }
