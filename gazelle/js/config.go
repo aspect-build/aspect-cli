@@ -64,9 +64,6 @@ const (
 	Directive_CustomTargetTestFiles = "js_custom_test_files"
 	// TODO(deprecated): remove - replaced with common generation_mode
 	Directive_GenerationMode = "js_generation_mode"
-
-	// TODO: move to common
-	Directive_GitIgnore = "gitignore"
 )
 
 type NpmPackageMode string
@@ -176,9 +173,6 @@ type JsGazelleConfig struct {
 
 	packageTargetKind PackageTargetKind
 
-	// TODO: move to common util
-	gitignoreEnabled bool
-
 	protoGenerationEnabled    bool
 	tsconfigGenerationEnabled bool
 	packageGenerationEnabled  NpmPackageMode
@@ -220,10 +214,6 @@ func newRootConfig() *JsGazelleConfig {
 		tsProtoLibraryName:         DefaultProtoLibraryName,
 		targets:                    DefaultSourceGlobs[:],
 		defaultTsconfigName:        defaultTsconfigName,
-
-		// TODO: move to common
-		// TODO: switch default to false
-		gitignoreEnabled: true,
 	}
 }
 
@@ -289,11 +279,6 @@ func (c *JsGazelleConfig) SetVisibility(groupName string, visLabels []string) {
 
 		target.visibility = append(target.visibility, l)
 	}
-}
-
-// TODO: move to common util
-func (c *JsGazelleConfig) SetGitIgnoreEnabled(enabled bool) {
-	c.gitignoreEnabled = enabled
 }
 
 // SetGenerationEnabled sets whether the extension is enabled or not.

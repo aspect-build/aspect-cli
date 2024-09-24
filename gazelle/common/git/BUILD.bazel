@@ -16,4 +16,5 @@ go_test(
     name = "git_test",
     srcs = ["gitignore_test.go"],
     embed = [":git"],
+    deps = ["@bazel_gazelle//config:go_default_library"],
 )

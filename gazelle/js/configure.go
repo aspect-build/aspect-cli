@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	common "aspect.build/cli/gazelle/common"
+	"aspect.build/cli/gazelle/common/git"
 	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -23,7 +24,11 @@ var _ config.Configurer = (*typeScriptLang)(nil)
 // method is called once with the root configuration when Gazelle
 // starts. RegisterFlags may set an initial values in Config.Exts. When flags
 // are set, they should modify these values.
-func (ts *typeScriptLang) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {}
+func (ts *typeScriptLang) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
+	// Enable .gitignore support by default
+	// TODO: change to false and encourage .bazelignore
+	git.EnableGitignore(c, true)
+}
 
 // CheckFlags validates the configuration after command line flags are parsed.
 // This is called once with the root configuration when Gazelle starts.
@@ -62,7 +67,7 @@ func (ts *typeScriptLang) KnownDirectives() []string {
 		Directive_CustomTargetTestFiles,
 
 		// TODO: move to common
-		Directive_GitIgnore,
+		git.Directive_GitIgnore,
 	}
 }
 
@@ -98,7 +103,7 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 	// Enable the WALKSUBDIR gazelle patch, setting the flag depending on js the GenerationMode.
 	c.Exts[common.ASPECT_WALKSUBDIR] = c.Exts[LanguageName].(*JsGazelleConfig).generationMode == common.GenerationModeUpdate
 
-	ts.gitignore.CollectIgnoreFiles(c, rel)
+	git.CollectIgnoreFiles(c, rel)
 }
 
 func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
@@ -125,8 +130,6 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 		value := strings.TrimSpace(d.Value)
 
 		switch d.Key {
-		case Directive_GitIgnore:
-			config.SetGitIgnoreEnabled(common.ReadEnabled(d))
 		case Directive_TypeScriptExtension:
 			config.SetGenerationEnabled(common.ReadEnabled(d))
 		case Directive_TypeScriptConfigExtension:
@@ -275,6 +278,9 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 			default:
 				log.Fatalf("invalid value for directive %q: %s", common.Directive_GenerationMode, d.Value)
 			}
+		// TODO: move to common
+		case git.Directive_GitIgnore:
+			git.EnableGitignore(c, common.ReadEnabled(d))
 		}
 	}
 }
