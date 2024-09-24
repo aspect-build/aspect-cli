@@ -1,7 +1,6 @@
 package gazelle
 
 import (
-	"aspect.build/cli/gazelle/common/git"
 	jvm_maven "github.com/bazel-contrib/rules_jvm/java/gazelle/private/maven"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
@@ -25,9 +24,6 @@ var _ language.Language = (*kotlinLang)(nil)
 // TypeScript satisfies the language.Language interface including the
 // Configurer and Resolver types.
 type kotlinLang struct {
-	// Ignore configurations for the workspace.
-	gitignore *git.GitIgnore
-
 	// TODO: extend rules_jvm extension instead of duplicating?
 	mavenResolver    *jvm_maven.Resolver
 	mavenInstallFile string
@@ -36,9 +32,7 @@ type kotlinLang struct {
 // NewLanguage initializes a new TypeScript that satisfies the language.Language
 // interface. This is the entrypoint for the extension initialization.
 func NewLanguage() language.Language {
-	return &kotlinLang{
-		gitignore: git.NewGitIgnore(),
-	}
+	return &kotlinLang{}
 }
 
 var kotlinKinds = map[string]rule.KindInfo{

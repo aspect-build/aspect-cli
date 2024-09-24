@@ -1,0 +1,42 @@
+diff --git a/config/config.go b/config/config.go
+index 23b1083..1841650 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -121,6 +121,7 @@ type MappedKind struct {
+ }
+ 
+ const ASPECT_WALKSUBDIR = "__aspect:walksubdir"
++const ASPECT_GITIGNORE = "__aspect:gitignore"
+ 
+ func New() *Config {
+ 	return &Config{
+diff --git a/walk/walk.go b/walk/walk.go
+index 7814088..8ebb086 100644
+--- a/walk/walk.go
++++ b/walk/walk.go
+@@ -165,6 +165,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+ 		return nil, false
+ 	}
+ 
++	// PATCH(gitignore) ---
++	isGitIgnored, hasGitIgnore := c.Exts[config.ASPECT_GITIGNORE].(isIgnoredFunc)
++	if !hasGitIgnore || isGitIgnored == nil {
++		isGitIgnored = nothingIgnored
++	}
++	// END PATCH(gitignore) ---
++
+ 	var dirs, subdirs, regularFiles []string
+ 	for _, ent := range ents {
+ 		base := ent.Name()
+@@ -172,6 +179,11 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+ 		if wc.isExcluded(entRel) {
+ 			continue
+ 		}
++		// PATCH(gitignore) ---
++		if isGitIgnored(entRel) {
++			continue
++		}
++		// END PATCH(gitignore) ---
+ 		ent := resolveFileInfo(wc, dir, entRel, ent)
+ 		switch {
+ 		case ent == nil:

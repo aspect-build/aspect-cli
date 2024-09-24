@@ -12,44 +12,74 @@ import (
 	gitignore "github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
-// Wrap the ignore files along with the relative path they were loaded from
-// to enable quick-exit checks.
-type ignoreEntry struct {
-	i    gitignore.Matcher
-	base string
-}
+// Must align with patched bazel-gazelle
+const ASPECT_GITIGNORE = "__aspect:gitignore"
 
-type GitIgnore struct {
-	ignores []ignoreEntry
-}
+// Directive to enable/disable gitignore support
+const Directive_GitIgnore = "gitignore"
 
-func NewGitIgnore() *GitIgnore {
-	return &GitIgnore{
-		ignores: make([]ignoreEntry, 0),
+// Internal
+const enabledExt = Directive_GitIgnore
+const lastConfiguredExt = "gitignore:dir"
+const ignorePatternsExt = "gitignore:patterns"
+
+func CollectIgnoreFiles(c *config.Config, rel string) {
+	// Only parse once per directory.
+	if lastCollected, hasCollected := c.Exts[lastConfiguredExt]; hasCollected && lastCollected == rel {
+		return
 	}
-}
+	c.Exts[lastConfiguredExt] = rel
 
-func (i *GitIgnore) CollectIgnoreFiles(c *config.Config, rel string) {
-	// Collect gitignore style ignore files in this directory.
+	// Find and add .gitignore files from this directory
 	ignoreFilePath := path.Join(c.RepoRoot, rel, ".gitignore")
-
-	if ignoreReader, ignoreErr := os.Open(ignoreFilePath); ignoreErr == nil {
+	ignoreReader, ignoreErr := os.Open(ignoreFilePath)
+	if ignoreErr == nil {
 		BazelLog.Tracef("Add ignore file %s/.gitignore", rel)
-
-		i.addIgnore(rel, ignoreReader)
+		defer ignoreReader.Close()
+		addIgnore(c, rel, ignoreReader)
+	} else if !os.IsNotExist(ignoreErr) {
+		BazelLog.Errorf("Failed to open %s/.gitignore: %v", rel, ignoreErr)
 	}
 }
 
-func (i *GitIgnore) addIgnore(rel string, ignoreReader io.Reader) {
-	// Persist a relative path to the ignore file to enable quick-exit checks.
-	base := path.Clean(rel)
-	if base == "." {
-		base = ""
+func EnableGitignore(c *config.Config, enabled bool) {
+	c.Exts[enabledExt] = enabled
+	if enabled {
+		c.Exts[ASPECT_GITIGNORE] = createMatcherFunc(c)
+	} else {
+		c.Exts[ASPECT_GITIGNORE] = nil
+	}
+}
+
+func isEnabled(c *config.Config) bool {
+	enabled, hasEnabled := c.Exts[enabledExt]
+	return hasEnabled && enabled.(bool)
+}
+
+func addIgnore(c *config.Config, rel string, ignoreReader io.Reader) {
+	var ignorePatterns []gitignore.Pattern
+
+	// Load parent ignore patterns
+	if c.Exts[ignorePatternsExt] != nil {
+		ignorePatterns = c.Exts[ignorePatternsExt].([]gitignore.Pattern)
 	}
 
-	domain := []string{}
-	if base != "" {
-		domain = strings.Split(base, "/")
+	// Append new ignore patterns
+	ignorePatterns = append(ignorePatterns, parseIgnore(rel, ignoreReader)...)
+
+	// Persist appended ignore patterns
+	c.Exts[ignorePatternsExt] = ignorePatterns
+
+	// Persist a matcher function with the updated ignore patterns if enabled
+	if isEnabled(c) {
+		c.Exts[ASPECT_GITIGNORE] = createMatcherFunc(c)
+	}
+}
+
+func parseIgnore(rel string, ignoreReader io.Reader) []gitignore.Pattern {
+	var domain []string
+	if rel != "" {
+		domain = strings.Split(path.Clean(rel), "/")
 	}
 
 	matcherPatterns := make([]gitignore.Pattern, 0)
@@ -64,31 +94,17 @@ func (i *GitIgnore) addIgnore(rel string, ignoreReader io.Reader) {
 		matcherPatterns = append(matcherPatterns, gitignore.ParsePattern(p, domain))
 	}
 
-	ignore := gitignore.NewMatcher(matcherPatterns)
-
-	// Add a trailing slash to the base path to ensure the ignore file only
-	// processes paths within that directory.
-	if base != "" && !strings.HasSuffix(base, "/") {
-		base += "/"
-	}
-
-	i.ignores = append(i.ignores, ignoreEntry{
-		i:    ignore,
-		base: base,
-	})
+	return matcherPatterns
 }
 
-func (i *GitIgnore) Matches(p string) bool {
-	for _, ignore := range i.ignores {
-		// Ensure the path is within the base path of the ignore file
-		// to avoid strings.Split unless necessary.
-		if !strings.HasPrefix(p, ignore.base) {
-			continue
-		}
-		if ignore.i.Match(strings.Split(p, "/"), false) {
-			return true
-		}
+func createMatcherFunc(c *config.Config) func(string) bool {
+	patterns, patternsFound := c.Exts[ignorePatternsExt]
+	if !patternsFound {
+		return nil
 	}
 
-	return false
+	matcher := gitignore.NewMatcher(patterns.([]gitignore.Pattern))
+	return func(s string) bool {
+		return matcher.Match(strings.Split(s, "/"), false)
+	}
 }
