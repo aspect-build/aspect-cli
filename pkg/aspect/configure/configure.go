@@ -26,12 +26,12 @@ import (
 	bzl "aspect.build/cli/gazelle/bzl"
 	js "aspect.build/cli/gazelle/js"
 	kotlin "aspect.build/cli/gazelle/kotlin"
+	python "aspect.build/cli/gazelle/python"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/ioutils"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
-	python "github.com/bazelbuild/rules_python/gazelle/python"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

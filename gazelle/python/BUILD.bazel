@@ -1,0 +1,25 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+# gazelle:ignore
+config_setting(
+    name = "windows",
+    constraint_values = ["@platforms//os:windows"],
+)
+
+go_library(
+    name = "python",
+    srcs = [
+        "unix.go",
+        "windows.go",
+    ],
+    importpath = "aspect.build/cli/gazelle/python",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@bazel_gazelle//language:go_default_library",
+    ] + select({
+        ":windows": [],
+        "//conditions:default": [
+            "@com_github_bazelbuild_rules_python_gazelle//python",
+        ],
+    }),
+)
