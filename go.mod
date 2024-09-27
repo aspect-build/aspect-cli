@@ -6,14 +6,15 @@ require (
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/alphadose/haxmap v1.4.0
 	github.com/bazel-contrib/rules_jvm v0.27.0
-	github.com/bazelbuild/bazel-gazelle v0.38.1-0.20240828161622-2d6805c8b74e // NOTE: keep in sync with WORKSPACE
+	github.com/bazelbuild/bazel-gazelle v0.38.1-0.20240917180916-571d953b2bb9 // NOTE: keep in sync with fetch.bzl
 	github.com/bazelbuild/bazelisk v1.17.0
-	github.com/bazelbuild/buildtools v0.0.0-20240606140350-80f1f6802857
-	github.com/bazelbuild/rules_go v0.49.1-0.20240813120622-9d1456e778a3 // indirect; NOTE: keep in sync with WORKSPACE
+	github.com/bazelbuild/buildtools v0.0.0-20240918101019-be1c24cc9a44
+	github.com/bazelbuild/rules_go v0.50.1 // indirect; NOTE: keep in sync with WORKSPACE
 	github.com/bluekeyes/go-gitdiff v0.7.3
 	github.com/bmatcuk/doublestar/v4 v4.6.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/fatih/color v1.17.0
+	github.com/go-git/go-git/v5 v5.12.0
 	github.com/golang/mock v1.7.0-rc.1
 	github.com/golang/protobuf v1.5.4
 	github.com/hashicorp/go-hclog v1.6.3
@@ -27,14 +28,14 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/rogpeppe/go-internal v1.12.0
 	github.com/rs/zerolog v1.33.0
-	github.com/smacker/go-tree-sitter v0.0.0-20240625050157-a31a98a7c0f6
+	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.19.0
 	github.com/tejzpr/ordered-concurrently/v3 v3.0.1
 	github.com/twmb/murmur3 v1.1.8
 	github.com/yargevad/filepathx v1.0.0
-	go.starlark.net v0.0.0-20240520160348-046347dcd104
+	go.starlark.net v0.0.0-20240725214946-42030a7cedce
 	golang.org/x/exp v0.0.0-20240716175740-e3f259677ff7
 	golang.org/x/sync v0.8.0
 	google.golang.org/genproto v0.0.0-20240528184218-531527333157
@@ -47,7 +48,6 @@ require (
 require (
 	github.com/bazelbuild/rules_python/gazelle v0.0.0-20240701102336-084b877c98b5
 	github.com/charmbracelet/huh v0.5.2
-	github.com/go-git/go-git/v5 v5.12.0
 	github.com/hay-kot/scaffold v0.3.0
 	github.com/sourcegraph/go-diff v0.7.0
 )
@@ -134,9 +134,9 @@ require (
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
 	golang.org/x/crypto v0.25.0 // indirect
-	golang.org/x/mod v0.19.0 // indirect
+	golang.org/x/mod v0.20.0 // indirect
 	golang.org/x/net v0.27.0 // indirect
-	golang.org/x/sys v0.24.0 // indirect
+	golang.org/x/sys v0.25.0 // indirect
 	golang.org/x/term v0.22.0 // indirect
 	golang.org/x/text v0.16.0 // indirect
 	golang.org/x/tools/go/vcs v0.1.0-deprecated // indirect
