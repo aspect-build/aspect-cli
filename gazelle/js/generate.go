@@ -192,6 +192,10 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 	}
 
 	for _, impt := range packageImports {
+		if cfg.IsImportIgnored(impt) {
+			continue
+		}
+
 		if sourceFiles.Contains(impt) || dataFiles.Contains(impt) {
 			npmPackageInfo.sources.Add(impt)
 		} else {

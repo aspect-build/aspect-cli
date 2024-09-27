@@ -1,0 +1,8 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+
+# gazelle:js_ignore_imports **/does-not-exist.js
+
+js_library(
+    name = "tsc",
+    srcs = ["lib1.js"],
+)
