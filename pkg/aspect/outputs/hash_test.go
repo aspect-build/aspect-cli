@@ -37,8 +37,8 @@ func TestHash(t *testing.T) {
 	t.Run("hashMurmur3Sync and hashMurmur3Concurrent return the same hash for the same set of files", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 
-		const testTarget1 = "//cli/core/pkg/aspect/outputs:test_label"
-		const testTarget2 = "//cli/core/pkg/aspect/outputs:test_label"
+		const testTarget1 = "//pkg/aspect/outputs:test_label"
+		const testTarget2 = "//pkg/aspect/outputs:test_label"
 
 		hashFiles := make(map[string][]string)
 		hashFiles["//:test_label_1"] = testFixtures(1)
