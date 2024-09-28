@@ -9,7 +9,7 @@ TAG=${GITHUB_REF_NAME}
 cat <<EOF
 ## Install Aspect CLI OSS
 
-See full install instructions in [README.md](https://github.com/aspect-build/aspect-cli/blob/${TAG}/README.md).
+See full install instructions in [README.md](https://github.com/aspect-build/aspect-cli/blob/${TAG}/README.md#installation).
 
 ### Bazelisk (MacOS / Linux)
 
