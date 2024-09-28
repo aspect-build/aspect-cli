@@ -2,7 +2,7 @@ name: Release
 on:
   push:
     tags:
-      - '5.*.*'
+      - '202*.*.*'
 jobs:
   build:
     runs-on: ubuntu-latest
