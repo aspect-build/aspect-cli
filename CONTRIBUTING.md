@@ -44,14 +44,15 @@ After this, you should be able to merge your changes without any conflicts in th
 
 ## Releasing
 
-1. Check with release engineer in silo about which release version of Aspect Pro should be used to
-   determine the version here.
+1. At the commit to release from, run `./workspace_status.sh | grep STABLE_ASPECT_CLI_BAZELISK_COMPAT_VERSION`
+   to determine the current release version. This version follows our monorepo versioning scheme minus
+   the hash so that it is compatible with Bazelisk. See comment in `workspace_status.sh` for more info.
 
-2. Push a `x.x.x` tag to the repository at the commit you want to release with the semver version
+2. Push a `xxxx.x.x` tag to the repository at the commit you want to release with the semver version
    from the prior step:
 
     ```
-    git tag x.x.x
+    git tag xxxx.x.x
     git push origin $_
     ```
 
@@ -61,20 +62,18 @@ After this, you should be able to merge your changes without any conflicts in th
     >
     > ```
     > BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
-    > USE_BAZEL_VERSION=aspect/x.x.x
+    > USE_BAZEL_VERSION=aspect/xxxx.x.x
     > ```
 
 3. Watch the automation run on GitHub actions (it's very slow, be prepared to wait)
 
-4. For go module support, we also require a `v1.x.x` tag that corresponds to the `x.x.x` release
+4. For go module support, we also require a `v1.yyyyww.x` tag that corresponds to the `yyyy.ww.x` release
    tag. We version the go module as `v1.x.x` since consuming `v2+` go modules downstream adds
-   undesirable complication. For now with CLI major releases as `5.x.x` the corresponding go module
-   version should be `v1.5xx.x` with the patch version matching and the minor zero-padded to two digits.
-   (e.g. `5.4.3` -> `v1.504.3`, `5.56.78` -> `v1.556.78`)
+   undesirable complication. The week should be zero-padded to two digits.
 
-    When the CLI major version is bumped to 6, this mapping will need to be updated.
+    For example, the version `2024.1.1` maps to `v1.202401.1` and `2024.39.4` maps to `v1.202439.4`.
 
     ```
-    git tag v1.5xx.x
+    git tag v1.yyyyww.x
     git push origin $_
     ```
