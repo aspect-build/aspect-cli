@@ -9,6 +9,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build release artifacts
         run: |
           if [ -n "$(git status --porcelain)" ]; then
