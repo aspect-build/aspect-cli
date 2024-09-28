@@ -114,10 +114,10 @@ func NewCmd(
 ) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "aspect",
-		Short:         buildinfo.Current().Name(),
+		Short:         "Aspect CLI",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Long:          boldCyan.Sprintf(buildinfo.Current().Name()) + ` is a better frontend for running bazel`,
+		Long:          boldCyan.Sprintf("Aspect CLI is a better frontend for running bazel"),
 		// Suppress timestamps in generated Markdown, for determinism
 		DisableAutoGenTag: true,
 		Version:           buildinfo.Current().Version(),
@@ -129,7 +129,6 @@ func NewCmd(
 	flags.AddGlobalFlags(cmd, defaultInteractive)
 	cmd.AddGroup(&cobra.Group{ID: "common", Title: "Common Bazel Commands:"})
 	cmd.AddGroup(&cobra.Group{ID: "aspect", Title: "Commands only in Aspect CLI:"})
-	cmd.AddGroup(&cobra.Group{ID: "aspect-pro", Title: "Commands only in Aspect CLI Pro:"})
 	cmd.AddGroup(&cobra.Group{ID: "plugin", Title: "Custom Commands from Plugins:"})
 	cmd.AddGroup(&cobra.Group{ID: "built-in", Title: "Other Bazel Built-in Commands:"})
 
@@ -161,8 +160,8 @@ func NewCmd(
 	cmd.AddCommand(outputs.NewDefaultCmd())
 	cmd.SetHelpCommand(help.NewCmd())
 
-	if !buildinfo.Current().IsAspectPro {
-		// Aspect CLI only commands
+	if buildinfo.Current().OpenSource {
+		// Aspect CLI OSS command configurations
 		cmd.AddCommand(lint.NewDefaultCmd(pluginSystem))
 		cmd.AddCommand(license.NewDefaultCmd())
 		cmd.AddCommand(configure.NewDefaultCmd())

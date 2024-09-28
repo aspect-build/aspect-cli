@@ -42,12 +42,12 @@ const (
 )
 
 type BuildInfo struct {
-	BuildTime   string
-	HostName    string
-	GitCommit   string
-	GitStatus   string
-	Release     string
-	IsAspectPro bool
+	BuildTime  string
+	HostName   string
+	GitCommit  string
+	GitStatus  string
+	Release    string
+	OpenSource bool
 }
 
 func New(
@@ -56,15 +56,15 @@ func New(
 	gitCommit string,
 	gitStatus string,
 	release string,
-	pro bool,
+	oss bool,
 ) *BuildInfo {
 	return &BuildInfo{
-		BuildTime:   buildTime,
-		HostName:    hostName,
-		GitCommit:   gitCommit,
-		GitStatus:   gitStatus,
-		Release:     release,
-		IsAspectPro: pro,
+		BuildTime:  buildTime,
+		HostName:   hostName,
+		GitCommit:  gitCommit,
+		GitStatus:  gitStatus,
+		Release:    release,
+		OpenSource: oss,
 	}
 }
 
@@ -75,7 +75,7 @@ func Current() *BuildInfo {
 		GitCommit,
 		GitStatus,
 		Release,
-		IsAspectPro != "",
+		OpenSource != "",
 	)
 }
 
@@ -101,16 +101,16 @@ func (bi BuildInfo) Version() string {
 }
 
 func (bi BuildInfo) Name() string {
-	if bi.IsAspectPro {
-		return "Aspect CLI Pro"
+	if bi.OpenSource {
+		return "Aspect CLI OSS"
 	} else {
 		return "Aspect CLI"
 	}
 }
 
 func (bi BuildInfo) GnuName() string {
-	if bi.IsAspectPro {
-		return "aspect pro"
+	if bi.OpenSource {
+		return "aspect oss"
 	} else {
 		return "aspect"
 	}

@@ -41,6 +41,7 @@ data = [
     )
     for test in [
         "configure",
+        "help",
         "info",
         "version",
     ]

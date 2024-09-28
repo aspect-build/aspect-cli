@@ -55,20 +55,6 @@ EOF
     assert_output --partial "Aspect CLI is a better frontend for running bazel"
 }
 
-@test 'lock_version flag should prevent downloading and running config version' {
-    cat >version-config.yaml <<'EOF'
-version: 1.2.3
-EOF
-
-    run aspect --aspect:config="version-config.yaml" --aspect:lock_version=false
-    assert_failure
-    assert_output --partial "could not download Bazel"
-
-    run aspect --aspect:config="version-config.yaml" --aspect:lock_version
-    assert_success
-    assert_output --partial "Aspect CLI is a better frontend for running bazel"
-}
-
 @test '--[no]able flags should work' {
     cat >BUILD.bazel <<'EOF'
 genrule(

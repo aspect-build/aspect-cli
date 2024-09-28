@@ -5,6 +5,7 @@ go_library(
     srcs = ["main.go"],
     importpath = "aspect.build/cli/cmd/docgen",
     visibility = ["//visibility:private"],
+    x_defs = {"aspect.build/cli/buildinfo.OpenSource": "true"},
     deps = [
         "//cmd/aspect/root",
         "//pkg/bazel",
