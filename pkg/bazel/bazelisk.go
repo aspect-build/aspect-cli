@@ -312,21 +312,7 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 		Reentrant: len(os.Getenv(aspectReentrantEnv)) != 0,
 		Version:   buildinfo.Current().Version(),
 		DevBuild:  strings.HasPrefix(buildinfo.Current().Version(), "unknown"),
-		BaseUrl:   config.AspectBaseUrl(buildinfo.Current().IsAspectPro),
-	}
-
-	// Get the Aspect CLI version configuration from the Aspect CLI config.yaml or from
-	// USE_ASPECT_VERSION
-	aspectConfig, err := config.GetVersionConfig()
-	if err != nil {
-		return "", "", fmt.Errorf("could not get aspect config: %w", err)
-	}
-
-	// If an Aspect CLI version is configured and does not match the running version then re-enter
-	// that version if we are allowed to re-enter and have not already re-entered.
-	if bazelisk.allowReenter && !aspectRuntime.Reentrant && aspectConfig.Configured && isAspectVersionMismatch(aspectRuntime, aspectConfig.Version, aspectConfig.BaseUrl) {
-		bazelisk.AspectShouldReenter = true
-		return aspectConfig.Version, aspectConfig.BaseUrl, nil
+		BaseUrl:   config.AspectBaseUrl(buildinfo.Current().OpenSource),
 	}
 
 	// Get the bazelisk version config from the USE_BAZEL_VERSION and BAZELISK_BASE_URL env vars
@@ -344,7 +330,7 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 		// For example, "aspect/1.2.3" => "1.2.3".
 		s := strings.Split(bazeliskConfig.UseBazelVersion, "/")
 		sanitizedUseBazelVersion := s[len(s)-1]
-		if bazelisk.allowReenter && !aspectRuntime.Reentrant && !aspectConfig.Configured && isAspectVersionMismatch(aspectRuntime, sanitizedUseBazelVersion, bazeliskConfig.BazeliskBaseUrl) {
+		if bazelisk.allowReenter && !aspectRuntime.Reentrant && isAspectVersionMismatch(aspectRuntime, sanitizedUseBazelVersion, bazeliskConfig.BazeliskBaseUrl) {
 			// If bazelisk is configured to bootstrap the CLI and the Aspect CLI config is not then
 			// re-enter that version if we are allowed to re-enter and have not already re-entered.
 			bazelisk.AspectShouldReenter = true

@@ -37,12 +37,12 @@ func TestNew(t *testing.T) {
 	g := NewGomegaWithT(t)
 	actual := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, release, false)
 	expected := &buildinfo.BuildInfo{
-		BuildTime:   buildTime,
-		HostName:    hostName,
-		GitCommit:   gitCommit,
-		GitStatus:   gitStatus,
-		Release:     release,
-		IsAspectPro: false,
+		BuildTime:  buildTime,
+		HostName:   hostName,
+		GitCommit:  gitCommit,
+		GitStatus:  gitStatus,
+		Release:    release,
+		OpenSource: false,
 	}
 	g.Expect(actual).To(Equal(expected))
 }
@@ -51,12 +51,12 @@ func TestCurrent(t *testing.T) {
 	g := NewGomegaWithT(t)
 	actual := buildinfo.Current()
 	expected := &buildinfo.BuildInfo{
-		BuildTime:   buildinfo.BuildTime,
-		HostName:    buildinfo.HostName,
-		GitCommit:   buildinfo.GitCommit,
-		GitStatus:   buildinfo.GitStatus,
-		Release:     buildinfo.Release,
-		IsAspectPro: buildinfo.IsAspectPro != "",
+		BuildTime:  buildinfo.BuildTime,
+		HostName:   buildinfo.HostName,
+		GitCommit:  buildinfo.GitCommit,
+		GitStatus:  buildinfo.GitStatus,
+		Release:    buildinfo.Release,
+		OpenSource: buildinfo.OpenSource != "",
 	}
 	g.Expect(actual).To(Equal(expected))
 }
