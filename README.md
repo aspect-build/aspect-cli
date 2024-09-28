@@ -53,7 +53,7 @@ On any platform, you can download the Aspect CLI OSS `aspect` binary for your pl
 Note, if you manually install for MacOS, you can bypass the "Unknown Developer" dialog by running
 `xattr -c $(which aspect)` before launching `aspect`.
 
-## Aspect CLI Standard
+## Aspect CLI (standard)
 
 ### Homebrew (MacOS)
 
@@ -75,10 +75,10 @@ Aspect CLI can be installed in an existing Bazel workspace using [bazelisk].
 Configure [bazelisk](https://github.com/bazelbuild/bazelisk) to use the Aspect CLI for all developers in a repository
 by adding the following to \`.bazeliskrc\` in the repository root:
 
-\`\`\`
+```
 BAZELISK_BASE_URL=https://static.aspect.build/aspect
-USE_BAZEL_VERSION=aspect/xxxx.xx.xx
-\`\`\`
+USE_BAZEL_VERSION=aspect/xxxx.x.x
+```
 
 Check the Aspect CLI [Homebrew formula](https://github.com/aspect-build/homebrew-aspect/blob/main/Formula/aspect.rb) for
 latest version of Aspect CLI.
