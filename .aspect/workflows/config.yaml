@@ -7,6 +7,9 @@ tasks:
       queue: aspect-cli-small-graviton
   - configure:
       queue: aspect-cli-small-graviton
+  - lint:
+      failure_strategy: 'hard'
+      only_annotate_changed_regions: false
   - test:
       hooks:
         - type: before_task

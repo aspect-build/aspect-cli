@@ -6,10 +6,11 @@ load("@npm//:defs.bzl", "npm_link_all_packages")
 
 npm_link_all_packages(name = "node_modules")
 
-# When generating the documents for this repo bazel needs to be started so that we can generate
-# the correct flags. To do this we need version from .bazelversion
 exports_files([
+    # When generating the documents for this repo bazel needs to be started so that we can generate
+    # the correct flags. To do this we need version from .bazelversion
     ".bazelversion",
+    ".shellcheckrc",
     "LICENSE",
     "README.md",
 ])
@@ -121,5 +122,5 @@ buildifier(
 
 alias(
     name = "format",
-    actual = "//tools:format",
+    actual = "//tools/format",
 )

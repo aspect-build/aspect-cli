@@ -5,7 +5,7 @@ sidebar_label: Overview
 
 The `aspect` CLI is a drop-in replacement for the `bazel` CLI that comes with Bazel.
 
-# Why Aspect CLI
+# Why Aspect CLI!
 
 Every organization has a different engineering culture and developer stack.
 Bazel was designed for Google's workflows, not yours.
@@ -42,8 +42,8 @@ Note, if you manually install for MacOS, you can bypass the "Unknown Developer" 
 In an already-existing Bazel workspace, you can have [bazelisk]
 install the Aspect CLI just like it can install the standard Bazel CLI.
 
->[!NOTE]
->This approach doesn't provide the `aspect init` command, which has to run outside a Bazel workspace.
+> [!NOTE]
+> This approach doesn't provide the `aspect init` command, which has to run outside a Bazel workspace.
 
 From the [releases page](https://github.com/aspect-build/aspect-cli/releases),
 copy the `.bazeliskrc` snippet into your `.bazeliskrc` file to install Aspect for all developers in this repository.
