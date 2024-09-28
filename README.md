@@ -3,7 +3,7 @@ title: Aspect CLI
 sidebar_label: Overview
 ---
 
-Aspect CLI (`aspect`) is a drop-in replacement for the CLI that comes with [Bazel](http://bazel.build) that adds additional features and extensibility to the popular polyglot build system from Google.
+Aspect CLI (`aspect`) is wrapper for [Bazel], built on top of [Bazelisk], that adds additional features and extensibility to the popular polyglot build system from Google.
 
 # Why Aspect CLI?
 
@@ -35,19 +35,19 @@ We intend for Aspect CLI to remain free for individuals (only for personal use),
 
 ### Bazelisk (MacOS / Linux)
 
-Aspect CLI OSS can be installed in an existing Bazel workspace using [bazelisk].
+Aspect CLI OSS can be installed in an existing Bazel workspace using [Bazelisk].
 
 > [!NOTE]
 > This approach doesn't provide the `aspect init` command, which has to run outside a Bazel workspace.
 
 From the [OSS releases page](https://github.com/aspect-build/aspect-cli/releases),
-copy the `.bazeliskrc` snippet into your `.bazeliskrc` file to install Aspect for all developers in the target repository.
+copy the `.bazeliskrc` snippet into your `.bazeliskrc` file to install Aspect CLI OSS for all developers in the target repository.
 
 The underlying version of Bazel can be configured in your `.bazelversion` file or the `BAZEL_VERSION` environment variable.
 
 ### Manual (MacOS / Linux)
 
-On any platform, you can download the Aspect CLI OSS `aspect` binary for your platform on our
+On MacOS and Linux, you can download the Aspect CLI OSS `aspect` binary for your platform on our
 [Releases](https://github.com/aspect-build/aspect-cli/releases) page and add it to your `PATH` manually.
 
 Note, if you manually install for MacOS, you can bypass the "Unknown Developer" dialog by running
@@ -63,16 +63,16 @@ To install the Aspect CLI on MacOS, you can run
 % brew install aspect-build/aspect/aspect
 ```
 
-This installs the `aspect` command and also links it to `bazel`, just like the [bazelisk] installer does.
+This installs the `aspect` command and also links it to `bazel`, just like the [Bazelisk] installer does.
 
 ### Bazelisk (MacOS / Linux)
 
-Aspect CLI can be installed in an existing Bazel workspace using [bazelisk].
+Aspect CLI can be installed in an existing Bazel workspace using [Bazelisk].
 
 > [!NOTE]
 > This approach doesn't provide the `aspect init` command, which has to run outside a Bazel workspace.
 
-Configure [bazelisk](https://github.com/bazelbuild/bazelisk) to use the Aspect CLI for all developers in a repository
+Configure [Bazelisk](https://github.com/bazelbuild/bazelisk) to use the Aspect CLI for all developers in a repository
 by adding the following to \`.bazeliskrc\` in the repository root:
 
 ```
@@ -126,4 +126,5 @@ Aspect CLI is built by [Aspect](http://aspect.build).
 
 See our website at <http://aspect.build> to learn more about our product offerings.
 
-[bazelisk]: https://github.com/bazelbuild/bazelisk
+[Bazel]: http://bazel.build
+[Bazelisk]: https://github.com/bazelbuild/bazelisk
