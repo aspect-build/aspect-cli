@@ -1,5 +1,6 @@
 name: Release
 on:
+  # Allow manual testing by invoking this workflow from the GH web UI
   workflow_dispatch:
   push:
     tags:
