@@ -18,10 +18,7 @@ jobs:
       - run: shasum -a 256 aspect* > SHA256.txt
       - name: Prepare workspace snippet
         run: .github/workflows/install_snippet.sh > release_notes.txt
-      - run: ls -alF .
-      # Disabled during testing
-      - if: false
-        name: Create GitHub draft release and upload artifacts
+      - name: Create GitHub draft release and upload artifacts
         uses: softprops/action-gh-release@v2
         with:
           # Use GH feature to populate the changelog automatically
