@@ -15,6 +15,8 @@ import (
 // Must align with patched bazel-gazelle
 const ASPECT_GITIGNORE = "__aspect:gitignore"
 
+type isGitIgnoredFunc = func(string, bool) bool
+
 // Directive to enable/disable gitignore support
 const Directive_GitIgnore = "gitignore"
 
@@ -97,14 +99,14 @@ func parseIgnore(rel string, ignoreReader io.Reader) []gitignore.Pattern {
 	return matcherPatterns
 }
 
-func createMatcherFunc(c *config.Config) func(string) bool {
+func createMatcherFunc(c *config.Config) isGitIgnoredFunc {
 	patterns, patternsFound := c.Exts[ignorePatternsExt]
 	if !patternsFound {
 		return nil
 	}
 
 	matcher := gitignore.NewMatcher(patterns.([]gitignore.Pattern))
-	return func(s string) bool {
-		return matcher.Match(strings.Split(s, "/"), false)
+	return func(s string, isDir bool) bool {
+		return matcher.Match(strings.Split(s, "/"), isDir)
 	}
 }

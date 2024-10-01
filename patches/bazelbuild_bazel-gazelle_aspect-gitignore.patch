@@ -10,30 +10,45 @@ index 23b1083..1841650 100644
  
  func New() *Config {
  	return &Config{
+diff --git a/walk/config.go b/walk/config.go
+index 1292146..07cdb3d 100644
+--- a/walk/config.go
++++ b/walk/config.go
+@@ -109,6 +109,7 @@ func (cr *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
+ }
+ 
+ type isIgnoredFunc = func(string) bool
++type isGitIgnoredFunc = func(string, bool) bool
+ 
+ var nothingIgnored isIgnoredFunc = func(string) bool { return false }
+ 
 diff --git a/walk/walk.go b/walk/walk.go
-index 7814088..8ebb086 100644
+index 7814088..1ba1b47 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -165,6 +165,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+@@ -165,6 +165,14 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
  		return nil, false
  	}
  
 +	// PATCH(gitignore) ---
-+	isGitIgnored, hasGitIgnore := c.Exts[config.ASPECT_GITIGNORE].(isIgnoredFunc)
-+	if !hasGitIgnore || isGitIgnored == nil {
-+		isGitIgnored = nothingIgnored
++	var isGitIgnored isGitIgnoredFunc
++	isGitIgnoredExt, hasGitIgnore := c.Exts[config.ASPECT_GITIGNORE]
++	if hasGitIgnore && isGitIgnoredExt != nil {
++		isGitIgnored = isGitIgnoredExt.(isGitIgnoredFunc)
 +	}
 +	// END PATCH(gitignore) ---
 +
  	var dirs, subdirs, regularFiles []string
  	for _, ent := range ents {
  		base := ent.Name()
-@@ -172,6 +179,11 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+@@ -172,6 +180,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
  		if wc.isExcluded(entRel) {
  			continue
  		}
 +		// PATCH(gitignore) ---
-+		if isGitIgnored(entRel) {
++		// NOTE: .gitignore must be applied *before* symlinks are followed
++		// See notes on symlink examples at https://git-scm.com/docs/gitignore#_examples
++		if isGitIgnored != nil && isGitIgnored(entRel, ent.IsDir()) {
 +			continue
 +		}
 +		// END PATCH(gitignore) ---

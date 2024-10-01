@@ -12,7 +12,11 @@ func TestGitIgnore(t *testing.T) {
 	shouldMatch := func(what string, c *config.Config, matches ...string) {
 		matcher := createMatcherFunc(c)
 		for _, m := range matches {
-			if !(matcher != nil && matcher(m)) {
+			// Use trailing slash in test data to indicate directory
+			isDir := strings.HasSuffix(m, "/")
+			m = strings.TrimSuffix(m, "/")
+
+			if !(matcher != nil && matcher(m, isDir)) {
 				t.Error(fmt.Sprintf("%s should match '%s'", what, m))
 			}
 		}
@@ -20,7 +24,11 @@ func TestGitIgnore(t *testing.T) {
 	shouldNotMatch := func(what string, c *config.Config, matches ...string) {
 		matcher := createMatcherFunc(c)
 		for _, m := range matches {
-			if matcher != nil && matcher(m) {
+			// Use trailing slash in test data to indicate directory
+			isDir := strings.HasSuffix(m, "/")
+			m = strings.TrimSuffix(m, "/")
+
+			if matcher != nil && matcher(m, isDir) {
 				t.Error(fmt.Sprintf("%s should NOT match '%s'", what, m))
 			}
 		}
@@ -182,6 +190,18 @@ func TestGitIgnore(t *testing.T) {
 
 		shouldMatch("double wildcard", c, "subdir/x.starstar.ts", "subdir/a/b/c/x.starstar.ts", "subdir/a/.starstar.ts")
 		shouldNotMatch("double wildcard different subdir", c, "startstar.ts", ".startstar.ts", "a/starstar.ts")
+	})
+
+	t.Run("dir specific matches", func(t *testing.T) {
+		c := config.New()
+		addIgnoreFileContent(c, "", `
+		    **/node_modules/
+		    **/foo.js/
+		`)
+
+		shouldMatch("dir pattern", c, "node_modules/", "a/b/node_modules/")
+		shouldMatch("dir pattern that looks like a file", c, "foo.js/", "a/b/foo.js/")
+		shouldNotMatch("ending file that looks like dir", c, "node_modules", "x/node_modules", "foo.js", "x/foo.js")
 	})
 }
 
