@@ -1,6 +1,7 @@
 package gazelle
 
 import (
+	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/emirpasic/gods/sets/treeset"
 	godsutils "github.com/emirpasic/gods/utils"
@@ -27,6 +28,22 @@ type LinkAllPackagesImports struct{}
 
 func newLinkAllPackagesImports() *LinkAllPackagesImports {
 	return &LinkAllPackagesImports{}
+}
+
+type TsPackageInfo struct {
+	TsProjectInfo
+
+	source *label.Label
+}
+
+func newTsPackageInfo(source *label.Label) *TsPackageInfo {
+	return &TsPackageInfo{
+		TsProjectInfo: TsProjectInfo{
+			imports: treeset.NewWith(importStatementComparator),
+			sources: treeset.NewWithStringComparator(),
+		},
+		source: source,
+	}
 }
 
 // TsProject rule import data

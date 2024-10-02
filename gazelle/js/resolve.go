@@ -206,10 +206,23 @@ func (ts *typeScriptLang) Resolve(
 	BazelLog.Infof("Resolve(%s): //%s:%s", LanguageName, from.Pkg, r.Name())
 
 	// TsProject imports are resolved as deps
-	if r.Kind() == TsProjectKind || r.Kind() == JsLibraryKind || r.Kind() == TsConfigKind || r.Kind() == TsProtoLibraryKind || r.Kind() == NpmPackageKind {
+	switch r.Kind() {
+	case TsProjectKind, JsLibraryKind, TsConfigKind, TsProtoLibraryKind:
 		deps := common.NewLabelSet(from)
 
-		err := ts.resolveImports(c, ix, deps, importData.(*TsProjectInfo).imports, from)
+		// Support this target representing a project or a package
+		var imports *treeset.Set
+		if packageInfo, isProjectInfo := importData.(*TsPackageInfo); isProjectInfo {
+			imports = packageInfo.imports
+
+			if packageInfo.source != nil {
+				deps.Add(packageInfo.source)
+			}
+		} else {
+			imports = importData.(*TsProjectInfo).imports
+		}
+
+		err := ts.resolveImports(c, ix, deps, imports, from)
 		if err != nil {
 			BazelLog.Fatalf("Resolution Error: %v", err)
 			os.Exit(1)
@@ -221,6 +234,27 @@ func (ts *typeScriptLang) Resolve(
 
 		if !deps.Empty() {
 			r.SetAttr("deps", deps.Labels())
+		}
+	case NpmPackageKind:
+		packageInfo := importData.(*TsPackageInfo)
+		srcs := packageInfo.sources.Values()
+
+		deps := common.NewLabelSet(from)
+		err := ts.resolveImports(c, ix, deps, packageInfo.imports, from)
+		if err != nil {
+			BazelLog.Fatalf("Resolution Error: %v", err)
+			os.Exit(1)
+		}
+		for _, dep := range deps.Labels() {
+			srcs = append(srcs, dep.String())
+		}
+
+		if packageInfo.source != nil {
+			srcs = append(srcs, packageInfo.source.String())
+		}
+
+		if len(srcs) > 0 {
+			r.SetAttr("srcs", srcs)
 		}
 	}
 

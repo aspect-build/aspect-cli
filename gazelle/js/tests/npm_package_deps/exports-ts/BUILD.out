@@ -5,6 +5,8 @@ npm_link_all_packages(name = "node_modules")
 
 npm_package(
     name = "pkg",
-    srcs = ["package.json"],
-    deps = ["//exports-ts/src:tsc"],
+    srcs = [
+        "package.json",
+        "//exports-ts/src:tsc",
+    ],
 )

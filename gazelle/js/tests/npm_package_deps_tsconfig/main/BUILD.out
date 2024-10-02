@@ -17,7 +17,6 @@ npm_package(
         "package.json",
         ":tsc",
     ],
-    deps = [":tsc"],
 )
 
 ts_config(

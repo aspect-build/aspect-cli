@@ -12,6 +12,8 @@ npm_link_all_packages(name = "node_modules")
 
 npm_package(
     name = "pkg",
-    srcs = ["package.json"],
-    deps = [":start.js"],
+    srcs = [
+        "package.json",
+        ":start.js",
+    ],
 )

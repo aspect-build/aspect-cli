@@ -14,8 +14,10 @@ ts_project(
 
 npm_package(
     name = "pkg",
-    srcs = ["package.json"],
-    deps = [":m"],
+    srcs = [
+        "package.json",
+        ":m",
+    ],
 )
 
 ts_config(

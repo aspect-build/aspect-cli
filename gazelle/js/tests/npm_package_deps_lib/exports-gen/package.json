@@ -1,0 +1,7 @@
+{
+  "name": "pkg-export-generated",
+  "private": true,
+  "exports": {
+    ".": "./start.js"
+  }
+}

@@ -1,0 +1,14 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+npm_link_all_packages(name = "node_modules")
+
+js_library(
+    name = "pkg",
+    srcs = ["package.json"],
+    deps = [
+        "//exports-js/bin:tsc",
+        "//exports-js/lib:tsc",
+        "//exports-js/lib2:tsc",
+    ],
+)
