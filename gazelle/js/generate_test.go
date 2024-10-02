@@ -134,25 +134,25 @@ func TestGenerate(t *testing.T) {
 
 	t.Run("toImportPaths", func(t *testing.T) {
 		// Traditional [.d].ts[x] don't require an extension
-		assertImports(t, "bar.ts", []string{"bar", "bar.js"})
-		assertImports(t, "bar.tsx", []string{"bar", "bar.js"})
-		assertImports(t, "bar.d.ts", []string{"bar", "bar.js"})
-		assertImports(t, "foo/bar.ts", []string{"foo/bar", "foo/bar.js"})
-		assertImports(t, "foo/bar.tsx", []string{"foo/bar", "foo/bar.js"})
-		assertImports(t, "foo/bar.d.ts", []string{"foo/bar", "foo/bar.js"})
+		assertImports(t, "bar.ts", []string{"bar", "bar.d.ts", "bar.js"})
+		assertImports(t, "bar.tsx", []string{"bar", "bar.d.ts", "bar.js"})
+		assertImports(t, "bar.d.ts", []string{"bar", "bar.d.ts", "bar.js"})
+		assertImports(t, "foo/bar.ts", []string{"foo/bar", "foo/bar.d.ts", "foo/bar.js"})
+		assertImports(t, "foo/bar.tsx", []string{"foo/bar", "foo/bar.d.ts", "foo/bar.js"})
+		assertImports(t, "foo/bar.d.ts", []string{"foo/bar", "foo/bar.d.ts", "foo/bar.js"})
 
 		// Traditional [.d].ts[x] index files
-		assertImports(t, "bar/index.ts", []string{"bar/index", "bar/index.js", "bar"})
-		assertImports(t, "bar/index.d.ts", []string{"bar/index", "bar/index.js", "bar"})
-		assertImports(t, "bar/index.tsx", []string{"bar/index", "bar/index.js", "bar"})
+		assertImports(t, "bar/index.ts", []string{"bar/index", "bar/index.d.ts", "bar/index.js", "bar"})
+		assertImports(t, "bar/index.d.ts", []string{"bar/index", "bar/index.d.ts", "bar/index.js", "bar"})
+		assertImports(t, "bar/index.tsx", []string{"bar/index", "bar/index.d.ts", "bar/index.js", "bar"})
 
 		// .mjs and .cjs files require an extension
-		assertImports(t, "bar.mts", []string{"bar.mjs"})
-		assertImports(t, "bar/index.mts", []string{"bar/index.mjs", "bar"})
-		assertImports(t, "bar.d.mts", []string{"bar.mjs"})
-		assertImports(t, "bar.cts", []string{"bar.cjs"})
-		assertImports(t, "bar/index.cts", []string{"bar/index.cjs", "bar"})
-		assertImports(t, "bar.d.cts", []string{"bar.cjs"})
+		assertImports(t, "bar.mts", []string{"bar.mjs", "bar.d.mts"})
+		assertImports(t, "bar/index.mts", []string{"bar/index.mjs", "bar/index.d.mts", "bar"})
+		assertImports(t, "bar.d.mts", []string{"bar.d.mts", "bar.mjs"})
+		assertImports(t, "bar.cts", []string{"bar.cjs", "bar.d.cts"})
+		assertImports(t, "bar/index.cts", []string{"bar/index.cjs", "bar/index.d.cts", "bar"})
+		assertImports(t, "bar.d.cts", []string{"bar.d.cts", "bar.cjs"})
 	})
 }
 

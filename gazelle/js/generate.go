@@ -724,8 +724,12 @@ func toImportPaths(p string) []string {
 	paths := make([]string, 0, 1)
 
 	if isDeclarationFileType(p) {
-		// With the js extension
-		paths = append(paths, swapDeclarationExtension(p))
+		// The import of the raw dts file
+		paths = append(paths, p)
+
+		// Assume the js extension also exists
+		// TODO: don't do that
+		paths = append(paths, stripDeclarationExtensions(p)+toJsExt(p))
 
 		// Without the js extension
 		if isImplicitSourceFileType(p) {
@@ -737,8 +741,9 @@ func toImportPaths(p string) []string {
 			paths = append(paths, path.Dir(p))
 		}
 	} else if isTranspiledSourceFileType(p) {
-		// The import with the transpiled file extension
+		// The transpiled files extensions
 		paths = append(paths, swapSourceExtension(p))
+		paths = append(paths, stripSourceFileExtension(p)+toDtsExt(p))
 
 		// Without the extension if it is implicit
 		if isImplicitSourceFileType(p) {
@@ -892,11 +897,6 @@ func stripDeclarationExtensions(f string) string {
 	return stripSourceFileExtension(stripSourceFileExtension(f))
 }
 
-// Swap compile to runtime extensions of of a path, assuming it isDeclarationFileType()
-func swapDeclarationExtension(f string) string {
-	return stripDeclarationExtensions(f) + toJsExt(f)
-}
-
 func toJsExt(f string) string {
 	e := path.Ext(f)
 	switch e {
@@ -913,6 +913,21 @@ func toJsExt(f string) string {
 	default:
 		BazelLog.Errorf("Unknown extension %q", e)
 		return ".js"
+	}
+}
+
+func toDtsExt(f string) string {
+	e := path.Ext(f)
+	switch e {
+	case ".ts", ".tsx":
+		return ".d.ts"
+	case ".cts":
+		return ".d.cts"
+	case ".mts":
+		return ".d.mts"
+	default:
+		BazelLog.Errorf("Unknown extension %q", e)
+		return ".d.ts"
 	}
 }
 
