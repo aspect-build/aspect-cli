@@ -1,0 +1,17 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  exports: {}
+
+  main: {}
+
+  main-custom_ts: {}
+
+  main-inherit-tsconfig: {}

@@ -1,0 +1,7 @@
+{
+  "name": "pkg-with-exports",
+  "private": true,
+  "exports": {
+    ".": "./dist/main.js"
+  }
+}

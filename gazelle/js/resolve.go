@@ -79,17 +79,31 @@ func (ts *typeScriptLang) sourceFileImports(c *config.Config, r *rule.Rule, f *r
 		srcs = expandedSrcs
 	}
 
+	_, tsconfig := ts.tsconfig.FindConfig(f.Pkg)
+
 	provides := make([]resolve.ImportSpec, 0, len(srcs)+1)
 
 	// Sources that produce importable paths.
 	for _, src := range srcs {
-		src = path.Clean(path.Join(f.Pkg, src))
+		// The raw source path
+		srcs = []string{path.Join(f.Pkg, src)}
 
-		for _, impt := range toImportPaths(src) {
-			provides = append(provides, resolve.ImportSpec{
-				Lang: LanguageName,
-				Imp:  impt,
-			})
+		// Also add tsconfig-mapped directories for references
+		// to the output files of the ts_project rule.
+		if tsconfig != nil {
+			outSrc := tsconfig.ToOutDir(src)
+			if outSrc != src {
+				srcs = append(srcs, path.Join(f.Pkg, outSrc))
+			}
+		}
+
+		for _, src := range srcs {
+			for _, impt := range toImportPaths(src) {
+				provides = append(provides, resolve.ImportSpec{
+					Lang: LanguageName,
+					Imp:  impt,
+				})
+			}
 		}
 	}
 
