@@ -13,7 +13,6 @@ npm_package(
     name = "pkg",
     srcs = [
         "package.json",
-        "start.js",
         ":tsc",
     ],
 )

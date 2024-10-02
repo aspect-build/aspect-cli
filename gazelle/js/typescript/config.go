@@ -3,8 +3,6 @@ package typescript
 import (
 	"fmt"
 	"path"
-	"path/filepath"
-	"strings"
 	"sync"
 
 	node "aspect.build/cli/gazelle/js/node"
@@ -119,21 +117,6 @@ func (tc *TsWorkspace) FindConfig(dir string) (string, *TsConfig) {
 	}
 
 	return "", nil
-}
-
-func (tc *TsWorkspace) IsWithinTsRoot(f string) bool {
-	dir, c := tc.FindConfig(path.Dir(f))
-	if c == nil {
-		return true
-	}
-
-	if c.RootDir == "" {
-		return true
-	}
-
-	rootRelative, relErr := filepath.Rel(path.Join(dir, c.RootDir), f)
-
-	return relErr == nil && !strings.Contains(rootRelative, "..")
 }
 
 func (tc *TsWorkspace) ExpandPaths(from, f string) []string {

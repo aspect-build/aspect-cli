@@ -14,7 +14,6 @@ js_library(
 npm_package(
     name = "pkg",
     srcs = [
-        "lib1.js",
         "package.json",
         ":tsc",
     ],

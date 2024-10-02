@@ -10,9 +10,6 @@ js_library(
 
 js_library(
     name = "pkg",
-    srcs = [
-        "package.json",
-        "start.js",
-    ],
+    srcs = ["package.json"],
     deps = [":tsc"],
 )
