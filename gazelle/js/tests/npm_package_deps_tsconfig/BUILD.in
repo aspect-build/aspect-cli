@@ -1,0 +1,5 @@
+# gazelle:generation_mode update
+# gazelle:js_tsconfig enabled
+# gazelle:js_npm_package_target_name pkg
+# gazelle:js_project_naming_convention tsc
+# gazelle:js_npm_package enabled

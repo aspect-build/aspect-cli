@@ -425,3 +425,43 @@ func TestTsconfigParse(t *testing.T) {
 		}
 	})
 }
+
+func TestTsconfigOutRootDirs(t *testing.T) {
+	t.Run("empty config", func(t *testing.T) {
+		o1 := parseTest(t, ".", `{}`)
+		assertEqual(t, o1.ToOutDir("foo.ts"), "foo.ts", "empty config")
+
+		o2 := parseTest(t, ".", `{"compilerOptions": {"rootDir": "./"}}`)
+		assertEqual(t, o2.ToOutDir("foo.ts"), "foo.ts", "empty rel config")
+	})
+
+	t.Run("rootDir config", func(t *testing.T) {
+		o1 := parseTest(t, ".", `{"compilerOptions": {"rootDir": "./src"}}`)
+		assertEqual(t, o1.ToOutDir("src/foo.ts"), "foo.ts", "empty config")
+
+		o2 := parseTest(t, ".", `{"compilerOptions": {"rootDir": "src"}}`)
+		assertEqual(t, o2.ToOutDir("src/foo.ts"), "foo.ts", "empty config")
+
+		o3 := parseTest(t, ".", `{"compilerOptions": {"rootDir": "src/foo/.."}}`)
+		assertEqual(t, o3.ToOutDir("src/foo.ts"), "foo.ts", "empty config")
+	})
+
+	t.Run("outDir config", func(t *testing.T) {
+		o1 := parseTest(t, ".", `{"compilerOptions": {"outDir": "dist"}}`)
+		assertEqual(t, o1.ToOutDir("foo.ts"), "dist/foo.ts", "empty config")
+
+		o2 := parseTest(t, ".", `{"compilerOptions": {"outDir": "./dist"}}`)
+		assertEqual(t, o2.ToOutDir("foo.ts"), "dist/foo.ts", "empty config")
+
+		o3 := parseTest(t, ".", `{"compilerOptions": {"outDir": "./dist/"}}`)
+		assertEqual(t, o3.ToOutDir("foo.ts"), "dist/foo.ts", "empty config")
+
+		o4 := parseTest(t, ".", `{"compilerOptions": {"outDir": "./dist/foo/.."}}`)
+		assertEqual(t, o4.ToOutDir("foo.ts"), "dist/foo.ts", "empty config")
+	})
+
+	t.Run("rootDir + outDir config", func(t *testing.T) {
+		options := parseTest(t, ".", `{"compilerOptions": {"rootDir": "./src", "outDir": "dist"}}`)
+		assertEqual(t, options.ToOutDir("src/foo.ts"), "dist/foo.ts", "empty config")
+	})
+}

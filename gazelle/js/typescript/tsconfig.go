@@ -332,6 +332,20 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	return &config, nil
 }
 
+func (c TsConfig) ToOutDir(f string) string {
+	if c.RootDir != "." {
+		if strings.HasPrefix(f, c.RootDir) && f[len(c.RootDir)] == '/' {
+			f = f[len(c.RootDir)+1:]
+		}
+	}
+
+	if c.OutDir != "." {
+		f = path.Join(c.OutDir, f)
+	}
+
+	return f
+}
+
 // Returns the path from the project base to the active tsconfig.json file
 // This is used to build the path from the project base to the file being imported
 // because gazelle seems to resolve files relative to the project base
