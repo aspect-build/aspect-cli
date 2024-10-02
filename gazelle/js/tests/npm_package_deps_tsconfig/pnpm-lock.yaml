@@ -15,3 +15,5 @@ importers:
   main-custom_ts: {}
 
   main-inherit-tsconfig: {}
+
+  scenario1: {}
