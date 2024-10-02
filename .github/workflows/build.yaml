@@ -19,6 +19,8 @@ jobs:
       artifact: ${{steps.upload.outputs.artifact-url}}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed to see tags
       - run: |
           bazel run --config=release //release -- /tmp/aspect/release
       - uses: actions/upload-artifact@v4
@@ -39,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # Needed to see tags
       - uses: bazel-contrib/setup-bazel@0.9.0
         with:
           # Avoid downloading Bazel every time.
@@ -48,15 +50,15 @@ jobs:
           disk-cache: ${{ github.workflow }}
           # Share repository cache between workflows.
           repository-cache: true
-      # Bootstrap: the first time we release for windows, we don't have a windows version of Aspect CLI to build with
-      # So use environment variables to defeat the .bazeliskrc file.
-      - run: bazel build //release:aspect_windows_amd64
-      - run: cp $(bazel cquery //release:aspect_windows_amd64 --output=files) aspect_windows_amd64.exe
+      - run: bazel build --config=release //release:release.windows
+      # Verify that we built a functional executable
       - name: smoke test
-        run: ./aspect_windows_amd64.exe --help
+        run: |
+          cp $(bazel cquery --config=release --output=files //release:aspect-windows-x86_64) aspect.exe
+          ./aspect.exe --help
       - uses: actions/upload-artifact@v4
         id: upload
         with:
           name: windows
           retention-days: 1
-          path: aspect_windows_amd64.exe
+          path: C:\Temp\release

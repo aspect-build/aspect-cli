@@ -20,8 +20,9 @@ expand_template(
 )
 
 platform_transition_filegroup(
-    name = "aspect_windows_amd64",
+    name = "aspect-windows-x86_64.exe",
     srcs = ["//cmd/aspect"],
+    tags = ["manual"],
     target_compatible_with = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",
@@ -30,7 +31,14 @@ platform_transition_filegroup(
 )
 
 bazelisk_artifacts(
-    name = "aspect_bazelisk_artifacts",
+    name = "windows_artifacts",
+    tags = ["manual"],
+    version_file = ":aspect_version",
+    windows_x86_64 = ":aspect-windows-x86_64.exe",
+)
+
+bazelisk_artifacts(
+    name = "linux_and_darwin_artifacts",
     darwin_arm64 = ":aspect-macos-aarch64",
     darwin_x86_64 = ":aspect-macos-x86_64",
     linux_arm64 = ":aspect-linux-aarch64",
@@ -44,7 +52,16 @@ release(
     tags = ["manual"],
     targets = [
         ":aspect",
-        ":aspect_bazelisk_artifacts",
+        ":linux_and_darwin_artifacts",
+    ],
+)
+
+release(
+    name = "release.windows",
+    tags = ["manual"],
+    targets = [
+        ":aspect-windows-x86_64.exe",
+        ":windows_artifacts",
     ],
 )
 
@@ -61,7 +78,7 @@ sh_binary(
     srcs = ["delivery.sh"],
     data = [
         ":aspect",
-        ":aspect_bazelisk_artifacts",
+        ":linux_and_darwin_artifacts",
     ],
 )
 
@@ -72,7 +89,7 @@ sh_binary(
     srcs = ["delivery.sh"],
     data = [
         ":aspect",
-        ":aspect_bazelisk_artifacts",
+        ":linux_and_darwin_artifacts",
     ],
     tags = ["deliverable"],
 )

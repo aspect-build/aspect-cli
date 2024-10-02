@@ -73,7 +73,7 @@ def release(name, targets, **kwargs):
     native.genrule(
         name = name,
         srcs = targets,
-        outs = ["release.sh"],
+        outs = [name + ".sh"],
         executable = True,
         cmd = "./$(location //release:create_release.sh) {locations} > \"$@\"".format(
             locations = " ".join(["$(locations {})".format(target) for target in targets]),

@@ -9,7 +9,7 @@ import %workspace%/.aspect/bazelrc/performance.bazelrc
 ### YOUR PROJECT SPECIFIC OPTIONS GO HERE ###
 common --enable_platform_specific_config
 
-common:release -c opt --stamp --workspace_status_command "${PWD}/tools/workspace_status.sh"
+common:release -c opt --stamp --workspace_status_command="node tools/workspace_status.js"
 
 # bzlmod causes issues with LLVM toolchain
 common --noenable_bzlmod
