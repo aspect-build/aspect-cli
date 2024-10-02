@@ -112,18 +112,20 @@ var DefaultSourceGlobs = []*TargetGroup{
 	&TargetGroup{
 		name:           DefaultLibraryName,
 		customSources:  []string{},
-		defaultSources: []string{fmt.Sprintf("**/*.{%s}", strings.Join(defaultTypescriptFileExtensionsArray, ","))},
+		defaultSources: []string{fmt.Sprintf("%s/**/*.{%s}", rootDirVar, strings.Join(defaultTypescriptFileExtensionsArray, ","))},
 		testonly:       false,
 	},
 	&TargetGroup{
 		name:           DefaultTestsName,
 		customSources:  []string{},
-		defaultSources: []string{fmt.Sprintf("**/*.{spec,test}.{%s}", strings.Join(defaultTypescriptFileExtensionsArray, ","))},
+		defaultSources: []string{fmt.Sprintf("%s/**/*.{spec,test}.{%s}", rootDirVar, strings.Join(defaultTypescriptFileExtensionsArray, ","))},
 		testonly:       true,
 	},
 }
 
 var (
+	rootDirVar = "${rootDir}"
+
 	// Array of default typescript source file extensions
 	defaultTypescriptFileExtensionsArray = []string{"ts", "tsx", "mts", "cts"}
 
@@ -451,7 +453,7 @@ func (c *JsGazelleConfig) RenderSourceTargetName(groupName, packageName string, 
 }
 
 // Determine if and which target the passed file belongs in.
-func (c *JsGazelleConfig) GetFileSourceTarget(filePath string) *TargetGroup {
+func (c *JsGazelleConfig) GetFileSourceTarget(filePath, rootDir string) *TargetGroup {
 	// Rules are evaluated in reverse order, so we want to
 	for i := len(c.targets) - 1; i >= 0; i-- {
 		target := c.targets[i]
@@ -462,7 +464,8 @@ func (c *JsGazelleConfig) GetFileSourceTarget(filePath string) *TargetGroup {
 			sources = target.defaultSources
 		}
 
-		for _, glob := range sources {
+		for _, globTmpl := range sources {
+			glob := path.Clean(strings.Replace(globTmpl, rootDirVar, rootDir, 1))
 			m, e := doublestar.Match(glob, filePath)
 			if e != nil {
 				log.Fatalf("Target (%s) glob error: %v", target.name, e)

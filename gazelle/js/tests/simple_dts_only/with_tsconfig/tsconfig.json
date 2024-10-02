@@ -4,7 +4,6 @@
         "declarationMap": true,
         "sourceMap": true,
         "outDir": "dist",
-        "resolveJsonModule": true,
-        "rootDir": "src"
+        "resolveJsonModule": true
     }
 }
