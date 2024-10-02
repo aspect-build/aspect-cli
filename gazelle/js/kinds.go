@@ -84,6 +84,9 @@ var tsKinds = map[string]rule.KindInfo{
 		MergeableAttrs: map[string]bool{
 			"srcs": true,
 		},
+		ResolveAttrs: map[string]bool{
+			"srcs": true,
+		},
 	},
 }
 
