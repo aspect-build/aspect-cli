@@ -11,7 +11,6 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/emirpasic/gods/maps/linkedhashmap"
-	"github.com/emirpasic/gods/sets/treeset"
 )
 
 // Directives. Keep in sync with documentation in /docs/cli/help/directives.md
@@ -113,32 +112,20 @@ var DefaultSourceGlobs = []*TargetGroup{
 	&TargetGroup{
 		name:           DefaultLibraryName,
 		customSources:  []string{},
-		defaultSources: []string{fmt.Sprintf("**/*.{%s}", strings.Join(typescriptFileExtensionsArray, ","))},
+		defaultSources: []string{fmt.Sprintf("**/*.{%s}", strings.Join(defaultTypescriptFileExtensionsArray, ","))},
 		testonly:       false,
 	},
 	&TargetGroup{
 		name:           DefaultTestsName,
 		customSources:  []string{},
-		defaultSources: []string{fmt.Sprintf("**/*.{spec,test}.{%s}", strings.Join(typescriptFileExtensionsArray, ","))},
+		defaultSources: []string{fmt.Sprintf("**/*.{spec,test}.{%s}", strings.Join(defaultTypescriptFileExtensionsArray, ","))},
 		testonly:       true,
 	},
 }
 
 var (
-	// Set of supported source file extensions.
-	typescriptFileExtensions = treeset.NewWithStringComparator("ts", "tsx", "mts", "cts")
-
-	// Array of typescriptFileExtensions.
-	typescriptFileExtensionsArray = []string{"ts", "tsx", "mts", "cts"}
-
-	// Importable declaration files that are not compiled
-	declarationFileExtensionsArray = []string{"d.ts", "d.mts", "d.cts"}
-
-	// Supported javascript file extensions that can be sources along with dts files.
-	javascriptFileExtensions = treeset.NewWithStringComparator("js", "jsx", "cjs", "mjs")
-
-	// Supported data file extensions that typescript can reference.
-	dataFileExtensions = treeset.NewWithStringComparator("json")
+	// Array of default typescript source file extensions
+	defaultTypescriptFileExtensionsArray = []string{"ts", "tsx", "mts", "cts"}
 
 	// The default TypeScript config file name
 	defaultTsconfigName = "tsconfig.json"
