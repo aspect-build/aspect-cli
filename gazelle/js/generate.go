@@ -183,7 +183,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 }
 
 func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.GenerateArgs, packageName string, sourceFiles, dataFiles *treeset.Set, srcLabel *label.Label, result *language.GenerateResult) {
-	npmPackageInfo := newTsProjectInfo()
+	npmPackageInfo := newTsPackageInfo(srcLabel)
 
 	packageJsonPath := path.Join(args.Rel, NpmPackageFilename)
 	packageImports, err := node.ParsePackageJsonImportsFile(args.Config.RepoRoot, packageJsonPath)
@@ -230,14 +230,6 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 	}
 
 	npmPackage := rule.NewRule(packageTargetKind, packageTargetName)
-	if srcLabel != nil {
-		if cfg.packageTargetKind == PackageTargetKind_Library {
-			npmPackage.SetAttr("deps", []label.Label{*srcLabel})
-		} else {
-			npmPackageInfo.sources.Add(srcLabel.String())
-		}
-	}
-
 	npmPackage.SetAttr("srcs", npmPackageInfo.sources.Values())
 
 	result.Gen = append(result.Gen, npmPackage)
