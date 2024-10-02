@@ -742,9 +742,22 @@ func toImportPaths(p string) []string {
 		if path.Base(stripDeclarationExtensions(p)) == IndexFileName {
 			paths = append(paths, path.Dir(p))
 		}
-	} else if isSourceFileType(p) {
-		// The import with the file extension
+	} else if isTranspiledSourceFileType(p) {
+		// The import with the transpiled file extension
 		paths = append(paths, swapSourceExtension(p))
+
+		// Without the extension if it is implicit
+		if isImplicitSourceFileType(p) {
+			paths = append(paths, stripSourceFileExtension(p))
+		}
+
+		// Directory without the filename
+		if path.Base(stripSourceFileExtension(p)) == IndexFileName {
+			paths = append(paths, path.Dir(p))
+		}
+	} else if isSourceFileType(p) {
+		// The import of the raw file
+		paths = append(paths, p)
 
 		// Without the extension if it is implicit
 		if isImplicitSourceFileType(p) {
@@ -826,44 +839,48 @@ func addLinkAllPackagesRule(cfg *JsGazelleConfig, args language.GenerateArgs, re
 
 // If the file is ts-compatible transpiled source code that may contain imports
 func isTranspiledSourceFileType(f string) bool {
-	ext := path.Ext(f)
-	return len(ext) > 0 && typescriptFileExtensions.Contains(ext[1:]) && !isDeclarationFileType(f)
+	switch path.Ext(f) {
+	case ".ts", ".cts", ".mts", ".tsx", ".jsx":
+		return !isDeclarationFileType(f)
+	default:
+		return false
+	}
 }
 
 // If the file is ts-compatible source code that may contain imports
 func isSourceFileType(f string) bool {
-	if isTranspiledSourceFileType(f) || isDeclarationFileType(f) {
+	switch path.Ext(f) {
+	case ".ts", ".cts", ".mts", ".tsx", ".jsx", ".js", ".cjs", ".mjs":
 		return true
+	default:
+		return false
 	}
-
-	ext := path.Ext(f)
-	return len(ext) > 0 && javascriptFileExtensions.Contains(ext[1:])
 }
 
 // A source file that does not explicitly declare itself as cjs or mjs so
 // it can be imported as if it is either. Node will decide how to interpret
 // it at runtime based on other factors.
 func isImplicitSourceFileType(f string) bool {
-	return path.Ext(f) == ".ts" || path.Ext(f) == ".tsx" || path.Ext(f) == ".js" || path.Ext(f) == ".jsx"
+	switch path.Ext(f) {
+	case ".ts", ".tsx", ".js", ".jsx":
+		return true
+	default:
+		return false
+	}
 }
 
 func isTsxFileType(f string) bool {
-	return path.Ext(f) == ".tsx"
+	return strings.HasSuffix(f, ".tsx") || strings.HasSuffix(f, ".jsx")
 }
 
+// Importable declaration files that are not compiled
 func isDeclarationFileType(f string) bool {
-	for _, ex := range declarationFileExtensionsArray {
-		if strings.HasSuffix(f, "."+ex) {
-			return true
-		}
-	}
-
-	return false
+	return strings.HasSuffix(f, ".d.ts") || strings.HasSuffix(f, ".d.mts") || strings.HasSuffix(f, ".d.cts")
 }
 
+// Supported data file extensions that typescript can reference.
 func isDataFileType(f string) bool {
-	ext := path.Ext(f)
-	return len(ext) > 0 && dataFileExtensions.Contains(ext[1:])
+	return strings.HasSuffix(f, ".json")
 }
 
 // Strip extensions off of a path, assuming it isSourceFileType()
