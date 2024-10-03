@@ -44,7 +44,8 @@ After this, you should be able to merge your changes without any conflicts in th
 
 ## Releasing
 
-1. At the commit to release from, run `./workspace_status.sh | grep STABLE_ASPECT_CLI_BAZELISK_COMPAT_VERSION`
+1. Sync your local `main` branch to the commit to release from.
+   Run `node ./tools/workspace_status.js | grep STABLE_ASPECT_CLI_BAZELISK_COMPAT_VERSION`
    to determine the current release version. This version follows our monorepo versioning scheme minus
    the hash so that it is compatible with Bazelisk. See comment in `workspace_status.sh` for more info.
 
