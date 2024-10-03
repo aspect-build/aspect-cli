@@ -16,7 +16,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - run: shasum -a 256 aspect* > SHA256.txt
+      - run: shasum -a 256 aspect* bazel-* > SHA256.txt
       - name: Prepare workspace snippet
         run: .github/workflows/install_snippet.sh > release_notes.txt
       - name: Create GitHub draft release and upload artifacts
@@ -27,4 +27,5 @@ jobs:
           body_path: release_notes.txt
           files: |
             aspect*
+            bazel-*
             SHA256.txt
