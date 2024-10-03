@@ -50,7 +50,7 @@ jobs:
           disk-cache: ${{ github.workflow }}
           # Share repository cache between workflows.
           repository-cache: true
-      - run: bazel build --config=release //release:release.windows
+      - run: bazel run --config=release //release:release.windows -- C:\Temp\release
       # Verify that we built a functional executable
       - name: smoke test
         run: |
