@@ -50,7 +50,6 @@ jobs:
           disk-cache: ${{ github.workflow }}
           # Share repository cache between workflows.
           repository-cache: true
-
       - run: bazel build --config=release //release:release.windows
       - run: bazel-bin/release/release.windows.sh "C:\Temp\release"
         shell: bash
@@ -59,7 +58,6 @@ jobs:
         run: |
           cp $(bazel cquery --config=release --output=files //release:aspect-windows-x86_64.exe) aspect.exe
           ./aspect.exe --help
-
       - uses: actions/upload-artifact@v4
         id: upload
         with:
