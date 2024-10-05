@@ -191,11 +191,20 @@ func (kt *kotlinLang) resolveImport(
 		if l, mavenError := (*mavenResolver).Resolve(jvm_import, cfg.ExcludedArtifacts(), cfg.MavenRepositoryName()); mavenError == nil {
 			return Resolution_Label, &l, nil
 		} else {
-			BazelLog.Debugf("Maven resolution error: %v", mavenError)
+			BazelLog.Debugf("Maven resolution failed: %v", mavenError)
 		}
 	}
 
-	return Resolution_NotFound, nil, nil
+	// The original import, like "x.y.z" might be a subpackage within a package that resolves,
+	// so try to resolve the original identifer, then try to resolve the parent
+	// identifier, etc.
+	importParent := impt.packageFullyQualifiedName().Parent()
+	if importParent == nil {
+		return Resolution_NotFound, nil, nil
+	}
+	parentImportSpec := impt
+	parentImportSpec.Imp = importParent.String()
+	return kt.resolveImport(c, ix, parentImportSpec, from)
 }
 
 // targetListFromResults returns a string with the human-readable list of
