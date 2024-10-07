@@ -22,10 +22,11 @@ aspect lint <target patterns> [flags]
 
 ```
       --diff      Show unified diff instead of diff stats for fixes
-      --fix       Apply all patch fixes for lint violations
+      --fix       Auto-apply all fixes
+      --fixes     Request fixes from linters (where supported) (default true)
   -h, --help      help for lint
-      --machine   Request the machine readable output from linters
-      --report    Output lint reports (default true)
+      --machine   Request machine readable lint reports from linters (where supported)
+      --report    Request lint reports from linters (default true)
 ```
 
 ### Options inherited from parent commands

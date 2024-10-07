@@ -82,11 +82,12 @@ func New(
 	}
 }
 
-func AddFlags(flags *pflag.FlagSet) {
-	flags.Bool("fix", false, "Apply all patch fixes for lint violations")
-	flags.Bool("diff", false, "Show unified diff instead of diff stats for fixes")
-	flags.Bool("report", true, "Output lint reports")
-	flags.Bool("machine", false, "Request the machine readable output from linters")
+func AddFlags(flagSet *pflag.FlagSet) {
+	flags.RegisterNoableBoolP(flagSet, "fix", "", false, "Auto-apply all fixes")
+	flags.RegisterNoableBoolP(flagSet, "diff", "", false, "Show unified diff instead of diff stats for fixes")
+	flags.RegisterNoableBoolP(flagSet, "fixes", "", true, "Request fixes from linters (where supported)")
+	flags.RegisterNoableBoolP(flagSet, "report", "", true, "Request lint reports from linters")
+	flags.RegisterNoableBoolP(flagSet, "machine", "", false, "Request machine readable lint reports from linters (where supported)")
 }
 
 // TODO: hoist this to a flags package so it can be used by other commands that require this functionality
@@ -159,8 +160,9 @@ lint:
 	// Get values of lint command specific flags
 	applyAll, _ := cmd.Flags().GetBool("fix")
 	showDiff, _ := cmd.Flags().GetBool("diff")
-	printReport, _ := cmd.Flags().GetBool("report")
-	machine, _ := cmd.Flags().GetBool("machine")
+	requestFixes, _ := cmd.Flags().GetBool("fixes")
+	requestReports, _ := cmd.Flags().GetBool("report")
+	machineReports, _ := cmd.Flags().GetBool("machine")
 
 	// Separate out the lint command specific flags from the list of args to
 	// pass to `bazel build`
@@ -181,12 +183,12 @@ lint:
 
 	// Don't request report and patch files in a mode where we don't need them
 	outputGroups := []string{}
-	if printReport || applyAll || isInteractiveMode {
+	if requestFixes || applyAll {
 		bazelCmd = append(bazelCmd, "--@aspect_rules_lint//lint:fix")
 		outputGroups = append(outputGroups, LINT_PATCH_GROUP)
 	}
-	if printReport {
-		if machine {
+	if requestReports {
+		if machineReports {
 			outputGroups = append(outputGroups, LINT_REPORT_GROUP_MACHINE)
 		} else {
 			outputGroups = append(outputGroups, LINT_REPORT_GROUP_HUMAN)
