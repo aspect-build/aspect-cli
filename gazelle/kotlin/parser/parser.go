@@ -61,14 +61,17 @@ func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error
 							nodeK := nodeJ.Child(k)
 							if nodeK.Type() == "identifier" {
 								isStar := false
-								for l := k + 1; l < int(nodeJ.ChildCount()); l++ {
-									if nodeJ.Child(l).Type() == ".*" {
+								for l := int(nodeJ.ChildCount()) - 1; l > k; l-- {
+									if nodeJ.Child(l).Type() == "wildcard_import" {
 										isStar = true
 										break
 									}
 								}
 
 								result.Imports = append(result.Imports, readIdentifier(nodeK, sourceCode, !isStar))
+
+								// Any remaining nodes within nodeJ are comments or wildcards
+								break
 							}
 						}
 					}
