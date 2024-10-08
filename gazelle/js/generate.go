@@ -220,7 +220,7 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 			npmPackageInfo.sources.Add(impt)
 		} else {
 			if strings.Contains(impt, "*") {
-				BazelLog.Warnf("Wildcard import %q in %q not supported", impt, packageJsonPath)
+				BazelLog.Debugf("Wildcard import %q in %q not supported", impt, packageJsonPath)
 				continue
 			}
 
@@ -231,6 +231,9 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 				},
 				ImportPath: impt,
 				SourcePath: packageJsonPath,
+
+				// Set as optional while package.json imports are experimental
+				Optional: true,
 			})
 		}
 	}

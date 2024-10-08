@@ -21,6 +21,9 @@ type ImportStatement struct {
 
 	// The path as written in the import statement
 	ImportPath string
+
+	// If the import is optional and failure to resolve should not be an error
+	Optional bool
 }
 
 // Npm link-all rule import data
