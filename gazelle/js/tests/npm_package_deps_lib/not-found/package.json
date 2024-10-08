@@ -1,0 +1,10 @@
+{
+  "name": "pkg-with-exports",
+  "private": true,
+  "main": "./not-found.js",
+  "types": "./not-found.d.ts",
+  "exports": {
+    ".": "./dist/main.js",
+    "./foo": "./not-found.js"
+  }
+}

@@ -7,6 +7,7 @@
     },
     "./bin": "./bin/does-not-exist.js",
     "./dne": "./does-not-exist.js",
+    "./not-ignored-dne": "./not-ignored.js",
     "./lib": "./lib1.js"
   }
 }

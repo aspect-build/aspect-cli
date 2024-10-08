@@ -305,7 +305,9 @@ func (ts *typeScriptLang) resolveImports(
 
 		// Neither the import or a type definition was found.
 		if resolutionType == Resolution_NotFound && len(types) == 0 {
-			if cfg.ValidateImportStatements() != ValidationOff {
+			if imp.Optional {
+				BazelLog.Infof("Optional import %q for target %q not found", imp.ImportPath, from.String())
+			} else if cfg.ValidateImportStatements() != ValidationOff {
 				BazelLog.Debugf("import %q for target %q not found", imp.ImportPath, from.String())
 
 				notFound := fmt.Errorf(
