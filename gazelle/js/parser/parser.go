@@ -156,12 +156,12 @@ func isTripleSlashDirective(node *sitter.Node, sourceCode []byte) bool {
 
 	comment := node.Content(sourceCode)
 
-	return strings.HasPrefix(comment, "/// <reference ")
+	return strings.HasPrefix(comment, "///")
 }
 
 // Extract a /// <reference> from a comment node
 // Note: could also potentially use a treesitter query such as:
-// /  `(program (comment) @result (#match? @c "^///\\s*<reference\\s+(lib|type)\\s*=\\s*\"[^\"]+\""))`
+// /  `(program (comment) @result (#match? @c "^///\\s*<reference\\s+(lib|types|path)\\s*=\\s*\"[^\"]+\""))`
 func getTripleSlashDirectiveModule(node *sitter.Node, sourceCode []byte) string {
 	comment := node.Content(sourceCode)
 	submatches := tripleSlashRe.FindAllStringSubmatchIndex(comment, -1)
