@@ -1,8 +1,27 @@
 #gazelle:js disabled
 
+load("@aspect_rules_js//js:defs.bzl", "js_library")
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
 ts_project(
     name = "lib",
     srcs = glob(["**/*.ts"]),
+)
+
+js_library(
+    name = "unknown-data-types",
+    srcs = glob(["**/*.yaml"]),
+)
+
+js_library(
+    name = "empty-glob",
+    srcs = glob(
+        ["**/*.does-not-exist"],
+        allow_empty = True,
+    ),
+)
+
+js_library(
+    name = "data",
+    srcs = glob(["data/*.json"]),
 )
