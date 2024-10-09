@@ -42,7 +42,9 @@ func evalCallbackString(stack starlark.CallStack) string {
 		fmt.Fprintf(out, "Traceback (most recent call last):\n")
 	}
 	for _, fr := range stack {
-		fmt.Fprintf(out, "  %s: in %s\n", strings.TrimLeft(fr.Pos.String(), strip), fr.Name)
+		p := strings.TrimPrefix(fr.Pos.String(), strip)
+		p = strings.Trim(p, " \n\r\t/\\")
+		fmt.Fprintf(out, "  %s: in %s\n", p, fr.Name)
 	}
 	return out.String()
 }
