@@ -1,8 +1,6 @@
 package gazelle
 
 import (
-	"path/filepath"
-
 	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/language"
 )
@@ -24,10 +22,7 @@ func GazelleWalkDir(args language.GenerateArgs, walkFunc GazelleWalkFunc) error 
 			continue
 		}
 
-		BazelLog.Tracef("GazelleWalkDir RegularFile: %s", f)
-
-		walkErr := walkFunc(f)
-		if walkErr != nil && walkErr != filepath.SkipDir {
+		if walkErr := walkFunc(f); walkErr != nil {
 			return walkErr
 		}
 	}
