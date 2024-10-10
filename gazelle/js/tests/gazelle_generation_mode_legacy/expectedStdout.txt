@@ -1,5 +1,0 @@
-DEPRECATED: js_generation_mode is deprecated, use generation_mode update|create
-DEPRECATED: js_generation_mode is deprecated, use generation_mode update|create
-DEPRECATED: js_generation_mode is deprecated, use generation_mode update|create
-DEPRECATED: js_generation_mode is deprecated, use generation_mode update|create
-DEPRECATED: js_generation_mode is deprecated, use generation_mode update|create

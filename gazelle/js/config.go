@@ -7,7 +7,6 @@ import (
 	"path"
 	"strings"
 
-	common "aspect.build/cli/gazelle/common"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/emirpasic/gods/maps/linkedhashmap"
@@ -158,7 +157,6 @@ type JsGazelleConfig struct {
 	parent *JsGazelleConfig
 
 	generationEnabled bool
-	generationMode    common.GenerationModeType
 
 	packageTargetKind PackageTargetKind
 
@@ -191,7 +189,6 @@ func newRootConfig() *JsGazelleConfig {
 		protoGenerationEnabled:     true,
 		tsconfigGenerationEnabled:  false,
 		packageGenerationEnabled:   NpmPackageReferencedMode,
-		generationMode:             common.GenerationModeCreate,
 		packageTargetKind:          PackageTargetKind_Package,
 		pnpmLockPath:               "pnpm-lock.yaml",
 		ignoreDependencies:         make([]string, 0),
@@ -382,18 +379,6 @@ func (c *JsGazelleConfig) SetValidateImportStatements(mode ValidationMode) {
 // it defaults to true.
 func (c *JsGazelleConfig) ValidateImportStatements() ValidationMode {
 	return c.validateImportStatements
-}
-
-// SetGenerationMode sets whether coarse-grained targets should be
-// generated or not.
-func (c *JsGazelleConfig) SetGenerationMode(generationMode common.GenerationModeType) {
-	c.generationMode = generationMode
-}
-
-// GenerationMode returns whether coarse-grained targets should be
-// generated or not.
-func (c *JsGazelleConfig) GenerationMode() common.GenerationModeType {
-	return c.generationMode
 }
 
 // SetLibraryNamingConvention sets the ts_project target naming convention.

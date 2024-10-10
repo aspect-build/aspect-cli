@@ -7,10 +7,14 @@ import (
 	"path"
 	"strings"
 
+	common "aspect.build/cli/gazelle/common"
 	BazelLog "aspect.build/cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
+	"github.com/bazelbuild/bazel-gazelle/rule"
 	gitignore "github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
+
+// TODO: remove and align with gazelle after https://github.com/aspect-build/aspect-cli/issues/755
 
 // Must align with patched bazel-gazelle
 const ASPECT_GITIGNORE = "__aspect:gitignore"
@@ -25,7 +29,7 @@ const enabledExt = Directive_GitIgnore
 const lastConfiguredExt = "gitignore:dir"
 const ignorePatternsExt = "gitignore:patterns"
 
-func CollectIgnoreFiles(c *config.Config, rel string) {
+func collectIgnoreFiles(c *config.Config, rel string) {
 	// Only parse once per directory.
 	if lastCollected, hasCollected := c.Exts[lastConfiguredExt]; hasCollected && lastCollected == rel {
 		return
@@ -44,12 +48,33 @@ func CollectIgnoreFiles(c *config.Config, rel string) {
 	}
 }
 
-func EnableGitignore(c *config.Config, enabled bool) {
-	c.Exts[enabledExt] = enabled
-	if enabled {
-		c.Exts[ASPECT_GITIGNORE] = createMatcherFunc(c)
-	} else {
-		c.Exts[ASPECT_GITIGNORE] = nil
+func ReadGitConfig(c *config.Config, rel string, f *rule.File) {
+	// Enable .gitignore support by default in Aspect gazelle languages.
+	// TODO: default to false and encourage use of .bazelignore instead
+	if rel == "" {
+		_, exists := c.Exts[enabledExt]
+		if !exists {
+			c.Exts[enabledExt] = true
+		}
+	}
+
+	// Collect ignore files within this config directory.
+	collectIgnoreFiles(c, rel)
+
+	// Collect config from directives within this BUILD.
+	if f != nil {
+		for _, d := range f.Directives {
+			switch d.Key {
+			case Directive_GitIgnore:
+				enabled := common.ReadEnabled(d)
+				c.Exts[enabledExt] = enabled
+				if enabled {
+					c.Exts[ASPECT_GITIGNORE] = createMatcherFunc(c)
+				} else {
+					c.Exts[ASPECT_GITIGNORE] = nil
+				}
+			}
+		}
 	}
 }
 
