@@ -55,13 +55,6 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 		return language.GenerateResult{}
 	}
 
-	// If this directory has not been declared as a bazel package only continue
-	// if generating new BUILD files is enabled.
-	if cfg.GenerationMode() == gazelle.GenerationModeUpdate && args.File == nil {
-		BazelLog.Tracef("GenerateRules(%s) BUILD creation disabled: %s", LanguageName, args.Rel)
-		return language.GenerateResult{}
-	}
-
 	BazelLog.Tracef("GenerateRules(%s): %s", LanguageName, args.Rel)
 
 	var result language.GenerateResult

@@ -48,7 +48,7 @@ func (kt *kotlinLang) Configure(c *config.Config, rel string, f *rule.File) {
 	}
 
 	// Collect the ignore files for this package
-	git.CollectIgnoreFiles(c, rel)
+	git.ReadGitConfig(c, rel, f)
 
 	if f != nil {
 		for _, d := range f.Directives {
@@ -62,10 +62,6 @@ func (kt *kotlinLang) Configure(c *config.Config, rel string, f *rule.File) {
 
 			case jvm_javaconfig.JavaMavenInstallFile:
 				cfg.SetMavenInstallFile(d.Value)
-
-			// TODO: move to common
-			case git.Directive_GitIgnore:
-				git.EnableGitignore(c, common.ReadEnabled(d))
 			}
 		}
 	}

@@ -1,4 +1,0 @@
-# Directory enabling 'directory' mode and containing a .ts
-# Same files/layout as sibling directories.
-
-# gazelle:js_generation_mode directory

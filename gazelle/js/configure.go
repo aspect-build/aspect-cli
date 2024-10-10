@@ -25,9 +25,6 @@ var _ config.Configurer = (*typeScriptLang)(nil)
 // starts. RegisterFlags may set an initial values in Config.Exts. When flags
 // are set, they should modify these values.
 func (ts *typeScriptLang) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
-	// Enable .gitignore support by default
-	// TODO: change to false and encourage .bazelignore
-	git.EnableGitignore(c, true)
 }
 
 // CheckFlags validates the configuration after command line flags are parsed.
@@ -59,15 +56,13 @@ func (ts *typeScriptLang) KnownDirectives() []string {
 		Directive_LibraryFiles,
 		Directive_TestFiles,
 
-		// Common directives supported by this language
-		common.Directive_GenerationMode,
-
 		// TODO(deprecated): remove
 		Directive_CustomTargetFiles,
 		Directive_CustomTargetTestFiles,
 
 		// TODO: move to common
 		git.Directive_GitIgnore,
+		common.Directive_GenerationMode,
 	}
 }
 
@@ -99,11 +94,9 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 		ts.readConfigurations(c, rel)
 	}
 
-	// TODO: move to common global config.Configurer
-	// Enable the WALKSUBDIR gazelle patch, setting the flag depending on js the GenerationMode.
-	c.Exts[common.ASPECT_WALKSUBDIR] = c.Exts[LanguageName].(*JsGazelleConfig).generationMode == common.GenerationModeUpdate
+	common.ReadWalkConfig(c, rel, f)
 
-	git.CollectIgnoreFiles(c, rel)
+	git.ReadGitConfig(c, rel, f)
 }
 
 func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
@@ -230,57 +223,17 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 			}
 
 			config.addTargetGlob(group, groupGlob, true)
+
+		// TODO: remove, deprecated
 		case Directive_CustomTargetFiles:
-			groupGlob := strings.Split(value, " ")
-			if len(groupGlob) != 2 {
-				err := fmt.Errorf("invalid value for directive %q: %s: value must be group + glob",
-					Directive_CustomTargetFiles, d.Value)
-				log.Fatal(err)
-			}
-
-			fmt.Printf("DEPRECATED: %s is deprecated, use %s %s instead\n", Directive_CustomTargetFiles, Directive_LibraryFiles, groupGlob[0])
-
-			config.addTargetGlob(groupGlob[0], groupGlob[1], false)
+			fmt.Fprintf(os.Stderr, "DEPRECATED: %s is deprecated, use %s\n", Directive_CustomTargetFiles, Directive_LibraryFiles)
+			os.Exit(1)
 		case Directive_CustomTargetTestFiles:
-			groupGlob := strings.Split(value, " ")
-			if len(groupGlob) != 2 {
-				err := fmt.Errorf("invalid value for directive %q: %s: value must be group + glob",
-					Directive_CustomTargetTestFiles, d.Value)
-				log.Fatal(err)
-			}
-
-			fmt.Printf("DEPRECATED: %s is deprecated, use %s %s instead\n", Directive_CustomTargetTestFiles, Directive_TestFiles, groupGlob[0])
-
-			config.addTargetGlob(groupGlob[0], groupGlob[1], true)
-
+			fmt.Fprintf(os.Stderr, "DEPRECATED: %s is deprecated, use %s\n", Directive_CustomTargetTestFiles, Directive_TestFiles)
+			os.Exit(1)
 		case Directive_GenerationMode:
-			mode := strings.TrimSpace(d.Value)
-			switch mode {
-			case "directory":
-				config.SetGenerationMode(common.GenerationModeCreate)
-			case "none":
-				config.SetGenerationMode(common.GenerationModeUpdate)
-			default:
-				log.Fatalf("invalid value for directive %q: %s", Directive_GenerationMode, d.Value)
-			}
-
-			fmt.Printf("DEPRECATED: %s is deprecated, use %s %s|%s\n", Directive_GenerationMode, common.Directive_GenerationMode, common.GenerationModeUpdate, common.GenerationModeCreate)
-
-		// Inherited aspect-cli common+pro values
-		// TODO: move to common location
-		case common.Directive_GenerationMode:
-			mode := common.GenerationModeType(strings.TrimSpace(d.Value))
-			switch mode {
-			case common.GenerationModeCreate:
-				config.SetGenerationMode(common.GenerationModeCreate)
-			case common.GenerationModeUpdate:
-				config.SetGenerationMode(common.GenerationModeUpdate)
-			default:
-				log.Fatalf("invalid value for directive %q: %s", common.Directive_GenerationMode, d.Value)
-			}
-		// TODO: move to common
-		case git.Directive_GitIgnore:
-			git.EnableGitignore(c, common.ReadEnabled(d))
+			fmt.Fprintf(os.Stderr, "DEPRECATED: %s is deprecated, use %s %s|%s\n", Directive_GenerationMode, common.Directive_GenerationMode, common.GenerationModeUpdate, common.GenerationModeCreate)
+			os.Exit(1)
 		}
 	}
 }
