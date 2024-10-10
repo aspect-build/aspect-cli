@@ -1,0 +1,10 @@
+// This tsconfig also maps paths but is only for IDEs!
+{
+    "compilerOptions": {
+        "paths": {
+            // The BUILD dependencies should prioritize the `workspace:*` packages
+            // instead of mapping to the `ts_project` targets that this tsconfig maps to.
+            "@lib/*": ["lib/*"]
+        }
+    }
+}
