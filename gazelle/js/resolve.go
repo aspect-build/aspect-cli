@@ -366,41 +366,9 @@ func (ts *typeScriptLang) resolveImport(
 		return Resolution_Override, res, nil
 	}
 
-	possible := make([]resolve.ImportSpec, 0, 1)
-	possible = append(possible, impStm.ImportSpec)
-	for _, expandedImp := range impStm.Alt {
-		possible = append(possible, resolve.ImportSpec{Lang: impStm.Lang, Imp: expandedImp})
-	}
-
-	// Gazelle rule index. Try each potential expanded path
-	for _, eImp := range possible {
-		if matches := ix.FindRulesByImportWithConfig(c, eImp, LanguageName); len(matches) > 0 {
-			filteredMatches := make([]label.Label, 0, len(matches))
-			for _, match := range matches {
-				// Prevent from adding itself as a dependency.
-				if !match.IsSelfImport(from) {
-					filteredMatches = append(filteredMatches, match.Label)
-				}
-			}
-
-			// Too many results, don't know which is correct
-			if len(filteredMatches) > 1 {
-				return Resolution_Error, nil, fmt.Errorf(
-					"Import %q from %q resolved to multiple targets (%s) - this must be fixed using the \"gazelle:resolve\" directive",
-					impStm.ImportPath, impStm.SourcePath, targetListFromResults(matches))
-			}
-
-			// The matches were self imports, no dependency is needed
-			if len(filteredMatches) == 0 {
-				return Resolution_None, nil, nil
-			}
-
-			match := filteredMatches[0]
-
-			BazelLog.Tracef("resolve %q import %q as %q", from, impStm.Imp, match)
-
-			return Resolution_Override, &match, nil
-		}
+	// Gazelle rule index
+	if resolution, match, err := ts.resolveImportFromIndex(c, ix, from, impStm); resolution != Resolution_NotFound {
+		return resolution, match, err
 	}
 
 	// References to a label such as a file or file-generating rule
@@ -413,12 +381,68 @@ func (ts *typeScriptLang) resolveImport(
 		return Resolution_Package, pkg, nil
 	}
 
+	// References via tsconfig mappings (paths, baseUrl, rootDirs etc.)
+	if tsconfigPaths := ts.tsconfig.ExpandPaths(impStm.SourcePath, impStm.ImportPath); len(tsconfigPaths) > 0 {
+		for _, p := range tsconfigPaths {
+			pImp := ImportStatement{
+				ImportSpec: resolve.ImportSpec{
+					Lang: impStm.ImportSpec.Lang,
+					Imp:  toImportSpecPath(impStm.SourcePath, p),
+				},
+				SourcePath: impStm.SourcePath,
+				ImportPath: impStm.ImportPath,
+				Optional:   impStm.Optional,
+			}
+			if resolution, match, err := ts.resolveImportFromIndex(c, ix, from, pImp); resolution != Resolution_NotFound {
+				return resolution, match, err
+			}
+		}
+	}
+
 	// Native node imports
 	if node.IsNodeImport(imp.Imp) {
 		return Resolution_NativeNode, nil, nil
 	}
 
 	return Resolution_NotFound, nil, nil
+}
+
+func (ts *typeScriptLang) resolveImportFromIndex(
+	c *config.Config,
+	ix *resolve.RuleIndex,
+	from label.Label,
+	impStm ImportStatement) (ResolutionType, *label.Label, error) {
+
+	matches := ix.FindRulesByImportWithConfig(c, impStm.ImportSpec, LanguageName)
+	if len(matches) == 0 {
+		return Resolution_NotFound, nil, nil
+	}
+
+	filteredMatches := make([]label.Label, 0, len(matches))
+	for _, match := range matches {
+		// Prevent from adding itself as a dependency.
+		if !match.IsSelfImport(from) {
+			filteredMatches = append(filteredMatches, match.Label)
+		}
+	}
+
+	// Too many results, don't know which is correct
+	if len(filteredMatches) > 1 {
+		return Resolution_Error, nil, fmt.Errorf(
+			"Import %q from %q resolved to multiple targets (%s) - this must be fixed using the \"gazelle:resolve\" directive",
+			impStm.ImportPath, impStm.SourcePath, targetListFromResults(matches))
+	}
+
+	// The matches were self imports, no dependency is needed
+	if len(filteredMatches) == 0 {
+		return Resolution_None, nil, nil
+	}
+
+	match := filteredMatches[0]
+
+	BazelLog.Tracef("resolve %q import %q as %q", from, impStm.Imp, match)
+
+	return Resolution_Override, &match, nil
 }
 
 func (ts *typeScriptLang) resolvePackageImport(from label.Label, imp string) *label.Label {

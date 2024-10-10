@@ -589,7 +589,6 @@ func (ts *typeScriptLang) collectProtoImports(cfg *JsGazelleConfig, args languag
 						Lang: LanguageName,
 						Imp:  dts,
 					},
-					Alt:        []string{},
 					ImportPath: imp,
 					SourcePath: sourceFile,
 				})
@@ -653,30 +652,25 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, rootDir, sourcePa
 	}
 
 	for _, importPath := range parseResults.Imports {
+		if cfg.IsImportIgnored(importPath) {
+			BazelLog.Tracef("Import ignored: %q", importPath)
+			continue
+		}
+
 		// The path from the root
 		workspacePath := toImportSpecPath(sourcePath, importPath)
 
-		if !cfg.IsImportIgnored(importPath) {
-			alternates := make([]string, 0)
-			for _, alt := range ts.tsconfig.ExpandPaths(sourcePath, importPath) {
-				alternates = append(alternates, toImportSpecPath(sourcePath, alt))
-			}
+		// Record all imports. Maybe local, maybe data, maybe in other BUILD etc.
+		result.Imports = append(result.Imports, ImportStatement{
+			ImportSpec: resolve.ImportSpec{
+				Lang: LanguageName,
+				Imp:  workspacePath,
+			},
+			ImportPath: importPath,
+			SourcePath: sourcePath,
+		})
 
-			// Record all imports. Maybe local, maybe data, maybe in other BUILD etc.
-			result.Imports = append(result.Imports, ImportStatement{
-				ImportSpec: resolve.ImportSpec{
-					Lang: LanguageName,
-					Imp:  workspacePath,
-				},
-				Alt:        alternates,
-				ImportPath: importPath,
-				SourcePath: sourcePath,
-			})
-
-			BazelLog.Tracef("Import: %q -> %q (alt: %v)", workspacePath, importPath, alternates)
-		} else {
-			BazelLog.Tracef("Import ignored: %q -> %q", workspacePath, importPath)
-		}
+		BazelLog.Tracef("Import: %q -> %q (via %q)", sourcePath, workspacePath, importPath)
 	}
 
 	return result
