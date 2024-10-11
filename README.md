@@ -33,7 +33,7 @@ We intend for Aspect CLI to remain free for individuals (only for personal use),
 
 ## Aspect CLI OSS
 
-### Bazelisk (MacOS / Linux)
+### Bazelisk (MacOS / Linux / Windows)
 
 Aspect CLI OSS can be installed in an existing Bazel workspace using [Bazelisk].
 
@@ -45,7 +45,7 @@ copy the `.bazeliskrc` snippet into your `.bazeliskrc` file to install Aspect CL
 
 The underlying version of Bazel can be configured in your `.bazelversion` file or the `BAZEL_VERSION` environment variable.
 
-### Manual (MacOS / Linux)
+### Manual (MacOS / Linux / Windows)
 
 On MacOS and Linux, you can download the Aspect CLI OSS `aspect` binary for your platform on our
 [Releases](https://github.com/aspect-build/aspect-cli/releases) page and add it to your `PATH` manually.
@@ -74,15 +74,8 @@ copy the `.bazeliskrc` snippet into your `.bazeliskrc` file to install Aspect CL
 
 The underlying version of Bazel can be configured in your `.bazelversion` file or the `BAZEL_VERSION` environment variable.
 
-## Windows
-
-Windows releases are no longer published as of [v5.5.0](https://github.com/aspect-build/aspect-cli/releases/tag/5.5.0).
-This is due to a new dependency on [go-tree-sitter](https://github.com/tree-sitter/tree-sitter-go)
-which has a CGO dependency that makes cross compiling to Windows difficult.
-
-To produce Windows releases will require some engineering work to resolve the CGO cross compilation issues.
-Please let us know if you require a Windows Aspect CLI binary.
-In the meantime, we recommend using WSL2 on Windows.
+> [!IMPORTANT]
+> Windows releases for Aspect CLI standard will be available soon. In the meantime, please use Aspect CLI OSS releases on Windows.
 
 # Usage
 
