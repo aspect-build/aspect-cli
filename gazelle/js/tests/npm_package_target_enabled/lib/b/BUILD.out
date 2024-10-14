@@ -18,5 +18,6 @@ ts_project(
 js_library(
     name = "b_pkg",
     srcs = [],
+    visibility = ["//visibility:public"],
     deps = [":b"],
 )

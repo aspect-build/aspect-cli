@@ -6,5 +6,6 @@ npm_link_all_packages(name = "node_modules")
 js_library(
     name = "pkg",
     srcs = ["package.json"],
+    visibility = ["//visibility:public"],
     deps = ["//exports-ts/src:tsc"],
 )

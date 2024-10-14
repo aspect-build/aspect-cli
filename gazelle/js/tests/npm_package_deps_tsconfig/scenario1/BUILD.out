@@ -25,6 +25,7 @@ npm_package(
         "package.json",
         ":tsc",
     ],
+    visibility = ["//visibility:public"],
 )
 
 ts_config(
