@@ -18,4 +18,5 @@ npm_package(
         "package.json",
         ":lib_lib",
     ],
+    visibility = ["//visibility:public"],
 )

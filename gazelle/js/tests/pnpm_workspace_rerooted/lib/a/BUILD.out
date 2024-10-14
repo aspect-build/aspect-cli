@@ -19,4 +19,5 @@ ts_project(
 npm_package(
     name = "a",
     srcs = [":a_lib"],
+    visibility = ["//visibility:public"],
 )

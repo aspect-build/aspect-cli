@@ -16,4 +16,5 @@ npm_package(
         "package.json",
         ":start.js",
     ],
+    visibility = ["//visibility:public"],
 )

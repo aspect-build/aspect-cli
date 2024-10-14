@@ -6,4 +6,5 @@ npm_link_all_packages(name = "node_modules")
 npm_package(
     name = "pnpm_project_refs",
     srcs = ["package.json"],
+    visibility = ["//visibility:public"],
 )

@@ -18,6 +18,7 @@ npm_package(
         "package.json",
         ":m",
     ],
+    visibility = ["//visibility:public"],
 )
 
 ts_config(

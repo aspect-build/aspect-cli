@@ -9,4 +9,5 @@ npm_package(
         "package.json",
         "//exports-single/bin:tsc",
     ],
+    visibility = ["//visibility:public"],
 )
