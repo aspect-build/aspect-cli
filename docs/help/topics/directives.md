@@ -83,7 +83,7 @@ enable other projects to declare dependencies on the package.
 | Equivalent to `js_files` but for the test `ts_project` rule. |
 | `# gazelle:js_npm_package_target_name _name_`           | `{dirname}`                 |
 | The format used to generate the name of the `npm_package` rule. |
-| `# gazelle:generation_mode update\|create`              | `create`                    |
+| `# gazelle:js_generation_mode update\|create`           | `create`                    |
 | DEPRECATED: see `generation_mode` directive. |
 | `# gazelle:js_custom_files _name_ _glob_`               |                             |
 | DEPRECATED:Generate additional custom `ts_project` targets |
