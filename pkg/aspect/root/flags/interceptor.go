@@ -36,6 +36,9 @@ func isFlagInFlagSet(flags *pflag.FlagSet, arg string) bool {
 	var flag *pflag.Flag
 	if arg[0] == '-' {
 		if arg[1] == '-' {
+			if len(arg) <= 2 {
+				return false
+			}
 			flag = flags.Lookup(strings.SplitN(arg[2:], "=", 2)[0])
 		} else {
 			for _, s := range arg[1:] {
