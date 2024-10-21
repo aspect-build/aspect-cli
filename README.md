@@ -60,7 +60,7 @@ Note, if you manually install for MacOS, you can bypass the "Unknown Developer" 
 To install the Aspect CLI on MacOS, you can run
 
 ```sh
-% brew install aspect-build/aspect/aspect
+brew install aspect-build/aspect/aspect
 ```
 
 This installs the `aspect` command and also links it to `bazel`, just like the [Bazelisk] installer does.
