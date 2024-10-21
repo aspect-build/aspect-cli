@@ -5,9 +5,3 @@ specifiers:
 
 dependencies:
   '@types/node': 18.11.11
-
-packages:
-
-  /@types/node/18.11.11:
-    resolution: {integrity: sha512-KJ021B1nlQUBLopzZmPBVuGU9un7WJd/W4ya7Ih02B4Uwky5Nja0yGYav2EfYIk0RR2Q9oVhf60S2XR1BCWJ2g==}
-    dev: false

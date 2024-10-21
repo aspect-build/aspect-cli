@@ -13,22 +13,3 @@ dependencies:
 devDependencies:
   '@types/jquery': 3.5.14
   '@types/testing-library__jest-dom': 5.14.5
-
-packages:
-  /@types/jquery/3.5.14:
-    resolution: {integrity: sha512-X1gtMRMbziVQkErhTQmSe2jFwwENA/Zr+PprCkF63vFq+Yt5PZ4AlKqgmeNlwgn7dhsXEK888eIW2520EpC+xg==}
-    dependencies:
-      '@types/sizzle': 2.3.3
-    dev: true
-
-  /@types/testing-library__jest-dom/5.14.5:
-    resolution: {integrity: sha512-fake-jest-dom-resolution}
-    dev: true
-
-  /jquery/3.6.1:
-    resolution: {integrity: sha512-opJeO4nCucVnsjiXOE+/PcCgYw9Gwpvs/a6B1LL/lQhwWwpbVEVYDZ1FokFr8PRc7ghYlrFPuyHuiiDNTQxmcw==}
-    dev: false
-
-  /lodash/1.2.3:
-    resolution: {integrity: sha512-fake-lodash-resolution}
-    dev: false
