@@ -315,6 +315,11 @@ func (c *JsGazelleConfig) PnpmLockfile() string {
 // a given package. Adding an ignored dependency to a package also makes it
 // ignored on a subpackage.
 func (c *JsGazelleConfig) AddIgnoredImport(impGlob string) {
+	if !doublestar.ValidatePattern(impGlob) {
+		fmt.Println("Invalid js ignore import glob: ", impGlob)
+		return
+	}
+
 	c.ignoreDependencies = append(c.ignoreDependencies, impGlob)
 }
 
@@ -324,14 +329,7 @@ func (c *JsGazelleConfig) IsImportIgnored(impt string) bool {
 	config := c
 	for config != nil {
 		for _, glob := range config.ignoreDependencies {
-			m, e := doublestar.Match(glob, impt)
-
-			if e != nil {
-				fmt.Println("Ignore import glob error: ", e)
-				return false
-			}
-
-			if m {
+			if doublestar.MatchUnvalidated(glob, impt) {
 				return true
 			}
 		}
@@ -343,6 +341,11 @@ func (c *JsGazelleConfig) IsImportIgnored(impt string) bool {
 }
 
 func (c *JsGazelleConfig) AddResolve(imprt string, label *label.Label) {
+	if !doublestar.ValidatePattern(imprt) {
+		fmt.Println("Invalid js resolve glob: ", imprt)
+		return
+	}
+
 	c.resolves.Put(imprt, label)
 }
 
@@ -350,13 +353,7 @@ func (c *JsGazelleConfig) GetResolution(imprt string) *label.Label {
 	config := c
 	for config != nil {
 		for _, glob := range config.resolves.Keys() {
-			m, e := doublestar.Match(glob.(string), imprt)
-			if e != nil {
-				fmt.Println("Resolve import glob error: ", e)
-				return nil
-			}
-
-			if m {
+			if doublestar.MatchUnvalidated(glob.(string), imprt) {
 				resolveLabel, _ := config.resolves.Get(glob)
 				return resolveLabel.(*label.Label)
 			}
@@ -451,13 +448,8 @@ func (c *JsGazelleConfig) GetFileSourceTarget(filePath, rootDir string) *TargetG
 
 		for _, globTmpl := range sources {
 			glob := path.Clean(strings.Replace(globTmpl, rootDirVar, rootDir, 1))
-			m, e := doublestar.Match(glob, filePath)
-			if e != nil {
-				log.Fatalf("Target (%s) glob error: %v", target.name, e)
-				os.Exit(1)
-			}
 
-			if m {
+			if doublestar.MatchUnvalidated(glob, filePath) {
 				return target
 			}
 		}
@@ -497,6 +489,13 @@ func (c *JsGazelleConfig) addTargetGlob(targetName, glob string, isTestOnly bool
 				log.Fatalf("Custom %s target %s:%s can not override %s target", targetWord, c.rel, targetName, overrideWord)
 				os.Exit(1)
 			}
+
+			if !doublestar.ValidatePattern(glob) {
+				log.Fatalf("Invalid target (%s) glob: %v", target.name, glob)
+				os.Exit(1)
+				return
+			}
+
 			target.customSources = append(target.customSources, glob)
 			return
 		}
