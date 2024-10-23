@@ -2,8 +2,11 @@
   "private": true,
   "type": "module",
   "devDependencies": {
-    "@bufbuild/protobuf": "1.8.0",
-    "@bufbuild/protoc-gen-es": "1.8.0",
+    "@bufbuild/protobuf": "^1.8.0",
+    "@bufbuild/protoc-gen-es": "^1.10.0",
     "prettier": "^2.8.7"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": []
   }
 }

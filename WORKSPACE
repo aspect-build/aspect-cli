@@ -24,50 +24,53 @@ register_toolchains(
 
 http_archive(
     name = "bazel_features",
-    sha256 = "2cd9e57d4c38675d321731d65c15258f3a66438ad531ae09cb8bb14217dc8572",
-    strip_prefix = "bazel_features-1.11.0",
-    url = "https://github.com/bazel-contrib/bazel_features/releases/download/v1.11.0/bazel_features-v1.11.0.tar.gz",
+    sha256 = "3646ffd447753490b77d2380fa63f4d55dd9722e565d84dfda01536b48e183da",
+    strip_prefix = "bazel_features-1.19.0",
+    url = "https://github.com/bazel-contrib/bazel_features/releases/download/v1.19.0/bazel_features-v1.19.0.tar.gz",
 )
 
 http_archive(
     name = "aspect_bazel_lib",
-    sha256 = "6d758a8f646ecee7a3e294fbe4386daafbe0e5966723009c290d493f227c390b",
-    strip_prefix = "bazel-lib-2.7.7",
-    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.7.7/bazel-lib-v2.7.7.tar.gz",
+    sha256 = "a272d79bb0ac6b6965aa199b1f84333413452e87f043b53eca7f347a23a478e8",
+    strip_prefix = "bazel-lib-2.9.3",
+    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.9.3/bazel-lib-v2.9.3.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_swc",
-    sha256 = "0c2e8912725a1d97a37bb751777c9846783758f5a0a8e996f1b9d21cad42e839",
-    strip_prefix = "rules_swc-2.0.0-rc1",
-    url = "https://github.com/aspect-build/rules_swc/releases/download/v2.0.0-rc1/rules_swc-v2.0.0-rc1.tar.gz",
+    sha256 = "e5ac926ebe1bbef1f38d245a65626d86f114eb1f3c68362e8a33472351d83608",
+    strip_prefix = "rules_swc-2.0.1",
+    url = "https://github.com/aspect-build/rules_swc/releases/download/v2.0.1/rules_swc-v2.0.1.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_js",
-    sha256 = "dfd2c5494b43704ab33574ae701b31b68ca27333e5da1a76b5e39374cdd8dda4",
-    strip_prefix = "rules_js-2.0.0-rc7",
-    url = "https://github.com/aspect-build/rules_js/releases/download/v2.0.0-rc7/rules_js-v2.0.0-rc7.tar.gz",
+    sha256 = "75c25a0f15a9e4592bbda45b57aa089e4bf17f9176fd735351e8c6444df87b52",
+    strip_prefix = "rules_js-2.1.0",
+    url = "https://github.com/aspect-build/rules_js/releases/download/v2.1.0/rules_js-v2.1.0.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_ts",
-    sha256 = "1d745fd7a5ffdb5bb7c0b77b36b91409a5933c0cbe25af32b05d90e26b7d14a7",
-    strip_prefix = "rules_ts-3.0.0-rc2",
-    url = "https://github.com/aspect-build/rules_ts/releases/download/v3.0.0-rc2/rules_ts-v3.0.0-rc2.tar.gz",
+    sha256 = "8bbac753f4b61adbfc1d9878b87b9cd0f64c9e8e6d8fafc8a1bbfa9625bab162",
+    strip_prefix = "rules_ts-3.2.1",
+    url = "https://github.com/aspect-build/rules_ts/releases/download/v3.2.1/rules_ts-v3.2.1.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_lint",
-    sha256 = "bd5a82b350cf20a662c45d6baa0f301a6a1a81833122e1d68a91a120e33a14dd",
-    strip_prefix = "rules_lint-37d0160469035e4ea0f1824135cb198cbdcc59e0",
-    url = "https://github.com/aspect-build/rules_lint/archive/37d0160469035e4ea0f1824135cb198cbdcc59e0.zip",
+    sha256 = "7d5feef9ad85f0ba78cc5757a9478f8fa99c58a8cabc1660d610b291dc242e9b",
+    strip_prefix = "rules_lint-1.0.2",
+    url = "https://github.com/aspect-build/rules_lint/releases/download/v1.0.2/rules_lint-v1.0.2.tar.gz",
 )
 
 http_archive(
     name = "bazel_skylib",
-    sha256 = "cd55a062e763b9349921f0f5db8c3933288dc8ba4f76dd9416aac68acee3cb94",
-    urls = ["https://github.com/bazelbuild/bazel-skylib/releases/download/1.5.0/bazel-skylib-1.5.0.tar.gz"],
+    sha256 = "bc283cdfcd526a52c3201279cda4bc298652efa898b10b4db0837dc51652756f",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/bazel-skylib/releases/download/1.7.1/bazel-skylib-1.7.1.tar.gz",
+        "https://github.com/bazelbuild/bazel-skylib/releases/download/1.7.1/bazel-skylib-1.7.1.tar.gz",
+    ],
 )
 
 http_archive(
@@ -155,12 +158,13 @@ http_archive(
     urls = ["https://s3.us-east-2.amazonaws.com/static.aspect.build/sysroots/MacOSX11.3.sdk.tar.xz"],
 )
 
+# Ensure this version always matches the go.mod version.
 http_archive(
     name = "io_bazel_rules_go",
-    sha256 = "67b4d1f517ba73e0a92eb2f57d821f2ddc21f5bc2bd7a231573f11bd8758192e",
+    sha256 = "f4a9314518ca6acfa16cc4ab43b0b8ce1e4ea64b81c38d8a3772883f153346b8",
     urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.50.0/rules_go-v0.50.0.zip",
-        "https://github.com/bazelbuild/rules_go/releases/download/v0.50.0/rules_go-v0.50.0.zip",
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.50.1/rules_go-v0.50.1.zip",
+        "https://github.com/bazelbuild/rules_go/releases/download/v0.50.1/rules_go-v0.50.1.zip",
     ],
 )
 
