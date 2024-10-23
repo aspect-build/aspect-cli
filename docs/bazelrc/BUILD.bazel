@@ -20,6 +20,7 @@ go_library(
         "debug.bazelrc",
         "javascript.bazelrc",
         "performance.bazelrc",
+        "java.bazelrc",
     ],
     importpath = "aspect.build/cli/docs/bazelrc",
     visibility = ["//visibility:public"],
