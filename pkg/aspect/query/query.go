@@ -30,8 +30,6 @@ import (
 )
 
 const (
-	useCQuery               = "query.cquery.use"
-	useCQueryInquired       = "query.cquery.inquired"
 	allowAllQueries         = "query.all.allow"
 	allowAllQueriesInquired = "query.all.inquired"
 )
@@ -88,21 +86,6 @@ func (runner *Query) Run(ctx context.Context, cmd *cobra.Command, args []string)
 		if err != nil {
 			return err
 		}
-
-		err = runner.checkConfig(
-			useCQuery,
-			useCQueryInquired,
-			"Use cquery instead of query",
-		)
-		if err != nil {
-			return err
-		}
-	}
-
-	command := "query"
-
-	if runner.Prefs.GetBool(useCQuery) {
-		command = "cquery"
 	}
 
 	if runner.Prefs.GetBool(allowAllQueries) {
@@ -114,7 +97,7 @@ func (runner *Query) Run(ctx context.Context, cmd *cobra.Command, args []string)
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	command, query, runReplacements, err := shared.SelectQuery(command, presets, runner.Presets, presetNames, runner.Streams, nonFlags, runner.Select)
+	command, query, runReplacements, err := shared.SelectQuery(cmd.CalledAs(), presets, runner.Presets, presetNames, runner.Streams, nonFlags, runner.Select)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
