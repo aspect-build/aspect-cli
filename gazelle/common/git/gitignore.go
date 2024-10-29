@@ -2,7 +2,9 @@ package git
 
 import (
 	"bufio"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"strings"
@@ -36,6 +38,11 @@ func collectIgnoreFiles(c *config.Config, rel string) {
 	}
 	c.Exts[lastConfiguredExt] = rel
 
+	ents := c.Exts[common.ASPECT_DIR_ENTRIES].(map[string]fs.DirEntry)
+	if _, hasIgnore := ents[".gitignore"]; !hasIgnore {
+		return
+	}
+
 	// Find and add .gitignore files from this directory
 	ignoreFilePath := path.Join(c.RepoRoot, rel, ".gitignore")
 	ignoreReader, ignoreErr := os.Open(ignoreFilePath)
@@ -43,8 +50,10 @@ func collectIgnoreFiles(c *config.Config, rel string) {
 		BazelLog.Tracef("Add ignore file %s/.gitignore", rel)
 		defer ignoreReader.Close()
 		addIgnore(c, rel, ignoreReader)
-	} else if !os.IsNotExist(ignoreErr) {
-		BazelLog.Errorf("Failed to open %s/.gitignore: %v", rel, ignoreErr)
+	} else {
+		msg := fmt.Sprintf("Failed to open %s/.gitignore: %v", rel, ignoreErr)
+		BazelLog.Errorf(msg)
+		fmt.Printf("%s\n", msg)
 	}
 }
 

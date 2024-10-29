@@ -305,7 +305,7 @@ func (c *JsGazelleConfig) GetNpmPackageGenerationMode() NpmPackageMode {
 
 // Set the pnpm-workspace.yaml file path.
 func (c *JsGazelleConfig) SetPnpmLockfile(pnpmLockPath string) {
-	c.pnpmLockPath = pnpmLockPath
+	c.pnpmLockPath = path.Clean(pnpmLockPath)
 }
 func (c *JsGazelleConfig) PnpmLockfile() string {
 	return c.pnpmLockPath

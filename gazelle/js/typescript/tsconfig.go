@@ -149,9 +149,6 @@ func parseTsConfigJSONFile(parsed map[string]*TsConfig, resolver TsConfigResolve
 
 	content, err := os.ReadFile(path.Join(root, tsconfig))
 	if err != nil {
-		if os.IsNotExist(err) {
-			err = nil
-		}
 		return nil, err
 	}
 

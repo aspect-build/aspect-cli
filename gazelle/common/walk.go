@@ -14,6 +14,7 @@ type GazelleWalkFunc func(path string) error
 
 // Must align with patched bazel-gazelle
 const ASPECT_WALKSUBDIR = "__aspect:walksubdir"
+const ASPECT_DIR_ENTRIES = "__aspect:direntries"
 
 // Read any configuration regarding walk options.
 func ReadWalkConfig(c *config.Config, rel string, f *rule.File) bool {
