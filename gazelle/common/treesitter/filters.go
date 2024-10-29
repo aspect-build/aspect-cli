@@ -16,7 +16,7 @@ import (
 // Predicates implemented here:
 //   - eq?
 //   - match?
-func matchesAllPredicates(q *sitter.Query, m *sitter.QueryMatch, qc *sitter.QueryCursor, input []byte) bool {
+func matchesAllPredicates(q *sitterQuery, m *sitter.QueryMatch, qc *sitter.QueryCursor, input []byte) bool {
 	qm := &sitter.QueryMatch{
 		ID:           m.ID,
 		PatternIndex: m.PatternIndex,
