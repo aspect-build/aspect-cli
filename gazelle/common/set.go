@@ -14,7 +14,26 @@ type LabelSet struct {
 }
 
 func LabelComparator(a, b interface{}) int {
-	return utils.StringComparator(a.(label.Label).String(), b.(label.Label).String())
+	al := a.(label.Label)
+	bl := b.(label.Label)
+
+	if al.Relative && !bl.Relative {
+		return -1
+	} else if !al.Relative && bl.Relative {
+		return +1
+	}
+
+	c := utils.StringComparator(al.Repo, bl.Repo)
+	if c != 0 {
+		return c
+	}
+
+	c = utils.StringComparator(al.Pkg, bl.Pkg)
+	if c != 0 {
+		return c
+	}
+
+	return utils.StringComparator(al.Name, bl.Name)
 }
 
 func NewLabelSet(from label.Label) *LabelSet {
