@@ -9,18 +9,13 @@ import (
 var regexCache = make(map[string]*regexp.Regexp)
 var regexMutex sync.Mutex
 
-func ParseRegex(regexStr string) (*regexp.Regexp, error) {
+func ParseRegex(regexStr string) *regexp.Regexp {
 	regexMutex.Lock()
 	defer regexMutex.Unlock()
 
 	if regexCache[regexStr] == nil {
-		re, err := regexp.Compile(regexStr)
-		if err != nil {
-			return nil, err
-		}
-
-		regexCache[regexStr] = re
+		regexCache[regexStr] = regexp.MustCompile(regexStr)
 	}
 
-	return regexCache[regexStr], nil
+	return regexCache[regexStr]
 }
