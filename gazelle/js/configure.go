@@ -3,6 +3,7 @@ package gazelle
 import (
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path"
@@ -89,10 +90,9 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 
 	if f != nil {
 		ts.readDirectives(c, rel, f)
-
-		// Read configurations relative to the current BUILD file.
-		ts.readConfigurations(c, rel)
 	}
+
+	ts.readConfigurations(c, rel)
 
 	common.ReadWalkConfig(c, rel, f)
 
@@ -102,16 +102,29 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
 	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
+	ents := c.Exts[common.ASPECT_DIR_ENTRIES].(map[string]fs.DirEntry)
+
 	// pnpm
-	lockfilePath := path.Join(c.RepoRoot, rel, config.PnpmLockfile())
-	if _, err := os.Stat(lockfilePath); err == nil {
-		ts.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, config.PnpmLockfile()))
+	pnpmLockPath := config.PnpmLockfile()
+	pnpmLockDir := path.Dir(pnpmLockPath)
+	if pnpmLockDir == "." {
+		// Common case of the lockfile not being within a subdirectory.
+		// Can use the fs.DirEntry list of this directory to check if the lockfile exists.
+		if ents[pnpmLockPath] != nil {
+			ts.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, pnpmLockPath))
+		}
+	} else if rootDirEntry := strings.Split(pnpmLockDir, "/")[0]; ents[rootDirEntry] != nil {
+		// If the lockfile is in a subdirectory then check the fs.DirEntry of the subdirectory.
+		// If the subdirectory exists then perform the expensive os.Stat to check if the file exists.
+		lockfilePath := path.Join(c.RepoRoot, rel, pnpmLockPath)
+		if _, err := os.Stat(lockfilePath); err == nil {
+			ts.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, pnpmLockPath))
+		}
 	}
 
 	// tsconfig
 	// TODO: add support for alternate tsconfig names
-	configPath := path.Join(c.RepoRoot, rel, config.defaultTsconfigName)
-	if _, err := os.Stat(configPath); err == nil {
+	if _, hasTsconfig := ents[config.defaultTsconfigName]; hasTsconfig {
 		ts.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.defaultTsconfigName)
 	}
 }

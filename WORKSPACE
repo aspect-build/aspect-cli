@@ -220,6 +220,7 @@ http_archive(
         "//:patches/bazelbuild_bazel-gazelle_aspect-cli.patch",
         "//:patches/bazelbuild_bazel-gazelle_aspect-walk-subdir.patch",
         "//:patches/bazelbuild_bazel-gazelle_aspect-gitignore.patch",
+        "//:patches/bazelbuild_bazel-gazelle_aspect-fs-direntry.patch",
     ],
     sha256 = "872f1532567cdc53dc8e9f4681cd45021cd6787e2bde8a022bcec24a5867ce4c",
     # Ensure this version always matches the go.mod version.
