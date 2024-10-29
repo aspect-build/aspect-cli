@@ -11,10 +11,10 @@ index 23b1083..1841650 100644
  func New() *Config {
  	return &Config{
 diff --git a/walk/config.go b/walk/config.go
-index 1292146..07cdb3d 100644
+index c8dd6b3..be59f8c 100644
 --- a/walk/config.go
 +++ b/walk/config.go
-@@ -109,6 +109,7 @@ func (cr *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
+@@ -112,6 +112,7 @@ func (cr *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
  }
  
  type isIgnoredFunc = func(string) bool
