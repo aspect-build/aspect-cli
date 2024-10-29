@@ -84,7 +84,11 @@ func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
 // A `TsConfigResolver` to resolve imports from *within* tsconfig files
 // to real paths such as resolved the tsconfig `extends`.
 func (tc *TsWorkspace) tsConfigResolver(dir, rel string) []string {
-	possible := []string{path.Join(dir, rel)}
+	possible := []string{}
+
+	if isRelativePath(rel) {
+		possible = append(possible, path.Join(dir, rel))
+	}
 
 	if p := tc.cm.pnpmProjects.GetProject(dir); p != nil {
 		pkg, subFile := node.ParseImportPath(rel)
