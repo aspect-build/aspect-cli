@@ -6,6 +6,7 @@ go_library(
         "filters.go",
         "parser.go",
         "queries.go",
+        "query.go",
         "traversal.go",
     ],
     importpath = "aspect.build/cli/gazelle/common/treesitter",
