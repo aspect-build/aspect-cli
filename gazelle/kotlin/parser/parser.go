@@ -18,7 +18,7 @@ type ParseResult struct {
 }
 
 type Parser interface {
-	Parse(filePath, source string) (*ParseResult, []error)
+	Parse(filePath string, source []byte) (*ParseResult, []error)
 }
 
 type treeSitterParser struct {
@@ -31,15 +31,13 @@ func NewParser() Parser {
 	return &p
 }
 
-func (p *treeSitterParser) Parse(filePath, source string) (*ParseResult, []error) {
+func (p *treeSitterParser) Parse(filePath string, sourceCode []byte) (*ParseResult, []error) {
 	var result = &ParseResult{
 		File:    filePath,
 		Imports: make([]string, 0),
 	}
 
 	errs := make([]error, 0)
-
-	sourceCode := []byte(source)
 
 	tree, err := treeutils.ParseSourceCode(treeutils.Kotlin, filePath, sourceCode)
 	if err != nil {

@@ -87,7 +87,7 @@ func matchesAllPredicates(q *sitter.Query, m *sitter.QueryMatch, qc *sitter.Quer
 					continue
 				}
 
-				if regex.Match([]byte(c.Node.Content(input))) != isPositive {
+				if regex.MatchString(c.Node.Content(input)) != isPositive {
 					return false
 				}
 			}

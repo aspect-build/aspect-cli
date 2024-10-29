@@ -24,7 +24,7 @@ func parseQuery(lang LanguageGrammar, queryStr string) *sitter.Query {
 		queryCache[lang] = make(map[string]*sitter.Query)
 	}
 	if queryCache[lang][queryStr] == nil {
-		queryCache[lang][queryStr] = mustNewQuery(lang, queryStr)
+		queryCache[lang][queryStr] = mustNewQuery(lang, []byte(queryStr))
 	}
 
 	return queryCache[lang][queryStr]
@@ -145,10 +145,10 @@ func fetchQueryMatch(query *sitter.Query, name string, m *sitter.QueryMatch, sou
 	return result
 }
 
-func mustNewQuery(lang LanguageGrammar, queryStr string) *sitter.Query {
-	treeQ, err := sitter.NewQuery([]byte(queryStr), toSitterLanguage(lang))
+func mustNewQuery(lang LanguageGrammar, query []byte) *sitter.Query {
+	treeQ, err := sitter.NewQuery(query, toSitterLanguage(lang))
 	if err != nil {
-		BazelLog.Fatalf("Failed to create query for %q: %v", queryStr, err)
+		BazelLog.Fatalf("Failed to create query for %q: %v", query, err)
 	}
 	return treeQ
 }
