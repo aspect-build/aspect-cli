@@ -12,7 +12,7 @@ index fed885d..23b1083 100644
  	return &Config{
  		ValidBuildFileNames: DefaultValidBuildFileNames,
 diff --git a/walk/config.go b/walk/config.go
-index 4fecedd..1292146 100644
+index 6cee8a3..c8dd6b3 100644
 --- a/walk/config.go
 +++ b/walk/config.go
 @@ -49,6 +49,11 @@ func getWalkConfig(c *config.Config) *walkConfig {
