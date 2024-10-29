@@ -109,9 +109,9 @@ func ParseSource(filePath, sourceCodeStr string) (ParseResult, []error) {
 						}
 					}
 				}
-			} else if isTripleSlashDirective(node, sourceCode) {
-				typesImport := getTripleSlashDirectiveModule(node, sourceCode)
-				if typesImport != "" {
+			} else if isPotentialTripleSlashDirective(node, sourceCode) {
+				typesImport, isTripleSlash := getTripleSlashDirectiveModule(node, sourceCode)
+				if isTripleSlash {
 					imports = append(imports, typesImport)
 				}
 			}
@@ -146,9 +146,10 @@ func ParseSource(filePath, sourceCodeStr string) (ParseResult, []error) {
 	return result, errs
 }
 
-// Determine if a node is a triple slash directive.
+// Determine if a node is potentially a triple-slash directive.
+// To be used before running a more expensive check and triple-slash directive extraction.
 // See: https://www.typescriptlang.org/docs/handbook/triple-slash-directives.html
-func isTripleSlashDirective(node *sitter.Node, sourceCode []byte) bool {
+func isPotentialTripleSlashDirective(node *sitter.Node, sourceCode []byte) bool {
 	nodeType := node.Type()
 	if nodeType != "comment" {
 		return false
@@ -162,16 +163,15 @@ func isTripleSlashDirective(node *sitter.Node, sourceCode []byte) bool {
 // Extract a /// <reference> from a comment node
 // Note: could also potentially use a treesitter query such as:
 // /  `(program (comment) @result (#match? @c "^///\\s*<reference\\s+(lib|types|path)\\s*=\\s*\"[^\"]+\""))`
-func getTripleSlashDirectiveModule(node *sitter.Node, sourceCode []byte) string {
+func getTripleSlashDirectiveModule(node *sitter.Node, sourceCode []byte) (string, bool) {
 	comment := node.Content(sourceCode)
 	submatches := tripleSlashRe.FindAllStringSubmatchIndex(comment, -1)
 	if len(submatches) != 1 {
-		Log.Errorf("Invalid triple slash directive: %q", comment)
-		return ""
+		return "", false
 	}
 
 	lib := tripleSlashRe.ExpandString(make([]byte, 0), "$lib", comment, submatches[0])
-	return string(lib)
+	return string(lib), len(lib) > 0
 }
 
 // Determine if a node is an import/export statement that may contain a `from` value.
