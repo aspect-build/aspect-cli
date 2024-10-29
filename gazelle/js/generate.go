@@ -695,7 +695,7 @@ func parseSourceFile(rootDir, filePath string) (parser.ParseResult, []error) {
 		return parser.ParseResult{}, []error{err}
 	}
 
-	return parser.ParseSource(filePath, string(content))
+	return parser.ParseSource(filePath, content)
 }
 
 func (ts *typeScriptLang) addFileLabel(importPath string, label *label.Label) {

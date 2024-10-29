@@ -55,12 +55,11 @@ var importQueries = map[string]string{
 
 var tripleSlashRe = regexp.MustCompile(`^///\s*<reference\s+(?:lib|path|types)\s*=\s*"(?P<lib>[^"]+)"`)
 
-func ParseSource(filePath, sourceCodeStr string) (ParseResult, []error) {
+func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 	imports := make([]string, 0, 5)
 	modules := make([]string, 0)
 	errs := make([]error, 0)
 
-	sourceCode := []byte(sourceCodeStr)
 	lang := filenameToLanguage(filePath)
 
 	// Parse the source code

@@ -69,7 +69,7 @@ func TestTreesitterParser(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			res, _ := NewParser().Parse(tc.filename, tc.kt)
+			res, _ := NewParser().Parse(tc.filename, []byte(tc.kt))
 
 			if !equal(res.Imports, tc.imports) {
 				t.Errorf("Imports...\nactual:  %#v;\nexpected: %#v\nkotlin code:\n%v", res.Imports, tc.imports, tc.kt)
@@ -82,24 +82,24 @@ func TestTreesitterParser(t *testing.T) {
 	}
 
 	t.Run("main detection", func(t *testing.T) {
-		res, _ := NewParser().Parse("main.kt", "fun main() {}")
+		res, _ := NewParser().Parse("main.kt", []byte("fun main() {}"))
 		if !res.HasMain {
 			t.Errorf("main method should be detected")
 		}
 
-		res, _ = NewParser().Parse("x.kt", `
+		res, _ = NewParser().Parse("x.kt", []byte(`
 package my.demo
 fun main() {}
-		`)
+		`))
 		if !res.HasMain {
 			t.Errorf("main method should be detected with package")
 		}
 
-		res, _ = NewParser().Parse("x.kt", `
+		res, _ = NewParser().Parse("x.kt", []byte(`
 package my.demo
 import kotlin.text.*
 fun main() {}
-		`)
+		`))
 		if !res.HasMain {
 			t.Errorf("main method should be detected with imports")
 		}

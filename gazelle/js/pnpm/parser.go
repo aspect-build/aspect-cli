@@ -29,13 +29,13 @@ func ParsePnpmLockFileDependencies(lockfilePath string) WorkspacePackageVersionM
 var lockVersionRegex = regexp.MustCompile(`^\s*lockfileVersion: '?(?P<Version>\d\.\d)'?`)
 
 func parsePnpmLockVersion(yamlFileContent []byte) (string, error) {
-	match := lockVersionRegex.FindStringSubmatch(string(yamlFileContent))
+	match := lockVersionRegex.FindSubmatch(yamlFileContent)
 
 	if len(match) != 2 {
 		return "", fmt.Errorf("failed to find lockfile version in: %q", string(yamlFileContent))
 	}
 
-	return match[1], nil
+	return string(match[1]), nil
 }
 
 func parsePnpmLockDependencies(yamlFileContent []byte) (WorkspacePackageVersionMap, error) {

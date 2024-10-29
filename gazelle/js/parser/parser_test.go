@@ -328,7 +328,7 @@ func equal[T comparable](a, b []T) bool {
 func TestTreesitterParser(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			res, _ := ParseSource(tc.filename, tc.ts)
+			res, _ := ParseSource(tc.filename, []byte(tc.ts))
 
 			if !equal(res.Imports, tc.expectedImports) {
 				t.Errorf("Unexpected import results\nactual:  %#v;\nexpected: %#v\ntypescript code:\n%v", res.Imports, tc.expectedImports, tc.ts)
