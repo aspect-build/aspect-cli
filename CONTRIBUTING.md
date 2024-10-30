@@ -44,12 +44,14 @@ After this, you should be able to merge your changes without any conflicts in th
 
 ## Releasing
 
-1. Sync your local `main` branch to the commit to release from.
-   Run `node ./tools/workspace_status.js | grep STABLE_ASPECT_CLI_BAZELISK_COMPAT_VERSION`
-   to determine the current release version. This version follows our monorepo versioning scheme minus
+1. Sync your local `main` branch to the commit to release from,
+   ensure your local git tags are up to date: `git fetch --tags`
+
+2. Run `node ./tools/workspace_status.js | grep STABLE_ASPECT_CLI_BAZELISK_COMPAT_VERSION`
+   to determine the current release version.This version follows our monorepo versioning scheme minus
    the hash so that it is compatible with Bazelisk. See comment in `workspace_status.sh` for more info.
 
-2. Push a `xxxx.x.x` tag to the repository at the commit you want to release with the semver version
+3. Push a `xxxx.x.x` tag to the repository at the commit you want to release with the semver version
    from the prior step:
 
     ```
@@ -66,9 +68,9 @@ After this, you should be able to merge your changes without any conflicts in th
     > USE_BAZEL_VERSION=aspect/xxxx.x.x
     > ```
 
-3. Watch the automation run on GitHub actions (it's very slow, be prepared to wait)
+4. Watch the automation run on GitHub actions (it's very slow, be prepared to wait)
 
-4. For go module support, we also require a `v1.yyyyww.x` tag that corresponds to the `yyyy.ww.x` release
+5. For go module support, we also require a `v1.yyyyww.x` tag that corresponds to the `yyyy.ww.x` release
    tag. We version the go module as `v1.x.x` since consuming `v2+` go modules downstream adds
    undesirable complication. The week should be zero-padded to two digits.
 
