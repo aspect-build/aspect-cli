@@ -201,7 +201,7 @@ func (tree TreeAst) QueryErrors() []error {
 			msg := pre + line
 			arw := strings.Repeat(" ", len(pre)+colI) + "^"
 
-			errors = append(errors, fmt.Errorf(msg+"\n"+arw))
+			errors = append(errors, fmt.Errorf("%s\n%s", msg, arw))
 		}
 	}
 

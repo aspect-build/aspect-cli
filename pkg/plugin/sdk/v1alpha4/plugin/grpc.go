@@ -21,6 +21,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -348,7 +349,7 @@ func (p *PrompterGRPCClient) Run(prompt promptui.Prompt) (string, error) {
 		return "", err
 	}
 	if res.Error != nil && res.Error.Happened {
-		return "", fmt.Errorf(res.Error.Message)
+		return "", errors.New(res.Error.Message)
 	}
 	return res.Result, nil
 }
