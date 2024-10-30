@@ -102,7 +102,7 @@ func HandleVersionFlags(streams ioutils.Streams, args []string, bzl bazel.Bazel)
 		if err != nil {
 			aspecterrors.HandleError(err)
 		}
-		fmt.Fprintf(streams.Stdout, version)
+		fmt.Fprint(streams.Stdout, version)
 		os.Exit(0)
 	}
 }

@@ -112,6 +112,12 @@ func Warnf(format string, args ...interface{}) {
 	logger.Printf(format, args...)
 }
 
+func Error(msg string) {
+	if level > ErrorLevel {
+		return
+	}
+	logger.Print(msg)
+}
 func Errorf(format string, args ...interface{}) {
 	if level > ErrorLevel {
 		return
@@ -121,6 +127,9 @@ func Errorf(format string, args ...interface{}) {
 
 func Fatalf(format string, args ...interface{}) {
 	logger.Fatalf(format+"\n", args...)
+}
+func Fatal(msg string) {
+	logger.Fatal(msg + "\n")
 }
 
 func IsLevelEnabled(l Level) bool {

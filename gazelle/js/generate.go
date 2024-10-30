@@ -399,11 +399,12 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 	// Check for name-collisions with the rule being generated.
 	colError := gazelle.CheckCollisionErrors(targetName, TsProjectKind, sourceRuleKinds, args)
 	if colError != nil {
-		return nil, fmt.Errorf(colError.Error()+" "+
+		return nil, fmt.Errorf("%v "+
 			"Use the '# aspect:%s' directive to change the naming convention.\n\n"+
 			"For example:\n"+
 			"\t# aspect:%s {dirname}_js\n"+
 			"\t# aspect:%s {dirname}_js_tests",
+			colError.Error(),
 			Directive_LibraryNamingConvention,
 			Directive_LibraryNamingConvention,
 			Directive_TestsNamingConvention,

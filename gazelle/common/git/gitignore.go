@@ -52,7 +52,7 @@ func collectIgnoreFiles(c *config.Config, rel string) {
 		addIgnore(c, rel, ignoreReader)
 	} else {
 		msg := fmt.Sprintf("Failed to open %s/.gitignore: %v", rel, ignoreErr)
-		BazelLog.Errorf(msg)
+		BazelLog.Error(msg)
 		fmt.Printf("%s\n", msg)
 	}
 }
