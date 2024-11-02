@@ -6,6 +6,7 @@ go_library(
         "bazel.go",
         "bazel_flags.go",
         "bazelisk.go",
+        "bazelisk-core.go",
     ],
     importpath = "aspect.build/cli/pkg/bazel",
     visibility = ["//visibility:public"],
