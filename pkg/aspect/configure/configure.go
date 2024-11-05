@@ -75,6 +75,17 @@ func (c *Configure) addDefaultLanguages() {
 
 	viper.SetDefault("configure.languages.go", false)
 	if viper.GetBool("configure.languages.go") {
+		if os.Getenv(GO_REPOSITORY_CONFIG_ENV) == "" {
+			goConfigPath, err := determineGoRepositoryConfigPath()
+			if err != nil {
+				log.Fatalf("ERROR: unable to determine go_repository config path: %v", err)
+			}
+
+			if goConfigPath != "" {
+				os.Setenv(GO_REPOSITORY_CONFIG_ENV, goConfigPath)
+			}
+		}
+
 		c.AddLanguage("go", golang.NewLanguage)
 	}
 
@@ -138,6 +149,11 @@ configure:
 	memprofile := os.Getenv("GAZELLE_MEMPROFILE")
 	if memprofile != "" {
 		fixArgs = append(fixArgs, "--memprofile="+memprofile)
+	}
+
+	go_repo_config := os.Getenv(GO_REPOSITORY_CONFIG_ENV)
+	if go_repo_config != "" {
+		fixArgs = append(fixArgs, "--repo_config="+go_repo_config)
 	}
 
 	// Append additional args including specific directories to fix.
