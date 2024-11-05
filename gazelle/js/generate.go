@@ -541,6 +541,13 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 				existing.DelAttr("resolve_json_module")
 			}
 
+			// Reflect the tsconfig resolve_json_module in the ts_project rule
+			if tsconfig.Jsx != typescript.JsxNone {
+				sourceRule.SetAttr("preserve_jsx", tsconfig.Jsx == typescript.JsxPreserve)
+			} else if existing != nil {
+				existing.DelAttr("preserve_jsx")
+			}
+
 			// Reflect the tsconfig out_dir in the ts_project rule
 			if tsconfig.OutDir != "" && tsconfig.OutDir != "." {
 				sourceRule.SetAttr("out_dir", tsconfig.OutDir)
@@ -561,6 +568,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 			existing.DelAttr("declaration")
 			existing.DelAttr("declaration_map")
 			existing.DelAttr("out_dir")
+			existing.DelAttr("preserve_jsx")
 			existing.DelAttr("resolve_json_module")
 			existing.DelAttr("source_map")
 			existing.DelAttr("root_dir")
