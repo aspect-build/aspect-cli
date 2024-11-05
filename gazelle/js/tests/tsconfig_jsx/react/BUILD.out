@@ -3,6 +3,7 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 ts_project(
     name = "react",
     srcs = ["r.tsx"],
+    preserve_jsx = False,
     tsconfig = ":tsconfig",
     deps = ["//:node_modules/react"],
 )
