@@ -35,7 +35,6 @@ go_library(
         "//cmd/aspect/sync",
         "//cmd/aspect/test",
         "//cmd/aspect/version",
-        "//docs/help/topics",
         "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",
         "//pkg/bazel",
