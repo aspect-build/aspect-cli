@@ -7,6 +7,7 @@ import (
 
 	node "aspect.build/cli/gazelle/js/node"
 	pnpm "aspect.build/cli/gazelle/js/pnpm"
+	BazelLog "aspect.build/cli/pkg/logger"
 )
 
 type workspacePath struct {
@@ -46,6 +47,8 @@ func (tc *TsWorkspace) AddTsConfigFile(root, rel, fileName string) {
 		return
 	}
 
+	BazelLog.Debugf("Adding tsconfig file %s/%s", rel, fileName)
+
 	tc.cm.configFiles[rel] = &workspacePath{
 		root:     root,
 		rel:      rel,
@@ -77,6 +80,8 @@ func (tc *TsWorkspace) GetTsConfigFile(rel string) *TsConfig {
 		fmt.Printf("Failed to parse tsconfig file %s: %v\n", path.Join(p.rel, p.fileName), err)
 		return nil
 	}
+
+	BazelLog.Debugf("Parsed tsconfig file %s/%s", p.rel, p.fileName)
 
 	return c
 }
