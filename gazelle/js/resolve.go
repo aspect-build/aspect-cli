@@ -228,14 +228,17 @@ func (ts *typeScriptLang) Resolve(
 
 		// Support this target representing a project or a package
 		var imports *treeset.Set
-		if packageInfo, isProjectInfo := importData.(*TsPackageInfo); isProjectInfo {
+		if packageInfo, isPackageInfo := importData.(*TsPackageInfo); isPackageInfo {
 			imports = packageInfo.imports
 
 			if packageInfo.source != nil {
 				deps.Add(packageInfo.source)
 			}
+		} else if projectInfo, isProjectInfo := importData.(*TsProjectInfo); isProjectInfo {
+			imports = projectInfo.imports
 		} else {
-			imports = importData.(*TsProjectInfo).imports
+			BazelLog.Infof("%s //%s:%s with no/unknown package info", r.Kind(), from.Pkg, r.Name())
+			break
 		}
 
 		err := ts.resolveImports(c, ix, deps, imports, from)
@@ -252,7 +255,12 @@ func (ts *typeScriptLang) Resolve(
 			r.SetAttr("deps", deps.Labels())
 		}
 	case NpmPackageKind:
-		packageInfo := importData.(*TsPackageInfo)
+		packageInfo, isPackageInfo := importData.(*TsPackageInfo)
+		if !isPackageInfo {
+			BazelLog.Infof("%s //%s:%s with no/unknown package info", r.Kind(), from.Pkg, r.Name())
+			break
+		}
+
 		srcs := packageInfo.sources.Values()
 
 		deps := common.NewLabelSet(from)
