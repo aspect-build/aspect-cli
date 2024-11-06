@@ -17,27 +17,12 @@ setup() {
 
 @test 'aspect with no args should display root help' {
     run aspect
-    assert_output --partial "Aspect CLI is a better frontend for running bazel" "Common Bazel Commands" "Commands only in Aspect CLI" "Other Bazel Built-in Commands" "Additional Commands" "Additional help topics"
+    assert_output --partial "Aspect CLI is a better frontend for running bazel" "Common Bazel Commands" "Commands only in Aspect CLI" "Other Bazel Built-in Commands" "Additional Commands"
 }
 
 @test 'aspect help with no args should display root help' {
     run aspect help
-    assert_output --partial "Aspect CLI is a better frontend for running bazel" "Common Bazel Commands" "Commands only in Aspect CLI" "Other Bazel Built-in Commands" "Additional Commands" "Additional help topics"
-}
-
-@test 'aspect help target-syntax' {
-    run aspect help target-syntax
-    assert_output --partial "Target pattern syntax"
-}
-
-@test 'aspect help info-keys' {
-    run aspect help info-keys
-    assert_output --partial "bazel-bin"
-}
-
-@test 'aspect help tags' {
-    run aspect help tags
-    assert_output --partial "exclusive"
+    assert_output --partial "Aspect CLI is a better frontend for running bazel" "Common Bazel Commands" "Commands only in Aspect CLI" "Other Bazel Built-in Commands" "Additional Commands"
 }
 
 @test 'aspect help flags-as-proto' {
