@@ -263,7 +263,7 @@ lint:
 	// Wait for BES completion event for some maximum amount fo time
 	select {
 	case <-besCompleted:
-	case <-time.After(60 * time.Millisecond):
+	case <-time.After(60 * time.Second):
 		return fmt.Errorf("timed out waiting for build completed event")
 	}
 
