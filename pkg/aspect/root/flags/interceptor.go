@@ -60,6 +60,7 @@ func FlagsInterceptor(streams ioutils.Streams) interceptors.Interceptor {
 			doubleDash := false
 			for _, arg := range args {
 				if arg == "" {
+					forwardArgs = append(forwardArgs, arg)
 					continue
 				}
 				if arg == "--" {
