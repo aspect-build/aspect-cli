@@ -69,7 +69,7 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 	}
 
 	if tree != nil {
-		rootNode := tree.(treeutils.TreeAst).SitterTree.RootNode()
+		rootNode := tree.RootNode()
 
 		// Quick pass over root nodes to find top level imports and modules
 		for i := 0; i < int(rootNode.NamedChildCount()); i++ {

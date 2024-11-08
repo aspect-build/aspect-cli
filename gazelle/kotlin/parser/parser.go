@@ -45,7 +45,7 @@ func (p *treeSitterParser) Parse(filePath string, sourceCode []byte) (*ParseResu
 	}
 
 	if tree != nil {
-		rootNode := tree.(treeutils.TreeAst).SitterTree.RootNode()
+		rootNode := tree.RootNode()
 
 		// Extract imports from the root nodes
 		for i := 0; i < int(rootNode.NamedChildCount()); i++ {

@@ -51,20 +51,20 @@ type AST interface {
 	// Wrapper utils
 	// TODO: delete
 	QueryStrings(query, returnVar string) []string
+	RootNode() *sitter.Node
 }
-type TreeAst struct {
-	AST
-
+type treeAst struct {
 	lang       LanguageGrammar
 	filePath   string
 	sourceCode []byte
 
-	// TODO: don't make public
-	SitterTree *sitter.Tree
+	sitterTree *sitter.Tree
 }
 
-func (tree TreeAst) String() string {
-	return fmt.Sprintf("TreeAst{\n lang: %q,\n filePath: %q,\n AST:\n  %v\n}", tree.lang, tree.filePath, tree.SitterTree.RootNode().String())
+var _ AST = (*treeAst)(nil)
+
+func (tree *treeAst) String() string {
+	return fmt.Sprintf("treeAst{\n lang: %q,\n filePath: %q,\n AST:\n  %v\n}", tree.lang, tree.filePath, tree.sitterTree.RootNode().String())
 }
 
 func toSitterLanguage(lang LanguageGrammar) *sitter.Language {
@@ -132,5 +132,5 @@ func ParseSourceCode(lang LanguageGrammar, filePath string, sourceCode []byte) (
 		return nil, err
 	}
 
-	return TreeAst{lang: lang, filePath: filePath, sourceCode: sourceCode, SitterTree: tree}, nil
+	return &treeAst{lang: lang, filePath: filePath, sourceCode: sourceCode, sitterTree: tree}, nil
 }
