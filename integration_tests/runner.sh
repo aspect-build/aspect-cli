@@ -15,4 +15,8 @@ export BATS_LIB_PATH
 export BATS_TEST_TIMEOUT="$TEST_TIMEOUT"
 export BATS_TMPDIR="$TEST_TMPDIR"
 
-exec "${BIN}" "$@"
+if [ -n "$TESTBRIDGE_TEST_ONLY" ]; then
+    exec "${BIN}" --filter "$TESTBRIDGE_TEST_ONLY" "$@"
+else
+    exec "${BIN}" "$@"
+fi
