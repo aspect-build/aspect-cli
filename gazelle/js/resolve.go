@@ -154,7 +154,7 @@ func (ts *typeScriptLang) protoLibraryImports(r *rule.Rule, f *rule.File) []reso
 	provides := make([]resolve.ImportSpec, 0, len(protoSrcs)+1)
 
 	for _, src := range protoSrcs {
-		src = path.Clean(path.Join(f.Pkg, src))
+		src = path.Join(f.Pkg, src)
 
 		for _, dts := range proto.ToTsPaths(src) {
 			for _, impt := range toImportPaths(dts) {
@@ -188,8 +188,11 @@ func (ts *typeScriptLang) Embeds(r *rule.Rule, from label.Label) []label.Label {
 		// The compiled dts and js files are accessible as embedded rules
 		for _, src := range srcs {
 			if isTranspiledSourceFileType(src) {
-				js := swapSourceExtension(src)
-				dts := path.Base(js) + ".d" + path.Ext(js)
+				pExt := path.Ext(src)
+				pNoExt := src[:len(src)-len(pExt)]
+				js := pNoExt + toJsExt(pExt)
+				dts := pNoExt + toDtsExt(pExt)
+
 				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, js))
 				tsEmbeds = append(tsEmbeds, label.New(from.Repo, from.Pkg, dts))
 			}
@@ -533,21 +536,21 @@ func (ts *typeScriptLang) resolveImportTypes(resolutionType ResolutionType, from
 	return nil
 }
 
-func toAtTypesPackage(imp string) string {
-	pkgParts := strings.Split(imp, "/")
+func toAtTypesPackage(pkg string) string {
+	slashI := strings.Index(pkg, "/")
 
-	if imp[0] == '@' {
-		if len(pkgParts) < 2 {
-			BazelLog.Errorf("Invalid scoped package: %q", imp)
-			return ""
-		}
-
-		pkgParts = []string{pkgParts[0][1:], pkgParts[1]}
-	} else {
-		pkgParts = []string{pkgParts[0]}
+	// Change the scoped packages to be __ separated.
+	if pkg[0] == '@' && slashI != -1 {
+		pkg = pkg[1:slashI] + "__" + pkg[slashI+1:]
+		slashI = strings.Index(pkg, "/")
 	}
 
-	return path.Join("@types", strings.Join(pkgParts, "__"))
+	// Strip any trailing subpaths
+	if slashI != -1 {
+		pkg = pkg[:slashI]
+	}
+
+	return "@types/" + pkg
 }
 
 // Find and resolve any @types package for an import

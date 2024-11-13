@@ -42,7 +42,8 @@ import (
 
 const (
 	// The filename (with any of the TS extensions) imported when importing a directory.
-	IndexFileName = "index"
+	IndexFileName      = "index"
+	SlashIndexFileName = "/" + IndexFileName
 
 	NpmPackageFilename = "package.json"
 
@@ -115,7 +116,8 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 
 	// Collect all source files.
 	collectErr := gazelle.GazelleWalkDir(args, func(file string) error {
-		if isSourceFileType(file) {
+		fileExt := path.Ext(file)
+		if isSourceFileExt(fileExt) {
 			if target := cfg.GetFileSourceTarget(file, tsconfigRootDir); target != nil {
 				BazelLog.Tracef("add '%s' src '%s/%s'", target.name, args.Rel, file)
 
@@ -127,7 +129,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 		}
 
 		// Not collect by any target group, but still collect as a data file.
-		if isDataFileType(file) {
+		if isDataFileExt(fileExt) {
 			dataFiles.Add(file)
 		}
 		return nil
@@ -710,20 +712,17 @@ func parseSourceFile(rootDir, filePath string) (parser.ParseResult, []error) {
 func (ts *typeScriptLang) addFileLabel(importPath string, label *label.Label) {
 	existing := ts.fileLabels[importPath]
 
-	if existing != nil {
+	if existing != nil && isDeclarationFileType(existing.Name) {
 		// Can not have two imports (such as .js and .d.ts) from different labels
-		if isDeclarationFileType(existing.Name) == isDeclarationFileType(label.Name) && !existing.Equal(*label) {
+		if isDeclarationFileType(label.Name) && !existing.Equal(*label) {
 			BazelLog.Fatalf("Duplicate file label ", importPath, " from ", existing.String(), " and ", label.String())
 		}
 
 		// Prefer the non-declaration file
-		if isDeclarationFileType(existing.Name) {
-			return
-		}
-
-		// Otherwise overwrite the existing non-declaration version
+		return
 	}
 
+	// Otherwise overwrite the existing non-declaration version
 	ts.fileLabels[importPath] = label
 }
 
@@ -737,53 +736,61 @@ func (ts *typeScriptLang) addModuleDeclaration(module string, moduleLabel *label
 
 // Find names/paths that the given path can be imported as.
 func toImportPaths(p string) []string {
+	// NOTE: this is invoked extremely frequently so it's important to keep it fast and light.
+	// Do not cause unnecessary memory allocations such as splitting or slicing strings.
+
+	// There will most likely be only one import path when a file is already known to be a "source file"
 	paths := make([]string, 0, 1)
 
+	pExt := path.Ext(p)
+	pNoExt := p[:len(p)-len(pExt)]
+
 	if isDeclarationFileType(p) {
+		pNoExt := p[:len(pNoExt)-2]
+
 		// The import of the raw dts file
 		paths = append(paths, p)
 
 		// Assume the js extension also exists
 		// TODO: don't do that
-		paths = append(paths, stripDeclarationExtensions(p)+toJsExt(p))
+		paths = append(paths, pNoExt+toJsExt(pExt))
 
-		// Without the js extension
-		if isImplicitSourceFileType(p) {
-			paths = append(paths, stripDeclarationExtensions(p))
+		// Without the dts extension
+		if isImplicitSourceFileExt(pExt) {
+			paths = append(paths, pNoExt)
 		}
 
 		// Directory without the filename
-		if path.Base(stripDeclarationExtensions(p)) == IndexFileName {
-			paths = append(paths, path.Dir(p))
+		if strings.HasSuffix(pNoExt, SlashIndexFileName) {
+			paths = append(paths, pNoExt[:len(pNoExt)-len(SlashIndexFileName)])
 		}
-	} else if isTranspiledSourceFileType(p) {
+	} else if isTranspiledSourceFileExt(pExt) {
 		// The transpiled files extensions
-		paths = append(paths, swapSourceExtension(p))
-		paths = append(paths, stripSourceFileExtension(p)+toDtsExt(p))
+		paths = append(paths, pNoExt+toJsExt(pExt), pNoExt+toDtsExt(pExt))
 
 		// Without the extension if it is implicit
-		if isImplicitSourceFileType(p) {
-			paths = append(paths, stripSourceFileExtension(p))
+		if isImplicitSourceFileExt(pExt) {
+			paths = append(paths, pNoExt)
 		}
 
 		// Directory without the filename
-		if path.Base(stripSourceFileExtension(p)) == IndexFileName {
-			paths = append(paths, path.Dir(p))
+		if strings.HasSuffix(pNoExt, SlashIndexFileName) {
+			paths = append(paths, pNoExt[:len(pNoExt)-len(SlashIndexFileName)])
 		}
-	} else if isSourceFileType(p) {
+	} else if isSourceFileExt(pExt) {
 		// The import of the raw file
 		paths = append(paths, p)
 
 		// Without the extension if it is implicit
-		if isImplicitSourceFileType(p) {
-			paths = append(paths, stripSourceFileExtension(p))
+		if isImplicitSourceFileExt(pExt) {
+			paths = append(paths, pNoExt)
 		}
 
 		// Directory without the filename
-		if path.Base(stripSourceFileExtension(p)) == IndexFileName {
-			paths = append(paths, path.Dir(p))
+		if strings.HasSuffix(pNoExt, SlashIndexFileName) {
+			paths = append(paths, pNoExt[:len(pNoExt)-len(SlashIndexFileName)])
 		}
-	} else if isDataFileType(p) {
+	} else if isDataFileExt(pExt) {
 		paths = append(paths, p)
 	}
 
@@ -854,17 +861,24 @@ func addLinkAllPackagesRule(cfg *JsGazelleConfig, args language.GenerateArgs, re
 
 // If the file is ts-compatible transpiled source code that may contain imports
 func isTranspiledSourceFileType(f string) bool {
-	switch path.Ext(f) {
+	return isTranspiledSourceFileExt(path.Ext(f)) && !isDeclarationFileType(f)
+}
+
+// If the file extension is one which must be transpiled.
+// Note caution must be taken if the file extension originated from a file that
+// may already be transpiled to a .d.ts file.
+func isTranspiledSourceFileExt(ext string) bool {
+	switch ext {
 	case ".ts", ".cts", ".mts", ".tsx", ".jsx":
-		return !isDeclarationFileType(f)
+		return true
 	default:
 		return false
 	}
 }
 
 // If the file is ts-compatible source code that may contain imports
-func isSourceFileType(f string) bool {
-	switch path.Ext(f) {
+func isSourceFileExt(ext string) bool {
+	switch ext {
 	case ".ts", ".cts", ".mts", ".tsx", ".jsx", ".js", ".cjs", ".mjs":
 		return true
 	default:
@@ -872,11 +886,11 @@ func isSourceFileType(f string) bool {
 	}
 }
 
-// A source file that does not explicitly declare itself as cjs or mjs so
+// A source file extension that does not explicitly declare itself as cjs or mjs so
 // it can be imported as if it is either. Node will decide how to interpret
 // it at runtime based on other factors.
-func isImplicitSourceFileType(f string) bool {
-	switch path.Ext(f) {
+func isImplicitSourceFileExt(ext string) bool {
+	switch ext {
 	case ".ts", ".tsx", ".js", ".jsx":
 		return true
 	default:
@@ -884,8 +898,13 @@ func isImplicitSourceFileType(f string) bool {
 	}
 }
 
-func isTsxFileType(f string) bool {
-	return strings.HasSuffix(f, ".tsx") || strings.HasSuffix(f, ".jsx")
+func isTsxFileExt(e string) bool {
+	switch e {
+	case ".tsx", ".jsx":
+		return true
+	default:
+		return false
+	}
 }
 
 // Importable declaration files that are not compiled
@@ -894,27 +913,11 @@ func isDeclarationFileType(f string) bool {
 }
 
 // Supported data file extensions that typescript can reference.
-func isDataFileType(f string) bool {
-	return strings.HasSuffix(f, ".json")
+func isDataFileExt(e string) bool {
+	return e == ".json"
 }
 
-// Strip extensions off of a path, assuming it isSourceFileType()
-func stripSourceFileExtension(f string) string {
-	return f[:len(f)-len(path.Ext(f))]
-}
-
-// Swap compile to runtime extensions of of a path, assuming it isSourceFileType()
-func swapSourceExtension(f string) string {
-	return stripSourceFileExtension(f) + toJsExt(f)
-}
-
-// Strip extensions off of a path, assuming it isDeclarationFileType()
-func stripDeclarationExtensions(f string) string {
-	return stripSourceFileExtension(stripSourceFileExtension(f))
-}
-
-func toJsExt(f string) string {
-	e := path.Ext(f)
+func toJsExt(e string) string {
 	switch e {
 	case ".ts", ".tsx":
 		return ".js"
@@ -932,8 +935,7 @@ func toJsExt(f string) string {
 	}
 }
 
-func toDtsExt(f string) string {
-	e := path.Ext(f)
+func toDtsExt(e string) string {
 	switch e {
 	case ".ts", ".tsx":
 		return ".d.ts"
