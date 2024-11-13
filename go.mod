@@ -6,10 +6,9 @@ require (
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/alphadose/haxmap v1.4.0
 	github.com/bazel-contrib/rules_jvm v0.27.0
-	github.com/bazelbuild/bazel-gazelle v0.38.1-0.20240917180916-571d953b2bb9 // NOTE: keep in sync with fetch.bzl
+	github.com/bazelbuild/bazel-gazelle v0.40.0 // NOTE: keep in sync with fetch.bzl
 	github.com/bazelbuild/bazelisk v1.17.0
 	github.com/bazelbuild/buildtools v0.0.0-20240918101019-be1c24cc9a44
-	github.com/bazelbuild/rules_go v0.50.1 // indirect; NOTE: keep in sync with WORKSPACE
 	github.com/bluekeyes/go-gitdiff v0.7.3
 	github.com/bmatcuk/doublestar/v4 v4.7.1
 	github.com/emirpasic/gods v1.18.1
@@ -80,7 +79,7 @@ require (
 	github.com/dlclark/regexp2 v1.11.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
-	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.5.0 // indirect
 	github.com/go-sprout/sprout v0.5.1 // indirect

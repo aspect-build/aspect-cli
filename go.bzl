@@ -106,8 +106,8 @@ def deps():
         name = "com_github_bazelbuild_bazel_gazelle",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/bazelbuild/bazel-gazelle",
-        sum = "h1:41XpkyMMp4jZ0JKVDu4G6ADxch1DhAYTWHKLzETCE4o=",
-        version = "v0.38.1-0.20240917180916-571d953b2bb9",
+        sum = "h1:SAYys3KRG5i3KTgQAvO423bLT1rQMSgqEKReMkM/CW0=",
+        version = "v0.40.0",
     )
     go_repository(
         name = "com_github_bazelbuild_bazelisk",
@@ -459,8 +459,8 @@ def deps():
         name = "com_github_fsnotify_fsnotify",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/fsnotify/fsnotify",
-        sum = "h1:8JEhPFa5W2WU7YfeZzPNqzMP6Lwt7L2715Ggo0nosvA=",
-        version = "v1.7.0",
+        sum = "h1:dAwr6QBTBZIkG8roQaJjGof0pp0EeF+tNV7YBP3F/8M=",
+        version = "v1.8.0",
     )
     go_repository(
         name = "com_github_ghodss_yaml",
@@ -2338,13 +2338,6 @@ def deps():
         importpath = "google.golang.org/grpc",
         sum = "h1:LKtvyfbX3UGVPFcGqJ9ItpVWW6oN/2XqTxfAnwRRXiA=",
         version = "v1.64.1",
-    )
-    go_repository(
-        name = "org_golang_google_grpc_cmd_protoc_gen_go_grpc",
-        build_file_proto_mode = "disable_global",
-        importpath = "google.golang.org/grpc/cmd/protoc-gen-go-grpc",
-        sum = "h1:rNBFJjBCOgVr9pWD7rs/knKL4FRTKgpZmsRfV214zcA=",
-        version = "v1.3.0",
     )
     go_repository(
         name = "org_golang_google_protobuf",

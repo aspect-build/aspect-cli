@@ -28,10 +28,10 @@ index 6cee8a3..c8dd6b3 100644
  	return matchAnyGlob(wc.excludes, p)
  }
 diff --git a/walk/walk.go b/walk/walk.go
-index 48cc835..7814088 100644
+index 797aaa9..78e5874 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -132,7 +132,7 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
+@@ -131,7 +131,7 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
  	visit(c, cexts, knownDirectives, updateRels, trie, wf, "", false)
  }
  
@@ -39,8 +39,8 @@ index 48cc835..7814088 100644
 +func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[string]bool, updateRels *UpdateFilter, trie *pathTrie, wf WalkFunc, rel string, updateParent bool) ([]string, bool) {
  	haveError := false
  
- 	ents := make([]fs.DirEntry, 0, len(trie.children))
-@@ -162,10 +162,10 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+ 	// Absolute path to the directory being visited
+@@ -152,7 +152,7 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
  	wc := getWalkConfig(c)
  
  	if wc.isExcluded(rel) {
@@ -48,38 +48,24 @@ index 48cc835..7814088 100644
 +		return nil, false
  	}
  
--	var subdirs, regularFiles []string
-+	var dirs, subdirs, regularFiles []string
- 	for _, ent := range ents {
- 		base := ent.Name()
- 		entRel := path.Join(rel, base)
-@@ -177,24 +177,42 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
- 		case ent == nil:
- 			continue
- 		case ent.IsDir():
--			subdirs = append(subdirs, base)
-+			dirs = append(dirs, base)
- 		default:
- 			regularFiles = append(regularFiles, base)
- 		}
- 	}
+ 	// Filter and collect files
+@@ -182,16 +182,34 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+ 			subdirs = append(subdirs, base)
  
- 	shouldUpdate := updateRels.shouldUpdate(rel, updateParent)
--	for _, sub := range subdirs {
-+	for _, sub := range dirs {
- 		if subRel := path.Join(rel, sub); updateRels.shouldVisit(subRel, shouldUpdate) {
--			visit(c, cexts, knownDirectives, updateRels, trie.children[sub], wf, subRel, shouldUpdate)
-+			// PATCH ---
-+			// Merge the returned 'subFiles' if 'mergeFiles' is true
-+			subFiles, mergeFiles := visit(c, cexts, knownDirectives, updateRels, trie.children[sub], wf, subRel, shouldUpdate)
-+			if mergeFiles {
-+				for _, f := range subFiles {
-+					regularFiles = append(regularFiles, path.Join(sub, f))
+ 			if updateRels.shouldVisit(entRel, shouldUpdate) {
+-				visit(c, cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)
++				// PATCH ---
++				// Merge the returned 'subFiles' if 'mergeFiles' is true
++				subFiles, mergeFiles := visit(c, cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)
++				if mergeFiles {
++					for _, f := range subFiles {
++						regularFiles = append(regularFiles, path.Join(base, f))
++					}
++				} else {
++					subdirs = append(subdirs, base)
 +				}
-+			} else {
-+				subdirs = append(subdirs, sub)
-+			}
-+			// END PATCH ---
++				// END PATCH ---
+ 			}
  		}
  	}
  

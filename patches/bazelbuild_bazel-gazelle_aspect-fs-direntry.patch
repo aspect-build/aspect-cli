@@ -11,17 +11,20 @@ index 1841650..f34ad5e 100644
  func New() *Config {
  	return &Config{
 diff --git a/walk/walk.go b/walk/walk.go
-index 1ba1b47..19e99ef 100644
+index 45fe869..fb79916 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -144,6 +144,14 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
- 		return ents[i].Name() < ents[j].Name()
- 	})
+@@ -134,6 +134,17 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
+ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[string]bool, updateRels *UpdateFilter, trie *pathTrie, wf WalkFunc, rel string, updateParent bool) ([]string, bool) {
+ 	haveError := false
  
 +	// PATCH(fs.DirEntry map) ---
 +	entsMap := make(map[string]fs.DirEntry, len(trie.children))
 +	for _, node := range trie.children {
-+		entsMap[(*node.entry).Name()] = *node.entry
++		entsMap[node.entry.Name()] = node.entry
++	}
++	for _, node := range trie.files {
++		entsMap[node.Name()] = node
 +	}
 +	c.Exts[config.ASPECT_DIR_ENTRIES] = entsMap
 +	// END PATCH(fs.DirEntry map) ---
@@ -29,7 +32,7 @@ index 1ba1b47..19e99ef 100644
  	// Absolute path to the directory being visited
  	dir := filepath.Join(c.RepoRoot, rel)
  
-@@ -158,7 +166,7 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+@@ -148,7 +159,7 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
  		haveError = true
  	}
  
@@ -38,16 +41,16 @@ index 1ba1b47..19e99ef 100644
  	wc := getWalkConfig(c)
  
  	if wc.isExcluded(rel) {
-@@ -203,7 +211,7 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
- 		if subRel := path.Join(rel, sub); updateRels.shouldVisit(subRel, shouldUpdate) {
- 			// PATCH ---
- 			// Merge the returned 'subFiles' if 'mergeFiles' is true
--			subFiles, mergeFiles := visit(c, cexts, knownDirectives, updateRels, trie.children[sub], wf, subRel, shouldUpdate)
-+			subFiles, mergeFiles := visit(c.Clone(), cexts, knownDirectives, updateRels, trie.children[sub], wf, subRel, shouldUpdate)
- 			if mergeFiles {
- 				for _, f := range subFiles {
- 					regularFiles = append(regularFiles, path.Join(sub, f))
-@@ -330,10 +338,7 @@ func loadBuildFile(c *config.Config, pkg, dir string, ents []fs.DirEntry) (*rule
+@@ -199,7 +210,7 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+ 			if updateRels.shouldVisit(entRel, shouldUpdate) {
+ 				// PATCH ---
+ 				// Merge the returned 'subFiles' if 'mergeFiles' is true
+-				subFiles, mergeFiles := visit(c, cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)
++				subFiles, mergeFiles := visit(c.Clone(), cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)
+ 				if mergeFiles {
+ 					for _, f := range subFiles {
+ 						regularFiles = append(regularFiles, path.Join(base, f))
+@@ -327,10 +338,7 @@ func loadBuildFile(c *config.Config, pkg, dir string, ents []fs.DirEntry) (*rule
  	return rule.LoadFile(path, pkg)
  }
  
@@ -59,7 +62,7 @@ index 1ba1b47..19e99ef 100644
  	if f != nil {
  		for _, d := range f.Directives {
  			if !knownDirectives[d.Key] {
-@@ -349,7 +354,6 @@ func configure(cexts []config.Configurer, knownDirectives map[string]bool, c *co
+@@ -346,7 +354,6 @@ func configure(cexts []config.Configurer, knownDirectives map[string]bool, c *co
  	for _, cext := range cexts {
  		cext.Configure(c, rel, f)
  	}
