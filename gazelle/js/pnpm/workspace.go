@@ -145,12 +145,12 @@ func (p *PnpmProject) AddPackage(pkg, version string, label *label.Label) {
 	p.packages[pkg] = label
 
 	// If this is a local workspace link or file reference normalize the path and collect the references
-	if strings.Index(version, "link:") == 0 {
+	if strings.HasPrefix(version, "link:") {
 		link := version[len("link:"):]
 
 		// Pnpm "link" references are relative to the package defining the link
 		p.addLocalReference(pkg, path.Join(p.Pkg(), link))
-	} else if strings.Index(version, "file:") == 0 {
+	} else if strings.HasPrefix(version, "file:") {
 		file := version[len("file:"):]
 
 		// Pnpm "file" references are relative to the pnpm workspace root.

@@ -1,6 +1,8 @@
 package gazelle
 
 import (
+	"path"
+
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/emirpasic/gods/sets/treeset"
@@ -68,7 +70,7 @@ func (i *TsProjectInfo) AddImport(impt ImportStatement) {
 func (i *TsProjectInfo) HasTsx() bool {
 	if i.sources != nil {
 		for _, src := range i.sources.Values() {
-			if isTsxFileType(src.(string)) {
+			if isTsxFileExt(path.Ext(src.(string))) {
 				return true
 			}
 		}
