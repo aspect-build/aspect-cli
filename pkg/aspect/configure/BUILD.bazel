@@ -17,6 +17,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/bzl",
+        "//gazelle/common/cache",
         "//gazelle/js",
         "//gazelle/kotlin",
         "//gazelle/python",

@@ -62,13 +62,13 @@ func (tree *treeAst) RootNode() *sitter.Node {
 }
 
 type queryResult struct {
-	captures map[string]string
+	QueryCaptures map[string]string
 }
 
 var _ ASTQueryResult = (*queryResult)(nil)
 
 func (qr queryResult) Captures() map[string]string {
-	return qr.captures
+	return qr.QueryCaptures
 }
 
 func (tree *treeAst) Query(query string) <-chan ASTQueryResult {
@@ -93,7 +93,7 @@ func (tree *treeAst) Query(query string) <-chan ASTQueryResult {
 				continue
 			}
 
-			out <- queryResult{captures: tree.mapQueryMatchCaptures(m, q)}
+			out <- queryResult{QueryCaptures: tree.mapQueryMatchCaptures(m, q)}
 		}
 
 		close(out)

@@ -22,6 +22,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common",
+        "//gazelle/common/cache",
         "//gazelle/common/git",
         "//gazelle/common/starlark",
         "//gazelle/js/node",
