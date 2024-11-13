@@ -757,6 +757,20 @@ def deps():
         version = "v1.1.0",
     )
     go_repository(
+        name = "com_github_itchyny_gojq",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/itchyny/gojq",
+        sum = "h1:yLfgLxhIr/6sJNVmYfQjTIv0jGctu6/DgDoivmxTr7g=",
+        version = "v0.12.16",
+    )
+    go_repository(
+        name = "com_github_itchyny_timefmt_go",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/itchyny/timefmt-go",
+        sum = "h1:ia3s54iciXDdzWzwaVKXZPbiXzxxnv1SPGFfM/myJ5Q=",
+        version = "v0.1.6",
+    )
+    go_repository(
         name = "com_github_jbenet_go_context",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/jbenet/go-context",

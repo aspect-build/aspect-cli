@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "bazel.go",
         "directives.go",
+        "jq.go",
         "regex.go",
         "rules.go",
         "set.go",
@@ -20,5 +21,6 @@ go_library(
         "@bazel_gazelle//rule:go_default_library",
         "@com_github_emirpasic_gods//sets/treeset",
         "@com_github_emirpasic_gods//utils",
+        "@com_github_itchyny_gojq//:gojq",
     ],
 )
