@@ -19,17 +19,15 @@ type npmPackageJSON struct {
 // Extract the various import types from the package.json file such as
 // 'main' and 'exports' fields.
 func ParsePackageJsonImportsFile(rootDir, packageJsonPath string) ([]string, error) {
-	content, err := os.ReadFile(path.Join(rootDir, packageJsonPath))
+	packageJsonReader, err := os.Open(path.Join(rootDir, packageJsonPath))
 	if err != nil {
 		return nil, err
 	}
 
-	return parsePackageJsonImports(content)
-}
+	packageJsonDecoder := jsonr.NewDecoder(packageJsonReader)
 
-func parsePackageJsonImports(packageJsonContent []byte) ([]string, error) {
 	var c npmPackageJSON
-	if err := jsonr.Unmarshal(packageJsonContent, &c); err != nil {
+	if err := packageJsonDecoder.Decode(&c); err != nil {
 		return nil, err
 	}
 

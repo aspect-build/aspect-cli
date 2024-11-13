@@ -2,13 +2,17 @@ package gazelle
 
 import (
 	"fmt"
+	"io"
 
 	"gopkg.in/yaml.v3"
 )
 
-func parsePnpmLockDependenciesV5(yamlFileContent []byte) (WorkspacePackageVersionMap, error) {
+func parsePnpmLockDependenciesV5(yamlReader io.Reader) (WorkspacePackageVersionMap, error) {
 	lockfile := PnpmLockfileV5{}
-	unmarshalErr := yaml.Unmarshal(yamlFileContent, &lockfile)
+	unmarshalErr := yaml.NewDecoder(yamlReader).Decode(&lockfile)
+	if unmarshalErr == io.EOF {
+		return nil, nil
+	}
 	if unmarshalErr != nil {
 		return nil, fmt.Errorf("parse error: %v", unmarshalErr)
 	}

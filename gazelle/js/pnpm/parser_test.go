@@ -1,19 +1,21 @@
 package gazelle
 
 import (
+	"bufio"
+	"strings"
 	"testing"
 )
 
 func TestPnpmLockParseDependencies(t *testing.T) {
 	t.Run("lockfile version", func(t *testing.T) {
-		v, e := parsePnpmLockVersion([]byte("lockfileVersion: 5.4"))
+		v, e := parsePnpmLockVersion(bufio.NewReader(strings.NewReader("lockfileVersion: 5.4")))
 		if e != nil {
 			t.Error(e)
 		} else if v != "5.4" {
 			t.Error("Failed to parse lockfile version 5.4")
 		}
 
-		v, e = parsePnpmLockVersion([]byte("lockfileVersion: '6.0'"))
+		v, e = parsePnpmLockVersion(bufio.NewReader(strings.NewReader("lockfileVersion: '6.0'")))
 		if e != nil {
 			t.Error(e)
 		} else if v != "6.0" {
@@ -22,35 +24,34 @@ func TestPnpmLockParseDependencies(t *testing.T) {
 	})
 
 	t.Run("empty lock file", func(t *testing.T) {
-		emptyLock, err := parsePnpmLockDependencies([]byte(""))
+		emptyLock, err := parsePnpmLockDependencies(strings.NewReader(""))
 		if err != nil {
 			t.Error("Parse failure: ", err)
 		}
-		if emptyLock == nil {
-			t.Error("Empty lock file not parsed")
+		if emptyLock != nil {
+			t.Errorf("Empty lock file returned non-nil, got: %v", emptyLock)
 		}
 	})
 
 	t.Run("unsupported version", func(t *testing.T) {
-		_, err := parsePnpmLockDependencies([]byte("lockfileVersion: 4.0"))
+		_, err := parsePnpmLockDependencies(strings.NewReader("lockfileVersion: 4.0"))
 		if err == nil {
 			t.Error("Expected error for unsupported version (4.0)")
 		}
 
-		_, err2 := parsePnpmLockDependencies([]byte("lockfileVersion: '4.0'"))
+		_, err2 := parsePnpmLockDependencies(strings.NewReader("lockfileVersion: '4.0'"))
 		if err2 == nil {
 			t.Error("Expected error for unsupported version ('4.0')")
 		}
 
-		_, err3 := parsePnpmLockDependencies([]byte("lockfileVersion: 10.0"))
+		_, err3 := parsePnpmLockDependencies(strings.NewReader("lockfileVersion: 10.0"))
 		if err3 == nil {
 			t.Error("Expected error for unsupported version (10)")
 		}
 	})
 
 	t.Run("basic deps (lockfile v5)", func(t *testing.T) {
-		basic, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: 5.4
+		basic, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: 5.4
 
 specifiers:
   '@aspect-test/a': 5.0.2
@@ -85,8 +86,7 @@ peerDependencies:
 	})
 
 	t.Run("basic deps (lockfile v6)", func(t *testing.T) {
-		basic, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: '6.0'
+		basic, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: '6.0'
 
 dependencies:
   '@aspect-test/a':
@@ -120,8 +120,7 @@ devDependencies:
 	})
 
 	t.Run("basic deps (lockfile v9)", func(t *testing.T) {
-		basic, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: '9.0'
+		basic, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: '9.0'
 
 dependencies:
   '@aspect-test/a':
@@ -155,8 +154,7 @@ devDependencies:
 	})
 
 	t.Run("basic deps in single project workspace (lockfile v6)", func(t *testing.T) {
-		basic, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: '6.0'
+		basic, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: '6.0'
 
 importers:
   .:
@@ -191,8 +189,7 @@ importers:
 	})
 
 	t.Run("basic deps in single project workspace (lockfile v9)", func(t *testing.T) {
-		basic, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: '9.0'
+		basic, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: '9.0'
 
 importers:
   .:
@@ -227,8 +224,7 @@ importers:
 	})
 
 	t.Run("basic deps in single project workspace (lockfile v5)", func(t *testing.T) {
-		basic, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: 5.4
+		basic, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: 5.4
 
 importers:
   .:
@@ -261,22 +257,20 @@ importers:
 	})
 
 	t.Run("no deps property", func(t *testing.T) {
-		empty, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: 5.4
+		empty, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: 5.4
 `))
 
 		if err != nil {
 			t.Error("Parse failure: ", err)
 		}
 
-		if len(empty) != 1 || len(empty["."]) != 0 {
+		if len(empty) != 0 {
 			t.Error("No deps parse error: ", empty)
 		}
 	})
 
 	t.Run("deps to workspace pkgs (lockfile v5)", func(t *testing.T) {
-		wksps, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: 5.3
+		wksps, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: 5.3
 importers:
   a:
     specifiers:
@@ -314,8 +308,7 @@ importers:
 	})
 
 	t.Run("deps to workspace pkgs (lockfile v6)", func(t *testing.T) {
-		wksps, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: '6.1'
+		wksps, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: '6.1'
 importers:
   a:
     dependencies:
@@ -353,8 +346,7 @@ importers:
 	})
 
 	t.Run("workspace deps (lockfile v5)", func(t *testing.T) {
-		wksps, err := parsePnpmLockDependencies([]byte(`
-lockfileVersion: 5.4
+		wksps, err := parsePnpmLockDependencies(strings.NewReader(`lockfileVersion: 5.4
 importers:
   .:
     specifiers:
