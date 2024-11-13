@@ -6,16 +6,13 @@ import (
 )
 
 // A cache of parsed regex strings
-var regexCache = make(map[string]*regexp.Regexp)
-var regexMutex sync.Mutex
+var regexCache = sync.Map{}
 
 func ParseRegex(regexStr string) *regexp.Regexp {
-	regexMutex.Lock()
-	defer regexMutex.Unlock()
-
-	if regexCache[regexStr] == nil {
-		regexCache[regexStr] = regexp.MustCompile(regexStr)
+	re, found := regexCache.Load(regexStr)
+	if !found {
+		re, _ = regexCache.LoadOrStore(regexStr, regexp.MustCompile(regexStr))
 	}
 
-	return regexCache[regexStr]
+	return re.(*regexp.Regexp)
 }

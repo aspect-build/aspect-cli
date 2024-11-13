@@ -13,21 +13,16 @@ import (
 var ErrorsQuery = `(ERROR) @error`
 
 // A cache of parsed queries per language
-var queryCache = make(map[LanguageGrammar]map[string]*sitterQuery)
-var queryMutex sync.Mutex
+var queryCache = sync.Map{}
 
 func parseQuery(lang LanguageGrammar, queryStr string) *sitterQuery {
-	queryMutex.Lock()
-	defer queryMutex.Unlock()
+	key := string(lang) + ":" + queryStr
 
-	if queryCache[lang] == nil {
-		queryCache[lang] = make(map[string]*sitterQuery)
+	q, found := queryCache.Load(key)
+	if !found {
+		q, _ = queryCache.LoadOrStore(key, mustNewQuery(lang, queryStr))
 	}
-	if queryCache[lang][queryStr] == nil {
-		queryCache[lang][queryStr] = mustNewQuery(lang, queryStr)
-	}
-
-	return queryCache[lang][queryStr]
+	return q.(*sitterQuery)
 }
 
 // Run a query finding string query matches.
