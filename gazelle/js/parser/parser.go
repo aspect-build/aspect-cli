@@ -70,12 +70,14 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 
 	if tree != nil {
 		rootNode := tree.RootNode()
+		rootNodeChildCount := int(rootNode.NamedChildCount())
 
 		// Quick pass over root nodes to find top level imports and modules
-		for i := 0; i < int(rootNode.NamedChildCount()); i++ {
+		for i := 0; i < rootNodeChildCount; i++ {
 			node := rootNode.NamedChild(i)
+			nodeType := node.Type()
 
-			if isImportStatement(node) {
+			if isImportStatement(nodeType) {
 				if rootImportNode := getImportStatementName(node); rootImportNode != nil {
 					rootImportPath := rootImportNode.Content(sourceCode)
 
@@ -83,7 +85,7 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 
 					imports = append(imports, rootImportPath)
 				}
-			} else if isModuleDeclaration(node) {
+			} else if isModuleDeclaration(nodeType) {
 				if modDeclNameNode := getModuleDeclarationName(node); modDeclNameNode != nil {
 					modDeclName := modDeclNameNode.Content(sourceCode)
 
@@ -97,7 +99,7 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 					for j := 0; j < int(moduleRootNode.NamedChildCount()); j++ {
 						moduleNode := moduleRootNode.NamedChild(j)
 
-						if isImportStatement(moduleNode) {
+						if isImportStatement(moduleNode.Type()) {
 							if moduleImportNode := getImportStatementName(moduleNode); moduleImportNode != nil {
 								moduleImport := moduleImportNode.Content(sourceCode)
 
@@ -108,9 +110,9 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 						}
 					}
 				}
-			} else if isPotentialTripleSlashDirective(node, sourceCode) {
-				typesImport, isTripleSlash := getTripleSlashDirectiveModule(node, sourceCode)
-				if isTripleSlash {
+			} else if nodeType == "comment" {
+				comment := node.Content(sourceCode)
+				if typesImport, isTripleSlash := getTripleSlashDirectiveModule(comment); isTripleSlash {
 					imports = append(imports, typesImport)
 				}
 			}
@@ -145,25 +147,17 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 	return result, errs
 }
 
-// Determine if a node is potentially a triple-slash directive.
-// To be used before running a more expensive check and triple-slash directive extraction.
+// Determine if a node is a triple-slash directive and parse the type reference.
+//
 // See: https://www.typescriptlang.org/docs/handbook/triple-slash-directives.html
-func isPotentialTripleSlashDirective(node *sitter.Node, sourceCode []byte) bool {
-	nodeType := node.Type()
-	if nodeType != "comment" {
-		return false
-	}
-
-	comment := node.Content(sourceCode)
-
-	return strings.HasPrefix(comment, "///")
-}
-
-// Extract a /// <reference> from a comment node
+//
 // Note: could also potentially use a treesitter query such as:
 // /  `(program (comment) @result (#match? @c "^///\\s*<reference\\s+(lib|types|path)\\s*=\\s*\"[^\"]+\""))`
-func getTripleSlashDirectiveModule(node *sitter.Node, sourceCode []byte) (string, bool) {
-	comment := node.Content(sourceCode)
+func getTripleSlashDirectiveModule(comment string) (string, bool) {
+	if !strings.HasPrefix(comment, "///") {
+		return "", false
+	}
+
 	submatches := tripleSlashRe.FindAllStringSubmatchIndex(comment, -1)
 	if len(submatches) != 1 {
 		return "", false
@@ -174,9 +168,7 @@ func getTripleSlashDirectiveModule(node *sitter.Node, sourceCode []byte) (string
 }
 
 // Determine if a node is an import/export statement that may contain a `from` value.
-func isImportStatement(node *sitter.Node) bool {
-	nodeType := node.Type()
-
+func isImportStatement(nodeType string) bool {
 	// Top level `import ... from "..."` statement.
 	// Top level `export ... from "..."` statement.
 	return nodeType == "import_statement" || nodeType == "export_statement"
@@ -192,9 +184,7 @@ func getImportStatementName(importStatement *sitter.Node) *sitter.Node {
 }
 
 // Determine if a node is a module declaration.
-func isModuleDeclaration(node *sitter.Node) bool {
-	nodeType := node.Type()
-
+func isModuleDeclaration(nodeType string) bool {
 	// `declare module "..." [{ ... }]` statement.
 	// See: https://www.typescriptlang.org/docs/handbook/modules.html#ambient-modules
 	//
