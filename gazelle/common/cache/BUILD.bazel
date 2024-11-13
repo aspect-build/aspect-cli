@@ -1,0 +1,19 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "cache",
+    srcs = [
+        "cache.go",
+        "configurer.go",
+        "disk.go",
+        "noop.go",
+    ],
+    importpath = "aspect.build/cli/gazelle/common/cache",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/logger",
+        "@bazel_gazelle//config:go_default_library",
+        "@bazel_gazelle//language:go_default_library",
+        "@bazel_gazelle//rule:go_default_library",
+    ],
+)

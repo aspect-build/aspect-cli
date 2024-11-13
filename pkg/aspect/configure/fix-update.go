@@ -32,6 +32,7 @@ import (
 
 	"github.com/bazelbuild/buildtools/build"
 
+	"aspect.build/cli/gazelle/common/cache"
 	wspace "aspect.build/cli/pkg/aspect/configure/internal/wspace"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	gzflag "github.com/bazelbuild/bazel-gazelle/flag"
@@ -271,11 +272,12 @@ type FixUpdateStatus struct {
 func runFixUpdate(wd string, languages []language.Language, cmd command, args []string) (*FixUpdateStatus, error) {
 	stats := FixUpdateStatus{}
 
-	cexts := make([]config.Configurer, 0, len(languages)+4)
+	cexts := make([]config.Configurer, 0, len(languages)+5)
 	cexts = append(cexts,
 		&config.CommonConfigurer{},
 		&updateConfigurer{},
 		&walk.Configurer{},
+		cache.NewConfigurer(), // NOTE: additional aspect-cli caching APIs
 		&resolve.Configurer{})
 
 	for _, lang := range languages {
@@ -468,7 +470,9 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 		}
 	})
 
-	for _, lang := range languages {
+	// NOTE: additional aspect-cli patch to invoke DoneGeneratingRules on all extensions
+	// and not only the languages.
+	for _, lang := range cexts {
 		if finishable, ok := lang.(language.FinishableLanguage); ok {
 			finishable.DoneGeneratingRules()
 		}
