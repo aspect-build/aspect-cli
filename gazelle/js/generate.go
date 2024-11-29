@@ -541,6 +541,13 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 				existing.DelAttr("source_map")
 			}
 
+			// Reflect the tsconfig incremental in the ts_project rule
+			if tsconfig.Incremental != nil {
+				sourceRule.SetAttr("incremental", *tsconfig.Incremental)
+			} else if existing != nil {
+				existing.DelAttr(("incremental"))
+			}
+
 			// Reflect the tsconfig resolve_json_module in the ts_project rule
 			if tsconfig.ResolveJsonModule != nil {
 				sourceRule.SetAttr("resolve_json_module", *tsconfig.ResolveJsonModule)
@@ -575,6 +582,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 			existing.DelAttr("composite")
 			existing.DelAttr("declaration")
 			existing.DelAttr("declaration_map")
+			existing.DelAttr("incremental")
 			existing.DelAttr("out_dir")
 			existing.DelAttr("preserve_jsx")
 			existing.DelAttr("resolve_json_module")

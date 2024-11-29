@@ -32,6 +32,7 @@ type tsCompilerOptionsJSON struct {
 	Composite         *bool                `json:"composite"`
 	Declaration       *bool                `json:"declaration"`
 	DeclarationMap    *bool                `json:"declarationMap"`
+	Incremental       *bool                `json:"incremental"`
 	SourceMap         *bool                `json:"sourceMap"`
 	ResolveJsonModule *bool                `json:"resolveJsonModule"`
 	OutDir            *string              `json:"outDir"`
@@ -85,6 +86,7 @@ type TsConfig struct {
 	Composite         *bool
 	Declaration       *bool
 	DeclarationMap    *bool
+	Incremental       *bool
 	SourceMap         *bool
 	OutDir            string
 	RootDir           string
@@ -240,6 +242,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		declarationMap = baseConfig.DeclarationMap
 	}
 
+	var incremental *bool
+	if c.CompilerOptions.Incremental != nil {
+		incremental = c.CompilerOptions.Incremental
+	} else if baseConfig != nil {
+		incremental = baseConfig.Incremental
+	}
+
 	var sourceMap *bool
 	if c.CompilerOptions.SourceMap != nil {
 		sourceMap = c.CompilerOptions.SourceMap
@@ -322,6 +331,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		Composite:         composite,
 		Declaration:       declaration,
 		DeclarationMap:    declarationMap,
+		Incremental:       incremental,
 		SourceMap:         sourceMap,
 		ResolveJsonModule: resolveJsonModule,
 		OutDir:            OutDir,
