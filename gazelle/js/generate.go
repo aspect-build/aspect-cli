@@ -513,6 +513,13 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 				existing.DelAttr("allow_js")
 			}
 
+			// Reflect the tsconfig composite in the ts_project rule
+			if tsconfig.Composite != nil {
+				sourceRule.SetAttr("composite", *tsconfig.Composite)
+			} else if existing != nil {
+				existing.DelAttr("composite")
+			}
+
 			// Reflect the tsconfig declaration in the ts_project rule
 			if tsconfig.Declaration != nil {
 				sourceRule.SetAttr("declaration", *tsconfig.Declaration)
@@ -565,6 +572,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 			// Clear tsconfig related attributes if no tsconfig is found
 			existing.DelAttr("tsconfig")
 			existing.DelAttr("allow_js")
+			existing.DelAttr("composite")
 			existing.DelAttr("declaration")
 			existing.DelAttr("declaration_map")
 			existing.DelAttr("out_dir")
