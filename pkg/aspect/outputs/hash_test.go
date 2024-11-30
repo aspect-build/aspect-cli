@@ -1,5 +1,5 @@
 /*
- * Copyright 2023 Aspect Build Systems, Inc.
+ * Copyright 2022 Aspect Build Systems, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,8 +37,8 @@ func TestHash(t *testing.T) {
 	t.Run("hashMurmur3Sync and hashMurmur3Concurrent return the same hash for the same set of files", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 
-		const testTarget1 = "//pkg/aspect/outputs:test_label"
-		const testTarget2 = "//pkg/aspect/outputs:test_label"
+		const testTarget1 = "//cli/core/pkg/aspect/outputs:test_label"
+		const testTarget2 = "//cli/core/pkg/aspect/outputs:test_label"
 
 		hashFiles := make(map[string][]string)
 		hashFiles["//:test_label_1"] = testFixtures(1)
