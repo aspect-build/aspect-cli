@@ -85,7 +85,7 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 			Stderr: &stderr,
 		}
 
-		err := bzl.RunCommand(buildStreams, nil, "build", aspectplugin.From)
+		err := bzl.RunCommand(buildStreams, nil, "build", "--remote_download_outputs=toplevel", aspectplugin.From)
 		if err != nil {
 			var exitErr *aspecterrors.ExitError
 			if errors.As(err, &exitErr) {
