@@ -47,6 +47,7 @@ func (ts *typeScriptLang) KnownDirectives() []string {
 		Directive_GenerationMode,
 		Directive_Visibility,
 		Directive_Lockfile,
+		Directive_TsconfigFile,
 		Directive_IgnoreImports,
 		Directive_Resolve,
 		Directive_ValidateImportStatements,
@@ -123,9 +124,8 @@ func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
 	}
 
 	// tsconfig
-	// TODO: add support for alternate tsconfig names
-	if _, hasTsconfig := ents[config.defaultTsconfigName]; hasTsconfig {
-		ts.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.defaultTsconfigName)
+	if _, hasTsconfig := ents[config.tsconfigName]; hasTsconfig {
+		ts.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.tsconfigName)
 	}
 }
 
@@ -172,6 +172,8 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 
 		case Directive_Lockfile:
 			config.SetPnpmLockfile(value)
+		case Directive_TsconfigFile:
+			config.SetTsconfigFile(value)
 		case Directive_IgnoreImports:
 			config.AddIgnoredImport(strings.TrimSpace(value))
 		case Directive_Resolve:
