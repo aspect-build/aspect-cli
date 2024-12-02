@@ -19,8 +19,6 @@ package outputs
 // For copybara, this import comes alphabetically before aspect.build
 // and causes the line ordering in the import to change.
 // So we just import it in a separate block.
-import "github.com/alphadose/haxmap"
-
 import (
 	"bufio"
 	"context"
@@ -32,8 +30,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/alphadose/haxmap"
 	"aspect.build/cli/pkg/bazel"
 	"github.com/rogpeppe/go-internal/dirhash"
+
 	concurrently "github.com/tejzpr/ordered-concurrently/v3"
 	"github.com/twmb/murmur3"
 )
@@ -96,7 +96,7 @@ func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath s
 }
 
 // =================================================================================================
-func gatherExecutableHashes(outs []bazel.Output) (map[string]string, error) {
+func gatherExecutableHashes(outs []bazel.Output, salt string) (map[string]string, error) {
 	// map from Label to the files/directories which should be hashed
 	hashFiles := make(map[string][]string)
 
@@ -110,10 +110,10 @@ func gatherExecutableHashes(outs []bazel.Output) (map[string]string, error) {
 		}
 	}
 
-	return HashLabelFiles(hashFiles, numConcurrentHashingThreads)
+	return HashLabelFiles(hashFiles, numConcurrentHashingThreads, salt)
 }
 
-func HashLabelFiles(labelFiles map[string][]string, concurrency int) (map[string]string, error) {
+func HashLabelFiles(labelFiles map[string][]string, concurrency int, salt string) (map[string]string, error) {
 	// cache of file hashes so we don't hash the same file twice for different targets
 	mep := haxmap.New[string, string]()
 	result := make(map[string]string)
@@ -123,9 +123,9 @@ func HashLabelFiles(labelFiles map[string][]string, concurrency int) (map[string
 		if concurrency == 0 {
 			// Fully synchronous hash implementation is used for testing to ensure that the faster
 			// concurrent implementation generates an identical hash to the slower sync implementation.
-			hash, err = hashMurmur3Sync(files, mep)
+			hash, err = hashMurmur3Sync(files, mep, salt)
 		} else {
-			hash, err = hashMurmur3Concurrent(files, mep, concurrency)
+			hash, err = hashMurmur3Concurrent(files, mep, concurrency, salt)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to compute runfiles hash for manifest: %w\n", err)
@@ -138,7 +138,7 @@ func HashLabelFiles(labelFiles map[string][]string, concurrency int) (map[string
 // =================================================================================================
 // https://github.com/twmb/murmur3
 // =================================================================================================
-func hashMurmur3Sync(files []string, mep *haxmap.Map[string, string]) (string, error) {
+func hashMurmur3Sync(files []string, mep *haxmap.Map[string, string], salt string) (string, error) {
 	h := murmur3.New128()
 	files = append([]string(nil), files...)
 	sort.Strings(files)
@@ -165,6 +165,7 @@ func hashMurmur3Sync(files []string, mep *haxmap.Map[string, string]) (string, e
 		mep.Set(file, s)
 		h.Write([]byte(s))
 	}
+	h.Write([]byte(salt))
 	return "m3:" + base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
 }
 
@@ -182,7 +183,7 @@ type hashResult struct {
 	err    error
 }
 
-func hashMurmur3Concurrent(files []string, mep *haxmap.Map[string, string], numThreads int) (string, error) {
+func hashMurmur3Concurrent(files []string, mep *haxmap.Map[string, string], numThreads int, salt string) (string, error) {
 	h := murmur3.New128()
 	files = append([]string(nil), files...)
 	sort.Strings(files)
@@ -230,6 +231,7 @@ func hashMurmur3Concurrent(files []string, mep *haxmap.Map[string, string], numT
 			return "", fmt.Errorf("expected go routine to return a cachedHashResult or hashResult")
 		}
 	}
+	h.Write([]byte(salt))
 	return "m3:" + base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
 }
 

@@ -76,5 +76,8 @@ Middleman bazel-out/darwin-fastbuild/internal/_middlemen/cli_Srelease-runfiles`,
 			outputs.New(streams, bzl).Run,
 		),
 	}
+
+	outputs.AddFlags(cmd.Flags())
+
 	return cmd
 }

@@ -15,6 +15,7 @@ go_library(
         "@com_github_alphadose_haxmap//:haxmap",
         "@com_github_rogpeppe_go_internal//dirhash",
         "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_pflag//:pflag",
         "@com_github_tejzpr_ordered_concurrently_v3//:ordered-concurrently",
         "@com_github_twmb_murmur3//:murmur3",
     ],
@@ -24,11 +25,16 @@ TEST_FIXTURES = list(range(9))
 
 go_test(
     name = "outputs_test",
-    srcs = ["hash_test.go"],
+    srcs = [
+        "hash_test.go",
+        "outputs_test.go",
+    ],
     data = ["test_fixture_{}".format(fixture) for fixture in TEST_FIXTURES],
     deps = [
         ":outputs",
         "@com_github_onsi_gomega//:gomega",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_pflag//:pflag",
     ],
 )
 
