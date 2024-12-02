@@ -17,4 +17,4 @@ Generated targets include:
 
 ### Directives
 
-See [Aspect CLI Directives](https://docs.aspect.build/cli/help/directives.md#JavaScript) for a list of supported directives.
+See [Aspect CLI Directives](https://docs.aspect.build/cli/help/directives#JavaScript) for a list of supported directives.
