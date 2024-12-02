@@ -54,7 +54,8 @@ Middleman bazel-out/darwin-fastbuild/internal/_middlemen/cli_Srelease-runfiles
 ### Options
 
 ```
-  -h, --help   help for outputs
+      --hash_salt string   When 'ExecutableHash' is specified, this value will be added as a suffix to every hash
+  -h, --help               help for outputs
 ```
 
 ### Options inherited from parent commands

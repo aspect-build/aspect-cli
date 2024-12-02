@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
@@ -39,10 +40,45 @@ func New(streams ioutils.Streams, bzl bazel.Bazel) *Outputs {
 	}
 }
 
-func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) error {
-	nonFlags, bazelFlags, err := bazel.SeparateBazelFlags("aquery", args)
+func AddFlags(flagSet *pflag.FlagSet) {
+	flagSet.String("hash_salt", "", "When 'ExecutableHash' is specified, this value will be added as a suffix to every hash")
+}
+
+func remove(slice []string, i int) []string {
+	return append(slice[:i], slice[i+1:]...)
+}
+
+func RemoveCobraFlagsFromArgs(cmd *cobra.Command, args []string) []string {
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		for i, arg := range args {
+			if arg == fmt.Sprintf("--%s=%s", f.Name, f.Value) {
+				args = remove(args, i)
+				break
+			} else if arg == fmt.Sprintf("--%s", f.Name) &&
+				len(args)+1 > i &&
+				args[i+1] == f.Value.String() {
+				args = remove(args, i+1)
+				args = remove(args, i)
+				break
+			}
+		}
+	})
+	return args
+}
+
+func (runner *Outputs) Run(_ context.Context, cmd *cobra.Command, args []string) error {
+	nonBazelFlags, bazelFlags, err := bazel.SeparateBazelFlags("aquery", args)
 	if err != nil {
 		return err
+	}
+
+	salt := ""
+	if cmd != nil {
+		nonBazelFlags = RemoveCobraFlagsFromArgs(cmd, nonBazelFlags)
+		salt, err = cmd.Flags().GetString("hash_salt")
+		if err != nil {
+			return err
+		}
 	}
 
 	// Test to see if the command has been passed the `--query_file` Bazel flag.
@@ -59,13 +95,13 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 	// The code in `bzl.Aquery` will filter that.
 	var query string
 	var mnemonicFilter string
-	numNonFlags := len(nonFlags)
+	numNonFlags := len(nonBazelFlags)
 
 	if hasQueryFileBazelFlag {
 		// We may have a single arg that is the mnemonic filter, or none.
 		if numNonFlags == 1 {
 			// The first should be the mnemonic
-			mnemonicFilter = nonFlags[0]
+			mnemonicFilter = nonBazelFlags[0]
 		} else if numNonFlags > 1 {
 			return fmt.Errorf("expecting a maximum of 1 argument to outputs when using --query_file, got %v", numNonFlags)
 		}
@@ -74,10 +110,10 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 		if numNonFlags < 1 {
 			return fmt.Errorf("a query expression is required as the first argument to outputs command")
 		}
-		query = nonFlags[0]
+		query = nonBazelFlags[0]
 
 		if numNonFlags == 2 {
-			mnemonicFilter = nonFlags[1]
+			mnemonicFilter = nonBazelFlags[1]
 		} else if numNonFlags > 2 {
 			return fmt.Errorf("expecting a maximum of 2 arguments to outputs command but got %v", numNonFlags)
 		}
@@ -92,7 +128,7 @@ func (runner *Outputs) Run(_ context.Context, _ *cobra.Command, args []string) e
 	// Special case pseudo-mnemonic indicating we should compute an overall hash
 	// for any executables in the aquery result
 	if mnemonicFilter == "ExecutableHash" {
-		hashes, err := gatherExecutableHashes(outs)
+		hashes, err := gatherExecutableHashes(outs, salt)
 		if err != nil {
 			return err
 		}
