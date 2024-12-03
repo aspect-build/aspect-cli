@@ -29,8 +29,10 @@ import (
 
 type tsCompilerOptionsJSON struct {
 	AllowJs           *bool                `json:"allowJs"`
+	Composite         *bool                `json:"composite"`
 	Declaration       *bool                `json:"declaration"`
 	DeclarationMap    *bool                `json:"declarationMap"`
+	Incremental       *bool                `json:"incremental"`
 	SourceMap         *bool                `json:"sourceMap"`
 	ResolveJsonModule *bool                `json:"resolveJsonModule"`
 	OutDir            *string              `json:"outDir"`
@@ -81,8 +83,10 @@ type TsConfig struct {
 
 	AllowJs           *bool
 	ResolveJsonModule *bool
+	Composite         *bool
 	Declaration       *bool
 	DeclarationMap    *bool
+	Incremental       *bool
 	SourceMap         *bool
 	OutDir            string
 	RootDir           string
@@ -217,6 +221,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		allowJs = baseConfig.AllowJs
 	}
 
+	var composite *bool
+	if c.CompilerOptions.Composite != nil {
+		composite = c.CompilerOptions.Composite
+	} else if baseConfig != nil {
+		composite = baseConfig.Composite
+	}
+
 	var declaration *bool
 	if c.CompilerOptions.Declaration != nil {
 		declaration = c.CompilerOptions.Declaration
@@ -229,6 +240,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		declarationMap = c.CompilerOptions.DeclarationMap
 	} else if baseConfig != nil {
 		declarationMap = baseConfig.DeclarationMap
+	}
+
+	var incremental *bool
+	if c.CompilerOptions.Incremental != nil {
+		incremental = c.CompilerOptions.Incremental
+	} else if baseConfig != nil {
+		incremental = baseConfig.Incremental
 	}
 
 	var sourceMap *bool
@@ -310,8 +328,10 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		ConfigDir:         configDir,
 		ConfigName:        configName,
 		AllowJs:           allowJs,
+		Composite:         composite,
 		Declaration:       declaration,
 		DeclarationMap:    declarationMap,
+		Incremental:       incremental,
 		SourceMap:         sourceMap,
 		ResolveJsonModule: resolveJsonModule,
 		OutDir:            OutDir,
