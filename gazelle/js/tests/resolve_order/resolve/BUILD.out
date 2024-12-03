@@ -22,6 +22,9 @@ npm_link_all_packages(name = "node_modules")
 
 ts_project(
     name = "resolve",
-    srcs = ["test.ts"],
+    srcs = [
+        "test.ts",
+        "the-import.ts",
+    ],
     deps = ["//resolve:directive-resolve"],
 )

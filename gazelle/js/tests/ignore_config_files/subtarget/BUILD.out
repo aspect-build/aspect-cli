@@ -10,13 +10,10 @@ genrule(
 ts_project(
     name = "subtarget",
     srcs = [
+        "generated.ts",
         "index.ts",
         "nested/star-ig.ts",
         "r2.ts",
     ],
-    deps = [
-        ":generated.ts",
-        "//:ignore_config_files",
-        "//:subdir/generated.ts",
-    ],
+    deps = ["//:ignore_config_files"],
 )

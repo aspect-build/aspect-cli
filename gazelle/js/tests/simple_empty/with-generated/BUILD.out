@@ -1,0 +1,6 @@
+# Generated .ts, but no non-generated so no ts_project is generated
+genrule(
+    name = "gen-1",
+    outs = ["generated.ts"],
+    cmd = "echo 'export const subtarget = 3' > $@",
+)
