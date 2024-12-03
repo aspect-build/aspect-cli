@@ -28,6 +28,8 @@ const (
 	Directive_Visibility = "js_visibility"
 	// The pnpm-lock.yaml file.
 	Directive_Lockfile = "js_pnpm_lockfile"
+	// The tsconfig.json file.
+	Directive_TsconfigFile = "js_tsconfig_file"
 	// Directive_IgnoreImports represents the directive that controls the
 	// ignored dependencies from the generated targets.
 	// Sub-packages extend this value.
@@ -127,9 +129,6 @@ var (
 
 	// Array of default typescript source file extensions
 	defaultTypescriptFileExtensionsArray = []string{"ts", "tsx", "mts", "cts"}
-
-	// The default TypeScript config file name
-	defaultTsconfigName = "tsconfig.json"
 )
 
 // ValidationMode represents what should happen when validation errors are found.
@@ -165,6 +164,7 @@ type JsGazelleConfig struct {
 	packageGenerationEnabled  NpmPackageMode
 
 	pnpmLockPath string
+	tsconfigName string
 
 	ignoreDependencies       []string
 	resolves                 *linkedhashmap.Map
@@ -176,9 +176,6 @@ type JsGazelleConfig struct {
 	targetNamingOverrides      map[string]string
 	npmPackageNamingConvention string
 	tsProtoLibraryName         string
-
-	// Name/location of tsconfig files relative to BUILDs
-	defaultTsconfigName string
 }
 
 // New creates a new JsGazelleConfig.
@@ -191,6 +188,7 @@ func newRootConfig() *JsGazelleConfig {
 		packageGenerationEnabled:   NpmPackageReferencedMode,
 		packageTargetKind:          PackageTargetKind_Package,
 		pnpmLockPath:               "pnpm-lock.yaml",
+		tsconfigName:               "tsconfig.json",
 		ignoreDependencies:         make([]string, 0),
 		resolves:                   linkedhashmap.New(),
 		validateImportStatements:   ValidationError,
@@ -199,7 +197,6 @@ func newRootConfig() *JsGazelleConfig {
 		targetNamingOverrides:      make(map[string]string),
 		tsProtoLibraryName:         DefaultProtoLibraryName,
 		targets:                    DefaultSourceGlobs[:],
-		defaultTsconfigName:        defaultTsconfigName,
 	}
 }
 
@@ -309,6 +306,14 @@ func (c *JsGazelleConfig) SetPnpmLockfile(pnpmLockPath string) {
 }
 func (c *JsGazelleConfig) PnpmLockfile() string {
 	return c.pnpmLockPath
+}
+
+// Set the tsconfig.json file name
+func (c *JsGazelleConfig) SetTsconfigFile(tsconfigName string) {
+	c.tsconfigName = tsconfigName
+}
+func (c *JsGazelleConfig) GetTsconfigFile() string {
+	return c.tsconfigName
 }
 
 // Adds a dependency to the list of ignored dependencies for

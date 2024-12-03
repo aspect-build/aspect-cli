@@ -330,7 +330,7 @@ func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args lang
 
 	for _, reference := range tsconfig.References {
 		// TODO: how do we know the referenced tsconfig filename?
-		referenceFile := cfg.defaultTsconfigName
+		referenceFile := cfg.tsconfigName
 
 		imports = append(imports, ImportStatement{
 			ImportSpec: resolve.ImportSpec{
