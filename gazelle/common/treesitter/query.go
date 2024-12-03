@@ -12,6 +12,8 @@ type sitterQuery struct {
 	predicatePatterns [][][]sitter.QueryPredicateStep
 }
 
+var _ TreeQuery = (*sitterQuery)(nil)
+
 func mustNewQuery(lang LanguageGrammar, query string) *sitterQuery {
 	q := mustNewTreeQuery(lang, query)
 

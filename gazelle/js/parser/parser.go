@@ -25,9 +25,9 @@ type ParseResult struct {
 
 // Queries finding import statements, tagging such Nodes as 'from' captures.
 // Optionally filtering captures using 'equals-{name}' vars and #eq? statements.
-var importQueries = map[string]string{
+var importQueries = map[string]treeutils.TreeQuery{
 	// Dynamic `import("...")` statement
-	"dynamic_esm_import": `
+	"dynamic_esm_import": treeutils.GetQuery(treeutils.Typescript, `
 		(call_expression
 			function: (import)
 			arguments: (
@@ -36,10 +36,10 @@ var importQueries = map[string]string{
 				)
 			)
 		)
-	`,
+	`),
 
 	// CJS `require("...")` statement
-	"require": `
+	"require": treeutils.GetQuery(treeutils.Typescript, `
 		(call_expression
 			function: (identifier) @equals-require
 			arguments: (
@@ -50,7 +50,7 @@ var importQueries = map[string]string{
 
 			(#eq? @equals-require "require")
 		)
-	`,
+	`),
 }
 
 var tripleSlashRe = regexp.MustCompile(`^///\s*<reference\s+(?:lib|path|types)\s*=\s*"(?P<lib>[^"]+)"`)
