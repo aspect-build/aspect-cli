@@ -27,6 +27,9 @@ npm_link_all_packages(name = "node_modules")
 
 ts_project(
     name = "base",
-    srcs = ["test.ts"],
+    srcs = [
+        "test.ts",
+        "the-import.ts",
+    ],
     deps = ["//base:directive-resolve"],
 )

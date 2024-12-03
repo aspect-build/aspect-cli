@@ -21,13 +21,15 @@ genrule(
 
 ts_project(
     name = "simple_import_generated",
-    srcs = ["main.ts"],
+    srcs = [
+        "main.ts",
+        "r1.ts",
+        "r2.d.ts",
+        "subdir/index.ts",
+        "subdir/sd1.ts",
+        "subdir/sd2.d.ts",
+    ],
     deps = [
-        ":r1.ts",
-        ":r2.d.ts",
-        ":subdir/index.ts",
-        ":subdir/sd1.ts",
-        ":subdir/sd2.d.ts",
         "//subbuild:sb1.ts",
         "//subbuild:sb2.d.ts",
         "//subbuild:sb3.d.ts",

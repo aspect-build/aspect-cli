@@ -20,15 +20,13 @@ ts_project(
     srcs = [
         "main.ts",
         "r2.ts",
+        "subdir/generated.ts",
         "subdir/index.ts",
+        "subdir/nested/generated.ts",
         "subdir/nested/index.ts",
         "subdir/not.nested-ig.ts",
         "subdir2/direct-ig.ts",
         "subdir2/modules.ts",
         "subdir2/not.nested-ig.ts",
-    ],
-    deps = [
-        ":subdir/generated.ts",
-        ":subdir/nested/generated.ts",
     ],
 )
