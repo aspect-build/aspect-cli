@@ -4,10 +4,12 @@ specifiers:
   '@testing-library/jest-dom': ^5.16.5
   '@types/jquery': 3.5.14
   '@types/testing-library__jest-dom': ^5.14.5
+  cypress: ^13.16.0
   jquery: 3.6.1
 
 dependencies:
   '@testing-library/jest-dom': 5.16.5
   '@types/jquery': 3.5.14
   '@types/testing-library__jest-dom': 5.14.5
+  cypress: 13.16.0
   jquery: 3.6.1

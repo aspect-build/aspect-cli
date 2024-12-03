@@ -23,6 +23,10 @@ type ImportStatement struct {
 
 	// If the import is optional and failure to resolve should not be an error
 	Optional bool
+
+	// If the import is explicitly for types, in which case prefer @types package
+	// dependencies when types are shipped separately
+	TypesOnly bool
 }
 
 // Npm link-all rule import data
