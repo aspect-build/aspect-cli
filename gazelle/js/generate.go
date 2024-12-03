@@ -504,6 +504,13 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 				existing.DelAttr("allow_js")
 			}
 
+			// Reflect the tsconfig composite in the ts_project rule
+			if tsconfig.Composite != nil {
+				sourceRule.SetAttr("composite", *tsconfig.Composite)
+			} else if existing != nil {
+				existing.DelAttr("composite")
+			}
+
 			// Reflect the tsconfig declaration in the ts_project rule
 			if tsconfig.Declaration != nil {
 				sourceRule.SetAttr("declaration", *tsconfig.Declaration)
@@ -523,6 +530,13 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 				sourceRule.SetAttr("source_map", *tsconfig.SourceMap)
 			} else if existing != nil {
 				existing.DelAttr("source_map")
+			}
+
+			// Reflect the tsconfig incremental in the ts_project rule
+			if tsconfig.Incremental != nil {
+				sourceRule.SetAttr("incremental", *tsconfig.Incremental)
+			} else if existing != nil {
+				existing.DelAttr(("incremental"))
 			}
 
 			// Reflect the tsconfig resolve_json_module in the ts_project rule
@@ -556,8 +570,10 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 			// Clear tsconfig related attributes if no tsconfig is found
 			existing.DelAttr("tsconfig")
 			existing.DelAttr("allow_js")
+			existing.DelAttr("composite")
 			existing.DelAttr("declaration")
 			existing.DelAttr("declaration_map")
+			existing.DelAttr("incremental")
 			existing.DelAttr("out_dir")
 			existing.DelAttr("preserve_jsx")
 			existing.DelAttr("resolve_json_module")
