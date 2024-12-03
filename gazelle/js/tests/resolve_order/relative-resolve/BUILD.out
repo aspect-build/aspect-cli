@@ -22,6 +22,8 @@ npm_link_all_packages(name = "node_modules")
 
 ts_project(
     name = "relative-resolve",
-    srcs = ["test.ts"],
-    deps = [":the-import.ts"],
+    srcs = [
+        "test.ts",
+        "the-import.ts",
+    ],
 )
