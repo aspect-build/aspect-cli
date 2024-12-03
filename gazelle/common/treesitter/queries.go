@@ -12,10 +12,13 @@ import (
 
 var ErrorsQuery = `(ERROR) @error`
 
+type TreeQuery interface {
+}
+
 // A cache of parsed queries per language
 var queryCache = sync.Map{}
 
-func parseQuery(lang LanguageGrammar, queryStr string) *sitterQuery {
+func GetQuery(lang LanguageGrammar, queryStr string) *sitterQuery {
 	key := string(lang) + ":" + queryStr
 
 	q, found := queryCache.Load(key)
@@ -26,11 +29,11 @@ func parseQuery(lang LanguageGrammar, queryStr string) *sitterQuery {
 }
 
 // Run a query finding string query matches.
-func (tree *treeAst) QueryStrings(query, returnVar string) []string {
+func (tree *treeAst) QueryStrings(query TreeQuery, returnVar string) []string {
 	rootNode := tree.sitterTree.RootNode()
 	results := make([]string, 0, 5)
 
-	sitterQuery := parseQuery(tree.lang, query)
+	sitterQuery := query.(*sitterQuery)
 
 	// Execute the query.
 	qc := sitter.NewQueryCursor()
@@ -71,8 +74,8 @@ func (qr queryResult) Captures() map[string]string {
 	return qr.QueryCaptures
 }
 
-func (tree *treeAst) Query(query string) <-chan ASTQueryResult {
-	q := parseQuery(tree.lang, query)
+func (tree *treeAst) Query(query TreeQuery) <-chan ASTQueryResult {
+	q := query.(*sitterQuery)
 	rootNode := tree.sitterTree.RootNode()
 
 	out := make(chan ASTQueryResult)
@@ -160,7 +163,7 @@ func (tree *treeAst) QueryErrors() []error {
 
 	errors := make([]error, 0)
 
-	query := parseQuery(tree.lang, ErrorsQuery)
+	query := GetQuery(tree.lang, ErrorsQuery)
 
 	// Execute the import query
 	qc := sitter.NewQueryCursor()

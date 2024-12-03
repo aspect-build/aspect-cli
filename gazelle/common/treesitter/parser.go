@@ -45,12 +45,12 @@ type ASTQueryResult interface {
 }
 
 type AST interface {
-	Query(query string) <-chan ASTQueryResult
+	Query(query TreeQuery) <-chan ASTQueryResult
 	QueryErrors() []error
 
 	// Wrapper utils
 	// TODO: delete
-	QueryStrings(query, returnVar string) []string
+	QueryStrings(query TreeQuery, returnVar string) []string
 	RootNode() *sitter.Node
 }
 type treeAst struct {
