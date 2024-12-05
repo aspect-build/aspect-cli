@@ -53,7 +53,7 @@ var importQueries = map[string]string{
 	`,
 }
 
-var tripleSlashRe = regexp.MustCompile(`^///\s*<reference\s+(?:lib|path|types)\s*=\s*"(?P<lib>[^"]+)"`)
+var tripleSlashRe = regexp.MustCompile(`^///\s*<reference\s+(?P<attr>lib|path|types)\s*=\s*"(?P<lib>[^"]+)"`)
 
 func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 	imports := make([]string, 0, 5)
@@ -112,8 +112,12 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 				}
 			} else if nodeType == "comment" {
 				comment := node.Content(sourceCode)
-				if typesImport, isTripleSlash := getTripleSlashDirectiveModule(comment); isTripleSlash {
-					imports = append(imports, typesImport)
+				if attr, typesImport, isTripleSlash := getTripleSlashDirectiveModule(comment); isTripleSlash {
+					// See: https://www.typescriptlang.org/docs/handbook/triple-slash-directives.html#-reference-lib-
+					// > This directive allows a file to explicitly include an existing built-in lib file
+					if attr != "lib" {
+						imports = append(imports, typesImport)
+					}
 				}
 			}
 		}
@@ -153,18 +157,19 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 //
 // Note: could also potentially use a treesitter query such as:
 // /  `(program (comment) @result (#match? @c "^///\\s*<reference\\s+(lib|types|path)\\s*=\\s*\"[^\"]+\""))`
-func getTripleSlashDirectiveModule(comment string) (string, bool) {
+func getTripleSlashDirectiveModule(comment string) (string, string, bool) {
 	if !strings.HasPrefix(comment, "///") {
-		return "", false
+		return "", "", false
 	}
 
 	submatches := tripleSlashRe.FindAllStringSubmatchIndex(comment, -1)
 	if len(submatches) != 1 {
-		return "", false
+		return "", "", false
 	}
 
+	attr := tripleSlashRe.ExpandString(make([]byte, 0), "$attr", comment, submatches[0])
 	lib := tripleSlashRe.ExpandString(make([]byte, 0), "$lib", comment, submatches[0])
-	return string(lib), len(lib) > 0
+	return string(attr), string(lib), len(attr) > 0 && len(lib) > 0
 }
 
 // Determine if a node is an import/export statement that may contain a `from` value.
