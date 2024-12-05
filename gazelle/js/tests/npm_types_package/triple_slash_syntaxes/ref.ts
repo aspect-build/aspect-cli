@@ -1,7 +1,7 @@
 // triple-slash references with various odd syntaxes/spacing
 
 // No space
-///<reference lib="jquery">
+///<reference types="jquery">
 
 // Random extra spaces
 ///     <reference   types = "@testing-library/jest-dom"  >

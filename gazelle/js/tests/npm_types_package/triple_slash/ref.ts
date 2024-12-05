@@ -1,5 +1,8 @@
-/// References to npm packages, via both "lib" and "types"
-/// <reference lib="jquery">
+// References to built-in libs
+/// <reference lib="webworker">
+
+// References to npm packages via "types"
+/// <reference types="jquery">
 /// <reference types="@testing-library/jest-dom">
 
 // Transpiled .ts files, referenced both with and without the .d.ts extension.
