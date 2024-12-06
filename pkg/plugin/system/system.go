@@ -241,9 +241,9 @@ func (ps *pluginSystem) createBesBackend(ctx context.Context, cmd *cobra.Command
 
 		besProxy := besproxy.NewBesProxy(userBesBackend, userRemoteHeaders)
 		if err := besProxy.Connect(); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to connect to build even stream backend %s: %s", userBesBackend, err.Error())
+			fmt.Fprintf(os.Stderr, "Failed to connect to build event stream backend %s: %s", userBesBackend, err.Error())
 		} else {
-			fmt.Fprintf(os.Stderr, "Forwarding build even stream to %v\n", userBesBackend)
+			fmt.Fprintf(os.Stderr, "Forwarding build event stream to %v\n", userBesBackend)
 			besBackend.RegisterBesProxy(besProxy)
 		}
 	}

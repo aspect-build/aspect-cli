@@ -179,7 +179,7 @@ func (bb *besBackend) Errors() []error {
 	return bb.errors.Errors()
 }
 
-// RegisterBesProxy registers a new build even stream proxy to send
+// RegisterBesProxy registers a new build event stream proxy to send
 // Build Event Protocol events to.
 func (bb *besBackend) RegisterBesProxy(p besproxy.BESProxy) {
 	bb.besProxies = append(bb.besProxies, p)
