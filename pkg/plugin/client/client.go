@@ -17,11 +17,9 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -32,9 +30,6 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 
-	"aspect.build/cli/pkg/aspect/outputs"
-	"aspect.build/cli/pkg/aspecterrors"
-	"aspect.build/cli/pkg/bazel"
 	"aspect.build/cli/pkg/ioutils"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/config"
 	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/plugin"
@@ -73,101 +68,64 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 
 	var checksum []byte
 	var hash hash.Hash
-	if strings.HasPrefix(aspectplugin.From, "//") || strings.HasPrefix(aspectplugin.From, "@") {
-		pluginLogger.Info(fmt.Sprintf("building %s plugin from target %s", aspectplugin.Name, aspectplugin.From))
+	if strings.HasPrefix(aspectplugin.From, "github.com/") {
+		// Syntax sugar:
+		//   from: github.com/org/repo
+		// is the same as
+		//   from: https://github.com/org/repo/releases/download
+		// Example release URL:
+		//   https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.1.0/plugin-plugin-linux_amd64
+		aspectplugin.From = fmt.Sprintf("https://%s/releases/download", aspectplugin.From)
+	}
 
-		bzl := bazel.WorkspaceFromWd
-
-		var stderr bytes.Buffer
-		buildStreams := ioutils.Streams{
-			Stdin:  os.Stdin,
-			Stdout: io.Discard,
-			Stderr: &stderr,
+	if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
+		// Example release URL:
+		//   from:          https://static.aspect.build/aspect
+		//   versioned url: https://static.aspect.build/aspect/1.2.3/foo-darwin_amd64
+		if len(aspectplugin.Version) < 1 {
+			return nil, fmt.Errorf("cannot download plugin %q: the version field is required", aspectplugin.Name)
 		}
 
-		err := bzl.RunCommand(buildStreams, nil, "build", "--remote_download_outputs=toplevel", aspectplugin.From)
+		pluginLogger.Info(fmt.Sprintf("downloading %s plugin from %s", aspectplugin.Name, aspectplugin.From))
+
+		downloadedPath, err := DownloadPlugin(aspectplugin.From, aspectplugin.Name, aspectplugin.Version)
 		if err != nil {
-			var exitErr *aspecterrors.ExitError
-			if errors.As(err, &exitErr) {
-				// Dump the `stderr` when Bazel executed and exited non-zero
-				return nil, fmt.Errorf("failed to build plugin: %w\nstderr:\n%s", err, stderr.String())
-			} else {
-				return nil, fmt.Errorf("failed to build plugin: %w", err)
-			}
+			return nil, err
 		}
+		aspectplugin.From = downloadedPath
+	} else if _, err := os.Stat(aspectplugin.From); err != nil {
+		pluginLogger.Warn(fmt.Sprintf("skipping install for plugin: does not exist at path %q.", aspectplugin.From))
+		return nil, nil
+	}
 
-		var stdout bytes.Buffer
-		outputsStreams := ioutils.Streams{
-			Stdin:  os.Stdin,
-			Stdout: &stdout,
-			Stderr: io.Discard, // unused
+	checksumFile := fmt.Sprintf("%s.sha256", aspectplugin.From)
+	hash = sha256.New()
+
+	if _, err := os.Stat(checksumFile); err != nil {
+		// We calculate the hashsum in case it was not provided by the remote server.
+		f, err := os.Open(aspectplugin.From)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
 		}
-		if err := outputs.New(outputsStreams, bzl).Run(context.Background(), nil, []string{aspectplugin.From, "GoLink"}); err != nil {
-			return nil, fmt.Errorf("failed to get plugin path for %q: %w", aspectplugin.From, err)
+		defer f.Close()
+		if _, err := io.Copy(hash, f); err != nil {
+			return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
 		}
-		aspectplugin.From = strings.TrimSpace(stdout.String())
-		checksum = []byte{0}
-		hash = noOpHash
+		checksum = hash.Sum(nil)
+		hash.Reset()
+		if err := os.WriteFile(checksumFile, []byte(hex.EncodeToString(checksum)), 0400); err != nil {
+			return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
+		}
 	} else {
-		if strings.HasPrefix(aspectplugin.From, "github.com/") {
-			// Syntax sugar:
-			//   from: github.com/org/repo
-			// is the same as
-			//   from: https://github.com/org/repo/releases/download
-			// Example release URL:
-			//   https://github.com/aspect-build/aspect-cli-plugin-template/releases/download/v0.1.0/plugin-plugin-linux_amd64
-			aspectplugin.From = fmt.Sprintf("https://%s/releases/download", aspectplugin.From)
+		b, err := os.ReadFile(checksumFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
 		}
-
-		if strings.HasPrefix(aspectplugin.From, "http://") || strings.HasPrefix(aspectplugin.From, "https://") {
-			// Example release URL:
-			//   from:          https://static.aspect.build/aspect
-			//   versioned url: https://static.aspect.build/aspect/1.2.3/foo-darwin_amd64
-			if len(aspectplugin.Version) < 1 {
-				return nil, fmt.Errorf("cannot download plugin %q: the version field is required", aspectplugin.Name)
-			}
-
-			pluginLogger.Info(fmt.Sprintf("downloading %s plugin from %s", aspectplugin.Name, aspectplugin.From))
-
-			downloadedPath, err := DownloadPlugin(aspectplugin.From, aspectplugin.Name, aspectplugin.Version)
-			if err != nil {
-				return nil, err
-			}
-			aspectplugin.From = downloadedPath
-		} else if _, err := os.Stat(aspectplugin.From); err != nil {
-			pluginLogger.Warn(fmt.Sprintf("skipping install for plugin: does not exist at path %q.", aspectplugin.From))
-			return nil, nil
+		decoded, err := hex.DecodeString(strings.Split(string(b), " ")[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
 		}
-
-		checksumFile := fmt.Sprintf("%s.sha256", aspectplugin.From)
-		hash = sha256.New()
-
-		if _, err := os.Stat(checksumFile); err != nil {
-			// We calculate the hashsum in case it was not provided by the remote server.
-			f, err := os.Open(aspectplugin.From)
-			if err != nil {
-				return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
-			}
-			defer f.Close()
-			if _, err := io.Copy(hash, f); err != nil {
-				return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
-			}
-			checksum = hash.Sum(nil)
-			hash.Reset()
-			if err := os.WriteFile(checksumFile, []byte(hex.EncodeToString(checksum)), 0400); err != nil {
-				return nil, fmt.Errorf("failed to calculate hash for %q: %w", aspectplugin.From, err)
-			}
-		} else {
-			b, err := os.ReadFile(checksumFile)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
-			}
-			decoded, err := hex.DecodeString(strings.Split(string(b), " ")[0])
-			if err != nil {
-				return nil, fmt.Errorf("failed to get hash for %q: %w", aspectplugin.From, err)
-			}
-			checksum = decoded
-		}
+		checksum = decoded
 	}
 
 	pluginLogger.Info(fmt.Sprintf("running %s plugin from %s", aspectplugin.Name, aspectplugin.From))
