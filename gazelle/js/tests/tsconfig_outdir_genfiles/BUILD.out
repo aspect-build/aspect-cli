@@ -1,0 +1,40 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
+
+# gazelle:js_tsconfig enabled
+
+# Generated .ts in src dir
+genrule(
+    name = "gen-0",
+    outs = ["x.ts"],
+    cmd = "echo 'export const x: number' > $@",
+)
+
+# Generated .d.ts in outDir dir
+genrule(
+    name = "gen-1",
+    outs = ["dist/generated.d.ts"],
+    cmd = "echo 'export const g: number' > $@",
+)
+
+# Generated .ts in outDir dir
+genrule(
+    name = "gen-2",
+    outs = ["dist/generated.js"],
+    cmd = "echo 'export const g = 3' > $@",
+)
+
+ts_project(
+    name = "tsconfig_outdir_genfiles",
+    srcs = [
+        "dist/generated.d.ts",
+        "main.ts",
+        "x.ts",
+    ],
+    out_dir = "dist",
+    tsconfig = ":tsconfig",
+)
+
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.json",
+)

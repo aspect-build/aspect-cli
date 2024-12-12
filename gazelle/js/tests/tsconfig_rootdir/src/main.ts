@@ -1,1 +1,3 @@
-console.log('No Imports!');
+import * as foo from './generated'
+
+console.log('Hello, world!', foo);
