@@ -32,18 +32,12 @@ func Write(v interface{}) starlark.Value {
 		return starlark.MakeInt64(v)
 	case float64:
 		return starlark.Float(v)
+	case []string:
+		return WriteList(v, WriteString)
 	case []interface{}:
-		l := make([]starlark.Value, 0, len(v))
-		for _, lv := range v {
-			l = append(l, Write(lv))
-		}
-		return starlark.NewList(l)
+		return WriteList(v, Write)
 	case map[string]interface{}:
-		d := starlark.NewDict(len(v))
-		for k, lv := range v {
-			d.SetKey(starlark.String(k), Write(lv))
-		}
-		return d
+		return WriteMap(v, Write)
 	}
 
 	log.Panicf("Failed to write value %v of type %q", v, reflect.TypeOf(v))
