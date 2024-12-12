@@ -1,2 +1,2 @@
-# gazelle:js_ignore_imports @types/ignored
-# gazelle:js_ignore_imports @types/test__ignored
+# gazelle:js_ignore_imports ignored
+# gazelle:js_ignore_imports @test/ignored

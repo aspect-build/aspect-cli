@@ -336,14 +336,15 @@ func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args lang
 	}
 
 	for _, t := range tsconfig.Types {
-		if typesImport := toAtTypesPackage(t); !cfg.IsImportIgnored(typesImport) {
+		if !cfg.IsImportIgnored(t) {
 			imports = append(imports, ImportStatement{
 				ImportSpec: resolve.ImportSpec{
 					Lang: LanguageName,
-					Imp:  typesImport,
+					Imp:  t,
 				},
 				ImportPath: t,
 				SourcePath: SourcePath,
+				TypesOnly:  true,
 			})
 		}
 	}
