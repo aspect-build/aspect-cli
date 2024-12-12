@@ -81,6 +81,25 @@ func TestReadWrite(t *testing.T) {
 		}
 	})
 
+	t.Run("[]string => List", func(t *testing.T) {
+		a := []string{"a", "b"}
+		l := Write(a).(*starlark.List)
+
+		if len(a) != l.Len() {
+			t.Errorf("Expected equal length")
+		}
+
+		l0, isString := l.Index(0).(starlark.String)
+		if !isString || a[0] != l0.GoString() {
+			t.Errorf("Expected %v to be String", l0)
+		}
+
+		l1, isString := l.Index(1).(starlark.String)
+		if !isString || a[1] != l1.GoString() {
+			t.Errorf("Expected %v to be String", l1)
+		}
+	})
+
 	t.Run("List <=> []interface{}", func(t *testing.T) {
 		l := starlark.NewList([]starlark.Value{starlark.MakeInt(1), starlark.String("hello"), starlark.Bool(true)})
 		a := Read(l).([]interface{})
