@@ -3,9 +3,19 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 # gazelle:generation_mode update
 # gazelle:js_tsconfig enabled
 
+# Generated .ts within the rootDir
+genrule(
+    name = "gen-1",
+    outs = ["src/generated.ts"],
+    cmd = "echo 'export const subtarget = 3' > $@",
+)
+
 ts_project(
     name = "tsconfig_rootdir",
-    srcs = ["src/main.ts"],
+    srcs = [
+        "src/generated.ts",
+        "src/main.ts",
+    ],
     root_dir = "src",
     tsconfig = ":tsconfig",
 )
