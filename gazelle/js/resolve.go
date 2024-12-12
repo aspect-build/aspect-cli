@@ -310,7 +310,7 @@ func (ts *typeScriptLang) resolveImports(
 			deps.Add(typesDep)
 		}
 
-		if dep != nil {
+		if dep != nil && (!imp.TypesOnly || len(types) == 0) {
 			deps.Add(dep)
 		}
 
