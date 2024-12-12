@@ -1,0 +1,22 @@
+# gazelle:js_tsconfig enabled
+
+# Generated .ts in src dir
+genrule(
+    name = "gen-0",
+    outs = ["x.ts"],
+    cmd = "echo 'export const x: number' > $@",
+)
+
+# Generated .d.ts in outDir dir
+genrule(
+    name = "gen-1",
+    outs = ["dist/generated.d.ts"],
+    cmd = "echo 'export const g: number' > $@",
+)
+
+# Generated .ts in outDir dir
+genrule(
+    name = "gen-2",
+    outs = ["dist/generated.js"],
+    cmd = "echo 'export const g = 3' > $@",
+)
