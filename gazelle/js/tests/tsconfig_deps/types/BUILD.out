@@ -1,7 +1,7 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config")
 
-# gazelle:js_ignore_imports @types/ignored
-# gazelle:js_ignore_imports @types/test__ignored
+# gazelle:js_ignore_imports ignored
+# gazelle:js_ignore_imports @test/ignored
 
 ts_config(
     name = "tsconfig",
@@ -9,6 +9,7 @@ ts_config(
     deps = [
         "//:node_modules/@types/jquery",
         "//:node_modules/@types/testing-library__jest-dom",
+        "//:node_modules/cypress",
         "//:tsconfig",
     ],
 )
