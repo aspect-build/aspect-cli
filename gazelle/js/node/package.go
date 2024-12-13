@@ -14,6 +14,10 @@ type npmPackageJSON struct {
 
 	// exports: https://nodejs.org/docs/latest-v22.x/api/packages.html#exports
 	Exports interface{} `json:"exports"`
+
+	// types/typings: https://www.typescriptlang.org/docs/handbook/declaration-files/publishing.html#including-declarations-in-your-npm-package
+	Types   string `json:"types"`
+	Typings string `json:"typings"`
 }
 
 // Extract the various import types from the package.json file such as
@@ -35,6 +39,12 @@ func ParsePackageJsonImportsFile(rootDir, packageJsonPath string) ([]string, err
 
 	if c.Main != "" {
 		imports = append(imports, path.Clean(c.Main))
+	}
+	if c.Types != "" {
+		imports = append(imports, path.Clean(c.Types))
+	}
+	if c.Typings != "" {
+		imports = append(imports, path.Clean(c.Typings))
 	}
 
 	if c.Exports != nil {

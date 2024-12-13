@@ -1,0 +1,20 @@
+load("@aspect_rules_js//npm:defs.bzl", "npm_package")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+genrule(
+    name = "foo",
+    srcs = [],
+    outs = ["types.d.ts"],
+    cmd = "echo \"export const foo: number\" > \"$@\"",
+)
+
+npm_link_all_packages(name = "node_modules")
+
+npm_package(
+    name = "pkg",
+    srcs = [
+        "package.json",
+        ":types.d.ts",
+    ],
+    visibility = ["//visibility:public"],
+)
