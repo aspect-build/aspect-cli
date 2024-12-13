@@ -127,7 +127,7 @@ func parseLinterMnemonicFromFilename(filename string) string {
 	return s[len(s)-2]
 }
 
-func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEvent) error {
+func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEvent, sn int64) error {
 	switch event.Payload.(type) {
 
 	case *buildeventstream.BuildEvent_WorkspaceInfo:

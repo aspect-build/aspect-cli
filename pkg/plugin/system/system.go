@@ -205,7 +205,7 @@ func (ps *pluginSystem) createBesBackend(ctx context.Context, cmd *cobra.Command
 	// Create the BES backend
 	besBackend := bep.NewBESBackend(ctx)
 	for node := ps.plugins.head; node != nil; node = node.next {
-		besBackend.RegisterSubscriber(node.payload.BEPEventCallback)
+		besBackend.RegisterSubscriber(node.payload.BEPEventCallback, node.payload.MultiThreaded)
 	}
 	opts := []grpc.ServerOption{
 		// Bazel doesn't seem to set a maximum send message size, therefore

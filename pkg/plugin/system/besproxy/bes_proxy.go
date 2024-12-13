@@ -37,6 +37,7 @@ type BESProxy interface {
 	Host() string
 	PublishBuildToolEventStream(ctx context.Context, opts ...grpc.CallOption) error
 	PublishLifecycleEvent(ctx context.Context, req *buildv1.PublishLifecycleEventRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	StreamCreated() bool
 	Recv() (*buildv1.PublishBuildToolEventStreamResponse, error)
 	Send(req *buildv1.PublishBuildToolEventStreamRequest) error
 }
@@ -87,9 +88,13 @@ func (bp *besProxy) PublishBuildToolEventStream(ctx context.Context, opts ...grp
 	return nil
 }
 
+func (bp *besProxy) StreamCreated() bool {
+	return bp.stream != nil
+}
+
 func (bp *besProxy) Send(req *buildv1.PublishBuildToolEventStreamRequest) error {
 	if bp.stream == nil {
-		return nil
+		return fmt.Errorf("stream to %v not configured", bp.host)
 	}
 
 	// If we want to mutate the BES events in the future before they are sent out to external consumers, this is the place

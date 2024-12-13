@@ -429,14 +429,16 @@ func UnmarshalPluginConfig(pluginsConfig interface{}) ([]types.PluginConfig, err
 
 		version, _ := pluginsMap["version"].(string)
 		logLevel, _ := pluginsMap["log_level"].(string)
+		multi_threaded_build_events, _ := pluginsMap["multi_threaded_build_events"].(bool)
 		properties, _ := pluginsMap["properties"].(map[string]interface{})
 
 		plugins = append(plugins, types.PluginConfig{
-			Name:       name,
-			From:       from,
-			Version:    version,
-			LogLevel:   logLevel,
-			Properties: properties,
+			Name:                     name,
+			From:                     from,
+			Version:                  version,
+			LogLevel:                 logLevel,
+			MultiThreadedBuildEvents: multi_threaded_build_events,
+			Properties:               properties,
 		})
 	}
 

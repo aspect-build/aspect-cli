@@ -1,6 +1,7 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
+load("//bazel/go:write_go_generated_source_files.bzl", "write_go_generated_source_files")
 
 # gazelle:exclude dummy.go
 
@@ -18,6 +19,14 @@ go_proto_library(
     proto = ":proto_proto",
     visibility = ["//visibility:public"],
     deps = ["//bazel/buildeventstream"],
+)
+
+write_go_generated_source_files(
+    name = "write_pb_go",
+    src = ":proto_go_proto",
+    output_files = [
+        "plugin.pb.go",
+    ],
 )
 
 go_library(
