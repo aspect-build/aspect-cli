@@ -53,7 +53,10 @@ var importQueries = map[string]treeutils.TreeQuery{
 	`),
 }
 
-var tripleSlashRe = regexp.MustCompile(`^///\s*<reference\s+(?:lib|path|types)\s*=\s*"(?P<lib>[^"]+)"`)
+// Note that we intentionally omit "lib" here since these directives do not result in a separate dependency
+// See: https://www.typescriptlang.org/docs/handbook/triple-slash-directives.html#-reference-lib-
+// > This directive allows a file to explicitly include an existing built-in lib file
+var tripleSlashRe = regexp.MustCompile(`^///\s*<reference\s+(?:path|types)\s*=\s*"(?P<lib>[^"]+)"`)
 
 func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 	imports := make([]string, 0, 5)
