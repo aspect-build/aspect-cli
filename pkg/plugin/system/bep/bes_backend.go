@@ -56,7 +56,7 @@ type BESBackend interface {
 	GracefulStop()
 	Addr() string
 	RegisterBesProxy(p besproxy.BESProxy)
-	RegisterSubscriber(callback CallbackFn)
+	RegisterSubscriber(callback CallbackFn, multiThreaded bool)
 	Errors() []error
 }
 
@@ -83,28 +83,30 @@ func InjectBESBackend(ctx context.Context, besBackend BESBackend) context.Contex
 }
 
 type besBackend struct {
-	besProxies  []besproxy.BESProxy
-	closeOnce   sync.Once
-	ctx         context.Context
-	errors      *aspecterrors.ErrorList
-	grpcDialer  aspectgrpc.Dialer
-	grpcServer  aspectgrpc.Server
-	listener    net.Listener
-	netListen   func(network, address string) (net.Listener, error)
-	startServe  chan struct{}
-	subscribers *subscriberList
+	besProxies    []besproxy.BESProxy
+	ctx           context.Context
+	errors        *aspecterrors.ErrorList
+	errorsMutex   sync.RWMutex
+	grpcDialer    aspectgrpc.Dialer
+	grpcServer    aspectgrpc.Server
+	listener      net.Listener
+	netListen     func(network, address string) (net.Listener, error)
+	startServe    chan struct{}
+	subscribers   *subscriberList
+	mtSubscribers *subscriberList
 }
 
 // NewBESBackend creates a new Build Event Protocol backend.
 func NewBESBackend(ctx context.Context) BESBackend {
 	return &besBackend{
-		besProxies:  []besproxy.BESProxy{},
-		ctx:         ctx,
-		errors:      &aspecterrors.ErrorList{},
-		grpcDialer:  aspectgrpc.NewDialer(),
-		netListen:   net.Listen,
-		startServe:  make(chan struct{}, 1),
-		subscribers: &subscriberList{},
+		besProxies:    []besproxy.BESProxy{},
+		ctx:           ctx,
+		errors:        &aspecterrors.ErrorList{},
+		grpcDialer:    aspectgrpc.NewDialer(),
+		netListen:     net.Listen,
+		startServe:    make(chan struct{}, 1),
+		subscribers:   &subscriberList{},
+		mtSubscribers: &subscriberList{},
 	}
 }
 
@@ -176,6 +178,8 @@ func (bb *besBackend) Addr() string {
 
 // Errors return the errors produced by the subscriber callback functions.
 func (bb *besBackend) Errors() []error {
+	bb.errorsMutex.RLock()
+	defer bb.errorsMutex.RUnlock()
 	return bb.errors.Errors()
 }
 
@@ -187,12 +191,16 @@ func (bb *besBackend) RegisterBesProxy(p besproxy.BESProxy) {
 
 // CallbackFn is the signature for the callback function used by the subscribers
 // of the Build Event Protocol events.
-type CallbackFn func(*buildeventstream.BuildEvent) error
+type CallbackFn func(*buildeventstream.BuildEvent, int64) error
 
 // RegisterSubscriber registers a new subscriber callback function to the
 // Build Event Protocol events.
-func (bb *besBackend) RegisterSubscriber(callback CallbackFn) {
-	bb.subscribers.Insert(callback)
+func (bb *besBackend) RegisterSubscriber(callback CallbackFn, multiThreaded bool) {
+	if multiThreaded {
+		bb.mtSubscribers.Insert(callback)
+	} else {
+		bb.subscribers.Insert(callback)
+	}
 }
 
 // PublishLifecycleEvent implements the gRPC PublishLifecycleEvent service.
@@ -212,6 +220,36 @@ func (bb *besBackend) PublishLifecycleEvent(
 	return &emptypb.Empty{}, eg.Wait()
 }
 
+func (bb *besBackend) SendEventsToSubscribers(c chan *buildv1.PublishBuildToolEventStreamRequest, subscribers *subscriberList) {
+	for req := range c {
+		// Forward the build event to subscribers
+		if subscribers.head == nil {
+			continue
+		}
+		event := req.GetOrderedBuildEvent().GetEvent()
+		if event != nil {
+			bazelEvent := event.GetBazelEvent()
+			if bazelEvent != nil {
+				var buildEvent *buildeventstream.BuildEvent = &buildeventstream.BuildEvent{}
+				err := bazelEvent.UnmarshalTo(buildEvent)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error unmarshaling build event %v: %s\n", req.GetOrderedBuildEvent().GetSequenceNumber(), err.Error())
+					continue
+				}
+				s := subscribers.head
+				for s != nil {
+					if err := s.callback(buildEvent, req.GetOrderedBuildEvent().GetSequenceNumber()); err != nil {
+						bb.errorsMutex.Lock()
+						bb.errors.Insert(err)
+						bb.errorsMutex.Unlock()
+					}
+					s = s.next
+				}
+			}
+		}
+	}
+}
+
 // PublishBuildToolEventStream implements the gRPC PublishBuildToolEventStream
 // service.
 func (bb *besBackend) PublishBuildToolEventStream(
@@ -219,88 +257,121 @@ func (bb *besBackend) PublishBuildToolEventStream(
 ) error {
 	ctx := stream.Context()
 
+	const numMultiSends = 10
+
+	subChan := make(chan *buildv1.PublishBuildToolEventStreamRequest, 1000)
+	subMultiChan := make(chan *buildv1.PublishBuildToolEventStreamRequest, 1000)
+	fwdChan := make(chan *buildv1.PublishBuildToolEventStreamRequest, 1000)
+	ackChan := make(chan *buildv1.PublishBuildToolEventStreamRequest, 1000)
+
+	eg, egCtx := errgroup.WithContext(ctx)
+
 	// Setup forwarding proxy streams
-	eg, ctx := errgroup.WithContext(ctx)
 	for _, bp := range bb.besProxies {
-		// Make a copy of the BESProxy before passing into the go-routine below.
-		proxy := bp
-		err := bp.PublishBuildToolEventStream(ctx, grpc.WaitForReady(false))
+		err := bp.PublishBuildToolEventStream(egCtx, grpc.WaitForReady(false))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating build event stream to %v: %s\n", proxy.Host(), err.Error())
+			// If we fail to create the build event stream to a proxy then print out an error but don't fail the GRPC call
+			fmt.Fprintf(os.Stderr, "Error creating build event stream to %v: %s\n", bp.Host(), err.Error())
+		}
+	}
+
+	// Goroutine to receive messages from the Bazel server and send them to processing channels
+	eg.Go(func() error {
+		for {
+			req, err := stream.Recv()
+			if err != nil {
+				close(subChan)
+				close(subMultiChan)
+				close(fwdChan)
+				close(ackChan)
+				if err == io.EOF {
+					return nil
+				}
+				// If we fail to receive a BES event from bazel server then fail the GRPC call early
+				// and surface this error back to Bazel; this is over localhost so should generally not
+				// happen unless something has gone terribly wrong.
+				return fmt.Errorf("error receiving on build event stream from bazel server: %v", err.Error())
+			}
+			subChan <- req
+			subMultiChan <- req
+			fwdChan <- req
+			ackChan <- req
+		}
+	})
+
+	// Goroutine to send acknowledgments back to the Bazel server
+	eg.Go(func() error {
+		for req := range ackChan {
+			res := &buildv1.PublishBuildToolEventStreamResponse{
+				StreamId:       req.OrderedBuildEvent.StreamId,
+				SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
+			}
+			err := stream.Send(res)
+			if err != nil {
+				// If we fail to send an ack back to the bazel server then fail the GRPC call early
+				// since Bazel will hang waiting for all acks; this is over localhost so should generally not
+				// happen unless something has gone terribly wrong.
+				return fmt.Errorf("error sending ack %v to bazel server: %v", res.SequenceNumber, err.Error())
+			}
+		}
+		return nil
+	})
+
+	// Goroutines to process messages and send to subscribers
+	eg.Go(func() error { bb.SendEventsToSubscribers(subChan, bb.subscribers); return nil })
+	for i := 0; i < numMultiSends; i++ {
+		eg.Go(func() error { bb.SendEventsToSubscribers(subMultiChan, bb.mtSubscribers); return nil })
+	}
+
+	// Goroutines to receive acks from BES proxies
+	for _, bp := range bb.besProxies {
+		if !bp.StreamCreated() {
 			continue
 		}
+		proxy := bp // make a copy of the BESProxy before passing into the go-routine below.
 		eg.Go(func() error {
 			for {
 				_, err := proxy.Recv()
-				if err == io.EOF {
-					break
-				}
 				if err != nil {
-					return fmt.Errorf("error receiving build event stream ack %v: %s\n", proxy.Host(), err.Error())
+					if err != io.EOF {
+						// If we fail to recv an ack from a proxy then print out an error but don't fail the GRPC call
+						fmt.Fprintf(os.Stderr, "Error receiving build event stream ack %v: %s\n", proxy.Host(), err.Error())
+					}
+					break
 				}
 			}
 			return nil
 		})
 	}
-	defer bb.closeBesProxies()
 
-	for {
-		// Wait for a build event
-		req, err := stream.Recv()
-		if err == io.EOF {
-			// Close BES proxy streams and wait for acks
-			bb.closeBesProxies()
-			return eg.Wait()
-		}
-		if err != nil {
-			return err
-		}
-
-		// Forward the build event to grpc outStreams
-		for _, bp := range bb.besProxies {
-			err := bp.Send(req)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error sending build event to %v: %s\n", bp.Host(), err.Error())
-			}
-		}
-
-		// Forward the build event to subscribers
-		event := req.OrderedBuildEvent.Event
-		if event != nil {
-			bazelEvent := event.GetBazelEvent()
-			if bazelEvent != nil {
-				var buildEvent buildeventstream.BuildEvent
-				if err := bazelEvent.UnmarshalTo(&buildEvent); err != nil {
-					return err
+	// Goroutine to forward to build event to BES proxies
+	eg.Go(func() error {
+		for fwd := range fwdChan {
+			for _, bp := range bb.besProxies {
+				if !bp.StreamCreated() {
+					continue
 				}
-
-				s := bb.subscribers.head
-				for s != nil {
-					if err := s.callback(&buildEvent); err != nil {
-						bb.errors.Insert(err)
-					}
-					s = s.next
+				err := bp.Send(fwd)
+				if err != nil {
+					// If we fail to send to a proxy then print out an error but don't fail the GRPC call
+					fmt.Fprintf(os.Stderr, "Error sending build event to %v: %s\n", bp.Host(), err.Error())
 				}
 			}
 		}
-
-		// Ack the message
-		res := &buildv1.PublishBuildToolEventStreamResponse{
-			StreamId:       req.OrderedBuildEvent.StreamId,
-			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
-		}
-		if err := stream.Send(res); err != nil {
-			return err
-		}
-	}
-}
-
-func (bb *besBackend) closeBesProxies() {
-	bb.closeOnce.Do(func() {
 		for _, bp := range bb.besProxies {
-			bp.CloseSend()
+			if !bp.StreamCreated() {
+				continue
+			}
+			if err := bp.CloseSend(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing build event stream to %v: %s\n", bp.Host(), err.Error())
+			}
 		}
+		return nil
 	})
+
+	err := eg.Wait()
+
+	return err
 }
 
 // SubscriberList is a linked list for the Build Event Protocol event

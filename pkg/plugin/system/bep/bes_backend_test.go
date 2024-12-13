@@ -247,7 +247,7 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 		besBackend := &besBackend{}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
-		g.Expect(err).To(MatchError(expectedErr))
+		g.Expect(err).To(MatchError(fmt.Errorf("error receiving on build event stream from bazel server: %v", expectedErr)))
 	})
 
 	t.Run("fails when stream.Send fails", func(t *testing.T) {
@@ -269,6 +269,12 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Recv().
 			Return(req, nil).
 			Times(1)
+		eventStream.
+			EXPECT().
+			Recv().
+			Return(nil, io.EOF).
+			Times(1).
+			After(recv)
 		res := &buildv1.PublishBuildToolEventStreamResponse{
 			StreamId:       req.OrderedBuildEvent.StreamId,
 			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
@@ -278,18 +284,17 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			EXPECT().
 			Send(res).
 			Return(expectedErr).
-			Times(1).
-			After(recv)
+			Times(1)
 
 		eventStream.
 			EXPECT().
 			Context().
 			Return(context.Background()).
 			Times(1)
-		besBackend := &besBackend{subscribers: &subscriberList{}}
+		besBackend := &besBackend{subscribers: &subscriberList{}, mtSubscribers: &subscriberList{}}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
-		g.Expect(err).To(MatchError(expectedErr))
+		g.Expect(err).To(MatchError(fmt.Errorf("error sending ack %v to bazel server: %v", 1, expectedErr)))
 	})
 
 	t.Run("succeeds without subscribers", func(t *testing.T) {
@@ -311,29 +316,28 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Recv().
 			Return(req, nil).
 			Times(1)
-		res := &buildv1.PublishBuildToolEventStreamResponse{
-			StreamId:       req.OrderedBuildEvent.StreamId,
-			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
-		}
-		send := eventStream.
-			EXPECT().
-			Send(res).
-			Return(nil).
-			Times(1).
-			After(recv)
 		eventStream.
 			EXPECT().
 			Recv().
 			Return(nil, io.EOF).
 			Times(1).
-			After(send)
+			After(recv)
+		res := &buildv1.PublishBuildToolEventStreamResponse{
+			StreamId:       req.OrderedBuildEvent.StreamId,
+			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
+		}
+		eventStream.
+			EXPECT().
+			Send(res).
+			Return(nil).
+			Times(1)
 
 		eventStream.
 			EXPECT().
 			Context().
 			Return(context.Background()).
 			Times(1)
-		besBackend := &besBackend{subscribers: &subscriberList{}}
+		besBackend := &besBackend{subscribers: &subscriberList{}, mtSubscribers: &subscriberList{}}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
 		g.Expect(err).To(Not(HaveOccurred()))
@@ -361,45 +365,48 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Recv().
 			Return(req, nil).
 			Times(1)
-		res := &buildv1.PublishBuildToolEventStreamResponse{
-			StreamId:       req.OrderedBuildEvent.StreamId,
-			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
-		}
-		send := eventStream.
-			EXPECT().
-			Send(res).
-			Return(nil).
-			Times(1).
-			After(recv)
 		eventStream.
 			EXPECT().
 			Recv().
 			Return(nil, io.EOF).
 			Times(1).
-			After(send)
+			After(recv)
+		res := &buildv1.PublishBuildToolEventStreamResponse{
+			StreamId:       req.OrderedBuildEvent.StreamId,
+			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
+		}
+		eventStream.
+			EXPECT().
+			Send(res).
+			Return(nil).
+			Times(1)
 
 		besBackend := &besBackend{
-			subscribers: &subscriberList{},
-			errors:      &aspecterrors.ErrorList{},
+			subscribers:   &subscriberList{},
+			mtSubscribers: &subscriberList{},
+			errors:        &aspecterrors.ErrorList{},
 		}
 		var calledSubscriber1, calledSubscriber2, calledSubscriber3 bool
-		besBackend.RegisterSubscriber(func(evt *buildeventstream.BuildEvent) error {
+		besBackend.RegisterSubscriber(func(evt *buildeventstream.BuildEvent, sn int64) error {
 			g.Expect(evt).To(Equal(buildEvent))
+			g.Expect(sn).To(Equal(orderedBuildEvent.SequenceNumber))
 			calledSubscriber1 = true
 			return nil
-		})
+		}, false)
 		expectedSubscriber2Err := fmt.Errorf("error from subscriber 2")
-		besBackend.RegisterSubscriber(func(evt *buildeventstream.BuildEvent) error {
+		besBackend.RegisterSubscriber(func(evt *buildeventstream.BuildEvent, sn int64) error {
 			g.Expect(evt).To(Equal(buildEvent))
+			g.Expect(sn).To(Equal(orderedBuildEvent.SequenceNumber))
 			calledSubscriber2 = true
 			return expectedSubscriber2Err
-		})
+		}, false)
 		expectedSubscriber3Err := fmt.Errorf("error from subscriber 3")
-		besBackend.RegisterSubscriber(func(evt *buildeventstream.BuildEvent) error {
+		besBackend.RegisterSubscriber(func(evt *buildeventstream.BuildEvent, sn int64) error {
 			g.Expect(evt).To(Equal(buildEvent))
+			g.Expect(sn).To(Equal(orderedBuildEvent.SequenceNumber))
 			calledSubscriber3 = true
 			return expectedSubscriber3Err
-		})
+		}, false)
 
 		eventStream.
 			EXPECT().
@@ -441,27 +448,27 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Recv().
 			Return(req, nil).
 			Times(1)
-		res := &buildv1.PublishBuildToolEventStreamResponse{
-			StreamId:       req.OrderedBuildEvent.StreamId,
-			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
-		}
-		send := eventStream.
-			EXPECT().
-			Send(res).
-			Return(nil).
-			Times(1).
-			After(recv)
 		eventStream.
 			EXPECT().
 			Recv().
 			Return(nil, io.EOF).
 			Times(1).
-			After(send)
+			After(recv)
+		res := &buildv1.PublishBuildToolEventStreamResponse{
+			StreamId:       req.OrderedBuildEvent.StreamId,
+			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
+		}
+		eventStream.
+			EXPECT().
+			Send(res).
+			Return(nil).
+			Times(1)
 
 		besBackend := &besBackend{
-			besProxies:  []besproxy.BESProxy{},
-			subscribers: &subscriberList{},
-			errors:      &aspecterrors.ErrorList{},
+			besProxies:    []besproxy.BESProxy{},
+			subscribers:   &subscriberList{},
+			mtSubscribers: &subscriberList{},
+			errors:        &aspecterrors.ErrorList{},
 		}
 
 		_, egCtx := errgroup.WithContext(ctx)
@@ -473,6 +480,11 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			PublishBuildToolEventStream(egCtx, grpc.WaitForReady(false)).
 			Return(nil).
 			Times(1)
+		besProxy.
+			EXPECT().
+			StreamCreated().
+			Return(true).
+			Times(3)
 		besProxy.
 			EXPECT().
 			Send(req).

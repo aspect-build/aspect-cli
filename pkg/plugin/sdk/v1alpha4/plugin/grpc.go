@@ -71,7 +71,7 @@ func (m *GRPCServer) BEPEventCallback(
 	ctx context.Context,
 	req *proto.BEPEventCallbackReq,
 ) (*proto.BEPEventCallbackRes, error) {
-	return &proto.BEPEventCallbackRes{}, m.Impl.BEPEventCallback(req.Event)
+	return &proto.BEPEventCallbackRes{}, m.Impl.BEPEventCallback(req.Event, req.SequenceNumber)
 }
 
 // Setup translates the gRPC call to the Plugin Setup implementation.
@@ -189,8 +189,8 @@ var _ Plugin = (*GRPCClient)(nil)
 
 // BEPEventCallback is called from the Core to execute the Plugin
 // BEPEventCallback.
-func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent) error {
-	_, err := m.client.BEPEventCallback(context.Background(), &proto.BEPEventCallbackReq{Event: event})
+func (m *GRPCClient) BEPEventCallback(event *buildeventstream.BuildEvent, sn int64) error {
+	_, err := m.client.BEPEventCallback(context.Background(), &proto.BEPEventCallbackReq{Event: event, SequenceNumber: sn})
 	return err
 }
 

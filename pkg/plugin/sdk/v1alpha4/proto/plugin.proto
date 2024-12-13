@@ -19,6 +19,7 @@ service Plugin {
 
 message BEPEventCallbackReq {
   build_event_stream.BuildEvent event = 1;
+  int64 sequence_number = 2;
 }
 
 message BEPEventCallbackRes {}
