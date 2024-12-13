@@ -25,3 +25,11 @@ importers:
   main-js-gen: {}
 
   main-ts: {}
+
+  types-js: {}
+
+  types-js-gen: {}
+
+  typings-js: {}
+
+  typings-js-gen: {}

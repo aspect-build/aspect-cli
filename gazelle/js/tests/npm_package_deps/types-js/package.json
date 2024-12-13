@@ -1,0 +1,6 @@
+{
+  "name": "types-js",
+  "private": true,
+  "main": "start.js",
+  "types": "types.d.ts"
+}

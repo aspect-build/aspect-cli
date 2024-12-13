@@ -1,0 +1,6 @@
+{
+  "name": "typings-js",
+  "private": true,
+  "main": "start.js",
+  "typings": "types.d.ts"
+}
