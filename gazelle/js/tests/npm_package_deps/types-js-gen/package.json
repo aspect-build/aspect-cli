@@ -1,0 +1,5 @@
+{
+  "name": "types-js-gen",
+  "private": true,
+  "types": "types.d.ts"
+}
