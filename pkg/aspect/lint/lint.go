@@ -243,7 +243,7 @@ lint:
 		}
 
 		lintBEPHandler = newLintBEPHandler(workspaceRoot, besCompleted)
-		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback)
+		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback, false)
 	}
 
 	if postTerminateArgs != nil {

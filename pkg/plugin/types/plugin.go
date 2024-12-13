@@ -18,9 +18,10 @@ package types
 
 // PluginConfig represents a plugin entry in the config file.
 type PluginConfig struct {
-	Name       string
-	From       string
-	Version    string
-	LogLevel   string
-	Properties map[string]interface{}
+	Name                     string
+	From                     string
+	Version                  string
+	LogLevel                 string
+	MultiThreadedBuildEvents bool
+	Properties               map[string]interface{}
 }
