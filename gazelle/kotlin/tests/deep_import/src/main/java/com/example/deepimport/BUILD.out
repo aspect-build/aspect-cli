@@ -1,0 +1,8 @@
+load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_binary")
+
+kt_jvm_binary(
+    name = "deepimport_bin",
+    srcs = ["DeepImport.kt"],
+    main_class = "com.example.deepimport.DeepImport",
+    deps = ["@maven//:com_google_guava_guava"],
+)
