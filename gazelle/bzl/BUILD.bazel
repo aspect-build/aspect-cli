@@ -6,7 +6,7 @@ load("//gazelle:gazelle.bzl", "gazelle_generation_test")
 go_library(
     name = "bzl",
     srcs = ["gazelle.go"],
-    importpath = "aspect.build/cli/gazelle/bzl",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/bzl",
     visibility = ["//visibility:public"],
     deps = [
         "@bazel_gazelle//config:go_default_library",

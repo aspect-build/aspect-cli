@@ -19,7 +19,7 @@ package flags
 import (
 	"fmt"
 
-	"aspect.build/cli/buildinfo"
+	"github.com/aspect-build/aspect-cli/buildinfo"
 
 	"github.com/spf13/cobra"
 )

@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "build",
     srcs = ["build.go"],
-    importpath = "aspect.build/cli/pkg/aspect/build",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/build",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/root/flags",

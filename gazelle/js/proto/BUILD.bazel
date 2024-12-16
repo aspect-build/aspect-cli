@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "proto",
     srcs = ["proto.go"],
-    importpath = "aspect.build/cli/gazelle/js/proto",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/js/proto",
     visibility = ["//visibility:public"],
     deps = [
         "@bazel_gazelle//language:go_default_library",

@@ -25,7 +25,7 @@ import "google/protobuf/any.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "aspect.build/cli/bazel/buildeventstream";
+option go_package = "github.com/aspect-build/aspect-cli/bazel/buildeventstream";
 
 // Identifier for a build event. It is deliberately structured to also provide
 // information about which build target etc the event is related to.

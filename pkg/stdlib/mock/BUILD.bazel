@@ -22,7 +22,7 @@ go_library(
         "doc.go",
         ":mock_stdlib_source",  # keep
     ],
-    importpath = "aspect.build/cli/pkg/stdlib/mock",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/stdlib/mock",
     visibility = ["//:__subpackages__"],
     deps = [
         "@com_github_golang_mock//gomock",  # keep

@@ -13,7 +13,7 @@ proto_library(
 
 go_proto_library(
     name = "failure_details_go_proto",
-    importpath = "aspect.build/cli/bazel/failure_details",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/failure_details",
     proto = ":failure_details_proto",
     visibility = ["//visibility:public"],
 )
@@ -30,7 +30,7 @@ write_go_generated_source_files(
 go_library(
     name = "failure_details",
     embed = [":failure_details_go_proto"],
-    importpath = "aspect.build/cli/bazel/failure_details",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/failure_details",
     visibility = ["//visibility:public"],
 )
 

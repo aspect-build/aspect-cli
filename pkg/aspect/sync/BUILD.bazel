@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "sync",
     srcs = ["sync.go"],
-    importpath = "aspect.build/cli/pkg/aspect/sync",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/sync",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/bazel",

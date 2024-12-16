@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"testing"
 
-	"aspect.build/cli/pkg/aspect/outputs"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/outputs"
 
 	. "github.com/onsi/gomega"
 )

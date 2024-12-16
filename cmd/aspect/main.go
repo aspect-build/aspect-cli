@@ -20,12 +20,12 @@ import (
 	"context"
 	"os"
 
-	"aspect.build/cli/cmd/aspect/root"
-	"aspect.build/cli/pkg/aspect/root/config"
-	"aspect.build/cli/pkg/aspecterrors"
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/system"
+	"github.com/aspect-build/aspect-cli/cmd/aspect/root"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
+	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/plugin/system"
 	"github.com/spf13/viper"
 )
 

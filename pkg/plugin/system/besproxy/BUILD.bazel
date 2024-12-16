@@ -9,7 +9,7 @@ go_library(
         "bes_proxy.go",
         "grpc_dial.go",
     ],
-    importpath = "aspect.build/cli/pkg/plugin/system/besproxy",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/plugin/system/besproxy",
     visibility = ["//visibility:public"],
     deps = [
         "@org_golang_google_genproto//googleapis/devtools/build/v1:build",

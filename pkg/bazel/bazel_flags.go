@@ -26,8 +26,8 @@ import (
 	"regexp"
 	"strings"
 
-	"aspect.build/cli/bazel/flags"
-	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
+	"github.com/aspect-build/aspect-cli/bazel/flags"
+	rootFlags "github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/bazelbuild/buildtools/edit"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"

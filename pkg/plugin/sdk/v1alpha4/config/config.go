@@ -22,7 +22,7 @@ import (
 	goplugin "github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
 
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/plugin"
+	"github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/plugin"
 )
 
 // DefaultPluginName is the name each aspect plugin must provide.

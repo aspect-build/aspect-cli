@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "aspectgrpc",
     srcs = ["grpc.go"],
-    importpath = "aspect.build/cli/pkg/aspectgrpc",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspectgrpc",
     visibility = ["//visibility:public"],
     deps = ["@org_golang_google_grpc//:grpc"],
 )

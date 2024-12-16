@@ -5,10 +5,10 @@ import (
 	"regexp"
 	"strings"
 
-	Log "aspect.build/cli/pkg/logger"
+	Log "github.com/aspect-build/aspect-cli/pkg/logger"
 	sitter "github.com/smacker/go-tree-sitter"
 
-	treeutils "aspect.build/cli/gazelle/common/treesitter"
+	treeutils "github.com/aspect-build/aspect-cli/gazelle/common/treesitter"
 )
 
 // Parse and find imports using TreeSitter (https://tree-sitter.github.io/).

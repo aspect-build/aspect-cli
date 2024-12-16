@@ -8,7 +8,7 @@ go_library(
         "root.go",
         "write.go",
     ],
-    importpath = "aspect.build/cli/pkg/aspect/root/config",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/root/config",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/root/flags",

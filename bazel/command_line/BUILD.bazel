@@ -13,7 +13,7 @@ proto_library(
 
 go_proto_library(
     name = "command_line_go_proto",
-    importpath = "aspect.build/cli/bazel/command_line",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/command_line",
     proto = ":command_line_proto",
     visibility = ["//visibility:public"],
     deps = ["//bazel/options"],
@@ -31,7 +31,7 @@ write_go_generated_source_files(
 go_library(
     name = "command_line",
     embed = [":command_line_go_proto"],
-    importpath = "aspect.build/cli/bazel/command_line",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/command_line",
     visibility = ["//visibility:public"],
 )
 

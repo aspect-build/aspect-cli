@@ -22,7 +22,7 @@ proto_library(
 
 go_proto_library(
     name = "buildeventstream_go_proto",
-    importpath = "aspect.build/cli/bazel/buildeventstream",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/buildeventstream",
     proto = ":buildeventstream_proto",
     visibility = ["//visibility:public"],
     deps = [
@@ -46,7 +46,7 @@ write_go_generated_source_files(
 go_library(
     name = "buildeventstream",
     embed = [":buildeventstream_go_proto"],
-    importpath = "aspect.build/cli/bazel/buildeventstream",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/buildeventstream",
     visibility = ["//visibility:public"],
 )
 

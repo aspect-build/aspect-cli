@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "canonicalizeflags",
     srcs = ["canonicalizeflags.go"],
-    importpath = "aspect.build/cli/pkg/aspect/canonicalizeflags",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/canonicalizeflags",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/bazel",

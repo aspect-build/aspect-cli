@@ -8,7 +8,7 @@ go_library(
     embedsrcs = [
         "LICENSE",
     ],
-    importpath = "aspect.build/cli/pkg/aspect/license",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/license",
     visibility = ["//visibility:public"],
     deps = [
         "//buildinfo",

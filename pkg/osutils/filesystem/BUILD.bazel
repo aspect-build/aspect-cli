@@ -12,7 +12,7 @@ go_library(
         "linux.go",
         "windows.go",
     ],
-    importpath = "aspect.build/cli/pkg/osutils/filesystem",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/osutils/filesystem",
     visibility = ["//visibility:public"],
 )
 

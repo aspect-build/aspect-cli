@@ -5,9 +5,9 @@ import (
 	"path"
 	"sync"
 
-	node "aspect.build/cli/gazelle/js/node"
-	pnpm "aspect.build/cli/gazelle/js/pnpm"
-	BazelLog "aspect.build/cli/pkg/logger"
+	node "github.com/aspect-build/aspect-cli/gazelle/js/node"
+	pnpm "github.com/aspect-build/aspect-cli/gazelle/js/pnpm"
+	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 )
 
 type workspacePath struct {

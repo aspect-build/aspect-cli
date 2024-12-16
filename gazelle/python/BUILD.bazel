@@ -12,7 +12,7 @@ go_library(
         "unix.go",
         "windows.go",
     ],
-    importpath = "aspect.build/cli/gazelle/python",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/python",
     visibility = ["//visibility:public"],
     deps = [
         "@bazel_gazelle//language:go_default_library",

@@ -30,10 +30,10 @@ import (
 	"github.com/bazelbuild/bazelisk/platforms"
 	"github.com/mitchellh/go-homedir"
 
-	"aspect.build/cli/buildinfo"
-	"aspect.build/cli/pkg/aspect/root/config"
-	"aspect.build/cli/pkg/aspecterrors"
-	"aspect.build/cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/buildinfo"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
+	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 )
 
 const (

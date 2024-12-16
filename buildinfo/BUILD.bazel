@@ -16,7 +16,7 @@ go_library(
         "build_info.go",
         "stamp.go",
     ],
-    importpath = "aspect.build/cli/buildinfo",
+    importpath = "github.com/aspect-build/aspect-cli/buildinfo",
     visibility = ["//visibility:public"],
     x_defs = _GO_STAMP_X_DEFS,
 )

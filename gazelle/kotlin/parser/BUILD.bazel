@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "parser",
     srcs = ["parser.go"],
-    importpath = "aspect.build/cli/gazelle/kotlin/parser",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/kotlin/parser",
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common/treesitter",

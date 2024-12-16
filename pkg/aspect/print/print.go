@@ -24,7 +24,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/bazelbuild/buildtools/edit"
 )
 

@@ -21,7 +21,7 @@ go_library(
         "doc.go",
         ":mock_client_source",  # keep
     ],
-    importpath = "aspect.build/cli/pkg/plugin/client/mock",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/plugin/client/mock",
     visibility = ["//:__subpackages__"],
     deps = [
         "//pkg/aspecterrors",  # keep

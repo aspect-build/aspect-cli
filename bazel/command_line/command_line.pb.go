@@ -7,7 +7,7 @@
 package command_line
 
 import (
-	options "aspect.build/cli/bazel/options"
+	options "github.com/aspect-build/aspect-cli/bazel/options"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"

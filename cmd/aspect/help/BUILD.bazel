@@ -6,7 +6,7 @@ go_library(
         "flags_as_proto.go",
         "help.go",
     ],
-    importpath = "aspect.build/cli/cmd/aspect/help",
+    importpath = "github.com/aspect-build/aspect-cli/cmd/aspect/help",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/root/flags",

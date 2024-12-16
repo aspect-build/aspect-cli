@@ -30,11 +30,11 @@ import (
 	"regexp"
 	"strings"
 
-	"aspect.build/cli/bazel/analysis"
-	"aspect.build/cli/bazel/flags"
-	"aspect.build/cli/pkg/aspecterrors"
-	"aspect.build/cli/pkg/bazel/workspace"
-	"aspect.build/cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/bazel/analysis"
+	"github.com/aspect-build/aspect-cli/bazel/flags"
+	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
+	"github.com/aspect-build/aspect-cli/pkg/bazel/workspace"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/spf13/cobra"
 
 	"github.com/bazelbuild/bazelisk/core"

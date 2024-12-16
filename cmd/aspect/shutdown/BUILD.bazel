@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "shutdown",
     srcs = ["shutdown.go"],
-    importpath = "aspect.build/cli/cmd/aspect/shutdown",
+    importpath = "github.com/aspect-build/aspect-cli/cmd/aspect/shutdown",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/root/flags",

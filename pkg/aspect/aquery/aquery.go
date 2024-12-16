@@ -22,9 +22,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"aspect.build/cli/pkg/aspect/query/shared"
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/query/shared"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 )
 
 type AQuery struct {

@@ -23,7 +23,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"aspect.build/cli/pkg/aspect/root/config"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/viper"
 )

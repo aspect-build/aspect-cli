@@ -19,7 +19,7 @@ package outputs_test
 import (
 	"testing"
 
-	"aspect.build/cli/pkg/aspect/outputs"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/outputs"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"

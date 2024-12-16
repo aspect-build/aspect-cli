@@ -8,7 +8,7 @@ import (
 	"go.starlark.net/starlark"
 	"go.starlark.net/syntax"
 
-	stdlib "aspect.build/cli/gazelle/common/starlark/stdlib"
+	stdlib "github.com/aspect-build/aspect-cli/gazelle/common/starlark/stdlib"
 )
 
 // Remain simple and strict like bazel starlark.

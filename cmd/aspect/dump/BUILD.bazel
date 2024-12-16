@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "dump",
     srcs = ["dump.go"],
-    importpath = "aspect.build/cli/cmd/aspect/dump",
+    importpath = "github.com/aspect-build/aspect-cli/cmd/aspect/dump",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/dump",

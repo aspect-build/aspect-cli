@@ -8,7 +8,7 @@ go_library(
         "bazelisk.go",
         "bazelisk-core.go",
     ],
-    importpath = "aspect.build/cli/pkg/bazel",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/bazel",
     visibility = ["//visibility:public"],
     deps = [
         "//bazel/analysis",

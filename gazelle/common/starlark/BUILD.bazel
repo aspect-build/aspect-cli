@@ -6,7 +6,7 @@ go_library(
         "eval.go",
         "glob.go",
     ],
-    importpath = "aspect.build/cli/gazelle/common/starlark",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/common/starlark",
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common",

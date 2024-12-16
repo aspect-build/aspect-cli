@@ -18,7 +18,7 @@ go_library(
         "doc.go",
         ":mock_bep_source",  # keep
     ],
-    importpath = "aspect.build/cli/pkg/plugin/system/bep/mock",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/plugin/system/bep/mock",
     visibility = ["//:__subpackages__"],
     deps = [
         "//pkg/plugin/system/bep",  # keep

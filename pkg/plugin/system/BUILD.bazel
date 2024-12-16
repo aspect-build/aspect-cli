@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "system",
     srcs = ["system.go"],
-    importpath = "aspect.build/cli/pkg/plugin/system",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/plugin/system",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/root/config",

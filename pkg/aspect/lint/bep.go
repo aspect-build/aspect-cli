@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"aspect.build/cli/bazel/buildeventstream"
+	"github.com/aspect-build/aspect-cli/bazel/buildeventstream"
 )
 
 // ResultForLabel aggregates the relevant files we find in the BEP for

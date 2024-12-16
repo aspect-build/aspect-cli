@@ -13,7 +13,7 @@ proto_library(
 
 go_proto_library(
     name = "bazel_go_proto",
-    importpath = "aspect.build/cli/bazel/analysis",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/analysis",
     proto = ":bazel_proto",
     visibility = ["//visibility:public"],
     deps = ["//bazel/query"],
@@ -31,7 +31,7 @@ write_go_generated_source_files(
 go_library(
     name = "analysis",
     embed = [":bazel_go_proto"],
-    importpath = "aspect.build/cli/bazel/analysis",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/analysis",
     visibility = ["//visibility:public"],
 )
 

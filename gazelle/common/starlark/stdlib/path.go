@@ -3,7 +3,7 @@ package starlark
 import (
 	"path"
 
-	utils "aspect.build/cli/gazelle/common/starlark/utils"
+	utils "github.com/aspect-build/aspect-cli/gazelle/common/starlark/utils"
 
 	"go.starlark.net/starlark"
 )

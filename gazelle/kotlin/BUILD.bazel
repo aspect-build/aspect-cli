@@ -15,7 +15,7 @@ go_library(
         "language.go",
         "resolver.go",
     ],
-    importpath = "aspect.build/cli/gazelle/kotlin",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/kotlin",
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common",

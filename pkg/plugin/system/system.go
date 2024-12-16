@@ -32,16 +32,16 @@ import (
 	"google.golang.org/grpc"
 	"sigs.k8s.io/yaml"
 
-	"aspect.build/cli/pkg/aspect/root/config"
-	"aspect.build/cli/pkg/aspect/root/flags"
-	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
-	"aspect.build/cli/pkg/aspecterrors"
-	"aspect.build/cli/pkg/interceptors"
-	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/client"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha4/plugin"
-	"aspect.build/cli/pkg/plugin/system/bep"
-	"aspect.build/cli/pkg/plugin/system/besproxy"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
+	rootFlags "github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
+	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
+	"github.com/aspect-build/aspect-cli/pkg/interceptors"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/plugin/client"
+	"github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/plugin"
+	"github.com/aspect-build/aspect-cli/pkg/plugin/system/bep"
+	"github.com/aspect-build/aspect-cli/pkg/plugin/system/besproxy"
 )
 
 // PluginSystem is the interface that defines all the methods for the aspect CLI

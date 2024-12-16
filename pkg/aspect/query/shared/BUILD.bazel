@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "shared",
     srcs = ["query.go"],
-    importpath = "aspect.build/cli/pkg/aspect/query/shared",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/query/shared",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/bazel",

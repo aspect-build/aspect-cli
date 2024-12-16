@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "clean",
     srcs = ["clean.go"],
-    importpath = "aspect.build/cli/cmd/aspect/clean",
+    importpath = "github.com/aspect-build/aspect-cli/cmd/aspect/clean",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/clean",
