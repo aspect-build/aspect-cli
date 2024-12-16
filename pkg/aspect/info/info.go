@@ -19,8 +19,8 @@ package info
 import (
 	"context"
 
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/spf13/cobra"
 )
 

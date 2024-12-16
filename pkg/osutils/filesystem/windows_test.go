@@ -19,7 +19,6 @@
 package filesystem_test
 
 import (
-	"io/fs"
 	"syscall"
 	"testing"
 	"time"
@@ -27,9 +26,8 @@ import (
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
 
-	"aspect.build/cli/pkg/osutils/filesystem"
-	filesystem_mock "aspect.build/cli/pkg/osutils/filesystem/mock"
-	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
+	"github.com/aspect-build/aspect-cli/pkg/osutils/filesystem"
+	stdlib_mock "github.com/aspect-build/aspect-cli/pkg/stdlib/mock"
 )
 
 func TestWindowsOsUtils(t *testing.T) {

@@ -6,6 +6,6 @@ go_library(
         "errors.go",
         "handle_error.go",
     ],
-    importpath = "aspect.build/cli/pkg/aspecterrors",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspecterrors",
     visibility = ["//visibility:public"],
 )

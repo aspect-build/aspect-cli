@@ -18,7 +18,7 @@ go_library(
         "doc.go",
         ":mock_bazel_source",  # keep
     ],
-    importpath = "aspect.build/cli/pkg/bazel/mock",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/bazel/mock",
     visibility = ["//:__subpackages__"],
     deps = [
         "//bazel/analysis",  # keep

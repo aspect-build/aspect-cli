@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "printaction",
     srcs = ["printaction.go"],
-    importpath = "aspect.build/cli/pkg/aspect/printaction",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/printaction",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/bazel",

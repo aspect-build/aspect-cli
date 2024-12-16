@@ -29,8 +29,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 )
 
 var placeholderRegex = regexp.MustCompile(`(\?[a-zA-Z]*)`)

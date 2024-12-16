@@ -12,7 +12,7 @@ proto_library(
 
 go_proto_library(
     name = "blaze_invocation_policy_go_proto",
-    importpath = "aspect.build/cli/bazel/invocation_policy",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/invocation_policy",
     proto = ":invocation_policy_proto",
     visibility = ["//visibility:public"],
 )
@@ -29,7 +29,7 @@ write_go_generated_source_files(
 go_library(
     name = "invocation_policy",
     embed = [":blaze_invocation_policy_go_proto"],
-    importpath = "aspect.build/cli/bazel/invocation_policy",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/invocation_policy",
     visibility = ["//visibility:public"],
 )
 

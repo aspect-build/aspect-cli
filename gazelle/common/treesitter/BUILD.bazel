@@ -9,7 +9,7 @@ go_library(
         "query.go",
         "traversal.go",
     ],
-    importpath = "aspect.build/cli/gazelle/common/treesitter",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/common/treesitter",
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common",

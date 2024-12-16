@@ -13,7 +13,7 @@ go_library(
         "print.go",
         "profiler.go",
     ],
-    importpath = "aspect.build/cli/pkg/aspect/configure",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/configure",
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/bzl",

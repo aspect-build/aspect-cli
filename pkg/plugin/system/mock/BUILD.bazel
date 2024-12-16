@@ -18,7 +18,7 @@ go_library(
         "doc.go",
         ":mock_system_source",  # keep
     ],
-    importpath = "aspect.build/cli/pkg/plugin/system/mock",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/plugin/system/mock",
     visibility = ["//:__subpackages__"],
     deps = [
         "//pkg/aspecterrors",  # keep

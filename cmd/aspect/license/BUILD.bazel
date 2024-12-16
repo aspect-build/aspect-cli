@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "license",
     srcs = ["license.go"],
-    importpath = "aspect.build/cli/cmd/aspect/license",
+    importpath = "github.com/aspect-build/aspect-cli/cmd/aspect/license",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/license",

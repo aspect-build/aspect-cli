@@ -30,8 +30,8 @@ import (
 	"sort"
 	"strings"
 
-	"aspect.build/cli/pkg/bazel"
 	"github.com/alphadose/haxmap"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/rogpeppe/go-internal/dirhash"
 
 	concurrently "github.com/tejzpr/ordered-concurrently/v3"

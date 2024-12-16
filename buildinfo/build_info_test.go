@@ -19,7 +19,7 @@ package buildinfo_test
 import (
 	"testing"
 
-	"aspect.build/cli/buildinfo"
+	"github.com/aspect-build/aspect-cli/buildinfo"
 	. "github.com/onsi/gomega"
 )
 

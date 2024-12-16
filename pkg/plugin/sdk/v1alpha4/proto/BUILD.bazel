@@ -15,7 +15,7 @@ proto_library(
 go_proto_library(
     name = "proto_go_proto",
     compilers = ["@io_bazel_rules_go//proto:go_grpc"],
-    importpath = "aspect.build/cli/pkg/plugin/sdk/v1alpha4/proto",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/proto",
     proto = ":proto_proto",
     visibility = ["//visibility:public"],
     deps = ["//bazel/buildeventstream"],
@@ -32,6 +32,6 @@ write_go_generated_source_files(
 go_library(
     name = "proto",
     embed = [":proto_go_proto"],
-    importpath = "aspect.build/cli/pkg/plugin/sdk/v1alpha4/proto",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/proto",
     visibility = ["//visibility:public"],
 )

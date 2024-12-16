@@ -32,8 +32,8 @@ import (
 
 	"github.com/bazelbuild/buildtools/build"
 
-	"aspect.build/cli/gazelle/common/cache"
-	wspace "aspect.build/cli/pkg/aspect/configure/internal/wspace"
+	"github.com/aspect-build/aspect-cli/gazelle/common/cache"
+	wspace "github.com/aspect-build/aspect-cli/pkg/aspect/configure/internal/wspace"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	gzflag "github.com/bazelbuild/bazel-gazelle/flag"
 	"github.com/bazelbuild/bazel-gazelle/label"

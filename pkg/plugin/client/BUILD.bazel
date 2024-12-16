@@ -6,7 +6,7 @@ go_library(
         "client.go",
         "download.go",
     ],
-    importpath = "aspect.build/cli/pkg/plugin/client",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/plugin/client",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/ioutils",

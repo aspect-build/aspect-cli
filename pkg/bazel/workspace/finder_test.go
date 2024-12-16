@@ -24,7 +24,7 @@ import (
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/gomega"
 
-	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
+	stdlib_mock "github.com/aspect-build/aspect-cli/pkg/stdlib/mock"
 )
 
 const (

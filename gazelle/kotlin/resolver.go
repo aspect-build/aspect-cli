@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
-	common "aspect.build/cli/gazelle/common"
-	"aspect.build/cli/gazelle/kotlin/kotlinconfig"
-	BazelLog "aspect.build/cli/pkg/logger"
+	common "github.com/aspect-build/aspect-cli/gazelle/common"
+	"github.com/aspect-build/aspect-cli/gazelle/kotlin/kotlinconfig"
+	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/repo"

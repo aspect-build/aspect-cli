@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"path"
 
-	BazelLog "aspect.build/cli/pkg/logger"
+	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/rule"

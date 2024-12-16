@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	treeutils "aspect.build/cli/gazelle/common/treesitter"
+	treeutils "github.com/aspect-build/aspect-cli/gazelle/common/treesitter"
 	"github.com/emirpasic/gods/sets/treeset"
 	sitter "github.com/smacker/go-tree-sitter"
 )

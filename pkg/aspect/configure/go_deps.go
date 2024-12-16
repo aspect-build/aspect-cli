@@ -22,9 +22,9 @@ import (
 	"path"
 	"strings"
 
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/ioutils"
-	BazelLog "aspect.build/cli/pkg/logger"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 )
 
 // The @gazelle go_deps extension name.

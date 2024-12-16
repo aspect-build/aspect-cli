@@ -23,8 +23,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"aspect.build/cli/pkg/interceptors"
-	"aspect.build/cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/interceptors"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 )
 
 func isFlagInFlagSet(flags *pflag.FlagSet, arg string) bool {

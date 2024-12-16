@@ -22,11 +22,11 @@ import (
 	"log"
 	"path"
 
-	"aspect.build/cli/gazelle/common/treesitter/grammars/json"
-	"aspect.build/cli/gazelle/common/treesitter/grammars/kotlin"
-	"aspect.build/cli/gazelle/common/treesitter/grammars/starlark"
-	"aspect.build/cli/gazelle/common/treesitter/grammars/tsx"
-	"aspect.build/cli/gazelle/common/treesitter/grammars/typescript"
+	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/json"
+	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/kotlin"
+	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/starlark"
+	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/tsx"
+	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/typescript"
 	sitter "github.com/smacker/go-tree-sitter"
 )
 

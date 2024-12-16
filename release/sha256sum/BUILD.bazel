@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
 go_library(
     name = "sha256sum_lib",
     srcs = ["main.go"],
-    importpath = "aspect.build/cli/release/sha256sum",
+    importpath = "github.com/aspect-build/aspect-cli/release/sha256sum",
     visibility = ["//visibility:private"],
 )
 

@@ -31,9 +31,9 @@ import (
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/osutils/filesystem"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/osutils/filesystem"
 )
 
 const (

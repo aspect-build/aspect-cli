@@ -19,12 +19,12 @@ package build
 import (
 	"github.com/spf13/cobra"
 
-	"aspect.build/cli/pkg/aspect/build"
-	"aspect.build/cli/pkg/aspect/root/flags"
-	"aspect.build/cli/pkg/bazel"
-	"aspect.build/cli/pkg/interceptors"
-	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/system"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/build"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/interceptors"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/plugin/system"
 )
 
 // NewDefaultCmd creates a new build cobra command with the default

@@ -7,7 +7,7 @@ go_library(
         "prompt.go",
         "streams.go",
     ],
-    importpath = "aspect.build/cli/pkg/ioutils",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/ioutils",
     visibility = ["//visibility:public"],
     deps = [
         "@com_github_manifoldco_promptui//:promptui",

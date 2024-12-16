@@ -8,7 +8,7 @@ go_library(
         "disk.go",
         "noop.go",
     ],
-    importpath = "aspect.build/cli/gazelle/common/cache",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/common/cache",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/logger",

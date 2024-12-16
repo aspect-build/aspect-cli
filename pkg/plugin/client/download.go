@@ -27,7 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"aspect.build/cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/fatih/color"
 )
 

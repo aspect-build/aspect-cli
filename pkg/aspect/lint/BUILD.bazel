@@ -6,7 +6,7 @@ go_library(
         "bep.go",
         "lint.go",
     ],
-    importpath = "aspect.build/cli/pkg/aspect/lint",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/lint",
     visibility = ["//visibility:public"],
     deps = [
         "//bazel/buildeventstream",

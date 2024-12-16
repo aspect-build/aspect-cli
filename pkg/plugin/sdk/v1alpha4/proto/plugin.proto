@@ -4,7 +4,7 @@ package proto;
 
 import "bazel/buildeventstream/build_event_stream.proto";
 
-option go_package = "aspect.build/cli/pkg/plugin/sdk/v1alpha4/proto";
+option go_package = "github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/proto";
 
 // Plugin is the service used by the Core to communicate with a Plugin instance.
 service Plugin {

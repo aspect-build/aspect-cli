@@ -1,7 +1,7 @@
 package treesitter
 
 import (
-	common "aspect.build/cli/gazelle/common"
+	common "github.com/aspect-build/aspect-cli/gazelle/common"
 	sitter "github.com/smacker/go-tree-sitter"
 )
 

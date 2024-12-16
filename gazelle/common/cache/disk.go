@@ -5,7 +5,7 @@ import (
 	"os"
 	"sync"
 
-	BazelLog "aspect.build/cli/pkg/logger"
+	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 )
 
 func NewDiskCache(cacheFilePath string) Cache {

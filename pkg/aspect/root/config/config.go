@@ -24,9 +24,9 @@ import (
 	"runtime"
 	"strings"
 
-	"aspect.build/cli/pkg/aspect/root/flags"
-	"aspect.build/cli/pkg/bazel/workspace"
-	"aspect.build/cli/pkg/plugin/types"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
+	"github.com/aspect-build/aspect-cli/pkg/bazel/workspace"
+	"github.com/aspect-build/aspect-cli/pkg/plugin/types"
 	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"

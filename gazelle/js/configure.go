@@ -9,9 +9,9 @@ import (
 	"path"
 	"strings"
 
-	common "aspect.build/cli/gazelle/common"
-	"aspect.build/cli/gazelle/common/git"
-	BazelLog "aspect.build/cli/pkg/logger"
+	common "github.com/aspect-build/aspect-cli/gazelle/common"
+	"github.com/aspect-build/aspect-cli/gazelle/common/git"
+	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/rule"

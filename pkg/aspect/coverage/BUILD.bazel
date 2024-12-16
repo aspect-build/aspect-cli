@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "coverage",
     srcs = ["coverage.go"],
-    importpath = "aspect.build/cli/pkg/aspect/coverage",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/coverage",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/root/flags",

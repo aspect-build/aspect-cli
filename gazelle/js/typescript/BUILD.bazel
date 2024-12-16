@@ -6,7 +6,7 @@ go_library(
         "config.go",
         "tsconfig.go",
     ],
-    importpath = "aspect.build/cli/gazelle/js/typescript",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/js/typescript",
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/js/node",

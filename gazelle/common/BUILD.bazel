@@ -11,7 +11,7 @@ go_library(
         "set.go",
         "walk.go",
     ],
-    importpath = "aspect.build/cli/gazelle/common",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/common",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/logger",

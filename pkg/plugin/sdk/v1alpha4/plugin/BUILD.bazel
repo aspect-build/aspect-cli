@@ -6,7 +6,7 @@ go_library(
         "grpc.go",
         "interface.go",
     ],
-    importpath = "aspect.build/cli/pkg/plugin/sdk/v1alpha4/plugin",
+    importpath = "github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/plugin",
     visibility = ["//visibility:public"],
     deps = [
         "//bazel/buildeventstream",

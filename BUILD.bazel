@@ -68,7 +68,7 @@ nogo(
     ],
 )
 
-# gazelle:prefix aspect.build/cli
+# gazelle:prefix github.com/aspect-build/aspect-cli
 # gazelle:exclude **/*.pb.go
 # gazelle:resolve go github.com/bazelbuild/buildtools/edit @com_github_bazelbuild_buildtools//edit:go_default_library
 # gazelle:resolve go github.com/bazelbuild/buildtools/build @com_github_bazelbuild_buildtools//build:go_default_library

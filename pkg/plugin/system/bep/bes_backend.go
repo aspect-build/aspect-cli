@@ -33,10 +33,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	buildeventstream "aspect.build/cli/bazel/buildeventstream"
-	"aspect.build/cli/pkg/aspecterrors"
-	"aspect.build/cli/pkg/aspectgrpc"
-	"aspect.build/cli/pkg/plugin/system/besproxy"
+	buildeventstream "github.com/aspect-build/aspect-cli/bazel/buildeventstream"
+	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
+	"github.com/aspect-build/aspect-cli/pkg/aspectgrpc"
+	"github.com/aspect-build/aspect-cli/pkg/plugin/system/besproxy"
 )
 
 // besBackendInterceptorKeyType is a type for the BESBackendInterceptorKey that

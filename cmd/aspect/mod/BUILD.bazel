@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "mod",
     srcs = ["mod.go"],
-    importpath = "aspect.build/cli/cmd/aspect/mod",
+    importpath = "github.com/aspect-build/aspect-cli/cmd/aspect/mod",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/aspect/mod",

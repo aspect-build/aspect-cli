@@ -12,7 +12,7 @@ proto_library(
 
 go_proto_library(
     name = "options_go_proto",
-    importpath = "aspect.build/cli/bazel/options",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/options",
     proto = ":options_proto",
     visibility = ["//visibility:public"],
 )
@@ -29,7 +29,7 @@ write_go_generated_source_files(
 go_library(
     name = "options",
     embed = [":options_go_proto"],
-    importpath = "aspect.build/cli/bazel/options",
+    importpath = "github.com/aspect-build/aspect-cli/bazel/options",
     visibility = ["//visibility:public"],
 )
 
