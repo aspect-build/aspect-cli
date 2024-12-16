@@ -77,6 +77,7 @@ func (p *treeSitterParser) Parse(filePath string, sourceCode []byte) (*ParseResu
 			} else if nodeI.Type() == "package_header" {
 				if result.Package != "" {
 					fmt.Printf("Multiple package declarations found in %s\n", filePath)
+					// TODO: Don't exit here and return an error instead?
 					os.Exit(1)
 				}
 
@@ -132,13 +133,17 @@ func readIdentifier(node *sitter.Node, sourceCode []byte, ignoreLast bool) strin
 
 		// TODO: are there any other node types under an "identifier"
 
-		if nodeC.Type() == "simple_identifier" {
+		switch nodeC.Type() {
+		case "simple_identifier":
 			if s.Len() > 0 {
 				s.WriteString(".")
 			}
 			s.WriteString(nodeC.Content(sourceCode))
-		} else if nodeC.Type() != "comment" {
+		case "multiline_comment", "comment":
+			// ignore
+		default:
 			fmt.Printf("Unexpected node type '%v' within: %s", nodeC.Type(), node.Content(sourceCode))
+			// TODO: Return error instead of exiting.
 			os.Exit(1)
 		}
 	}
