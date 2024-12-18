@@ -1,0 +1,11 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "dynamic_import_tsx",
+    srcs = ["d.tsx"],
+    deps = [
+        "//:node_modules/@aspect-test/c",
+        "//:node_modules/@types/jquery",
+        "//:node_modules/jquery",
+    ],
+)

@@ -25,9 +25,9 @@ type ParseResult struct {
 
 // Queries finding import statements, tagging such Nodes as 'from' captures.
 // Optionally filtering captures using 'equals-{name}' vars and #eq? statements.
-var importQueries = map[string]treeutils.TreeQuery{
+var importQueries = map[string]string{
 	// Dynamic `import("...")` statement
-	"dynamic_esm_import": treeutils.GetQuery(treeutils.Typescript, `
+	"dynamic_esm_import": `
 		(call_expression
 			function: (import)
 			arguments: (
@@ -36,10 +36,10 @@ var importQueries = map[string]treeutils.TreeQuery{
 				)
 			)
 		)
-	`),
+	`,
 
 	// CJS `require("...")` statement
-	"require": treeutils.GetQuery(treeutils.Typescript, `
+	"require": `
 		(call_expression
 			function: (identifier) @equals-require
 			arguments: (
@@ -50,7 +50,7 @@ var importQueries = map[string]treeutils.TreeQuery{
 
 			(#eq? @equals-require "require")
 		)
-	`),
+	`,
 }
 
 // Note that we intentionally omit "lib" here since these directives do not result in a separate dependency
@@ -122,7 +122,9 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 		}
 
 		// Extra queries for more complex import statements.
-		for key, q := range importQueries {
+		for key, queryString := range importQueries {
+			q := treeutils.GetQuery(lang, queryString)
+
 			queryResults := tree.QueryStrings(q, "from")
 
 			if len(queryResults) > 0 {
