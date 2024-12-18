@@ -9,6 +9,8 @@ const (
 	TsProjectKind         = "ts_project"
 	TsProtoLibraryKind    = "ts_proto_library"
 	JsLibraryKind         = "js_library"
+	JsBinaryKind          = "js_binary"
+	JsRunBinaryKind       = "js_run_binary"
 	TsConfigKind          = "ts_config"
 	NpmPackageKind        = "npm_package"
 	NpmLinkAllKind        = "npm_link_all_packages"
@@ -50,6 +52,29 @@ var tsKinds = map[string]rule.KindInfo{
 		},
 		ResolveAttrs: map[string]bool{
 			"deps": true,
+		},
+	},
+	JsBinaryKind: {
+		MatchAny: false,
+		NonEmptyAttrs: map[string]bool{
+			"entry_point": true,
+		},
+		SubstituteAttrs: map[string]bool{},
+		MergeableAttrs:  map[string]bool{},
+		ResolveAttrs: map[string]bool{
+			"data": true,
+		},
+	},
+	JsRunBinaryKind: {
+		MatchAny: false,
+		NonEmptyAttrs: map[string]bool{
+			"tool": true,
+		},
+		SubstituteAttrs: map[string]bool{},
+		MergeableAttrs:  map[string]bool{},
+		ResolveAttrs: map[string]bool{
+			"srcs": true,
+			"tool": true,
 		},
 	},
 	TsConfigKind: {
@@ -123,7 +148,7 @@ var tsLoads = []rule.LoadInfo{
 	{
 		Name: "@" + RulesJsRepositoryName + "//js:defs.bzl",
 		Symbols: []string{
-			JsLibraryKind,
+			JsLibraryKind, JsBinaryKind, JsRunBinaryKind,
 		},
 	},
 
