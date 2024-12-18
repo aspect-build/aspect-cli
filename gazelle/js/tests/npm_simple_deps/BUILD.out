@@ -15,6 +15,7 @@ ts_project(
     deps = [
         ":node_modules/@aspect-test/a",
         ":node_modules/@aspect-test/c",
+        ":node_modules/@types/jquery",
         ":node_modules/jquery",
     ],
 )

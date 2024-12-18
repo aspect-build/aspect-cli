@@ -1,15 +1,27 @@
 lockfileVersion: 5.4
 
 specifiers:
-  '@aspect-test/a': 5.0.2
+  '@aspect-test/a': 5.0.1
+  '@aspect-test/b': 5.0.2
   '@aspect-test/c': 2.0.2
+  '@aspect-test/d': 5.0.3
+  '@aspect-test/e': 5.0.4
+  '@aspect-test/f': 5.0.5
+  '@aspect-test/g': 5.0.6
+  '@types/jquery': 3.6.1
   jquery: 3.6.1
 
 dependencies:
-  '@aspect-test/a': 5.0.2
+  '@aspect-test/a': 5.0.1
+  '@aspect-test/b': 5.0.2
+  '@aspect-test/c': 2.0.2
+  '@aspect-test/d': 5.0.3
+  jquery: 3.6.1
 
 peerDependencies:
-  '@aspect-test/c': 2.0.2
+  '@aspect-test/e': 5.0.4
+  '@aspect-test/f': 5.0.5
+  '@aspect-test/g': 5.0.6
 
 devDependencies:
-  jquery: 3.6.1
+  '@types/jquery': 3.6.1

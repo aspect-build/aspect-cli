@@ -1,0 +1,17 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "dynamic_type_import",
+    srcs = ["type-imports.ts"],
+    deps = [
+        "//:node_modules/@aspect-test/a",
+        "//:node_modules/@aspect-test/b",
+        "//:node_modules/@aspect-test/c",
+        "//:node_modules/@aspect-test/d",
+        "//:node_modules/@aspect-test/e",
+        "//:node_modules/@aspect-test/f",
+        "//:node_modules/@aspect-test/g",
+        "//:node_modules/@types/jquery",
+        "//:node_modules/jquery",
+    ],
+)
