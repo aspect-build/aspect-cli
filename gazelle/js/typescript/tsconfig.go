@@ -33,6 +33,7 @@ type tsCompilerOptionsJSON struct {
 	Declaration       *bool                `json:"declaration"`
 	DeclarationMap    *bool                `json:"declarationMap"`
 	Incremental       *bool                `json:"incremental"`
+	TsBuildInfoFile   *string              `json:"tsBuildInfoFile"`
 	SourceMap         *bool                `json:"sourceMap"`
 	ResolveJsonModule *bool                `json:"resolveJsonModule"`
 	OutDir            *string              `json:"outDir"`
@@ -87,6 +88,7 @@ type TsConfig struct {
 	Declaration       *bool
 	DeclarationMap    *bool
 	Incremental       *bool
+	TsBuildInfoFile   string
 	SourceMap         *bool
 	OutDir            string
 	RootDir           string
@@ -249,6 +251,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		incremental = baseConfig.Incremental
 	}
 
+	var tsBuildInfoFile string
+	if c.CompilerOptions.TsBuildInfoFile != nil {
+		tsBuildInfoFile = *c.CompilerOptions.TsBuildInfoFile
+	} else if baseConfig != nil {
+		tsBuildInfoFile = baseConfig.TsBuildInfoFile
+	}
+
 	var sourceMap *bool
 	if c.CompilerOptions.SourceMap != nil {
 		sourceMap = c.CompilerOptions.SourceMap
@@ -332,6 +341,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		Declaration:       declaration,
 		DeclarationMap:    declarationMap,
 		Incremental:       incremental,
+		TsBuildInfoFile:   tsBuildInfoFile,
 		SourceMap:         sourceMap,
 		ResolveJsonModule: resolveJsonModule,
 		OutDir:            OutDir,
