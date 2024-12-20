@@ -580,6 +580,13 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 				existing.DelAttr(("incremental"))
 			}
 
+			// Reflect the tsconfig tsBuildInfoFile in the ts_project rule
+			if tsconfig.TsBuildInfoFile != "" {
+				sourceRule.SetAttr("ts_build_info_file", tsconfig.TsBuildInfoFile)
+			} else if existing != nil {
+				existing.DelAttr(("ts_build_info_file"))
+			}
+
 			// Reflect the tsconfig resolve_json_module in the ts_project rule
 			if tsconfig.ResolveJsonModule != nil {
 				sourceRule.SetAttr("resolve_json_module", *tsconfig.ResolveJsonModule)
@@ -615,6 +622,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 			existing.DelAttr("declaration")
 			existing.DelAttr("declaration_map")
 			existing.DelAttr("incremental")
+			existing.DelAttr("ts_build_info_file")
 			existing.DelAttr("out_dir")
 			existing.DelAttr("preserve_jsx")
 			existing.DelAttr("resolve_json_module")
