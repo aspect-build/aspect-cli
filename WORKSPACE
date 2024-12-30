@@ -342,7 +342,3 @@ multitool(
     name = "multitool",
     lockfile = "@aspect_rules_lint//format:multitool.lock.json",
 )
-
-load("//.aspect/workflows:deps.bzl", "fetch_workflows_deps")
-
-fetch_workflows_deps()

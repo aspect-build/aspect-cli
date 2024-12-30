@@ -70,26 +70,3 @@ bzl_library(
     srcs = ["platforms.bzl"],
     visibility = ["//visibility:public"],
 )
-
-# Demonstration delivery target for Aspect Workflows.
-# In the future this could be wired up to push dev releases to an S3 bucket.
-sh_binary(
-    name = "aspect_cli_delivery",
-    srcs = ["delivery.sh"],
-    data = [
-        ":aspect",
-        ":linux_and_darwin_artifacts",
-    ],
-)
-
-# Demonstration delivery target for Aspect Workflows.
-# In the future this could be wired up to push dev releases to an S3 bucket.
-sh_binary(
-    name = "aspect_cli_delivery_only_on_change",
-    srcs = ["delivery.sh"],
-    data = [
-        ":aspect",
-        ":linux_and_darwin_artifacts",
-    ],
-    tags = ["deliverable"],
-)
