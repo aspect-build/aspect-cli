@@ -121,7 +121,7 @@ func (runner *Outputs) Run(_ context.Context, cmd *cobra.Command, args []string)
 
 	agc, err := runner.bzl.AQuery(query, bazelFlags)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s", err.Error())
 	}
 	outs := bazel.ParseOutputs(agc)
 
