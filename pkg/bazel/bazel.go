@@ -111,6 +111,28 @@ func findWorkspace() Bazel {
 	return New(wr)
 }
 
+func getLastLine(input string) string {
+	// Split the string by newline
+	lines := strings.Split(input, "\n")
+
+	// Return the last non-empty line
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i] != "" {
+			return lines[i]
+		}
+	}
+
+	// If all lines are empty, return an empty string
+	return ""
+}
+
+func stripColorCodes(input string) string {
+	// Regular expression to match ANSI escape codes
+	re := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	// Replace all occurrences of the escape codes with an empty string
+	return re.ReplaceAllString(input, "")
+}
+
 func (b *bazel) WithEnv(env []string) Bazel {
 	b.env = env
 	return b
@@ -410,7 +432,6 @@ func (b *bazel) BazelFlagsAsProto() ([]byte, error) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 	}
-	stdoutDecoder := base64.NewDecoder(base64.StdEncoding, &stdout)
 
 	bazelErrs := make(chan error, 1)
 	defer close(bazelErrs)
@@ -434,9 +455,21 @@ func (b *bazel) BazelFlagsAsProto() ([]byte, error) {
 		}
 	}
 
-	flagsProtoBytes, err := io.ReadAll(stdoutDecoder)
+	flagsProtoBase64, err := io.ReadAll(&stdout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read bazel flags: %w", err)
+	}
+
+	// getLastLine & stripColorCodes are work-arounds for the BB CLI which mixes stderr into stdout in its output
+	// and also adds color codes:
+	// Extracting Bazel installation...
+	// Starting local Bazel server and connecting to it...
+	// Cs8CCiVleHBlcmltZW50...XTkoGUkVNT1RFUAA=[0m
+	flagsProtoBase64Sanitized := stripColorCodes(getLastLine(string(flagsProtoBase64[:])))
+
+	flagsProtoBytes, err := base64.StdEncoding.DecodeString(flagsProtoBase64Sanitized)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode bazel flags: %w\n==> %v", err, flagsProtoBase64Sanitized)
 	}
 
 	return flagsProtoBytes, nil
