@@ -41,13 +41,12 @@ import (
 var _ resolve.Resolver = (*typeScriptLang)(nil)
 
 const (
-	Resolution_Error      = -1
-	Resolution_None       = 0
-	Resolution_NotFound   = 1
-	Resolution_Package    = 2
-	Resolution_Label      = 3
-	Resolution_NativeNode = 4
-	Resolution_Override   = 5
+	Resolution_Error = iota
+	Resolution_None
+	Resolution_NotFound
+	Resolution_Label
+	Resolution_NativeNode
+	Resolution_Override
 )
 
 type ResolutionType = int
@@ -199,12 +198,40 @@ func (ts *typeScriptLang) Embeds(r *rule.Rule, from label.Label) []label.Label {
 		}
 
 		return tsEmbeds
+	case NpmLinkAllKind:
+		// Do not return the embedded :node_modules/{pkg} targets.
+		// Instead the npm CrossResolver will resolve to specific package targets.
+		break
 	}
 
 	// TODO(jbedard): ts_proto_library() embeds
 
 	// TODO(jbedard): implement other rule kinds
-	return make([]label.Label, 0)
+	return []label.Label{}
+}
+
+var _ resolve.CrossResolver = (*typeScriptLang)(nil)
+
+func (ts *typeScriptLang) CrossResolve(c *config.Config, ix *resolve.RuleIndex, imp resolve.ImportSpec, lang string) []resolve.FindResult {
+	// Only resolve imports of js, can be from any language.
+	if imp.Lang != LanguageName {
+		return nil
+	}
+
+	fromRel := c.Exts[configRelExtension].(string)
+
+	results := []resolve.FindResult{}
+
+	// Imports of npm packages
+	if impPkg, _ := node.ParseImportPath(imp.Imp); impPkg != "" {
+		if pkg := ts.findPackage(fromRel, impPkg); pkg != nil {
+			results = append(results, resolve.FindResult{
+				Label: *pkg,
+			})
+		}
+	}
+
+	return results
 }
 
 // Resolve translates imported libraries for a given rule into Bazel
@@ -295,7 +322,7 @@ func (ts *typeScriptLang) addTsLib(
 ) {
 	_, tsconfig := ts.tsconfig.FindConfig(from.Pkg)
 	if tsconfig != nil && tsconfig.ImportHelpers {
-		if tslibLabel := ts.resolvePackage(from, "tslib"); tslibLabel != nil {
+		if tslibLabel := ts.findPackage(from.Pkg, "tslib"); tslibLabel != nil {
 			deps.Add(tslibLabel)
 		}
 	}
@@ -316,12 +343,24 @@ func (ts *typeScriptLang) resolveImports(
 	for it.Next() {
 		imp := it.Value().(ImportStatement)
 
+		// Overrides override all
+		if override, ok := resolve.FindRuleWithOverride(c, imp.ImportSpec, LanguageName); ok {
+			deps.Add(&override)
+			continue
+		}
+
+		// JS Overrides (js_resolve) override all
+		if res := cfg.GetResolution(imp.Imp); res != nil {
+			deps.Add(res)
+			continue
+		}
+
 		resolutionType, dep, err := ts.resolveImport(c, ix, from, imp)
 		if err != nil {
 			return err
 		}
 
-		types := ts.resolveImportTypes(resolutionType, from, imp)
+		types := ts.resolveImportTypes(c, ix, resolutionType, from, imp)
 		for _, typesDep := range types {
 			deps.Add(typesDep)
 		}
@@ -379,33 +418,16 @@ func (ts *typeScriptLang) resolveImport(
 	from label.Label,
 	impStm ImportStatement,
 ) (ResolutionType, *label.Label, error) {
-	cfg := c.Exts[LanguageName].(*JsGazelleConfig)
-
 	imp := impStm.ImportSpec
 
-	// Overrides
-	if override, ok := resolve.FindRuleWithOverride(c, imp, LanguageName); ok {
-		return Resolution_Override, &override, nil
-	}
-
-	// JS Overrides (js_resolve)
-	if res := cfg.GetResolution(imp.Imp); res != nil {
-		return Resolution_Override, res, nil
-	}
-
 	// Gazelle rule index
-	if resolution, match, err := ts.resolveImportFromIndex(c, ix, from, impStm); resolution != Resolution_NotFound {
+	if resolution, match, err := ts.resolveExplicitImportFromIndex(c, ix, from, impStm); resolution != Resolution_NotFound {
 		return resolution, match, err
 	}
 
 	// References to a label such as a file or file-generating rule
 	if importLabel := ts.getImportLabel(imp.Imp); importLabel != nil {
 		return Resolution_Label, importLabel, nil
-	}
-
-	// References to an npm package, pnpm workspace projects etc.
-	if pkg := ts.resolvePackageImport(from, impStm.Imp); pkg != nil {
-		return Resolution_Package, pkg, nil
 	}
 
 	// References via tsconfig mappings (paths, baseUrl, rootDirs etc.)
@@ -420,7 +442,7 @@ func (ts *typeScriptLang) resolveImport(
 				ImportPath: impStm.ImportPath,
 				Optional:   impStm.Optional,
 			}
-			if resolution, match, err := ts.resolveImportFromIndex(c, ix, from, pImp); resolution != Resolution_NotFound {
+			if resolution, match, err := ts.resolveExplicitImportFromIndex(c, ix, from, pImp); resolution != Resolution_NotFound {
 				return resolution, match, err
 			}
 		}
@@ -434,7 +456,7 @@ func (ts *typeScriptLang) resolveImport(
 	return Resolution_NotFound, nil, nil
 }
 
-func (ts *typeScriptLang) resolveImportFromIndex(
+func (ts *typeScriptLang) resolveExplicitImportFromIndex(
 	c *config.Config,
 	ix *resolve.RuleIndex,
 	from label.Label,
@@ -445,82 +467,78 @@ func (ts *typeScriptLang) resolveImportFromIndex(
 		return Resolution_NotFound, nil, nil
 	}
 
-	filteredMatches := make([]label.Label, 0, len(matches))
+	filteredMatches := common.NewLabelSet(from)
 	for _, match := range matches {
 		// Prevent from adding itself as a dependency.
 		if !match.IsSelfImport(from) {
-			filteredMatches = append(filteredMatches, match.Label)
+			filteredMatches.Add(&match.Label)
 		}
 	}
 
 	// Too many results, don't know which is correct
-	if len(filteredMatches) > 1 {
+	if filteredMatches.Size() > 1 {
 		return Resolution_Error, nil, fmt.Errorf(
 			"Import %q from %q resolved to multiple targets (%s) - this must be fixed using the \"aspect:resolve\" directive",
 			impStm.ImportPath, impStm.SourcePath, targetListFromResults(matches))
 	}
 
 	// The matches were self imports, no dependency is needed
-	if len(filteredMatches) == 0 {
+	if filteredMatches.Size() == 0 {
 		return Resolution_None, nil, nil
 	}
 
-	match := filteredMatches[0]
+	match := filteredMatches.Labels()[0]
 
 	BazelLog.Tracef("resolve %q import %q as %q", from, impStm.Imp, match)
 
-	return Resolution_Override, &match, nil
+	return Resolution_Label, &match, nil
 }
 
-func (ts *typeScriptLang) resolvePackageImport(from label.Label, imp string) *label.Label {
-	impPkg, _ := node.ParseImportPath(imp)
-
-	// Imports not in the form of a package
-	if impPkg == "" {
-		return nil
-	}
-
-	return ts.resolvePackage(from, impPkg)
-}
-
-func (ts *typeScriptLang) resolvePackage(from label.Label, impPkg string) *label.Label {
-	fromProject := ts.pnpmProjects.GetProject(from.Pkg)
+func (ts *typeScriptLang) findPackage(from string, impPkg string) *label.Label {
+	fromProject := ts.pnpmProjects.GetProject(from)
 	if fromProject == nil {
-		BazelLog.Tracef("resolve %q import %q project not found", from.String(), impPkg)
+		BazelLog.Tracef("resolve %q import %q project not found", from, impPkg)
 		return nil
 	}
 
 	impPkgLabel := fromProject.Get(impPkg)
 	if impPkgLabel == nil {
-		BazelLog.Tracef("resolve %q import %q not found", from.String(), impPkg)
+		BazelLog.Tracef("resolve %q import %q not found", from, impPkg)
 		return nil
 	}
 
-	BazelLog.Tracef("resolve %q import %q to %q", from.String(), impPkg, impPkgLabel)
+	BazelLog.Tracef("resolve %q import %q to %q", from, impPkg, impPkgLabel)
 
 	return impPkgLabel
 }
 
-func (ts *typeScriptLang) resolveImportTypes(resolutionType ResolutionType, from label.Label, imp ImportStatement) []*label.Label {
+func (ts *typeScriptLang) resolveImportTypes(c *config.Config, ix *resolve.RuleIndex, resolutionType ResolutionType, from label.Label, imp ImportStatement) []*label.Label {
 	// Overrides are not extended with additional types
 	if resolutionType == Resolution_Override {
 		return nil
 	}
 
-	// Types for native node imports are always resolved to @types/node
+	// The package the @types are for
+	var typesPkg string
 	if resolutionType == Resolution_NativeNode {
-		if typesNode := ts.resolveAtTypes(from, "node"); typesNode != nil {
-			return []*label.Label{typesNode}
+		typesPkg = "@types/node"
+	} else {
+		typesPkg, _ = node.ParseImportPath(imp.ImportSpec.Imp)
+		if typesPkg == "" {
+			return nil
 		}
 
-		return nil
+		typesPkg = toAtTypesPackage(typesPkg)
 	}
 
-	// Packages with specific @types/* definitions
-	if typesPkg := ts.resolveAtTypes(from, imp.Imp); typesPkg != nil {
+	typesSpec := resolve.ImportSpec{
+		Lang: LanguageName,
+		Imp:  typesPkg,
+	}
+	if matches := ix.FindRulesByImportWithConfig(c, typesSpec, LanguageName); len(matches) > 0 {
 		// @types packages for any named imports
 		// The import may be a package, may be an unresolved import with only @types
-		return []*label.Label{typesPkg}
+		return []*label.Label{&matches[0].Label}
 	}
 
 	// If an import has not been found and has no designated package or @types package
@@ -551,18 +569,6 @@ func toAtTypesPackage(pkg string) string {
 	}
 
 	return "@types/" + pkg
-}
-
-// Find and resolve any @types package for an import
-func (ts *typeScriptLang) resolveAtTypes(from label.Label, imp string) *label.Label {
-	fromProject := ts.pnpmProjects.GetProject(from.Pkg)
-	if fromProject == nil {
-		return nil
-	}
-
-	typesPkg := toAtTypesPackage(imp)
-
-	return fromProject.Get(typesPkg)
 }
 
 // targetListFromResults returns a string with the human-readable list of
