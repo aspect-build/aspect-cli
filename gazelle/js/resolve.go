@@ -273,8 +273,9 @@ func (ts *typeScriptLang) Resolve(
 
 		err := ts.resolveImports(c, ix, deps, imports, from)
 		if err != nil {
-			BazelLog.Fatalf("Resolution Error: %v", err)
-			os.Exit(1)
+			msg := fmt.Sprintf("Resolution Error: %v", err)
+			fmt.Println(msg)
+			BazelLog.Fatalf(msg)
 		}
 
 		if r.Kind() == TsProjectKind {
@@ -296,8 +297,9 @@ func (ts *typeScriptLang) Resolve(
 		deps := common.NewLabelSet(from)
 		err := ts.resolveImports(c, ix, deps, packageInfo.imports, from)
 		if err != nil {
-			BazelLog.Fatalf("Resolution Error: %v", err)
-			os.Exit(1)
+			msg := fmt.Sprintf("Resolution Error: %v", err)
+			fmt.Println(msg)
+			BazelLog.Fatalf(msg)
 		}
 		for _, dep := range deps.Labels() {
 			srcs = append(srcs, dep.String())
