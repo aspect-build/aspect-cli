@@ -55,6 +55,10 @@ func (s *LabelSet) Add(l *label.Label) {
 	s.labels.Add(relL)
 }
 
+func (s *LabelSet) Size() int {
+	return s.labels.Size()
+}
+
 func (s *LabelSet) Empty() bool {
 	return s.labels.Empty()
 }

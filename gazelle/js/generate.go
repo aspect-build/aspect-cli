@@ -54,6 +54,8 @@ const (
 
 	DefaultRootTargetName = "root"
 
+	configRelExtension = "__aspect_js_rel"
+
 	MaxWorkerCount = 12
 )
 
@@ -65,6 +67,9 @@ func (ts *typeScriptLang) getImportLabel(imp string) *label.Label {
 // GenerateRules is called in each directory where an update is requested
 // in depth-first post-order.
 func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
+	// TODO: move to common location or fix/patch a feature in gazelle
+	args.Config.Exts[configRelExtension] = args.Rel
+
 	cfg := args.Config.Exts[LanguageName].(*JsGazelleConfig)
 
 	// Collect any labels that could be imported
