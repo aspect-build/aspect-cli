@@ -8,3 +8,17 @@ index f5ba580..067838f 100644
  
 -var directiveRe = regexp.MustCompile(`^#\s*gazelle:(\w+)\s*(.*?)\s*$`)
 +var directiveRe = regexp.MustCompile(`^#\s*(?:gazelle|aspect):(\w+)\s*(.*?)\s*$`)
+diff --git a/internal/wspace/finder.go b/internal/wspace/finder.go
+index 14d62eb..7214ebb 100644
+--- a/internal/wspace/finder.go
++++ b/internal/wspace/finder.go
+@@ -54,7 +54,8 @@ func FindRepoRoot(dir string) (string, error) {
+ 	}
+ 
+ 	for {
+-		for _, workspaceFile := range workspaceFiles {
++		// Patched to cherry-pick https://github.com/bazel-contrib/bazel-gazelle/pull/2013
++		for _, workspaceFile := range []string{"WORKSPACE.bazel", "WORKSPACE", "REPO.bazel", "MODULE.bazel"} {
+ 			filepath := filepath.Join(dir, workspaceFile)
+ 			info, err := os.Stat(filepath)
+ 			if err == nil && !info.IsDir() {
