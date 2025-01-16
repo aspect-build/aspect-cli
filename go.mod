@@ -48,8 +48,10 @@ require (
 require (
 	github.com/bazelbuild/rules_python/gazelle v0.0.0-20240701102336-084b877c98b5
 	github.com/charmbracelet/huh v0.5.2
+	github.com/creack/pty v1.1.24
 	github.com/hay-kot/scaffold v0.3.0
 	github.com/sourcegraph/go-diff v0.7.0
+	golang.org/x/term v0.25.0
 )
 
 require (
@@ -138,7 +140,6 @@ require (
 	golang.org/x/mod v0.21.0 // indirect
 	golang.org/x/net v0.30.0 // indirect
 	golang.org/x/sys v0.26.0 // indirect
-	golang.org/x/term v0.25.0 // indirect
 	golang.org/x/text v0.19.0 // indirect
 	golang.org/x/tools/go/vcs v0.1.0-deprecated // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240604185151-ef581f913117 // indirect
