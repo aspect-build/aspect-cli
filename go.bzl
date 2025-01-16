@@ -372,6 +372,13 @@ def deps():
         version = "v2.0.4",
     )
     go_repository(
+        name = "com_github_creack_pty",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/creack/pty",
+        sum = "h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=",
+        version = "v1.1.24",
+    )
+    go_repository(
         name = "com_github_cyphar_filepath_securejoin",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/cyphar/filepath-securejoin",

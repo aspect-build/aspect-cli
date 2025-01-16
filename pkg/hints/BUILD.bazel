@@ -1,0 +1,13 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "hints",
+    srcs = ["hints.go"],
+    importpath = "github.com/aspect-build/aspect-cli/pkg/hints",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/ioutils",
+        "@com_github_creack_pty//:pty",
+        "@org_golang_x_term//:term",
+    ],
+)

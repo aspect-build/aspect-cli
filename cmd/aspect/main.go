@@ -24,6 +24,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/hints"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system"
 	"github.com/spf13/viper"
@@ -38,7 +39,20 @@ func main() {
 
 	bzl := bazel.WorkspaceFromWd
 
+	// Load Aspect CLI config.yaml
 	if err := config.Load(viper.GetViper(), os.Args); err != nil {
+		aspecterrors.HandleError(err)
+	}
+
+	h := hints.New()
+
+	// Configure hints from Aspect CLI config.yaml 'hints' attribute
+	if err := h.Configure(viper.Get("hints")); err != nil {
+		aspecterrors.HandleError(err)
+	}
+
+	// Attach hints from Stdout and Stderr streams
+	if err := h.Attach(); err != nil {
 		aspecterrors.HandleError(err)
 	}
 
@@ -64,12 +78,20 @@ func main() {
 	}
 
 	args, startupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
-
 	if err != nil {
 		aspecterrors.HandleError(err)
 	}
 
-	if err = command(bzl, streams, args, startupFlags); err != nil {
+	err = command(bzl, streams, args, startupFlags)
+
+	// Detach hints from Stdout and Stderr streams
+	h.Detach()
+
+	// Print hints
+	h.PrintHints(os.Stderr)
+
+	// Handle command errors
+	if err != nil {
 		aspecterrors.HandleError(err)
 	}
 }

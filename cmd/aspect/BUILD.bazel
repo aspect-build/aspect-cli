@@ -15,6 +15,7 @@ go_library(
         "//pkg/aspect/root/config",
         "//pkg/aspecterrors",
         "//pkg/bazel",
+        "//pkg/hints",
         "//pkg/ioutils",
         "//pkg/plugin/system",
         "@com_github_spf13_viper//:viper",
