@@ -2200,6 +2200,13 @@ def deps():
         version = "v1.67.0",
     )
     go_repository(
+        name = "in_gopkg_op_go_logging_v1",
+        build_file_proto_mode = "disable_global",
+        importpath = "gopkg.in/op/go-logging.v1",
+        sum = "h1:6D+BvnJ/j6e222UW8s2qTSe3wGBtvo0MbVQG/c5k8RE=",
+        version = "v1.0.0-20160211212156-b2cb9fa56473",
+    )
+    go_repository(
         name = "in_gopkg_warnings_v0",
         build_file_proto_mode = "disable_global",
         importpath = "gopkg.in/warnings.v0",

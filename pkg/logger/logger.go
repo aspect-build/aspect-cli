@@ -8,6 +8,8 @@ import (
 	"os"
 	"path"
 	"strings"
+
+	logging "gopkg.in/op/go-logging.v1"
 )
 
 // A Level is a logging priority. Higher levels are more important.
@@ -59,6 +61,9 @@ func init() {
 
 		logger.SetOutput(bufio.NewWriter(logfile))
 	}
+
+	// Override known noisy loggers
+	logging.SetLevel(logging.WARNING, "yq-lib")
 
 	// Override the default log level
 	if os.Getenv("ASPECT_CLI_LOG_DEBUG") != "" {
