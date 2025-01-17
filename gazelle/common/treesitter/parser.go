@@ -22,6 +22,7 @@ import (
 	"log"
 	"path"
 
+	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/java"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/json"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/kotlin"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/starlark"
@@ -38,6 +39,7 @@ const (
 	Typescript                  = "typescript"
 	TypescriptX                 = "tsx"
 	JSON                        = "json"
+	Java                        = "java"
 )
 
 type ASTQueryResult interface {
@@ -69,6 +71,8 @@ func (tree *treeAst) String() string {
 
 func toSitterLanguage(lang LanguageGrammar) *sitter.Language {
 	switch lang {
+	case Java:
+		return java.GetLanguage()
 	case JSON:
 		return json.GetLanguage()
 	case Kotlin:
@@ -89,8 +93,10 @@ func PathToLanguage(p string) LanguageGrammar {
 	return extensionToLanguage(path.Ext(p))
 }
 
+// Based on https://github.com/github-linguist/linguist/blob/master/lib/linguist/languages.yml
 var EXT_LANGUAGES = map[string]LanguageGrammar{
 	"kt":  Kotlin,
+	"ktm": Kotlin,
 	"kts": Kotlin,
 
 	"bzl": Starlark,
@@ -105,6 +111,9 @@ var EXT_LANGUAGES = map[string]LanguageGrammar{
 	"tsx": TypescriptX,
 	"jsx": TypescriptX,
 
+	"java": Java,
+	"jav":  Java,
+	"jsh":  Java,
 	"json": JSON,
 }
 
