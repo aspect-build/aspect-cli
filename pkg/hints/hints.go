@@ -2,8 +2,6 @@ package hints
 
 import (
 	"bufio"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -38,17 +36,17 @@ func New() *Hints {
 }
 
 func (h *Hints) Configure(data interface{}) error {
-	config, err := unmarshalInterfaceToMap(data)
+	config, err := umarshalHintsConfig(data)
 	if err != nil {
 		return err
 	}
 
-	for pattern, msg := range config {
-		regex, err := regexp.Compile(pattern)
+	for _, entry := range config {
+		regex, err := regexp.Compile(entry.pattern)
 		if err != nil {
 			return err
 		}
-		h.hintMap[regex] = msg
+		h.hintMap[regex] = entry.hint
 	}
 
 	return nil
@@ -106,7 +104,7 @@ func (h *Hints) Attach() error {
 				}
 				break
 			}
-			h.ProcessLine(line)
+			h.ProcessLine(strings.TrimSpace(line))
 			fmt.Fprint(h.originalStdout, line)
 		}
 	}()
@@ -122,7 +120,7 @@ func (h *Hints) Attach() error {
 				}
 				break
 			}
-			h.ProcessLine(line)
+			h.ProcessLine(strings.TrimSpace(line))
 			fmt.Fprint(h.originalStderr, line)
 		}
 	}()
@@ -155,8 +153,9 @@ func (h *Hints) Detach() {
 }
 
 func (h *Hints) ProcessLine(line string) {
+	sanitizedLine := stripColorCodes(line)
 	for regex, hint := range h.hintMap {
-		matches := regex.FindStringSubmatch(line)
+		matches := regex.FindStringSubmatch(sanitizedLine)
 		if len(matches) > 0 {
 			// apply regex capture group replacements to given hint
 			for i, match := range matches {
@@ -182,9 +181,35 @@ func (h *Hints) PrintHints(f *os.File) {
 	printMiddle(f, "[Aspect CLI]")
 	printMiddle(f, "")
 	for node := h.hints.head; node != nil; node = node.next {
-		printMiddle(f, "- "+node.hint)
+		lines := strings.Split(node.hint, "\n")
+		for i, line := range lines {
+			if i == 0 {
+				printMiddle(f, "- "+line)
+			} else {
+				printMiddle(f, "  "+line)
+			}
+		}
 	}
 	printBreak(f)
+}
+
+func stripColorCodes(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' { // Start of ANSI escape sequence
+			// Skip until we see 'm' which ends the ANSI code
+			for i++; i < len(s) && s[i] != 'm'; i++ {
+			}
+			if i < len(s) {
+				i++ // Skip the 'm'
+			}
+		} else {
+			result.WriteByte(s[i])
+			i++
+		}
+	}
+	return result.String()
 }
 
 func printBreak(f *os.File) {
@@ -219,36 +244,44 @@ func printMiddle(f *os.File, str string) {
 	fmt.Fprintln(f, b.String())
 }
 
-func unmarshalInterfaceToMap(data interface{}) (map[string]string, error) {
-	// Create a map to hold the result
-	result := make(map[string]string)
+type hintConfig struct {
+	pattern string
+	hint    string
+}
 
-	// Accept an undefined entry
+func umarshalHintsConfig(data interface{}) ([]hintConfig, error) {
+	result := []hintConfig{}
+
 	if data == nil {
 		return result, nil
 	}
 
-	// Check if the input is a map
-	mapData, ok := data.(map[string]interface{})
+	entries, ok := data.([]interface{})
+
 	if !ok {
-		return nil, errors.New("hints config is not a map[string]interface{}")
+		return nil, fmt.Errorf("expected hints config to be a list")
 	}
 
-	// Convert each value to a string and populate the result map
-	for key, value := range mapData {
-		switch v := value.(type) {
-		case string:
-			result[key] = v
-		case fmt.Stringer: // For types implementing the Stringer interface
-			result[key] = v.String()
-		default:
-			// Use JSON marshaling for complex types
-			jsonValue, err := json.Marshal(v)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal value for hints key '%s': %w", key, err)
-			}
-			result[key] = string(jsonValue)
+	for i, h := range entries {
+		m, ok := h.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("expected hint entry %v to be a map", i)
 		}
+
+		pattern, ok := m["pattern"].(string)
+		if !ok {
+			return nil, fmt.Errorf("expected hint entry %v to have a 'pattern' attribute", i)
+		}
+
+		hint, ok := m["hint"].(string)
+		if !ok {
+			return nil, fmt.Errorf("expected hint entry '%v' to have a 'hint' attribute", i)
+		}
+
+		result = append(result, hintConfig{
+			pattern: pattern,
+			hint:    hint,
+		})
 	}
 
 	return result, nil
