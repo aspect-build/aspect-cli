@@ -52,6 +52,7 @@ require (
 	github.com/hay-kot/scaffold v0.3.0
 	github.com/sourcegraph/go-diff v0.7.0
 	golang.org/x/term v0.25.0
+	gopkg.in/op/go-logging.v1 v1.0.0-20160211212156-b2cb9fa56473
 )
 
 require (
