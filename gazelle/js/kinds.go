@@ -36,6 +36,21 @@ var tsKinds = map[string]rule.KindInfo{
 		SubstituteAttrs: map[string]bool{},
 		MergeableAttrs: map[string]bool{
 			"srcs": true,
+
+			// Attributes aligning with tsconfig marked as mergeable to support `#keep` directive
+			// preserving custom values.
+			"tsconfig":            true,
+			"allow_js":            true,
+			"composite":           true,
+			"declaration":         true,
+			"declaration_map":     true,
+			"source_map":          true,
+			"incremental":         true,
+			"ts_build_info_file":  true,
+			"resolve_json_module": true,
+			"preserve_jsx":        true,
+			"out_dir":             true,
+			"root_dir":            true,
 		},
 		ResolveAttrs: map[string]bool{
 			"deps": true,

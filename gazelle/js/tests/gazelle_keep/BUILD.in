@@ -1,8 +1,15 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
+# gazelle:js_tsconfig enabled
+
 ts_project(
     name = "gazelle_keep",
-    srcs = [],
+    srcs = [
+        "generated.ts",  # keep
+    ],
+    tsconfig = "//some/random:tsconfig",  # keep: this keep has a ':'
+    out_dir = "bad",
+    root_dir = "foo",  # keep
     deps = [
         "@npm//@types/jquery", # keep
     ],

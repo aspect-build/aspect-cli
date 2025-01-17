@@ -1,12 +1,23 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
+
+# gazelle:js_tsconfig enabled
 
 ts_project(
     name = "gazelle_keep",
     srcs = [
+        "generated.ts",  # keep
         "lib.ts",
         "main.ts",
     ],
+    out_dir = "dist",
+    root_dir = "foo",  # keep
+    tsconfig = "//some/random:tsconfig",  # keep: this keep has a ':'
     deps = [
         "@npm//@types/jquery",  # keep
     ],
+)
+
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.json",
 )

@@ -1,0 +1,18 @@
+# Demonstrate tsconfig related attributes being maintained when ts_config() generation
+# is disabled. This maintains previous behavior when these attributes were not "mergeable"
+# and fully managed by gazelle.
+
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_tsconfig disabled
+
+ts_project(
+    name = "tsconfig_disabled_manual",
+    srcs = ["main.ts"],
+    declaration = True,
+    tsconfig = {
+        "compilerOptions": {
+            "declaration": False,
+        },
+    },
+)
