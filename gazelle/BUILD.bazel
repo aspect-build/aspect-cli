@@ -6,3 +6,10 @@ bzl_library(
     visibility = ["//visibility:public"],
     deps = ["@bazel_gazelle//:def"],
 )
+
+bzl_library(
+    name = "deps",
+    srcs = ["deps.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["@bazel_tools//tools/build_defs/repo:http.bzl"],
+)
