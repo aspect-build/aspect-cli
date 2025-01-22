@@ -361,7 +361,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 
 func (c TsConfig) ToOutDir(f string) string {
 	if c.RootDir != "." {
-		if strings.HasPrefix(f, c.RootDir) && f[len(c.RootDir)] == '/' {
+		if strings.HasPrefix(f, c.RootDir) && len(f) > len(c.RootDir) && f[len(c.RootDir)] == '/' {
 			f = f[len(c.RootDir)+1:]
 		}
 	}
