@@ -14,7 +14,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/repo"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
-	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 type progressPhase = string
@@ -67,15 +67,14 @@ func (p *progressLang) run(ctx context.Context) {
 }
 
 func writeStatus(s *progressStatus) {
-	ws, err := unix.IoctlGetWinsize(syscall.Stdout, unix.TIOCGWINSZ)
+	width, _, err := term.GetSize(syscall.Stdout)
 	if err != nil {
 		fmt.Printf("\nTerm error: %v\n", err)
 		return
 	}
 
-	width := float64(ws.Col)
-	msgWidth := float64(len(s.phase) + len(s.what) + 2)
-	extraSpace := int(math.Max(0, width-msgWidth))
+	msgWidth := len(s.phase) + len(s.what) + 2
+	extraSpace := int(math.Max(0, float64(width-msgWidth)))
 
 	fmt.Print("\x1b7")   // save the cursor position
 	fmt.Print("\x1b[2k") // erase the current line
