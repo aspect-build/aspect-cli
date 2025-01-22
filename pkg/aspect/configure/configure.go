@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	bzl "github.com/aspect-build/aspect-cli/gazelle/bzl"
+	"github.com/aspect-build/aspect-cli/gazelle/common/progress"
 	js "github.com/aspect-build/aspect-cli/gazelle/js"
 	kotlin "github.com/aspect-build/aspect-cli/gazelle/kotlin"
 	python "github.com/aspect-build/aspect-cli/gazelle/python"
@@ -34,6 +35,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/term"
 )
 
 type Configure struct {
@@ -49,6 +51,10 @@ func New(streams ioutils.Streams) *Configure {
 	}
 
 	c.addDefaultLanguages()
+
+	if os.Getenv("CONFIGURE_PROGRESS") != "" && term.IsTerminal(int(os.Stdout.Fd())) {
+		c.AddLanguage("progress", progress.NewLanguage)
+	}
 
 	return c
 }
