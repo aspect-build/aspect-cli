@@ -309,6 +309,7 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 	}
 
 	npmPackage := rule.NewRule(packageTargetKind, packageTargetName)
+	npmPackage.SetPrivateAttr("ts_project_info", &npmPackageInfo.TsProjectInfo)
 	npmPackage.SetAttr("srcs", npmPackageInfo.sources.Values())
 	npmPackage.SetAttr("visibility", []string{rule.CheckInternalVisibility(cfg.rel, "//visibility:public")})
 
