@@ -11,6 +11,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/bazel",
+        "//pkg/bazel/runfiles",
         "//pkg/ioutils",
         "@com_github_alphadose_haxmap//:haxmap",
         "@com_github_rogpeppe_go_internal//dirhash",

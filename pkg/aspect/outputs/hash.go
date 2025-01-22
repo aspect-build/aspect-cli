@@ -32,6 +32,7 @@ import (
 
 	"github.com/alphadose/haxmap"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	r "github.com/aspect-build/aspect-cli/pkg/bazel/runfiles"
 	"github.com/rogpeppe/go-internal/dirhash"
 
 	concurrently "github.com/tejzpr/ordered-concurrently/v3"
@@ -73,7 +74,7 @@ func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath s
 		// execroot/path /some/absolute/path
 		entry := strings.Split(fileScanner.Text(), " ")
 		// key := entry[0]
-		abspath := entry[1]
+		abspath := r.Unescape(entry[1])
 		fileinfo, err := os.Stat(abspath)
 
 		if err != nil {
