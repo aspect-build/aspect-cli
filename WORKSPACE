@@ -284,15 +284,6 @@ load("//gazelle/common/treesitter/grammars:grammars.bzl", "fetch_grammars")
 
 fetch_grammars()
 
-http_archive(
-    name = "bazel_gomock",
-    sha256 = "82a5fb946d2eb0fed80d3d70c2556784ec6cb5c35cd65a1b5e93e46f99681650",
-    strip_prefix = "bazel_gomock-1.3",
-    urls = [
-        "https://github.com/jmhodges/bazel_gomock/archive/refs/tags/v1.3.tar.gz",
-    ],
-)
-
 load("@aspect_rules_js//js:repositories.bzl", "rules_js_dependencies")
 
 rules_js_dependencies()
