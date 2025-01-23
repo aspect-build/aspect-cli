@@ -686,6 +686,11 @@ func (ts *typeScriptLang) collectProtoImports(cfg *JsGazelleConfig, args languag
 		}
 
 		for _, imp := range imports {
+			if cfg.IsImportIgnored(imp) {
+				BazelLog.Tracef("Proto import ignored: %q", imp)
+				continue
+			}
+
 			for _, dts := range proto.ToTsImports(imp) {
 				results = append(results, ImportStatement{
 					ImportSpec: resolve.ImportSpec{
