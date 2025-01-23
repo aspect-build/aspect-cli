@@ -155,6 +155,13 @@ func (ts *typeScriptLang) protoLibraryImports(r *rule.Rule, f *rule.File) []reso
 	for _, src := range protoSrcs {
 		src = path.Join(f.Pkg, src)
 
+		// The js-lang imports of the .proto
+		provides = append(provides, resolve.ImportSpec{
+			Lang: LanguageName,
+			Imp:  src,
+		})
+
+		// The imports of the raw ts files
 		for _, dts := range proto.ToTsPaths(src) {
 			for _, impt := range toImportPaths(dts) {
 				provides = append(provides, resolve.ImportSpec{

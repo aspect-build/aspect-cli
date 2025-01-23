@@ -1,0 +1,16 @@
+load("@aspect_rules_ts//ts:proto.bzl", "ts_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+# gazelle:js_ignore_imports does-not-exist.proto
+
+proto_library(
+    name = "lib_proto",
+    srcs = ["lib.proto"],
+    visibility = ["//visibility:public"],
+    deps = ["//:root_proto"],
+)
+
+ts_proto_library(
+    name = "lib_proto_ts",
+    proto = ":lib_proto",
+)
