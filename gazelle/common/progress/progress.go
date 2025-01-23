@@ -67,7 +67,12 @@ func (p *progressLang) run(ctx context.Context) {
 }
 
 func writeStatus(s *progressStatus) {
-	width, _, err := term.GetSize(syscall.Stdout)
+	// NOTE(windows): syscall.Stdout is a `Handle`` on windows while `int` on other platforms
+	// while `term.GetSize` only accepts the `int` type.
+	var sysout interface{}
+	sysout = syscall.Stdout
+
+	width, _, err := term.GetSize(sysout.(int))
 	if err != nil {
 		fmt.Printf("\nTerm error: %v\n", err)
 		return
