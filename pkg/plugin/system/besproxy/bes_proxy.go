@@ -98,7 +98,7 @@ func (bp *besProxy) Send(req *buildv1.PublishBuildToolEventStreamRequest) error 
 	}
 
 	// If we want to mutate the BES events in the future before they are sent out to external consumers, this is the place
-	// to do it. See https://github.com/aspect-build/silo/blob/7f13ab16fa10ffcec71b09737f0370f22a508823/pkg/plugin/system/besproxy/bes_proxy.go#L103
+	// to do it. See https://github.com/aspect-build/silo/blob/7f13ab16fa10ffcec71b09737f0370f22a508823/cli/core/pkg/plugin/system/besproxy/bes_proxy.go#L103
 	// as an example.
 
 	return bp.stream.Send(req)
