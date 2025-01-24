@@ -26,13 +26,13 @@ import (
 	common "github.com/aspect-build/aspect-cli/gazelle/common"
 	starlark "github.com/aspect-build/aspect-cli/gazelle/common/starlark"
 	node "github.com/aspect-build/aspect-cli/gazelle/js/node"
-	proto "github.com/aspect-build/aspect-cli/gazelle/js/proto"
 	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/repo"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/bazelbuild/buildtools/build"
 	"github.com/emirpasic/gods/sets/treeset"
 )
 
@@ -150,30 +150,60 @@ func (ts *typeScriptLang) protoLibraryImports(r *rule.Rule, f *rule.File) []reso
 	}
 
 	protoSrcs := protoSrcsAttr.([]string)
-	provides := make([]resolve.ImportSpec, 0, len(protoSrcs)+1)
+	dtsOutputs := []string{}
 
 	for _, src := range protoSrcs {
-		src = path.Join(f.Pkg, src)
+		srcPath := path.Join(f.Pkg, src)
+		srcBase := strings.TrimSuffix(srcPath, ".proto")
 
-		// The js-lang imports of the .proto
-		provides = append(provides, resolve.ImportSpec{
-			Lang: LanguageName,
-			Imp:  src,
-		})
+		// Messages: https://github.com/aspect-build/rules_ts/blob/v3.4.0/ts/private/ts_proto_library.bzl#L71
+		dtsOutputs = append(dtsOutputs, srcBase+"_pb")
 
-		// The imports of the raw ts files
-		for _, dts := range proto.ToTsPaths(src) {
-			for _, impt := range toImportPaths(dts) {
-				provides = append(provides, resolve.ImportSpec{
-					Lang: LanguageName,
-					Imp:  impt,
-				})
+		// Connect: https://github.com/aspect-build/rules_ts/blob/v3.4.0/ts/private/ts_proto_library.bzl#L72-L73
+		if starlark.AttrBool(r, "gen_connect_es") {
+			dtsOutputs = append(dtsOutputs, srcBase+"_connect")
+		}
+
+		// Query services: https://github.com/aspect-build/rules_ts/blob/v3.4.0/ts/private/ts_proto_library.bzl#L74-L78
+		if starlark.AttrBool(r, "gen_connect_query") {
+			for _, p := range starlark.AttrMap(r, "gen_connect_query_service_mapping") {
+				proto := p.Key.(*build.StringExpr).Value
+				protoName := strings.TrimSuffix(proto, ".proto")
+
+				if services, isServicesArray := p.Value.(*build.ListExpr); isServicesArray {
+					for _, service := range services.List {
+						// Service filename: https://github.com/aspect-build/rules_ts/blob/v3.4.0/ts/private/ts_proto_library.bzl#L78C54-L78C105
+						serviceFile := fmt.Sprintf("%s-%s_connectquery", protoName, service.(*build.StringExpr).Value)
+
+						dtsOutputs = append(dtsOutputs, path.Join(f.Pkg, serviceFile))
+					}
+				} else {
+					BazelLog.Errorf("Expected ts_proto_library.gen_connect_query_service_mapping to be a list of services, got %v", p.Value)
+				}
 			}
 		}
 	}
 
-	if len(provides) == 0 {
+	if len(dtsOutputs) == 0 {
 		return nil
+	}
+
+	provides := make([]resolve.ImportSpec, 0, 3*len(dtsOutputs))
+
+	// ts_proto_library outputs both .js and .d.ts files, and can also be imported without an extension
+	for _, dtsOutput := range dtsOutputs {
+		provides = append(provides, resolve.ImportSpec{
+			Lang: LanguageName,
+			Imp:  dtsOutput,
+		})
+		provides = append(provides, resolve.ImportSpec{
+			Lang: LanguageName,
+			Imp:  dtsOutput + ".js",
+		})
+		provides = append(provides, resolve.ImportSpec{
+			Lang: LanguageName,
+			Imp:  dtsOutput + ".d.ts",
+		})
 	}
 
 	return provides

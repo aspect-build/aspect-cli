@@ -678,11 +678,12 @@ func (ts *typeScriptLang) collectProtoImports(cfg *JsGazelleConfig, args languag
 	results := make([]ImportStatement, 0)
 
 	for _, sourceFile := range sourceFiles {
-		imports, err := proto.GetProtoImports(path.Join(args.Rel, sourceFile))
+		imports, err := proto.GetProtoImports(path.Join(args.Dir, sourceFile))
 		if err != nil {
-			fmt.Printf("%s:\n", sourceFile)
-			fmt.Printf("%s\n", err)
-			fmt.Println()
+			msg := fmt.Sprintf("Error parsing .proto file %q: %v", sourceFile, err)
+			BazelLog.Error(msg)
+			fmt.Printf("%s:\n", msg)
+			continue
 		}
 
 		for _, imp := range imports {
@@ -691,16 +692,18 @@ func (ts *typeScriptLang) collectProtoImports(cfg *JsGazelleConfig, args languag
 				continue
 			}
 
-			for _, dts := range proto.ToTsImports(imp) {
-				results = append(results, ImportStatement{
-					ImportSpec: resolve.ImportSpec{
-						Lang: LanguageName,
-						Imp:  dts,
-					},
-					ImportPath: imp,
-					SourcePath: sourceFile,
-				})
-			}
+			workspacePath := toImportSpecPath(sourceFile, imp)
+			workspacePath = strings.TrimSuffix(workspacePath, ".proto")
+			workspacePath = workspacePath + "_pb"
+
+			results = append(results, ImportStatement{
+				ImportSpec: resolve.ImportSpec{
+					Lang: LanguageName,
+					Imp:  workspacePath,
+				},
+				ImportPath: imp,
+				SourcePath: sourceFile,
+			})
 		}
 	}
 
