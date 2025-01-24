@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "eval.go",
         "glob.go",
+        "rule.go",
     ],
     importpath = "github.com/aspect-build/aspect-cli/gazelle/common/starlark",
     visibility = ["//visibility:public"],
@@ -13,6 +14,7 @@ go_library(
         "//gazelle/common/starlark/stdlib",
         "//pkg/logger",
         "@bazel_gazelle//config:go_default_library",
+        "@bazel_gazelle//rule:go_default_library",
         "@com_github_bazelbuild_buildtools//build:go_default_library",
         "@com_github_yargevad_filepathx//:filepathx",
         "@net_starlark_go//lib/json",

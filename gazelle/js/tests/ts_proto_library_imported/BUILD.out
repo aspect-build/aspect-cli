@@ -1,0 +1,25 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@aspect_rules_ts//ts:proto.bzl", "ts_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+proto_library(
+    name = "lib_proto",
+    srcs = ["lib.proto"],
+    visibility = ["//visibility:public"],
+)
+
+ts_proto_library(
+    name = "lib_proto_ts",
+    gen_connect_es = True,
+    gen_connect_query = True,
+    gen_connect_query_service_mapping = {
+        "lib.proto": ["MyService"],
+    },
+    proto = ":lib_proto",
+)
+
+ts_project(
+    name = "ts_proto_library_ignore",
+    srcs = ["main.ts"],
+    deps = [":lib_proto_ts"],
+)

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io/ioutil"
 	"log"
-	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -47,22 +46,6 @@ func GetProtoLibraries(args language.GenerateArgs, result *language.GenerateResu
 	}
 
 	return protos, emptyProtos
-}
-
-func ToTsImports(src string) []string {
-	src = src[:len(src)-len(path.Ext(src))]
-	return []string{
-		src + "_connect", // TODO: only add when a service is defined
-		src + "_pb",
-	}
-}
-
-func ToTsPaths(src string) []string {
-	src = src[:len(src)-len(path.Ext(src))]
-	return []string{
-		src + "_connect.d.ts", // TODO: only add when a service is defined
-		src + "_pb.d.ts",
-	}
 }
 
 func GetProtoImports(filepath string) ([]string, error) {
