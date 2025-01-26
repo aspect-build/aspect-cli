@@ -106,8 +106,8 @@ def deps():
         name = "com_github_bazelbuild_bazel_gazelle",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/bazelbuild/bazel-gazelle",
-        sum = "h1:SAYys3KRG5i3KTgQAvO423bLT1rQMSgqEKReMkM/CW0=",
-        version = "v0.40.0",
+        sum = "h1:blh57YCxe3QNFbzRtEuLxaak+f5KYSQynznGnUNDRc4=",
+        version = "v0.41.0",
     )
     go_repository(
         name = "com_github_bazelbuild_bazelisk",

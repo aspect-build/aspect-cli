@@ -449,7 +449,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			}
 		} else {
 			merger.MergeFile(f, empty, gen, merger.PreResolve,
-				unionKindInfoMaps(kinds, mappedKindInfo))
+				unionKindInfoMaps(kinds, mappedKindInfo), c.AliasMap)
 		}
 		visits = append(visits, visitRecord{
 			pkgRel:         rel,
@@ -512,7 +512,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			}
 		}
 		merger.MergeFile(v.file, v.empty, v.rules, merger.PostResolve,
-			unionKindInfoMaps(kinds, v.mappedKindInfo))
+			unionKindInfoMaps(kinds, v.mappedKindInfo), c.AliasMap)
 	}
 	for _, lang := range languages {
 		if life, ok := lang.(language.LifecycleManager); ok {
