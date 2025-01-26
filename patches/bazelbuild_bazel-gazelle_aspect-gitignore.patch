@@ -1,8 +1,8 @@
 diff --git a/config/config.go b/config/config.go
-index 23b1083..1841650 100644
+index d27e333..4a22f51 100644
 --- a/config/config.go
 +++ b/config/config.go
-@@ -121,6 +121,7 @@ type MappedKind struct {
+@@ -127,6 +127,7 @@ type MappedKind struct {
  }
  
  const ASPECT_WALKSUBDIR = "__aspect:walksubdir"
@@ -23,10 +23,10 @@ index c8dd6b3..be59f8c 100644
  var nothingIgnored isIgnoredFunc = func(string) bool { return false }
  
 diff --git a/walk/walk.go b/walk/walk.go
-index 78e5874..45fe869 100644
+index fe81ca2..1b71732 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -155,6 +155,14 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+@@ -164,6 +164,14 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
  		return nil, false
  	}
  
@@ -41,7 +41,7 @@ index 78e5874..45fe869 100644
  	// Filter and collect files
  	var regularFiles []string
  	for _, ent := range trie.files {
-@@ -163,6 +171,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+@@ -172,6 +180,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
  		if wc.isExcluded(entRel) {
  			continue
  		}
