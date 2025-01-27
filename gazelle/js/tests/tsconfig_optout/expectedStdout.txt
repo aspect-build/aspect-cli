@@ -1,3 +1,0 @@
-Unknown ts_project attribute to ignore: "declaration_dir"
-
-Ignored attributes must be the ts_project attribute, not the tsconfig.json option name
