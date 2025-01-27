@@ -9,6 +9,7 @@ ts_project(
         "lib.ts",
         "main.ts",
     ],
+    declaration_dir = "baddir",  # keep
     out_dir = "dist",
     root_dir = "foo",  # keep
     tsconfig = "//some/random:tsconfig",  # keep: this keep has a ':'

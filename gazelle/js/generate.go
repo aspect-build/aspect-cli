@@ -64,6 +64,7 @@ var tsProjectReflectedConfigAttributes = []string{
 	"allow_js",
 	"composite",
 	"declaration",
+	"declaration_dir",
 	"declaration_map",
 	"source_map",
 	"incremental",
@@ -639,6 +640,13 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 			sourceRule.SetAttr("out_dir", tsconfig.OutDir)
 		} else {
 			sourceRule.DelAttr("out_dir")
+		}
+
+		// Reflect the tsconfig outDir in the ts_project rule
+		if tsconfig != nil && tsconfig.DeclarationDir != tsconfig.OutDir {
+			sourceRule.SetAttr("declaration_dir", tsconfig.DeclarationDir)
+		} else {
+			sourceRule.DelAttr("declaration_dir")
 		}
 
 		// Reflect the tsconfig rootDir in the ts_project rule
