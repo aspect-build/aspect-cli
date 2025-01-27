@@ -110,6 +110,11 @@ func (ts *typeScriptLang) sourceFileImports(c *config.Config, r *rule.Rule, f *r
 			if outSrc != src {
 				srcs = append(srcs, path.Join(f.Pkg, outSrc))
 			}
+
+			declarationOutDir := tsconfig.ToDeclarationOutDir(src)
+			if outSrc != declarationOutDir && declarationOutDir != src {
+				srcs = append(srcs, path.Join(f.Pkg, declarationOutDir))
+			}
 		}
 
 		for _, src := range srcs {

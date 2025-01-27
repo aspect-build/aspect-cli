@@ -4,6 +4,7 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
 ts_project(
     name = "gazelle_keep",
+    declaration_dir = "baddir", # keep
     srcs = [
         "generated.ts",  # keep
     ],

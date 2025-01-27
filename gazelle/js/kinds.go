@@ -43,6 +43,7 @@ var tsKinds = map[string]rule.KindInfo{
 			"allow_js":            true,
 			"composite":           true,
 			"declaration":         true,
+			"declaration_dir":     true,
 			"declaration_map":     true,
 			"source_map":          true,
 			"incremental":         true,

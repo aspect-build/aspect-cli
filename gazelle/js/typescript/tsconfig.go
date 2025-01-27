@@ -31,6 +31,7 @@ type tsCompilerOptionsJSON struct {
 	AllowJs           *bool                `json:"allowJs"`
 	Composite         *bool                `json:"composite"`
 	Declaration       *bool                `json:"declaration"`
+	DeclarationDir    *string              `json:"declarationDir"`
 	DeclarationMap    *bool                `json:"declarationMap"`
 	Incremental       *bool                `json:"incremental"`
 	TsBuildInfoFile   *string              `json:"tsBuildInfoFile"`
@@ -86,6 +87,7 @@ type TsConfig struct {
 	ResolveJsonModule *bool
 	Composite         *bool
 	Declaration       *bool
+	DeclarationDir    string
 	DeclarationMap    *bool
 	Incremental       *bool
 	TsBuildInfoFile   string
@@ -286,6 +288,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		OutDir = "."
 	}
 
+	var declarationDir string
+	if c.CompilerOptions.DeclarationDir != nil {
+		declarationDir = path.Clean(*c.CompilerOptions.DeclarationDir)
+	} else {
+		declarationDir = OutDir
+	}
+
 	var BaseUrl string
 	if c.CompilerOptions.BaseUrl != nil {
 		BaseUrl = path.Clean(*c.CompilerOptions.BaseUrl)
@@ -339,6 +348,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		AllowJs:           allowJs,
 		Composite:         composite,
 		Declaration:       declaration,
+		DeclarationDir:    declarationDir,
 		DeclarationMap:    declarationMap,
 		Incremental:       incremental,
 		TsBuildInfoFile:   tsBuildInfoFile,
@@ -360,14 +370,21 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 }
 
 func (c TsConfig) ToOutDir(f string) string {
+	return c.stripRootPrependDir(c.OutDir, f)
+}
+func (c TsConfig) ToDeclarationOutDir(f string) string {
+	return c.stripRootPrependDir(c.DeclarationDir, f)
+}
+
+func (c TsConfig) stripRootPrependDir(out, f string) string {
 	if c.RootDir != "." {
 		if strings.HasPrefix(f, c.RootDir) && len(f) > len(c.RootDir) && f[len(c.RootDir)] == '/' {
 			f = f[len(c.RootDir)+1:]
 		}
 	}
 
-	if c.OutDir != "." {
-		f = path.Join(c.OutDir, f)
+	if out != "." {
+		f = path.Join(out, f)
 	}
 
 	return f
