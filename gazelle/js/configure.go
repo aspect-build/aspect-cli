@@ -48,6 +48,7 @@ func (ts *typeScriptLang) KnownDirectives() []string {
 		Directive_Visibility,
 		Directive_Lockfile,
 		Directive_TsconfigFile,
+		Directive_TypeScriptConfigIgnore,
 		Directive_IgnoreImports,
 		Directive_Resolve,
 		Directive_ValidateImportStatements,
@@ -174,6 +175,8 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 			config.SetPnpmLockfile(value)
 		case Directive_TsconfigFile:
 			config.SetTsconfigFile(value)
+		case Directive_TypeScriptConfigIgnore:
+			config.AddIgnoredTsConfig(strings.TrimSpace(value))
 		case Directive_IgnoreImports:
 			config.AddIgnoredImport(strings.TrimSpace(value))
 		case Directive_Resolve:

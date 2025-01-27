@@ -1,0 +1,18 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
+
+ts_project(
+    name = "removed",
+    srcs = ["main.ts"],
+    allow_js = True,
+    source_map = False, # keep
+    declaration = False,
+    declaration = True,
+    resolve_json_module = False,
+    tsconfig = ":tsconfig",
+)
+
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.json",
+    deps = ["//:tsconfig"],
+)

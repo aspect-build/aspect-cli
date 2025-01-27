@@ -1,0 +1,4 @@
+# gazelle:js_tsconfig_ignore tsconfig
+# gazelle:js_tsconfig_ignore out_dir
+# gazelle:js_tsconfig_ignore root_dir
+# gazelle:js_tsconfig_ignore declaration_dir

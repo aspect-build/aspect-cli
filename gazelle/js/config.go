@@ -30,6 +30,8 @@ const (
 	Directive_Lockfile = "js_pnpm_lockfile"
 	// The tsconfig.json file.
 	Directive_TsconfigFile = "js_tsconfig_file"
+	// Ignore and do not generate a tsconfig related `ts_project` attribute
+	Directive_TypeScriptConfigIgnore = "js_tsconfig_ignore"
 	// Directive_IgnoreImports represents the directive that controls the
 	// ignored dependencies from the generated targets.
 	// Sub-packages extend this value.
@@ -164,7 +166,9 @@ type JsGazelleConfig struct {
 	packageGenerationEnabled  NpmPackageMode
 
 	pnpmLockPath string
-	tsconfigName string
+
+	tsconfigName         string
+	tsconfigIgnoredProps []string
 
 	ignoreDependencies       []string
 	resolves                 *linkedhashmap.Map
@@ -190,6 +194,7 @@ func newRootConfig() *JsGazelleConfig {
 		pnpmLockPath:               "pnpm-lock.yaml",
 		tsconfigName:               "tsconfig.json",
 		ignoreDependencies:         make([]string, 0),
+		tsconfigIgnoredProps:       make([]string, 0),
 		resolves:                   linkedhashmap.New(),
 		validateImportStatements:   ValidationError,
 		npmLinkAllTargetName:       DefaultNpmLinkAllTargetName,
@@ -314,6 +319,28 @@ func (c *JsGazelleConfig) SetTsconfigFile(tsconfigName string) {
 }
 func (c *JsGazelleConfig) GetTsconfigFile() string {
 	return c.tsconfigName
+}
+
+func (c *JsGazelleConfig) AddIgnoredTsConfig(propName string) {
+	// TODO: potentially support multiple comma-separated properties, removing properties instead of only adding
+
+	for _, prop := range tsProjectReflectedConfigAttributes {
+		if prop == propName {
+			c.tsconfigIgnoredProps = append(c.tsconfigIgnoredProps, propName)
+			return
+		}
+	}
+
+	fmt.Printf("Unknown ts_project attribute to ignore: %q\n\nIgnored attributes must be the ts_project attribute, not the tsconfig.json option name\n", propName)
+}
+
+func (c *JsGazelleConfig) IsTsConfigIgnored(propName string) bool {
+	for _, prop := range c.tsconfigIgnoredProps {
+		if prop == propName {
+			return true
+		}
+	}
+	return false
 }
 
 // Adds a dependency to the list of ignored dependencies for
