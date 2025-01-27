@@ -1,0 +1,17 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+# gazelle:js_tsconfig_ignore tsconfig
+
+ts_project(
+    name = "ignore_tsconfig",
+    srcs = ["main.ts"],
+    composite = True,
+    declaration = True,
+    declaration_map = True,
+    incremental = True,
+    out_dir = "dist",
+    resolve_json_module = True,
+    root_dir = "src",
+    source_map = True,
+    ts_build_info_file = "dist/tsconfig.tsbuildinfo",
+)

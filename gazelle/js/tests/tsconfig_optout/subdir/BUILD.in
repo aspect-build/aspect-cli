@@ -1,0 +1,3 @@
+# gazelle:js_tsconfig_ignore resolve_json_module
+# gazelle:js_tsconfig_ignore declaration_map
+# gazelle:js_tsconfig_ignore allow_js
