@@ -145,6 +145,7 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 		fileExt := path.Ext(file)
 		if isSourceFileExt(fileExt) {
 			if target := cfg.GetFileSourceTarget(file, tsconfigRootDir); target != nil {
+				// Source files belonging to a target group.
 				BazelLog.Tracef("add '%s' src '%s/%s'", target.name, args.Rel, file)
 
 				groupFiles, _ := groups.Get(target.name)
@@ -154,7 +155,11 @@ func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.Gen
 				}
 				groupFiles.(*treeset.Set).Add(file)
 			} else {
-				BazelLog.Tracef("Skip src '%s'", file)
+				// Source files with no group, but may still be considered "data"
+				// of other source-importing targets such as npm package targets.
+				BazelLog.Tracef("add src data file '%s/%s'", args.Rel, file)
+
+				dataFiles.Add(file)
 			}
 		}
 
