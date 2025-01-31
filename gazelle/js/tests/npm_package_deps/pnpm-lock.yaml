@@ -28,6 +28,8 @@ importers:
 
   types-js: {}
 
+  types-non-rootDir: {}
+
   types-js-gen: {}
 
   typings-js: {}
