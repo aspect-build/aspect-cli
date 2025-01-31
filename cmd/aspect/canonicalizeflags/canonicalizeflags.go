@@ -38,7 +38,7 @@ func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		
 This is useful when you need a unique key to group Bazel invocations by their flags.
 
-Documentation: <https://bazel.build/docs/user-manual#canonicalize-flags>`,
+Read [the Bazel canonicalize-flags documentation](https://bazel.build/docs/user-manual#canonicalize-flags)`,
 		Example: `% aspect canonicalize-flags -- -k -c opt
 --keep_going=1
 --compilation_mode=opt`,

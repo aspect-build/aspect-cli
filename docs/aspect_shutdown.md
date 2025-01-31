@@ -9,7 +9,7 @@ Stop the bazel server
 
 This command shuts down the memory resident bazel server process.
 
-Documentation: <https://bazel.build/docs/user-manual#shutdown>
+Read [the Bazel shutdown documentation](https://bazel.build/docs/user-manual#shutdown)
 
 ```
 aspect shutdown [flags]

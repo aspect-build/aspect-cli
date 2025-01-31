@@ -38,7 +38,7 @@ func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		Short: "Remove the output tree",
 		Long: `Removes bazel-created output, including all object files, and bazel metadata.
 
-Documentation: <https://bazel.build/docs/user-manual#clean>
+		Read [the Bazel clean documentation](https://bazel.build/docs/user-manual#clean)
 
 clean deletes the output directories for all build configurations performed by
 this Bazel instance, or the entire working tree created by this Bazel instance,

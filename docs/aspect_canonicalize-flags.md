@@ -11,7 +11,7 @@ This command canonicalizes a list of bazel options.
 		
 This is useful when you need a unique key to group Bazel invocations by their flags.
 
-Documentation: <https://bazel.build/docs/user-manual#canonicalize-flags>
+Read [the Bazel canonicalize-flags documentation](https://bazel.build/docs/user-manual#canonicalize-flags)
 
 ```
 aspect canonicalize-flags -- <bazel flags>

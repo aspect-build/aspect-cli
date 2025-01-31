@@ -40,11 +40,11 @@ func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 Note that Bazel uses the term "fetch" to mean both downloading remote files, and also running local
 installation commands declared by rules for these external files.
 
-Documentation: <https://bazel.build/run/build#fetching-external-dependencies>
+Read [the Bazel fetch documentation](https://bazel.build/run/build#fetching-external-dependencies)
 
 If you observe fetching that should not be needed to build the
 requested targets, this may indicate an "eager fetch" bug in some ruleset you rely on.
-Read more: <https://blog.aspect.build/avoid-eager-fetches>`,
+Read more: https://blog.aspect.build/avoid-eager-fetches`,
 		GroupID: "built-in",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{

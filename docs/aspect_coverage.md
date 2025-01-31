@@ -17,8 +17,7 @@ $(bazel info output_path)/_coverage/_coverage_report.dat.
 Coverage reports are also produced if tests fail, though note that this does not extend to the
 failed tests - only passing tests are reported.
 
-More documentation on gathering code coverage data with Bazel:
-<https://bazel.build/configure/coverage>
+Read [the Bazel coverage documentation](https://bazel.build/configure/coverage) on gathering code coverage data.
 
 See 'aspect help target-syntax' for details and examples on how to specify targets.
 

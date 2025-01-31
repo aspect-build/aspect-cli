@@ -48,7 +48,7 @@ func NewCmd(
 		Short: "Build a single target and run it with the given arguments",
 		Long: `Equivalent to ` + "`aspect build <target>`" + ` followed by spawning the resulting executable.
 
-Documentation: <https://bazel.build/docs/user-manual#running-executables>
+Read [the Bazel run documentation](https://bazel.build/docs/user-manual#running-executables)
 
 Two environment variables will be present that the program may reference:
 - ` + "`BUILD_WORKSPACE_DIRECTORY`" + `: the root of the workspace where the build was run.
@@ -57,7 +57,7 @@ Two environment variables will be present that the program may reference:
 Note that the ` + "`<target>`" + `may have an ` + "`args`" + ` and ` + "`env`" + `attribute. The ` + "`run`" + ` command honors these and
 sets the arguments and environment of the spawned executable, unlike if the binary is executed as
 an action during a build step, or is run directly outside of Bazel.
-See <https://bazel.build/reference/be/common-definitions#common-attributes-binaries>.
+Read [the Bazel common binary attributes documentation](https://bazel.build/reference/be/common-definitions#common-attributes-binaries).
 
 ` + "`run`" + ` accepts any ` + "`build`" + ` options, and will inherit any defaults provided by ` + "`.bazelrc.`" + `
 

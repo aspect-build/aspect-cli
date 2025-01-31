@@ -35,8 +35,8 @@ func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		Use:   "mobile-install",
 		Short: "Install targets to mobile devices",
 		Long: `Installs a target to an Android device. Currently experimental.
-		
-Documentation: <https://bazel.build/docs/user-manual#mobile-install>`,
+
+Read [the Bazel mobile-install documentation](https://bazel.build/docs/user-manual#mobile-install)`,
 		GroupID: "built-in",
 		Hidden:  true, // This command is documented as "Currently experimental"
 		RunE: interceptors.Run(

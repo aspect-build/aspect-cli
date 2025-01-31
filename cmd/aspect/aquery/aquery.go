@@ -36,7 +36,7 @@ func NewAQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 		Short: "Query the action graph",
 		Long: `Executes a query language expression over a specified subgraph of the action graph.
 
-Documentation: <https://bazel.build/query/aquery>
+Read [the Bazel aquery documentation](https://bazel.build/query/aquery)
 
 Aspect CLI introduces the second form, where in place of an expression, you can give a preset query name.
 Some preset queries also accept parameters, such as labels of targets, which can be provided as arguments.
