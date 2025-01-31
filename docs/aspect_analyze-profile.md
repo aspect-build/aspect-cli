@@ -16,7 +16,7 @@ You can use the `--profile=<file>` flag to supply an alternative path where the 
 
 This command just dumps profile data to stdout. To inspect a profile you may want to use a GUI
 instead, such as the `chrome//:tracing` interface built into Chromium / Google Chrome, or
-<https://ui.perfetto.dev/>.
+[ui.perfetto.dev](https://ui.perfetto.dev).
 
 By default, a summary of the analysis is printed.  For post-processing
 with scripts, the `--dump=raw` option is recommended, causing this

@@ -11,7 +11,7 @@ setup() {
 
 @test 'help command should work' {
     run aspect help build
-    assert_output --partial "Performs a build on the specified targets, producing their default outputs." "Documentation: <https://bazel.build/run/build#bazel-build>"
+    assert_output --partial "Performs a build on the specified targets, producing their default outputs." "See bazel run Documentation: <https://bazel.build/run/build#bazel-build>"
     assert_output --partial "aspect build <target patterns> [flags]"
 }
 

@@ -39,7 +39,7 @@ func NewQueryCommand(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 Note that this ignores the current configuration. Most users should use cquery instead,
 unless you have a specific need to query the unconfigured graph.
 
-Documentation: <https://bazel.build/query/quickstart>`,
+Read [the Bazel query documentation](https://bazel.build/query/quickstart)`,
 		// Note: we list query in the "built-in" rather than "common" group because most users should
 		// use cquery most of the time.
 		GroupID: "built-in",

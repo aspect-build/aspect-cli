@@ -49,7 +49,7 @@ func NewCmd(
 		Short: "Build the specified targets",
 		Long: `Performs a build on the specified targets, producing their default outputs.
 
-Documentation: <https://bazel.build/run/build#bazel-build>
+Read [the Bazel build documentation](https://bazel.build/run/build#bazel-build)
 
 Run 'aspect help target-syntax' for details and examples on how to specify targets to build.
 

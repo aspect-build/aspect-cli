@@ -12,7 +12,7 @@ Executes a query language expression over a specified subgraph of the unconfigur
 Note that this ignores the current configuration. Most users should use cquery instead,
 unless you have a specific need to query the unconfigured graph.
 
-Documentation: <https://bazel.build/query/quickstart>
+Read [the Bazel query documentation](https://bazel.build/query/quickstart)
 
 ```
 aspect query [expression |  <preset name> [arg ...]] [flags]

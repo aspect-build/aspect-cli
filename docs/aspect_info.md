@@ -13,7 +13,7 @@ several output directories.  Because some of the
 values are affected by the options passed to 'bazel build', the
 info command accepts the same set of options.
 
-Documentation: <https://bazel.build/docs/user-manual#info>
+Read [the Bazel info documentation](https://bazel.build/docs/user-manual#info)
 
 If arguments are specified, each should be one of the keys (e.g. "bazel-bin").
 In this case only the value(s) for those keys will be printed.
