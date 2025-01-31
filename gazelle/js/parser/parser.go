@@ -23,35 +23,21 @@ type ParseResult struct {
 	Modules []string
 }
 
-// Queries finding import statements, tagging such Nodes as 'from' captures.
-// Optionally filtering captures using 'equals-{name}' vars and #eq? statements.
-var importQueries = map[string]string{
-	// Dynamic `import("...")` statement
-	"dynamic_esm_import": `
-		(call_expression
-			function: (import)
-			arguments: (
-				arguments (
-					string (string_fragment) @from
-				)
-			)
-		)
-	`,
+// A query finding esm import() statements and cjs require() statements
+// with the resulting import string exposed as @from.
+//
+// Use the '.' anchor operator to only match the first argument
+const DYNAMIC_IMPORTS = `
+	(call_expression
+		function: [
+			(identifier) @equals-require
+			(import)
+		]
+		arguments: (arguments . (string (string_fragment) @from))
 
-	// CJS `require("...")` statement
-	"require": `
-		(call_expression
-			function: (identifier) @equals-require
-			arguments: (
-				arguments (
-					string (string_fragment) @from
-				)
-			)
-
-			(#eq? @equals-require "require")
-		)
-	`,
-}
+		(#eq? @equals-require "require")
+	)
+`
 
 // Note that we intentionally omit "lib" here since these directives do not result in a separate dependency
 // See: https://www.typescriptlang.org/docs/handbook/triple-slash-directives.html#-reference-lib-
@@ -121,17 +107,12 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 			}
 		}
 
-		// Extra queries for more complex import statements.
-		for key, queryString := range importQueries {
-			q := treeutils.GetQuery(lang, queryString)
+		// Query for more complex non-root node imports.
+		q := treeutils.GetQuery(lang, DYNAMIC_IMPORTS)
+		if queryResults := tree.QueryStrings(q, "from"); len(queryResults) > 0 {
+			Log.Tracef("Dynamic Imports %q: %v", filePath, queryResults)
 
-			queryResults := tree.QueryStrings(q, "from")
-
-			if len(queryResults) > 0 {
-				Log.Tracef("Import Query (%s) result %q => %v", key, filePath, queryResults)
-
-				imports = append(imports, queryResults...)
-			}
+			imports = append(imports, queryResults...)
 		}
 
 		// Parse errors. Only log them due to many false positives potentially caused by issues
