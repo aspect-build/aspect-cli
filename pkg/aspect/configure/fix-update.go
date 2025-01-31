@@ -330,6 +330,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 
 	var errorsFromWalk []error
 	walk.Walk(c, cexts, uc.dirs, uc.walkMode, func(dir, rel string, c *config.Config, update bool, f *rule.File, subdirs, regularFiles, genFiles []string) {
+		mrslv.AliasedKinds(rel, c.AliasMap)
 		// If this file is ignored or if Gazelle was not asked to update this
 		// directory, just index the build file and move on.
 		if !update {
@@ -449,7 +450,9 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			}
 		} else {
 			merger.MergeFile(f, empty, gen, merger.PreResolve,
-				unionKindInfoMaps(kinds, mappedKindInfo), c.AliasMap)
+				unionKindInfoMaps(kinds, mappedKindInfo),
+				c.AliasMap,
+			)
 		}
 		visits = append(visits, visitRecord{
 			pkgRel:         rel,
@@ -512,7 +515,9 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			}
 		}
 		merger.MergeFile(v.file, v.empty, v.rules, merger.PostResolve,
-			unionKindInfoMaps(kinds, v.mappedKindInfo), c.AliasMap)
+			unionKindInfoMaps(kinds, v.mappedKindInfo),
+			v.c.AliasMap,
+		)
 	}
 	for _, lang := range languages {
 		if life, ok := lang.(language.LifecycleManager); ok {
@@ -623,6 +628,7 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 	for _, d := range uc.dirs {
 		if d == c.RepoRoot {
 			shouldFix = true
+			break
 		}
 	}
 	if !shouldFix {
@@ -634,7 +640,6 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 		workspaceFile := wspace.FindWORKSPACEFile(c.RepoRoot)
 
 		if f.Path == workspaceFile {
-			removeLegacyGoRepository(f)
 			if err := merger.CheckGazelleLoaded(f); err != nil {
 				return err
 			}
@@ -644,20 +649,6 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 		}
 	}
 	return nil
-}
-
-// removeLegacyGoRepository removes loads of go_repository from
-// @io_bazel_rules_go. FixLoads should be called after this; it will load from
-// @bazel_gazelle.
-func removeLegacyGoRepository(f *rule.File) {
-	for _, l := range f.Loads {
-		if l.Name() == "@io_bazel_rules_go//go:def.bzl" {
-			l.Remove("go_repository")
-			if l.IsEmpty() {
-				l.Delete()
-			}
-		}
-	}
 }
 
 func findWorkspaceName(f *rule.File) string {
@@ -753,10 +744,11 @@ func unionKindInfoMaps(a, b map[string]rule.KindInfo) map[string]rule.KindInfo {
 		return a
 	}
 	result := make(map[string]rule.KindInfo, len(a)+len(b))
-	for _, m := range []map[string]rule.KindInfo{a, b} {
-		for k, v := range m {
-			result[k] = v
-		}
+	for k, v := range a {
+		result[k] = v
+	}
+	for k, v := range b {
+		result[k] = v
 	}
 	return result
 }
@@ -794,12 +786,6 @@ func appendOrMergeKindMapping(mappedLoads []rule.LoadInfo, mappedKind config.Map
 }
 
 func isDirErr(err error) bool {
-	if err == nil {
-		return false
-	}
 	var pe *os.PathError
-	if errors.As(err, &pe) {
-		return pe.Err == syscall.EISDIR
-	}
-	return false
+	return errors.As(err, &pe) && pe.Err == syscall.EISDIR
 }
