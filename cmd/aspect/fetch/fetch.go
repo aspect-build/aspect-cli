@@ -22,15 +22,20 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspect/fetch"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/hints"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
+	return NewCmd(
+		ioutils.DefaultStreams,
+		hints.DefaultStreams,
+		bazel.WorkspaceFromWd,
+	)
 }
 
-func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
+func NewCmd(streams ioutils.Streams, hstreams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "fetch <target patterns>",
 		Args:  cobra.MinimumNArgs(1),
@@ -50,7 +55,7 @@ Read more: https://blog.aspect.build/avoid-eager-fetches`,
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			fetch.New(streams, bzl).Run,
+			fetch.New(streams, hstreams, bzl).Run,
 		),
 	}
 

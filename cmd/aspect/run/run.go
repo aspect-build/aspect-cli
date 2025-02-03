@@ -22,6 +22,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/run"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/hints"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system"
@@ -32,6 +33,7 @@ import (
 func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewCmd(
 		ioutils.DefaultStreams,
+		hints.DefaultStreams,
 		pluginSystem,
 		bazel.WorkspaceFromWd,
 	)
@@ -39,6 +41,7 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 
 func NewCmd(
 	streams ioutils.Streams,
+	hstreams ioutils.Streams,
 	pluginSystem system.PluginSystem,
 	bzl bazel.Bazel,
 ) *cobra.Command {
@@ -80,7 +83,7 @@ directory of the process. You'd typically do this at the very beginning of the p
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.RunHooksInterceptor(streams),
 			},
-			run.New(streams, bzl).Run,
+			run.New(streams, hstreams, bzl).Run,
 		),
 	}
 }

@@ -62,7 +62,7 @@ func TestRun(t *testing.T) {
 
 		ctx := bep.InjectBESBackend(context.Background(), besBackend)
 
-		b := run.New(streams, bzl)
+		b := run.New(streams, streams, bzl)
 		err := b.Run(ctx, nil, []string{"//..."})
 
 		g.Expect(err).To(MatchError(expectErr))
@@ -97,7 +97,7 @@ func TestRun(t *testing.T) {
 
 		ctx := bep.InjectBESBackend(context.Background(), besBackend)
 
-		b := run.New(streams, bzl)
+		b := run.New(streams, streams, bzl)
 		err := b.Run(ctx, nil, []string{"//..."})
 
 		expectedError := fmt.Errorf("2 BES subscriber error(s)")
@@ -130,7 +130,7 @@ func TestRun(t *testing.T) {
 
 		ctx := bep.InjectBESBackend(context.Background(), besBackend)
 
-		b := run.New(streams, bzl)
+		b := run.New(streams, streams, bzl)
 		err := b.Run(ctx, nil, []string{"//my/runable:target", "--", "myarg"})
 
 		g.Expect(err).To(BeNil())

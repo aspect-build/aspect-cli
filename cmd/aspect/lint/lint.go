@@ -22,16 +22,23 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspect/lint"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/hints"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system"
 )
 
 func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, pluginSystem, bazel.WorkspaceFromWd, []lint.LintResultsHandler{})
+	return NewCmd(
+		ioutils.DefaultStreams,
+		hints.DefaultStreams,
+		pluginSystem,
+		bazel.WorkspaceFromWd,
+		[]lint.LintResultsHandler{},
+	)
 }
 
-func NewCmd(streams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel.Bazel, lintHandlers []lint.LintResultsHandler) *cobra.Command {
+func NewCmd(streams ioutils.Streams, hstreams ioutils.Streams, pluginSystem system.PluginSystem, bzl bazel.Bazel, lintHandlers []lint.LintResultsHandler) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "lint <target patterns>",
 		Args:  cobra.MinimumNArgs(1),
@@ -48,7 +55,7 @@ In addition to flags listed below, flags accepted by the 'bazel build' command a
 				flags.FlagsInterceptor(streams),
 				pluginSystem.BESBackendSubscriberInterceptor(),
 			},
-			lint.New(streams, bzl, lintHandlers).Run,
+			lint.New(streams, hstreams, bzl, lintHandlers).Run,
 		),
 	}
 	lint.AddFlags(cmd.Flags())

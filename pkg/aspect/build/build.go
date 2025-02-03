@@ -29,18 +29,21 @@ import (
 
 // Build represents the aspect build command.
 type Build struct {
-	ioutils.Streams
-	bzl bazel.Bazel
+	streams  ioutils.Streams
+	hstreams ioutils.Streams
+	bzl      bazel.Bazel
 }
 
 // New creates a Build command.
 func New(
 	streams ioutils.Streams,
+	hstreams ioutils.Streams,
 	bzl bazel.Bazel,
 ) *Build {
 	return &Build{
-		Streams: streams,
-		bzl:     bzl,
+		streams:  streams,
+		hstreams: hstreams,
+		bzl:      bzl,
 	}
 }
 
@@ -62,13 +65,13 @@ func (runner *Build) Run(ctx context.Context, _ *cobra.Command, args []string) e
 		bazelCmd = flags.AddFlagToCommand(bazelCmd, besBackendFlag)
 	}
 
-	err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
+	err := runner.bzl.RunCommand(runner.hstreams, nil, bazelCmd...)
 
 	// Check for subscriber errors
 	subscriberErrors := bep.BESErrors(ctx)
 	if len(subscriberErrors) > 0 {
 		for _, err := range subscriberErrors {
-			fmt.Fprintf(runner.Streams.Stderr, "Error: failed to run build command: %v\n", err)
+			fmt.Fprintf(runner.streams.Stderr, "Error: failed to run build command: %v\n", err)
 		}
 		if err == nil {
 			err = fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))

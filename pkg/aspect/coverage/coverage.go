@@ -28,14 +28,16 @@ import (
 )
 
 type Coverage struct {
-	ioutils.Streams
-	bzl bazel.Bazel
+	streams  ioutils.Streams
+	hstreams ioutils.Streams
+	bzl      bazel.Bazel
 }
 
-func New(streams ioutils.Streams, bzl bazel.Bazel) *Coverage {
+func New(streams ioutils.Streams, hstreams ioutils.Streams, bzl bazel.Bazel) *Coverage {
 	return &Coverage{
-		Streams: streams,
-		bzl:     bzl,
+		streams:  streams,
+		hstreams: hstreams,
+		bzl:      bzl,
 	}
 }
 
@@ -55,13 +57,13 @@ func (runner *Coverage) Run(ctx context.Context, _ *cobra.Command, args []string
 		bazelCmd = flags.AddFlagToCommand(bazelCmd, besBackendFlag)
 	}
 
-	err := runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
+	err := runner.bzl.RunCommand(runner.hstreams, nil, bazelCmd...)
 
 	// Check for subscriber errors
 	subscriberErrors := bep.BESErrors(ctx)
 	if len(subscriberErrors) > 0 {
 		for _, err := range subscriberErrors {
-			fmt.Fprintf(runner.Streams.Stderr, "Error: failed to run coverage command: %v\n", err)
+			fmt.Fprintf(runner.streams.Stderr, "Error: failed to run coverage command: %v\n", err)
 		}
 		if err == nil {
 			err = fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))

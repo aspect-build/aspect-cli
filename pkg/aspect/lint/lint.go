@@ -55,7 +55,8 @@ type LintResultsHandler interface {
 }
 
 type Linter struct {
-	ioutils.Streams
+	streams         ioutils.Streams
+	hstreams        ioutils.Streams
 	bzl             bazel.Bazel
 	resultsHandlers []LintResultsHandler
 }
@@ -72,11 +73,13 @@ const (
 
 func New(
 	streams ioutils.Streams,
+	hstreams ioutils.Streams,
 	bzl bazel.Bazel,
 	resultsHandlers []LintResultsHandler,
 ) *Linter {
 	return &Linter{
-		Streams:         streams,
+		streams:         streams,
+		hstreams:        hstreams,
 		bzl:             bzl,
 		resultsHandlers: resultsHandlers,
 	}
@@ -146,7 +149,7 @@ func (runner *Linter) Run(ctx context.Context, cmd *cobra.Command, args []string
 	linters := viper.GetStringSlice("lint.aspects")
 
 	if len(linters) == 0 {
-		fmt.Fprintf(runner.Streams.Stdout, `No aspects enabled for linting.
+		fmt.Fprintf(runner.streams.Stdout, `No aspects enabled for linting.
 		
 Add a section like the following to your .aspect/cli/config.yaml:
 
@@ -251,7 +254,7 @@ lint:
 		bazelCmd = append(bazelCmd, postTerminateArgs...)
 	}
 
-	err = runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
+	err = runner.bzl.RunCommand(runner.hstreams, nil, bazelCmd...)
 	if err != nil {
 		return err
 	}
@@ -271,7 +274,7 @@ lint:
 	subscriberErrors := bep.BESErrors(ctx)
 	if len(subscriberErrors) > 0 {
 		for _, err := range subscriberErrors {
-			fmt.Fprintf(runner.Streams.Stderr, "Error: failed to run lint command: %v\n", err)
+			fmt.Fprintf(runner.streams.Stderr, "Error: failed to run lint command: %v\n", err)
 		}
 		return fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))
 	}
@@ -349,7 +352,7 @@ lint:
 				runner.printLintResultsHeader(r.Label)
 				printHeader = false
 			}
-			color.New(color.FgYellow).Fprintf(runner.Streams.Stdout, "Some problems have automated fixes available:\n\n")
+			color.New(color.FgYellow).Fprintf(runner.streams.Stdout, "Some problems have automated fixes available:\n\n")
 			if showDiff {
 				runner.printLintPatchDiff(r.Patch)
 			} else {
@@ -408,12 +411,12 @@ lint:
 }
 
 func (runner *Linter) printLintResultsHeader(label string) {
-	color.New(color.Bold).Fprintf(runner.Streams.Stdout, "Lint results for %s:\n\n", label)
+	color.New(color.Bold).Fprintf(runner.streams.Stdout, "Lint results for %s:\n\n", label)
 }
 
 func (runner *Linter) printLintReport(report string) {
-	fmt.Fprintf(runner.Streams.Stdout, "%s\n", report)
-	fmt.Fprintln(runner.Streams.Stdout, "")
+	fmt.Fprintf(runner.streams.Stdout, "%s\n", report)
+	fmt.Fprintln(runner.streams.Stdout, "")
 }
 
 type diffSummary struct {
@@ -514,33 +517,33 @@ func (runner *Linter) printLintPatchDiffStat(patch []byte) error {
 			// truncate long filenames
 			name = "..." + name[len(name)-nameColumn+3:]
 		}
-		fmt.Fprintf(runner.Streams.Stdout, "  %-*s | ", nameColumn, name)
-		fmt.Fprintf(runner.Streams.Stdout, "%*d ", linesColumn, summary.total)
-		color.New(color.FgGreen).Fprint(runner.Streams.Stdout, strings.Repeat("+", histAdded))
-		color.New(color.FgRed).Fprint(runner.Streams.Stdout, strings.Repeat("-", histDeleted))
-		color.New(color.FgCyan).Fprint(runner.Streams.Stdout, strings.Repeat("!", histChanged))
-		fmt.Fprintln(runner.Streams.Stdout, "")
+		fmt.Fprintf(runner.streams.Stdout, "  %-*s | ", nameColumn, name)
+		fmt.Fprintf(runner.streams.Stdout, "%*d ", linesColumn, summary.total)
+		color.New(color.FgGreen).Fprint(runner.streams.Stdout, strings.Repeat("+", histAdded))
+		color.New(color.FgRed).Fprint(runner.streams.Stdout, strings.Repeat("-", histDeleted))
+		color.New(color.FgCyan).Fprint(runner.streams.Stdout, strings.Repeat("!", histChanged))
+		fmt.Fprintln(runner.streams.Stdout, "")
 	}
 
 	// 1 file, 1 insertion(+), 5 deletions(-), 1 modification(!)
-	fmt.Fprintf(runner.Streams.Stdout, "  %d file%s", len(summaries), strings.Repeat("s", min(1, len(summaries)-1)))
+	fmt.Fprintf(runner.streams.Stdout, "  %d file%s", len(summaries), strings.Repeat("s", min(1, len(summaries)-1)))
 	if sumAdded > 0 {
-		fmt.Fprintf(runner.Streams.Stdout, ", %d insertion%s(+)", sumAdded, strings.Repeat("s", min(1, sumAdded-1)))
+		fmt.Fprintf(runner.streams.Stdout, ", %d insertion%s(+)", sumAdded, strings.Repeat("s", min(1, sumAdded-1)))
 	}
 	if sumDeleted > 0 {
-		fmt.Fprintf(runner.Streams.Stdout, ", %d deletion%s(-)", sumDeleted, strings.Repeat("s", min(1, sumDeleted-1)))
+		fmt.Fprintf(runner.streams.Stdout, ", %d deletion%s(-)", sumDeleted, strings.Repeat("s", min(1, sumDeleted-1)))
 	}
 	if sumChanged > 0 {
-		fmt.Fprintf(runner.Streams.Stdout, ", %d modification%s(!)", sumChanged, strings.Repeat("s", min(1, sumChanged-1)))
+		fmt.Fprintf(runner.streams.Stdout, ", %d modification%s(!)", sumChanged, strings.Repeat("s", min(1, sumChanged-1)))
 	}
-	fmt.Fprintln(runner.Streams.Stdout, "")
-	fmt.Fprintln(runner.Streams.Stdout, "")
+	fmt.Fprintln(runner.streams.Stdout, "")
+	fmt.Fprintln(runner.streams.Stdout, "")
 	return nil
 }
 
 func (runner *Linter) printLintPatchDiff(patch []byte) {
-	fmt.Fprint(runner.Streams.Stdout, string(patch))
-	fmt.Fprintln(runner.Streams.Stdout, "")
+	fmt.Fprint(runner.streams.Stdout, string(patch))
+	fmt.Fprintln(runner.streams.Stdout, "")
 }
 
 func (runner *Linter) applyLintPatch(patch []byte) error {
@@ -576,11 +579,11 @@ func (runner *Linter) applyLintPatch(patch []byte) error {
 		if writeErr != nil {
 			return writeErr
 		}
-		color.New(color.Faint).Fprintf(runner.Streams.Stdout, "Patched %s\n", file.NewName[2:])
+		color.New(color.Faint).Fprintf(runner.streams.Stdout, "Patched %s\n", file.NewName[2:])
 	}
 
 	if len(files) > 0 {
-		fmt.Fprintln(runner.Streams.Stdout, "")
+		fmt.Fprintln(runner.streams.Stdout, "")
 	}
 
 	return nil

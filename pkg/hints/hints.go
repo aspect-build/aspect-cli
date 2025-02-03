@@ -14,18 +14,18 @@ import (
 	"golang.org/x/term"
 )
 
+var DefaultStreams = ioutils.DefaultStreams
+
 type Hints struct {
-	hintMap                map[*regexp.Regexp]string
-	hints                  *hintSet
-	hintsMutex             sync.Mutex
-	wg                     sync.WaitGroup
-	originalStdout         *os.File
-	originalStderr         *os.File
-	originalDefaultStreams *ioutils.Streams
-	stdoutR                *os.File
-	stdoutW                *os.File
-	stderrR                *os.File
-	stderrW                *os.File
+	Stdout *os.File
+	Stderr *os.File
+
+	hintMap    map[*regexp.Regexp]string
+	hints      *hintSet
+	hintsMutex sync.Mutex
+	wg         sync.WaitGroup
+	stdoutR    *os.File
+	stderrR    *os.File
 }
 
 func New() *Hints {
@@ -62,32 +62,26 @@ func (h *Hints) Attach() error {
 	stdoutTerm := term.IsTerminal(int(os.Stdout.Fd()))
 	stderrTerm := term.IsTerminal(int(os.Stderr.Fd()))
 	if stdoutTerm {
-		h.stdoutR, h.stdoutW, err = pty.Open()
+		h.stdoutR, h.Stdout, err = pty.Open()
 	} else {
-		h.stdoutR, h.stdoutW, err = os.Pipe()
+		h.stdoutR, h.Stdout, err = os.Pipe()
 	}
 	if err != nil {
 		return err
 	}
 	if stderrTerm {
-		h.stderrR, h.stderrW, err = pty.Open()
+		h.stderrR, h.Stderr, err = pty.Open()
 	} else {
-		h.stderrR, h.stderrW, err = os.Pipe()
+		h.stderrR, h.Stderr, err = os.Pipe()
 	}
 	if err != nil {
 		return err
 	}
 
-	// Save original Stdout, Stderr and DefaultStreams and override
-	h.originalStdout = os.Stdout
-	h.originalStderr = os.Stderr
-	h.originalDefaultStreams = &ioutils.DefaultStreams
-	os.Stdout = h.stdoutW
-	os.Stderr = h.stderrW
-	ioutils.DefaultStreams = ioutils.Streams{
+	DefaultStreams = ioutils.Streams{
 		Stdin:  ioutils.DefaultStreams.Stdin,
-		Stdout: h.stdoutW,
-		Stderr: h.stderrW,
+		Stdout: h.Stdout,
+		Stderr: h.Stderr,
 	}
 
 	// Create goroutines to forward streams and create hints on regex matches
@@ -100,12 +94,12 @@ func (h *Hints) Attach() error {
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				if err != io.EOF {
-					fmt.Fprintf(h.originalStderr, "Error reading from stdout: %v\n", err)
+					fmt.Fprintf(ioutils.DefaultStreams.Stderr, "Error reading from stdout: %v\n", err)
 				}
 				break
 			}
 			h.ProcessLine(strings.TrimSpace(line))
-			fmt.Fprint(h.originalStdout, line)
+			fmt.Fprint(ioutils.DefaultStreams.Stdout, line)
 		}
 	}()
 
@@ -116,12 +110,12 @@ func (h *Hints) Attach() error {
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				if err != io.EOF {
-					fmt.Fprintf(h.originalStderr, "Error reading from stderr: %v\n", err)
+					fmt.Fprintf(ioutils.DefaultStreams.Stderr, "Error reading from stderr: %v\n", err)
 				}
 				break
 			}
 			h.ProcessLine(strings.TrimSpace(line))
-			fmt.Fprint(h.originalStderr, line)
+			fmt.Fprint(ioutils.DefaultStreams.Stderr, line)
 		}
 	}()
 
@@ -129,27 +123,17 @@ func (h *Hints) Attach() error {
 }
 
 func (h *Hints) Detach() {
-	if h.stdoutW != nil {
-		h.stdoutW.Close()
-		h.stdoutW = nil
+	DefaultStreams = ioutils.DefaultStreams
+
+	if h.Stdout != nil {
+		h.Stdout.Close()
+		h.Stdout = nil
 	}
-	if h.stderrW != nil {
-		h.stderrW.Close()
-		h.stderrW = nil
+	if h.Stderr != nil {
+		h.Stderr.Close()
+		h.Stderr = nil
 	}
 	h.wg.Wait()
-	if h.originalStdout != nil {
-		os.Stdout = h.originalStdout
-		h.originalStdout = nil
-	}
-	if h.originalStderr != nil {
-		os.Stderr = h.originalStderr
-		h.originalStderr = nil
-	}
-	if h.originalDefaultStreams != nil {
-		ioutils.DefaultStreams = *h.originalDefaultStreams
-		h.originalDefaultStreams = nil
-	}
 }
 
 func (h *Hints) ProcessLine(line string) {
