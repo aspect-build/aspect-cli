@@ -9,6 +9,7 @@ go_library(
         "//pkg/aspect/root/flags",
         "//pkg/aspect/run",
         "//pkg/bazel",
+        "//pkg/hints",
         "//pkg/interceptors",
         "//pkg/ioutils",
         "//pkg/plugin/system",

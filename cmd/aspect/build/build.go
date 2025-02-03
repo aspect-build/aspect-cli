@@ -22,6 +22,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspect/build"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/hints"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system"
@@ -32,6 +33,7 @@ import (
 func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	return NewCmd(
 		ioutils.DefaultStreams,
+		hints.DefaultStreams,
 		pluginSystem,
 		bazel.WorkspaceFromWd,
 	)
@@ -40,6 +42,7 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 // NewCmd creates a new build cobra command.
 func NewCmd(
 	streams ioutils.Streams,
+	hstreams ioutils.Streams,
 	pluginSystem system.PluginSystem,
 	bzl bazel.Bazel,
 ) *cobra.Command {
@@ -80,7 +83,7 @@ The target pattern may be further filtered using the flag
 				pluginSystem.BESBackendInterceptor(),
 				pluginSystem.BuildHooksInterceptor(streams),
 			},
-			build.New(streams, bzl).Run,
+			build.New(streams, hstreams, bzl).Run,
 		),
 	}
 }

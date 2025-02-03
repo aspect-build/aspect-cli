@@ -57,7 +57,7 @@ func TestTest(t *testing.T) {
 
 		ctx := bep.InjectBESBackend(context.Background(), besBackend)
 
-		b := test.New(streams, bzl)
+		b := test.New(streams, streams, bzl)
 		g.Expect(b.Run(ctx, nil, []string{})).Should(Succeed())
 	})
 }

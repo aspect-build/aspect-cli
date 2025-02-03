@@ -114,7 +114,8 @@ func TestLint(t *testing.T) {
 		cmd := getCMD()
 
 		l := &Linter{
-			Streams:         streams,
+			streams:         streams,
+			hstreams:        streams,
 			bzl:             bzl,
 			resultsHandlers: make([]LintResultsHandler, 0),
 		}
@@ -148,7 +149,8 @@ func TestLint(t *testing.T) {
 		cmd := getCMD()
 
 		l := &Linter{
-			Streams:         streams,
+			streams:         streams,
+			hstreams:        streams,
 			bzl:             bzl,
 			resultsHandlers: make([]LintResultsHandler, 0),
 		}
@@ -182,7 +184,8 @@ func TestLint(t *testing.T) {
 		cmd := getCMD()
 
 		l := &Linter{
-			Streams:         streams,
+			streams:         streams,
+			hstreams:        streams,
 			bzl:             bzl,
 			resultsHandlers: make([]LintResultsHandler, 0),
 		}

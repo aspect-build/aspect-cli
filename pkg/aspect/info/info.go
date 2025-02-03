@@ -25,19 +25,21 @@ import (
 )
 
 type Info struct {
-	ioutils.Streams
-	bzl bazel.Bazel
+	streams  ioutils.Streams
+	hstreams ioutils.Streams
+	bzl      bazel.Bazel
 }
 
-func New(streams ioutils.Streams, bzl bazel.Bazel) *Info {
+func New(streams ioutils.Streams, hstreams ioutils.Streams, bzl bazel.Bazel) *Info {
 	return &Info{
-		Streams: streams,
-		bzl:     bzl,
+		streams:  streams,
+		hstreams: hstreams,
+		bzl:      bzl,
 	}
 }
 
 func (runner *Info) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"info"}
 	bazelCmd = append(bazelCmd, args...)
-	return runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
+	return runner.bzl.RunCommand(runner.hstreams, nil, bazelCmd...)
 }

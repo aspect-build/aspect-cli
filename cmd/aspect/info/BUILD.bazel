@@ -9,6 +9,7 @@ go_library(
         "//pkg/aspect/info",
         "//pkg/aspect/root/flags",
         "//pkg/bazel",
+        "//pkg/hints",
         "//pkg/interceptors",
         "//pkg/ioutils",
         "@com_github_spf13_cobra//:cobra",

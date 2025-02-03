@@ -22,15 +22,20 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspect/info"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/hints"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams, bazel.WorkspaceFromWd)
+	return NewCmd(
+		ioutils.DefaultStreams,
+		hints.DefaultStreams,
+		bazel.WorkspaceFromWd,
+	)
 }
 
-func NewCmd(streams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
+func NewCmd(streams ioutils.Streams, hstreams ioutils.Streams, bzl bazel.Bazel) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "info [keys]",
 		Short: "Display runtime info about the bazel server",
@@ -97,7 +102,7 @@ When no arguments are given, most key/values are printed.
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			info.New(streams, bzl).Run,
+			info.New(streams, hstreams, bzl).Run,
 		),
 	}
 	return cmd

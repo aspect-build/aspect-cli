@@ -25,19 +25,21 @@ import (
 )
 
 type Fetch struct {
-	ioutils.Streams
-	bzl bazel.Bazel
+	streams  ioutils.Streams
+	hstreams ioutils.Streams
+	bzl      bazel.Bazel
 }
 
-func New(streams ioutils.Streams, bzl bazel.Bazel) *Fetch {
+func New(streams ioutils.Streams, hstreams ioutils.Streams, bzl bazel.Bazel) *Fetch {
 	return &Fetch{
-		Streams: streams,
-		bzl:     bzl,
+		streams:  streams,
+		hstreams: hstreams,
+		bzl:      bzl,
 	}
 }
 
 func (runner *Fetch) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	bazelCmd := []string{"fetch"}
 	bazelCmd = append(bazelCmd, args...)
-	return runner.bzl.RunCommand(runner.Streams, nil, bazelCmd...)
+	return runner.bzl.RunCommand(runner.hstreams, nil, bazelCmd...)
 }
