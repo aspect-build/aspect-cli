@@ -18,6 +18,8 @@ import(3, "not-first")
 
 // A valid first arg
 import("lib", 3)
+import(/* chunk */ "lib", 3)
+import(/* chunk */ /* chunk2 */ "lib")
 
 // Various invalid cjs requires
 require(3 * 5)
@@ -25,3 +27,4 @@ require(3, "not-first")
 
 // Valid first arg
 require("lib", 3)
+require(/* chunk */ /* chunk2 */ "lib")
