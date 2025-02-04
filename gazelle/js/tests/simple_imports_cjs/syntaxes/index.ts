@@ -15,13 +15,13 @@ var s2 = require('../subproject-index').subproject_index;
 let { subproject_index } = require('../subproject');
 
 // const { single: renamed }
-const { subproject_lib: foo } = require('../subproject/lib');
+const { subproject_lib: foo } = require(/* comment */  '../subproject/lib' /* comment */, "ignore-this-one" );
 
 // const { multi }
 const {
     backref_subproject_index,
     backref_subproject_lib,
-} = require('../subproject-backref/lib');
+} = require( /* comment */ '../subproject-backref/lib');
 
 // avoid unused-var warnings
 console.log(

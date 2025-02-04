@@ -1,0 +1,12 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "syntaxes",
+    srcs = ["index.ts"],
+    deps = [
+        "//:simple_imports_dynamic",
+        "//exts",
+        "//subproject",
+        "//subproject-backref",
+    ],
+)

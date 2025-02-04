@@ -33,7 +33,7 @@ const DYNAMIC_IMPORTS = `
 			(identifier) @equals-require
 			(import)
 		]
-		arguments: (arguments . (string (string_fragment) @from))
+		arguments: (arguments . (comment)* . (string (string_fragment) @from))
 
 		(#eq? @equals-require "require")
 	)
