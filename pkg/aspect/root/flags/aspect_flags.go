@@ -26,4 +26,5 @@ const (
 	AspectInteractiveFlagName     = AspectFlagPrefix + "interactive"
 	AspectForceBesBackendFlagName = AspectFlagPrefix + "force_bes_backend"
 	AspectDisablePluginsFlagName  = AspectFlagPrefix + "disable_plugins"
+	AspectHintsFlagName           = AspectFlagPrefix + "hints"
 )

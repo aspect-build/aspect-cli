@@ -44,18 +44,6 @@ func main() {
 		aspecterrors.HandleError(err)
 	}
 
-	h := hints.New()
-
-	// Configure hints from Aspect CLI config.yaml 'hints' attribute
-	if err := h.Configure(viper.Get("hints")); err != nil {
-		aspecterrors.HandleError(err)
-	}
-
-	// Attach hints from Stdout and Stderr streams
-	if err := h.Attach(); err != nil {
-		aspecterrors.HandleError(err)
-	}
-
 	streams := ioutils.DefaultStreams
 
 	// Handle --version, -v and --bazel-version before re-entering and before initializing the
@@ -79,6 +67,18 @@ func main() {
 
 	args, startupFlags, err := bazel.InitializeStartupFlags(os.Args[1:])
 	if err != nil {
+		aspecterrors.HandleError(err)
+	}
+
+	h := hints.New()
+
+	// Configure hints from Aspect CLI config.yaml 'hints' attribute
+	if err := h.Configure(viper.Get("hints")); err != nil {
+		aspecterrors.HandleError(err)
+	}
+
+	// Attach hints from Stdout and Stderr streams
+	if err := h.Attach(); err != nil {
 		aspecterrors.HandleError(err)
 	}
 
