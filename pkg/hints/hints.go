@@ -24,6 +24,7 @@ type Hints struct {
 	hints      *hintSet
 	hintsMutex sync.Mutex
 	wg         sync.WaitGroup
+	terminal   bool
 	stdoutR    *os.File
 	stderrR    *os.File
 }
@@ -59,9 +60,8 @@ func (h *Hints) Attach() error {
 
 	// Create stream pipes using pty if Stdout/Stderr is a terminal other using a standard pipe
 	var err error
-	stdoutTerm := term.IsTerminal(int(os.Stdout.Fd()))
-	stderrTerm := term.IsTerminal(int(os.Stderr.Fd()))
-	if stdoutTerm {
+	h.terminal = term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
+	if h.terminal {
 		h.stdoutR, h.Stdout, err = pty.Open()
 	} else {
 		h.stdoutR, h.Stdout, err = os.Pipe()
@@ -69,7 +69,7 @@ func (h *Hints) Attach() error {
 	if err != nil {
 		return err
 	}
-	if stderrTerm {
+	if h.terminal {
 		h.stderrR, h.Stderr, err = pty.Open()
 	} else {
 		h.stderrR, h.Stderr, err = os.Pipe()
@@ -96,7 +96,7 @@ func (h *Hints) Attach() error {
 			n, err := reader.Read(buffer)
 			if n > 0 {
 				data := buffer[:n]
-				fmt.Fprint(ioutils.DefaultStreams.Stdout, string(data))
+				ioutils.DefaultStreams.Stdout.Write(data)
 				for _, b := range data {
 					if b == '\n' {
 						h.ProcessLine(strings.TrimSpace(lineBuffer.String()))
@@ -127,7 +127,7 @@ func (h *Hints) Attach() error {
 			n, err := reader.Read(buffer)
 			if n > 0 {
 				data := buffer[:n]
-				fmt.Fprint(ioutils.DefaultStreams.Stderr, string(data))
+				ioutils.DefaultStreams.Stderr.Write(data)
 				for _, b := range data {
 					if b == '\n' {
 						h.ProcessLine(strings.TrimSpace(lineBuffer.String()))
@@ -155,6 +155,20 @@ func (h *Hints) Attach() error {
 func (h *Hints) Detach() {
 	DefaultStreams = ioutils.DefaultStreams
 
+	if h.stdoutR != nil {
+		h.stdoutR.Close()
+		h.stdoutR = nil
+	}
+	if h.stderrR != nil {
+		h.stderrR.Close()
+		h.stderrR = nil
+	}
+
+	// Detach process is varies depending on if hints is using a pty or a standard os.Pipe
+	if !h.terminal {
+		h.wg.Wait()
+	}
+
 	if h.Stdout != nil {
 		h.Stdout.Close()
 		h.Stdout = nil
@@ -164,7 +178,9 @@ func (h *Hints) Detach() {
 		h.Stderr = nil
 	}
 
-	h.wg.Wait()
+	if !h.terminal {
+		h.wg.Wait()
+	}
 }
 
 func (h *Hints) ProcessLine(line string) {
