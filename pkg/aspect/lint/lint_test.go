@@ -86,6 +86,7 @@ func getCMD() *cobra.Command {
 	}
 
 	cmd.PersistentFlags().Bool(rootFlags.AspectInteractiveFlagName, false, "")
+	cmd.PersistentFlags().Bool(rootFlags.AspectHintsFlagName, false, "")
 
 	return cmd
 }

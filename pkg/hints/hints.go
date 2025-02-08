@@ -90,32 +90,62 @@ func (h *Hints) Attach() error {
 	go func() {
 		defer h.wg.Done()
 		reader := bufio.NewReader(h.stdoutR)
+		buffer := make([]byte, 4096)
+		var lineBuffer strings.Builder
 		for {
-			line, err := reader.ReadString('\n')
+			n, err := reader.Read(buffer)
+			if n > 0 {
+				data := buffer[:n]
+				fmt.Fprint(ioutils.DefaultStreams.Stdout, string(data))
+				for _, b := range data {
+					if b == '\n' {
+						h.ProcessLine(strings.TrimSpace(lineBuffer.String()))
+						lineBuffer.Reset()
+					} else {
+						lineBuffer.WriteByte(b)
+					}
+				}
+			}
 			if err != nil {
+				if lineBuffer.Len() > 0 {
+					h.ProcessLine(strings.TrimSpace(lineBuffer.String()))
+				}
 				if err != io.EOF {
 					fmt.Fprintf(ioutils.DefaultStreams.Stderr, "Error reading from stdout: %v\n", err)
 				}
 				break
 			}
-			h.ProcessLine(strings.TrimSpace(line))
-			fmt.Fprint(ioutils.DefaultStreams.Stdout, line)
 		}
 	}()
 
 	go func() {
 		defer h.wg.Done()
 		reader := bufio.NewReader(h.stderrR)
+		buffer := make([]byte, 4096)
+		var lineBuffer strings.Builder
 		for {
-			line, err := reader.ReadString('\n')
+			n, err := reader.Read(buffer)
+			if n > 0 {
+				data := buffer[:n]
+				fmt.Fprint(ioutils.DefaultStreams.Stderr, string(data))
+				for _, b := range data {
+					if b == '\n' {
+						h.ProcessLine(strings.TrimSpace(lineBuffer.String()))
+						lineBuffer.Reset()
+					} else {
+						lineBuffer.WriteByte(b)
+					}
+				}
+			}
 			if err != nil {
+				if lineBuffer.Len() > 0 {
+					h.ProcessLine(strings.TrimSpace(lineBuffer.String()))
+				}
 				if err != io.EOF {
 					fmt.Fprintf(ioutils.DefaultStreams.Stderr, "Error reading from stderr: %v\n", err)
 				}
 				break
 			}
-			h.ProcessLine(strings.TrimSpace(line))
-			fmt.Fprint(ioutils.DefaultStreams.Stderr, line)
 		}
 	}()
 
@@ -133,6 +163,7 @@ func (h *Hints) Detach() {
 		h.Stderr.Close()
 		h.Stderr = nil
 	}
+
 	h.wg.Wait()
 }
 

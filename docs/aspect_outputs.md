@@ -62,6 +62,7 @@ Middleman bazel-out/darwin-fastbuild/internal/_middlemen/cli_Srelease-runfiles
 
 ```
       --aspect:config string   User-specified Aspect CLI config file. /dev/null indicates that all further --aspect:config flags will be ignored.
+      --aspect:hints           Enable hints if configured (default true)
       --aspect:interactive     Interactive mode (e.g. prompts for user input)
 ```
 

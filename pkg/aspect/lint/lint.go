@@ -254,7 +254,18 @@ lint:
 		bazelCmd = append(bazelCmd, postTerminateArgs...)
 	}
 
-	err = runner.bzl.RunCommand(runner.hstreams, nil, bazelCmd...)
+	bzlCommandStreams := runner.streams
+	if cmd != nil {
+		hints, err := cmd.Root().PersistentFlags().GetBool(flags.AspectHintsFlagName)
+		if err != nil {
+			return err
+		}
+		if hints {
+			bzlCommandStreams = runner.hstreams
+		}
+	}
+
+	err = runner.bzl.RunCommand(bzlCommandStreams, nil, bazelCmd...)
 	if err != nil {
 		return err
 	}

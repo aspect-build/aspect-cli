@@ -19,6 +19,7 @@ package fetch
 import (
 	"context"
 
+	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/spf13/cobra"
@@ -38,8 +39,20 @@ func New(streams ioutils.Streams, hstreams ioutils.Streams, bzl bazel.Bazel) *Fe
 	}
 }
 
-func (runner *Fetch) Run(ctx context.Context, _ *cobra.Command, args []string) error {
+func (runner *Fetch) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
 	bazelCmd := []string{"fetch"}
 	bazelCmd = append(bazelCmd, args...)
-	return runner.bzl.RunCommand(runner.hstreams, nil, bazelCmd...)
+
+	bzlCommandStreams := runner.streams
+	if cmd != nil {
+		hints, err := cmd.Root().PersistentFlags().GetBool(flags.AspectHintsFlagName)
+		if err != nil {
+			return err
+		}
+		if hints {
+			bzlCommandStreams = runner.hstreams
+		}
+	}
+
+	return runner.bzl.RunCommand(bzlCommandStreams, nil, bazelCmd...)
 }

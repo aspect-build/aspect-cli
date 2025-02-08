@@ -41,7 +41,7 @@ func New(streams ioutils.Streams, hstreams ioutils.Streams, bzl bazel.Bazel) *Co
 	}
 }
 
-func (runner *Coverage) Run(ctx context.Context, _ *cobra.Command, args []string) (exitErr error) {
+func (runner *Coverage) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 	bazelCmd := []string{"coverage"}
 	bazelCmd = append(bazelCmd, args...)
 
@@ -57,7 +57,18 @@ func (runner *Coverage) Run(ctx context.Context, _ *cobra.Command, args []string
 		bazelCmd = flags.AddFlagToCommand(bazelCmd, besBackendFlag)
 	}
 
-	err := runner.bzl.RunCommand(runner.hstreams, nil, bazelCmd...)
+	bzlCommandStreams := runner.streams
+	if cmd != nil {
+		hints, err := cmd.Root().PersistentFlags().GetBool(flags.AspectHintsFlagName)
+		if err != nil {
+			return err
+		}
+		if hints {
+			bzlCommandStreams = runner.hstreams
+		}
+	}
+
+	err := runner.bzl.RunCommand(bzlCommandStreams, nil, bazelCmd...)
 
 	// Check for subscriber errors
 	subscriberErrors := bep.BESErrors(ctx)

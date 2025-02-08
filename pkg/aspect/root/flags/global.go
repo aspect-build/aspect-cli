@@ -40,6 +40,7 @@ func AddGlobalFlags(cmd *cobra.Command, defaultInteractive bool) {
 	// Documented global flags. These flags show up as "global flags" on the `help` command output.
 	cmd.PersistentFlags().String(AspectConfigFlagName, "", fmt.Sprintf("User-specified Aspect CLI config file. /dev/null indicates that all further --%s flags will be ignored.", AspectConfigFlagName))
 	cmd.PersistentFlags().Bool(AspectInteractiveFlagName, defaultInteractive, "Interactive mode (e.g. prompts for user input)")
+	cmd.PersistentFlags().Bool(AspectHintsFlagName, true, "Enable hints if configured")
 
 	// Hidden global flags
 	cmd.PersistentFlags().Bool(AspectLockVersion, AspectLockVersionDefault(), "Lock the version of the Aspect CLI. This prevents the Aspect CLI from downloading and running an different version of the Aspect CLI if one is specified in .bazeliskrc or the Aspect CLI config.")
