@@ -3,6 +3,7 @@
   "private": true,
   "exports": {
     ".": "./src/main.js",
-    "./stars/*": "./other/*.js"
+    "./stars/*": "./other/*.js",
+    "./stars/internal/*": null
   }
 }

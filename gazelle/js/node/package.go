@@ -59,6 +59,16 @@ func ParsePackageJsonImportsFile(rootDir, packageJsonPath string) ([]string, err
 				case string:
 					// Regular subpath export
 					imports = append(imports, path.Clean(e))
+				case nil:
+					// According to https://nodejs.org/api/packages.html#subpath-patterns, to exclude
+					// private subfolders from patterns, null targets can be used:
+					// {
+					//   "exports": {
+					// 	   "./features/*.js": "./src/features/*.js",
+					// 	   "./features/private-internal/*": null
+					// 	 }
+					// }
+					break
 				case map[string]interface{}:
 					// Conditional subpath export
 					for subEKey, subE := range e {
