@@ -273,6 +273,13 @@ func (ts *typeScriptLang) CrossResolve(c *config.Config, ix *resolve.RuleIndex, 
 		}
 	}
 
+	// Imports of js from other languages. Simulate importing from js.
+	if lang != LanguageName {
+		for _, r := range ix.FindRulesByImport(imp, LanguageName) {
+			results = append(results, r)
+		}
+	}
+
 	return results
 }
 
