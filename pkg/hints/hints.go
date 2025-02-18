@@ -231,20 +231,24 @@ func (h *Hints) PrintHints(f *os.File) {
 	if h.hints.size == 0 {
 		return
 	}
-	printBreak(f)
-	printMiddle(f, "[Aspect CLI]")
-	printMiddle(f, "")
+	fmt.Fprintln(f, "┌")
+	fmt.Fprintln(f, "| Aspect CLI")
+	fmt.Fprintln(f, "|")
 	for node := h.hints.head; node != nil; node = node.next {
 		lines := strings.Split(node.hint, "\n")
 		for i, line := range lines {
 			if i == 0 {
-				printMiddle(f, "- "+line)
+				fmt.Fprintln(f, "| - "+line)
 			} else {
-				printMiddle(f, "  "+line)
+				if len(strings.TrimSpace(line)) > 0 {
+					fmt.Fprintln(f, "|   "+line)
+				} else {
+					fmt.Fprintln(f, "|")
+				}
 			}
 		}
 	}
-	printBreak(f)
+	fmt.Fprintln(f, "└")
 }
 
 func stripColorCodes(s string) string {
@@ -264,38 +268,6 @@ func stripColorCodes(s string) string {
 		}
 	}
 	return result.String()
-}
-
-func printBreak(f *os.File) {
-	// using buffer so that we can easily determine the current length of the string and
-	// ensure we create a proper square with a straight border
-	var b strings.Builder
-
-	fmt.Fprint(&b, " ")
-
-	for i := 0; i < 90; i++ {
-		fmt.Fprint(&b, "-")
-	}
-
-	fmt.Fprint(&b, " ")
-
-	fmt.Fprintln(f, b.String())
-}
-
-func printMiddle(f *os.File, str string) {
-	// using buffer so that we can easily determine the current length of the string and
-	// ensure we create a proper square with a straight border
-	var b strings.Builder
-
-	fmt.Fprint(&b, "| ")
-	fmt.Fprint(&b, str)
-
-	for b.Len() < 91 {
-		fmt.Fprint(&b, " ")
-	}
-
-	fmt.Fprint(&b, "|")
-	fmt.Fprintln(f, b.String())
 }
 
 type hintConfig struct {
