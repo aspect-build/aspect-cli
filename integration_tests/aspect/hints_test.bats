@@ -26,30 +26,36 @@ hints:
 EOF
     run aspect info
     [ "$status" -eq 0 ]
-    assert_output --partial "| [Aspect CLI]                                                                             |"
-    assert_output --partial "| - single line hint                                                                       |"
-    assert_output --partial "| - multi                                                                                  |"
-    assert_output --partial "|   line                                                                                   |"
-    assert_output --partial "|   hint                                                                                   |"
-    assert_output --partial "| - hint with replace %workspace%                                                          |"
+    assert_output --partial "┌"
+    assert_output --partial "| Aspect CLI"
+    assert_output --partial "| - single line hint"
+    assert_output --partial "| - multi"
+    assert_output --partial "|   line"
+    assert_output --partial "|   hint"
+    assert_output --partial "| - hint with replace %workspace%"
+    assert_output --partial "└"
 
     run aspect info --aspect:hints=true
     [ "$status" -eq 0 ]
-    assert_output --partial "| [Aspect CLI]                                                                             |"
-    assert_output --partial "| - single line hint                                                                       |"
-    assert_output --partial "| - multi                                                                                  |"
-    assert_output --partial "|   line                                                                                   |"
-    assert_output --partial "|   hint                                                                                   |"
-    assert_output --partial "| - hint with replace %workspace%                                                          |"
+    assert_output --partial "┌"
+    assert_output --partial "| Aspect CLI"
+    assert_output --partial "| - single line hint"
+    assert_output --partial "| - multi"
+    assert_output --partial "|   line"
+    assert_output --partial "|   hint"
+    assert_output --partial "| - hint with replace %workspace%"
+    assert_output --partial "└"
 
     run aspect info --aspect:hints=1
     [ "$status" -eq 0 ]
-    assert_output --partial "| [Aspect CLI]                                                                             |"
-    assert_output --partial "| - single line hint                                                                       |"
-    assert_output --partial "| - multi                                                                                  |"
-    assert_output --partial "|   line                                                                                   |"
-    assert_output --partial "|   hint                                                                                   |"
-    assert_output --partial "| - hint with replace %workspace%                                                          |"
+    assert_output --partial "┌"
+    assert_output --partial "| Aspect CLI"
+    assert_output --partial "| - single line hint"
+    assert_output --partial "| - multi"
+    assert_output --partial "|   line"
+    assert_output --partial "|   hint"
+    assert_output --partial "| - hint with replace %workspace%"
+    assert_output --partial "└"
 }
 
 @test 'can disable hints with flag' {
@@ -67,9 +73,9 @@ hints:
 EOF
     run aspect info --aspect:hints=false
     [ "$status" -eq 0 ]
-    refute_output --partial "| [Aspect CLI]                                                                             |"
+    refute_output --partial "| Aspect CLI"
 
     run aspect info --aspect:hints=0
     [ "$status" -eq 0 ]
-    refute_output --partial "| [Aspect CLI]                                                                             |"
+    refute_output --partial "| Aspect CLI"
 }
