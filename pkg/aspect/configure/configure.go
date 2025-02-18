@@ -29,6 +29,7 @@ import (
 	kotlin "github.com/aspect-build/aspect-cli/gazelle/kotlin"
 	python "github.com/aspect-build/aspect-cli/gazelle/python"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
+	"github.com/aspect-build/aspect-cli/pkg/hints"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
@@ -175,7 +176,23 @@ configure:
 		languages = append(languages, lang())
 	}
 
+	// swap os.Stdout, os.Stderr and ioutils.DefaultStreams for hints
+	// before calling runFixUpdate. We can't easily control where gazelle plugins
+	// write to so we swap these instead to capture all of their outputs.
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	oldDefaultStreams := ioutils.DefaultStreams
+	os.Stdout = hints.Stdout
+	os.Stderr = hints.Stderr
+	log.Default().SetOutput(hints.Stderr)
+
 	stats, err := runFixUpdate(wd, languages, updateCmd, fixArgs)
+
+	// Swap back
+	log.Default().SetOutput(oldStderr)
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+	ioutils.DefaultStreams = oldDefaultStreams
 
 	exitCode := aspecterrors.OK
 
