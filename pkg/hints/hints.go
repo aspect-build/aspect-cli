@@ -15,18 +15,21 @@ import (
 )
 
 var DefaultStreams = ioutils.DefaultStreams
+var Stdout = os.Stdout
+var Stderr = os.Stderr
 
 type Hints struct {
 	Stdout *os.File
 	Stderr *os.File
 
-	hintMap    map[*regexp.Regexp]string
-	hints      *hintSet
-	hintsMutex sync.Mutex
-	wg         sync.WaitGroup
-	terminal   bool
-	stdoutR    *os.File
-	stderrR    *os.File
+	hintMap     map[*regexp.Regexp]string
+	hints       *hintSet
+	hintsMutex  sync.Mutex
+	wg          sync.WaitGroup
+	terminal    bool
+	stdoutR     *os.File
+	stderrR     *os.File
+	detachMutex sync.Mutex
 }
 
 func New() *Hints {
@@ -83,6 +86,8 @@ func (h *Hints) Attach() error {
 		Stdout: h.Stdout,
 		Stderr: h.Stderr,
 	}
+	Stdout = h.Stdout
+	Stderr = h.Stderr
 
 	// Create goroutines to forward streams and create hints on regex matches
 	h.wg.Add(2)
@@ -111,7 +116,12 @@ func (h *Hints) Attach() error {
 					h.ProcessLine(strings.TrimSpace(lineBuffer.String()))
 				}
 				if err != io.EOF {
-					fmt.Fprintf(ioutils.DefaultStreams.Stderr, "Error reading from stdout: %v\n", err)
+					h.detachMutex.Lock()
+					closed := h.stdoutR == nil
+					h.detachMutex.Unlock()
+					if !closed {
+						fmt.Fprintf(ioutils.DefaultStreams.Stderr, "Error reading from stdout: %v\n", err)
+					}
 				}
 				break
 			}
@@ -142,7 +152,12 @@ func (h *Hints) Attach() error {
 					h.ProcessLine(strings.TrimSpace(lineBuffer.String()))
 				}
 				if err != io.EOF {
-					fmt.Fprintf(ioutils.DefaultStreams.Stderr, "Error reading from stderr: %v\n", err)
+					h.detachMutex.Lock()
+					closed := h.stderrR == nil
+					h.detachMutex.Unlock()
+					if !closed {
+						fmt.Fprintf(ioutils.DefaultStreams.Stderr, "Error reading from stderr: %v\n", err)
+					}
 				}
 				break
 			}
@@ -154,14 +169,22 @@ func (h *Hints) Attach() error {
 
 func (h *Hints) Detach() {
 	DefaultStreams = ioutils.DefaultStreams
+	Stdout = os.Stdout
+	Stderr = os.Stderr
 
 	if h.stdoutR != nil {
-		h.stdoutR.Close()
+		toClose := h.stdoutR
+		h.detachMutex.Lock()
 		h.stdoutR = nil
+		h.detachMutex.Unlock()
+		toClose.Close()
 	}
 	if h.stderrR != nil {
-		h.stderrR.Close()
+		toClose := h.stderrR
+		h.detachMutex.Lock()
 		h.stderrR = nil
+		h.detachMutex.Unlock()
+		toClose.Close()
 	}
 
 	// Detach process is varies depending on if hints is using a pty or a standard os.Pipe
