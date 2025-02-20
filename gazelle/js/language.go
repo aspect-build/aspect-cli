@@ -32,6 +32,9 @@ type typeScriptLang struct {
 	tsconfig *typescript.TsWorkspace
 }
 
+var _ language.Language = (*typeScriptLang)(nil)
+var _ language.ModuleAwareLanguage = (*typeScriptLang)(nil)
+
 // NewLanguage initializes a new TypeScript that satisfies the language.Language
 // interface. This is the entrypoint for the extension initialization.
 func NewLanguage() language.Language {

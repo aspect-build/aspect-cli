@@ -1,0 +1,6 @@
+load("@rules_ts_module_foo//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "root",
+    srcs = ["main.ts"],
+)

@@ -14,8 +14,10 @@ const (
 	TsConfigKind          = "ts_config"
 	NpmPackageKind        = "npm_package"
 	NpmLinkAllKind        = "npm_link_all_packages"
-	RulesJsRepositoryName = "aspect_rules_js"
-	RulesTsRepositoryName = "aspect_rules_ts"
+	RulesJsModuleName     = "aspect_rules_js"
+	RulesJsRepositoryName = RulesJsModuleName
+	RulesTsModuleName     = "aspect_rules_ts"
+	RulesTsRepositoryName = RulesTsModuleName
 	NpmRepositoryName     = "npm"
 )
 
@@ -135,43 +137,55 @@ var tsKinds = map[string]rule.KindInfo{
 // GenerateRules, now or in the past, should be loadable from one of these
 // files.
 func (ts *typeScriptLang) Loads() []rule.LoadInfo {
-	return tsLoads
+	panic("ApparentLoads should be called instead")
 }
 
-var tsLoads = []rule.LoadInfo{
-	{
-		Name: "@" + RulesTsRepositoryName + "//ts:defs.bzl",
-		Symbols: []string{
-			TsProjectKind,
-			TsConfigKind,
-		},
-	},
+func (h *typeScriptLang) ApparentLoads(moduleToApparentName func(string) string) []rule.LoadInfo {
+	tsModName := moduleToApparentName(RulesTsModuleName)
+	if tsModName == "" {
+		tsModName = RulesTsRepositoryName
+	}
 
-	{
-		Name: "@" + RulesTsRepositoryName + "//ts:proto.bzl",
-		Symbols: []string{
-			TsProtoLibraryKind,
-		},
-	},
+	jsModName := moduleToApparentName(RulesJsModuleName)
+	if jsModName == "" {
+		jsModName = RulesJsRepositoryName
+	}
 
-	{
-		Name: "@" + RulesJsRepositoryName + "//npm:defs.bzl",
-		Symbols: []string{
-			NpmPackageKind,
+	return []rule.LoadInfo{
+		{
+			Name: "@" + tsModName + "//ts:defs.bzl",
+			Symbols: []string{
+				TsProjectKind,
+				TsConfigKind,
+			},
 		},
-	},
 
-	{
-		Name: "@" + RulesJsRepositoryName + "//js:defs.bzl",
-		Symbols: []string{
-			JsLibraryKind, JsBinaryKind, JsRunBinaryKind,
+		{
+			Name: "@" + tsModName + "//ts:proto.bzl",
+			Symbols: []string{
+				TsProtoLibraryKind,
+			},
 		},
-	},
 
-	{
-		Name: "@" + NpmRepositoryName + "//:defs.bzl",
-		Symbols: []string{
-			NpmLinkAllKind,
+		{
+			Name: "@" + jsModName + "//npm:defs.bzl",
+			Symbols: []string{
+				NpmPackageKind,
+			},
 		},
-	},
+
+		{
+			Name: "@" + jsModName + "//js:defs.bzl",
+			Symbols: []string{
+				JsLibraryKind, JsBinaryKind, JsRunBinaryKind,
+			},
+		},
+
+		{
+			Name: "@" + NpmRepositoryName + "//:defs.bzl",
+			Symbols: []string{
+				NpmLinkAllKind,
+			},
+		},
+	}
 }
