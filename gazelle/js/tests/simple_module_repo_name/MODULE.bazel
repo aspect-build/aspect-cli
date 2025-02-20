@@ -1,0 +1,10 @@
+module(
+    name = "simple_module_repo_name",
+    version = "0.0.0",
+)
+
+bazel_dep(
+    name = "aspect_rules_ts",
+    version = "1.2.3",
+    repo_name = "rules_ts_module_foo",
+)

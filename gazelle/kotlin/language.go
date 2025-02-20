@@ -13,6 +13,7 @@ const LanguageName = "kotlin"
 const (
 	KtJvmLibrary              = "kt_jvm_library"
 	KtJvmBinary               = "kt_jvm_binary"
+	RulesKotlinModuleName     = "rules_kotlin"
 	RulesKotlinRepositoryName = "io_bazel_rules_kotlin"
 )
 
@@ -28,6 +29,9 @@ type kotlinLang struct {
 	mavenResolver    *jvm_maven.Resolver
 	mavenInstallFile string
 }
+
+var _ language.Language = (*kotlinLang)(nil)
+var _ language.ModuleAwareLanguage = (*kotlinLang)(nil)
 
 // NewLanguage initializes a new TypeScript that satisfies the language.Language
 // interface. This is the entrypoint for the extension initialization.
@@ -62,22 +66,29 @@ var kotlinKinds = map[string]rule.KindInfo{
 	},
 }
 
-var kotlinLoads = []rule.LoadInfo{
-	{
-		Name: "@" + RulesKotlinRepositoryName + "//kotlin:jvm.bzl",
-		Symbols: []string{
-			KtJvmLibrary,
-			KtJvmBinary,
-		},
-	},
-}
-
 func (*kotlinLang) Kinds() map[string]rule.KindInfo {
 	return kotlinKinds
 }
 
 func (*kotlinLang) Loads() []rule.LoadInfo {
-	return kotlinLoads
+	panic("ApparentLoads should be called instead")
+}
+
+func (h *kotlinLang) ApparentLoads(moduleToApparentName func(string) string) []rule.LoadInfo {
+	modName := moduleToApparentName(RulesKotlinModuleName)
+	if modName == "" {
+		modName = RulesKotlinRepositoryName
+	}
+
+	return []rule.LoadInfo{
+		{
+			Name: "@" + modName + "//kotlin:jvm.bzl",
+			Symbols: []string{
+				KtJvmLibrary,
+				KtJvmBinary,
+			},
+		},
+	}
 }
 
 func (*kotlinLang) Fix(c *config.Config, f *rule.File) {}

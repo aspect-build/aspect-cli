@@ -1,0 +1,10 @@
+module(
+    name = "simple_module_repo_name",
+    version = "0.0.0",
+)
+
+bazel_dep(
+    name = "rules_kotlin",
+    version = "1.2.3",
+    repo_name = "rules_kotlin_module_foo",
+)
