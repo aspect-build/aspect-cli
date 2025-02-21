@@ -202,11 +202,20 @@ func SelectQuery(
 	presetNames []string,
 	streams ioutils.Streams,
 	args []string,
+	flags []string,
 	s func(presetNames []string) SelectRunner,
 ) (string, string, bool, error) {
 
+	hasQueryFile := false
+	for _, flag := range flags {
+		if strings.Contains(flag, "--query_file") {
+			hasQueryFile = true
+			break
+		}
+	}
+
 	var preset *PresetQuery
-	if len(args) == 0 {
+	if len(args) == 0 && !hasQueryFile {
 		selectQueryPrompt := s(presetNames)
 
 		i, _, err := selectQueryPrompt.Run()
@@ -217,7 +226,10 @@ func SelectQuery(
 
 		preset = rawPresets[i]
 	} else {
-		maybeQueryOrPreset := args[0]
+		maybeQueryOrPreset := ""
+		if len(args) > 0 {
+			maybeQueryOrPreset = args[0]
+		}
 		if value, ok := processedPresets[maybeQueryOrPreset]; ok {
 			// Treat this as the name of the preset query, so don't prompt for it.
 			fmt.Fprintf(streams.Stdout, "Preset query \"%s\" selected\n", value.Name)
