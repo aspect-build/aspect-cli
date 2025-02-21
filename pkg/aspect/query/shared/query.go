@@ -206,16 +206,16 @@ func SelectQuery(
 	s func(presetNames []string) SelectRunner,
 ) (string, string, bool, error) {
 
-	hasToolTag := false
+	hasQueryFile := false
 	for _, flag := range flags {
-		if strings.Contains(flag, "--tool_tag") {
-			hasToolTag = true
+		if strings.Contains(flag, "--query_file") {
+			hasQueryFile = true
 			break
 		}
 	}
 
 	var preset *PresetQuery
-	if len(args) == 0 && !hasToolTag {
+	if len(args) == 0 && !hasQueryFile {
 		selectQueryPrompt := s(presetNames)
 
 		i, _, err := selectQueryPrompt.Run()
