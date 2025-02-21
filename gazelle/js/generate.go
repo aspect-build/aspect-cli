@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/aspect-build/aspect-cli/buildinfo"
 	gazelle "github.com/aspect-build/aspect-cli/gazelle/common"
 	"github.com/aspect-build/aspect-cli/gazelle/common/cache"
 	starlark "github.com/aspect-build/aspect-cli/gazelle/common/starlark"
@@ -858,7 +859,15 @@ func init() {
 func computeCacheKey(content []byte) (string, bool) {
 	cacheDigest := crypto.MD5.New()
 
+	if buildinfo.IsStamped() {
+		if _, err := cacheDigest.Write([]byte(buildinfo.GitCommit)); err != nil {
+			BazelLog.Errorf("Failed to write GitCommit to cache digest: %v", err)
+			return "", false
+		}
+	}
+
 	if _, err := cacheDigest.Write(content); err != nil {
+		BazelLog.Errorf("Failed to write source to cache digest: %v", err)
 		return "", false
 	}
 

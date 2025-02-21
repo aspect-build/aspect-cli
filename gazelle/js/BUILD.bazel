@@ -21,6 +21,7 @@ go_library(
     importpath = "github.com/aspect-build/aspect-cli/gazelle/js",
     visibility = ["//visibility:public"],
     deps = [
+        "//buildinfo",
         "//gazelle/common",
         "//gazelle/common/cache",
         "//gazelle/common/git",
