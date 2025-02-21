@@ -97,7 +97,7 @@ func (runner *Query) Run(ctx context.Context, cmd *cobra.Command, args []string)
 		return shared.GetPrettyError(cmd, err)
 	}
 
-	command, query, runReplacements, err := shared.SelectQuery(cmd.CalledAs(), presets, runner.Presets, presetNames, runner.Streams, nonFlags, runner.Select)
+	command, query, runReplacements, err := shared.SelectQuery(cmd.CalledAs(), presets, runner.Presets, presetNames, runner.Streams, nonFlags, flags, runner.Select)
 	if err != nil {
 		return shared.GetPrettyError(cmd, err)
 	}
