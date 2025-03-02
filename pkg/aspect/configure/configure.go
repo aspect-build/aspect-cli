@@ -17,7 +17,6 @@
 package configure
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -33,8 +32,6 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"golang.org/x/term"
 )
 
@@ -45,15 +42,34 @@ type Configure struct {
 	languages    []func() language.Language
 }
 
+// Builtin Gazelle languages
+type ConfigureLanguage = string
+
+const (
+	JavaScript ConfigureLanguage = "javascript"
+	Go                           = "go"
+	Kotlin                       = "kotlin"
+	Protobuf                     = "protobuf"
+	Bzl                          = "bzl"
+	Python                       = "python"
+)
+
+// Gazelle --mode
+type ConfigureMode = string
+
+const (
+	Fix   ConfigureMode = "fix"
+	Print               = "update"
+	Diff                = "diff"
+)
+
 func New(streams ioutils.Streams) *Configure {
 	c := &Configure{
 		Streams: streams,
 	}
 
-	c.addDefaultLanguages()
-
 	if os.Getenv("CONFIGURE_PROGRESS") != "" && term.IsTerminal(int(os.Stdout.Fd())) {
-		c.AddLanguage("progress", progress.NewLanguage)
+		c.AddLanguageFactory("progress", progress.NewLanguage)
 	}
 
 	return c
@@ -67,20 +83,16 @@ func pluralize(s string, num int) string {
 	}
 }
 
-func (c *Configure) AddLanguage(lang string, langFactory func() language.Language) {
+func (c *Configure) AddLanguageFactory(lang string, langFactory func() language.Language) {
 	c.languageKeys = append(c.languageKeys, lang)
 	c.languages = append(c.languages, langFactory)
 }
 
-func (c *Configure) addDefaultLanguages() {
-	// Order matters for gazelle languages. Proto should be run before golang.
-	viper.SetDefault("configure.languages.protobuf", false)
-	if viper.GetBool("configure.languages.protobuf") {
-		c.AddLanguage("protobuf", proto.NewLanguage)
-	}
-
-	viper.SetDefault("configure.languages.go", false)
-	if viper.GetBool("configure.languages.go") {
+func (c *Configure) AddLanguage(lang ConfigureLanguage) {
+	switch lang {
+	case JavaScript:
+		c.AddLanguageFactory(lang, js.NewLanguage)
+	case Go:
 		if os.Getenv(GO_REPOSITORY_CONFIG_ENV) == "" {
 			goConfigPath, err := determineGoRepositoryConfigPath()
 			if err != nil {
@@ -91,44 +103,22 @@ func (c *Configure) addDefaultLanguages() {
 				os.Setenv(GO_REPOSITORY_CONFIG_ENV, goConfigPath)
 			}
 		}
-
-		c.AddLanguage("go", golang.NewLanguage)
-	}
-
-	viper.SetDefault("configure.languages.javascript", false)
-	if viper.GetBool("configure.languages.javascript") {
-		c.AddLanguage("javascript", js.NewLanguage)
-	}
-
-	viper.SetDefault("configure.languages.kotlin", false)
-	if viper.GetBool("configure.languages.kotlin") {
-		c.AddLanguage("kotlin", kotlin.NewLanguage)
-	}
-
-	viper.SetDefault("configure.languages.bzl", false)
-	if viper.GetBool("configure.languages.bzl") {
-		c.AddLanguage("bzl", bzl.NewLanguage)
-	}
-
-	viper.SetDefault("configure.languages.python", false)
-	if viper.GetBool("configure.languages.python") {
-		c.AddLanguage("python", python.NewLanguage)
+		c.AddLanguageFactory(lang, golang.NewLanguage)
+	case Kotlin:
+		c.AddLanguageFactory(lang, kotlin.NewLanguage)
+	case Protobuf:
+		c.AddLanguageFactory(lang, proto.NewLanguage)
+	case Bzl:
+		c.AddLanguageFactory(lang, bzl.NewLanguage)
+	case Python:
+		c.AddLanguageFactory(lang, python.NewLanguage)
+	default:
+		log.Fatalf("ERROR: unknown language %q", lang)
 	}
 }
 
-func (runner *Configure) Run(_ context.Context, cmd *cobra.Command, args []string) error {
+func (runner *Configure) Run(mode ConfigureMode, args []string) error {
 	if len(runner.languageKeys) == 0 {
-		fmt.Fprintln(runner.Streams.Stderr, `No languages enabled for BUILD file generation.
-
-To enable one or more languages, add the following to the .aspect/cli/config.yaml
-file in your WORKSPACE or home directory and enable/disable languages as needed:
-
-configure:
-  languages:
-    javascript: true
-    go: true
-    kotlin: true
-    protobuf: true`)
 		return &aspecterrors.ExitError{
 			ExitCode: aspecterrors.ConfigureNoConfig,
 		}
@@ -141,8 +131,6 @@ configure:
 	}
 
 	// Append the aspect-cli mode flag to the args parsed by gazelle.
-	mode, _ := cmd.Flags().GetString("mode")
-
 	fixArgs := []string{"--mode=" + mode}
 
 	// gazelle --cpuprofile enabled via environment variable.

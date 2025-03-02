@@ -17,10 +17,15 @@
 package configure
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"github.com/aspect-build/aspect-cli/pkg/aspect/configure"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
+	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 )
@@ -68,7 +73,10 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			v.Run,
+			func(_ context.Context, cmd *cobra.Command, args []string) error {
+				mode, _ := cmd.Flags().GetString("mode")
+				return run(streams, v, mode, args)
+			},
 		),
 	}
 
@@ -76,4 +84,59 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 	cmd.Flags().String("mode", "fix", "Method for emitting merged BUILD files.\n\tfix: write generated and merged files to disk\n\tprint: print files to stdout\n\tdiff: print a unified diff")
 
 	return cmd
+}
+
+func run(streams ioutils.Streams, v *configure.Configure, mode string, args []string) error {
+	addCliEnabledLanguages(v)
+
+	err := v.Run(mode, args)
+	if aspectError, isAError := err.(*aspecterrors.ExitError); isAError && aspectError.ExitCode == aspecterrors.ConfigureNoConfig {
+		fmt.Fprintln(streams.Stderr, `No languages enabled for BUILD file generation.
+
+To enable one or more languages, add the following to the .aspect/cli/config.yaml
+file in your WORKSPACE or home directory and enable/disable languages as needed:
+
+configure:
+  languages:
+	javascript: true
+	go: true
+	kotlin: true
+	protobuf: true
+	bzl: true
+	python true`)
+	}
+	return err
+}
+
+func addCliEnabledLanguages(c *configure.Configure) {
+	// Order matters for gazelle languages. Proto should be run before golang.
+	viper.SetDefault("configure.languages.protobuf", false)
+	if viper.GetBool("configure.languages.protobuf") {
+		c.AddLanguage(configure.Protobuf)
+	}
+
+	viper.SetDefault("configure.languages.go", false)
+	if viper.GetBool("configure.languages.go") {
+		c.AddLanguage(configure.Go)
+	}
+
+	viper.SetDefault("configure.languages.javascript", false)
+	if viper.GetBool("configure.languages.javascript") {
+		c.AddLanguage(configure.JavaScript)
+	}
+
+	viper.SetDefault("configure.languages.kotlin", false)
+	if viper.GetBool("configure.languages.kotlin") {
+		c.AddLanguage(configure.Kotlin)
+	}
+
+	viper.SetDefault("configure.languages.bzl", false)
+	if viper.GetBool("configure.languages.bzl") {
+		c.AddLanguage(configure.Bzl)
+	}
+
+	viper.SetDefault("configure.languages.python", false)
+	if viper.GetBool("configure.languages.python") {
+		c.AddLanguage(configure.Python)
+	}
 }
