@@ -40,8 +40,6 @@ go_library(
         "@bazel_gazelle//walk:go_default_library",
         "@com_github_bazelbuild_buildtools//build:go_default_library",
         "@com_github_pmezard_go_difflib//difflib",
-        "@com_github_spf13_cobra//:cobra",
-        "@com_github_spf13_viper//:viper",
         "@org_golang_x_term//:term",
     ],
 )
