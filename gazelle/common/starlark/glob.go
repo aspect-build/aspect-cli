@@ -18,14 +18,11 @@ import (
 	"go.starlark.net/starlark"
 	"go.starlark.net/syntax"
 
-	// filepathx supports double-star glob patterns (the stdlib doesn't). This
-	// is necessary to match the behaviour from Bazel.
-	"github.com/yargevad/filepathx"
-
 	common "github.com/aspect-build/aspect-cli/gazelle/common"
 	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	bzl "github.com/bazelbuild/buildtools/build"
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 func IsCustomSrcs(srcs bzl.Expr) bool {
@@ -159,7 +156,7 @@ func (g *Globber) Glob(
 				return nil, fmt.Errorf("failed glob: exclude pattern must be a string")
 			}
 			absPattern := path.Join(absPkg, string(excludePattern))
-			matches, err := filepathx.Glob(absPattern)
+			matches, err := doublestar.FilepathGlob(absPattern)
 			if err != nil {
 				return nil, fmt.Errorf("failed glob: %w", err)
 			}
@@ -183,7 +180,7 @@ func (g *Globber) Glob(
 			return nil, fmt.Errorf("failed glob: include pattern must be a string")
 		}
 		absPattern := path.Join(absPkg, string(includePattern))
-		matches, err := filepathx.Glob(absPattern)
+		matches, err := doublestar.FilepathGlob(absPattern)
 		if err != nil {
 			return nil, fmt.Errorf("failed glob: %w", err)
 		}

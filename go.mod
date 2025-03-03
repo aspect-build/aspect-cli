@@ -35,7 +35,6 @@ require (
 	github.com/spf13/viper v1.19.0
 	github.com/tejzpr/ordered-concurrently/v3 v3.0.1
 	github.com/twmb/murmur3 v1.1.8
-	github.com/yargevad/filepathx v1.0.0
 	go.starlark.net v0.0.0-20240725214946-42030a7cedce
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8 // indirect
 	golang.org/x/sync v0.10.0
