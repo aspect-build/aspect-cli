@@ -1341,13 +1341,6 @@ def deps():
         version = "v0.0.0-20240521201337-686a1a2994c1",
     )
     go_repository(
-        name = "com_github_yargevad_filepathx",
-        build_file_proto_mode = "disable_global",
-        importpath = "github.com/yargevad/filepathx",
-        sum = "h1:SYcT+N3tYGi+NvazubCNlvgIPbzAk7i7y2dwg3I5FYc=",
-        version = "v1.0.0",
-    )
-    go_repository(
         name = "com_github_yuin_goldmark",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/yuin/goldmark",
