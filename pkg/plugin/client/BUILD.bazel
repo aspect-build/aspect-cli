@@ -10,6 +10,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/ioutils",
+        "//pkg/ioutils/cache",
         "//pkg/plugin/sdk/v1alpha4/config",
         "//pkg/plugin/sdk/v1alpha4/plugin",
         "//pkg/plugin/types",

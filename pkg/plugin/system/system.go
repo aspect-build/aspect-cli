@@ -38,6 +38,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils/prompt"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/client"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/plugin"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system/bep"
@@ -60,7 +61,7 @@ type PluginSystem interface {
 type pluginSystem struct {
 	clientFactory client.Factory
 	plugins       *PluginList
-	promptRunner  ioutils.PromptRunner
+	promptRunner  prompt.PromptRunner
 }
 
 // NewPluginSystem instantiates a default internal implementation of the
@@ -69,7 +70,7 @@ func NewPluginSystem() PluginSystem {
 	return &pluginSystem{
 		clientFactory: client.NewFactory(),
 		plugins:       &PluginList{},
-		promptRunner:  ioutils.NewPromptRunner(),
+		promptRunner:  prompt.NewPromptRunner(),
 	}
 }
 

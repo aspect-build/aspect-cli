@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package ioutils
+package cache
 
 import (
 	"fmt"

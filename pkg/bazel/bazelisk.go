@@ -34,6 +34,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils/cache"
 )
 
 const (
@@ -63,7 +64,7 @@ func (bazelisk *Bazelisk) GetBazelPath(repos *core.Repositories) (string, error)
 
 	bazeliskHome := bazelisk.GetEnvOrConfig("BAZELISK_HOME")
 	if len(bazeliskHome) == 0 {
-		userCacheDir, err := ioutils.UserCacheDir()
+		userCacheDir, err := cache.UserCacheDir()
 		if err != nil {
 			return "", err
 		}

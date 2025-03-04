@@ -27,7 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils/cache"
 	"github.com/fatih/color"
 )
 
@@ -36,7 +36,7 @@ var (
 )
 
 func DownloadPlugin(url string, name string, version string) (string, error) {
-	aspectCacheDir, err := ioutils.AspectCacheDir()
+	aspectCacheDir, err := cache.AspectCacheDir()
 	if err != nil {
 		return "", err
 	}

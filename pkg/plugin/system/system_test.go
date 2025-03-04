@@ -31,6 +31,7 @@ import (
 	rootFlags "github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils/prompt"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/client"
 	client_mock "github.com/aspect-build/aspect-cli/pkg/plugin/client/mock"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/plugin"
@@ -269,7 +270,7 @@ func TestPluginSystemInterceptors(t *testing.T) {
 			PostRunHook(gomock.Any(), gomock.Any()).
 			DoAndReturn(func(
 				isInteractiveMode bool,
-				promptRunner ioutils.PromptRunner,
+				promptRunner prompt.PromptRunner,
 			) error {
 				return fmt.Errorf("plugin error")
 			})

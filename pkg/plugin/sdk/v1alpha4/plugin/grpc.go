@@ -30,7 +30,7 @@ import (
 	"google.golang.org/grpc"
 
 	buildeventstream "github.com/aspect-build/aspect-cli/bazel/buildeventstream"
-	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils/prompt"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/proto"
 )
 
@@ -241,19 +241,19 @@ func (m *GRPCClient) ExecuteCustomCommand(customCommand string, ctx context.Cont
 
 // PostBuildHook is called from the Core to execute the Plugin PostBuildHook. It
 // starts the prompt runner server with the provided PromptRunner.
-func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
+func (m *GRPCClient) PostBuildHook(isInteractiveMode bool, promptRunner prompt.PromptRunner) error {
 	return callClientHook(m.broker, m.client.PostBuildHook, isInteractiveMode, promptRunner)
 }
 
 // PostTestHook is called from the Core to execute the Plugin PostTestHook. It
 // starts the prompt runner server with the provided PromptRunner.
-func (m *GRPCClient) PostTestHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
+func (m *GRPCClient) PostTestHook(isInteractiveMode bool, promptRunner prompt.PromptRunner) error {
 	return callClientHook(m.broker, m.client.PostTestHook, isInteractiveMode, promptRunner)
 }
 
 // PostRunHook is called from the Core to execute the Plugin PostRunHook. It
 // starts the prompt runner server with the provided PromptRunner.
-func (m *GRPCClient) PostRunHook(isInteractiveMode bool, promptRunner ioutils.PromptRunner) error {
+func (m *GRPCClient) PostRunHook(isInteractiveMode bool, promptRunner prompt.PromptRunner) error {
 	return callClientHook(m.broker, m.client.PostRunHook, isInteractiveMode, promptRunner)
 }
 
@@ -264,7 +264,7 @@ func callClientHook[
 	broker *goplugin.GRPCBroker,
 	callFn func(context.Context, *ReqT, ...grpc.CallOption) (*ResT, error),
 	isInteractiveMode bool,
-	promptRunner ioutils.PromptRunner,
+	promptRunner prompt.PromptRunner,
 ) error {
 	prompterServer := &PrompterGRPCServer{promptRunner: promptRunner}
 	var s *grpc.Server
@@ -291,7 +291,7 @@ func callClientHook[
 // PrompterGRPCServer implements the gRPC server that runs on the Core and is
 // passed to the Plugin to allow prompt actions to the CLI user.
 type PrompterGRPCServer struct {
-	promptRunner ioutils.PromptRunner
+	promptRunner prompt.PromptRunner
 }
 
 // Run translates the gRPC call to perform a prompt Run on the Core.
