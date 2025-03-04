@@ -19,6 +19,7 @@ go_library(
         "//pkg/aspecterrors",
         "//pkg/bazel/workspace",
         "//pkg/ioutils",
+        "//pkg/ioutils/cache",
         "@com_github_bazelbuild_bazelisk//core",
         "@com_github_bazelbuild_bazelisk//httputil",
         "@com_github_bazelbuild_bazelisk//platforms",

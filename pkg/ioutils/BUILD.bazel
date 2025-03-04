@@ -2,15 +2,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "ioutils",
-    srcs = [
-        "cache.go",
-        "prompt.go",
-        "streams.go",
-    ],
+    srcs = ["streams.go"],
     importpath = "github.com/aspect-build/aspect-cli/pkg/ioutils",
     visibility = ["//visibility:public"],
-    deps = [
-        "@com_github_manifoldco_promptui//:promptui",
-        "@com_github_mitchellh_go_homedir//:go-homedir",
-    ],
 )

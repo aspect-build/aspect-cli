@@ -35,6 +35,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/bazel/workspace"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils/cache"
 	"github.com/spf13/cobra"
 
 	"github.com/bazelbuild/bazelisk/core"
@@ -184,7 +185,7 @@ func GetAspectVersions() ([]string, error) {
 func GetBazelVersions(bazelFork string) ([]string, error) {
 	repos := createRepositories()
 
-	aspectCacheDir, err := ioutils.AspectCacheDir()
+	aspectCacheDir, err := cache.AspectCacheDir()
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +220,7 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 		return allFlags, nil
 	}
 
-	aspectCacheDir, err := ioutils.AspectCacheDir()
+	aspectCacheDir, err := cache.AspectCacheDir()
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +403,7 @@ func (b *bazel) AbsPathRelativeToWorkspace(relativePath string) (string, error) 
 func (b *bazel) BazelFlagsAsProto() ([]byte, error) {
 	// create a directory in the aspect cache dir with an empty WORKSPACE file to run
 	// `bazel help flags-as-proto` in so it doesn't affect the bazel server in the user's WORKSPACE
-	aspectCacheDir, err := ioutils.AspectCacheDir()
+	aspectCacheDir, err := cache.AspectCacheDir()
 	if err != nil {
 		return nil, err
 	}

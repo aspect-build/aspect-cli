@@ -22,7 +22,7 @@ import (
 	"strings"
 
 	buildeventstream "github.com/aspect-build/aspect-cli/bazel/buildeventstream"
-	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/ioutils/prompt"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/proto"
 )
 
@@ -32,15 +32,15 @@ type Plugin interface {
 	CustomCommands() ([]*Command, error)
 	PostBuildHook(
 		isInteractiveMode bool,
-		promptRunner ioutils.PromptRunner,
+		promptRunner prompt.PromptRunner,
 	) error
 	PostTestHook(
 		isInteractiveMode bool,
-		promptRunner ioutils.PromptRunner,
+		promptRunner prompt.PromptRunner,
 	) error
 	PostRunHook(
 		isInteractiveMode bool,
-		promptRunner ioutils.PromptRunner,
+		promptRunner prompt.PromptRunner,
 	) error
 	Setup(config *SetupConfig) error
 }
@@ -98,17 +98,17 @@ func (*Base) CustomCommands() ([]*Command, error) {
 }
 
 // PostBuildHook satisfies Plugin.PostBuildHook.
-func (*Base) PostBuildHook(bool, ioutils.PromptRunner) error {
+func (*Base) PostBuildHook(bool, prompt.PromptRunner) error {
 	return nil
 }
 
 // PostTestHook satisfies Plugin.PostTestHook.
-func (*Base) PostTestHook(bool, ioutils.PromptRunner) error {
+func (*Base) PostTestHook(bool, prompt.PromptRunner) error {
 	return nil
 }
 
 // PostRunHook satisfies Plugin.PostRunHook.
-func (*Base) PostRunHook(bool, ioutils.PromptRunner) error {
+func (*Base) PostRunHook(bool, prompt.PromptRunner) error {
 	return nil
 }
 
