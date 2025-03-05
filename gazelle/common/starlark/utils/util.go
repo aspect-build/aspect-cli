@@ -1,6 +1,7 @@
 package starlark
 
 import (
+	"fmt"
 	"log"
 	"reflect"
 
@@ -140,10 +141,38 @@ func ReadRecurse(v starlark.Value, read func(v starlark.Value) interface{}) inte
 		return ReadList(v, read)
 	case *starlark.Dict:
 		return ReadMap2(v, read)
+	case starlark.Sequence:
+		return readIterable(v, v.Len(), read)
+	case starlark.Iterable:
+		return readIterable(v, -1, read)
+	case starlark.Indexable:
+		return readIndexable(v, read)
 	}
 
-	log.Panicf("Failed to read starlark value %v", v)
+	log.Panicf("Failed to read starlark value %T", v)
 	return nil
+}
+
+func readIterable(v starlark.Iterable, len int, read func(v starlark.Value) interface{}) []interface{} {
+	iter := v.Iterate()
+	defer iter.Done()
+
+	a := make([]interface{}, 0, len)
+	var x starlark.Value
+	for iter.Next(&x) {
+		a = append(a, read(x))
+	}
+
+	return a
+}
+
+func readIndexable(v starlark.Indexable, read func(v starlark.Value) interface{}) []interface{} {
+	len := v.Len()
+	a := make([]interface{}, 0, len)
+	for i := 0; i < len; i++ {
+		a = append(a, read(v.Index(i)))
+	}
+	return a
 }
 
 func ReadMap[K any](v starlark.Value, f func(k string, v starlark.Value) K) map[string]K {
@@ -221,3 +250,67 @@ func ReadBoolMap(v starlark.Value) map[string]bool {
 func ReadStringMap(v starlark.Value) map[string]string {
 	return ReadMap2(v, ReadString)
 }
+
+// Looping: efficient utils for iterators, sequences etc
+
+func MappedSequence[V any](a []V, f func(v V) starlark.Value) starlark.Sequence {
+	return &mappedSequence[V]{values: a, mapper: f}
+}
+
+func MappedIterator[V any](a []V, f func(v V) starlark.Value) starlark.Iterator {
+	return &mappedIterator[V]{values: a, mapper: f, i: 0}
+}
+
+type mappedSequence[V any] struct {
+	values []V
+	mapper func(v V) starlark.Value
+}
+
+var _ starlark.Sequence = (*mappedSequence[any])(nil)
+var _ starlark.Indexable = (*mappedSequence[any])(nil)
+
+func (s *mappedSequence[V]) String() string {
+	return fmt.Sprintf("MappedSequence{%v}", s.values)
+}
+func (s *mappedSequence[V]) Type() string         { return "MappedSequence" }
+func (s *mappedSequence[V]) Freeze()              {}
+func (s *mappedSequence[V]) Truth() starlark.Bool { return starlark.True }
+func (s *mappedSequence[V]) Hash() (uint32, error) {
+	return 0, fmt.Errorf("unhashable: %s", s.Type())
+}
+func (s *mappedSequence[V]) Iterate() starlark.Iterator {
+	return MappedIterator(s.values, s.mapper)
+}
+func (s *mappedSequence[V]) Len() int {
+	return len(s.values)
+}
+func (s *mappedSequence[V]) Index(i int) starlark.Value {
+	return s.mapper(s.values[i])
+}
+
+type mappedIterator[V any] struct {
+	values []V
+	i      int
+	mapper func(v V) starlark.Value
+}
+
+var _ starlark.Iterator = (*mappedIterator[any])(nil)
+
+func (s *mappedIterator[V]) String() string {
+	return fmt.Sprintf("MappedIterator{%v @ %v}", s.values, s.i)
+}
+func (s *mappedIterator[V]) Type() string         { return "MappedIterator" }
+func (s *mappedIterator[V]) Freeze()              {}
+func (s *mappedIterator[V]) Truth() starlark.Bool { return starlark.True }
+func (s *mappedIterator[V]) Hash() (uint32, error) {
+	return 0, fmt.Errorf("unhashable: %s", s.Type())
+}
+func (s *mappedIterator[V]) Next(p *starlark.Value) bool {
+	if s.i < len(s.values) {
+		*p = s.mapper(s.values[s.i])
+		s.i = s.i + 1
+		return true
+	}
+	return false
+}
+func (s mappedIterator[V]) Done() {}

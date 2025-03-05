@@ -124,3 +124,51 @@ func TestReadWrite(t *testing.T) {
 		}
 	})
 }
+
+func stringToStarlark(s string) starlark.Value {
+	return starlark.String(s)
+}
+
+func TestSequences(t *testing.T) {
+	t.Run("MappedSequence iterate", func(t *testing.T) {
+		s := MappedSequence([]string{"a", "b", "c"}, stringToStarlark)
+
+		if s.Len() != 3 {
+			t.Errorf("Expected 3")
+		}
+
+		var v starlark.Value
+
+		i := s.Iterate()
+		if i.Next(&v); v.(starlark.String).GoString() != "a" {
+			t.Errorf("Expected a")
+		}
+		if i.Next(&v); v.(starlark.String).GoString() != "b" {
+			t.Errorf("Expected b")
+		}
+		if i.Next(&v); v.(starlark.String).GoString() != "c" {
+			t.Errorf("Expected c")
+		}
+	})
+	t.Run("MappedSequence iterable", func(t *testing.T) {
+		s := MappedSequence([]string{"a", "b", "c"}, stringToStarlark)
+
+		a := make([]string, 0, 3)
+		for v := range starlark.Elements(s) {
+			a = append(a, v.(starlark.String).GoString())
+		}
+
+		if len(a) != 3 {
+			t.Errorf("Expected 3")
+		}
+		if a[0] != "a" {
+			t.Errorf("Expected a")
+		}
+		if a[1] != "b" {
+			t.Errorf("Expected b")
+		}
+		if a[2] != "c" {
+			t.Errorf("Expected c")
+		}
+	})
+}
