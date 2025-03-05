@@ -25,7 +25,7 @@ aspect lint <target patterns> [flags]
       --fix            Auto-apply all fixes
       --fixes          Request fixes from linters (where supported) (default true)
   -h, --help           help for lint
-      --hide-success   Hie successful lint results
+      --hide-success   Hide successful lint results
       --machine        Request machine readable lint reports from linters (where supported)
       --report         Request lint reports from linters (default true)
 ```
