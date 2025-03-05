@@ -26,6 +26,7 @@ aspect lint <target patterns> [flags]
       --fixes     Request fixes from linters (where supported) (default true)
   -h, --help      help for lint
       --machine   Request machine readable lint reports from linters (where supported)
+      --quiet     Hide successful lint results
       --report    Request lint reports from linters (default true)
 ```
 
