@@ -91,7 +91,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flags.RegisterNoableBoolP(flagSet, "fixes", "", true, "Request fixes from linters (where supported)")
 	flags.RegisterNoableBoolP(flagSet, "report", "", true, "Request lint reports from linters")
 	flags.RegisterNoableBoolP(flagSet, "machine", "", false, "Request machine readable lint reports from linters (where supported)")
-	flags.RegisterNoableBoolP(flagSet, "hide-success", "", false, "Hie successful lint results")
+	flags.RegisterNoableBoolP(flagSet, "hide-success", "", false, "Hide successful lint results")
 }
 
 // TODO: hoist this to a flags package so it can be used by other commands that require this functionality
