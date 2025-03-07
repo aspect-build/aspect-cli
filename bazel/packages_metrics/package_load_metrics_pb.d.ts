@@ -7,9 +7,9 @@ import type { Message } from "@bufbuild/protobuf";
 import type { Duration } from "@bufbuild/protobuf/wkt";
 
 /**
- * Describes the file bazel/packages_metrics/package_load_metrics.proto.
+ * Describes the file cli/core/bazel/packages_metrics/package_load_metrics.proto.
  */
-export declare const file_bazel_packages_metrics_package_load_metrics: GenFile;
+export declare const file_cli_core_bazel_packages_metrics_package_load_metrics: GenFile;
 
 /**
  * @generated from message metrics.PackageLoadMetrics

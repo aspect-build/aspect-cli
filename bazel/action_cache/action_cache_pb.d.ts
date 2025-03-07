@@ -6,9 +6,9 @@ import type { GenEnum, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv1"
 import type { Message } from "@bufbuild/protobuf";
 
 /**
- * Describes the file bazel/action_cache/action_cache.proto.
+ * Describes the file cli/core/bazel/action_cache/action_cache.proto.
  */
-export declare const file_bazel_action_cache_action_cache: GenFile;
+export declare const file_cli_core_bazel_action_cache_action_cache: GenFile;
 
 /**
  * @generated from message bazel.ActionCacheStatistics

@@ -6,9 +6,9 @@ import type { GenEnum, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv1"
 import type { Message } from "@bufbuild/protobuf";
 
 /**
- * Describes the file bazel/invocation_policy/invocation_policy.proto.
+ * Describes the file cli/core/bazel/invocation_policy/invocation_policy.proto.
  */
-export declare const file_bazel_invocation_policy_invocation_policy: GenFile;
+export declare const file_cli_core_bazel_invocation_policy_invocation_policy: GenFile;
 
 /**
  * @generated from message invocation_policy.InvocationPolicy

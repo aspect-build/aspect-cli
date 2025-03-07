@@ -5,9 +5,9 @@
 import type { GenEnum, GenFile } from "@bufbuild/protobuf/codegenv1";
 
 /**
- * Describes the file bazel/options/option_filters.proto.
+ * Describes the file cli/core/bazel/options/option_filters.proto.
  */
-export declare const file_bazel_options_option_filters: GenFile;
+export declare const file_cli_core_bazel_options_option_filters: GenFile;
 
 /**
  * @generated from enum options.OptionEffectTag

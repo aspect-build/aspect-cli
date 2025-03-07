@@ -7,9 +7,9 @@ import type { Message } from "@bufbuild/protobuf";
 import type { EnumValueOptions } from "@bufbuild/protobuf/wkt";
 
 /**
- * Describes the file bazel/failure_details/failure_details.proto.
+ * Describes the file cli/core/bazel/failure_details/failure_details.proto.
  */
-export declare const file_bazel_failure_details_failure_details: GenFile;
+export declare const file_cli_core_bazel_failure_details_failure_details: GenFile;
 
 /**
  * @generated from message failure_details.FailureDetailMetadata

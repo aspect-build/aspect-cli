@@ -6,9 +6,9 @@ import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv1";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
- * Describes the file bazel/flags/flags.proto.
+ * Describes the file cli/core/bazel/flags/flags.proto.
  */
-export declare const file_bazel_flags_flags: GenFile;
+export declare const file_cli_core_bazel_flags_flags: GenFile;
 
 /**
  * @generated from message bazel.FlagInfo

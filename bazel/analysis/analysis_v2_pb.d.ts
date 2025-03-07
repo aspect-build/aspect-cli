@@ -7,9 +7,9 @@ import type { Message } from "@bufbuild/protobuf";
 import type { Target as Target$1 } from "../query/build_pb";
 
 /**
- * Describes the file bazel/analysis/analysis_v2.proto.
+ * Describes the file cli/core/bazel/analysis/analysis_v2.proto.
  */
-export declare const file_bazel_analysis_analysis_v2: GenFile;
+export declare const file_cli_core_bazel_analysis_analysis_v2: GenFile;
 
 /**
  * @generated from message bazel.ActionGraphContainer

@@ -12,9 +12,9 @@ import type { PackageLoadMetrics } from "../packages_metrics/package_load_metric
 import type { CommandLine } from "../command_line/command_line_pb";
 
 /**
- * Describes the file bazel/buildeventstream/build_event_stream.proto.
+ * Describes the file cli/core/bazel/buildeventstream/build_event_stream.proto.
  */
-export declare const file_bazel_buildeventstream_build_event_stream: GenFile;
+export declare const file_cli_core_bazel_buildeventstream_build_event_stream: GenFile;
 
 /**
  * @generated from message build_event_stream.BuildEventId

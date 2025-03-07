@@ -6,9 +6,9 @@ import type { GenEnum, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv1"
 import type { Message } from "@bufbuild/protobuf";
 
 /**
- * Describes the file bazel/query/build.proto.
+ * Describes the file cli/core/bazel/query/build.proto.
  */
-export declare const file_bazel_query_build: GenFile;
+export declare const file_cli_core_bazel_query_build: GenFile;
 
 /**
  * @generated from message blaze_query_aspect_mirror.License

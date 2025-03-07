@@ -7,9 +7,9 @@ import type { Message } from "@bufbuild/protobuf";
 import type { OptionEffectTag, OptionMetadataTag } from "../options/option_filters_pb";
 
 /**
- * Describes the file bazel/command_line/command_line.proto.
+ * Describes the file cli/core/bazel/command_line/command_line.proto.
  */
-export declare const file_bazel_command_line_command_line: GenFile;
+export declare const file_cli_core_bazel_command_line_command_line: GenFile;
 
 /**
  * @generated from message command_line.CommandLine
