@@ -13,6 +13,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common",
+        "//gazelle/common/treesitter/grammars/golang",
         "//gazelle/common/treesitter/grammars/java",
         "//gazelle/common/treesitter/grammars/json",
         "//gazelle/common/treesitter/grammars/kotlin",

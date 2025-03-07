@@ -16,6 +16,13 @@ filegroup(
 # buildifier: disable=function-docstring
 def fetch_grammars():
     http_archive(
+        name = "tree-sitter-go",
+        integrity = "sha256-M7w7RN4de4FfUv6fQuSXhsWDPZGB/Vn9aRDBnIJVkik=",
+        urls = ["https://github.com/tree-sitter/tree-sitter-go/releases/download/v0.23.4/tree-sitter-go.tar.xz"],
+        build_file_content = BUILD,
+    )
+
+    http_archive(
         name = "tree-sitter-java",
         sha256 = "ed766e1045be236e50a7f99295996f6705d7506628b79af80d1fd5efb63c86a7",
         urls = ["https://github.com/tree-sitter/tree-sitter-java/releases/download/v0.23.5/tree-sitter-java.tar.xz"],

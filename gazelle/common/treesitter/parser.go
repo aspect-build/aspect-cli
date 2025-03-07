@@ -22,6 +22,7 @@ import (
 	"log"
 	"path"
 
+	golang "github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/golang"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/java"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/json"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/kotlin"
@@ -40,6 +41,7 @@ const (
 	TypescriptX                 = "tsx"
 	JSON                        = "json"
 	Java                        = "java"
+	Go                          = "go"
 )
 
 type ASTQueryResult interface {
@@ -71,6 +73,8 @@ func (tree *treeAst) String() string {
 
 func toSitterLanguage(lang LanguageGrammar) *sitter.Language {
 	switch lang {
+	case Go:
+		return golang.GetLanguage()
 	case Java:
 		return java.GetLanguage()
 	case JSON:
@@ -95,6 +99,8 @@ func PathToLanguage(p string) LanguageGrammar {
 
 // Based on https://github.com/github-linguist/linguist/blob/master/lib/linguist/languages.yml
 var EXT_LANGUAGES = map[string]LanguageGrammar{
+	"go": Go,
+
 	"kt":  Kotlin,
 	"ktm": Kotlin,
 	"kts": Kotlin,
