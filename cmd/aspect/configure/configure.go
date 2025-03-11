@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/aspect-build/aspect-cli/buildinfo"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/configure"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
@@ -88,6 +89,12 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 
 func run(streams ioutils.Streams, v *configure.Configure, mode string, args []string) error {
 	addCliEnabledLanguages(v)
+
+	if buildinfo.Current().OpenSource {
+		if configurePlugins := viper.GetStringSlice("configure.plugins"); len(configurePlugins) > 0 {
+			fmt.Fprintln(streams.Stderr, "WARNING: Aspect CLI configure.plugins are not supported in Aspect OSS CLI.")
+		}
+	}
 
 	err := v.Run(mode, args)
 	if aspectError, isAError := err.(*aspecterrors.ExitError); isAError && aspectError.ExitCode == aspecterrors.ConfigureNoConfig {

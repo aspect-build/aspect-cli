@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/aspect-build/aspect-cli/cmd/aspect/configure",
     visibility = ["//visibility:public"],
     deps = [
+        "//buildinfo",
         "//pkg/aspect/configure",
         "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",
