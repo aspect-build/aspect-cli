@@ -76,18 +76,20 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 			},
 			func(_ context.Context, cmd *cobra.Command, args []string) error {
 				mode, _ := cmd.Flags().GetString("mode")
-				return run(streams, v, mode, args)
+				exclude, _ := cmd.Flags().GetStringSlice("exclude")
+				return run(streams, v, mode, exclude, args)
 			},
 		),
 	}
 
 	// TODO: restrict to only valid values (see https://github.com/spf13/pflag/issues/236)
 	cmd.Flags().String("mode", "fix", "Method for emitting merged BUILD files.\n\tfix: write generated and merged files to disk\n\tprint: print files to stdout\n\tdiff: print a unified diff")
+	cmd.Flags().StringSlice("exclude", []string{}, "Files to exclude from BUILD generation")
 
 	return cmd
 }
 
-func run(streams ioutils.Streams, v *configure.Configure, mode string, args []string) error {
+func run(streams ioutils.Streams, v *configure.Configure, mode string, exclude []string, args []string) error {
 	addCliEnabledLanguages(v)
 
 	if buildinfo.Current().OpenSource {
@@ -96,7 +98,7 @@ func run(streams ioutils.Streams, v *configure.Configure, mode string, args []st
 		}
 	}
 
-	err := v.Run(mode, args)
+	err := v.Run(mode, exclude, args)
 	if aspectError, isAError := err.(*aspecterrors.ExitError); isAError && aspectError.ExitCode == aspecterrors.ConfigureNoConfig {
 		fmt.Fprintln(streams.Stderr, `No languages enabled for BUILD file generation.
 
