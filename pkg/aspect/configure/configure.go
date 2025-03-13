@@ -117,7 +117,7 @@ func (c *Configure) AddLanguage(lang ConfigureLanguage) {
 	}
 }
 
-func (runner *Configure) Run(mode ConfigureMode, args []string) error {
+func (runner *Configure) Run(mode ConfigureMode, excludes []string, args []string) error {
 	if len(runner.languageKeys) == 0 {
 		return &aspecterrors.ExitError{
 			ExitCode: aspecterrors.ConfigureNoConfig,
@@ -132,6 +132,10 @@ func (runner *Configure) Run(mode ConfigureMode, args []string) error {
 
 	// Append the aspect-cli mode flag to the args parsed by gazelle.
 	fixArgs := []string{"--mode=" + mode}
+
+	for _, exclude := range excludes {
+		fixArgs = append(fixArgs, "--exclude="+exclude)
+	}
 
 	// gazelle --cpuprofile enabled via environment variable.
 	cpuprofile := os.Getenv("GAZELLE_CPUPROFILE")
