@@ -37,6 +37,7 @@ func (tree *treeAst) QueryStrings(query TreeQuery, returnVar string) []string {
 
 	// Execute the query.
 	qc := sitter.NewQueryCursor()
+	defer qc.Close()
 	qc.Exec(sitterQuery.q, rootNode)
 
 	// Collect string from the query results.
@@ -83,6 +84,7 @@ func (tree *treeAst) Query(query TreeQuery) <-chan ASTQueryResult {
 	// Execute the query.
 	go func() {
 		qc := sitter.NewQueryCursor()
+		defer qc.Close()
 		qc.Exec(q.q, rootNode)
 
 		for {
@@ -167,6 +169,7 @@ func (tree *treeAst) QueryErrors() []error {
 
 	// Execute the import query
 	qc := sitter.NewQueryCursor()
+	defer qc.Close()
 	qc.Exec(query.q, node)
 
 	// Collect import statements from the query results
