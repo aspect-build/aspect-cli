@@ -31,9 +31,9 @@ def fetch_grammars():
 
     http_archive(
         name = "tree-sitter-json",
-        sha256 = "ecde752640fb6eedd25b63647f016f92b3b63096d08f60742cbf19395c5c6036",
-        strip_prefix = "tree-sitter-json-0.23.0",
-        urls = ["https://github.com/tree-sitter/tree-sitter-json/archive/v0.23.0.tar.gz"],
+        sha256 = "acf6e8362457e819ed8b613f2ad9a0e1b621a77556c296f3abea58f7880a9213",
+        strip_prefix = "tree-sitter-json-0.24.8",
+        urls = ["https://github.com/tree-sitter/tree-sitter-json/archive/v0.24.8.tar.gz"],
         build_file_content = BUILD,
     )
 
@@ -47,17 +47,17 @@ def fetch_grammars():
 
     http_archive(
         name = "tree-sitter-starlark",
-        integrity = "sha256-STb+4buXAstpVLGTDqwTPCzxzEDz3n1EpqPXdtI7IWw=",
-        strip_prefix = "tree-sitter-starlark-1.2.0",
-        urls = ["https://github.com/tree-sitter-grammars/tree-sitter-starlark/archive/v1.2.0.tar.gz"],
+        sha256 = "31c58a540d738a17b366f2046da298b66dfa0695bcbfa207f61fa63cfe5c03ed",
+        strip_prefix = "tree-sitter-starlark-1.3.0",
+        urls = ["https://github.com/tree-sitter-grammars/tree-sitter-starlark/archive/v1.3.0.tar.gz"],
         build_file_content = BUILD,
     )
 
     http_archive(
         name = "tree-sitter-typescript",
-        sha256 = "af500e16060b0221db8fb0743a37ca677340f8024127b54f6b6fc1ebfde496f4",
-        strip_prefix = "tree-sitter-typescript-0.23.0",
-        urls = ["https://github.com/tree-sitter/tree-sitter-typescript/archive/v0.23.0.tar.gz"],
+        sha256 = "2c4ce711ae8d1218a3b2f899189298159d672870b5b34dff5d937bed2f3e8983",
+        strip_prefix = "tree-sitter-typescript-0.23.2",
+        urls = ["https://github.com/tree-sitter/tree-sitter-typescript/archive/v0.23.2.tar.gz"],
         build_file_content = """
 filegroup(
     name = "typescript-srcs",
