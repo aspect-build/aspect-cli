@@ -58,6 +58,7 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 	}
 
 	if tree != nil {
+		defer tree.Close()
 		rootNode := tree.RootNode()
 		rootNodeChildCount := int(rootNode.NamedChildCount())
 

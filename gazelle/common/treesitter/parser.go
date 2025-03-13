@@ -56,6 +56,10 @@ type AST interface {
 	// TODO: delete
 	QueryStrings(query TreeQuery, returnVar string) []string
 	RootNode() *sitter.Node
+
+	// Release all resources related to this AST.
+	// The AST is most likely no longer usable after this call.
+	Close()
 }
 type treeAst struct {
 	lang       LanguageGrammar
@@ -66,6 +70,12 @@ type treeAst struct {
 }
 
 var _ AST = (*treeAst)(nil)
+
+func (tree *treeAst) Close() {
+	tree.sitterTree.Close()
+	tree.sitterTree = nil
+	tree.sourceCode = nil
+}
 
 func (tree *treeAst) String() string {
 	return fmt.Sprintf("treeAst{\n lang: %q,\n filePath: %q,\n AST:\n  %v\n}", tree.lang, tree.filePath, tree.sitterTree.RootNode().String())

@@ -45,6 +45,7 @@ func (p *treeSitterParser) Parse(filePath string, sourceCode []byte) (*ParseResu
 	}
 
 	if tree != nil {
+		defer tree.Close()
 		rootNode := tree.RootNode()
 
 		// Extract imports from the root nodes
