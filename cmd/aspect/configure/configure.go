@@ -86,12 +86,12 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 	cmd.Flags().String("mode", "fix", "Method for emitting merged BUILD files.\n\tfix: write generated and merged files to disk\n\tprint: print files to stdout\n\tdiff: print a unified diff")
 	cmd.Flags().StringSlice("exclude", []string{}, "Files to exclude from BUILD generation")
 
+	addCliEnabledLanguages(v)
+
 	return cmd
 }
 
 func run(streams ioutils.Streams, v *configure.Configure, mode string, exclude []string, args []string) error {
-	addCliEnabledLanguages(v)
-
 	if buildinfo.Current().OpenSource {
 		if configurePlugins := viper.GetStringSlice("configure.plugins"); len(configurePlugins) > 0 {
 			fmt.Fprintln(streams.Stderr, "WARNING: Aspect CLI configure.plugins are not supported in Aspect OSS CLI.")
