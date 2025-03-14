@@ -119,6 +119,14 @@ func (runner *Outputs) Run(_ context.Context, cmd *cobra.Command, args []string)
 		}
 	}
 
+	var out strings.Builder
+	streams := ioutils.Streams{Stdout: &out, Stderr: nil}
+	err = runner.bzl.RunCommand(streams, nil, "info", "output_base")
+	if err != nil {
+		return fmt.Errorf("unable to locate output_base: %w", err)
+	}
+	outputBase := strings.TrimSpace(out.String())
+
 	agc, err := runner.bzl.AQuery(query, bazelFlags)
 	if err != nil {
 		return fmt.Errorf("%s", err.Error())
@@ -128,7 +136,7 @@ func (runner *Outputs) Run(_ context.Context, cmd *cobra.Command, args []string)
 	// Special case pseudo-mnemonic indicating we should compute an overall hash
 	// for any executables in the aquery result
 	if mnemonicFilter == "ExecutableHash" {
-		hashes, err := gatherExecutableHashes(outs, salt)
+		hashes, err := gatherExecutableHashes(outs, salt, outputBase)
 		if err != nil {
 			return err
 		}

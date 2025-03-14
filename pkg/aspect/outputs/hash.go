@@ -26,7 +26,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -53,7 +55,7 @@ func AddExecutableHash(hashFiles map[string][]string, label string, exePath stri
 
 // AddRunfilesHash iterates through the runfiles entries of the manifest, appending all files
 // contained (or files inside directories) to the hashFiles entry of the label
-func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath string) error {
+func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath string, outputBase string) error {
 	_, err := os.Stat(manifestPath)
 	if os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "%s manifest %s is not on disk, did you build it? Skipping...\n", label, manifestPath)
@@ -72,9 +74,20 @@ func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath s
 		// Manifest entries are in the form
 		// execroot/path /some/absolute/path
 		entry := strings.Split(fileScanner.Text(), " ")
-		// key := entry[0]
-		abspath := entry[1]
-		fileinfo, err := os.Stat(abspath)
+		abspath := unescape(entry[1])
+
+		var fileinfo fs.FileInfo = nil
+		if !strings.HasPrefix(abspath, "/") {
+			possibleAbsolutePath := filepath.Join(outputBase, "external", abspath)
+			if possibleFileinfo, err := os.Stat(possibleAbsolutePath); err == nil {
+				abspath = possibleAbsolutePath
+				fileinfo = possibleFileinfo
+			}
+		}
+
+		if fileinfo == nil {
+			fileinfo, err = os.Stat(abspath)
+		}
 
 		if err != nil {
 			return fmt.Errorf("failed to stat runfiles manifest entry %s: %w\n", abspath, err)
@@ -96,7 +109,7 @@ func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath s
 }
 
 // =================================================================================================
-func gatherExecutableHashes(outs []bazel.Output, salt string) (map[string]string, error) {
+func gatherExecutableHashes(outs []bazel.Output, salt string, outputBase string) (map[string]string, error) {
 	// map from Label to the files/directories which should be hashed
 	hashFiles := make(map[string][]string)
 
@@ -104,7 +117,7 @@ func gatherExecutableHashes(outs []bazel.Output, salt string) (map[string]string
 		if a.Mnemonic == "ExecutableSymlink" {
 			AddExecutableHash(hashFiles, a.Label, a.Path)
 		} else if a.Mnemonic == "SourceSymlinkManifest" {
-			if err := AddRunfilesHash(hashFiles, a.Label, a.Path); err != nil {
+			if err := AddRunfilesHash(hashFiles, a.Label, a.Path, outputBase); err != nil {
 				return nil, err
 			}
 		}
