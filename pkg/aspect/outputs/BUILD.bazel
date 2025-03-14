@@ -6,6 +6,7 @@ go_library(
     srcs = [
         "hash.go",
         "outputs.go",
+        "paths.go",
     ],
     importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/outputs",
     visibility = ["//visibility:public"],
@@ -28,10 +29,11 @@ go_test(
     srcs = [
         "hash_test.go",
         "outputs_test.go",
+        "paths_test.go",
     ],
     data = ["test_fixture_{}".format(fixture) for fixture in TEST_FIXTURES],
+    embed = [":outputs"],
     deps = [
-        ":outputs",
         "@com_github_onsi_gomega//:gomega",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_pflag//:pflag",

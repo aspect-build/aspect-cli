@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 
-package outputs_test
+package outputs
 
 import (
 	"testing"
 
-	"github.com/aspect-build/aspect-cli/pkg/aspect/outputs"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -35,7 +34,7 @@ func TestOutputs(t *testing.T) {
 
 		hash_salt := "some_hash_salt"
 
-		outputs.AddFlags(cmd.Flags())
+		AddFlags(cmd.Flags())
 
 		cmd.Flags().VisitAll(func(f *pflag.Flag) {
 			// Need to set this as we arent actually running cobra which would populate this from the actual args.
@@ -44,42 +43,42 @@ func TestOutputs(t *testing.T) {
 			}
 		})
 
-		resultingFlags := outputs.RemoveCobraFlagsFromArgs(cmd, []string{"foo", "bar", "--hash_salt", hash_salt, "baz"})
+		resultingFlags := RemoveCobraFlagsFromArgs(cmd, []string{"foo", "bar", "--hash_salt", hash_salt, "baz"})
 
 		g.Expect(len(resultingFlags)).To(Equal(3))
 		g.Expect(resultingFlags[0]).To(Equal("foo"))
 		g.Expect(resultingFlags[1]).To(Equal("bar"))
 		g.Expect(resultingFlags[2]).To(Equal("baz"))
 
-		resultingFlags = outputs.RemoveCobraFlagsFromArgs(cmd, []string{"foo", "bar", "--hash_salt=" + hash_salt, "baz"})
+		resultingFlags = RemoveCobraFlagsFromArgs(cmd, []string{"foo", "bar", "--hash_salt=" + hash_salt, "baz"})
 
 		g.Expect(len(resultingFlags)).To(Equal(3))
 		g.Expect(resultingFlags[0]).To(Equal("foo"))
 		g.Expect(resultingFlags[1]).To(Equal("bar"))
 		g.Expect(resultingFlags[2]).To(Equal("baz"))
 
-		resultingFlags = outputs.RemoveCobraFlagsFromArgs(cmd, []string{"foo", "bar", "baz", "--hash_salt", hash_salt})
+		resultingFlags = RemoveCobraFlagsFromArgs(cmd, []string{"foo", "bar", "baz", "--hash_salt", hash_salt})
 
 		g.Expect(len(resultingFlags)).To(Equal(3))
 		g.Expect(resultingFlags[0]).To(Equal("foo"))
 		g.Expect(resultingFlags[1]).To(Equal("bar"))
 		g.Expect(resultingFlags[2]).To(Equal("baz"))
 
-		resultingFlags = outputs.RemoveCobraFlagsFromArgs(cmd, []string{"foo", "bar", "baz", "--hash_salt=" + hash_salt})
+		resultingFlags = RemoveCobraFlagsFromArgs(cmd, []string{"foo", "bar", "baz", "--hash_salt=" + hash_salt})
 
 		g.Expect(len(resultingFlags)).To(Equal(3))
 		g.Expect(resultingFlags[0]).To(Equal("foo"))
 		g.Expect(resultingFlags[1]).To(Equal("bar"))
 		g.Expect(resultingFlags[2]).To(Equal("baz"))
 
-		resultingFlags = outputs.RemoveCobraFlagsFromArgs(cmd, []string{"--hash_salt", hash_salt, "foo", "bar", "baz"})
+		resultingFlags = RemoveCobraFlagsFromArgs(cmd, []string{"--hash_salt", hash_salt, "foo", "bar", "baz"})
 
 		g.Expect(len(resultingFlags)).To(Equal(3))
 		g.Expect(resultingFlags[0]).To(Equal("foo"))
 		g.Expect(resultingFlags[1]).To(Equal("bar"))
 		g.Expect(resultingFlags[2]).To(Equal("baz"))
 
-		resultingFlags = outputs.RemoveCobraFlagsFromArgs(cmd, []string{"--hash_salt=" + hash_salt, "foo", "bar", "baz"})
+		resultingFlags = RemoveCobraFlagsFromArgs(cmd, []string{"--hash_salt=" + hash_salt, "foo", "bar", "baz"})
 
 		g.Expect(len(resultingFlags)).To(Equal(3))
 		g.Expect(resultingFlags[0]).To(Equal("foo"))
