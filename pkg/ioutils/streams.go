@@ -32,3 +32,9 @@ var DefaultStreams = Streams{
 	Stdout: os.Stdout,
 	Stderr: os.Stderr,
 }
+
+var DiscardStreams = Streams{
+	Stdin:  os.Stdin,
+	Stdout: io.Discard,
+	Stderr: io.Discard,
+}
