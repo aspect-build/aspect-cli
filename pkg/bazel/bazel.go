@@ -70,11 +70,24 @@ type Bazel interface {
 	Flags() (map[string]*flags.FlagInfo, error)
 	AbsPathRelativeToWorkspace(relativePath string) (string, error)
 	AddBazelFlags(cmd *cobra.Command) error
+	WorkspaceRoot() string
+	ExecutablePath() (string, error)
 }
 
 type bazel struct {
 	workspaceRoot string
 	env           []string
+}
+
+// ExecutablePath implements Bazel.
+func (b *bazel) ExecutablePath() (string, error) {
+	bazelisk := NewBazelisk(b.workspaceRoot, false)
+	return bazelisk.GetBazelPath(createRepositories())
+}
+
+// WorkspaceRoot implements Bazel.
+func (b *bazel) WorkspaceRoot() string {
+	return b.workspaceRoot
 }
 
 func New(workspaceRoot string) Bazel {
@@ -86,6 +99,7 @@ func New(workspaceRoot string) Bazel {
 		// If we can't get the absolute path, it's a programming logic error.
 		panic(err)
 	}
+
 	return &bazel{
 		workspaceRoot: absWkspRoot,
 	}
@@ -200,7 +214,6 @@ func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...strin
 	repos := createRepositories()
 
 	bazelisk := NewBazelisk(b.workspaceRoot, false)
-
 	return bazelisk.Run(command, repos, streams, b.env, wd)
 }
 
