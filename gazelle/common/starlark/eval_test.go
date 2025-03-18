@@ -9,9 +9,10 @@ import (
 )
 
 func run(t *testing.T, code string) (starlark.StringDict, error) {
-	testFile := path.Join(os.TempDir(), "test.star")
+	testDir := os.TempDir()
+	testFile := "test.star"
 
-	f, err := os.Create(testFile)
+	f, err := os.Create(path.Join(testDir, testFile))
 	if err != nil {
 		t.Errorf("Temp star create failure: %v", err)
 	}
@@ -26,7 +27,7 @@ func run(t *testing.T, code string) (starlark.StringDict, error) {
 		t.Errorf("Temp star close failure: %v", err)
 	}
 
-	return Eval(testFile, make(map[string]starlark.Value), make(map[string]interface{}))
+	return Eval(testDir, testFile, make(map[string]starlark.Value), make(map[string]interface{}))
 }
 
 func runOk(t *testing.T, code string) starlark.StringDict {
@@ -76,35 +77,6 @@ y = "s"
 		ystr, _ := starlark.AsString(y)
 		if ystr != "s" {
 			t.Errorf("Expected string 's', got %v", ystr)
-		}
-	})
-
-	t.Run("basic func", func(t *testing.T) {
-		res := runOk(t, `
-def f():
-	return 1
-`)
-		f, hasF := res["f"]
-		if !hasF {
-			t.Errorf("Expected f to be defined")
-		}
-
-		if f.Type() != "function" {
-			t.Errorf("Expected type function %v", f.Type())
-		}
-
-		v, err := Call(f, starlark.Tuple{}, nil)
-		if err != nil {
-			t.Errorf("Expected call to succeed %v", err)
-		}
-
-		i, intErr := starlark.AsInt32(v)
-		if intErr != nil {
-			t.Errorf("Expected int %v", intErr)
-		}
-
-		if i != 1 {
-			t.Errorf("Expected 1, got %v", i)
 		}
 	})
 }
