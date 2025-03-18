@@ -617,6 +617,15 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 			}
 		}
 
+		// Reflect the tsconfig emitDeclarationOnly in the ts_project rule
+		if !cfg.IsTsConfigIgnored("emit_declaration_only") {
+			if tsconfig != nil && tsconfig.DeclarationOnly != nil {
+				sourceRule.SetAttr("emit_declaration_only", *tsconfig.DeclarationOnly)
+			} else {
+				sourceRule.DelAttr("emit_declaration_only")
+			}
+		}
+
 		// Reflect the tsconfig sourceMap in the ts_project rule
 		if !cfg.IsTsConfigIgnored("source_map") {
 			if tsconfig != nil && tsconfig.SourceMap != nil {

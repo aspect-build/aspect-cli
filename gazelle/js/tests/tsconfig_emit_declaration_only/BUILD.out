@@ -1,19 +1,16 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
+# gazelle:js_tsconfig enabled
+
 ts_project(
-    name = "removed",
+    name = "tsconfig_emit_declaration_only",
     srcs = ["main.ts"],
-    allow_js = True,
-    source_map = False,
-    declaration = False,
     declaration = True,
     emit_declaration_only = True,
-    resolve_json_module = False,
     tsconfig = ":tsconfig",
 )
 
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
-    deps = ["//:tsconfig"],
 )
