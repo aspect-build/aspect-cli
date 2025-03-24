@@ -17,9 +17,7 @@
 package gazelle
 
 import (
-	"crypto"
 	"encoding/gob"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"os"
@@ -27,7 +25,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/aspect-build/aspect-cli/buildinfo"
 	gazelle "github.com/aspect-build/aspect-cli/gazelle/common"
 	"github.com/aspect-build/aspect-cli/gazelle/common/cache"
 	starlark "github.com/aspect-build/aspect-cli/gazelle/common/starlark"
@@ -476,12 +473,8 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 
 	// Parse source files, do not parse generated files that are not source files.
 	for result := range ts.parseFiles(cfg, args, sourceFiles) {
-		if len(result.Errors) > 0 {
-			fmt.Printf("%s:\n", result.SourcePath)
-			for _, err := range result.Errors {
-				fmt.Printf("%s\n", err)
-			}
-			fmt.Println()
+		if result.Error != nil {
+			fmt.Printf("%s:\n%s\n\n", result.SourcePath, result.Error)
 		}
 
 		for _, sourceImport := range result.Imports {
@@ -719,7 +712,7 @@ type parseResult struct {
 	SourcePath string
 	Imports    []ImportStatement
 	Modules    []string
-	Errors     []error
+	Error      error
 }
 
 func (ts *typeScriptLang) collectProtoImports(cfg *JsGazelleConfig, args language.GenerateArgs, sourceFiles []string) []ImportStatement {
@@ -801,11 +794,11 @@ func (ts *typeScriptLang) parseFiles(cfg *JsGazelleConfig, args language.Generat
 }
 
 func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, config *config.Config, rootDir, sourcePath string) parseResult {
-	parseResults, errs := parseSourceFile(config, rootDir, sourcePath)
+	parseResults, err := parseSourceFile(config, rootDir, sourcePath)
 
 	result := parseResult{
 		SourcePath: sourcePath,
-		Errors:     errs,
+		Error:      err,
 		Imports:    make([]ImportStatement, 0, len(parseResults.Imports)),
 		Modules:    parseResults.Modules,
 	}
@@ -836,51 +829,24 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, config *config.Co
 }
 
 // Parse the passed file for import statements.
-func parseSourceFile(config *config.Config, rootDir, filePath string) (parser.ParseResult, []error) {
+func parseSourceFile(config *config.Config, rootDir, filePath string) (parser.ParseResult, error) {
 	BazelLog.Tracef("ParseImports(%s): %s", LanguageName, filePath)
 
-	content, err := os.ReadFile(path.Join(rootDir, filePath))
-	if err != nil {
-		return parser.ParseResult{}, []error{err}
-	}
-
 	parserCache := cache.Get[parser.ParseResult](config)
-	parserCacheKey, parsingCacheable := computeCacheKey(content)
-	if parserCache != nil && parsingCacheable {
-		if cachedResults, found := parserCache.Load(parserCacheKey); found {
-			return cachedResults.(parser.ParseResult), nil
-		}
+	if parserCache == nil {
+		parserCache = cache.Noop()
 	}
 
-	r, errs := parser.ParseSource(filePath, content)
-	if parserCache != nil && parsingCacheable && len(errs) == 0 {
-		parserCache.Store(parserCacheKey, r)
-	}
+	r, _, err := parserCache.LoadAndStoreFile(rootDir, filePath, func(filePath string, content []byte) (any, error) {
+		return parser.ParseSource(filePath, content)
+	})
 
-	return r, errs
+	return r.(parser.ParseResult), err
 }
 
 func init() {
 	// TODO: don't expose 'gob' cache serialization here
 	gob.Register(parser.ParseResult{})
-}
-
-func computeCacheKey(content []byte) (string, bool) {
-	cacheDigest := crypto.MD5.New()
-
-	if buildinfo.IsStamped() {
-		if _, err := cacheDigest.Write([]byte(buildinfo.GitCommit)); err != nil {
-			BazelLog.Errorf("Failed to write GitCommit to cache digest: %v", err)
-			return "", false
-		}
-	}
-
-	if _, err := cacheDigest.Write(content); err != nil {
-		BazelLog.Errorf("Failed to write source to cache digest: %v", err)
-		return "", false
-	}
-
-	return hex.EncodeToString(cacheDigest.Sum(nil)), true
 }
 
 func (ts *typeScriptLang) addFileLabel(importPath string, label *label.Label) {

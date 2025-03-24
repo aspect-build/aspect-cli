@@ -23,6 +23,20 @@ type ParseResult struct {
 	Modules []string
 }
 
+type ParseErrors struct {
+	Errors []error
+}
+
+var _ error = (*ParseErrors)(nil)
+
+func (pe *ParseErrors) Error() string {
+	s := make([]string, 0, len(pe.Errors))
+	for _, err := range pe.Errors {
+		s = append(s, err.Error())
+	}
+	return strings.Join(s, "\n")
+}
+
 // A query finding esm import() statements and cjs require() statements
 // with the resulting import string exposed as @from.
 //
@@ -44,7 +58,7 @@ const DYNAMIC_IMPORTS = `
 // > This directive allows a file to explicitly include an existing built-in lib file
 var tripleSlashRe = regexp.MustCompile(`^///\s*<reference\s+(?:path|types)\s*=\s*"(?P<lib>[^"]+)"`)
 
-func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
+func ParseSource(filePath string, sourceCode []byte) (ParseResult, error) {
 	imports := make([]string, 0, 5)
 	modules := make([]string, 0)
 	errs := make([]error, 0)
@@ -131,7 +145,12 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, []error) {
 		Modules: modules,
 	}
 
-	return result, errs
+	var perr error
+	if len(errs) > 0 {
+		perr = &ParseErrors{errs}
+	}
+
+	return result, perr
 }
 
 // Determine if a node is a triple-slash directive and parse the type reference.
