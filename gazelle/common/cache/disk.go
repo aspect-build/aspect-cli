@@ -1,10 +1,14 @@
 package cache
 
 import (
+	"crypto"
 	"encoding/gob"
+	"encoding/hex"
 	"os"
+	"path"
 	"sync"
 
+	"github.com/aspect-build/aspect-cli/buildinfo"
 	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 )
 
@@ -32,6 +36,24 @@ type diskCache struct {
 	file string
 	old  map[string]any
 	new  *sync.Map
+}
+
+func computeCacheKey(content []byte) (string, bool) {
+	cacheDigest := crypto.MD5.New()
+
+	if buildinfo.IsStamped() {
+		if _, err := cacheDigest.Write([]byte(buildinfo.GitCommit)); err != nil {
+			BazelLog.Errorf("Failed to write GitCommit to cache digest: %v", err)
+			return "", false
+		}
+	}
+
+	if _, err := cacheDigest.Write(content); err != nil {
+		BazelLog.Errorf("Failed to write source to cache digest: %v", err)
+		return "", false
+	}
+
+	return hex.EncodeToString(cacheDigest.Sum(nil)), true
 }
 
 func (c *diskCache) read() {
@@ -83,6 +105,32 @@ func (c *diskCache) Load(key string) (any, bool) {
 
 func (c *diskCache) Store(key string, value any) {
 	c.new.Store(key, value)
+}
+
+func (c *diskCache) LoadAndStoreFile(root, p string, loader func(path string, content []byte) (any, error)) (any, bool, error) {
+	content, err := os.ReadFile(path.Join(root, p))
+	if err != nil {
+		return nil, false, err
+	}
+
+	if parserCacheKey, parsingCacheable := computeCacheKey(content); parsingCacheable {
+		// Try loading from the cache.
+		if v, found := c.Load(parserCacheKey); found {
+			return v, true, nil
+		}
+
+		// Compute and persist in cache.
+		v, err := loader(p, content)
+		if err != nil {
+			c.Store(parserCacheKey, v)
+		}
+
+		return v, false, err
+	}
+
+	// Not cacheable, simply recompute each time.
+	v, err := loader(p, content)
+	return v, false, err
 }
 
 func (c *diskCache) Persist() {
