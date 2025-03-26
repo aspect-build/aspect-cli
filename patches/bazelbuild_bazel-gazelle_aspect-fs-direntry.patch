@@ -1,20 +1,8 @@
-diff --git a/config/config.go b/config/config.go
-index 4a22f51..98ef84d 100644
---- a/config/config.go
-+++ b/config/config.go
-@@ -128,6 +128,7 @@ type MappedKind struct {
- 
- const ASPECT_WALKSUBDIR = "__aspect:walksubdir"
- const ASPECT_GITIGNORE = "__aspect:gitignore"
-+const ASPECT_DIR_ENTRIES = "__aspect:direntries"
- 
- func New() *Config {
- 	return &Config{
 diff --git a/walk/walk.go b/walk/walk.go
-index 1b71732..af37ae7 100644
+index 5503ee7..b073404 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -143,6 +143,17 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
+@@ -140,6 +140,17 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
  func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[string]bool, updateRels *UpdateFilter, trie *pathTrie, wf WalkFunc, rel string, updateParent bool) ([]string, bool) {
  	haveError := false
  
@@ -26,7 +14,7 @@ index 1b71732..af37ae7 100644
 +	for _, node := range trie.files {
 +		entsMap[node.Name()] = node
 +	}
-+	c.Exts[config.ASPECT_DIR_ENTRIES] = entsMap
++	c.Exts["__aspect:direntries"] = entsMap
 +	// END PATCH(fs.DirEntry map) ---
 +
  	// Absolute path to the directory being visited

@@ -1,38 +1,35 @@
-diff --git a/config/config.go b/config/config.go
-index d27e333..4a22f51 100644
---- a/config/config.go
-+++ b/config/config.go
-@@ -127,6 +127,7 @@ type MappedKind struct {
- }
- 
- const ASPECT_WALKSUBDIR = "__aspect:walksubdir"
-+const ASPECT_GITIGNORE = "__aspect:gitignore"
- 
- func New() *Config {
- 	return &Config{
 diff --git a/walk/config.go b/walk/config.go
-index c8dd6b3..be59f8c 100644
+index e5b52e8..ce434ef 100644
 --- a/walk/config.go
 +++ b/walk/config.go
-@@ -112,6 +112,7 @@ func (cr *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
+@@ -174,6 +174,8 @@ type ignoreFilter struct {
+ 	ignorePaths          map[string]struct{}
  }
  
- type isIgnoredFunc = func(string) bool
 +type isGitIgnoredFunc = func(string, bool) bool
- 
- var nothingIgnored isIgnoredFunc = func(string) bool { return false }
- 
++
+ func newIgnoreFilter(repoRoot string) *ignoreFilter {
+ 	bazelignorePaths, err := loadBazelIgnore(repoRoot)
+ 	if err != nil {
 diff --git a/walk/walk.go b/walk/walk.go
-index fe81ca2..1b71732 100644
+index b073404..43c3f58 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -164,6 +164,14 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+@@ -177,6 +177,22 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
  		return nil, false
  	}
  
 +	// PATCH(gitignore) ---
++	// Process any new .gitignore files
++	if _, hasGitIgnore := entsMap[".gitignore"]; hasGitIgnore {
++		if ignoreProcessor, hasGitIgnoreProcessor := c.Exts["__aspect:processGitignoreFile"]; hasGitIgnoreProcessor {
++			ignoreProcessor.(func(*config.Config, string))(c, path.Join(rel, ".gitignore"))
++		}
++	}
++
++	// Fetch any configured gitignore filters
 +	var isGitIgnored isGitIgnoredFunc
-+	isGitIgnoredExt, hasGitIgnore := c.Exts[config.ASPECT_GITIGNORE]
++	isGitIgnoredExt, hasGitIgnore := c.Exts["__aspect:gitignore"]
 +	if hasGitIgnore && isGitIgnoredExt != nil {
 +		isGitIgnored = isGitIgnoredExt.(isGitIgnoredFunc)
 +	}
@@ -41,17 +38,31 @@ index fe81ca2..1b71732 100644
  	// Filter and collect files
  	var regularFiles []string
  	for _, ent := range trie.files {
-@@ -172,6 +180,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+@@ -185,6 +201,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
  		if wc.isExcluded(entRel) {
  			continue
  		}
++
 +		// PATCH(gitignore) ---
-+		// NOTE: .gitignore must be applied *before* symlinks are followed
-+		// See notes on symlink examples at https://git-scm.com/docs/gitignore#_examples
 +		if isGitIgnored != nil && isGitIgnored(entRel, ent.IsDir()) {
 +			continue
 +		}
 +		// END PATCH(gitignore) ---
- 		if ent := resolveFileInfo(wc, dir, entRel, ent); ent != nil {
++
+ 		if shouldFollow(wc, dir, entRel, ent) {
  			regularFiles = append(regularFiles, base)
  		}
+@@ -200,6 +223,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
+ 		if wc.isExcluded(entRel) {
+ 			continue
+ 		}
++
++		// PATCH(gitignore) ---
++		if isGitIgnored != nil && isGitIgnored(entRel, t.entry.IsDir()) {
++			continue
++		}
++		// END PATCH(gitignore) ---
++
+ 		if shouldFollow(wc, dir, entRel, t.entry) {
+ 			if updateRels.shouldVisit(entRel, shouldUpdate) {
+ 				subFiles, shouldMerge := visit(c.Clone(), cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)

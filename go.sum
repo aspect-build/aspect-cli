@@ -31,8 +31,8 @@ github.com/aymerick/douceur v0.2.0 h1:Mv+mAeH1Q+n9Fr+oyamOlAkUNPWPlA8PPGR0QAaYuP
 github.com/aymerick/douceur v0.2.0/go.mod h1:wlT5vV2O3h55X9m7iVYN0TBM0NH/MmbLnd30/FjWUq4=
 github.com/bazel-contrib/rules_jvm v0.27.0 h1:Qkew39EgVTv+v0if0d8KZXcgazMx3mxg0LGwkcZ7Rd0=
 github.com/bazel-contrib/rules_jvm v0.27.0/go.mod h1:5biFsRs+vKr9mRcHMKfV770Oir5KVvj4ajJltB9+62Y=
-github.com/bazelbuild/bazel-gazelle v0.42.0 h1:BpkUzE3H2l6buJYFTKgzVMecJimQgWwYud25qVIx0SQ=
-github.com/bazelbuild/bazel-gazelle v0.42.0/go.mod h1:SRCc60YGZ27y+BqLzQ+nMh249+FyZz7YtX/V2ng+/z4=
+github.com/bazelbuild/bazel-gazelle v0.42.1-0.20250322095255-186298911d38 h1:Us/BcN+zpIpA1yfuOCZSKhTjd+VPvDETQTVC5BwAIFE=
+github.com/bazelbuild/bazel-gazelle v0.42.1-0.20250322095255-186298911d38/go.mod h1:SRCc60YGZ27y+BqLzQ+nMh249+FyZz7YtX/V2ng+/z4=
 github.com/bazelbuild/bazelisk v1.17.0 h1:TDt+a1PYrnBF9on3WRJUisXXFhCMrhcNo8OebyS5Q34=
 github.com/bazelbuild/bazelisk v1.17.0/go.mod h1:nWNmVF7yKsUt3EWCBCrqUeMNQpbB+DAphHIeckV1ov4=
 github.com/bazelbuild/buildtools v0.0.0-20240918101019-be1c24cc9a44 h1:FGzENZi+SX9I7h9xvMtRA3rel8hCEfyzSixteBgn7MU=

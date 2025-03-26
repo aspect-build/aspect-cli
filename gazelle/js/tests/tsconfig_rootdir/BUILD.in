@@ -1,4 +1,4 @@
-# gazelle:generation_mode update
+# gazelle:generation_mode update_only
 # gazelle:js_tsconfig enabled
 
 # Generated .ts within the rootDir

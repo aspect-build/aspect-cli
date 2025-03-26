@@ -1,4 +1,4 @@
-# gazelle:generation_mode update
+# gazelle:generation_mode update_only
 
 # gazelle:js_files srcs/**/*.ts
 # gazelle:js_test_files tests/**/*.ts

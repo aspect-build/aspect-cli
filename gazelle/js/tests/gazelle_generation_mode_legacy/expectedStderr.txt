@@ -1,1 +1,1 @@
-DEPRECATED: js_generation_mode is deprecated, use generation_mode update|create
+DEPRECATED: js_generation_mode is deprecated, use standard gazelle generation_mode update_only|create_and_update

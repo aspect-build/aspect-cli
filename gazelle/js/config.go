@@ -65,7 +65,7 @@ const (
 	// TODO(deprecated): remove - replaced with js_test_files [group]
 	Directive_CustomTargetTestFiles = "js_custom_test_files"
 	// TODO(deprecated): remove - replaced with common generation_mode
-	Directive_GenerationMode = "js_generation_mode"
+	Directive_JsGenerationMode = "js_generation_mode"
 )
 
 type NpmPackageMode string

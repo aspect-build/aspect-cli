@@ -1,87 +1,19 @@
-diff --git a/config/config.go b/config/config.go
-index 5aae20c..d27e333 100644
---- a/config/config.go
-+++ b/config/config.go
-@@ -126,6 +126,8 @@ type MappedKind struct {
- 	FromKind, KindName, KindLoad string
- }
- 
-+const ASPECT_WALKSUBDIR = "__aspect:walksubdir"
-+
- func New() *Config {
- 	return &Config{
- 		ValidBuildFileNames: DefaultValidBuildFileNames,
 diff --git a/walk/config.go b/walk/config.go
-index 6cee8a3..c8dd6b3 100644
+index 0ec648d..e5b52e8 100644
 --- a/walk/config.go
 +++ b/walk/config.go
-@@ -49,6 +49,11 @@ func getWalkConfig(c *config.Config) *walkConfig {
- 	return c.Exts[walkName].(*walkConfig)
- }
- 
-+func isWalkOnly(c *config.Config) bool {
-+	walkSubdirsExt, walkSubdirsExtExists := c.Exts[config.ASPECT_WALKSUBDIR]
-+	return walkSubdirsExtExists && walkSubdirsExt.(bool)
-+}
-+
- func (wc *walkConfig) isExcluded(p string) bool {
- 	return matchAnyGlob(wc.excludes, p)
- }
-diff --git a/walk/walk.go b/walk/walk.go
-index 3ff813d..fe81ca2 100644
---- a/walk/walk.go
-+++ b/walk/walk.go
-@@ -140,7 +140,7 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
- //
- // Traversal may skip subtrees or files based on the config.Config exclude/ignore/follow options
- // as well as the UpdateFilter callbacks.
--func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[string]bool, updateRels *UpdateFilter, trie *pathTrie, wf WalkFunc, rel string, updateParent bool) {
-+func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[string]bool, updateRels *UpdateFilter, trie *pathTrie, wf WalkFunc, rel string, updateParent bool) ([]string, bool) {
- 	haveError := false
- 
- 	// Absolute path to the directory being visited
-@@ -161,7 +161,7 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
- 	wc := getWalkConfig(c)
- 
- 	if wc.isExcluded(rel) {
--		return
-+		return nil, false
- 	}
- 
- 	// Filter and collect files
-@@ -191,16 +191,34 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
- 			subdirs = append(subdirs, base)
- 
- 			if updateRels.shouldVisit(entRel, shouldUpdate) {
--				visit(c.Clone(), cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)
-+				// PATCH ---
-+				// Merge the returned 'subFiles' if 'mergeFiles' is true
-+				subFiles, mergeFiles := visit(c.Clone(), cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)
-+				if mergeFiles {
-+					for _, f := range subFiles {
-+						regularFiles = append(regularFiles, path.Join(base, f))
-+					}
-+				} else {
-+					subdirs = append(subdirs, base)
-+				}
-+				// END PATCH ---
- 			}
- 		}
- 	}
- 
-+	// PATCH ---
-+	// If not walking subdirectories simply return the files to the parent call
-+	if f == nil && isWalkOnly(c) {
-+		return regularFiles, true
-+	}
-+	// END PATCH ---
-+
- 	update := !haveError && !wc.ignore && shouldUpdate
- 	if updateRels.shouldCall(rel, updateParent) {
- 		genFiles := findGenFiles(wc, f)
- 		wf(dir, rel, c, update, f, subdirs, regularFiles, genFiles)
- 	}
-+	return nil, false
- }
- 
- // An UpdateFilter tracks which directories need to be updated
+@@ -131,8 +131,14 @@ func (cr *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
+ 				c.ValidBuildFileNames = strings.Split(d.Value, ",")
+ 			case "generation_mode":
+ 				switch generationModeType(strings.TrimSpace(d.Value)) {
++				case "update":
++					fmt.Printf("DEPRECATED: `# aspect:generation_mode` %q has been renamed to %q\n", "update", generationModeUpdate)
++					fallthrough
+ 				case generationModeUpdate:
+ 					wcCopy.updateOnly = true
++				case "create":
++					fmt.Printf("DEPRECATED: `# aspect:generation_mode` %q has been renamed to %q\n", "create", generationModeCreate)
++					fallthrough
+ 				case generationModeCreate:
+ 					wcCopy.updateOnly = false
+ 				default:
