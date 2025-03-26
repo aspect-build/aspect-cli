@@ -26,6 +26,7 @@ var _ config.Configurer = (*typeScriptLang)(nil)
 // starts. RegisterFlags may set an initial values in Config.Exts. When flags
 // are set, they should modify these values.
 func (ts *typeScriptLang) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
+	git.SetupGitConfig(c)
 }
 
 // CheckFlags validates the configuration after command line flags are parsed.
@@ -44,7 +45,6 @@ func (ts *typeScriptLang) KnownDirectives() []string {
 		Directive_TypeScriptProtoExtension,
 		Directive_TypeScriptConfigExtension,
 		Directive_NpmPackageExtension,
-		Directive_GenerationMode,
 		Directive_Visibility,
 		Directive_Lockfile,
 		Directive_TsconfigFile,
@@ -62,10 +62,10 @@ func (ts *typeScriptLang) KnownDirectives() []string {
 		// TODO(deprecated): remove
 		Directive_CustomTargetFiles,
 		Directive_CustomTargetTestFiles,
+		Directive_JsGenerationMode,
 
 		// TODO: move to common
 		git.Directive_GitIgnore,
-		common.Directive_GenerationMode,
 	}
 }
 
@@ -95,8 +95,6 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 	}
 
 	ts.readConfigurations(c, rel)
-
-	common.ReadWalkConfig(c, rel, f)
 
 	git.ReadGitConfig(c, rel, f)
 }
@@ -249,8 +247,8 @@ func (ts *typeScriptLang) readDirectives(c *config.Config, rel string, f *rule.F
 		case Directive_CustomTargetTestFiles:
 			fmt.Fprintf(os.Stderr, "DEPRECATED: %s is deprecated, use %s\n", Directive_CustomTargetTestFiles, Directive_TestFiles)
 			os.Exit(1)
-		case Directive_GenerationMode:
-			fmt.Fprintf(os.Stderr, "DEPRECATED: %s is deprecated, use %s %s|%s\n", Directive_GenerationMode, common.Directive_GenerationMode, common.GenerationModeUpdate, common.GenerationModeCreate)
+		case Directive_JsGenerationMode:
+			fmt.Fprintf(os.Stderr, "DEPRECATED: %s is deprecated, use standard gazelle generation_mode update_only|create_and_update\n", Directive_JsGenerationMode)
 			os.Exit(1)
 		}
 	}

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
 	"strings"
@@ -28,30 +27,21 @@ const Directive_GitIgnore = "gitignore"
 
 // Internal
 const enabledExt = Directive_GitIgnore
-const lastConfiguredExt = "gitignore:dir"
 const ignorePatternsExt = "gitignore:patterns"
 
-func collectIgnoreFiles(c *config.Config, rel string) {
-	// Only parse once per directory.
-	if lastCollected, hasCollected := c.Exts[lastConfiguredExt]; hasCollected && lastCollected == rel {
-		return
-	}
-	c.Exts[lastConfiguredExt] = rel
+func SetupGitConfig(rootConfig *config.Config) {
+	rootConfig.Exts["__aspect:processGitignoreFile"] = processGitignoreFile
+}
 
-	ents := c.Exts[common.ASPECT_DIR_ENTRIES].(map[string]fs.DirEntry)
-	if _, hasIgnore := ents[".gitignore"]; !hasIgnore {
-		return
-	}
-
-	// Find and add .gitignore files from this directory
-	ignoreFilePath := path.Join(c.RepoRoot, rel, ".gitignore")
+func processGitignoreFile(c *config.Config, p string) {
+	ignoreFilePath := path.Join(c.RepoRoot, p)
 	ignoreReader, ignoreErr := os.Open(ignoreFilePath)
 	if ignoreErr == nil {
-		BazelLog.Tracef("Add ignore file %s/.gitignore", rel)
+		BazelLog.Tracef("Add gitignore file %s", p)
 		defer ignoreReader.Close()
-		addIgnore(c, rel, ignoreReader)
+		addIgnore(c, path.Dir(p), ignoreReader)
 	} else {
-		msg := fmt.Sprintf("Failed to open %s/.gitignore: %v", rel, ignoreErr)
+		msg := fmt.Sprintf("Failed to open %s: %v", p, ignoreErr)
 		BazelLog.Error(msg)
 		fmt.Printf("%s\n", msg)
 	}
@@ -66,9 +56,6 @@ func ReadGitConfig(c *config.Config, rel string, f *rule.File) {
 			c.Exts[enabledExt] = true
 		}
 	}
-
-	// Collect ignore files within this config directory.
-	collectIgnoreFiles(c, rel)
 
 	// Collect config from directives within this BUILD.
 	if f != nil {
@@ -114,7 +101,7 @@ func addIgnore(c *config.Config, rel string, ignoreReader io.Reader) {
 
 func parseIgnore(rel string, ignoreReader io.Reader) []gitignore.Pattern {
 	var domain []string
-	if rel != "" {
+	if rel != "" && rel != "." {
 		domain = strings.Split(path.Clean(rel), "/")
 	}
 

@@ -2,7 +2,7 @@ load("@aspect_rules_js//npm:defs.bzl", "npm_package")
 load("@npm//:defs.bzl", "npm_link_all_packages")
 
 # aspect:js_files **/*.{js,ts}
-# gazelle:generation_mode update
+# gazelle:generation_mode update_only
 # gazelle:js_tsconfig enabled
 # gazelle:js_npm_package_target_name pkg
 # gazelle:js_project_naming_convention tsc

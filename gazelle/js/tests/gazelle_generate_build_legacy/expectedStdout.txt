@@ -1,0 +1,5 @@
+DEPRECATED: `# aspect:generation_mode` "create" has been renamed to "create_and_update"
+DEPRECATED: `# aspect:generation_mode` "update" has been renamed to "update_only"
+DEPRECATED: `# aspect:generation_mode` "update" has been renamed to "update_only"
+DEPRECATED: `# aspect:generation_mode` "create" has been renamed to "create_and_update"
+DEPRECATED: `# aspect:generation_mode` "create" has been renamed to "create_and_update"

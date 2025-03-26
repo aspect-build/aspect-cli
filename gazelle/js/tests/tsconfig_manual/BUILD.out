@@ -1,6 +1,6 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config")
 
-# gazelle:generation_mode update
+# gazelle:generation_mode update_only
 # gazelle:js_tsconfig disabled
 
 ts_config(

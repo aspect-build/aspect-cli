@@ -194,22 +194,8 @@ go_rules_dependencies()
 
 go_register_toolchains(version = "1.24.1")
 
-http_archive(
-    name = "bazel_gazelle",
-    patch_args = ["-p1"],
-    patches = [
-        "//:patches/bazelbuild_bazel-gazelle_aspect-cli.patch",
-        "//:patches/bazelbuild_bazel-gazelle_aspect-walk-subdir.patch",
-        "//:patches/bazelbuild_bazel-gazelle_aspect-gitignore.patch",
-        "//:patches/bazelbuild_bazel-gazelle_aspect-fs-direntry.patch",
-    ],
-    # Ensure this version always matches the go.mod version.
-    #
-    # :notice: Care should be taken when upgrading gazelle since we have vendored & modified parts of gazelle
-    # in the CLI configure command (pkg/aspect/configure).
-    sha256 = "aefbf2fc7c7616c9ed73aa3d51c77100724d5b3ce66cfa16406e8c13e87c8b52",
-    urls = ["https://github.com/bazel-contrib/bazel-gazelle/releases/download/v0.41.0/bazel-gazelle-v0.41.0.tar.gz"],
-)
+load("//gazelle:deps.bzl", fetch_gazelle_deps = "fetch_deps")
+fetch_gazelle_deps()
 
 http_archive(
     name = "rules_python",

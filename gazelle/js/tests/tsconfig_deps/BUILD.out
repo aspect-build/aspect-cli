@@ -1,7 +1,7 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config")
 load("@npm//:defs.bzl", "npm_link_all_packages")
 
-# gazelle:generation_mode update
+# gazelle:generation_mode update_only
 # gazelle:js_tsconfig enabled
 
 npm_link_all_packages(name = "node_modules")
