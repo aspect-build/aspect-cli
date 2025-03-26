@@ -30,8 +30,8 @@ import (
 	"github.com/aspect-build/aspect-cli/bazel/buildeventstream"
 )
 
-// ResultForLabel aggregates the relevant files we find in the BEP for
-type ResultForLabel struct {
+// ResultForLabelAndMnemonic aggregates the relevant files we find in the BEP for
+type ResultForLabelAndMnemonic struct {
 	label        string
 	mnemonic     string
 	exitCodeFile *buildeventstream.File
@@ -40,11 +40,11 @@ type ResultForLabel struct {
 }
 
 type LintBEPHandler struct {
-	namedSets      map[string]*buildeventstream.NamedSetOfFiles
-	workspaceRoot  string
-	localExecRoot  string
-	besCompleted   chan<- struct{}
-	resultsByLabel map[string]*ResultForLabel
+	namedSets                map[string]*buildeventstream.NamedSetOfFiles
+	workspaceRoot            string
+	localExecRoot            string
+	besCompleted             chan<- struct{}
+	resultsByLabelByMnemonic map[string]*ResultForLabelAndMnemonic
 
 	besOnce             sync.Once
 	besChan             chan OrderedBuildEvent
@@ -58,11 +58,11 @@ type OrderedBuildEvent struct {
 
 func newLintBEPHandler(workspaceRoot string, besCompleted chan<- struct{}) *LintBEPHandler {
 	return &LintBEPHandler{
-		namedSets:      make(map[string]*buildeventstream.NamedSetOfFiles),
-		resultsByLabel: make(map[string]*ResultForLabel),
-		workspaceRoot:  workspaceRoot,
-		besCompleted:   besCompleted,
-		besChan:        make(chan OrderedBuildEvent, 100),
+		namedSets:                make(map[string]*buildeventstream.NamedSetOfFiles),
+		resultsByLabelByMnemonic: make(map[string]*ResultForLabelAndMnemonic),
+		workspaceRoot:            workspaceRoot,
+		besCompleted:             besCompleted,
+		besChan:                  make(chan OrderedBuildEvent, 100),
 	}
 }
 
@@ -231,21 +231,31 @@ func (runner *LintBEPHandler) bepEventHandler(event *buildeventstream.BuildEvent
 			for _, fileSetId := range outputGroup.FileSets {
 				if fileSet := runner.namedSets[fileSetId.Id]; fileSet != nil {
 					runner.namedSets[fileSetId.Id] = nil
-					result := runner.resultsByLabel[label]
-					if result == nil {
-						result = &ResultForLabel{label: label}
-						runner.resultsByLabel[label] = result
-					}
+					result := &ResultForLabelAndMnemonic{label: label}
 
 					for _, file := range fileSet.GetFiles() {
 						if outputGroup.Name == LINT_PATCH_GROUP {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
 								result.mnemonic = mnemonic
+
+								savedResult := runner.resultsByLabelByMnemonic[label+mnemonic]
+								if savedResult == nil {
+									runner.resultsByLabelByMnemonic[label+mnemonic] = result
+								} else {
+									result = savedResult
+								}
 							}
 							result.patchFile = file
 						} else if outputGroup.Name == LINT_REPORT_GROUP_MACHINE {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
 								result.mnemonic = mnemonic
+
+								savedResult := runner.resultsByLabelByMnemonic[label+mnemonic]
+								if savedResult == nil {
+									runner.resultsByLabelByMnemonic[label+mnemonic] = result
+								} else {
+									result = savedResult
+								}
 							}
 							if strings.HasSuffix(file.Name, ".report") {
 								result.reportFile = file
@@ -255,6 +265,13 @@ func (runner *LintBEPHandler) bepEventHandler(event *buildeventstream.BuildEvent
 						} else if outputGroup.Name == LINT_REPORT_GROUP_HUMAN {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
 								result.mnemonic = mnemonic
+
+								savedResult := runner.resultsByLabelByMnemonic[label+mnemonic]
+								if savedResult == nil {
+									runner.resultsByLabelByMnemonic[label+mnemonic] = result
+								} else {
+									result = savedResult
+								}
 							}
 							if strings.HasSuffix(file.Name, ".out") {
 								result.reportFile = file

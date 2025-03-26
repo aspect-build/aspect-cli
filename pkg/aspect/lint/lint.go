@@ -295,8 +295,8 @@ lint:
 	}
 
 	// Convert raw results to list of LintResult structs
-	results := make([]*LintResult, 0, len(lintBEPHandler.resultsByLabel))
-	for _, r := range lintBEPHandler.resultsByLabel {
+	results := make([]*LintResult, 0, len(lintBEPHandler.resultsByLabelByMnemonic))
+	for _, r := range lintBEPHandler.resultsByLabelByMnemonic {
 		result := &LintResult{
 			Mnemonic: r.mnemonic,
 			Label:    r.label,
