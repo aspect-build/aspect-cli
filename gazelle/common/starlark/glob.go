@@ -156,7 +156,7 @@ func (g *Globber) Glob(
 				return nil, fmt.Errorf("failed glob: exclude pattern must be a string")
 			}
 			absPattern := path.Join(absPkg, string(excludePattern))
-			matches, err := doublestar.FilepathGlob(absPattern)
+			matches, err := doublestar.FilepathGlob(absPattern, doublestar.WithFilesOnly(), doublestar.WithNoFollow())
 			if err != nil {
 				return nil, fmt.Errorf("failed glob: %w", err)
 			}
