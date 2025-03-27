@@ -157,9 +157,11 @@ http_archive(
 
 http_archive(
     name = "buildifier_prebuilt",
-    sha256 = "8ada9d88e51ebf5a1fdff37d75ed41d51f5e677cdbeafb0a22dda54747d6e07e",
-    strip_prefix = "buildifier-prebuilt-6.4.0",
-    urls = ["http://github.com/keith/buildifier-prebuilt/archive/6.4.0.tar.gz"],
+    sha256 = "bf9101bd5d657046674167986a18d44c5612e417194dc55aff8ca174344de031",
+    strip_prefix = "buildifier-prebuilt-8.0.3",
+    urls = [
+        "http://github.com/keith/buildifier-prebuilt/archive/8.0.3.tar.gz",
+    ],
 )
 
 load("@buildifier_prebuilt//:deps.bzl", "buildifier_prebuilt_deps")
@@ -195,6 +197,7 @@ go_rules_dependencies()
 go_register_toolchains(version = "1.24.1")
 
 load("//gazelle:deps.bzl", fetch_gazelle_deps = "fetch_deps")
+
 fetch_gazelle_deps()
 
 http_archive(
