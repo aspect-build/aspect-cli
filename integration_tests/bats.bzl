@@ -1,5 +1,7 @@
 "macro function running bats tests using sh_test"
 
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 def bats_test(srcs = [], **kwargs):
     """macro rule running bats tests using sh_test
 
@@ -22,8 +24,7 @@ def bats_test(srcs = [], **kwargs):
 
     env["BATS_LIB_PATH"] = ":".join(["$(rootpaths %s)/.." % helper_dir for helper_dir in helpers_dirs])
     env["BIN"] = "$(rootpath @bats_core//:bin)"
-
-    native.sh_test(
+    sh_test(
         srcs = [
             "//integration_tests:runner.sh",
         ],

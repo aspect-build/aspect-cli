@@ -10,12 +10,11 @@ load("@bazel_skylib//rules:write_file.bzl", _write_file = "write_file")
 
 ts_config = _ts_config
 
-def ts_project(name, module_type = "commonjs", **kwargs):
+def ts_project(name, **kwargs):
     """Macro around ts_project for silo.
 
     Args:
         name: Name of the ts_project target
-        module_type: Type of module swc should transpile to
         **kwargs: Additional attributes to pass to the ts_project rule
     """
     swcrc = ".swcrc_%s" % name
@@ -25,6 +24,7 @@ def ts_project(name, module_type = "commonjs", **kwargs):
         content = json.encode({
             "inlineSourcesContent": True,
             "jsc": {
+                "baseUrl": ".",
                 "keepClassNames": True,
                 "parser": {
                     "decorators": True,
@@ -41,7 +41,8 @@ def ts_project(name, module_type = "commonjs", **kwargs):
                 },
             },
             "module": {
-                "type": module_type,
+                "resolveFully": True,
+                "type": "es6",
             },
             "sourceMaps": True,
         }).splitlines(),
@@ -64,8 +65,9 @@ def ts_project(name, module_type = "commonjs", **kwargs):
     )
 
 def ts_proto_library(name, protoc_gen_options = {
-    "js_import_style": "legacy_commonjs",
+    "js_import_style": "module",
     "target": "js+dts",
+    "import_extension": ".js",
 }, **kwargs):
     _ts_proto_library(
         name = name,
