@@ -1,0 +1,15 @@
+bazel_dep(name = "rules_python", version = "1.2.0")  # must match go.mod
+bazel_dep(name = "rules_python_gazelle_plugin", version = "1.2.0")  # must match go.mod
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    is_default = True,
+    python_version = "3.12",
+)
+use_repo(python, "python_3_12")
+
+python_stdlib_list = use_extension("@rules_python_gazelle_plugin//python:extensions.bzl", "python_stdlib_list")
+use_repo(
+    python_stdlib_list,
+    "python_stdlib_list",
+)

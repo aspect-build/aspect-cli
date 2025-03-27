@@ -200,22 +200,6 @@ load("//gazelle:deps.bzl", fetch_gazelle_deps = "fetch_deps")
 
 fetch_gazelle_deps()
 
-http_archive(
-    name = "rules_python",
-    integrity = "sha256-bERKXOYmJB6fdw/0TFPBLWen8f+81eG2p0EAneLkBAo=",
-    strip_prefix = "rules_python-49cdf7d3fe000076d6432a34238e5d25f5b598d0",
-    # NB: version matches go.mod where we fetch the rules_python/gazelle Go package.
-    url = "https://github.com/bazelbuild/rules_python/archive/49cdf7d3fe000076d6432a34238e5d25f5b598d0.tar.gz",
-)
-
-load("@rules_python//python:repositories.bzl", "py_repositories")
-
-py_repositories()
-
-load("@rules_python//gazelle:deps.bzl", "python_stdlib_list_deps")
-
-python_stdlib_list_deps()
-
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
 load("//:go.bzl", _go_repositories = "deps")
 

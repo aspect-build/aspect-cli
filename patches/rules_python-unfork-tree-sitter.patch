@@ -1,0 +1,75 @@
+diff --git a/gazelle/go.mod b/gazelle/go.mod
+index 29a0b5cb..da6a50be 100644
+--- a/gazelle/go.mod
++++ b/gazelle/go.mod
+@@ -7,7 +7,7 @@ require (
+ 	github.com/bazelbuild/buildtools v0.0.0-20231103205921-433ea8554e82
+ 	github.com/bazelbuild/rules_go v0.41.0
+ 	github.com/bmatcuk/doublestar/v4 v4.6.1
+-	github.com/dougthor42/go-tree-sitter v0.0.0-20241210060307-2737e1d0de6b
++	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+ 	github.com/emirpasic/gods v1.18.1
+ 	github.com/ghodss/yaml v1.0.0
+ 	github.com/stretchr/testify v1.9.0
+diff --git a/gazelle/go.sum b/gazelle/go.sum
+index d48da9ec..c7b04ffc 100644
+--- a/gazelle/go.sum
++++ b/gazelle/go.sum
+@@ -45,6 +45,8 @@ github.com/google/go-cmp v0.5.9/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeN
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+ github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
++github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82 h1:6C8qej6f1bStuePVkLSFxoU22XBS165D3klxlzRg8F4=
++github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82/go.mod h1:xe4pgH49k4SsmkQq5OT8abwhWmnzkhpgnXeekbx2efw=
+ github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
+ github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
+ go.starlark.net v0.0.0-20210223155950-e043a3d3c984/go.mod h1:t3mmBBPzAVvK0L0n1drDmrQsJ8FoIx4INCqVMTr/Zo0=
+diff --git a/gazelle/python/BUILD.bazel b/gazelle/python/BUILD.bazel
+index 893c82e8..558d8622 100644
+--- a/gazelle/python/BUILD.bazel
++++ b/gazelle/python/BUILD.bazel
+@@ -37,13 +37,13 @@ go_library(
+         "@bazel_gazelle//repo:go_default_library",
+         "@bazel_gazelle//resolve:go_default_library",
+         "@bazel_gazelle//rule:go_default_library",
+-        "@com_github_bazelbuild_buildtools//build:go_default_library",
++        "@com_github_bazelbuild_buildtools//build",
+         "@com_github_bmatcuk_doublestar_v4//:doublestar",
+-        "@com_github_dougthor42_go_tree_sitter//:go-tree-sitter",
+-        "@com_github_dougthor42_go_tree_sitter//python",
+         "@com_github_emirpasic_gods//lists/singlylinkedlist",
+         "@com_github_emirpasic_gods//sets/treeset",
+         "@com_github_emirpasic_gods//utils",
++        "@com_github_smacker_go_tree_sitter//:go-tree-sitter",
++        "@com_github_smacker_go_tree_sitter//python",
+         "@org_golang_x_sync//errgroup",
+     ],
+ )
+diff --git a/gazelle/python/file_parser.go b/gazelle/python/file_parser.go
+index c147984f..a1f47f40 100644
+--- a/gazelle/python/file_parser.go
++++ b/gazelle/python/file_parser.go
+@@ -22,8 +22,8 @@ import (
+ 	"path/filepath"
+ 	"strings"
+ 
+-	sitter "github.com/dougthor42/go-tree-sitter"
+-	"github.com/dougthor42/go-tree-sitter/python"
++	sitter "github.com/smacker/go-tree-sitter"
++	"github.com/smacker/go-tree-sitter/python"
+ )
+ 
+ const (
+@@ -115,10 +115,10 @@ func (p *FileParser) parseMain(ctx context.Context, node *sitter.Node) bool {
+ 				a, b = b, a
+ 			}
+ 			if a.Type() == sitterNodeTypeIdentifier && a.Content(p.code) == "__name__" &&
+-				// at github.com/dougthor42/go-tree-sitter@latest (after v0.0.0-20240422154435-0628b34cbf9c we used)
++				// at github.com/smacker/go-tree-sitter@latest (after v0.0.0-20240422154435-0628b34cbf9c we used)
+ 				// "__main__" is the second child of b. But now, it isn't.
+ 				// we cannot use the latest go-tree-sitter because of the top level reference in scanner.c.
+-				// https://github.com/dougthor42/go-tree-sitter/blob/04d6b33fe138a98075210f5b770482ded024dc0f/python/scanner.c#L1
++				// https://github.com/smacker/go-tree-sitter/blob/04d6b33fe138a98075210f5b770482ded024dc0f/python/scanner.c#L1
+ 				b.Type() == sitterNodeTypeString && string(p.code[b.StartByte()+1:b.EndByte()-1]) == "__main__" {
+ 				return true
+ 			}

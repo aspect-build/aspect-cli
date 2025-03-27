@@ -46,7 +46,7 @@ require (
 )
 
 require (
-	github.com/bazelbuild/rules_python/gazelle v0.0.0-20240701102336-084b877c98b5
+	github.com/bazelbuild/rules_python/gazelle v0.0.0-20250222074919-2ad200249585
 	github.com/charmbracelet/huh v0.6.0
 	github.com/creack/pty v1.1.24
 	github.com/hay-kot/scaffold v0.6.1
@@ -78,6 +78,7 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.6 // indirect
 	github.com/cyphar/filepath-securejoin v0.4.1 // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
+	github.com/dougthor42/go-tree-sitter v0.0.0-20241210060307-2737e1d0de6b // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
