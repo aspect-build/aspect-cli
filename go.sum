@@ -39,8 +39,8 @@ github.com/bazelbuild/buildtools v0.0.0-20240918101019-be1c24cc9a44 h1:FGzENZi+S
 github.com/bazelbuild/buildtools v0.0.0-20240918101019-be1c24cc9a44/go.mod h1:PLNUetjLa77TCCziPsz0EI8a6CUxgC+1jgmWv0H25tg=
 github.com/bazelbuild/rules_go v0.52.0 h1:+ozpngVAW67pCAwfhepaXSSrG3yHcj8K9hNAxSYBno4=
 github.com/bazelbuild/rules_go v0.52.0/go.mod h1:M+YrupNArA7OiTlv++rFUgQ6Sm+ZXbQ5HPUj0cGa0us=
-github.com/bazelbuild/rules_python/gazelle v0.0.0-20240701102336-084b877c98b5 h1:OpDDYqUhemfIN9aBoTbJznXzI5pJijMiiNqaUcUKyu0=
-github.com/bazelbuild/rules_python/gazelle v0.0.0-20240701102336-084b877c98b5/go.mod h1:KoDh6+H75gM946IxVKnOjm8C74p3M5L6iJXiwyodpeM=
+github.com/bazelbuild/rules_python/gazelle v0.0.0-20250222074919-2ad200249585 h1:TGtsj8b1oWzWPGA2S7Ym3FCgqtqfTfP3zsb24AdL9vs=
+github.com/bazelbuild/rules_python/gazelle v0.0.0-20250222074919-2ad200249585/go.mod h1:2sYjawFH5ezreOt6/b3Q3ccixqdpfqZfvtW9380fWmo=
 github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d h1:xDfNPAt8lFiC1UJrqV3uuy861HCTo708pDMbjHHdCas=
 github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d/go.mod h1:6QX/PXZ00z/TKoufEY6K/a0k6AhaJrQKdFe6OfVXsa4=
 github.com/bluekeyes/go-gitdiff v0.7.3 h1:SElKwtm/IQPOwKs0vdowW5uAlip+P+jatagmUU8E0r4=
@@ -98,6 +98,8 @@ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dlclark/regexp2 v1.11.5 h1:Q/sSnsKerHeCkc/jSTNq1oCm7KiVgUMZRDUoRu0JQZQ=
 github.com/dlclark/regexp2 v1.11.5/go.mod h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8=
+github.com/dougthor42/go-tree-sitter v0.0.0-20241210060307-2737e1d0de6b h1:b9s96BulIARx0konX36sJ5oZhWvAvjQBBntxp1eUukQ=
+github.com/dougthor42/go-tree-sitter v0.0.0-20241210060307-2737e1d0de6b/go.mod h1:87UkDyPt18bTH/FvinLc/kj587VNYOdRKZT1la4T8Hg=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/elazarl/goproxy v1.4.0 h1:4GyuSbFa+s26+3rmYNSuUVsx+HgPrV1bk1jXI0l9wjM=

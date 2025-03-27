@@ -133,14 +133,12 @@ def deps():
     )
     go_repository(
         name = "com_github_bazelbuild_rules_python_gazelle",
-        # Overwrite BUILD files in rules_python which reference Bazel symbols
-        build_file_generation = "on",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/bazelbuild/rules_python/gazelle",
         patch_args = ["-p2"],  # keep
-        patches = ["//patches:rules_python-fcf7221c1e079307ff13d32239b7782d2f1dc48c.patch"],
-        sum = "h1:OpDDYqUhemfIN9aBoTbJznXzI5pJijMiiNqaUcUKyu0=",
-        version = "v0.0.0-20240701102336-084b877c98b5",
+        patches = ["//patches:rules_python-unfork-tree-sitter.patch"],
+        sum = "h1:TGtsj8b1oWzWPGA2S7Ym3FCgqtqfTfP3zsb24AdL9vs=",
+        version = "v0.0.0-20250222074919-2ad200249585",
     )
     go_repository(
         name = "com_github_bgentry_go_netrc",
@@ -379,6 +377,13 @@ def deps():
         importpath = "github.com/dlclark/regexp2",
         sum = "h1:Q/sSnsKerHeCkc/jSTNq1oCm7KiVgUMZRDUoRu0JQZQ=",
         version = "v1.11.5",
+    )
+    go_repository(
+        name = "com_github_dougthor42_go_tree_sitter",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/dougthor42/go-tree-sitter",
+        sum = "h1:b9s96BulIARx0konX36sJ5oZhWvAvjQBBntxp1eUukQ=",
+        version = "v0.0.0-20241210060307-2737e1d0de6b",
     )
     go_repository(
         name = "com_github_dustin_go_humanize",
