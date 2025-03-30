@@ -3,7 +3,6 @@ package gazelle
 import (
 	"flag"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"path"
@@ -102,7 +101,7 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
 	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
-	ents := c.Exts[common.ASPECT_DIR_ENTRIES].(map[string]fs.DirEntry)
+	ents := common.GetSourceEntries(c)
 
 	// pnpm
 	pnpmLockPath := config.PnpmLockfile()

@@ -10,17 +10,12 @@ package starlark
 
 import (
 	"fmt"
-	"path"
-	"path/filepath"
-	"strings"
 
 	"go.starlark.net/repl"
 	"go.starlark.net/starlark"
 	"go.starlark.net/syntax"
 
-	common "github.com/aspect-build/aspect-cli/gazelle/common"
 	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
-	"github.com/bazelbuild/bazel-gazelle/config"
 	bzl "github.com/bazelbuild/buildtools/build"
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -43,7 +38,7 @@ var expandSrcsFileOptions = &syntax.FileOptions{
 // LoaderOptions for evaluating glob expressions
 var expandSrcsLoadOptions = repl.MakeLoadOptions(expandSrcsFileOptions)
 
-func ExpandSrcs(repoRoot, pkg string, expr bzl.Expr) ([]string, error) {
+func ExpandSrcs(repoRoot, pkg string, files []string, expr bzl.Expr) ([]string, error) {
 	// Pure array of source paths.
 	if list, ok := expr.(*bzl.ListExpr); ok {
 		srcs := make([]string, 0, len(list.List))
@@ -57,36 +52,107 @@ func ExpandSrcs(repoRoot, pkg string, expr bzl.Expr) ([]string, error) {
 		return srcs, nil
 	}
 
-	// Glob expression that must be evaluated
+	// Starlark thread+env for evaluating the expression
 	thread := &starlark.Thread{Load: expandSrcsLoadOptions}
-	globber := Globber{
-		repoRoot: repoRoot,
-		pkg:      pkg,
-	}
+	globber := Globber{files: files}
 	env := starlark.StringDict{"glob": starlark.NewBuiltin("glob", globber.Glob)}
+
+	// Parse the expression
 	srcsSyntaxExpr, err := expandSrcsFileOptions.ParseExpr("", bzl.FormatString(expr), 0)
 	if err != nil {
 		return nil, fmt.Errorf("Expression parse error: %w", err)
 	}
+
+	// Evaluate the expression
 	srcsVal, err := starlark.EvalExprOptions(expandSrcsFileOptions, thread, srcsSyntaxExpr, env)
 	if err != nil {
 		return nil, fmt.Errorf("Expression evaluation error: %w", err)
 	}
+
 	srcsValList := srcsVal.(*starlark.List)
 	srcs := make([]string, 0, srcsValList.Len())
-	srcsValListIterator := srcsValList.Iterate()
-	var srcVal starlark.Value
-	for srcsValListIterator.Next(&srcVal) {
-		src := srcVal.(starlark.String)
-		srcs = append(srcs, string(src))
+	for src := range srcsValList.Elements() {
+		srcs = append(srcs, string(src.(starlark.String)))
 	}
 	return srcs, nil
 }
 
 // Globber implements the glob built-in to evaluate the srcs attribute containing glob patterns.
 type Globber struct {
-	repoRoot string
-	pkg      string
+	files []string
+}
+
+func parseGlobArgs(args starlark.Tuple, kwargs []starlark.Tuple) ([]string, []string, bool, error) {
+	var includeArg starlark.Value = nil
+	var excludeArg starlark.Value = nil
+	var allowEmpty starlark.Bool = starlark.False
+
+	if len(args) == 1 {
+		includeArg = args[0]
+	}
+	for _, kwarg := range kwargs {
+		switch kwarg[0] {
+		case starlark.String("include"):
+			if includeArg != nil {
+				return nil, nil, false, fmt.Errorf("invalid syntax: cannot use include as kwarg and arg")
+			}
+			includeArg = kwarg[1]
+		case starlark.String("exclude"):
+			excludeArg = kwarg[1]
+		case starlark.String("exclude_directories"):
+			// TODO: implement.
+			BazelLog.Warnf("WARNING: the 'exclude_directories' attribute of 'glob' was set but is not supported by Gazelle")
+
+		case starlark.String("allow_empty"):
+			allowEmptyAssert, ok := kwarg[1].(starlark.Bool)
+			if !ok {
+				return nil, nil, false, fmt.Errorf("invalid syntax: allow_empty must be a boolean")
+			}
+			allowEmpty = allowEmptyAssert
+		default:
+			return nil, nil, false, fmt.Errorf("invalid syntax: kwarg %q not recognized", kwarg[0])
+		}
+	}
+
+	// An include array is required
+	if includeArg == nil {
+		return nil, nil, false, fmt.Errorf("include is required")
+	}
+
+	// Convert + assert to include/exclude lists
+	includePatterns, ok := includeArg.(*starlark.List)
+	if !ok {
+		return nil, nil, false, fmt.Errorf("include must be a List")
+	}
+	excludePatterns, ok := excludeArg.(*starlark.List)
+	if excludeArg != nil && !ok {
+		return nil, nil, false, fmt.Errorf("exclude must be a List")
+	}
+
+	// Convert to string slices + warn on other types
+	var includeA, excludeA []string
+
+	includeA = make([]string, 0, includePatterns.Len())
+	for includeP := range includePatterns.Elements() {
+		if s, ok := includeP.(starlark.String); ok {
+			includeA = append(includeA, string(s))
+		} else {
+			BazelLog.Warnf("WARNING: invalid glob include type %T", includeP)
+		}
+	}
+
+	if excludePatterns != nil {
+		excludeA = make([]string, 0, excludePatterns.Len())
+		for excludeP := range excludePatterns.Elements() {
+			if s, ok := excludeP.(starlark.String); ok {
+				excludeA = append(excludeA, string(s))
+			} else {
+				BazelLog.Warnf("WARNING: invalid glob exclude type %T", excludeP)
+			}
+		}
+	}
+
+	return includeA, excludeA, bool(allowEmpty), nil
 }
 
 // Glob expands the glob patterns and filters Bazel sub-packages from the tree.
@@ -102,173 +168,41 @@ func (g *Globber) Glob(
 	if len(args) > 1 {
 		return nil, fmt.Errorf("failed glob: only 1 positional argument is allowed")
 	}
-	absPkg := path.Join(g.repoRoot, g.pkg)
-	var includeArg starlark.Value
-	if len(args) == 1 {
-		includeArg = args[0]
+
+	include, exclude, allowEmpty, err := parseGlobArgs(args, kwargs)
+	if err != nil {
+		return nil, err
 	}
-	var excludeArg starlark.Value
-	allowEmpty := true
-	for _, kwarg := range kwargs {
-		switch kwarg[0] {
-		case starlark.String("include"):
-			if includeArg != nil {
-				return nil, fmt.Errorf("failed glob: invalid syntax: cannot use include as kwarg and arg")
+
+	matches := []starlark.Value{}
+
+	for _, file := range g.files {
+		matched := false
+
+		for _, pattern := range include {
+			if doublestar.MatchUnvalidated(pattern, file) {
+				matched = true
+				break
 			}
-			includeArg = kwarg[1]
-		case starlark.String("exclude"):
-			excludeArg = kwarg[1]
-		case starlark.String("exclude_directories"):
-			excludeDirectoriesArg := kwarg[1]
-			excludeDirectoriesInt, ok := excludeDirectoriesArg.(starlark.Int)
-			if !ok {
-				return nil, fmt.Errorf("failed glob: invalid syntax: exclude_directories must be 0 or 1")
+		}
+
+		if matched {
+			for _, pattern := range exclude {
+				if doublestar.MatchUnvalidated(pattern, file) {
+					matched = false
+					break
+				}
 			}
-			excludeDirectories, ok := excludeDirectoriesInt.Int64()
-			if !ok || (excludeDirectories != 0 && excludeDirectories != 1) {
-				return nil, fmt.Errorf("failed glob: invalid syntax: exclude_directories must be 0 or 1")
-			}
-			// TODO: implement.
-			BazelLog.Warnf("WARNING: the 'exclude_directories' attribute of 'glob' was set but is not supported by Gazelle")
-		case starlark.String("allow_empty"):
-			allowEmptyArg := kwarg[1]
-			allowEmptyAssert, ok := allowEmptyArg.(starlark.Bool)
-			if !ok {
-				return nil, fmt.Errorf("failed glob: invalid syntax: allow_empty must be a boolean")
-			}
-			allowEmpty = bool(allowEmptyAssert)
-		default:
-			return nil, fmt.Errorf("failed glob: invalid syntax: kwarg %q not recognized", kwarg[0])
+		}
+
+		if matched {
+			matches = append(matches, starlark.String(file))
 		}
 	}
 
-	excludeSet := make(map[string]struct{})
-	if excludeArg != nil {
-		excludePatterns, ok := excludeArg.(*starlark.List)
-		if !ok {
-			return nil, fmt.Errorf("failed glob: exclude is not a list")
-		}
-		excludeIterator := excludePatterns.Iterate()
-		var excludePatternVal starlark.Value
-		for excludeIterator.Next(&excludePatternVal) {
-			excludePattern, ok := excludePatternVal.(starlark.String)
-			if !ok {
-				return nil, fmt.Errorf("failed glob: exclude pattern must be a string")
-			}
-			absPattern := path.Join(absPkg, string(excludePattern))
-			matches, err := doublestar.FilepathGlob(absPattern, doublestar.WithFilesOnly(), doublestar.WithNoFollow())
-			if err != nil {
-				return nil, fmt.Errorf("failed glob: %w", err)
-			}
-			for _, match := range matches {
-				exclude, _ := filepath.Rel(absPkg, match)
-				excludeSet[exclude] = struct{}{}
-			}
-		}
+	if !allowEmpty && len(matches) == 0 {
+		return nil, fmt.Errorf("no files matched the glob pattern")
 	}
 
-	rootBazelPackageTree := NewBazelPackageTree(g.pkg)
-	includePatterns, ok := includeArg.(*starlark.List)
-	if !ok {
-		return nil, fmt.Errorf("failed glob: include is not a list")
-	}
-	includeIterator := includePatterns.Iterate()
-	var includePatternVal starlark.Value
-	for includeIterator.Next(&includePatternVal) {
-		includePattern, ok := includePatternVal.(starlark.String)
-		if !ok {
-			return nil, fmt.Errorf("failed glob: include pattern must be a string")
-		}
-		absPattern := path.Join(absPkg, string(includePattern))
-		matches, err := doublestar.FilepathGlob(absPattern)
-		if err != nil {
-			return nil, fmt.Errorf("failed glob: %w", err)
-		}
-		for _, match := range matches {
-			src, _ := filepath.Rel(absPkg, match)
-			if _, excluded := excludeSet[src]; !excluded {
-				parts := strings.Split(src, string(filepath.Separator))
-				rootBazelPackageTree.AddPath(parts)
-			}
-		}
-	}
-
-	result := rootBazelPackageTree.Paths()
-
-	if !allowEmpty && len(result) == 0 {
-		return nil, fmt.Errorf("failed glob: 'allow_empty' was set and the result was empty")
-	}
-
-	return starlark.NewList(result), nil
-}
-
-// BazelPackageTree is a representation of a filesystem tree specialized for
-// filtering paths that are under a Bazel sub-package. It understands the
-// file-based boundaries that represent a sub-package (a nested BUILD file).
-// The nature of this data structure also enables us to remove duplicated paths.
-type BazelPackageTree struct {
-	// pkg is the Bazel package this tree represents.
-	pkg *string
-	// branches is the connected branches of this tree, which is a recursive
-	// field.
-	branches map[string]*BazelPackageTree
-	// isBazelPackage indicates whether this tree (which can also be considered
-	// a "node" in the whole tree) is a Bazel package or not. This is used to
-	// filter out sub-packages.
-	isBazelPackage bool
-	// isFile indicates whether this node is a leaf or not, so, when returning
-	// the list of paths, we know append the part without joining it to the
-	// child branches. This also enables constructing the paths without
-	// returning partial paths during the recursion.
-	isFile bool
-}
-
-// NewBazelPackageTree constructs a new BazelPackageTree.
-func NewBazelPackageTree(pkg string) *BazelPackageTree {
-	return &BazelPackageTree{
-		pkg:      &pkg,
-		branches: make(map[string]*BazelPackageTree),
-	}
-}
-
-// AddPath adds a path to the package tree.
-func (pt *BazelPackageTree) AddPath(parts []string) {
-	branches := pt.branches
-	for i, part := range parts {
-		branch, exists := branches[part]
-		if !exists {
-			isFile := (i == len(parts)-1)
-			var isBazelPkg bool
-			if !isFile {
-				dir := path.Join(parts[:i+1]...)
-				dir = path.Join(*pt.pkg, dir)
-				isBazelPkg = common.HasBUILDFile(config.DefaultValidBuildFileNames, dir)
-			}
-			branch = &BazelPackageTree{
-				pkg:            pt.pkg,
-				branches:       make(map[string]*BazelPackageTree),
-				isBazelPackage: isBazelPkg,
-				isFile:         isFile,
-			}
-			branches[part] = branch
-		}
-		branches = branch.branches
-	}
-}
-
-// Paths returns the list of paths in the tree, filtering Bazel sub-packages.
-func (pt *BazelPackageTree) Paths() []starlark.Value {
-	paths := make([]starlark.Value, 0)
-	for part, branch := range pt.branches {
-		if branch.isBazelPackage {
-			continue
-		}
-		if branch.isFile {
-			paths = append(paths, starlark.String(part))
-		}
-		for _, branchPath := range branch.Paths() {
-			paths = append(paths, starlark.String(path.Join(part, string(branchPath.(starlark.String)))))
-		}
-	}
-	return paths
+	return starlark.NewList(matches), nil
 }
