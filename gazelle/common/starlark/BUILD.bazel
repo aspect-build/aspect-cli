@@ -10,10 +10,8 @@ go_library(
     importpath = "github.com/aspect-build/aspect-cli/gazelle/common/starlark",
     visibility = ["//visibility:public"],
     deps = [
-        "//gazelle/common",
         "//gazelle/common/starlark/stdlib",
         "//pkg/logger",
-        "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//label:go_default_library",
         "@bazel_gazelle//rule:go_default_library",
         "@com_github_bazelbuild_buildtools//build:go_default_library",

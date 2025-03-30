@@ -69,7 +69,7 @@ func (ts *typeScriptLang) sourceFileImports(c *config.Config, r *rule.Rule, f *r
 			srcs = append(srcs, s.(string))
 		}
 	} else {
-		expandedSrcs, err := starlark.ExpandSrcs(c.RepoRoot, f.Pkg, r.Attr("srcs"))
+		expandedSrcs, err := starlark.ExpandSrcs(c.RepoRoot, f.Pkg, common.GetSourceRegularFiles(c), r.Attr("srcs"))
 		if err != nil {
 			BazelLog.Debugf("Failed to expand srcs of %s:%s - %v", f.Pkg, r.Name(), err)
 			return []resolve.ImportSpec{}
