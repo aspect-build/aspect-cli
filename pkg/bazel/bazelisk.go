@@ -18,6 +18,7 @@ package bazel
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -318,10 +319,15 @@ func (bazelisk *Bazelisk) maybeDelegateToWrapper(bazel string) string {
 	return wrapper
 }
 
-func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams ioutils.Streams, env []string, wd *string) *exec.Cmd {
+func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams ioutils.Streams, env []string, wd *string, ctx context.Context) *exec.Cmd {
 	execPath := bazelisk.maybeDelegateToWrapper(bazel)
 
-	cmd := exec.Command(execPath, args...)
+	var cmd *exec.Cmd
+	if ctx != nil {
+		cmd = exec.CommandContext(ctx, execPath, args...)
+	} else {
+		cmd = exec.Command(execPath, args...)
+	}
 	cmd.Env = os.Environ()
 	if env != nil {
 		cmd.Env = append(cmd.Env, env...)

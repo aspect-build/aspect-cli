@@ -218,7 +218,7 @@ func prependDirToPathList(cmd *exec.Cmd, dir string) {
 }
 
 func (bazelisk *Bazelisk) runBazel(bazel string, args []string, streams ioutils.Streams, env []string, wd *string) (int, error) {
-	cmd := bazelisk.makeBazelCmd(bazel, args, streams, env, wd)
+	cmd := bazelisk.makeBazelCmd(bazel, args, streams, env, wd, nil)
 
 	err := cmd.Start()
 	if err != nil {
