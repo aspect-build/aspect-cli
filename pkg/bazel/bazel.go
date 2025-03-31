@@ -18,6 +18,7 @@ package bazel
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
@@ -25,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -71,7 +73,7 @@ type Bazel interface {
 	AbsPathRelativeToWorkspace(relativePath string) (string, error)
 	AddBazelFlags(cmd *cobra.Command) error
 	WorkspaceRoot() string
-	ExecutablePath() (string, error)
+	MakeBazelCommand(ctx context.Context, args []string, streams ioutils.Streams, env []string, wd *string) (*exec.Cmd, error)
 }
 
 type bazel struct {
@@ -80,9 +82,17 @@ type bazel struct {
 }
 
 // ExecutablePath implements Bazel.
-func (b *bazel) ExecutablePath() (string, error) {
+func (b *bazel) MakeBazelCommand(ctx context.Context, args []string, streams ioutils.Streams, env []string, wd *string) (*exec.Cmd, error) {
 	bazelisk := NewBazelisk(b.workspaceRoot, false)
-	return bazelisk.GetBazelPath(createRepositories())
+	repos := createRepositories()
+	bazelPath, err := bazelisk.GetBazelPath(repos)
+	if err != nil {
+		return nil, fmt.Errorf("could not get path to Bazel: %v", err)
+	}
+	allArgs := []string{}
+	allArgs = append(allArgs, startupFlags...)
+	allArgs = append(allArgs, args...)
+	return bazelisk.makeBazelCmd(bazelPath, allArgs, streams, env, wd, ctx), nil
 }
 
 // WorkspaceRoot implements Bazel.
