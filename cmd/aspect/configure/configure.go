@@ -38,7 +38,7 @@ func NewDefaultCmd() *cobra.Command {
 func NewCmd(streams ioutils.Streams) *cobra.Command {
 	return NewCmdWithConfigure(streams, configure.New(streams))
 }
-func NewCmdWithConfigure(streams ioutils.Streams, v *configure.Configure) *cobra.Command {
+func NewCmdWithConfigure(streams ioutils.Streams, v configure.ConfigureRunner) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "configure",
 		Short: "Auto-configure Bazel by updating BUILD files",
@@ -91,14 +91,14 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 	return cmd
 }
 
-func run(streams ioutils.Streams, v *configure.Configure, mode string, exclude []string, args []string) error {
+func run(streams ioutils.Streams, v configure.ConfigureRunner, mode string, exclude []string, args []string) error {
 	if buildinfo.Current().OpenSource {
 		if configurePlugins := viper.GetStringSlice("configure.plugins"); len(configurePlugins) > 0 {
 			fmt.Fprintln(streams.Stderr, "WARNING: Aspect CLI configure.plugins are not supported in Aspect OSS CLI.")
 		}
 	}
 
-	err := v.Run(mode, exclude, args)
+	err := v.Generate(mode, exclude, args)
 	if aspectError, isAError := err.(*aspecterrors.ExitError); isAError && aspectError.ExitCode == aspecterrors.ConfigureNoConfig {
 		fmt.Fprintln(streams.Stderr, `No languages enabled for BUILD file generation.
 
@@ -117,7 +117,7 @@ configure:
 	return err
 }
 
-func addCliEnabledLanguages(c *configure.Configure) {
+func addCliEnabledLanguages(c configure.ConfigureRunner) {
 	// Order matters for gazelle languages. Proto should be run before golang.
 	viper.SetDefault("configure.languages.protobuf", false)
 	if viper.GetBool("configure.languages.protobuf") {
