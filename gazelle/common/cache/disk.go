@@ -50,7 +50,7 @@ func computeCacheKey(content []byte, key string) string {
 func (c *diskCache) read() {
 	cacheReader, err := os.Open(c.file)
 	if err != nil {
-		BazelLog.Tracef("Failed to open cache %q: %v", c.file, err)
+		BazelLog.Infof("Failed to open cache %q: %v", c.file, err)
 		return
 	}
 	defer cacheReader.Close()
@@ -58,7 +58,10 @@ func (c *diskCache) read() {
 	cacheDecoder := gob.NewDecoder(cacheReader)
 	if e := cacheDecoder.Decode(&c.old); e != nil {
 		BazelLog.Errorf("Failed to read cache %q: %v", c.file, e)
+		return
 	}
+
+	BazelLog.Infof("Loaded %d entries from cache %q\n", len(c.old), c.file)
 }
 
 func (c *diskCache) write() {
@@ -78,7 +81,10 @@ func (c *diskCache) write() {
 	cacheEncoder := gob.NewEncoder(cacheWriter)
 	if e := cacheEncoder.Encode(m); e != nil {
 		BazelLog.Errorf("Failed to write cache %q: %v", c.file, e)
+		return
 	}
+
+	BazelLog.Infof("Wrote %d entries to cache %q\n", len(m), c.file)
 }
 
 func (c *diskCache) Load(key string) (any, bool) {
@@ -120,7 +126,7 @@ func (c *diskCache) LoadOrStoreFile(root, p, key string, loader FileCompute) (an
 	// Compute and persist in cache.
 	if !found {
 		v, err = loader(p, content)
-		if err != nil {
+		if err == nil {
 			v, found = c.LoadOrStore(key, v)
 		}
 	}
