@@ -38,22 +38,13 @@ type diskCache struct {
 	new  *sync.Map
 }
 
-func computeCacheKey(content []byte) (string, bool) {
+func computeCacheKey(content []byte, key string) string {
 	cacheDigest := crypto.MD5.New()
-
 	if buildinfo.IsStamped() {
-		if _, err := cacheDigest.Write([]byte(buildinfo.GitCommit)); err != nil {
-			BazelLog.Errorf("Failed to write GitCommit to cache digest: %v", err)
-			return "", false
-		}
+		cacheDigest.Write([]byte(buildinfo.GitCommit))
 	}
-
-	if _, err := cacheDigest.Write(content); err != nil {
-		BazelLog.Errorf("Failed to write source to cache digest: %v", err)
-		return "", false
-	}
-
-	return hex.EncodeToString(cacheDigest.Sum(nil)), true
+	cacheDigest.Write([]byte(key))
+	return hex.EncodeToString(cacheDigest.Sum(content))
 }
 
 func (c *diskCache) read() {
@@ -91,15 +82,18 @@ func (c *diskCache) write() {
 }
 
 func (c *diskCache) Load(key string) (any, bool) {
+	// Already written to new cache.
 	if v, found := c.new.Load(key); found {
 		return v, true
 	}
 
+	// Exists in old cache and can transfer to new.
 	if v, ok := c.old[key]; ok {
-		c.new.LoadOrStore(key, v)
+		v, _ = c.LoadOrStore(key, v)
 		return v, true
 	}
 
+	// Cache miss
 	return nil, false
 }
 
@@ -107,30 +101,31 @@ func (c *diskCache) Store(key string, value any) {
 	c.new.Store(key, value)
 }
 
-func (c *diskCache) LoadAndStoreFile(root, p string, loader func(path string, content []byte) (any, error)) (any, bool, error) {
+func (c *diskCache) LoadOrStore(key string, value any) (any, bool) {
+	return c.new.LoadOrStore(key, value)
+}
+
+func (c *diskCache) LoadOrStoreFile(root, p, key string, loader FileCompute) (any, bool, error) {
 	content, err := os.ReadFile(path.Join(root, p))
 	if err != nil {
 		return nil, false, err
 	}
 
-	if parserCacheKey, parsingCacheable := computeCacheKey(content); parsingCacheable {
-		// Try loading from the cache.
-		if v, found := c.Load(parserCacheKey); found {
-			return v, true, nil
-		}
+	// Include the file content in the cache key
+	key = computeCacheKey(content, key)
 
-		// Compute and persist in cache.
-		v, err := loader(p, content)
+	// Try loading from the cache.
+	v, found := c.Load(key)
+
+	// Compute and persist in cache.
+	if !found {
+		v, err = loader(p, content)
 		if err != nil {
-			c.Store(parserCacheKey, v)
+			v, found = c.LoadOrStore(key, v)
 		}
-
-		return v, false, err
 	}
 
-	// Not cacheable, simply recompute each time.
-	v, err := loader(p, content)
-	return v, false, err
+	return v, found, err
 }
 
 func (c *diskCache) Persist() {

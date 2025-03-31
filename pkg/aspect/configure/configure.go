@@ -35,12 +35,20 @@ import (
 	"golang.org/x/term"
 )
 
+type ConfigureRunner interface {
+	AddLanguage(lang ConfigureLanguage)
+	AddLanguageFactory(lang string, langFactory func() language.Language)
+	Generate(mode ConfigureMode, excludes []string, args []string) error
+}
+
 type Configure struct {
 	ioutils.Streams
 
 	languageKeys []string
 	languages    []func() language.Language
 }
+
+var _ ConfigureRunner = (*Configure)(nil)
 
 // Builtin Gazelle languages
 type ConfigureLanguage = string
@@ -117,7 +125,7 @@ func (c *Configure) AddLanguage(lang ConfigureLanguage) {
 	}
 }
 
-func (runner *Configure) Run(mode ConfigureMode, excludes []string, args []string) error {
+func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []string) error {
 	if len(runner.languageKeys) == 0 {
 		return &aspecterrors.ExitError{
 			ExitCode: aspecterrors.ConfigureNoConfig,

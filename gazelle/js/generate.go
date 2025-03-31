@@ -832,16 +832,18 @@ func (ts *typeScriptLang) collectImports(cfg *JsGazelleConfig, config *config.Co
 func parseSourceFile(config *config.Config, rootDir, filePath string) (parser.ParseResult, error) {
 	BazelLog.Tracef("ParseImports(%s): %s", LanguageName, filePath)
 
-	parserCache := cache.Get[parser.ParseResult](config)
-	if parserCache == nil {
-		parserCache = cache.Noop()
-	}
+	parserCache := cache.Get(config)
 
-	r, _, err := parserCache.LoadAndStoreFile(rootDir, filePath, func(filePath string, content []byte) (any, error) {
+	var p parser.ParseResult
+	r, _, err := parserCache.LoadOrStoreFile(rootDir, filePath, "js.ParseSource", func(filePath string, content []byte) (any, error) {
 		return parser.ParseSource(filePath, content)
 	})
 
-	return r.(parser.ParseResult), err
+	if r != nil {
+		p = r.(parser.ParseResult)
+	}
+
+	return p, err
 }
 
 func init() {
