@@ -4,7 +4,44 @@ module(
 )
 
 bazel_dep(name = "aspect_bazel_lib", version = "2.10.0")
+# bazel_lib = use_extension("@aspect_bazel_lib//lib:extensions.bzl", "toolchains")
+# bazel_lib.jq()
+# bazel_lib.tar()
+# use_repo(bazel_lib, "bsd_tar_toolchains", "jq_linux_amd64", "jq_linux_arm64", "jq_toolchains")
+
+bazel_dep(name = "buildifier_prebuilt", version = "8.0.0")
+bazel_dep(name = "rules_nodejs", version = "6.3.1")
+
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = "17.9.1")
+use_repo(node, "nodejs_linux_amd64", "nodejs_linux_arm64")
+
+bazel_dep(name = "aspect_rules_js", version = "2.1.2")
+
+pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
+pnpm.pnpm(
+    name = "pnpm",
+    pnpm_version = "9.7.0",
+)
+use_repo(pnpm, "pnpm")
+
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+npm.npm_translate_lock(
+    name = "npm",
+    pnpm_lock = "//:pnpm-lock.yaml",
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+use_repo(npm, "npm")
+
+rules_ts_ext = use_extension("@aspect_rules_ts//ts:extensions.bzl", "ext")
+rules_ts_ext.deps(ts_version_from = "//:package.json")
+use_repo(rules_ts_ext, "npm_typescript")
+
+bazel_dep(name = "aspect_rules_lint", version = "1.0.7")
+bazel_dep(name = "aspect_rules_swc", version = "2.3.0")
+bazel_dep(name = "aspect_rules_ts", version = "3.4.0")
 bazel_dep(name = "bazel_features", version = "1.19.0")
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
 
 include("//bazel/include:llvm.MODULE.bazel")
 
