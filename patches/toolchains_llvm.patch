@@ -1,0 +1,78 @@
+diff --git a/toolchain/cc_toolchain_config.bzl b/toolchain/cc_toolchain_config.bzl
+index 9dbb41d..12c4ccb 100644
+--- a/toolchain/cc_toolchain_config.bzl
++++ b/toolchain/cc_toolchain_config.bzl
+@@ -168,11 +168,17 @@ def cc_toolchain_config(
+     archive_flags = []
+ 
+     # Linker flags:
+-    if exec_os == "darwin" and not is_xcompile:
+-        # lld is experimental for Mach-O, so we use the native ld64 linker.
+-        # TODO: How do we cross-compile from Linux to Darwin?
+-        use_lld = False
++    ld = "ld.lld"
++    if target_os == "darwin":
++        use_lld = True
++
++        ld = "ld64.lld"
++        ld_path = toolchain_path_prefix + "/bin/" + ld
++        compile_flags.append("-mmacosx-version-min=12.0")
+         link_flags.extend([
++            "-mmacosx-version-min=12.0",
++            "-Wl,-platform_version,macos,12.0,12.0",
++            "--ld-path=" + ld_path,
+             "-headerpad_max_install_names",
+             "-fobjc-link-runtime",
+         ])
+@@ -195,7 +201,9 @@ def cc_toolchain_config(
+         # not an option because it is not a cross-linker, so lld is the
+         # only option.
+         use_lld = True
++        ld_path = toolchain_path_prefix + "/bin/" + ld
+         link_flags.extend([
++            "--ld-path=" + ld_path,
+             "-fuse-ld=lld",
+             "-Wl,--build-id=md5",
+             "-Wl,--hash-style=gnu",
+@@ -228,10 +236,6 @@ def cc_toolchain_config(
+         if use_lld:
+             # For single-platform builds, we can statically link the bundled
+             # libraries.
+-            link_flags.extend([
+-                "-l:libc++.a",
+-                "-l:libc++abi.a",
+-            ])
+             compiler_rt_link_flags = ["-rtlib=compiler-rt"]
+             libunwind_link_flags = [
+                 "-l:libunwind.a",
+@@ -283,9 +287,6 @@ def cc_toolchain_config(
+             "-stdlib=libstdc++",
+         ]
+ 
+-        link_flags.extend([
+-            "-l:libstdc++.a",
+-        ])
+     elif stdlib == "libc":
+         cxx_flags = [
+             "-std=" + cxx_standard,
+@@ -323,7 +324,7 @@ def cc_toolchain_config(
+         "dwp": tools_path_prefix + "llvm-dwp",
+         "gcc": wrapper_bin_prefix + "cc_wrapper.sh",
+         "gcov": tools_path_prefix + "llvm-profdata",
+-        "ld": tools_path_prefix + "ld.lld" if use_lld else "/usr/bin/ld",
++        "ld": tools_path_prefix + ld if use_lld else "/usr/bin/ld",
+         "llvm-cov": tools_path_prefix + "llvm-cov",
+         "llvm-profdata": tools_path_prefix + "llvm-profdata",
+         "nm": tools_path_prefix + "llvm-nm",
+diff --git a/toolchain/internal/common.bzl b/toolchain/internal/common.bzl
+index 1feae98..6773380 100644
+--- a/toolchain/internal/common.bzl
++++ b/toolchain/internal/common.bzl
+@@ -28,6 +28,7 @@ _toolchain_tools = {
+     for name in [
+         "clang-cpp",
+         "ld.lld",
++        "ld64.lld",
+         "llvm-ar",
+         "llvm-dwp",
+         "llvm-profdata",

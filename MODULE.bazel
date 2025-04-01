@@ -6,6 +6,8 @@ module(
 bazel_dep(name = "aspect_bazel_lib", version = "2.10.0")
 bazel_dep(name = "bazel_features", version = "1.19.0")
 
+include("//bazel/include:llvm.MODULE.bazel")
+
 include("//bazel/include:proto.MODULE.bazel")
 
 include("//bazel/include:python.MODULE.bazel")
