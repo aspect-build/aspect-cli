@@ -23,20 +23,6 @@ register_toolchains(
 )
 
 http_archive(
-    name = "bazel_features",
-    sha256 = "3646ffd447753490b77d2380fa63f4d55dd9722e565d84dfda01536b48e183da",
-    strip_prefix = "bazel_features-1.19.0",
-    url = "https://github.com/bazel-contrib/bazel_features/releases/download/v1.19.0/bazel_features-v1.19.0.tar.gz",
-)
-
-http_archive(
-    name = "aspect_bazel_lib",
-    sha256 = "7b39d9f38b82260a8151b18dd4a6219d2d7fc4a0ac313d4f5a630ae6907d205d",
-    strip_prefix = "bazel-lib-2.10.0",
-    url = "https://github.com/aspect-build/bazel-lib/releases/download/v2.10.0/bazel-lib-v2.10.0.tar.gz",
-)
-
-http_archive(
     name = "aspect_rules_swc",
     sha256 = "e5ac926ebe1bbef1f38d245a65626d86f114eb1f3c68362e8a33472351d83608",
     strip_prefix = "rules_swc-2.0.1",
@@ -228,32 +214,6 @@ http_archive(
     # in the CLI configure command (pkg/aspect/configure).
     sha256 = "aefbf2fc7c7616c9ed73aa3d51c77100724d5b3ce66cfa16406e8c13e87c8b52",
     urls = ["https://github.com/bazel-contrib/bazel-gazelle/releases/download/v0.41.0/bazel-gazelle-v0.41.0.tar.gz"],
-)
-
-http_archive(
-    name = "rules_proto",
-    sha256 = "303e86e722a520f6f326a50b41cfc16b98fe6d1955ce46642a5b7a67c11c0f5d",
-    strip_prefix = "rules_proto-6.0.0",
-    url = "https://github.com/bazelbuild/rules_proto/releases/download/6.0.0/rules_proto-6.0.0.tar.gz",
-)
-
-load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies")
-
-rules_proto_dependencies()
-
-http_archive(
-    name = "toolchains_protoc",
-    sha256 = "1f3cd768bbb92164952301228bac5e5079743843488598f2b17fecd41163cadb",
-    strip_prefix = "toolchains_protoc-0.2.4",
-    url = "https://github.com/aspect-build/toolchains_protoc/releases/download/v0.2.4/toolchains_protoc-v0.2.4.tar.gz",
-)
-
-load("@toolchains_protoc//protoc:toolchain.bzl", "protoc_toolchains")
-
-protoc_toolchains(
-    name = "protoc_toolchains",
-    google_protobuf = "com_google_protobuf",
-    version = "v21.7",
 )
 
 http_archive(

@@ -6,3 +6,4 @@
 /.vscode
 **/.terraform/*
 node_modules/
+MODULE.bazel.lock
