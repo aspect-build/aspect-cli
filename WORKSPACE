@@ -61,12 +61,7 @@ http_archive(
 
 http_archive(
     name = "com_grail_bazel_toolchain",
-    patch_args = ["-p1"],
     # Note: these commits are on the silo branch of aspect-forks/bazel-toolchain
-    patches = [
-        "//patches:com_grail_bazel_toolchain.patch",
-        "//patches:com_grail_bazel_toolchain.001.patch",
-    ],
     sha256 = "a9fc7cf01d0ea0a935bd9e3674dd3103766db77dfc6aafcb447a7ddd6ca24a78",
     strip_prefix = "toolchains_llvm-c65ef7a45907016a754e5bf5bfabac76eb702fd3",
     urls = ["https://github.com/bazel-contrib/toolchains_llvm/archive/c65ef7a45907016a754e5bf5bfabac76eb702fd3.tar.gz"],
