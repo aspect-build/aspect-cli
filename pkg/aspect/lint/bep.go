@@ -126,17 +126,17 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) ([]byte, 
 
 func parseLinterMnemonicFromFilename(filename string) string {
 	// Parse the filename convention that rules_lint has for output files.
-	// path/to/<target_name>.<mnemonic>.<suffix> -> linter
+	// path/to/<target_name>.<mnemonic>.<suffixes> -> linter
 	// See https://github.com/aspect-build/rules_lint/blob/6df14f0e5dae0c9a9c0e8e6f69e25bbdb3aa7394/lint/private/lint_aspect.bzl#L28.
 	s := strings.Split(filepath.Base(filename), ".")
 	if len(s) < 3 {
 		return ""
 	}
 	// Filter out mnemonics that don't start with AspectRulesLint, which is the rules_lint convention
-	if !strings.HasPrefix(s[len(s)-2], "AspectRulesLint") {
+	if !strings.HasPrefix(s[1], "AspectRulesLint") {
 		return ""
 	}
-	return s[len(s)-2]
+	return s[1]
 }
 
 func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEvent, sequenceNumber int64) error {
