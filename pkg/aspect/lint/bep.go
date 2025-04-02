@@ -235,8 +235,11 @@ func (runner *LintBEPHandler) bepEventHandler(event *buildeventstream.BuildEvent
 					// go through the fileSet and create a result for each mnemonic
 					for _, file := range fileSet.GetFiles() {
 						if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
-							result := &ResultForLabelAndMnemonic{label: label, mnemonic: mnemonic}
-							runner.resultsByLabelByMnemonic[label+mnemonic] = result
+							if _, ok := runner.resultsByLabelByMnemonic[label+mnemonic]; !ok {
+								// create a new result for this label and mnemonic
+								result := &ResultForLabelAndMnemonic{label: label, mnemonic: mnemonic}
+								runner.resultsByLabelByMnemonic[label+mnemonic] = result
+							}
 						}
 					}
 
