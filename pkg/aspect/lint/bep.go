@@ -231,46 +231,38 @@ func (runner *LintBEPHandler) bepEventHandler(event *buildeventstream.BuildEvent
 			for _, fileSetId := range outputGroup.FileSets {
 				if fileSet := runner.namedSets[fileSetId.Id]; fileSet != nil {
 					runner.namedSets[fileSetId.Id] = nil
-					result := &ResultForLabelAndMnemonic{label: label}
+
+					// go through the fileSet and create a result for each mnemonic
+					for _, file := range fileSet.GetFiles() {
+						if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
+							result := &ResultForLabelAndMnemonic{label: label, mnemonic: mnemonic}
+							runner.resultsByLabelByMnemonic[label+mnemonic] = result
+						}
+					}
 
 					for _, file := range fileSet.GetFiles() {
 						if outputGroup.Name == LINT_PATCH_GROUP {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
-								result.mnemonic = mnemonic
-
 								savedResult := runner.resultsByLabelByMnemonic[label+mnemonic]
-								if savedResult == nil {
-									runner.resultsByLabelByMnemonic[label+mnemonic] = result
-								}
+								savedResult.patchFile = file
 							}
-							result.patchFile = file
 						} else if outputGroup.Name == LINT_REPORT_GROUP_MACHINE {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
-								result.mnemonic = mnemonic
-
 								savedResult := runner.resultsByLabelByMnemonic[label+mnemonic]
-								if savedResult == nil {
-									runner.resultsByLabelByMnemonic[label+mnemonic] = result
+								if strings.HasSuffix(file.Name, ".report") {
+									savedResult.reportFile = file
+								} else if strings.HasSuffix(file.Name, ".exit_code") {
+									savedResult.exitCodeFile = file
 								}
-							}
-							if strings.HasSuffix(file.Name, ".report") {
-								result.reportFile = file
-							} else if strings.HasSuffix(file.Name, ".exit_code") {
-								result.exitCodeFile = file
 							}
 						} else if outputGroup.Name == LINT_REPORT_GROUP_HUMAN {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
-								result.mnemonic = mnemonic
-
 								savedResult := runner.resultsByLabelByMnemonic[label+mnemonic]
-								if savedResult == nil {
-									runner.resultsByLabelByMnemonic[label+mnemonic] = result
+								if strings.HasSuffix(file.Name, ".out") {
+									savedResult.reportFile = file
+								} else if strings.HasSuffix(file.Name, ".exit_code") {
+									savedResult.exitCodeFile = file
 								}
-							}
-							if strings.HasSuffix(file.Name, ".out") {
-								result.reportFile = file
-							} else if strings.HasSuffix(file.Name, ".exit_code") {
-								result.exitCodeFile = file
 							}
 						}
 					}
