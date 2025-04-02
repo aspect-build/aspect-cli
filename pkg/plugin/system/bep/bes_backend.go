@@ -83,30 +83,33 @@ func InjectBESBackend(ctx context.Context, besBackend BESBackend) context.Contex
 }
 
 type besBackend struct {
-	besProxies    []besproxy.BESProxy
-	ctx           context.Context
-	errors        *aspecterrors.ErrorList
-	errorsMutex   sync.RWMutex
-	grpcDialer    aspectgrpc.Dialer
-	grpcServer    aspectgrpc.Server
-	listener      net.Listener
-	netListen     func(network, address string) (net.Listener, error)
-	startServe    chan struct{}
-	subscribers   *subscriberList
-	mtSubscribers *subscriberList
+	besProxies            []besproxy.BESProxy
+	ctx                   context.Context
+	errors                *aspecterrors.ErrorList
+	errorsMutex           sync.RWMutex
+	grpcDialer            aspectgrpc.Dialer
+	grpcServer            aspectgrpc.Server
+	listener              net.Listener
+	netListen             func(network, address string) (net.Listener, error)
+	startServe            chan struct{}
+	subscribers           *subscriberList
+	mtSubscribers         *subscriberList
+	ignoreBesUploadErrors bool
 }
 
 // NewBESBackend creates a new Build Event Protocol backend.
 func NewBESBackend(ctx context.Context) BESBackend {
+	ignoreBesUploadErrors := os.Getenv("IGNORE_BES_UPLOAD_ERRORS") == "1"
 	return &besBackend{
-		besProxies:    []besproxy.BESProxy{},
-		ctx:           ctx,
-		errors:        &aspecterrors.ErrorList{},
-		grpcDialer:    aspectgrpc.NewDialer(),
-		netListen:     net.Listen,
-		startServe:    make(chan struct{}, 1),
-		subscribers:   &subscriberList{},
-		mtSubscribers: &subscriberList{},
+		besProxies:            []besproxy.BESProxy{},
+		ctx:                   ctx,
+		errors:                &aspecterrors.ErrorList{},
+		grpcDialer:            aspectgrpc.NewDialer(),
+		netListen:             net.Listen,
+		startServe:            make(chan struct{}, 1),
+		subscribers:           &subscriberList{},
+		mtSubscribers:         &subscriberList{},
+		ignoreBesUploadErrors: ignoreBesUploadErrors,
 	}
 }
 
@@ -214,6 +217,10 @@ func (bb *besBackend) PublishLifecycleEvent(
 		client := c
 		eg.Go(func() error {
 			_, err := client.PublishLifecycleEvent(ctx, req)
+			if bb.ignoreBesUploadErrors {
+				// Silence errors when reporting back to bazel
+				err = nil
+			}
 			return err
 		})
 	}
@@ -370,6 +377,11 @@ func (bb *besBackend) PublishBuildToolEventStream(
 	})
 
 	err := eg.Wait()
+
+	if bb.ignoreBesUploadErrors {
+		// Silence errors when reporting back to bazel
+		err = nil
+	}
 
 	return err
 }
