@@ -297,6 +297,53 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 		g.Expect(err).To(MatchError(fmt.Errorf("error sending ack %v to bazel server: %v", 1, expectedErr)))
 	})
 
+	t.Run("succeeds when stream.Send fails but ignoreBesUploadErrors is true", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		eventStream := grpc_mock.NewMockPublishBuildEvent_PublishBuildToolEventStreamServer(ctrl)
+		event := &buildv1.BuildEvent{}
+		streamId := &buildv1.StreamId{BuildId: "1"}
+		orderedBuildEvent := &buildv1.OrderedBuildEvent{
+			StreamId:       streamId,
+			SequenceNumber: 1,
+			Event:          event,
+		}
+		req := &buildv1.PublishBuildToolEventStreamRequest{OrderedBuildEvent: orderedBuildEvent}
+		recv := eventStream.
+			EXPECT().
+			Recv().
+			Return(req, nil).
+			Times(1)
+		eventStream.
+			EXPECT().
+			Recv().
+			Return(nil, io.EOF).
+			Times(1).
+			After(recv)
+		res := &buildv1.PublishBuildToolEventStreamResponse{
+			StreamId:       req.OrderedBuildEvent.StreamId,
+			SequenceNumber: req.OrderedBuildEvent.SequenceNumber,
+		}
+		expectedErr := fmt.Errorf("failed to send")
+		eventStream.
+			EXPECT().
+			Send(res).
+			Return(expectedErr).
+			Times(1)
+
+		eventStream.
+			EXPECT().
+			Context().
+			Return(context.Background()).
+			Times(1)
+		besBackend := &besBackend{subscribers: &subscriberList{}, mtSubscribers: &subscriberList{}, ignoreBesUploadErrors: true}
+		err := besBackend.PublishBuildToolEventStream(eventStream)
+
+		g.Expect(err).To(Not(HaveOccurred()))
+	})
+
 	t.Run("succeeds without subscribers", func(t *testing.T) {
 		g := NewGomegaWithT(t)
 		ctrl := gomock.NewController(t)
