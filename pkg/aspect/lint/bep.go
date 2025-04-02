@@ -30,8 +30,8 @@ import (
 	"github.com/aspect-build/aspect-cli/bazel/buildeventstream"
 )
 
-// ResultForLabel aggregates the relevant files we find in the BEP for
-type ResultForLabel struct {
+// ResultForLabelAndMnemonic aggregates the relevant files we find in the BEP for
+type ResultForLabelAndMnemonic struct {
 	label        string
 	mnemonic     string
 	exitCodeFile *buildeventstream.File
@@ -40,11 +40,11 @@ type ResultForLabel struct {
 }
 
 type LintBEPHandler struct {
-	namedSets      map[string]*buildeventstream.NamedSetOfFiles
-	workspaceRoot  string
-	localExecRoot  string
-	besCompleted   chan<- struct{}
-	resultsByLabel map[string]*ResultForLabel
+	namedSets                map[string]*buildeventstream.NamedSetOfFiles
+	workspaceRoot            string
+	localExecRoot            string
+	besCompleted             chan<- struct{}
+	resultsByLabelByMnemonic map[string]*ResultForLabelAndMnemonic
 
 	besOnce             sync.Once
 	besChan             chan OrderedBuildEvent
@@ -58,11 +58,11 @@ type OrderedBuildEvent struct {
 
 func newLintBEPHandler(workspaceRoot string, besCompleted chan<- struct{}) *LintBEPHandler {
 	return &LintBEPHandler{
-		namedSets:      make(map[string]*buildeventstream.NamedSetOfFiles),
-		resultsByLabel: make(map[string]*ResultForLabel),
-		workspaceRoot:  workspaceRoot,
-		besCompleted:   besCompleted,
-		besChan:        make(chan OrderedBuildEvent, 100),
+		namedSets:                make(map[string]*buildeventstream.NamedSetOfFiles),
+		resultsByLabelByMnemonic: make(map[string]*ResultForLabelAndMnemonic),
+		workspaceRoot:            workspaceRoot,
+		besCompleted:             besCompleted,
+		besChan:                  make(chan OrderedBuildEvent, 100),
 	}
 }
 
@@ -126,17 +126,17 @@ func (runner *LintBEPHandler) readBEPFile(file *buildeventstream.File) ([]byte, 
 
 func parseLinterMnemonicFromFilename(filename string) string {
 	// Parse the filename convention that rules_lint has for output files.
-	// path/to/<target_name>.<mnemonic>.<suffix> -> linter
+	// path/to/<target_name>.<mnemonic>.<suffixes> -> linter
 	// See https://github.com/aspect-build/rules_lint/blob/6df14f0e5dae0c9a9c0e8e6f69e25bbdb3aa7394/lint/private/lint_aspect.bzl#L28.
 	s := strings.Split(filepath.Base(filename), ".")
 	if len(s) < 3 {
 		return ""
 	}
 	// Filter out mnemonics that don't start with AspectRulesLint, which is the rules_lint convention
-	if !strings.HasPrefix(s[len(s)-2], "AspectRulesLint") {
+	if !strings.HasPrefix(s[1], "AspectRulesLint") {
 		return ""
 	}
-	return s[len(s)-2]
+	return s[1]
 }
 
 func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEvent, sequenceNumber int64) error {
@@ -231,35 +231,41 @@ func (runner *LintBEPHandler) bepEventHandler(event *buildeventstream.BuildEvent
 			for _, fileSetId := range outputGroup.FileSets {
 				if fileSet := runner.namedSets[fileSetId.Id]; fileSet != nil {
 					runner.namedSets[fileSetId.Id] = nil
-					result := runner.resultsByLabel[label]
-					if result == nil {
-						result = &ResultForLabel{label: label}
-						runner.resultsByLabel[label] = result
+
+					// go through the fileSet and create a result for each mnemonic
+					for _, file := range fileSet.GetFiles() {
+						if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
+							if _, ok := runner.resultsByLabelByMnemonic[label+mnemonic]; !ok {
+								// create a new result for this label and mnemonic
+								result := &ResultForLabelAndMnemonic{label: label, mnemonic: mnemonic}
+								runner.resultsByLabelByMnemonic[label+mnemonic] = result
+							}
+						}
 					}
 
 					for _, file := range fileSet.GetFiles() {
 						if outputGroup.Name == LINT_PATCH_GROUP {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
-								result.mnemonic = mnemonic
+								savedResult := runner.resultsByLabelByMnemonic[label+mnemonic]
+								savedResult.patchFile = file
 							}
-							result.patchFile = file
 						} else if outputGroup.Name == LINT_REPORT_GROUP_MACHINE {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
-								result.mnemonic = mnemonic
-							}
-							if strings.HasSuffix(file.Name, ".report") {
-								result.reportFile = file
-							} else if strings.HasSuffix(file.Name, ".exit_code") {
-								result.exitCodeFile = file
+								savedResult := runner.resultsByLabelByMnemonic[label+mnemonic]
+								if strings.HasSuffix(file.Name, ".report") {
+									savedResult.reportFile = file
+								} else if strings.HasSuffix(file.Name, ".exit_code") {
+									savedResult.exitCodeFile = file
+								}
 							}
 						} else if outputGroup.Name == LINT_REPORT_GROUP_HUMAN {
 							if mnemonic := parseLinterMnemonicFromFilename(file.Name); mnemonic != "" {
-								result.mnemonic = mnemonic
-							}
-							if strings.HasSuffix(file.Name, ".out") {
-								result.reportFile = file
-							} else if strings.HasSuffix(file.Name, ".exit_code") {
-								result.exitCodeFile = file
+								savedResult := runner.resultsByLabelByMnemonic[label+mnemonic]
+								if strings.HasSuffix(file.Name, ".out") {
+									savedResult.reportFile = file
+								} else if strings.HasSuffix(file.Name, ".exit_code") {
+									savedResult.exitCodeFile = file
+								}
 							}
 						}
 					}
