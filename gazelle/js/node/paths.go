@@ -1,7 +1,6 @@
 package gazelle
 
 import (
-	"path"
 	"strings"
 )
 
@@ -11,27 +10,42 @@ func ParseImportPath(imp string) (string, string) {
 		return "", imp
 	}
 
-	// Imports of npm-like packages
-	// Trim to only the package name or scoped package name
+	// Imports of @scoped-package-like paths
 	if imp[0] == '@' {
-		parts := strings.SplitN(imp, "/", 3)
-
-		// Scoped packages must have a second part, otherwise it is not a "package" import.
-		if len(parts) < 2 {
+		scopeEnd := strings.IndexByte(imp, '/')
+		if scopeEnd == -1 {
 			return "", imp
 		}
-
-		if len(parts) == 2 {
+		subPkg := imp[scopeEnd+1:]
+		subPkgEnd := strings.IndexByte(subPkg, '/')
+		if subPkgEnd == -1 {
 			return imp, ""
 		}
-
-		return path.Join(parts[0], parts[1]), parts[2]
+		return imp[:scopeEnd+subPkgEnd+1], imp[scopeEnd+subPkgEnd+2:]
 	}
 
-	pkgEnd := strings.Index(imp, "/")
+	// Imports of package-like paths
+	pkgEnd := strings.IndexByte(imp, '/')
 	if pkgEnd == -1 {
 		return imp, ""
 	}
 
 	return imp[:pkgEnd], imp[pkgEnd+1:]
+}
+
+func ToAtTypesPackage(pkg string) string {
+	// @scoped packages
+	if pkg[0] == '@' {
+		if i := strings.IndexRune(pkg, '/'); i != -1 {
+			return "@types/" + pkg[1:i] + "__" + pkg[i+1:]
+		}
+		return ""
+	}
+
+	// packages with trailing 0
+	if i := strings.IndexRune(pkg, '/'); i != -1 {
+		return "@types/" + pkg[:i]
+	}
+
+	return "@types/" + pkg
 }

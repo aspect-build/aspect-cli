@@ -1096,7 +1096,7 @@ func toDtsExt(e string) string {
 func toImportSpecPath(importFrom, importPath string) string {
 	// Relative paths
 	if importPath[0] == '.' {
-		return path.Join(path.Dir(importFrom), importPath)
+		return path.Join(importFrom, "..", importPath)
 	}
 
 	// URLs of any protocol
