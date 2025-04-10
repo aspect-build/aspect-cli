@@ -20,14 +20,12 @@ package client
 
 import (
 	"fmt"
-	"io"
-	"io/fs"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 
 	"github.com/aspect-build/aspect-cli/pkg/ioutils/cache"
+	"github.com/bazelbuild/bazelisk/httputil"
 	"github.com/fatih/color"
 )
 
@@ -54,16 +52,13 @@ func DownloadPlugin(url string, name string, version string) (string, error) {
 
 	versionedURL := fmt.Sprintf("%s/%s/%s", url, version, filename)
 
-	pluginfile, err := downloadFile(versionedURL, pluginsCache, filename, 0700)
+	pluginfile, err := downloadBinary(versionedURL, pluginsCache, filename)
 	if err != nil {
 		return "", fmt.Errorf("unable to fetch remote plugin from %s: %v", url, err)
 	}
 
-	sha256URL := fmt.Sprintf("%s.sha256", versionedURL)
-	sha256Filename := fmt.Sprintf("%s.sha256", filename)
-
 	// We don't care if this errors. We have logic to do Trust on first use (TOFU).
-	downloadFile(sha256URL, pluginsCache, sha256Filename, 0400)
+	downloadBinarySha(versionedURL, pluginsCache, filename)
 
 	return pluginfile, nil
 }
@@ -95,44 +90,22 @@ func determinePluginFilename(pluginName string) (string, error) {
 	return fmt.Sprintf("%s-%s_%s%s", pluginName, osName, machineName, filenameSuffix), nil
 }
 
-func downloadFile(originURL, destDir, destFile string, mode fs.FileMode) (string, error) {
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return "", fmt.Errorf("could not create directory %s: %v", destDir, err)
-	}
-	destinationPath := filepath.Join(destDir, destFile)
+func downloadBinary(originURL, destDir, destFile string) (string, error) {
+	return httputil.DownloadBinary(originURL, destDir, destFile)
+}
+func downloadBinarySha(versionedURL, destDir, destFile string) (string, error) {
+	sha256URL := fmt.Sprintf("%s.sha256", versionedURL)
+	sha256Filename := fmt.Sprintf("%s.sha256", destFile)
 
-	if _, err := os.Stat(destinationPath); err != nil {
-		tmpfile, err := os.CreateTemp(destDir, "download")
-		if err != nil {
-			return "", fmt.Errorf("could not create temporary file: %v", err)
-		}
-		defer os.Remove(tmpfile.Name())
-		defer tmpfile.Close()
-
-		faint.Fprintf(os.Stderr, "Downloading %s...\n", originURL)
-
-		resp, err := http.Get(originURL)
-		if err != nil {
-			return "", fmt.Errorf("HTTP GET %s failed: %v", originURL, err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			return "", fmt.Errorf("HTTP GET %s failed with error %v", originURL, resp.StatusCode)
-		}
-
-		if _, err := io.Copy(tmpfile, resp.Body); err != nil {
-			return "", fmt.Errorf("could not copy from %s to %s: %v", originURL, tmpfile.Name(), err)
-		}
-
-		if err := os.Chmod(tmpfile.Name(), mode); err != nil {
-			return "", fmt.Errorf("could not chmod file %s: %v", tmpfile.Name(), err)
-		}
-
-		if err := os.Rename(tmpfile.Name(), destinationPath); err != nil {
-			return "", fmt.Errorf("could not move %s to %s: %v", tmpfile.Name(), destinationPath, err)
-		}
+	// Use DownloadBinary() to ensure the same HTTP auth/header logic is used
+	p, err := httputil.DownloadBinary(sha256URL, destDir, sha256Filename)
+	if err != nil {
+		return p, err
 	}
 
-	return destinationPath, nil
+	if err := os.Chmod(p, 0400); err != nil {
+		return p, err
+	}
+
+	return p, nil
 }
