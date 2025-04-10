@@ -7,14 +7,14 @@ require (
 	github.com/alphadose/haxmap v1.4.0
 	github.com/bazel-contrib/rules_jvm v0.27.0
 	github.com/bazelbuild/bazel-gazelle v0.42.1-0.20250322095255-186298911d38 // NOTE: keep in sync with deps.bzl
-	github.com/bazelbuild/bazelisk v1.17.0
-	github.com/bazelbuild/buildtools v0.0.0-20240918101019-be1c24cc9a44
+	github.com/bazelbuild/bazelisk v1.25.0 // NOTE: keep vendored code in sync
+	github.com/bazelbuild/buildtools v0.0.0-20250326091033-f79c8eafbddd
 	github.com/bazelbuild/rules_go v0.52.0 // indirect; NOTE: keep in sync with fetch.bzl
 	github.com/bluekeyes/go-gitdiff v0.7.3
 	github.com/bmatcuk/doublestar/v4 v4.8.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/fatih/color v1.18.0
-	github.com/go-git/go-git/v5 v5.13.2
+	github.com/go-git/go-git/v5 v5.14.0
 	github.com/golang/mock v1.7.0-rc.1
 	github.com/golang/protobuf v1.5.4
 	github.com/hashicorp/go-hclog v1.6.3
@@ -27,7 +27,7 @@ require (
 	github.com/onsi/gomega v1.34.1
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
-	github.com/rogpeppe/go-internal v1.12.0
+	github.com/rogpeppe/go-internal v1.14.1
 	github.com/rs/zerolog v1.33.0
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	github.com/spf13/cobra v1.8.1
@@ -35,9 +35,9 @@ require (
 	github.com/spf13/viper v1.19.0
 	github.com/tejzpr/ordered-concurrently/v3 v3.0.1
 	github.com/twmb/murmur3 v1.1.8
-	go.starlark.net v0.0.0-20240725214946-42030a7cedce
+	go.starlark.net v0.0.0-20250318223901-d9371fef63fe
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8 // indirect
-	golang.org/x/sync v0.11.0
+	golang.org/x/sync v0.12.0
 	google.golang.org/genproto v0.0.0-20240528184218-531527333157
 	google.golang.org/grpc v1.64.1
 	google.golang.org/protobuf v1.34.1
@@ -51,7 +51,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/hay-kot/scaffold v0.6.1
 	github.com/sourcegraph/go-diff v0.7.0
-	golang.org/x/term v0.29.0
+	golang.org/x/term v0.31.0
 	gopkg.in/op/go-logging.v1 v1.0.0-20160211212156-b2cb9fa56473
 )
 
@@ -86,9 +86,10 @@ require (
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.6.2 // indirect
 	github.com/go-sprout/sprout v1.0.0 // indirect
+	github.com/gofrs/flock v0.12.1 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/btree v1.1.2 // indirect
-	github.com/google/go-cmp v0.6.0 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/hashicorp/go-version v1.7.0 // indirect
@@ -136,10 +137,10 @@ require (
 	github.com/yuin/goldmark-emoji v1.0.4 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
-	golang.org/x/crypto v0.33.0 // indirect
+	golang.org/x/crypto v0.35.0 // indirect
 	golang.org/x/mod v0.22.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/tools/go/vcs v0.1.0-deprecated // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240604185151-ef581f913117 // indirect

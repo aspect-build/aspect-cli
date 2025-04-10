@@ -1,5 +1,5 @@
 diff --git a/repositories/github.go b/repositories/github.go
-index 0d02067..24b12e7 100644
+index c5c3f4b..9955e74 100644
 --- a/repositories/github.go
 +++ b/repositories/github.go
 @@ -3,6 +3,7 @@ package repositories
@@ -8,9 +8,9 @@ index 0d02067..24b12e7 100644
  	"fmt"
 +	"strings"
  
+ 	"github.com/bazelbuild/bazelisk/config"
  	"github.com/bazelbuild/bazelisk/httputil"
- 	"github.com/bazelbuild/bazelisk/platforms"
-@@ -51,12 +52,19 @@ func (gh *GitHubRepo) getFilteredVersions(bazeliskHome, bazelFork string, wantPr
+@@ -52,12 +53,19 @@ func (gh *GitHubRepo) getFilteredVersions(bazeliskHome, bazelFork string, wantPr
  		return json.Marshal(releases)
  	}
  

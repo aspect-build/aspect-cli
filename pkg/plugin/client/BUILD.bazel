@@ -14,6 +14,7 @@ go_library(
         "//pkg/plugin/sdk/v1alpha4/config",
         "//pkg/plugin/sdk/v1alpha4/plugin",
         "//pkg/plugin/types",
+        "@com_github_bazelbuild_bazelisk//config",
         "@com_github_bazelbuild_bazelisk//httputil",
         "@com_github_fatih_color//:color",
         "@com_github_hashicorp_go_hclog//:go-hclog",

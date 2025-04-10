@@ -25,13 +25,12 @@ import (
 	"runtime"
 
 	"github.com/aspect-build/aspect-cli/pkg/ioutils/cache"
+	"github.com/bazelbuild/bazelisk/config"
 	"github.com/bazelbuild/bazelisk/httputil"
 	"github.com/fatih/color"
 )
 
-var (
-	faint = color.New(color.Faint)
-)
+var faint = color.New(color.Faint)
 
 func DownloadPlugin(url string, name string, version string) (string, error) {
 	aspectCacheDir, err := cache.AspectCacheDir()
@@ -91,14 +90,15 @@ func determinePluginFilename(pluginName string) (string, error) {
 }
 
 func downloadBinary(originURL, destDir, destFile string) (string, error) {
-	return httputil.DownloadBinary(originURL, destDir, destFile)
+	return httputil.DownloadBinary(originURL, destDir, destFile, config.FromEnv())
 }
+
 func downloadBinarySha(versionedURL, destDir, destFile string) (string, error) {
 	sha256URL := fmt.Sprintf("%s.sha256", versionedURL)
 	sha256Filename := fmt.Sprintf("%s.sha256", destFile)
 
 	// Use DownloadBinary() to ensure the same HTTP auth/header logic is used
-	p, err := httputil.DownloadBinary(sha256URL, destDir, sha256Filename)
+	p, err := httputil.DownloadBinary(sha256URL, destDir, sha256Filename, config.FromEnv())
 	if err != nil {
 		return p, err
 	}
