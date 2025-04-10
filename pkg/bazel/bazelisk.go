@@ -17,29 +17,21 @@
 package bazel
 
 import (
-	"bufio"
-	"context"
 	"fmt"
-	"log"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
+	bazeliskConfig "github.com/bazelbuild/bazelisk/config"
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/httputil"
-	"github.com/bazelbuild/bazelisk/platforms"
-	"github.com/mitchellh/go-homedir"
 
 	"github.com/aspect-build/aspect-cli/buildinfo"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
-	"github.com/aspect-build/aspect-cli/pkg/ioutils/cache"
 )
 
 const (
-	aspectReentrantEnv = "ASPECT_REENTRANT"
 	useBazelVersionEnv = "USE_BAZEL_VERSION"
 )
 
@@ -48,78 +40,31 @@ type Bazelisk struct {
 
 	allowReenter bool
 
-	// Set to true in getBazelVersion() if this aspect binary is not the user's configured
+	config bazeliskConfig.Config
+
+	// Set to true in getBazelVersionAndUrl() if this aspect binary is not the user's configured
 	// version and should re-enter another aspect binary of a different version
 	AspectShouldReenter bool
 }
 
 func NewBazelisk(workspaceRoot string, allowReenter bool) *Bazelisk {
 	return &Bazelisk{
+		config:        core.MakeDefaultConfig(),
 		workspaceRoot: workspaceRoot,
 		allowReenter:  allowReenter,
 	}
 }
 
-func (bazelisk *Bazelisk) GetBazelPath(repos *core.Repositories) (string, error) {
-	httputil.UserAgent = bazelisk.getUserAgent()
-
-	bazeliskHome := bazelisk.GetEnvOrConfig("BAZELISK_HOME")
-	if len(bazeliskHome) == 0 {
-		userCacheDir, err := cache.UserCacheDir()
-		if err != nil {
-			return "", err
-		}
-
-		bazeliskHome = filepath.Join(userCacheDir, "bazelisk")
-	}
-
-	err := os.MkdirAll(bazeliskHome, 0755)
-	if err != nil {
-		return "", fmt.Errorf("could not create directory %s: %v", bazeliskHome, err)
-	}
-
-	bazelVersionString, baseUrl, err := bazelisk.getBazelVersion()
-	if err != nil {
-		return "", fmt.Errorf("could not get Bazel version: %v", err)
-	}
-
-	if bazelisk.AspectShouldReenter {
-		// Work-around for re-entering older versions of the Aspect CLI that didn't handle
-		// env boostrap correctly.
-		scrubEnvOfBazeliskAspectBootstrap()
-	}
-
-	bazelPath, err := homedir.Expand(bazelVersionString)
-	if err != nil {
-		return "", fmt.Errorf("could not expand home directory in path: %v", err)
-	}
-
-	// If we aren't using a local Bazel binary, we'll have to parse the version string and
-	// download the version that the user wants.
-	if !filepath.IsAbs(bazelPath) {
-		bazelPath, err = downloadBazel(bazelVersionString, baseUrl, bazeliskHome, repos)
-		if err != nil {
-			return "", fmt.Errorf("could not download Bazel: %v", err)
-		}
-	} else {
-		baseDirectory := filepath.Join(bazeliskHome, "local")
-		bazelPath, err = linkLocalBazel(baseDirectory, bazelPath)
-		if err != nil {
-			return "", fmt.Errorf("could not link local Bazel: %v", err)
-		}
-	}
-
-	return bazelPath, nil
-}
-
 // Run runs the main Bazelisk logic for the given arguments and Bazel repositories.
-func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams, env []string, wd *string) error {
-	bazelPath, err := bazelisk.GetBazelPath(repos)
+func (bazelisk *Bazelisk) Run(args []string, repos *core.Repositories, streams ioutils.Streams, env []string, config bazeliskConfig.Config, wd *string) error {
+	httputil.UserAgent = getUserAgent(config)
+
+	bazelInstallation, err := bazelisk.GetBazelInstallation(repos, config)
 	if err != nil {
 		return fmt.Errorf("could not get path to Bazel: %v", err)
 	}
 
-	exitCode, err := bazelisk.runBazel(bazelPath, args, streams, env, wd)
+	exitCode, err := bazelisk.runBazel(bazelInstallation.Path, args, streams, env, config, wd)
 	if err != nil {
 		return fmt.Errorf("could not run Bazel: %v", err)
 	}
@@ -173,15 +118,13 @@ func isAspectVersionMismatch(aspectRuntime *aspectRuntimeInfo, version string, b
 	return aspectRuntime.Version != version || aspectRuntime.BaseUrl != baseUrl
 }
 
-func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
-	// The logic in upstream Bazelisk v1.15.0
-	// (https://github.com/bazelbuild/bazelisk/blob/c9081741bc1420d601140a4232b5c48872370fdc/core/core.go#L318)
-	// has been updated here to support bootstrapping and reentering a different version and/or tier
-	// of Aspect CLI.
+func (bazelisk *Bazelisk) getBazelVersionAndUrl() (string, string, error) {
+	// The logic wraps the Bazelisk GetBazelVersion() to add support for bootstrapping
+	// and reentering a different version and/or tier of Aspect CLI.
 
 	// Gather info on the Aspect CLI version running
 	aspectRuntime := &aspectRuntimeInfo{
-		Reentrant: len(os.Getenv(aspectReentrantEnv)) != 0,
+		Reentrant: len(os.Getenv(skipWrapperEnv)) != 0,
 		Version:   buildinfo.Current().Version(),
 		DevBuild:  strings.HasPrefix(buildinfo.Current().Version(), "unknown"),
 		BaseUrl:   config.AspectBaseUrl(buildinfo.Current().OpenSource),
@@ -190,8 +133,8 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	// Get the bazelisk version config from the USE_BAZEL_VERSION and BAZELISK_BASE_URL env vars
 	// and/or the .bazeliskrc file
 	bazeliskConfig := &bazeliskVersionConfig{
-		UseBazelVersion: bazelisk.GetEnvOrConfig(useBazelVersionEnv),
-		BazeliskBaseUrl: bazelisk.GetEnvOrConfig(core.BaseURLEnv),
+		UseBazelVersion: bazelisk.config.Get(useBazelVersionEnv),
+		BazeliskBaseUrl: bazelisk.config.Get(core.BaseURLEnv),
 	}
 
 	// If bazelisk is configured to bootstrap the Aspect CLI and the version configured does not
@@ -220,128 +163,9 @@ func (bazelisk *Bazelisk) getBazelVersion() (string, string, error) {
 	}
 
 	// Same as upstream bazelisk at this point:
-	// https://github.com/bazelbuild/bazelisk/blob/c9081741bc1420d601140a4232b5c48872370fdc/core/core.go#L344
-
-	workspaceRoot := bazelisk.workspaceRoot
-
-	// Load the version from the .bazelversion file if we know the workspace root and it exists
-	if len(workspaceRoot) != 0 {
-		bazelVersionPath := filepath.Join(workspaceRoot, ".bazelversion")
-		if _, err := os.Stat(bazelVersionPath); err == nil {
-			f, err := os.Open(bazelVersionPath)
-			if err != nil {
-				return "", "", fmt.Errorf("could not read %s: %v", bazelVersionPath, err)
-			}
-			defer f.Close()
-
-			scanner := bufio.NewScanner(f)
-			scanner.Scan()
-			bazelVersion := scanner.Text()
-			if err := scanner.Err(); err != nil {
-				return "", "", fmt.Errorf("could not read version from file %s: %v", bazelVersion, err)
-			}
-
-			if len(bazelVersion) != 0 {
-				return bazelVersion, bazeliskConfig.BazeliskBaseUrl, nil
-			}
-		}
-	}
-
-	// If we still don't have a Bazel version then check for a USE_BAZEL_FALLBACK_VERSION
-	fallbackVersionFormat := bazelisk.GetEnvOrConfig("USE_BAZEL_FALLBACK_VERSION")
-	fallbackVersionMode, fallbackVersion, hasFallbackVersionMode := strings.Cut(fallbackVersionFormat, ":")
-	if !hasFallbackVersionMode {
-		fallbackVersionMode, fallbackVersion, hasFallbackVersionMode = "silent", fallbackVersionMode, true
-	}
-	if len(fallbackVersion) == 0 {
-		fallbackVersion = "latest"
-	}
-	if fallbackVersionMode == "error" {
-		return "", "", fmt.Errorf("not allowed to use fallback version %q", fallbackVersion)
-	}
-	if fallbackVersionMode == "warn" {
-		log.Printf("Warning: used fallback version %q\n", fallbackVersion)
-		return fallbackVersion, bazeliskConfig.BazeliskBaseUrl, nil
-	}
-	if fallbackVersionMode == "silent" {
-		return fallbackVersion, bazeliskConfig.BazeliskBaseUrl, nil
-	}
-	return "", "", fmt.Errorf("invalid fallback version format %q (effectively %q)", fallbackVersionFormat, fmt.Sprintf("%s:%s", fallbackVersionMode, fallbackVersion))
-}
-
-func downloadBazel(bazelVersionString, baseURL string, bazeliskHome string, repos *core.Repositories) (string, error) {
-	bazelFork, bazelVersion, err := parseBazelForkAndVersion(bazelVersionString)
+	v, err := bazelisk.GetBazelVersion(bazelisk.config)
 	if err != nil {
-		return "", fmt.Errorf("could not parse Bazel fork and version: %v", err)
+		return "", "", err
 	}
-
-	resolvedBazelVersion, downloader, err := repos.ResolveVersion(bazeliskHome, bazelFork, bazelVersion)
-	if err != nil {
-		return "", fmt.Errorf("could not resolve the version '%s' to an actual version number: %v", bazelVersion, err)
-	}
-
-	bazelForkOrURL := dirForURL(baseURL)
-	if len(bazelForkOrURL) == 0 {
-		bazelForkOrURL = bazelFork
-	}
-
-	baseDirectory := filepath.Join(bazeliskHome, "downloads", bazelForkOrURL)
-	bazelPath, err := downloadBazelIfNecessary(resolvedBazelVersion, baseDirectory, repos, baseURL, downloader)
-	return bazelPath, err
-}
-
-func downloadBazelIfNecessary(version string, baseDirectory string, repos *core.Repositories, baseURL string, downloader core.DownloadFunc) (string, error) {
-	pathSegment, err := platforms.DetermineBazelFilename(version, false)
-	if err != nil {
-		return "", fmt.Errorf("could not determine path segment to use for Bazel binary: %v", err)
-	}
-
-	destDir := filepath.Join(baseDirectory, pathSegment, "bin")
-	destFile := "bazel" + platforms.DetermineExecutableFilenameSuffix()
-
-	if baseURL != "" {
-		return repos.DownloadFromBaseURL(baseURL, version, destDir, destFile)
-	}
-
-	return downloader(destDir, destFile)
-}
-
-func (bazelisk *Bazelisk) maybeDelegateToWrapper(bazel string) string {
-	if bazelisk.GetEnvOrConfig(skipWrapperEnv) != "" || os.Getenv(aspectReentrantEnv) != "" {
-		return bazel
-	}
-
-	wrapper := filepath.Join(bazelisk.workspaceRoot, wrapperPath)
-	if stat, err := os.Stat(wrapper); err != nil || stat.IsDir() || stat.Mode().Perm()&0111 == 0 {
-		return bazel
-	}
-
-	return wrapper
-}
-
-func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams ioutils.Streams, env []string, wd *string, ctx context.Context) *exec.Cmd {
-	execPath := bazelisk.maybeDelegateToWrapper(bazel)
-
-	var cmd *exec.Cmd
-	if ctx != nil {
-		cmd = exec.CommandContext(ctx, execPath, args...)
-	} else {
-		cmd = exec.Command(execPath, args...)
-	}
-	cmd.Env = os.Environ()
-	if env != nil {
-		cmd.Env = append(cmd.Env, env...)
-	}
-	cmd.Env = append(cmd.Env, aspectReentrantEnv+"=true")
-	if execPath != bazel {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", bazelReal, bazel))
-	}
-	if wd != nil {
-		cmd.Dir = *wd
-	}
-	prependDirToPathList(cmd, filepath.Dir(execPath))
-	cmd.Stdin = streams.Stdin
-	cmd.Stdout = streams.Stdout
-	cmd.Stderr = streams.Stderr
-	return cmd
+	return v, bazeliskConfig.BazeliskBaseUrl, err
 }
