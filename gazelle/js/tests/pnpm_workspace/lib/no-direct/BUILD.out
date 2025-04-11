@@ -6,6 +6,7 @@ npm_link_all_packages(name = "node_modules")
 ts_project(
     name = "no-direct",
     srcs = ["index.ts"],
+    tsconfig = "//:tsconfig",
     deps = [
         ":node_modules/@lib/b",
         ":node_modules/typescript",
