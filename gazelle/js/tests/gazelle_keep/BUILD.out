@@ -1,7 +1,5 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
-# gazelle:js_tsconfig enabled
-
 ts_project(
     name = "gazelle_keep",
     srcs = [

@@ -188,7 +188,7 @@ func newRootConfig() *JsGazelleConfig {
 		rel:                        "",
 		generationEnabled:          true,
 		protoGenerationEnabled:     true,
-		tsconfigGenerationEnabled:  false,
+		tsconfigGenerationEnabled:  true,
 		packageGenerationEnabled:   NpmPackageReferencedMode,
 		packageTargetKind:          PackageTargetKind_Package,
 		pnpmLockPath:               "pnpm-lock.yaml",

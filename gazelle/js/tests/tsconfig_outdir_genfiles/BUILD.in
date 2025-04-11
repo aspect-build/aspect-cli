@@ -1,5 +1,3 @@
-# gazelle:js_tsconfig enabled
-
 # Generated .ts in src dir
 genrule(
     name = "gen-0",

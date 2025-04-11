@@ -10,6 +10,7 @@ ts_project(
         "index.ts",
         "package.json",
     ],
+    tsconfig = "//:tsconfig",
     deps = [
         ":node_modules/@aspect-test/e",
         ":node_modules/@lib/b",
