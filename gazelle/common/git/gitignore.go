@@ -48,15 +48,6 @@ func processGitignoreFile(c *config.Config, p string) {
 }
 
 func ReadGitConfig(c *config.Config, rel string, f *rule.File) {
-	// Enable .gitignore support by default in Aspect gazelle languages.
-	// TODO: default to false and encourage use of .bazelignore instead
-	if rel == "" {
-		_, exists := c.Exts[enabledExt]
-		if !exists {
-			c.Exts[enabledExt] = true
-		}
-	}
-
 	// Collect config from directives within this BUILD.
 	if f != nil {
 		for _, d := range f.Directives {
