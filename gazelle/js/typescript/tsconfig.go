@@ -178,13 +178,17 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	var baseConfig *TsConfig
 	var extends string
 	if c.Extends != "" {
+		// Load the extended config if it can be resolved.
+		// Extending external config such as npm packages can not be loaded but should
+		// still be recorderded for computing dependencies.
+		extends = path.Clean(c.Extends)
+
 		for _, potential := range resolver(path.Dir(tsconfig), c.Extends) {
 			base, err := parseTsConfigJSONFile(parsed, resolver, root, potential)
 
 			if err != nil {
 				BazelLog.Warnf("Failed to load base tsconfig file %q from %q: %v", c.Extends, tsconfig, err)
 			} else if base != nil {
-				extends = path.Clean(c.Extends)
 				baseConfig = base
 				break
 			}

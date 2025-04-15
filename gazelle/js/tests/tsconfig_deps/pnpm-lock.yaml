@@ -6,6 +6,7 @@ specifiers:
   '@types/testing-library__jest-dom': ^5.14.5
   cypress: ^13.16.0
   jquery: 3.6.1
+  fastify-tsconfig: ~1.2.3
 
 dependencies:
   '@testing-library/jest-dom': 5.16.5
@@ -13,3 +14,4 @@ dependencies:
   '@types/testing-library__jest-dom': 5.14.5
   cypress: 13.16.0
   jquery: 3.6.1
+  fastify-tsconfig: 1.2.3
