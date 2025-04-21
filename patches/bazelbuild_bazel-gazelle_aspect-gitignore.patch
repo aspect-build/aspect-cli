@@ -12,7 +12,7 @@ index e5b52e8..ce434ef 100644
  	bazelignorePaths, err := loadBazelIgnore(repoRoot)
  	if err != nil {
 diff --git a/walk/walk.go b/walk/walk.go
-index b073404..43c3f58 100644
+index 3a6de86..f977519 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
 @@ -177,6 +177,22 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
