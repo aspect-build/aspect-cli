@@ -35,7 +35,7 @@ genrule(
 )
 EOF
 
-    run aspect build :foo --announce_rc --keep_going --aspect:interactive=false --nocheck_up_to_date --experimental_use_sandboxfs=false --keep_going
+    CI=true run aspect build :foo --announce_rc --keep_going --nocheck_up_to_date --experimental_use_sandboxfs=false --keep_going
     assert_success
     assert_output --partial "INFO: Build completed successfully"
 }
@@ -162,16 +162,17 @@ EOF
 
 @test 'should warn about unknown flags that start with --aspect:' {
     touch BUILD.bazel
+    export CI=true
 
-    run aspect query --aspect:nounknownflag=1 --aspect:interactive=false //...
+    run aspect query --aspect:nounknownflag=1 //...
     assert_failure
     assert_output --partial "ERROR: --aspect:nounknownflag=1 :: Unrecognized option: --aspect:nounknownflag=1"
 
-    run aspect query --aspect:unknownflag=2 --aspect:interactive=false //...
+    run aspect query --aspect:unknownflag=2 //...
     assert_failure
     assert_output --partial "ERROR: --aspect:unknownflag=2 :: Unrecognized option: --aspect:unknownflag=2"
 
-    run aspect query --aspect:interactive=false //...
+    run aspect query //...
     assert_success
 }
 
