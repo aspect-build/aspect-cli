@@ -549,6 +549,16 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 		sourceRule.SetAttr("visibility", group.visibility)
 	}
 
+	// Manage the ts_project(isolated_typecheck) attribute
+	if ruleKind == TsProjectKind {
+		if tsconfig != nil && tsconfig.IsolatedDeclarations != nil {
+			// Assign if specified in the tsconfig
+			sourceRule.SetAttr("isolated_typecheck", *tsconfig.IsolatedDeclarations)
+		}
+	} else {
+		sourceRule.DelAttr("isolated_typecheck")
+	}
+
 	// If the rule kind is not a ts_project rule then delete all tsconfig related attributes.
 	// Delete from the existing rule if it exists to bypass any merge/#keep logic related to ts_project.
 	if ruleKind != TsProjectKind {
