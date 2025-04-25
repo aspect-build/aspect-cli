@@ -28,24 +28,25 @@ import (
 )
 
 type tsCompilerOptionsJSON struct {
-	AllowJs           *bool                `json:"allowJs"`
-	Composite         *bool                `json:"composite"`
-	Declaration       *bool                `json:"declaration"`
-	DeclarationDir    *string              `json:"declarationDir"`
-	DeclarationMap    *bool                `json:"declarationMap"`
-	DeclarationOnly   *bool                `json:"emitDeclarationOnly"`
-	Incremental       *bool                `json:"incremental"`
-	TsBuildInfoFile   *string              `json:"tsBuildInfoFile"`
-	SourceMap         *bool                `json:"sourceMap"`
-	ResolveJsonModule *bool                `json:"resolveJsonModule"`
-	OutDir            *string              `json:"outDir"`
-	RootDir           *string              `json:"rootDir"`
-	RootDirs          *[]string            `json:"rootDirs"`
-	BaseUrl           *string              `json:"baseUrl"`
-	Paths             *map[string][]string `json:"paths"`
-	Types             *[]string            `json:"types"`
-	JSX               *TsConfigJsxType     `json:"jsx"`
-	ImportHelpers     *bool                `json:"importHelpers"`
+	AllowJs              *bool                `json:"allowJs"`
+	Composite            *bool                `json:"composite"`
+	Declaration          *bool                `json:"declaration"`
+	DeclarationDir       *string              `json:"declarationDir"`
+	DeclarationMap       *bool                `json:"declarationMap"`
+	DeclarationOnly      *bool                `json:"emitDeclarationOnly"`
+	Incremental          *bool                `json:"incremental"`
+	IsolatedDeclarations *bool                `json:"isolatedDeclarations"`
+	TsBuildInfoFile      *string              `json:"tsBuildInfoFile"`
+	SourceMap            *bool                `json:"sourceMap"`
+	ResolveJsonModule    *bool                `json:"resolveJsonModule"`
+	OutDir               *string              `json:"outDir"`
+	RootDir              *string              `json:"rootDir"`
+	RootDirs             *[]string            `json:"rootDirs"`
+	BaseUrl              *string              `json:"baseUrl"`
+	Paths                *map[string][]string `json:"paths"`
+	Types                *[]string            `json:"types"`
+	JSX                  *TsConfigJsxType     `json:"jsx"`
+	ImportHelpers        *bool                `json:"importHelpers"`
 }
 
 type tsReferenceJSON struct {
@@ -103,6 +104,8 @@ type TsConfig struct {
 	Paths *TsConfigPaths
 
 	ImportHelpers bool
+
+	IsolatedDeclarations *bool
 
 	// How jsx/tsx files are handled
 	Jsx TsConfigJsxType
@@ -266,6 +269,13 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		incremental = baseConfig.Incremental
 	}
 
+	var isolatedDeclarations *bool
+	if c.CompilerOptions.IsolatedDeclarations != nil {
+		isolatedDeclarations = c.CompilerOptions.IsolatedDeclarations
+	} else if baseConfig != nil {
+		isolatedDeclarations = baseConfig.IsolatedDeclarations
+	}
+
 	var tsBuildInfoFile string
 	if c.CompilerOptions.TsBuildInfoFile != nil {
 		tsBuildInfoFile = *c.CompilerOptions.TsBuildInfoFile
@@ -356,28 +366,29 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	}
 
 	config := TsConfig{
-		ConfigDir:         configDir,
-		ConfigName:        configName,
-		AllowJs:           allowJs,
-		Composite:         composite,
-		Declaration:       declaration,
-		DeclarationDir:    declarationDir,
-		DeclarationMap:    declarationMap,
-		DeclarationOnly:   declarationOnly,
-		Incremental:       incremental,
-		TsBuildInfoFile:   tsBuildInfoFile,
-		SourceMap:         sourceMap,
-		ResolveJsonModule: resolveJsonModule,
-		OutDir:            OutDir,
-		RootDir:           RootDir,
-		BaseUrl:           BaseUrl,
-		Paths:             Paths,
-		VirtualRootDirs:   VirtualRootDirs,
-		Extends:           extends,
-		ImportHelpers:     importHelpers,
-		Jsx:               jsx,
-		Types:             types,
-		References:        references,
+		ConfigDir:            configDir,
+		ConfigName:           configName,
+		AllowJs:              allowJs,
+		Composite:            composite,
+		Declaration:          declaration,
+		DeclarationDir:       declarationDir,
+		DeclarationMap:       declarationMap,
+		DeclarationOnly:      declarationOnly,
+		Incremental:          incremental,
+		IsolatedDeclarations: isolatedDeclarations,
+		TsBuildInfoFile:      tsBuildInfoFile,
+		SourceMap:            sourceMap,
+		ResolveJsonModule:    resolveJsonModule,
+		OutDir:               OutDir,
+		RootDir:              RootDir,
+		BaseUrl:              BaseUrl,
+		Paths:                Paths,
+		VirtualRootDirs:      VirtualRootDirs,
+		Extends:              extends,
+		ImportHelpers:        importHelpers,
+		Jsx:                  jsx,
+		Types:                types,
+		References:           references,
 	}
 
 	return &config, nil
