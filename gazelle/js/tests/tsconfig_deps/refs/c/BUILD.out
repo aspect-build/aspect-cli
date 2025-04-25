@@ -1,14 +1,22 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
 ts_project(
-    name = "a",
+    name = "c",
     srcs = ["index.ts"],
     composite = True,
     tsconfig = ":tsconfig",
+    deps = [
+        "//refs/a",
+        "//refs/b",
+    ],
 )
 
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
-    deps = ["//:tsconfig"],
+    deps = [
+        "//:tsconfig",
+        "//refs/a:tsconfig",
+        "//refs/b:tsconfig",
+    ],
 )
