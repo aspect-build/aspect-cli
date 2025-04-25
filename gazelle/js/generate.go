@@ -375,13 +375,18 @@ func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args lang
 	}
 
 	for _, reference := range tsconfig.References {
-		// TODO: how do we know the referenced tsconfig filename?
 		referenceFile := cfg.tsconfigName
+		referenceDir := "."
+		if strings.HasSuffix(reference, ".json") {
+			referenceFile = reference
+		} else {
+			referenceDir = reference
+		}
 
 		imports = append(imports, ImportStatement{
 			ImportSpec: resolve.ImportSpec{
 				Lang: LanguageName,
-				Imp:  path.Join(reference, referenceFile),
+				Imp:  path.Join(referenceDir, referenceFile),
 			},
 			ImportPath: reference,
 			SourcePath: SourcePath,
