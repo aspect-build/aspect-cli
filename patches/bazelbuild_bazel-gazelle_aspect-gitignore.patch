@@ -1,68 +1,112 @@
 diff --git a/walk/config.go b/walk/config.go
-index e5b52e8..ce434ef 100644
+index 67d2c16..07cfea5 100644
 --- a/walk/config.go
 +++ b/walk/config.go
-@@ -174,6 +174,8 @@ type ignoreFilter struct {
- 	ignorePaths          map[string]struct{}
+@@ -58,6 +58,12 @@ type walkConfig struct {
+ 	ignore              bool
+ 	follow              []string
+ 	validBuildFileNames []string // to be copied to config.Config
++
++	// PATCH(gitignore) ---
++	isGitIgnoreDisabled bool
++	gitIgnoreData       interface{}
++	isGitIgnoredExt     func(string, bool) bool
++	// END PATCH(gitignore) ---
  }
  
-+type isGitIgnoredFunc = func(string, bool) bool
+ const (
+@@ -79,6 +85,18 @@ func (wc *walkConfig) clone() *walkConfig {
+ 	return &wcCopy
+ }
+ 
++// PATCH(gitignore) ---
++func (wc *walkConfig) isGitIgnored(p string, isDir bool) bool {
++	if wc.isGitIgnoreDisabled {
++		return false
++	}
++	if wc.isGitIgnoredExt == nil {
++		return false
++	}
++	return wc.isGitIgnoredExt(p, isDir)
++	// END PATCH(gitignore) ---
++}
 +
- func newIgnoreFilter(repoRoot string) *ignoreFilter {
- 	bazelignorePaths, err := loadBazelIgnore(repoRoot)
- 	if err != nil {
-diff --git a/walk/walk.go b/walk/walk.go
-index 59dd672..8a94499 100644
---- a/walk/walk.go
-+++ b/walk/walk.go
-@@ -177,6 +177,22 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
- 		return nil, false
+ func (wc *walkConfig) isExcludedDir(p string) bool {
+ 	return path.Base(p) == ".git" || wc.ignoreFilter.isDirectoryIgnored(p) || matchAnyGlob(wc.excludes, p)
+ }
+@@ -139,7 +157,8 @@ func (cr *Configurer) CheckFlags(_ *flag.FlagSet, c *config.Config) error {
+ }
+ 
+ func (*Configurer) KnownDirectives() []string {
+-	return []string{"build_file_name", "generation_mode", "exclude", "follow", "ignore"}
++	// PATCH(gitignore) ---
++	return []string{"build_file_name", "generation_mode", "exclude", "follow", "ignore", "gitignore"}
+ }
+ 
+ func (cr *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
+@@ -202,6 +221,9 @@ func configureForWalk(parent *walkConfig, rel string, f *rule.File) *walkConfig
+ 					log.Printf("the ignore directive does not take any arguments. Did you mean to use gazelle:exclude instead? in //%s '# gazelle:ignore %s'", f.Pkg, d.Value)
+ 				}
+ 				wc.ignore = true
++			case "gitignore":
++				// PATCH(gitignore) ---
++				wc.isGitIgnoreDisabled = d.Value != "enabled"
+ 			}
+ 		}
+ 	}
+diff --git a/walk/dirinfo.go b/walk/dirinfo.go
+index ea59bbb..12ad5a6 100644
+--- a/walk/dirinfo.go
++++ b/walk/dirinfo.go
+@@ -11,6 +11,17 @@ import (
+ 	"github.com/bazelbuild/bazel-gazelle/rule"
+ )
+ 
++// PATCH(gitignore) ---
++type GitIgnoreProcessor func(r, p string, d interface{}) (func(p string, isDir bool) bool, interface{})
++
++var gitignoreProcessor GitIgnoreProcessor
++
++func SetGitIgnoreProcessor(p GitIgnoreProcessor) {
++	gitignoreProcessor = p
++}
++
++// END-PATCH(gitignore) ---
++
+ // dirInfo holds all the information about a directory that Walk2 needs.
+ type dirInfo struct {
+ 	// subdirs and regularFiles hold the names of subdirectories and regular files
+@@ -67,6 +78,19 @@ func (w *walker) loadDirInfo(rel string) (dirInfo, error) {
  	}
  
+ 	info.config = configureForWalk(parentConfig, rel, info.file)
++
 +	// PATCH(gitignore) ---
-+	// Process any new .gitignore files
-+	if _, hasGitIgnore := filesMap[".gitignore"]; hasGitIgnore {
-+		if ignoreProcessor, hasGitIgnoreProcessor := c.Exts["__aspect:processGitignoreFile"]; hasGitIgnoreProcessor {
-+			ignoreProcessor.(func(*config.Config, string))(c, path.Join(rel, ".gitignore"))
++	if gitignoreProcessor != nil {
++		// Process any new .gitignore files
++		for _, entry := range entries {
++			if entry.Name() == ".gitignore" {
++				info.config.isGitIgnoredExt, info.config.gitIgnoreData = gitignoreProcessor(w.rootConfig.RepoRoot, filepath.Join(rel, entry.Name()), parentConfig.gitIgnoreData)
++				break
++			}
 +		}
 +	}
++	// END-PATCH(gitignore) ---
 +
-+	// Fetch any configured gitignore filters
-+	var isGitIgnored isGitIgnoredFunc
-+	isGitIgnoredExt, hasGitIgnore := c.Exts["__aspect:gitignore"]
-+	if hasGitIgnore && isGitIgnoredExt != nil {
-+		isGitIgnored = isGitIgnoredExt.(isGitIgnoredFunc)
-+	}
-+	// END PATCH(gitignore) ---
-+
- 	// Filter and collect files
- 	var regularFiles []string
- 	for _, ent := range trie.files {
-@@ -185,6 +201,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
- 		if wc.isExcluded(entRel) {
- 			continue
- 		}
+ 	if info.config.isExcludedDir(rel) {
+ 		// Build file excludes the current directory. Ignore contents.
+ 		entries = nil
+@@ -75,6 +99,13 @@ func (w *walker) loadDirInfo(rel string) (dirInfo, error) {
+ 	for _, e := range entries {
+ 		entryRel := path.Join(rel, e.Name())
+ 		e = maybeResolveSymlink(info.config, dir, entryRel, e)
 +
 +		// PATCH(gitignore) ---
-+		if isGitIgnored != nil && isGitIgnored(entRel, ent.IsDir()) {
++		if info.config.isGitIgnored(entryRel, e.IsDir()) {
 +			continue
 +		}
-+		// END PATCH(gitignore) ---
++		// END-PATCH(gitignore) ---
 +
- 		if shouldFollow(wc, dir, entRel, ent) {
- 			regularFiles = append(regularFiles, base)
- 		}
-@@ -200,6 +223,13 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
- 		if wc.isExcluded(entRel) {
- 			continue
- 		}
-+
-+		// PATCH(gitignore) ---
-+		if isGitIgnored != nil && isGitIgnored(entRel, t.entry.IsDir()) {
-+			continue
-+		}
-+		// END PATCH(gitignore) ---
-+
- 		if shouldFollow(wc, dir, entRel, t.entry) {
- 			if updateRels.shouldVisit(entRel, shouldUpdate) {
- 				subFiles, shouldMerge := visit(c.Clone(), cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)
+ 		if e.IsDir() && !info.config.isExcludedDir(entryRel) {
+ 			info.subdirs = append(info.subdirs, e.Name())
+ 		} else if !e.IsDir() && !info.config.isExcludedFile(entryRel) {

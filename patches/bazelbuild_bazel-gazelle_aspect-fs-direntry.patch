@@ -1,34 +1,40 @@
 diff --git a/walk/walk.go b/walk/walk.go
-index 5503ee7..59dd672 100644
+index 5a79dc0..c657dd3 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -140,6 +140,17 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
- func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[string]bool, updateRels *UpdateFilter, trie *pathTrie, wf WalkFunc, rel string, updateParent bool) ([]string, bool) {
- 	haveError := false
+@@ -402,6 +402,17 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
+ 	}
+ 	hasBuildFileError := err != nil
  
 +	// PATCH(files list) ---
 +	filesMap := make(map[string]bool)
-+	for _, node := range trie.children {
-+		filesMap[node.entry.Name()] = true
++	for _, f := range info.regularFiles {
++		filesMap[f] = true
 +	}
-+	for _, node := range trie.files {
-+		filesMap[node.Name()] = true
++	for _, d := range info.subdirs {
++		filesMap[d] = true
 +	}
 +	c.Exts["__aspect:files"] = filesMap
 +	// END PATCH(files list) ---
 +
- 	// Absolute path to the directory being visited
- 	dir := filepath.Join(c.RepoRoot, rel)
- 
-@@ -194,6 +205,11 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
- 				subFiles, shouldMerge := visit(c.Clone(), cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)
- 				if shouldMerge {
- 					for _, f := range subFiles {
-+						// PATCH(files list) ---
-+						// TODO: this part of the patch can be removed once https://github.com/bazel-contrib/bazel-gazelle/pull/1928 lands
-+						filesMap[path.Join(base, f)] = true
-+						// END PATCH(files list) ---
+ 	wc := info.config
+ 	containedByParent := info.file == nil && wc.updateOnly
+ 	if !containedByParent {
+@@ -443,9 +454,17 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
+ 				return
+ 			}
+ 			for _, f := range vi.regularFiles {
++				// PATCH(files list) ---
++				filesMap[path.Join(prefix, f)] = true
++				// END PATCH(files list) ---
 +
- 						regularFiles = append(regularFiles, path.Join(base, f))
- 					}
- 				} else {
+ 				regularFiles = append(regularFiles, path.Join(prefix, f))
+ 			}
+ 			for _, f := range vi.subdirs {
++				// PATCH(files list) ---
++				filesMap[path.Join(prefix, f)] = true
++				// END PATCH(files list) ---
++
+ 				subdirs = append(subdirs, path.Join(prefix, f))
+ 			}
+ 			for _, subdir := range vi.subdirs {
