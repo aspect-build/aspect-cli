@@ -16,6 +16,10 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
 
+func init() {
+	git.SetupGitIgnore()
+}
+
 // Configurer satisfies the config.Configurer interface. It's the
 // language-specific configuration extension.
 var _ config.Configurer = (*typeScriptLang)(nil)
@@ -25,7 +29,6 @@ var _ config.Configurer = (*typeScriptLang)(nil)
 // starts. RegisterFlags may set an initial values in Config.Exts. When flags
 // are set, they should modify these values.
 func (ts *typeScriptLang) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
-	git.SetupGitConfig(c)
 }
 
 // CheckFlags validates the configuration after command line flags are parsed.
@@ -62,9 +65,6 @@ func (ts *typeScriptLang) KnownDirectives() []string {
 		Directive_CustomTargetFiles,
 		Directive_CustomTargetTestFiles,
 		Directive_JsGenerationMode,
-
-		// TODO: move to common
-		git.Directive_GitIgnore,
 	}
 }
 
@@ -94,8 +94,6 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 	}
 
 	ts.readConfigurations(c, rel)
-
-	git.ReadGitConfig(c, rel, f)
 }
 
 func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {

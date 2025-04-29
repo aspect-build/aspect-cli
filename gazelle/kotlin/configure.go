@@ -14,15 +14,16 @@ import (
 	"github.com/rs/zerolog"
 )
 
+func init() {
+	git.SetupGitIgnore()
+}
+
 var _ config.Configurer = (*kotlinLang)(nil)
 
 func (kt *kotlinLang) KnownDirectives() []string {
 	return []string{
 		kotlinconfig.Directive_KotlinExtension,
 		jvm_javaconfig.JavaMavenInstallFile,
-
-		// TODO: move to common
-		git.Directive_GitIgnore,
 	}
 }
 
@@ -46,9 +47,6 @@ func (kt *kotlinLang) Configure(c *config.Config, rel string, f *rule.File) {
 		cfg = parent.NewChild(rel)
 		cfgs[rel] = cfg
 	}
-
-	// Collect the ignore files for this package
-	git.ReadGitConfig(c, rel, f)
 
 	if f != nil {
 		for _, d := range f.Directives {
@@ -84,8 +82,6 @@ func (kt *kotlinLang) Configure(c *config.Config, rel string, f *rule.File) {
 }
 
 func (kc *kotlinLang) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
-	git.SetupGitConfig(c)
-
 	// TODO: support rules_jvm flags such as 'java-maven-install-file'? (see rules_jvm java/gazelle/configure.go)
 }
 

@@ -8,85 +8,52 @@ import (
 	"path"
 	"strings"
 
-	common "github.com/aspect-build/aspect-cli/gazelle/common"
 	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
-	"github.com/bazelbuild/bazel-gazelle/config"
-	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/bazelbuild/bazel-gazelle/walk"
 	gitignore "github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
 // TODO: remove and align with gazelle after https://github.com/aspect-build/aspect-cli/issues/755
 
-// Must align with patched bazel-gazelle
-const ASPECT_GITIGNORE = "__aspect:gitignore"
-
-type isGitIgnoredFunc = func(string, bool) bool
-
-// Directive to enable/disable gitignore support
-const Directive_GitIgnore = "gitignore"
-
-// Internal
-const enabledExt = Directive_GitIgnore
-const ignorePatternsExt = "gitignore:patterns"
-
-func SetupGitConfig(rootConfig *config.Config) {
-	rootConfig.Exts["__aspect:processGitignoreFile"] = processGitignoreFile
+func SetupGitIgnore() {
+	walk.SetGitIgnoreProcessor(processGitignoreFile)
 }
 
-func processGitignoreFile(c *config.Config, p string) {
-	ignoreFilePath := path.Join(c.RepoRoot, p)
-	ignoreReader, ignoreErr := os.Open(ignoreFilePath)
+type isGitIgnored func(p string, isDir bool) bool
+
+func processGitignoreFile(rootDir, gitignorePath string, d interface{}) (func(p string, isDir bool) bool, interface{}) {
+	var ignorePatterns []gitignore.Pattern
+	if d != nil {
+		ignorePatterns = d.([]gitignore.Pattern)
+	}
+
+	ignoreReader, ignoreErr := os.Open(path.Join(rootDir, gitignorePath))
 	if ignoreErr == nil {
-		BazelLog.Tracef("Add gitignore file %s", p)
+		BazelLog.Tracef("Add gitignore file %s", gitignorePath)
 		defer ignoreReader.Close()
-		addIgnore(c, path.Dir(p), ignoreReader)
+
+		ignorePatterns = append(ignorePatterns, parseIgnore(path.Dir(gitignorePath), ignoreReader)...)
 	} else {
-		msg := fmt.Sprintf("Failed to open %s: %v", p, ignoreErr)
+		msg := fmt.Sprintf("Failed to open %s: %v", gitignorePath, ignoreErr)
 		BazelLog.Error(msg)
 		fmt.Printf("%s\n", msg)
 	}
-}
 
-func ReadGitConfig(c *config.Config, rel string, f *rule.File) {
-	// Collect config from directives within this BUILD.
-	if f != nil {
-		for _, d := range f.Directives {
-			switch d.Key {
-			case Directive_GitIgnore:
-				enabled := common.ReadEnabled(d)
-				c.Exts[enabledExt] = enabled
-				if enabled {
-					c.Exts[ASPECT_GITIGNORE] = createMatcherFunc(c)
-				} else {
-					c.Exts[ASPECT_GITIGNORE] = nil
-				}
-			}
-		}
-	}
-}
-
-func isEnabled(c *config.Config) bool {
-	enabled, hasEnabled := c.Exts[enabledExt]
-	return hasEnabled && enabled.(bool)
-}
-
-func addIgnore(c *config.Config, rel string, ignoreReader io.Reader) {
-	var ignorePatterns []gitignore.Pattern
-
-	// Load parent ignore patterns
-	if c.Exts[ignorePatternsExt] != nil {
-		ignorePatterns = c.Exts[ignorePatternsExt].([]gitignore.Pattern)
+	if len(ignorePatterns) == 0 {
+		return nil, nil
 	}
 
-	// Append new ignore patterns
-	ignorePatterns = append(ignorePatterns, parseIgnore(rel, ignoreReader)...)
+	// Trim the capacity of the slice to the length to ensure any additional
+	// append()ing in the future will reallocate and copy the origina slice.
+	ignorePatterns = ignorePatterns[:len(ignorePatterns):len(ignorePatterns)]
 
-	// Persist appended ignore patterns
-	c.Exts[ignorePatternsExt] = ignorePatterns
+	return createMatcherFunc(ignorePatterns), ignorePatterns
+}
 
-	// Persist a matcher function with the updated ignore patterns if enabled
-	if isEnabled(c) {
-		c.Exts[ASPECT_GITIGNORE] = createMatcherFunc(c)
+func createMatcherFunc(ignorePatterns []gitignore.Pattern) isGitIgnored {
+	matcher := gitignore.NewMatcher(ignorePatterns)
+	return func(s string, isDir bool) bool {
+		return matcher.Match(strings.Split(s, "/"), isDir)
 	}
 }
 
@@ -109,16 +76,4 @@ func parseIgnore(rel string, ignoreReader io.Reader) []gitignore.Pattern {
 	}
 
 	return matcherPatterns
-}
-
-func createMatcherFunc(c *config.Config) isGitIgnoredFunc {
-	patterns, patternsFound := c.Exts[ignorePatternsExt]
-	if !patternsFound {
-		return nil
-	}
-
-	matcher := gitignore.NewMatcher(patterns.([]gitignore.Pattern))
-	return func(s string, isDir bool) bool {
-		return matcher.Match(strings.Split(s, "/"), isDir)
-	}
 }
