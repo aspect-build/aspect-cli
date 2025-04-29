@@ -1,7 +1,6 @@
 package gazelle
 
 import (
-	"io/fs"
 	"maps"
 	"slices"
 
@@ -13,10 +12,10 @@ import (
 type GazelleWalkFunc func(path string) error
 
 // Must align with patched bazel-gazelle
-const ASPECT_DIR_ENTRIES = "__aspect:direntries"
+const ASPECT_DIR_FILES = "__aspect:files"
 
-func GetSourceEntries(c *config.Config) map[string]fs.DirEntry {
-	return c.Exts[ASPECT_DIR_ENTRIES].(map[string]fs.DirEntry)
+func GetSourceEntries(c *config.Config) map[string]bool {
+	return c.Exts[ASPECT_DIR_FILES].(map[string]bool)
 }
 
 func GetSourceRegularFiles(c *config.Config) []string {

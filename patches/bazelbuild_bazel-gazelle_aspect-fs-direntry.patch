@@ -1,21 +1,21 @@
 diff --git a/walk/walk.go b/walk/walk.go
-index 5503ee7..3a6de86 100644
+index 5503ee7..59dd672 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
 @@ -140,6 +140,17 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
  func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[string]bool, updateRels *UpdateFilter, trie *pathTrie, wf WalkFunc, rel string, updateParent bool) ([]string, bool) {
  	haveError := false
  
-+	// PATCH(fs.DirEntry map) ---
-+	entsMap := make(map[string]fs.DirEntry, len(trie.children))
++	// PATCH(files list) ---
++	filesMap := make(map[string]bool)
 +	for _, node := range trie.children {
-+		entsMap[node.entry.Name()] = node.entry
++		filesMap[node.entry.Name()] = true
 +	}
 +	for _, node := range trie.files {
-+		entsMap[node.Name()] = node
++		filesMap[node.Name()] = true
 +	}
-+	c.Exts["__aspect:direntries"] = entsMap
-+	// END PATCH(fs.DirEntry map) ---
++	c.Exts["__aspect:files"] = filesMap
++	// END PATCH(files list) ---
 +
  	// Absolute path to the directory being visited
  	dir := filepath.Join(c.RepoRoot, rel)
@@ -24,10 +24,10 @@ index 5503ee7..3a6de86 100644
  				subFiles, shouldMerge := visit(c.Clone(), cexts, knownDirectives, updateRels, t, wf, entRel, shouldUpdate)
  				if shouldMerge {
  					for _, f := range subFiles {
-+						// PATCH(fs.DirEntry map) ---
++						// PATCH(files list) ---
 +						// TODO: this part of the patch can be removed once https://github.com/bazel-contrib/bazel-gazelle/pull/1928 lands
-+						entsMap[path.Join(base, f)] = nil
-+						// END PATCH(fs.DirEntry map) ---
++						filesMap[path.Join(base, f)] = true
++						// END PATCH(files list) ---
 +
  						regularFiles = append(regularFiles, path.Join(base, f))
  					}

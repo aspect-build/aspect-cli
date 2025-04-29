@@ -12,7 +12,7 @@ index e5b52e8..ce434ef 100644
  	bazelignorePaths, err := loadBazelIgnore(repoRoot)
  	if err != nil {
 diff --git a/walk/walk.go b/walk/walk.go
-index 3a6de86..f977519 100644
+index 59dd672..8a94499 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
 @@ -177,6 +177,22 @@ func visit(c *config.Config, cexts []config.Configurer, knownDirectives map[stri
@@ -21,7 +21,7 @@ index 3a6de86..f977519 100644
  
 +	// PATCH(gitignore) ---
 +	// Process any new .gitignore files
-+	if _, hasGitIgnore := entsMap[".gitignore"]; hasGitIgnore {
++	if _, hasGitIgnore := filesMap[".gitignore"]; hasGitIgnore {
 +		if ignoreProcessor, hasGitIgnoreProcessor := c.Exts["__aspect:processGitignoreFile"]; hasGitIgnoreProcessor {
 +			ignoreProcessor.(func(*config.Config, string))(c, path.Join(rel, ".gitignore"))
 +		}
