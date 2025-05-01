@@ -18,13 +18,11 @@ package lint
 
 import (
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aspect-build/aspect-cli/bazel/buildeventstream"
@@ -45,10 +43,6 @@ type LintBEPHandler struct {
 	localExecRoot            string
 	besCompleted             chan<- struct{}
 	resultsByLabelByMnemonic map[string]*ResultForLabelAndMnemonic
-
-	besOnce             sync.Once
-	besChan             chan OrderedBuildEvent
-	besHandlerWaitGroup sync.WaitGroup
 }
 
 type OrderedBuildEvent struct {
@@ -62,7 +56,6 @@ func newLintBEPHandler(workspaceRoot string, besCompleted chan<- struct{}) *Lint
 		resultsByLabelByMnemonic: make(map[string]*ResultForLabelAndMnemonic),
 		workspaceRoot:            workspaceRoot,
 		besCompleted:             besCompleted,
-		besChan:                  make(chan OrderedBuildEvent, 100),
 	}
 }
 
@@ -139,83 +132,7 @@ func parseLinterMnemonicFromFilename(filename string) string {
 	return s[len(s)-2]
 }
 
-func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEvent, sequenceNumber int64) error {
-	runner.besChan <- OrderedBuildEvent{event: event, sequenceNumber: sequenceNumber}
-
-	runner.besOnce.Do(func() {
-		runner.besHandlerWaitGroup.Add(1)
-		go func() {
-			defer runner.besHandlerWaitGroup.Done()
-			var nextSn int64 = 1
-			eventBuf := make(map[int64]*buildeventstream.BuildEvent)
-			for o := range runner.besChan {
-				if o.sequenceNumber == 0 {
-					// Zero is an invalid squence number. Process the event since we can't order it.
-					if err := runner.bepEventHandler(o.event); err != nil {
-						log.Printf("error handling build event: %v\n", err)
-					}
-					continue
-				}
-
-				// Check for duplicate sequence numbers
-				if _, exists := eventBuf[o.sequenceNumber]; exists {
-					log.Printf("duplicate sequence number %v\n", o.sequenceNumber)
-					continue
-				}
-
-				// Add the event to the buffer
-				eventBuf[o.sequenceNumber] = o.event
-
-				// Process events in order
-				for {
-					if orderedEvent, exists := eventBuf[nextSn]; exists {
-						if err := runner.bepEventHandler(orderedEvent); err != nil {
-							log.Printf("error handling build event: %v\n", err)
-						}
-						delete(eventBuf, nextSn) // Remove processed event
-						nextSn++                 // Move to the next expected sequence
-					} else {
-						break
-					}
-				}
-			}
-		}()
-	})
-
-	return nil
-}
-
-// waitGroupWithTimeout waits for a WaitGroup with a specified timeout.
-func waitGroupWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
-	done := make(chan struct{})
-
-	// Run a goroutine to close the channel when WaitGroup is done
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// WaitGroup finished within timeout
-		return true
-	case <-time.After(timeout):
-		// Timeout occurred
-		return false
-	}
-}
-
-func (runner *LintBEPHandler) Shutdown() {
-	// Close the build events channel
-	close(runner.besChan)
-
-	// Wait for all build events to come in
-	if !waitGroupWithTimeout(&runner.besHandlerWaitGroup, 60*time.Second) {
-		log.Printf("timed out waiting for BES events\n")
-	}
-}
-
-func (runner *LintBEPHandler) bepEventHandler(event *buildeventstream.BuildEvent) error {
+func (runner *LintBEPHandler) bepEventCallback(event *buildeventstream.BuildEvent, sn int64) error {
 	switch event.Payload.(type) {
 
 	case *buildeventstream.BuildEvent_WorkspaceInfo:
