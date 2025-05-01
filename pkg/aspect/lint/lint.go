@@ -248,7 +248,7 @@ lint:
 		}
 
 		lintBEPHandler = newLintBEPHandler(workspaceRoot, besCompleted)
-		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback, true)
+		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback, false)
 	}
 
 	if postTerminateArgs != nil {
@@ -282,8 +282,6 @@ lint:
 	case <-time.After(60 * time.Second):
 		return fmt.Errorf("timed out waiting for build completed event")
 	}
-
-	lintBEPHandler.Shutdown()
 
 	// Check for subscriber errors
 	subscriberErrors := bep.BESErrors(ctx)
