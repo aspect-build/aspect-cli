@@ -244,10 +244,7 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Context().
 			Return(context.Background()).
 			Times(1)
-		besBackend := &besBackend{
-			ready: make(chan bool, 1),
-		}
-		close(besBackend.ready)
+		besBackend := &besBackend{}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
 		g.Expect(err).To(MatchError(fmt.Errorf("error receiving on build event stream from bazel server: %v", expectedErr)))
@@ -294,12 +291,7 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Context().
 			Return(context.Background()).
 			Times(1)
-		besBackend := &besBackend{
-			subscribers:   &subscriberList{},
-			mtSubscribers: &subscriberList{},
-			ready:         make(chan bool),
-		}
-		close(besBackend.ready)
+		besBackend := &besBackend{subscribers: &subscriberList{}, mtSubscribers: &subscriberList{}}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
 		g.Expect(err).To(MatchError(fmt.Errorf("error sending ack %v to bazel server: %v", 1, expectedErr)))
@@ -346,13 +338,7 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Context().
 			Return(context.Background()).
 			Times(1)
-		besBackend := &besBackend{
-			subscribers:           &subscriberList{},
-			mtSubscribers:         &subscriberList{},
-			ignoreBesUploadErrors: true,
-			ready:                 make(chan bool),
-		}
-		close(besBackend.ready)
+		besBackend := &besBackend{subscribers: &subscriberList{}, mtSubscribers: &subscriberList{}, ignoreBesUploadErrors: true}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
 		g.Expect(err).To(Not(HaveOccurred()))
@@ -398,12 +384,7 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			Context().
 			Return(context.Background()).
 			Times(1)
-		besBackend := &besBackend{
-			subscribers:   &subscriberList{},
-			mtSubscribers: &subscriberList{},
-			ready:         make(chan bool),
-		}
-		close(besBackend.ready)
+		besBackend := &besBackend{subscribers: &subscriberList{}, mtSubscribers: &subscriberList{}}
 		err := besBackend.PublishBuildToolEventStream(eventStream)
 
 		g.Expect(err).To(Not(HaveOccurred()))
@@ -451,9 +432,7 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			subscribers:   &subscriberList{},
 			mtSubscribers: &subscriberList{},
 			errors:        &aspecterrors.ErrorList{},
-			ready:         make(chan bool),
 		}
-		close(besBackend.ready)
 		var calledSubscriber1, calledSubscriber2, calledSubscriber3 bool
 		besBackend.RegisterSubscriber(func(evt *buildeventstream.BuildEvent, sn int64) error {
 			// g.Expect(evt).To(Equal(buildEvent))
@@ -537,21 +516,17 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 			subscribers:   &subscriberList{},
 			mtSubscribers: &subscriberList{},
 			errors:        &aspecterrors.ErrorList{},
-			ready:         make(chan bool),
 		}
-		close(besBackend.ready)
 
 		_, egCtx := errgroup.WithContext(ctx)
 		besProxy := besproxy_mock.NewMockBESProxy(ctrl)
+		besBackend.RegisterBesProxy(besProxy)
 
 		besProxy.
 			EXPECT().
 			PublishBuildToolEventStream(egCtx, grpc.WaitForReady(false)).
 			Return(nil).
 			Times(1)
-
-		besBackend.RegisterBesProxy(egCtx, besProxy)
-
 		besProxy.
 			EXPECT().
 			StreamCreated().
