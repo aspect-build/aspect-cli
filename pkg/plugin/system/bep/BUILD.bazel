@@ -13,7 +13,6 @@ go_library(
         "//pkg/aspecterrors",
         "//pkg/aspectgrpc",
         "//pkg/plugin/system/besproxy",
-        "@com_github_fatih_color//:color",
         "@com_github_golang_protobuf//ptypes/empty",
         "@org_golang_google_genproto//googleapis/devtools/build/v1:build",
         "@org_golang_google_grpc//:grpc",
