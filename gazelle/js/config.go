@@ -89,7 +89,8 @@ const (
 	// The suffix added to the end of a target being wrapped in a package.
 	PackageSrcSuffix = "_lib"
 
-	// The default should align with the rules_js default npm_translate_lock(npm_package_target_name)
+	// TODO: the default should align with the rules_js default npm_translate_lock(npm_package_target_name)
+	// See https://github.com/aspect-build/aspect-cli/issues/560
 	DefaultNpmPackageTargetName = TargetNameDirectoryVar
 )
 
