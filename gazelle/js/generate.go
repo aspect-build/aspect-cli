@@ -67,6 +67,7 @@ var tsProjectReflectedConfigAttributes = []string{
 	"source_map",
 	"incremental",
 	"ts_build_info_file",
+	"no_emit",
 	"resolve_json_module",
 	"preserve_jsx",
 	"out_dir",
@@ -658,6 +659,15 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 				sourceRule.SetAttr("ts_build_info_file", tsconfig.TsBuildInfoFile)
 			} else {
 				sourceRule.DelAttr("ts_build_info_file")
+			}
+		}
+
+		// Reflect the tsconfig noEmit in the ts_project rule
+		if !cfg.IsTsConfigIgnored("no_emit") {
+			if tsconfig != nil && tsconfig.NoEmit != nil {
+				sourceRule.SetAttr("no_emit", *tsconfig.NoEmit)
+			} else {
+				sourceRule.DelAttr("no_emit")
 			}
 		}
 
