@@ -10,6 +10,7 @@ ts_project(
     composite = True,
     declaration = True,
     incremental = True,
+    out_dir = "dist",
     source_map = False,
     ts_build_info_file = "dist/tsconfig.tsbuildinfo",
 )
