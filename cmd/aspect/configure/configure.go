@@ -112,7 +112,7 @@ configure:
 	kotlin: true
 	protobuf: true
 	bzl: true
-	python true`)
+	python: true`)
 	}
 	return err
 }
