@@ -7,7 +7,7 @@ require (
 	github.com/alphadose/haxmap v1.4.0
 	github.com/bazel-contrib/rules_jvm v0.27.0
 	github.com/bazelbuild/bazel-gazelle v0.43.1-0.20250425175824-710f7cb6156a // NOTE: keep in sync with deps.bzl
-	github.com/bazelbuild/bazelisk v1.25.0 // NOTE: keep vendored code in sync
+	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync
 	github.com/bazelbuild/buildtools v0.0.0-20250326091033-f79c8eafbddd
 	github.com/bazelbuild/rules_go v0.52.0 // indirect; NOTE: keep in sync with fetch.bzl
 	github.com/bluekeyes/go-gitdiff v0.7.3

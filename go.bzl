@@ -114,8 +114,8 @@ def deps():
         build_file_generation = "clean",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/bazelbuild/bazelisk",
-        sum = "h1:sMoyCM+x6tsc8CI0INJW1+izZgn3RlY8P++hg0Hdbek=",
-        version = "v1.25.0",
+        sum = "h1:LvPtflqF7p+gjfdp491hqVWtu4+S/7yW9Yz2Xj4KzQk=",
+        version = "v1.26.0",
     )
     go_repository(
         name = "com_github_bazelbuild_buildtools",
