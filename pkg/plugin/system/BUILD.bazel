@@ -15,7 +15,6 @@ go_library(
         "//pkg/plugin/client",
         "//pkg/plugin/sdk/v1alpha4/plugin",
         "//pkg/plugin/system/bep",
-        "//pkg/plugin/system/besproxy",
         "@com_github_spf13_cobra//:cobra",
         "@io_k8s_sigs_yaml//:yaml",
         "@org_golang_google_grpc//:grpc",

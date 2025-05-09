@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
-	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	rootFlags "github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
@@ -42,7 +41,6 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/plugin/client"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/sdk/v1alpha4/plugin"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system/bep"
-	"github.com/aspect-build/aspect-cli/pkg/plugin/system/besproxy"
 )
 
 // PluginSystem is the interface that defines all the methods for the aspect CLI
@@ -216,37 +214,6 @@ func (ps *pluginSystem) createBesBackend(ctx context.Context, cmd *cobra.Command
 		// Here we are just being explicit with the default value since we
 		// also set the receive message size.
 		grpc.MaxSendMsgSize(math.MaxInt32),
-	}
-
-	// Check if user has specified --bes_backend
-	// https://bazel.build/reference/command-line-reference#flag--bes_backend
-	userBesBackend, _ := cmd.Flags().GetString("bes_backend")
-
-	// Configure a BES proxy if `--bes_backend` is set by the user
-	if userBesBackend != "" {
-		// Check if user has specified any --remote_header values
-		// https://bazel.build/reference/command-line-reference#flag--remote_header
-		// TODO: parse the --remote_header values from the .bazelrc files in use instead
-		userRemoteHeaders := make(map[string]string)
-		userRemoteHeader, ok := cmd.Flag("remote_header").Value.(*flags.MultiString)
-		if !ok {
-			return fmt.Errorf("expected --remote_header flag to be registered with cobra as a MultiString")
-		}
-		for _, header := range userRemoteHeader.Get() {
-			s := strings.Split(header, "=")
-			if len(s) != 2 {
-				return fmt.Errorf("invalid ---remote_header flag value '%v'; value must be in the form of a 'name=value' assignment", header)
-			}
-			userRemoteHeaders[s[0]] = s[1]
-		}
-
-		besProxy := besproxy.NewBesProxy(userBesBackend, userRemoteHeaders)
-		if err := besProxy.Connect(); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to connect to build event stream backend %s: %s", userBesBackend, err.Error())
-		} else {
-			fmt.Fprintf(os.Stderr, "Forwarding build event stream to %v\n", userBesBackend)
-			besBackend.RegisterBesProxy(besProxy)
-		}
 	}
 
 	// Setup the BES backend grpc server
