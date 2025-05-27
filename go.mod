@@ -46,7 +46,7 @@ require (
 )
 
 require (
-	github.com/bazelbuild/rules_python/gazelle v0.0.0-20250222074919-2ad200249585
+	github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250508195008-4f5a693bb324
 	github.com/charmbracelet/huh v0.6.0
 	github.com/creack/pty v1.1.24
 	github.com/hay-kot/scaffold v0.6.1

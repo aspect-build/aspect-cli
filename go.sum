@@ -31,6 +31,8 @@ github.com/aymerick/douceur v0.2.0 h1:Mv+mAeH1Q+n9Fr+oyamOlAkUNPWPlA8PPGR0QAaYuP
 github.com/aymerick/douceur v0.2.0/go.mod h1:wlT5vV2O3h55X9m7iVYN0TBM0NH/MmbLnd30/FjWUq4=
 github.com/bazel-contrib/rules_jvm v0.27.0 h1:Qkew39EgVTv+v0if0d8KZXcgazMx3mxg0LGwkcZ7Rd0=
 github.com/bazel-contrib/rules_jvm v0.27.0/go.mod h1:5biFsRs+vKr9mRcHMKfV770Oir5KVvj4ajJltB9+62Y=
+github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250508195008-4f5a693bb324 h1:rP5C+dqPQ5Q9HLDfxXR4AFn9k/F2jcOs4/IIKaP0ik0=
+github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250508195008-4f5a693bb324/go.mod h1:sn64a+UFQCzTy+yCBBnYZFMNENoQWkioKYQQoe0Zs9E=
 github.com/bazelbuild/bazel-gazelle v0.43.1-0.20250425175824-710f7cb6156a h1:lpePoer9Ibj+XibWAO3PNDkNYDXOJTiF5ktLftCZPRI=
 github.com/bazelbuild/bazel-gazelle v0.43.1-0.20250425175824-710f7cb6156a/go.mod h1:SRCc60YGZ27y+BqLzQ+nMh249+FyZz7YtX/V2ng+/z4=
 github.com/bazelbuild/bazelisk v1.26.0 h1:LvPtflqF7p+gjfdp491hqVWtu4+S/7yW9Yz2Xj4KzQk=
@@ -39,8 +41,6 @@ github.com/bazelbuild/buildtools v0.0.0-20250326091033-f79c8eafbddd h1:IEd6eE1VA
 github.com/bazelbuild/buildtools v0.0.0-20250326091033-f79c8eafbddd/go.mod h1:PLNUetjLa77TCCziPsz0EI8a6CUxgC+1jgmWv0H25tg=
 github.com/bazelbuild/rules_go v0.52.0 h1:+ozpngVAW67pCAwfhepaXSSrG3yHcj8K9hNAxSYBno4=
 github.com/bazelbuild/rules_go v0.52.0/go.mod h1:M+YrupNArA7OiTlv++rFUgQ6Sm+ZXbQ5HPUj0cGa0us=
-github.com/bazelbuild/rules_python/gazelle v0.0.0-20250222074919-2ad200249585 h1:TGtsj8b1oWzWPGA2S7Ym3FCgqtqfTfP3zsb24AdL9vs=
-github.com/bazelbuild/rules_python/gazelle v0.0.0-20250222074919-2ad200249585/go.mod h1:2sYjawFH5ezreOt6/b3Q3ccixqdpfqZfvtW9380fWmo=
 github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d h1:xDfNPAt8lFiC1UJrqV3uuy861HCTo708pDMbjHHdCas=
 github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d/go.mod h1:6QX/PXZ00z/TKoufEY6K/a0k6AhaJrQKdFe6OfVXsa4=
 github.com/bluekeyes/go-gitdiff v0.7.3 h1:SElKwtm/IQPOwKs0vdowW5uAlip+P+jatagmUU8E0r4=

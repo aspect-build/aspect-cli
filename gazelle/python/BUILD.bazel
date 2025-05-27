@@ -19,7 +19,7 @@ go_library(
     ] + select({
         ":windows": [],
         "//conditions:default": [
-            "@com_github_bazelbuild_rules_python_gazelle//python",
+            "@com_github_bazel_contrib_rules_python_gazelle//python",
         ],
     }),
 )

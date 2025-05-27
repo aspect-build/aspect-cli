@@ -103,6 +103,17 @@ def deps():
         version = "v0.27.0",
     )
     go_repository(
+        name = "com_github_bazel_contrib_rules_python_gazelle",
+        build_file_proto_mode = "disable_global",
+        importpath = "github.com/bazel-contrib/rules_python/gazelle",
+        patch_args = ["-p2"],  # keep
+        patches = [
+            "//patches:rules_python-unfork-tree-sitter.patch",
+        ],
+        sum = "h1:rP5C+dqPQ5Q9HLDfxXR4AFn9k/F2jcOs4/IIKaP0ik0=",
+        version = "v0.0.0-20250508195008-4f5a693bb324",
+    )
+    go_repository(
         name = "com_github_bazelbuild_bazel_gazelle",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/bazelbuild/bazel-gazelle",
@@ -130,15 +141,6 @@ def deps():
         importpath = "github.com/bazelbuild/rules_go",
         sum = "h1:+ozpngVAW67pCAwfhepaXSSrG3yHcj8K9hNAxSYBno4=",
         version = "v0.52.0",
-    )
-    go_repository(
-        name = "com_github_bazelbuild_rules_python_gazelle",
-        build_file_proto_mode = "disable_global",
-        importpath = "github.com/bazelbuild/rules_python/gazelle",
-        patch_args = ["-p2"],  # keep
-        patches = ["//patches:rules_python-unfork-tree-sitter.patch"],
-        sum = "h1:TGtsj8b1oWzWPGA2S7Ym3FCgqtqfTfP3zsb24AdL9vs=",
-        version = "v0.0.0-20250222074919-2ad200249585",
     )
     go_repository(
         name = "com_github_bgentry_go_netrc",
