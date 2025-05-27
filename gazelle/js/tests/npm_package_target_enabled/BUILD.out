@@ -10,5 +10,5 @@ npm_link_all_packages(name = "node_modules")
 npm_package(
     name = "npm_package_target_enabled_pkg",
     srcs = ["package.json"],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__pkg__"],
 )

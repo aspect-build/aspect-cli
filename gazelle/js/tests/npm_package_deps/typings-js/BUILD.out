@@ -18,5 +18,5 @@ npm_package(
         "package.json",
         ":tsc",
     ],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__pkg__"],
 )

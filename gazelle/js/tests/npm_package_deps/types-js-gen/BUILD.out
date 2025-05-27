@@ -16,5 +16,5 @@ npm_package(
         "package.json",
         ":types.d.ts",
     ],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__pkg__"],
 )

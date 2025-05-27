@@ -313,10 +313,15 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 		packageTargetKind = JsLibraryKind
 	}
 
+	npmPackageVisibility := "//:__pkg__"
+	if lockDir := path.Dir(cfg.PnpmLockfile()); lockDir != "." {
+		npmPackageVisibility = fmt.Sprintf("//%s:__pkg__", lockDir)
+	}
+
 	npmPackage := rule.NewRule(packageTargetKind, packageTargetName)
 	npmPackage.SetPrivateAttr("ts_project_info", &npmPackageInfo.TsProjectInfo)
 	npmPackage.SetAttr("srcs", npmPackageInfo.sources.Values())
-	npmPackage.SetAttr("visibility", []string{rule.CheckInternalVisibility(cfg.rel, "//visibility:public")})
+	npmPackage.SetAttr("visibility", []string{npmPackageVisibility})
 
 	result.Gen = append(result.Gen, npmPackage)
 	result.Imports = append(result.Imports, npmPackageInfo)
