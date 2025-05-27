@@ -21,7 +21,7 @@ npm_package(
         "types.d.ts",
         ":tsc",
     ],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__pkg__"],
 )
 
 ts_config(

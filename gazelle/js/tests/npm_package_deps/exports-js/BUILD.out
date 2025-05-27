@@ -11,5 +11,5 @@ npm_package(
         "//exports-js/lib:tsc",
         "//exports-js/lib2:tsc",
     ],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__pkg__"],
 )

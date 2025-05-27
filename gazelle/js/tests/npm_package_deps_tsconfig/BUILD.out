@@ -12,7 +12,7 @@ npm_link_all_packages(name = "node_modules")
 npm_package(
     name = "pkg",
     srcs = ["package.json"],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__pkg__"],
 )
 
 ts_config(
