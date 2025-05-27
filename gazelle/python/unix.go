@@ -4,8 +4,8 @@
 package python
 
 import (
+	python "github.com/bazel-contrib/rules_python/gazelle/python"
 	"github.com/bazelbuild/bazel-gazelle/language"
-	python "github.com/bazelbuild/rules_python/gazelle/python"
 )
 
 func NewLanguage() language.Language {

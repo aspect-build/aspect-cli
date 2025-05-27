@@ -1,5 +1,5 @@
-bazel_dep(name = "rules_python", version = "1.2.0")  # must match go.mod
-bazel_dep(name = "rules_python_gazelle_plugin", version = "1.2.0")  # must match go.mod
+bazel_dep(name = "rules_python", version = "1.4.1")  # must match go.mod
+bazel_dep(name = "rules_python_gazelle_plugin", version = "1.4.1")  # must match go.mod
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
