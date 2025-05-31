@@ -74,6 +74,10 @@ nogo(
 # gazelle:resolve go github.com/bazelbuild/buildtools/edit @com_github_bazelbuild_buildtools//edit:go_default_library
 # gazelle:resolve go github.com/bazelbuild/buildtools/build @com_github_bazelbuild_buildtools//build:go_default_library
 
+# Use legacy go grpc compilers instead of default v2 (https://github.com/bazel-contrib/bazel-gazelle/commit/e425d46f735e6ccb8c83237f47b4bf338d317a84)
+# TODO: upgrade
+# gazelle:go_grpc_compilers @io_bazel_rules_go//proto:go_grpc
+
 # gazelle-TODO:
 #   cannot use :map_kind go_proto_library go_proto_library //:go_proto_library.bzl
 #   because we need gazelle to understand the built-in kind, see https://github.com/bazelbuild/bazel-gazelle/issues/1162
