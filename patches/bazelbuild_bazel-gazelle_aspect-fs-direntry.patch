@@ -1,10 +1,14 @@
 diff --git a/walk/walk.go b/walk/walk.go
-index 5a79dc0..c657dd3 100644
+index b2097b4..2c2bc08 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -402,6 +402,17 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
+@@ -473,9 +473,21 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
+ 		w.errs = append(w.errs, err)
  	}
  	hasBuildFileError := err != nil
++
+ 	wc := info.config
+ 	containedByParent := info.file == nil && wc.updateOnly
  
 +	// PATCH(files list) ---
 +	filesMap := make(map[string]bool)
@@ -17,10 +21,10 @@ index 5a79dc0..c657dd3 100644
 +	c.Exts["__aspect:files"] = filesMap
 +	// END PATCH(files list) ---
 +
- 	wc := info.config
- 	containedByParent := info.file == nil && wc.updateOnly
- 	if !containedByParent {
-@@ -443,9 +454,17 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
+ 	// Configure the directory, if we haven't done so already.
+ 	_, alreadyConfigured := w.visits[rel]
+ 	if !containedByParent && !alreadyConfigured {
+@@ -519,9 +531,17 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
  				return
  			}
  			for _, f := range vi.regularFiles {

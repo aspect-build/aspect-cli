@@ -6,10 +6,10 @@ require (
 	github.com/Masterminds/semver/v3 v3.3.1
 	github.com/alphadose/haxmap v1.4.0
 	github.com/bazel-contrib/rules_jvm v0.27.0
-	github.com/bazelbuild/bazel-gazelle v0.43.1-0.20250425175824-710f7cb6156a // NOTE: keep in sync with deps.bzl
+	github.com/bazelbuild/bazel-gazelle v0.43.1-0.20250525205641-4dde518211a0 // NOTE: keep in sync with go.MODULE.bazel
 	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync
-	github.com/bazelbuild/buildtools v0.0.0-20250326091033-f79c8eafbddd
-	github.com/bazelbuild/rules_go v0.52.0 // indirect; NOTE: keep in sync with fetch.bzl
+	github.com/bazelbuild/buildtools v0.0.0-20240918101019-be1c24cc9a44
+	github.com/bazelbuild/rules_go v0.54.1-0.20250528223417-fc0cf7999290 // indirect; NOTE: keep in sync with fetch.bzl
 	github.com/bluekeyes/go-gitdiff v0.7.3
 	github.com/bmatcuk/doublestar/v4 v4.8.1
 	github.com/emirpasic/gods v1.18.1
@@ -38,9 +38,9 @@ require (
 	go.starlark.net v0.0.0-20250318223901-d9371fef63fe
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8 // indirect
 	golang.org/x/sync v0.12.0
-	google.golang.org/genproto v0.0.0-20240528184218-531527333157
-	google.golang.org/grpc v1.64.1
-	google.golang.org/protobuf v1.36.6
+	google.golang.org/genproto v0.0.0-20250115164207-1a7da9e5054f
+	google.golang.org/grpc v1.67.3
+	google.golang.org/protobuf v1.36.3
 	gopkg.in/yaml.v3 v3.0.1
 	sigs.k8s.io/yaml v1.4.0
 )
@@ -138,13 +138,13 @@ require (
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
 	golang.org/x/crypto v0.35.0 // indirect
-	golang.org/x/mod v0.22.0 // indirect
+	golang.org/x/mod v0.23.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/tools/go/vcs v0.1.0-deprecated // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20240604185151-ef581f913117 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240528184218-531527333157 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20250106144421-5f5ef82da422 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250106144421-5f5ef82da422 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
