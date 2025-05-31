@@ -1,5 +1,13 @@
 bazel_dep(name = "rules_python", version = "1.4.1")  # must match go.mod
 bazel_dep(name = "rules_python_gazelle_plugin", version = "1.4.1")  # must match go.mod
+single_version_override(
+    module_name = "rules_python_gazelle_plugin",
+    patch_strip = 2,
+    patches = [
+        "//patches:rules_python-unfork-tree-sitter.patch",
+    ],
+    version = "1.4.1",
+)
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
