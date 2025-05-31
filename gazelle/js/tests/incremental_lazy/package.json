@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "dependencies": {
+    "@aspect-test/a": "1.0.0"
+  }
+}

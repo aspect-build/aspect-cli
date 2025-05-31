@@ -313,6 +313,13 @@ func (c *JsGazelleConfig) SetPnpmLockfile(pnpmLockPath string) {
 func (c *JsGazelleConfig) PnpmLockfile() string {
 	return c.pnpmLockPath
 }
+func (c *JsGazelleConfig) PnpmLockRel() string {
+	lockDir := path.Dir(c.pnpmLockPath)
+	if lockDir == "." {
+		return ""
+	}
+	return lockDir
+}
 
 // Set the tsconfig.json file name
 func (c *JsGazelleConfig) SetTsconfigFile(tsconfigName string) {

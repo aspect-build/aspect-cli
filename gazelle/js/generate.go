@@ -115,6 +115,25 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 	return result
 }
 
+func (ts *typeScriptLang) tsPackageInfoToRelsToIndex(cfg *JsGazelleConfig, args language.GenerateArgs, info *TsProjectInfo) []string {
+	i := []string{
+		// Might be an npm package reference
+		cfg.PnpmLockRel(),
+	}
+
+	for _, imp := range info.imports.Values() {
+		impt := imp.(ImportStatement)
+
+		// Might be a direct import of a file or dir
+		i = append(i, impt.Imp)
+
+		// Might require tsconfig path expansion (rootDir[s], paths etc.)
+		i = append(i, ts.tsconfig.ExpandPaths(impt.SourcePath, impt.Imp)...)
+	}
+
+	return i
+}
+
 func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
 	tsconfigRel, tsconfig := ts.tsconfig.FindConfig(args.Rel)
 
@@ -325,6 +344,7 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 
 	result.Gen = append(result.Gen, npmPackage)
 	result.Imports = append(result.Imports, npmPackageInfo)
+	result.RelsToIndex = append(result.RelsToIndex, ts.tsPackageInfoToRelsToIndex(cfg, args, &npmPackageInfo.TsProjectInfo)...)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", cfg.packageTargetKind, args.Rel, packageTargetName)
 }
@@ -347,6 +367,7 @@ func (ts *typeScriptLang) addTsConfigRules(cfg *JsGazelleConfig, args language.G
 
 	result.Gen = append(result.Gen, tsconfigRule)
 	result.Imports = append(result.Imports, imports)
+	result.RelsToIndex = append(result.RelsToIndex, ts.tsPackageInfoToRelsToIndex(cfg, args, imports)...)
 }
 
 func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args language.GenerateArgs, tsconfig *typescript.TsConfig) []ImportStatement {
@@ -446,6 +467,7 @@ func (ts *typeScriptLang) addTsProtoRule(cfg *JsGazelleConfig, args language.Gen
 
 	result.Gen = append(result.Gen, tsProtoLibrary)
 	result.Imports = append(result.Imports, imports)
+	result.RelsToIndex = append(result.RelsToIndex, ts.tsPackageInfoToRelsToIndex(cfg, args, imports)...)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", tsProtoLibrary.Kind(), args.Rel, tsProtoLibrary.Name())
 }
@@ -733,6 +755,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 
 	result.Gen = append(result.Gen, sourceRule)
 	result.Imports = append(result.Imports, info)
+	result.RelsToIndex = append(result.RelsToIndex, ts.tsPackageInfoToRelsToIndex(cfg, args, info)...)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", sourceRule.Kind(), args.Rel, sourceRule.Name())
 
