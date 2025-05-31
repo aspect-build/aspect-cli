@@ -6,5 +6,6 @@ npm_link_all_packages(name = "node_modules")
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
+    visibility = [":__subpackages__"],
     deps = [":node_modules/@tsconfig-test/tools"],
 )

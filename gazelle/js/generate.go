@@ -343,6 +343,7 @@ func (ts *typeScriptLang) addTsConfigRules(cfg *JsGazelleConfig, args language.G
 	tsconfigName := cfg.RenderTsConfigName(tsconfig.ConfigName)
 	tsconfigRule := rule.NewRule(TsConfigKind, tsconfigName)
 	tsconfigRule.SetAttr("src", tsconfig.ConfigName)
+	tsconfigRule.SetAttr("visibility", []string{":__subpackages__"})
 
 	result.Gen = append(result.Gen, tsconfigRule)
 	result.Imports = append(result.Imports, imports)

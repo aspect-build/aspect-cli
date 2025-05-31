@@ -12,4 +12,5 @@ ts_project(
 ts_config(
     name = "bazel_tsconfig",
     src = "bazel.tsconfig.json",
+    visibility = [":__subpackages__"],
 )

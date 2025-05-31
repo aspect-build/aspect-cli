@@ -31,4 +31,5 @@ npm_package(
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
+    visibility = [":__subpackages__"],
 )
