@@ -6,6 +6,7 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_config")
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
+    visibility = [":__subpackages__"],
     deps = [
         "//:node_modules/@types/jquery",
         "//:node_modules/@types/testing-library__jest-dom",

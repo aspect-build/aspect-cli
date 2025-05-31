@@ -12,4 +12,5 @@ js_library(
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
+    visibility = [":__subpackages__"],
 )
