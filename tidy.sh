@@ -8,7 +8,7 @@ set -o errexit -o nounset -o pipefail
 cd "${BUILD_WORKSPACE_DIRECTORY:-.}"
 
 bazel run @go_sdk//:bin/go -- mod tidy
-bazel run //:gazelle_update_repos
+bazel mod tidy
 bazel run //:gazelle
 
 if [ "$(git status --porcelain | wc -l)" -gt 0 ]; then
