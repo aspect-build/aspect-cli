@@ -758,6 +758,11 @@ func (ts *typeScriptLang) collectProtoImports(cfg *JsGazelleConfig, args languag
 		}
 
 		for _, imp := range imports {
+			if proto.IsRulesTsProtoBuiltin(imp) {
+				BazelLog.Tracef("Proto import builtin: %q", imp)
+				continue
+			}
+
 			if cfg.IsImportIgnored(imp) {
 				BazelLog.Tracef("Proto import ignored: %q", imp)
 				continue
