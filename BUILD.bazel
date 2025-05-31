@@ -33,7 +33,6 @@ nogo(
         "@org_golang_x_tools//go/analysis/passes/bools",
         "@org_golang_x_tools//go/analysis/passes/buildssa",
         "@org_golang_x_tools//go/analysis/passes/buildtag",
-        "@org_golang_x_tools//go/analysis/passes/cgocall",
         "@org_golang_x_tools//go/analysis/passes/composite",
         "@org_golang_x_tools//go/analysis/passes/copylock",
         "@org_golang_x_tools//go/analysis/passes/ctrlflow",
@@ -51,7 +50,6 @@ nogo(
         "@org_golang_x_tools//go/analysis/passes/pkgfact",
         "@org_golang_x_tools//go/analysis/passes/printf",
         "@org_golang_x_tools//go/analysis/passes/reflectvaluecompare",
-        "@org_golang_x_tools//go/analysis/passes/shadow",
         "@org_golang_x_tools//go/analysis/passes/shift",
         "@org_golang_x_tools//go/analysis/passes/sigchanyzer",
         "@org_golang_x_tools//go/analysis/passes/sortslice",
@@ -64,8 +62,17 @@ nogo(
         "@org_golang_x_tools//go/analysis/passes/unreachable",
         "@org_golang_x_tools//go/analysis/passes/unsafeptr",
         "@org_golang_x_tools//go/analysis/passes/unusedresult",
-        "@org_golang_x_tools//go/analysis/passes/unusedwrite",
         "@org_golang_x_tools//go/analysis/passes/usesgenerics",
+
+        # TODO:
+        # "@org_golang_x_tools//go/analysis/passes/unusedwrite",
+
+        # Enabling this requires a number of refactors around `err` handling.
+        # "@org_golang_x_tools//go/analysis/passes/shadow:go_default_library",
+
+        # Enabling this requires upstream to resolve
+        # https://github.com/bazelbuild/rules_go/issues/2396
+        # "@org_golang_x_tools//go/analysis/passes/cgocall:go_default_library",
     ],
 )
 
@@ -78,22 +85,16 @@ nogo(
 # TODO: upgrade
 # gazelle:go_grpc_compilers @io_bazel_rules_go//proto:go_grpc
 
+# Use the gazelle bazel modules instead of go.mod modules
+# gazelle:resolve_regexp go github.com/bazelbuild/bazel-gazelle/(.*) @bazel_gazelle//$1:go_default_library
+# gazelle:resolve_regexp go github.com/bazel-contrib/rules_python/gazelle/(.*) @rules_python_gazelle_plugin//$1
+# gazelle:resolve_regexp go github.com/bazelbuild/rules_go/(.*) @io_bazel_rules_go//$1
+
 # gazelle-TODO:
 #   cannot use :map_kind go_proto_library go_proto_library //:go_proto_library.bzl
 #   because we need gazelle to understand the built-in kind, see https://github.com/bazelbuild/bazel-gazelle/issues/1162
 #   so instead we are using the aspect-build/rules_go fork which has our write_source_files feature
 gazelle(name = "gazelle")
-
-gazelle(
-    name = "gazelle_update_repos",
-    args = [
-        "-build_file_proto_mode=disable_global",
-        "-from_file=go.mod",
-        "-to_macro=go.bzl%deps",
-        "-prune",
-    ],
-    command = "update-repos",
-)
 
 alias(
     name = "aspect",

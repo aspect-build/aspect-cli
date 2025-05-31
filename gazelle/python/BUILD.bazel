@@ -11,19 +11,19 @@ go_library(
     deps = select({
         "@io_bazel_rules_go//go/platform:android": [
             "@bazel_gazelle//language:go_default_library",
-            "@com_github_bazel_contrib_rules_python_gazelle//python",
+            "@rules_python_gazelle_plugin//python",
         ],
         "@io_bazel_rules_go//go/platform:darwin": [
             "@bazel_gazelle//language:go_default_library",
-            "@com_github_bazel_contrib_rules_python_gazelle//python",
+            "@rules_python_gazelle_plugin//python",
         ],
         "@io_bazel_rules_go//go/platform:ios": [
             "@bazel_gazelle//language:go_default_library",
-            "@com_github_bazel_contrib_rules_python_gazelle//python",
+            "@rules_python_gazelle_plugin//python",
         ],
         "@io_bazel_rules_go//go/platform:linux": [
             "@bazel_gazelle//language:go_default_library",
-            "@com_github_bazel_contrib_rules_python_gazelle//python",
+            "@rules_python_gazelle_plugin//python",
         ],
         "@io_bazel_rules_go//go/platform:windows": [
             "@bazel_gazelle//language:go_default_library",
