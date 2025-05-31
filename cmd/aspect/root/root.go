@@ -67,6 +67,10 @@ var (
 
 func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 	defaultInteractive := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
+	// Some CI systems attach a TTY, but we shouldn't prompt there
+	if _, ok := os.LookupEnv("CI"); ok {
+		defaultInteractive = false
+	}
 	return NewCmd(ioutils.DefaultStreams, pluginSystem, defaultInteractive)
 }
 

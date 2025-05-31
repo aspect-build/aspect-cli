@@ -1,19 +1,19 @@
 diff --git a/walk/config.go b/walk/config.go
-index 0ec648d..e5b52e8 100644
+index 53dcabe..67d2c16 100644
 --- a/walk/config.go
 +++ b/walk/config.go
-@@ -131,8 +131,14 @@ func (cr *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
- 				c.ValidBuildFileNames = strings.Split(d.Value, ",")
+@@ -171,8 +171,14 @@ func configureForWalk(parent *walkConfig, rel string, f *rule.File) *walkConfig
+ 				wc.validBuildFileNames = strings.Split(d.Value, ",")
  			case "generation_mode":
  				switch generationModeType(strings.TrimSpace(d.Value)) {
 +				case "update":
 +					fmt.Printf("DEPRECATED: `# aspect:generation_mode` %q has been renamed to %q\n", "update", generationModeUpdate)
 +					fallthrough
  				case generationModeUpdate:
- 					wcCopy.updateOnly = true
+ 					wc.updateOnly = true
 +				case "create":
 +					fmt.Printf("DEPRECATED: `# aspect:generation_mode` %q has been renamed to %q\n", "create", generationModeCreate)
 +					fallthrough
  				case generationModeCreate:
- 					wcCopy.updateOnly = false
+ 					wc.updateOnly = false
  				default:

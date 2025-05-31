@@ -33,5 +33,6 @@ def gazelle_generation_test(name, gazelle_binary, dir, data = [], **kwargs):
         size = kwargs.pop("size", "small"),
         gazelle_binary = gazelle_binary,
         test_data = data,
+        env = {"ASPECT_CLI_LOG_DEBUG": "trace"} | kwargs.pop("env", {}),
         **kwargs
     )

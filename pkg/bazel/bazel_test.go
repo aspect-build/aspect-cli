@@ -37,7 +37,7 @@ var testTmpdir = os.Getenv("TEST_TMPDIR")
 var workspaceDir = filepath.Join(testTmpdir, "project")
 var workspaceFile = filepath.Join(workspaceDir, "WORKSPACE")
 var workspaceOverrideDir = filepath.Join(testTmpdir, "project", "foo", "bar")
-var wrapperOverridePath = filepath.Join(workspaceOverrideDir, wrapperPath)
+var wrapperOverridePath = filepath.Join(workspaceOverrideDir, defaultWrapperDirectory, defaultWrapperName)
 var wrapperContents = []byte("#!/usr/bin/env bash\nprintf 'wrapper called'")
 
 func init() {

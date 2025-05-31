@@ -12,12 +12,13 @@ ts_project(
         "index.ts",
         "package.json",
     ],
+    tsconfig = "//:tsconfig",
     deps = [":node_modules/@aspect-test/f"],
 )
 
 js_library(
     name = "c",
     srcs = [],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__pkg__"],
     deps = [":c_lib"],
 )

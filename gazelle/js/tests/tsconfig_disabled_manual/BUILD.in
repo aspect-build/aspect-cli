@@ -10,6 +10,7 @@ ts_project(
     name = "tsconfig_disabled_manual",
     srcs = [],
     declaration = True,
+    isolated_typecheck = True,
     tsconfig = {
         "compilerOptions": {
             "declaration": False,

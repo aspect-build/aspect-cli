@@ -10,11 +10,12 @@ ts_project(
         "index.ts",
         "package.json",
     ],
+    tsconfig = "//:tsconfig",
     deps = [":node_modules/@aspect-test/f"],
 )
 
 npm_package(
     name = "b",
     srcs = [":b_lib"],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__pkg__"],
 )

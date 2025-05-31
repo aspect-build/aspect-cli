@@ -1,7 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-ts_project(
-    name = "a2",
-    srcs = ["lib-a2.ts"],
-    deps = ["//directory/a/a1"],
-)

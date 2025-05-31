@@ -28,24 +28,26 @@ import (
 )
 
 type tsCompilerOptionsJSON struct {
-	AllowJs           *bool                `json:"allowJs"`
-	Composite         *bool                `json:"composite"`
-	Declaration       *bool                `json:"declaration"`
-	DeclarationDir    *string              `json:"declarationDir"`
-	DeclarationMap    *bool                `json:"declarationMap"`
-	DeclarationOnly   *bool                `json:"emitDeclarationOnly"`
-	Incremental       *bool                `json:"incremental"`
-	TsBuildInfoFile   *string              `json:"tsBuildInfoFile"`
-	SourceMap         *bool                `json:"sourceMap"`
-	ResolveJsonModule *bool                `json:"resolveJsonModule"`
-	OutDir            *string              `json:"outDir"`
-	RootDir           *string              `json:"rootDir"`
-	RootDirs          *[]string            `json:"rootDirs"`
-	BaseUrl           *string              `json:"baseUrl"`
-	Paths             *map[string][]string `json:"paths"`
-	Types             *[]string            `json:"types"`
-	JSX               *TsConfigJsxType     `json:"jsx"`
-	ImportHelpers     *bool                `json:"importHelpers"`
+	AllowJs              *bool                `json:"allowJs"`
+	Composite            *bool                `json:"composite"`
+	Declaration          *bool                `json:"declaration"`
+	DeclarationDir       *string              `json:"declarationDir"`
+	DeclarationMap       *bool                `json:"declarationMap"`
+	DeclarationOnly      *bool                `json:"emitDeclarationOnly"`
+	Incremental          *bool                `json:"incremental"`
+	IsolatedDeclarations *bool                `json:"isolatedDeclarations"`
+	TsBuildInfoFile      *string              `json:"tsBuildInfoFile"`
+	SourceMap            *bool                `json:"sourceMap"`
+	ResolveJsonModule    *bool                `json:"resolveJsonModule"`
+	NoEmit               *bool                `json:"noEmit"`
+	OutDir               *string              `json:"outDir"`
+	RootDir              *string              `json:"rootDir"`
+	RootDirs             *[]string            `json:"rootDirs"`
+	BaseUrl              *string              `json:"baseUrl"`
+	Paths                *map[string][]string `json:"paths"`
+	Types                *[]string            `json:"types"`
+	JSX                  *TsConfigJsxType     `json:"jsx"`
+	ImportHelpers        *bool                `json:"importHelpers"`
 }
 
 type tsReferenceJSON struct {
@@ -94,6 +96,7 @@ type TsConfig struct {
 	Incremental       *bool
 	TsBuildInfoFile   string
 	SourceMap         *bool
+	NoEmit            *bool
 	OutDir            string
 	RootDir           string
 	BaseUrl           string
@@ -103,6 +106,8 @@ type TsConfig struct {
 	Paths *TsConfigPaths
 
 	ImportHelpers bool
+
+	IsolatedDeclarations *bool
 
 	// How jsx/tsx files are handled
 	Jsx TsConfigJsxType
@@ -178,13 +183,17 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	var baseConfig *TsConfig
 	var extends string
 	if c.Extends != "" {
+		// Load the extended config if it can be resolved.
+		// Extending external config such as npm packages can not be loaded but should
+		// still be recorderded for computing dependencies.
+		extends = path.Clean(c.Extends)
+
 		for _, potential := range resolver(path.Dir(tsconfig), c.Extends) {
 			base, err := parseTsConfigJSONFile(parsed, resolver, root, potential)
 
 			if err != nil {
 				BazelLog.Warnf("Failed to load base tsconfig file %q from %q: %v", c.Extends, tsconfig, err)
 			} else if base != nil {
-				extends = path.Clean(c.Extends)
 				baseConfig = base
 				break
 			}
@@ -262,6 +271,20 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		incremental = baseConfig.Incremental
 	}
 
+	var isolatedDeclarations *bool
+	if c.CompilerOptions.IsolatedDeclarations != nil {
+		isolatedDeclarations = c.CompilerOptions.IsolatedDeclarations
+	} else if baseConfig != nil {
+		isolatedDeclarations = baseConfig.IsolatedDeclarations
+	}
+
+	var noEmit *bool
+	if c.CompilerOptions.NoEmit != nil {
+		noEmit = c.CompilerOptions.NoEmit
+	} else if baseConfig != nil {
+		noEmit = baseConfig.NoEmit
+	}
+
 	var tsBuildInfoFile string
 	if c.CompilerOptions.TsBuildInfoFile != nil {
 		tsBuildInfoFile = *c.CompilerOptions.TsBuildInfoFile
@@ -293,6 +316,8 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	var OutDir string
 	if c.CompilerOptions.OutDir != nil {
 		OutDir = path.Clean(*c.CompilerOptions.OutDir)
+	} else if baseConfig != nil {
+		OutDir = baseConfig.OutDir
 	} else {
 		OutDir = "."
 	}
@@ -352,28 +377,30 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	}
 
 	config := TsConfig{
-		ConfigDir:         configDir,
-		ConfigName:        configName,
-		AllowJs:           allowJs,
-		Composite:         composite,
-		Declaration:       declaration,
-		DeclarationDir:    declarationDir,
-		DeclarationMap:    declarationMap,
-		DeclarationOnly:   declarationOnly,
-		Incremental:       incremental,
-		TsBuildInfoFile:   tsBuildInfoFile,
-		SourceMap:         sourceMap,
-		ResolveJsonModule: resolveJsonModule,
-		OutDir:            OutDir,
-		RootDir:           RootDir,
-		BaseUrl:           BaseUrl,
-		Paths:             Paths,
-		VirtualRootDirs:   VirtualRootDirs,
-		Extends:           extends,
-		ImportHelpers:     importHelpers,
-		Jsx:               jsx,
-		Types:             types,
-		References:        references,
+		ConfigDir:            configDir,
+		ConfigName:           configName,
+		AllowJs:              allowJs,
+		Composite:            composite,
+		Declaration:          declaration,
+		DeclarationDir:       declarationDir,
+		DeclarationMap:       declarationMap,
+		DeclarationOnly:      declarationOnly,
+		Incremental:          incremental,
+		IsolatedDeclarations: isolatedDeclarations,
+		TsBuildInfoFile:      tsBuildInfoFile,
+		SourceMap:            sourceMap,
+		ResolveJsonModule:    resolveJsonModule,
+		NoEmit:               noEmit,
+		OutDir:               OutDir,
+		RootDir:              RootDir,
+		BaseUrl:              BaseUrl,
+		Paths:                Paths,
+		VirtualRootDirs:      VirtualRootDirs,
+		Extends:              extends,
+		ImportHelpers:        importHelpers,
+		Jsx:                  jsx,
+		Types:                types,
+		References:           references,
 	}
 
 	return &config, nil

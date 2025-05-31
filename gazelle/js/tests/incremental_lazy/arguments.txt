@@ -1,0 +1,3 @@
+-index=lazy
+-r=false
+libs/to-update

@@ -1,6 +1,6 @@
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_file")
 load("@aspect_rules_js//js:defs.bzl", "js_binary")
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "node",
@@ -38,4 +38,10 @@ write_source_file(
     in_file = ":gen_std_modules_go",
     out_file = "std_modules_list.go",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "node_test",
+    srcs = ["paths_test.go"],
+    embed = [":node"],
 )

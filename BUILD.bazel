@@ -74,22 +74,20 @@ nogo(
 # gazelle:resolve go github.com/bazelbuild/buildtools/edit @com_github_bazelbuild_buildtools//edit:go_default_library
 # gazelle:resolve go github.com/bazelbuild/buildtools/build @com_github_bazelbuild_buildtools//build:go_default_library
 
+# Use legacy go grpc compilers instead of default v2 (https://github.com/bazel-contrib/bazel-gazelle/commit/e425d46f735e6ccb8c83237f47b4bf338d317a84)
+# TODO: upgrade
+# gazelle:go_grpc_compilers @io_bazel_rules_go//proto:go_grpc
+
+# Use the gazelle bazel modules instead of go.mod modules
+# gazelle:resolve_regexp go github.com/bazelbuild/bazel-gazelle/(.*) @bazel_gazelle//$1:go_default_library
+# gazelle:resolve_regexp go github.com/bazel-contrib/rules_python/gazelle/(.*) @rules_python_gazelle_plugin//$1
+# gazelle:resolve_regexp go github.com/bazelbuild/rules_go/(.*) @io_bazel_rules_go//$1
+
 # gazelle-TODO:
 #   cannot use :map_kind go_proto_library go_proto_library //:go_proto_library.bzl
 #   because we need gazelle to understand the built-in kind, see https://github.com/bazelbuild/bazel-gazelle/issues/1162
 #   so instead we are using the aspect-build/rules_go fork which has our write_source_files feature
 gazelle(name = "gazelle")
-
-gazelle(
-    name = "gazelle_update_repos",
-    args = [
-        "-build_file_proto_mode=disable_global",
-        "-from_file=go.mod",
-        "-to_macro=go.bzl%deps",
-        "-prune",
-    ],
-    command = "update-repos",
-)
 
 alias(
     name = "aspect",

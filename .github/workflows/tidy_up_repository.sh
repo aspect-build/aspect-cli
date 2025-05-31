@@ -13,7 +13,7 @@ fi
 # For each command, we check if the repository is still clean and proceed.
 commands=(
     "bazel run @go_sdk//:bin/go -- mod tidy"
-    "bazel run //:gazelle_update_repos"
+    "bazel mod tidy"
     "bazel run //:gazelle"
     "bazel run //docs:command_list_update"
 )

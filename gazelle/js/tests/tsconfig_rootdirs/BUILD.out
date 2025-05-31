@@ -1,7 +1,6 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_config", "ts_project")
 
 # gazelle:generation_mode update_only
-# gazelle:js_tsconfig enabled
 
 ts_project(
     name = "tsconfig_rootdirs",
@@ -13,4 +12,5 @@ ts_project(
 ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
+    visibility = [":__subpackages__"],
 )

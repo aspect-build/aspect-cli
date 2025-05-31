@@ -40,6 +40,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/ioutils/cache"
 	"github.com/spf13/cobra"
 
+	"github.com/bazelbuild/bazelisk/config"
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
 	"google.golang.org/protobuf/proto"
@@ -84,15 +85,15 @@ type bazel struct {
 // ExecutablePath implements Bazel.
 func (b *bazel) MakeBazelCommand(ctx context.Context, args []string, streams ioutils.Streams, env []string, wd *string) (*exec.Cmd, error) {
 	bazelisk := NewBazelisk(b.workspaceRoot, false)
-	repos := createRepositories()
-	bazelPath, err := bazelisk.GetBazelPath(repos)
+	repos := createRepositories(bazelisk.config)
+	bazelInstallation, err := bazelisk.GetBazelInstallation(repos, bazelisk.config)
 	if err != nil {
 		return nil, fmt.Errorf("could not get path to Bazel: %v", err)
 	}
 	allArgs := []string{}
 	allArgs = append(allArgs, startupFlags...)
 	allArgs = append(allArgs, args...)
-	return bazelisk.makeBazelCmd(bazelPath, allArgs, streams, env, wd, ctx), nil
+	return bazelisk.makeBazelCmd(bazelInstallation.Path, allArgs, streams, env, bazelisk.config, wd, ctx), nil
 }
 
 // WorkspaceRoot implements Bazel.
@@ -163,11 +164,11 @@ func (b *bazel) WithEnv(env []string) Bazel {
 	return b
 }
 
-func createRepositories() *core.Repositories {
+func createRepositories(config config.Config) *core.Repositories {
 	gcs := &repositories.GCSRepo{}
-	gitHub := repositories.CreateGitHubRepo(core.GetEnvOrConfig("BAZELISK_GITHUB_TOKEN"))
-	// Fetch LTS releases, release candidates, rolling releases and Bazel-at-commits from GCS, forks from GitHub.
-	return core.CreateRepositories(gcs, gcs, gitHub, gcs, gcs, true)
+	gitHub := repositories.CreateGitHubRepo(config.Get("BAZELISK_GITHUB_TOKEN"))
+	// Fetch LTS releases & candidates, rolling releases and Bazel-at-commits from GCS, forks from GitHub.
+	return core.CreateRepositories(gcs, gitHub, gcs, gcs, true)
 }
 
 func scrubEnvOfBazeliskAspectBootstrap() {
@@ -186,16 +187,16 @@ func scrubEnvOfBazeliskAspectBootstrap() {
 func (b *bazel) HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error) {
 	bazelisk := NewBazelisk(b.workspaceRoot, true)
 
-	// Calling bazelisk.getBazelVersion() has the side-effect of setting AspectShouldReenter.
+	// Calling bazelisk.getBazelVersionAndUrl() has the side-effect of setting AspectShouldReenter.
 	// TODO: this pattern could get cleaned up so it does not rely on the side-effect
-	_, _, err := bazelisk.getBazelVersion()
+	_, _, err := bazelisk.getBazelVersionAndUrl()
 	if err != nil {
 		return false, err
 	}
 
 	if bazelisk.AspectShouldReenter && !aspectLockVersion {
-		repos := createRepositories()
-		err := bazelisk.Run(args, repos, streams, b.env, nil)
+		repos := createRepositories(bazelisk.config)
+		err := bazelisk.Run(args, repos, streams, b.env, bazelisk.config, nil)
 		return true, err
 	}
 
@@ -207,7 +208,7 @@ func GetAspectVersions() ([]string, error) {
 }
 
 func GetBazelVersions(bazelFork string) ([]string, error) {
-	repos := createRepositories()
+	repos := createRepositories(core.MakeDefaultConfig())
 
 	aspectCacheDir, err := cache.AspectCacheDir()
 	if err != nil {
@@ -221,10 +222,9 @@ func (b *bazel) RunCommand(streams ioutils.Streams, wd *string, command ...strin
 	// Prepend startup flags
 	command = append(startupFlags, command...)
 
-	repos := createRepositories()
-
 	bazelisk := NewBazelisk(b.workspaceRoot, false)
-	return bazelisk.Run(command, repos, streams, b.env, wd)
+	repos := createRepositories(bazelisk.config)
+	return bazelisk.Run(command, repos, streams, b.env, bazelisk.config, wd)
 }
 
 // Initializes start-up flags from args and returns args without start-up flags
@@ -254,12 +254,14 @@ func (b *bazel) Flags() (map[string]*flags.FlagInfo, error) {
 		return nil, fmt.Errorf("failed write create directory %s: %w", flagsAsProtoCacheDir, err)
 	}
 
-	repos := createRepositories()
 	bazelisk := NewBazelisk(b.workspaceRoot, false)
-	bazelPath, err := bazelisk.GetBazelPath(repos)
+	repos := createRepositories(bazelisk.config)
+	bazelInstallation, err := bazelisk.GetBazelInstallation(repos, bazelisk.config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path to Bazel: %w", err)
 	}
+
+	bazelPath := bazelInstallation.Path
 
 	// If bazelPath ends in local/something/bin/bazel then don't cache since it is a local bazel
 	// that could change versions. Search for "linkLocalBazel" function in the code to find where

@@ -48,6 +48,10 @@ func GetProtoLibraries(args language.GenerateArgs, result *language.GenerateResu
 	return protos, emptyProtos
 }
 
+func IsRulesTsProtoBuiltin(imp string) bool {
+	return strings.HasPrefix(imp, "google/protobuf/")
+}
+
 func GetProtoImports(filepath string) ([]string, error) {
 	content, err := ioutil.ReadFile(filepath)
 	if err != nil {

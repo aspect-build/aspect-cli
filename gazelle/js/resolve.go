@@ -558,12 +558,12 @@ func (ts *typeScriptLang) resolveImportTypes(c *config.Config, ix *resolve.RuleI
 	if resolutionType == Resolution_NativeNode {
 		typesPkg = "@types/node"
 	} else {
-		typesPkg, _ = node.ParseImportPath(imp.ImportSpec.Imp)
-		if typesPkg == "" {
+		pkg, _ := node.ParseImportPath(imp.ImportSpec.Imp)
+		if pkg == "" {
 			return nil
 		}
 
-		typesPkg = toAtTypesPackage(typesPkg)
+		typesPkg = node.ToAtTypesPackage(pkg)
 	}
 
 	typesSpec := resolve.ImportSpec{
@@ -587,23 +587,6 @@ func (ts *typeScriptLang) resolveImportTypes(c *config.Config, ix *resolve.RuleI
 
 	// No types found
 	return nil
-}
-
-func toAtTypesPackage(pkg string) string {
-	slashI := strings.Index(pkg, "/")
-
-	// Change the scoped packages to be __ separated.
-	if pkg[0] == '@' && slashI != -1 {
-		pkg = pkg[1:slashI] + "__" + pkg[slashI+1:]
-		slashI = strings.Index(pkg, "/")
-	}
-
-	// Strip any trailing subpaths
-	if slashI != -1 {
-		pkg = pkg[:slashI]
-	}
-
-	return "@types/" + pkg
 }
 
 // targetListFromResults returns a string with the human-readable list of

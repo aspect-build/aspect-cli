@@ -1,2 +1,1 @@
-# gazelle:js_tsconfig enabled
 # gazelle:js_tsconfig_file bazel.tsconfig.json

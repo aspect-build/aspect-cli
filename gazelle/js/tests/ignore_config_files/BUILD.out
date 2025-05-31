@@ -1,6 +1,7 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
 # gazelle:generation_mode update_only
+# gazelle:gitignore enabled
 
 # Generated .ts
 genrule(

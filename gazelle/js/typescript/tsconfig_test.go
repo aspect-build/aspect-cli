@@ -159,7 +159,7 @@ func TestTsconfigLoad(t *testing.T) {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
 
-		assertEqual(t, recursive.Extends, "", "should not fail extending itself")
+		assertEqual(t, recursive.Extends, "extends-recursive.json", "should not fail extending itself")
 	})
 
 	t.Run("parse a tsconfig file extending an unknown file", func(t *testing.T) {
@@ -168,7 +168,7 @@ func TestTsconfigLoad(t *testing.T) {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
 
-		assertEqual(t, notFound.Extends, "", "should not fail extending unknown")
+		assertEqual(t, notFound.Extends, "does-not-exist.json", "should not fail extending unknown")
 	})
 
 	t.Run("parse a tsconfig file extending a blank string", func(t *testing.T) {
@@ -187,7 +187,7 @@ func TestTsconfigLoad(t *testing.T) {
 			t.Errorf("parseTsConfigJSONFile: %v", err)
 		}
 
-		assertEqual(t, unknown.Extends, "", "should set Extends to blank when not found")
+		assertEqual(t, unknown.Extends, ".svelte-kit/tsconfig.json", "should set Extends to blank when not found")
 	})
 
 	t.Run("parse a tsconfig file extending a named-import", func(t *testing.T) {

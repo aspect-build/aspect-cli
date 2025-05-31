@@ -67,6 +67,7 @@ var tsProjectReflectedConfigAttributes = []string{
 	"source_map",
 	"incremental",
 	"ts_build_info_file",
+	"no_emit",
 	"resolve_json_module",
 	"preserve_jsx",
 	"out_dir",
@@ -112,6 +113,25 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 	}
 
 	return result
+}
+
+func (ts *typeScriptLang) tsPackageInfoToRelsToIndex(cfg *JsGazelleConfig, args language.GenerateArgs, info *TsProjectInfo) []string {
+	i := []string{
+		// Might be an npm package reference
+		cfg.PnpmLockRel(),
+	}
+
+	for _, imp := range info.imports.Values() {
+		impt := imp.(ImportStatement)
+
+		// Might be a direct import of a file or dir
+		i = append(i, impt.Imp)
+
+		// Might require tsconfig path expansion (rootDir[s], paths etc.)
+		i = append(i, ts.tsconfig.ExpandPaths(impt.SourcePath, impt.Imp)...)
+	}
+
+	return i
 }
 
 func (ts *typeScriptLang) addSourceRules(cfg *JsGazelleConfig, args language.GenerateArgs, result *language.GenerateResult) {
@@ -312,13 +332,19 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 		packageTargetKind = JsLibraryKind
 	}
 
+	npmPackageVisibility := "//:__pkg__"
+	if lockDir := path.Dir(cfg.PnpmLockfile()); lockDir != "." {
+		npmPackageVisibility = fmt.Sprintf("//%s:__pkg__", lockDir)
+	}
+
 	npmPackage := rule.NewRule(packageTargetKind, packageTargetName)
 	npmPackage.SetPrivateAttr("ts_project_info", &npmPackageInfo.TsProjectInfo)
 	npmPackage.SetAttr("srcs", npmPackageInfo.sources.Values())
-	npmPackage.SetAttr("visibility", []string{rule.CheckInternalVisibility(cfg.rel, "//visibility:public")})
+	npmPackage.SetAttr("visibility", []string{npmPackageVisibility})
 
 	result.Gen = append(result.Gen, npmPackage)
 	result.Imports = append(result.Imports, npmPackageInfo)
+	result.RelsToIndex = append(result.RelsToIndex, ts.tsPackageInfoToRelsToIndex(cfg, args, &npmPackageInfo.TsProjectInfo)...)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", cfg.packageTargetKind, args.Rel, packageTargetName)
 }
@@ -337,9 +363,11 @@ func (ts *typeScriptLang) addTsConfigRules(cfg *JsGazelleConfig, args language.G
 	tsconfigName := cfg.RenderTsConfigName(tsconfig.ConfigName)
 	tsconfigRule := rule.NewRule(TsConfigKind, tsconfigName)
 	tsconfigRule.SetAttr("src", tsconfig.ConfigName)
+	tsconfigRule.SetAttr("visibility", []string{":__subpackages__"})
 
 	result.Gen = append(result.Gen, tsconfigRule)
 	result.Imports = append(result.Imports, imports)
+	result.RelsToIndex = append(result.RelsToIndex, ts.tsPackageInfoToRelsToIndex(cfg, args, imports)...)
 }
 
 func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args language.GenerateArgs, tsconfig *typescript.TsConfig) []ImportStatement {
@@ -375,13 +403,18 @@ func (ts *typeScriptLang) collectTsConfigImports(cfg *JsGazelleConfig, args lang
 	}
 
 	for _, reference := range tsconfig.References {
-		// TODO: how do we know the referenced tsconfig filename?
 		referenceFile := cfg.tsconfigName
+		referenceDir := "."
+		if strings.HasSuffix(reference, ".json") {
+			referenceFile = reference
+		} else {
+			referenceDir = reference
+		}
 
 		imports = append(imports, ImportStatement{
 			ImportSpec: resolve.ImportSpec{
 				Lang: LanguageName,
-				Imp:  path.Join(reference, referenceFile),
+				Imp:  path.Join(referenceDir, referenceFile),
 			},
 			ImportPath: reference,
 			SourcePath: SourcePath,
@@ -434,6 +467,7 @@ func (ts *typeScriptLang) addTsProtoRule(cfg *JsGazelleConfig, args language.Gen
 
 	result.Gen = append(result.Gen, tsProtoLibrary)
 	result.Imports = append(result.Imports, imports)
+	result.RelsToIndex = append(result.RelsToIndex, ts.tsPackageInfoToRelsToIndex(cfg, args, imports)...)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", tsProtoLibrary.Kind(), args.Rel, tsProtoLibrary.Name())
 }
@@ -549,6 +583,16 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 		sourceRule.SetAttr("visibility", group.visibility)
 	}
 
+	// Manage the ts_project(isolated_typecheck) attribute
+	if ruleKind == TsProjectKind {
+		if tsconfig != nil && tsconfig.IsolatedDeclarations != nil {
+			// Assign if specified in the tsconfig
+			sourceRule.SetAttr("isolated_typecheck", *tsconfig.IsolatedDeclarations)
+		}
+	} else {
+		sourceRule.DelAttr("isolated_typecheck")
+	}
+
 	// If the rule kind is not a ts_project rule then delete all tsconfig related attributes.
 	// Delete from the existing rule if it exists to bypass any merge/#keep logic related to ts_project.
 	if ruleKind != TsProjectKind {
@@ -646,6 +690,15 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 			}
 		}
 
+		// Reflect the tsconfig noEmit in the ts_project rule
+		if !cfg.IsTsConfigIgnored("no_emit") {
+			if tsconfig != nil && tsconfig.NoEmit != nil {
+				sourceRule.SetAttr("no_emit", *tsconfig.NoEmit)
+			} else {
+				sourceRule.DelAttr("no_emit")
+			}
+		}
+
 		// Reflect the tsconfig resolveJsonModule in the ts_project rule
 		if !cfg.IsTsConfigIgnored("resolve_json_module") {
 			if tsconfig != nil && tsconfig.ResolveJsonModule != nil {
@@ -702,6 +755,7 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 
 	result.Gen = append(result.Gen, sourceRule)
 	result.Imports = append(result.Imports, info)
+	result.RelsToIndex = append(result.RelsToIndex, ts.tsPackageInfoToRelsToIndex(cfg, args, info)...)
 
 	BazelLog.Infof("add rule '%s' '%s:%s'", sourceRule.Kind(), args.Rel, sourceRule.Name())
 
@@ -728,6 +782,11 @@ func (ts *typeScriptLang) collectProtoImports(cfg *JsGazelleConfig, args languag
 		}
 
 		for _, imp := range imports {
+			if proto.IsRulesTsProtoBuiltin(imp) {
+				BazelLog.Tracef("Proto import builtin: %q", imp)
+				continue
+			}
+
 			if cfg.IsImportIgnored(imp) {
 				BazelLog.Tracef("Proto import ignored: %q", imp)
 				continue
@@ -1096,7 +1155,7 @@ func toDtsExt(e string) string {
 func toImportSpecPath(importFrom, importPath string) string {
 	// Relative paths
 	if importPath[0] == '.' {
-		return path.Join(path.Dir(importFrom), importPath)
+		return path.Join(importFrom, "..", importPath)
 	}
 
 	// URLs of any protocol
