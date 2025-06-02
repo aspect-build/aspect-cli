@@ -1,6 +1,6 @@
 configure:
   languages:
     javascript: false
-    go: false
+    go: true
     kotlin: false
     protobuf: true
