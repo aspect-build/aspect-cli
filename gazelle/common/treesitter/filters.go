@@ -17,12 +17,7 @@ import (
 //   - eq?
 //   - match?
 func matchesAllPredicates(q *sitterQuery, m *sitter.QueryMatch, qc *sitter.QueryCursor, input []byte) bool {
-	qm := &sitter.QueryMatch{
-		ID:           m.ID,
-		PatternIndex: m.PatternIndex,
-	}
-
-	predicates := q.PredicatesForPattern(uint32(qm.PatternIndex))
+	predicates := q.PredicatesForPattern(uint32(m.PatternIndex))
 	if len(predicates) == 0 {
 		return true
 	}
