@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"path"
+	"unsafe"
 
 	golang "github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/golang"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/java"
@@ -81,22 +82,22 @@ func (tree *treeAst) String() string {
 	return fmt.Sprintf("treeAst{\n lang: %q,\n filePath: %q,\n AST:\n  %v\n}", tree.lang, tree.filePath, tree.sitterTree.RootNode().String())
 }
 
-func toSitterLanguage(lang LanguageGrammar) *sitter.Language {
+func toSitterLanguage(lang LanguageGrammar) unsafe.Pointer {
 	switch lang {
 	case Go:
-		return golang.GetLanguage()
+		return golang.Language()
 	case Java:
-		return java.GetLanguage()
+		return java.Language()
 	case JSON:
-		return json.GetLanguage()
+		return json.Language()
 	case Kotlin:
-		return kotlin.GetLanguage()
+		return kotlin.Language()
 	case Starlark:
-		return starlark.GetLanguage()
+		return starlark.Language()
 	case Typescript:
-		return typescript.GetLanguage()
+		return typescript.LanguageTypescript()
 	case TypescriptX:
-		return tsx.GetLanguage()
+		return tsx.LanguageTSX()
 	}
 
 	log.Panicf("Unknown LanguageGrammar %q", lang)
@@ -150,7 +151,7 @@ func ParseSourceCode(lang LanguageGrammar, filePath string, sourceCode []byte) (
 	ctx := context.Background()
 
 	parser := sitter.NewParser()
-	parser.SetLanguage(toSitterLanguage(lang))
+	parser.SetLanguage(sitter.NewLanguage(toSitterLanguage(lang)))
 
 	tree, err := parser.ParseCtx(ctx, nil, sourceCode)
 	if err != nil {

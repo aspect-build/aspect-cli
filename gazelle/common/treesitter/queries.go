@@ -149,7 +149,7 @@ func fetchQueryMatch(query *sitterQuery, name string, m *sitter.QueryMatch, sour
 }
 
 func mustNewTreeQuery(lang LanguageGrammar, query string) *sitter.Query {
-	treeQ, err := sitter.NewQuery([]byte(query), toSitterLanguage(lang))
+	treeQ, err := sitter.NewQuery([]byte(query), sitter.NewLanguage(toSitterLanguage(lang)))
 	if err != nil {
 		BazelLog.Fatalf("Failed to create query for %q: %v", query, err)
 	}
