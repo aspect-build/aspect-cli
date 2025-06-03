@@ -1,0 +1,2 @@
+# gazelle:js_test_files mocks **/__mocks__/**
+# gazelle:js_test_files **/*.test.ts

@@ -1,0 +1,13 @@
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+
+ts_project(
+    name = "simple_globs",
+    srcs = ["srcs/main.ts"],
+)
+
+ts_project(
+    name = "simple_globs_tests",
+    testonly = True,
+    srcs = ["tests/main.ts"],
+    deps = [":simple_globs"],
+)
