@@ -21,11 +21,8 @@ package tsx
 import "C"
 import (
 	"unsafe"
-
-	sitter "github.com/smacker/go-tree-sitter"
 )
 
-func GetLanguage() *sitter.Language {
-	ptr := unsafe.Pointer(C.tree_sitter_tsx())
-	return sitter.NewLanguage(ptr)
+func LanguageTSX() unsafe.Pointer {
+	return unsafe.Pointer(C.tree_sitter_tsx())
 }
