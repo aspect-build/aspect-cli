@@ -7,7 +7,7 @@ require (
 	github.com/alphadose/haxmap v1.4.0
 	github.com/bazel-contrib/rules_jvm v0.27.0
 	github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250526133658-b40d96aba36d // NOTE: keep in sync with python.MODULE.bazel
-	github.com/bazelbuild/bazel-gazelle v0.43.1-0.20250525205641-4dde518211a0 // NOTE: keep in sync with go.MODULE.bazel
+	github.com/bazelbuild/bazel-gazelle v0.43.1-0.20250530234731-18d02235448d // NOTE: keep in sync with go.MODULE.bazel
 	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync
 	github.com/bazelbuild/buildtools v0.0.0-20250326091033-f79c8eafbddd
 	github.com/bazelbuild/rules_go v0.54.1 // indirect; NOTE: keep in sync with fetch.bzl
