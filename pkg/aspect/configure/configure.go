@@ -28,6 +28,7 @@ import (
 	kotlin "github.com/aspect-build/aspect-cli/gazelle/kotlin"
 	python "github.com/aspect-build/aspect-cli/gazelle/python"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
@@ -132,10 +133,14 @@ func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []
 		}
 	}
 
-	var err error
 	var wd string
-	if wd, err = os.Getwd(); err != nil {
-		log.Fatal(err)
+	if wsRoot := bazel.WorkspaceFromWd.WorkspaceRoot(); wsRoot != "" {
+		wd = wsRoot
+	} else {
+		var err error
+		if wd, err = os.Getwd(); err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	// Append the aspect-cli mode flag to the args parsed by gazelle.
