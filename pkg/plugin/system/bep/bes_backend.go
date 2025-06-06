@@ -325,6 +325,7 @@ func (bb *besBackend) SendEventsToSubscribers(c <-chan *buildv1.PublishBuildTool
 func (bb *besBackend) setupBesUpstreamBackends(ctx context.Context, optionsparsed *buildeventstream.OptionsParsed) error {
 	backends := []string{}
 	remoteHeaders := map[string]string{}
+	hasNoWaitForUpload := false
 	for _, arg := range optionsparsed.CmdLine {
 		if strings.HasPrefix(arg, "--bes_backend=") {
 			// Always skip our bes_backend to avoid recursive uploads.
@@ -338,8 +339,21 @@ func (bb *besBackend) setupBesUpstreamBackends(ctx context.Context, optionsparse
 				return fmt.Errorf("invalid ---remote_header flag value '%v'; value must be in the form of a 'name=value' assignment", arg)
 			}
 			remoteHeaders[remoteHeader[0]] = remoteHeader[1]
+		} else if strings.HasPrefix(arg, "--bes_upload_mode=") {
+			mode := arg[len("--bes_upload_mode="):]
+			hasNoWaitForUpload = mode == "nowait_for_upload_complete" || mode == "fully_async"
 		}
 	}
+
+	if hasNoWaitForUpload {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s --bes_upload_mode nowait_for_upload_complete|fully_async may lead to incomplete BES uploads with Aspect CLI\n\t"+
+				"See: https://github.com/aspect-build/aspect-cli/issues/851\n",
+			color.YellowString("WARNING:"),
+		)
+	}
+
 	// Supporting multiple backends as easy flipping this.
 	// See: https://github.com/aspect-build/silo/issues/3485
 	if len(backends) > 1 {
