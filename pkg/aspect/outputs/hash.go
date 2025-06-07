@@ -72,37 +72,54 @@ func AddRunfilesHash(hashFiles map[string][]string, label string, manifestPath s
 
 	for fileScanner.Scan() {
 		// Manifest entries are in the form
-		// execroot/path /some/absolute/path
-		entry := strings.Split(fileScanner.Text(), " ")
-		abspath := unescape(entry[1])
+		// path/in/runfiles /some/absolute/path/to/actual/file
+		// path/in/runfiles some/relative/path/to/actual/file
+		rawLine := fileScanner.Text()
+
+		// Trim spaces from start and end of string. We saw a case at a customer where there was an
+		// additional space before the start of the runfiles path:
+		// ' _main/external/rules_python~~pip~pypi_312_scipy/site-packages/scipy/io/tests/data/Transparent\sBusy.ani /mnt/ephemeral/output/dirt/__main__/external/rules_python~~pip~pypi_312_scipy/site-packages/scipy/io/tests/data/Transparent Busy.ani'
+		line := strings.TrimSpace(rawLine)
+
+		// Find the index of the first space
+		spaceIndex := strings.Index(line, " ")
+		if spaceIndex == -1 {
+			fmt.Fprintf(os.Stderr, "skipping invalid runfiles manifest entry: '%s'\n", rawLine)
+			continue
+		}
+
+		// Actual path is everything after the first space including additional unescaped spaces
+		actualPath := unescape(line[spaceIndex+1:])
 
 		var fileinfo fs.FileInfo = nil
-		if !strings.HasPrefix(abspath, "/") {
-			possibleAbsolutePath := filepath.Join(outputBase, "external", abspath)
-			if possibleFileinfo, err := os.Stat(possibleAbsolutePath); err == nil {
-				abspath = possibleAbsolutePath
+
+		// As of Bazel 7.4.0, runfiles paths can be relative
+		if !strings.HasPrefix(actualPath, "/") {
+			maybeAbsPath := filepath.Join(outputBase, "external", actualPath)
+			if possibleFileinfo, err := os.Stat(maybeAbsPath); err == nil {
+				actualPath = maybeAbsPath
 				fileinfo = possibleFileinfo
 			}
 		}
 
 		if fileinfo == nil {
-			fileinfo, err = os.Stat(abspath)
+			fileinfo, err = os.Stat(actualPath)
 		}
 
 		if err != nil {
-			return fmt.Errorf("failed to stat runfiles manifest entry %s: %w\n", abspath, err)
+			return fmt.Errorf("failed to stat runfiles manifest entry %s: %w\n", actualPath, err)
 		}
 
 		if fileinfo.IsDir() {
-			// TODO(alexeagle): I think the abspath means we'll get more hashed than we mean to
+			// TODO(alexeagle): I think the actualPath means we'll get more hashed than we mean to
 			// we should pass some other value to the second arg "prefix"
-			direntries, err := dirhash.DirFiles(abspath, abspath)
+			direntries, err := dirhash.DirFiles(actualPath, actualPath)
 			if err != nil {
-				return fmt.Errorf("failed to recursively list directory %s: %w\n", abspath, err)
+				return fmt.Errorf("failed to recursively list directory %s: %w\n", actualPath, err)
 			}
 			hashFiles[label] = append(hashFiles[label], direntries...)
 		} else {
-			hashFiles[label] = append(hashFiles[label], abspath)
+			hashFiles[label] = append(hashFiles[label], actualPath)
 		}
 	}
 	return nil
