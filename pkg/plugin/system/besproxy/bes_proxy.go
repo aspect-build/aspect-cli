@@ -19,7 +19,6 @@ package besproxy
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -51,8 +50,6 @@ func NewBesProxy(host string, headers map[string]string) *besProxy {
 }
 
 type besProxy struct {
-	hadError bool
-
 	client  buildv1.PublishBuildEventClient
 	stream  buildv1.PublishBuildEvent_PublishBuildToolEventStreamClient
 	host    string
@@ -100,37 +97,17 @@ func (bp *besProxy) Send(req *buildv1.PublishBuildToolEventStreamRequest) error 
 		return fmt.Errorf("stream to %v not configured", bp.host)
 	}
 
-	if bp.hadError {
-		return fmt.Errorf("stream to %v is dead", bp.host)
-	}
-
 	// If we want to mutate the BES events in the future before they are sent out to external consumers, this is the place
 	// to do it. See https://github.com/aspect-build/silo/blob/7f13ab16fa10ffcec71b09737f0370f22a508823/pkg/plugin/system/besproxy/bes_proxy.go#L103
 	// as an example.
 
-	err := bp.stream.Send(req)
-
-	// EOF indicates the server sent an error which must be received.
-	if err == io.EOF {
-		_, err = bp.Recv()
-	}
-
-	if err != nil {
-		bp.hadError = true
-	}
-
-	return err
+	return bp.stream.Send(req)
 }
 
 func (bp *besProxy) Recv() (*buildv1.PublishBuildToolEventStreamResponse, error) {
 	if bp.stream == nil {
 		return nil, fmt.Errorf("stream to %v not configured", bp.host)
 	}
-
-	if bp.hadError {
-		return nil, fmt.Errorf("stream to %v is dead", bp.host)
-	}
-
 	return bp.stream.Recv()
 }
 
