@@ -37,7 +37,7 @@ import (
 
 const (
 	bazelReal               = "BAZEL_REAL"
-	skipWrapperEnv          = "ASPECT_REENTRANT"
+	skipWrapperEnv          = "BAZELISK_SKIP_WRAPPER"
 	bazeliskEnv             = "BAZELISK"
 	defaultWrapperDirectory = "./tools"
 	defaultWrapperName      = "bazel"
@@ -389,6 +389,7 @@ func (bazelisk *Bazelisk) makeBazelCmd(bazel string, args []string, streams iout
 		cmd.Env = append(cmd.Env, env...)
 	}
 	cmd.Env = append(cmd.Env, skipWrapperEnv+"=true")
+	cmd.Env = append(cmd.Env, aspectReentrantEnv+"=true") //MODIFIED: also set the aspect-cli reentrant var
 	if execPath != bazel {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", bazelReal, bazel))
 	}

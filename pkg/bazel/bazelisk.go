@@ -32,6 +32,7 @@ import (
 )
 
 const (
+	aspectReentrantEnv = "ASPECT_REENTRANT"
 	useBazelVersionEnv = "USE_BAZEL_VERSION"
 )
 
@@ -124,7 +125,7 @@ func (bazelisk *Bazelisk) getBazelVersionAndUrl() (string, string, error) {
 
 	// Gather info on the Aspect CLI version running
 	aspectRuntime := &aspectRuntimeInfo{
-		Reentrant: len(os.Getenv(skipWrapperEnv)) != 0,
+		Reentrant: os.Getenv(aspectReentrantEnv) != "",
 		Version:   buildinfo.Current().Version(),
 		DevBuild:  strings.HasPrefix(buildinfo.Current().Version(), "unknown"),
 		BaseUrl:   config.AspectBaseUrl(buildinfo.Current().OpenSource),
