@@ -161,5 +161,58 @@ plugins:
 	g.Expect(fmt.Sprintf("%v", v.Get("configure"))).To(Equal("map[languages:map[go:false javascript:true protobuf:false]]"))
 
 	// Plugin lists should be merged with plugins that have the same name being overrides
-	g.Expect(fmt.Sprintf("%v", v.Get("plugins"))).To(Equal("[map[from:https://static.plugins.com/foo log_level:debug name:foo version:3.2.1] map[from:https://static.plugins.com/fum name:fum version:1.2.3] map[from:https://static.plugins.com/bar name:bar version:1.2.3]]"))
+	g.Expect(fmt.Sprintf("%v", v.Get("plugins"))).To(Equal("[map[from:https://static.plugins.com/foo log_level:debug multi_threaded_build_events:false name:foo version:3.2.1] map[from:https://static.plugins.com/fum multi_threaded_build_events:false name:fum version:1.2.3] map[from:https://static.plugins.com/bar multi_threaded_build_events:false name:bar version:1.2.3]]"))
+}
+
+func TestMarshalling(t *testing.T) {
+	g := NewWithT(t)
+
+	p, err := config.UnmarshalPluginConfig([]interface{}{map[string]interface{}{
+		"name": "foo",
+		"from": "foo-from",
+		// multi_threaded_build_events should default to false
+	}})
+
+	g.Expect(err).ToNot(HaveOccurred())
+
+	g.Expect(len(p)).To(Equal(1))
+	g.Expect(p[0].Name).To(Equal("foo"))
+	g.Expect(p[0].From).To(Equal("foo-from"))
+	g.Expect(p[0].MultiThreadedBuildEvents).To(BeFalse())
+
+	c := config.MarshalPluginConfig(p)
+	g.Expect(c).To(Equal([]interface{}{map[string]interface{}{
+		"name":                        "foo",
+		"from":                        "foo-from",
+		"multi_threaded_build_events": false,
+	}}))
+
+	p2, err := config.UnmarshalPluginConfig([]interface{}{map[string]interface{}{
+		"name": "foo2",
+		"from": "foo2-from",
+
+		// multi_threaded_build_events explicitly set to true should be maintained
+		"multi_threaded_build_events": true,
+	}})
+
+	g.Expect(err).ToNot(HaveOccurred())
+
+	g.Expect(len(p2)).To(Equal(1))
+	g.Expect(p2[0].Name).To(Equal("foo2"))
+	g.Expect(p2[0].From).To(Equal("foo2-from"))
+	g.Expect(p2[0].MultiThreadedBuildEvents).To(BeTrue())
+
+	c2 := config.MarshalPluginConfig(p2)
+	g.Expect(c2).To(Equal([]interface{}{map[string]interface{}{
+		"name":                        "foo2",
+		"from":                        "foo2-from",
+		"multi_threaded_build_events": true,
+	}}))
+
+	// should be able convert back and forth and be equal
+	p3, err := config.UnmarshalPluginConfig(c2)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(p3).To(Equal(p2))
+	c3 := config.MarshalPluginConfig(p3)
+	g.Expect(c3).To(Equal(c2))
 }

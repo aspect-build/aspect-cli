@@ -381,8 +381,9 @@ func MarshalPluginConfig(plugins []types.PluginConfig) interface{} {
 	l := []interface{}{}
 	for _, p := range plugins {
 		i := map[string]interface{}{
-			"name": p.Name,
-			"from": p.From,
+			"name":                        p.Name,
+			"from":                        p.From,
+			"multi_threaded_build_events": p.MultiThreadedBuildEvents,
 		}
 		if p.Version != "" {
 			i["version"] = p.Version
