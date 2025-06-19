@@ -189,7 +189,7 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 		// If there are no plugins configured and --aspect:force_bes_backend is not set then short
 		// circuit here since we don't have any need to create a grpc server to consume the build event
 		// stream.
-		if ps.plugins.head == nil && !forceBesBackend {
+		if !(forceBesBackend || ps.hasBESPlugins()) {
 			return next(ctx, cmd, args)
 		}
 		if forceBesBackend {
@@ -200,11 +200,23 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 	}
 }
 
+// Check if any plugins are registered that require BES event processing
+func (ps *pluginSystem) hasBESPlugins() bool {
+	for node := ps.plugins.head; node != nil; node = node.next {
+		if !node.payload.DisableBESEvents {
+			return true
+		}
+	}
+	return false
+}
+
 func (ps *pluginSystem) createBesBackend(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 	// Create the BES backend
 	besBackend := bep.NewBESBackend(ctx)
 	for node := ps.plugins.head; node != nil; node = node.next {
-		besBackend.RegisterSubscriber(node.payload.BEPEventCallback, node.payload.MultiThreaded)
+		if !node.payload.DisableBESEvents {
+			besBackend.RegisterSubscriber(node.payload.BEPEventCallback, node.payload.MultiThreaded)
+		}
 	}
 	opts := []grpc.ServerOption{
 		// Bazel doesn't seem to set a maximum send message size, therefore

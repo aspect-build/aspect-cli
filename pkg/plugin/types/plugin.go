@@ -23,5 +23,6 @@ type PluginConfig struct {
 	Version                  string
 	LogLevel                 string
 	MultiThreadedBuildEvents bool
+	DisableBESEvents         bool
 	Properties               map[string]interface{}
 }

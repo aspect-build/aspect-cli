@@ -384,6 +384,7 @@ func MarshalPluginConfig(plugins []types.PluginConfig) interface{} {
 			"name":                        p.Name,
 			"from":                        p.From,
 			"multi_threaded_build_events": p.MultiThreadedBuildEvents,
+			"disable_bes_events":          p.DisableBESEvents,
 		}
 		if p.Version != "" {
 			i["version"] = p.Version
@@ -431,6 +432,7 @@ func UnmarshalPluginConfig(pluginsConfig interface{}) ([]types.PluginConfig, err
 		version, _ := pluginsMap["version"].(string)
 		logLevel, _ := pluginsMap["log_level"].(string)
 		multi_threaded_build_events, _ := pluginsMap["multi_threaded_build_events"].(bool)
+		disable_bes_events, _ := pluginsMap["disable_bes_events"].(bool)
 		properties, _ := pluginsMap["properties"].(map[string]interface{})
 
 		plugins = append(plugins, types.PluginConfig{
@@ -439,6 +441,7 @@ func UnmarshalPluginConfig(pluginsConfig interface{}) ([]types.PluginConfig, err
 			Version:                  version,
 			LogLevel:                 logLevel,
 			MultiThreadedBuildEvents: multi_threaded_build_events,
+			DisableBESEvents:         disable_bes_events,
 			Properties:               properties,
 		})
 	}
