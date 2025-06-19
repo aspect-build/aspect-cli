@@ -158,9 +158,10 @@ func (c *clientFactory) New(aspectplugin types.PluginConfig, streams ioutils.Str
 	}
 
 	res := &PluginInstance{
-		Plugin:        rawplugin.(plugin.Plugin),
-		Provider:      goclient,
-		MultiThreaded: aspectplugin.MultiThreadedBuildEvents,
+		Plugin:           rawplugin.(plugin.Plugin),
+		Provider:         goclient,
+		MultiThreaded:    aspectplugin.MultiThreadedBuildEvents,
+		DisableBESEvents: aspectplugin.DisableBESEvents,
 	}
 
 	if customCommandExecutor, ok := rawplugin.(CustomCommandExecutor); ok {
@@ -181,7 +182,8 @@ type Provider interface {
 // as any associated objects or metadata.
 type PluginInstance struct {
 	plugin.Plugin
-	MultiThreaded bool
+	MultiThreaded    bool
+	DisableBESEvents bool
 	Provider
 	CustomCommandExecutor
 }
