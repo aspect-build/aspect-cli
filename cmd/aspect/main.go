@@ -18,7 +18,10 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"os"
+	"runtime/pprof"
 
 	"github.com/aspect-build/aspect-cli/cmd/aspect/root"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
@@ -27,6 +30,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/hints"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system"
+	"github.com/fatih/color"
 	"github.com/spf13/viper"
 )
 
@@ -35,6 +39,25 @@ func main() {
 	// users working directory, don't run in the execroot
 	if wd, exists := os.LookupEnv("BUILD_WORKING_DIRECTORY"); exists {
 		_ = os.Chdir(wd)
+	}
+
+	if cpuprofile, exists := os.LookupEnv("ASPECT_CLI_CPUPROFILE"); exists {
+		f, err := os.Create(cpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Printf("%s cpuprofile %s\n", color.GreenString("INFO:"), cpuprofile)
+
+		pprof.StartCPUProfile(f)
+		defer func() {
+			pprof.StopCPUProfile()
+			if err := f.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "%s failed to close CPU profile file %s: %v", color.RedString("ERROR:"), cpuprofile, err)
+			} else {
+				fmt.Printf("%s cpuprofile %s COMPLETE\n", color.GreenString("INFO:"), cpuprofile)
+			}
+		}()
 	}
 
 	bzl := bazel.WorkspaceFromWd
