@@ -182,7 +182,16 @@ func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []
 
 	stats, err := runFixUpdate(wd, languages, updateCmd, fixArgs)
 
-	exitCode := aspecterrors.OK
+	if mode == "fix" && stats != nil {
+		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s visited\n", stats.NumBuildFilesVisited, pluralize("file", stats.NumBuildFilesVisited))
+		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s updated\n", stats.NumBuildFilesUpdated, pluralize("file", stats.NumBuildFilesUpdated))
+	}
+
+	if err == nil {
+		return nil
+	}
+
+	exitCode := aspecterrors.UnhandledOrInternalError
 
 	// Unique error codes for changes fixed vs diffs, otherwise fallback to bazel unhandled error code.
 	if err == errExit {
@@ -191,13 +200,6 @@ func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []
 	} else if err == resultFileChanged {
 		exitCode = aspecterrors.ConfigureFixed
 		err = nil
-	} else if err != nil {
-		exitCode = aspecterrors.UnhandledOrInternalError
-	}
-
-	if mode == "fix" && stats != nil {
-		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s visited\n", stats.NumBuildFilesVisited, pluralize("file", stats.NumBuildFilesVisited))
-		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s updated\n", stats.NumBuildFilesUpdated, pluralize("file", stats.NumBuildFilesUpdated))
 	}
 
 	return &aspecterrors.ExitError{
