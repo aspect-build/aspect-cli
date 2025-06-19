@@ -17,8 +17,6 @@
 package aspecterrors
 
 const (
-	OK = 0
-
 	// Bazel defines exit codes ~ 1-50: https://bazel.build/run/scripts#exit-codes
 	// `bazel run` may propagate the exit code of the binary it runs.
 	Failed                   = 1 // test/build/run build failure
