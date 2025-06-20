@@ -65,6 +65,7 @@ var (
 		"persistent_multiplex_android_dex_desugar":        {},
 		"persistent_multiplex_android_resource_processor": {},
 		"persistent_multiplex_android_tools":              {},
+		"remote_download_all":                             {},
 		"remote_download_minimal":                         {},
 		"remote_download_toplevel":                        {},
 		"short":                                           {},
