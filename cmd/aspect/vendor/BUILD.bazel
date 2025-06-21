@@ -1,0 +1,16 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "vendor",
+    srcs = ["vendor.go"],
+    importmap = "github.com/aspect-build/aspect-cli/cmd/aspect/vendor",
+    importpath = "",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/aspect/root/flags",
+        "//pkg/bazel",
+        "//pkg/interceptors",
+        "//pkg/ioutils",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

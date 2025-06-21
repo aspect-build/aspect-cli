@@ -34,6 +34,7 @@ go_library(
         "//cmd/aspect/shutdown",
         "//cmd/aspect/sync",
         "//cmd/aspect/test",
+        "//cmd/aspect/vendor",
         "//cmd/aspect/version",
         "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",

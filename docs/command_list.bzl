@@ -24,5 +24,6 @@ COMMAND_LIST = [
     "run",
     "shutdown",
     "test",
+    "vendor",
     "version",
 ]
