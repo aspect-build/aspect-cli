@@ -22,6 +22,7 @@ import (
 	"os"
 	"strings"
 
+	cc "github.com/EngFlow/gazelle_cc/language/cc"
 	bzl "github.com/aspect-build/aspect-cli/gazelle/bzl"
 	"github.com/aspect-build/aspect-cli/gazelle/common/progress"
 	js "github.com/aspect-build/aspect-cli/gazelle/js"
@@ -61,6 +62,7 @@ const (
 	Protobuf                     = "protobuf"
 	Bzl                          = "bzl"
 	Python                       = "python"
+	CC                           = "cc"
 )
 
 // Gazelle --mode
@@ -121,6 +123,8 @@ func (c *Configure) AddLanguage(lang ConfigureLanguage) {
 		c.AddLanguageFactory(lang, bzl.NewLanguage)
 	case Python:
 		c.AddLanguageFactory(lang, python.NewLanguage)
+	case CC:
+		c.AddLanguageFactory(lang, cc.NewLanguage)
 	default:
 		log.Fatalf("ERROR: unknown language %q", lang)
 	}

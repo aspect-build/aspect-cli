@@ -40,6 +40,7 @@ go_library(
         "@bazel_gazelle//walk:go_default_library",
         "@com_github_bazelbuild_buildtools//build:go_default_library",
         "@com_github_pmezard_go_difflib//difflib",
+        "@gazelle_cc//language/cc",
         "@org_golang_x_term//:term",
     ],
 )

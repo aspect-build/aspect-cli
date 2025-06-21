@@ -48,6 +48,7 @@ require (
 )
 
 require (
+	github.com/EngFlow/gazelle_cc v0.1.0
 	github.com/charmbracelet/huh v0.6.0
 	github.com/creack/pty v1.1.24
 	github.com/hay-kot/scaffold v0.6.2-0.20250317013600-8a6092d5e4ff

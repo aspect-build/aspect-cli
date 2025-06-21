@@ -99,6 +99,7 @@ nogo(
 # gazelle:resolve_regexp go github.com/bazelbuild/bazel-gazelle/(.*) @bazel_gazelle//$1:go_default_library
 # gazelle:resolve_regexp go github.com/bazel-contrib/rules_python/gazelle/(.*) @rules_python_gazelle_plugin//$1
 # gazelle:resolve_regexp go github.com/bazelbuild/rules_go/(.*) @io_bazel_rules_go//$1
+# gazelle:resolve_regexp go github.com/EngFlow/gazelle_cc/(.*) @gazelle_cc//$1
 
 # gazelle-TODO:
 #   cannot use :map_kind go_proto_library go_proto_library //:go_proto_library.bzl
