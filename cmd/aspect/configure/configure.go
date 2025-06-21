@@ -148,4 +148,9 @@ func addCliEnabledLanguages(c configure.ConfigureRunner) {
 	if viper.GetBool("configure.languages.python") {
 		c.AddLanguage(configure.Python)
 	}
+
+	viper.SetDefault("configure.languages.cc", false)
+	if viper.GetBool("configure.languages.cc") {
+		c.AddLanguage(configure.CC)
+	}
 }
