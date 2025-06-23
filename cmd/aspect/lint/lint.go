@@ -58,6 +58,9 @@ In addition to flags listed below, flags accepted by the 'bazel build' command a
 			lint.New(streams, hstreams, bzl, lintHandlers).Run,
 		),
 	}
+
+	cmd.Flags().StringSlice("lint:aspects", []string{}, "A set of lint aspects to use. Overriding, appending or removing from those set in the Aspect CLI config.")
+
 	lint.AddFlags(cmd.Flags())
 
 	for _, h := range lintHandlers {
