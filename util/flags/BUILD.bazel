@@ -1,0 +1,15 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "flags",
+    srcs = ["set.go"],
+    importpath = "github.com/aspect-build/aspect-cli/util/flags",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "flags_test",
+    srcs = ["set_test.go"],
+    embed = [":flags"],
+    deps = ["@com_github_onsi_gomega//:gomega"],
+)

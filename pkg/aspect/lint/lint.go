@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/bazel/workspace"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system/bep"
+	flagUtils "github.com/aspect-build/aspect-cli/util/flags"
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 	"github.com/charmbracelet/huh"
 	"github.com/fatih/color"
@@ -120,6 +122,13 @@ func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, []s
 		if len(name) == 0 || name[0] == '-' || name[0] == '=' {
 			return nil, nil, nil, fmt.Errorf("bad flag syntax: %s", s)
 		}
+
+		// A flat for the lint command, not for bazel or the linter
+		// TODO: do this better, return a separate array of "lint command args"?
+		if strings.HasPrefix(name, "lint:") {
+			continue
+		}
+
 		split := strings.SplitN(name, "=", 2)
 		name = split[0]
 		flag := flags.Lookup(name)
@@ -161,6 +170,15 @@ lint:
 		return nil
 	}
 
+	lintAspectsArg, _ := cmd.Flags().GetStringSlice("lint:aspects")
+	finalLinters := flagUtils.ParseSet(linters, lintAspectsArg)
+	if len(finalLinters) == 0 {
+		fmt.Fprintf(runner.streams.Stdout, "No aspects enabled for linting after filtering\n")
+		return nil
+	} else if !slices.Equal(linters, finalLinters) {
+		fmt.Fprintf(runner.streams.Stdout, "Linting using a modified list of lint aspects:\n\t%s\n", strings.Join(finalLinters, "\n\t"))
+	}
+
 	// Get values of lint command specific flags
 	applyAll, _ := cmd.Flags().GetBool("fix")
 	showDiff, _ := cmd.Flags().GetBool("diff")
@@ -184,7 +202,7 @@ lint:
 	// Construct the `bazel build` command
 	bazelCmd := []string{"build"}
 	bazelCmd = append(bazelCmd, bazelArgs...)
-	bazelCmd = append(bazelCmd, fmt.Sprintf("--aspects=%s", strings.Join(linters, ",")))
+	bazelCmd = append(bazelCmd, fmt.Sprintf("--aspects=%s", strings.Join(finalLinters, ",")))
 
 	// Don't request report and patch files in a mode where we don't need them
 	outputGroups := []string{}
