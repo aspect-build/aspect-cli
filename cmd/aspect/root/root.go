@@ -52,6 +52,7 @@ import (
 	"github.com/aspect-build/aspect-cli/cmd/aspect/shutdown"
 	"github.com/aspect-build/aspect-cli/cmd/aspect/sync"
 	"github.com/aspect-build/aspect-cli/cmd/aspect/test"
+	vendor "github.com/aspect-build/aspect-cli/cmd/aspect/vend"
 	"github.com/aspect-build/aspect-cli/cmd/aspect/version"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
@@ -159,6 +160,7 @@ func NewCmd(
 	cmd.AddCommand(sync.NewDefaultCmd())
 	cmd.AddCommand(shutdown.NewDefaultCmd())
 	cmd.AddCommand(test.NewDefaultCmd(pluginSystem))
+	cmd.AddCommand(vendor.NewDefaultCmd())
 	cmd.AddCommand(version.NewDefaultCmd())
 	cmd.AddCommand(outputs.NewDefaultCmd())
 	cmd.SetHelpCommand(help.NewCmd())

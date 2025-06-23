@@ -42,5 +42,6 @@ Aspect CLI is a better frontend for running bazel
 * [aspect run](aspect_run.md)	 - Build a single target and run it with the given arguments
 * [aspect shutdown](aspect_shutdown.md)	 - Stop the bazel server
 * [aspect test](aspect_test.md)	 - Build the specified targets and run all test targets among them
+* [aspect vendor](aspect_vendor.md)	 - Downloads external repositories into a folder specified by the flag --vendor_dir. Only works with bzlmod.
 * [aspect version](aspect_version.md)	 - Print the versions of Aspect CLI and Bazel
 
