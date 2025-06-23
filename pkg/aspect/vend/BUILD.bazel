@@ -1,0 +1,15 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+# NOTE: this directory is named 'vend' instead of 'vendor' which has distinct meaning in gazelle
+
+go_library(
+    name = "vend",
+    srcs = ["vendor.go"],
+    importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/vend",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/bazel",
+        "//pkg/ioutils",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
