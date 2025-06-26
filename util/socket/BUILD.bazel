@@ -1,0 +1,11 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "socket",
+    srcs = [
+        "json.go",
+        "socket.go",
+    ],
+    importpath = "github.com/aspect-build/aspect-cli/util/socket",
+    visibility = ["//visibility:public"],
+)
