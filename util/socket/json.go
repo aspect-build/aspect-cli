@@ -2,6 +2,7 @@ package socket
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 )
@@ -13,8 +14,14 @@ type jsonSocket[S, R interface{}] struct {
 type jsonClientSocket[S, R interface{}] struct {
 	jsonSocket[S, R]
 }
+type jsonServerSocket[S, R interface{}] struct {
+	jsonSocket[S, R]
+
+	serv net.Listener
+}
 
 var _ Socket[any, any] = (*jsonSocket[any, any])(nil)
+var _ Server[any, any] = (*jsonServerSocket[any, any])(nil)
 
 func ConnectJsonSocket[S, R interface{}](socketPath string) (Socket[S, R], error) {
 	s := &jsonClientSocket[S, R]{}
@@ -22,6 +29,10 @@ func ConnectJsonSocket[S, R interface{}](socketPath string) (Socket[S, R], error
 		return nil, err
 	}
 	return s, nil
+}
+
+func NewJsonServer[S, R interface{}]() Server[S, R] {
+	return &jsonServerSocket[S, R]{}
 }
 
 func (sock *jsonSocket[S, R]) Close() error {
@@ -80,5 +91,57 @@ func (sock *jsonClientSocket[S, R]) connect(socketPath string) error {
 	}
 	sock.conn = conn
 	sock.read = json.NewDecoder(sock.conn)
+	return nil
+}
+
+func (sock *jsonServerSocket[S, R]) HasConnection() bool {
+	return sock.conn != nil
+}
+
+func (sock *jsonServerSocket[S, R]) Close() error {
+	var err error
+	if sock.serv != nil {
+		err = sock.serv.Close()
+		sock.serv = nil
+	}
+	return errors.Join(err, sock.jsonSocket.Close())
+}
+
+func (sock *jsonServerSocket[S, R]) Serve(socketPath string) error {
+	if sock.serv != nil {
+		return fmt.Errorf("socket already serving")
+	}
+
+	serv, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("failed to listen to socket: %w", err)
+	}
+	sock.serv = serv
+	return nil
+}
+
+var ErrNotAccepted error = net.ErrClosed
+
+func (sock *jsonServerSocket[S, R]) Accept() error {
+	if sock.serv == nil {
+		return fmt.Errorf("socket not serving")
+	}
+
+	if sock.conn != nil {
+		return fmt.Errorf("socket already connected")
+	}
+
+	conn, err := sock.serv.Accept()
+	if err != nil {
+		// Propagate the error if the socket is closed without receiving a connection.
+		if errors.Is(err, net.ErrClosed) {
+			return ErrNotAccepted
+		}
+
+		return fmt.Errorf("failed to accept socket connection: %w", err)
+	}
+
+	sock.conn = conn
+	sock.read = json.NewDecoder(conn)
 	return nil
 }
