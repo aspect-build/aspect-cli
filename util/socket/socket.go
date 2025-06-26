@@ -5,3 +5,10 @@ type Socket[S, R interface{}] interface {
 	Recv() (R, error)
 	Close() error
 }
+
+type Server[S, R interface{}] interface {
+	Socket[S, R]
+	Serve(path string) error
+	Accept() error
+	HasConnection() bool
+}
