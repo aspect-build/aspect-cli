@@ -16,18 +16,18 @@
 
 package flags
 
-func AddFlagToCommand(command []string, flag string) []string {
+func AddFlagToCommand(command []string, flag ...string) []string {
 	result := make([]string, 0, len(command)+1)
 	for i, c := range command {
 		if c == "--" {
 			// inject the flag right before a double dash if it exists
-			result = append(result, flag)
+			result = append(result, flag...)
 			result = append(result, command[i:len(command)]...)
 			return result
 		}
 		result = append(result, c)
 	}
 	// if no double dash then add the flag at the end of the command
-	result = append(result, flag)
+	result = append(result, flag...)
 	return result
 }
