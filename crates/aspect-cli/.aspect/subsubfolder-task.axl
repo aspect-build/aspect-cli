@@ -1,0 +1,9 @@
+def _impl(ctx):
+    print("I'm a task in a subfolder")
+    return 0
+
+subsubfolder_task = task(
+    implementation = _impl,
+    args = {},
+    groups = ["experimental", "subfolder"],
+)

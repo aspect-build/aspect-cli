@@ -1,0 +1,4 @@
+load("@standard/index.axl", _build = "build", _test = "test")
+
+build = _build
+test = _test

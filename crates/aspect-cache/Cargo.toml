@@ -1,0 +1,15 @@
+[package]
+name = "aspect-cache"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dirs = "6.0.0"
+miette = "7.6.0"
+aspect-config = { path = "../aspect-config" }

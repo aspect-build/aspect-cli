@@ -1,0 +1,13 @@
+def  _impl(ctx):
+    cmd = ctx.http().download(
+        url = "https://github.com/aspect-extensions/run/releases/download/2025.41.0/pty-multiplex_aarch64_apple_darwin",
+        output = "/tmp/pty-multiplex",
+        mode = 0o777
+    ).block();
+
+    print(cmd.body)
+
+download = task(
+    implementation = _impl,
+    args = {}
+)

@@ -1,0 +1,17 @@
+exports_files(["create_release.sh"])
+
+config_setting(
+    name = "is_opt",
+    values = {
+        "compilation_mode": "opt",
+    },
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "is_debug",
+    values = {
+        "compilation_mode": "dbg",
+    },
+    visibility = ["//visibility:public"],
+)

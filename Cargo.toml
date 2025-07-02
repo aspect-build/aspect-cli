@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/*"]
+exclude = ["crates/example-tui"]
+default-members = ["crates/aspect-cli"]
+resolver = "2"
+
+[profile.release]
+lto="fat"
+codegen-units = 1
+opt-level = "z"
+
+[workspace.package]
+version = "0.0.0-DEV"
+categories = ["development-tools"]
+homepage = "https://github.com/aspect-build/aspect-cli"
+repository = "https://github.com/aspect-build/aspect-cli"
+license = "Apache 2"
+edition = "2024"
+readme = "README.md"
+rust-version = "1.88.0"

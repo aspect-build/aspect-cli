@@ -1,0 +1,18 @@
+load("//bazel/rust:defs.bzl", "rust_binary")
+
+rust_binary(
+    name = "axl-lsp",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "@crates//:starlark_lsp",
+        "@crates//:starlark",
+        "@crates//:anyhow",
+        "//crates/axl-runtime"
+    ],
+    proc_macro_deps = [
+        "@crates//:starlark_derive",
+    ],
+    visibility = [
+        "//crates/aspect-cli:__pkg__",
+    ],
+)

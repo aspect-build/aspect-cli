@@ -1,0 +1,16 @@
+load("@bazel_env.bzl", "bazel_env")
+load("@multitool//:tools.bzl", MULTITOOL_TOOLS = "TOOLS")
+
+bazel_env(
+    name = "bazel_env",
+    toolchains = {
+        "rust": "@rules_rust//rust/toolchain:current_rust_toolchain",
+    },
+    tools = {
+        # Mapping from tool binary name ($PATH entry) to Bazel label
+        "buildifier": "@buildifier_prebuilt//:buildifier",
+        "cargo": "@rules_rust//tools/upstream_wrapper:cargo",
+        "rustc": "@rules_rust//tools/upstream_wrapper:rustc",
+        "rustfmt": "@rules_rust//tools/upstream_wrapper:rustfmt",
+    } | MULTITOOL_TOOLS,
+)

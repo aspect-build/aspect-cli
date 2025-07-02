@@ -1,0 +1,18 @@
+"Bazel dependencies"
+
+bazel_dep(name = "aspect_bazel_lib", version = "2.21.1")
+bazel_dep(name = "bazel_env.bzl", version = "0.5.0")
+bazel_dep(name = "bazel_skylib", version = "1.8.1")
+bazel_dep(name = "bazelrc-preset.bzl", version = "1.4.0")
+bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2")
+bazel_dep(name = "gazelle", version = "0.45.0")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_go", version = "0.57.0")
+bazel_dep(name = "rules_pkg", version = "1.1.0")
+bazel_dep(name = "rules_shell", version = "0.6.0")
+bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
+
+include("//bazel/include:llvm.MODULE.bazel")
+include("//bazel/include:multitool.MODULE.bazel")
+include("//bazel/include:musl.MODULE.bazel")
+include("//bazel/include:rust.MODULE.bazel")

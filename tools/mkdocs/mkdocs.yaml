@@ -1,0 +1,43 @@
+# mkdocs.yml
+site_name: "aspect-cli"
+
+docs_dir: ../../docs/
+
+site_dir: ../../site/
+
+theme:
+  name: shadcn
+  show_title: true
+  show_stargazers: true
+  pygments_style:
+    light: shadcn-light
+    dark: github-dark
+  icon: heroicons:beaker
+  topbar_sections: false
+  show_datetime: true
+  features:
+    - content.code.copy
+    - navigation.sections
+
+nav:
+  - Introduction: index.md
+  - API Reference: lib.md
+
+extra_css:
+  - style.css
+
+markdown_extensions:
+  admonition:
+  codehilite:
+  fenced_code:
+  footnotes:
+  extra:
+  pymdownx.blocks.details:
+  pymdownx.tabbed:
+  pymdownx.blocks.tab:
+    combine_header_slug: true
+    separator: ___
+  pymdownx.snippets:
+
+hooks:
+  - postprocess.py

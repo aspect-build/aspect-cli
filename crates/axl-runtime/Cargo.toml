@@ -1,0 +1,60 @@
+[package]
+name = "axl-runtime"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+derive_more = { version = "2.0.1", features = ["full"] }
+display_container = "0.9.0"
+allocative = "0.3.4"
+either = "1.15.0"
+dupe = "0.9.1"
+starlark = "0.13.0"
+starlark_derive = "0.13.0"
+starlark_map = "0.13.0"
+
+anyhow = "1.0.98"
+thiserror = "2.0.12"
+
+reqwest = { version="0.12.22", features = ["stream"] }
+prost = "0.14.1"
+zstd = "0.13.3"
+
+nix = { version = "0.30.1", features = ["fs"] }
+wasmi = "0.51.0"
+wasmi_wasi = "0.51.0"
+
+getargs = "0.5.0"
+clap = "4.5.47"
+serde_json = "1.0.145"
+
+tokio = { version = "1.45.1", features = ["fs", "macros", "rt", "rt-multi-thread", "signal"], default-features = false }
+tokio-stream = { version = "0.1.17", features = ["io-util", "signal", "sync", "tokio-util"] }
+futures = "0.3.31"
+futures-util = "0.3.31"
+
+handlebars = "6.3.2"
+minijinja = "2.12.0"
+liquid = "0.26.11"
+liquid-core = "0.26.11"
+
+aspect-cache = { path = "../aspect-cache" }
+axl-proto = { path = "../axl-proto" }
+build-event-stream = { path = "../build-event-stream" }
+
+
+uuid = { version = "1.18.1", features = ["v4"] }
+tonic = "0.14.2"
+fibre = "0.5.0"
+tar = "0.4.44"
+flate2 = "1.1.2"
+ssri = "9.2.0"
+dirs = "6.0.0"
+sha256 = "1.6.0"
+tracing = "0.1.41"

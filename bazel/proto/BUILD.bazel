@@ -1,0 +1,19 @@
+load(":descriptor.bzl", "descriptor_set")
+
+descriptor_set(
+    name = "descriptor",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@bazel//src/main/java/com/google/devtools/build/lib/buildeventstream/proto:build_event_stream_proto",
+        "@bazel//src/main/protobuf:action_cache_proto",
+        "@bazel//src/main/protobuf:analysis_v2_proto",
+        "@bazel//src/main/protobuf:spawn_proto",
+        "@bazel//src/main/protobuf:option_filters_proto",
+        "@bazel//src/main/protobuf:command_line_proto",
+        "@bazel//src/main/protobuf:bazel_flags_proto",
+        "@bazel//src/main/protobuf:failure_details_proto",
+        "@bazel//src/main/protobuf:invocation_policy_proto",
+        "@bazel//src/main/protobuf:build_proto",
+        "@googleapis//google/devtools/build/v1:build_proto"
+    ],
+)

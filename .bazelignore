@@ -1,0 +1,3 @@
+# Cargo output directory
+target/
+bazel/proto/

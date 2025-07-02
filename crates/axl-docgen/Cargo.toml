@@ -1,0 +1,20 @@
+[package]
+name = "axl-docgen"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+starlark = "0.13.0"
+axl-runtime = { path="../axl-runtime" }
+tokio = "1.47.1"
+anyhow = "1.0.100"
+markdown = "1.0.0"
+syntect = "5.3.0"
+regex = "1.11.3"
+mdast_util_to_markdown = "0.0.2"

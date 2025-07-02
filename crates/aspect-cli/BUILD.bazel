@@ -1,0 +1,39 @@
+load("//bazel/rust:defs.bzl", "rust_binary")
+load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
+load("//bazel/release:release.bzl", "release")
+
+rust_binary(
+    name = "aspect-cli",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "@crates//:clap",
+        "@crates//:miette",
+        "@crates//:reqwest",
+        "@crates//:starlark",
+        "@crates//:tokio",
+        "@crates//:thiserror",
+        "@crates//:tracing",
+        "@crates//:tracing-core",
+        "@crates//:tracing-opentelemetry",
+        "@crates//:tracing-subscriber",
+        "@crates//:opentelemetry-semantic-conventions",
+        "@crates//:opentelemetry",
+        "@crates//:opentelemetry_sdk",
+        "@crates//:opentelemetry-otlp",
+        "//crates/aspect-config",
+        "//crates/axl-runtime",
+    ],
+    visibility = ["//:__pkg__"],
+)
+
+multi_platform_rust_binaries(
+    name = "bins",
+    target = ":aspect-cli",
+    tags = ["no-macos"],
+)
+
+release(
+    name = "release",
+    targets = [":bins"],
+    tags = ["no-macos"],
+)

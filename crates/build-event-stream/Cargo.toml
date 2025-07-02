@@ -1,0 +1,25 @@
+[package]
+name = "build-event-stream"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tonic = {version = "0.14.2", features = ["channel", "transport", "tls-ring",  "tls-native-roots"]}
+axl-proto = {path="../axl-proto"}
+thiserror = "2.0.17"
+http = "1.3.1"
+futures = "0.3.31"
+tokio-stream = "0.1.17"
+prost-types = "0.14.1"
+
+[build-dependencies]
+
+[dev-dependencies]
+tokio = "1.47.1"
+uuid = { version = "1.18.1", features = ["v4"] }

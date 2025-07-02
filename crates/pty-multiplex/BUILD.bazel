@@ -1,0 +1,29 @@
+load("//bazel/rust:defs.bzl", "rust_binary")
+load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
+load("//bazel/release:release.bzl", "release")
+
+rust_binary(
+    name = "pty-multiplex",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "@crates//:bytes",
+        "@crates//:crossterm",
+        "@crates//:portable-pty",
+        "@crates//:ratatui",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:tracing-subscriber",
+        "@crates//:tui-term",
+    ],
+    visibility = ["//:__pkg__"],
+)
+
+multi_platform_rust_binaries(
+    name = "bins",
+    target = ":pty-multiplex",
+)
+
+release(
+    name = "release",
+    targets = [":bins"],
+)

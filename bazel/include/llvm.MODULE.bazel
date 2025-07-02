@@ -1,0 +1,127 @@
+"LLVM configuration"
+
+bazel_dep(name = "toolchains_llvm", version = "1.4.0")
+single_version_override(
+    module_name = "toolchains_llvm",
+    patch_strip = 1,
+    patches = [
+        "//bazel/patches:toolchains_llvm.patch",
+    ],
+)
+
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+
+execution_oses = [
+    "macos",
+    "linux",
+]
+
+execution_cpus = [
+    "aarch64",
+    "x86_64",
+]
+
+[
+    [
+        llvm.toolchain(
+            name = "llvm_toolchain_{}_{}".format(exec_os, exec_cpu),
+            exec_arch = exec_cpu,
+            exec_os = exec_os if exec_os != "macos" else "darwin",
+            llvm_version = "20.1.2"
+        ),
+        llvm.sysroot(
+            name = "llvm_toolchain_{}_{}".format(exec_os, exec_cpu),
+            label = "@org_chromium_sysroot_linux_x86_64//:sysroot",
+            targets = ["linux-x86_64"],
+        ),
+        llvm.sysroot(
+            name = "llvm_toolchain_{}_{}".format(exec_os, exec_cpu),
+            label = "@org_chromium_sysroot_linux_arm64//:sysroot",
+            targets = ["linux-aarch64"],
+        ),
+        llvm.sysroot(
+            name = "llvm_toolchain_{}_{}".format(exec_os, exec_cpu),
+            label = "@sysroot_darwin_universal//:sysroot",
+            targets = [
+                "darwin-aarch64",
+                "darwin-x86_64",
+            ],
+        ),
+        use_repo(llvm, "llvm_toolchain_{}_{}".format(exec_os, exec_cpu)),
+    ]
+    for exec_os in execution_oses
+    for exec_cpu in execution_cpus
+]
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+_SYSROOT_LINUX_BUILD_FILE = """\
+filegroup(
+    name = "sysroot",
+    srcs = glob(["*/**"]),
+    visibility = ["//visibility:public"],
+)
+"""
+
+http_archive(
+    name = "org_chromium_sysroot_linux_arm64",
+    build_file_content = _SYSROOT_LINUX_BUILD_FILE,
+    sha256 = "b199942a0bd9c34800e8d7b669778ef45f2054b9f106039439383dd66efcef31",
+    urls = ["https://github.com/DavidZbarsky-at/sysroot-min/releases/download/v0.0.20/debian_bullseye_arm64_sysroot.tar.xz"],
+)
+
+http_archive(
+    name = "org_chromium_sysroot_linux_x86_64",
+    build_file_content = _SYSROOT_LINUX_BUILD_FILE,
+    sha256 = "b279dd2926e7d3860bb4e134997a45df5106f680e160a959b945580ba4ec755f",
+    urls = ["https://github.com/DavidZbarsky-at/sysroot-min/releases/download/v0.0.20/debian_bullseye_amd64_sysroot.tar.xz"],
+)
+
+http_archive(
+    name = "sysroot_darwin_universal",
+    build_file_content = """
+filegroup(
+    name = "sysroot",
+    srcs = glob(
+        include = ["**"],
+        exclude = ["**/*:*"],
+    ),
+    visibility = ["//visibility:public"],
+)
+""",
+    # The ruby header has an infinite symlink that we need to remove.
+    patch_cmds = ["rm System/Library/Frameworks/Ruby.framework/Versions/Current/Headers/ruby/ruby"],
+    integrity = "sha256-9qzGIJ251Wtn/K+R7B3v5Ici6esT3CH7kc/s6xSJ5X4=",
+    strip_prefix = "MacOSX14.5.sdk",
+    urls = ["https://github.com/alexey-lysiuk/macos-sdk/releases/download/14.5/MacOSX14.5.tar.xz"],
+)
+
+target_oses = [
+    "macos",
+    "linux",
+]
+
+target_cpus = [
+    "aarch64",
+    "x86_64",
+]
+
+platforms = [
+    {
+        "exec_os": exec_os,
+        "exec_cpu": exec_cpu,
+        "tgt_os": tgt_os,
+        "tgt_cpu": tgt_cpu,
+    }
+    for exec_os in execution_oses
+    for exec_cpu in execution_cpus
+    for tgt_os in target_oses
+    for tgt_cpu in target_cpus
+]
+
+[register_toolchains("//bazel/platforms/toolchains:{}_{}_{}_{}_llvm".format(
+    p["exec_os"],
+    p["exec_cpu"],
+    p["tgt_os"],
+    p["tgt_cpu"],
+)) for p in platforms]

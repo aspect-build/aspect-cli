@@ -1,0 +1,8 @@
+pre code {
+    text-wrap: pretty !important;
+}
+
+/*pre code span.kc ~ span.o::after {
+    display: block;
+    content: "";
+}*/

@@ -1,0 +1,19 @@
+load("//bazel/rust:defs.bzl", "rust_proc_macro")
+
+rust_proc_macro(
+    name = "starbuf-derive",
+    srcs = [
+        "src/lib.rs",
+    ],
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:darling",
+        "@crates//:proc-macro2",
+        "@crates//:quote",
+        "@crates//:syn"
+    ],
+    edition = "2021",
+    visibility = [
+        "//crates/axl-proto:__pkg__",
+    ],
+)

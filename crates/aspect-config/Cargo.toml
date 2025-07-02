@@ -1,0 +1,14 @@
+[package]
+name = "aspect-config"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+toml = "0.8.23"

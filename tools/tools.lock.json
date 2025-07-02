@@ -1,0 +1,152 @@
+{
+    "$schema": "https://raw.githubusercontent.com/theoremlp/rules_multitool/main/lockfile.schema.json",
+    "buildozer": {
+      "binaries": [
+        {
+          "kind": "file",
+          "url": "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildozer-linux-arm64",
+          "sha256": "0b5a2a717ac4fc911e1fec8d92af71dbb4fe95b10e5213da0cc3d56cea64a328",
+          "os": "linux",
+          "cpu": "arm64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildozer-linux-amd64",
+          "sha256": "3305e287b3fcc68b9a35fd8515ee617452cd4e018f9e6886b6c7cdbcba8710d4",
+          "os": "linux",
+          "cpu": "x86_64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildozer-darwin-arm64",
+          "sha256": "31b1bfe20d7d5444be217af78f94c5c43799cdf847c6ce69794b7bf3319c5364",
+          "os": "macos",
+          "cpu": "arm64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildozer-darwin-amd64",
+          "sha256": "854c9583efc166602276802658cef3f224d60898cfaa60630b33d328db3b0de2",
+          "os": "macos",
+          "cpu": "x86_64"
+        }
+      ]
+    },
+    "gazelle": {
+      "binaries": [
+        {
+          "kind": "file",
+          "url": "https://github.com/alexeagle/gazelle-prebuilt/releases/download/2025.26.30+f33bce6/gazelle-darwin_arm64_cgo",
+          "sha256": "4aa9a4eff3b4e09762f2d471a0d469696b821a6523b3d06f004b68021746c1d4",
+          "os": "macos",
+          "cpu": "arm64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/alexeagle/gazelle-prebuilt/releases/download/2025.26.30+f33bce6/gazelle-linux_amd64_cgo",
+          "sha256": "7a53e90c4ae605e441b45a90fff496dbf58743c2ccfb3dfd6d23193deb25c1a1",
+          "os": "linux",
+          "cpu": "x86_64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/alexeagle/gazelle-prebuilt/releases/download/2025.26.30+f33bce6/gazelle-linux_arm64_cgo",
+          "sha256": "04932db0357fe60401112885d57c079581f1ba2c7aa01bf2d4ad5a8c8c406208",
+          "os": "linux",
+          "cpu": "arm64"
+        }
+      ]
+    },
+    "ibazel": {
+      "binaries": [
+        {
+          "kind": "file",
+          "url": "https://github.com/bazelbuild/bazel-watcher/releases/download/v0.25.3/ibazel_linux_arm64",
+          "sha256": "3fa76bef2a1eac55975a0e6949c133d0a9898eb1e5425ce4f7df0289859f56c5",
+          "os": "linux",
+          "cpu": "arm64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/bazelbuild/bazel-watcher/releases/download/v0.25.3/ibazel_linux_amd64",
+          "sha256": "d8e1ea02777670a095719ed3800e9bbf814269b05edf901992c1e7c5eca0e3b6",
+          "os": "linux",
+          "cpu": "x86_64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/bazelbuild/bazel-watcher/releases/download/v0.25.3/ibazel_darwin_arm64",
+          "sha256": "c2da75cbab7a4b2b97ba534653bb12e4dd731157bb1c9d660f79df3b330a7239",
+          "os": "macos",
+          "cpu": "arm64"
+        }
+      ]
+    },
+    "multitool": {
+      "binaries": [
+        {
+          "kind": "archive",
+          "url": "https://github.com/theoremlp/multitool/releases/download/v0.9.0/multitool-aarch64-unknown-linux-gnu.tar.xz",
+          "file": "multitool-aarch64-unknown-linux-gnu/multitool",
+          "sha256": "693b66def2d8dacdfcb5a011b7c32a8e89a13bdc031db8dc40c0759a38253103",
+          "os": "linux",
+          "cpu": "arm64"
+        },
+        {
+          "kind": "archive",
+          "url": "https://github.com/theoremlp/multitool/releases/download/v0.9.0/multitool-x86_64-unknown-linux-gnu.tar.xz",
+          "file": "multitool-x86_64-unknown-linux-gnu/multitool",
+          "sha256": "34dc5968dad458a4050ebde58e484ebb7c624a119e4031347683eeb80922e6df",
+          "os": "linux",
+          "cpu": "x86_64"
+        },
+        {
+          "kind": "archive",
+          "url": "https://github.com/theoremlp/multitool/releases/download/v0.9.0/multitool-aarch64-apple-darwin.tar.xz",
+          "file": "multitool-aarch64-apple-darwin/multitool",
+          "sha256": "8f5e0cd033b0fcc128c762f8d527110433523da378619cecf40e91c1df5c0686",
+          "os": "macos",
+          "cpu": "arm64"
+        }
+      ]
+    },
+    "yq": {
+      "binaries": [
+        {
+          "kind": "file",
+          "url": "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_arm64",
+          "sha256": "0e7e1524f68d91b3ff9b089872d185940ab0fa020a5a9052046ef10547023156",
+          "os": "linux",
+          "cpu": "arm64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64",
+          "sha256": "a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7",
+          "os": "linux",
+          "cpu": "x86_64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_darwin_arm64",
+          "sha256": "559a594ef7a6ebc5b81a67b7717fb3accedd266d8fa7d8352da7fec9e463f48b",
+          "os": "macos",
+          "cpu": "arm64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_darwin_amd64",
+          "sha256": "216ddfa03e7ba0e5aba00b236ec78324b5bfc49b610db254fe92310878baea20",
+          "os": "macos",
+          "cpu": "x86_64"
+        },
+        {
+          "kind": "file",
+          "url": "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_windows_amd64.exe",
+          "sha256": "d509d51e6db30ebb7c9363b7ca8714224f93a456a421d7a7819ab564b868acc7",
+          "os": "windows",
+          "cpu": "x86_64"
+        }
+      ]
+    }
+  }

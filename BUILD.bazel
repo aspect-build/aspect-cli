@@ -1,0 +1,6 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+alias(
+    name = "cli",
+    actual = "//crates/aspect-cli",
+)

@@ -1,0 +1,17 @@
+load("//bazel/rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "build-event-stream",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "@crates//:tonic",
+        "@crates//:thiserror",
+        "@crates//:futures",
+        "@crates//:prost-types",
+        "@crates//:http",
+        "//crates/axl-proto",
+    ],
+    visibility = [
+        "//crates/axl-runtime:__pkg__",
+    ],
+)

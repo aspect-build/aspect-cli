@@ -1,0 +1,85 @@
+name: Build Release Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_call:
+    outputs:
+      linux:
+        description: "Linux and MacOS binaries"
+        value: ${{jobs.build.outputs.artifact}}
+
+permissions:
+  id-token: write
+  attestations: write
+  contents: write
+
+jobs:
+  build:
+    name: Build MacOS and Linux release artifacts
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact: ${{steps.upload.outputs.artifact-url}}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need to see tags (https://github.com/actions/checkout?tab=readme-ov-file#fetch-all-history-for-all-tags-and-branches)
+
+      - name: Free up disk space
+        run: |
+          echo "Listing 100 largest packages"
+          dpkg-query -Wf '${Installed-Size}\t${Package}\n' | sort -n | tail -n 100
+          df -h
+          echo "Removing large packages"
+          sudo apt-get remove -y 'aspnetcore-.*' '^clang-tidy-.*' '^google.*' '^dotnet-.*'
+          sudo apt-get remove -y 'php.*' '^mongodb-.*' '^mysql-.*' '^docker-.*' '^llvm-.*'
+          sudo apt-get remove -y podman azure-cli firefox powershell buildah
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          df -h
+          echo "Removing large directories"
+          sudo rm -rf /usr/share/dotnet/
+          sudo rm -rf /usr/local/graalvm/
+          sudo rm -rf /usr/local/.ghcup/
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/local/lib/node_modules
+          df -h
+
+      - name: Setup bazelisk
+        run: |
+          sudo curl -fssL https://github.com/bazelbuild/bazelisk/releases/download/v1.27.0/bazelisk-linux-amd64 -o /usr/bin/bazel &&
+          sudo chmod +x /usr/bin/bazel
+
+      - name: Setup bazel
+        uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          # Avoid downloading Bazel every time.
+          bazelisk-cache: true
+          # Store build cache per workflow.
+          disk-cache: true
+          # Share repository cache between workflows.
+          repository-cache: true
+
+      - name: Build release artifacts
+        run: |
+          mkdir -p upload_root/assets
+          bazel run --config=release --config=ci //crates/aspect-cli:release -- "${PWD}/upload_root/assets"
+          bazel run --config=release --config=ci //crates/aspect-launcher:release -- "${PWD}/upload_root/assets"
+          bazel run --config=release --config=ci //crates/pty-multiplex:release -- "${PWD}/upload_root/assets"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: "upload_root/assets/*"
+        if: false # can't do this until the repo is public
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: upload_root/
+          retention-days: 1

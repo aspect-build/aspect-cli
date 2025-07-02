@@ -1,0 +1,24 @@
+load("//bazel/rust:defs.bzl", "rust_library")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+
+cargo_build_script(
+    name = "build_rs",
+    srcs = ["build.rs"],
+)
+
+rust_library(
+    name = "aspect-config",
+    srcs = ["src/lib.rs"],
+    version_key = "STABLE_MONOREPO_VERSION",
+    deps = [
+        "@crates//:serde",
+        "@crates//:toml",
+        "@crates//:clap",
+        ":build_rs"
+    ],
+    visibility = [
+        "//crates/aspect-cache:__pkg__",
+        "//crates/aspect-cli:__pkg__",
+        "//crates/aspect-launcher:__pkg__",
+    ],
+)

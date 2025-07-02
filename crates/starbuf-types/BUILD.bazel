@@ -1,0 +1,17 @@
+load("//bazel/rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "starbuf-types",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "@crates//:allocative",
+        "@crates//:anyhow",
+        "@crates//:derive_more",
+        "@crates//:prost-types",
+        "@crates//:starlark",
+    ],
+    visibility = [
+        "//crates/aspect-cli:__pkg__",
+        "//crates/axl-lsp:__pkg__",
+    ],
+)

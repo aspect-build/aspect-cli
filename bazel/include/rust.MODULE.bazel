@@ -1,0 +1,227 @@
+"Rust configuration"
+
+bazel_dep(name = "rules_rust", version = "0.63.0")
+bazel_dep(name = "openssl", version = "3.3.1.bcr.6")
+
+RUST_EDITION = "2024"
+
+RUST_VERSION = "1.88.0"
+
+rust = use_extension(
+    "@rules_rust//rust:extensions.bzl",
+    "rust",
+)
+
+crate = use_extension(
+    "@rules_rust//crate_universe:extension.bzl",
+    "crate",
+)
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = [
+        "//:Cargo.toml",
+        "//crates/aspect-cache:Cargo.toml",
+        "//crates/aspect-cli:Cargo.toml",
+        "//crates/aspect-config:Cargo.toml",
+        "//crates/aspect-launcher:Cargo.toml",
+        "//crates/example-tui:Cargo.toml",
+        "//crates/pty-multiplex:Cargo.toml",
+        "//crates/axl-docgen:Cargo.toml",
+        "//crates/axl-runtime:Cargo.toml",
+        "//crates/axl-lsp:Cargo.toml",
+        "//crates/axl-proto:Cargo.toml",
+        "//crates/starbuf-derive:Cargo.toml",
+        "//crates/starbuf-types:Cargo.toml",
+        "//crates/build-event-stream:Cargo.toml"
+    ],
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+    ],
+)
+crate.annotation(
+    build_script_data = ["@@openssl~//:gen_dir"],
+    build_script_env = {
+        "OPENSSL_STATIC": "1",
+        "OPENSSL_DIR": "$(location @@openssl~//:gen_dir)",
+    },
+    crate = "openssl-sys",
+)
+use_repo(crate, "crates")
+
+# These override the default rust_repository_sets created by rust_register_toolchain. They must be named exactly as follows.
+# NB: The first call for a particular name may set the `edition`, `exec_triple`, and `versions` attributes, the subsequent calls shoud not set it or else Bazel will fail with,
+# "Error in fail: You must only set edition on the first call to repository_set for a particular name but it was set multiple times for rust_linux_x86_64"
+# "Error in fail: You must only set exec_triple on the first call to repository_set for a particular name but it was set multiple times for rust_linux_x86_64"
+# "Error in fail: You must only set versions on the first call to repository_set for a particular name but it was set multiple times for rust_linux_x86_64"
+
+# Execution platform : linux x86 (x86_64-unknown-linux-gnu)
+# -> linux x86_64 (gnu)
+rust.repository_set(
+    name = "rust_linux_x86_64",
+    edition = RUST_EDITION, # "edition" only set in first instance of "rust_linux_x86_64" repository_set (see comment above)
+    exec_triple = "x86_64-unknown-linux-gnu", # "exec_triple" only set in first instance of "rust_linux_x86_64" repository_set (see comment above)
+    target_compatible_with = [
+        "@//bazel/platforms/linkers:unknown",
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "x86_64-unknown-linux-gnu",
+    versions = [RUST_VERSION], # "versions" only set in first instance of "rust_linux_x86_64" repository_set (see comment above)
+)
+# -> linux x86_64 (musl)
+rust.repository_set(
+    name = "rust_linux_x86_64",
+    target_compatible_with = [
+        "@//bazel/platforms/linkers:musl",
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "x86_64-unknown-linux-musl",
+)
+# -> linux arm (musl)
+rust.repository_set(
+    name = "rust_linux_x86_64",
+    target_compatible_with = [
+        "@//bazel/platforms/linkers:musl",
+        "@platforms//cpu:arm64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "aarch64-unknown-linux-musl",
+)
+# -> darwin x86
+rust.repository_set(
+    name = "rust_linux_x86_64",
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:macos",
+    ],
+    target_triple = "x86_64-apple-darwin",
+)
+# -> darwin arm
+rust.repository_set(
+    name = "rust_linux_x86_64",
+    target_compatible_with = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:macos",
+    ],
+    target_triple = "aarch64-apple-darwin",
+)
+
+# Execution platform : linux arm (aarch64-unknown-linux-gnu)
+# -> linux arm (gnu)
+rust.repository_set(
+    name = "rust_linux_aarch64",
+    edition = RUST_EDITION, # "edition" only set in first instance of "rust_linux_aarch64" repository_set (see comment above)
+    exec_triple = "aarch64-unknown-linux-gnu", # "exec_triple" only set in first instance of "rust_linux_aarch64" repository_set (see comment above)
+    target_compatible_with = [
+        "@//bazel/platforms/linkers:unknown",
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "aarch64-unknown-linux-gnu",
+    versions = [RUST_VERSION], # "versions" only set in first instance of "rust_linux_aarch64" repository_set (see comment above)
+)
+# -> linux arm (musl)
+rust.repository_set(
+    name = "rust_linux_aarch64",
+    target_compatible_with = [
+        "@//bazel/platforms/linkers:musl",
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "aarch64-unknown-linux-musl",
+)
+
+# Execution platform : darwin x86 (x86_64-apple-darwin)
+# -> linux x86 (musl)
+rust.repository_set(
+    name = "rust_darwin_x86_64",
+    edition = RUST_EDITION, # "edition" only set in first instance of "rust_darwin_x86_64" repository_set (see comment above)
+    exec_triple = "x86_64-apple-darwin", # "exec_triple" only set in first instance of "rust_darwin_x86_64" repository_set (see comment above)
+    target_compatible_with = [
+        "@//bazel/platforms/linkers:musl",
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "x86_64-unknown-linux-musl",
+    versions = [RUST_VERSION], # "versions" only set in first instance of "rust_darwin_x86_64" repository_set (see comment above)
+)
+# -> linux arm (musl)
+rust.repository_set(
+    name = "rust_darwin_x86_64",
+    target_compatible_with = [
+        "@//bazel/platforms/linkers:musl",
+        "@platforms//cpu:arm64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "aarch64-unknown-linux-musl",
+)
+# -> darwin x86
+rust.repository_set(
+    name = "rust_darwin_x86_64",
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:macos",
+    ],
+    target_triple = "x86_64-apple-darwin",
+)
+# -> darwin arm
+rust.repository_set(
+    name = "rust_darwin_x86_64",
+    target_compatible_with = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:macos",
+    ],
+    target_triple = "aarch64-apple-darwin",
+)
+
+# Execution platform : darwin arm (aarch64-apple-darwin)
+# -> linux x86 (musl)
+rust.repository_set(
+    name = "rust_darwin_aarch64",
+    edition = RUST_EDITION, # "edition" only set in first instance of "rust_darwin_aarch64" repository_set (see comment above)
+    exec_triple = "aarch64-apple-darwin", # "exec_triple" only set in first instance of "rust_darwin_aarch64" repository_set (see comment above)
+    target_compatible_with = [
+        "@//bazel/platforms/linkers:musl",
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "x86_64-unknown-linux-musl",
+    versions = [RUST_VERSION], # "versions" only set in first instance of "rust_darwin_aarch64" repository_set (see comment above)
+)
+# -> linux arm (musl)
+rust.repository_set(
+    name = "rust_darwin_aarch64",
+    target_compatible_with = [
+        "@//bazel/platforms/linkers:musl",
+        "@platforms//cpu:arm64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "aarch64-unknown-linux-musl",
+)
+# -> darwin x86
+rust.repository_set(
+    name = "rust_darwin_aarch64",
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:macos",
+    ],
+    target_triple = "x86_64-apple-darwin",
+)
+# -> darwin arm
+rust.repository_set(
+    name = "rust_darwin_aarch64",
+    target_compatible_with = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:macos",
+    ],
+    target_triple = "aarch64-apple-darwin",
+)
+
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")

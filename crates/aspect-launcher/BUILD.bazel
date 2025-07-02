@@ -1,0 +1,34 @@
+load("//bazel/rust:defs.bzl", "rust_binary")
+load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
+load("//bazel/release:release.bzl", "release")
+
+rust_binary(
+    name = "aspect-launcher",
+    srcs = ["src/main.rs"],
+    deps = [
+        "@crates//:clap",
+        "@crates//:dirs",
+        "@crates//:fork",
+        "@crates//:futures-util",
+        "@crates//:liquid",
+        "@crates//:miette",
+        "@crates//:reqwest",
+        "@crates//:serde",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "//crates/aspect-config",
+        "//crates/aspect-cache",
+    ],
+)
+
+multi_platform_rust_binaries(
+    name = "bins",
+    target = ":aspect-launcher",
+    tags = ["no-macos"],
+)
+
+release(
+    name = "release",
+    targets = [":bins"],
+    tags = ["no-macos"],
+)

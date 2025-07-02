@@ -1,0 +1,16 @@
+[package]
+name = "starbuf-types"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+allocative = "0.3.4"
+derive_more = "2.0.1"
+prost-types = "0.14.1"
+starlark = "0.13.0"

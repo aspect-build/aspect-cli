@@ -1,0 +1,50 @@
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("//bazel/rust:defs.bzl", "rust_library")
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    data = [
+        "descriptor.bin",
+    ],
+    build_script_env = {
+        "DESCRIPTOR": "$(location :descriptor.bin)",
+    },
+    deps = [
+        "@crates//:tonic",
+        "@crates//:prost",
+        "@crates//:prost-build",
+        "@crates//:prost-types",
+        "@crates//:tonic-prost-build",
+    ],
+)
+
+
+rust_library(
+    name = "axl-proto",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "@crates//:allocative",
+        "@crates//:anyhow",
+        "@crates//:derive_more",
+        "@crates//:display_container",
+        "@crates//:dupe",
+        "@crates//:either",
+        "@crates//:starlark",
+        "@crates//:tonic",
+        "@crates//:tonic-prost",
+        "@crates//:prost",
+        "@crates//:prost-types",
+        "@crates//:uuid",
+        "@crates//:tokio",
+        ":build_script"
+    ],
+    proc_macro_deps = [
+        "@crates//:starlark_derive",
+        "//crates/starbuf-derive"
+    ],
+    visibility = [
+        "//crates/axl-runtime:__pkg__",
+        "//crates/build-event-stream:__pkg__",
+    ],
+)
