@@ -8,8 +8,9 @@ import (
 )
 
 type jsonSocket[S, R interface{}] struct {
-	conn net.Conn
-	read *json.Decoder
+	conn  net.Conn
+	write *json.Encoder
+	read  *json.Decoder
 }
 type jsonClientSocket[S, R interface{}] struct {
 	jsonSocket[S, R]
@@ -64,20 +65,7 @@ func (sock *jsonSocket[S, R]) Send(cmd S) error {
 		return fmt.Errorf("not connected to socket")
 	}
 
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return fmt.Errorf("failed to marshal command to json: %w", err)
-	}
-
-	_, err = sock.conn.Write(data)
-	if err != nil {
-		return fmt.Errorf("failed to write to socket: %w", err)
-	}
-	_, err = sock.conn.Write([]byte("\n"))
-	if err != nil {
-		return fmt.Errorf("failed to write to socket: %w", err)
-	}
-	return nil
+	return sock.write.Encode(cmd)
 }
 
 func (sock *jsonClientSocket[S, R]) connect(socketPath string) error {
@@ -90,7 +78,9 @@ func (sock *jsonClientSocket[S, R]) connect(socketPath string) error {
 		return err
 	}
 	sock.conn = conn
-	sock.read = json.NewDecoder(sock.conn)
+	sock.read = json.NewDecoder(conn)
+	sock.write = json.NewEncoder(conn)
+	sock.write.SetEscapeHTML(false)
 	return nil
 }
 
@@ -143,5 +133,7 @@ func (sock *jsonServerSocket[S, R]) Accept() error {
 
 	sock.conn = conn
 	sock.read = json.NewDecoder(conn)
+	sock.write = json.NewEncoder(conn)
+	sock.write.SetEscapeHTML(false)
 	return nil
 }
