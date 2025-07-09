@@ -96,7 +96,19 @@ var testCases = []struct {
 			import React from "react";
 			*/
 		`,
-		filename: "comments.ts",
+		filename:        "comments.ts",
+		expectedImports: []string{},
+	},
+	{
+		desc: "ignores require()-like statements",
+		ts: `
+			// require('foo')
+			require('foo' + 'bar')
+			required("foo")
+			imported('foo')
+		`,
+		filename:        "require-like.ts",
+		expectedImports: []string{},
 	},
 	{
 		desc: "ignores imports inside of strings - both multi-line template strings and literal strings",

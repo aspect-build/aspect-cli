@@ -28,43 +28,6 @@ func GetQuery(lang LanguageGrammar, queryStr string) *sitterQuery {
 	return q.(*sitterQuery)
 }
 
-// Run a query finding string query matches.
-func (tree *treeAst) QueryStrings(query TreeQuery, returnVar string) []string {
-	rootNode := tree.sitterTree.RootNode()
-	results := make([]string, 0, 5)
-
-	sitterQuery := query.(*sitterQuery)
-
-	// Execute the query.
-	qc := sitter.NewQueryCursor()
-	defer qc.Close()
-	qc.Exec(sitterQuery.q, rootNode)
-
-	// Collect string from the query results.
-	for {
-		m, ok := qc.NextMatch()
-		if !ok {
-			break
-		}
-
-		// Apply predicates to filter results.
-		if !matchesAllPredicates(sitterQuery, m, qc, tree.sourceCode) {
-			continue
-		}
-
-		result := fetchQueryMatch(sitterQuery, returnVar, m, tree.sourceCode)
-		if result != nil {
-			resultCode := result.Node.Content(tree.sourceCode)
-			results = append(results, resultCode)
-		}
-	}
-
-	return results
-}
-func (tree *treeAst) RootNode() *sitter.Node {
-	return tree.sitterTree.RootNode()
-}
-
 type queryResult struct {
 	QueryCaptures map[string]string
 }
@@ -76,16 +39,14 @@ func (qr queryResult) Captures() map[string]string {
 }
 
 func (tree *treeAst) Query(query TreeQuery) <-chan ASTQueryResult {
-	q := query.(*sitterQuery)
-	rootNode := tree.sitterTree.RootNode()
-
 	out := make(chan ASTQueryResult)
 
 	// Execute the query.
 	go func() {
+		q := query.(*sitterQuery)
 		qc := sitter.NewQueryCursor()
 		defer qc.Close()
-		qc.Exec(q.q, rootNode)
+		qc.Exec(q.q, tree.sitterTree.RootNode())
 
 		for {
 			m, ok := qc.NextMatch()
@@ -111,41 +72,10 @@ func (tree *treeAst) mapQueryMatchCaptures(m *sitter.QueryMatch, q *sitterQuery)
 	captures := make(map[string]string, len(m.Captures))
 	for _, c := range m.Captures {
 		name := q.CaptureNameForId(c.Index)
-		if v, e := captures[name]; e {
-			panic(fmt.Sprintf("Multiple captures for %q: %q and %q", name, v, c.Node.Content(tree.sourceCode)))
-		}
-
 		captures[name] = c.Node.Content(tree.sourceCode)
 	}
 
 	return captures
-}
-
-// Find and read the `from` QueryCapture from a QueryMatch.
-// Filter matches based on captures value using "equals-{name}" vars.
-func fetchQueryMatch(query *sitterQuery, name string, m *sitter.QueryMatch, sourceCode []byte) *sitter.QueryCapture {
-	var result *sitter.QueryCapture
-
-	for _, c := range m.Captures {
-		cn := query.CaptureNameForId(c.Index)
-
-		// Filters where a capture must equal a specific value.
-		if strings.HasPrefix(cn, "equals-") {
-			if c.Node.Content(sourceCode) != cn[len("equals-"):] {
-				return nil
-			}
-			continue
-		}
-
-		if cn == name {
-			if result != nil {
-				BazelLog.Errorf("Multiple matches for %q", name)
-			}
-			result = &c
-		}
-	}
-
-	return result
 }
 
 func mustNewTreeQuery(lang LanguageGrammar, query string) *sitter.Query {

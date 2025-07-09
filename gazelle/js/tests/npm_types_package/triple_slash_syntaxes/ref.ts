@@ -13,3 +13,7 @@
 /// <reference-bad>
 /// <reference>
 /// <reference types>
+
+function f() {
+    /// <reference types="never/exists" />
+}

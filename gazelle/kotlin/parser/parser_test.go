@@ -66,10 +66,12 @@ value class Password(private val s: String)
 }
 
 func TestTreesitterParser(t *testing.T) {
-
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			res, _ := NewParser().Parse(tc.filename, []byte(tc.kt))
+			res, errs := NewParser().Parse(tc.filename, []byte(tc.kt))
+			if len(errs) > 0 {
+				t.Errorf("Errors parsing %q: %v", tc.filename, errs)
+			}
 
 			if !equal(res.Imports, tc.imports) {
 				t.Errorf("Imports...\nactual:  %#v;\nexpected: %#v\nkotlin code:\n%v", res.Imports, tc.imports, tc.kt)
@@ -82,24 +84,34 @@ func TestTreesitterParser(t *testing.T) {
 	}
 
 	t.Run("main detection", func(t *testing.T) {
-		res, _ := NewParser().Parse("main.kt", []byte("fun main() {}"))
+		res, errs := NewParser().Parse("main.kt", []byte("fun main() {}"))
+		if len(errs) > 0 {
+			t.Errorf("Parse error: %v", errs)
+		}
+
 		if !res.HasMain {
 			t.Errorf("main method should be detected")
 		}
 
-		res, _ = NewParser().Parse("x.kt", []byte(`
+		res, errs = NewParser().Parse("x.kt", []byte(`
 package my.demo
 fun main() {}
 		`))
+		if len(errs) > 0 {
+			t.Errorf("Parse error: %v", errs)
+		}
 		if !res.HasMain {
 			t.Errorf("main method should be detected with package")
 		}
 
-		res, _ = NewParser().Parse("x.kt", []byte(`
+		res, errs = NewParser().Parse("x.kt", []byte(`
 package my.demo
 import kotlin.text.*
 fun main() {}
 		`))
+		if len(errs) > 0 {
+			t.Errorf("Parse error: %v", errs)
+		}
 		if !res.HasMain {
 			t.Errorf("main method should be detected with imports")
 		}

@@ -8,7 +8,6 @@ go_library(
     deps = [
         "//gazelle/common/treesitter",
         "//pkg/logger",
-        "@com_github_smacker_go_tree_sitter//:go-tree-sitter",
     ],
 )
 

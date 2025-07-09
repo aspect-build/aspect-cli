@@ -1,13 +1,12 @@
 package parser
 
 import (
-	"fmt"
-	"os"
+	"log"
 	"strings"
 
+	Log "github.com/aspect-build/aspect-cli/pkg/logger"
+
 	treeutils "github.com/aspect-build/aspect-cli/gazelle/common/treesitter"
-	"github.com/emirpasic/gods/sets/treeset"
-	sitter "github.com/smacker/go-tree-sitter"
 )
 
 type ParseResult struct {
@@ -31,6 +30,31 @@ func NewParser() Parser {
 	return &p
 }
 
+const importsQuery = `
+	(source_file
+		(import_list
+			(import_header
+				(identifier) @from
+				(wildcard_import)? @from-wild
+			)
+		)
+	)
+
+	(source_file
+		(package_header
+			(identifier) @package
+		)
+	)
+
+	(source_file
+		(function_declaration
+			(simple_identifier) @equals-main
+		)
+
+		(#eq? @equals-main "main")
+	)
+`
+
 func (p *treeSitterParser) Parse(filePath string, sourceCode []byte) (*ParseResult, []error) {
 	var result = &ParseResult{
 		File:    filePath,
@@ -46,48 +70,29 @@ func (p *treeSitterParser) Parse(filePath string, sourceCode []byte) (*ParseResu
 
 	if tree != nil {
 		defer tree.Close()
-		rootNode := tree.RootNode()
 
-		// Extract imports from the root nodes
-		for i := 0; i < int(rootNode.NamedChildCount()); i++ {
-			nodeI := rootNode.NamedChild(i)
+		q := treeutils.GetQuery(treeutils.Kotlin, importsQuery)
+		for queryResult := range tree.Query(q) {
+			Log.Tracef("Kotlin AST Query %q: %v", filePath, queryResult)
 
-			if nodeI.Type() == "import_list" {
-				for j := 0; j < int(nodeI.NamedChildCount()); j++ {
-					nodeJ := nodeI.NamedChild(j)
-					if nodeJ.Type() == "import_header" {
-						for k := 0; k < int(nodeJ.ChildCount()); k++ {
-							nodeK := nodeJ.Child(k)
-							if nodeK.Type() == "identifier" {
-								isStar := false
-								for l := int(nodeJ.ChildCount()) - 1; l > k; l-- {
-									if nodeJ.Child(l).Type() == "wildcard_import" {
-										isStar = true
-										break
-									}
-								}
-
-								result.Imports = append(result.Imports, readIdentifier(nodeK, sourceCode, !isStar))
-
-								// Any remaining nodes within nodeJ are comments or wildcards
-								break
-							}
-						}
+			caps := queryResult.Captures()
+			if from, isFrom := caps["from"]; isFrom {
+				if _, isFromWild := caps["from-wild"]; !isFromWild {
+					if lastDot := strings.LastIndex(from, "."); lastDot != -1 {
+						from = from[:lastDot]
 					}
 				}
-			} else if nodeI.Type() == "package_header" {
+				result.Imports = append(result.Imports, from)
+			} else if pkg, isPackage := caps["package"]; isPackage {
 				if result.Package != "" {
-					fmt.Printf("Multiple package declarations found in %s\n", filePath)
-					// TODO: Don't exit here and return an error instead?
-					os.Exit(1)
+					log.Fatalf("Multiple package declarations found in %q: %s and %s", filePath, result.Package, pkg)
 				}
 
-				result.Package = readIdentifier(getLoneChild(nodeI, "identifier"), sourceCode, false)
-			} else if nodeI.Type() == "function_declaration" {
-				nodeJ := getLoneChild(nodeI, "simple_identifier")
-				if nodeJ.Content(sourceCode) == "main" {
-					result.HasMain = true
-				}
+				result.Package = pkg
+			} else if _, isMain := caps["equals-main"]; isMain {
+				result.HasMain = true
+			} else {
+				log.Fatalf("Unexpected query result for %q: %v", filePath, queryResult)
 			}
 		}
 
@@ -98,56 +103,4 @@ func (p *treeSitterParser) Parse(filePath string, sourceCode []byte) (*ParseResu
 	}
 
 	return result, errs
-}
-
-type KotlinImports struct {
-	imports *treeset.Set
-}
-
-func getLoneChild(node *sitter.Node, name string) *sitter.Node {
-	for i := 0; i < int(node.NamedChildCount()); i++ {
-		if node.NamedChild(i).Type() == name {
-			return node.NamedChild(i)
-		}
-	}
-
-	fmt.Printf("Node %v must contain node of type %q", node, name)
-	os.Exit(1)
-	return nil
-}
-
-func readIdentifier(node *sitter.Node, sourceCode []byte, ignoreLast bool) string {
-	if node.Type() != "identifier" {
-		fmt.Printf("Must be type 'identifier': %v - %s", node.Type(), node.Content(sourceCode))
-		os.Exit(1)
-	}
-
-	var s strings.Builder
-
-	total := int(node.NamedChildCount())
-	if ignoreLast {
-		total = total - 1
-	}
-
-	for c := 0; c < total; c++ {
-		nodeC := node.NamedChild(c)
-
-		// TODO: are there any other node types under an "identifier"
-
-		switch nodeC.Type() {
-		case "simple_identifier":
-			if s.Len() > 0 {
-				s.WriteString(".")
-			}
-			s.WriteString(nodeC.Content(sourceCode))
-		case "multiline_comment", "comment":
-			// ignore
-		default:
-			fmt.Printf("Unexpected node type '%v' within: %s", nodeC.Type(), node.Content(sourceCode))
-			// TODO: Return error instead of exiting.
-			os.Exit(1)
-		}
-	}
-
-	return s.String()
 }
