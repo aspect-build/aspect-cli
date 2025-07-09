@@ -53,11 +53,6 @@ type AST interface {
 	Query(query TreeQuery) <-chan ASTQueryResult
 	QueryErrors() []error
 
-	// Wrapper utils
-	// TODO: delete
-	QueryStrings(query TreeQuery, returnVar string) []string
-	RootNode() *sitter.Node
-
 	// Release all resources related to this AST.
 	// The AST is most likely no longer usable after this call.
 	Close()

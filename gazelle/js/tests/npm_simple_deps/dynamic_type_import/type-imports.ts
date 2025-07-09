@@ -14,7 +14,7 @@ const g = (null as any) as typeof import('@aspect-test/c')
 
 // typeof-import in another function invocation
 (function() {
-    return ...(await x<typeof import("@aspect-test/d")>()),
+    return [...(await x<typeof import("@aspect-test/d")>())]
 })()
 
 // typeof-import in a variable declaration

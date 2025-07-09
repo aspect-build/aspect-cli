@@ -1,12 +1,12 @@
 package parser
 
 import (
+	"log"
 	"path"
 	"regexp"
 	"strings"
 
 	Log "github.com/aspect-build/aspect-cli/pkg/logger"
-	sitter "github.com/smacker/go-tree-sitter"
 
 	treeutils "github.com/aspect-build/aspect-cli/gazelle/common/treesitter"
 )
@@ -37,11 +37,13 @@ func (pe *ParseErrors) Error() string {
 	return strings.Join(s, "\n")
 }
 
-// A query finding esm import() statements and cjs require() statements
-// with the resulting import string exposed as @from.
+// A query finding dependencies and declarations in TypeScript/JavaScript files.
 //
-// Use the '.' anchor operator to only match the first argument
-const DYNAMIC_IMPORTS = `
+// Query matches may include captures:
+// - from: a string representing an imported resource such as a name or path
+// - triple-slash: a triple-slash directive comment
+// - defined: a string representing a defined module name
+const importsQuery = `
 	(call_expression
 		function: [
 			(identifier) @equals-require
@@ -50,6 +52,46 @@ const DYNAMIC_IMPORTS = `
 		arguments: (arguments . (comment)* . (string (string_fragment) @from))
 
 		(#eq? @equals-require "require")
+	)
+
+	(program
+		(import_statement
+			source: (string (string_fragment) @from)
+		)
+	)
+
+	(program
+		(export_statement
+			source: (string (string_fragment) @from)
+		)
+	)
+
+	(program
+		(comment) @triple-slash
+		(#match? @triple-slash "^///\\s*<reference\\s+(?:path|types)\\s*=")
+	)
+
+	(program
+		(ambient_declaration
+			(module
+				body: (statement_block [
+					(import_statement
+						source: (string (string_fragment) @from)
+					)
+					(export_statement
+						source: (string (string_fragment) @from)
+					)
+				])
+			)
+		)
+	)
+
+	(program
+		(ambient_declaration
+			(module
+				name: (string (string_fragment) @defined)
+			)
+		)
 	)
 `
 
@@ -73,61 +115,25 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, error) {
 
 	if tree != nil {
 		defer tree.Close()
-		rootNode := tree.RootNode()
-		rootNodeChildCount := int(rootNode.NamedChildCount())
-
-		// Quick pass over root nodes to find top level imports and modules
-		for i := 0; i < rootNodeChildCount; i++ {
-			node := rootNode.NamedChild(i)
-			nodeType := node.Type()
-
-			if isImportStatement(nodeType) {
-				if rootImportNode := getImportStatementName(node); rootImportNode != nil {
-					rootImportPath := rootImportNode.Content(sourceCode)
-
-					Log.Tracef("ESM import %q: %v", filePath, rootImportPath)
-
-					imports = append(imports, rootImportPath)
-				}
-			} else if isModuleDeclaration(nodeType) {
-				if modDeclNameNode := getModuleDeclarationName(node); modDeclNameNode != nil {
-					modDeclName := modDeclNameNode.Content(sourceCode)
-
-					Log.Tracef("Module declaration %q: %v", filePath, modDeclName)
-
-					modules = append(modules, modDeclName)
-				}
-
-				// Import/export statements within a module declaration.
-				if moduleRootNode := treeutils.GetNodeChildByTypePath(node, "module", "statement_block"); moduleRootNode != nil {
-					for j := 0; j < int(moduleRootNode.NamedChildCount()); j++ {
-						moduleNode := moduleRootNode.NamedChild(j)
-
-						if isImportStatement(moduleNode.Type()) {
-							if moduleImportNode := getImportStatementName(moduleNode); moduleImportNode != nil {
-								moduleImport := moduleImportNode.Content(sourceCode)
-
-								Log.Tracef("Module declaration import %q: %v", filePath, moduleImport)
-
-								imports = append(imports, moduleImport)
-							}
-						}
-					}
-				}
-			} else if nodeType == "comment" {
-				comment := node.Content(sourceCode)
-				if typesImport, isTripleSlash := getTripleSlashDirectiveModule(comment); isTripleSlash {
-					imports = append(imports, typesImport)
-				}
-			}
-		}
 
 		// Query for more complex non-root node imports.
-		q := treeutils.GetQuery(lang, DYNAMIC_IMPORTS)
-		if queryResults := tree.QueryStrings(q, "from"); len(queryResults) > 0 {
-			Log.Tracef("Dynamic Imports %q: %v", filePath, queryResults)
+		q := treeutils.GetQuery(lang, importsQuery)
+		for queryResult := range tree.Query(q) {
+			Log.Tracef("AST Query %q: %v", filePath, queryResult)
 
-			imports = append(imports, queryResults...)
+			caps := queryResult.Captures()
+			if from, isFrom := caps["from"]; isFrom {
+				imports = append(imports, from)
+			} else if tripSlash, isTripSlash := caps["triple-slash"]; isTripSlash {
+				// Parse triple-slash directives
+				if lib, ok := getTripleSlashDirectiveModule(tripSlash); ok {
+					imports = append(imports, lib)
+				}
+			} else if defined, isDefined := caps["defined"]; isDefined {
+				modules = append(modules, defined)
+			} else {
+				log.Fatalf("Unexpected query result for %q: %v", filePath, queryResult)
+			}
 		}
 
 		// Parse errors. Only log them due to many false positives potentially caused by issues
@@ -153,17 +159,10 @@ func ParseSource(filePath string, sourceCode []byte) (ParseResult, error) {
 	return result, perr
 }
 
-// Determine if a node is a triple-slash directive and parse the type reference.
+// Extract the module name out of a triple-slash directive comment.
 //
 // See: https://www.typescriptlang.org/docs/handbook/triple-slash-directives.html
-//
-// Note: could also potentially use a treesitter query such as:
-// /  `(program (comment) @result (#match? @c "^///\\s*<reference\\s+(lib|types|path)\\s*=\\s*\"[^\"]+\""))`
 func getTripleSlashDirectiveModule(comment string) (string, bool) {
-	if !strings.HasPrefix(comment, "///") {
-		return "", false
-	}
-
 	submatches := tripleSlashRe.FindAllStringSubmatchIndex(comment, -1)
 	if len(submatches) != 1 {
 		return "", false
@@ -171,40 +170,6 @@ func getTripleSlashDirectiveModule(comment string) (string, bool) {
 
 	lib := tripleSlashRe.ExpandString(make([]byte, 0), "$lib", comment, submatches[0])
 	return string(lib), len(lib) > 0
-}
-
-// Determine if a node is an import/export statement that may contain a `from` value.
-func isImportStatement(nodeType string) bool {
-	// Top level `import ... from "..."` statement.
-	// Top level `export ... from "..."` statement.
-	return nodeType == "import_statement" || nodeType == "export_statement"
-}
-
-// Return a Node representing the `from` value of an import/export statement.
-func getImportStatementName(importStatement *sitter.Node) *sitter.Node {
-	from := importStatement.ChildByFieldName("source")
-	if from != nil {
-		return from.Child(1)
-	}
-	return nil
-}
-
-// Determine if a node is a module declaration.
-func isModuleDeclaration(nodeType string) bool {
-	// `declare module "..." [{ ... }]` statement.
-	// See: https://www.typescriptlang.org/docs/handbook/modules.html#ambient-modules
-	//
-	// Example node: (ambient_declaration (module name: (string (string_fragment)) body: (statement_block)))
-	return nodeType == "ambient_declaration"
-}
-
-// Return a Node representing the module declaration name
-func getModuleDeclarationName(node *sitter.Node) *sitter.Node {
-	if module := treeutils.GetNodeChildByType(node, "module"); module != nil {
-		return treeutils.GetNodeStringField(module, "name")
-	}
-
-	return nil
 }
 
 // File extension to language key
