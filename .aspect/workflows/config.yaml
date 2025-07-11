@@ -4,8 +4,6 @@ tasks:
       queue: aspect-medium
   - buildifier:
       queue: aspect-medium
-  - configure:
-      queue: aspect-medium
   - test:
   - finalization:
       queue: aspect-small
