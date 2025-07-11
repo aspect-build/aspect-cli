@@ -1,13 +1,9 @@
 diff --git a/walk/walk.go b/walk/walk.go
-index b2097b4..2c2bc08 100644
+index 72cac22..64b92e4 100644
 --- a/walk/walk.go
 +++ b/walk/walk.go
-@@ -473,9 +473,21 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
- 		w.errs = append(w.errs, err)
- 	}
- 	hasBuildFileError := err != nil
-+
- 	wc := info.config
+@@ -446,6 +446,17 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
+ 
  	containedByParent := info.file == nil && wc.updateOnly
  
 +	// PATCH(files list) ---
@@ -24,7 +20,7 @@ index b2097b4..2c2bc08 100644
  	// Configure the directory, if we haven't done so already.
  	_, alreadyConfigured := w.visits[rel]
  	if !containedByParent && !alreadyConfigured {
-@@ -519,9 +531,17 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
+@@ -483,9 +494,17 @@ func (w *walker) visit(c *config.Config, rel string, updateParent bool) {
  				return
  			}
  			for _, f := range vi.regularFiles {

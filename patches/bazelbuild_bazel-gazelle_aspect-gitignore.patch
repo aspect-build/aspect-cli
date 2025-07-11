@@ -55,7 +55,7 @@ index 67d2c16..07cfea5 100644
  		}
  	}
 diff --git a/walk/dirinfo.go b/walk/dirinfo.go
-index ea59bbb..12ad5a6 100644
+index c690f52..94fca48 100644
 --- a/walk/dirinfo.go
 +++ b/walk/dirinfo.go
 @@ -11,6 +11,17 @@ import (
