@@ -31,7 +31,7 @@ platform_transition_filegroup(
 )
 
 platform_transition_filegroup(
-    name = "aspect-windows-arm64.exe",
+    name = "aspect-windows-aarch64.exe",
     srcs = ["//cmd/aspect"],
     tags = ["manual"],
     target_compatible_with = [
@@ -46,7 +46,7 @@ bazelisk_artifacts(
     tags = ["manual"],
     version_file = ":aspect_version",
     windows_x86_64 = ":aspect-windows-x86_64.exe",
-    windows_arm64 = ":aspect-windows-arm64.exe",
+    windows_arm64 = ":aspect-windows-aarch64.exe",
 )
 
 bazelisk_artifacts(
