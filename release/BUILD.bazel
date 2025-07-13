@@ -45,7 +45,13 @@ bazelisk_artifacts(
     name = "windows_artifacts",
     tags = ["manual"],
     version_file = ":aspect_version",
-    windows_x86_64 = ":aspect-windows-x86_64.exe",
+    windows_arm64 = ":aspect-windows-aarch64.exe",
+)
+
+bazelisk_artifacts(
+    name = "windows_artifacts_arm64",
+    tags = ["manual"],
+    version_file = ":aspect_version",
     windows_arm64 = ":aspect-windows-aarch64.exe",
 )
 
@@ -73,8 +79,16 @@ release(
     tags = ["manual"],
     targets = [
         ":aspect-windows-x86_64.exe",
-        ":aspect-windows-arm64.exe",
         ":windows_artifacts",
+    ],
+)
+
+release(
+    name = "release.windows-arm64",
+    tags = ["manual"],
+    targets = [
+        ":aspect-windows-aarch64.exe",
+        ":windows_artifacts_arm64",
     ],
 )
 

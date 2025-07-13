@@ -32,7 +32,16 @@ jobs:
   # Cross-compiling to Windows is too hard. Just build on a windows runner instead.
   build_windows:
     name: windows
-    runs-on: windows-2022
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-2022
+            build_target: release.windows
+            artifact_name: windows-x86_64.exe
+          - os: windows-11-arm
+            build_target: release.windows-arm64
+            artifact_name: windows-aarch64.exe
     outputs:
       artifact: ${{steps.upload.outputs.artifact-url}}
     env:
@@ -50,13 +59,13 @@ jobs:
           disk-cache: ${{ github.workflow }}
           # Share repository cache between workflows.
           repository-cache: true
-      - run: bazel build --config=release //release:release.windows
+      - run: bazel build --config=release //release:${{ matrix.build_target }}
       - run: bazel-bin/release/release.windows.sh "C:\Temp\release"
         shell: bash
       # Verify that we built a functional executable
       - name: smoke test
         run: |
-          cp $(bazel cquery --config=release --output=files //release:aspect-windows-x86_64.exe) aspect.exe
+          cp $(bazel cquery --config=release --output=files //release:aspect-${{ matrix.artifact_name }}) aspect.exe
           ./aspect.exe --help
       - uses: actions/upload-artifact@v4
         id: upload
