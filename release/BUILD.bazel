@@ -36,7 +36,7 @@ platform_transition_filegroup(
     tags = ["manual"],
     target_compatible_with = [
         "@platforms//os:windows",
-        "@platforms//cpu:arm64",
+        "@platforms//cpu:aarch64",
     ],
     target_platform = "@zig_sdk//platform:windows_arm64",
 )
