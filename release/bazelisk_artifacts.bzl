@@ -26,6 +26,10 @@ _ATTRS = {
         mandatory = True,
         allow_single_file = True,
     ),
+    "windows_arm64": attr.label(
+        doc = "The artifact for the windows-arm64 platform.",
+        allow_single_file = True,
+    ),
     "windows_x86_64": attr.label(
         doc = "The artifact for the windows-x86_64 platform.",
         allow_single_file = True,
@@ -49,6 +53,10 @@ def _impl(ctx):
         inputs.append(ctx.file.windows_x86_64)
         args.add(ctx.file.windows_x86_64)
         args.add("windows-x86_64.exe")
+    else if: ctx.attr.windows_arm64:
+        inputs.append(ctx.file.windows_arm64)
+        args.add(ctx.file.windows_arm64)
+        args.add("windows-arm64.exe")
     else:
         inputs.extend([
             ctx.file.darwin_arm64,

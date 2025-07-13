@@ -30,11 +30,30 @@ platform_transition_filegroup(
     target_platform = "@zig_sdk//platform:windows_x86_64",
 )
 
+platform_transition_filegroup(
+    name = "aspect-windows-arm64.exe",
+    srcs = ["//cmd/aspect"],
+    tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//os:windows",
+        "@platforms//cpu:arm64",
+    ],
+    target_platform = "@zig_sdk//platform:windows_arm64",
+)
+
 bazelisk_artifacts(
     name = "windows_artifacts",
     tags = ["manual"],
     version_file = ":aspect_version",
     windows_x86_64 = ":aspect-windows-x86_64.exe",
+    windows_arm64 = ":aspect-windows-arm64.exe",
+)
+
+bazelisk_artifacts(
+    name = "windows_artifacts",
+    tags = ["manual"],
+    version_file = ":aspect_version",
+    windowsarm64 = ":aspect-windows-arm64.exe",
 )
 
 bazelisk_artifacts(
@@ -61,6 +80,7 @@ release(
     tags = ["manual"],
     targets = [
         ":aspect-windows-x86_64.exe",
+        ":aspect-windows-arm64.exe",
         ":windows_artifacts",
     ],
 )
