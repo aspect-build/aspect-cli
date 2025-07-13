@@ -1,5 +1,7 @@
 # See https://docs.aspect.build/workflows/configuration
 tasks:
+  - branch_freshness:
+      update_strategy: none
   - format:
       queue: aspect-medium
   - buildifier:
