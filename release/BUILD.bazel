@@ -45,7 +45,7 @@ bazelisk_artifacts(
     name = "windows_artifacts",
     tags = ["manual"],
     version_file = ":aspect_version",
-    windows_arm64 = ":aspect-windows-aarch64.exe",
+    windows_x86_64 = ":aspect-windows-x86_64.exe",
 )
 
 bazelisk_artifacts(
