@@ -53,7 +53,7 @@ def _impl(ctx):
         inputs.append(ctx.file.windows_x86_64)
         args.add(ctx.file.windows_x86_64)
         args.add("windows-x86_64.exe")
-    else if: ctx.attr.windows_arm64:
+    elif ctx.attr.windows_arm64:
         inputs.append(ctx.file.windows_arm64)
         args.add(ctx.file.windows_arm64)
         args.add("windows-arm64.exe")

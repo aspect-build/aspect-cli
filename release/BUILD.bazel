@@ -50,13 +50,6 @@ bazelisk_artifacts(
 )
 
 bazelisk_artifacts(
-    name = "windows_artifacts",
-    tags = ["manual"],
-    version_file = ":aspect_version",
-    windowsarm64 = ":aspect-windows-arm64.exe",
-)
-
-bazelisk_artifacts(
     name = "linux_and_darwin_artifacts",
     darwin_arm64 = ":aspect-macos-aarch64",
     darwin_x86_64 = ":aspect-macos-x86_64",
