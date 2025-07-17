@@ -271,9 +271,15 @@ type FixUpdateStatus struct {
 	NumBuildFilesUpdated int
 }
 
-func runFixUpdate(wd string, languages []language.Language, cmd command, args []string) (*FixUpdateStatus, error) {
-	stats := FixUpdateStatus{}
+// NOTE: additional aspect-cli wrapper of `runFixUpdate` to make public and add `FixUpdateStatus`
+// while minimizing the diff of vendored code.
+func RunGazelleFixUpdate(wd string, languages []language.Language, args []string) (*FixUpdateStatus, error) {
+	stats := &FixUpdateStatus{}
+	err := runFixUpdate(wd, languages, updateCmd, args, stats)
+	return stats, err
+}
 
+func runFixUpdate(wd string, languages []language.Language, cmd command, args []string, stats *FixUpdateStatus) error {
 	cexts := make([]config.Configurer, 0, len(languages)+5)
 	cexts = append(cexts,
 		&config.CommonConfigurer{},
@@ -288,7 +294,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 
 	c, err := newFixUpdateConfiguration(wd, cmd, args, cexts)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	mrslv := newMetaResolver()
@@ -310,7 +316,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 	ruleIndex := resolve.NewRuleIndex(mrslv.Resolver, exts...)
 
 	if err = fixRepoFiles(c, loads); err != nil {
-		return nil, err
+		return err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -502,7 +508,7 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 	}
 
 	if walkErr != nil {
-		return nil, walkErr
+		return walkErr
 	}
 
 	// Finish building the index for dependency resolution.
@@ -548,7 +554,6 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 			} else if err == resultFileChanged {
 				// NOTE: aspect-cli "changed" result, increment counter
 				stats.NumBuildFilesUpdated++
-				exit = err
 			} else {
 				log.Print(err)
 			}
@@ -556,11 +561,11 @@ func runFixUpdate(wd string, languages []language.Language, cmd command, args []
 	}
 	if uc.patchPath != "" {
 		if err := os.WriteFile(uc.patchPath, uc.patchBuffer.Bytes(), 0o666); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return &stats, exit
+	return exit
 }
 
 // lookupMapKindReplacement finds a mapped replacement for rule kind `kind`, resolving transitively.
