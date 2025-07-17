@@ -130,13 +130,7 @@ func (c *Configure) AddLanguage(lang ConfigureLanguage) {
 	}
 }
 
-func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []string) error {
-	if len(runner.languageKeys) == 0 {
-		return &aspecterrors.ExitError{
-			ExitCode: aspecterrors.ConfigureNoConfig,
-		}
-	}
-
+func (runner *Configure) PrepareGazelleArgs(mode ConfigureMode, excludes []string, args []string) (string, []string) {
 	var wd string
 	if wsRoot := bazel.WorkspaceFromWd.WorkspaceRoot(); wsRoot != "" {
 		wd = wsRoot
@@ -174,17 +168,33 @@ func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []
 	// Append additional args including specific directories to fix.
 	fixArgs = append(fixArgs, args...)
 
-	if mode == "fix" {
-		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(runner.languageKeys, ", "))
-	}
+	return wd, fixArgs
+}
 
-	// Instantiate all the languages
+// Instantiate an instance of each language enabled in this Configure instance.
+func (runner *Configure) InstantiateLanguages() []language.Language {
 	languages := make([]language.Language, 0, len(runner.languages))
 	for _, lang := range runner.languages {
 		languages = append(languages, lang())
 	}
+	return languages
+}
 
-	stats, err := RunGazelleFixUpdate(wd, languages, fixArgs)
+func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []string) error {
+	if len(runner.languageKeys) == 0 {
+		return &aspecterrors.ExitError{
+			ExitCode: aspecterrors.ConfigureNoConfig,
+		}
+	}
+
+	wd, fixArgs := runner.PrepareGazelleArgs(mode, excludes, args)
+
+	if mode == "fix" {
+		fmt.Fprintf(runner.Streams.Stdout, "Updating BUILD files for %s\n", strings.Join(runner.languageKeys, ", "))
+	}
+
+	// Run gazelle
+	stats, err := RunGazelleFixUpdate(wd, runner.InstantiateLanguages(), fixArgs)
 
 	if mode == "fix" && stats != nil {
 		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s visited\n", stats.NumBuildFilesVisited, pluralize("file", stats.NumBuildFilesVisited))
