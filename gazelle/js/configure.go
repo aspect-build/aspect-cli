@@ -108,14 +108,14 @@ func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
 		// Common case of the lockfile not being within a subdirectory.
 		// Can use the fs.DirEntry list of this directory to check if the lockfile exists.
 		if ents[pnpmLockPath] {
-			ts.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, pnpmLockPath))
+			ts.addPnpmLockfile(c, config, path.Join(rel, pnpmLockPath))
 		}
 	} else if rootDirEntry := strings.Split(pnpmLockDir, "/")[0]; ents[rootDirEntry] {
 		// If the lockfile is in a subdirectory then check the fs.DirEntry of the subdirectory.
 		// If the subdirectory exists then perform the expensive os.Stat to check if the file exists.
 		lockfilePath := path.Join(c.RepoRoot, rel, pnpmLockPath)
 		if _, err := os.Stat(lockfilePath); err == nil {
-			ts.addPnpmLockfile(config, c.RepoName, c.RepoRoot, path.Join(rel, pnpmLockPath))
+			ts.addPnpmLockfile(c, config, path.Join(rel, pnpmLockPath))
 		}
 	}
 

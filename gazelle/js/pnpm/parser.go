@@ -2,10 +2,10 @@ package gazelle
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"regexp"
 
 	semver "github.com/Masterminds/semver/v3"
@@ -13,19 +13,14 @@ import (
 
 type WorkspacePackageVersionMap map[string]map[string]string
 
+func init() {
+	gob.Register(WorkspacePackageVersionMap{})
+}
+
 /* Parse a lockfile and return a map of workspace projects to a map of dependency name to version.
  */
-func ParsePnpmLockFileDependencies(lockfilePath string) WorkspacePackageVersionMap {
-	yamlFileReader, readErr := os.Open(lockfilePath)
-	if readErr != nil {
-		log.Fatalf("failed to read lockfile '%s': %s", lockfilePath, readErr.Error())
-	}
-
-	deps, err := parsePnpmLockDependencies(yamlFileReader)
-	if err != nil {
-		log.Fatalf("pnpm parse - %v\n", err)
-	}
-	return deps
+func ParsePnpmLockFileDependencies(lockfileContent []byte) (WorkspacePackageVersionMap, error) {
+	return parsePnpmLockDependencies(bytes.NewReader(lockfileContent))
 }
 
 var lockVersionRegex = regexp.MustCompile(`^\s*lockfileVersion: '?(?P<Version>\d\.\d)'?`)
