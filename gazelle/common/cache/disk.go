@@ -27,6 +27,8 @@ func init() {
 	// only have to register custom types.
 	gob.Register(map[string]interface{}{})
 	gob.Register(map[string]string{})
+	gob.Register(map[string][]string{})
+	gob.Register(map[string]map[string]string{})
 	gob.Register([]interface{}{})
 }
 

@@ -1026,14 +1026,20 @@ func (ts *typeScriptLang) addPackageRules(cfg *JsGazelleConfig, args language.Ge
 
 // Add pnpm rules for a pnpm lockfile.
 // Collect pnpm projects and project dependencies from the lockfile.
-func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRoot, lockfileRel string) {
+func (ts *typeScriptLang) addPnpmLockfile(c *config.Config, cfg *JsGazelleConfig, lockfileRel string) {
 	BazelLog.Infof("pnpm add %q", lockfileRel)
 
-	lockfilePath := path.Join(repoRoot, lockfileRel)
+	parsedCache := cache.Get(c)
+	parsedLockfile, _, readErr := parsedCache.LoadOrStoreFile(c.RepoRoot, lockfileRel, "pnpm.ParsePnpmLockFile", func(filePath string, content []byte) (any, error) {
+		return pnpm.ParsePnpmLockFileDependencies(content)
+	})
+	if readErr != nil {
+		BazelLog.Fatalf("failed to read lockfile %q: %v", lockfileRel, readErr)
+	}
 
 	pnpmWorkspace := ts.pnpmProjects.NewWorkspace(lockfileRel)
 
-	for project, packages := range pnpm.ParsePnpmLockFileDependencies(lockfilePath) {
+	for project, packages := range parsedLockfile.(pnpm.WorkspacePackageVersionMap) {
 		BazelLog.Debugf("pnpm add %q: project %q ", lockfileRel, project)
 
 		pnpmProject := pnpmWorkspace.AddProject(project)
@@ -1042,7 +1048,7 @@ func (ts *typeScriptLang) addPnpmLockfile(cfg *JsGazelleConfig, repoName, repoRo
 			BazelLog.Tracef("pnpm add %q: project %q: package: %q", lockfileRel, project, pkg)
 
 			pnpmProject.AddPackage(pkg, version, &label.Label{
-				Repo:     repoName,
+				Repo:     c.RepoName,
 				Pkg:      pnpmProject.Pkg(),
 				Name:     path.Join(cfg.npmLinkAllTargetName, pkg),
 				Relative: false,
