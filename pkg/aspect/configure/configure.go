@@ -184,26 +184,28 @@ func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []
 		languages = append(languages, lang())
 	}
 
-	stats, err := runFixUpdate(wd, languages, updateCmd, fixArgs)
+	stats, err := RunGazelleFixUpdate(wd, languages, fixArgs)
 
 	if mode == "fix" && stats != nil {
 		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s visited\n", stats.NumBuildFilesVisited, pluralize("file", stats.NumBuildFilesVisited))
 		fmt.Fprintf(runner.Streams.Stdout, "%v BUILD %s updated\n", stats.NumBuildFilesUpdated, pluralize("file", stats.NumBuildFilesUpdated))
 	}
 
-	if err == nil {
-		return nil
-	}
+	var exitCode int
 
-	exitCode := aspecterrors.UnhandledOrInternalError
-
-	// Unique error codes for changes fixed vs diffs, otherwise fallback to bazel unhandled error code.
+	// Unique error codes for:
+	// - files diffs
+	// - files updated
+	// - internal errors
 	if err == errExit {
 		exitCode = aspecterrors.ConfigureDiff
 		err = nil
-	} else if err == resultFileChanged {
+	} else if err != nil {
+		exitCode = aspecterrors.UnhandledOrInternalError
+	} else if stats != nil && stats.NumBuildFilesUpdated > 0 {
 		exitCode = aspecterrors.ConfigureFixed
-		err = nil
+	} else {
+		return nil
 	}
 
 	return &aspecterrors.ExitError{
