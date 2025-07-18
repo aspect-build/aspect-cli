@@ -1,7 +1,7 @@
 load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 
 ts_project(
-    name = "unspecified",
+    name = "kept",
     srcs = ["w.ts"],
-    isolated_typecheck = True,
+    isolated_typecheck = True,  # keep
 )
