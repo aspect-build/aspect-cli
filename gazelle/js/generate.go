@@ -17,6 +17,7 @@
 package gazelle
 
 import (
+	"bytes"
 	"encoding/gob"
 	"fmt"
 	"math"
@@ -286,12 +287,16 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 	npmPackageInfo := newTsPackageInfo(srcLabel)
 
 	packageJsonPath := path.Join(args.Rel, NpmPackageFilename)
-	packageImports, err := node.ParsePackageJsonImportsFile(args.Config.RepoRoot, packageJsonPath)
+
+	parserCache := cache.Get(args.Config)
+	packageImports, _, err := parserCache.LoadOrStoreFile(args.Config.RepoRoot, packageJsonPath, "parsePackageJsonImports", func(path string, content []byte) (any, error) {
+		return node.ParsePackageJsonImports(bytes.NewReader(content))
+	})
 	if err != nil {
 		BazelLog.Warnf("Failed to parse %q imports: %e", packageJsonPath, err)
 	}
 
-	for _, impt := range packageImports {
+	for _, impt := range packageImports.([]string) {
 		if cfg.IsImportIgnored(impt) {
 			continue
 		}

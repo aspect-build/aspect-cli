@@ -42,6 +42,9 @@ write_source_file(
 
 go_test(
     name = "node_test",
-    srcs = ["paths_test.go"],
+    srcs = [
+        "package_test.go",
+        "paths_test.go",
+    ],
     embed = [":node"],
 )

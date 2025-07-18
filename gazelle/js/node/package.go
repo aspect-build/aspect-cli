@@ -1,7 +1,7 @@
 package gazelle
 
 import (
-	"os"
+	"io"
 	"path"
 
 	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
@@ -22,12 +22,7 @@ type npmPackageJSON struct {
 
 // Extract the various import types from the package.json file such as
 // 'main' and 'exports' fields.
-func ParsePackageJsonImportsFile(rootDir, packageJsonPath string) ([]string, error) {
-	packageJsonReader, err := os.Open(path.Join(rootDir, packageJsonPath))
-	if err != nil {
-		return nil, err
-	}
-
+func ParsePackageJsonImports(packageJsonReader io.Reader) ([]string, error) {
 	packageJsonDecoder := jsonr.NewDecoder(packageJsonReader)
 
 	var c npmPackageJSON
