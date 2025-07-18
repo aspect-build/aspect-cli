@@ -101,9 +101,9 @@ const importsQuery = `
 var tripleSlashRe = regexp.MustCompile(`^///\s*<reference\s+(?:path|types)\s*=\s*"(?P<lib>[^"]+)"`)
 
 func ParseSource(filePath string, sourceCode []byte) (ParseResult, error) {
-	imports := make([]string, 0, 5)
-	modules := make([]string, 0)
-	errs := make([]error, 0)
+	var imports []string
+	var modules []string
+	var errs []error
 
 	lang := filenameToLanguage(filePath)
 
