@@ -73,8 +73,8 @@ func (i *TsProjectInfo) AddImport(impt ImportStatement) {
 
 func (i *TsProjectInfo) HasTsx() bool {
 	if i.sources != nil {
-		for _, src := range i.sources.Values() {
-			if isTsxFileExt(path.Ext(src.(string))) {
+		for it := i.sources.Iterator(); it.Next(); {
+			if isTsxFileExt(path.Ext(it.Value().(string))) {
 				return true
 			}
 		}

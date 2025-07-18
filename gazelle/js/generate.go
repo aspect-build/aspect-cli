@@ -121,8 +121,8 @@ func (ts *typeScriptLang) tsPackageInfoToRelsToIndex(cfg *JsGazelleConfig, args 
 		cfg.PnpmLockRel(),
 	}
 
-	for _, imp := range info.imports.Values() {
-		impt := imp.(ImportStatement)
+	for it := info.imports.Iterator(); it.Next(); {
+		impt := it.Value().(ImportStatement)
 
 		// Might be a direct import of a file or dir
 		i = append(i, impt.Imp)
@@ -473,13 +473,9 @@ func (ts *typeScriptLang) addTsProtoRule(cfg *JsGazelleConfig, args language.Gen
 }
 
 func hasTranspiledSources(sourceFiles *treeset.Set) bool {
-	for _, f := range sourceFiles.Values() {
-		if isTranspiledSourceFileType(f.(string)) {
-			return true
-		}
-	}
-
-	return false
+	return sourceFiles.Any(func(_ int, f any) bool {
+		return isTranspiledSourceFileType(f.(string))
+	})
 }
 
 func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel string, tsconfig *typescript.TsConfig, args language.GenerateArgs, group *TargetGroup, targetName string, sourceFiles, genFiles, dataFiles *treeset.Set, result *language.GenerateResult) (*rule.Rule, error) {
@@ -500,9 +496,9 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 
 	// Project data combined from all files.
 	info := newTsProjectInfo()
-	info.sources.Add(sourceFiles.Values()...)
+	sourceFiles.Each(func(_ int, f any) { info.sources.Add(f.(string)) })
 	if genFiles != nil {
-		info.sources.Add(genFiles.Values()...)
+		genFiles.Each(func(_ int, f any) { info.sources.Add(f.(string)) })
 	}
 
 	// Parse source files, do not parse generated files that are not source files.
@@ -538,20 +534,22 @@ func (ts *typeScriptLang) addProjectRule(cfg *JsGazelleConfig, tsconfigRel strin
 	}
 
 	// Data file lookup map. Workspace path => local path
-	dataFileWorkspacePaths := treemap.NewWithStringComparator()
-	for _, dataFile := range dataFiles.Values() {
-		dataFileWorkspacePaths.Put(path.Join(args.Rel, dataFile.(string)), dataFile)
+	dataFileWorkspacePaths := make(map[string]string, dataFiles.Size())
+	for it := dataFiles.Iterator(); it.Next(); {
+		dataFile := it.Value().(string)
+		dataFileWorkspacePaths[path.Join(args.Rel, dataFile)] = dataFile
 	}
 
 	// Add any imported data files as sources.
-	for _, importStatement := range info.imports.Values() {
-		workspacePath := importStatement.(ImportStatement).Imp
+	for it := info.imports.Iterator(); it.Next(); {
+		importStatement := it.Value().(ImportStatement)
+		workspacePath := importStatement.Imp
 
 		// If the imported path is a file that can be compiled as ts source
 		// then add it to the importedDataFiles to be included in the srcs.
 		// Remove it from the dataFiles to signify that it is now a "source" file
 		// owned by this target.
-		if dataFile, _ := dataFileWorkspacePaths.Get(workspacePath); dataFile != nil {
+		if dataFile, ok := dataFileWorkspacePaths[workspacePath]; ok {
 			info.sources.Add(dataFile)
 			dataFiles.Remove(dataFile)
 		}

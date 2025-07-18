@@ -101,9 +101,10 @@ func containsMappedKind(args language.GenerateArgs, generatedKinds *treeset.Set,
 }
 
 func getMappedKind(args language.GenerateArgs, generatedKinds *treeset.Set, kind string) (string, bool) {
-	for _, generatedKind := range generatedKinds.Values() {
-		if MapKind(args, generatedKind.(string)) == kind {
-			return generatedKind.(string), true
+	for it := generatedKinds.Iterator(); it.Next(); {
+		generatedKind := it.Value().(string)
+		if MapKind(args, generatedKind) == kind {
+			return generatedKind, true
 		}
 	}
 

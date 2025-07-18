@@ -392,10 +392,10 @@ func (c *JsGazelleConfig) AddResolve(imprt string, label *label.Label) {
 func (c *JsGazelleConfig) GetResolution(imprt string) *label.Label {
 	config := c
 	for config != nil {
-		for _, glob := range config.resolves.Keys() {
-			if doublestar.MatchUnvalidated(glob.(string), imprt) {
-				resolveLabel, _ := config.resolves.Get(glob)
-				return resolveLabel.(*label.Label)
+		for it := config.resolves.Iterator(); it.Next(); {
+			glob := it.Key().(string)
+			if doublestar.MatchUnvalidated(glob, imprt) {
+				return it.Value().(*label.Label)
 			}
 		}
 		config = config.parent
