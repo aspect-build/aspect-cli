@@ -65,8 +65,8 @@ func (s *LabelSet) Empty() bool {
 
 func (s *LabelSet) Labels() []label.Label {
 	labels := make([]label.Label, 0, s.labels.Size())
-	for _, l := range s.labels.Values() {
-		labels = append(labels, l.(label.Label))
+	for it := s.labels.Iterator(); it.Next(); {
+		labels = append(labels, it.Value().(label.Label))
 	}
 	return labels
 }

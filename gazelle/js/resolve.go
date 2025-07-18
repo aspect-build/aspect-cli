@@ -65,8 +65,8 @@ func (ts *typeScriptLang) sourceFileImports(c *config.Config, r *rule.Rule, f *r
 	if infoAttr != nil && infoAttr.(*TsProjectInfo).sources != nil {
 		srcsSet := infoAttr.(*TsProjectInfo).sources
 		srcs = make([]string, 0, srcsSet.Size())
-		for _, s := range srcsSet.Values() {
-			srcs = append(srcs, s.(string))
+		for it := srcsSet.Iterator(); it.Next(); {
+			srcs = append(srcs, it.Value().(string))
 		}
 	} else {
 		expandedSrcs, err := starlark.ExpandSrcs(c.RepoRoot, f.Pkg, common.GetSourceRegularFiles(c), r.Attr("srcs"))
