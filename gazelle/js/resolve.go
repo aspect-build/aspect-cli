@@ -502,31 +502,32 @@ func (ts *typeScriptLang) resolveExplicitImportFromIndex(
 		return Resolution_NotFound, nil, nil
 	}
 
-	filteredMatches := common.NewLabelSet(from)
+	var resultMatch *label.Label
+
 	for _, match := range matches {
 		// Prevent from adding itself as a dependency.
-		if !match.IsSelfImport(from) {
-			filteredMatches.Add(&match.Label)
+		if match.IsSelfImport(from) {
+			continue
 		}
-	}
 
-	// Too many results, don't know which is correct
-	if filteredMatches.Size() > 1 {
-		return Resolution_Error, nil, fmt.Errorf(
-			"Import %q from %q resolved to multiple targets (%s) - this must be fixed using the \"aspect:resolve\" directive",
-			impStm.ImportPath, impStm.SourcePath, targetListFromResults(matches))
+		// Too many results, don't know which is correct
+		if resultMatch != nil {
+			return Resolution_Error, nil, fmt.Errorf(
+				"Import %q from %q resolved to multiple targets (%s) - this must be fixed using the \"aspect:resolve\" directive",
+				impStm.ImportPath, impStm.SourcePath, targetListFromResults(matches))
+		}
+
+		resultMatch = &match.Label
 	}
 
 	// The matches were self imports, no dependency is needed
-	if filteredMatches.Size() == 0 {
+	if resultMatch == nil {
 		return Resolution_None, nil, nil
 	}
 
-	match := filteredMatches.Labels()[0]
+	BazelLog.Tracef("resolve %q import %q as %q", from, impStm.Imp, resultMatch)
 
-	BazelLog.Tracef("resolve %q import %q as %q", from, impStm.Imp, match)
-
-	return Resolution_Label, &match, nil
+	return Resolution_Label, resultMatch, nil
 }
 
 func (ts *typeScriptLang) findPackage(from string, impPkg string) *label.Label {
