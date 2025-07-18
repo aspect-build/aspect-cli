@@ -9,8 +9,7 @@ load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
 ts_project(
     name = "tsconfig_disabled_manual",
     srcs = ["main.ts"],
-    declaration = True,
-    isolated_typecheck = True,
+    declaration = True,  # value maintained as-is when tsconfig generation disabled
     tsconfig = {
         "compilerOptions": {
             "declaration": False,

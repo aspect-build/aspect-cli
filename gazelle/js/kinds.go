@@ -39,11 +39,10 @@ var tsKinds = map[string]rule.KindInfo{
 		MergeableAttrs: map[string]bool{
 			"srcs": true,
 
-			// Managed attributes that the user can #keep to override
-			"isolated_typecheck": false,
+			// Generated based on project config.
+			"isolated_typecheck": true,
 
-			// Attributes aligning with tsconfig marked as mergeable to support `#keep` directive
-			// preserving custom values.
+			// Attributes reflecting tsconfig when tsconfig generation is enabled.
 			"tsconfig":              true,
 			"allow_js":              true,
 			"composite":             true,
