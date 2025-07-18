@@ -194,8 +194,8 @@ func newRootConfig() *JsGazelleConfig {
 		packageTargetKind:          PackageTargetKind_Package,
 		pnpmLockPath:               "pnpm-lock.yaml",
 		tsconfigName:               "tsconfig.json",
-		ignoreDependencies:         make([]string, 0),
-		tsconfigIgnoredProps:       make([]string, 0),
+		ignoreDependencies:         []string{},
+		tsconfigIgnoredProps:       []string{},
 		resolves:                   linkedhashmap.New(),
 		validateImportStatements:   ValidationError,
 		npmLinkAllTargetName:       DefaultNpmLinkAllTargetName,
@@ -214,7 +214,7 @@ func (g *TargetGroup) newChild() *TargetGroup {
 
 	return &TargetGroup{
 		name:           g.name,
-		customSources:  make([]string, 0),
+		customSources:  []string{},
 		defaultSources: sources,
 		testonly:       g.testonly,
 		visibility:     g.visibility,
@@ -227,7 +227,7 @@ func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
 	cCopy := *c
 	cCopy.rel = childPath
 	cCopy.parent = c
-	cCopy.ignoreDependencies = make([]string, 0)
+	cCopy.ignoreDependencies = []string{}
 	cCopy.resolves = linkedhashmap.New()
 
 	// Copy the targets, any modifications will be local.
@@ -237,7 +237,7 @@ func (c *JsGazelleConfig) NewChild(childPath string) *JsGazelleConfig {
 	}
 
 	// Copy the overrides, any modifications will be local.
-	cCopy.targetNamingOverrides = make(map[string]string)
+	cCopy.targetNamingOverrides = make(map[string]string, len(c.targetNamingOverrides))
 	for k, v := range c.targetNamingOverrides {
 		cCopy.targetNamingOverrides[k] = v
 	}

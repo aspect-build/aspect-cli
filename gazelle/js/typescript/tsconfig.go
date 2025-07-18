@@ -351,7 +351,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 		Paths = &DefaultConfigPaths
 	}
 
-	var VirtualRootDirs = make([]string, 0)
+	var VirtualRootDirs []string
 	if c.CompilerOptions.RootDirs != nil {
 		for _, d := range *c.CompilerOptions.RootDirs {
 			VirtualRootDirs = append(VirtualRootDirs, path.Clean(d))
@@ -447,7 +447,7 @@ func (c TsConfig) expandRelativePath(importPath string) string {
 // Inspired by: https://github.com/evanw/esbuild/blob/deb93e92267a96575a6e434ff18421f4ef0605e4/internal/resolver/resolver.go#L1831-L1945
 func (c TsConfig) ExpandPaths(from, p string) []string {
 	pathMap := c.Paths.Map
-	possible := make([]string, 0)
+	possible := []string{}
 
 	// Check for exact 'paths' matches first
 	if exact := (*pathMap)[p]; len(exact) > 0 {
