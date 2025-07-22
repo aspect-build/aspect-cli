@@ -12,10 +12,13 @@ import (
 	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 )
 
+/**
+ * Cache to disk, keyed by file content hash and `buildinfo.GitCommit`.
+ */
 func NewDiskCache(cacheFilePath string) Cache {
 	c := &diskCache{
 		file: cacheFilePath,
-		old:  map[string]any{},
+		old:  map[string]map[string]any{},
 		new:  &sync.Map{},
 	}
 	c.read()
@@ -28,6 +31,7 @@ func init() {
 	gob.Register(map[string]interface{}{})
 	gob.Register(map[string]string{})
 	gob.Register(map[string][]string{})
+	gob.Register(map[string]map[string]interface{}{})
 	gob.Register(map[string]map[string]string{})
 	gob.Register([]interface{}{})
 }
@@ -35,17 +39,26 @@ func init() {
 var _ Cache = (*diskCache)(nil)
 
 type diskCache struct {
+	// Where the cache is persisted to disk.
 	file string
-	old  map[string]any
-	new  *sync.Map
+
+	// A cache mapped by file-content-hash => map[key]value
+	old map[string]map[string]any
+
+	// A cache mapped by file path => cacheEntry
+	new *sync.Map
 }
 
-func computeCacheKey(content []byte, key string) string {
+type cacheEntry struct {
+	contentHash string
+	values      *sync.Map
+}
+
+func computeCacheKey(content []byte) string {
 	cacheDigest := crypto.MD5.New()
 	if buildinfo.IsStamped() {
 		cacheDigest.Write([]byte(buildinfo.GitCommit))
 	}
-	cacheDigest.Write([]byte(key))
 	return hex.EncodeToString(cacheDigest.Sum(content))
 }
 
@@ -74,9 +87,16 @@ func (c *diskCache) write() {
 	}
 	defer cacheWriter.Close()
 
-	m := make(map[string]any)
-	c.new.Range(func(key, value interface{}) bool {
-		m[key.(string)] = value
+	m := make(map[string]map[string]any)
+	c.new.Range(func(p, e interface{}) bool {
+		ce := e.(*cacheEntry)
+		ce.values.Range(func(k, v interface{}) bool {
+			if _, ok := m[ce.contentHash]; !ok {
+				m[ce.contentHash] = make(map[string]any)
+			}
+			m[ce.contentHash][k.(string)] = v
+			return true
+		})
 		return true
 	})
 
@@ -89,30 +109,6 @@ func (c *diskCache) write() {
 	BazelLog.Infof("Wrote %d entries to cache %q\n", len(m), c.file)
 }
 
-func (c *diskCache) Load(key string) (any, bool) {
-	// Already written to new cache.
-	if v, found := c.new.Load(key); found {
-		return v, true
-	}
-
-	// Exists in old cache and can transfer to new.
-	if v, ok := c.old[key]; ok {
-		v, _ = c.LoadOrStore(key, v)
-		return v, true
-	}
-
-	// Cache miss
-	return nil, false
-}
-
-func (c *diskCache) Store(key string, value any) {
-	c.new.Store(key, value)
-}
-
-func (c *diskCache) LoadOrStore(key string, value any) (any, bool) {
-	return c.new.LoadOrStore(key, value)
-}
-
 func (c *diskCache) LoadOrStoreFile(root, p, key string, loader FileCompute) (any, bool, error) {
 	content, err := os.ReadFile(path.Join(root, p))
 	if err != nil {
@@ -120,20 +116,39 @@ func (c *diskCache) LoadOrStoreFile(root, p, key string, loader FileCompute) (an
 	}
 
 	// Include the file content in the cache key
-	key = computeCacheKey(content, key)
+	contentKey := computeCacheKey(content)
 
-	// Try loading from the cache.
-	v, found := c.Load(key)
+	pCache, pCacheFound := c.new.Load(p)
 
-	// Compute and persist in cache.
-	if !found {
-		v, err = loader(p, content)
-		if err == nil {
-			v, found = c.LoadOrStore(key, v)
+	// Try loading from the cache if exists and content has not changed.
+	if pCacheFound && pCache.(*cacheEntry).contentHash == contentKey {
+		if v, found := pCache.(*cacheEntry).values.Load(key); found {
+			return v, true, nil
+		}
+	} else {
+		pCache = &cacheEntry{
+			contentHash: contentKey,
+			values:      &sync.Map{},
+		}
+		c.new.LoadOrStore(p, pCache)
+	}
+
+	// Try loading from the old cache and populate the new.
+	if oldCache, found := c.old[contentKey]; found {
+		if v, found := oldCache[key]; found {
+			v, _ := pCache.(*cacheEntry).values.LoadOrStore(key, v)
+			return v, true, nil
 		}
 	}
 
-	return v, found, err
+	// Compute and persist the value.
+	v, err := loader(p, content)
+	if err != nil {
+		return nil, false, err
+	}
+
+	v, found := pCache.(*cacheEntry).values.LoadOrStore(key, v)
+	return v, found, nil
 }
 
 func (c *diskCache) Persist() {
