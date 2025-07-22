@@ -34,7 +34,7 @@ import (
 
 	"github.com/alphadose/haxmap"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
-	"github.com/rogpeppe/go-internal/dirhash"
+	"golang.org/x/mod/sumdb/dirhash"
 
 	concurrently "github.com/tejzpr/ordered-concurrently/v3"
 	"github.com/twmb/murmur3"

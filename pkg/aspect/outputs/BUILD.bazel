@@ -14,11 +14,11 @@ go_library(
         "//pkg/bazel",
         "//pkg/ioutils",
         "@com_github_alphadose_haxmap//:haxmap",
-        "@com_github_rogpeppe_go_internal//dirhash",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_pflag//:pflag",
         "@com_github_tejzpr_ordered_concurrently_v3//:ordered-concurrently",
         "@com_github_twmb_murmur3//:murmur3",
+        "@org_golang_x_mod//sumdb/dirhash",
     ],
 )
 
