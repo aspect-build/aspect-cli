@@ -3,13 +3,6 @@ package cache
 import "github.com/bazelbuild/bazel-gazelle/config"
 
 type Cache interface {
-	/** Load a key from the cache. */
-	Load(key string) (any, bool)
-	/** Store a key+value in the ache */
-	Store(key string, value any)
-	/** Store a key+value in the cache, or return the existing value */
-	LoadOrStore(key string, value any) (any, bool)
-
 	/** Persist any changes to the cache */
 	Persist()
 
