@@ -1,0 +1,78 @@
+lockfileVersion: 5.4
+
+importers:
+
+  .:
+    specifiers: {}
+
+  ..:
+    specifiers:
+      '@aspect-test/a': 5.0.2
+      '@aspect-test/b': 5.0.2
+      '@aspect-test/c': 2.0.2
+      typescript: 4.9.3
+    dependencies:
+      '@aspect-test/a': 5.0.2
+      typescript: 4.9.3
+    optionalDependencies:
+      '@aspect-test/c': 2.0.2
+    devDependencies:
+      '@aspect-test/b': 5.0.2
+
+  ../app/a:
+    specifiers:
+      '@aspect-test/a': 5.0.2
+      '@aspect-test/g': 1.0.0
+      '@lib/a': workspace:*
+    dependencies:
+      '@aspect-test/a': 5.0.2
+      '@aspect-test/g': 1.0.0
+      '@lib/a': link:../../lib/a
+
+  ../app/b:
+    specifiers:
+      '@aspect-test/h': 1.0.0
+      '@lib/b': workspace:*
+      '@lib/b_alias': workspace:@lib/b@*
+    dependencies:
+      '@aspect-test/h': 1.0.0
+      '@lib/b': link:../../lib/b
+      '@lib/b_alias': link:../../lib/b
+
+  ../app/c:
+    specifiers:
+      '@aspect-test/a': 5.0.2
+      '@aspect-test/g': 1.0.0
+      '@lib/c': file:../../lib/c
+    dependencies:
+      '@aspect-test/a': 5.0.2
+      '@aspect-test/g': 1.0.0
+      '@lib/c': file:../lib/c
+
+  ../lib/a:
+    specifiers:
+      '@aspect-test/e': 1.0.0
+      '@lib/b': workspace:*
+    dependencies:
+      '@aspect-test/e': 1.0.0
+      '@lib/b': link:../b
+
+  ../lib/b:
+    specifiers:
+      '@aspect-test/f': 1.0.0
+    dependencies:
+      '@aspect-test/f': 1.0.0
+
+  ../lib/c:
+    specifiers:
+      '@aspect-test/f': 1.0.0
+    dependencies:
+      '@aspect-test/f': 1.0.0
+
+  ../lib/no-direct:
+    specifiers:
+      '@lib/b': workspace:*
+      typescript: 4.9.3
+    dependencies:
+      '@lib/b': link:../b
+      typescript: 4.9.3

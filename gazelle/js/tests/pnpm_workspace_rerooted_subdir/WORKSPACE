@@ -1,0 +1,2 @@
+# This is a copy of ./pnpm_workspace with the pnpm-workspace + lock moved into a ./root/ without a BUILD file alongside it.
+workspace(name = "pnpm_workspace_rerooted_subdir")

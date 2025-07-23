@@ -1,2 +1,2 @@
-# This is a copy of ./pnpm_workspace with the pnpm-workspace + lock moved into a ./root/
+# This is a copy of ./pnpm_workspace with the pnpm-workspace + lock moved into a ./root/ with a BUILD file alongside it
 workspace(name = "pnpm_workspace_rerooted")

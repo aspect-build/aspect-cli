@@ -1,0 +1,6 @@
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+# gazelle:generation_mode update_only
+# gazelle:js_pnpm_lockfile root/pnpm-lock.yaml
+
+npm_link_all_packages(name = "node_modules")
