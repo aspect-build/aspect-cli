@@ -1,0 +1,8 @@
+{
+  "name": "@lib/no-direct",
+  "private": true,
+  "dependencies": {
+    "@lib/b": "workspace:*",
+    "typescript": "5.4.5"
+  }
+}
