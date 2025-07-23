@@ -123,11 +123,17 @@ var WorkspaceFromWd Bazel = findWorkspace()
 
 func findWorkspace() Bazel {
 	if workingDirectory == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			panic(err)
+		// Support running cli via `bazel run`
+		workingDirectory = os.Getenv("BUILD_WORKING_DIRECTORY")
+
+		// Fallback to CWD
+		if workingDirectory == "" {
+			wd, err := os.Getwd()
+			if err != nil {
+				panic(err)
+			}
+			workingDirectory = wd
 		}
-		workingDirectory = wd
 	}
 	finder := workspace.DefaultFinder
 	wr, err := finder.Find(workingDirectory)
