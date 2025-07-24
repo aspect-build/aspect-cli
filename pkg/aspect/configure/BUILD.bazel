@@ -18,6 +18,7 @@ go_library(
     deps = [
         "//gazelle/bzl",
         "//gazelle/common/cache",
+        "//gazelle/common/git",
         "//gazelle/common/progress",
         "//gazelle/js",
         "//gazelle/kotlin",
