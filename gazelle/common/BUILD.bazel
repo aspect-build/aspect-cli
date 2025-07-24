@@ -14,10 +14,10 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/logger",
-        "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//label:go_default_library",
         "@bazel_gazelle//language:go_default_library",
         "@bazel_gazelle//rule:go_default_library",
+        "@bazel_gazelle//walk:go_default_library",
         "@com_github_emirpasic_gods//sets/treeset",
         "@com_github_emirpasic_gods//utils",
         "@com_github_itchyny_gojq//:gojq",

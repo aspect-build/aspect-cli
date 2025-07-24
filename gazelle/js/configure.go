@@ -99,28 +99,15 @@ func (ts *typeScriptLang) Configure(c *config.Config, rel string, f *rule.File) 
 func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
 	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
-	ents := common.GetSourceEntries(c)
-
 	// pnpm
-	pnpmLockPath := config.PnpmLockfile()
-	pnpmLockDir := path.Dir(pnpmLockPath)
-	if pnpmLockDir == "." {
-		// Common case of the lockfile not being within a subdirectory.
-		// Can use the fs.DirEntry list of this directory to check if the lockfile exists.
-		if ents[pnpmLockPath] {
-			ts.addPnpmLockfile(c, config, path.Join(rel, pnpmLockPath))
-		}
-	} else if rootDirEntry := strings.Split(pnpmLockDir, "/")[0]; ents[rootDirEntry] {
-		// If the lockfile is in a subdirectory then check the fs.DirEntry of the subdirectory.
-		// If the subdirectory exists then perform the expensive os.Stat to check if the file exists.
-		lockfilePath := path.Join(c.RepoRoot, rel, pnpmLockPath)
-		if _, err := os.Stat(lockfilePath); err == nil {
-			ts.addPnpmLockfile(c, config, path.Join(rel, pnpmLockPath))
+	if rel == config.pnpmLockDir {
+		if common.WalkHasPath(config.pnpmLockDir, config.pnpmLockPath) {
+			ts.addPnpmLockfile(c, config, path.Join(config.pnpmLockDir, config.pnpmLockPath))
 		}
 	}
 
 	// tsconfig
-	if _, hasTsconfig := ents[config.tsconfigName]; hasTsconfig {
+	if common.WalkHasPath(rel, config.tsconfigName) {
 		ts.tsconfig.AddTsConfigFile(c.RepoRoot, rel, config.tsconfigName)
 	}
 }
