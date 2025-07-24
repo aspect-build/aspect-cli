@@ -23,6 +23,7 @@ go_library(
 # Internal only for tests
 gazelle_binary(
     name = "gazelle_bzl_binary",
+    testonly = True,
     languages = [
         "@bazel_gazelle//language/proto:go_default_library",
         ":bzl",

@@ -23,7 +23,6 @@ go_library(
     deps = [
         "//gazelle/common",
         "//gazelle/common/cache",
-        "//gazelle/common/git",
         "//gazelle/common/starlark",
         "//gazelle/js/node",
         "//gazelle/js/parser",
@@ -56,9 +55,11 @@ go_test(
 # Internal only for tests.
 gazelle_binary(
     name = "gazelle_js_binary",
+    testonly = True,
     languages = [
         "@bazel_gazelle//language/proto:go_default_library",
         ":js",
+        "//gazelle/common/git/testing",
     ],
     visibility = ["//visibility:private"],
 )
