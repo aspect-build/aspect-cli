@@ -119,7 +119,7 @@ func (ts *typeScriptLang) GenerateRules(args language.GenerateArgs) language.Gen
 func (ts *typeScriptLang) tsPackageInfoToRelsToIndex(cfg *JsGazelleConfig, args language.GenerateArgs, info *TsProjectInfo) []string {
 	i := []string{
 		// Might be an npm package reference
-		cfg.PnpmLockRel(),
+		cfg.PnpmLockDir(),
 	}
 
 	for it := info.imports.Iterator(); it.Next(); {
@@ -337,10 +337,7 @@ func (ts *typeScriptLang) addPackageRule(cfg *JsGazelleConfig, args language.Gen
 		packageTargetKind = JsLibraryKind
 	}
 
-	npmPackageVisibility := "//:__pkg__"
-	if lockDir := path.Dir(cfg.PnpmLockfile()); lockDir != "." {
-		npmPackageVisibility = fmt.Sprintf("//%s:__pkg__", lockDir)
-	}
+	npmPackageVisibility := fmt.Sprintf("//%s:__pkg__", cfg.PnpmLockDir())
 
 	npmPackage := rule.NewRule(packageTargetKind, packageTargetName)
 	npmPackage.SetPrivateAttr("ts_project_info", &npmPackageInfo.TsProjectInfo)

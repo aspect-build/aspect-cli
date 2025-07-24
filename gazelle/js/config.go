@@ -166,6 +166,7 @@ type JsGazelleConfig struct {
 	tsconfigGenerationEnabled bool
 	packageGenerationEnabled  NpmPackageMode
 
+	pnpmLockDir  string
 	pnpmLockPath string
 
 	tsconfigName         string
@@ -192,6 +193,7 @@ func newRootConfig() *JsGazelleConfig {
 		tsconfigGenerationEnabled:  true,
 		packageGenerationEnabled:   NpmPackageReferencedMode,
 		packageTargetKind:          PackageTargetKind_Package,
+		pnpmLockDir:                "",
 		pnpmLockPath:               "pnpm-lock.yaml",
 		tsconfigName:               "tsconfig.json",
 		ignoreDependencies:         []string{},
@@ -308,13 +310,11 @@ func (c *JsGazelleConfig) GetNpmPackageGenerationMode() NpmPackageMode {
 
 // Set the pnpm-workspace.yaml file path.
 func (c *JsGazelleConfig) SetPnpmLockfile(pnpmLockPath string) {
-	c.pnpmLockPath = path.Clean(pnpmLockPath)
+	c.pnpmLockDir = c.rel
+	c.pnpmLockPath = pnpmLockPath
 }
-func (c *JsGazelleConfig) PnpmLockfile() string {
-	return c.pnpmLockPath
-}
-func (c *JsGazelleConfig) PnpmLockRel() string {
-	lockDir := path.Dir(c.pnpmLockPath)
+func (c *JsGazelleConfig) PnpmLockDir() string {
+	lockDir := path.Dir(path.Join(c.pnpmLockDir, c.pnpmLockPath))
 	if lockDir == "." {
 		return ""
 	}

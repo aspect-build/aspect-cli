@@ -1,26 +1,17 @@
 package gazelle
 
 import (
-	"maps"
+	"log"
+	"path"
 	"slices"
+	"strings"
 
 	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
-	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
+	"github.com/bazelbuild/bazel-gazelle/walk"
 )
 
 type GazelleWalkFunc func(path string) error
-
-// Must align with patched bazel-gazelle
-const ASPECT_DIR_FILES = "__aspect:files"
-
-func GetSourceEntries(c *config.Config) map[string]bool {
-	return c.Exts[ASPECT_DIR_FILES].(map[string]bool)
-}
-
-func GetSourceRegularFiles(c *config.Config) []string {
-	return slices.Collect(maps.Keys(GetSourceEntries(c)))
-}
 
 // Walk the directory being generated, respecting any walk generation config.
 func GazelleWalkDir(args language.GenerateArgs, walkFunc GazelleWalkFunc) error {
@@ -39,4 +30,53 @@ func GazelleWalkDir(args language.GenerateArgs, walkFunc GazelleWalkFunc) error 
 	}
 
 	return nil
+}
+
+func WalkHasPath(rel, p string) bool {
+	d, err := walk.GetDirInfo(rel)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	base := path.Base(p)
+
+	// Navigate into subdirs
+	if subdir := path.Dir(p); subdir != "." {
+		for _, pp := range strings.Split(subdir, "/") {
+			if !slices.Contains(d.Subdirs, pp) {
+				return false
+			}
+			rel = path.Join(rel, pp)
+			d, err = walk.GetDirInfo(rel)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+
+	return slices.Contains(d.RegularFiles, base)
+}
+
+func GetSourceRegularFiles(rel string) ([]string, error) {
+	d, err := walk.GetDirInfo(rel)
+	if err != nil {
+		return nil, err
+	}
+
+	return getSourceRegularSubFiles(rel, ".", d, d.RegularFiles[:])
+}
+
+func getSourceRegularSubFiles(base, rel string, d walk.DirInfo, files []string) ([]string, error) {
+	for _, sd := range d.Subdirs {
+		sdRel := path.Join(rel, sd)
+		sdInfo, _ := walk.GetDirInfo(path.Join(base, sdRel))
+
+		for _, f := range sdInfo.RegularFiles {
+			files = append(files, path.Join(sdRel, f))
+		}
+
+		files, _ = getSourceRegularSubFiles(base, sdRel, sdInfo, files)
+	}
+
+	return files, nil
 }
