@@ -17,7 +17,6 @@ go_library(
         "@com_github_bazelbuild_buildtools//build:go_default_library",
         "@com_github_bmatcuk_doublestar_v4//:doublestar",
         "@net_starlark_go//lib/json",
-        "@net_starlark_go//repl",
         "@net_starlark_go//starlark",
         "@net_starlark_go//syntax",
     ],
