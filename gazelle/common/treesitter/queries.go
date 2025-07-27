@@ -2,6 +2,7 @@ package treesitter
 
 import (
 	"fmt"
+	"iter"
 	"strings"
 	"sync"
 
@@ -38,12 +39,11 @@ func (qr queryResult) Captures() map[string]string {
 	return qr.QueryCaptures
 }
 
-func (tree *treeAst) Query(query TreeQuery) <-chan ASTQueryResult {
-	out := make(chan ASTQueryResult)
-
-	// Execute the query.
-	go func() {
+func (tree *treeAst) Query(query TreeQuery) iter.Seq[ASTQueryResult] {
+	return func(yield func(ASTQueryResult) bool) {
 		q := query.(*sitterQuery)
+
+		// Execute the query.
 		qc := sitter.NewQueryCursor()
 		defer qc.Close()
 		qc.Exec(q.q, tree.sitterTree.RootNode())
@@ -59,13 +59,12 @@ func (tree *treeAst) Query(query TreeQuery) <-chan ASTQueryResult {
 				continue
 			}
 
-			out <- queryResult{QueryCaptures: tree.mapQueryMatchCaptures(m, q)}
+			r := &queryResult{QueryCaptures: tree.mapQueryMatchCaptures(m, q)}
+			if !yield(r) {
+				break
+			}
 		}
-
-		close(out)
-	}()
-
-	return out
+	}
 }
 
 func (tree *treeAst) mapQueryMatchCaptures(m *sitter.QueryMatch, q *sitterQuery) map[string]string {
