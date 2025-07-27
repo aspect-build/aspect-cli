@@ -19,6 +19,7 @@ package treesitter
 import (
 	"context"
 	"fmt"
+	"iter"
 	"log"
 	"path"
 	"unsafe"
@@ -50,7 +51,7 @@ type ASTQueryResult interface {
 }
 
 type AST interface {
-	Query(query TreeQuery) <-chan ASTQueryResult
+	Query(query TreeQuery) iter.Seq[ASTQueryResult]
 	QueryErrors() []error
 
 	// Release all resources related to this AST.
