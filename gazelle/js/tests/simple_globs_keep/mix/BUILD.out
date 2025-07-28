@@ -9,6 +9,7 @@ ts_project(
             "**/*.mock.ts",
         ],
     ),  #keep
+    deps = ["//mix/sub"],
 )
 
 ts_project(
