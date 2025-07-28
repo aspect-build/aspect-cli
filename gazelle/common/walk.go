@@ -2,7 +2,6 @@ package gazelle
 
 import (
 	"log"
-	"path"
 	"slices"
 	"strings"
 
@@ -38,23 +37,28 @@ func WalkHasPath(rel, p string) bool {
 		log.Fatal(err)
 	}
 
-	base := path.Base(p)
-
-	// Navigate into subdirs
-	if subdir := path.Dir(p); subdir != "." {
-		for _, pp := range strings.Split(subdir, "/") {
-			if !slices.Contains(d.Subdirs, pp) {
-				return false
-			}
-			rel = path.Join(rel, pp)
-			d, err = walk.GetDirInfo(rel)
-			if err != nil {
-				log.Fatal(err)
-			}
+	// Navigate into subdirectories...
+	// - Do not allocate arrays such as string.Split()
+	// - Do not allow path.Join/Clean() multiple times on the same paths
+	for i := strings.IndexByte(p, '/'); i >= 0; i = strings.IndexByte(p, '/') {
+		subdir := p[:i]
+		if !slices.Contains(d.Subdirs, subdir) {
+			return false
 		}
+		if rel == "" {
+			rel = subdir
+		} else {
+			rel = rel + "/" + subdir
+		}
+		d, err = walk.GetDirInfo(rel)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		p = p[i+1:]
 	}
 
-	return slices.Contains(d.RegularFiles, base)
+	return slices.Contains(d.RegularFiles, p)
 }
 
 func GetSourceRegularFiles(rel string) ([]string, error) {
@@ -63,16 +67,21 @@ func GetSourceRegularFiles(rel string) ([]string, error) {
 		return nil, err
 	}
 
-	return getSourceRegularSubFiles(rel, ".", d, d.RegularFiles[:])
+	if rel != "" {
+		rel = rel + "/"
+	}
+	return getSourceRegularSubFiles(rel, "", d, d.RegularFiles[:])
 }
 
 func getSourceRegularSubFiles(base, rel string, d walk.DirInfo, files []string) ([]string, error) {
-	for _, sd := range d.Subdirs {
-		sdRel := path.Join(rel, sd)
-		sdInfo, _ := walk.GetDirInfo(path.Join(base, sdRel))
+	for _, sdRel := range d.Subdirs {
+		if rel != "" {
+			sdRel = rel + "/" + sdRel
+		}
+		sdInfo, _ := walk.GetDirInfo(base + sdRel)
 
 		for _, f := range sdInfo.RegularFiles {
-			files = append(files, path.Join(sdRel, f))
+			files = append(files, sdRel+"/"+f)
 		}
 
 		files, _ = getSourceRegularSubFiles(base, sdRel, sdInfo, files)

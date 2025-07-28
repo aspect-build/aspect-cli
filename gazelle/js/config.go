@@ -166,6 +166,7 @@ type JsGazelleConfig struct {
 	tsconfigGenerationEnabled bool
 	packageGenerationEnabled  NpmPackageMode
 
+	pnpmLockRel  string
 	pnpmLockDir  string
 	pnpmLockPath string
 
@@ -193,6 +194,7 @@ func newRootConfig() *JsGazelleConfig {
 		tsconfigGenerationEnabled:  true,
 		packageGenerationEnabled:   NpmPackageReferencedMode,
 		packageTargetKind:          PackageTargetKind_Package,
+		pnpmLockRel:                "",
 		pnpmLockDir:                "",
 		pnpmLockPath:               "pnpm-lock.yaml",
 		tsconfigName:               "tsconfig.json",
@@ -310,20 +312,21 @@ func (c *JsGazelleConfig) GetNpmPackageGenerationMode() NpmPackageMode {
 
 // Set the pnpm-workspace.yaml file path.
 func (c *JsGazelleConfig) SetPnpmLockfile(pnpmLockPath string) {
-	c.pnpmLockDir = c.rel
-	c.pnpmLockPath = pnpmLockPath
+	// The path to the lockfile and what it is relative to
+	c.pnpmLockRel = c.rel
+	c.pnpmLockPath = path.Clean(pnpmLockPath)
+
+	// The exact directory of the lockfile
+	pnpmLockDir, _ := path.Split(path.Join(c.pnpmLockRel, c.pnpmLockPath))
+	c.pnpmLockDir = strings.Trim(pnpmLockDir, "/")
 }
 func (c *JsGazelleConfig) PnpmLockDir() string {
-	lockDir := path.Dir(path.Join(c.pnpmLockDir, c.pnpmLockPath))
-	if lockDir == "." {
-		return ""
-	}
-	return lockDir
+	return c.pnpmLockDir
 }
 
 // Set the tsconfig.json file name
 func (c *JsGazelleConfig) SetTsconfigFile(tsconfigName string) {
-	c.tsconfigName = tsconfigName
+	c.tsconfigName = path.Clean(tsconfigName)
 }
 func (c *JsGazelleConfig) GetTsconfigFile() string {
 	return c.tsconfigName

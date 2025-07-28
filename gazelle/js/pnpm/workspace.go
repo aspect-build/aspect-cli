@@ -15,7 +15,7 @@ func normalizeProject(project string) string {
 	if project == "." {
 		return ""
 	}
-	return project
+	return strings.TrimSuffix(project, "/")
 }
 
 // A global map of pnpm projects across the bazel workspace.
@@ -30,6 +30,7 @@ type PnpmWorkspace struct {
 
 	// The lockfile this struct represents
 	lockfile string
+	lockdir  string
 
 	// References to projects. The key is referenced by a project.
 	// Currently only needed for IsReferenced() so only a boolean is persisted.
@@ -75,7 +76,8 @@ func (pm *PnpmProjectMap) GetProject(project string) *PnpmProject {
 			break
 		}
 
-		project = normalizeProject(path.Dir(project))
+		project, _ = path.Split(project)
+		project = normalizeProject(project)
 	}
 
 	return pm.projects[project]
@@ -96,12 +98,13 @@ func newPnpmWorkspace(pm *PnpmProjectMap, lockfile string) *PnpmWorkspace {
 	w := &PnpmWorkspace{}
 	w.referenced = make(map[string]bool)
 	w.lockfile = lockfile
+	w.lockdir = path.Dir(lockfile)
 	w.pm = pm
 	return w
 }
 
 func (w *PnpmWorkspace) Root() string {
-	return path.Dir(w.lockfile)
+	return w.lockdir
 }
 
 func (w *PnpmWorkspace) AddProject(pkg string) *PnpmProject {
@@ -154,12 +157,13 @@ func (p *PnpmProject) AddPackage(pkg, version string, label *label.Label) {
 		file := version[len("file:"):]
 
 		// Pnpm "file" references are relative to the pnpm workspace root.
-		p.addLocalReference(pkg, path.Join(path.Dir(p.workspace.lockfile), file))
+		p.addLocalReference(pkg, path.Join(p.workspace.lockdir, file))
 	}
 }
 
 func (p *PnpmProject) Parent() *PnpmProject {
-	pp := p.workspace.pm.GetProject(path.Dir(p.project))
+	d, _ := path.Split(p.project)
+	pp := p.workspace.pm.GetProject(normalizeProject(d))
 
 	if pp == p {
 		return nil

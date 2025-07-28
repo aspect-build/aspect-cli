@@ -3,6 +3,7 @@ package typescript
 import (
 	"fmt"
 	"path"
+	"strings"
 	"sync"
 
 	node "github.com/aspect-build/aspect-cli/gazelle/js/node"
@@ -122,14 +123,16 @@ func (tc *TsWorkspace) FindConfig(dir string) (string, *TsConfig) {
 			break
 		}
 
-		dir = path.Dir(dir)
+		dir, _ = path.Split(dir)
+		dir = strings.TrimSuffix(dir, "/")
 	}
 
 	return "", nil
 }
 
 func (tc *TsWorkspace) ExpandPaths(from, f string) []string {
-	_, c := tc.FindConfig(path.Dir(from))
+	d, _ := path.Split(from)
+	_, c := tc.FindConfig(d)
 	if c == nil {
 		return []string{}
 	}
