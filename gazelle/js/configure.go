@@ -95,9 +95,9 @@ func (ts *typeScriptLang) readConfigurations(c *config.Config, rel string) {
 	config := c.Exts[LanguageName].(*JsGazelleConfig)
 
 	// pnpm
-	if rel == config.pnpmLockDir {
-		if common.WalkHasPath(config.pnpmLockDir, config.pnpmLockPath) {
-			ts.addPnpmLockfile(c, config, path.Join(config.pnpmLockDir, config.pnpmLockPath))
+	if rel == config.pnpmLockRel {
+		if common.WalkHasPath(config.pnpmLockRel, config.pnpmLockPath) {
+			ts.addPnpmLockfile(c, config, path.Join(config.pnpmLockRel, config.pnpmLockPath))
 		}
 	}
 

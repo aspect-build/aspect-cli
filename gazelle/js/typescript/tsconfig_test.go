@@ -119,7 +119,7 @@ func TestTsconfigLoad(t *testing.T) {
 			t.Errorf("should inherit compilerOptions.importHelpers")
 		}
 		assertEqual(t, extender.Paths.Rel, "src", "should inherit Paths.Rel from extended")
-		assertEqual(t, (*extender.Paths.Map)["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
+		assertEqual(t, extender.Paths.Map["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
 		assertEqual(t, extender.Extends, "base.tsconfig.json", "should not fail extending")
 	})
 
@@ -133,7 +133,7 @@ func TestTsconfigLoad(t *testing.T) {
 			t.Errorf("should inherit compilerOptions.importHelpers")
 		}
 		assertEqual(t, extender.Paths.Rel, "../src", "should inherit Paths.Rel from extended")
-		assertEqual(t, (*extender.Paths.Map)["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
+		assertEqual(t, extender.Paths.Map["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
 		assertEqual(t, extender.Extends, "../base.tsconfig.json", "should not fail extending")
 	})
 
@@ -147,9 +147,9 @@ func TestTsconfigLoad(t *testing.T) {
 			t.Errorf("should inherit compilerOptions.importHelpers")
 		}
 		assertEqual(t, extender.Paths.Rel, ".", "should override Paths.Rel with local")
-		_, aliasAExists := (*extender.Paths.Map)["alias-a"]
+		_, aliasAExists := extender.Paths.Map["alias-a"]
 		assertTrue(t, !aliasAExists, "should override Paths from extended")
-		assertEqual(t, (*extender.Paths.Map)["alias-b"][0], "src/lib/b", "should override Paths.Map")
+		assertEqual(t, extender.Paths.Map["alias-b"][0], "src/lib/b", "should override Paths.Map")
 		assertEqual(t, extender.Extends, "../base.tsconfig.json", "should not fail extending")
 	})
 
@@ -197,7 +197,7 @@ func TestTsconfigLoad(t *testing.T) {
 		}
 
 		assertEqual(t, extender.Paths.Rel, "src", "should inherit Paths.Rel from extended")
-		assertEqual(t, (*extender.Paths.Map)["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
+		assertEqual(t, extender.Paths.Map["alias-a"][0], "src/lib/a", "should inherit Paths.Rel from extended")
 		assertEqual(t, extender.Extends, "foo", "should not fail extending")
 	})
 }
@@ -363,7 +363,7 @@ func TestTsconfigParse(t *testing.T) {
 			ConfigDir: "tsconfig_test",
 			Paths: &TsConfigPaths{
 				Rel: "../libs/ts/liba",
-				Map: &map[string][]string{
+				Map: map[string][]string{
 					"@org/liba/*": {"src/*"},
 				},
 			},
@@ -496,6 +496,27 @@ func TestTsconfigParse(t *testing.T) {
 		  }`)
 
 		assertExpand(t, config, "a", "sub/a", "a", "a")
+	})
+
+	t.Run("tsconfig path normalizing", func(t *testing.T) {
+		config := parseTest(t, ".", `{
+			"compilerOptions": {
+			  "baseUrl": ".",
+			  "paths": {
+				"to-c1": ["a/../b/../c/."],
+				"to-c2": ["c"],
+				"to-c3": ["./c"],
+				"to-c4": ["./c/"],
+				"to-c5": ["./a/../c/."],
+			  }
+			}
+		  }`)
+
+		assertExpand(t, config, "to-c1", "c", "to-c1")
+		assertExpand(t, config, "to-c2", "c", "to-c2")
+		assertExpand(t, config, "to-c3", "c", "to-c3")
+		assertExpand(t, config, "to-c4", "c", "to-c4")
+		assertExpand(t, config, "to-c5", "c", "to-c5")
 	})
 
 	t.Run("tsconfig importHelpers", func(t *testing.T) {

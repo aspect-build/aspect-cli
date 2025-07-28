@@ -122,12 +122,12 @@ type TsConfig struct {
 
 type TsConfigPaths struct {
 	Rel string
-	Map *map[string][]string
+	Map map[string][]string
 }
 
 var DefaultConfigPaths = TsConfigPaths{
 	Rel: ".",
-	Map: &map[string][]string{},
+	Map: map[string][]string{},
 }
 
 var InvalidTsconfig = TsConfig{
@@ -340,7 +340,7 @@ func parseTsConfigJSON(parsed map[string]*TsConfig, resolver TsConfigResolver, r
 	if c.CompilerOptions.Paths != nil {
 		Paths = &TsConfigPaths{
 			Rel: BaseUrl,
-			Map: c.CompilerOptions.Paths,
+			Map: *c.CompilerOptions.Paths,
 		}
 	} else if baseConfig != nil {
 		Paths = &TsConfigPaths{
@@ -450,7 +450,7 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 	possible := []string{}
 
 	// Check for exact 'paths' matches first
-	if exact := (*pathMap)[p]; len(exact) > 0 {
+	if exact := pathMap[p]; len(exact) > 0 {
 		BazelLog.Tracef("TsConfig.paths exact matches for %q: %v", p, exact)
 
 		for _, m := range exact {
@@ -460,7 +460,7 @@ func (c TsConfig) ExpandPaths(from, p string) []string {
 
 	// Check for pattern matches next
 	possibleMatches := make(matchArray, 0)
-	for key, originalPaths := range *pathMap {
+	for key, originalPaths := range pathMap {
 		if starIndex := strings.IndexByte(key, '*'); starIndex != -1 {
 			prefix, suffix := key[:starIndex], key[starIndex+1:]
 
