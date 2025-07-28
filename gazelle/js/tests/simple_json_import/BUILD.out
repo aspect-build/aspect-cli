@@ -12,5 +12,9 @@ ts_project(
         "subdir/oddpaths.ts",
         "subdir/sub.ts",
     ],
-    deps = ["//subproject"],
+    deps = [
+        "//subdir-globs:json-lib",
+        "//subdir-globs/sub2:json-lib",
+        "//subproject",
+    ],
 )
