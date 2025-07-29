@@ -1,0 +1,9 @@
+filegroup(
+    name = "not-me",
+    srcs = ["foo.bar"],
+)
+
+filegroup(
+    name = "deleteme",
+    srcs = ["foo.bar"],
+)

@@ -1,0 +1,9 @@
+filegroup(
+    name = "other1",
+    srcs = glob(["**/*.foo"]),
+)
+
+filegroup(
+    name = "other2",
+    srcs = glob(["**/*.foo"]),
+)

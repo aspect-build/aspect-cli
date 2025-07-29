@@ -1,0 +1,11 @@
+load("@test//:x.bzl", "props_test")
+
+props_test(name = "no_defaults")
+
+props_test(
+    name = "with_defaults",
+    b = True,
+    n = 123,
+    s = "default-value",
+    sa = "1,2,3",
+)

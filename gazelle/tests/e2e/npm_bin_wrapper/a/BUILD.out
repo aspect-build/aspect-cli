@@ -1,0 +1,13 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("//:pcss.bzl", "postcss")
+
+js_library(
+    name = "postcss_config",
+    srcs = ["postcss.config.mjs"],
+)
+
+postcss(
+    name = "css",
+    srcs = ["a.css"],
+    config = "//:postcss_config",
+)

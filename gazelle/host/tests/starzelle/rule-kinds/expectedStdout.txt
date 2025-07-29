@@ -1,0 +1,1 @@
+Invalid rule 'From' label "@--invalid --label": label parse error: repository has invalid characters: "@--invalid --label"

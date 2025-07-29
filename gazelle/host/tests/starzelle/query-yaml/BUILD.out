@@ -1,0 +1,18 @@
+load("@deps-test//my:rules.bzl", "x_lib")
+
+x_lib(
+    name = "a_lib",
+    testonly = True,
+    srcs = ["a.yaml"],
+    deps = [
+        ":b_lib",
+        "//lib:l_lib",
+    ],
+)
+
+x_lib(
+    name = "b_lib",
+    testonly = False,
+    srcs = ["b.yaml"],
+    deps = ["//lib:l_lib"],
+)

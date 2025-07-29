@@ -1,0 +1,9 @@
+filegroup(
+    name = "deleteme-filegroup",
+    srcs = ["foo.bar"],
+)
+
+filegroup(
+    name = "deleteme-copy_to_bin",
+    srcs = ["foo.bar"],
+)

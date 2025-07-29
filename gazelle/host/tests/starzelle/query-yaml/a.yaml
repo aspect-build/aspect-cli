@@ -1,0 +1,4 @@
+imports:
+  - b
+  - lib/l
+testonly: true

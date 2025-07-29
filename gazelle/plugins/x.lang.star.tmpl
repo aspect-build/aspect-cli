@@ -1,0 +1,104 @@
+"""
+template plugin for 'aspect configure'
+"""
+
+def Name():
+    return "x"
+
+def Properties():
+    return {
+        "my_prop": {
+            "Type": "string",
+        },
+    }
+
+def prepare(_):
+    return {
+        "extensions": [".ext", ".ext2"],
+        "queries": {
+            "imports": {
+                "query_type": "vars",
+                "extensions": [".ext"],
+                "query": """
+                    (source_file
+                        (import_list
+                            (import_header (identifier) @result (".*")? @is_star)
+                        )
+                    )
+                """,
+            },
+        },
+    }
+
+# ctx:
+#   rel         string
+#   properties  map[string]string
+#   sources     []TargetSource
+#
+# TargetSource:
+#   path          string
+#   query_results  QueryResults
+#
+# query_results:
+#   [query_key]  bool|string|None
+def declare_targets(ctx):
+    """
+    This function declares targets based on the context.
+
+    Args:
+        ctx: The context object.
+
+    Returns:
+        a 'DeclareTargetsResult'
+    """
+
+    for file in ctx.sources:
+        # Trim the class name from the import for non-.* imports.
+        # Convert to TargetImport, exclude native imports
+        imports = [
+            {
+                "name": i["result"] if "is_star" in i and i["is_star"]
+                        else i["result"][:i["result"].rindex(".")],
+                "from": file.path,
+            }
+            for i in file.query_results["imports"]
+            if not is_native(i["result"])
+        ]
+
+        lib["srcs"].append(file.path)
+        lib["imports"].extend(imports)
+        lib["packages"].append({
+            "name": path.Base(file.path),
+            "from": file.path,
+        })
+
+    lib_name = path.base(ctx.rel) if ctx.rel else ctx.repo_name
+    if len(lib["srcs"]) > 0:
+        ctx.targets.add(
+            name = lib_name,
+            kind = KT_JVM_LIBRARY,
+            attrs = {
+                "srcs": lib["srcs"],
+            },
+            exports = lib["packages"],
+            imports = lib["imports"],
+        )
+    else:
+        ctx.targets.remove(lib_name)
+
+NATIVE_LIBS = [
+    "abc",
+]
+def is_native(imp):
+    for lib in NATIVE_LIBS:
+        if imp == lib or imp.startswith(lib + "."):
+            return True
+
+    return False
+
+aspect.register_rule_kind("my_rule", {
+    "From": "@my_ruleset//:defs.bzl",
+    "NonEmptyAttrs": ["srcs"],
+    "MergeableAttrs": ["srcs"],
+    "ResolveAttrs": ["deps"],
+})

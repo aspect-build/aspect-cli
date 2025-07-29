@@ -1,0 +1,29 @@
+load("@test//:x.bzl", "props_test")
+
+# aspect:s foo
+# aspect:s_defaults asdf
+
+# aspect:sa foo, bar
+# aspect:sa_defaults asdf, fdsa
+
+# aspect:b foo
+# aspect:b_defaults foo, bar
+
+# aspect:n 123456
+# aspect:n_defaults foo, 5432
+
+props_test(
+    name = "no_defaults",
+    b = False,
+    n = 123456,
+    s = "foo",
+    sa = ["foo, bar"],
+)
+
+props_test(
+    name = "with_defaults",
+    b = False,
+    n = 123,
+    s = "asdf",
+    sa = ["asdf, fdsa"],
+)

@@ -1,0 +1,19 @@
+load("@aspect_bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
+
+copy_to_bin(
+    name = "ctb",
+)
+
+filegroup(
+    name = "other1",
+    srcs = glob(["**/*.foo"]),
+)
+
+filegroup(
+    name = "all-files",
+)
+
+filegroup(
+    name = "other2",
+    srcs = glob(["**/*.foo"]),
+)

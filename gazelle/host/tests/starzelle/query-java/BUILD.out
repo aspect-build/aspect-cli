@@ -1,0 +1,7 @@
+load("@deps-test//my:rules.bzl", "java_library")
+
+java_library(
+    name = "a_lib",
+    srcs = ["a.java"],
+    tags = ["imports-com.google.common.primitives.Ints"],
+)

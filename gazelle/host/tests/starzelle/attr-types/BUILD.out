@@ -1,0 +1,36 @@
+load("@deps-test//my:rules.bzl", "x_lib")
+
+x_lib(
+    name = "a",
+    i = 42,
+    is = [42],
+    l = "@r//p:l",
+    l2 = ":local",
+    single_dep = ":b",
+    str = "bar",
+    strs = [
+        "bar",
+        "baz",
+    ],
+    types2 = [
+        "//p2:l2",
+        ":rel",
+        "//default",
+        "@foo//repo-default",
+        ":value",
+        "//:value",
+    ],
+    deps = [
+        ":b",
+        ":rel",
+        ":value",
+        "//:value",
+        "//default",
+        "@r//p:l",
+    ],
+)
+
+x_lib(
+    name = "b",
+    foo = "baz",
+)

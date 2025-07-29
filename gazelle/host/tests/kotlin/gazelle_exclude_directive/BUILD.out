@@ -1,0 +1,21 @@
+load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
+
+# Simple
+# aspect:exclude **/*.ig.kt
+
+# Should support sub-directories
+# aspect:exclude subdir/ignored.kt
+# gazelle:exclude **/sub-ignored.kt
+
+# Sub-directories must be relative to BUILD
+# gazelle:exclude sub-not-ignored.kt
+
+# Should not be able to exclude for a different BUILD
+# aspect:exclude sub-ignored.kt
+# gazelle:exclude subproject/*
+# gazelle:exclude subproject-included/*
+
+kt_jvm_library(
+    name = "gazelle_exclude_directive",
+    srcs = ["main.kt"],
+)

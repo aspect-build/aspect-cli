@@ -1,0 +1,7 @@
+filegroup(
+    name = "the-list",
+    srcs = [
+        "groups.lang.star",
+        "list.lang.star",
+    ],
+)

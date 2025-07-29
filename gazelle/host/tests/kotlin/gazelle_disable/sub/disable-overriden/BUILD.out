@@ -1,0 +1,8 @@
+load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
+
+#gazelle:kotlin enabled
+
+kt_jvm_library(
+    name = "disable-overriden",
+    srcs = ["not-ignored.kt"],
+)

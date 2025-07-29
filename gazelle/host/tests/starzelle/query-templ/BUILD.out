@@ -1,0 +1,10 @@
+load("@deps-test//my:rules.bzl", "templ_library")
+
+templ_library(
+    name = "file_lib",
+    srcs = ["file.templ"],
+    tags = [
+        "imports-github.com/org/central/demo/htmx/models",
+        "imports-github.com/org/central/demo/htmx/views/components",
+    ],
+)

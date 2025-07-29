@@ -1,0 +1,1 @@
+Source rule generation error: failed to generate target "//:rules_conflicting_name" of kind "kt_jvm_library": a target of kind "unknown" with the same name already exists.

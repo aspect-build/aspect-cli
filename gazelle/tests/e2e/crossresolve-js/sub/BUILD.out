@@ -1,0 +1,31 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@deps-test//my:rules.bzl", "x_lib")
+load("//bazel:defs.bzl", "vitest_test")
+
+ts_project(
+    name = "sub",
+    srcs = ["sub-lib.ts"],
+    deps = [
+        ":a",
+        "//:a",
+    ],
+)
+
+ts_project(
+    name = "sub_tests",
+    testonly = True,
+    srcs = ["sub.spec.ts"],
+)
+
+x_lib(name = "a")
+
+js_library(
+    name = "b",
+    srcs = ["file-served-by-js_library.js"],
+)
+
+vitest_test(
+    name = "vitest",
+    data = [":sub_tests"],
+)

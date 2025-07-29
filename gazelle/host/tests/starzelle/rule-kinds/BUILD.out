@@ -1,0 +1,12 @@
+load("@builder//:a.bzl", "my_build")
+load("@my_tester_repo//:b.bzl", "my_test")
+
+my_build(
+    name = "b",
+    x = False,
+)
+
+my_test(
+    name = "t",
+    y = True,
+)
