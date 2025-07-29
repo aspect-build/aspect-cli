@@ -1,0 +1,15 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "ibp",
+    srcs = [
+        "client.go",
+        "protocol.go",
+    ],
+    importpath = "github.com/aspect-build/aspect-cli/pkg/ibp",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//util/socket",
+        "@com_github_fatih_color//:color",
+    ],
+)

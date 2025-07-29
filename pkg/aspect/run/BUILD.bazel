@@ -2,23 +2,35 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "run",
-    srcs = ["run.go"],
+    srcs = [
+        "changedetector.go",
+        "ibazel.go",
+        "run.go",
+    ],
     importpath = "github.com/aspect-build/aspect-cli/pkg/aspect/run",
     visibility = ["//visibility:public"],
     deps = [
+        "//bazel/buildeventstream",
         "//pkg/aspect/root/flags",
         "//pkg/bazel",
+        "//pkg/ibp",
         "//pkg/ioutils",
         "//pkg/plugin/system/bep",
+        "//pkg/watch",
+        "@com_github_fatih_color//:color",
         "@com_github_spf13_cobra//:cobra",
+        "@org_golang_google_protobuf//encoding/protodelim",
     ],
 )
 
 go_test(
     name = "run_test",
-    srcs = ["run_test.go"],
+    srcs = [
+        "changedetector_test.go",
+        "run_test.go",
+    ],
+    embed = [":run"],
     deps = [
-        ":run",
         "//pkg/aspecterrors",
         "//pkg/bazel/mock",
         "//pkg/ioutils",

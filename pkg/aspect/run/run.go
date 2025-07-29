@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 Aspect Build Systems, Inc.
+ * Copyright 2025 Aspect Build Systems, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,11 +19,22 @@ package run
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"os/signal"
+	"runtime"
+	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/ibp"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system/bep"
+	watcher "github.com/aspect-build/aspect-cli/pkg/watch"
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
@@ -32,6 +43,19 @@ type Run struct {
 	streams  ioutils.Streams
 	hstreams ioutils.Streams
 	bzl      bazel.Bazel
+}
+
+var watchConnectionTimeout = 1 * time.Second
+
+func init() {
+	timeoutEnv := os.Getenv("ASPECT_WATCH_CONNECTION_TIMEOUT_MS")
+	if timeoutEnv != "" {
+		timeout, err := strconv.Atoi(timeoutEnv)
+		if err != nil {
+			log.Fatalf("Invalid ASPECT_WATCH_CONNECTION_TIMEOUT_MS value (%v): %v", timeoutEnv, err)
+		}
+		watchConnectionTimeout = time.Duration(timeout) * time.Millisecond
+	}
 }
 
 // New creates a Run command.
@@ -51,7 +75,24 @@ func New(
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
 func (runner *Run) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 	bazelCmd := []string{"run"}
-	bazelCmd = append(bazelCmd, args...)
+
+	watch := false
+	found_dash_dash := false
+	for _, arg := range args {
+		if arg == "--" {
+			found_dash_dash = true
+		} else if !found_dash_dash && arg == "--watch" {
+			watch = true
+
+			fmt.Fprintf(
+				runner.streams.Stderr,
+				"%s Watching feature is experimental and may have breaking changes in the future.\n",
+				color.YellowString("WARNING:"),
+			)
+			continue
+		}
+		bazelCmd = append(bazelCmd, arg)
+	}
 
 	// Currently Bazel only supports a single --bes_backend so adding ours after
 	// any user supplied value will result in our bes_backend taking precedence.
@@ -76,13 +117,18 @@ func (runner *Run) Run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 	}
 
-	err := runner.bzl.RunCommand(bzlCommandStreams, nil, bazelCmd...)
+	var err error
+	if !watch {
+		err = runner.bzl.RunCommand(bzlCommandStreams, nil, bazelCmd...)
+	} else {
+		err = runner.runWatch(ctx, bazelCmd, bzlCommandStreams)
+	}
 
 	// Check for subscriber errors
 	subscriberErrors := bep.BESErrors(ctx)
 	if len(subscriberErrors) > 0 {
-		for _, err := range subscriberErrors {
-			fmt.Fprintf(runner.streams.Stderr, "Error: failed to run 'aspect run' command: %v\n", err)
+		for _, serr := range subscriberErrors {
+			fmt.Fprintf(runner.streams.Stderr, "Error: failed to run 'aspect run' command: %v\n", serr)
 		}
 		if err == nil {
 			err = fmt.Errorf("%v BES subscriber error(s)", len(subscriberErrors))
@@ -90,4 +136,302 @@ func (runner *Run) Run(ctx context.Context, cmd *cobra.Command, args []string) (
 	}
 
 	return err
+}
+
+func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandStreams ioutils.Streams) error {
+	changedetect, err := newChangeDetector(runner.bzl.WorkspaceRoot())
+	if err != nil {
+		return fmt.Errorf("failed to created change detector: %w", err)
+	}
+	defer changedetect.Close()
+
+	startScriptName := fmt.Sprintf("aspect-run-%v", os.Getpid())
+	if runtime.GOOS == "windows" {
+		startScriptName += ".bat"
+	}
+
+	startScript, err := os.CreateTemp(os.TempDir(), startScriptName)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		startScript.Close()
+		os.Remove(startScript.Name())
+	}()
+
+	// Primary context to rule all async and background operations.
+	// TODO: Cobras context seems to cancel too early. perhaps use that instead
+	// of using our own signal?
+	pcctx, cancel := context.WithCancel(context.Background())
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		cancel()
+	}()
+
+	// The abazel protocol, potentially used as the incremental build tool.
+	// Must initialize and start listening for connections before the initial bazel run command.
+	// Start the incremental build service in case the process supports it and connects
+	abazel := ibp.NewServer()
+
+	// Start listening for a connection immediately.
+	if err := abazel.Serve(pcctx); err != nil {
+		return fmt.Errorf("failed to connect to aspect bazel protocol: %w", err)
+	}
+
+	// Close the watch protocol on complete, no matter what the status is
+	defer abazel.Close()
+
+	fmt.Printf("%s Listening on watch socket %s\n", color.GreenString("INFO:"), abazel.Address())
+
+	createBazelScriptCmd := func(allowDiscard bool) (*exec.Cmd, error) {
+		// Additional arguments for the bazel run command
+		runCmdArgs := []string{}
+
+		// ChangeDetector normally adds additional flags
+		runCmdArgs = append(runCmdArgs, changedetect.bazelFlags()...)
+
+		// --norun and generate a run script instead
+		runCmdArgs = append(runCmdArgs, "--norun", "--script_path", startScript.Name())
+
+		// --noallow_analysis_cache_discard except on the intial setup run
+		if !allowDiscard {
+			runCmdArgs = append(runCmdArgs, "--noallow_analysis_cache_discard")
+		}
+
+		return runner.bzl.MakeBazelCommand(pcctx, flags.AddFlagToCommand(bazelCmd, runCmdArgs...), bzlCommandStreams, nil, nil)
+	}
+
+	createRunCmd := func() *exec.Cmd {
+		// Inherit the CLI environment variables
+		env := os.Environ()[:]
+
+		// Add the incremental build protocol(s) environment variables
+		env = append(env, "IBAZEL_NOTIFY_CHANGES=y")
+		if abazel != nil {
+			env = append(env, abazel.Env()...)
+		}
+
+		startCmd := exec.CommandContext(pcctx, startScript.Name())
+		startCmd.Stdin = bzlCommandStreams.Stdin
+		startCmd.Stdout = bzlCommandStreams.Stdout
+		startCmd.Stderr = bzlCommandStreams.Stderr
+		startCmd.Env = env
+		return startCmd
+	}
+
+	// Create and start the intial bazel command to build+inspect the run target
+	initCmd, err := createBazelScriptCmd(true)
+	if err != nil {
+		return fmt.Errorf("failed to create initial bazel command: %w", err)
+	}
+	if err := initCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start initial bazel command: %w", err)
+	}
+
+	// Watch the initial BES events to inspect and gather information about the run target.
+	initCtx, initCancel := context.WithCancel(pcctx)
+	defer initCancel()
+	go func() {
+		if err := changedetect.processBES(initCtx); err != nil {
+			fmt.Printf("failed to process BES on init: %v\n", err)
+		}
+	}()
+
+	if err := initCmd.Wait(); err != nil {
+		if err == context.Canceled {
+			return nil
+		}
+
+		return fmt.Errorf("initial bazel command failed: %w", err)
+	}
+	initCmd = nil
+	initCancel()
+
+	if !changedetect.hasTargetBuildEventInfo() {
+		return fmt.Errorf("failed to determine target %v information from build events: %v", changedetect.targetLabel, changedetect.besFile.Name())
+	}
+
+	// Start the workspace watcher
+	w := watcher.NewWatchman(runner.bzl.WorkspaceRoot())
+	if err := w.Start(); err != nil {
+		return fmt.Errorf("failed to start the watcher: %w", err)
+	}
+	defer w.Stop()
+
+	// Since the Subscribe() method is blocking, we need to run a separate
+	// goroutine to stop the watcher when we receive a signal to cancel the
+	// process.
+	go func() {
+		<-pcctx.Done()
+		w.Stop()
+	}()
+
+	// The command to start the run target.
+	startCmd := createRunCmd()
+
+	// The incremental bazel protocol/tool to use going forward.
+	var incrementalProtocol ibp.IncrementalBazel
+
+	// If the target explicitly supports ibazel but NOT excplicitly supports incremental build protocol.
+	if changedetect.supportsIBazelNotifyChanges() && !changedetect.explicitlySupportsIBP() {
+		// Fallback to only using the legacy ibazel protocol.
+		fmt.Printf("%s Fallback to legacy ibazel protocol\n", color.GreenString("INFO:"))
+
+		// In order to support ibazel events we need to set the stdin to a pipe.
+		// By default MakeBazelCommand sets it to bzlCommandStreams.stdin but we
+		// want to control stdin depending on the watch mode.
+		// In order to pipe stdin we need to set it to nil first and then call StdinPipe.
+		startCmd.Stdin = nil
+		runStdin, err := startCmd.StdinPipe()
+		if err != nil {
+			return fmt.Errorf("failed to create stdin pipe for ibazel: %w", err)
+		}
+
+		incrementalProtocol = &IBazelProtocol{
+			stdin: runStdin,
+		}
+	} else {
+		incrementalProtocol = abazel
+	}
+
+	// Close the incremental protocol when complete, no matter the protocol type.
+	defer incrementalProtocol.Close()
+
+	// Start the bazel command
+	startErr := startCmd.Start()
+	if startErr != nil {
+		if startErr == context.Canceled {
+			return nil
+		}
+
+		return fmt.Errorf("failed to start bazel command: %w", startErr)
+	}
+
+	// Give the watcher some time to start and open the connection before sending Init()
+	if !incrementalProtocol.HasConnection() {
+		// TODO: don't assume abazel is the only non-instant connection
+
+		select {
+		case <-pcctx.Done():
+			fmt.Printf("%s Process cancelled before establishing connection: %v\n", color.RedString("ERROR:"), pcctx.Err())
+			return pcctx.Err()
+		case v := <-abazel.WaitForConnection():
+			fmt.Printf("%s Received connection to %s using abazel v%v\n", color.GreenString("INFO:"), abazel.Address(), v)
+		case <-time.After(watchConnectionTimeout):
+			fmt.Printf("%s Timeout waiting for watch protocol connection.\n", color.YellowString("WARNING:"))
+			break
+		}
+	}
+
+	// Abandon the incrmental protocol if the target has not responded
+	if !incrementalProtocol.HasConnection() {
+		fmt.Printf("%s No watch protocol connection established. Fallback to restart.\n", color.YellowString("WARNING:"))
+
+		if changedetect.explicitlySupportsIBP() {
+			fmt.Printf("%s target explicitly supports incremental build protocol but did not connect.\n", color.RedString("WARNING:"))
+		}
+
+		go abazel.Close()
+		abazel = nil
+
+		incrementalProtocol = &RestartBazelProtocol{
+			createRunCmd: createRunCmd,
+			runCmd:       startCmd,
+		}
+	}
+
+	// Init() with the full runfiles list
+	initRunfiles, initRunfielsErr := changedetect.loadFullSourceInfo()
+	if initRunfielsErr != nil {
+		return fmt.Errorf("failed to load initial runfiles: %w", initRunfielsErr)
+	}
+	initErr := incrementalProtocol.Init(initRunfiles)
+	if initErr != nil {
+		return fmt.Errorf("failed to initialize watch protocol: %w", initErr)
+	}
+
+	// Send an 'Exit' message to the child process when the context completes in case
+	// the context was cancelled due to the cli being shutdown.
+	go func() {
+		<-pcctx.Done()
+
+		// If a connection still exists to the incremental protocol, send an Exit message and
+		// hope for a graceful shutdown.
+		if incrementalProtocol.HasConnection() {
+			if err := incrementalProtocol.Exit(err); err != nil {
+				fmt.Printf("%s Failed to Exit() watch protocol: %v\n", color.RedString("ERROR:"), err)
+			}
+		}
+
+		// Terminate the process if it is still running.
+		terminate(startCmd.Process)
+	}()
+
+	// Subscribe to further changes
+	for cs, err := range w.Subscribe("aspect-run-watch") {
+		if err != nil {
+			return fmt.Errorf("failed to get next event: %w", err)
+		}
+
+		// Enter into the build state to discard supirious changes caused by Bazel reading the
+		// inputs which leads to their atime to change.
+		if err := w.StateEnter("aspect-run-watch"); err != nil {
+			return fmt.Errorf("failed to enter build state: %w", err)
+		}
+
+		// The command to detect changes in the run target.
+		detectCmd, err := createBazelScriptCmd(false)
+		if err != nil {
+			return fmt.Errorf("failed to create bazel detect command: %w", err)
+		}
+
+		// TODO: delay the command stdout and do not output on quick noops
+		incBuildErr := detectCmd.Run()
+
+		if incBuildErr != nil {
+			// The incremental build failed.
+			// Assume a temporary compilation error, assume an appopriate error message was outputted by the run command.
+			// Output a basic warning and resume waiting for changes.
+			fmt.Printf("%s incremental bazel build command failed: %v\n", color.YellowString("WARNING:"), incBuildErr)
+		} else {
+			// Something has changed, but we have no idea if it affects our target.
+			// Normally we'd want to perform a cquery to determine if it affects but
+			// that is too costly especially in larger monorepos. So instead we rebuild
+			// the target with --execution_log_json_file and determine if it ran any
+			// actions.
+			//
+			// Obviously just looking at the execution log is not enough because there
+			// might be some sources that are not part of any actions but is part of the
+			// runfiles tree.
+			// Here we run a cycle to parse the last execution log.
+			changes, err := changedetect.detectChanges(cs.Paths)
+			if err != nil {
+				return fmt.Errorf("failed to detect changes: %w", err)
+			}
+
+			// For now just rerun the target, beware that RunCommand does not yield until
+			// the subprocess exists.
+			if len(changes) > 0 {
+				fmt.Printf("%s Found %d changes, rebuilding the target.\n", color.GreenString("INFO:"), len(changes))
+
+				if err := incrementalProtocol.Cycle(changes); err != nil {
+					return fmt.Errorf("failed to report cycle events: %w", err)
+				}
+
+				// TODO: if we want to support ibazel livereload then we need to report changes.
+			} else {
+				fmt.Printf("%s Target is up-to-date.\n", color.GreenString("INFO:"))
+			}
+		}
+
+		// Leave the build state and fast forward the subscription clock.
+		if err := w.StateLeave("aspect-run-watch"); err != nil {
+			return fmt.Errorf("failed to enter build state: %w", err)
+		}
+	}
+
+	return nil
 }
