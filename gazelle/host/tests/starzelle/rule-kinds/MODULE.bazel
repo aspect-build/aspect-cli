@@ -1,0 +1,14 @@
+module(
+    name = "rule-kinds",
+    version = "0.0.0",
+)
+
+bazel_dep(
+    name = "builder",
+    version = "1.2.3",
+)
+bazel_dep(
+    name = "tester",
+    version = "1.2.3",
+    repo_name = "my_tester_repo",
+)

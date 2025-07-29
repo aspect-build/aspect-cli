@@ -1,0 +1,8 @@
+Resolution error Import "lib.not" from "lib.kt" is an unknown dependency. Possible solutions:
+	1. Instruct Gazelle to resolve to a known dependency using a directive:
+		# aspect:resolve [src-lang] kotlin import-string label
+
+Resolution error Import "foo" from "main.kt" is an unknown dependency. Possible solutions:
+	1. Instruct Gazelle to resolve to a known dependency using a directive:
+		# aspect:resolve [src-lang] kotlin import-string label
+

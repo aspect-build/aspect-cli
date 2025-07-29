@@ -1,0 +1,8 @@
+{
+    "name": "npm_bin_wrapper-test",
+    "private": true,
+    "devDependencies": {
+        "postcss":"^8.4.49",
+        "postcss-utilities":"^0.8.4"
+    }
+}

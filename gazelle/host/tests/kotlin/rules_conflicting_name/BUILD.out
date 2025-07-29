@@ -1,0 +1,3 @@
+unknown(
+    name = "rules_conflicting_name",
+)

@@ -1,0 +1,14 @@
+load("//:defs.bzl", "custom_my_build", "custom_my_test")
+
+# gazelle:map_kind my_build custom_my_build //:defs.bzl
+# gazelle:map_kind my_test custom_my_test //:defs.bzl
+
+custom_my_build(
+    name = "b",
+    x = False,
+)
+
+custom_my_test(
+    name = "t",
+    y = True,
+)

@@ -1,0 +1,14 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@deps-test//my:rules.bzl", "x_lib")
+
+js_library(
+    name = "viteconfig",
+    srcs = ["vitest.config.mjs"],
+)
+
+x_lib(name = "a")
+
+js_library(
+    name = "b",
+    srcs = ["file-served-by-js_library.js"],
+)

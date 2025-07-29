@@ -1,0 +1,41 @@
+filegroup(
+    name = "the-dict-js",
+    srcs = [
+        "a.js",
+        "b.js",
+        "c.js",
+    ],
+)
+
+filegroup(
+    name = "the-dict-txt",
+    srcs = [
+        "a.txt",
+        "b.txt",
+        "c.txt",
+    ],
+)
+
+filegroup(
+    name = "the-dict-all",
+    srcs = [
+        "a.js",
+        "a.txt",
+        "b.js",
+        "b.txt",
+        "c.js",
+        "c.txt",
+    ],
+)
+
+filegroup(
+    name = "the-list",
+    srcs = [
+        "a.js",
+        "a.txt",
+        "b.js",
+        "b.txt",
+        "c.js",
+        "c.txt",
+    ],
+)

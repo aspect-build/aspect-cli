@@ -1,0 +1,64 @@
+package pages
+
+import "github.com/org/central/demo/htmx/models"
+import "github.com/org/central/demo/htmx/views/components"
+
+templ Debug(debugInfo models.DebugInfo) {
+  <h1 class="m-6 text-3xl font-bold">Debug details</h1>
+
+  <h2 class="text-xl font-bold">Who are you?</h2>
+
+  <p class="p-3">Your user identity (User-Id) is:</p>
+
+  <pre>{ debugInfo.UserIdentity }</pre>
+
+  <p class="p-3">Your decoded JWT, if any, is:</p>
+
+  <pre>{ debugInfo.JWT }</pre>
+
+  <h2 class="text-xl font-bold">Request headers for a non-HTMX GET</h2>
+
+  <div class="w-full flex flex-col justify-center p-3">
+    @components.KeyValues(debugInfo.RequestHeader.KeyValues)
+  </div>
+
+  <h2 class="text-xl font-bold">Request headers for an HTMX GET</h2>
+
+  <div class="w-full flex flex-col justify-center p-3" id="inner-content">
+    <div id="inner-content" hx-get="/debug/info" hx-target="#inner-content" hx-swap="innerHTML" hx-trigger="load"></div>
+  </div>
+
+    <!-- Dropdown for Organization Selection -->
+    <h2 class="text-xl font-bold">Switch Organization</h2>
+    <div class="w-full flex flex-col justify-center p-3">
+      <select id="org-selector" name="org_id" class="p-2 border border-gray-300 rounded">
+        <option value="">Select an organization</option>
+        <option value="b59bbfd8-7e08-42d3-b708-1b1dec308bdd">Media Group = 1 = b59bbfd8-7e08-42d3-b708-1b1dec308bdd</option>
+        <option value="275ac542-23c7-4777-8e32-bd608861d331">Demo Group = 4 = 275ac542-23c7-4777-8e32-bd608861d331</option>
+        <option value="14e001fc-14fb-49ef-b5eb-5f272128fb0c">Other Group = 6 = 14e001fc-14fb-49ef-b5eb-5f272128fb0c</option>
+        <option value="d23507a0-4f4f-49fb-a787-1fd78d3e6d4b">Test Holding Company = 333 = d23507a0-4f4f-49fb-a787-1fd78d3e6d4b</option>
+        <option value="a0772c22-4a81-4091-89df-14beac81a6f7">OpenAPI = 468 = a0772c22-4a81-4091-89df-14beac81a6f7</option>
+      </select>
+    </div>
+
+    <script>
+        document.getElementById('org-selector').addEventListener('change', function(event) {
+          const selectedOrgId = event.target.value;
+          if (selectedOrgId) {
+            const url = `/v1/organizations/${selectedOrgId}/switch`;
+
+            // Submit request when an organization is selected from the dropdown
+            htmx.ajax('POST', url, {
+              target: 'document',
+              swap: 'outerHTML',
+              headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+              },
+              withCredentials: true
+            });
+          }
+        });
+    </script>
+
+
+}

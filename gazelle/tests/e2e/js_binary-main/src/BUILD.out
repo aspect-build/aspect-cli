@@ -1,0 +1,7 @@
+load("@aspect_rules_js//js:defs.bzl", "js_run_binary")
+
+js_run_binary(
+    name = "bin",
+    srcs = ["input1.txt"],
+    tool = "//tool1:bin",
+)

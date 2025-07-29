@@ -1,0 +1,12 @@
+load("//a:does-not-exist.bzl", "foo")
+
+foo()
+
+# comment
+
+filegroup(
+    name = "x",
+    srcs = [],
+)
+
+# comment2

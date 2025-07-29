@@ -1,0 +1,6 @@
+load("@deps-test//my:rules.bzl", "r_lib")
+
+r_lib(
+    name = "l_lib",
+    srcs = ["l.r"],
+)

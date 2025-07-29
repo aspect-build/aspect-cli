@@ -1,0 +1,8 @@
+load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_binary")
+
+kt_jvm_binary(
+    name = "compare_bin",
+    srcs = ["Compare.kt"],
+    main_class = "com.example.compare.Compare",
+    deps = ["@maven//:com_google_guava_guava"],
+)

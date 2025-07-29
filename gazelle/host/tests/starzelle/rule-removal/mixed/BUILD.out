@@ -1,0 +1,9 @@
+filegroup(
+    name = "not-me1",
+    srcs = ["foo.bar"],
+)
+
+filegroup(
+    name = "not-me2",
+    srcs = ["foo.bar"],
+)

@@ -1,0 +1,19 @@
+load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_binary", "kt_jvm_library")
+
+kt_jvm_library(
+    name = "bin",
+    srcs = ["lib.kt"],
+)
+
+kt_jvm_binary(
+    name = "hello_bin",
+    srcs = ["Hello.kt"],
+    main_class = "Hello",
+)
+
+kt_jvm_binary(
+    name = "pkghello_bin",
+    srcs = ["PkgHello.kt"],
+    main_class = "foo.pkg.PkgHello",
+    deps = [":bin"],
+)

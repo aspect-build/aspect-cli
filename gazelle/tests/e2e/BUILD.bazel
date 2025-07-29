@@ -1,0 +1,32 @@
+load("@bazel_gazelle//:def.bzl", "gazelle_binary")
+load("//gazelle:gazelle.bzl", "gazelle_generation_test")
+
+# Disable the gazelle extensions
+# gazelle:exclude .
+
+# Starzelle e2e tests with all standard gazelle extensions enabled.
+# Each test has its own additional *.star plugins.
+
+gazelle_binary(
+    name = "gazelle_binary-host_js",
+    languages = [
+        "//gazelle/js",
+        "//gazelle/host",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+[
+    gazelle_generation_test(
+        name = "%s_test" % t,
+        dir = t,
+        env = {
+            "TEST_STARZELLE_PLUGINS": "%s/%s" % (
+                package_name(),
+                t,
+            ),
+        },
+        gazelle_binary = ":gazelle_binary-host_js",
+    )
+    for t in [t.replace("/WORKSPACE", "") for t in glob(["*/WORKSPACE"])]
+]

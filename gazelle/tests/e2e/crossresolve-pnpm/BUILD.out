@@ -1,0 +1,9 @@
+load("@deps-test//my:rules.bzl", "x_lib")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+npm_link_all_packages(name = "node_modules")
+
+x_lib(
+    name = "a",
+    deps = [":node_modules/jquery"],
+)

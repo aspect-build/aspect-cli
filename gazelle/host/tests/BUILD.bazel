@@ -1,0 +1,34 @@
+load("//gazelle:gazelle.bzl", "gazelle_generation_test")
+
+BUILTIN_PLUGINS_DIR = "gazelle/plugins"
+
+# Disable the gazelle extensions
+# gazelle:exclude .
+
+# bzl plugin tests
+BZL_TESTS = [t.replace("/WORKSPACE", "") for t in glob(["bzl/*/WORKSPACE"])]
+
+[
+    gazelle_generation_test(
+        name = "%s_test" % t.replace("bzl/", "bzl-"),
+        data = [
+            "//gazelle/plugins:bzl.lang.star",
+        ],
+        dir = t,
+        env = {
+            "TEST_STARZELLE_PLUGINS": BUILTIN_PLUGINS_DIR,
+        },
+        gazelle_binary = "//gazelle/host:gazelle_host_binary",
+    )
+    for t in BZL_TESTS
+    # TODO: remove opt-outs
+    if t.replace("bzl/", "") not in [
+        "bazel_tools",
+        "defaultvisibility",
+        "empty",
+        "external",
+        "multidir",
+        "tests",
+        "relative_import",
+    ]
+]

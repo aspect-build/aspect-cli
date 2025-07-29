@@ -1,0 +1,9 @@
+module(
+    name = "simple_module",
+    version = "0.0.0",
+)
+
+bazel_dep(
+    name = "rules_kotlin",
+    version = "1.2.3",
+)
