@@ -27,7 +27,6 @@ import (
 	"github.com/aspect-build/aspect-cli/gazelle/common/git"
 	"github.com/aspect-build/aspect-cli/gazelle/common/progress"
 	js "github.com/aspect-build/aspect-cli/gazelle/js"
-	kotlin "github.com/aspect-build/aspect-cli/gazelle/kotlin"
 	python "github.com/aspect-build/aspect-cli/gazelle/python"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
@@ -59,7 +58,6 @@ type ConfigureLanguage = string
 const (
 	JavaScript ConfigureLanguage = "javascript"
 	Go                           = "go"
-	Kotlin                       = "kotlin"
 	Protobuf                     = "protobuf"
 	Bzl                          = "bzl"
 	Python                       = "python"
@@ -121,8 +119,6 @@ func (c *Configure) AddLanguage(lang ConfigureLanguage) {
 			}
 		}
 		c.AddLanguageFactory(lang, golang.NewLanguage)
-	case Kotlin:
-		c.AddLanguageFactory(lang, kotlin.NewLanguage)
 	case Protobuf:
 		c.AddLanguageFactory(lang, proto.NewLanguage)
 	case Bzl:
