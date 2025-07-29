@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"os"
 	"os/exec"
 	"path"
 	"sync/atomic"
@@ -322,7 +323,7 @@ func (w *WatchmanWatcher) Subscribe(dropWithinState string) iter.Seq2[*ChangeSet
 		// close the socket when the subscription is done
 		defer sock.Close()
 
-		subscriptionName := fmt.Sprintf("aspect-cli-%d", w.subscriberId.Add(1))
+		subscriptionName := fmt.Sprintf("aspect-cli-%d.%d", os.Getpid(), w.subscriberId.Add(1))
 		queryParams := w.makeQueryParams(w.lastClockSpec)
 		if dropWithinState != "" {
 			queryParams["drop"] = []string{dropWithinState}
