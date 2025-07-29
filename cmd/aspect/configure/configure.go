@@ -109,7 +109,6 @@ configure:
   languages:
 	javascript: true
 	go: true
-	kotlin: true
 	protobuf: true
 	bzl: true
 	python: true`)
@@ -132,11 +131,6 @@ func addCliEnabledLanguages(c configure.ConfigureRunner) {
 	viper.SetDefault("configure.languages.javascript", false)
 	if viper.GetBool("configure.languages.javascript") {
 		c.AddLanguage(configure.JavaScript)
-	}
-
-	viper.SetDefault("configure.languages.kotlin", false)
-	if viper.GetBool("configure.languages.kotlin") {
-		c.AddLanguage(configure.Kotlin)
 	}
 
 	viper.SetDefault("configure.languages.bzl", false)

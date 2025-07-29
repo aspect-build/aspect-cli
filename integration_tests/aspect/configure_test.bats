@@ -13,17 +13,13 @@ setup() {
     mkdir go
     touch go/a.go
 
-    # kotlin
-    mkdir kotlin
-    touch kotlin/a.kt
-
     # proto
     mkdir proto
     touch proto/a.proto
 }
 
 teardown() {
-    rm -rf BUILD.bazel WORKSPACE js/ go/ kotlin/ proto/
+    rm -rf BUILD.bazel WORKSPACE js/ go/ proto/
     rm -f "$HOME/.aspect/cli/config.yaml"
 }
 
@@ -88,20 +84,6 @@ EOF
     assert_output --partial "1 BUILD file updated"
     run cat go/BUILD.bazel
     assert_output --partial "go_library("
-}
-
-@test 'aspect configure enable kotlin' {
-    cat >"$HOME/.aspect/cli/config.yaml" <<'EOF'
-configure:
-  languages:
-    kotlin: true
-EOF
-    run aspect configure
-    [ "$status" -eq 110 ]
-    assert_output --partial "Updating BUILD files for"
-    assert_output --partial "1 BUILD file updated"
-    run cat kotlin/BUILD.bazel
-    assert_output --partial "kt_jvm_library("
 }
 
 @test 'aspect configure enable protobuf' {
