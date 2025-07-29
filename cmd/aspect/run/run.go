@@ -46,7 +46,7 @@ func NewCmd(
 	bzl bazel.Bazel,
 ) *cobra.Command {
 	return &cobra.Command{
-		Use:   "run [--run_under=command-prefix] <target> -- [args for program ...]",
+		Use:   "run [--run_under=command-prefix] <target> [--watch] -- [args for program ...]",
 		Args:  cobra.MinimumNArgs(1),
 		Short: "Build a single target and run it with the given arguments",
 		Long: `Equivalent to ` + "`aspect build <target>`" + ` followed by spawning the resulting executable.

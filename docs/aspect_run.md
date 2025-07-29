@@ -35,7 +35,7 @@ directory of the process. You'd typically do this at the very beginning of the p
 
 
 ```
-aspect run [--run_under=command-prefix] <target> -- [args for program ...]
+aspect run [--run_under=command-prefix] <target> [--watch] -- [args for program ...]
 ```
 
 ### Options

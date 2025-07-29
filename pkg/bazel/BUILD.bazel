@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "bazel.go",
         "bazel_flags.go",
+        "bazelignore.go",
         "bazelisk.go",
         "bazelisk-core.go",
     ],

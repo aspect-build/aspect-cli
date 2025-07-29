@@ -29,6 +29,7 @@ data = [
         "init",
         "lint",
         "reenter",
+        "run",
     ]
 ]
 
