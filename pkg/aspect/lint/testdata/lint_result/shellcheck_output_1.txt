@@ -1,0 +1,23 @@
+In docs/delivery.sh line 6:
+echo $msg
+     ^--^ SC2086 (info): Double quote to prevent globbing and word splitting.
+     ^--^ SC2250 (style): Prefer putting braces around variable references even when not strictly required.
+
+Did you mean: 
+echo "${msg}"
+
+
+In docs/delivery.sh line 8:
+export FOO="${BAR}"
+            ^----^ SC2154 (warning): BAR is referenced but not assigned.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2154 -- BAR is referenced but not assigned.
+  https://www.shellcheck.net/wiki/SC2086 -- Double quote to prevent globbing ...
+  https://www.shellcheck.net/wiki/SC2250 -- Prefer putting braces around vari...
+
+Some problems have automated fixes available:
+
+  docs/delivery.sh | 1 !
+  1 file, 1 modification(!)
+

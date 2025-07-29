@@ -1,0 +1,85 @@
+--- a/workflows/marvin/domain/comment.ts
++++ b/workflows/marvin/domain/comment.ts
+@@ -26,7 +26,7 @@
+  * A class representing the build results comment in a pull request.
+  */
+ export class Comment {
+-    public static readonly TASK_ORDERING: ReadonlyArray<TaskType> = [
++    public static readonly TASK_ORDERING: readonly TaskType[] = [
+         TaskType.BUILD,
+         TaskType.TEST,
+         TaskType.BUILDIFIER,
+@@ -52,7 +52,7 @@
+         return comment;
+     }
+ 
+-    private _results: Map<string, TaskResults> = new Map();
++    private _results = new Map<string, TaskResults>();
+ 
+     // Do not use directly. Use `new` factory method or reconstitute
+     // from CommentRepository.
+@@ -65,7 +65,7 @@
+         private _body: Option<string>,
+         private _label: Option<string>
+     ) {
+-        for (let result of results) {
++        for (const result of results) {
+             this._results.set(this.getResultsKey(result), result);
+         }
+     }
+@@ -306,17 +306,9 @@
+     );
+ }
+ 
+-function calculateTestTargetTimeIndents(results: Map<string, TaskResults>): {
+-    [key: string]: {
+-        [key: string]: number;
+-    };
+-} {
++function calculateTestTargetTimeIndents(results: Map<string, TaskResults>): Record<string, Record<string, number>> {
+     const CLEARANCE = 1;
+-    const indents: {
+-        [key: string]: {
+-            [key: string]: number;
+-        };
+-    } = {};
++    const indents: Record<string, Record<string, number>> = {};
+ 
+     results.forEach((result, id) => {
+         if (result.task_type === TaskType.TEST) {
+@@ -417,13 +409,13 @@
+     return count <= 0 ? '' : ' '.repeat(count);
+ }
+ 
+-type LegacyFailedBuildTarget = {
++interface LegacyFailedBuildTarget {
+     label: string;
+     messages: {
+         content: string;
+         truncated?: number;
+     }[];
+-};
++}
+ 
+ type LegacyBuildTaskResults<T extends BuildTaskResults> = Omit<
+     T,
+--- a/workflows/marvin/domain/suggestions.repository.ts
++++ b/workflows/marvin/domain/suggestions.repository.ts
+@@ -47,7 +47,7 @@
+         suggestions: Suggestions
+     ): AsyncResult<void, string> {
+         try {
+-            for (let suggestion of suggestions.suggestionsToCreate) {
++            for (const suggestion of suggestions.suggestionsToCreate) {
+                 await this.octokit.rest.pulls.createReviewComment({
+                     owner: suggestion.pullRequest.repo_owner,
+                     repo: suggestion.pullRequest.repo_name,
+@@ -78,7 +78,7 @@
+         suggestions: Suggestions
+     ): AsyncResult<void, string> {
+         try {
+-            for (let suggestion of suggestions.suggestionsToDelete) {
++            for (const suggestion of suggestions.suggestionsToDelete) {
+                 await this.octokit.rest.pulls.deleteReviewComment({
+                     owner: suggestion.pullRequest.repo_owner,
+                     repo: suggestion.pullRequest.repo_name,

@@ -34,7 +34,9 @@ func NewDefaultCmd(pluginSystem system.PluginSystem) *cobra.Command {
 		hints.DefaultStreams,
 		pluginSystem,
 		bazel.WorkspaceFromWd,
-		[]lint.LintResultsHandler{},
+		[]lint.LintResultsHandler{
+			&lint.LintResultsFileHandler{Streams: ioutils.DefaultStreams},
+		},
 	)
 }
 

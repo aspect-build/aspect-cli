@@ -1,0 +1,77 @@
+--- a/workflows/marvin/domain/check.repository.spec.ts
++++ b/workflows/marvin/domain/check.repository.spec.ts
+@@ -34,9 +34,9 @@
+         pull_id: '5',
+     };
+ 
+-    const COMMIT: string = '407fd999431250c1b168a7f2e54deb7a27a9491e';
++    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';
+ 
+-    const NAME: string = 'Lint';
++    const NAME = 'Lint';
+ 
+     const repository = new CheckRepository(mockOctokit);
+ 
+--- a/workflows/marvin/domain/check.spec.ts
++++ b/workflows/marvin/domain/check.spec.ts
+@@ -16,9 +16,9 @@
+         pull_id: '5',
+     };
+ 
+-    const COMMIT: string = '407fd999431250c1b168a7f2e54deb7a27a9491e';
++    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';
+ 
+-    const NAME: string = 'Lint';
++    const NAME = 'Lint';
+ 
+     const DIAGNOSTICS: Diagnostic[] = [
+         Diagnostic.from({
+--- a/workflows/marvin/domain/comment.repository.spec.ts
++++ b/workflows/marvin/domain/comment.repository.spec.ts
+@@ -501,7 +501,7 @@
+         });
+     });
+ 
+-    function generateValidCommentBody(type: string = 'result'): string {
++    function generateValidCommentBody(type = 'result'): string {
+         return `foobar\n<!--${zlib
+             .gzipSync(
+                 JSON.stringify({
+--- a/workflows/marvin/domain/suggestions.repository.spec.ts
++++ b/workflows/marvin/domain/suggestions.repository.spec.ts
+@@ -29,9 +29,9 @@
+         pull_id: '5',
+     };
+ 
+-    const COMMIT: string = '407fd999431250c1b168a7f2e54deb7a27a9491e';
++    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';
+ 
+-    const NAME: string = 'Lint';
++    const NAME = 'Lint';
+ 
+     const repository = new SuggestionsRepository(mockOctokit);
+ 
+--- a/workflows/marvin/domain/suggestions.spec.ts
++++ b/workflows/marvin/domain/suggestions.spec.ts
+@@ -12,7 +12,7 @@
+     pull_id: '5',
+ };
+ 
+-const COMMIT: string = 'foo';
++const COMMIT = 'foo';
+ 
+ describe('Suggestion', () => {
+     describe('SuggestionsAreIdentical', () => {
+@@ -141,9 +141,9 @@
+         pull_id: '5',
+     };
+ 
+-    const COMMIT: string = '407fd999431250c1b168a7f2e54deb7a27a9491e';
++    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';
+ 
+-    const TASK_ID: string = 'Lint';
++    const TASK_ID = 'Lint';
+ 
+     describe('.suggestions', () => {
+         it('make suggestions available', async () => {
+

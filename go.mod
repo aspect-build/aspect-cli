@@ -5,14 +5,13 @@ go 1.24.5
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/alphadose/haxmap v1.4.1
-	github.com/bazel-contrib/rules_jvm v0.27.0
 	github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250706032523-18d0d297aa69 // NOTE: keep in sync with python.MODULE.bazel
 	github.com/bazelbuild/bazel-gazelle v0.44.1-0.20250718191312-df6879377186 // NOTE: keep in sync with go.MODULE.bazel
 	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync
 	github.com/bazelbuild/buildtools v0.0.0-20250715102656-62b9413b08bb
 	github.com/bazelbuild/rules_go v0.55.1 // indirect; NOTE: keep in sync with go.MODULE.bazel
 	github.com/bluekeyes/go-gitdiff v0.7.3
-	github.com/bmatcuk/doublestar/v4 v4.9.0
+	github.com/bmatcuk/doublestar/v4 v4.9.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/fatih/color v1.18.0
 	github.com/go-git/go-git/v5 v5.16.2
@@ -28,6 +27,7 @@ require (
 	github.com/onsi/gomega v1.34.1
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
+	github.com/reviewdog/errorformat v0.0.0-20240608101709-1d3280ed6bd4
 	github.com/rs/zerolog v1.33.0
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	github.com/spf13/cobra v1.9.1
@@ -52,10 +52,12 @@ require (
 	github.com/charmbracelet/huh v0.6.0
 	github.com/creack/pty v1.1.24
 	github.com/hay-kot/scaffold v0.6.2-0.20250317013600-8a6092d5e4ff
+	github.com/reviewdog/reviewdog v0.17.4
 	github.com/sourcegraph/go-diff v0.7.0
 	golang.org/x/term v0.33.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20250603155806-513f23925822
 	gopkg.in/op/go-logging.v1 v1.0.0-20160211212156-b2cb9fa56473
+	gotest.tools/v3 v3.5.1
 )
 
 require (
@@ -94,12 +96,13 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.2.1 // indirect
 	github.com/gofrs/flock v0.12.1 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
-	github.com/google/btree v1.1.2 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/hashicorp/go-version v1.7.0 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
+	github.com/haya14busa/go-checkstyle v0.0.0-20170303121022-5e9d09f51fa1 // indirect
+	github.com/haya14busa/go-sarif v0.0.0-20210102043135-e2c5fed2fa3d // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/itchyny/timefmt-go v0.1.6 // indirect
@@ -119,7 +122,7 @@ require (
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/oklog/run v1.1.0 // indirect
-	github.com/pelletier/go-toml/v2 v2.2.3 // indirect
+	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pjbgf/sha1cd v0.3.2 // indirect
 	github.com/psanford/memfs v0.0.0-20241019191636-4ef911798f9b // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect

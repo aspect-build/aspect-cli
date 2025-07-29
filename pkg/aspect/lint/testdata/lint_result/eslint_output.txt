@@ -1,0 +1,7 @@
+workflows/marvin/domain/check.repository.spec.ts: line 12, col 6, Warning - 'GitHubComment' is defined but never used. (@typescript-eslint/no-unused-vars)
+workflows/marvin/domain/comment.repository.spec.ts: line 447, col 19, Error - 'result' is assigned a value but never used. (@typescript-eslint/no-unused-vars)
+workflows/marvin/domain/suggestion.service.spec.ts: line 80, col 15, Warning - 'id1' is assigned a value but never used. (@typescript-eslint/no-unused-vars)
+workflows/marvin/domain/suggestion.service.spec.ts: line 84, col 15, Warning - 'id2' is assigned a value but never used. (@typescript-eslint/no-unused-vars)
+workflows/marvin/domain/task-results.spec.ts: line 919, col 13, Error - Use "@ts-expect-error" instead of "@ts-ignore", as "@ts-ignore" will do nothing if the following line is error-free. (@typescript-eslint/ban-ts-comment)
+
+5 problems

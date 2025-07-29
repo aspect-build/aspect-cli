@@ -1,0 +1,920 @@
+[
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": [
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 4
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 6
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 7
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 8
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 9
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 6,
+                    "startLine": 11
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "'GitHubComment' is defined but never used. (@typescript-eslint/no-unused-vars)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 4
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 2
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 4
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 6
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 8
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 10
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 16
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 19,
+                    "startLine": 445
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "'result' is assigned a value but never used. (@typescript-eslint/no-unused-vars)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 3
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 17,
+                    "startLine": 3
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "'CIHost' is defined but never used. (@typescript-eslint/no-unused-vars)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 6
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/task-results.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 2
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/task-results.spec.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 13,
+                    "startLine": 919
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Use \"@ts-expect-error\" instead of \"@ts-ignore\", as \"@ts-ignore\" will do nothing if the following line is error-free. (@typescript-eslint/ban-ts-comment)"
+            }
+          }
+        ],
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "ESLint",
+            "rules": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": [
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.repository.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 3
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 2
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 4
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/check.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 18,
+                    "startLine": 105
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Unexpected constant truthiness on the left-hand side of a `||` expression. (no-constant-binary-expression)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 2
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 4
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 6
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 8
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.repository.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 25,
+                    "startLine": 313
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Empty block statement. (no-empty)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 2
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 3
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 5
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/comment.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 7
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "workflows/marvin/domain/task-results.ts",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 2
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Imports should be sorted alphabetically. (sort-imports)"
+            }
+          }
+        ],
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "ESLint",
+            "rules": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": [
+          {
+            "level": "warning",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "speller/announce/announce.cc",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 16,
+                    "startLine": 19
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "function is not thread safe [concurrency-mt-unsafe]"
+            }
+          },
+          {
+            "level": "warning",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "speller/announce/announce.cc",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 29,
+                    "startLine": 19
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "function is not thread safe [concurrency-mt-unsafe]"
+            }
+          }
+        ],
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "ClangTidy",
+            "rules": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": [
+          {
+            "level": "warning",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "docs/delivery.sh",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startLine": 8
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "BAR is referenced but not assigned."
+            }
+          }
+        ],
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "ShellCheck",
+            "rules": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": [
+          {
+            "level": "warning",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "integration_tests/runner.sh",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startLine": 15
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "TEST_TIMEOUT is referenced but not assigned."
+            }
+          },
+          {
+            "level": "warning",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "integration_tests/runner.sh",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startLine": 16
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "TEST_TMPDIR is referenced but not assigned."
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "integration_tests/runner.sh",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startLine": 18
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "BIN is referenced but not assigned."
+            }
+          }
+        ],
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "ShellCheck",
+            "rules": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": [
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "src/hello.css",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 5,
+                    "startLine": 11
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Unexpected empty block (block-no-empty)"
+            }
+          },
+          {
+            "level": "warning",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "src/hello.css",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 3,
+                    "startLine": 16
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Unexpected duplicate \"color\" (declaration-block-no-duplicate-properties)"
+            }
+          }
+        ],
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "Stylelint",
+            "rules": null
+          }
+        }
+      }
+    ]
+  }
+]

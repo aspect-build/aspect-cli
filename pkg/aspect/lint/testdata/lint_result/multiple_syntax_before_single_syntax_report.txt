@@ -1,0 +1,16 @@
+workflows/marvin/domain/check.repository.ts: line 3, col 1, Error - Expected 'multiple' syntax before 'single' syntax. (sort-imports)
+workflows/marvin/domain/check.ts: line 2, col 1, Error - Expected 'multiple' syntax before 'single' syntax. (sort-imports)
+workflows/marvin/domain/check.ts: line 4, col 1, Error - Expected 'multiple' syntax before 'single' syntax. (sort-imports)
+workflows/marvin/domain/check.ts: line 105, col 18, Error - Unexpected constant truthiness on the left-hand side of a `||` expression. (no-constant-binary-expression)
+workflows/marvin/domain/comment.repository.ts: line 2, col 1, Error - Expected 'multiple' syntax before 'single' syntax. (sort-imports)
+workflows/marvin/domain/comment.repository.ts: line 4, col 1, Error - Imports should be sorted alphabetically. (sort-imports)
+workflows/marvin/domain/comment.repository.ts: line 6, col 1, Error - Expected 'multiple' syntax before 'single' syntax. (sort-imports)
+workflows/marvin/domain/comment.repository.ts: line 8, col 1, Error - Expected 'multiple' syntax before 'single' syntax. (sort-imports)
+workflows/marvin/domain/comment.repository.ts: line 313, col 25, Error - Empty block statement. (no-empty)
+workflows/marvin/domain/comment.ts: line 2, col 1, Error - Expected 'multiple' syntax before 'single' syntax. (sort-imports)
+workflows/marvin/domain/comment.ts: line 3, col 1, Error - Imports should be sorted alphabetically. (sort-imports)
+workflows/marvin/domain/comment.ts: line 5, col 1, Error - Expected 'multiple' syntax before 'single' syntax. (sort-imports)
+workflows/marvin/domain/comment.ts: line 7, col 1, Error - Expected 'multiple' syntax before 'single' syntax. (sort-imports)
+workflows/marvin/domain/task-results.ts: line 2, col 1, Error - Imports should be sorted alphabetically. (sort-imports)
+
+14 problems

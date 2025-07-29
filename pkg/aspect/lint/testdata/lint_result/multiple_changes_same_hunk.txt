@@ -1,0 +1,19 @@
+--- a/workflows/rosetta/src/bazel/executor.ts
++++ b/workflows/rosetta/src/bazel/executor.ts
+@@ -84,12 +85,12 @@
+ 
+ export class LocalRetryingBazelCommandExecutor extends BazelCommandExecutor {
+     // The results from each retry attempt
+-    private attempts: Array<Result<ProcessOutput, ProcessOutput>> = [];
+-    private invocations: Set<string> = new Set();
++    private attempts: Result<ProcessOutput, ProcessOutput>[] = [];
++    private invocations = new Set<string>();
+ 
+     private retryCodes: ReadonlySet<BazelExitCode> = DEFAULT_RETRY_CODES;
+-    private retryDelay: number = 3000;
+-    private retryAttempts: number = 3;
++    private retryDelay = 3000;
++    private retryAttempts = 3;
+ 
+     withRetryCodes(
+         codes: ReadonlySet<BazelExitCode>
