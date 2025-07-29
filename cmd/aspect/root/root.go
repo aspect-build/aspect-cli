@@ -151,6 +151,7 @@ func NewCmd(
 	cmd.AddCommand(docs.NewDefaultCmd())
 	cmd.AddCommand(info.NewDefaultCmd())
 	cmd.AddCommand(init_.NewDefaultCmd())
+	cmd.AddCommand(lint.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(mobileinstall.NewDefaultCmd())
 	cmd.AddCommand(mod.NewDefaultCmd())
 	cmd.AddCommand(print.NewDefaultCmd())
@@ -167,7 +168,6 @@ func NewCmd(
 
 	if buildinfo.Current().OpenSource {
 		// Aspect CLI OSS command configurations
-		cmd.AddCommand(lint.NewDefaultCmd(pluginSystem))
 		cmd.AddCommand(license.NewDefaultCmd())
 		cmd.AddCommand(configure.NewDefaultCmd())
 	}

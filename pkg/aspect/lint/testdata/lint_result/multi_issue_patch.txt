@@ -1,0 +1,54 @@
+--- a/workflows/rosetta/src/tasks/lint.task.ts
++++ b/workflows/rosetta/src/tasks/lint.task.ts
+@@ -2,17 +2,17 @@
+ import * as path from 'path';
+ import { z } from 'zod';
+ 
++import { maybe, none, Option } from '../../../../tslibs/result';
++import { ChangedFiles } from '../../../git-state';
++import { AsyncResult,DiagnosticInput, SeveritySchema } from '../../../ohno';
+ import { BazelCommand, BazelExitCode, BazelServerDirectories } from '../bazel';
+ import { LabelSchema } from '../configuration/bazel.schema';
++import { Logger } from '../logger';
+ import { TMP_DIR } from '../utils';
+ import { BazelTaskConfigurationSchema, BazelTaskRef } from './bazel.task';
++import { TaskType, TaskTypeSchemaWithType } from './domain/task-type';
+ import { TaskEvent, TaskEventPayload } from './task-events';
+ import { TaskOutcome } from './task-outcome';
+-import { Logger } from '../logger';
+-import { ChangedFiles } from '../../../git-state';
+-import { TaskType, TaskTypeSchemaWithType } from './domain/task-type';
+-import { SeveritySchema, DiagnosticInput, AsyncResult } from '../../../ohno';
+-import { maybe, none, Option } from '../../../../tslibs/result';
+ 
+ /**
+  * Configures a task to run 'aspect lint'.
+@@ -184,7 +184,7 @@
+                 })
+             );
+ 
+-            let maybeChangedFiles = ChangedFiles.FromHeadCommit();
++            const maybeChangedFiles = ChangedFiles.FromHeadCommit();
+             if (maybeChangedFiles.isErr()) {
+                 // TODO: We should be falling back to the GH API here. Do what is done in the format task
+                 Logger.diagnostic(
+@@ -196,7 +196,7 @@
+                 return [];
+             }
+ 
+-            let changedFiles: ChangedFiles = maybeChangedFiles.unwrap();
++            const changedFiles: ChangedFiles = maybeChangedFiles.unwrap();
+ 
+             console.log('The diagnostics about to be printed', [
+                 ...this.getAnnotationDiagnostics(diagnostics, changedFiles),
+@@ -344,8 +344,8 @@
+         };
+ 
+         // User changed region
+-        let aIsFromChanged = diagnosticIsFromChangedLine(a, changedFiles);
+-        let bIsFromChanged = diagnosticIsFromChangedLine(b, changedFiles);
++        const aIsFromChanged = diagnosticIsFromChangedLine(a, changedFiles);
++        const bIsFromChanged = diagnosticIsFromChangedLine(b, changedFiles);
+         if (aIsFromChanged && !bIsFromChanged) return -1;
+         if (!aIsFromChanged && bIsFromChanged) return 1;
+ 

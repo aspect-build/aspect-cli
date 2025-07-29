@@ -1,0 +1,10 @@
+81522 warnings generated.
+warning: redefining builtin macro [clang-diagnostic-builtin-macro-redefined]
+/some_absolute_path_123456789/private/var/tmp/_bazel_jesse/93d7e699c5e2019d94351d19b00be5a3/sandbox/darwin-sandbox/249/execroot/_main/speller/announce/announce.cc:19:16: warning: function is not thread safe [concurrency-mt-unsafe]
+            << std::asctime(std::localtime(&result));
+               ^
+/some_absolute_path_123456789/private/var/tmp/_bazel_jesse/93d7e699c5e2019d94351d19b00be5a3/sandbox/darwin-sandbox/249/execroot/_main/speller/announce/announce.cc:19:29: warning: function is not thread safe [concurrency-mt-unsafe]
+            << std::asctime(std::localtime(&result));
+                            ^
+Suppressed 81517 warnings (81517 in non-user code).
+Use -header-filter=.* to display errors from all non-system headers. Use -system-headers to display errors from system headers as well.

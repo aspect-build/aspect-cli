@@ -1,0 +1,11 @@
+--- a/workflows/rosetta/src/bazel/command.ts
++++ b/workflows/rosetta/src/bazel/command.ts
+@@ -176,7 +177,7 @@
+     }
+ 
+     withFlags(
+-        flags: ReadonlyArray<BazelFlag | [string, string] | string>
++        flags: readonly (BazelFlag | [string, string] | string)[]
+     ): CommandBuilder {
+         const v = flags.map((f) => {
+             const bf = Array.isArray(f)

@@ -1,0 +1,928 @@
+{
+  "diagnostics": [
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 4
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 6
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 7
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 8
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 9
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "'GitHubComment' is defined but never used. (@typescript-eslint/no-unused-vars)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 11
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 4
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 2
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 4
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 6
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 8
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 10
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 16
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "'result' is assigned a value but never used. (@typescript-eslint/no-unused-vars)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 445
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 3
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "'CIHost' is defined but never used. (@typescript-eslint/no-unused-vars)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 3
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 6
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/task-results.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 2
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "message": "Use \"@ts-expect-error\" instead of \"@ts-ignore\", as \"@ts-ignore\" will do nothing if the following line is error-free. (@typescript-eslint/ban-ts-comment)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/task-results.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 919
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "help": "    public static readonly TASK_ORDERING: readonly TaskType[] = [",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.ts"
+      },
+      "spans": [
+        {
+          "offset": 29
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "help": "    private _results = new Map\u003cstring, TaskResults\u003e();",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.ts"
+      },
+      "spans": [
+        {
+          "offset": 55
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "help": "        for (const result of results) {",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.ts"
+      },
+      "spans": [
+        {
+          "offset": 68
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "help": "function calculateTestTargetTimeIndents(results: Map\u003cstring, TaskResults\u003e): Record\u003cstring, Record\u003cstring, number\u003e\u003e {\n    const CLEARANCE = 1;\n    const indents: Record\u003cstring, Record\u003cstring, number\u003e\u003e = {};",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.ts"
+      },
+      "spans": [
+        {
+          "height": 10,
+          "offset": 309
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "help": "interface LegacyFailedBuildTarget {\n    label: string;\n    messages: {\n        content: string;\n        truncated?: number;\n    }[];\n}",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.ts"
+      },
+      "spans": [
+        {
+          "height": 6,
+          "offset": 420
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "help": "            for (const suggestion of suggestions.suggestionsToCreate) {",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/suggestions.repository.ts"
+      },
+      "spans": [
+        {
+          "offset": 50
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_tests_typings"
+      },
+      "help": "            for (const suggestion of suggestions.suggestionsToDelete) {",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/suggestions.repository.ts"
+      },
+      "spans": [
+        {
+          "offset": 81
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.repository.ts"
+      },
+      "spans": [
+        {
+          "offset": 3
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.ts"
+      },
+      "spans": [
+        {
+          "offset": 2
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.ts"
+      },
+      "spans": [
+        {
+          "offset": 4
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Unexpected constant truthiness on the left-hand side of a `||` expression. (no-constant-binary-expression)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.ts"
+      },
+      "spans": [
+        {
+          "offset": 105
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.ts"
+      },
+      "spans": [
+        {
+          "offset": 2
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.ts"
+      },
+      "spans": [
+        {
+          "offset": 4
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.ts"
+      },
+      "spans": [
+        {
+          "offset": 6
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.ts"
+      },
+      "spans": [
+        {
+          "offset": 8
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Empty block statement. (no-empty)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.ts"
+      },
+      "spans": [
+        {
+          "offset": 313
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.ts"
+      },
+      "spans": [
+        {
+          "offset": 2
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.ts"
+      },
+      "spans": [
+        {
+          "offset": 3
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.ts"
+      },
+      "spans": [
+        {
+          "offset": 5
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.ts"
+      },
+      "spans": [
+        {
+          "offset": 7
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "message": "Imports should be sorted alphabetically. (sort-imports)",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/task-results.ts"
+      },
+      "spans": [
+        {
+          "offset": 2
+        }
+      ],
+      "title": "ESLint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "help": "    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';\n\n    const NAME = 'Lint';",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "height": 2,
+          "offset": 37
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "help": "    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';\n\n    const NAME = 'Lint';",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/check.spec.ts"
+      },
+      "spans": [
+        {
+          "height": 2,
+          "offset": 19
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "help": "    function generateValidCommentBody(type = 'result'): string {",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/comment.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 504
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "help": "    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';\n\n    const NAME = 'Lint';",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/suggestions.repository.spec.ts"
+      },
+      "spans": [
+        {
+          "height": 2,
+          "offset": 32
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "help": "const COMMIT = 'foo';",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/suggestions.spec.ts"
+      },
+      "spans": [
+        {
+          "offset": 15
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/marvin/domain:domain_typings"
+      },
+      "help": "    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';\n\n    const TASK_ID = 'Lint';",
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/marvin/domain/suggestions.spec.ts"
+      },
+      "spans": [
+        {
+          "height": 2,
+          "offset": 144
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//speller/announce:announce"
+      },
+      "message": "function is not thread safe [concurrency-mt-unsafe]",
+      "severity": 3,
+      "source_content": {
+        "name": "speller/announce/announce.cc"
+      },
+      "spans": [
+        {
+          "offset": 19
+        }
+      ],
+      "title": "ClangTidy found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//speller/announce:announce"
+      },
+      "message": "function is not thread safe [concurrency-mt-unsafe]",
+      "severity": 3,
+      "source_content": {
+        "name": "speller/announce/announce.cc"
+      },
+      "spans": [
+        {
+          "offset": 19
+        }
+      ],
+      "title": "ClangTidy found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//docs:docs_delivery"
+      },
+      "message": "BAR is referenced but not assigned.",
+      "severity": 3,
+      "source_content": {
+        "name": "docs/delivery.sh"
+      },
+      "spans": [
+        {
+          "offset": 8
+        }
+      ],
+      "title": "ShellCheck found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//integration_tests:shell"
+      },
+      "message": "TEST_TIMEOUT is referenced but not assigned.",
+      "severity": 3,
+      "source_content": {
+        "name": "integration_tests/runner.sh"
+      },
+      "spans": [
+        {
+          "offset": 15
+        }
+      ],
+      "title": "ShellCheck found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//integration_tests:shell"
+      },
+      "message": "TEST_TMPDIR is referenced but not assigned.",
+      "severity": 3,
+      "source_content": {
+        "name": "integration_tests/runner.sh"
+      },
+      "spans": [
+        {
+          "offset": 16
+        }
+      ],
+      "title": "ShellCheck found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//integration_tests:shell"
+      },
+      "message": "BIN is referenced but not assigned.",
+      "severity": 4,
+      "source_content": {
+        "name": "integration_tests/runner.sh"
+      },
+      "spans": [
+        {
+          "offset": 18
+        }
+      ],
+      "title": "ShellCheck found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//src:css"
+      },
+      "message": "Unexpected empty block (block-no-empty)",
+      "severity": 4,
+      "source_content": {
+        "name": "src/hello.css"
+      },
+      "spans": [
+        {
+          "offset": 11
+        }
+      ],
+      "title": "Stylelint found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//src:css"
+      },
+      "message": "Unexpected duplicate \"color\" (declaration-block-no-duplicate-properties)",
+      "severity": 3,
+      "source_content": {
+        "name": "src/hello.css"
+      },
+      "spans": [
+        {
+          "offset": 16
+        }
+      ],
+      "title": "Stylelint found an issue",
+      "type": 1
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+src/hello.css: line 11, col 5, error - Unexpected empty block (block-no-empty)
+src/hello.css: line 16, col 3, warning - Unexpected duplicate "color" (declaration-block-no-duplicate-properties)
+
+Some problems have automated fixes available:
+
+  src/hello.css | 1 -
+  1 file, 1 deletion(-)

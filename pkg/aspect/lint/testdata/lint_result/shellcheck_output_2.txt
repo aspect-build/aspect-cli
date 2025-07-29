@@ -1,0 +1,41 @@
+In integration_tests/runner.sh line 2:
+IFS=':' read -ra LIBS <<<"$BATS_LIB_PATH"
+                          ^------------^ SC2250 (style): Prefer putting braces around variable references even when not strictly required.
+
+Did you mean: 
+IFS=':' read -ra LIBS <<<"${BATS_LIB_PATH}"
+
+
+In integration_tests/runner.sh line 7:
+    NEW_LIBS+=("$NEW_PATH")
+                ^-------^ SC2250 (style): Prefer putting braces around variable references even when not strictly required.
+
+Did you mean: 
+    NEW_LIBS+=("${NEW_PATH}")
+
+
+In integration_tests/runner.sh line 15:
+export BATS_TEST_TIMEOUT="$TEST_TIMEOUT"
+                          ^-----------^ SC2154 (warning): TEST_TIMEOUT is referenced but not assigned.
+                          ^-----------^ SC2250 (style): Prefer putting braces around variable references even when not strictly required.
+
+Did you mean: 
+export BATS_TEST_TIMEOUT="${TEST_TIMEOUT}"
+
+
+In integration_tests/runner.sh line 16:
+export BATS_TMPDIR="$TEST_TMPDIR"
+                    ^----------^ SC2154 (warning): TEST_TMPDIR is referenced but not assigned.
+                    ^----------^ SC2250 (error): Prefer putting braces around variable references even when not strictly required.
+
+Did you mean: 
+export BATS_TMPDIR="${TEST_TMPDIR}"
+
+
+In integration_tests/runner.sh line 18:
+exec "${BIN}" "$@"
+      ^----^ SC2154 (error): BIN is referenced but not assigned.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2154 -- BIN is referenced but not assigned.
+  https://www.shellcheck.net/wiki/SC2250 -- Prefer putting braces around vari...
