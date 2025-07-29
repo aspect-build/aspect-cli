@@ -287,6 +287,10 @@ func (w *WatchmanWatcher) Stop() error {
 //
 // NOTE: This will not close any activate subscriptions, refer to the Subscribe function for that.
 func (w *WatchmanWatcher) Close() error {
+	if w.socket == nil {
+		return nil
+	}
+
 	err := w.socket.Close()
 	w.socket = nil
 	return err

@@ -259,14 +259,14 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("failed to start the watcher: %w", err)
 	}
-	defer w.Stop()
+	defer w.Close()
 
 	// Since the Subscribe() method is blocking, we need to run a separate
 	// goroutine to stop the watcher when we receive a signal to cancel the
 	// process.
 	go func() {
 		<-pcctx.Done()
-		w.Stop()
+		w.Close()
 	}()
 
 	// The command to start the run target.
