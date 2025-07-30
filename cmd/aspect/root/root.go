@@ -144,6 +144,7 @@ func NewCmd(
 	cmd.AddCommand(canonicalizeflags.NewDefaultCmd())
 	cmd.AddCommand(clean.NewDefaultCmd())
 	cmd.AddCommand(config.NewDefaultCmd())
+	cmd.AddCommand(configure.NewDefaultCmd())
 	cmd.AddCommand(coverage.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(cquery.NewDefaultCmd())
 	cmd.AddCommand(dump.NewDefaultCmd())
@@ -169,7 +170,6 @@ func NewCmd(
 	if buildinfo.Current().OpenSource {
 		// Aspect CLI OSS command configurations
 		cmd.AddCommand(license.NewDefaultCmd())
-		cmd.AddCommand(configure.NewDefaultCmd())
 	}
 
 	return cmd
