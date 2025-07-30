@@ -27,6 +27,7 @@ go_library(
         "//pkg/bazel",
         "//pkg/ioutils",
         "//pkg/logger",
+        "//pkg/watch",
         "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//flag:go_default_library",
         "@bazel_gazelle//label:go_default_library",

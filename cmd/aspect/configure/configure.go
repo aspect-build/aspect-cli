@@ -20,10 +20,12 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/aspect-build/aspect-cli/buildinfo"
+	"github.com/aspect-build/aspect-cli/gazelle/common/cache"
+	starzelleHost "github.com/aspect-build/aspect-cli/gazelle/host"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/configure"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
@@ -77,7 +79,9 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 			func(_ context.Context, cmd *cobra.Command, args []string) error {
 				mode, _ := cmd.Flags().GetString("mode")
 				exclude, _ := cmd.Flags().GetStringSlice("exclude")
-				return run(streams, v, mode, exclude, args)
+				watch, _ := cmd.Flags().GetBool("watch")
+				watchman, _ := cmd.Flags().GetBool("watchman")
+				return run(streams, v, mode, exclude, watch, watchman, args)
 			},
 		),
 	}
@@ -85,20 +89,26 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 	// TODO: restrict to only valid values (see https://github.com/spf13/pflag/issues/236)
 	cmd.Flags().String("mode", "fix", "Method for emitting merged BUILD files.\n\tfix: write generated and merged files to disk\n\tprint: print files to stdout\n\tdiff: print a unified diff")
 	cmd.Flags().StringSlice("exclude", []string{}, "Files to exclude from BUILD generation")
+	cmd.Flags().Bool("watchman", false, "Use the EXPERIMENTAL watchman daemon to watch for changes across 'configure' invocations")
+	cmd.Flags().Bool("watch", false, "Use the EXPERIMENTAL watch mode to watch for changes in the workspace and automatically 'configure' when files change")
 
 	addCliEnabledLanguages(v)
 
 	return cmd
 }
 
-func run(streams ioutils.Streams, v configure.ConfigureRunner, mode string, exclude []string, args []string) error {
-	if buildinfo.Current().OpenSource {
-		if configurePlugins := viper.GetStringSlice("configure.plugins"); len(configurePlugins) > 0 {
-			fmt.Fprintln(streams.Stderr, "WARNING: Aspect CLI configure.plugins are not supported in Aspect OSS CLI.")
-		}
+func run(streams ioutils.Streams, v configure.ConfigureRunner, mode string, exclude []string, watch, watchman bool, args []string) error {
+	if watch || watchman {
+		cache.SetCacheFactory(cache.NewWatchmanCache)
 	}
 
-	err := v.Generate(mode, exclude, args)
+	var err error
+	if watch {
+		err = v.Watch(mode, exclude, args)
+	} else {
+		err = v.Generate(mode, exclude, args)
+	}
+
 	if aspectError, isAError := err.(*aspecterrors.ExitError); isAError && aspectError.ExitCode == aspecterrors.ConfigureNoConfig {
 		fmt.Fprintln(streams.Stderr, `No languages enabled for BUILD file generation.
 
@@ -111,7 +121,9 @@ configure:
 	go: true
 	protobuf: true
 	bzl: true
-	python: true`)
+	python: true
+  plugins:
+    path/to/starlark/plugin.star`)
 	}
 	return err
 }
@@ -146,5 +158,12 @@ func addCliEnabledLanguages(c configure.ConfigureRunner) {
 	viper.SetDefault("configure.languages.cc", false)
 	if viper.GetBool("configure.languages.cc") {
 		c.AddLanguage(configure.CC)
+	}
+
+	// Add additional starlark plugins
+	if configurePlugins := viper.GetStringSlice("configure.plugins"); len(configurePlugins) > 0 {
+		c.AddLanguageFactory(starzelleHost.GazelleLanguageName, func() language.Language {
+			return starzelleHost.NewLanguage(configurePlugins...)
+		})
 	}
 }
