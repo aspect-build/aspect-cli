@@ -371,7 +371,7 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	}()
 
 	// Subscribe to further changes
-	for cs, err := range w.Subscribe("aspect-run-watch") {
+	for cs, err := range w.Subscribe(pcctx, "aspect-run-watch") {
 		if err != nil {
 			return fmt.Errorf("failed to get next event: %w", err)
 		}

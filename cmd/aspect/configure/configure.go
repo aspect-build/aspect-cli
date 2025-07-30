@@ -76,12 +76,12 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
 			},
-			func(_ context.Context, cmd *cobra.Command, args []string) error {
+			func(ctx context.Context, cmd *cobra.Command, args []string) error {
 				mode, _ := cmd.Flags().GetString("mode")
 				exclude, _ := cmd.Flags().GetStringSlice("exclude")
 				watch, _ := cmd.Flags().GetBool("watch")
 				watchman, _ := cmd.Flags().GetBool("watchman")
-				return run(streams, v, mode, exclude, watch, watchman, args)
+				return run(ctx, streams, v, mode, exclude, watch, watchman, args)
 			},
 		),
 	}
@@ -97,14 +97,14 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 	return cmd
 }
 
-func run(streams ioutils.Streams, v configure.ConfigureRunner, mode string, exclude []string, watch, watchman bool, args []string) error {
+func run(ctx context.Context, streams ioutils.Streams, v configure.ConfigureRunner, mode string, exclude []string, watch, watchman bool, args []string) error {
 	if watch || watchman {
 		cache.SetCacheFactory(cache.NewWatchmanCache)
 	}
 
 	var err error
 	if watch {
-		err = v.Watch(mode, exclude, args)
+		err = v.Watch(ctx, mode, exclude, args)
 	} else {
 		err = v.Generate(mode, exclude, args)
 	}

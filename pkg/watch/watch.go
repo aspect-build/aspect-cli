@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -51,7 +52,7 @@ type Watcher interface {
 	Start() error
 	Stop() error
 	GetDiff(clockspec string) (*ChangeSet, error)
-	Subscribe(dropWithinState string) iter.Seq2[*ChangeSet, error]
+	Subscribe(ctx context.Context, dropWithinState string) iter.Seq2[*ChangeSet, error]
 	Close() error
 }
 
@@ -308,7 +309,7 @@ func (w *WatchmanWatcher) Close() error {
 //
 // When dropWithinState argument is non-empty, any change during state transition will be dropped.
 // See: https://facebook.github.io/watchman/docs/cmd/subscribe#advanced-settling
-func (w *WatchmanWatcher) Subscribe(dropWithinState string) iter.Seq2[*ChangeSet, error] {
+func (w *WatchmanWatcher) Subscribe(ctx context.Context, dropWithinState string) iter.Seq2[*ChangeSet, error] {
 	return func(yield func(*ChangeSet, error) bool) {
 		if w.socket == nil {
 			yield(nil, fmt.Errorf("watcher not started, call Start() first"))
@@ -320,8 +321,17 @@ func (w *WatchmanWatcher) Subscribe(dropWithinState string) iter.Seq2[*ChangeSet
 			yield(nil, err)
 			return
 		}
-		// close the socket when the subscription is done
+
+		// Close the socket when the iterator is complete.
 		defer sock.Close()
+
+		// Close the socket when the context is done.
+		if ctx != nil {
+			go func() {
+				<-ctx.Done()
+				sock.Close()
+			}()
+		}
 
 		subscriptionName := fmt.Sprintf("aspect-cli-%d.%d", os.Getpid(), w.subscriberId.Add(1))
 		queryParams := w.makeQueryParams(w.lastClockSpec)

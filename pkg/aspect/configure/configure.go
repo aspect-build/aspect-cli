@@ -17,6 +17,7 @@
 package configure
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -42,7 +43,7 @@ type ConfigureRunner interface {
 	AddLanguage(lang ConfigureLanguage)
 	AddLanguageFactory(lang string, langFactory func() language.Language)
 	Generate(mode ConfigureMode, excludes []string, args []string) error
-	Watch(mode ConfigureMode, excludes []string, args []string) error
+	Watch(ctx context.Context, mode ConfigureMode, excludes []string, args []string) error
 }
 
 type Configure struct {
@@ -227,7 +228,7 @@ func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []
 		Err:      err,
 	}
 }
-func (p *Configure) Watch(mode ConfigureMode, excludes []string, args []string) error {
+func (p *Configure) Watch(ctx context.Context, mode ConfigureMode, excludes []string, args []string) error {
 	// Params for the underlying gazelle call
 	wd, fixArgs := p.PrepareGazelleArgs(mode, excludes, args)
 
@@ -252,7 +253,7 @@ func (p *Configure) Watch(mode ConfigureMode, excludes []string, args []string) 
 	defer w.Close()
 
 	// Subscribe to further changes
-	for cs, err := range w.Subscribe("aspect-configure-watch") {
+	for cs, err := range w.Subscribe(ctx, "aspect-configure-watch") {
 		if err != nil {
 			return fmt.Errorf("failed to get next event: %w", err)
 		}
