@@ -1,0 +1,180 @@
+/**
+ * Copied from aspect workflows.
+ *
+ * DO NOT MODIFY THIS FILE.
+ */
+
+syntax = "proto3";
+
+package ohno;
+
+enum DiagnosticType {
+  /**
+   * The standard diagnostic type
+   */
+  GENERIC = 0;
+
+  /**
+   * Contains issues found with a file.
+   * For example, a linting or formatting issue.
+   */
+  FILE = 1;
+
+  /**
+   * Contains issues found with running bazel.
+   */
+  BAZEL = 2;
+}
+
+enum Severity {
+  INFO = 0;
+  ADVICE = 2;
+  WARNING = 3;
+  ERROR = 4;
+}
+
+message SourceContent {
+  /**
+   * Source content string that caused the diagnostic.
+   */
+  string content = 1;
+
+  /**
+   * Name of the this source, likely a filename or some other helpful hint to where
+   * the source originated.
+   */
+  string name = 2;
+}
+
+message SourceReference {
+  /**
+   * A filename / path for the source of the diagnostic.
+   */
+  string name = 1;
+}
+
+message Span {
+  /**
+   * Offset into the source at which to start the span.
+   * Zero based.
+   */
+  int32 offset = 1;
+
+  /**
+   * Optional width of the span to highlight in the source.
+   */
+  int32 width = 2;
+
+  /**
+   * Optional height of the span to highlight in the source.
+   */
+  int32 height = 3;
+}
+
+message ProcessOutput {
+  /**
+   * Capture of the stdout of a process.
+   */
+  string stdout = 1;
+
+  /**
+   * Capture of the stderr of a process.
+   */
+  string stderr = 2;
+
+  /**
+   * Exit code for the underlying process that created this output.
+   */
+  int32 exit = 3;
+
+  /**
+   * Additional key -> value pairs of data that can be passed along with the output.
+   * Generally these are ignored by reporters.
+   */
+  map<string, string> baggage = 4;
+}
+
+message Diagnostic {
+  /**
+   * A human friendly message describing the issue.
+   */
+  string message = 1;
+
+  /**
+   * The original message that was converted to this diagnostic.
+   */
+  string raw = 2;
+
+  /**
+   * Unique diagnostic code to look up more information about this Diagnostic.
+   * Ideally also globally unique, and documented.
+   */
+  string code = 3;
+
+  /**
+   * A suggested exit code that should be used when this diagnostic is encountered.
+   * When a diagnostic is wrapped in another, the exit code is inherited up the diagnostic chain.
+   */
+  int32 exit = 4;
+
+  /**
+   * Diagnostic severity, can be used the change the style of diagnostic reporting.
+   * Defaults to Error.
+   */
+  Severity severity = 5;
+
+  /**
+   * Additional help text related to this Diagnostic.
+   */
+  string help = 6;
+
+  /**
+   * URL to visit for a more detailed explanation/help about this Diagnostic.
+   */
+  string url = 7;
+
+  /**
+   * The title of the diagnostic
+   */
+  string title = 8;
+
+  /**
+   * Originating source that the diagnostic references.
+   * Labels will use this as the source.
+   */
+  oneof source {
+    SourceContent source_content = 9;
+    SourceReference source_ref = 10;
+  }
+
+  /**
+   * The regions of the source file that are relevant to the diagnostic message.
+   */
+  repeated Span spans = 11;
+
+  /**
+   * Original capture of stdout, stderr and exit code of a process
+   * that perhaps caused this diagnostic.
+   */
+  ProcessOutput output = 12;
+
+  /**
+   * Additional key -> value pairs of data that can be passed along the diagnostic chain.
+   * Generally these are ignored by reporters.
+   */
+  map<string, string> baggage = 13;
+
+  /**
+   * The type of diagnostic that has been created.
+   */
+  DiagnosticType type = 14;
+
+  /**
+   * Optional cause of this diagnostic.
+   */
+  Diagnostic cause = 15;
+}
+
+message Diagnostics {
+  repeated Diagnostic diagnostics = 1;
+}

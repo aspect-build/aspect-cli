@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aspect-build/aspect-cli/pkg/aspect/lint/diagnostic"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
-	"github.com/aspect-build/silo/workflows/ohno/diagnostic"
 	. "github.com/onsi/gomega"
 )
 
