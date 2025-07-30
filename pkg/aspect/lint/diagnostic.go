@@ -19,7 +19,7 @@ package lint
 import (
 	"strings"
 
-	"github.com/aspect-build/silo/workflows/ohno/diagnostic"
+	"github.com/aspect-build/aspect-cli/pkg/aspect/lint/diagnostic"
 	"github.com/reviewdog/reviewdog/parser"
 	godiff "github.com/sourcegraph/go-diff/diff"
 )
