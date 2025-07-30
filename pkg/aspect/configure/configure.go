@@ -31,6 +31,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	watcher "github.com/aspect-build/aspect-cli/pkg/watch"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
@@ -41,6 +42,7 @@ type ConfigureRunner interface {
 	AddLanguage(lang ConfigureLanguage)
 	AddLanguageFactory(lang string, langFactory func() language.Language)
 	Generate(mode ConfigureMode, excludes []string, args []string) error
+	Watch(mode ConfigureMode, excludes []string, args []string) error
 }
 
 type Configure struct {
@@ -224,4 +226,63 @@ func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []
 		ExitCode: exitCode,
 		Err:      err,
 	}
+}
+func (p *Configure) Watch(mode ConfigureMode, excludes []string, args []string) error {
+	// Params for the underlying gazelle call
+	wd, fixArgs := p.PrepareGazelleArgs(mode, excludes, args)
+
+	// Initial run and status update to stdout.
+	fmt.Fprintf(p.Streams.Stdout, "Initialize BUILD file generation --watch in %v\n", wd)
+	languages := p.InstantiateLanguages()
+	stats, err := RunGazelleFixUpdate(wd, languages, fixArgs)
+	if err != nil {
+		return fmt.Errorf("failed to run gazelle fix/update: %w", err)
+	}
+	if stats.NumBuildFilesUpdated > 0 {
+		fmt.Fprintf(p.Streams.Stdout, "Initial %v/%v BUILD files updated\n", stats.NumBuildFilesUpdated, stats.NumBuildFilesVisited)
+	} else {
+		fmt.Fprintf(p.Streams.Stdout, "Initial %v BUILD files visited\n", stats.NumBuildFilesVisited)
+	}
+
+	// Use watchman to detect changes to trigger further invocations
+	w := watcher.NewWatchman(wd)
+	if err := w.Start(); err != nil {
+		return fmt.Errorf("failed to start the watcher: %w", err)
+	}
+	defer w.Close()
+
+	// Subscribe to further changes
+	for cs, err := range w.Subscribe("aspect-configure-watch") {
+		if err != nil {
+			return fmt.Errorf("failed to get next event: %w", err)
+		}
+
+		// Enter into a state to discard supirious changes caused by potential file atime
+		// updates by gazelle languages.
+		if err := w.StateEnter("aspect-configure-watch"); err != nil {
+			return fmt.Errorf("failed to enter watch state: %w", err)
+		}
+
+		fmt.Fprintf(p.Streams.Stdout, "Detected %d changes in %v: %v\n", len(cs.Paths), wd, cs.Paths)
+
+		// Run gazelle
+		stats, err := RunGazelleFixUpdate(wd, p.InstantiateLanguages(), fixArgs)
+		if err != nil {
+			return fmt.Errorf("failed to run gazelle fix/update: %w", err)
+		}
+
+		// Only output when changes were made, otherwise hopefully the execution was fast enough to be unnoticeable.
+		if stats.NumBuildFilesUpdated > 0 {
+			fmt.Fprintf(p.Streams.Stdout, "%v/%v BUILD files updated\n", stats.NumBuildFilesUpdated, stats.NumBuildFilesVisited)
+		}
+
+		// Leave the state and fast forward the subscription clock.
+		if err := w.StateLeave("aspect-configure-watch"); err != nil {
+			return fmt.Errorf("failed to leave watch state: %w", err)
+		}
+	}
+
+	fmt.Fprintf(p.Streams.Stdout, "BUILD file generation --watch exiting...\n")
+
+	return nil
 }

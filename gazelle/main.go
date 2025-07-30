@@ -38,7 +38,7 @@ func main() {
 		c.AddLanguage(lang)
 	}
 
-	// Add additional pro-only configure languages
+	// Add additional starlark plugins
 	fmt.Printf("Plugins: %v\n", plugins)
 	c.AddLanguageFactory(host.GazelleLanguageName, func() language.Language {
 		return host.NewLanguage(plugins...)

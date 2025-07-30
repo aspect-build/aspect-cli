@@ -48,6 +48,8 @@ aspect configure [flags]
                           	fix: write generated and merged files to disk
                           	print: print files to stdout
                           	diff: print a unified diff (default "fix")
+      --watch             Use the EXPERIMENTAL watch mode to watch for changes in the workspace and automatically 'configure' when files change
+      --watchman          Use the EXPERIMENTAL watchman daemon to watch for changes across 'configure' invocations
 ```
 
 ### Options inherited from parent commands
