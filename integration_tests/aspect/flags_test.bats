@@ -2,14 +2,20 @@ load "common.bats"
 
 setup() {
     cd "$TEST_REPO" || exit 1
+
+    mkdir test
 }
 
 teardown() {
+    rm -rf test
+
     rm -f .bazelrc
     rm -f .bazeliskrc
     rm -f BUILD.bazel
     rm -f version-config.yaml
     rm -rf "$HOME/.aspect/cli/config.yaml"
+
+    aspect clean
 }
 
 @test 'flags should work' {
@@ -190,4 +196,70 @@ EOF
     run aspect info
     assert_success
     refute_output --partial "WARNING: Running Bazel server needs to be killed, because the startup options are different."
+}
+
+@test "should run successfully" {
+    echo "" >test/success.sh
+    chmod +x test/success.sh
+    echo 'sh_binary(name = "test", srcs = ["success.sh"])' >test/BUILD.bazel
+
+    run aspect build //...
+    assert_success
+
+    run aspect outputs //... ExecutableHash
+    assert_success
+    assert_output --partial '//test:test m3:'
+}
+
+@test "should warn with 'did you build message'" {
+    echo "" >test/success.sh
+    chmod +x test/success.sh
+    echo 'sh_binary(name = "test", srcs = ["success.sh"])' >test/BUILD.bazel
+
+    run aspect outputs //... ExecutableHash
+    assert_success
+
+    assert_output --partial '//test:test'
+    assert_output --partial 'bin/test/test is not on disk, did you build it? Skipping...'
+    assert_output --partial 'bin/test/test.runfiles_manifest is not on disk, did you build it? Skipping...'
+}
+
+@test "should not complain about aspect cli flags" {
+    echo "" >test/success.sh
+    chmod +x test/success.sh
+    echo 'sh_binary(name = "test", srcs = ["success.sh"])' >test/BUILD.bazel
+
+    run aspect build //...
+    assert_success
+
+    run aspect outputs //... ExecutableHash --aspect:interactive
+    assert_success
+    assert_output --partial '//test:test m3:'
+}
+
+@test "should forward bazel cli flags" {
+    echo "" >test/success.sh
+    chmod +x test/success.sh
+    cat >test/BUILD.bazel <<EOF
+config_setting(
+    name = "dbg",
+    values = { "compilation_mode": "dbg" },
+)
+
+sh_binary(
+    name = "test", 
+    srcs =  select({
+        ":dbg": ["success.sh"],
+        "//conditions:default": [] # will lead to failure if the plugin doesn't forward bazel flags. 
+    })
+)
+EOF
+
+    run aspect build //... --compilation_mode=dbg
+    assert_success
+    refute_output --partial "you must specify exactly one file in 'srcs'"
+
+    run aspect outputs //... ExecutableHash --compilation_mode=dbg
+    assert_success
+    assert_output --partial '//test:test m3:'
 }
