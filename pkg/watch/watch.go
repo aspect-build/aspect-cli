@@ -170,10 +170,16 @@ func (w *WatchmanWatcher) connect() (watchmanSocket, error) {
 }
 
 func (w *WatchmanWatcher) recv() (map[string]interface{}, error) {
+	if w.socket == nil {
+		return nil, fmt.Errorf("watchman socket closed")
+	}
 	return w.socket.Recv()
 }
 
 func (w *WatchmanWatcher) send(args ...interface{}) error {
+	if w.socket == nil {
+		return fmt.Errorf("watchman socket closed")
+	}
 	return w.socket.Send(args)
 }
 
@@ -181,7 +187,7 @@ func (w *WatchmanWatcher) send(args ...interface{}) error {
 // If clockspec is not nil, it will return the changes since the provided clockspec
 func (w *WatchmanWatcher) GetDiff(clockspec string) (*ChangeSet, error) {
 	if w.socket == nil {
-		return nil, fmt.Errorf("watcher not started, call Start() first")
+		return nil, fmt.Errorf("watchman socket closed")
 	}
 	if clockspec == "" {
 		clockspec = w.lastClockSpec
@@ -275,9 +281,6 @@ func (w *WatchmanWatcher) Start() error {
 //
 // NOTE: This will not close any activate subscriptions, refer to the Subscribe function for that.
 func (w *WatchmanWatcher) Stop() error {
-	if w.socket == nil {
-		return nil
-	}
 	w.lastClockSpec = ""
 	if err := w.send("watch-del", w.watchedRoot); err != nil {
 		return fmt.Errorf("failed to send watch-del command: %w", err)
