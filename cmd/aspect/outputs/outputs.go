@@ -44,21 +44,21 @@ You can optionally provide an extra argument, which is a filter on the mnemonic.
 'ExecutableHash' is a special value for the mnemonic. This combines the ExecutableSymlink and
 SourceSymlinkManifest mnemonics, then hashes the outputs of these two. This provides a good hash
 for an executable target to determine if it has changed.`,
-		Example: `# Show all outputs of the //cli/pro target, which is a go_binary:
+		Example: `# Show all outputs of the //cli/core target, which is a go_binary:
 
-% aspect outputs //cli/pro
+% aspect outputs //cli/core
 
-GoCompilePkg bazel-out/k8-fastbuild/bin/cli/pro/pro.a
-GoCompilePkg bazel-out/k8-fastbuild/bin/cli/pro/pro.x
-GoLink bazel-out/k8-fastbuild/bin/cli/pro/pro_/pro
-SourceSymlinkManifest bazel-out/k8-fastbuild/bin/cli/pro/pro_/pro.runfiles_manifest
-SymlinkTree bazel-out/k8-fastbuild/bin/cli/pro/pro_/pro.runfiles/MANIFEST
+GoCompilePkg bazel-out/k8-fastbuild/bin/cli/core/core.a
+GoCompilePkg bazel-out/k8-fastbuild/bin/cli/core/core.x
+GoLink bazel-out/k8-fastbuild/bin/cli/core/core_/core
+SourceSymlinkManifest bazel-out/k8-fastbuild/bin/cli/core/core_/core.runfiles_manifest
+SymlinkTree bazel-out/k8-fastbuild/bin/cli/core/core_/core.runfiles/MANIFEST
 Middleman bazel-out/k8-fastbuild/internal/_middlemen/cli_Spro_Spro_U_Spro-runfiles
 
 # Show just the output of the GoLink action, which is the executable produced by a go_binary:
 
-% aspect outputs //cli/pro GoLink
-bazel-out/k8-fastbuild/bin/cli/pro/pro_/pro
+% aspect outputs //cli/core GoLink
+bazel-out/k8-fastbuild/bin/cli/core/core_/core
 
 # Show the outputs of all targets that contain the 'deliverable' tag
 
