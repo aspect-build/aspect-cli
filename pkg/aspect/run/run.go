@@ -18,8 +18,10 @@ package run
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -236,15 +238,16 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	defer initCancel()
 	go func() {
 		if err := changedetect.processBES(initCtx); err != nil {
+			// Ignore cancel events and do not output to stdout.
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+
 			fmt.Printf("failed to process BES on init: %v\n", err)
 		}
 	}()
 
 	if err := initCmd.Wait(); err != nil {
-		if err == context.Canceled {
-			return nil
-		}
-
 		return fmt.Errorf("initial bazel command failed: %w", err)
 	}
 	initCmd = nil
@@ -303,10 +306,6 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	// Start the bazel command
 	startErr := startCmd.Start()
 	if startErr != nil {
-		if startErr == context.Canceled {
-			return nil
-		}
-
 		return fmt.Errorf("failed to start bazel command: %w", startErr)
 	}
 
@@ -359,11 +358,10 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		<-pcctx.Done()
 
 		// If a connection still exists to the incremental protocol, send an Exit message and
-		// hope for a graceful shutdown.
+		// hope for a graceful shutdown. Ignore any errors as the process may already be in the
+		// process of shutting down.
 		if incrementalProtocol.HasConnection() {
-			if err := incrementalProtocol.Exit(err); err != nil {
-				fmt.Printf("%s Failed to Exit() watch protocol: %v\n", color.RedString("ERROR:"), err)
-			}
+			incrementalProtocol.Exit(err)
 		}
 
 		// Terminate the process if it is still running.
@@ -373,6 +371,11 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	// Subscribe to further changes
 	for cs, err := range w.Subscribe(pcctx, "aspect-run-watch") {
 		if err != nil {
+			// Break the subscribe iteration if the context is done or if the watcher is closed.
+			if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+				break
+			}
+
 			return fmt.Errorf("failed to get next event: %w", err)
 		}
 
