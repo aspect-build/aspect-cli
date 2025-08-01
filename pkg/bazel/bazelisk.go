@@ -128,7 +128,7 @@ func (bazelisk *Bazelisk) getBazelVersionAndUrl() (string, string, error) {
 		Reentrant: os.Getenv(aspectReentrantEnv) != "",
 		Version:   buildinfo.Current().Version(),
 		DevBuild:  strings.HasPrefix(buildinfo.Current().Version(), "unknown"),
-		BaseUrl:   config.AspectBaseUrl(buildinfo.Current().OpenSource),
+		BaseUrl:   config.AspectBaseUrl(),
 	}
 
 	// Get the bazelisk version config from the USE_BAZEL_VERSION and BAZELISK_BASE_URL env vars

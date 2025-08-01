@@ -35,9 +35,6 @@ var GitStatus = "unknown"
 // Release is the revision number, if any.
 var Release = "no release"
 
-// OpenSource indicates if this is an Aspect CLI OSS build
-var OpenSource = ""
-
 func IsStamped() bool {
 	return BuildTime != "{BUILD_TIMESTAMP}"
 }

@@ -60,7 +60,6 @@ func TestVersion(t *testing.T) {
 			gitCommit,
 			buildinfo.CleanGitStatus,
 			release,
-			false,
 		)
 		cmd := &cobra.Command{}
 		cmd.Flags().Bool("gnu_format", false, "")
@@ -89,7 +88,6 @@ func TestVersion(t *testing.T) {
 			gitCommit,
 			buildinfo.CleanGitStatus,
 			release,
-			false,
 		)
 		cmd := &cobra.Command{}
 		gnuFormat := cmd.Flags().Bool("gnu_format", false, "")
@@ -117,7 +115,6 @@ func TestVersion(t *testing.T) {
 			gitCommit,
 			buildinfo.CleanGitStatus,
 			release,
-			false,
 		)
 		cmd := &cobra.Command{}
 		cmd.Flags().Bool("gnu_format", false, "")
@@ -144,7 +141,6 @@ func TestVersion(t *testing.T) {
 			gitCommit,
 			dirtyGitStatus,
 			release,
-			false,
 		)
 		cmd := &cobra.Command{}
 		cmd.Flags().Bool("gnu_format", false, "")

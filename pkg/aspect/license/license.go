@@ -21,7 +21,6 @@ import (
 	_ "embed"
 	"fmt"
 
-	"github.com/aspect-build/aspect-cli/buildinfo"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/spf13/cobra"
@@ -50,22 +49,7 @@ func New(streams ioutils.Streams, bzl bazel.Bazel, licenseText string) *License 
 
 func (runner *License) Run(ctx context.Context, _ *cobra.Command, args []string) error {
 	// ASCII art generated with https://patorjk.com/software/taag/ "ANSI Shadow" font
-	if buildinfo.Current().OpenSource {
-		fmt.Printf(`
-=====================================================================================================
-
- █████╗ ███████╗██████╗ ███████╗ ██████╗████████╗     ██████╗██╗     ██╗     ██████╗ ███████╗███████╗
-██╔══██╗██╔════╝██╔══██╗██╔════╝██╔════╝╚══██╔══╝    ██╔════╝██║     ██║    ██╔═══██╗██╔════╝██╔════╝
-███████║███████╗██████╔╝█████╗  ██║        ██║       ██║     ██║     ██║    ██║   ██║███████╗███████╗
-██╔══██║╚════██║██╔═══╝ ██╔══╝  ██║        ██║       ██║     ██║     ██║    ██║   ██║╚════██║╚════██║
-██║  ██║███████║██║     ███████╗╚██████╗   ██║       ╚██████╗███████╗██║    ╚██████╔╝███████║███████║
-╚═╝  ╚═╝╚══════╝╚═╝     ╚══════╝ ╚═════╝   ╚═╝        ╚═════╝╚══════╝╚═╝     ╚═════╝ ╚══════╝╚══════╝
-
-=====================================================================================================		
-
-`)
-	} else {
-		fmt.Printf(`
+	fmt.Printf(`
 =====================================================================================================
 
                █████╗ ███████╗██████╗ ███████╗ ██████╗████████╗     ██████╗██╗     ██╗
@@ -78,7 +62,6 @@ func (runner *License) Run(ctx context.Context, _ *cobra.Command, args []string)
 =====================================================================================================
 
 `)
-	}
 	fmt.Print(runner.licenseText)
 
 	// ASCII art generated with https://patorjk.com/software/taag/ "Standard" font

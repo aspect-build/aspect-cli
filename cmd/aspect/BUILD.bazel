@@ -9,7 +9,6 @@ go_library(
         "//cmd:__subpackages__",
         "//release:__pkg__",  # For https://github.com/aspect-build/aspect-cli release
     ],
-    x_defs = {"github.com/aspect-build/aspect-cli/buildinfo.OpenSource": "true"},
     deps = [
         "//cmd/aspect/root",
         "//pkg/aspect/root/config",
