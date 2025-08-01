@@ -147,30 +147,26 @@ func NewCmd(
 	cmd.AddCommand(configure.NewDefaultCmd())
 	cmd.AddCommand(coverage.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(cquery.NewDefaultCmd())
+	cmd.AddCommand(docs.NewDefaultCmd())
 	cmd.AddCommand(dump.NewDefaultCmd())
 	cmd.AddCommand(fetch.NewDefaultCmd())
-	cmd.AddCommand(docs.NewDefaultCmd())
 	cmd.AddCommand(info.NewDefaultCmd())
 	cmd.AddCommand(init_.NewDefaultCmd())
+	cmd.AddCommand(license.NewDefaultCmd())
 	cmd.AddCommand(lint.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(mobileinstall.NewDefaultCmd())
 	cmd.AddCommand(mod.NewDefaultCmd())
+	cmd.AddCommand(outputs.NewDefaultCmd())
 	cmd.AddCommand(print.NewDefaultCmd())
 	cmd.AddCommand(printaction.NewDefaultCmd())
 	cmd.AddCommand(query.NewDefaultCmd())
 	cmd.AddCommand(run.NewDefaultCmd(pluginSystem))
-	cmd.AddCommand(sync.NewDefaultCmd())
 	cmd.AddCommand(shutdown.NewDefaultCmd())
+	cmd.AddCommand(sync.NewDefaultCmd())
 	cmd.AddCommand(test.NewDefaultCmd(pluginSystem))
 	cmd.AddCommand(vendor.NewDefaultCmd())
 	cmd.AddCommand(version.NewDefaultCmd())
-	cmd.AddCommand(outputs.NewDefaultCmd())
 	cmd.SetHelpCommand(help.NewCmd())
-
-	if buildinfo.Current().OpenSource {
-		// Aspect CLI OSS command configurations
-		cmd.AddCommand(license.NewDefaultCmd())
-	}
 
 	return cmd
 }

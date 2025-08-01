@@ -35,14 +35,13 @@ const (
 
 func TestNew(t *testing.T) {
 	g := NewGomegaWithT(t)
-	actual := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, release, false)
+	actual := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, release)
 	expected := &buildinfo.BuildInfo{
-		BuildTime:  buildTime,
-		HostName:   hostName,
-		GitCommit:  gitCommit,
-		GitStatus:  gitStatus,
-		Release:    release,
-		OpenSource: false,
+		BuildTime: buildTime,
+		HostName:  hostName,
+		GitCommit: gitCommit,
+		GitStatus: gitStatus,
+		Release:   release,
 	}
 	g.Expect(actual).To(Equal(expected))
 }
@@ -51,12 +50,11 @@ func TestCurrent(t *testing.T) {
 	g := NewGomegaWithT(t)
 	actual := buildinfo.Current()
 	expected := &buildinfo.BuildInfo{
-		BuildTime:  buildinfo.BuildTime,
-		HostName:   buildinfo.HostName,
-		GitCommit:  buildinfo.GitCommit,
-		GitStatus:  buildinfo.GitStatus,
-		Release:    buildinfo.Release,
-		OpenSource: buildinfo.OpenSource != "",
+		BuildTime: buildinfo.BuildTime,
+		HostName:  buildinfo.HostName,
+		GitCommit: buildinfo.GitCommit,
+		GitStatus: buildinfo.GitStatus,
+		Release:   buildinfo.Release,
 	}
 	g.Expect(actual).To(Equal(expected))
 }
@@ -64,17 +62,17 @@ func TestCurrent(t *testing.T) {
 func TestBuildinfoHasRelease(t *testing.T) {
 	t.Run("has a release value", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, release, false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, release)
 		g.Expect(bi.HasRelease()).To(BeTrue())
 	})
 	t.Run("does not have a release value", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, "", false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, "")
 		g.Expect(bi.HasRelease()).To(BeFalse())
 	})
 	t.Run("has pre-stamp release value", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, buildinfo.PreStampRelease, false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, buildinfo.PreStampRelease)
 		g.Expect(bi.HasRelease()).To(BeFalse())
 	})
 }
@@ -82,12 +80,12 @@ func TestBuildinfoHasRelease(t *testing.T) {
 func TestBuildinfoIsClean(t *testing.T) {
 	t.Run("has a clean git status", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release, false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release)
 		g.Expect(bi.IsClean()).To(BeTrue())
 	})
 	t.Run("does not have a clean git status", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, release, false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, release)
 		g.Expect(bi.IsClean()).To(BeFalse())
 	})
 }
@@ -95,19 +93,19 @@ func TestBuildinfoIsClean(t *testing.T) {
 func TestVersion(t *testing.T) {
 	t.Run("with release, is clean", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release, false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release)
 		actual := bi.Version()
 		g.Expect(actual).To(Equal(bi.Release))
 	})
 	t.Run("with release, is not clean", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, release, false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, gitStatus, release)
 		actual := bi.Version()
 		g.Expect(actual).To(Equal(bi.Release + buildinfo.NotCleanVersionSuffix))
 	})
 	t.Run("without release", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, "", false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, "")
 		actual := bi.Version()
 		g.Expect(actual).To(Equal(buildinfo.NoReleaseVersion))
 	})
@@ -116,13 +114,13 @@ func TestVersion(t *testing.T) {
 func TestCommandVersion(t *testing.T) {
 	t.Run("with conventional format", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release, false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release)
 		actual := bi.CommandVersion(buildinfo.ConventionalFormat)
 		g.Expect(actual).To(Equal("Aspect CLI version: 1.2.3"))
 	})
 	t.Run("with GNU format", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release, false)
+		bi := buildinfo.New(buildTime, hostName, gitCommit, buildinfo.CleanGitStatus, release)
 		actual := bi.CommandVersion(buildinfo.GNUFormat)
 		g.Expect(actual).To(Equal("aspect 1.2.3"))
 	})

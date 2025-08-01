@@ -16,10 +16,6 @@
 
 package config
 
-func AspectBaseUrl(isOss bool) string {
-	if isOss {
-		return "https://github.com/aspect-build/aspect-cli/releases/download"
-	} else {
-		return "https://static.aspect.build/aspect"
-	}
+func AspectBaseUrl() string {
+	return "https://github.com/aspect-build/aspect-cli/releases/download"
 }
