@@ -147,6 +147,14 @@ func (cd *ChangeDetector) processBES(ctx context.Context) error {
 
 	reader := bufio.NewReader(r)
 
+	// It is expected that the BES output will contain new information every
+	// 20 seconds to avoid deadlocking the program.
+	// If for some reason Bazel can't produce BES data every 20 seconds, it
+	// might be dead already or so slow that it can be considered dead.
+	// This can be adjusted as needed in future if needed.
+	timeoutd := 20 * time.Second
+	timeout := time.After(timeoutd)
+
 	namedSets := make(map[string][]*buildeventstream.File, 0)
 
 	for !cd.hasTargetBuildEventInfo() {
@@ -162,6 +170,8 @@ func (cd *ChangeDetector) processBES(ctx context.Context) error {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
+				case <-timeout:
+					return fmt.Errorf("timeout waiting for BES data")
 				case <-time.After(50):
 					// throttle the reading of the BES file when no new data is available
 					continue
@@ -170,6 +180,9 @@ func (cd *ChangeDetector) processBES(ctx context.Context) error {
 
 			return fmt.Errorf("failed to parse BES event: %w", err)
 		}
+
+		// We have received an event, reset the timer.
+		timeout = time.After(timeoutd)
 
 		switch event.Id.Id.(type) {
 		case *buildeventstream.BuildEventId_ExecRequest:
@@ -216,6 +229,10 @@ func (cd *ChangeDetector) processBES(ctx context.Context) error {
 		if event.LastMessage {
 			break
 		}
+	}
+
+	if !cd.hasTargetBuildEventInfo() {
+		return fmt.Errorf("failed to determine target information from build events: %v", cd.besFile)
 	}
 
 	return nil

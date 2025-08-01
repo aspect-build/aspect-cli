@@ -233,25 +233,19 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		return fmt.Errorf("failed to start initial bazel command: %w", err)
 	}
 
-	// Watch the initial BES events to inspect and gather information about the run target.
-	initCtx, initCancel := context.WithCancel(pcctx)
-	defer initCancel()
-	go func() {
-		if err := changedetect.processBES(initCtx); err != nil {
-			// Ignore cancel events and do not output to stdout.
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-
-			fmt.Printf("failed to process BES on init: %v\n", err)
+	// Watch the process BES events to inspect the run target
+	if err := changedetect.processBES(pcctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
 		}
-	}()
+
+		return fmt.Errorf("failed to process BES on init: %w", err)
+	}
 
 	if err := initCmd.Wait(); err != nil {
 		return fmt.Errorf("initial bazel command failed: %w", err)
 	}
 	initCmd = nil
-	initCancel()
 
 	if !changedetect.hasTargetBuildEventInfo() {
 		return fmt.Errorf("failed to determine target %v information from build events: %v", changedetect.targetLabel, changedetect.besFile.Name())
