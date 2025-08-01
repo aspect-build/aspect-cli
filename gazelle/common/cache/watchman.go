@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/aspect-build/aspect-cli/buildinfo"
 	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
 	watcher "github.com/aspect-build/aspect-cli/pkg/watch"
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -21,7 +20,6 @@ func init() {
 
 type cacheState struct {
 	ClockSpec string
-	BuildId   string
 	Entries   map[string]map[string]any
 }
 
@@ -80,17 +78,14 @@ func (c *watchmanCache) read() {
 	var v cacheState
 
 	cacheDecoder := gob.NewDecoder(cacheReader)
-	if e := cacheDecoder.Decode(&v); e != nil {
-		BazelLog.Errorf("Failed to read cache %q: %v", c.file, e)
+
+	if !verifyCacheVersion(cacheDecoder, "watchman", c.file) {
 		return
 	}
 
-	// If the stamp has changed, discard the cache.
-	if buildinfo.IsStamped() {
-		if v.BuildId != buildinfo.GitCommit {
-			BazelLog.Infof("Cache buildId stale, clearing")
-			return
-		}
+	if e := cacheDecoder.Decode(&v); e != nil {
+		BazelLog.Errorf("Failed to read cache %q: %v", c.file, e)
+		return
 	}
 
 	cs, err := c.w.GetDiff(v.ClockSpec)
@@ -142,14 +137,15 @@ func (c *watchmanCache) write() {
 	s := cacheState{
 		ClockSpec: c.lastClockSpec,
 		Entries:   m,
-		BuildId:   "",
-	}
-
-	if buildinfo.IsStamped() {
-		s.BuildId = buildinfo.GitCommit
 	}
 
 	cacheEncoder := gob.NewEncoder(cacheWriter)
+
+	if err := writeCacheVersion(cacheEncoder, "watchman"); err != nil {
+		BazelLog.Errorf("Failed to write cache info to %q: %v", c.file, err)
+		return
+	}
+
 	if e := cacheEncoder.Encode(s); e != nil {
 		BazelLog.Errorf("Failed to write cache %q: %v", c.file, e)
 	}

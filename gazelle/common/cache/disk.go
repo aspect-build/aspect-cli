@@ -34,6 +34,7 @@ func init() {
 	gob.Register(map[string]map[string]interface{}{})
 	gob.Register(map[string]map[string]string{})
 	gob.Register([]interface{}{})
+	gob.Register(persistedCacheInfo{})
 }
 
 var _ Cache = (*diskCache)(nil)
@@ -71,6 +72,11 @@ func (c *diskCache) read() {
 	defer cacheReader.Close()
 
 	cacheDecoder := gob.NewDecoder(cacheReader)
+
+	if !verifyCacheVersion(cacheDecoder, "disk", c.file) {
+		return
+	}
+
 	if e := cacheDecoder.Decode(&c.old); e != nil {
 		BazelLog.Errorf("Failed to read cache %q: %v", c.file, e)
 		return
@@ -101,6 +107,12 @@ func (c *diskCache) write() {
 	})
 
 	cacheEncoder := gob.NewEncoder(cacheWriter)
+
+	if err := writeCacheVersion(cacheEncoder, "disk"); err != nil {
+		BazelLog.Errorf("Failed to write cache info to %q: %v", c.file, err)
+		return
+	}
+
 	if e := cacheEncoder.Encode(m); e != nil {
 		BazelLog.Errorf("Failed to write cache %q: %v", c.file, e)
 		return
@@ -153,4 +165,40 @@ func (c *diskCache) LoadOrStoreFile(root, p, key string, loader FileCompute) (an
 
 func (c *diskCache) Persist() {
 	c.write()
+}
+
+type persistedCacheInfo struct {
+	Type    string
+	Version string
+}
+
+func writeCacheVersion(encoder *gob.Encoder, cacheType string) error {
+	return encoder.Encode(persistedCacheInfo{
+		Type:    cacheType,
+		Version: buildinfo.GitCommit,
+	})
+}
+
+func verifyCacheVersion(decoder *gob.Decoder, expectedType, file string) bool {
+	var pi persistedCacheInfo
+
+	// Read the cache metadata
+	if err := decoder.Decode(&pi); err != nil {
+		BazelLog.Errorf("Failed to read cache %q: %v", file, err)
+		return false
+	}
+
+	// Assert the type
+	if pi.Type != expectedType {
+		BazelLog.Errorf("Cache type mismatch (expected: %q, actual %q), clearing cache %q", expectedType, pi.Type, file)
+		return false
+	}
+
+	// Assert the version
+	if buildinfo.IsStamped() && pi.Version != buildinfo.GitCommit {
+		BazelLog.Infof("Cache version mismatch (expected: %q, actual %q), clearing cache %q", buildinfo.GitCommit, pi.Version, file)
+		return false
+	}
+
+	return true
 }
