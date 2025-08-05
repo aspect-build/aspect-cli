@@ -55,6 +55,10 @@ require (
 	github.com/mikefarah/yq/v4 v4.47.2
 	github.com/reviewdog/reviewdog v0.17.4
 	github.com/sourcegraph/go-diff v0.7.0
+	go.opentelemetry.io/otel v1.37.0
+	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.37.0
+	go.opentelemetry.io/otel/sdk v1.37.0
+	go.opentelemetry.io/otel/trace v1.37.0
 	golang.org/x/term v0.34.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20250603155806-513f23925822
 	gopkg.in/op/go-logging.v1 v1.0.0-20160211212156-b2cb9fa56473
@@ -98,6 +102,8 @@ require (
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.6.2 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
+	github.com/go-logr/logr v1.4.3 // indirect
+	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-sprout/sprout v1.0.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.2.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
@@ -152,7 +158,8 @@ require (
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
-	go.opentelemetry.io/otel v1.36.0 // indirect
+	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
+	go.opentelemetry.io/otel/metric v1.37.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect

@@ -36,6 +36,9 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
+	"go.opentelemetry.io/otel"
+	traceAttr "go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
 )
 
@@ -48,6 +51,8 @@ type ConfigureRunner interface {
 
 type Configure struct {
 	ioutils.Streams
+
+	tracer trace.Tracer
 
 	languageKeys []string
 	languages    []func() language.Language
@@ -84,6 +89,7 @@ func init() {
 func New(streams ioutils.Streams) *Configure {
 	c := &Configure{
 		Streams: streams,
+		tracer:  otel.GetTracerProvider().Tracer("aspect-configure"),
 	}
 
 	if os.Getenv("CONFIGURE_PROGRESS") != "" && term.IsTerminal(int(os.Stdout.Fd())) {
@@ -192,6 +198,14 @@ func (runner *Configure) Generate(mode ConfigureMode, excludes []string, args []
 		}
 	}
 
+	_, t := runner.tracer.Start(context.Background(), "Configure.Generate", trace.WithAttributes(
+		traceAttr.String("mode", mode),
+		traceAttr.StringSlice("languages", runner.languageKeys),
+		traceAttr.StringSlice("excludes", excludes),
+		traceAttr.StringSlice("args", args),
+	))
+	defer t.End()
+
 	wd, fixArgs := runner.PrepareGazelleArgs(mode, excludes, args)
 
 	if mode == "fix" {
@@ -252,11 +266,21 @@ func (p *Configure) Watch(ctx context.Context, mode ConfigureMode, excludes []st
 	}
 	defer w.Close()
 
+	ctx, t := p.tracer.Start(ctx, "Configure.Subscribe", trace.WithAttributes(
+		traceAttr.String("mode", mode),
+		traceAttr.StringSlice("languages", p.languageKeys),
+		traceAttr.StringSlice("excludes", excludes),
+		traceAttr.StringSlice("args", args),
+	))
+	defer t.End()
+
 	// Subscribe to further changes
 	for cs, err := range w.Subscribe(ctx, "aspect-configure-watch") {
 		if err != nil {
 			return fmt.Errorf("failed to get next event: %w", err)
 		}
+
+		_, t := p.tracer.Start(ctx, "Configure.Subscribe.Trigger")
 
 		// Enter into a state to discard supirious changes caused by potential file atime
 		// updates by gazelle languages.
@@ -281,6 +305,8 @@ func (p *Configure) Watch(ctx context.Context, mode ConfigureMode, excludes []st
 		if err := w.StateLeave("aspect-configure-watch"); err != nil {
 			return fmt.Errorf("failed to leave watch state: %w", err)
 		}
+
+		t.End()
 	}
 
 	fmt.Fprintf(p.Streams.Stdout, "BUILD file generation --watch exiting...\n")
