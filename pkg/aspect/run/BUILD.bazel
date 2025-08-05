@@ -19,6 +19,9 @@ go_library(
         "//pkg/watch",
         "@com_github_fatih_color//:color",
         "@com_github_spf13_cobra//:cobra",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_trace//:trace",
         "@org_golang_google_protobuf//encoding/protodelim",
     ],
 )

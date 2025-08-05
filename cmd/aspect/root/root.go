@@ -59,6 +59,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system"
+	"github.com/aspect-build/aspect-cli/pkg/telemetry"
 )
 
 var (
@@ -125,6 +126,11 @@ func NewCmd(
 		// Suppress timestamps in generated Markdown, for determinism
 		DisableAutoGenTag: true,
 		Version:           buildinfo.Current().Version(),
+
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cobra.OnFinalize(telemetry.StartSession(cmd.Context()))
+			return nil
+		},
 	}
 
 	// Fallback version template incase it is not handled by HandleVersionFlags

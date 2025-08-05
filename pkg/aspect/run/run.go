@@ -38,6 +38,9 @@ import (
 	watcher "github.com/aspect-build/aspect-cli/pkg/watch"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
+	traceAttr "go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Run represents the aspect run command.
@@ -45,6 +48,8 @@ type Run struct {
 	streams  ioutils.Streams
 	hstreams ioutils.Streams
 	bzl      bazel.Bazel
+
+	tracer trace.Tracer
 }
 
 var watchConnectionTimeout = 1 * time.Second
@@ -70,6 +75,7 @@ func New(
 		streams:  streams,
 		hstreams: hstreams,
 		bzl:      bzl,
+		tracer:   otel.Tracer("aspect-run"),
 	}
 }
 
@@ -121,7 +127,7 @@ func (runner *Run) Run(ctx context.Context, cmd *cobra.Command, args []string) (
 
 	var err error
 	if !watch {
-		err = runner.bzl.RunCommand(bzlCommandStreams, nil, bazelCmd...)
+		err = runner.runCommand(ctx, bazelCmd, bzlCommandStreams)
 	} else {
 		err = runner.runWatch(ctx, bazelCmd, bzlCommandStreams)
 	}
@@ -138,6 +144,15 @@ func (runner *Run) Run(ctx context.Context, cmd *cobra.Command, args []string) (
 	}
 
 	return err
+}
+
+func (runner *Run) runCommand(ctx context.Context, bazelCmd []string, bzlCommandStreams ioutils.Streams) error {
+	ctx, t := runner.tracer.Start(ctx, "Run", trace.WithAttributes(
+		traceAttr.StringSlice("command", bazelCmd),
+	))
+	defer t.End()
+
+	return runner.bzl.RunCommand(bzlCommandStreams, nil, bazelCmd...)
 }
 
 func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandStreams ioutils.Streams) error {
@@ -172,6 +187,11 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		<-c
 		cancel()
 	}()
+
+	pcctx, t := runner.tracer.Start(pcctx, "Run.Watch", trace.WithAttributes(
+		traceAttr.StringSlice("command", bazelCmd),
+	))
+	defer t.End()
 
 	// The abazel protocol, potentially used as the incremental build tool.
 	// Must initialize and start listening for connections before the initial bazel run command.
@@ -362,6 +382,9 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		terminate(startCmd.Process)
 	}()
 
+	pcctx, st := runner.tracer.Start(pcctx, "Run.Subscribe")
+	defer st.End()
+
 	// Subscribe to further changes
 	for cs, err := range w.Subscribe(pcctx, "aspect-run-watch") {
 		if err != nil {
@@ -372,6 +395,8 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 
 			return fmt.Errorf("failed to get next event: %w", err)
 		}
+
+		_, st := runner.tracer.Start(pcctx, "Run.Subscribe.Trigger")
 
 		// Enter into the build state to discard supirious changes caused by Bazel reading the
 		// inputs which leads to their atime to change.
@@ -428,6 +453,8 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		if err := w.StateLeave("aspect-run-watch"); err != nil {
 			return fmt.Errorf("failed to enter build state: %w", err)
 		}
+
+		st.End()
 	}
 
 	return nil
