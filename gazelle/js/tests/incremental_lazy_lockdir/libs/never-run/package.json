@@ -1,0 +1,7 @@
+{
+  "name": "@lib/no-direct",
+  "private": true,
+  "dependencies": {
+    "@lib/b": "workspace:*"
+  }
+}
