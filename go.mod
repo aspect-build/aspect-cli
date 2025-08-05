@@ -6,7 +6,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/alphadose/haxmap v1.4.1
 	github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250706032523-18d0d297aa69 // NOTE: keep in sync with python.MODULE.bazel
-	github.com/bazelbuild/bazel-gazelle v0.44.1-0.20250718191312-df6879377186 // NOTE: keep in sync with go.MODULE.bazel
+	github.com/bazelbuild/bazel-gazelle v0.44.1-0.20250707152251-85aa3a252a58 // NOTE: keep in sync with go.MODULE.bazel
 	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync
 	github.com/bazelbuild/buildtools v0.0.0-20250715102656-62b9413b08bb
 	github.com/bazelbuild/rules_go v0.55.1 // indirect; NOTE: keep in sync with go.MODULE.bazel
