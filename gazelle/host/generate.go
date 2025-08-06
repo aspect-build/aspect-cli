@@ -236,10 +236,11 @@ func (host *GazelleHost) applyPluginAction(args gazelleLanguage.GenerateArgs, pl
 		}
 
 		// Generate the gazelle Rule to be added/merged into the BUILD file.
-		rule := convertPluginTargetDeclaration(args, pluginId, target)
+		rule, attrs := convertPluginTargetDeclaration(args, pluginId, target)
 
 		result.Gen = append(result.Gen, rule)
-		result.Imports = append(result.Imports, rule.PrivateAttr(targetAttrValues))
+		result.Imports = append(result.Imports, attrs)
+		result.RelsToIndex = append(result.RelsToIndex, targetAttributesToRelsToImport(args, attrs)...)
 
 		BazelLog.Tracef("GenerateRules(%s) add target: %s %s(%q)", GazelleLanguageName, args.Rel, target.Kind, target.Name)
 	default:
@@ -253,7 +254,7 @@ type attributeValue struct {
 	imports   []plugin.TargetImport
 }
 
-func convertPluginTargetDeclaration(args gazelleLanguage.GenerateArgs, pluginId plugin.PluginId, target plugin.TargetDeclaration) *gazelleRule.Rule {
+func convertPluginTargetDeclaration(args gazelleLanguage.GenerateArgs, pluginId plugin.PluginId, target plugin.TargetDeclaration) (*gazelleRule.Rule, map[string]*attributeValue) {
 	targetRule := gazelleRule.NewRule(target.Kind, target.Name)
 
 	ruleAttrs := make(map[string]*attributeValue, len(target.Attrs))
@@ -287,7 +288,25 @@ func convertPluginTargetDeclaration(args gazelleLanguage.GenerateArgs, pluginId 
 		}
 	}
 
-	return targetRule
+	return targetRule, ruleAttrs
+}
+
+func targetAttributesToRelsToImport(args gazelleLanguage.GenerateArgs, attrs map[string]*attributeValue) []string {
+	relToImport := []string{}
+
+	// By default it is assumed all imports are workspace-relative paths.
+	// TODO: provide hooks for plugins to override this behavior.
+
+	for _, attrVal := range attrs {
+		for _, imp := range attrVal.imports {
+			rel := imp.Id
+			rel = strings.Trim(rel, "/")
+
+			relToImport = append(relToImport, rel)
+		}
+	}
+
+	return relToImport
 }
 
 func convertPluginAttribute(args gazelleLanguage.GenerateArgs, val interface{}) ([]interface{}, []plugin.TargetImport, bool) {
