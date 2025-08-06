@@ -15,6 +15,9 @@ type BUILDConfig struct {
 	rel    string
 	parent *BUILDConfig
 
+	// If this BUILD has been generated during this execution
+	generated bool
+
 	// All directives of this BUILD
 	directiveRawValues map[string][]string
 
@@ -43,6 +46,7 @@ func (c *BUILDConfig) NewChildConfig(rel string) *BUILDConfig {
 	cCopy := *c
 
 	// Child specific
+	cCopy.generated = false
 	cCopy.rel = rel
 	cCopy.parent = c
 	cCopy.directiveRawValues = make(map[string][]string)
