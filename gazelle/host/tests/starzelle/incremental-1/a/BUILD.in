@@ -1,0 +1,18 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+
+# a/index.js has a new import, but is not effected due to the test args
+
+js_library(
+    name = "index_lib",
+    srcs = ["index.js"],
+)
+
+js_library(
+    name = "a2_lib",
+    srcs = ["a2.js"],
+)
+
+js_library(
+    name = "a3_lib",
+    srcs = ["a3.js"],
+)
