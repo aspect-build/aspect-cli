@@ -44,7 +44,7 @@ func symbolToImportSpec(symbol plugin.Symbol) resolve.ImportSpec {
 
 const extGeneratedRules = "__starzelle_generated_rules"
 
-func (re *GazelleHost) importsGenerateRules(c *config.Config, r *rule.Rule, f *rule.File) gazelleLanguage.GenerateResult {
+func (re *GazelleHost) importsGenerateRules(cfg *BUILDConfig, c *config.Config, r *rule.Rule, f *rule.File) gazelleLanguage.GenerateResult {
 	BazelLog.Debugf("Imports.GenerateRules(%s): //%s:%s", GazelleLanguageName, f.Pkg, r.Name())
 
 	regularFiles, err := common.GetSourceRegularFiles(f.Pkg)
@@ -52,7 +52,7 @@ func (re *GazelleHost) importsGenerateRules(c *config.Config, r *rule.Rule, f *r
 		log.Fatalf("Error getting regular files for %s: %v", f.Pkg, err)
 	}
 
-	return re.GenerateRules(gazelleLanguage.GenerateArgs{
+	return re.generateRules(cfg, gazelleLanguage.GenerateArgs{
 		File:   f,
 		Rel:    f.Pkg,
 		Dir:    path.Join(c.RepoRoot, f.Pkg),
@@ -85,7 +85,7 @@ func (re *GazelleHost) Imports(c *config.Config, r *rule.Rule, f *rule.File) []r
 		// When running partial generations this means we must manually invoke GenerateRules() if it
 		// was not invoked by gazelle as part of the partial run.
 		if c.Exts[extGeneratedRules] == nil {
-			c.Exts[extGeneratedRules] = re.importsGenerateRules(c, r, f)
+			c.Exts[extGeneratedRules] = re.importsGenerateRules(cfg, c, r, f)
 		}
 
 		// Find this rule in the host-generated rules

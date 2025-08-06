@@ -46,6 +46,10 @@ func (host *GazelleHost) GenerateRules(args gazelleLanguage.GenerateArgs) gazell
 	// Mark this BUILDConfig as generated since it is having real rules generated.
 	cfg.generated = true
 
+	return host.generateRules(cfg, args)
+}
+
+func (host *GazelleHost) generateRules(cfg *BUILDConfig, args gazelleLanguage.GenerateArgs) gazelleLanguage.GenerateResult {
 	queryCache := cache.Get(args.Config)
 
 	// Stage 1:
