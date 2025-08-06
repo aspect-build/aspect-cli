@@ -1,0 +1,16 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+
+js_library(
+    name = "index_lib",
+    srcs = ["index.js"],
+    deps = [
+        ":c2_lib",
+        "//a:index_lib",
+        "//c/sub:index_lib",
+    ],
+)
+
+js_library(
+    name = "c2_lib",
+    srcs = ["c2.js"],
+)

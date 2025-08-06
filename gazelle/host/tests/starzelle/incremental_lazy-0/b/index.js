@@ -1,0 +1,1 @@
+import 'c/index.js';

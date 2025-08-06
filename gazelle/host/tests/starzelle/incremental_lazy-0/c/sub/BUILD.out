@@ -1,0 +1,8 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+
+# c/sub/index.js has a new import, but is not effected due to the test args
+
+js_library(
+    name = "index_lib",
+    srcs = ["index.js"],
+)
