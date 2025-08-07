@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"strings"
 
 	cc "github.com/EngFlow/gazelle_cc/language/cc"
@@ -290,8 +291,15 @@ func (p *Configure) Watch(ctx context.Context, mode ConfigureMode, excludes []st
 
 		fmt.Fprintf(p.Streams.Stdout, "Detected %d changes in %v: %v\n", len(cs.Paths), wd, cs.Paths)
 
+		// The directories that have changed which gazelle should update.
+		// This assumes all enabled gazelle languages support incremental updates.
+		changedDirs := make([]string, 0, len(cs.Paths))
+		for _, p := range cs.Paths {
+			changedDirs = append(changedDirs, path.Dir(p))
+		}
+
 		// Run gazelle
-		stats, err := RunGazelleFixUpdate(wd, p.InstantiateLanguages(), fixArgs)
+		stats, err := RunGazelleFixUpdate(wd, p.InstantiateLanguages(), append(fixArgs, changedDirs...))
 		if err != nil {
 			return fmt.Errorf("failed to run gazelle fix/update: %w", err)
 		}
