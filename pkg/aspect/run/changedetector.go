@@ -125,7 +125,7 @@ func (cd *ChangeDetector) bazelFlags() []string {
 	flags := []string{}
 
 	// TODO: maybe use a more compact format for better performance?
-	flags = append(flags, "--execution_log_json_file", cd.execlogFile.Name())
+	flags = append(flags, "--execution_log_json_file", cd.execlogFile.Name(), "--noexecution_log_sort")
 
 	if !cd.hasTargetBuildEventInfo() {
 		flags = append(flags, "--build_event_binary_file", cd.besFile.Name(), "--build_event_binary_file_upload_mode=fully_async")
