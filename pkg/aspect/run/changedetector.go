@@ -358,7 +358,7 @@ func parseExecLogInputs(in io.Reader) ([]string, error) {
 func (cd *ChangeDetector) parseRunfilesManifest(manifestPath string) (*manifestMetadata, error) {
 	// TODO: cache based on manifest file stats?
 
-	manifestFile, err := os.Open(manifestPath)
+	manifestFile, err := os.Open(path.Join(cd.workspaceDir, manifestPath))
 	if err != nil {
 		return nil, err
 	}
