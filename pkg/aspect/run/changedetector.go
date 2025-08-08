@@ -83,7 +83,11 @@ type ChangeDetector struct {
 	execlogFile  *os.File
 	besFile      *os.File
 
+	// Current known state of sources
 	sourcesInfo ibp.SourceInfoMap
+
+	// Changes detected to the sources since the last cycleChanges() call.
+	cycleSourceChanges ibp.SourceInfoMap
 
 	targetTags             []string
 	targetLabel            string
@@ -263,22 +267,21 @@ func (cd *ChangeDetector) loadFullSourceInfo() (ibp.SourceInfoMap, error) {
 	}
 
 	cd.sourcesInfo = sim
+	cd.cycleSourceChanges = make(ibp.SourceInfoMap)
 
 	return sim, nil
 }
 
 // Cycle reparses execution log to discover inputs
-func (cd *ChangeDetector) detectChanges(sourceChanges []string) (ibp.SourceInfoMap, error) {
+func (cd *ChangeDetector) detectChanges(sourceChanges []string) error {
 	latestManifest, err := cd.parseRunfilesManifest(fmt.Sprintf("%s.runfiles_manifest", cd.targetExecutablePath))
 	if err != nil {
-		return nil, fmt.Errorf("failed to cycle the runfiles manifest: %w", err)
+		return fmt.Errorf("failed to cycle the runfiles manifest: %w", err)
 	}
 	execLogEntries, err := cd.cycleExecLog()
 	if err != nil {
-		return nil, fmt.Errorf("failed to cycle the execlog: %w", err)
+		return fmt.Errorf("failed to cycle the execlog: %w", err)
 	}
-
-	changedSourceInfo := make(ibp.SourceInfoMap)
 
 	for _, execLogEntry := range execLogEntries {
 		// The actual outputs are the files that were actually produced by the action
@@ -288,7 +291,7 @@ func (cd *ChangeDetector) detectChanges(sourceChanges []string) (ibp.SourceInfoM
 				IsSource:  toJsonBoolPtr(runfile.is_source),
 			}
 
-			changedSourceInfo[runfile.runfilesPath] = si
+			cd.cycleSourceChanges[runfile.runfilesPath] = si
 			cd.sourcesInfo[runfile.runfilesPath] = si
 		}
 	}
@@ -302,7 +305,7 @@ func (cd *ChangeDetector) detectChanges(sourceChanges []string) (ibp.SourceInfoM
 				IsSource:  toJsonBoolPtr(runfile.is_source),
 			}
 
-			changedSourceInfo[runfile.runfilesPath] = si
+			cd.cycleSourceChanges[runfile.runfilesPath] = si
 			cd.sourcesInfo[runfile.runfilesPath] = si
 		}
 	}
@@ -314,11 +317,17 @@ func (cd *ChangeDetector) detectChanges(sourceChanges []string) (ibp.SourceInfoM
 			delete(cd.sourcesInfo, lastRunfilesPath)
 
 			// Mark as deleted in the "changed" source info
-			changedSourceInfo[lastRunfilesPath] = nil
+			cd.cycleSourceChanges[lastRunfilesPath] = nil
 		}
 	}
 
-	return changedSourceInfo, nil
+	return nil
+}
+
+func (cd *ChangeDetector) cycleChanges() ibp.SourceInfoMap {
+	changed := cd.cycleSourceChanges
+	cd.cycleSourceChanges = make(ibp.SourceInfoMap)
+	return changed
 }
 
 // Cycle reparses execution log to discover inputs

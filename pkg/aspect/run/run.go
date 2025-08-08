@@ -410,43 +410,37 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 			return fmt.Errorf("failed to create bazel detect command: %w", err)
 		}
 
+		// Something has changed, but we have no idea if it affects our target.
+		// Normally we'd want to perform a cquery to determine if it affects but
+		// that is too costly especially in larger monorepos. So instead we rebuild
+		// the target with --execution_log_json_file and determine if it ran any
+		// actions.
+		//
 		// TODO: delay the command stdout and do not output on quick noops
 		incBuildErr := detectCmd.Run()
+
+		dtErr := changedetect.detectChanges(cs.Paths)
+		if dtErr != nil {
+			return fmt.Errorf("failed to detect changes: %w", dtErr)
+		}
 
 		if incBuildErr != nil {
 			// The incremental build failed.
 			// Assume a temporary compilation error, assume an appopriate error message was outputted by the run command.
 			// Output a basic warning and resume waiting for changes.
 			fmt.Printf("%s incremental bazel build command failed: %v\n", color.YellowString("WARNING:"), incBuildErr)
-		} else {
-			// Something has changed, but we have no idea if it affects our target.
-			// Normally we'd want to perform a cquery to determine if it affects but
-			// that is too costly especially in larger monorepos. So instead we rebuild
-			// the target with --execution_log_json_file and determine if it ran any
-			// actions.
-			//
-			// Obviously just looking at the execution log is not enough because there
-			// might be some sources that are not part of any actions but is part of the
-			// runfiles tree.
-			// Here we run a cycle to parse the last execution log.
-			changes, err := changedetect.detectChanges(cs.Paths)
-			if err != nil {
-				return fmt.Errorf("failed to detect changes: %w", err)
-			}
-
+		} else if changes := changedetect.cycleChanges(); len(changes) > 0 {
 			// For now just rerun the target, beware that RunCommand does not yield until
 			// the subprocess exists.
-			if len(changes) > 0 {
-				fmt.Printf("%s Found %d changes, rebuilding the target.\n", color.GreenString("INFO:"), len(changes))
+			fmt.Printf("%s Found %d changes, rebuilding the target.\n", color.GreenString("INFO:"), len(changes))
 
-				if err := incrementalProtocol.Cycle(changes); err != nil {
-					return fmt.Errorf("failed to report cycle events: %w", err)
-				}
-
-				// TODO: if we want to support ibazel livereload then we need to report changes.
-			} else {
-				fmt.Printf("%s Target is up-to-date.\n", color.GreenString("INFO:"))
+			if err := incrementalProtocol.Cycle(changes); err != nil {
+				return fmt.Errorf("failed to report cycle events: %w", err)
 			}
+
+			// TODO: if we want to support ibazel livereload then we need to report changes.
+		} else {
+			fmt.Printf("%s Target is up-to-date.\n", color.GreenString("INFO:"))
 		}
 
 		// Leave the build state and fast forward the subscription clock.
