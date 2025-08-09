@@ -10,18 +10,18 @@ go_sdk.nogo(nogo = "//:nogo")
 use_repo(go_sdk, "go_sdk")
 
 # Gazelle to load go modules and generate BUILD files
-bazel_dep(name = "gazelle", version = "0.44.0", repo_name = "bazel_gazelle")
+bazel_dep(name = "gazelle", version = "0.45.0", repo_name = "bazel_gazelle")
 archive_override(
     module_name = "gazelle",
-    integrity = "sha256-B2jOqbVMnNOuOXLU/1cs/buPMKce3Kl3AR3ySo2x064=",
+    integrity = "sha256-9fxljMw1cBHcY4cX2Wm3OchB+yLaWNQs9jH6R0pxfi8=",
     patch_strip = 1,
     patches = [
         "//patches:bazelbuild_bazel-gazelle_aspect-cli.patch",
         "//patches:bazelbuild_bazel-gazelle_aspect-walk-subdir.patch",
         "//patches:bazelbuild_bazel-gazelle_aspect-gitignore.patch",
     ],
-    strip_prefix = "bazel-gazelle-077e8c62ea001525b45736cee85f7e808ad01b05",
-    urls = ["https://github.com/bazel-contrib/bazel-gazelle/archive/077e8c62ea001525b45736cee85f7e808ad01b05.tar.gz"],
+    strip_prefix = "bazel-gazelle-efeeebf581083dd6bac6e4ebd1512265d8b13f3f",
+    urls = ["https://github.com/bazel-contrib/bazel-gazelle/archive/efeeebf581083dd6bac6e4ebd1512265d8b13f3f.tar.gz"],
 )
 
 bazel_dep(name = "gazelle_cc", version = "0.1.0")
