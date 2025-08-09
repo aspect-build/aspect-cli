@@ -208,12 +208,12 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 
 	fmt.Printf("%s Listening on watch socket %s\n", color.GreenString("INFO:"), abazel.Address())
 
-	createBazelScriptCmd := func(allowDiscard bool) (*exec.Cmd, error) {
+	createBazelScriptCmd := func(allowDiscard, trackChanges bool) (*exec.Cmd, error) {
 		// Additional arguments for the bazel run command
 		runCmdArgs := []string{}
 
 		// ChangeDetector normally adds additional flags
-		runCmdArgs = append(runCmdArgs, changedetect.bazelFlags()...)
+		runCmdArgs = append(runCmdArgs, changedetect.bazelFlags(trackChanges)...)
 
 		// --norun and generate a run script instead
 		runCmdArgs = append(runCmdArgs, "--norun", "--script_path", startScript.Name())
@@ -245,7 +245,7 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	}
 
 	// Create and start the intial bazel command to build+inspect the run target
-	initCmd, err := createBazelScriptCmd(true)
+	initCmd, err := createBazelScriptCmd(true, false)
 	if err != nil {
 		return fmt.Errorf("failed to create initial bazel command: %w", err)
 	}
@@ -405,7 +405,7 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		}
 
 		// The command to detect changes in the run target.
-		detectCmd, err := createBazelScriptCmd(false)
+		detectCmd, err := createBazelScriptCmd(false, true)
 		if err != nil {
 			return fmt.Errorf("failed to create bazel detect command: %w", err)
 		}
