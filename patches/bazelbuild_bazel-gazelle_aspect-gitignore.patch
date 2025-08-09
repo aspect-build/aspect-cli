@@ -55,10 +55,10 @@ index 67d2c16..07cfea5 100644
  		}
  	}
 diff --git a/walk/dirinfo.go b/walk/dirinfo.go
-index 9f7387c..7da124a 100644
+index d2f989b..b3c279c 100644
 --- a/walk/dirinfo.go
 +++ b/walk/dirinfo.go
-@@ -11,6 +11,17 @@ import (
+@@ -10,6 +10,17 @@ import (
  	"github.com/bazelbuild/bazel-gazelle/rule"
  )
  
@@ -76,7 +76,7 @@ index 9f7387c..7da124a 100644
  // DirInfo holds all the information about a directory that Walk2 needs.
  type DirInfo struct {
  	// Subdirs and RegularFiles hold the names of subdirectories and regular files
-@@ -70,6 +81,19 @@ func (w *walker) loadDirInfo(rel string) (DirInfo, error) {
+@@ -69,6 +80,19 @@ func (w *walker) loadDirInfo(rel string) (DirInfo, error) {
  	}
  
  	info.config = configureForWalk(parentConfig, rel, info.File)
@@ -96,7 +96,7 @@ index 9f7387c..7da124a 100644
  	if info.config.isExcludedDir(rel) {
  		// Build file excludes the current directory. Ignore contents.
  		entries = nil
-@@ -78,6 +102,13 @@ func (w *walker) loadDirInfo(rel string) (DirInfo, error) {
+@@ -77,6 +101,13 @@ func (w *walker) loadDirInfo(rel string) (DirInfo, error) {
  	for _, e := range entries {
  		entryRel := path.Join(rel, e.Name())
  		e = maybeResolveSymlink(info.config, dir, entryRel, e)
