@@ -6,7 +6,7 @@ go_library(
     importpath = "github.com/aspect-build/aspect-cli/gazelle/common/git",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/logger",
+        "//gazelle/common/logger",
         "@bazel_gazelle//walk:go_default_library",
         "@com_github_go_git_go_git_v5//plumbing/format/gitignore",
     ],

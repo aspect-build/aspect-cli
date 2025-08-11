@@ -7,8 +7,8 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common/cache",
-        "//gazelle/host",
-        "//pkg/aspect/configure",
+        "//gazelle/languages/host",
+        "//gazelle/runner",
         "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",
         "//pkg/interceptors",

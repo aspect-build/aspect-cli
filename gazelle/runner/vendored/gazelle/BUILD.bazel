@@ -1,0 +1,31 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "gazelle",
+    srcs = [
+        "diff.go",
+        "fix.go",
+        "fix-update.go",
+        "main.go",
+        "metaresolver.go",
+        "print.go",
+        "profiler.go",
+    ],
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/runner/vendored/gazelle",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//gazelle/common/cache",
+        "//gazelle/runner/vendored/gazelle/internal/wspace",
+        "@bazel_gazelle//config:go_default_library",
+        "@bazel_gazelle//flag:go_default_library",
+        "@bazel_gazelle//label:go_default_library",
+        "@bazel_gazelle//language:go_default_library",
+        "@bazel_gazelle//merger:go_default_library",
+        "@bazel_gazelle//repo:go_default_library",
+        "@bazel_gazelle//resolve:go_default_library",
+        "@bazel_gazelle//rule:go_default_library",
+        "@bazel_gazelle//walk:go_default_library",
+        "@com_github_bazelbuild_buildtools//build:go_default_library",
+        "@com_github_pmezard_go_difflib//difflib",
+    ],
+)

@@ -1,0 +1,11 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "logger",
+    srcs = ["logger.go"],
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/common/logger",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@in_gopkg_op_go_logging_v1//:go-logging_v1",
+    ],
+)

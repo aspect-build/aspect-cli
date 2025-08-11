@@ -1,0 +1,31 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "runner",
+    srcs = [
+        "go_deps.go",
+        "runner.go",
+    ],
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/runner",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//gazelle/common/git",
+        "//gazelle/common/logger",
+        "//gazelle/common/progress",
+        "//gazelle/languages/bzl",
+        "//gazelle/languages/js",
+        "//gazelle/languages/python",
+        "//gazelle/runner/vendored/gazelle",
+        "//pkg/bazel",
+        "//pkg/ioutils",
+        "//pkg/watch",
+        "@bazel_gazelle//language:go_default_library",
+        "@bazel_gazelle//language/go:go_default_library",
+        "@bazel_gazelle//language/proto:go_default_library",
+        "@gazelle_cc//language/cc",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_trace//:trace",
+        "@org_golang_x_term//:term",
+    ],
+)

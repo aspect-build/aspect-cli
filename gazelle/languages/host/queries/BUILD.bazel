@@ -1,0 +1,23 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "queries",
+    srcs = [
+        "ast.go",
+        "jq.go",
+        "queries.go",
+        "regex.go",
+        "yq.go",
+    ],
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/languages/host/queries",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//gazelle/common",
+        "//gazelle/common/logger",
+        "//gazelle/common/treesitter",
+        "//gazelle/languages/host/plugin",
+        "@com_github_itchyny_gojq//:gojq",
+        "@com_github_mikefarah_yq_v4//pkg/yqlib",
+        "@org_golang_x_sync//errgroup",
+    ],
+)

@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"sync"
 
-	BazelLog "github.com/aspect-build/aspect-cli/pkg/logger"
+	BazelLog "github.com/aspect-build/aspect-cli/gazelle/common/logger"
 	watcher "github.com/aspect-build/aspect-cli/pkg/watch"
 	"github.com/bazelbuild/bazel-gazelle/config"
 )

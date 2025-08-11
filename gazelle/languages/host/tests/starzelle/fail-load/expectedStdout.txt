@@ -1,0 +1,1 @@
+Failed to load configure plugin "gazelle/languages/host/tests/starzelle/fail-load/bad.lang.star": gazelle/languages/host/tests/starzelle/fail-load/bad.lang.star:1:11: got identifier, want newline
