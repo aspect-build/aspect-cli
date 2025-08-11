@@ -3,15 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path"
 
 	"github.com/aspect-build/aspect-cli/buildinfo"
-	host "github.com/aspect-build/aspect-cli/gazelle/host"
-	"github.com/aspect-build/aspect-cli/pkg/aspect/configure"
-	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
+	host "github.com/aspect-build/aspect-cli/gazelle/languages/host"
+	"github.com/aspect-build/aspect-cli/gazelle/runner"
 	"github.com/aspect-build/aspect-cli/pkg/ibp"
-	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"gopkg.in/yaml.v3"
 )
@@ -30,7 +29,7 @@ func main() {
 
 	mode, languages, plugins, dirs := parseArgs()
 
-	c := configure.New(ioutils.DefaultStreams)
+	c := runner.New()
 
 	// Add languages
 	fmt.Printf("Languages: %v\n", languages)
@@ -66,21 +65,21 @@ func main() {
 			c.Generate(mode, []string{}, dirs)
 		}
 	} else {
-		err := c.Generate(mode, []string{}, dirs)
+		_, err := c.Generate(mode, []string{}, dirs)
 
 		// Handle command errors
 		if err != nil {
-			aspecterrors.HandleError(err)
+			log.Fatalf("Error running gazelle: %v", err)
 		}
 	}
 }
 
 // Simple CLI parser for 'configure' args.
 // No support for flag variations, shortforms etc.
-func parseArgs() (configure.ConfigureMode, []string, []string, []string) {
+func parseArgs() (runner.GazelleMode, []string, []string, []string) {
 	args := flag.NewFlagSet("Aspect Configure", flag.ExitOnError)
 
-	mode := args.String("mode", configure.Diff, "Configure mode: fix|update|diff")
+	mode := args.String("mode", runner.Diff, "Configure mode: fix|update|diff")
 	help := args.Bool("help", false, "Print help message")
 	version := args.Bool("version", false, "Print version")
 	config := args.String("config", "", `Aspect CLI config file (yaml). Properties include:

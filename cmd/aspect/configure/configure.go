@@ -25,8 +25,8 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/aspect-build/aspect-cli/gazelle/common/cache"
-	starzelleHost "github.com/aspect-build/aspect-cli/gazelle/host"
-	"github.com/aspect-build/aspect-cli/pkg/aspect/configure"
+	starzelleHost "github.com/aspect-build/aspect-cli/gazelle/languages/host"
+	"github.com/aspect-build/aspect-cli/gazelle/runner"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
@@ -34,13 +34,6 @@ import (
 )
 
 func NewDefaultCmd() *cobra.Command {
-	return NewCmd(ioutils.DefaultStreams)
-}
-
-func NewCmd(streams ioutils.Streams) *cobra.Command {
-	return NewCmdWithConfigure(streams, configure.New(streams))
-}
-func NewCmdWithConfigure(streams ioutils.Streams, v configure.ConfigureRunner) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "configure",
 		Short: "Auto-configure Bazel by updating BUILD files",
@@ -74,14 +67,14 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 		GroupID: "aspect",
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
-				flags.FlagsInterceptor(streams),
+				flags.FlagsInterceptor(ioutils.DefaultStreams),
 			},
 			func(ctx context.Context, cmd *cobra.Command, args []string) error {
 				mode, _ := cmd.Flags().GetString("mode")
 				exclude, _ := cmd.Flags().GetStringSlice("exclude")
 				watch, _ := cmd.Flags().GetBool("watch")
 				watchman, _ := cmd.Flags().GetBool("watchman")
-				return run(ctx, streams, v, mode, exclude, watch, watchman, args)
+				return run(ctx, mode, exclude, watch, watchman, args)
 			},
 		),
 	}
@@ -92,25 +85,20 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 	cmd.Flags().Bool("watchman", false, "Use the EXPERIMENTAL watchman daemon to watch for changes across 'configure' invocations")
 	cmd.Flags().Bool("watch", false, "Use the EXPERIMENTAL watch mode to watch for changes in the workspace and automatically 'configure' when files change")
 
-	addCliEnabledLanguages(v)
-
 	return cmd
 }
 
-func run(ctx context.Context, streams ioutils.Streams, v configure.ConfigureRunner, mode string, exclude []string, watch, watchman bool, args []string) error {
+func run(ctx context.Context, mode string, exclude []string, watch, watchman bool, args []string) error {
 	if watch || watchman {
 		cache.SetCacheFactory(cache.NewWatchmanCache)
 	}
 
-	var err error
-	if watch {
-		err = v.Watch(ctx, mode, exclude, args)
-	} else {
-		err = v.Generate(mode, exclude, args)
-	}
+	v := runner.New()
 
-	if aspectError, isAError := err.(*aspecterrors.ExitError); isAError && aspectError.ExitCode == aspecterrors.ConfigureNoConfig {
-		fmt.Fprintln(streams.Stderr, `No languages enabled for BUILD file generation.
+	addCliEnabledLanguages(v)
+
+	if len(v.Languages()) == 0 {
+		fmt.Fprintln(ioutils.DefaultStreams.Stderr, `No languages enabled for BUILD file generation.
 
 To enable one or more languages, add the following to the .aspect/cli/config.yaml
 file in your WORKSPACE or home directory and enable/disable languages as needed:
@@ -124,40 +112,74 @@ configure:
 	python: true
   plugins:
     path/to/starlark/plugin.star`)
+
+		return &aspecterrors.ExitError{
+			ExitCode: aspecterrors.ConfigureNoConfig,
+		}
 	}
+
+	var changed bool
+	var err error
+	if watch {
+		err = v.Watch(ctx, mode, exclude, args)
+	} else {
+		changed, err = v.Generate(mode, exclude, args)
+	}
+
+	// Unique error codes for:
+	// - internal errors
+	// - files diffs
+	// - files updated
+	if err != nil {
+		err = &aspecterrors.ExitError{
+			ExitCode: aspecterrors.UnhandledOrInternalError,
+			Err:      err,
+		}
+	} else if changed {
+		if mode == "fix" {
+			err = &aspecterrors.ExitError{
+				ExitCode: aspecterrors.ConfigureFixed,
+			}
+		} else {
+			err = &aspecterrors.ExitError{
+				ExitCode: aspecterrors.ConfigureDiff,
+			}
+		}
+	}
+
 	return err
 }
 
-func addCliEnabledLanguages(c configure.ConfigureRunner) {
+func addCliEnabledLanguages(c *runner.GazelleRunner) {
 	// Order matters for gazelle languages. Proto should be run before golang.
 	viper.SetDefault("configure.languages.protobuf", false)
 	if viper.GetBool("configure.languages.protobuf") {
-		c.AddLanguage(configure.Protobuf)
+		c.AddLanguage(runner.Protobuf)
 	}
 
 	viper.SetDefault("configure.languages.go", false)
 	if viper.GetBool("configure.languages.go") {
-		c.AddLanguage(configure.Go)
+		c.AddLanguage(runner.Go)
 	}
 
 	viper.SetDefault("configure.languages.javascript", false)
 	if viper.GetBool("configure.languages.javascript") {
-		c.AddLanguage(configure.JavaScript)
+		c.AddLanguage(runner.JavaScript)
 	}
 
 	viper.SetDefault("configure.languages.bzl", false)
 	if viper.GetBool("configure.languages.bzl") {
-		c.AddLanguage(configure.Bzl)
+		c.AddLanguage(runner.Bzl)
 	}
 
 	viper.SetDefault("configure.languages.python", false)
 	if viper.GetBool("configure.languages.python") {
-		c.AddLanguage(configure.Python)
+		c.AddLanguage(runner.Python)
 	}
 
 	viper.SetDefault("configure.languages.cc", false)
 	if viper.GetBool("configure.languages.cc") {
-		c.AddLanguage(configure.CC)
+		c.AddLanguage(runner.CC)
 	}
 
 	// Add additional starlark plugins

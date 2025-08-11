@@ -12,6 +12,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common",
+        "//gazelle/common/logger",
         "//gazelle/common/treesitter/grammars/golang",
         "//gazelle/common/treesitter/grammars/java",
         "//gazelle/common/treesitter/grammars/json",
@@ -19,7 +20,6 @@ go_library(
         "//gazelle/common/treesitter/grammars/starlark",
         "//gazelle/common/treesitter/grammars/tsx",
         "//gazelle/common/treesitter/grammars/typescript",
-        "//pkg/logger",
         "@com_github_smacker_go_tree_sitter//:go-tree-sitter",
     ],
 )
