@@ -7,7 +7,7 @@ go_library(
         "@tree-sitter-starlark//:srcs",  #keep
     ],
     cgo = True,
-    copts = ["-Iexternal/tree-sitter-starlark"],  #keep
+    copts = ["-Iexternal/*tree-sitter-starlark"],  #keep
     importpath = "github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/starlark",
     visibility = ["//gazelle/common/treesitter:__subpackages__"],
 )

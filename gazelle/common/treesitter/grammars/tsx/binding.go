@@ -16,7 +16,7 @@
 
 package tsx
 
-//#include "tsx/src/tree_sitter/parser.h"
+//#include "tree_sitter/parser.h"
 //TSLanguage *tree_sitter_tsx();
 import "C"
 import (

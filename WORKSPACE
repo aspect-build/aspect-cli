@@ -22,10 +22,6 @@ register_toolchains(
     "@zig_sdk//toolchain:windows_arm64",
 )
 
-load("//gazelle/common/treesitter/grammars:grammars.bzl", "fetch_grammars")
-
-fetch_grammars()
-
 load("//integration_tests:bats_deps.bzl", "bats_dependencies")
 
 bats_dependencies()
