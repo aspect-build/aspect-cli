@@ -7,7 +7,7 @@ go_library(
         "@tree-sitter-java//:srcs",  #keep
     ],
     cgo = True,
-    copts = ["-Iexternal/tree-sitter-java"],  #keep
+    copts = ["-Iexternal/*tree-sitter-java"],  #keep
     importpath = "github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/java",
     visibility = ["//gazelle/common/treesitter:__subpackages__"],
 )

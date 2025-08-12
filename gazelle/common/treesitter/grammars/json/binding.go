@@ -1,6 +1,6 @@
 package json
 
-//#include "src/tree_sitter/parser.h"
+//#include "tree_sitter/parser.h"
 //TSLanguage *tree_sitter_json();
 import "C"
 import (

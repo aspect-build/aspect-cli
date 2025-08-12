@@ -1,6 +1,6 @@
 package golang
 
-//#include "src/tree_sitter/parser.h"
+//#include "tree_sitter/parser.h"
 //TSLanguage *tree_sitter_go();
 import "C"
 import (

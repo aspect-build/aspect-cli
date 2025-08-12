@@ -1,6 +1,6 @@
 package java
 
-//#include "src/tree_sitter/parser.h"
+//#include "tree_sitter/parser.h"
 //TSLanguage *tree_sitter_java();
 import "C"
 import (

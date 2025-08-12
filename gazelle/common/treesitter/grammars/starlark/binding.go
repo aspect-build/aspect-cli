@@ -1,6 +1,6 @@
 package starlark
 
-//#include "src/tree_sitter/parser.h"
+//#include "tree_sitter/parser.h"
 //TSLanguage *tree_sitter_starlark();
 import "C"
 import (
