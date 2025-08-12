@@ -89,11 +89,10 @@ type ChangeDetector struct {
 	// Changes detected to the sources since the last cycleChanges() call.
 	cycleSourceChanges ibp.SourceInfoMap
 
-	targetTags             []string
-	targetLabel            string
-	targetExecutablePath   string
-	targetWorkingDirectory string
-	localExecroot          string
+	targetTags           []string
+	targetLabel          string
+	targetExecutablePath string
+	localExecroot        string
 }
 
 func newChangeDetector(workspaceDir string) (*ChangeDetector, error) {
@@ -106,13 +105,12 @@ func newChangeDetector(workspaceDir string) (*ChangeDetector, error) {
 		return nil, err
 	}
 	return &ChangeDetector{
-		workspaceDir:           workspaceDir,
-		execlogFile:            execlog,
-		besFile:                bes,
-		targetTags:             []string{},
-		targetLabel:            "",
-		targetExecutablePath:   "",
-		targetWorkingDirectory: "",
+		workspaceDir:         workspaceDir,
+		execlogFile:          execlog,
+		besFile:              bes,
+		targetTags:           []string{},
+		targetLabel:          "",
+		targetExecutablePath: "",
 	}, nil
 }
 
@@ -193,8 +191,11 @@ func (cd *ChangeDetector) processBES(ctx context.Context) error {
 		switch event.Id.Id.(type) {
 		case *buildeventstream.BuildEventId_ExecRequest:
 			execPath := strings.Split(string(event.GetExecRequest().GetArgv()[2]), " ")[0]
+			if cd.targetExecutablePath != "" && cd.targetExecutablePath != execPath {
+				return fmt.Errorf("target executable path changed from %s to %s, this is not supported", cd.targetExecutablePath, execPath)
+			}
+
 			cd.targetExecutablePath = execPath
-			cd.targetWorkingDirectory = string(event.GetExecRequest().GetWorkingDirectory())
 
 		case *buildeventstream.BuildEventId_NamedSet:
 			// Record the named sets of files which the TargetCompleted event may reference.
@@ -210,6 +211,10 @@ func (cd *ChangeDetector) processBES(ctx context.Context) error {
 			if importantOutput := event.GetCompleted().GetImportantOutput(); len(importantOutput) > 0 {
 				// The deprecated "important output" path to the executable
 				execPath := strings.TrimPrefix(importantOutput[0].GetUri(), "file://")
+				if cd.targetExecutablePath != "" && cd.targetExecutablePath != execPath {
+					return fmt.Errorf("target executable path changed from %s to %s, this is not supported", cd.targetExecutablePath, execPath)
+				}
+
 				cd.targetExecutablePath = execPath
 			} else {
 				// The default output group reference to the executable via named file sets
@@ -217,7 +222,12 @@ func (cd *ChangeDetector) processBES(ctx context.Context) error {
 					if og.Name == "default" {
 						for _, f := range og.GetFileSets() {
 							if files, hasGroup := namedSets[f.Id]; hasGroup && len(files) == 1 {
-								cd.targetExecutablePath = path.Join(cd.targetWorkingDirectory, path.Join(files[0].PathPrefix...), files[0].Name)
+								execPath := path.Join(cd.workspaceDir, path.Join(files[0].PathPrefix...), files[0].Name)
+								if cd.targetExecutablePath != "" && cd.targetExecutablePath != execPath {
+									return fmt.Errorf("target executable path changed from %s to %s, this is not supported", cd.targetExecutablePath, execPath)
+								}
+
+								cd.targetExecutablePath = execPath
 								break
 							}
 						}
@@ -238,7 +248,7 @@ func (cd *ChangeDetector) processBES(ctx context.Context) error {
 	}
 
 	if !cd.hasTargetBuildEventInfo() {
-		return fmt.Errorf("failed to determine target information from build events: %v", cd.besFile)
+		return fmt.Errorf("failed to determine target information from build events: %v", cd.besFile.Name())
 	}
 
 	return nil
@@ -254,7 +264,7 @@ func (cd *ChangeDetector) supportsIBazelNotifyChanges() bool {
 
 func (cd *ChangeDetector) loadFullSourceInfo() (ibp.SourceInfoMap, error) {
 	// Load the runfiles manifest to get the full list of files
-	manifest, err := cd.parseRunfilesManifest(fmt.Sprintf("%s.runfiles_manifest", cd.targetExecutablePath))
+	manifest, err := cd.parseRunfilesManifest()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load runfiles manifest: %w", err)
 	}
@@ -276,7 +286,7 @@ func (cd *ChangeDetector) loadFullSourceInfo() (ibp.SourceInfoMap, error) {
 
 // Cycle reparses execution log to discover inputs
 func (cd *ChangeDetector) detectChanges(sourceChanges []string) error {
-	latestManifest, err := cd.parseRunfilesManifest(fmt.Sprintf("%s.runfiles_manifest", cd.targetExecutablePath))
+	latestManifest, err := cd.parseRunfilesManifest()
 	if err != nil {
 		return fmt.Errorf("failed to cycle the runfiles manifest: %w", err)
 	}
@@ -366,10 +376,12 @@ func parseExecLogInputs(in io.Reader) ([]string, error) {
 }
 
 // Cycle reparses execution log to discover inputs
-func (cd *ChangeDetector) parseRunfilesManifest(manifestPath string) (*manifestMetadata, error) {
+func (cd *ChangeDetector) parseRunfilesManifest() (*manifestMetadata, error) {
 	// TODO: cache based on manifest file stats?
 
-	manifestFile, err := os.Open(path.Join(cd.workspaceDir, manifestPath))
+	manifestPath := fmt.Sprintf("%s.runfiles_manifest", cd.targetExecutablePath)
+
+	manifestFile, err := os.Open(manifestPath)
 	if err != nil {
 		return nil, err
 	}
