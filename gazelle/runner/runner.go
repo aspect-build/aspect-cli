@@ -33,6 +33,7 @@ import (
 	vendoredGazelle "github.com/aspect-build/aspect-cli/gazelle/runner/vendored/gazelle"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	watcher "github.com/aspect-build/aspect-cli/pkg/watch"
+	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
@@ -254,14 +255,11 @@ func (p *GazelleRunner) Watch(ctx context.Context, mode GazelleMode, excludes []
 			return fmt.Errorf("failed to enter watch state: %w", err)
 		}
 
-		fmt.Printf("Detected %d changes in %v: %v\n", len(cs.Paths), wd, cs.Paths)
-
 		// The directories that have changed which gazelle should update.
 		// This assumes all enabled gazelle languages support incremental updates.
-		changedDirs := make([]string, 0, len(cs.Paths))
-		for _, p := range cs.Paths {
-			changedDirs = append(changedDirs, path.Dir(p))
-		}
+		changedDirs := computeUpdatedDirs(wd, cs.Paths)
+
+		fmt.Printf("Detected changes in %v\n", changedDirs)
 
 		// Run gazelle
 		visited, updated, err := vendoredGazelle.RunGazelleFixUpdate(wd, p.InstantiateLanguages(), append(fixArgs, changedDirs...))
@@ -285,4 +283,44 @@ func (p *GazelleRunner) Watch(ctx context.Context, mode GazelleMode, excludes []
 	fmt.Printf("BUILD file generation --watch exiting...\n")
 
 	return nil
+}
+
+/**
+ * Convert a set of changed source files to a set of directories that gazelle
+ * should update.
+ *
+ * A simple `path.Dir` is not sufficient because `generation_mode update_only`
+ * may require a parent directory to be updated.
+ *
+ * TODO: this should be solved in gazelle? Including invocations on cli?
+ */
+func computeUpdatedDirs(rootDir string, changedFiles []string) []string {
+	changedDirs := make([]string, 0, 1)
+	processedDirs := make(map[string]bool, len(changedFiles))
+
+	for _, f := range changedFiles {
+		dir := path.Dir(f)
+		for !processedDirs[dir] {
+			processedDirs[dir] = true
+
+			if hasBuildFile(rootDir, dir) {
+				changedDirs = append(changedDirs, dir)
+				break
+			}
+
+			dir = path.Dir(dir)
+		}
+	}
+
+	return changedDirs
+}
+
+func hasBuildFile(rootDir, rel string) bool {
+	for _, f := range config.DefaultValidBuildFileNames {
+		if _, err := os.Stat(path.Join(rootDir, rel, f)); err == nil {
+			return true
+		}
+	}
+
+	return false
 }

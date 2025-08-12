@@ -19,6 +19,7 @@ go_library(
         "//pkg/bazel",
         "//pkg/ioutils",
         "//pkg/watch",
+        "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//language:go_default_library",
         "@bazel_gazelle//language/go:go_default_library",
         "@bazel_gazelle//language/proto:go_default_library",
