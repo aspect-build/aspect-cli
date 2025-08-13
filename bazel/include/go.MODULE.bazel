@@ -17,7 +17,6 @@ archive_override(
     patch_strip = 1,
     patches = [
         "//patches:bazelbuild_bazel-gazelle_aspect-cli.patch",
-        "//patches:bazelbuild_bazel-gazelle_aspect-walk-subdir.patch",
         "//patches:bazelbuild_bazel-gazelle_aspect-gitignore.patch",
     ],
     strip_prefix = "bazel-gazelle-efeeebf581083dd6bac6e4ebd1512265d8b13f3f",
@@ -33,7 +32,6 @@ go_deps.module_override(
     patch_strip = 1,
     patches = [
         "//patches:bazelbuild_bazel-gazelle_aspect-cli.patch",
-        "//patches:bazelbuild_bazel-gazelle_aspect-walk-subdir.patch",
         "//patches:bazelbuild_bazel-gazelle_aspect-gitignore.patch",
     ],
     path = "github.com/bazelbuild/bazel-gazelle",
