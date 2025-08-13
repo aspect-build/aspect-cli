@@ -249,26 +249,14 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	if err != nil {
 		return fmt.Errorf("failed to create initial bazel command: %w", err)
 	}
-	if err := initCmd.Start(); err != nil {
-		return fmt.Errorf("failed to start initial bazel command: %w", err)
-	}
-
-	// Watch the process BES events to inspect the run target
-	if err := changedetect.processBES(pcctx); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
-
-		return fmt.Errorf("failed to process BES on init: %w", err)
-	}
-
-	if err := initCmd.Wait(); err != nil {
+	if err := initCmd.Run(); err != nil {
 		return fmt.Errorf("initial bazel command failed: %w", err)
 	}
 	initCmd = nil
 
-	if !changedetect.hasTargetBuildEventInfo() {
-		return fmt.Errorf("failed to determine target %v information from build events: %v", changedetect.targetLabel, changedetect.besFile.Name())
+	// Detect the context of the run target after this initial build.
+	if err := changedetect.detectContext(); err != nil {
+		return fmt.Errorf("failed to detect context on init: %w", err)
 	}
 
 	// Start the workspace watcher

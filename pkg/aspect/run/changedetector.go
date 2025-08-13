@@ -2,7 +2,8 @@ package run
 
 import (
 	"bufio"
-	"context"
+	"crypto/sha256"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +12,8 @@ import (
 	"path"
 	"slices"
 	"strings"
-	"time"
 
-	buildeventstream "github.com/aspect-build/aspect-cli/bazel/buildeventstream"
 	"github.com/aspect-build/aspect-cli/pkg/ibp"
-	"google.golang.org/protobuf/encoding/protodelim"
 )
 
 type ExecLogEntry struct {
@@ -79,12 +77,15 @@ type ExecLogEntry struct {
 }
 
 type ChangeDetector struct {
-	workspaceDir string
-	execlogFile  *os.File
-	besFile      *os.File
+	workspaceDir      string
+	execlogFile       *os.File
+	watchManifestFile *os.File
 
 	// Current known state of sources
 	sourcesInfo ibp.SourceInfoMap
+
+	watchRepoDir  string
+	watchRepoName string
 
 	// Changes detected to the sources since the last cycleChanges() call.
 	cycleSourceChanges ibp.SourceInfoMap
@@ -95,19 +96,31 @@ type ChangeDetector struct {
 	localExecroot        string
 }
 
+//go:embed aspect_watch.bzl
+var ASPECT_WATCH_BZL_CONTENT []byte
+
 func newChangeDetector(workspaceDir string) (*ChangeDetector, error) {
 	execlog, err := os.CreateTemp(os.TempDir(), fmt.Sprintf("aspect-watch-%v-execlog-*.json", os.Getpid()))
 	if err != nil {
 		return nil, err
 	}
-	bes, err := os.CreateTemp(os.TempDir(), fmt.Sprintf("aspect-watch-%v-bes-*.proto", os.Getpid()))
+
+	watchManifest, err := os.CreateTemp(os.TempDir(), fmt.Sprintf("aspect-watch-%v-*.manifest", os.Getpid()))
 	if err != nil {
 		return nil, err
 	}
+
+	watchRepoName, watchRepoDir, err := createUserWatchRepo()
+	if err != nil {
+		return nil, err
+	}
+
 	return &ChangeDetector{
 		workspaceDir:         workspaceDir,
 		execlogFile:          execlog,
-		besFile:              bes,
+		watchManifestFile:    watchManifest,
+		watchRepoDir:         watchRepoDir,
+		watchRepoName:        watchRepoName,
 		targetTags:           []string{},
 		targetLabel:          "",
 		targetExecutablePath: "",
@@ -117,9 +130,9 @@ func newChangeDetector(workspaceDir string) (*ChangeDetector, error) {
 func (cd *ChangeDetector) Close() error {
 	return errors.Join(
 		cd.execlogFile.Close(),
-		cd.besFile.Close(),
+		cd.watchManifestFile.Close(),
 		os.Remove(cd.execlogFile.Name()),
-		os.Remove(cd.besFile.Name()),
+		os.Remove(cd.watchManifestFile.Name()),
 	)
 }
 
@@ -131,127 +144,11 @@ func (cd *ChangeDetector) bazelFlags(trackChanges bool) []string {
 		flags = append(flags, "--execution_log_json_file", cd.execlogFile.Name(), "--noexecution_log_sort")
 	}
 
-	if !cd.hasTargetBuildEventInfo() {
-		flags = append(flags, "--build_event_binary_file", cd.besFile.Name(), "--build_event_binary_file_upload_mode=fully_async")
-	}
+	flags = append(flags, fmt.Sprintf("--override_repository=%s=%s", cd.watchRepoName, cd.watchRepoDir))
+	flags = append(flags, fmt.Sprintf("--aspects=@@%s//:aspect_watch.bzl%%watch_manifest", cd.watchRepoName))
+	flags = append(flags, "--output_groups=+__aspect_watch_watch_manifest", fmt.Sprintf("--aspects_parameters=aspect_watch_watch_manifest=%s", cd.watchManifestFile.Name()))
 
 	return flags
-}
-
-func (cd *ChangeDetector) hasTargetBuildEventInfo() bool {
-	return !(cd.targetLabel == "" || cd.targetExecutablePath == "" || cd.localExecroot == "")
-}
-
-func (cd *ChangeDetector) processBES(ctx context.Context) error {
-	r, err := os.Open(cd.besFile.Name())
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-
-	reader := bufio.NewReader(r)
-
-	// It is expected that the BES output will contain new information every
-	// 20 seconds to avoid deadlocking the program.
-	// If for some reason Bazel can't produce BES data every 20 seconds, it
-	// might be dead already or so slow that it can be considered dead.
-	// This can be adjusted as needed in future if needed.
-	timeoutd := 20 * time.Second
-	timeout := time.After(timeoutd)
-
-	namedSets := make(map[string][]*buildeventstream.File, 0)
-
-	for !cd.hasTargetBuildEventInfo() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		event := buildeventstream.BuildEvent{}
-		if err := protodelim.UnmarshalFrom(reader, &event); err != nil {
-			if errors.Is(err, io.EOF) {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-timeout:
-					return fmt.Errorf("timeout waiting for BES data")
-				case <-time.After(50):
-					// throttle the reading of the BES file when no new data is available
-					continue
-				}
-			}
-
-			return fmt.Errorf("failed to parse BES event: %w", err)
-		}
-
-		// We have received an event, reset the timer.
-		timeout = time.After(timeoutd)
-
-		switch event.Id.Id.(type) {
-		case *buildeventstream.BuildEventId_ExecRequest:
-			execPath := strings.Split(string(event.GetExecRequest().GetArgv()[2]), " ")[0]
-			if cd.targetExecutablePath != "" && cd.targetExecutablePath != execPath {
-				return fmt.Errorf("target executable path changed from %s to %s, this is not supported", cd.targetExecutablePath, execPath)
-			}
-
-			cd.targetExecutablePath = execPath
-
-		case *buildeventstream.BuildEventId_NamedSet:
-			// Record the named sets of files which the TargetCompleted event may reference.
-			namedSets[event.Id.GetNamedSet().GetId()] = event.GetNamedSetOfFiles().GetFiles()
-
-		case *buildeventstream.BuildEventId_TargetCompleted:
-			if event.Id.GetTargetCompleted().Aspect != "" {
-				continue
-			}
-			cd.targetLabel = event.Id.GetTargetCompleted().GetLabel()
-			cd.targetTags = event.GetCompleted().GetTag()
-
-			if importantOutput := event.GetCompleted().GetImportantOutput(); len(importantOutput) > 0 {
-				// The deprecated "important output" path to the executable
-				execPath := strings.TrimPrefix(importantOutput[0].GetUri(), "file://")
-				if cd.targetExecutablePath != "" && cd.targetExecutablePath != execPath {
-					return fmt.Errorf("target executable path changed from %s to %s, this is not supported", cd.targetExecutablePath, execPath)
-				}
-
-				cd.targetExecutablePath = execPath
-			} else {
-				// The default output group reference to the executable via named file sets
-				for _, og := range event.GetCompleted().GetOutputGroup() {
-					if og.Name == "default" {
-						for _, f := range og.GetFileSets() {
-							if files, hasGroup := namedSets[f.Id]; hasGroup && len(files) == 1 {
-								execPath := path.Join(cd.workspaceDir, path.Join(files[0].PathPrefix...), files[0].Name)
-								if cd.targetExecutablePath != "" && cd.targetExecutablePath != execPath {
-									return fmt.Errorf("target executable path changed from %s to %s, this is not supported", cd.targetExecutablePath, execPath)
-								}
-
-								cd.targetExecutablePath = execPath
-								break
-							}
-						}
-						break
-					}
-				}
-			}
-
-		case *buildeventstream.BuildEventId_Workspace:
-			cd.localExecroot = event.GetWorkspaceInfo().LocalExecRoot
-		}
-
-		// This is here to prevent deadlocking, when we reach the last BES
-		// message, ideally should never happen, we stop the loop.
-		if event.LastMessage {
-			break
-		}
-	}
-
-	if !cd.hasTargetBuildEventInfo() {
-		return fmt.Errorf("failed to determine target information from build events: %v", cd.besFile.Name())
-	}
-
-	return nil
 }
 
 func (cd *ChangeDetector) explicitlySupportsIBP() bool {
@@ -284,8 +181,32 @@ func (cd *ChangeDetector) loadFullSourceInfo() (ibp.SourceInfoMap, error) {
 	return sim, nil
 }
 
-// Cycle reparses execution log to discover inputs
+// Detect initial context for the run target.
+func (cd *ChangeDetector) detectContext() error {
+	manifestFile, err := os.ReadFile(cd.watchManifestFile.Name())
+	if err != nil {
+		return fmt.Errorf("failed to read watch manifest file: %w", err)
+	}
+	lines := strings.Split(string(manifestFile), "\n")
+	if len(lines) != 5 || lines[4] != "" {
+		return fmt.Errorf("watch manifest file is malformed, expected 5 lines, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+
+	cd.localExecroot = lines[0]
+	cd.targetExecutablePath = lines[1]
+	cd.targetLabel = lines[2]
+	cd.targetTags = strings.Split(lines[3], ",")
+
+	return nil
+}
+
+// Detect changes after an incremental triggered by the source changes.
 func (cd *ChangeDetector) detectChanges(sourceChanges []string) error {
+	err := cd.detectContext()
+	if err != nil {
+		return fmt.Errorf("failed to detect context: %w", err)
+	}
+
 	latestManifest, err := cd.parseRunfilesManifest()
 	if err != nil {
 		return fmt.Errorf("failed to cycle the runfiles manifest: %w", err)
@@ -378,6 +299,10 @@ func parseExecLogInputs(in io.Reader) ([]string, error) {
 // Cycle reparses execution log to discover inputs
 func (cd *ChangeDetector) parseRunfilesManifest() (*manifestMetadata, error) {
 	// TODO: cache based on manifest file stats?
+
+	if cd.targetExecutablePath == "" {
+		return nil, fmt.Errorf("targetExecutablePath is not set")
+	}
 
 	manifestPath := fmt.Sprintf("%s.runfiles_manifest", cd.targetExecutablePath)
 
@@ -474,4 +399,31 @@ func toJsonBoolPtr(b bool) *bool {
 		return &b
 	}
 	return nil
+}
+
+func createUserWatchRepo() (string, string, error) {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", "", err
+	}
+
+	name := fmt.Sprintf("aspect-watch-%x", sha256.Sum256(ASPECT_WATCH_BZL_CONTENT))
+	dir := path.Join(cacheDir, name)
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return name, dir, err
+	}
+	if err := os.WriteFile(path.Join(dir, "aspect_watch.bzl"), ASPECT_WATCH_BZL_CONTENT, 0644); err != nil {
+		return name, dir, err
+	}
+	if err := os.WriteFile(path.Join(dir, "MODULE.bazel"), []byte{}, 0644); err != nil {
+		return name, dir, err
+	}
+	if err := os.WriteFile(path.Join(dir, "BUILD.bazel"), []byte{}, 0644); err != nil {
+		return name, dir, err
+	}
+	if err := os.WriteFile(path.Join(dir, "WORKSPACE"), []byte{}, 0644); err != nil {
+		return name, dir, err
+	}
+	return name, dir, nil
 }
