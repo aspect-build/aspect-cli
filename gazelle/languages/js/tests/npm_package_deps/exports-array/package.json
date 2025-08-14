@@ -1,0 +1,8 @@
+{
+  "name": "pkg-with-exports-array",
+  "private": true,
+  "exports": [
+    "./bin/main.js",
+    "./lib/lib.js"
+  ]
+}
