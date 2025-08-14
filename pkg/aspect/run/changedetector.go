@@ -410,6 +410,12 @@ func createUserWatchRepo() (string, string, error) {
 	name := fmt.Sprintf("aspect-watch-%x", sha256.Sum256(ASPECT_WATCH_BZL_CONTENT))
 	dir := path.Join(cacheDir, name)
 
+	// If the directory already exists simply return it. The sha256 hash ensures that the
+	// repo is up to date and contains the correct files.
+	if d, err := os.Stat(dir); err == nil && d.IsDir() {
+		return name, dir, nil
+	}
+
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return name, dir, err
 	}
