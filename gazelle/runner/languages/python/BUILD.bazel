@@ -6,7 +6,7 @@ go_library(
         "unix.go",
         "windows.go",
     ],
-    importpath = "github.com/aspect-build/aspect-cli/gazelle/languages/python",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/runner/languages/python",
     visibility = ["//visibility:public"],
     deps = select({
         "@io_bazel_rules_go//go/platform:android": [
