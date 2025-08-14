@@ -9,7 +9,7 @@ require (
 	github.com/bazelbuild/bazel-gazelle v0.45.1-0.20250807184103-efeeebf58108 // NOTE: keep in sync with go.MODULE.bazel
 	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync
 	github.com/bazelbuild/buildtools v0.0.0-20250715102656-62b9413b08bb
-	github.com/bazelbuild/rules_go v0.55.1 // indirect; NOTE: keep in sync with go.MODULE.bazel
+	github.com/bazelbuild/rules_go v0.56.1 // indirect; NOTE: keep in sync with go.MODULE.bazel
 	github.com/bluekeyes/go-gitdiff v0.7.3
 	github.com/bmatcuk/doublestar/v4 v4.9.1
 	github.com/emirpasic/gods v1.18.1

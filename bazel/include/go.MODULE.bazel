@@ -1,5 +1,5 @@
 # rules_go
-bazel_dep(name = "rules_go", version = "0.55.1", repo_name = "io_bazel_rules_go")
+bazel_dep(name = "rules_go", version = "0.56.1", repo_name = "io_bazel_rules_go")
 
 go_sdk = use_extension("@io_bazel_rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.from_file(
@@ -44,16 +44,6 @@ go_deps.module_override(
 go_deps.gazelle_override(
     build_file_generation = "clean",
     path = "github.com/bazelbuild/bazelisk",
-)
-go_deps.module_override(
-    # See https://github.com/bazelbuild/bazel-gazelle/issues/1421
-    patches = [
-        "//patches:com_github_cloudflare_circl/fp25519.patch",
-        "//patches:com_github_cloudflare_circl/fp448.patch",
-        "//patches:com_github_cloudflare_circl/x25519.patch",
-        "//patches:com_github_cloudflare_circl/x448.patch",
-    ],
-    path = "github.com/cloudflare/circl",
 )
 go_deps.module_override(
     patch_strip = 2,
