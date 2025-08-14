@@ -8,6 +8,8 @@ importers:
 
   .: {}
 
+  exports-array: {}
+
   exports-gen: {}
 
   exports-ignore: {}

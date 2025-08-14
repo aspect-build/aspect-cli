@@ -15,13 +15,22 @@ func TestParsePackageJsonImports(t *testing.T) {
 	})
 
 	t.Run("package exports", func(t *testing.T) {
+		// String
+		assertParsePackageJsonImports(t, `{"exports":"./foo.js"}`, "foo.js")
+
+		// Object
 		assertParsePackageJsonImports(t, `{"exports":{"entry-name":"./foo.js"}}`, "foo.js")
 		assertParsePackageJsonImports(t, `{"exports":{"./subpath":"./foo.js"}}`, "foo.js")
 		assertParsePackageJsonImports(t, `{"exports":{"./subpath":null}}`)
 		assertParsePackageJsonImports(t, `{"exports":{"./subpath":"./foo.js","./subpath2":"./bar.js"}}`, "foo.js", "bar.js")
+
+		// Array
+		assertParsePackageJsonImports(t, `{"exports":[]}`)
+		assertParsePackageJsonImports(t, `{"exports":["./foo.js"]}`, "foo.js")
 	})
 
 	t.Run("invalid exports", func(t *testing.T) {
+		assertParsePackageJsonImports(t, `{"exports":null}`)
 		assertParsePackageJsonImports(t, `{"exports":{"./subpath":123, "x": []}}`)
 	})
 }

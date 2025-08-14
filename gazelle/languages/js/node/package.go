@@ -42,6 +42,7 @@ func ParsePackageJsonImports(packageJsonReader io.Reader) ([]string, error) {
 		imports = append(imports, path.Clean(c.Typings))
 	}
 
+	// https://nodejs.org/api/packages.html#exports
 	if c.Exports != nil {
 		switch exports := c.Exports.(type) {
 		case string:
@@ -71,15 +72,25 @@ func ParsePackageJsonImports(packageJsonReader io.Reader) ([]string, error) {
 						case string:
 							imports = append(imports, path.Clean(subE))
 						default:
-							BazelLog.Warnf("unknown exports.%s.%s type: %T", exportKey, subEKey, subE)
+							BazelLog.Warnf("Unknown package.json exports.%s.%s type: %T", exportKey, subEKey, subE)
 						}
 					}
 				default:
-					BazelLog.Warnf("unknown exports.%s type: %T", exportKey, export)
+					BazelLog.Warnf("Unknown package.json exports.%s type: %T", exportKey, export)
+				}
+			}
+		case []interface{}:
+			// Array of subpath exports
+			for i, subE := range exports {
+				switch subE := subE.(type) {
+				case string:
+					imports = append(imports, path.Clean(subE))
+				default:
+					BazelLog.Warnf("Unknown package.json exports[%v] type: %T", i, subE)
 				}
 			}
 		default:
-			BazelLog.Warnf("unknown exports type: %T", exports)
+			BazelLog.Warnf("Unknown package.json exports type: %T", exports)
 		}
 	}
 
