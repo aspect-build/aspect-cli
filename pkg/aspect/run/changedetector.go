@@ -306,7 +306,7 @@ func (cd *ChangeDetector) parseRunfilesManifest() (*manifestMetadata, error) {
 
 	manifestPath := fmt.Sprintf("%s.runfiles_manifest", cd.targetExecutablePath)
 
-	manifestFile, err := os.Open(manifestPath)
+	manifestFile, err := os.Open(path.Join(cd.localExecroot, manifestPath))
 	if err != nil {
 		return nil, err
 	}
