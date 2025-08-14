@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 
+	"github.com/spf13/viper"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -20,17 +21,27 @@ const (
  * Configure global OpenTelemetry settings for the CLI.
  */
 func StartSession(ctx context.Context) func() {
-	if os.Getenv(outputFileEnv) != "" {
-		des, err := setupOTelFile(ctx)
-		if err != nil {
-			panic(err)
-		}
-		return des
+	des, err := setupOTelFile(ctx)
+	if err != nil {
+		panic(err)
 	}
-	return func() {}
+	if des == nil {
+		return func() {}
+	}
+	return des
 }
 
 func setupOTelFile(ctx context.Context) (func(), error) {
+	telemetryOutFile := os.Getenv(outputFileEnv)
+	if telemetryOutFile == "" {
+		telemetryOutFile = viper.GetString("telemetry.output")
+	}
+
+	// No telemetry output configured
+	if telemetryOutFile == "" {
+		return nil, nil
+	}
+
 	r, err := resource.Merge(
 		resource.Default(),
 		resource.NewWithAttributes(
@@ -42,7 +53,7 @@ func setupOTelFile(ctx context.Context) (func(), error) {
 		return nil, err
 	}
 
-	f, err := os.OpenFile(os.Getenv(outputFileEnv), os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(telemetryOutFile, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, err
 	}
