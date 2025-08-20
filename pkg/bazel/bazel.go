@@ -65,6 +65,7 @@ type Bazel interface {
 	WithEnv(env []string) Bazel
 	AQuery(expr string, bazelFlags []string) (*analysis.ActionGraphContainer, error)
 	BazelDashDashVersion() (string, error)
+	GetBazelInstallation() (*BazelInstallation, error)
 	BazelFlagsAsProto() ([]byte, error)
 	HandleReenteringAspect(streams ioutils.Streams, args []string, aspectLockVersion bool) (bool, error)
 	RunCommand(streams ioutils.Streams, wd *string, command ...string) error
@@ -80,6 +81,12 @@ type Bazel interface {
 type bazel struct {
 	workspaceRoot string
 	env           []string
+}
+
+func (b *bazel) GetBazelInstallation() (*BazelInstallation, error) {
+	bazelisk := NewBazelisk(b.workspaceRoot, false)
+	repos := createRepositories(bazelisk.config)
+	return bazelisk.GetBazelInstallation(repos, bazelisk.config)
 }
 
 // ExecutablePath implements Bazel.

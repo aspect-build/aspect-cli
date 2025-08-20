@@ -51,8 +51,6 @@ cp {info_file} {aspect_watch_watch_manifest}
 
 watch_manifest = aspect(
     implementation = _watch_manifest_impl,
-    attr_aspects = [],
-    required_providers = [DefaultInfo],
     attrs = {
         "aspect_watch_watch_manifest": attr.string(),
     },

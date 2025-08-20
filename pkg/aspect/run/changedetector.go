@@ -94,12 +94,15 @@ type ChangeDetector struct {
 	targetLabel          string
 	targetExecutablePath string
 	localExecroot        string
+
+	// Support bazel <8
+	useLegacyReplaceWorkspace bool
 }
 
 //go:embed aspect_watch.bzl
 var ASPECT_WATCH_BZL_CONTENT []byte
 
-func newChangeDetector(workspaceDir string) (*ChangeDetector, error) {
+func newChangeDetector(workspaceDir string, useLegacyReplaceWorkspace bool) (*ChangeDetector, error) {
 	execlog, err := os.CreateTemp(os.TempDir(), fmt.Sprintf("aspect-watch-%v-execlog-*.json", os.Getpid()))
 	if err != nil {
 		return nil, err
@@ -124,6 +127,8 @@ func newChangeDetector(workspaceDir string) (*ChangeDetector, error) {
 		targetTags:           []string{},
 		targetLabel:          "",
 		targetExecutablePath: "",
+
+		useLegacyReplaceWorkspace: useLegacyReplaceWorkspace,
 	}, nil
 }
 
@@ -144,8 +149,15 @@ func (cd *ChangeDetector) bazelFlags(trackChanges bool) []string {
 		flags = append(flags, "--execution_log_json_file", cd.execlogFile.Name(), "--noexecution_log_sort")
 	}
 
-	flags = append(flags, fmt.Sprintf("--override_repository=%s=%s", cd.watchRepoName, cd.watchRepoDir))
-	flags = append(flags, fmt.Sprintf("--aspects=@@%s//:aspect_watch.bzl%%watch_manifest", cd.watchRepoName))
+	injectArgName := "inject_repository"
+	aspectRepoPrefix := "@"
+	if cd.useLegacyReplaceWorkspace {
+		injectArgName = "override_repository"
+		aspectRepoPrefix = "@@"
+	}
+
+	flags = append(flags, fmt.Sprintf("--%s=%s=%s", injectArgName, cd.watchRepoName, cd.watchRepoDir))
+	flags = append(flags, fmt.Sprintf("--aspects=%s%s//:aspect_watch.bzl%%watch_manifest", aspectRepoPrefix, cd.watchRepoName))
 	flags = append(flags, "--output_groups=+__aspect_watch_watch_manifest", fmt.Sprintf("--aspects_parameters=aspect_watch_watch_manifest=%s", cd.watchManifestFile.Name()))
 
 	return flags
@@ -189,7 +201,7 @@ func (cd *ChangeDetector) detectContext() error {
 	}
 	lines := strings.Split(string(manifestFile), "\n")
 	if len(lines) != 5 || lines[4] != "" {
-		return fmt.Errorf("watch manifest file is malformed, expected 5 lines, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+		return fmt.Errorf("watch manifest file (%s) is malformed, expected 5 lines, got %d:\n%s", cd.watchManifestFile.Name(), len(lines), strings.Join(lines, "\n"))
 	}
 
 	cd.localExecroot = lines[0]
