@@ -5,7 +5,7 @@ go 1.24.5
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/alphadose/haxmap v1.4.1
-	github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250706032523-18d0d297aa69 // NOTE: keep in sync with python.MODULE.bazel
+	github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250715122526-cab415d82ebb // NOTE: keep in sync with python.MODULE.bazel
 	github.com/bazelbuild/bazel-gazelle v0.45.1-0.20250807184103-efeeebf58108 // NOTE: keep in sync with go.MODULE.bazel
 	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync
 	github.com/bazelbuild/buildtools v0.0.0-20250715102656-62b9413b08bb
@@ -93,7 +93,6 @@ require (
 	github.com/cyphar/filepath-securejoin v0.4.1 // indirect
 	github.com/dimchansky/utfbom v1.1.1 // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
-	github.com/dougthor42/go-tree-sitter v0.0.0-20241210060307-2737e1d0de6b // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elliotchance/orderedmap v1.8.0 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
