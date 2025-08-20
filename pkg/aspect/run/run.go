@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -156,7 +157,12 @@ func (runner *Run) runCommand(ctx context.Context, bazelCmd []string, bzlCommand
 }
 
 func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandStreams ioutils.Streams) error {
-	changedetect, err := newChangeDetector(runner.bzl.WorkspaceRoot())
+	bazelInstall, err := runner.bzl.GetBazelInstallation()
+	if err != nil {
+		return fmt.Errorf("failed to get Bazel installation: %w", err)
+	}
+
+	changedetect, err := newChangeDetector(runner.bzl.WorkspaceRoot(), strings.HasPrefix(bazelInstall.Version, "7."))
 	if err != nil {
 		return fmt.Errorf("failed to created change detector: %w", err)
 	}
