@@ -46,23 +46,12 @@ func main() {
 	fmt.Printf("Mode: %s\n", mode)
 	fmt.Printf("Dirs: %v\n", dirs)
 
-	if os.Getenv(ibp.PROTOCOL_SOCKET_ENV) != "" {
-		watch := ibp.NewClient(os.Getenv(ibp.PROTOCOL_SOCKET_ENV))
+	if watchSocket := os.Getenv(ibp.PROTOCOL_SOCKET_ENV); watchSocket != "" {
+		err := c.Watch(watchSocket, mode, []string{}, dirs)
 
-		// TODO: established connection must be watching the source code, not the runfiles!
-
-		if err := watch.Connect(); err != nil {
-			fmt.Printf("Failed to connect to incremental build service: %v\n", err)
-			os.Exit(1)
-		}
-		defer watch.Disconnect()
-
-		fmt.Printf("Using incremental build service from %v\n", os.Getenv(ibp.PROTOCOL_SOCKET_ENV))
-
-		for cycle := range watch.AwaitCycle() {
-			fmt.Printf("Cycle %d: %v\n", cycle.CycleId, cycle.Sources)
-
-			c.Generate(mode, []string{}, dirs)
+		// Handle command errors
+		if err != nil {
+			log.Fatalf("Error running gazelle watcher: %v", err)
 		}
 	} else {
 		_, err := c.Generate(mode, []string{}, dirs)
