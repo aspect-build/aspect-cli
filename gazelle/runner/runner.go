@@ -32,7 +32,7 @@ import (
 	python "github.com/aspect-build/aspect-cli/gazelle/runner/languages/python"
 	vendoredGazelle "github.com/aspect-build/aspect-cli/gazelle/runner/vendored/gazelle"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
-	watcher "github.com/aspect-build/aspect-cli/pkg/watch"
+	"github.com/aspect-build/aspect-cli/pkg/ibp"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
@@ -209,7 +209,13 @@ func (runner *GazelleRunner) Generate(mode GazelleMode, excludes []string, args 
 
 	return updated > 0, err
 }
-func (p *GazelleRunner) Watch(ctx context.Context, mode GazelleMode, excludes []string, args []string) error {
+
+func (p *GazelleRunner) Watch(watchAddress string, mode GazelleMode, excludes []string, args []string) error {
+	watch := ibp.NewClient(watchAddress)
+	if err := watch.Connect(); err != nil {
+		return fmt.Errorf("failed to connect to watchman: %w", err)
+	}
+
 	// Params for the underlying gazelle call
 	wd, fixArgs := p.PrepareGazelleArgs(mode, excludes, args)
 
@@ -226,14 +232,7 @@ func (p *GazelleRunner) Watch(ctx context.Context, mode GazelleMode, excludes []
 		fmt.Printf("Initial %v BUILD files visited\n", visited)
 	}
 
-	// Use watchman to detect changes to trigger further invocations
-	w := watcher.NewWatchman(wd)
-	if err := w.Start(); err != nil {
-		return fmt.Errorf("failed to start the watcher: %w", err)
-	}
-	defer w.Close()
-
-	ctx, t := p.tracer.Start(ctx, "GazelleRunner.Subscribe", trace.WithAttributes(
+	ctx, t := p.tracer.Start(context.Background(), "GazelleRunner.Watch", trace.WithAttributes(
 		traceAttr.String("mode", mode),
 		traceAttr.StringSlice("languages", p.languageKeys),
 		traceAttr.StringSlice("excludes", excludes),
@@ -242,22 +241,12 @@ func (p *GazelleRunner) Watch(ctx context.Context, mode GazelleMode, excludes []
 	defer t.End()
 
 	// Subscribe to further changes
-	for cs, err := range w.Subscribe(ctx, "aspect-configure-watch") {
-		if err != nil {
-			return fmt.Errorf("failed to get next event: %w", err)
-		}
-
-		_, t := p.tracer.Start(ctx, "GazelleRunner.Subscribe.Trigger")
-
-		// Enter into a state to discard supirious changes caused by potential file atime
-		// updates by gazelle languages.
-		if err := w.StateEnter("aspect-configure-watch"); err != nil {
-			return fmt.Errorf("failed to enter watch state: %w", err)
-		}
+	for cs := range watch.AwaitCycle() {
+		_, t := p.tracer.Start(ctx, "GazelleRunner.Watch.Trigger")
 
 		// The directories that have changed which gazelle should update.
 		// This assumes all enabled gazelle languages support incremental updates.
-		changedDirs := computeUpdatedDirs(wd, cs.Paths)
+		changedDirs := computeUpdatedDirs(wd, cs.Sources)
 
 		fmt.Printf("Detected changes in %v\n", changedDirs)
 
@@ -270,11 +259,6 @@ func (p *GazelleRunner) Watch(ctx context.Context, mode GazelleMode, excludes []
 		// Only output when changes were made, otherwise hopefully the execution was fast enough to be unnoticeable.
 		if updated > 0 {
 			fmt.Printf("%v/%v BUILD files updated\n", updated, visited)
-		}
-
-		// Leave the state and fast forward the subscription clock.
-		if err := w.StateLeave("aspect-configure-watch"); err != nil {
-			return fmt.Errorf("failed to leave watch state: %w", err)
 		}
 
 		t.End()
@@ -294,11 +278,11 @@ func (p *GazelleRunner) Watch(ctx context.Context, mode GazelleMode, excludes []
  *
  * TODO: this should be solved in gazelle? Including invocations on cli?
  */
-func computeUpdatedDirs(rootDir string, changedFiles []string) []string {
+func computeUpdatedDirs(rootDir string, changedFiles ibp.SourceInfoMap) []string {
 	changedDirs := make([]string, 0, 1)
 	processedDirs := make(map[string]bool, len(changedFiles))
 
-	for _, f := range changedFiles {
+	for f, _ := range changedFiles {
 		dir := path.Dir(f)
 		for !processedDirs[dir] {
 			processedDirs[dir] = true

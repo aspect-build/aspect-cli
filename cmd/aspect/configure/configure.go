@@ -18,7 +18,10 @@ package configure
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"time"
 
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/spf13/cobra"
@@ -29,8 +32,11 @@ import (
 	"github.com/aspect-build/aspect-cli/gazelle/runner"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
+	"github.com/aspect-build/aspect-cli/pkg/bazel"
+	"github.com/aspect-build/aspect-cli/pkg/ibp"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
+	"github.com/aspect-build/aspect-cli/pkg/watch"
 )
 
 func NewDefaultCmd() *cobra.Command {
@@ -118,13 +124,12 @@ configure:
 		}
 	}
 
-	var changed bool
-	var err error
 	if watch {
-		err = v.Watch(ctx, mode, exclude, args)
-	} else {
-		changed, err = v.Generate(mode, exclude, args)
+		// Watch mode has its own run/return/exit-code logic
+		return runConfigureWatch(ctx, v, mode, exclude, args)
 	}
+
+	changed, err := v.Generate(mode, exclude, args)
 
 	// Unique error codes for:
 	// - internal errors
@@ -148,6 +153,95 @@ configure:
 	}
 
 	return err
+}
+
+func runConfigureWatch(ctx context.Context, v *runner.GazelleRunner, mode string, exclude []string, args []string) error {
+	abazel := ibp.NewServer()
+
+	// Start listening for a connection immediately.
+	if err := abazel.Serve(ctx); err != nil {
+		return fmt.Errorf("failed to connect to aspect bazel protocol: %w", err)
+	}
+
+	// Close the watch protocol on complete, no matter what the status is
+	defer abazel.Close()
+
+	watchDone := make(chan struct{})
+
+	// "Launch" the client in the background
+	go func() {
+		v.Watch(abazel.Address(), mode, exclude, args)
+		close(watchDone)
+	}()
+
+	// Start the workspace watcher
+	w := watch.NewWatchman(bazel.WorkspaceFromWd.WorkspaceRoot())
+	if err := w.Start(); err != nil {
+		return fmt.Errorf("failed to start the watcher: %w", err)
+	}
+	defer w.Close()
+
+	// Since the Subscribe() method is blocking, we need to run a separate
+	// goroutine to stop the watcher when we receive a signal to cancel the
+	// process.
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-watchDone:
+		}
+
+		w.Close()
+	}()
+
+	// Wait for either the connection to be established or the timeout to occur.
+	// Should be instant since the runner is in-process.
+	select {
+	case <-abazel.WaitForConnection():
+	case <-time.After(10 * time.Second):
+	}
+
+	if !abazel.HasConnection() {
+		return fmt.Errorf("no connection to incremental protocol")
+	}
+
+	for cs, err := range w.Subscribe(ctx, "aspect-configure-watch") {
+		if err != nil {
+			// Break the subscribe iteration if the context is done or if the watcher is closed.
+			if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+				break
+			}
+
+			return fmt.Errorf("failed to get next event: %w", err)
+		}
+
+		// Enter into the build state to discard supirious changes caused by Bazel reading the
+		// inputs which leads to their atime to change.
+		if err := w.StateEnter("aspect-configure-watch"); err != nil {
+			return fmt.Errorf("failed to enter build state: %w", err)
+		}
+
+		if err := abazel.Cycle(changesetToCycle(cs)); err != nil {
+			return fmt.Errorf("failed to send cycle to incremental protocol: %w", err)
+		}
+
+		// Leave the build state and fast forward the subscription clock.
+		if err := w.StateLeave("aspect-configure-watch"); err != nil {
+			return fmt.Errorf("failed to enter build state: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Convert a watch.ChangeSet to ibp.SourceInfoMap
+func changesetToCycle(cs *watch.ChangeSet) ibp.SourceInfoMap {
+	b := true
+	si := &ibp.SourceInfo{IsSource: &b}
+	changes := make(ibp.SourceInfoMap, len(cs.Paths))
+	for _, p := range cs.Paths {
+		changes[p] = si
+	}
+	return changes
 }
 
 func addCliEnabledLanguages(c *runner.GazelleRunner) {
