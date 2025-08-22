@@ -186,6 +186,9 @@ lint:
 	requestReports, _ := cmd.Flags().GetBool("report")
 	machineReports, _ := cmd.Flags().GetBool("machine")
 	hideSuccess, _ := cmd.Flags().GetBool("quiet")
+	if viper.GetBool("lint.quiet") {
+		hideSuccess = true
+	}
 
 	// Separate out the lint command specific flags from the list of args to
 	// pass to `bazel build`
