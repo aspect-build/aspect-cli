@@ -157,6 +157,7 @@ func separateFlags(flags *pflag.FlagSet, args []string) ([]string, []string, []s
 func (runner *Linter) Run(ctx context.Context, cmd *cobra.Command, args []string) error {
 	isInteractiveMode, _ := cmd.Root().PersistentFlags().GetBool(flags.AspectInteractiveFlagName)
 	linters := viper.GetStringSlice("lint.aspects")
+	hideSuccess := viper.GetBool("lint.quiet")
 
 	if len(linters) == 0 {
 		fmt.Fprintf(runner.streams.Stdout, `No aspects enabled for linting.
@@ -185,7 +186,11 @@ lint:
 	requestFixes, _ := cmd.Flags().GetBool("fixes")
 	requestReports, _ := cmd.Flags().GetBool("report")
 	machineReports, _ := cmd.Flags().GetBool("machine")
-	hideSuccess, _ := cmd.Flags().GetBool("quiet")
+
+	// This flag overrides the config file if set
+	if cmd.Flags().Changed("quiet") {
+		hideSuccess, _ = cmd.Flags().GetBool("quiet")
+	}
 
 	// Separate out the lint command specific flags from the list of args to
 	// pass to `bazel build`
