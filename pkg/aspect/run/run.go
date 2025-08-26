@@ -84,24 +84,8 @@ func New(
 // Event Protocol backend used by Aspect plugins to subscribe to build events.
 func (runner *Run) Run(ctx context.Context, cmd *cobra.Command, args []string) (exitErr error) {
 	bazelCmd := []string{"run"}
-
-	watch := false
-	found_dash_dash := false
-	for _, arg := range args {
-		if arg == "--" {
-			found_dash_dash = true
-		} else if !found_dash_dash && arg == "--watch" {
-			watch = true
-
-			fmt.Fprintf(
-				runner.streams.Stderr,
-				"%s Watching feature is experimental and may have breaking changes in the future.\n",
-				color.YellowString("WARNING:"),
-			)
-			continue
-		}
-		bazelCmd = append(bazelCmd, arg)
-	}
+	watch, args := flags.RemoveFlag(args, "--watch")
+	bazelCmd = append(bazelCmd, args...)
 
 	// Currently Bazel only supports a single --bes_backend so adding ours after
 	// any user supplied value will result in our bes_backend taking precedence.
@@ -157,6 +141,12 @@ func (runner *Run) runCommand(ctx context.Context, bazelCmd []string, bzlCommand
 }
 
 func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandStreams ioutils.Streams) error {
+	fmt.Fprintf(
+		runner.streams.Stderr,
+		"%s Watching feature is experimental and may have breaking changes in the future.\n",
+		color.YellowString("WARNING:"),
+	)
+
 	bazelInstall, err := runner.bzl.GetBazelInstallation()
 	if err != nil {
 		return fmt.Errorf("failed to get Bazel installation: %w", err)
