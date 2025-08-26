@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
+	"os"
 	"time"
 
 	"github.com/bazelbuild/bazel-gazelle/language"
@@ -28,15 +30,15 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/aspect-build/aspect-cli/gazelle/common/cache"
+	"github.com/aspect-build/aspect-cli/gazelle/common/ibp"
+	"github.com/aspect-build/aspect-cli/gazelle/common/watch"
 	starzelleHost "github.com/aspect-build/aspect-cli/gazelle/languages/host"
 	"github.com/aspect-build/aspect-cli/gazelle/runner"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
-	"github.com/aspect-build/aspect-cli/pkg/ibp"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
-	"github.com/aspect-build/aspect-cli/pkg/watch"
 )
 
 func NewDefaultCmd() *cobra.Command {
@@ -253,6 +255,16 @@ func addCliEnabledLanguages(c *runner.GazelleRunner) {
 
 	viper.SetDefault("configure.languages.go", false)
 	if viper.GetBool("configure.languages.go") {
+		if os.Getenv(runner.GO_REPOSITORY_CONFIG_ENV) == "" {
+			goConfigPath, err := determineGoRepositoryConfigPath()
+			if err != nil {
+				log.Fatalf("ERROR: unable to determine go_repository config path: %v", err)
+			}
+
+			if goConfigPath != "" {
+				os.Setenv(runner.GO_REPOSITORY_CONFIG_ENV, goConfigPath)
+			}
+		}
 		c.AddLanguage(runner.Go)
 	}
 

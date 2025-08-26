@@ -8,7 +8,7 @@ import (
 	"path"
 	"sync"
 
-	"github.com/aspect-build/aspect-cli/buildinfo"
+	"github.com/aspect-build/aspect-cli/gazelle/common/buildinfo"
 	BazelLog "github.com/aspect-build/aspect-cli/gazelle/common/logger"
 )
 

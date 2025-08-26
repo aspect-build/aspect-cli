@@ -10,8 +10,8 @@ import (
 	"path"
 	"sync/atomic"
 
-	"github.com/aspect-build/aspect-cli/pkg/bazel"
-	"github.com/aspect-build/aspect-cli/util/socket"
+	"github.com/aspect-build/aspect-cli/gazelle/common/bazel"
+	"github.com/aspect-build/aspect-cli/gazelle/common/socket"
 )
 
 type ChangeSet struct {

@@ -6,6 +6,6 @@ go_library(
         "json.go",
         "socket.go",
     ],
-    importpath = "github.com/aspect-build/aspect-cli/util/socket",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/common/socket",
     visibility = ["//visibility:public"],
 )

@@ -7,7 +7,7 @@ import (
 	"path"
 	"sync/atomic"
 
-	"github.com/aspect-build/aspect-cli/util/socket"
+	"github.com/aspect-build/aspect-cli/gazelle/common/socket"
 	"github.com/fatih/color"
 )
 

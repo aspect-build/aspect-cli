@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "git",
     srcs = ["gitignore.go"],
-    importpath = "github.com/aspect-build/aspect-cli/gazelle/common/git",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/runner/git",
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common/logger",

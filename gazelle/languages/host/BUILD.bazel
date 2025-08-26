@@ -17,12 +17,12 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common",
+        "//gazelle/common/bazel/workspace",
         "//gazelle/common/cache",
         "//gazelle/common/logger",
         "//gazelle/languages/host/plugin",
         "//gazelle/languages/host/queries",
         "//gazelle/languages/host/starzelle",
-        "//pkg/bazel/workspace",
         "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//label:go_default_library",
         "@bazel_gazelle//language:go_default_library",
@@ -42,7 +42,7 @@ gazelle_binary(
     testonly = True,
     languages = [
         ":host",
-        "//gazelle/common/git/testing",
+        "//gazelle/runner/git/testing",
     ],
     visibility = ["//gazelle:__subpackages__"],
 )
