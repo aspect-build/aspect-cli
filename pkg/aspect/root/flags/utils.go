@@ -31,3 +31,15 @@ func AddFlagToCommand(command []string, flag ...string) []string {
 	result = append(result, flag...)
 	return result
 }
+
+func RemoveFlag(args []string, flag string) (bool, []string) {
+	for i, arg := range args {
+		switch arg {
+		case flag:
+			return true, append(args[:i], args[i+1:]...)
+		case "--":
+			return false, args
+		}
+	}
+	return false, args
+}
