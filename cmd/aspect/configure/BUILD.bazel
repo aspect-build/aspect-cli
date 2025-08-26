@@ -2,20 +2,24 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "configure",
-    srcs = ["configure.go"],
+    srcs = [
+        "configure.go",
+        "go_deps.go",
+    ],
     importpath = "github.com/aspect-build/aspect-cli/cmd/aspect/configure",
     visibility = ["//visibility:public"],
     deps = [
         "//gazelle/common/cache",
+        "//gazelle/common/ibp",
+        "//gazelle/common/logger",
+        "//gazelle/common/watch",
         "//gazelle/languages/host",
         "//gazelle/runner",
         "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",
         "//pkg/bazel",
-        "//pkg/ibp",
         "//pkg/interceptors",
         "//pkg/ioutils",
-        "//pkg/watch",
         "@bazel_gazelle//language:go_default_library",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_viper//:viper",

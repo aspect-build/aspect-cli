@@ -4,10 +4,10 @@ go_library(
     name = "testing",
     testonly = True,
     srcs = ["language.go"],
-    importpath = "github.com/aspect-build/aspect-cli/gazelle/common/git/testing",
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/runner/git/testing",
     visibility = ["//visibility:public"],
     deps = [
-        "//gazelle/common/git",
+        "//gazelle/runner/git",
         "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//label:go_default_library",
         "@bazel_gazelle//language:go_default_library",

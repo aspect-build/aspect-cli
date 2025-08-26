@@ -24,15 +24,15 @@ import (
 	"path"
 	"strings"
 
-	cc "github.com/EngFlow/gazelle_cc/language/cc"
-	"github.com/aspect-build/aspect-cli/gazelle/common/git"
+	"github.com/EngFlow/gazelle_cc/language/cc"
+	"github.com/aspect-build/aspect-cli/gazelle/common/bazel"
+	"github.com/aspect-build/aspect-cli/gazelle/common/ibp"
 	"github.com/aspect-build/aspect-cli/gazelle/common/progress"
 	js "github.com/aspect-build/aspect-cli/gazelle/languages/js"
-	bzl "github.com/aspect-build/aspect-cli/gazelle/runner/languages/bzl"
-	python "github.com/aspect-build/aspect-cli/gazelle/runner/languages/python"
+	"github.com/aspect-build/aspect-cli/gazelle/runner/git"
+	"github.com/aspect-build/aspect-cli/gazelle/runner/languages/bzl"
+	"github.com/aspect-build/aspect-cli/gazelle/runner/languages/python"
 	vendoredGazelle "github.com/aspect-build/aspect-cli/gazelle/runner/vendored/gazelle"
-	"github.com/aspect-build/aspect-cli/pkg/bazel"
-	"github.com/aspect-build/aspect-cli/pkg/ibp"
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	golang "github.com/bazelbuild/bazel-gazelle/language/go"
@@ -70,6 +70,9 @@ const (
 	Print             = "update"
 	Diff              = "diff"
 )
+
+// An environment variable to set the full path to the gazelle repo_config
+const GO_REPOSITORY_CONFIG_ENV = "bazel_gazelle_go_repository_config"
 
 // Setup the 'configure' support for gitignore within Gazelle.
 func init() {
@@ -110,16 +113,6 @@ func (c *GazelleRunner) AddLanguage(lang GazelleLanguage) {
 	case JavaScript:
 		c.AddLanguageFactory(lang, js.NewLanguage)
 	case Go:
-		if os.Getenv(GO_REPOSITORY_CONFIG_ENV) == "" {
-			goConfigPath, err := determineGoRepositoryConfigPath()
-			if err != nil {
-				log.Fatalf("ERROR: unable to determine go_repository config path: %v", err)
-			}
-
-			if goConfigPath != "" {
-				os.Setenv(GO_REPOSITORY_CONFIG_ENV, goConfigPath)
-			}
-		}
 		c.AddLanguageFactory(lang, golang.NewLanguage)
 	case Protobuf:
 		c.AddLanguageFactory(lang, proto.NewLanguage)
@@ -136,7 +129,7 @@ func (c *GazelleRunner) AddLanguage(lang GazelleLanguage) {
 
 func (runner *GazelleRunner) PrepareGazelleArgs(mode GazelleMode, excludes []string, args []string) (string, []string) {
 	var wd string
-	if wsRoot := bazel.WorkspaceFromWd.WorkspaceRoot(); wsRoot != "" {
+	if wsRoot := bazel.FindWorkspaceDirectory(); wsRoot != "" {
 		wd = wsRoot
 	} else {
 		var err error

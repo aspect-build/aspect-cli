@@ -2,23 +2,18 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "runner",
-    srcs = [
-        "go_deps.go",
-        "runner.go",
-    ],
+    srcs = ["runner.go"],
     importpath = "github.com/aspect-build/aspect-cli/gazelle/runner",
     visibility = ["//visibility:public"],
     deps = [
-        "//gazelle/common/git",
-        "//gazelle/common/logger",
+        "//gazelle/common/bazel",
+        "//gazelle/common/ibp",
         "//gazelle/common/progress",
         "//gazelle/languages/js",
+        "//gazelle/runner/git",
         "//gazelle/runner/languages/bzl",
         "//gazelle/runner/languages/python",
         "//gazelle/runner/vendored/gazelle",
-        "//pkg/bazel",
-        "//pkg/ibp",
-        "//pkg/ioutils",
         "@bazel_gazelle//config:go_default_library",
         "@bazel_gazelle//language:go_default_library",
         "@bazel_gazelle//language/go:go_default_library",

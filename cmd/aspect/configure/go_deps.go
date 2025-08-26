@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package runner
+package configure
 
 import (
 	"fmt"
@@ -34,9 +34,6 @@ const GO_DEPS_EXTENSION_NAME = "go_deps"
 // The repository name for the gazelle repo_config.
 // https://github.com/bazel-contrib/bazel-gazelle/blob/v0.39.1/internal/bzlmod/go_deps.bzl#L648-L654
 const GO_REPOSITORY_CONFIG_REPO_NAME = "bazel_gazelle_go_repository_config"
-
-// An environment variable to set the full path to the gazelle repo_config
-const GO_REPOSITORY_CONFIG_ENV = GO_REPOSITORY_CONFIG_REPO_NAME
 
 // bazel 8 switches the bzlmod separator to "+"
 // See https://github.com/bazelbuild/bazel/issues/23127
