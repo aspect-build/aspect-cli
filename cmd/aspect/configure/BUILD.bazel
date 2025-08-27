@@ -13,7 +13,7 @@ go_library(
         "//gazelle/common/ibp",
         "//gazelle/common/logger",
         "//gazelle/common/watch",
-        "//gazelle/languages/host",
+        "//gazelle/language/host",
         "//gazelle/runner",
         "//pkg/aspect/root/flags",
         "//pkg/aspecterrors",

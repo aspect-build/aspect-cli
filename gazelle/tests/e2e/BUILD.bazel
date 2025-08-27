@@ -10,8 +10,8 @@ load("//gazelle:gazelle.bzl", "gazelle_generation_test")
 gazelle_binary(
     name = "gazelle_binary-host_js",
     languages = [
-        "//gazelle/languages/js",
-        "//gazelle/languages/host",
+        "//gazelle/language/js",
+        "//gazelle/language/host",
     ],
     visibility = ["//visibility:private"],
 )
