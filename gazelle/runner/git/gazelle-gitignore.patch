@@ -1,5 +1,5 @@
 diff --git a/walk/config.go b/walk/config.go
-index 67d2c16..07cfea5 100644
+index 53dcabe..a678127 100644
 --- a/walk/config.go
 +++ b/walk/config.go
 @@ -58,6 +58,12 @@ type walkConfig struct {
@@ -44,7 +44,7 @@ index 67d2c16..07cfea5 100644
  }
  
  func (cr *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
-@@ -202,6 +221,9 @@ func configureForWalk(parent *walkConfig, rel string, f *rule.File) *walkConfig
+@@ -196,6 +215,9 @@ func configureForWalk(parent *walkConfig, rel string, f *rule.File) *walkConfig
  					log.Printf("the ignore directive does not take any arguments. Did you mean to use gazelle:exclude instead? in //%s '# gazelle:ignore %s'", f.Pkg, d.Value)
  				}
  				wc.ignore = true
