@@ -1,5 +1,8 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
+# Export patch so other repositories can depend on it.
+exports_files(["gazelle-gitignore.patch"])
+
 go_library(
     name = "git",
     srcs = ["gitignore.go"],
