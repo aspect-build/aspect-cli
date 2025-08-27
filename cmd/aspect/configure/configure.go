@@ -32,7 +32,7 @@ import (
 	"github.com/aspect-build/aspect-cli/gazelle/common/cache"
 	"github.com/aspect-build/aspect-cli/gazelle/common/ibp"
 	"github.com/aspect-build/aspect-cli/gazelle/common/watch"
-	starzelleHost "github.com/aspect-build/aspect-cli/gazelle/languages/host"
+	starzelleHost "github.com/aspect-build/aspect-cli/gazelle/language/host"
 	"github.com/aspect-build/aspect-cli/gazelle/runner"
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/flags"
 	"github.com/aspect-build/aspect-cli/pkg/aspecterrors"

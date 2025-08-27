@@ -1,0 +1,42 @@
+load("@bazel_gazelle//:def.bzl", "gazelle_binary")
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("//gazelle:gazelle.bzl", "gazelle_generation_test")
+
+# gazelle:exclude tests/
+go_library(
+    name = "bzl",
+    srcs = ["gazelle.go"],
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/runner/language/bzl",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@bazel_gazelle//config:go_default_library",
+        "@bazel_gazelle//label:go_default_library",
+        "@bazel_gazelle//language:go_default_library",
+        "@bazel_gazelle//pathtools:go_default_library",
+        "@bazel_gazelle//repo:go_default_library",
+        "@bazel_gazelle//resolve:go_default_library",
+        "@bazel_gazelle//rule:go_default_library",
+        "@com_github_bazelbuild_buildtools//build:go_default_library",
+    ],
+)
+
+# Internal only for tests
+gazelle_binary(
+    name = "gazelle_bzl_binary",
+    testonly = True,
+    languages = [
+        "@bazel_gazelle//language/proto:go_default_library",
+        ":bzl",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+# A separate generation test for each tests/* test case
+[
+    gazelle_generation_test(
+        name = "%s_test" % test_workspace.replace("/WORKSPACE", "").replace("tests/", ""),
+        dir = test_workspace.replace("/WORKSPACE", ""),
+        gazelle_binary = "gazelle_bzl_binary",
+    )
+    for test_workspace in glob(["tests/**/WORKSPACE"])
+]

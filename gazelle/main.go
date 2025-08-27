@@ -9,7 +9,7 @@ import (
 
 	"github.com/aspect-build/aspect-cli/gazelle/common/buildinfo"
 	"github.com/aspect-build/aspect-cli/gazelle/common/ibp"
-	host "github.com/aspect-build/aspect-cli/gazelle/languages/host"
+	host "github.com/aspect-build/aspect-cli/gazelle/language/host"
 	"github.com/aspect-build/aspect-cli/gazelle/runner"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"gopkg.in/yaml.v3"
