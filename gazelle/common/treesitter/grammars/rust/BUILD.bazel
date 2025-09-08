@@ -1,0 +1,13 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "rust",
+    srcs = [
+        "binding.go",
+        "@tree-sitter-rust//:srcs",  #keep
+    ],
+    cgo = True,
+    copts = ["-Iexternal/tree-sitter-rust"],  #keep
+    importpath = "github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/rust",
+    visibility = ["//gazelle/common/treesitter:__subpackages__"],
+)
