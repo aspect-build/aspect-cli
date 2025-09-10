@@ -95,9 +95,11 @@ func bufferUntilReadyChan[T any](in <-chan T, ready <-chan bool) <-chan T {
 		defer close(out)
 		for {
 			select {
-			case e := <-in:
+			case e, ok := <-in:
 				// not ready, buffer events.
-				buf = append(buf, e)
+				if ok {
+					buf = append(buf, e)
+				}
 			case <-ready:
 				// got the ready signal, move to flush_buffer to start
 				// releasing events received prior to ready event.
@@ -324,21 +326,60 @@ func (bb *besBackend) SendEventsToSubscribers(c <-chan *buildv1.PublishBuildTool
 
 func (bb *besBackend) setupBesUpstreamBackends(ctx context.Context, optionsparsed *buildeventstream.OptionsParsed) error {
 	backends := []string{}
-	remoteHeaders := map[string]string{}
+	backendSeen := make(map[string]bool)
+	globalRemoteHeaders := make(map[string]string)
+	scopedRemoteHeaders := map[string]map[string]string{}
+
 	hasNoWaitForUpload := false
+
+	// Parse backends first to build up that map, then parse headers
 	for _, arg := range optionsparsed.CmdLine {
 		if strings.HasPrefix(arg, "--bes_backend=") {
 			// Always skip our bes_backend to avoid recursive uploads.
 			if arg == fmt.Sprintf("--bes_backend=%s", bb.Addr()) {
 				continue
 			}
-			backends = append(backends, strings.TrimLeft(arg, "--bes_backend="))
-		} else if strings.HasPrefix(arg, "--remote_header=") {
-			remoteHeader := strings.SplitN(strings.TrimLeft(arg, "--remote_header="), "=", 2)
-			if len(remoteHeader) != 2 {
-				return fmt.Errorf("invalid ---remote_header flag value '%v'; value must be in the form of a 'name=value' assignment", arg)
+
+			backend := strings.TrimLeft(arg, "--bes_backend=")
+			if backendSeen[backend] {
+				continue
 			}
-			remoteHeaders[remoteHeader[0]] = remoteHeader[1]
+			backendSeen[backend] = true
+			backends = append(backends, backend)
+		} else if strings.HasPrefix(arg, "--remote_header=") || strings.HasPrefix(arg, "--bes_header=") {
+			rawValue := strings.TrimPrefix(strings.TrimPrefix(arg, "--bes_header="), "--remote_header=")
+			remoteHeader := strings.SplitN(rawValue, "=", 3)
+			if len(remoteHeader) > 3 || len(remoteHeader) < 2 {
+				return fmt.Errorf("invalid --remote_header flag value '%v'; value must be in the form of a 'name=value' assignment", arg)
+			}
+
+			// Decide which backend the header belongs to.
+			backend := ""
+			key := remoteHeader[0]
+			value := remoteHeader[1]
+			if len(remoteHeader) == 3 {
+				backend = remoteHeader[2]
+			}
+
+			if backend == "" {
+				globalRemoteHeaders[key] = value
+			} else {
+				// Append if the header already exists.
+				if headers, ok := scopedRemoteHeaders[backend]; ok {
+					// Append the new value to the existing value with a comma separator
+					if prevValue, exists := headers[key]; exists {
+						headers[key] = prevValue + ", " + value
+					} else {
+						headers[key] = value
+					}
+				} else {
+					// Initialize the headers map if it doesn't exist.
+					headers := map[string]string{
+						key: value,
+					}
+					scopedRemoteHeaders[backend] = headers
+				}
+			}
 		} else if strings.HasPrefix(arg, "--bes_upload_mode=") {
 			mode := arg[len("--bes_upload_mode="):]
 			hasNoWaitForUpload = mode == "nowait_for_upload_complete" || mode == "fully_async"
@@ -354,30 +395,29 @@ func (bb *besBackend) setupBesUpstreamBackends(ctx context.Context, optionsparse
 		)
 	}
 
-	// Supporting multiple backends as easy flipping this.
-	// See: https://github.com/aspect-build/silo/issues/3485
-	if len(backends) > 1 {
+	if len(backends) > 0 {
 		fmt.Fprintf(
 			os.Stderr,
-			"%s Multiple BES backends were specified: %s. Forwarding to %s.\n",
+			"%s BES backends: %s. Forwarding to all.\n",
 			color.GreenString("INFO:"),
 			strings.Join(backends, ", "),
-			backends[len(backends)-1],
 		)
 	}
 
-	if len(backends) > 0 {
-		userBesBackend := backends[len(backends)-1]
-		besProxy := besproxy.NewBesProxy(userBesBackend, remoteHeaders)
+	for _, backend := range backends {
+		headers := make(map[string]string)
+		for key, value := range globalRemoteHeaders {
+			headers[key] = value
+		}
+		if scoped, ok := scopedRemoteHeaders[backend]; ok {
+			for key, value := range scoped {
+				headers[key] = value
+			}
+		}
+		besProxy := besproxy.NewBesProxy(backend, headers)
 		if err := besProxy.Connect(); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to connect to build event stream backend %s: %s", userBesBackend, err.Error())
+			fmt.Fprintf(os.Stderr, "Failed to connect to build event stream backend %s: %s", backend, err.Error())
 		} else {
-			fmt.Fprintf(
-				os.Stderr,
-				"%s Forwarding build event stream to %v\n",
-				color.GreenString("INFO:"),
-				userBesBackend,
-			)
 			bb.RegisterBesProxy(ctx, besProxy)
 		}
 	}
