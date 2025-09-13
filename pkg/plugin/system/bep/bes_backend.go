@@ -32,7 +32,9 @@ import (
 	"golang.org/x/sync/errgroup"
 	buildv1 "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	buildeventstream "github.com/aspect-build/aspect-cli/bazel/buildeventstream"
@@ -264,6 +266,9 @@ func (bb *besBackend) PublishLifecycleEvent(
 		eg, ctx := errgroup.WithContext(ctx)
 		for _, c := range bb.besProxies {
 			client := c
+			if !client.Healthy() {
+				continue
+			}
 
 			eg.Go(func() error {
 				_, err := client.PublishLifecycleEvent(ctx, req)
@@ -518,17 +523,24 @@ func (bb *besBackend) PublishBuildToolEventStream(
 		<-bb.ready
 		// Goroutines to receive acks from BES proxies
 		for _, bp := range bb.besProxies {
-			if !bp.StreamCreated() {
+			if !bp.Healthy() {
 				continue
 			}
 			proxy := bp // make a copy of the BESProxy before passing into the go-routine below.
 			eg.Go(func() error {
 				for {
+					// If the proxy is not healthy, break out of the loop
+					if !proxy.Healthy() {
+						break
+					}
 					_, err := proxy.Recv()
 					if err != nil {
 						if err != io.EOF {
+							if status.Code(err) == codes.Canceled {
+								break
+							}
 							// If we fail to recv an ack from a proxy then print out an error but don't fail the GRPC call
-							fmt.Fprintf(os.Stderr, "Error receiving build event stream ack %v: %s\n", proxy.Host(), err.Error())
+							fmt.Fprintf(os.Stderr, "error receiving build event stream ack %v: %s\n", proxy.Host(), err.Error())
 						}
 						break
 					}
@@ -543,7 +555,7 @@ func (bb *besBackend) PublishBuildToolEventStream(
 	eg.Go(func() error {
 		for fwd := range fwdChanRead {
 			for _, bp := range bb.besProxies {
-				if !bp.StreamCreated() {
+				if !bp.Healthy() {
 					continue
 				}
 				err := bp.Send(fwd)
@@ -554,7 +566,7 @@ func (bb *besBackend) PublishBuildToolEventStream(
 			}
 		}
 		for _, bp := range bb.besProxies {
-			if !bp.StreamCreated() {
+			if !bp.Healthy() {
 				continue
 			}
 			if err := bp.CloseSend(); err != nil {

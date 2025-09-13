@@ -554,9 +554,9 @@ func TestPublishBuildToolEventStream(t *testing.T) {
 
 		besProxy.
 			EXPECT().
-			StreamCreated().
+			Healthy().
 			Return(true).
-			Times(3)
+			Times(5)
 		besProxy.
 			EXPECT().
 			Send(req).
