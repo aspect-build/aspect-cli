@@ -39,6 +39,7 @@ type BESProxy interface {
 	PublishBuildToolEventStream(ctx context.Context, opts ...grpc.CallOption) error
 	PublishLifecycleEvent(ctx context.Context, req *buildv1.PublishLifecycleEventRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	StreamCreated() bool
+	Healthy() bool
 	Recv() (*buildv1.PublishBuildToolEventStreamResponse, error)
 	Send(req *buildv1.PublishBuildToolEventStreamRequest) error
 }
@@ -51,7 +52,7 @@ func NewBesProxy(host string, headers map[string]string) *besProxy {
 }
 
 type besProxy struct {
-	hadError bool
+	hadError int32
 
 	client  buildv1.PublishBuildEventClient
 	stream  buildv1.PublishBuildEvent_PublishBuildToolEventStreamClient
@@ -76,7 +77,8 @@ func (bp *besProxy) PublishLifecycleEvent(ctx context.Context, req *buildv1.Publ
 	if bp.client == nil {
 		return &emptypb.Empty{}, fmt.Errorf("not connected to %v", bp.host)
 	}
-	return bp.client.PublishLifecycleEvent(ctx, req)
+	ev, err := bp.client.PublishLifecycleEvent(ctx, req)
+	return ev, bp.trackError(err)
 }
 
 func (bp *besProxy) PublishBuildToolEventStream(ctx context.Context, opts ...grpc.CallOption) error {
@@ -85,6 +87,7 @@ func (bp *besProxy) PublishBuildToolEventStream(ctx context.Context, opts ...grp
 	}
 	s, err := bp.client.PublishBuildToolEventStream(ctx, opts...)
 	if err != nil {
+		bp.trackError(err)
 		return fmt.Errorf("failed to create build event stream to %v: %w", bp.host, err)
 	}
 	bp.stream = s
@@ -100,10 +103,6 @@ func (bp *besProxy) Send(req *buildv1.PublishBuildToolEventStreamRequest) error 
 		return fmt.Errorf("stream to %v not configured", bp.host)
 	}
 
-	if bp.hadError {
-		return fmt.Errorf("stream to %v is dead", bp.host)
-	}
-
 	// If we want to mutate the BES events in the future before they are sent out to external consumers, this is the place
 	// to do it. See https://github.com/aspect-build/silo/blob/7f13ab16fa10ffcec71b09737f0370f22a508823/pkg/plugin/system/besproxy/bes_proxy.go#L103
 	// as an example.
@@ -115,28 +114,37 @@ func (bp *besProxy) Send(req *buildv1.PublishBuildToolEventStreamRequest) error 
 		_, err = bp.Recv()
 	}
 
-	if err != nil {
-		bp.hadError = true
-	}
-
-	return err
+	return bp.trackError(err)
 }
 
 func (bp *besProxy) Recv() (*buildv1.PublishBuildToolEventStreamResponse, error) {
 	if bp.stream == nil {
 		return nil, fmt.Errorf("stream to %v not configured", bp.host)
 	}
-
-	if bp.hadError {
-		return nil, fmt.Errorf("stream to %v is dead", bp.host)
-	}
-
-	return bp.stream.Recv()
+	resp, err := bp.stream.Recv()
+	return resp, bp.trackError(err)
 }
 
 func (bp *besProxy) CloseSend() error {
 	if bp.stream == nil {
 		return nil
 	}
-	return bp.stream.CloseSend()
+	err := bp.stream.CloseSend()
+	bp.stream = nil
+	return err
+}
+
+// TrackError tracks errors and marks the stream as unhealthy if too many errors occur.
+func (bp *besProxy) trackError(err error) error {
+	if err != nil {
+		bp.hadError++
+		if bp.hadError == 5 {
+			fmt.Printf("stream to %s is marked unhealthy, taking out of rotation.", bp.host)
+		}
+	}
+	return err
+}
+
+func (bp *besProxy) Healthy() bool {
+	return bp.hadError < 5 && bp.stream != nil
 }
