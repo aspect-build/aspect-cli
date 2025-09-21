@@ -258,7 +258,6 @@ func (bb *besBackend) PublishLifecycleEvent(
 	ctx context.Context,
 	req *buildv1.PublishLifecycleEventRequest,
 ) (*empty.Empty, error) {
-
 	broadCastEvent := func(ctx context.Context, req *buildv1.PublishLifecycleEventRequest) {
 		eg, ctx := errgroup.WithContext(ctx)
 		for _, p := range bb.besProxies {
@@ -271,7 +270,7 @@ func (bb *besBackend) PublishLifecycleEvent(
 				_, err := besProxy.PublishLifecycleEvent(ctx, req)
 				if err != nil {
 					// If we fail to send to a proxy then print out an error but don't fail the GRPC call
-					fmt.Fprintf(os.Stderr, "error calling PublishLifecycleEvent on %v: %s\n", besProxy.Host(), err.Error())
+					fmt.Fprintf(os.Stderr, "Error calling PublishLifecycleEvent on %v: %v\n", besProxy.Host(), err)
 				}
 				return nil
 			})
@@ -290,7 +289,7 @@ func (bb *besBackend) PublishLifecycleEvent(
 		// and wait until it is ready and forward the events.
 		go func() {
 			<-bb.ready
-			broadCastEvent(ctx, req)
+			broadCastEvent(context.Background(), req)
 		}()
 		// We don't want bazel to wait before sending us more event.
 		return &emptypb.Empty{}, nil
