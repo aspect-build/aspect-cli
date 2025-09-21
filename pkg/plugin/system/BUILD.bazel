@@ -18,6 +18,7 @@ go_library(
         "@com_github_spf13_cobra//:cobra",
         "@io_k8s_sigs_yaml//:yaml",
         "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//keepalive",
         "@org_golang_x_sync//errgroup",
     ],
 )

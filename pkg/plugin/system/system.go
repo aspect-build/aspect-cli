@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"sigs.k8s.io/yaml"
 
 	"github.com/aspect-build/aspect-cli/pkg/aspect/root/config"
@@ -226,6 +227,11 @@ func (ps *pluginSystem) createBesBackend(ctx context.Context, cmd *cobra.Command
 		// Here we are just being explicit with the default value since we
 		// also set the receive message size.
 		grpc.MaxSendMsgSize(math.MaxInt32),
+		// Allow pings as frequent as every 1s
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             1 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	}
 
 	// Setup the BES backend grpc server

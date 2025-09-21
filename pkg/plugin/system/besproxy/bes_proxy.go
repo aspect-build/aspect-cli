@@ -78,7 +78,10 @@ func (bp *besProxy) PublishLifecycleEvent(ctx context.Context, req *buildv1.Publ
 		return &emptypb.Empty{}, fmt.Errorf("not connected to %v", bp.host)
 	}
 	ev, err := bp.client.PublishLifecycleEvent(ctx, req)
-	return ev, bp.trackError(err)
+	if err != nil {
+		return ev, bp.trackError(fmt.Errorf("failed calling PublishLifecycleEvent to %v: %w", bp.host, err))
+	}
+	return ev, nil
 }
 
 func (bp *besProxy) PublishBuildToolEventStream(ctx context.Context, opts ...grpc.CallOption) error {
@@ -88,7 +91,7 @@ func (bp *besProxy) PublishBuildToolEventStream(ctx context.Context, opts ...grp
 	s, err := bp.client.PublishBuildToolEventStream(ctx, opts...)
 	if err != nil {
 		bp.trackError(err)
-		return fmt.Errorf("failed to create build event stream to %v: %w", bp.host, err)
+		return fmt.Errorf("failed calling PublishBuildToolEventStream to %v: %w", bp.host, err)
 	}
 	bp.stream = s
 	return nil
@@ -102,10 +105,6 @@ func (bp *besProxy) Send(req *buildv1.PublishBuildToolEventStreamRequest) error 
 	if bp.stream == nil {
 		return fmt.Errorf("stream to %v not configured", bp.host)
 	}
-
-	// If we want to mutate the BES events in the future before they are sent out to external consumers, this is the place
-	// to do it. See https://github.com/aspect-build/silo/blob/7f13ab16fa10ffcec71b09737f0370f22a508823/pkg/plugin/system/besproxy/bes_proxy.go#L103
-	// as an example.
 
 	err := bp.stream.Send(req)
 
