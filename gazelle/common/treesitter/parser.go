@@ -28,7 +28,6 @@ import (
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/java"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/json"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/kotlin"
-	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/rust"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/starlark"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/tsx"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/typescript"
@@ -45,7 +44,6 @@ const (
 	JSON                        = "json"
 	Java                        = "java"
 	Go                          = "go"
-	Rust                        = "rust"
 )
 
 type ASTQueryResult interface {
@@ -90,8 +88,6 @@ func toSitterLanguage(lang LanguageGrammar) unsafe.Pointer {
 		return json.Language()
 	case Kotlin:
 		return kotlin.Language()
-	case Rust:
-		return rust.Language()
 	case Starlark:
 		return starlark.Language()
 	case Typescript:
@@ -111,8 +107,6 @@ func PathToLanguage(p string) LanguageGrammar {
 // Based on https://github.com/github-linguist/linguist/blob/master/lib/linguist/languages.yml
 var EXT_LANGUAGES = map[string]LanguageGrammar{
 	"go": Go,
-
-	"rs": Rust,
 
 	"kt":  Kotlin,
 	"ktm": Kotlin,
