@@ -78,7 +78,7 @@ func (tree *treeAst) mapQueryMatchCaptures(m *sitter.QueryMatch, q *sitterQuery)
 }
 
 func mustNewTreeQuery(lang LanguageGrammar, query string) *sitter.Query {
-	treeQ, err := sitter.NewQuery([]byte(query), sitter.NewLanguage(toSitterLanguage(lang)))
+	treeQ, err := sitter.NewQuery([]byte(query), toSitterLanguage(lang))
 	if err != nil {
 		BazelLog.Fatalf("Failed to create query for %q: %v", query, err)
 	}

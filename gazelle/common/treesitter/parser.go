@@ -22,7 +22,6 @@ import (
 	"iter"
 	"log"
 	"path"
-	"unsafe"
 
 	golang "github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/golang"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/java"
@@ -32,6 +31,7 @@ import (
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/tsx"
 	"github.com/aspect-build/aspect-cli/gazelle/common/treesitter/grammars/typescript"
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/rust"
 )
 
 type LanguageGrammar string
@@ -44,6 +44,7 @@ const (
 	JSON                        = "json"
 	Java                        = "java"
 	Go                          = "go"
+	Rust                        = "rust"
 )
 
 type ASTQueryResult interface {
@@ -78,22 +79,24 @@ func (tree *treeAst) String() string {
 	return fmt.Sprintf("treeAst{\n lang: %q,\n filePath: %q,\n AST:\n  %v\n}", tree.lang, tree.filePath, tree.sitterTree.RootNode().String())
 }
 
-func toSitterLanguage(lang LanguageGrammar) unsafe.Pointer {
+func toSitterLanguage(lang LanguageGrammar) *sitter.Language {
 	switch lang {
 	case Go:
-		return golang.Language()
+		return sitter.NewLanguage(golang.Language())
 	case Java:
-		return java.Language()
+		return sitter.NewLanguage(java.Language())
 	case JSON:
-		return json.Language()
+		return sitter.NewLanguage(json.Language())
 	case Kotlin:
-		return kotlin.Language()
+		return sitter.NewLanguage(kotlin.Language())
+	case Rust:
+		return rust.GetLanguage()
 	case Starlark:
-		return starlark.Language()
+		return sitter.NewLanguage(starlark.Language())
 	case Typescript:
-		return typescript.LanguageTypescript()
+		return sitter.NewLanguage(typescript.LanguageTypescript())
 	case TypescriptX:
-		return tsx.LanguageTSX()
+		return sitter.NewLanguage(tsx.LanguageTSX())
 	}
 
 	log.Panicf("Unknown LanguageGrammar %q", lang)
@@ -107,6 +110,8 @@ func PathToLanguage(p string) LanguageGrammar {
 // Based on https://github.com/github-linguist/linguist/blob/master/lib/linguist/languages.yml
 var EXT_LANGUAGES = map[string]LanguageGrammar{
 	"go": Go,
+
+	"rs": Rust,
 
 	"kt":  Kotlin,
 	"ktm": Kotlin,
@@ -147,7 +152,7 @@ func ParseSourceCode(lang LanguageGrammar, filePath string, sourceCode []byte) (
 	ctx := context.Background()
 
 	parser := sitter.NewParser()
-	parser.SetLanguage(sitter.NewLanguage(toSitterLanguage(lang)))
+	parser.SetLanguage(toSitterLanguage(lang))
 
 	tree, err := parser.ParseCtx(ctx, nil, sourceCode)
 	if err != nil {
