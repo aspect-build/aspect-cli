@@ -1,0 +1,67 @@
+monopi/lib/py/os/gpu.py:1:1: I001 [*] Import block is un-sorted or un-formatted
+   |
+ 1 | / import contextlib
+ 2 | | import dataclasses
+ 3 | | import pathlib
+ 4 | | import os
+ 5 | | from typing import ClassVar
+ 6 | | from gettext import gettext as _
+ 7 | | 
+ 8 | | import pynvml
+ 9 | | 
+10 | | 
+11 | | @contextlib.contextmanager
+   | |_^ I001
+12 |   def nvml_context():
+13 |       """Context manager for pynvml.nvmlInit() and pynvml.nvmlShutdown(). pynvml.NVMLError is
+   |
+   = help: Organize imports
+
+monopi/lib/py/os/gpu.py:38:5: E722 Do not use bare `except`
+   |
+36 |         with nvml_context():
+37 |             return operation()
+38 |     except:
+   |     ^^^^^^ E722
+39 |         return default_value
+   |
+
+monopi/lib/py/os/gpu.py:58:5: F841 Local variable `x` is assigned to but never used
+   |
+56 | def get_gpu_names() -> list[str]:
+57 |     """Get the names of the GPUs available on the system."""
+58 |     x = 10
+   |     ^ F841
+59 | 
+60 |     name = "Maria"
+   |
+   = help: Remove assignment to unused variable `x`
+
+monopi/lib/py/os/gpu.py:61:7: UP031 Use format specifiers instead of percent format
+   |
+60 |     name = "Maria"
+61 |     _("Hello, %s!" % name)  # Looks for "Hello, Maria!".
+   |       ^^^^^^^^^^^^^^^^^^^ UP031
+62 |     return _with_nvml_context(
+63 |         lambda: [pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(i)) for i in range(get_num_gpus())], []
+   |
+   = help: Replace with format specifiers
+
+Found 4 errors.
+[*] 1 fixable with the `--fix` option (2 hidden fixes can be enabled with the `--unsafe-fixes` option).
+
+Some problems have automated fixes available:
+
+  monopi/lib/py/os/gpu.py | 3 +-!
+  1 file, 1 insertion(+), 1 deletion(-), 1 modification(!)
+
+monopi/lib/py/os/gpu.py:50:1: W293 [*] Blank line contains whitespace
+   |
+48 | def get_num_gpus() -> int:
+49 | 
+50 |     
+   | ^^^^ W293
+51 |     """Get the number of GPUs available on the system."""
+52 |     return _with_nvml_context(lambda: pynvml.nvmlDeviceGetCount(), 0)
+   |
+   = help: Remove whitespace from blank line

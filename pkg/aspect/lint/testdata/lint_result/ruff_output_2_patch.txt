@@ -1,0 +1,20 @@
+--- a/monopi/lib/py/os/gpu.py
++++ b/monopi/lib/py/os/gpu.py
+@@ -1,7 +1,7 @@
+ import contextlib
+ import dataclasses
+-import pathlib
+ import os
++import pathlib
+ from typing import ClassVar
+ 
+ import pynvml
+@@ -47,7 +47,7 @@
+ 
+ def get_num_gpus() -> int:
+ 
+-    
++
+     """Get the number of GPUs available on the system."""
+     return _with_nvml_context(lambda: pynvml.nvmlDeviceGetCount(), 0)
+ 

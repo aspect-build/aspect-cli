@@ -62,9 +62,10 @@ func (handler *LintResultsFileHandler) toSarifJsonString(label string, mnemonic 
 		fm = []string{`%f:%l:\\t%m`}
 	case "AspectRulesLintRuff":
 		fm = []string{
-			`%f:%l:%c: %t%n %m`,
-			`%-GFound %n error%.%#`,
-			`%-G[*] %n fixable%.%#`,
+			// %E forces a multiline error severity message. There is no forced single line error message
+			`%E%f:%l:%c: %m`,
+			// End the multiline error message on the next line and ignore said line
+			`%-Z%r`,
 		}
 	case "AspectRulesLintBuf":
 		fm = []string{

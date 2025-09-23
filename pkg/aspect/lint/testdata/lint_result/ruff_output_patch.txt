@@ -1,0 +1,11 @@
+--- a/monopi/lib/py/os/gpu.py
++++ b/monopi/lib/py/os/gpu.py
+@@ -1,7 +1,7 @@
+ import contextlib
+ import dataclasses
+-import pathlib
+ import os
++import pathlib
+ from typing import ClassVar
+ 
+ import pynvml
