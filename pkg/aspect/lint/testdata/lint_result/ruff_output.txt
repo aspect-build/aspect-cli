@@ -1,0 +1,25 @@
+monopi/lib/py/os/gpu.py:1:1: I001 [*] Import block is un-sorted or un-formatted
+   |
+ 1 | / import contextlib
+ 2 | | import dataclasses
+ 3 | | import pathlib
+ 4 | | import os
+ 5 | | from typing import ClassVar
+ 6 | | 
+ 7 | | import pynvml
+ 8 | | 
+ 9 | | 
+10 | | @contextlib.contextmanager
+   | |_^ I001
+11 |   def nvml_context():
+12 |       """Context manager for pynvml.nvmlInit() and pynvml.nvmlShutdown(). pynvml.NVMLError is
+   |
+   = help: Organize imports
+
+Found 1 error.
+[*] 1 fixable with the `--fix` option.
+
+Some problems have automated fixes available:
+
+  monopi/lib/py/os/gpu.py | 2 +-
+  1 file, 1 insertion(+), 1 deletion(-)

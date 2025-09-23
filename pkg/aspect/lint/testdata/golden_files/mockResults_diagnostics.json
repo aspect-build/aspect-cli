@@ -923,6 +923,160 @@
       ],
       "title": "Stylelint found an issue",
       "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//monopi/lib/py/os:gpu"
+      },
+      "message": "I001 [*] Import block is un-sorted or un-formatted",
+      "severity": 4,
+      "source_content": {
+        "name": "monopi/lib/py/os/gpu.py"
+      },
+      "spans": [
+        {
+          "offset": 1
+        }
+      ],
+      "title": "Ruff found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//monopi/lib/py/os:gpu"
+      },
+      "help": "import os\nimport pathlib",
+      "severity": 4,
+      "source_content": {
+        "name": "monopi/lib/py/os/gpu.py"
+      },
+      "spans": [
+        {
+          "height": 1,
+          "offset": 3
+        }
+      ],
+      "title": "Ruff provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//monopi/lib/py/os:gpu"
+      },
+      "message": "I001 [*] Import block is un-sorted or un-formatted",
+      "severity": 4,
+      "source_content": {
+        "name": "monopi/lib/py/os/gpu.py"
+      },
+      "spans": [
+        {
+          "offset": 1
+        }
+      ],
+      "title": "Ruff found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//monopi/lib/py/os:gpu"
+      },
+      "message": "E722 Do not use bare `except`",
+      "severity": 4,
+      "source_content": {
+        "name": "monopi/lib/py/os/gpu.py"
+      },
+      "spans": [
+        {
+          "offset": 38
+        }
+      ],
+      "title": "Ruff found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//monopi/lib/py/os:gpu"
+      },
+      "message": "F841 Local variable `x` is assigned to but never used",
+      "severity": 4,
+      "source_content": {
+        "name": "monopi/lib/py/os/gpu.py"
+      },
+      "spans": [
+        {
+          "offset": 58
+        }
+      ],
+      "title": "Ruff found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//monopi/lib/py/os:gpu"
+      },
+      "message": "UP031 Use format specifiers instead of percent format",
+      "severity": 4,
+      "source_content": {
+        "name": "monopi/lib/py/os/gpu.py"
+      },
+      "spans": [
+        {
+          "offset": 61
+        }
+      ],
+      "title": "Ruff found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//monopi/lib/py/os:gpu"
+      },
+      "message": "W293 [*] Blank line contains whitespace",
+      "severity": 4,
+      "source_content": {
+        "name": "monopi/lib/py/os/gpu.py"
+      },
+      "spans": [
+        {
+          "offset": 50
+        }
+      ],
+      "title": "Ruff found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//monopi/lib/py/os:gpu"
+      },
+      "help": "import os\nimport pathlib",
+      "severity": 4,
+      "source_content": {
+        "name": "monopi/lib/py/os/gpu.py"
+      },
+      "spans": [
+        {
+          "height": 1,
+          "offset": 3
+        }
+      ],
+      "title": "Ruff provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//monopi/lib/py/os:gpu"
+      },
+      "severity": 4,
+      "source_content": {
+        "name": "monopi/lib/py/os/gpu.py"
+      },
+      "spans": [
+        {
+          "offset": 50
+        }
+      ],
+      "title": "Ruff provided a suggestion",
+      "type": 1
     }
   ]
 }

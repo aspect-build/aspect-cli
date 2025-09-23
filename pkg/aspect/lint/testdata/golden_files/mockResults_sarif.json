@@ -916,5 +916,159 @@
         }
       }
     ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": [
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "monopi/lib/py/os/gpu.py",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 1
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "I001 [*] Import block is un-sorted or un-formatted"
+            }
+          }
+        ],
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "Ruff",
+            "rules": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": [
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "monopi/lib/py/os/gpu.py",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 1
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "I001 [*] Import block is un-sorted or un-formatted"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "monopi/lib/py/os/gpu.py",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 5,
+                    "startLine": 38
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "E722 Do not use bare `except`"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "monopi/lib/py/os/gpu.py",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 5,
+                    "startLine": 58
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "F841 Local variable `x` is assigned to but never used"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "monopi/lib/py/os/gpu.py",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 7,
+                    "startLine": 61
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "UP031 Use format specifiers instead of percent format"
+            }
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "monopi/lib/py/os/gpu.py",
+                    "uriBaseId": "%SRCROOT%"
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 50
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "W293 [*] Blank line contains whitespace"
+            }
+          }
+        ],
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "Ruff",
+            "rules": null
+          }
+        }
+      }
+    ]
   }
 ]

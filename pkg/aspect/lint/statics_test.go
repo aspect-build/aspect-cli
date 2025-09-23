@@ -59,8 +59,20 @@ var shellcheck_output_2 string
 //go:embed testdata/lint_result/stylelint_output.txt
 var stylelint_output string
 
+//go:embed testdata/lint_result/ruff_output.txt
+var ruff_output string
+
+//go:embed testdata/lint_result/ruff_output_patch.txt
+var ruff_output_patch []byte
+
+//go:embed testdata/lint_result/ruff_output_2.txt
+var ruff_output_2 string
+
+//go:embed testdata/lint_result/ruff_output_2_patch.txt
+var ruff_output_2_patch []byte
+
 func mockResults() []*LintResult {
-	var results [8]*LintResult
+	var results [10]*LintResult
 	results[0] = &LintResult{
 		Label:    "//workflows/marvin/domain:domain_tests",
 		Mnemonic: "AspectRulesLintESLint",
@@ -123,6 +135,22 @@ func mockResults() []*LintResult {
 		ExitCode: 1,
 		Report:   stylelint_output,
 		Patch:    nil,
+	}
+
+	results[8] = &LintResult{
+		Label:    "//monopi/lib/py/os:gpu",
+		Mnemonic: "AspectRulesLintRuff",
+		ExitCode: 1,
+		Report:   ruff_output,
+		Patch:    ruff_output_patch,
+	}
+
+	results[9] = &LintResult{
+		Label:    "//monopi/lib/py/os:gpu",
+		Mnemonic: "AspectRulesLintRuff",
+		ExitCode: 1,
+		Report:   ruff_output_2,
+		Patch:    ruff_output_2_patch,
 	}
 
 	return results[:]
