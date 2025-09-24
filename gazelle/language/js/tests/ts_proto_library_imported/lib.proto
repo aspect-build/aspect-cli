@@ -1,8 +1,0 @@
-syntax = "proto3";
-
-message SayRequest {
-    string sentence = 1;
-}
-
-service MyService {
-}

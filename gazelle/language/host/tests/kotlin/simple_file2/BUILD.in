@@ -1,1 +1,0 @@
-# gazelle:resolve kotlin com.google.cloud.storage.contrib.nio @maven//:com_google_cloud_google_cloud_nio

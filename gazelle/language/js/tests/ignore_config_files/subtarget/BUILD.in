@@ -1,7 +1,0 @@
-
-# Generated .ts
-genrule(
-    name = "gen-1",
-    outs = ["generated.ts"],
-    cmd = "echo 'export const subtarget = 3' > $@",
-)

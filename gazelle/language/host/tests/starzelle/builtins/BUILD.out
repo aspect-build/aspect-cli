@@ -1,7 +1,0 @@
-filegroup(
-    name = "all-files",
-    srcs = [
-        "copy-txt.lang.star",
-        "filegroup.lang.star",
-    ],
-)

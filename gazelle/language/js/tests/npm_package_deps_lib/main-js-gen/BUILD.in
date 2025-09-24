@@ -1,6 +1,0 @@
-genrule(
-    name = "foo",
-    srcs = [],
-    outs = ["start.js"],
-    cmd = "echo \"console.log(42)\" > \"$@\"",
-)

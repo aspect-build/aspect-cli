@@ -1,8 +1,0 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
-
-go_library(
-    name = "wspace",
-    srcs = ["finder.go"],
-    importpath = "github.com/aspect-build/aspect-cli/gazelle/runner/vendored/gazelle/internal/wspace",
-    visibility = ["//gazelle/runner/vendored/gazelle:__subpackages__"],
-)

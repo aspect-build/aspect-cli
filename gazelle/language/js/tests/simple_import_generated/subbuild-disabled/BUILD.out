@@ -1,8 +1,0 @@
-# gazelle:js disabled
-
-# Generated .ts - should be importable despite no generated ts_project()
-genrule(
-    name = "gen-d",
-    outs = ["d1.ts"],
-    cmd = "echo 'export const d1 = 5' > $@",
-)

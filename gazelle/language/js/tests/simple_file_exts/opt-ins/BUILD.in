@@ -1,6 +1,0 @@
-# gazelle:js_files **/*.{js,cjs,mjs,jsx}
-# gazelle:js_files m **/*.mjs
-# gazelle:js_files c **/*.cjs
-# gazelle:js_test_files **/*.spec.{js,cjs,mjs,jsx}
-# gazelle:js_test_files mtest **/*.spec.mjs
-# gazelle:js_test_files ctest **/*.spec.cjs

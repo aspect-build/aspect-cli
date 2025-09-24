@@ -1,8 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-# gazelle:js_validate_import_statements off
-
-ts_project(
-    name = "validate_import_statements_off",
-    srcs = ["main.ts"],
-)

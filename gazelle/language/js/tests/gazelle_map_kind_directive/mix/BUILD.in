@@ -1,6 +1,0 @@
-load("//:defs.bzl", "ts_my_project")
-
-ts_my_project(
-    name = "mix",
-    srcs = ["m.ts"],
-)

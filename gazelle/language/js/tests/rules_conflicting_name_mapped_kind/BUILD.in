@@ -1,5 +1,0 @@
-# gazelle:map_kind ts_project ts_override //:defs-override.bzl
-
-asdf(
-    name = "rules_conflicting_name_mapped_kind",
-)

@@ -1,3 +1,0 @@
-# Override *-root.ts and put it into different library
-
-# gazelle:js_files croot *-root.ts

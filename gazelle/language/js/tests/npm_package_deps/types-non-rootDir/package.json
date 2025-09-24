@@ -1,6 +1,0 @@
-{
-  "name": "types-non-root-dir",
-  "private": true,
-  "main": "./dist/start.js",
-  "types": "./types.d.ts"
-}

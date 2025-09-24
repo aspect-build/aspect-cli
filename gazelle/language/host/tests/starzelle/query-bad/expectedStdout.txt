@@ -1,3 +1,0 @@
-Error in aspect.RawQuery: RawQuery: unexpected keyword argument "f"
-Traceback (most recent call last):
-  query-bad/bad.lang.star:9:33: in lambda

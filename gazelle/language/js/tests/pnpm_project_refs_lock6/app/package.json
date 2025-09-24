@@ -1,8 +1,0 @@
-{
-  "name": "ref-app",
-  "dependencies": {
-    "main-lib": "workspace:*",
-    "lib-a": "workspace:*",
-    "lib-b": "../lib-non-wksp"
-  }
-}

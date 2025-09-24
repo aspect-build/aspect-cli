@@ -1,3 +1,0 @@
-# gazelle:js_package_rule_kind npm_package
-# gazelle:js_npm_package_target_name {dirname}_pkg
-# gazelle:js_npm_package enabled

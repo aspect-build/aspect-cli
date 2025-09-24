@@ -1,9 +1,0 @@
-load("@io_bazel_rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
-
-kt_jvm_library(
-    name = "sub1",
-    srcs = [
-        "index.kt",
-        "r2.kt",
-    ],
-)

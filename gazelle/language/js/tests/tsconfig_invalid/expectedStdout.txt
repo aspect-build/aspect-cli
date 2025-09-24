@@ -1,1 +1,0 @@
-Failed to parse tsconfig file tsconfig.json: ERR: position:0 invalid element: this is ba

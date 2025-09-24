@@ -1,4 +1,0 @@
-# remove visibility completely
-# gazelle:js_visibility
-
-# other visibility is inherited

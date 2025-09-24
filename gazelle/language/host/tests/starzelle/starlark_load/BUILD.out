@@ -1,7 +1,0 @@
-filegroup(
-    name = "all-files",
-    srcs = [
-        "a.txt",
-        "fg.lang.star",
-    ],
-)

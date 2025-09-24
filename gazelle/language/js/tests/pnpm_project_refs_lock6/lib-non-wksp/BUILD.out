@@ -1,8 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-# this is intentionally NOT in pnpm-workspace.yaml
-
-ts_project(
-    name = "lib-non-wksp",
-    srcs = ["index.ts"],
-)

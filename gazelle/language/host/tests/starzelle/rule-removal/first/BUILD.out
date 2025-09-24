@@ -1,4 +1,0 @@
-filegroup(
-    name = "not-me",
-    srcs = ["foo.bar"],
-)

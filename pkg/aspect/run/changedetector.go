@@ -13,7 +13,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/aspect-build/aspect-cli/gazelle/common/ibp"
+	"github.com/aspect-build/orion/common/ibp"
 )
 
 type ExecLogEntry struct {

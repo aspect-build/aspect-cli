@@ -1,2 +1,0 @@
-# The use of 'lib-a' without any @types or npm package
-# will fallback to ALL `declare module 'lib-a'` definitions

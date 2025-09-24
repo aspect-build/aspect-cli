@@ -1,2 +1,0 @@
-# gazelle:js_npm_package_target_name pkg
-# gazelle:js_project_naming_convention tsc

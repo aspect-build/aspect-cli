@@ -1,8 +1,0 @@
-load("@rules_proto//proto:defs.bzl", "proto_library")
-
-# gazelle:proto disable
-
-proto_library(
-    name = "foo_proto",
-    srcs = ["foo.proto"],
-)

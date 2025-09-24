@@ -1,5 +1,0 @@
-load("@npm//:defs.bzl", "npm_link_all_packages")
-
-# gazelle:generation_mode update_only
-
-npm_link_all_packages(name = "node_modules")

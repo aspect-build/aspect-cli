@@ -1,6 +1,0 @@
-load("@deps-test//my:rules.bzl", "rust_library")
-
-rust_library(
-    name = "a_lib",
-    srcs = ["a.rs"],
-)

@@ -1,2 +1,0 @@
-# The the 'jquery' and '@types/jquery' package excludes the additional //addons/jquery
-# 'declare module' statements should be ignored for any imports with packages or @types packages

@@ -3,39 +3,39 @@ module github.com/aspect-build/aspect-cli
 go 1.24.5
 
 require (
-	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/alphadose/haxmap v1.4.1
-	github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250715122526-cab415d82ebb // NOTE: keep in sync with python.MODULE.bazel
-	github.com/bazelbuild/bazel-gazelle v0.45.1-0.20250807184103-efeeebf58108 // NOTE: keep in sync with go.MODULE.bazel
+	github.com/aspect-build/orion v0.0.0-20250924165506-f925c675d11e
+	github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250715122526-cab415d82ebb // indirect; NOTE: keep in sync with python.MODULE.bazel
+	github.com/bazelbuild/bazel-gazelle v0.45.1-0.20250827145400-0e862c3d8182 // NOTE: keep in sync with go.MODULE.bazel
 	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync
 	github.com/bazelbuild/buildtools v0.0.0-20250715102656-62b9413b08bb
-	github.com/bazelbuild/rules_go v0.56.1 // indirect; NOTE: keep in sync with go.MODULE.bazel
 	github.com/bluekeyes/go-gitdiff v0.7.3
-	github.com/bmatcuk/doublestar/v4 v4.9.1
-	github.com/emirpasic/gods v1.18.1
+	github.com/bmatcuk/doublestar/v4 v4.9.1 // indirect
+	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/fatih/color v1.18.0
-	github.com/go-git/go-git/v5 v5.16.2
+	github.com/go-git/go-git/v5 v5.16.2 // indirect
 	github.com/golang/mock v1.7.0-rc.1
 	github.com/golang/protobuf v1.5.4
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.6.1
-	github.com/itchyny/gojq v0.12.17
+	github.com/itchyny/gojq v0.12.17 // indirect
 	github.com/manifoldco/promptui v0.9.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mitchellh/go-homedir v1.1.0
-	github.com/msolo/jsonr v0.0.0-20231023064044-62fbfc3a0313
+	github.com/msolo/jsonr v0.0.0-20231023064044-62fbfc3a0313 // indirect
 	github.com/onsi/gomega v1.34.1
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/reviewdog/errorformat v0.0.0-20240608101709-1d3280ed6bd4
 	github.com/rs/zerolog v1.33.0
-	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82 // indirect
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.20.1
 	github.com/tejzpr/ordered-concurrently/v3 v3.0.1
 	github.com/twmb/murmur3 v1.1.8
-	go.starlark.net v0.0.0-20250717191651-336a4b3a6d1d
+	go.starlark.net v0.0.0-20250717191651-336a4b3a6d1d // indirect
 	golang.org/x/exp v0.0.0-20250718183923-645b1fa84792 // indirect
 	golang.org/x/mod v0.26.0
 	golang.org/x/sync v0.16.0
@@ -43,16 +43,14 @@ require (
 	google.golang.org/genproto v0.0.0-20250603155806-513f23925822
 	google.golang.org/grpc v1.73.0
 	google.golang.org/protobuf v1.36.6
-	gopkg.in/yaml.v3 v3.0.1
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 	sigs.k8s.io/yaml v1.4.0
 )
 
 require (
-	github.com/EngFlow/gazelle_cc v0.1.0
 	github.com/charmbracelet/huh v0.6.0
 	github.com/creack/pty v1.1.24
 	github.com/hay-kot/scaffold v0.6.2-0.20250317013600-8a6092d5e4ff
-	github.com/mikefarah/yq/v4 v4.47.2
 	github.com/reviewdog/reviewdog v0.17.4
 	github.com/sourcegraph/go-diff v0.7.0
 	go.opentelemetry.io/otel v1.37.0
@@ -61,12 +59,12 @@ require (
 	go.opentelemetry.io/otel/trace v1.37.0
 	golang.org/x/term v0.34.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20250603155806-513f23925822
-	gopkg.in/op/go-logging.v1 v1.0.0-20160211212156-b2cb9fa56473
 	gotest.tools/v3 v3.5.1
 )
 
 require (
 	dario.cat/mergo v1.0.2 // indirect
+	github.com/EngFlow/gazelle_cc v0.1.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/a8m/envsubst v1.4.3 // indirect
@@ -128,6 +126,7 @@ require (
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
+	github.com/mikefarah/yq/v4 v4.47.2 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/go-testing-interface v1.14.1 // indirect
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
@@ -168,6 +167,7 @@ require (
 	golang.org/x/text v0.28.0 // indirect
 	golang.org/x/tools/go/vcs v0.1.0-deprecated // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250528174236-200df99c418a // indirect
+	gopkg.in/op/go-logging.v1 v1.0.0-20160211212156-b2cb9fa56473 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

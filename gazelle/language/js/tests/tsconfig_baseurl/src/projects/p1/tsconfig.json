@@ -1,6 +1,0 @@
-{
-  "compilerOptions": {
-    "baseUrl": "./nested_lib"
-  },
-  "include": ["./**/*.ts"]
-}

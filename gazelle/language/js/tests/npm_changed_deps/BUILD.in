@@ -1,7 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-ts_project(
-    name = "npm_changed_deps",
-    srcs = ["main.ts"],
-    deps = ["//:node_modules/now-unused"],
-)

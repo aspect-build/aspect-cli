@@ -1,7 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-ts_project(
-    name = "fr",
-    srcs = ["lang/strings.ts"],
-    tsconfig = "//:tsconfig",
-)

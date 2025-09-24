@@ -1,5 +1,0 @@
-{
-  "name": "pkg-with-main",
-  "private": true,
-  "main": "start.js"
-}

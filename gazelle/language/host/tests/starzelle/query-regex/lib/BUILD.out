@@ -1,6 +1,0 @@
-load("@deps-test//my:rules.bzl", "x_lib")
-
-x_lib(
-    name = "l_lib",
-    srcs = ["l.x"],
-)
