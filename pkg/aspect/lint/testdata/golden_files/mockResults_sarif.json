@@ -1070,5 +1070,420 @@
         }
       }
     ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": [
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 5
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Extra separation in import group before 'com.fasterxml.jackson.annotation.JsonIgnore'"
+            },
+            "ruleId": "import.groups.separated.internally"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 5
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Wrong order for 'com.fasterxml.jackson.annotation.JsonIgnore' import."
+            },
+            "ruleId": "import.ordering"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 20
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Missing a Javadoc comment."
+            },
+            "ruleId": "javadoc.missing"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 78,
+                    "startLine": 22
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "'(' is followed by whitespace."
+            },
+            "ruleId": "ws.followed"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 80,
+                    "startLine": 22
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "')' is preceded with whitespace."
+            },
+            "ruleId": "ws.preceded"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 78,
+                    "startLine": 23
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "'(' is followed by whitespace."
+            },
+            "ruleId": "ws.followed"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 80,
+                    "startLine": 23
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "')' is preceded with whitespace."
+            },
+            "ruleId": "ws.preceded"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 1,
+                    "startLine": 34
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Line contains a tab character."
+            },
+            "ruleId": "containsTab"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startLine": 38
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Line is longer than 160 characters (found 262)."
+            },
+            "ruleId": "maxLineLen"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 3,
+                    "startLine": 78
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Class 'PageKeys' looks like designed for extension (can be subclassed), but the method 'encrypt' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'PageKeys' final or making the method 'encrypt' static/final/abstract/empty, or adding allowed annotation for the method."
+            },
+            "ruleId": "design.forExtension"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 3,
+                    "startLine": 114
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Class 'PageKeys' looks like designed for extension (can be subclassed), but the method 'decrypt' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'PageKeys' final or making the method 'decrypt' static/final/abstract/empty, or adding allowed annotation for the method."
+            },
+            "ruleId": "design.forExtension"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 5,
+                    "startLine": 162
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Missing a Javadoc comment."
+            },
+            "ruleId": "javadoc.missing"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 24,
+                    "startLine": 169
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "'{' is not followed by whitespace."
+            },
+            "ruleId": "ws.notFollowed"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 25,
+                    "startLine": 169
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "'}' is not preceded with whitespace."
+            },
+            "ruleId": "ws.notPreceded"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 7,
+                    "startLine": 171
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'customerId' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'customerId' static/final/abstract/empty, or adding allowed annotation for the method."
+            },
+            "ruleId": "design.forExtension"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 7,
+                    "startLine": 176
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'userId' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'userId' static/final/abstract/empty, or adding allowed annotation for the method."
+            },
+            "ruleId": "design.forExtension"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 7,
+                    "startLine": 187
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'length' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'length' static/final/abstract/empty, or adding allowed annotation for the method."
+            },
+            "ruleId": "design.forExtension"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 7,
+                    "startLine": 192
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'methodName' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'methodName' static/final/abstract/empty, or adding allowed annotation for the method."
+            },
+            "ruleId": "design.forExtension"
+          },
+          {
+            "level": "error",
+            "locations": [
+              {
+                "physicalLocation": {
+                  "artifactLocation": {
+                    "uri": "/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java",
+                    "uriBaseId": ""
+                  },
+                  "region": {
+                    "startColumn": 7,
+                    "startLine": 197
+                  }
+                }
+              }
+            ],
+            "message": {
+              "text": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'build' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'build' static/final/abstract/empty, or adding allowed annotation for the method."
+            },
+            "ruleId": "design.forExtension"
+          }
+        ],
+        "tool": {
+          "driver": {
+            "fullName": "Checkstyle",
+            "informationUri": "https://checkstyle.org/",
+            "name": "Checkstyle",
+            "rules": []
+          }
+        }
+      }
+    ]
   }
 ]

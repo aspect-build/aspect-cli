@@ -83,6 +83,7 @@ func TestSarif(t *testing.T) {
 		g := NewGomegaWithT(t)
 
 		// real examples
+		g.Expect(determineRelativePath("/mnt/ephemeral/output/platform/__main__/sandbox/linux-sandbox/6210/execroot/com_vectara_platform/apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java", "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging")).To(Equal("apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"))
 		g.Expect(determineRelativePath("/mnt/ephemeral/output/bazel-examples/__main__/sandbox/linux-sandbox/769/execroot/_main/speller/lookup/lookup-test.cc", "//speller/lookup:lookup")).To(Equal("speller/lookup/lookup-test.cc"))
 		g.Expect(determineRelativePath("/mnt/ephemeral/output/bazel-examples/__main__/sandbox/linux-sandbox/780/execroot/_main/speller/data_driven_tests/lookup-datatest.cc", "//speller/data_driven_tests:test-002")).To(Equal("speller/data_driven_tests/lookup-datatest.cc"))
 		g.Expect(determineRelativePath("/private/var/tmp/_bazel_jesse/93d7e699c5e2019d94351d19b00be5a3/sandbox/darwin-sandbox/249/execroot/_main/speller/announce/announce.cc", "//speller/announce:announce")).To(Equal("speller/announce/announce.cc"))
