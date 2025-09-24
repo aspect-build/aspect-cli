@@ -1,4 +1,0 @@
-filegroup(
-    name = "all-files",
-    srcs = ["unused.md"],
-)

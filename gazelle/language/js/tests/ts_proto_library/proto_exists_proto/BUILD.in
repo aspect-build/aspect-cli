@@ -1,7 +1,0 @@
-load("@rules_proto//proto:defs.bzl", "proto_library")
-
-proto_library(
-    name = "connectrpc_eliza_v1_proto",
-    srcs = ["eliza.proto"],
-    visibility = ["//visibility:public"],
-)

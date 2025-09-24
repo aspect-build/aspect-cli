@@ -1,2 +1,0 @@
-# gazelle:generation_mode update_only
-# gazelle:js_pnpm_lockfile locks/pnpm-lock.yaml

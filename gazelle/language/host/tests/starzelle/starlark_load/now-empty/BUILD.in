@@ -1,7 +1,0 @@
-filegroup(
-    name = "all-files",
-    srcs = [
-        "b.txt",
-        "c.txt",
-    ],
-)

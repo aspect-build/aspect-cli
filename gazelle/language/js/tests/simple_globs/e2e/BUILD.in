@@ -1,5 +1,0 @@
-# Modify the globs within a subdirectory.
-# Should not effect the js_test_files of parent/sibling directories.
-# Example bug: https://github.com/sourcegraph/sourcegraph/commit/87a70c7c1ff0328540af1b2d77eb3b035b41b1d3
-
-# gazelle:js_test_files **/*.{ts,tsx}

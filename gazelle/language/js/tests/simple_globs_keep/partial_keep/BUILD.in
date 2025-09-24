@@ -1,8 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-# TODO: BUG: a.spec.ts should be excluded from the _tests target
-
-ts_project(
-    name = "partial_keep",
-    srcs = ["a.ts", "a.foo.ts", "a.spec.ts"], #keep
-)

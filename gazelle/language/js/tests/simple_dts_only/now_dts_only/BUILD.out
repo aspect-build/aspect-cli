@@ -1,9 +1,0 @@
-load("@aspect_rules_js//js:defs.bzl", "js_library")
-
-js_library(
-    name = "now_dts_only",
-    srcs = [
-        "lib.d.ts",
-        "lib.js",
-    ],
-)

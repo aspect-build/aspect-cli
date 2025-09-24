@@ -1,2 +1,0 @@
-# gazelle:map_kind my_build custom_my_build //:defs.bzl
-# gazelle:map_kind my_test custom_my_test //:defs.bzl

@@ -1,6 +1,0 @@
-genrule(
-    name = "foo",
-    srcs = [],
-    outs = ["types.d.ts"],
-    cmd = "echo \"export const foo: number\" > \"$@\"",
-)

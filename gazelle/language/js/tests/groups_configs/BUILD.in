@@ -1,2 +1,0 @@
-# gazelle:js_files {dirname}_root *-root.ts
-# gazelle:js_test_files e2e *.e2e.ts

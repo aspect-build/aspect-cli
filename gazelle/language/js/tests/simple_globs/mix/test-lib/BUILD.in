@@ -1,4 +1,0 @@
-# Output everything as a standard lib, no test target
-
-# Only contains a standard target, no tests
-# gazelle:js_test_files there-are-no-tests

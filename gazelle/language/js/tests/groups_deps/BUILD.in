@@ -1,2 +1,0 @@
-# gazelle:js_files e2e *.e2e.ts
-# gazelle:js_files pos *.po.ts

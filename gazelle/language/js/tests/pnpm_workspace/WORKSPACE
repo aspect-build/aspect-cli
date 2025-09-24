@@ -1,6 +1,0 @@
-# This is a Bazel workspace for the Gazelle test data.
-# This test is a copy of https://github.com/aspect-build/rules_js/tree/a60c9ab12499183b2f915d4ca98b897fbe03e440/e2e/pnpm_workspace
-# with the .js renamed to .ts
-
-# IF CHANGING: also changing ../pnpm_workspace_rerooted
-workspace(name = "pnpm_workspace")

@@ -1,9 +1,0 @@
-syntax = "proto3";
-
-package a;
-
-import "google/protobuf/duration.proto";
-
-message Test {
-  google.protobuf.Duration duration = 1;
-}

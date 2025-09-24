@@ -1,5 +1,0 @@
-# gazelle:js_files pos *.po.ts
-
-# gazelle:js_visibility //visibility:private
-# gazelle:js_visibility {dirname}_tests :__pkg__
-# gazelle:js_visibility pos :__subpackages__

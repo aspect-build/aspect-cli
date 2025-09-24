@@ -1,7 +1,0 @@
-lockfileVersion: 5.4
-
-specifiers:
-  '@aspect-test/c': ^2.0.2
-
-dependencies:
-  '@aspect-test/c': 2.0.2

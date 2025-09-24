@@ -1,4 +1,0 @@
-filegroup(
-    name = "deleteme-copy_to_bin",
-    srcs = ["foo.bar"],
-)

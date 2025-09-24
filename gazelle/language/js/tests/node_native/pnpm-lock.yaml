@@ -1,7 +1,0 @@
-lockfileVersion: 5.4
-
-specifiers:
-  '@types/node': ^18.11.11
-
-dependencies:
-  '@types/node': 18.11.11

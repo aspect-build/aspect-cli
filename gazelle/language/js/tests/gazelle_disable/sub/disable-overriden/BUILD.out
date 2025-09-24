@@ -1,8 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-#gazelle:js enabled
-
-ts_project(
-    name = "disable-overriden",
-    srcs = ["not-ignored.ts"],
-)

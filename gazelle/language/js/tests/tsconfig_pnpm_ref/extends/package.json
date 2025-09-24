@@ -1,7 +1,0 @@
-{
-  "name": "@tsconfig-test/app",
-  "private": true,
-  "dependencies": {
-    "@tsconfig-test/tools": "workspace:*"
-  }
-}

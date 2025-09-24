@@ -1,6 +1,0 @@
-{
-    "compilerOptions": {
-        "incremental": true,
-        "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
-    }
-}

@@ -1,8 +1,0 @@
-# aspect:map_kind ts_project ts_my_project //:defs.bzl
-
-load("//:defs.bzl", "ts_my_project")
-
-ts_my_project(
-    name = "mapped_kind",
-    srcs = ["oldfile.ts"],
-)

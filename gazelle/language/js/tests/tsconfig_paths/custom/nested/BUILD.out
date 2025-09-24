@@ -1,8 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-ts_project(
-    name = "nested",
-    srcs = ["test.ts"],
-    tsconfig = "//custom:tsconfig",
-    deps = ["//lib/a"],
-)

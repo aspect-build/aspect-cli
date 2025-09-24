@@ -1,8 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-# gazelle:js_ignore_imports extra-ignore
-
-ts_project(
-    name = "subproject",
-    srcs = ["a.ts"],
-)

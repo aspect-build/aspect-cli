@@ -51,5 +51,3 @@ include("//bazel/include:llvm.MODULE.bazel")
 include("//bazel/include:proto.MODULE.bazel")
 
 include("//bazel/include:python.MODULE.bazel")
-
-include("//gazelle/common/treesitter/grammars:grammars.MODULE.bazel")

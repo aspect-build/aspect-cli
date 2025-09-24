@@ -1,2 +1,0 @@
-# This is a Bazel workspace for the Gazelle test data.
-workspace(name = "gazelle_ignore_directive")

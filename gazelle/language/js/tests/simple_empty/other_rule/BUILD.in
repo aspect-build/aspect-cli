@@ -1,9 +1,0 @@
-filegroup(
-    name = "other_rule",
-    srcs = ["oldfile.ts"],
-)
-
-filegroup(
-    name = "other_rule_tests",
-    srcs = ["oldfile.ts"],
-)

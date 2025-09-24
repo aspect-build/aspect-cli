@@ -1,9 +1,0 @@
-lockfileVersion: 5.4
-
-specifiers:
-  jquery: ^3.6.1
-  lodash: ^4.17.21
-
-dependencies:
-  jquery: 3.6.1
-  lodash: 4.17.21

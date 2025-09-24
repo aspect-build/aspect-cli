@@ -1,9 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_config")
-
-# gazelle:js_tsconfig_ignore allow_js
-
-ts_config(
-    name = "tsconfig",
-    src = "tsconfig.json",
-    visibility = [":__subpackages__"],
-)

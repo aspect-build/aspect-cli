@@ -1,3 +1,0 @@
-filegroup(
-    name = "rules_conflicting_name",
-)

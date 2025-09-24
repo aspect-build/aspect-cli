@@ -1,8 +1,0 @@
-load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
-
-ts_project(
-    name = "tests_tests",
-    testonly = True,
-    srcs = ["main.spec.ts"],
-    deps = ["//:tests_subproject"],
-)

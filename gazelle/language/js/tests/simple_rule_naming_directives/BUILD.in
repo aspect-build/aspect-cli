@@ -1,2 +1,0 @@
-# gazelle:js_project_naming_convention _my_{dirname}
-# gazelle:js_tests_naming_convention _my_{dirname}_tests
