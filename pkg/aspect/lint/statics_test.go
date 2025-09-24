@@ -71,8 +71,11 @@ var ruff_output_2 string
 //go:embed testdata/lint_result/ruff_output_2_patch.txt
 var ruff_output_2_patch []byte
 
+//go:embed testdata/lint_result/checkstyle_sarif.txt
+var checkstyle_sarif string
+
 func mockResults() []*LintResult {
-	var results [10]*LintResult
+	var results [11]*LintResult
 	results[0] = &LintResult{
 		Label:    "//workflows/marvin/domain:domain_tests",
 		Mnemonic: "AspectRulesLintESLint",
@@ -151,6 +154,14 @@ func mockResults() []*LintResult {
 		ExitCode: 1,
 		Report:   ruff_output_2,
 		Patch:    ruff_output_2_patch,
+	}
+
+	results[10] = &LintResult{
+		Label:    "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+		Mnemonic: "AspectRulesLintCheckstyle",
+		ExitCode: 1,
+		Report:   checkstyle_sarif,
+		Patch:    nil,
 	}
 
 	return results[:]

@@ -37,7 +37,7 @@ func (handler *LintResultsFileHandler) sarifToDiagnostics(sarif parser.SarifJson
 						Severity: toSeverity(result.Level),
 						Source: &diagnostic.Diagnostic_SourceContent{
 							SourceContent: &diagnostic.SourceContent{
-								Name: location.PhysicalLocation.ArtifactLocation.URI,
+								Name: determineRelativePath(location.PhysicalLocation.ArtifactLocation.URI, label),
 							},
 						},
 						Spans: []*diagnostic.Span{{

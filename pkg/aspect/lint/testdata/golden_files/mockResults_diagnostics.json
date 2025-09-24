@@ -1077,6 +1077,329 @@
       ],
       "title": "Ruff provided a suggestion",
       "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Extra separation in import group before 'com.fasterxml.jackson.annotation.JsonIgnore'",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 5
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Wrong order for 'com.fasterxml.jackson.annotation.JsonIgnore' import.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 5
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Missing a Javadoc comment.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 20
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "'(' is followed by whitespace.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 22
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "')' is preceded with whitespace.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 22
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "'(' is followed by whitespace.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 23
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "')' is preceded with whitespace.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 23
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Line contains a tab character.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 34
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Line is longer than 160 characters (found 262).",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 38
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Class 'PageKeys' looks like designed for extension (can be subclassed), but the method 'encrypt' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'PageKeys' final or making the method 'encrypt' static/final/abstract/empty, or adding allowed annotation for the method.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 78
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Class 'PageKeys' looks like designed for extension (can be subclassed), but the method 'decrypt' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'PageKeys' final or making the method 'decrypt' static/final/abstract/empty, or adding allowed annotation for the method.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 114
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Missing a Javadoc comment.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 162
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "'{' is not followed by whitespace.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 169
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "'}' is not preceded with whitespace.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 169
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'customerId' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'customerId' static/final/abstract/empty, or adding allowed annotation for the method.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 171
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'userId' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'userId' static/final/abstract/empty, or adding allowed annotation for the method.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 176
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'length' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'length' static/final/abstract/empty, or adding allowed annotation for the method.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 187
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'methodName' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'methodName' static/final/abstract/empty, or adding allowed annotation for the method.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 192
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+      },
+      "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'build' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'build' static/final/abstract/empty, or adding allowed annotation for the method.",
+      "severity": 4,
+      "source_content": {
+        "name": "apiv2/common/src/main/java/com/vectara/apiv2/common/paging/PageKeys.java"
+      },
+      "spans": [
+        {
+          "offset": 197
+        }
+      ],
+      "title": "Checkstyle found an issue",
+      "type": 1
     }
   ]
 }
