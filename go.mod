@@ -5,7 +5,7 @@ go 1.24.5
 require (
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/alphadose/haxmap v1.4.1
-	github.com/aspect-build/orion v0.0.0-20250924165506-f925c675d11e
+	github.com/aspect-build/aspect-gazelle v0.0.0-20250925222926-272fd7ebfc73
 	github.com/bazel-contrib/rules_python/gazelle v0.0.0-20250715122526-cab415d82ebb // indirect; NOTE: keep in sync with python.MODULE.bazel
 	github.com/bazelbuild/bazel-gazelle v0.45.1-0.20250827145400-0e862c3d8182 // NOTE: keep in sync with go.MODULE.bazel
 	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync

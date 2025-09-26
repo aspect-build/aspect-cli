@@ -5,6 +5,6 @@ exports_files(glob(["**/*.patch"]))
 write_source_files(
     name = "orion_patches",
     files = {
-        "gazelle-gitignore.patch": "@aspect_orion//runner/git:gazelle-gitignore.patch",
+        "gazelle-gitignore.patch": "@aspect_gazelle//runner/git:gazelle-gitignore.patch",
     },
 )

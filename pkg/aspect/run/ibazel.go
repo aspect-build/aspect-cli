@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aspect-build/orion/common/ibp"
+	"github.com/aspect-build/aspect-gazelle/common/ibp"
 )
 
 var (

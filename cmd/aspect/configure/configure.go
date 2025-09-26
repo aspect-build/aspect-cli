@@ -50,11 +50,11 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
-	"github.com/aspect-build/orion/common/cache"
-	"github.com/aspect-build/orion/common/ibp"
-	"github.com/aspect-build/orion/common/watch"
-	starzelleHost "github.com/aspect-build/orion/language/host"
-	"github.com/aspect-build/orion/runner"
+	"github.com/aspect-build/aspect-gazelle/common/cache"
+	"github.com/aspect-build/aspect-gazelle/common/ibp"
+	"github.com/aspect-build/aspect-gazelle/common/watch"
+	orion "github.com/aspect-build/aspect-gazelle/language/orion"
+	"github.com/aspect-build/aspect-gazelle/runner"
 )
 
 func NewDefaultCmd() *cobra.Command {
@@ -306,8 +306,8 @@ func addCliEnabledLanguages(c *runner.GazelleRunner) {
 
 	// Add additional starlark plugins
 	if configurePlugins := viper.GetStringSlice("configure.plugins"); len(configurePlugins) > 0 {
-		c.AddLanguageFactory(starzelleHost.GazelleLanguageName, func() language.Language {
-			return starzelleHost.NewLanguage(configurePlugins...)
+		c.AddLanguageFactory(orion.GazelleLanguageName, func() language.Language {
+			return orion.NewLanguage(configurePlugins...)
 		})
 	}
 }

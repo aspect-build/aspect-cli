@@ -45,7 +45,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system/bep"
-	"github.com/aspect-build/orion/common/watch"
+	"github.com/aspect-build/aspect-gazelle/common/watch"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )

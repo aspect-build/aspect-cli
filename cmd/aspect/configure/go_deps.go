@@ -40,7 +40,7 @@ import (
 
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
-	BazelLog "github.com/aspect-build/orion/common/logger"
+	BazelLog "github.com/aspect-build/aspect-gazelle/common/logger"
 )
 
 // The @gazelle go_deps extension name.
