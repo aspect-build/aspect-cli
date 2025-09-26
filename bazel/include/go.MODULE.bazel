@@ -13,22 +13,22 @@ use_repo(go_sdk, "go_sdk")
 bazel_dep(name = "gazelle", version = "0.45.0", repo_name = "bazel_gazelle")
 archive_override(
     module_name = "gazelle",
-    integrity = "sha256-9fxljMw1cBHcY4cX2Wm3OchB+yLaWNQs9jH6R0pxfi8=",
+    integrity = "sha256-3NCjXwfTFu/htS5BEzcn/uKXSdjKEZhrYdC+zykbcUE=",
     patch_strip = 1,
     patches = [
         "//patches:bazelbuild_bazel-gazelle_aspect-cli.patch",
         "//patches:gazelle-gitignore.patch",
     ],
-    strip_prefix = "bazel-gazelle-efeeebf581083dd6bac6e4ebd1512265d8b13f3f",
-    urls = ["https://github.com/bazel-contrib/bazel-gazelle/archive/efeeebf581083dd6bac6e4ebd1512265d8b13f3f.tar.gz"],
+    strip_prefix = "bazel-gazelle-0e862c3d81827441407c1e7c421831af511acfdb",
+    urls = ["https://github.com/bazel-contrib/bazel-gazelle/archive/0e862c3d81827441407c1e7c421831af511acfdb.tar.gz"],
 )
 
-bazel_dep(name = "aspect_orion", version = "0.0.0")
+bazel_dep(name = "aspect_gazelle", version = "0.0.0")
 archive_override(
-    module_name = "aspect_orion",
-    integrity = "sha256-cjnmbodn+gAMdGYrcSkpAkv9NVx0efXZDCvEiHsmsgE=",
-    strip_prefix = "orion-f925c675d11e2c4c2e825d9fbde3a9125944ca09",
-    urls = ["https://github.com/aspect-build/orion/archive/f925c675d11e2c4c2e825d9fbde3a9125944ca09.tar.gz"],
+    module_name = "aspect_gazelle",
+    integrity = "sha256-TkQIYtV0zS6U+3K6h6+gw9dD80MJmr8iLQboHbWHers=",
+    strip_prefix = "aspect-gazelle-272fd7ebfc738bf6d48d17e738f36244e90ff64d",
+    urls = ["https://github.com/aspect-build/aspect-gazelle/archive/272fd7ebfc738bf6d48d17e738f36244e90ff64d.tar.gz"],
 )
 
 bazel_dep(name = "gazelle_cc", version = "0.1.0")
