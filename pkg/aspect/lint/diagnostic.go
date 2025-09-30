@@ -21,7 +21,7 @@ import (
 
 	"github.com/aspect-build/aspect-cli/pkg/aspect/lint/diagnostic"
 	"github.com/reviewdog/reviewdog/parser"
-	godiff "github.com/sourcegraph/go-diff/diff"
+	"github.com/sourcegraph/go-diff/diff"
 )
 
 func (handler *LintResultsFileHandler) sarifToDiagnostics(sarif parser.SarifJson, label string) []*diagnostic.Diagnostic {
@@ -43,9 +43,12 @@ func (handler *LintResultsFileHandler) sarifToDiagnostics(sarif parser.SarifJson
 						Spans: []*diagnostic.Span{{
 							Offset: int32(location.PhysicalLocation.Region.GetRdfRange().Start.Line),
 						}},
-						Title:   run.Tool.Driver.Name + " found an issue",
-						Type:    diagnostic.DiagnosticType_FILE,
-						Baggage: map[string]string{"label": label},
+						Title: run.Tool.Driver.Name + " found an issue",
+						Type:  diagnostic.DiagnosticType_FILE,
+						Baggage: map[string]string{
+							"label":            label,
+							"lint_result_type": "annotation",
+						},
 					})
 				}
 			}
@@ -97,77 +100,100 @@ func (handler *LintResultsFileHandler) patchToDiagnostics(patch []byte, mnemonic
 				Offset: int32(hunk.Span.Offset),
 				Height: int32(hunk.Span.Height),
 			}},
-			Title:   toolName + " provided a suggestion",
-			Help:    hunk.Body,
-			Type:    diagnostic.DiagnosticType_FILE,
-			Baggage: map[string]string{"label": label},
+			Title: toolName + " provided a suggestion",
+			Help:  hunk.Body,
+			Type:  diagnostic.DiagnosticType_FILE,
+			Baggage: map[string]string{
+				"label":            label,
+				"lint_result_type": "suggestion",
+			},
 		}
 	}
 
 	return diagnostics, nil
 }
 
-func baseHunk(NewName string) Hunk {
-	return Hunk{
-		Path: strings.Replace(NewName, "b/", "", 1),
-		Span: diagnostic.Span{
-			Offset: 0,
-			Height: 0,
-		},
-		Body: "",
-	}
-}
-
 func patchToHunks(patch []byte) (hunks []Hunk, err error) {
-	diffs, err := godiff.ParseMultiFileDiff(patch)
+	diffs, err := diff.ParseMultiFileDiff(patch)
 	if err != nil {
-		return hunks, err
+		return nil, err
 	}
 
-	for _, diff := range diffs {
-		hunk := baseHunk(diff.NewName)
-		for _, diffHunk := range diff.Hunks {
-			lineNumber := diffHunk.OrigStartLine
-			var potentialBody []string
-			var body []string
-			var changesStarted bool = false
-			var potentialHeight int32 = 0
-			for _, line := range strings.Split(strings.TrimSuffix(string(diffHunk.Body), "\n"), "\n") {
-				if !strings.HasPrefix(line, "+") && changesStarted {
-					potentialHeight = potentialHeight + 1
-				}
-				if (strings.HasPrefix(line, "-") || strings.HasPrefix(line, "+")) && !changesStarted {
-					hunk.Span.Offset = int32(lineNumber)
-					if strings.HasPrefix(line, "-") {
-						hunk.Span.Height = 1
-					}
-					changesStarted = true
-				}
-				if strings.HasPrefix(line, "+") {
-					body = append(body, potentialBody...)
-					body = append(body, strings.Replace(line, "+", "", 1))
-					potentialBody = make([]string, 0)
-					hunk.Span.Height = int32(hunk.Span.Height) + int32(potentialHeight)
-					potentialHeight = 0
-				} else if strings.HasPrefix(line, "-") {
-					body = append(body, potentialBody...)
-					potentialBody = make([]string, 0)
-					hunk.Span.Height = int32(hunk.Span.Height) + int32(potentialHeight)
-					potentialHeight = 0
-				} else if changesStarted {
-					potentialBody = append(potentialBody, strings.Replace(line, " ", "", 1))
-				}
+	for _, fileDiff := range diffs {
+		for _, diffHunk := range fileDiff.Hunks {
+			lines := strings.Split(string(diffHunk.Body), "\n")
 
-				if !strings.HasPrefix(line, "+") {
-					lineNumber = lineNumber + 1
+			// --- Pass 1: Find the start and end indices of the change block. ---
+			firstChangeIndex, lastChangeIndex := -1, -1
+			for i, line := range lines {
+				if len(line) > 0 && (line[0] == '+' || line[0] == '-') {
+					if firstChangeIndex == -1 {
+						firstChangeIndex = i
+					}
+					lastChangeIndex = i
 				}
 			}
 
-			hunk.Span.Height = hunk.Span.Height - 1
-			hunk.Body = strings.Join(body, "\n")
+			// If the hunk contains no changes, skip it.
+			if firstChangeIndex == -1 {
+				continue
+			}
 
-			//nolint:copylocks // Single threaded
-			hunks = append(hunks, hunk)
+			// --- Pass 2: Calculate file span and build the suggestion body. ---
+			var startLineInFile, endLineInFile int32 = -1, -1
+			var bodyLines []string
+			var foundAddition bool
+			currentLineInFile := int32(diffHunk.OrigStartLine)
+
+			// The suggestion body starts from the first non-deletion line within the change block.
+			bodyStartIndex := -1
+			for i := firstChangeIndex; i <= lastChangeIndex; i++ {
+				if len(lines[i]) > 0 && lines[i][0] != '-' {
+					bodyStartIndex = i
+					break
+				}
+			}
+
+			for i, line := range lines {
+				if len(line) == 0 {
+					continue
+				}
+
+				// Lines not starting with '+' existed in the original file and advance the line counter.
+				if line[0] != '+' {
+					// If this line is part of the change block, it defines the span of the change.
+					if i >= firstChangeIndex && i <= lastChangeIndex {
+						if startLineInFile == -1 {
+							startLineInFile = currentLineInFile
+						}
+						endLineInFile = currentLineInFile
+					}
+					currentLineInFile++
+				} else {
+					foundAddition = true
+				}
+
+				// If we have found where the body starts, collect all non-deletion lines.
+				if bodyStartIndex != -1 && i >= bodyStartIndex && i <= lastChangeIndex && line[0] != '-' {
+					bodyLines = append(bodyLines, line[1:])
+				}
+			}
+
+			// A pure addition has no span in the original file. The "span" is a zero-height
+			// insertion point located after the last line preceding the addition.
+			if foundAddition && startLineInFile == -1 {
+				startLineInFile = currentLineInFile - 1
+				endLineInFile = startLineInFile
+			}
+
+			hunks = append(hunks, Hunk{
+				Path: strings.TrimPrefix(fileDiff.NewName, "b/"),
+				Span: diagnostic.Span{
+					Offset: startLineInFile,
+					Height: endLineInFile - startLineInFile,
+				},
+				Body: strings.Join(bodyLines, "\n"),
+			})
 		}
 	}
 

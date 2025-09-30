@@ -2,7 +2,8 @@
   "diagnostics": [
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -19,7 +20,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -36,7 +38,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -53,7 +56,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -70,7 +74,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -87,7 +92,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "'GitHubComment' is defined but never used. (@typescript-eslint/no-unused-vars)",
       "severity": 4,
@@ -104,7 +110,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -121,7 +128,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -138,7 +146,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -155,7 +164,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -172,7 +182,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -189,7 +200,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -206,7 +218,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -223,7 +236,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "'result' is assigned a value but never used. (@typescript-eslint/no-unused-vars)",
       "severity": 4,
@@ -240,7 +254,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -257,7 +272,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "'CIHost' is defined but never used. (@typescript-eslint/no-unused-vars)",
       "severity": 4,
@@ -274,7 +290,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -291,7 +308,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -308,7 +326,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Use \"@ts-expect-error\" instead of \"@ts-ignore\", as \"@ts-ignore\" will do nothing if the following line is error-free. (@typescript-eslint/ban-ts-comment)",
       "severity": 4,
@@ -325,7 +344,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "    public static readonly TASK_ORDERING: readonly TaskType[] = [",
       "severity": 4,
@@ -342,7 +362,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "    private _results = new Map\u003cstring, TaskResults\u003e();",
       "severity": 4,
@@ -359,7 +380,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "        for (const result of results) {",
       "severity": 4,
@@ -376,7 +398,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "function calculateTestTargetTimeIndents(results: Map\u003cstring, TaskResults\u003e): Record\u003cstring, Record\u003cstring, number\u003e\u003e {\n    const CLEARANCE = 1;\n    const indents: Record\u003cstring, Record\u003cstring, number\u003e\u003e = {};",
       "severity": 4,
@@ -394,7 +417,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "interface LegacyFailedBuildTarget {\n    label: string;\n    messages: {\n        content: string;\n        truncated?: number;\n    }[];\n}",
       "severity": 4,
@@ -412,7 +436,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "            for (const suggestion of suggestions.suggestionsToCreate) {",
       "severity": 4,
@@ -429,7 +454,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_tests_typings"
+        "label": "//workflows/marvin/domain:domain_tests_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "            for (const suggestion of suggestions.suggestionsToDelete) {",
       "severity": 4,
@@ -446,7 +472,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -463,7 +490,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -480,7 +508,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -497,7 +526,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Unexpected constant truthiness on the left-hand side of a `||` expression. (no-constant-binary-expression)",
       "severity": 4,
@@ -514,7 +544,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -531,7 +562,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -548,7 +580,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -565,7 +598,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -582,7 +616,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Empty block statement. (no-empty)",
       "severity": 4,
@@ -599,7 +634,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -616,7 +652,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -633,7 +670,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -650,7 +688,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Expected 'multiple' syntax before 'single' syntax. (sort-imports)",
       "severity": 4,
@@ -667,7 +706,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "annotation"
       },
       "message": "Imports should be sorted alphabetically. (sort-imports)",
       "severity": 4,
@@ -684,7 +724,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';\n\n    const NAME = 'Lint';",
       "severity": 4,
@@ -702,7 +743,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';\n\n    const NAME = 'Lint';",
       "severity": 4,
@@ -720,7 +762,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "    function generateValidCommentBody(type = 'result'): string {",
       "severity": 4,
@@ -737,7 +780,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';\n\n    const NAME = 'Lint';",
       "severity": 4,
@@ -755,7 +799,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "const COMMIT = 'foo';",
       "severity": 4,
@@ -772,7 +817,8 @@
     },
     {
       "baggage": {
-        "label": "//workflows/marvin/domain:domain_typings"
+        "label": "//workflows/marvin/domain:domain_typings",
+        "lint_result_type": "suggestion"
       },
       "help": "    const COMMIT = '407fd999431250c1b168a7f2e54deb7a27a9491e';\n\n    const TASK_ID = 'Lint';",
       "severity": 4,
@@ -790,7 +836,8 @@
     },
     {
       "baggage": {
-        "label": "//speller/announce:announce"
+        "label": "//speller/announce:announce",
+        "lint_result_type": "annotation"
       },
       "message": "function is not thread safe [concurrency-mt-unsafe]",
       "severity": 3,
@@ -807,7 +854,8 @@
     },
     {
       "baggage": {
-        "label": "//speller/announce:announce"
+        "label": "//speller/announce:announce",
+        "lint_result_type": "annotation"
       },
       "message": "function is not thread safe [concurrency-mt-unsafe]",
       "severity": 3,
@@ -824,7 +872,8 @@
     },
     {
       "baggage": {
-        "label": "//docs:docs_delivery"
+        "label": "//docs:docs_delivery",
+        "lint_result_type": "annotation"
       },
       "message": "BAR is referenced but not assigned.",
       "severity": 3,
@@ -841,7 +890,8 @@
     },
     {
       "baggage": {
-        "label": "//integration_tests:shell"
+        "label": "//integration_tests:shell",
+        "lint_result_type": "annotation"
       },
       "message": "TEST_TIMEOUT is referenced but not assigned.",
       "severity": 3,
@@ -858,7 +908,8 @@
     },
     {
       "baggage": {
-        "label": "//integration_tests:shell"
+        "label": "//integration_tests:shell",
+        "lint_result_type": "annotation"
       },
       "message": "TEST_TMPDIR is referenced but not assigned.",
       "severity": 3,
@@ -875,7 +926,8 @@
     },
     {
       "baggage": {
-        "label": "//integration_tests:shell"
+        "label": "//integration_tests:shell",
+        "lint_result_type": "annotation"
       },
       "message": "BIN is referenced but not assigned.",
       "severity": 4,
@@ -892,7 +944,8 @@
     },
     {
       "baggage": {
-        "label": "//src:css"
+        "label": "//src:css",
+        "lint_result_type": "annotation"
       },
       "message": "Unexpected empty block (block-no-empty)",
       "severity": 4,
@@ -909,7 +962,8 @@
     },
     {
       "baggage": {
-        "label": "//src:css"
+        "label": "//src:css",
+        "lint_result_type": "annotation"
       },
       "message": "Unexpected duplicate \"color\" (declaration-block-no-duplicate-properties)",
       "severity": 3,
@@ -926,7 +980,8 @@
     },
     {
       "baggage": {
-        "label": "//monopi/lib/py/os:gpu"
+        "label": "//monopi/lib/py/os:gpu",
+        "lint_result_type": "annotation"
       },
       "message": "I001 [*] Import block is un-sorted or un-formatted",
       "severity": 4,
@@ -943,7 +998,8 @@
     },
     {
       "baggage": {
-        "label": "//monopi/lib/py/os:gpu"
+        "label": "//monopi/lib/py/os:gpu",
+        "lint_result_type": "suggestion"
       },
       "help": "import os\nimport pathlib",
       "severity": 4,
@@ -961,7 +1017,8 @@
     },
     {
       "baggage": {
-        "label": "//monopi/lib/py/os:gpu"
+        "label": "//monopi/lib/py/os:gpu",
+        "lint_result_type": "annotation"
       },
       "message": "I001 [*] Import block is un-sorted or un-formatted",
       "severity": 4,
@@ -978,7 +1035,8 @@
     },
     {
       "baggage": {
-        "label": "//monopi/lib/py/os:gpu"
+        "label": "//monopi/lib/py/os:gpu",
+        "lint_result_type": "annotation"
       },
       "message": "E722 Do not use bare `except`",
       "severity": 4,
@@ -995,7 +1053,8 @@
     },
     {
       "baggage": {
-        "label": "//monopi/lib/py/os:gpu"
+        "label": "//monopi/lib/py/os:gpu",
+        "lint_result_type": "annotation"
       },
       "message": "F841 Local variable `x` is assigned to but never used",
       "severity": 4,
@@ -1012,7 +1071,8 @@
     },
     {
       "baggage": {
-        "label": "//monopi/lib/py/os:gpu"
+        "label": "//monopi/lib/py/os:gpu",
+        "lint_result_type": "annotation"
       },
       "message": "UP031 Use format specifiers instead of percent format",
       "severity": 4,
@@ -1029,7 +1089,8 @@
     },
     {
       "baggage": {
-        "label": "//monopi/lib/py/os:gpu"
+        "label": "//monopi/lib/py/os:gpu",
+        "lint_result_type": "annotation"
       },
       "message": "W293 [*] Blank line contains whitespace",
       "severity": 4,
@@ -1046,7 +1107,8 @@
     },
     {
       "baggage": {
-        "label": "//monopi/lib/py/os:gpu"
+        "label": "//monopi/lib/py/os:gpu",
+        "lint_result_type": "suggestion"
       },
       "help": "import os\nimport pathlib",
       "severity": 4,
@@ -1064,7 +1126,8 @@
     },
     {
       "baggage": {
-        "label": "//monopi/lib/py/os:gpu"
+        "label": "//monopi/lib/py/os:gpu",
+        "lint_result_type": "suggestion"
       },
       "severity": 4,
       "source_content": {
@@ -1080,7 +1143,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Extra separation in import group before 'com.fasterxml.jackson.annotation.JsonIgnore'",
       "severity": 4,
@@ -1097,7 +1161,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Wrong order for 'com.fasterxml.jackson.annotation.JsonIgnore' import.",
       "severity": 4,
@@ -1114,7 +1179,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Missing a Javadoc comment.",
       "severity": 4,
@@ -1131,7 +1197,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "'(' is followed by whitespace.",
       "severity": 4,
@@ -1148,7 +1215,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "')' is preceded with whitespace.",
       "severity": 4,
@@ -1165,7 +1233,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "'(' is followed by whitespace.",
       "severity": 4,
@@ -1182,7 +1251,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "')' is preceded with whitespace.",
       "severity": 4,
@@ -1199,7 +1269,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Line contains a tab character.",
       "severity": 4,
@@ -1216,7 +1287,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Line is longer than 160 characters (found 262).",
       "severity": 4,
@@ -1233,7 +1305,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Class 'PageKeys' looks like designed for extension (can be subclassed), but the method 'encrypt' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'PageKeys' final or making the method 'encrypt' static/final/abstract/empty, or adding allowed annotation for the method.",
       "severity": 4,
@@ -1250,7 +1323,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Class 'PageKeys' looks like designed for extension (can be subclassed), but the method 'decrypt' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'PageKeys' final or making the method 'decrypt' static/final/abstract/empty, or adding allowed annotation for the method.",
       "severity": 4,
@@ -1267,7 +1341,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Missing a Javadoc comment.",
       "severity": 4,
@@ -1284,7 +1359,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "'{' is not followed by whitespace.",
       "severity": 4,
@@ -1301,7 +1377,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "'}' is not preceded with whitespace.",
       "severity": 4,
@@ -1318,7 +1395,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'customerId' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'customerId' static/final/abstract/empty, or adding allowed annotation for the method.",
       "severity": 4,
@@ -1335,7 +1413,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'userId' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'userId' static/final/abstract/empty, or adding allowed annotation for the method.",
       "severity": 4,
@@ -1352,7 +1431,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'length' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'length' static/final/abstract/empty, or adding allowed annotation for the method.",
       "severity": 4,
@@ -1369,7 +1449,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'methodName' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'methodName' static/final/abstract/empty, or adding allowed annotation for the method.",
       "severity": 4,
@@ -1386,7 +1467,8 @@
     },
     {
       "baggage": {
-        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging"
+        "label": "//apiv2/common/src/main/java/com/vectara/apiv2/common/paging:paging",
+        "lint_result_type": "annotation"
       },
       "message": "Class 'Builder' looks like designed for extension (can be subclassed), but the method 'build' does not have javadoc that explains how to do that safely. If class is not designed for extension consider making the class 'Builder' final or making the method 'build' static/final/abstract/empty, or adding allowed annotation for the method.",
       "severity": 4,
@@ -1399,6 +1481,41 @@
         }
       ],
       "title": "Checkstyle found an issue",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/rosetta/src:src",
+        "lint_result_type": "suggestion"
+      },
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/rosetta/src/tasks/lint.task.ts"
+      },
+      "spans": [
+        {
+          "offset": 9
+        }
+      ],
+      "title": "ESLint provided a suggestion",
+      "type": 1
+    },
+    {
+      "baggage": {
+        "label": "//workflows/rosetta/src:src",
+        "lint_result_type": "suggestion"
+      },
+      "severity": 4,
+      "source_content": {
+        "name": "workflows/rosetta/src/tasks/lint.task.ts"
+      },
+      "spans": [
+        {
+          "height": 2,
+          "offset": 9
+        }
+      ],
+      "title": "ESLint provided a suggestion",
       "type": 1
     }
   ]

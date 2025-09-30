@@ -1,0 +1,15 @@
+--- a/removed-lines-first.ts
++++ b/removed-lines-first.ts
+@@ -5,10 +5,10 @@
+ import { mocked } from 'jest-mock';
+ 
+ import { none, some } from '../../../tslibs/result';
+-import { Suggestion } from './suggestion';
+-import { SuggestionService } from './suggestion.service';
+ import { Diagnostic } from '../../ohno';
+ import { PullRequest } from './pull-request';
++import { Suggestion } from './suggestion';
++import { SuggestionService } from './suggestion.service';
+ 
+ describe('SuggestionService', () => {
+     const PULL_REQUEST: PullRequest = {

@@ -74,8 +74,26 @@ var ruff_output_2_patch []byte
 //go:embed testdata/lint_result/checkstyle_sarif.txt
 var checkstyle_sarif string
 
+//go:embed testdata/lint_result/1_removed_line_report.txt
+var one_removed_line_report string
+
+//go:embed testdata/lint_result/1_removed_line_patch.txt
+var one_removed_line_patch []byte
+
+//go:embed testdata/lint_result/3_removed_lines_report.txt
+var three_removed_lines_report string
+
+//go:embed testdata/lint_result/3_removed_lines_patch.txt
+var three_removed_lines_patch []byte
+
+//go:embed testdata/lint_result/removed_lines_first_patch.txt
+var removed_lines_first_patch []byte
+
+//go:embed testdata/lint_result/split_removed_lines_patch.txt
+var split_removed_lines_patch []byte
+
 func mockResults() []*LintResult {
-	var results [11]*LintResult
+	var results [13]*LintResult
 	results[0] = &LintResult{
 		Label:    "//workflows/marvin/domain:domain_tests",
 		Mnemonic: "AspectRulesLintESLint",
@@ -162,6 +180,22 @@ func mockResults() []*LintResult {
 		ExitCode: 1,
 		Report:   checkstyle_sarif,
 		Patch:    nil,
+	}
+
+	results[11] = &LintResult{
+		Label:    "//workflows/rosetta/src:src",
+		Mnemonic: "AspectRulesLintESLint",
+		ExitCode: 1,
+		Report:   one_removed_line_report,
+		Patch:    one_removed_line_patch,
+	}
+
+	results[12] = &LintResult{
+		Label:    "//workflows/rosetta/src:src",
+		Mnemonic: "AspectRulesLintESLint",
+		ExitCode: 1,
+		Report:   three_removed_lines_report,
+		Patch:    three_removed_lines_patch,
 	}
 
 	return results[:]
