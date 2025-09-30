@@ -1,0 +1,14 @@
+--- a/workflows/rosetta/src/tasks/lint.task.ts
++++ b/workflows/rosetta/src/tasks/lint.task.ts
+@@ -6,11 +6,8 @@
+ import { ChangedFiles } from '../../../git-state';
+ import { AsyncResult, DiagnosticInput, Severity } from '../../../ohno';
+ import { BazelCommand, BazelExitCode, BazelServerDirectories } from '../bazel';
+-import { Bazel } from '../bazel';
+-import { CommandBuilder } from '../bazel';
+ import { LabelSchema } from '../configuration/bazel.schema';
+ import { Event } from '../events/event-bus';
+-import { BazelTraceEventName } from '../bazel';
+ import { Logger } from '../logger';
+ import { TMP_DIR } from '../utils';
+ import { BazelTaskConfigurationSchema, BazelTaskRef } from './bazel.task';

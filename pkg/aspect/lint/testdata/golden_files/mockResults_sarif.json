@@ -1485,5 +1485,37 @@
         }
       }
     ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": null,
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "ESLint",
+            "rules": null
+          }
+        }
+      }
+    ]
+  },
+  {
+    "runs": [
+      {
+        "originalUriBaseIds": null,
+        "results": null,
+        "tool": {
+          "driver": {
+            "fullName": "",
+            "informationUri": "",
+            "name": "ESLint",
+            "rules": null
+          }
+        }
+      }
+    ]
   }
 ]

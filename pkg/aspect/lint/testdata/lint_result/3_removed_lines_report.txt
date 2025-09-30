@@ -1,0 +1,4 @@
+Some problems have automated fixes available:
+
+  workflows/rosetta/src/tasks/lint.task.ts | 3 ---
+  1 file, 3 deletions(-)
