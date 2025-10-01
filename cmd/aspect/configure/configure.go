@@ -57,6 +57,18 @@ import (
 	"github.com/aspect-build/aspect-gazelle/runner"
 )
 
+func init() {
+	if os.Getenv("ASPECT_CLI_LOG_FILE") != "" {
+		panic("ASPECT_CLI_LOG_FILE for 'configure' logging renamed to ASPECT_GAZELLE_LOG_FILE\n\tSee: https://github.com/aspect-build/aspect-gazelle")
+	}
+	if os.Getenv("ASPECT_CLI_LOG_DEBUG") != "" {
+		panic("ASPECT_CLI_LOG_DEBUG for 'configure' logging renamed to ASPECT_GAZELLE_LOG_LEVEL\n\tSee: https://github.com/aspect-build/aspect-gazelle")
+	}
+	if os.Getenv("ASPECT_CONFIGURE_CACHE") != "" {
+		panic("ASPECT_CONFIGURE_CACHE for 'configure' caching renamed to ASPECT_GAZELLE_CACHE\n\tSee: https://github.com/aspect-build/aspect-gazelle")
+	}
+}
+
 func NewDefaultCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "configure",
