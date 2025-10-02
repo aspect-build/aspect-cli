@@ -1,4 +1,4 @@
 gitignore_excludes: true
 doublestar: true
 exclude:
-  - gazelle/js/tests/**/*.yaml
+  - gazelle/**/tests/**/*.yaml
