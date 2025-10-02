@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aspect-build/aspect-gazelle/common/ibp"
+	"github.com/aspect-build/aspect-gazelle/runner/pkg/ibp"
 )
 
 var (
