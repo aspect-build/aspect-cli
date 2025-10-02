@@ -77,6 +77,3 @@ exports_files(["bazel"])
 bazel_binary = repository_rule(
     implementation = _bazel_binary_impl,
 )
-
-def bazel_binaries():
-    bazel_binary(name = "bazel_6_4_0")

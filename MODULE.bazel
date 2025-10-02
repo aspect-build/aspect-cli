@@ -44,6 +44,13 @@ bazel_dep(name = "bazel_features", version = "1.19.0")
 bazel_dep(name = "rules_shell", version = "0.4.0")
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
 
+# For integration testing.
+# In the future, consider using this to get them:
+# bazel_dep(name = "rules_bazel_integration_test", version = "0.32.1", dev_dependency = True)
+bazel_binary = use_repo_rule("//integration_tests:bazel_binary.bzl", "bazel_binary")
+
+bazel_binary(name = "bazel_6_4_0")
+
 include("//bazel/include:go.MODULE.bazel")
 
 include("//bazel/include:llvm.MODULE.bazel")
