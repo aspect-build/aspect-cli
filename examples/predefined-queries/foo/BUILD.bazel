@@ -1,5 +1,0 @@
-genrule(
-    name = "foo",
-    outs = ["foo.txt"],
-    cmd = "echo 'Hello World' > '$@'",
-)
