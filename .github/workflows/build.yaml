@@ -36,7 +36,7 @@ jobs:
     outputs:
       artifact: ${{steps.upload.outputs.artifact-url}}
     env:
-      USE_BAZEL_VERSION: 7.2.1
+      USE_BAZEL_VERSION: 7.6.1
       BAZELISK_BASE_URL: https://github.com/bazelbuild/bazel/releases/download
     steps:
       - uses: actions/checkout@v4
