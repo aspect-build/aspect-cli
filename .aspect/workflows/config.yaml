@@ -1,7 +1,8 @@
 # See https://docs.aspect.build/workflows/configuration
 tasks:
-  - format:
-      queue: aspect-medium
+  # TODO: 401 errors https://buildkite.com/aspect-build/aspect-cli/builds/351#0199a676-6099-449e-8fac-2bb00e7c669d
+  #   - format:
+  #       queue: aspect-medium
   - buildifier:
       queue: aspect-medium
   - test:
