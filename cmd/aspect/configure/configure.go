@@ -51,10 +51,10 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/interceptors"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-gazelle/common/cache"
-	"github.com/aspect-build/aspect-gazelle/common/ibp"
-	"github.com/aspect-build/aspect-gazelle/common/watch"
 	orion "github.com/aspect-build/aspect-gazelle/language/orion"
 	"github.com/aspect-build/aspect-gazelle/runner"
+	"github.com/aspect-build/aspect-gazelle/runner/pkg/ibp"
+	"github.com/aspect-build/aspect-gazelle/runner/pkg/watchman"
 )
 
 func init() {
@@ -124,9 +124,9 @@ Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directive
 	return cmd
 }
 
-func run(ctx context.Context, mode string, exclude []string, watch, watchman bool, args []string) error {
-	if watch || watchman {
-		cache.SetCacheFactory(cache.NewWatchmanCache)
+func run(ctx context.Context, mode string, exclude []string, watch, useWatchman bool, args []string) error {
+	if watch || useWatchman {
+		cache.SetCacheFactory(watchman.NewWatchmanCache)
 	}
 
 	v := runner.New()
@@ -205,7 +205,7 @@ func runConfigureWatch(ctx context.Context, v *runner.GazelleRunner, mode string
 	}()
 
 	// Start the workspace watcher
-	w := watch.NewWatchman(bazel.WorkspaceFromWd.WorkspaceRoot())
+	w := watchman.NewWatchman(bazel.WorkspaceFromWd.WorkspaceRoot())
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("failed to start the watcher: %w", err)
 	}
@@ -264,7 +264,7 @@ func runConfigureWatch(ctx context.Context, v *runner.GazelleRunner, mode string
 }
 
 // Convert a watch.ChangeSet to ibp.SourceInfoMap
-func changesetToCycle(cs *watch.ChangeSet) ibp.SourceInfoMap {
+func changesetToCycle(cs *watchman.ChangeSet) ibp.SourceInfoMap {
 	b := true
 	si := &ibp.SourceInfo{IsSource: &b}
 	changes := make(ibp.SourceInfoMap, len(cs.Paths))

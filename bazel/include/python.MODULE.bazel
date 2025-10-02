@@ -1,10 +1,4 @@
-bazel_dep(name = "rules_python", version = "1.5.3")  # must match go.mod
-bazel_dep(name = "rules_python_gazelle_plugin", version = "1.5.3")  # must match go.mod
-archive_override(
-    module_name = "rules_python_gazelle_plugin",
-    strip_prefix = "rules_python-5e750070e3bcf952f10c9f32d1da468c3c784f3a/gazelle",
-    urls = ["https://github.com/bazel-contrib/rules_python/archive/5e750070e3bcf952f10c9f32d1da468c3c784f3a.tar.gz"],
-)
+bazel_dep(name = "rules_python", version = "1.6.3")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
@@ -12,9 +6,3 @@ python.toolchain(
     python_version = "3.12",
 )
 use_repo(python, "python_3_12")
-
-python_stdlib_list = use_extension("@rules_python_gazelle_plugin//python:extensions.bzl", "python_stdlib_list")
-use_repo(
-    python_stdlib_list,
-    "python_stdlib_list",
-)

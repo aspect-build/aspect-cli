@@ -45,7 +45,7 @@ import (
 	"github.com/aspect-build/aspect-cli/pkg/bazel"
 	"github.com/aspect-build/aspect-cli/pkg/ioutils"
 	"github.com/aspect-build/aspect-cli/pkg/plugin/system/bep"
-	"github.com/aspect-build/aspect-gazelle/common/watch"
+	"github.com/aspect-build/aspect-gazelle/runner/pkg/watchman"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -134,7 +134,7 @@ func (runner *Test) testWatch(ctx context.Context, bazelCmd []string, streams io
 	// TODO: reduce duplication with build/run--watch
 
 	// Start the workspace watcher
-	w := watch.NewWatchman(runner.bzl.WorkspaceRoot())
+	w := watchman.NewWatchman(runner.bzl.WorkspaceRoot())
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("failed to start the watcher: %w", err)
 	}

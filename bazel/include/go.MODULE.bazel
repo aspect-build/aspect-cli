@@ -26,9 +26,42 @@ archive_override(
 bazel_dep(name = "aspect_gazelle", version = "0.0.0")
 archive_override(
     module_name = "aspect_gazelle",
-    integrity = "sha256-TkQIYtV0zS6U+3K6h6+gw9dD80MJmr8iLQboHbWHers=",
-    strip_prefix = "aspect-gazelle-272fd7ebfc738bf6d48d17e738f36244e90ff64d",
-    urls = ["https://github.com/aspect-build/aspect-gazelle/archive/272fd7ebfc738bf6d48d17e738f36244e90ff64d.tar.gz"],
+    integrity = "sha256-LhY5Te+jYS9EGk9Rjc7dTvMi2fujjtvhTRplM5U5Rik=",
+    strip_prefix = "aspect-gazelle-1f68580e97012bb07d4ea85a7df79c77b44b0b8a",
+    urls = ["https://github.com/aspect-build/aspect-gazelle/archive/1f68580e97012bb07d4ea85a7df79c77b44b0b8a.tar.gz"],
+)
+
+bazel_dep(name = "aspect_gazelle_js", version = "0.0.0")
+archive_override(
+    module_name = "aspect_gazelle_js",
+    integrity = "sha256-LhY5Te+jYS9EGk9Rjc7dTvMi2fujjtvhTRplM5U5Rik=",
+    strip_prefix = "aspect-gazelle-1f68580e97012bb07d4ea85a7df79c77b44b0b8a/language/js",
+    urls = ["https://github.com/aspect-build/aspect-gazelle/archive/1f68580e97012bb07d4ea85a7df79c77b44b0b8a.tar.gz"],
+)
+
+bazel_dep(name = "aspect_gazelle_orion", version = "0.0.0")
+archive_override(
+    module_name = "aspect_gazelle_orion",
+    integrity = "sha256-LhY5Te+jYS9EGk9Rjc7dTvMi2fujjtvhTRplM5U5Rik=",
+    strip_prefix = "aspect-gazelle-1f68580e97012bb07d4ea85a7df79c77b44b0b8a/language/orion",
+    urls = ["https://github.com/aspect-build/aspect-gazelle/archive/1f68580e97012bb07d4ea85a7df79c77b44b0b8a.tar.gz"],
+)
+
+bazel_dep(name = "aspect_gazelle_runner", version = "0.0.0")
+archive_override(
+    module_name = "aspect_gazelle_runner",
+    integrity = "sha256-LhY5Te+jYS9EGk9Rjc7dTvMi2fujjtvhTRplM5U5Rik=",
+    strip_prefix = "aspect-gazelle-1f68580e97012bb07d4ea85a7df79c77b44b0b8a/runner",
+    urls = ["https://github.com/aspect-build/aspect-gazelle/archive/1f68580e97012bb07d4ea85a7df79c77b44b0b8a.tar.gz"],
+)
+
+# Not direclty used but must be declared+overriden until aspect_gazelle_runner points to one published to BCR.
+bazel_dep(name = "aspect_gazelle_kotlin", version = "0.0.0")
+archive_override(
+    module_name = "aspect_gazelle_kotlin",
+    integrity = "sha256-LhY5Te+jYS9EGk9Rjc7dTvMi2fujjtvhTRplM5U5Rik=",
+    strip_prefix = "aspect-gazelle-1f68580e97012bb07d4ea85a7df79c77b44b0b8a/language/kotlin",
+    urls = ["https://github.com/aspect-build/aspect-gazelle/archive/1f68580e97012bb07d4ea85a7df79c77b44b0b8a.tar.gz"],
 )
 
 bazel_dep(name = "gazelle_cc", version = "0.1.0")
@@ -53,9 +86,4 @@ go_deps.gazelle_override(
     build_file_generation = "clean",
     path = "github.com/bazelbuild/bazelisk",
 )
-go_deps.module_override(
-    patch_strip = 2,
-    patches = ["//patches:rules_python-unfork-tree-sitter.patch"],
-    path = "github.com/bazel-contrib/rules_python/gazelle",
-)
-use_repo(go_deps, "com_github_alphadose_haxmap", "com_github_bazel_contrib_rules_python_gazelle", "com_github_bazelbuild_bazel_gazelle", "com_github_bazelbuild_bazelisk", "com_github_bazelbuild_buildtools", "com_github_bluekeyes_go_gitdiff", "com_github_charmbracelet_huh", "com_github_creack_pty", "com_github_fatih_color", "com_github_golang_mock", "com_github_golang_protobuf", "com_github_hashicorp_go_hclog", "com_github_hashicorp_go_plugin", "com_github_hay_kot_scaffold", "com_github_manifoldco_promptui", "com_github_mattn_go_isatty", "com_github_mitchellh_go_homedir", "com_github_onsi_gomega", "com_github_pkg_browser", "com_github_reviewdog_errorformat", "com_github_reviewdog_reviewdog", "com_github_rs_zerolog", "com_github_sourcegraph_go_diff", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_spf13_viper", "com_github_tejzpr_ordered_concurrently_v3", "com_github_twmb_murmur3", "io_k8s_sigs_yaml", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_stdout_stdouttrace", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_trace", "org_golang_google_genproto", "org_golang_google_genproto_googleapis_api", "org_golang_google_grpc", "org_golang_google_protobuf", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_term", "org_golang_x_tools", "tools_gotest_v3")
+use_repo(go_deps, "com_github_alphadose_haxmap", "com_github_bazelbuild_bazel_gazelle", "com_github_bazelbuild_bazelisk", "com_github_bazelbuild_buildtools", "com_github_bluekeyes_go_gitdiff", "com_github_charmbracelet_huh", "com_github_creack_pty", "com_github_fatih_color", "com_github_golang_mock", "com_github_golang_protobuf", "com_github_hashicorp_go_hclog", "com_github_hashicorp_go_plugin", "com_github_hay_kot_scaffold", "com_github_manifoldco_promptui", "com_github_mattn_go_isatty", "com_github_mitchellh_go_homedir", "com_github_onsi_gomega", "com_github_pkg_browser", "com_github_reviewdog_errorformat", "com_github_reviewdog_reviewdog", "com_github_rs_zerolog", "com_github_russross_blackfriday_v2", "com_github_sourcegraph_go_diff", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_spf13_viper", "com_github_tejzpr_ordered_concurrently_v3", "com_github_twmb_murmur3", "io_k8s_sigs_yaml", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_stdout_stdouttrace", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_trace", "org_golang_google_genproto", "org_golang_google_genproto_googleapis_api", "org_golang_google_grpc", "org_golang_google_protobuf", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_term", "org_golang_x_tools", "tools_gotest_v3")
