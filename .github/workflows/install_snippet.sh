@@ -16,7 +16,7 @@ See full install instructions in [README.md](https://github.com/aspect-build/asp
 Configure [bazelisk](https://github.com/bazelbuild/bazelisk) to use the Aspect CLI for all developers in a repository
 by adding the following to \`.bazeliskrc\` in the repository root:
 
-\`\`\`
+\`\`\`sh
 BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download
 USE_BAZEL_VERSION=aspect/${TAG}
 \`\`\`
@@ -30,9 +30,9 @@ The underlying version of Bazel can be configured in your \`.bazelversion\` file
 
 To install the Aspect CLI on MacOS, you can run
 
-```sh
+\`\`\`sh
 brew install aspect-build/aspect/aspect
-```
+\`\`\`
 
 This installs the `aspect` command and also links it to `bazel`, just like the [bazelisk](https://github.com/bazelbuild/bazelisk) installer does.
 
