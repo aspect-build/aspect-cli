@@ -80,3 +80,5 @@ After this, you should be able to merge your changes without any conflicts in th
     git tag v1.yyyyww.x
     git push origin $_
     ```
+
+6. Update the `aspect-build/aspect/aspect` Homebrew formula: https://github.com/aspect-build/homebrew-aspect?tab=readme-ov-file#updating-formulas-to-the-latest-release
