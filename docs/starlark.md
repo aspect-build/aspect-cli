@@ -6,7 +6,7 @@ sidebar_label: Starlark Extensions
 Aspect CLI includes the ability to write BUILD file generation extensions in Starlark.
 These extensions are executed when a user runs [`aspect configure`](./commands/aspect_configure.md).
 
-<iframe width="560" height="315" src="https://www.youtube.com/embed/pmveB5OfuLg?si=1GczyKvxtFpvl0hU" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+Watch [Master Build File Automation with Aspect CLI and Gazelle](https://www.youtube.com/embed/pmveB5OfuLg?si=1GczyKvxtFpvl0hU).
 
 :::warning
 This feature is experimental, and the Starlark API is subject to change without notice.
