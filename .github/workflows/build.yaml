@@ -22,6 +22,8 @@ jobs:
         with:
           fetch-depth: 0 # Needed to see tags
       - run: |
+          git status
+          bazel build --config=release //release
           bazel run --config=release //release -- /tmp/aspect/release
       - uses: actions/upload-artifact@v4
         id: upload
