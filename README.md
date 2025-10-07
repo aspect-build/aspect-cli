@@ -15,8 +15,6 @@ untested Bash script living in `/tools/bazel` which Bazelisk understands as a wr
 
 Over time, the wrapper accumulates more code, and is a constant source of developer distress.
 
-See more on our docsite: <https://docs.aspect.build/cli/>
-
 # Licenses
 
 Aspect CLI is [Apache 2](./LICENSE) licensed.
@@ -59,17 +57,6 @@ Note, if you manually install for MacOS, you can bypass the "Unknown Developer" 
 
 Just run `aspect help` to see the available commands.
 Some are the standard ones you know from Bazel, and others are new, such as `print` and `docs`.
-
-## Write a plugin
-
-Aspect's plugin system allows you to fit Bazel into your team's development process,
-with custom commands, behaviors, and integrations.
-
-A plugin is any program (written in any language) that serves our gRPC protocol.
-The easiest way to get started is to clone our
-[starter template repo](https://github.com/aspect-build/aspect-cli-plugin-template).
-
-See the [Plugin Documentation](https://docs.aspect.build/cli/plugins/) for more information on how to write a plugin.
 
 # Need help or having issues?
 

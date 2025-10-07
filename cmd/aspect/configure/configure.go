@@ -98,7 +98,7 @@ The advantage of configure in Aspect CLI is that you don't need to compile the t
 
 To change the behavior of configure, you add "directives" to your BUILD files, which are comments
 in a special syntax.
-Run 'aspect help directives' or see https://docs.aspect.build/cli/help/directives for more info.
+Run 'aspect help directives' or see https://github.com/aspect-build/aspect-cli/blob/main/docs/aspect_configure.md for more info.
 `,
 		GroupID: "aspect",
 		RunE: interceptors.Run(
