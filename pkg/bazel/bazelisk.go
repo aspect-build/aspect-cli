@@ -109,7 +109,7 @@ func isBazeliskAspectBootstrap(bazeliskConfig *bazeliskVersionConfig) bool {
 		return true
 	}
 	if bazeliskConfig.BazeliskBaseUrl == "https://github.com/aspect-build/aspect-cli/releases/download" {
-		// GitHub aspect-cli OSS releases
+		// GitHub aspect-cli releases
 		return true
 	}
 	return false
