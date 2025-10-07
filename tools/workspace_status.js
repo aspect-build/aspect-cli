@@ -9,7 +9,7 @@ import { execSync } from 'node:child_process';
 // Note, BUILD_USER is automatically available in the stable-status.txt, it matches $USER
 const has_local_changes = execSync('git status --porcelain').length > 0;
 console.log(`STABLE_BUILD_SCM_SHA ${execSync('git rev-parse HEAD')}`);
-console.log(`STABLE_BUILD_SCM_LOCAL_CHANGES ${has_local_changes}`);
+console.log(`STABLE_BUILD_SCM_LOCAL_CHANGES ${has_local_changes?'dirty':'clean'}`);
 
 const gitTags = execSync('git tag');
 if (gitTags.length > 0) {
