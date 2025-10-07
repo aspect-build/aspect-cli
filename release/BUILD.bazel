@@ -3,6 +3,30 @@ load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load(":bazelisk_artifacts.bzl", "bazelisk_artifacts")
 load(":release.bzl", "multi_platform_binaries", "release")
+load("//release/homebrew:brew_go_artifacts.bzl", "brew_go_artifacts")
+
+brew_go_artifacts(
+    name = "aspect_cli_brew_artifacts",
+    additional_bins = [":bazel"],
+    # Based on Bazelisk brew formula:
+    # https://github.com/Homebrew/homebrew-core/blob/7ee2ad3624ac2364aabf28c8d8ee5efaf8592ef1/Formula/bazelisk.rb
+    additional_content = """
+  conflicts_with "bazel", because: "aspect replaces the bazel binary"
+  conflicts_with "bazelisk", because: "aspect replaces the bazel binary"
+""",
+    bottle_root_url = "https://github.com/aspect-build/aspect-cli/releases/download/0.0.0-PLACEHOLDER",
+    desc = "Correct, fast, usable: choose three",
+    formula_name = "aspect",
+    homepage = "https://aspect.build",
+    license = "Apache-2.0",
+    multi_platform_go_binaries = "//release:aspect",
+    root_files = [
+        ":LICENSE",
+        ":README.md",
+    ],
+    url = "https://github.com/aspect-build",
+    version_file = "//release:aspect_version_file",
+)
 
 multi_platform_binaries(
     name = "aspect",
@@ -53,6 +77,7 @@ release(
     targets = [
         ":aspect",
         ":linux_and_darwin_artifacts",
+        ":aspect_cli_brew_artifacts",
     ],
 )
 

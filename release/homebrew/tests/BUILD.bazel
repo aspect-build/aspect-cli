@@ -1,0 +1,201 @@
+load("@aspect_bazel_lib//lib:testing.bzl", "assert_contains")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//release/homebrew:brew_artifacts.bzl", "brew_artifacts")
+load("//release/homebrew:brew_bottle.bzl", "brew_bottle")
+load("//release/homebrew:brew_formula.bzl", "brew_formula")
+load("//release/homebrew:brews.bzl", "brews")
+load(":brew_platforms_tests.bzl", "brew_platforms_test_suite")
+load(":brews_tests.bzl", "brews_test_suite")
+
+# Starlark Unit Tests
+
+brews_test_suite()
+
+brew_platforms_test_suite()
+
+# Setup for Tests
+
+write_file(
+    name = "test_version",
+    testonly = True,
+    out = "test.version",
+    content = [
+        "1.2.3",
+        "",
+    ],
+)
+
+_FORMULA = "myapp"
+
+_ALL_BREW_PLATFORMS = [
+    "monterey",
+    "arm64_monterey",
+    "x86_64_linux",
+]
+
+write_file(
+    name = "test_readme",
+    testonly = True,
+    out = "README.md",
+    content = [
+        "# Interesting Title",
+        "",
+    ],
+)
+
+write_file(
+    name = "binary_no_rename",
+    testonly = True,
+    out = "goodbye",
+    content = [
+        "echo 'Goodbye, World!'",
+    ],
+    is_executable = True,
+)
+
+[
+    write_file(
+        name = "{}_binary".format(p),
+        testonly = True,
+        out = "hello_{}".format(p),
+        content = [
+            "echo 'Hello, World!'",
+            "echo 'I am {}'".format(p),
+        ],
+        is_executable = True,
+    )
+    for p in _ALL_BREW_PLATFORMS
+]
+
+[
+    brew_bottle(
+        name = brews.bottle_name(p),
+        testonly = True,
+        bin_files = [
+            "{}_binary".format(p),
+            ":binary_no_rename",
+        ],
+        bin_renames = {
+            "{}_binary".format(p): "hello",
+        },
+        formula = _FORMULA,
+        root_files = [":test_readme"],
+        version_file = ":test_version",
+    )
+    for p in _ALL_BREW_PLATFORMS
+]
+
+_ARTIFACTS_NAME = "{}_artifacts".format(_FORMULA)
+
+brew_artifacts(
+    name = _ARTIFACTS_NAME,
+    testonly = True,
+    bottles = {
+        brews.bottle_name(p): p
+        for p in _ALL_BREW_PLATFORMS
+    },
+    desc = "This is my cool app",
+    formula = _FORMULA,
+    homepage = "https://example.com/myapp",
+    url = "https://github.com/example/foo.git",
+    version_file = ":test_version",
+)
+
+# Other Formulas
+
+_BOTTLE_ROOT_URL_ARTIFACTS_NAME = _ARTIFACTS_NAME + "_with_bottle_root_url"
+
+brew_artifacts(
+    name = _BOTTLE_ROOT_URL_ARTIFACTS_NAME,
+    testonly = True,
+    bottle_root_url = "https://cdn.example.com/brew_bottles",
+    bottles = {
+        brews.bottle_name(p): p
+        for p in _ALL_BREW_PLATFORMS
+    },
+    desc = "This is my cool app",
+    formula = _FORMULA,
+    homepage = "https://example.com/myapp",
+    ruby_class_name = "OverrideClassName",
+    url = "https://github.com/example/foo.git",
+    version_file = ":test_version",
+)
+
+# Tests
+
+build_test(
+    name = "build_test",
+    targets = [_ARTIFACTS_NAME],
+)
+
+_FORMULA_NAME = "{}_formula".format(_ARTIFACTS_NAME)
+
+brew_formula(
+    name = _FORMULA_NAME,
+    testonly = True,
+    artifacts = _ARTIFACTS_NAME,
+)
+
+assert_contains(
+    name = "{}_test".format(_FORMULA_NAME),
+    actual = _FORMULA_NAME,
+    expected = "class Myapp < Formula",
+)
+
+_BOTTLE_ROOT_URL_FORMULA_NAME = "{}_formula".format(
+    _BOTTLE_ROOT_URL_ARTIFACTS_NAME,
+)
+
+brew_formula(
+    name = _BOTTLE_ROOT_URL_FORMULA_NAME,
+    testonly = True,
+    artifacts = _BOTTLE_ROOT_URL_ARTIFACTS_NAME,
+)
+
+assert_contains(
+    name = "{}_override_test".format(_BOTTLE_ROOT_URL_FORMULA_NAME),
+    actual = _BOTTLE_ROOT_URL_FORMULA_NAME,
+    expected = "class OverrideClassName < Formula",
+)
+
+assert_contains(
+    name = "{}_bottle_test".format(_BOTTLE_ROOT_URL_FORMULA_NAME),
+    actual = _BOTTLE_ROOT_URL_FORMULA_NAME,
+    expected = """\
+  bottle do
+    root_url "https://cdn.example.com/brew_bottles"
+""",
+)
+
+sh_test(
+    name = "brew_bottle_test",
+    srcs = ["brew_bottle_test.sh"],
+    data = [
+        ":monterey_bottle",
+    ],
+    deps = [
+        "@aspect_bazel_lib//shlib/lib:assertions",  # keep
+    ],
+)
+
+sh_test(
+    name = "generate_formula_test",
+    srcs = ["generate_formula_test.sh"],
+    data = [
+        "//release/homebrew:generate_formula",
+    ],
+    deps = [
+        "@aspect_bazel_lib//shlib/lib:assertions",  # keep
+    ],
+)
+
+sh_library(
+    name = "shell",
+    srcs = [
+        "brew_bottle_test.sh",
+        "generate_formula_test.sh",
+    ],
+)

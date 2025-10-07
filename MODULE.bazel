@@ -41,8 +41,9 @@ bazel_dep(name = "aspect_rules_lint", version = "1.0.7")
 bazel_dep(name = "aspect_rules_swc", version = "2.3.0")
 bazel_dep(name = "aspect_rules_ts", version = "3.4.0")
 bazel_dep(name = "bazel_features", version = "1.19.0")
-bazel_dep(name = "rules_shell", version = "0.4.0")
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "rules_pkg", version = "1.1.0")
+bazel_dep(name = "rules_shell", version = "0.4.0")
 
 # For integration testing.
 # In the future, consider using this to get them:
