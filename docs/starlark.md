@@ -8,9 +8,8 @@ These extensions are executed when a user runs [`aspect configure`](./commands/a
 
 Watch [Master Build File Automation with Aspect CLI and Gazelle](https://www.youtube.com/embed/pmveB5OfuLg?si=1GczyKvxtFpvl0hU).
 
-:::warning
-This feature is experimental, and the Starlark API is subject to change without notice.
-:::
+> [!WARNING]
+> This feature is experimental, and the Starlark API is subject to change without notice.
 
 ## Why we made it
 
