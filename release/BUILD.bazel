@@ -1,9 +1,9 @@
 load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("//release/homebrew:brew_go_artifacts.bzl", "brew_go_artifacts")
 load(":bazelisk_artifacts.bzl", "bazelisk_artifacts")
 load(":release.bzl", "multi_platform_binaries", "release")
-load("//release/homebrew:brew_go_artifacts.bzl", "brew_go_artifacts")
 
 brew_go_artifacts(
     name = "aspect_cli_brew_artifacts",
