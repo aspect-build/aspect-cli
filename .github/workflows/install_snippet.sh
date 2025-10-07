@@ -34,6 +34,6 @@ To install the Aspect CLI on MacOS, you can run
 brew install aspect-build/aspect/aspect
 \`\`\`
 
-This installs the `aspect` command and also links it to `bazel`, just like the [bazelisk](https://github.com/bazelbuild/bazelisk) installer does.
+This installs the \`aspect\` command and also links it to \`bazel\`, just like the [bazelisk](https://github.com/bazelbuild/bazelisk) installer does.
 
 EOF
