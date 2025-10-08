@@ -8,7 +8,7 @@ assertions_sh="$(rlocation "${assertions_sh_location}")" ||
 # shellcheck source=/dev/null
 source "${assertions_sh}"
 
-generate_formula_sh_location=_main/bazel/release/brew/generate_formula.sh
+generate_formula_sh_location=_main/release/homebrew/generate_formula.sh
 generate_formula_sh="$(rlocation "${generate_formula_sh_location}")" ||
     (echo >&2 "Failed to locate ${generate_formula_sh_location}" && exit 1)
 
