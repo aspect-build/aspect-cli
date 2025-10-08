@@ -6,6 +6,7 @@ tasks:
   - buildifier:
       queue: aspect-medium
   - test:
+      queue: aspect-large
   - finalization:
       queue: aspect-small
 notifications:
