@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"runtime"
 	"strconv"
 	"strings"
@@ -179,13 +180,9 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		startScriptName += ".bat"
 	}
 
-	startScript, err := os.CreateTemp(os.TempDir(), startScriptName)
-	if err != nil {
-		return err
-	}
+	startScript := path.Join(os.TempDir(), startScriptName)
 	defer func() {
-		startScript.Close()
-		os.Remove(startScript.Name())
+		os.Remove(startScript)
 	}()
 
 	// Primary context to rule all async and background operations.
@@ -228,7 +225,7 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		runCmdArgs = append(runCmdArgs, changedetect.bazelFlags(trackChanges)...)
 
 		// --norun and generate a run script instead
-		runCmdArgs = append(runCmdArgs, "--norun", "--script_path", startScript.Name())
+		runCmdArgs = append(runCmdArgs, "--norun", "--script_path", startScript)
 
 		// --noallow_analysis_cache_discard except on the intial setup run
 		if !allowDiscard {
@@ -248,7 +245,7 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 			env = append(env, abazel.Env()...)
 		}
 
-		startCmd := exec.CommandContext(pcctx, startScript.Name())
+		startCmd := exec.CommandContext(pcctx, startScript)
 		startCmd.Stdin = bzlCommandStreams.Stdin
 		startCmd.Stdout = bzlCommandStreams.Stdout
 		startCmd.Stderr = bzlCommandStreams.Stderr
