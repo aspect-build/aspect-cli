@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 Aspect Build Systems, Inc.
+ * Copyright 2023 Aspect Build Systems, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,7 +51,7 @@ type PluginSystem interface {
 	TearDown()
 	RegisterCustomCommands(cmd *cobra.Command, bazelStartupArgs []string) error
 	BESBackendInterceptor() interceptors.Interceptor
-	BESBackendSubscriberInterceptor() interceptors.Interceptor
+	BESSocketInterceptor() interceptors.Interceptor
 	BuildHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	TestHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
 	RunHooksInterceptor(streams ioutils.Streams) interceptors.Interceptor
@@ -167,18 +167,19 @@ func (ps *pluginSystem) TearDown() {
 	}
 }
 
-// BESBackendSubscriberInterceptor always starts a BES backend and injects it into the context.
+// BESSocketInterceptor always starts a BES backend and injects it into the context.
 // Use BESBackendInterceptor to only create the grpc service when there is a known subscriber.
-func (ps *pluginSystem) BESBackendSubscriberInterceptor() interceptors.Interceptor {
+func (ps *pluginSystem) BESSocketInterceptor() interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
-		return ps.createBesBackend(ctx, cmd, args, next)
+		return ps.createBesSocket(ctx, cmd, args, next)
 	}
 }
 
 // BESBackendInterceptor sometimes starts a BES backend and injects it into the context.
 // It short-circuits and does nothing in cases where we think there is no subscriber.
-// Use BESBackendSubscriberInterceptor if you always know there will be a subscriber.
 // It gracefully stops the server after the main command is executed.
+//
+// DEPRECATED: use BESSocketInterceptor instead.
 func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 		// Check if --aspect:force_bes_backend is set. This is primarily used for testing.
@@ -209,6 +210,22 @@ func (ps *pluginSystem) hasBESPlugins() bool {
 		}
 	}
 	return false
+}
+
+func (ps *pluginSystem) createBesSocket(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
+	besSocket, err := bep.NewBESSocket(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create BES socket: %w", err)
+	}
+	if err := besSocket.Setup(); err != nil {
+		return fmt.Errorf("failed to setup BES socket: %w", err)
+	}
+	if err := besSocket.ServeWait(ctx); err != nil {
+		return fmt.Errorf("failed to serve BES socket: %w", err)
+	}
+	defer besSocket.GracefulStop()
+	ctx = bep.InjectBESSocket(ctx, besSocket)
+	return next(ctx, cmd, args)
 }
 
 func (ps *pluginSystem) createBesBackend(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {

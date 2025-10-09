@@ -266,10 +266,9 @@ lint:
 	// we could build this support into the Aspect CLI and post on that issue
 	// that using the Aspect CLI resolves it.
 	var lintBEPHandler *LintBEPHandler
-	if bep.HasBESBackend(ctx) {
-		besBackend := bep.BESBackendFromContext(ctx)
-		besBackendFlag := fmt.Sprintf("--bes_backend=%s", besBackend.Addr())
-		bazelCmd = flags.AddFlagToCommand(bazelCmd, besBackendFlag)
+	if bep.HasBESSocket(ctx) {
+		besBackend := bep.BESSocketFromContext(ctx)
+		bazelCmd = flags.AddFlagToCommand(bazelCmd, besBackend.Args()...)
 
 		workingDirectory, err := os.Getwd()
 		if err != nil {
@@ -282,7 +281,7 @@ lint:
 		}
 
 		lintBEPHandler = newLintBEPHandler(workspaceRoot, besCompleted)
-		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback, false)
+		besBackend.RegisterSubscriber(lintBEPHandler.bepEventCallback)
 	}
 
 	if postTerminateArgs != nil {
@@ -318,7 +317,7 @@ lint:
 	}
 
 	// Check for subscriber errors
-	subscriberErrors := bep.BESErrors(ctx)
+	subscriberErrors := bep.BESSocketErrors(ctx)
 	if len(subscriberErrors) > 0 {
 		for _, err := range subscriberErrors {
 			fmt.Fprintf(runner.streams.Stderr, "Error: failed to run lint command: %v\n", err)

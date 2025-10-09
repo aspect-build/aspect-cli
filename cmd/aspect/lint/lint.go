@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 Aspect Build Systems, Inc.
+ * Copyright 2023 Aspect Build Systems, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ In addition to flags listed below, flags accepted by the 'bazel build' command a
 		RunE: interceptors.Run(
 			[]interceptors.Interceptor{
 				flags.FlagsInterceptor(streams),
-				pluginSystem.BESBackendSubscriberInterceptor(),
+				pluginSystem.BESSocketInterceptor(),
 			},
 			lint.New(streams, hstreams, bzl, lintHandlers).Run,
 		),
