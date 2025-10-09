@@ -31,17 +31,17 @@ cp {info_file} {aspect_watch_watch_manifest}
         arguments = [
             default.files_to_run.executable.path,
             str(ctx.label),
-            " ".join(ctx.rule.attr.tags),
+            ",".join(ctx.rule.attr.tags),
         ],
         outputs = [watch_manifest],
         mnemonic = "AspectWatchTargetInfo",
         execution_requirements = {
-            # prevents the action or test from being executed remotely or cached remotely
-            "no-remote": "1",
-            # keyword results in the action or test never being cached (locally or remotely)
-            "no-cache": "1",
             # precludes the action from being remotely cached, remotely executed, or run inside the sandbox
             "local": "1",
+            # keyword results in the action or test never being cached (locally or remotely)
+            "no-cache": "1",
+            # prevents the action or test from being executed remotely or cached remotely
+            "no-remote": "1",
         },
     )
 

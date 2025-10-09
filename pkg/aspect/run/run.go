@@ -70,7 +70,7 @@ type Run struct {
 	tracer trace.Tracer
 }
 
-var watchConnectionTimeout = 1 * time.Second
+var defaultWatchConnectionTimeout = 1 * time.Second
 
 func init() {
 	timeoutEnv := os.Getenv("ASPECT_WATCH_CONNECTION_TIMEOUT_MS")
@@ -79,7 +79,7 @@ func init() {
 		if err != nil {
 			log.Fatalf("Invalid ASPECT_WATCH_CONNECTION_TIMEOUT_MS value (%v): %v", timeoutEnv, err)
 		}
-		watchConnectionTimeout = time.Duration(timeout) * time.Millisecond
+		defaultWatchConnectionTimeout = time.Duration(timeout) * time.Millisecond
 	}
 }
 
@@ -289,7 +289,8 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	// The incremental bazel protocol/tool to use going forward.
 	var incrementalProtocol ibp.IncrementalBazel
 
-	// If the target explicitly supports ibazel but NOT excplicitly supports incremental build protocol.
+	// If the target explicitly supports ibazel but NOT excplicitly supports incremental build protocol
+	// then assume only legacy ibazel support is available.
 	if changedetect.supportsIBazelNotifyChanges() && !changedetect.explicitlySupportsIBP() {
 		// Fallback to only using the legacy ibazel protocol.
 		fmt.Printf("%s Fallback to legacy ibazel protocol\n", color.GreenString("INFO:"))
@@ -320,6 +321,13 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		return fmt.Errorf("failed to start bazel command: %w", startErr)
 	}
 
+	// Significantly increase the timeout if the target explicitly supports the watch protocol
+	// since failure to connect will be a hard error instead of a fallback to restarting.
+	watchConnectionTimeout := defaultWatchConnectionTimeout
+	if changedetect.explicitlySupportsIBP() {
+		watchConnectionTimeout *= 10
+	}
+
 	// Give the watcher some time to start and open the connection before sending Init()
 	if !incrementalProtocol.HasConnection() {
 		// TODO: don't assume abazel is the only non-instant connection
@@ -331,18 +339,19 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 		case v := <-abazel.WaitForConnection():
 			fmt.Printf("%s Received connection to %s using abazel v%v\n", color.GreenString("INFO:"), abazel.Address(), v)
 		case <-time.After(watchConnectionTimeout):
-			fmt.Printf("%s Timeout waiting for watch protocol connection.\n", color.YellowString("WARNING:"))
+			fmt.Printf("%s Timeout (%vms) waiting for watch protocol connection.\n", color.YellowString("WARNING:"), watchConnectionTimeout.Milliseconds())
 			break
 		}
 	}
 
 	// Abandon the incrmental protocol if the target has not responded
 	if !incrementalProtocol.HasConnection() {
-		fmt.Printf("%s No watch protocol connection established. Fallback to restart.\n", color.YellowString("WARNING:"))
-
 		if changedetect.explicitlySupportsIBP() {
-			fmt.Printf("%s target explicitly supports incremental build protocol but did not connect.\n", color.RedString("WARNING:"))
+			fmt.Printf("%s target explicitly supports incremental build protocol but did not connect within %vms.\n", color.RedString("ERROR:"), watchConnectionTimeout.Milliseconds())
+			os.Exit(1)
 		}
+
+		fmt.Printf("%s No watch protocol connection established. Fallback to restart.\n", color.YellowString("WARNING:"))
 
 		go abazel.Close()
 		abazel = nil
