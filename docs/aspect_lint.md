@@ -25,6 +25,7 @@ aspect lint <target patterns> [flags]
       --fix                    Auto-apply all fixes
       --fixes                  Request fixes from linters (where supported) (default true)
   -h, --help                   help for lint
+      --interactive            Enable or disable interactive mode for applying fixes
       --lint:aspects strings   A set of lint aspects to use. Overriding, appending or removing from those set in the Aspect CLI config.
       --machine                Request machine readable lint reports from linters (where supported)
       --quiet                  Hide successful lint results

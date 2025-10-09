@@ -94,6 +94,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flags.RegisterNoableBoolP(flagSet, "report", "", true, "Request lint reports from linters")
 	flags.RegisterNoableBoolP(flagSet, "machine", "", false, "Request machine readable lint reports from linters (where supported)")
 	flags.RegisterNoableBoolP(flagSet, "quiet", "", false, "Hide successful lint results")
+	flags.RegisterNoableBoolP(flagSet, "interactive", "", false, "Enable or disable interactive mode for applying fixes")
 }
 
 // TODO: hoist this to a flags package so it can be used by other commands that require this functionality
@@ -159,6 +160,11 @@ func (runner *Linter) Run(ctx context.Context, cmd *cobra.Command, args []string
 	linters := viper.GetStringSlice("lint.aspects")
 	hideSuccess := viper.GetBool("lint.quiet")
 
+	// Allow overriding lint interactive mode via config file
+	if viper.IsSet("lint.interactive") {
+		isInteractiveMode = isInteractiveMode && viper.GetBool("lint.interactive")
+	}
+
 	if len(linters) == 0 {
 		fmt.Fprintf(runner.streams.Stdout, `No aspects enabled for linting.
 		
@@ -190,6 +196,11 @@ lint:
 	// This flag overrides the config file if set
 	if cmd.Flags().Changed("quiet") {
 		hideSuccess, _ = cmd.Flags().GetBool("quiet")
+	}
+
+	// This flag overrides the config file if set
+	if cmd.Flags().Changed("interactive") {
+		isInteractiveMode, _ = cmd.Flags().GetBool("interactive")
 	}
 
 	// Separate out the lint command specific flags from the list of args to
