@@ -5,9 +5,9 @@ go 1.24.5
 require (
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/alphadose/haxmap v1.4.1
-	github.com/aspect-build/aspect-gazelle/common v0.0.0-20251002133957-1f68580e9701
-	github.com/aspect-build/aspect-gazelle/language/orion v0.0.0-20251002133957-1f68580e9701
-	github.com/aspect-build/aspect-gazelle/runner v0.0.0-20251002133957-1f68580e9701
+	github.com/aspect-build/aspect-gazelle/common v0.0.0-20251009224809-e75afa1f8569
+	github.com/aspect-build/aspect-gazelle/language/orion v0.0.0-20251009224809-e75afa1f8569
+	github.com/aspect-build/aspect-gazelle/runner v0.0.0-20251009224809-e75afa1f8569
 	github.com/bazelbuild/bazel-gazelle v0.45.1-0.20250924144014-2de7b829fef1
 	github.com/bazelbuild/bazelisk v1.26.0 // NOTE: keep vendored code in sync
 	github.com/bazelbuild/buildtools v0.0.0-20250926132224-6c4b75d79427
@@ -20,7 +20,7 @@ require (
 	github.com/golang/protobuf v1.5.4
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.6.1
-	github.com/itchyny/gojq v0.12.17 // indirect
+	github.com/itchyny/gojq v0.12.18-0.20251005142832-e46d0344f209 // indirect
 	github.com/manifoldco/promptui v0.9.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mitchellh/go-homedir v1.1.0
@@ -73,7 +73,7 @@ require (
 	github.com/a8m/envsubst v1.4.3 // indirect
 	github.com/alecthomas/chroma/v2 v2.15.0 // indirect
 	github.com/alecthomas/participle/v2 v2.1.4 // indirect
-	github.com/aspect-build/aspect-gazelle/language/js v0.0.0-20251002133957-1f68580e9701 // indirect
+	github.com/aspect-build/aspect-gazelle/language/js v0.0.0-20251001194427-669d53ca49e3 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
