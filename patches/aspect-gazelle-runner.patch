@@ -1,0 +1,10 @@
+diff --git a/runner/MODULE.bazel b/runner/MODULE.bazel
+index edfb9dbf..45ed1f0a 100644
+--- a/runner/MODULE.bazel
++++ b/runner/MODULE.bazel
+@@ -72,5 +72,3 @@ go_deps2.module_override(
+     path = "github.com/bazelbuild/bazel-gazelle",
+ )
+ 
+-# For cgo
+-include("//:llvm.MODULE.bazel")
