@@ -59,6 +59,7 @@ import (
 	"go.opentelemetry.io/otel"
 	traceAttr "go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
 )
 
 // Run represents the aspect run command.
@@ -202,6 +203,27 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	))
 	defer t.End()
 
+	// Start the workspace watcher.
+	// Start in the background while bazel-run is also initializing in parallel
+	// in case watchman is slow to startup.
+	w := watcher.NewWatchman(runner.bzl.WorkspaceRoot())
+	wInit := errgroup.Group{}
+	wInit.Go(func() error {
+		if err := w.Start(); err != nil {
+			return fmt.Errorf("failed to start the watcher: %w", err)
+		}
+		return nil
+	})
+	defer w.Close()
+
+	// Since the Subscribe() method is blocking, we need to run a separate
+	// goroutine to stop the watcher when we receive a signal to cancel the
+	// process.
+	go func() {
+		<-pcctx.Done()
+		w.Close()
+	}()
+
 	// The abazel protocol, potentially used as the incremental build tool.
 	// Must initialize and start listening for connections before the initial bazel run command.
 	// Start the incremental build service in case the process supports it and connects
@@ -267,21 +289,6 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 	if err := changedetect.detectContext(); err != nil {
 		return fmt.Errorf("failed to detect context on init: %w", err)
 	}
-
-	// Start the workspace watcher
-	w := watcher.NewWatchman(runner.bzl.WorkspaceRoot())
-	if err := w.Start(); err != nil {
-		return fmt.Errorf("failed to start the watcher: %w", err)
-	}
-	defer w.Close()
-
-	// Since the Subscribe() method is blocking, we need to run a separate
-	// goroutine to stop the watcher when we receive a signal to cancel the
-	// process.
-	go func() {
-		<-pcctx.Done()
-		w.Close()
-	}()
 
 	// The command to start the run target.
 	startCmd := createRunCmd()
@@ -390,6 +397,12 @@ func (runner *Run) runWatch(ctx context.Context, bazelCmd []string, bzlCommandSt
 
 	pcctx, st := runner.tracer.Start(pcctx, "Run.Subscribe")
 	defer st.End()
+
+	// Watchman must finish initializing before we can subscribe
+	wErr := wInit.Wait()
+	if wErr != nil {
+		return wErr
+	}
 
 	// Subscribe to further changes
 	for cs, err := range w.Subscribe(pcctx, "aspect-run-watch") {
