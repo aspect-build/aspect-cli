@@ -19,7 +19,7 @@ permissions:
 jobs:
   build:
     name: Build MacOS and Linux release artifacts
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04-32core
     outputs:
       artifact: ${{steps.upload.outputs.artifact-url}}
     steps:
@@ -27,28 +27,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0 # need to see tags (https://github.com/actions/checkout?tab=readme-ov-file#fetch-all-history-for-all-tags-and-branches)
-
-      - name: Free up disk space
-        run: |
-          echo "Listing 100 largest packages"
-          dpkg-query -Wf '${Installed-Size}\t${Package}\n' | sort -n | tail -n 100
-          df -h
-          echo "Removing large packages"
-          sudo apt-get remove -y 'aspnetcore-.*' '^clang-tidy-.*' '^google.*' '^dotnet-.*'
-          sudo apt-get remove -y 'php.*' '^mongodb-.*' '^mysql-.*' '^docker-.*' '^llvm-.*'
-          sudo apt-get remove -y podman azure-cli firefox powershell buildah
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          df -h
-          echo "Removing large directories"
-          sudo rm -rf /usr/share/dotnet/
-          sudo rm -rf /usr/local/graalvm/
-          sudo rm -rf /usr/local/.ghcup/
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/lib/node_modules
-          df -h
 
       - name: Setup bazelisk
         run: |
