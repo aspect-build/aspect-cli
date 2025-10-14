@@ -1,5 +1,5 @@
 use axl_proto::google::devtools::build::v1::{
-    StreamId, build_event::Event, stream_id::BuildComponent,
+    build_event::Event, stream_id::BuildComponent, StreamId,
 };
 
 pub fn stream_id(build_id: String, invocation_id: String, ev: &Event) -> StreamId {

@@ -7,9 +7,9 @@ use starlark::environment::MethodsStatic;
 
 use starlark::starlark_simple_value;
 use starlark::values;
+use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
-use starlark::values::starlark_value;
 
 use starlark::{
     environment::GlobalsBuilder, starlark_module,

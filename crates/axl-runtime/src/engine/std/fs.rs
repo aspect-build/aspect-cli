@@ -3,20 +3,20 @@ use derive_more::Display;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
-use starlark::values::ValueOfUnchecked;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneType;
+use starlark::values::ValueOfUnchecked;
 use std::fs;
 
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
+use starlark::values::starlark_value;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::StringValue;
 use starlark::values::Trace;
-use starlark::values::starlark_value;
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<fs.DirEntry path:{path} is_dir:{is_dir} is_file:{is_file}>")]

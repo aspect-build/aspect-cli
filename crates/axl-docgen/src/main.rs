@@ -1,7 +1,7 @@
 mod highlight;
 use anyhow::{Ok, Result};
 use axl_runtime::eval;
-use starlark::docs::multipage::{DocModuleInfo, render_markdown_multipage};
+use starlark::docs::multipage::{render_markdown_multipage, DocModuleInfo};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;

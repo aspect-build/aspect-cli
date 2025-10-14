@@ -2,21 +2,21 @@ use allocative::Allocative;
 use anyhow::Context;
 use derive_more::Display;
 
-use starlark::StarlarkResultExt;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::eval::Arguments;
 use starlark::eval::Evaluator;
-use starlark::values::AllocValue;
-use starlark::values::Heap;
-use starlark::values::Value;
-use starlark::values::ValueLike;
 use starlark::values::dict::UnpackDictEntries;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneType;
 use starlark::values::tuple::AllocTuple;
 use starlark::values::tuple::UnpackTuple;
+use starlark::values::AllocValue;
+use starlark::values::Heap;
+use starlark::values::Value;
+use starlark::values::ValueLike;
+use starlark::StarlarkResultExt;
 use starlark_derive::Trace;
 use wasmi_wasi::ambient_authority;
 
@@ -30,9 +30,9 @@ use wasmi_wasi::WasiCtx;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
+use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
-use starlark::values::starlark_value;
 
 #[derive(Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<wasm_memory>")]

@@ -4,13 +4,13 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use starlark::environment::{FrozenModule, Module};
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::AstModule;
 
-use crate::eval::{AxlScriptEvaluator, LOAD_STACK, is_local_module_path};
-use crate::helpers::{ASPECT_ROOT, AXL_MODULE_DIR, sanitize_load_path_lexically};
+use crate::eval::{is_local_module_path, AxlScriptEvaluator, LOAD_STACK};
+use crate::helpers::{sanitize_load_path_lexically, ASPECT_ROOT, AXL_MODULE_DIR};
 
 thread_local! {
     static LOADED_MODULES: RefCell<HashMap<String, FrozenModule>> = RefCell::new(HashMap::new());

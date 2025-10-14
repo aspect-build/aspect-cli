@@ -5,13 +5,13 @@ use std::{
 };
 
 use axl_proto::{
+    build_event_stream::{build_event::Payload, build_event_id::Id, BuildEvent},
     Timestamp,
-    build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id},
 };
 
 use fibre::spmc::Receiver;
 use tokio::task;
-use tracing::{Level, Span, span::EnteredSpan};
+use tracing::{span::EnteredSpan, Level, Span};
 
 use super::super::r#async::rt::AsyncRuntime;
 
@@ -81,22 +81,20 @@ impl TracingEventStreamSink {
                         }
                     }
                     (Payload::Started(s), Id::Started(_)) => {
-                        assert!(
-                            spans
-                                .insert(
-                                    "building",
-                                    tracing::info_span!(
-                                        "build_tool",
-                                        version = ?s.build_tool_version,
-                                        pid = ?s.server_pid,
-                                        uuid = ?s.uuid,
-                                        current_dir = ?s.working_directory,
-                                        repo_root = ?s.workspace_directory,
-                                    )
-                                    .entered()
+                        assert!(spans
+                            .insert(
+                                "building",
+                                tracing::info_span!(
+                                    "build_tool",
+                                    version = ?s.build_tool_version,
+                                    pid = ?s.server_pid,
+                                    uuid = ?s.uuid,
+                                    current_dir = ?s.working_directory,
+                                    repo_root = ?s.workspace_directory,
                                 )
-                                .is_none()
-                        );
+                                .entered()
+                            )
+                            .is_none());
                     }
                     (Payload::Finished(_), Id::BuildFinished(_)) => {
                         spans

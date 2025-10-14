@@ -10,10 +10,10 @@ use allocative::Allocative;
 use derive_more::Display;
 use starlark::eval::Evaluator;
 use starlark::starlark_simple_value;
+use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkValue;
-use starlark::values::starlark_value;
 
 #[derive(Debug, ProvidesStaticType, Default)]
 pub struct ModuleStore {

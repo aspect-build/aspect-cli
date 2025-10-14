@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use aspect_config::ToolSpec;
 use dirs::cache_dir as get_cache_dir;
-use miette::{Context, IntoDiagnostic, Result, miette};
+use miette::{miette, Context, IntoDiagnostic, Result};
 use std::fs;
 
 #[derive(Debug, Clone)]

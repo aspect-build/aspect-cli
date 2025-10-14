@@ -1,8 +1,8 @@
 use allocative::Allocative;
 use derive_more::Display;
 
-use futures::FutureExt;
 use futures::future::BoxFuture;
+use futures::FutureExt;
 use starlark::docs::{DocItem, DocMember, DocProperty, DocString};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
@@ -10,7 +10,7 @@ use starlark::starlark_module;
 use starlark::typing::{Ty, TyStarlarkValue, TyUser, TyUserParams};
 use starlark::values::typing::TypeInstanceId;
 use starlark::values::{self, AllocValue, Heap, Trace, Tracer, UnpackValue, ValueLike};
-use starlark::values::{NoSerialize, ProvidesStaticType, starlark_value};
+use starlark::values::{starlark_value, NoSerialize, ProvidesStaticType};
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::rc::Rc;

@@ -1,6 +1,6 @@
 use axl_proto::build_event_stream::BuildEvent;
+use fibre::spmc::{bounded, Receiver};
 use fibre::SendError;
-use fibre::spmc::{Receiver, bounded};
 use prost::Message;
 use std::{
     fs::File,

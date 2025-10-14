@@ -1,4 +1,4 @@
-use aspect_config::{BZLARCH, BZLOS, TELURL, cli_version};
+use aspect_config::{cli_version, BZLARCH, BZLOS, TELURL};
 use reqwest::header::HeaderName;
 use reqwest::redirect::Policy;
 use reqwest::{self, Method};

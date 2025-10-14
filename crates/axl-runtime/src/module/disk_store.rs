@@ -11,8 +11,8 @@ use tokio::fs::{self, File};
 
 use crate::module::store::Override;
 
-use super::AxlDep;
 use super::store::ModuleStore;
+use super::AxlDep;
 
 pub struct DiskStore {
     #[allow(unused)]
