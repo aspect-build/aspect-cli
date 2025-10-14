@@ -39,4 +39,4 @@ steps:
         --config=workflows \
         --config=ci \
         --show_progress_rate_limit=1 \
-        //tools/format.check
+        //tools/format:format.check
