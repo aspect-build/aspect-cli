@@ -4,6 +4,9 @@ import %workspace%/bazel/defaults.bazelrc
 common --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 common --incompatible_enable_cc_toolchain_resolution
 
+# Check local dev setup
+common --workspace_status_command=tools/githooks/check-config.sh
+
 # Don't link against libunwind on macos as it causes linking failures (https://github.com/bazel-contrib/toolchains_llvm/pull/346)
 common:macos --@toolchains_llvm//toolchain/config:libunwind=False
 common:macos --build_tag_filters=-no-macos

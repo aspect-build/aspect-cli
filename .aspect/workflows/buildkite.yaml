@@ -20,3 +20,23 @@ steps:
         --test_output=summary \
         --show_progress_rate_limit=1 \
         -- //...
+  - label: ":broom: Format"
+    agents:
+      queue: aspect-small
+    command: |
+      echo "--- :aspect-build: Workflows environment"
+      /etc/aspect/workflows/bin/configure_workflows_env
+      echo "--- :stethoscope: Agent health check"
+      /etc/aspect/workflows/bin/agent_health_check
+      echo "--- :bazel: bazel run //tools/format:format.check"
+      pwd
+      rosetta bazelrc > /etc/bazel.bazelrc
+      bazel \
+        --nohome_rc \
+        --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ \
+        --output_base=/mnt/ephemeral/output/aspect-cli/__main__ \
+        run \
+        --config=workflows \
+        --config=ci \
+        --show_progress_rate_limit=1 \
+        //tools/format:format.check
