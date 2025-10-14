@@ -22,7 +22,7 @@ steps:
         -- //...
   - label: ":broom: Format"
     agents:
-      queue: aspect-default
+      queue: aspect-small
     command: |
       echo "--- :aspect-build: Workflows environment"
       /etc/aspect/workflows/bin/configure_workflows_env
