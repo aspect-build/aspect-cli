@@ -8,11 +8,11 @@ use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
+use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::ValueLike;
-use starlark::values::starlark_value;
 
 use super::bazel::Bazel;
 use super::delivery::DeliveryModule;
@@ -96,7 +96,9 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
 
     /// Expand template files.
     #[starlark(attribute)]
-    fn template<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<template::Template> {
+    fn template<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+    ) -> starlark::Result<template::Template> {
         Ok(template::Template::new())
     }
 

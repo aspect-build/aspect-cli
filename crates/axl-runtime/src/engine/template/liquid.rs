@@ -1,5 +1,5 @@
 use liquid::ParserBuilder as LiquidParserBuilder;
-use liquid_core::model::{Value as LiquidValue, KString, Object as LiquidObject};
+use liquid_core::model::{KString, Object as LiquidObject, Value as LiquidValue};
 
 use serde_json::Value as JsonValue;
 
@@ -14,11 +14,11 @@ pub(super) fn liquid_render(template: &str, data: &JsonValue) -> anyhow::Result<
                 } else {
                     LiquidValue::scalar(n.as_f64().unwrap())
                 }
-            },
+            }
             JsonValue::String(s) => LiquidValue::scalar(s.as_str()),
             JsonValue::Array(arr) => {
                 LiquidValue::array(arr.iter().map(json_to_liquid).collect::<Vec<_>>())
-            },
+            }
             JsonValue::Object(obj) => {
                 let mut liquid_obj = LiquidObject::new();
                 for (k, v) in obj.iter() {
@@ -29,7 +29,9 @@ pub(super) fn liquid_render(template: &str, data: &JsonValue) -> anyhow::Result<
         }
     }
 
-    let parser = LiquidParserBuilder::with_stdlib().build().map_err(|e| anyhow::anyhow!(e))?;
+    let parser = LiquidParserBuilder::with_stdlib()
+        .build()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let template = parser.parse(template).map_err(|e| anyhow::anyhow!(e))?;
     let globals = if let LiquidValue::Object(obj) = json_to_liquid(data) {
         obj

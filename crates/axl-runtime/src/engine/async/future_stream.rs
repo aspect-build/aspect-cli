@@ -1,12 +1,12 @@
 use allocative::Allocative;
 use derive_more::Display;
 use starlark::values;
+use starlark::values::starlark_value;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
-use starlark::values::starlark_value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;

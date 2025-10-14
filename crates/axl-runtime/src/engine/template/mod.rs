@@ -4,26 +4,29 @@ mod handlebars;
 
 use allocative::Allocative;
 use derive_more::Display;
+use serde_json::{Map, Value as JsonValue};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::dict::UnpackDictEntries;
-use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkValue, Value, starlark_value};
 use starlark::values::StringValue;
-use serde_json::{Map, Value as JsonValue};
+use starlark::values::{starlark_value, NoSerialize, ProvidesStaticType, StarlarkValue, Value};
 
 use crate::engine::template::handlebars::handlebars_render;
 // use crate::engine::template::jinja2::jinja2_render;
 // use crate::engine::template::liquid::liquid_render;
 
 use liquid::ParserBuilder as LiquidParserBuilder;
-use liquid_core::model::{Value as LiquidValue, KString, Object as LiquidObject};
-use minijinja::{Environment as MinijinjaEnvironment, value::Value as MinijinjaValue};
+use liquid_core::model::{KString, Object as LiquidObject, Value as LiquidValue};
+use minijinja::{value::Value as MinijinjaValue, Environment as MinijinjaEnvironment};
 
 pub(super) fn jinja2_render(template: &str, data: &JsonValue) -> anyhow::Result<String> {
     let mut env = MinijinjaEnvironment::new();
-    env.add_template("template", template).map_err(|e| anyhow::anyhow!(e))?;
-    let tmpl = env.get_template("template").map_err(|e| anyhow::anyhow!(e))?;
+    env.add_template("template", template)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let tmpl = env
+        .get_template("template")
+        .map_err(|e| anyhow::anyhow!(e))?;
     let ctx = MinijinjaValue::from_serialize(data);
     tmpl.render(&ctx).map_err(|e| anyhow::anyhow!(e))
 }
@@ -39,11 +42,11 @@ fn liquid_render(template: &str, data: &JsonValue) -> anyhow::Result<String> {
                 } else {
                     LiquidValue::scalar(n.as_f64().unwrap())
                 }
-            },
+            }
             JsonValue::String(s) => LiquidValue::scalar(s.to_string()),
             JsonValue::Array(arr) => {
                 LiquidValue::array(arr.iter().map(json_to_liquid).collect::<Vec<_>>())
-            },
+            }
             JsonValue::Object(obj) => {
                 let mut liquid_obj = LiquidObject::new();
                 for (k, v) in obj.iter() {
@@ -54,7 +57,9 @@ fn liquid_render(template: &str, data: &JsonValue) -> anyhow::Result<String> {
         }
     }
 
-    let parser = LiquidParserBuilder::with_stdlib().build().map_err(|e| anyhow::anyhow!(e))?;
+    let parser = LiquidParserBuilder::with_stdlib()
+        .build()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let template = parser.parse(template).map_err(|e| anyhow::anyhow!(e))?;
     let globals = if let LiquidValue::Object(obj) = json_to_liquid(data) {
         obj
@@ -102,7 +107,8 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
     fn handlebars<'v>(
         #[allow(unused)] this: Value<'v>,
         #[starlark(require = pos)] template: StringValue<'v>,
-        #[starlark(require = named, default = UnpackDictEntries::default())] data: UnpackDictEntries<String, Value<'v>>,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        data: UnpackDictEntries<String, Value<'v>>,
     ) -> anyhow::Result<String> {
         let mut json_map: Map<String, JsonValue> = Map::new();
         for (k, v) in data.entries {
@@ -128,7 +134,8 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
     fn jinja2<'v>(
         #[allow(unused)] this: Value<'v>,
         #[starlark(require = pos)] template: StringValue<'v>,
-        #[starlark(require = named, default = UnpackDictEntries::default())] data: UnpackDictEntries<String, Value<'v>>,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        data: UnpackDictEntries<String, Value<'v>>,
     ) -> anyhow::Result<String> {
         let mut json_map: Map<String, JsonValue> = Map::new();
         for (k, v) in data.entries {
@@ -154,7 +161,8 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
     fn liquid<'v>(
         #[allow(unused)] this: Value<'v>,
         #[starlark(require = pos)] template: StringValue<'v>,
-        #[starlark(require = named, default = UnpackDictEntries::default())] data: UnpackDictEntries<String, Value<'v>>,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        data: UnpackDictEntries<String, Value<'v>>,
     ) -> anyhow::Result<String> {
         let mut json_map: Map<String, JsonValue> = Map::new();
         for (k, v) in data.entries {

@@ -11,13 +11,13 @@ use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_simple_value;
 use starlark::values;
-use starlark::values::NoSerialize;
-use starlark::values::ProvidesStaticType;
 use starlark::values::dict::UnpackDictEntries;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 use starlark::values::tuple::UnpackTuple;
+use starlark::values::NoSerialize;
+use starlark::values::ProvidesStaticType;
 
 use starlark::{
     environment::GlobalsBuilder, starlark_module,

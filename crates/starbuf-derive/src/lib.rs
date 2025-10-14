@@ -2,12 +2,12 @@ extern crate proc_macro;
 
 use std::collections::BTreeMap;
 
-use anyhow::{Error, bail};
+use anyhow::{bail, Error};
 use darling::{FromField, FromMeta, FromVariant};
 use proc_macro2::{Span, TokenStream};
-use quote::{ToTokens, quote};
+use quote::{quote, ToTokens};
 use syn::Item;
-use syn::{Attribute, Field, parse_str, spanned::Spanned};
+use syn::{parse_str, spanned::Spanned, Attribute, Field};
 use syn::{
     Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FieldsNamed, FieldsUnnamed, Ident, Type,
     Variant,

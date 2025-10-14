@@ -75,7 +75,9 @@ pub fn validate_module_name(module_name: &str) -> starlark::Result<()> {
 /// * `Ok((Option<String>, PathBuf))` where the first element is the module name if present,
 ///   and the second is the normalized path with the module prefix stripped (if it was present).
 /// * `Err(starlark::Error)` with a descriptive error if any validation fails.
-pub fn sanitize_load_path_lexically(load_path: &str) -> starlark::Result<(Option<String>, PathBuf)> {
+pub fn sanitize_load_path_lexically(
+    load_path: &str,
+) -> starlark::Result<(Option<String>, PathBuf)> {
     if load_path.trim() != load_path {
         return Err(starlark::Error::new_other(anyhow!(
             "Paths starting or ending with whitespace are disallowed"
@@ -122,19 +124,23 @@ pub fn sanitize_load_path_lexically(load_path: &str) -> starlark::Result<(Option
         )));
     }
 
-    let (module_name_option, path_to_validate): (Option<String>, &str) = if load_path.starts_with('@') {
-        // Must have at least one / (already checked via rfind above)
+    let (module_name_option, path_to_validate): (Option<String>, &str) =
+        if load_path.starts_with('@') {
+            // Must have at least one / (already checked via rfind above)
 
-        // Extract module_name: between @ and first /
-        let first_slash_pos = load_path.find('/').unwrap(); // Safe due to prior check
-        let module_name = &load_path[1..first_slash_pos];
+            // Extract module_name: between @ and first /
+            let first_slash_pos = load_path.find('/').unwrap(); // Safe due to prior check
+            let module_name = &load_path[1..first_slash_pos];
 
-        validate_module_name(module_name)?;
+            validate_module_name(module_name)?;
 
-        (Some(module_name.to_string()), &load_path[(first_slash_pos + 1)..])
-    } else {
-        (None, load_path)
-    };
+            (
+                Some(module_name.to_string()),
+                &load_path[(first_slash_pos + 1)..],
+            )
+        } else {
+            (None, load_path)
+        };
 
     // Validate path segments after module (if present)
     let mut allowing_relative = true;
@@ -168,7 +174,10 @@ pub fn sanitize_load_path_lexically(load_path: &str) -> starlark::Result<(Option
         validate_path_segment(segment)?;
     }
 
-    Ok((module_name_option, normalize_load_path_lexically(Path::new(path_to_validate))))
+    Ok((
+        module_name_option,
+        normalize_load_path_lexically(Path::new(path_to_validate)),
+    ))
 }
 
 /// Normalizes an absolute path by removing redundant '.' components and resolving '..' components against preceding normal components where possible.
@@ -215,7 +224,8 @@ pub fn normalize_abs_path_lexically(path: &Path) -> starlark::Result<PathBuf> {
     for component in iter {
         match component {
             Component::ParentDir => {
-                if !components.is_empty() && matches!(components.last(), Some(Component::Normal(_))) {
+                if !components.is_empty() && matches!(components.last(), Some(Component::Normal(_)))
+                {
                     components.pop();
                 }
                 // Ignore if at root; do not push
@@ -244,7 +254,8 @@ fn normalize_load_path_lexically(path: &Path) -> PathBuf {
     for component in path.components() {
         match component {
             Component::ParentDir => {
-                if !components.is_empty() && matches!(components.last(), Some(Component::Normal(_))) {
+                if !components.is_empty() && matches!(components.last(), Some(Component::Normal(_)))
+                {
                     components.pop();
                 } else {
                     components.push(component);
@@ -261,7 +272,10 @@ fn normalize_load_path_lexically(path: &Path) -> PathBuf {
     }
 
     let first_comp = result.components().next();
-    if starts_with_cur && first_comp != Some(Component::ParentDir) && first_comp != Some(Component::CurDir) {
+    if starts_with_cur
+        && first_comp != Some(Component::ParentDir)
+        && first_comp != Some(Component::CurDir)
+    {
         PathBuf::from(".").join(&result)
     } else {
         result
@@ -319,9 +333,9 @@ fn validate_path_segment(segment: &str) -> starlark::Result<()> {
     // COM0-COM9 (serial ports), LPT0-LPT9 (parallel ports).
     // We check the base name (before the first dot) to catch names like "CON.txt".
     let reserved = [
-        "CON", "PRN", "AUX", "NUL",
-        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
+        "LPT9",
     ];
     if reserved.contains(&base) {
         return Err(starlark::Error::new_other(anyhow!(
@@ -334,7 +348,8 @@ fn validate_path_segment(segment: &str) -> starlark::Result<()> {
         if c.is_control() || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
             return Err(starlark::Error::new_other(anyhow!(
                 "Invalid character '{}' in path segment '{}'",
-                c, segment
+                c,
+                segment
             )));
         }
     }

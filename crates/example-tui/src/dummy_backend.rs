@@ -162,8 +162,8 @@ where
         let to_set = *new - prev;
         let to_del = prev - *new;
 
-        use SetAttribute as Set;
         use anes::Attribute as AA;
+        use SetAttribute as Set;
 
         // Bold/faint/normal are all mutually exclusive
         if to_set.contains(Modifier::BOLD) {

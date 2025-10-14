@@ -11,12 +11,12 @@ use zstd::Decoder;
 
 use starlark::typing::Ty;
 use starlark::values;
+use starlark::values::starlark_value;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
-use starlark::values::starlark_value;
 
 use crate::engine::bazel::execlog_stream::{ExecLogIterator, RetryStream};
 

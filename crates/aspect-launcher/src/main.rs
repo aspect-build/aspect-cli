@@ -1,12 +1,15 @@
 use aspect_cache::AspectCache;
-use aspect_config::{BZLARCH, BZLOS, GOARCH, GOOS, LLVM_TRIPLE, TELURL, ToolSource, ToolSpec, autoconf, cli_version, debug_mode};
-use clap::{Arg, Command, arg};
-use fork::{Fork, fork};
+use aspect_config::{
+    autoconf, cli_version, debug_mode, ToolSource, ToolSpec, BZLARCH, BZLOS, GOARCH, GOOS,
+    LLVM_TRIPLE, TELURL,
+};
+use clap::{arg, Arg, Command};
+use fork::{fork, Fork};
 use futures_util::TryStreamExt;
-use miette::{Context, IntoDiagnostic, Result, miette};
-use reqwest::{self, Client, Method, Request, RequestBuilder, StatusCode};
+use miette::{miette, Context, IntoDiagnostic, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
+use reqwest::{self, Client, Method, Request, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use std::env::{self, var};
 use std::fs;
@@ -200,7 +203,7 @@ async fn configure_tool_task(
                         HeaderValue::from_static("application/vnd.github+json"),
                     )
                     .build()
-                        .into_diagnostic()?;
+                    .into_diagnostic()?;
 
                     // FIXME: Accumulate errors
                     let resp = client

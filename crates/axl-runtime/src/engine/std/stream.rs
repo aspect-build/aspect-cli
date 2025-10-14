@@ -1,6 +1,6 @@
 use anyhow::anyhow;
-use starlark::values::Heap;
 use starlark::values::list::AllocList;
+use starlark::values::Heap;
 
 use std::cell::RefCell;
 use std::fmt::Debug;
@@ -24,11 +24,11 @@ use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
+use starlark::values::none::NoneType;
+use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::ValueLike;
-use starlark::values::none::NoneType;
-use starlark::values::starlark_value;
 
 use crate::engine::std::stream_iter;
 

@@ -3,19 +3,19 @@ use std::fmt::Display;
 use std::u32;
 
 use allocative::Allocative;
-use starlark::ErrorKind;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkValue;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::ErrorKind;
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub enum TaskArg {

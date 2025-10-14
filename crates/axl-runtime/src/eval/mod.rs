@@ -19,7 +19,7 @@ use crate::engine::task_args::TaskArgs;
 use crate::engine::{self, task::Task};
 use crate::eval::load::AxlLoader;
 use crate::helpers::{
-    ASPECT_ROOT, AXL_MODULE_DIR, normalize_abs_path_lexically, sanitize_load_path_lexically,
+    normalize_abs_path_lexically, sanitize_load_path_lexically, ASPECT_ROOT, AXL_MODULE_DIR,
 };
 
 /// The core evaluator for .axl files, holding configuration like repository root,
