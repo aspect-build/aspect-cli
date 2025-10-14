@@ -54,7 +54,6 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: "upload_root/assets/*"
-        if: false # can't do this until the repo is public
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
