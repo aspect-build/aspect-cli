@@ -28,7 +28,7 @@ steps:
       /etc/aspect/workflows/bin/configure_workflows_env
       echo "--- :stethoscope: Agent health check"
       /etc/aspect/workflows/bin/agent_health_check
-      echo "--- :bazel: bazel test //..."
+      echo "--- :bazel: bazel run //tools/format:format.check"
       pwd
       rosetta bazelrc > /etc/bazel.bazelrc
       bazel \
