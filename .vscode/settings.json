@@ -1,0 +1,21 @@
+{
+    "search.exclude": {
+        "bazel-*": true
+    },
+    "files.watcherExclude": {
+        "bazel-*/**": true,
+        
+    },
+    "C_Cpp.workspaceParsingPriority": "medium",
+    "bazel.buildifierFixOnFormat": true,
+    "bazel.enableCodeLens": true,
+    "bazel.buildifierExecutable": "./bazel-out/bazel_env-opt/bin/tools/bazel_env/bin/buildifier",
+    "bazel.lsp.command": "./bazel-out/bazel_env-opt/bin/tools/bazel_env/bin/starpls",
+    "bazel.queriesShareServer": false,
+    "bazel.lsp.args": [
+        "server",
+        "--experimental_infer_ctx_attributes",
+        "--experimental_use_code_flow_analysis",
+        "--experimental_enable_label_completions"
+    ],
+}
