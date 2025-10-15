@@ -2,6 +2,7 @@ use allocative::Allocative;
 use derive_more::Display;
 use futures::FutureExt;
 use futures::TryStreamExt;
+use reqwest::redirect::Policy;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::values::dict::UnpackDictEntries;
 use starlark::values::AllocValue;
@@ -24,7 +25,12 @@ pub struct Http {
 impl Http {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent("AXL-Runtime")
+                // This is the default but lets be explicit.
+                .redirect(Policy::limited(10))
+                .build()
+                .expect("failed to build the http client"),
         }
     }
 }
@@ -56,7 +62,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         }
 
         let fut = async move {
-            let res = req.send().await?;
+            let res = req.send().await?.error_for_status()?;
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)

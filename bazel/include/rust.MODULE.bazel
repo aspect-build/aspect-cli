@@ -26,7 +26,6 @@ crate.from_cargo(
         "//crates/aspect-config:Cargo.toml",
         "//crates/aspect-launcher:Cargo.toml",
         "//crates/example-tui:Cargo.toml",
-        "//crates/pty-multiplex:Cargo.toml",
         "//crates/axl-docgen:Cargo.toml",
         "//crates/axl-runtime:Cargo.toml",
         "//crates/axl-lsp:Cargo.toml",
