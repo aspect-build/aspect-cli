@@ -1,12 +1,9 @@
 # Development
 
-## Getting started
+## With direnv
 
-1. Clone this repo `git clone git@github.com:aspect-build/aspect-cli.git`
-2. Fetch a prebuild `cd aspect-cli && ./tools/install.sh`
-3. Move the prebuilt CLI into your `$PATH`
-
-You are now ready to `aspect build //...` and hack away!
+We use https://direnv.net with the `.envrc` file to setup tooling on the $PATH.
+This includes the most recent release of the `aspect` command.
 
 ## Crates
 
