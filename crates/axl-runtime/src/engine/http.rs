@@ -1,10 +1,10 @@
 use allocative::Allocative;
 use derive_more::Display;
 use futures::FutureExt;
-use futures::TryFutureExt;
 use futures::TryStreamExt;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::values::dict::UnpackDictEntries;
+use starlark::values::AllocValue;
 use starlark::values::{starlark_value, StarlarkValue};
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueLike};
 use starlark::{starlark_module, starlark_simple_value, values};
@@ -55,41 +55,24 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             req = req.header(key.as_str(), value.as_str());
         }
 
-        let fut = async move || -> Result<(), anyhow::Error> {
+        let fut = async move {
             let res = req.send().await?;
-
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
                 .mode(mode)
                 .open(output)
                 .await?;
+            let response = HttpResponse::from(&res);
             let mut stream = res.bytes_stream();
 
             while let Some(bytes) = stream.try_next().await? {
                 file.write_all(&bytes).await?;
             }
-            Ok(())
+            Ok(response)
         };
 
-        let fut = fut().map_ok_or_else(
-            |err| {
-                let alloc: HttpAllocable = HttpResponse {
-                    body: err.to_string(),
-                }
-                .into();
-                alloc.into_box_alloc()
-            },
-            |_| {
-                let alloc: HttpAllocable = HttpResponse {
-                    body: String::new(),
-                }
-                .into();
-                alloc.into_box_alloc()
-            },
-        );
-
-        Ok(StarlarkFuture::from_future::<HttpResponse>(fut.boxed()))
+        Ok(StarlarkFuture::from_future::<HttpResponse>(fut))
     }
 
     fn get<'v>(
@@ -104,21 +87,12 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             req = req.header(key.as_str(), value.as_str());
         }
 
-        let fut = req.send().and_then(|res| res.text()).map_ok_or_else(
-            |err| {
-                let alloc: HttpAllocable = HttpResponse {
-                    body: err.to_string(),
-                }
-                .into();
-                alloc.into_box_alloc()
-            },
-            |t| {
-                let alloc: HttpAllocable = HttpResponse { body: t }.into();
-                alloc.into_box_alloc()
-            },
-        );
+        let fut = async {
+            let res = req.send().await?;
+            Ok(HttpResponse::from(&res))
+        };
 
-        Ok(StarlarkFuture::from_future::<HttpResponse>(fut.boxed()))
+        Ok(StarlarkFuture::from_future(fut.boxed()))
     }
 
     fn post<'v>(
@@ -134,28 +108,35 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             req = req.header(key.as_str(), value.as_str());
         }
         req = req.body(data);
-        let fut = req.send().and_then(|res| res.text()).map_ok_or_else(
-            |err| {
-                let alloc: HttpAllocable = HttpResponse {
-                    body: err.to_string(),
-                }
-                .into();
-                alloc.into_box_alloc()
-            },
-            |t| {
-                let alloc: HttpAllocable = HttpResponse { body: t }.into();
-                alloc.into_box_alloc()
-            },
-        );
+        let fut = async {
+            let res = req.send().await?;
+            Ok(HttpResponse::from(&res))
+        };
 
-        Ok(StarlarkFuture::from_future::<HttpResponse>(fut.boxed()))
+        Ok(StarlarkFuture::from_future(fut))
     }
 }
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
-#[display("<http_response>")]
+#[display("<http_response {status}>")]
 pub struct HttpResponse {
+    status: u16,
     body: String,
+    headers: Vec<(String, String)>,
+}
+
+impl From<&reqwest::Response> for HttpResponse {
+    fn from(value: &reqwest::Response) -> Self {
+        Self {
+            status: value.status().as_u16(),
+            headers: value
+                .headers()
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_str().unwrap().to_string()))
+                .collect(),
+            body: String::new(),
+        }
+    }
 }
 
 #[starlark_value(type = "http_response")]
@@ -171,32 +152,23 @@ starlark_simple_value!(HttpResponse);
 #[starlark_module]
 pub(crate) fn http_response_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
+    fn status<'v>(this: values::Value<'v>) -> anyhow::Result<u32> {
+        Ok(this.downcast_ref_err::<HttpResponse>()?.status as u32)
+    }
+
+    #[starlark(attribute)]
     fn body<'v>(this: values::Value<'v>) -> anyhow::Result<&'v str> {
         Ok(this.downcast_ref_err::<HttpResponse>()?.body.as_str())
     }
-}
 
-#[derive(Clone, Debug, Display, ProvidesStaticType)]
-pub enum HttpAllocable {
-    HttpResponse(HttpResponse),
-}
-
-impl HttpAllocable {
-    fn into_box_alloc(self) -> Box<dyn FutureAlloc> {
-        Box::new(self)
+    #[starlark(attribute)]
+    fn headers<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(this.downcast_ref_err::<HttpResponse>()?.headers.clone())
     }
 }
 
-impl From<HttpResponse> for HttpAllocable {
-    fn from(resp: HttpResponse) -> Self {
-        HttpAllocable::HttpResponse(resp)
-    }
-}
-
-impl FutureAlloc for HttpAllocable {
+impl FutureAlloc for HttpResponse {
     fn alloc_value_fut<'v>(self: Box<Self>, heap: &'v Heap) -> values::Value<'v> {
-        match *self {
-            HttpAllocable::HttpResponse(resp) => heap.alloc(resp),
-        }
+        self.alloc_value(heap)
     }
 }

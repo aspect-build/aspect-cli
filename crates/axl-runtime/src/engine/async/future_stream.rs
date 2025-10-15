@@ -20,7 +20,7 @@ pub struct FutureStream {
     #[allocative(skip)]
     pub(super) rt: AsyncRuntime,
     #[allocative(skip)]
-    pub(super) stream: Arc<RwLock<JoinSet<Box<dyn super::future::FutureAlloc>>>>,
+    pub(super) stream: Arc<RwLock<JoinSet<super::future::FutOutput>>>,
 }
 
 impl std::fmt::Debug for FutureStream {
@@ -83,7 +83,8 @@ impl<'v> values::StarlarkValue<'v> for FutureStream {
             .unwrap()
         });
         let value = out?.ok()?;
-        Some(value.alloc_value_fut(heap))
+        // TODO: Should stream stop when any of the futures result in error?
+        Some(value.ok()?.alloc_value_fut(heap))
     }
     unsafe fn iter_stop(&self) {
         // TODO: destroy the joinset, ensure nothing is left behind.
