@@ -136,16 +136,17 @@ impl<'v> values::StarlarkValue<'v> for WasmCallable {
         let mut outputs: Vec<wasmi::Val> = vec![];
         let heap = eval.heap();
 
-        let positionals = if ty.params().is_empty() {
+        let positionals = if !ty.params().is_empty() {
             use starlark::__derive_refs::{
                 parse_args::{check_required, parse_signature},
                 sig::parameter_spec,
             };
             let __args: [_; 1] = parse_signature(
-                &parameter_spec("get_memory", &[], &[], true, &[], false),
+                &parameter_spec("args", &[], &[], true, &[], false),
                 args,
                 eval.heap(),
             )?;
+
             let positionals: UnpackTuple<Value<'v>> = check_required("args", __args[0])?;
 
             positionals.items
