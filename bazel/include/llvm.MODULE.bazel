@@ -21,13 +21,42 @@ execution_cpus = [
     "x86_64",
 ]
 
+# Get a smaller llvm distribution for fetch and repo rule performance
+# (Maybe --repo_contents_cache makes this less important someday)
+# From https://github.com/dzbarsky/static-clang/releases/tag/v20.1.1-4
+dzbarsky_static_clang = {
+    "macos": {
+        "aarch64": struct(
+            sha256 = "a4e65db49d01e4b37abcbc36a03e4f1121fbea63a7c7b58f9d49e3848a4cbdfc",  # darwin_arm64.tar.zst
+            # 3491c3d2062a57216d34a85662942a9f7e24b997a065832e8dbec943c0c1cfc1  darwin_arm64_minimal.tar.zst
+        ),
+        "x86_64": struct(
+            sha256 = "b681a621e6d456e20fdfc7626db23edad63f7dabb1442790db3397431688cb41", # darwin_amd64.tar.zst
+            # 7952368ac99c61a2bfaec147aa2a4055b5ee9cba01789cc78289106e7d0dfe34  darwin_amd64_minimal.tar.zst
+        ),
+    },
+    "linux": {
+        "aarch64": struct(
+            sha256 = "a71d6686edfb32e455717a1befb013b580a52042915a49f21fc25f83fff59e20", #  linux_arm64.tar.zst
+            # 485f4c6efe55e595d93ae870d5c11fdd2ee532f91f8cfe3da417baa5c0c86ccc  linux_arm64_minimal.tar.zst
+        ),
+        "x86_64": struct(
+            sha256 = "2096e63a41887a860199aec0f046f82e6469b2cd5ae4e4245a7a111bff4abe5b", #  linux_amd64.tar.zst
+            # 7bfc12074796463443477218f1ba92a5c6a3e6f87959e2ec1a574422a05d84de  linux_amd64_minimal.tar.zst
+        ),
+    },
+}
+
 [
     [
         llvm.toolchain(
             name = "llvm_toolchain_{}_{}".format(exec_os, exec_cpu),
             exec_arch = exec_cpu,
             exec_os = exec_os if exec_os != "macos" else "darwin",
-            llvm_version = "20.1.2"
+            sha256 = dzbarsky_static_clang[exec_os][exec_arch].sha256,
+            strip_prefix = dzbarsky_static_clang[exec_os][exec_arch].strip_prefix,
+            urls = dzbarsky_static_clang[exec_os][exec_arch].urls,
+            llvm_version = "20.1.1"
         ),
         llvm.sysroot(
             name = "llvm_toolchain_{}_{}".format(exec_os, exec_cpu),
