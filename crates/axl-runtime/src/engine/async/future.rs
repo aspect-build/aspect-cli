@@ -3,12 +3,11 @@ use derive_more::Display;
 
 use futures::future::BoxFuture;
 use futures::FutureExt;
-use starlark::docs::{DocItem, DocMember, DocProperty, DocString};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::typing::{Ty, TyStarlarkValue, TyUser, TyUserParams};
-use starlark::values::typing::TypeInstanceId;
+use starlark::typing::Ty;
+use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::{self, AllocValue, Heap, Trace, Tracer, UnpackValue, ValueLike};
 use starlark::values::{starlark_value, NoSerialize, ProvidesStaticType};
 use std::cell::RefCell;
@@ -21,26 +20,42 @@ pub trait FutureAlloc: Send {
     fn alloc_value_fut<'v>(self: Box<Self>, heap: &'v Heap) -> values::Value<'v>;
 }
 
+impl StarlarkTypeRepr for Box<dyn FutureAlloc> {
+    type Canonical = Self;
+
+    fn starlark_type_repr() -> Ty {
+        Ty::never()
+    }
+}
+
+impl<'v> AllocValue<'v> for Box<dyn FutureAlloc> {
+    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+        self.alloc_value_fut(heap)
+    }
+}
+pub type FutOutput = Result<Box<dyn FutureAlloc>, anyhow::Error>;
+
 #[derive(Display, Allocative, ProvidesStaticType, NoSerialize)]
 #[display("future")]
 pub struct StarlarkFuture {
     #[allocative(skip)]
-    inner: Rc<RefCell<Option<BoxFuture<'static, Box<dyn FutureAlloc>>>>>,
-    tys: TyStarlarkValue,
-    ty: Ty,
+    inner: Rc<RefCell<Option<BoxFuture<'static, FutOutput>>>>,
 }
 
 impl StarlarkFuture {
-    pub fn from_future<'v, T: values::StarlarkValue<'v>>(
-        fut: impl Future<Output = Box<dyn FutureAlloc>> + Send + 'static,
+    pub fn from_future<T: FutureAlloc + Send + 'static>(
+        fut: impl Future<Output = Result<T, anyhow::Error>> + Send + 'static,
     ) -> Self {
+        use futures::TryFutureExt;
         Self {
-            inner: Rc::new(RefCell::new(Some(fut.boxed()))),
-            tys: TyStarlarkValue::new::<T>(),
-            ty: Ty::starlark_value::<T>(),
+            inner: Rc::new(RefCell::new(Some(
+                fut.map_ok_or_else(|e| Err(e), |r| Ok(Box::new(r) as Box<dyn FutureAlloc>))
+                    .boxed(),
+            ))),
         }
     }
-    pub fn as_fut(&self) -> impl Future<Output = Box<dyn FutureAlloc>> + Send + 'static {
+
+    pub fn as_fut(&self) -> impl Future<Output = FutOutput> + Send + 'static {
         let inner = self.inner.replace(None);
         let r = inner
             .ok_or(anyhow::anyhow!("future has already been awaited"))
@@ -51,7 +66,7 @@ impl StarlarkFuture {
 }
 
 impl Future for StarlarkFuture {
-    type Output = Box<dyn FutureAlloc>;
+    type Output = FutOutput;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -84,47 +99,12 @@ impl<'v> UnpackValue<'v> for StarlarkFuture {
         let fut = value.downcast_ref_err::<StarlarkFuture>()?;
         Ok(Some(Self {
             inner: fut.inner.clone(),
-            ty: fut.ty.clone(),
-            tys: fut.tys,
         }))
     }
 }
 
 #[starlark_value(type = "future")]
 impl<'v> values::StarlarkValue<'v> for StarlarkFuture {
-    fn typechecker_ty(&self) -> Option<Ty> {
-        let ty = TyUser::new(
-            format!("future[{}]", self.ty.as_name()?),
-            self.tys,
-            TypeInstanceId::r#gen(),
-            TyUserParams {
-                // iter_item: Some(self.ty.clone()),
-                ..Default::default()
-            },
-        )
-        .ok()?;
-        Some(Ty::custom(ty))
-    }
-
-    /// Evaluate this value as a type expression. Basically, `eval_type(this)`.
-    fn eval_type(&self) -> Option<Ty> {
-        self.typechecker_ty()
-    }
-
-    fn documentation(&self) -> DocItem
-    where
-        Self: Sized,
-    {
-        let ty = self
-            .typechecker_ty()
-            .unwrap_or_else(Self::get_type_starlark_repr);
-
-        DocItem::Member(DocMember::Property(DocProperty {
-            typ: ty,
-            docs: DocString::from_docstring(starlark::docs::DocStringKind::Rust, "/// hello"),
-        }))
-    }
-
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
         RES.methods(future_methods)
@@ -143,7 +123,7 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
             .inner
             .replace(None)
             .ok_or(anyhow::anyhow!("future has already been awaited"))?;
-        let value = rt.block_on(fut);
+        let value = rt.block_on(fut)?;
         Ok(value.alloc_value_fut(eval.heap()))
     }
 }
