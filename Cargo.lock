@@ -165,6 +165,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d301b3b94cb4b2f23d7917810addbbaff90738e0ca2be692bd027e70d7e0330c"
 
 [[package]]
+name = "arc-slice"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f55bfcb612be7dde478052f4067f400502245aaa2675acaa263d2496b5a1541"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -323,6 +332,7 @@ version = "0.0.0-DEV"
 dependencies = [
  "allocative",
  "anyhow",
+ "arc-slice",
  "aspect-cache",
  "axl-proto",
  "build-event-stream",

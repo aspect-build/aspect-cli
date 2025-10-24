@@ -8,6 +8,7 @@ mod delivery;
 mod http;
 mod std;
 mod template;
+mod types;
 mod wasm;
 
 pub mod r#async;

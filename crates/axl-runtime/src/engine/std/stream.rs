@@ -72,18 +72,6 @@ impl From<Stdin> for Readable {
     }
 }
 
-impl From<Stdout> for Writable {
-    fn from(stdout: Stdout) -> Self {
-        Self::Stdout(Arc::new(stdout))
-    }
-}
-
-impl From<Stderr> for Writable {
-    fn from(stderr: Stderr) -> Self {
-        Self::Stderr(Arc::new(stderr))
-    }
-}
-
 impl From<ChildStderr> for Readable {
     fn from(stderr: ChildStderr) -> Self {
         Self::ChildStderr(Arc::new(Mutex::new(RefCell::new(stderr))))
@@ -93,6 +81,24 @@ impl From<ChildStderr> for Readable {
 impl From<ChildStdout> for Readable {
     fn from(stdout: ChildStdout) -> Self {
         Self::ChildStdout(Arc::new(Mutex::new(RefCell::new(stdout))))
+    }
+}
+
+impl From<ChildStdin> for Writable {
+    fn from(stdin: ChildStdin) -> Self {
+        Self::ChildStdin(Arc::new(Mutex::new(RefCell::new(stdin))))
+    }
+}
+
+impl From<Stdout> for Writable {
+    fn from(stdout: Stdout) -> Self {
+        Self::Stdout(Arc::new(stdout))
+    }
+}
+
+impl From<Stderr> for Writable {
+    fn from(stderr: Stderr) -> Self {
+        Self::Stderr(Arc::new(stderr))
     }
 }
 
