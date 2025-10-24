@@ -13,3 +13,17 @@ axl_dep(
     strip_prefix = "modules/standard",
     dev = True
 )
+
+
+axl_dep(
+    name = "watchdog",
+    urls = ["https://github.com/aspect-extensions/example/releases/download/v0.0.2/v0.0.2.tar.gz"],
+    integrity = "sha384-0msqclam8aGttoXIntaUFgzYK0N2PRzeqBLsqeNaIUnL6o1n3CU6dJqTF5rxkUBr",
+    strip_prefix = "modules/standard",
+    dev = True
+)
+
+local_path_override(
+    dep_name = "watchdog",
+    path = "../extensions/watchdog"
+)

@@ -36,6 +36,7 @@ rust_library(
         "@crates//:sha256",
         "@crates//:dirs",
         "@crates//:tracing",
+        "@crates//:arc-slice",
         "//crates/axl-proto",
         "//crates/build-event-stream"
     ],

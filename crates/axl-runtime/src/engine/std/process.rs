@@ -246,6 +246,24 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
         Ok(stream::Readable::from(child_stderr))
     }
 
+    /// The handle for writing to the child’s standard input (stdin), if it has been captured.
+    /// Calling this function more than once will yield error.
+    fn stdin<'v>(this: values::Value<'v>) -> anyhow::Result<stream::Writable> {
+        let child = this.downcast_ref_err::<Child>()?;
+
+        let mut inner = child.inner.borrow_mut();
+
+        let inner = inner
+            .as_mut()
+            .ok_or(anyhow::anyhow!("child is no longer active"))?;
+
+        let child_stdin = inner.stdin.take().ok_or(anyhow!(
+            r#"stdin is not available. spawn the process with stdin("piped")."#
+        ))?;
+
+        Ok(stream::Writable::from(child_stdin))
+    }
+
     /// Returns the OS-assigned process identifier associated with this child.
     #[starlark(attribute)]
     fn id<'v>(this: values::Value<'v>) -> anyhow::Result<u32> {
