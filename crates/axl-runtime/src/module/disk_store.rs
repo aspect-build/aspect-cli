@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::{io, os::unix::ffi::OsStrExt, path::PathBuf, str::FromStr};
 
 use anyhow::anyhow;
@@ -9,10 +10,10 @@ use ssri::IntegrityChecker;
 use thiserror::Error;
 use tokio::fs::{self, File};
 
-use crate::module::store::Override;
+use crate::builtins;
 
 use super::store::ModuleStore;
-use super::AxlDep;
+use super::{AxlArchiveDep, AxlLocalDep, Dep};
 
 pub struct DiskStore {
     #[allow(unused)]
@@ -30,7 +31,6 @@ pub enum StoreError {
     ChecksumError(#[from] ssri::Error),
     #[error("failed to unpack: {0}")]
     UnpackError(std::io::Error),
-
     #[error("failed to link: {0}")]
     LinkError(std::io::Error),
 }
@@ -53,15 +53,15 @@ impl DiskStore {
         self.root().join("deps").join(&self.root_sha)
     }
 
-    fn dep_path(&self, dep: &AxlDep) -> PathBuf {
-        self.deps_path().join(&dep.name)
+    fn dep_path(&self, dep: &str) -> PathBuf {
+        self.deps_path().join(dep)
     }
 
-    fn dep_marker_path(&self, dep: &AxlDep) -> PathBuf {
-        self.deps_path().join(format!("{}@marker", &dep.name))
+    fn dep_marker_path(&self, dep: &Dep) -> PathBuf {
+        self.deps_path().join(format!("{}@marker", dep.name()))
     }
 
-    fn cas_path(&self, dep: &AxlDep) -> PathBuf {
+    fn cas_path(&self, dep: &AxlArchiveDep) -> PathBuf {
         let hex = dep.integrity.to_hex();
         self.root().join("cas").join(hex.0.to_string()).join(hex.1)
     }
@@ -69,7 +69,7 @@ impl DiskStore {
     async fn fetch_dep(
         &self,
         client: &Client,
-        dep: &AxlDep,
+        dep: &AxlArchiveDep,
         url: &String,
     ) -> Result<(), StoreError> {
         let cas_path = self.cas_path(dep);
@@ -111,8 +111,8 @@ impl DiskStore {
         Ok(())
     }
 
-    async fn expand_dep(&self, dep: &AxlDep) -> Result<(), io::Error> {
-        let dep_path = self.dep_path(dep);
+    async fn expand_dep(&self, dep: &AxlArchiveDep) -> Result<(), io::Error> {
+        let dep_path = self.dep_path(&dep.name);
         let cas_path = self.cas_path(dep);
         let raw = File::open(&cas_path).await?;
         let raw = raw.into_std().await;
@@ -168,66 +168,64 @@ impl DiskStore {
         Ok(())
     }
 
-    async fn link_dep(&self, dep: &AxlDep) -> Result<(), io::Error> {
-        let dep_path = self.dep_path(dep);
-        match dep.r#override.as_ref() {
-            Some(Override::Local { path }) => fs::symlink(path, dep_path).await?,
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    anyhow!("link_dep was called with no overrides"),
-                ));
-            }
-        };
-
-        Ok(())
+    async fn link_dep(&self, dep: &AxlLocalDep) -> Result<(), io::Error> {
+        let dep_path = self.dep_path(&dep.name);
+        fs::symlink(&dep.path, dep_path).await
     }
 
-    pub async fn expand_store(&self, module_store: &ModuleStore) -> Result<(), StoreError> {
+    pub async fn expand_store(
+        &self,
+        store: &ModuleStore,
+    ) -> Result<Vec<(String, PathBuf)>, StoreError> {
         let root = self.root();
         fs::create_dir_all(&root).await?;
         fs::create_dir_all(self.deps_path()).await?;
         fs::create_dir_all(&root.join("cas")).await?;
+        fs::create_dir_all(&root.join("builtins")).await?;
 
         let client = reqwest::Client::new();
 
-        for dep in module_store.deps.borrow().values() {
-            let cas_path = self.cas_path(&dep);
-            fs::create_dir_all(
-                &cas_path
-                    .parent()
-                    .expect("unexpected: cas path did not have a parent. "),
-            )
-            .await?;
+        let mut all: HashMap<String, Dep> =
+            builtins::expand_builtins(&self.root, root.join("builtins"))?
+                .into_iter()
+                .map(|(name, path)| {
+                    (
+                        name.clone(),
+                        Dep::Local(AxlLocalDep {
+                            name: name,
+                            path: path,
+                            // Builtins are always autoused
+                            autouse: true,
+                        }),
+                    )
+                })
+                .collect();
 
-            if !cas_path.exists() && dep.r#override.is_none() {
-                for (i, url) in dep.urls.iter().enumerate() {
-                    match self.fetch_dep(&client, &dep, url).await {
-                        Ok(_) => break,
-                        // If ran out of urls to try, then return the err.
-                        Err(err) if i == dep.urls.len() - 1 => {
-                            return Err(err);
-                        }
-                        // If have more than one url to try, then notify.
-                        Err(err) if dep.urls.len() > 1 => {
-                            eprintln!("failed to fetch `{url}`: {err}");
-                            continue;
-                        }
-                        // Still have urls to try because i != dep.urls.len() - 1
-                        Err(_) => {
-                            continue;
-                        }
-                    }
-                }
-            }
+        all.extend(store.deps.take());
 
+        let mut module_roots = vec![];
+
+        for dep in all.values() {
             let dep_marker_path = self.dep_marker_path(&dep);
-            let dep_path = self.dep_path(&dep);
+            let dep_path = self.dep_path(&dep.name());
 
-            let current_hash = sha256::digest(format!(
-                "{}{}{:?}",
-                dep.integrity, dep.strip_prefix, dep.r#override
-            ));
+            match dep {
+                Dep::Local(local) if local.autouse => {
+                    module_roots.push((local.name.clone(), dep_path.clone()))
+                }
+                Dep::Remote(remote) if remote.autouse => {
+                    module_roots.push((remote.name.clone(), dep_path.clone()))
+                }
+                _ => {}
+            };
+
+            let current_hash = match dep {
+                Dep::Local(dep) => sha256::digest(dep.path.to_str().unwrap()),
+                Dep::Remote(dep) => {
+                    sha256::digest(format!("{}{}", dep.integrity, dep.strip_prefix))
+                }
+            };
+
             if dep_marker_path.exists() {
                 let prev_hash = fs::read_to_string(&dep_marker_path).await?;
                 if prev_hash != current_hash {
@@ -235,20 +233,54 @@ impl DiskStore {
                 }
             }
 
-            if !dep_path.exists() && dep.r#override.is_none() {
-                fs::create_dir_all(&dep_path).await?;
-                self.expand_dep(dep)
-                    .await
-                    .map_err(|err| StoreError::UnpackError(err))?;
-            } else if !dep_path.exists() && dep.r#override.is_some() {
-                self.link_dep(dep)
-                    .await
-                    .map_err(|err| StoreError::LinkError(err))?;
+            if !dep_path.exists() {
+                match dep {
+                    Dep::Local(local) => {
+                        eprintln!("hit");
+                        self.link_dep(local)
+                            .await
+                            .map_err(|err| StoreError::LinkError(err))?;
+                    }
+                    Dep::Remote(dep) => {
+                        let cas_path = self.cas_path(&dep);
+                        fs::create_dir_all(
+                            &cas_path
+                                .parent()
+                                .expect("unexpected: cas path did not have a parent. "),
+                        )
+                        .await?;
+
+                        for (i, url) in dep.urls.iter().enumerate() {
+                            match self.fetch_dep(&client, &dep, url).await {
+                                Ok(_) => break,
+                                // If ran out of urls to try, then return the err.
+                                Err(err) if i == dep.urls.len() - 1 => {
+                                    return Err(err);
+                                }
+                                // If have more than one url to try, then notify.
+                                Err(err) if dep.urls.len() > 1 => {
+                                    eprintln!("failed to fetch `{url}`: {err}");
+                                    continue;
+                                }
+                                // Still have urls to try because i != dep.urls.len() - 1
+                                Err(_) => {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        fs::create_dir_all(&dep_path).await?;
+                        self.expand_dep(dep)
+                            .await
+                            .map_err(|err| StoreError::UnpackError(err))?;
+                    }
+                }
             }
 
             // write the marker once the expansion is succesful
             fs::write(&dep_marker_path, current_hash).await?;
         }
-        Ok(())
+
+        Ok(module_roots)
     }
 }

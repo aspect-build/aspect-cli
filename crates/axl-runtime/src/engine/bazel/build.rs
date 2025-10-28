@@ -226,6 +226,11 @@ impl<'v> values::StarlarkValue<'v> for Build {
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     fn events<'v>(this: values::Value<'v>) -> anyhow::Result<BuildEventIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
+        assert!(build
+            .child
+            .borrow_mut()
+            .try_wait()
+            .is_ok_and(|r| r.is_none()));
         let event_stream = build.event_stream.borrow();
         let event_stream = event_stream.as_ref().ok_or(anyhow::anyhow!(
             "call `ctx.bazel.build` with `events = true` in order to receive build events."

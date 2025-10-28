@@ -334,6 +334,7 @@ dependencies = [
  "anyhow",
  "arc-slice",
  "aspect-cache",
+ "aspect-config",
  "axl-proto",
  "build-event-stream",
  "clap",

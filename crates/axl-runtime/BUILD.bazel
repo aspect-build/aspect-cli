@@ -38,6 +38,7 @@ rust_library(
         "@crates//:tracing",
         "@crates//:arc-slice",
         "//crates/axl-proto",
+        "//crates/aspect-config",
         "//crates/build-event-stream"
     ],
     proc_macro_deps = [

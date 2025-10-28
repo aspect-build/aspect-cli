@@ -1,0 +1,28 @@
+def _test_impl(ctx):
+    stdout = ctx.std.io.stdout
+    stderr = ctx.std.io.stderr
+    targets = ctx.args.targets or ["//..."]
+    test = ctx.bazel.build(
+        bazel_flags = [
+            "--isatty=" + str(int(stdout.is_tty)),
+        ],
+        events = True,
+        bazel_verb = "test",
+        *targets
+    )
+    for event in test.events():
+        if event.kind == "progress":
+            stdout.write(event.payload.stdout)
+            stdout.flush()
+            stderr.write(event.payload.stderr)
+            stderr.flush()
+
+
+
+test = task(
+    implementation = _test_impl,
+    args = {
+        # TODO: support a long --pattern_file like bazel does.
+        "targets": args.positional(minimum = 1, maximum = 512),
+    }
+)

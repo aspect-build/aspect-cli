@@ -2,7 +2,6 @@ use anyhow::Result;
 use ssri::Integrity;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -17,15 +16,21 @@ use starlark::values::StarlarkValue;
 
 #[derive(Debug, ProvidesStaticType, Default)]
 pub struct ModuleStore {
-    pub repo_root: PathBuf,
-    pub deps: Rc<RefCell<HashMap<String, AxlDep>>>,
+    pub repo_name: String,
+    pub repo_path: PathBuf,
+    pub root_repo_path: PathBuf,
+    pub deps: Rc<RefCell<HashMap<String, Dep>>>,
+    pub tasks: Rc<RefCell<Vec<(String, String)>>>,
 }
 
 impl ModuleStore {
-    pub fn new(repo_root: PathBuf) -> Self {
+    pub fn new(repo_name: String, repo_path: PathBuf, root_repo_path: PathBuf) -> Self {
         Self {
-            repo_root,
+            repo_name,
+            repo_path,
+            root_repo_path,
             deps: Rc::new(RefCell::new(HashMap::new())),
+            tasks: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -36,38 +41,56 @@ impl ModuleStore {
             .downcast_ref::<ModuleStore>()
             .ok_or(anyhow::anyhow!("failed to cast module store"))?;
         Ok(ModuleStore {
-            repo_root: value.repo_root.clone(),
+            repo_name: value.repo_name.clone(),
+            repo_path: value.repo_path.clone(),
+            root_repo_path: value.root_repo_path.clone(),
             deps: Rc::clone(&value.deps),
+            tasks: Rc::clone(&value.tasks),
         })
     }
 }
 
 #[derive(Clone, Debug, ProvidesStaticType, Allocative)]
-pub enum Override {
-    Local { path: PathBuf },
+pub enum Dep {
+    Local(AxlLocalDep),
+    Remote(AxlArchiveDep),
 }
 
-impl Display for Override {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Dep {
+    pub fn name(&self) -> &String {
         match self {
-            Override::Local { path } => write!(f, "local_path_override(path={:?})", path),
+            Dep::Local(local) => &local.name,
+            Dep::Remote(remote) => &remote.name,
         }
     }
 }
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
-#[display("axl_dep")]
-pub struct AxlDep {
+#[display("axl_local_dep")]
+pub struct AxlLocalDep {
+    pub name: String,
+    pub path: PathBuf,
+    pub autouse: bool,
+}
+
+#[starlark_value(type = "axl_local_dep")]
+impl<'v> StarlarkValue<'v> for AxlLocalDep {}
+
+starlark_simple_value!(AxlLocalDep);
+
+#[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
+#[display("axl_archive_dep")]
+pub struct AxlArchiveDep {
     pub urls: Vec<String>,
     #[allocative(skip)]
     pub integrity: Integrity,
     pub dev: bool,
     pub name: String,
     pub strip_prefix: String,
-    pub r#override: Option<Override>,
+    pub autouse: bool,
 }
 
-#[starlark_value(type = "axl_dep")]
-impl<'v> StarlarkValue<'v> for AxlDep {}
+#[starlark_value(type = "axl_archive_dep")]
+impl<'v> StarlarkValue<'v> for AxlArchiveDep {}
 
-starlark_simple_value!(AxlDep);
+starlark_simple_value!(AxlArchiveDep);

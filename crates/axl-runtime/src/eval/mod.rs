@@ -182,6 +182,24 @@ impl AxlScriptEvaluator {
         }
     }
 
+    // pub fn eval_label(
+    //     &self,
+    //     label: &String,
+    //     abs_script_path: PathBuf,
+    // ) -> Result<EvaluatedAxlScript, EvalError> {
+    //     let loader = AxlLoader {
+    //         script_evaluator: self,
+    //         script_dir: abs_script_path
+    //             .parent()
+    //             .expect("file path has parent")
+    //             .to_path_buf(),
+    //         in_module: false,
+    //         root_dir: self.repo_root.clone(),
+    //         root_deps_dir: self.deps_root.clone(),
+    //     };
+    //     let load = loader.load(label)?;
+    // }
+
     /// Evaluates the given .axl script path relative to the repository root, returning
     /// the evaluated script or an error. Performs security checks to ensure the script
     /// file is within the repository and isn't in a module directory.

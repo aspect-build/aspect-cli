@@ -4,4 +4,4 @@ mod store;
 
 pub use disk_store::{DiskStore, StoreError};
 pub use eval::{register_toplevels, AxlModuleEvaluator, BOUNDARY_FILE};
-pub use store::{AxlDep, ModuleStore};
+pub use store::{AxlArchiveDep, AxlLocalDep, Dep, ModuleStore};

@@ -44,6 +44,7 @@ minijinja = "2.12.0"
 liquid = "0.26.11"
 liquid-core = "0.26.11"
 
+aspect-config = { path = "../aspect-config" }
 aspect-cache = { path = "../aspect-cache" }
 axl-proto = { path = "../axl-proto" }
 build-event-stream = { path = "../build-event-stream" }

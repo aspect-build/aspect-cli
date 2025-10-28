@@ -1,0 +1,48 @@
+"""
+Implement a 'build' task that wraps a build command.
+
+Improvements over 'bazel build' command:
+
+- customize some of the progess message text
+- CAN: supports multiple bes backends
+- CAN: process execlog in realtime
+"""
+
+def impl(ctx: task_context) -> int:
+    stdout = ctx.std.io.stdout
+    stderr = ctx.std.io.stderr
+    events = True
+
+    if ctx.args.bes_backend:
+        if not ctx.args.bes_header:
+            fail("--bes_header is required with --bes_backend")
+        (k, _, v) = ctx.args.bes_header.partition("=")
+        events = [
+            bazel.build_events.grpc(
+                uri = ctx.args.bes_backend,
+                metadata = {k: v}
+            )
+        ]
+
+    build = ctx.bazel.build(
+        events = events,
+        bazel_flags = ["--isatty=" + str(int(stdout.is_tty))]
+    );
+    for event in build.events():
+        if event.kind == "progress":
+            stdout.write(event.payload.stdout)
+            stdout.flush()
+            stderr.write(event.payload.stderr)
+            stderr.flush()
+
+    exit = build.wait()
+    return exit.code
+
+build = task(
+    implementation = impl,
+    args = {
+        "targets": args.positional(minimum = 1, maximum = 512),
+        "bes_backend": args.string(),
+        "bes_header": args.string()
+    }
+)
