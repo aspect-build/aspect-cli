@@ -48,4 +48,8 @@ rust_library(
         "//crates/aspect-cli:__pkg__",
         "//crates/axl-lsp:__pkg__",
     ],
+    compile_data = glob([
+        "src/builtins/**/*.axl",
+        "src/builtins/**/*.aspect",
+    ]),
 )
