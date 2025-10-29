@@ -1,3 +1,55 @@
+def _fancy_tui(ctx, test):
+    events = test.events()
+    offset = 0
+    in_flight = {}
+    last_drawn_lines = 0
+
+    def clear():
+        if last_drawn_lines:
+            print("\033[1A" * (last_drawn_lines) + "\033[J\033[1A")
+
+    for timer in forever(17):
+        event = events.poll()
+
+        if event != None:
+            # print(debug(event.kind))
+            # print(debug(event.id))
+
+            if event.kind == "target_configured":
+                in_flight[event.id.label] = timer
+
+            elif event.kind == "target_completed":
+                in_flight.pop(event.id.label, None)
+
+            elif event.kind == "progress":
+                clear()
+                last_drawn_lines = 0
+
+                ctx.std.io.stdout.write(event.payload.stdout)
+                ctx.std.io.stdout.flush()
+                ctx.std.io.stderr.write(event.payload.stderr)
+                ctx.std.io.stderr.flush()
+
+            elif event.kind == "build_finished":
+                break
+
+        elif timer % 60 == 0 and in_flight:
+            clear()
+
+            for k, t in (in_flight.items() + in_flight.items())[offset:offset + len(in_flight)]:
+                print("-", k, ((timer - t) // 60))
+
+            last_drawn_lines = len(in_flight)
+            offset = (offset + 1) % len(in_flight)
+
+def _simple_tui(ctx, test):
+    for event in test.events():
+        if event.kind == "progress":
+            ctx.std.io.stdout.write(event.payload.stdout)
+            ctx.std.io.stdout.flush()
+            ctx.std.io.stderr.write(event.payload.stderr)
+            ctx.std.io.stderr.flush()
+
 def _test_impl(ctx):
     stdout = ctx.std.io.stdout
     stderr = ctx.std.io.stderr
@@ -11,29 +63,17 @@ def _test_impl(ctx):
         bazel_verb = "test",
         *targets
     )
-    events = test.events()
-    for timer in forever(17):
-        event = events.poll()
-        if event != None:
-            print(debug(event.kind))
+    if stdout.is_tty:
+        _fancy_tui(ctx, test)
 
-            if event.kind == "progress":
-                stdout.write(event.payload.stdout)
-                stdout.flush()
-                stderr.write(event.payload.stderr)
-                stderr.flush()
-
-            elif event.kind == "build_finished":
-                break
-                
-        else:
-            print(timer)
-
+    else:
+        _simple_tui(ctx, test)
 
 test = task(
     implementation = _test_impl,
     args = {
-        # TODO: support a long --pattern_file like bazel does.
+        # TODO: Support a long --pattern_file like bazel does (@./targets)
+        # TODO: Support - (list from stdin)
         "targets": args.positional(minimum = 1, maximum = 512),
     }
 )
