@@ -83,27 +83,22 @@ impl CommandTree {
         current
     }
 
-    pub fn get_task_path(&self, matches: &ArgMatches) -> PathBuf {
+    pub fn get_task_path(&self, matches: &ArgMatches) -> String {
         assert!(matches.contains_id(COMMAND_PATH_ID));
-        PathBuf::from(matches.get_one::<String>(COMMAND_PATH_ID).unwrap())
+        matches.get_one::<String>(COMMAND_PATH_ID).unwrap().clone()
     }
 }
 
 pub fn make_command(
-    repo_root: &PathBuf,
     name: &String,
+    defined_in: &str,
     path: &PathBuf,
     task: &dyn TaskLike<'_>,
 ) -> Command {
     let about = if task.description().is_empty() {
         format!(
             "\x1b[3m{}\x1b[0m task defined in \x1b[3m{}\x1b[0m",
-            name,
-            path.strip_prefix(repo_root)
-                .expect("failed make path relative")
-                .as_os_str()
-                .to_str()
-                .expect("failed to encode path")
+            name, defined_in,
         )
     } else {
         task.description().clone()

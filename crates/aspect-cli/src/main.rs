@@ -122,21 +122,30 @@ async fn main() -> miette::Result<ExitCode> {
 
     let extension_eval = AxlModuleEvaluator::new(repo_dir.clone());
 
-    if repo_dir.join(AXL_BOUNDARY_FILE).exists() {
-        let _ = info_span!("expand_module_store").enter();
-        let content =
-            std::fs::read_to_string(repo_dir.join(AXL_BOUNDARY_FILE)).into_diagnostic()?;
-        let module_store = extension_eval
-            .evaluate("./MODULE.aspect", content.as_str())
-            .into_diagnostic()?;
+    let _ = info_span!("expand_module_store").enter();
 
-        // Do not even start a runtime if there is no deps to register.
-        if module_store.deps.borrow().len() > 0 {
-            disk_store
-                .expand_store(&module_store)
-                .await
-                .into_diagnostic()?;
-        }
+    let module_store = extension_eval
+        .evaluate("_root_".to_string(), repo_dir.clone())
+        .into_diagnostic()?;
+
+    let module_roots = disk_store
+        .expand_store(&module_store)
+        .await
+        .into_diagnostic()?;
+
+    let mut use_tasks = vec![(
+        module_store.repo_name,
+        module_store.repo_path,
+        module_store.tasks.take(),
+    )];
+
+    for (name, root) in module_roots {
+        let module_store = extension_eval.evaluate(name, root).into_diagnostic()?;
+        use_tasks.push((
+            module_store.repo_name,
+            module_store.repo_path,
+            module_store.tasks.take(),
+        ))
     }
 
     let deps_path = disk_store.deps_path();
@@ -151,11 +160,48 @@ async fn main() -> miette::Result<ExitCode> {
     let out = spawn_blocking(move || {
         let _enter = espan.enter();
 
-        let te = AxlScriptEvaluator::new(repo_dir.clone(), deps_path);
-
         // Collect tasks into tree
         let mut tree = CommandTree::default();
-        let mut tasks: HashMap<&PathBuf, EvaluatedAxlScript> = HashMap::new();
+        let mut tasks: HashMap<String, EvaluatedAxlScript> = HashMap::new();
+
+        for (repo_name, repo_root, usetasks) in use_tasks {
+            let te = AxlScriptEvaluator::new(repo_root.clone(), deps_path.clone());
+
+            for (relative_path, symbol) in usetasks {
+                let path = repo_root.join(&relative_path);
+                let script = te.eval(&PathBuf::from(&relative_path)).into_diagnostic()?;
+                if let Some(task_val) = script.module.get(symbol.as_str()) {
+                    let def = if let Some(task) = task_val.downcast_ref::<Task>() {
+                        task.as_task()
+                    } else if let Some(task) = task_val.downcast_ref::<FrozenTask>() {
+                        task.as_task()
+                    } else {
+                        return Err(miette!(
+                            "invalid use_task({}, {}) call in {} at {:?}",
+                            relative_path,
+                            symbol,
+                            repo_name,
+                            repo_root
+                        ));
+                    };
+
+                    let name = symbol;
+                    let rel_path = &path
+                        .strip_prefix(&repo_root)
+                        .expect("failed make path relative")
+                        .as_os_str()
+                        .to_str()
+                        .expect("failed to encode path");
+                    let groups = def.groups();
+                    let defined_in = format!("@{}/{}", repo_name, rel_path);
+                    let cmd = make_command(&name, &defined_in, &path, def);
+                    tree.insert(&groups, name, &path, cmd).into_diagnostic()?;
+                    tasks.insert(path.to_str().unwrap().to_string(), script);
+                }
+            }
+        }
+
+        let te = AxlScriptEvaluator::new(repo_dir.clone(), deps_path.clone());
 
         for path in axl_sources.iter() {
             let rel_path = path
@@ -177,12 +223,20 @@ async fn main() -> miette::Result<ExitCode> {
 
                     let name = name.as_str().to_string();
                     let groups = def.groups();
-                    let cmd = make_command(&repo_dir, &name, path, def);
+                    let defined_in = path
+                        .strip_prefix(&repo_dir)
+                        .expect("failed make path relative")
+                        .as_os_str()
+                        .to_str()
+                        .expect("failed to encode path");
+                    let cmd = make_command(&name, defined_in, path, def);
                     tree.insert(&groups, name, &path, cmd).into_diagnostic()?;
                 }
             }
 
-            assert!(tasks.insert(path, script).is_none());
+            assert!(tasks
+                .insert(path.to_str().unwrap().to_string(), script)
+                .is_none());
         }
 
         // Turn the command tree into a command with subcommands.
@@ -204,7 +258,7 @@ async fn main() -> miette::Result<ExitCode> {
                 let task = tasks.get(&task_path).unwrap();
                 let def = task.definition(name).into_diagnostic()?;
 
-                let span = info_span!("task", name = name, path = task_path.to_str().unwrap(),);
+                let span = info_span!("task", name = name, path = task_path);
 
                 let _enter = span.enter();
                 let exit_code = task

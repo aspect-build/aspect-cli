@@ -1,0 +1,2 @@
+use_task("./build.axl", "build")
+use_task("./test.axl", "test")

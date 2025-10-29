@@ -3,12 +3,18 @@ use axl_proto::build_event_stream::BuildEvent;
 
 use derive_more::Display;
 use fibre::spmc::Receiver;
+use starlark::values::none::NoneOr;
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::BufReader;
 use zstd::Decoder;
 
+use starlark::environment::Methods;
+use starlark::environment::MethodsBuilder;
+use starlark::environment::MethodsStatic;
+use starlark::starlark_module;
+use starlark::starlark_simple_value;
 use starlark::typing::Ty;
 use starlark::values;
 use starlark::values::starlark_value;
@@ -17,6 +23,7 @@ use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
+use starlark::values::ValueLike;
 
 use crate::engine::bazel::execlog_stream::{ExecLogIterator, RetryStream};
 
@@ -41,6 +48,17 @@ impl<'v> AllocValue<'v> for BuildEventIterator {
     }
 }
 
+#[starlark_module]
+pub(crate) fn build_event_methods(registry: &mut MethodsBuilder) {
+    fn poll<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<BuildEvent>> {
+        let this = this.downcast_ref_err::<BuildEventIterator>()?;
+        match this.recv.borrow_mut().try_recv() {
+            Ok(it) => Ok(NoneOr::Other(it)),
+            Err(_) => Ok(NoneOr::None),
+        }
+    }
+}
+
 #[starlark_value(type = "build_event_iterator")]
 impl<'v> values::StarlarkValue<'v> for BuildEventIterator {
     fn eval_type(&self) -> Option<Ty> {
@@ -51,6 +69,11 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIterator {
 
     fn get_type_starlark_repr() -> Ty {
         Ty::iter(axl_proto::build_event_stream::BuildEvent::get_type_starlark_repr())
+    }
+
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(build_event_methods)
     }
 
     unsafe fn iterate(
