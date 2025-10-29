@@ -7,6 +7,8 @@ use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
+use starlark::values::list::UnpackList;
+use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::NoSerialize;
@@ -19,11 +21,27 @@ use starlark::ErrorKind;
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub enum TaskArg {
-    String { required: bool, default: String },
-    Boolean { required: bool, default: bool },
-    Int { required: bool, default: i32 },
-    UInt { required: bool, default: u32 },
-    Positional { minimum: u32, maximum: u32 },
+    String {
+        required: bool,
+        default: String,
+    },
+    Boolean {
+        required: bool,
+        default: bool,
+    },
+    Int {
+        required: bool,
+        default: i32,
+    },
+    UInt {
+        required: bool,
+        default: u32,
+    },
+    Positional {
+        minimum: u32,
+        maximum: u32,
+        default: Option<Vec<String>>,
+    },
     TrailingVarArgs,
 }
 
@@ -83,10 +101,12 @@ pub fn register_task_args_toplevels(_: &mut GlobalsBuilder) {
     fn positional<'v>(
         #[starlark(require = named, default = 0)] minimum: u32,
         #[starlark(require = named, default = 1)] maximum: u32,
+        #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<String>>,
     ) -> starlark::Result<TaskArg> {
         Ok(TaskArg::Positional {
             minimum: minimum,
             maximum: maximum,
+            default: default.into_option().map(|it| it.items),
         })
     }
 

@@ -1,2 +1,5 @@
 use_task("./build.axl", "build")
 use_task("./test.axl", "test")
+use_task("./query.axl", "query")
+use_task("./cquery.axl", "cquery")
+use_task("./aquery.axl", "aquery")

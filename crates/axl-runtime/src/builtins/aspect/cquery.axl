@@ -1,0 +1,21 @@
+
+def _cquery_impl(ctx):
+    stdout = ctx.std.io.stdout
+    stderr = ctx.std.io.stderr
+    build = ctx.bazel.build(
+        ctx.args.pattern[0],
+        bazel_flags = [
+            "--isatty=" + str(int(stdout.is_tty)),
+            "--curses=yes",
+        ],
+        bazel_verb = "cquery",
+    )
+    exit = build.wait()
+    return exit.code
+
+cquery = task(
+    implementation = _cquery_impl,
+    args = {
+        "pattern": args.positional(default = ["..."]),
+    }
+)

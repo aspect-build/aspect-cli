@@ -1,0 +1,16 @@
+
+def _query_impl(ctx):
+    stdout = ctx.std.io.stdout
+    stderr = ctx.std.io.stderr
+    build = ctx.bazel.query(
+        ctx.args.pattern[0],
+    )
+    exit = build.wait()
+    return exit.code
+
+query = task(
+    implementation = _query_impl,
+    args = {
+        "pattern": args.positional(default = ["..."]),
+    }
+)
