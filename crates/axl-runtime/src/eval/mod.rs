@@ -1,6 +1,7 @@
 mod load;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -10,9 +11,10 @@ use anyhow::anyhow;
 use starlark::environment::{Globals, GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect, DialectTypes};
-use starlark::values::{Heap, ValueLike};
+use starlark::values::{Heap, Value, ValueLike};
 use thiserror::Error;
 
+use crate::engine::context::AxlContext;
 use crate::engine::r#async::rt::AsyncRuntime;
 use crate::engine::task::{AsTaskLike, FrozenTask, TaskLike};
 use crate::engine::task_args::TaskArgs;
@@ -33,6 +35,7 @@ pub struct AxlScriptEvaluator {
     dialect: Dialect,
     globals: Globals,
     async_runtime: AsyncRuntime,
+    tools: HashMap<String, PathBuf>,
 }
 
 /// Represents the result of evaluating an .axl script, encapsulating the module,
@@ -42,6 +45,7 @@ pub struct EvaluatedAxlScript {
     pub path: PathBuf,
     pub module: Rc<Module>,
     async_runtime: AsyncRuntime,
+    tools: HashMap<String, PathBuf>,
 }
 
 /// Enum representing possible errors during evaluation, including Starlark-specific errors,
@@ -102,6 +106,7 @@ impl EvaluatedAxlScript {
             path,
             module: Rc::new(module),
             async_runtime,
+            tools: HashMap::new(),
         }
     }
 
@@ -120,8 +125,9 @@ impl EvaluatedAxlScript {
         }
     }
 
-    /// Executes a task from the module by symbol, providing arguments and returning the exit code.
-    pub fn execute(
+    /// Executes a task from the module by symbol, providing arguments and
+    /// returning the exit code.
+    pub fn execute_task(
         &self,
         symbol: &str,
         args: impl FnOnce(&Heap) -> TaskArgs,
@@ -134,8 +140,13 @@ impl EvaluatedAxlScript {
         let heap = self.module.heap();
         let args = args(heap);
         let context = heap.alloc(engine::task_context::TaskContext::new(args));
+
+        let ctx = AxlContext {
+            runtime: self.async_runtime.clone(),
+            tools: self.tools.clone(),
+        };
         let mut eval = Evaluator::new(&self.module);
-        eval.extra = Some(&self.async_runtime);
+        eval.extra = Some(&ctx);
         let ret = if let Some(val) = def.downcast_ref::<Task>() {
             eval.eval_function(val.implementation(), &[context], &[])?
         } else if let Some(val) = def.downcast_ref::<FrozenTask>() {
@@ -146,6 +157,33 @@ impl EvaluatedAxlScript {
             )));
         };
         Ok(ret.unpack_i32().map(|ex| ex as u8))
+    }
+
+    /// Executes a config function from the module by symbol, providing
+    /// arguments and returning the exit code.
+    pub fn execute_config(
+        &self,
+        symbol: &str,
+        args: impl FnOnce(&Heap) -> TaskArgs,
+    ) -> Result<Value<'_>, EvalError> {
+        let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
+            self.path.clone(),
+            symbol.to_string(),
+        ))?;
+
+        let heap = self.module.heap();
+        let args = args(heap);
+        // FIXME: Don't just use a TaskContext, use something else
+        let context = heap.alloc(engine::task_context::TaskContext::new(args));
+
+        let ctx = AxlContext {
+            runtime: self.async_runtime.clone(),
+            tools: self.tools.clone(),
+        };
+        let mut eval = Evaluator::new(&self.module);
+        eval.extra = Some(&ctx);
+        eval.eval_function(def, &[context], &[])
+            .map_err(|it| EvalError::UnknownError(it.into_anyhow()))
     }
 }
 
@@ -172,13 +210,14 @@ impl AxlScriptEvaluator {
     }
 
     /// Creates a new AxlScriptEvaluator with the given repository root.
-    pub fn new(repo_root: PathBuf, deps_root: PathBuf) -> Self {
+    pub fn new(repo_root: &dyn AsRef<Path>, deps_root: &dyn AsRef<Path>) -> Self {
         Self {
-            repo_root,
-            deps_root,
+            repo_root: repo_root.as_ref().to_owned(),
+            deps_root: deps_root.as_ref().to_owned(),
             dialect: AxlScriptEvaluator::dialect(),
             globals: AxlScriptEvaluator::globals(),
             async_runtime: AsyncRuntime::new(),
+            tools: HashMap::new(),
         }
     }
 
@@ -203,8 +242,9 @@ impl AxlScriptEvaluator {
     /// Evaluates the given .axl script path relative to the repository root, returning
     /// the evaluated script or an error. Performs security checks to ensure the script
     /// file is within the repository and isn't in a module directory.
-    pub fn eval(&self, load_path: &Path) -> Result<EvaluatedAxlScript, EvalError> {
-        let (module_name, load_path) = sanitize_load_path_lexically(load_path.to_str().unwrap())?;
+    pub fn eval(&self, load_path: &dyn AsRef<Path>) -> Result<EvaluatedAxlScript, EvalError> {
+        let (module_name, load_path) =
+            sanitize_load_path_lexically(load_path.as_ref().to_str().unwrap())?;
 
         // Don't allow evaluating scripts directly from modules (e.g., via @module/ paths)
         if module_name.is_some() {
@@ -251,9 +291,13 @@ impl AxlScriptEvaluator {
         let raw = fs::read_to_string(&abs_script_path)?;
         let ast = AstModule::parse(&abs_script_path.to_string_lossy(), raw, &self.dialect)?;
         let module = Module::new();
+        let ctx = AxlContext {
+            runtime: self.async_runtime.clone(),
+            tools: self.tools.clone(),
+        };
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
-        eval.extra = Some(&self.async_runtime);
+        eval.extra = Some(&ctx);
         eval.eval_module(ast, &self.globals)?;
         drop(eval);
 

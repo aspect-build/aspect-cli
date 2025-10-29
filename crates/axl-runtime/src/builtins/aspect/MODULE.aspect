@@ -1,7 +1,13 @@
 use_task("./build.axl", "build")
 use_task("./test.axl", "test")
 use_task("./query.axl", "query")
+<<<<<<< HEAD
 # TODO: aquery
 # TODO: cquery
 # TODO: bazel escape hatch
 # TODO: info
+||||||| parent of 6f33f07d ([NO TESTS] WIP)
+use_task("./cquery.axl", "cquery")
+use_task("./aquery.axl", "aquery")
+=======
+>>>>>>> 6f33f07d ([NO TESTS] WIP)

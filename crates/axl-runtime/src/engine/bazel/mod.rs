@@ -26,6 +26,7 @@ use starlark::{
 
 use axl_proto;
 
+use crate::engine::context::AxlContext;
 use crate::engine::r#async::rt::AsyncRuntime;
 
 mod build;
@@ -54,12 +55,20 @@ impl<'v> values::StarlarkValue<'v> for Bazel {
 #[starlark_module]
 pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// Build targets within AXL with ctx.bazel.build().
-    /// The result is a `build`, which has `artifacts()` (TODO),
-    /// `failures()` (TODO), and a `events()` functions that provide
-    /// iterators to the artifacts, failures, events respectively.
     ///
-    /// Running `ctx.bazel.build()` does not block the starlark thread. Explicitly
-    /// call `.wait()` on the `build` type to wait until the build finishes.
+    /// The result of calling `build()` is a `build` instance.
+    ///
+    /// `build` instance support the following instance methods:
+    ///  - `.events()`
+    ///  - `.execution_logs()`
+    ///  - `.wait()`
+    ///  - `.status()`          (TODO; return status if finished otherwise return pending)
+    ///  - `.artifacts()`       (TODO)
+    ///  - `.failures()`        (TODO)
+    ///
+    /// Running `ctx.bazel.build()` does not block the starlark thread.
+    /// Explicitly call `.wait()` on the `build` type to wait until the build
+    /// finishes.
     ///
     /// You can pass in a single target or target pattern to build.
     ///
@@ -94,12 +103,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<build::Build> {
+        let extra = eval.extra.unwrap().downcast_ref::<AxlContext>().unwrap();
         let events = match events {
             Either::Left(events) => (events, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
         let rt = AsyncRuntime::from_eval(eval)?;
         let build = build::Build::spawn(
+            &extra.tools["bazel"],
             bazel_verb
                 .into_option()
                 .map_or("build", |verb| verb.as_str()),
