@@ -5,18 +5,29 @@ def _test_impl(ctx):
     test = ctx.bazel.build(
         bazel_flags = [
             "--isatty=" + str(int(stdout.is_tty)),
+            "--curses=yes",
         ],
         events = True,
         bazel_verb = "test",
         *targets
     )
-    for event in test.events():
-        if event.kind == "progress":
-            stdout.write(event.payload.stdout)
-            stdout.flush()
-            stderr.write(event.payload.stderr)
-            stderr.flush()
+    events = test.events()
+    for timer in forever(17):
+        event = events.poll()
+        if event != None:
+            print(debug(event.kind))
 
+            if event.kind == "progress":
+                stdout.write(event.payload.stdout)
+                stdout.flush()
+                stderr.write(event.payload.stderr)
+                stderr.flush()
+
+            elif event.kind == "build_finished":
+                break
+                
+        else:
+            print(timer)
 
 
 test = task(

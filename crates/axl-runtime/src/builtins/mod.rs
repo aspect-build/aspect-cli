@@ -1,13 +1,17 @@
+#[cfg(debug_assertions)]
+use std::path::Path;
 use std::path::PathBuf;
 
 #[cfg(debug_assertions)]
 pub fn expand_builtins(
-    repo_root: &PathBuf,
+    repo_root: impl AsRef<Path>,
     _broot: PathBuf,
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
     Ok(vec![(
         "aspect".to_string(),
-        repo_root.join("crates/axl-runtime/src/builtins/aspect"),
+        repo_root
+            .as_ref()
+            .join("crates/axl-runtime/src/builtins/aspect"),
     )])
 }
 

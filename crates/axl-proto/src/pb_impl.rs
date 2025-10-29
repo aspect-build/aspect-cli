@@ -4,7 +4,7 @@ impl super::build_event_stream::build_event_id::Id {
             Self::Unknown(_) => "unknown",
             Self::Progress(_) => "progress",
             Self::Started(_) => "build_started",
-            Self::BuildFinished(_) => "build_finished_id",
+            Self::BuildFinished(_) => "build_finished",
             Self::UnstructuredCommandLine(_) => "unstructured_command_line",
             Self::StructuredCommandLine(_) => "structured_command_line",
             Self::WorkspaceStatus(_) => "workspace_status",

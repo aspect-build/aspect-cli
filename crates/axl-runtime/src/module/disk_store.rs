@@ -186,7 +186,7 @@ impl DiskStore {
         let client = reqwest::Client::new();
 
         let mut all: HashMap<String, Dep> =
-            builtins::expand_builtins(&self.root, root.join("builtins"))?
+            builtins::expand_builtins(self.root.clone(), root.join("builtins"))?
                 .into_iter()
                 .map(|(name, path)| {
                     (

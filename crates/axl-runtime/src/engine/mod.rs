@@ -5,6 +5,7 @@ use starlark::{
 
 mod bazel;
 mod delivery;
+mod globals;
 mod http;
 mod std;
 mod template;
@@ -45,4 +46,5 @@ pub fn register_toplevels(builder: &mut GlobalsBuilder) {
     builder.namespace("std", std::register_toplevels);
     task_arg::register_toplevels(builder);
     task::register_toplevels(builder);
+    globals::register_toplevels(builder);
 }
