@@ -1,3 +1,4 @@
+// Deprecated: use github.com/aspect-build/aspect-cli-legacy instead.
 module github.com/aspect-build/aspect-cli
 
 go 1.24.5
