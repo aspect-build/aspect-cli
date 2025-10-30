@@ -1,12 +1,12 @@
-
 def _query_impl(ctx):
     stdout = ctx.std.io.stdout
     stderr = ctx.std.io.stderr
-    build = ctx.bazel.query(
+    build = ctx.bazel.query().raw(
         ctx.args.pattern[0],
     )
-    exit = build.wait()
-    return exit.code
+    for result in build.eval():
+        print(result.name)
+
 
 query = task(
     implementation = _query_impl,
