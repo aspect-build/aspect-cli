@@ -40,14 +40,14 @@ def configure(ctx):
     print("Made a builder", debug(cfg))
 
     print("Trying to register a tool...")
-    cfg.add_tool(
-        "bazelisks",
-        ctx.http(
-            # bazelisks[(ctx.os.name, ctx.os.arch)]
-            bazelisks[("darwin", "arm64")]
-        ),
-    )
+    # cfg.add_tool(
+    #     "bazelisks",
+    #     ctx.http(
+    #         # bazelisks[(ctx.os.name, ctx.os.arch)]
+    #         bazelisks[("darwin", "arm64")]
+    #     ),
+    # )
 
     print("Success!")
 
-    return cfg.build()
+    return struct() # cfg.build()

@@ -79,10 +79,11 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
         Ok(Http::new())
     }
 
-    #[starlark(attribute)]
-    fn os<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
-        Ok(Os {})
-    }
+    // TODO
+    // #[starlark(attribute)]
+    // fn os<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
+    //     Ok(Os {})
+    // }
 }
 
 #[starlark_module]
