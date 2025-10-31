@@ -1,0 +1,21 @@
+
+def _aquery_impl(ctx):
+    stdout = ctx.std.io.stdout
+    stderr = ctx.std.io.stderr
+    build = ctx.bazel.build(
+        ctx.args.pattern[0],
+        bazel_flags = [
+            "--isatty=" + str(int(stdout.is_tty)),
+            "--curses=yes",
+        ],
+        bazel_verb = "aquery",
+    )
+    exit = build.wait()
+    return exit.code
+
+aquery = task(
+    implementation = _aquery_impl,
+    args = {
+        "pattern": args.positional(default = ["..."]),
+    }
+)

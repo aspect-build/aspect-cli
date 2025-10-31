@@ -5,3 +5,5 @@ use_task("./query.axl", "query")
 # TODO: cquery
 # TODO: bazel escape hatch
 # TODO: info
+use_task("./cquery.axl", "cquery")
+use_task("./aquery.axl", "aquery")

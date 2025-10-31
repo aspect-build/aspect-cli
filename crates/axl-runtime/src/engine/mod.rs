@@ -4,6 +4,8 @@ use starlark::{
 };
 
 mod bazel;
+mod config;
+mod config_context;
 mod delivery;
 mod globals;
 mod http;
@@ -13,6 +15,7 @@ mod types;
 mod wasm;
 
 pub mod r#async;
+pub mod context;
 pub mod task;
 pub mod task_arg;
 pub mod task_args;
@@ -47,4 +50,6 @@ pub fn register_toplevels(builder: &mut GlobalsBuilder) {
     task_arg::register_toplevels(builder);
     task::register_toplevels(builder);
     globals::register_toplevels(builder);
+    config::register_toplevels(builder);
+    config_context::register_toplevels(builder);
 }

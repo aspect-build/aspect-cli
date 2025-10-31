@@ -7,7 +7,6 @@ def _query_impl(ctx):
     for result in build.eval():
         print(result.name)
 
-
 query = task(
     implementation = _query_impl,
     args = {
