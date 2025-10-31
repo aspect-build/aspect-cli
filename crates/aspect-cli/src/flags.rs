@@ -29,10 +29,20 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
             .required(required.to_owned())
             .default_value(default.to_string())
             .value_parser(value_parser!(u32)),
-        TaskArg::Positional { minimum, maximum } => Arg::new(name)
-            .value_parser(value_parser!(String))
-            .value_name(name)
-            .num_args(minimum.to_owned() as usize..=maximum.to_owned() as usize),
+        TaskArg::Positional {
+            minimum,
+            maximum,
+            default,
+        } => {
+            let mut it = Arg::new(name)
+                .value_parser(value_parser!(String))
+                .value_name(name)
+                .num_args(minimum.to_owned() as usize..=maximum.to_owned() as usize);
+            if let Some(default) = default {
+                it = it.default_values(default);
+            }
+            it
+        }
         TaskArg::TrailingVarArgs => Arg::new(name)
             .value_parser(value_parser!(String))
             .value_name(name)

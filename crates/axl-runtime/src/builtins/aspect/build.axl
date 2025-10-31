@@ -8,6 +8,8 @@ Improvements over 'bazel build' command:
 - CAN: process execlog in realtime
 """
 
+load("./common.axl", "tui")
+
 def impl(ctx: task_context) -> int:
     stdout = ctx.std.io.stdout
     stderr = ctx.std.io.stderr
@@ -27,16 +29,8 @@ def impl(ctx: task_context) -> int:
     build = ctx.bazel.build(
         events = events,
         bazel_flags = ["--isatty=" + str(int(stdout.is_tty))]
-    );
-    for event in build.events():
-        if event.kind == "progress":
-            stdout.write(event.payload.stdout)
-            stdout.flush()
-            stderr.write(event.payload.stderr)
-            stderr.flush()
-
-    exit = build.wait()
-    return exit.code
+    )
+    return tui(ctx, build)
 
 build = task(
     implementation = impl,

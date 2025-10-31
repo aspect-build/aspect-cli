@@ -17,6 +17,7 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 
+use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::Ty;
 use starlark::values;
@@ -235,6 +236,7 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     fn raw<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] expr: values::StringValue,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Query> {
         use dupe::Dupe;
         let query = this.downcast_ref_err::<Query>()?;
