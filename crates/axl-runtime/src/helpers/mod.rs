@@ -84,12 +84,6 @@ pub fn sanitize_load_path_lexically(
         )));
     }
 
-    if load_path.starts_with('/') {
-        return Err(starlark::Error::new_other(anyhow!(
-            "Paths starting with '/' are disallowed"
-        )));
-    }
-
     if load_path.contains('\\') {
         return Err(starlark::Error::new_other(anyhow!(
             "Paths containing '\\' separators are disallowed"

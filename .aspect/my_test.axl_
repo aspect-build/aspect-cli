@@ -1,0 +1,16 @@
+load("@aspect/test.axl", "test")
+
+dev = task_from(
+    name = "my-test",
+    group = ["web"],
+    args = {
+        "new_arg": args.string()
+    },
+    config = record(
+        capabilities = record(
+            should_send_slack_message = field(typing.Callable([[str, str], bool]), lambda x, y: False),
+            transform_slack_message = field(typing.Callable([[str], str]), lambda x: x),
+        ),
+        foo = typing.Any,
+    )
+)

@@ -1,0 +1,81 @@
+tool_manifest = record(
+    url = str,
+    digest = str,
+)
+
+def bazelisk_manifest(version, filename):
+  return "https://github.com/bazelbuild/bazelisk/releases/v{version}/bazelisk-{filename}".format(
+    version = version,
+    filename = filename,
+  )
+
+bazelisk_manifest = partial(bazelisk_manifest, "1.27.0")
+
+# https://github.com/bazelbuild/bazelisk/releases/download/v1.27.0/bazelisk-darwin-amd64
+
+bazelisks = {
+  # (os, arch): tool_manifest
+  ("darwin", "arm64"): tool_manifest(
+      url = bazelisk_manifest("darwin-arm64"),
+      digest = "",
+  ),
+  ("darwin", "amd64"): tool_manifest(
+      url = bazelisk_manifest("darwin-amd64"),
+      digest = "",
+  ),
+  ("linux", "arm64"): tool_manifest(
+      url = bazelisk_manifest("linux-arm64"),
+      digest = "",
+  ),
+  ("linux", "amd64"): tool_manifest(
+      url = bazelisk_manifest("linux-amd64"),
+      digest = "",
+  ),
+}
+
+# load("@aspect/workflows/legacy:task.axl", "test")
+
+def configure(ctx):
+    print("Its a config!")
+
+    # print("Passed in tasks", debug(ctx.tasks))
+
+    # =========
+    # auto-discovered tasks are already there
+    # for task in ctx.tasks:
+    #     debug(task)
+
+    # =========
+    # backward compat story
+    # legacy_yaml = ctx.yaml.load(".aspect/workflows/config.yaml")
+    # for legacy_task in legacy_yaml:
+    #     if legacy_task.kind == "test":
+    #         ctx.add_task(test())
+    # for location, task in ctx.tasks:
+    #     # hey look, this now includes the legacy tasks
+    #     debug(task)
+
+    # =========
+    # mutate args
+    # for task in ctx.tasks:
+    #     for k, v in task.args:
+    #         if k == "foo":
+    #             task.args[k].set_default("bar")
+
+    # =========
+    # mutate config
+    # for task in ctx.tasks:
+    #     # if task.group == ["web", "ui"] && task.name == "test":
+    #     if task.path == ["web", "ui", "test"]:
+    #         test.config.bindings.slack.should_send.message = lambda x, y: True
+
+    print("Trying to register a tool...")
+    # cfg.add_tool(
+    #     "bazelisks",
+    #     ctx.http(
+    #         # bazelisks[(ctx.os.name, ctx.os.arch)]
+    #         bazelisks[("darwin", "arm64")]
+    #     ),
+    # )
+
+    print("Success!")

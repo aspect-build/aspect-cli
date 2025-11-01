@@ -1,0 +1,18 @@
+def _dev_impl(ctx):
+    print("go forth and build things!")
+
+# load("@aspect/slack/defs.axl", "slack_capabilities")
+
+dev = task(
+    # name = "test",
+    # group = ["dev"],
+    implementation = _dev_impl,
+    args = {},
+    # config = record(
+    #     capabilities = record(
+    #         should_send_slack_message = field(typing.Callable([[str, str], bool]), lambda x, y: False),
+    #         transform_slack_message = field(typing.Callable([[str], str]), lambda x: x),
+    #     ),
+    #     foo = typing.Any,
+    # )
+)
