@@ -4,6 +4,7 @@ use std::env::temp_dir;
 use std::fs;
 use std::fs::File;
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
@@ -127,6 +128,7 @@ pub struct Build {
 impl Build {
     // TODO: this should return a thiserror::Error
     pub fn spawn(
+        tool: &dyn AsRef<Path>,
         verb: &str,
         targets: impl IntoIterator<Item = String>,
         (events, sinks): (bool, Vec<BuildEventSink>),
@@ -142,7 +144,7 @@ impl Build {
         )
         .entered();
 
-        let mut cmd = Command::new("bazel");
+        let mut cmd = Command::new(tool.as_ref());
         cmd.arg(verb);
 
         let event_stream = if events {

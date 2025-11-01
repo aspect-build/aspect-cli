@@ -1,0 +1,16 @@
+def _dev_impl(ctx):
+    print("go forth and build things!")
+
+dev = task(
+    # name = "test",
+    # command_group = ["dev"],
+    implementation = _dev_impl,
+    args = {},
+    # config = record(
+    #     bindings = record(
+    #         should_send_slack_message = field(typing.Callable([[str, str], bool]), lambda x, y: False),
+    #         transform_slack_message = field(typing.Callable([[str], str]), lambda x: x),
+    #     ),
+    #     foo = typing.Any,
+    # )
+)

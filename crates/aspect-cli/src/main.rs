@@ -150,6 +150,22 @@ async fn main() -> miette::Result<ExitCode> {
 
     let deps_path = disk_store.deps_path();
 
+    // Deal with the config.axl file
+    // TODO: Make the config axl configurable
+    //   --config=
+    //   --noconfig
+    let aspect_dir = repo_dir.join(".aspect");
+    let config_axl = aspect_dir.join("config.axl");
+    println!("Trying to load config {config_axl:?}");
+    if config_axl.is_file() {
+        let te = AxlScriptEvaluator::new(&aspect_dir, &deps_path);
+        let script = te.eval(&PathBuf::from("./config.axl")).into_diagnostic()?;
+        let config = script
+            .execute_config("configure", |_heap| TaskArgs::new())
+            .into_diagnostic()?;
+        println!("Got config {:?}", config);
+    }
+
     // Scan for .axl files from CWD up to repo root
     let current_workdir = std::env::current_dir().into_diagnostic()?;
     let axl_sources = find_tasks(&current_workdir, &repo_dir)
@@ -165,7 +181,7 @@ async fn main() -> miette::Result<ExitCode> {
         let mut tasks: HashMap<String, EvaluatedAxlScript> = HashMap::new();
 
         for (repo_name, repo_root, usetasks) in use_tasks {
-            let te = AxlScriptEvaluator::new(repo_root.clone(), deps_path.clone());
+            let te = AxlScriptEvaluator::new(&repo_root, &deps_path);
 
             for (relative_path, symbol) in usetasks {
                 let path = repo_root.join(&relative_path);
@@ -201,7 +217,7 @@ async fn main() -> miette::Result<ExitCode> {
             }
         }
 
-        let te = AxlScriptEvaluator::new(repo_dir.clone(), deps_path.clone());
+        let te = AxlScriptEvaluator::new(&repo_dir, &deps_path);
 
         for path in axl_sources.iter() {
             let rel_path = path
@@ -262,7 +278,7 @@ async fn main() -> miette::Result<ExitCode> {
 
                 let _enter = span.enter();
                 let exit_code = task
-                    .execute(name, |heap| {
+                    .execute_task(name, |heap| {
                         let mut args = TaskArgs::new();
                         for (k, v) in def.args().iter() {
                             let val = match v {

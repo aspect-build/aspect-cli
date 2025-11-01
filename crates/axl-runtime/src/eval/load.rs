@@ -9,6 +9,7 @@ use starlark::environment::{FrozenModule, Module};
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::AstModule;
 
+use crate::engine::context::AxlContext;
 use crate::eval::{is_local_module_path, AxlScriptEvaluator, LOAD_STACK};
 use crate::helpers::{sanitize_load_path_lexically, ASPECT_ROOT, AXL_MODULE_DIR};
 
@@ -250,9 +251,13 @@ impl<'a> FileLoader for AxlLoader<'a> {
             root_dir,
             root_deps_dir: self.root_deps_dir.clone(),
         };
+        let ctx = AxlContext {
+            runtime: self.script_evaluator.async_runtime.clone(),
+            tools: HashMap::new(),
+        };
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&new_loader);
-        eval.extra = Some(&self.script_evaluator.async_runtime);
+        eval.extra = Some(&ctx);
         eval.eval_module(ast, &self.script_evaluator.globals)?;
         drop(eval);
         let frozen_module = module.freeze()?;
