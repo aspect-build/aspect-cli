@@ -9,8 +9,8 @@ use starlark::environment::{FrozenModule, Module};
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::AstModule;
 
-use crate::eval::{is_local_module_path, AxlScriptEvaluator, LOAD_STACK};
-use crate::helpers::{sanitize_load_path_lexically, ASPECT_ROOT, AXL_MODULE_DIR};
+use crate::eval::{AxlScriptEvaluator, LOAD_STACK};
+use crate::helpers::{sanitize_load_path_lexically, ASPECT_ROOT};
 
 thread_local! {
     static LOADED_MODULES: RefCell<HashMap<String, FrozenModule>> = RefCell::new(HashMap::new());
@@ -24,9 +24,6 @@ pub struct AxlLoader<'a> {
 
     // The script dir which relative loads are relative to
     pub(super) script_dir: PathBuf,
-
-    // Whether the script is in a module
-    pub(super) in_module: bool,
 
     // The root directory that relative loads cannot escape
     pub(super) root_dir: PathBuf,
@@ -47,82 +44,44 @@ impl<'a> AxlLoader<'a> {
         None
     }
 
-    fn resolve_module(
+    fn resolve_axl_module_script(
         &self,
         module_name: &str,
         load_path: &Path,
     ) -> starlark::Result<(PathBuf, PathBuf)> {
-        let mut search_dirs: Vec<PathBuf> = Vec::new();
-
-        if self.in_module {
-            // Add the module root dir
-            search_dirs.push(self.root_dir.clone());
+        let module_root_path =  self.root_deps_dir.join(module_name);
+        let module_script_path = module_root_path.join(load_path);
+        if module_script_path.is_file() {
+            return Ok((module_script_path, module_root_path));
+        }
+        if !module_root_path.exists() {
+            return Err(starlark::Error::new_other(anyhow!(
+                "Failed to resolve load(\"@{}/{}\", ...): module '{}' not found (expected module directory at '{}')",
+                module_name,
+                load_path.display(),
+                module_name,
+                module_root_path.display()
+            )));
+        } else if !module_root_path.is_dir() {
+            return Err(starlark::Error::new_other(anyhow!(
+                "Failed to resolve load(\"@{}/{}\", ...): module '{}' root at '{}' exists but is not a directory",
+                module_name,
+                load_path.display(),
+                module_name,
+                module_root_path.display()
+            )));
         } else {
-            // Check if script_dir is within an .aspect folder
-            let nearest_opt = self.find_nearest_aspect_dir_parent(&self.script_dir);
-            let mut current: Option<&Path>;
-            if let Some(ref nearest) = nearest_opt {
-                search_dirs.push(
-                    nearest
-                        .join(ASPECT_ROOT)
-                        .join(AXL_MODULE_DIR)
-                        .join(module_name),
-                );
-                current = nearest.parent();
-            } else {
-                search_dirs.push(
-                    self.script_dir
-                        .join(ASPECT_ROOT)
-                        .join(AXL_MODULE_DIR)
-                        .join(module_name),
-                );
-                current = self.script_dir.parent();
-            }
-
-            // Add for each parent up to but not including root_dir
-            while let Some(parent) = current {
-                if !parent.starts_with(&self.root_dir) {
-                    break;
-                }
-                search_dirs.push(
-                    parent
-                        .join(ASPECT_ROOT)
-                        .join(AXL_MODULE_DIR)
-                        .join(module_name),
-                );
-                current = parent.parent();
-            }
+            return Err(starlark::Error::new_other(anyhow!(
+                "Failed to resolve load(\"@{}/{}\", ...): script file not found in module '{}' (expected at '{}')",
+                module_name,
+                load_path.display(),
+                module_name,
+                module_script_path.display()
+            )));
         }
-
-        // Add cache_dir_for_module
-        let cache_dir_for_module = self.root_deps_dir.join(module_name);
-        if self.root_dir != cache_dir_for_module {
-            search_dirs.push(cache_dir_for_module);
-        }
-
-        let mut search_paths: Vec<PathBuf> = Vec::new();
-        for dir in &search_dirs {
-            let path = dir.join(load_path);
-            search_paths.push(path.clone());
-            if path.is_file() {
-                return Ok((path, dir.clone()));
-            }
-        }
-
-        let searched_str = search_paths
-            .iter()
-            .map(|p| format!(" - {}", p.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Err(starlark::Error::new_other(anyhow!(
-            "Module load not found for @{}/{};\nsearched:\n{}",
-            module_name,
-            load_path.display(),
-            searched_str
-        )))
     }
 
-    fn resolve(&self, load_path: &Path) -> starlark::Result<PathBuf> {
+    fn resolve_axl_script(&self, load_path: &Path) -> starlark::Result<PathBuf> {
         let load_str = load_path.to_str().ok_or_else(|| {
             starlark::Error::new_other(anyhow!("Path is not valid UTF-8: {}", load_path.display()))
         })?;
@@ -177,15 +136,6 @@ impl<'a> FileLoader for AxlLoader<'a> {
 
         let (module_name, load_path) = sanitize_load_path_lexically(load_path)?;
 
-        // Don't allow loading via .aspect/modules/foo/path/to/file.axl -- force use of @foo/path/to/file.axl
-        // so we can check the LOADED_MODULES cache
-        if is_local_module_path(&load_path) {
-            return Err(starlark::Error::new_other(anyhow::anyhow!(
-                "Cannot load AXL files directly from local module directories; use the @module_name/ syntax instead: {}",
-                load_path.display(),
-            )));
-        }
-
         // Check if the @module/path/to/file.axl has been loaded before; if it has use the cached version.
         // NB: it is by design that a `root/sub/.aspect/modules/foo/foo.axl` can override
         // the load of a `root/.aspect/modules/foo/foo.axl` and of `modules_cache/foo/foo.axl` since
@@ -201,9 +151,9 @@ impl<'a> FileLoader for AxlLoader<'a> {
 
         // Resolve the load path to a file on disk
         let (resolved, root_dir) = if module_name.is_some() {
-            self.resolve_module(module_name.as_ref().unwrap().as_str(), &load_path)?
+            self.resolve_axl_module_script(module_name.as_ref().unwrap().as_str(), &load_path)?
         } else {
-            (self.resolve(&load_path)?, self.root_dir.clone())
+            (self.resolve_axl_script(&load_path)?, self.root_dir.clone())
         };
 
         // Cycle detection: Prevent loading the same file recursively.
@@ -246,7 +196,6 @@ impl<'a> FileLoader for AxlLoader<'a> {
                 .parent()
                 .expect("file path has parent")
                 .to_path_buf(),
-            in_module: module_name.is_some(),
             root_dir,
             root_deps_dir: self.root_deps_dir.clone(),
         };

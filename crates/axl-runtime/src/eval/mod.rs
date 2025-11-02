@@ -19,7 +19,7 @@ use crate::engine::task_args::TaskArgs;
 use crate::engine::{self, task::Task};
 use crate::eval::load::AxlLoader;
 use crate::helpers::{
-    normalize_abs_path_lexically, sanitize_load_path_lexically, ASPECT_ROOT, AXL_MODULE_DIR,
+    normalize_abs_path_lexically, sanitize_load_path_lexically, ASPECT_ROOT,
 };
 
 /// The core evaluator for .axl files, holding configuration like repository root,
@@ -182,24 +182,6 @@ impl AxlScriptEvaluator {
         }
     }
 
-    // pub fn eval_label(
-    //     &self,
-    //     label: &String,
-    //     abs_script_path: PathBuf,
-    // ) -> Result<EvaluatedAxlScript, EvalError> {
-    //     let loader = AxlLoader {
-    //         script_evaluator: self,
-    //         script_dir: abs_script_path
-    //             .parent()
-    //             .expect("file path has parent")
-    //             .to_path_buf(),
-    //         in_module: false,
-    //         root_dir: self.repo_root.clone(),
-    //         root_deps_dir: self.deps_root.clone(),
-    //     };
-    //     let load = loader.load(label)?;
-    // }
-
     /// Evaluates the given .axl script path relative to the repository root, returning
     /// the evaluated script or an error. Performs security checks to ensure the script
     /// file is within the repository and isn't in a module directory.
@@ -210,14 +192,6 @@ impl AxlScriptEvaluator {
         if module_name.is_some() {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
                 "AXL scripts cannot be loaded directly from a module (load path starts with '@'): {}",
-                load_path.display(),
-            )));
-        }
-
-        // Don't allow evaluating scripts from local module directories
-        if is_local_module_path(&load_path) {
-            return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "AXL scripts cannot be loaded from a local module directory: {}",
                 load_path.display(),
             )));
         }
@@ -239,7 +213,6 @@ impl AxlScriptEvaluator {
                 .parent()
                 .expect("file path has parent")
                 .to_path_buf(),
-            in_module: false,
             root_dir: self.repo_root.clone(),
             root_deps_dir: self.deps_root.clone(),
         };
@@ -267,21 +240,4 @@ impl AxlScriptEvaluator {
             module,
         ))
     }
-}
-
-/// Checks if the given script_path is within a local module
-pub fn is_local_module_path(script_path: &Path) -> bool {
-    let mut components = script_path.components().peekable();
-
-    while let Some(current) = components.next() {
-        if let (Component::Normal(curr), Some(Component::Normal(next))) =
-            (current, components.peek().cloned())
-        {
-            if curr == OsStr::new(ASPECT_ROOT) && next == OsStr::new(AXL_MODULE_DIR) {
-                return true;
-            }
-        }
-    }
-
-    false
 }

@@ -5,7 +5,6 @@ use anyhow::anyhow;
 // Constants for special directory names used in module resolution.
 // These define the structure for local modules (e.g., .aspect/axl/module_name).
 pub const ASPECT_ROOT: &str = ".aspect";
-pub const AXL_MODULE_DIR: &str = "modules";
 
 /// Validates a module name according to the following rules:
 /// - Must not be empty.
