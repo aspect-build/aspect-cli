@@ -17,7 +17,7 @@ pub fn expand_builtins(
 
 #[cfg(not(debug_assertions))]
 pub fn expand_builtins(
-    repo_root: PathBuf,
+    _repo_root: PathBuf,
     broot: PathBuf,
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
     use aspect_config::cli_version;

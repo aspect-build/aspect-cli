@@ -2,10 +2,6 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::anyhow;
 
-// Constants for special directory names used in module resolution.
-// These define the structure for local modules (e.g., .aspect/axl/module_name).
-pub const ASPECT_ROOT: &str = ".aspect";
-
 /// Validates a module name according to the following rules:
 /// - Must not be empty.
 /// - Must begin with a lowercase letter (a-z).
@@ -144,16 +140,7 @@ pub fn sanitize_load_path_lexically(
     // Validate path segments after module (if present)
     let mut allowing_relative = true;
     let mut seen_dot = false;
-    let mut aspect_root_count = 0;
     for segment in path_to_validate.split('/') {
-        if segment == ASPECT_ROOT {
-            aspect_root_count += 1;
-            if aspect_root_count > 1 {
-                return Err(starlark::Error::new_other(anyhow!(
-                    "Load paths with multiple '{ASPECT_ROOT}' segments are disallowed"
-                )));
-            }
-        }
         if allowing_relative {
             if segment == "." {
                 if seen_dot {

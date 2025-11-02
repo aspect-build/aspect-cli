@@ -1,9 +1,8 @@
 mod load;
 
 use std::cell::RefCell;
-use std::ffi::OsStr;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::anyhow;
@@ -18,9 +17,7 @@ use crate::engine::task::{AsTaskLike, FrozenTask, TaskLike};
 use crate::engine::task_args::TaskArgs;
 use crate::engine::{self, task::Task};
 use crate::eval::load::AxlLoader;
-use crate::helpers::{
-    normalize_abs_path_lexically, sanitize_load_path_lexically, ASPECT_ROOT,
-};
+use crate::helpers::{normalize_abs_path_lexically, sanitize_load_path_lexically};
 
 /// The core evaluator for .axl files, holding configuration like repository root,
 /// Starlark dialect, globals, and async runtime. Used to evaluate .axl files securely.

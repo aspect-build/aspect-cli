@@ -236,7 +236,7 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     fn raw<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] expr: values::StringValue,
-        eval: &mut Evaluator<'v, '_, '_>,
+        _eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Query> {
         use dupe::Dupe;
         let query = this.downcast_ref_err::<Query>()?;

@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -10,7 +9,7 @@ use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::AstModule;
 
 use crate::eval::{AxlScriptEvaluator, LOAD_STACK};
-use crate::helpers::{sanitize_load_path_lexically, ASPECT_ROOT};
+use crate::helpers::sanitize_load_path_lexically;
 
 thread_local! {
     static LOADED_MODULES: RefCell<HashMap<String, FrozenModule>> = RefCell::new(HashMap::new());
@@ -38,7 +37,7 @@ impl<'a> AxlLoader<'a> {
         module_name: &str,
         load_path: &Path,
     ) -> starlark::Result<(PathBuf, PathBuf)> {
-        let module_root_path =  self.root_deps_dir.join(module_name);
+        let module_root_path = self.root_deps_dir.join(module_name);
         let module_script_path = module_root_path.join(load_path);
         if module_script_path.is_file() {
             return Ok((module_script_path, module_root_path));

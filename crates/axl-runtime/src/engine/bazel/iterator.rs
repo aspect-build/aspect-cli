@@ -14,7 +14,6 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
-use starlark::starlark_simple_value;
 use starlark::typing::Ty;
 use starlark::values;
 use starlark::values::starlark_value;
