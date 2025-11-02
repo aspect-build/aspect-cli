@@ -1,61 +1,28 @@
 mod cmd_tree;
 mod flags;
+mod repo_root;
 mod telemetry;
 mod trace;
 
-use aspect_config::cli_version;
-use axl_runtime::engine::task::{AsTaskLike, FrozenTask, Task};
 use std::collections::HashMap;
-use std::env::current_dir;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use aspect_config::cli_version;
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
+use axl_runtime::engine::task::{AsTaskLike, FrozenTask, Task};
 use axl_runtime::eval::{AxlScriptEvaluator, EvaluatedAxlScript};
-use axl_runtime::module::{AxlModuleEvaluator, DiskStore, BOUNDARY_FILE as AXL_BOUNDARY_FILE};
-use starlark::values::ValueLike;
-
+use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
 use clap::{Arg, Command};
 use miette::{miette, IntoDiagnostic};
-use tokio::task::spawn_blocking;
+use starlark::values::ValueLike;
 use tokio::{fs, task};
+use tokio::task::spawn_blocking;
 use tracing::{info_span, instrument};
 
 use crate::cmd_tree::{make_command, CommandTree};
-
-#[instrument]
-pub async fn repo_root() -> Result<PathBuf, ()> {
-    let current_dir = current_dir().map_err(|_| ())?;
-
-    // Returns an Err if the path exists
-    async fn err_if_exists(path: PathBuf) -> Result<(), ()> {
-        match fs::try_exists(path).await {
-            Ok(true) => Err(()),
-            Ok(false) => Ok(()),
-            Err(_) => Ok(()),
-        }
-    }
-
-    for ancestor in current_dir.ancestors().into_iter() {
-        let result = tokio::try_join!(
-            err_if_exists(ancestor.join(AXL_BOUNDARY_FILE)),
-            err_if_exists(ancestor.join("MODULE.bazel")),
-            err_if_exists(ancestor.join("MODULE.bazel.lock")),
-            err_if_exists(ancestor.join("REPO.bazel")),
-            err_if_exists(ancestor.join("WORKSPACE")),
-            err_if_exists(ancestor.join("WORKSPACE.bazel")),
-        );
-        // No error means there was no match for any of the branches.
-        if result.is_ok() {
-            continue;
-        } else {
-            return Ok(ancestor.to_path_buf());
-        }
-    }
-
-    return Err(());
-}
+use crate::repo_root::find_repo_root;
 
 #[instrument]
 pub async fn find_tasks(
@@ -114,7 +81,7 @@ async fn main() -> miette::Result<ExitCode> {
             .action(clap::ArgAction::SetTrue),
     );
 
-    let repo_dir = repo_root()
+    let repo_dir = find_repo_root()
         .await
         .map_err(|_| miette!("Could not find repository root, running inside a module?"))?;
 
