@@ -33,17 +33,6 @@ pub struct AxlLoader<'a> {
 }
 
 impl<'a> AxlLoader<'a> {
-    fn find_nearest_aspect_dir_parent(&self, path: &Path) -> Option<PathBuf> {
-        let mut current = path.to_path_buf();
-        while let Some(parent) = current.parent() {
-            if current.file_name() == Some(OsStr::new(ASPECT_ROOT)) {
-                return Some(parent.to_path_buf());
-            }
-            current = parent.to_path_buf();
-        }
-        None
-    }
-
     fn resolve_axl_module_script(
         &self,
         module_name: &str,
