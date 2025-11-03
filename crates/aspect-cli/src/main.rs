@@ -58,13 +58,6 @@ async fn main() -> miette::Result<ExitCode> {
 
     let mut cmd = Command::new("aspect");
 
-    cmd = cmd.arg(
-        Arg::new("version")
-            .short('v')
-            .long("version")
-            .action(clap::ArgAction::SetTrue),
-    );
-
     let _ = info_span!("expand_module_store").enter();
 
     // Creates the module store and evaluates the root MODULE.aspect (if it exists) for axl_*_deps, use_task, etc...
@@ -196,6 +189,15 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Turn the command tree into a command with subcommands.
         cmd = tree.as_command(cmd);
+
+        // Add the --version and -v flags
+        cmd = cmd.arg(
+            Arg::new("version")
+                .short('v')
+                .long("version")
+                .action(clap::ArgAction::SetTrue),
+        );
+
         // Add version command
         cmd = cmd.subcommand(Command::new("version"));
 
