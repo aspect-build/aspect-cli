@@ -21,7 +21,7 @@ use tokio::task;
 use tokio::task::spawn_blocking;
 use tracing::info_span;
 
-use crate::cmd_tree::{make_command, CommandTree};
+use crate::cmd_tree::{BUILTIN_COMMAND_DISPLAY_ORDER, make_command_from_task, CommandTree};
 use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_paths};
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
@@ -110,6 +110,17 @@ async fn main() -> miette::Result<ExitCode> {
 
         let mut cmd = Command::new("aspect");
 
+        // Add version command
+        cmd = cmd.subcommand(Command::new("version").display_order(BUILTIN_COMMAND_DISPLAY_ORDER));
+
+        // Add the --version and -v flags
+        cmd = cmd.arg(
+            Arg::new("version")
+                .short('v')
+                .long("version")
+                .action(clap::ArgAction::SetTrue),
+        );
+
         // Collect tasks into tree
         let mut tree = CommandTree::default();
         let mut tasks: HashMap<String, EvaluatedAxlScript> = HashMap::new();
@@ -144,7 +155,7 @@ async fn main() -> miette::Result<ExitCode> {
                         .expect("failed to encode path");
                     let group = def.group();
                     let defined_in = format!("@{}/{}", repo_name, rel_path);
-                    let cmd = make_command(&name, &defined_in, &path, def);
+                    let cmd = make_command_from_task(&name, &defined_in, &path, def);
                     tree.insert(&name, &group, &group, &path, cmd).into_diagnostic()?;
                     tasks.insert(path.to_str().unwrap().to_string(), script);
                 }
@@ -179,7 +190,7 @@ async fn main() -> miette::Result<ExitCode> {
                         .as_os_str()
                         .to_str()
                         .expect("failed to encode path");
-                    let cmd = make_command(&name, defined_in, path, def);
+                    let cmd = make_command_from_task(&name, defined_in, path, def);
                     tree.insert(&name, &group, &group, &path, cmd).into_diagnostic()?;
                 }
             }
@@ -190,91 +201,83 @@ async fn main() -> miette::Result<ExitCode> {
         }
 
         // Turn the command tree into a command with subcommands.
-        cmd = tree.as_command(cmd);
-
-        // Add the --version and -v flags
-        cmd = cmd.arg(
-            Arg::new("version")
-                .short('v')
-                .long("version")
-                .action(clap::ArgAction::SetTrue),
-        );
-
-        // Add version command
-        cmd = cmd.subcommand(Command::new("version"));
+        let cmd = tree.as_command(cmd, &[]).into_diagnostic()?;
 
         let matches = cmd.try_get_matches();
 
-        if let Ok(matches) = matches {
-            if let Some("version") = matches.subcommand_name() {
-                let v = cli_version();
-                println!("Aspect CLI {v:}");
-                return Ok(ExitCode::SUCCESS);
-            }
-
-            if let Some((name, cmdargs)) = matches.subcommand() {
-                let task_path = tree.get_task_path(&cmdargs);
-                let task = tasks.get(&task_path).unwrap();
-                let def = task.definition(name).into_diagnostic()?;
-
-                let span = info_span!("task", name = name, path = task_path);
-
-                let _enter = span.enter();
-                let exit_code = task
-                    .execute(name, |heap| {
-                        let mut args = TaskArgs::new();
-                        for (k, v) in def.args().iter() {
-                            let val = match v {
-                                TaskArg::String { .. } => heap
-                                    .alloc_str(
-                                        cmdargs
-                                            .get_one::<String>(k.as_str())
-                                            .unwrap_or(&String::new()),
-                                    )
-                                    .to_value(),
-                                TaskArg::Int { .. } => heap
-                                    .alloc(
-                                        cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned(),
-                                    )
-                                    .to_value(),
-                                TaskArg::UInt { .. } => heap
-                                    .alloc(
-                                        cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned(),
-                                    )
-                                    .to_value(),
-                                TaskArg::Boolean { .. } => heap.alloc(
-                                    cmdargs
-                                        .get_one::<bool>(k.as_str())
-                                        .unwrap_or(&false)
-                                        .to_owned(),
-                                ),
-                                TaskArg::Positional { .. } => heap.alloc(TaskArgs::alloc_list(
-                                    cmdargs
-                                        .get_many::<String>(k.as_str())
-                                        .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
-                                )),
-                                TaskArg::TrailingVarArgs => heap.alloc(TaskArgs::alloc_list(
-                                    cmdargs
-                                        .get_many::<String>(k.as_str())
-                                        .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
-                                )),
-                            };
-                            args.insert(k.clone(), val);
-                        }
-                        args
-                    })
-                    .into_diagnostic()?;
-
-                return Ok(ExitCode::from(exit_code.unwrap_or(0)));
-            }
-
-            eprintln!("unknown command {:?}", matches.subcommand_name());
-            return Ok(ExitCode::FAILURE);
-        } else {
+        if !matches.is_ok() {
             let err = matches.unwrap_err();
             err.print().into_diagnostic()?;
             return Ok(ExitCode::from(err.exit_code() as u8));
         }
+
+        let matches = matches.expect("failed to get matches");
+
+        // If the top-level subcommand name is 'version' then print out the version information and exit success
+        if let Some("version") = matches.subcommand_name() {
+            let v = cli_version();
+            println!("Aspect CLI {v:}");
+            return Ok(ExitCode::SUCCESS);
+        }
+
+        if let Some((name, cmdargs)) = matches.subcommand() {
+            let task_path = tree.get_task_path(&cmdargs);
+            let task = tasks.get(&task_path).unwrap();
+            let def = task.definition(name).into_diagnostic()?;
+
+            let span = info_span!("task", name = name, path = task_path);
+
+            let _enter = span.enter();
+            let exit_code = task
+                .execute(name, |heap| {
+                    let mut args = TaskArgs::new();
+                    for (k, v) in def.args().iter() {
+                        let val = match v {
+                            TaskArg::String { .. } => heap
+                                .alloc_str(
+                                    cmdargs
+                                        .get_one::<String>(k.as_str())
+                                        .unwrap_or(&String::new()),
+                                )
+                                .to_value(),
+                            TaskArg::Int { .. } => heap
+                                .alloc(
+                                    cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned(),
+                                )
+                                .to_value(),
+                            TaskArg::UInt { .. } => heap
+                                .alloc(
+                                    cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned(),
+                                )
+                                .to_value(),
+                            TaskArg::Boolean { .. } => heap.alloc(
+                                cmdargs
+                                    .get_one::<bool>(k.as_str())
+                                    .unwrap_or(&false)
+                                    .to_owned(),
+                            ),
+                            TaskArg::Positional { .. } => heap.alloc(TaskArgs::alloc_list(
+                                cmdargs
+                                    .get_many::<String>(k.as_str())
+                                    .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                            )),
+                            TaskArg::TrailingVarArgs => heap.alloc(TaskArgs::alloc_list(
+                                cmdargs
+                                    .get_many::<String>(k.as_str())
+                                    .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                            )),
+                        };
+                        args.insert(k.clone(), val);
+                    }
+                    args
+                })
+                .into_diagnostic()?;
+
+            return Ok(ExitCode::from(exit_code.unwrap_or(0)));
+        }
+
+        eprintln!("unknown command {:?}", matches.subcommand_name());
+        return Ok(ExitCode::FAILURE);
     });
 
     match out.await {

@@ -4,7 +4,12 @@ use axl_runtime::engine::task::{TaskLike, MAX_TASK_GROUPS};
 use clap::{Arg, ArgMatches, Command};
 use thiserror::Error;
 
-const COMMAND_PATH_ID: &'static str = "@@@__AXL__PATH__@@@";
+const TASK_COMMAND_PATH_ID: &'static str = "@@@__AXL__PATH__@@@";
+
+// Clap's help generation sorts by (display_order, name)—-equal display_order values fall back to name-based sorting.
+const TASK_COMMAND_DISPLAY_ORDER: usize = 0;
+const TASK_GROUP_DISPLAY_ORDER: usize = 1;
+pub const BUILTIN_COMMAND_DISPLAY_ORDER: usize = 2;
 
 #[derive(Default)]
 pub struct CommandTree {
@@ -27,6 +32,12 @@ pub enum TreeError {
 
     #[error("task {0:?} (defined in {1:?}) cannot have more than {2:?} group levels")]
     TooManyGroups(String, PathBuf, usize),
+
+    #[error("task {0:?} in group {1:?} conflicts with a previously defined command")]
+    TaskCommandConflict(String, Vec<String>),
+
+    #[error("group {0:?} conflicts with a previously defined command")]
+    GroupCommandConflict(Vec<String>),
 }
 
 impl CommandTree {
@@ -60,20 +71,24 @@ impl CommandTree {
         Ok(())
     }
 
-    pub fn as_command(&self, mut current: Command) -> Command {
+    pub fn as_command(&self, mut current: Command, group: &[String]) -> Result<Command, TreeError> {
         // Collect all subcommand names (groups and tasks) and sort them alphabetically
 
         for (name, subtree) in &self.subgroups {
-            let mut subcmd = Command::new(name.clone());
-            subcmd = subtree.as_command(subcmd);
-            // If the group has subcommands or tasks, require a subcommand
-            if !subtree.subgroups.is_empty() || !subtree.tasks.is_empty() {
-                subcmd = subcmd.subcommand_required(true);
+            let mut group = group.to_vec();
+            group.push(name.clone());
+            if current.find_subcommand(name).is_some() {
+                return Err(TreeError::GroupCommandConflict(group.to_vec()));
             }
+            let mut subcmd = Command::new(name.clone()).display_order(TASK_GROUP_DISPLAY_ORDER);
+            subcmd = subtree.as_command(subcmd, &group)?;
             current = current.subcommand(subcmd);
         }
 
-        for (_, subcmd) in &self.tasks {
+        for (name, subcmd) in &self.tasks {
+            if current.find_subcommand(name).is_some() {
+                return Err(TreeError::TaskCommandConflict(name.to_string(), group.to_vec()));
+            }
             current = current.subcommand(subcmd);
         }
 
@@ -82,16 +97,17 @@ impl CommandTree {
             current = current.subcommand_required(true);
         }
 
-        current
+        Ok(current)
     }
 
     pub fn get_task_path(&self, matches: &ArgMatches) -> String {
-        assert!(matches.contains_id(COMMAND_PATH_ID));
-        matches.get_one::<String>(COMMAND_PATH_ID).unwrap().clone()
+        println!("{:#?}", matches);
+        assert!(matches.contains_id(TASK_COMMAND_PATH_ID));
+        matches.get_one::<String>(TASK_COMMAND_PATH_ID).unwrap().clone()
     }
 }
 
-pub fn make_command(
+pub fn make_command_from_task(
     name: &String,
     defined_in: &str,
     path: &PathBuf,
@@ -107,21 +123,24 @@ pub fn make_command(
         task.description().clone()
     };
 
-    let mut subcmd = Command::new(name).about(about).arg(
-        Arg::new(COMMAND_PATH_ID)
-            .long(COMMAND_PATH_ID)
-            .hide(true)
-            .hide_default_value(true)
-            .hide_short_help(true)
-            .hide_possible_values(true)
-            .hide_long_help(true)
-            .default_value(path.as_os_str().to_string_lossy().to_string()),
-    );
+    let mut cmd = Command::new(name)
+        .about(about)
+        .display_order(TASK_COMMAND_DISPLAY_ORDER)
+        .arg(
+            Arg::new(TASK_COMMAND_PATH_ID)
+                .long(TASK_COMMAND_PATH_ID)
+                .hide(true)
+                .hide_default_value(true)
+                .hide_short_help(true)
+                .hide_possible_values(true)
+                .hide_long_help(true)
+                .default_value(path.as_os_str().to_string_lossy().to_string()),
+        );
 
     for (name, arg) in task.args() {
         let arg = crate::flags::convert_arg(&name, arg);
-        subcmd = subcmd.arg(arg);
+        cmd = cmd.arg(arg);
     }
 
-    subcmd
+    cmd
 }
