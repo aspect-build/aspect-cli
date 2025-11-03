@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::fmt::Debug;
 use std::rc::Rc;
 
-use super::rt::AsyncRuntime;
+use crate::engine::context::AxlContext;
 
 pub trait FutureAlloc: Send {
     fn alloc_value_fut<'v>(self: Box<Self>, heap: &'v Heap) -> values::Value<'v>;
@@ -117,13 +117,13 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<values::Value<'v>> {
-        let rt = AsyncRuntime::from_eval(eval)?;
+        let ctx = AxlContext::from_eval(eval)?;
         let this = this.downcast_ref_err::<StarlarkFuture>()?;
         let fut = this
             .inner
             .replace(None)
             .ok_or(anyhow::anyhow!("future has already been awaited"))?;
-        let value = rt.block_on(fut)?;
+        let value = ctx.rt.block_on(fut)?;
         Ok(value.alloc_value_fut(eval.heap()))
     }
 }

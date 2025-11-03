@@ -26,7 +26,7 @@ use starlark::{
 
 use axl_proto;
 
-use crate::engine::r#async::rt::AsyncRuntime;
+use crate::engine::context::AxlContext;
 
 mod build;
 mod execlog_stream;
@@ -98,7 +98,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(events) => (events, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let rt = AsyncRuntime::from_eval(eval)?;
+        let ctx = AxlContext::from_eval(eval)?;
         let build = build::Build::spawn(
             bazel_verb
                 .into_option()
@@ -111,7 +111,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 .iter()
                 .map(|f| f.as_str().to_string())
                 .collect(),
-            rt,
+            ctx.rt,
         )
         .context("failed to spawn build tool")?;
         Ok(build)
