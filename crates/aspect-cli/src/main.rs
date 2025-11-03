@@ -114,6 +114,10 @@ async fn main() -> miette::Result<ExitCode> {
         let cmd = Command::new("aspect")
             // set binary name to "aspect" in help
             .bin_name("aspect")
+            // customize the subcommands section title to "Tasks:"
+            .subcommand_help_heading("Tasks")
+            // customize the usage string to use <TASK>
+            .subcommand_value_name("TASK")
             // handle --version and -v flags
             .version(cli_version())
             .disable_version_flag(true)  // disable auto -V / --version
@@ -125,7 +129,11 @@ async fn main() -> miette::Result<ExitCode> {
                     .help("Print version")
             )
             // add version command
-            .subcommand(Command::new("version").display_order(BUILTIN_COMMAND_DISPLAY_ORDER));
+            .subcommand(
+                Command::new("version")
+                    .about("Print version")
+                    .display_order(BUILTIN_COMMAND_DISPLAY_ORDER)
+            );
 
         // Collect tasks into tree
         let mut tree = CommandTree::default();

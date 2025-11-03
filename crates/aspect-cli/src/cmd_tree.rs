@@ -81,7 +81,13 @@ impl CommandTree {
             if current.find_subcommand(name).is_some() {
                 return Err(TreeError::GroupCommandConflict(group.to_vec()));
             }
-            let mut subcmd = Command::new(name.clone()).display_order(TASK_GROUP_DISPLAY_ORDER);
+            let mut subcmd = Command::new(name.clone())
+                // customize the subcommands section title to "Tasks:"
+                .subcommand_help_heading("Tasks")
+                // customize the usage string to use <TASK>
+                .subcommand_value_name("TASK")
+                .about(format!("\x1b[3m{}\x1b[0m task group", name))
+                .display_order(TASK_GROUP_DISPLAY_ORDER);
             subcmd = subtree.as_command(subcmd, &group)?;
             current = current.subcommand(subcmd);
         }
