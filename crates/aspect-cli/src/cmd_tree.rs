@@ -93,7 +93,7 @@ impl CommandTree {
             current = current.subcommand(subcmd);
         }
 
-        // For the root command, require subcommand if there are any
+        // Require subcommand if are subgroups or tasks
         if !self.subgroups.is_empty() || !self.tasks.is_empty() {
             current = current.subcommand_required(true);
         }

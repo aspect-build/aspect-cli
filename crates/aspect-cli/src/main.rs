@@ -14,7 +14,7 @@ use axl_runtime::engine::task_args::TaskArgs;
 use axl_runtime::engine::task::{AsTaskLike, FrozenTask, Task};
 use axl_runtime::eval::{AxlScriptEvaluator, EvaluatedAxlScript};
 use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, Command};
 use miette::{miette, IntoDiagnostic};
 use starlark::values::ValueLike;
 use tokio::task;
@@ -110,18 +110,22 @@ async fn main() -> miette::Result<ExitCode> {
     let out = spawn_blocking(move || {
         let _enter = espan.enter();
 
-        let mut cmd = Command::new("aspect");
-
-        // Add version command
-        cmd = cmd.subcommand(Command::new("version").display_order(BUILTIN_COMMAND_DISPLAY_ORDER));
-
-        // Add the --version and -v flags
-        cmd = cmd.arg(
-            Arg::new("version")
-                .short('v')
-                .long("version")
-                .action(clap::ArgAction::SetTrue),
-        );
+        // TODO: add .about()
+        let cmd = Command::new("aspect")
+            // set binary name to "aspect" in help
+            .bin_name("aspect")
+            // handle --version and -v flags
+            .version(cli_version())
+            .disable_version_flag(true)  // disable auto -V / --version
+            .arg(
+                Arg::new("version")
+                    .short('v')
+                    .long("version")
+                    .action(ArgAction::Version)
+                    .help("Print version")
+            )
+            // add version command
+            .subcommand(Command::new("version").display_order(BUILTIN_COMMAND_DISPLAY_ORDER));
 
         // Collect tasks into tree
         let mut tree = CommandTree::default();
@@ -206,32 +210,28 @@ async fn main() -> miette::Result<ExitCode> {
         // Turn the command tree into a command with subcommands.
         let cmd = tree.as_command(cmd, &[]).into_diagnostic()?;
 
-        let matches = cmd.try_get_matches();
-
-        if !matches.is_ok() {
-            let err = matches.unwrap_err();
-            err.print().into_diagnostic()?;
-            return Ok(ExitCode::from(err.exit_code() as u8));
-        }
-
-        let matches = matches.expect("failed to get matches");
+        // Match command line arguments to available commands
+        let matches = match cmd.try_get_matches() {
+            Ok(m) => m,
+            Err(err) => {
+                err.print().into_diagnostic()?;
+                return Ok(ExitCode::from(err.exit_code() as u8));
+            }
+        };
 
         // If the top-level subcommand name is 'version' then print out the version information and exit success
         if let Some("version") = matches.subcommand_name() {
-            let v = cli_version();
-            println!("Aspect CLI {v:}");
+            println!("Aspect CLI {:}", cli_version());
             return Ok(ExitCode::SUCCESS);
         }
 
-        let cmd = matches.subcommand();
-        if cmd.is_none() {
-            eprintln!("unknown command {:?}", matches.subcommand_name());
-            return Ok(ExitCode::FAILURE);
-        }
-        let mut cmd = cmd.expect("failed to get command");
+        // We're expecting a valid subcommand since subcommand_required is set on commands
+        let mut cmd = matches.subcommand().expect("failed to get command");
+
+        // Drill down through all command groups
         while let Some(subcmd) = cmd.1.subcommand() {
             cmd = subcmd;
-        }
+        };
 
         let (name, cmdargs) = cmd;
         let task_path = tree.get_task_path(&cmdargs);
