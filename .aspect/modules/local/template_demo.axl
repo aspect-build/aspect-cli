@@ -1,0 +1,56 @@
+def _impl(ctx):
+    data = {
+        "name": "Alice",
+        "age": 30,
+        "active": True,
+        "hobbies": ["reading", "swimming"],
+        "address": {"street": "123 Main St", "city": "Anytown", "nested": {"deep": "nested-value"}},
+    }
+
+    template_hb = """
+Hello {{name}}, your age is {{age}}
+active: {{active}}
+hobbies: {{#each hobbies}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
+address: {{address.street}}, {{address.city}}
+deep: {{address.nested.deep}}
+"""
+    result_hb = ctx.template.handlebars(
+        template_hb,
+        data = data
+    )
+    print("Handlebars result:\n%s" % result_hb)
+
+    template_j2 = """
+Hello {{name}}, your age is {{age}}
+active: {{active}}
+hobbies: {% for hobby in hobbies %}{{hobby}}{% if not loop.last %}, {% endif %}{% endfor %}
+address: {{address.street}}, {{address.city}}
+deep: {{address.nested.deep}}
+"""
+    result_j2 = ctx.template.jinja2(
+        template_j2,
+        data = data
+    )
+
+    print("Jinja2 result:\n%s" % result_j2)
+
+    template_li = """
+Hello {{name}}, your age is {{age}}
+active: {{active}}
+hobbies: {% for hobby in hobbies %}{{hobby}}{% unless forloop.last %}, {% endunless %}{% endfor %}
+address: {{address.street}}, {{address.city}}
+deep: {{address.nested.deep}}
+"""
+    result_li = ctx.template.liquid(
+        template_li,
+        data = data
+    )
+
+    print("Liquid result:\n%s" % result_li)
+    return 0
+
+template_demo = task(
+    implementation = _impl,
+    args = {},
+    groups = ["user", "local"],
+)

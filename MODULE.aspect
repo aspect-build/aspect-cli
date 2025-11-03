@@ -1,0 +1,16 @@
+axl_archive_dep(
+    name = "experimental",
+    urls = ["https://github.com/aspect-extensions/example/releases/download/v0.0.2/v0.0.2.tar.gz"],
+    integrity = "sha384-0msqclam8aGttoXIntaUFgzYK0N2PRzeqBLsqeNaIUnL6o1n3CU6dJqTF5rxkUBr",
+    strip_prefix = "modules/experimental",
+    autouse = True,
+    dev = True
+)
+
+axl_local_dep(
+    name = "local",
+    path = ".aspect/modules/local",
+    autouse = True,
+)
+
+use_task(".aspect/elsewhere/user-task.axl", "user_task")
