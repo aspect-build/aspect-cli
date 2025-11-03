@@ -1,6 +1,6 @@
 mod cmd_tree;
 mod flags;
-mod repo_root;
+mod helpers;
 mod telemetry;
 mod trace;
 
@@ -19,38 +19,10 @@ use miette::{miette, IntoDiagnostic};
 use starlark::values::ValueLike;
 use tokio::{fs, task};
 use tokio::task::spawn_blocking;
-use tracing::{info_span, instrument};
+use tracing::info_span;
 
 use crate::cmd_tree::{make_command, CommandTree};
-use crate::repo_root::find_repo_root;
-
-#[instrument]
-pub async fn find_tasks(
-    current_dir: &PathBuf,
-    repo_root: &PathBuf,
-) -> Result<Vec<PathBuf>, std::io::Error> {
-    let mut found: Vec<PathBuf> = vec![];
-
-    for current in current_dir.ancestors() {
-        let aspect_dir = current.join(".aspect");
-        let aspect_dir_metadata = fs::metadata(&aspect_dir).await;
-
-        if aspect_dir_metadata.map_or_else(|_| false, |meta| meta.is_dir()) {
-            let mut entries = fs::read_dir(&aspect_dir).await?;
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if path.is_file() && path.extension().map(|e| e == "axl").unwrap_or(false) {
-                    found.push(path);
-                }
-            }
-        }
-
-        if current == repo_root {
-            break;
-        }
-    }
-    Ok(found)
-}
+use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_paths};
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
 //
@@ -72,6 +44,7 @@ pub async fn find_tasks(
 async fn main() -> miette::Result<ExitCode> {
     let _ = task::spawn(telemetry::send_telemetry());
     let _tracing = trace::init();
+
     let _root = info_span!("root").entered();
 
     let mut cmd = Command::new("aspect").arg(
@@ -81,7 +54,9 @@ async fn main() -> miette::Result<ExitCode> {
             .action(clap::ArgAction::SetTrue),
     );
 
-    let repo_dir = find_repo_root()
+    let current_work_dir = std::env::current_dir().into_diagnostic()?;
+
+    let repo_dir = find_repo_root(&current_work_dir)
         .await
         .map_err(|_| miette!("Could not find repository root, running inside a module?"))?;
 
@@ -117,9 +92,12 @@ async fn main() -> miette::Result<ExitCode> {
 
     let deps_path = disk_store.deps_path();
 
-    // Scan for .axl files from CWD up to repo root
-    let current_workdir = std::env::current_dir().into_diagnostic()?;
-    let axl_sources = find_tasks(&current_workdir, &repo_dir)
+    // Get the default search paths given the current working directory and the repository root
+    let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_dir);
+    // TODO: allow user to configure additonal search paths in the future?
+
+    // Scan for .axl files in the search paths
+    let axl_sources = find_axl_scripts(&search_paths)
         .await
         .into_diagnostic()?;
 
