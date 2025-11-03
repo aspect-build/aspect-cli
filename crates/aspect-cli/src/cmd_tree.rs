@@ -97,6 +97,7 @@ pub fn make_command(
     path: &PathBuf,
     task: &dyn TaskLike<'_>,
 ) -> Command {
+    // Generate a default task description if none was provided by task
     let about = if task.description().is_empty() {
         format!(
             "\x1b[3m{}\x1b[0m task defined in \x1b[3m{}\x1b[0m",
