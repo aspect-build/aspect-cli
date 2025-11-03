@@ -50,7 +50,8 @@ deep: {{address.nested.deep}}
     return 0
 
 template_demo = task(
+    name = "template-demo",
+    group = ["user", "local"],
     implementation = _impl,
     args = {},
-    group = ["user", "local"],
 )

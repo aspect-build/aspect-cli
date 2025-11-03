@@ -133,7 +133,7 @@ async fn main() -> miette::Result<ExitCode> {
                         ));
                     };
 
-                    let name = symbol;
+                    let name = if def.name().is_empty() { symbol } else { def.name().clone() };
                     let rel_path = &path
                         .strip_prefix(&repo_root)
                         .expect("failed make path relative")
@@ -169,7 +169,7 @@ async fn main() -> miette::Result<ExitCode> {
                         continue 'inner;
                     };
 
-                    let name = name.as_str().to_string();
+                    let name = if def.name().is_empty() { name.as_str().to_string() } else { def.name().clone() };
                     let group = def.group();
                     let defined_in = path
                         .strip_prefix(&repo_dir)

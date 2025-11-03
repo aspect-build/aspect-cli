@@ -24,6 +24,7 @@ pub trait TaskLike<'v>: 'v {
     fn args(&self) -> &SmallMap<String, TaskArg>;
     fn description(&self) -> &String;
     fn group(&self) -> &Vec<String>;
+    fn name(&self) -> &String;
 }
 
 pub trait AsTaskLike<'v>: TaskLike<'v> {
@@ -47,6 +48,7 @@ pub struct Task<'v> {
     args: SmallMap<String, TaskArg>,
     description: String,
     group: Vec<String>,
+    name: String,
 }
 
 impl<'v> Task<'v> {
@@ -62,6 +64,9 @@ impl<'v> Task<'v> {
     pub fn group(&self) -> &Vec<String> {
         &self.group
     }
+    pub fn name(&self) -> &String {
+        &self.name
+    }
 }
 
 impl<'v> TaskLike<'v> for Task<'v> {
@@ -73,6 +78,9 @@ impl<'v> TaskLike<'v> for Task<'v> {
     }
     fn group(&self) -> &Vec<String> {
         &self.group
+    }
+    fn name(&self) -> &String {
+        &self.name
     }
 }
 
@@ -94,6 +102,7 @@ impl<'v> values::Freeze for Task<'v> {
             r#impl: frozen_impl,
             description: self.description,
             group: self.group,
+            name: self.name,
         })
     }
 }
@@ -106,6 +115,7 @@ pub struct FrozenTask {
     args: SmallMap<String, TaskArg>,
     description: String,
     group: Vec<String>,
+    name: String,
 }
 
 starlark_simple_value!(FrozenTask);
@@ -130,6 +140,9 @@ impl<'v> TaskLike<'v> for FrozenTask {
     }
     fn group(&self) -> &Vec<String> {
         &self.group
+    }
+    fn name(&self) -> &String {
+        &self.name
     }
 }
 
@@ -157,11 +170,13 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
     ///     pass
     ///
     /// build = task(
+    ///     name = "build",
+    ///     group = [],
     ///     impl = _task_impl,
+    ///     description = "build task",
     ///     task_args = {
     ///         "target": args.string(),
     ///     }
-    ///     group = [],
     /// )
     /// ```
     fn task<'v>(
@@ -173,6 +188,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
         #[starlark(require = named)] args: values::dict::UnpackDictEntries<&'v str, TaskArg>,
         #[starlark(require = named, default = String::new())] description: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
+        #[starlark(require = named, default = String::new())] name: String,
     ) -> starlark::Result<Task<'v>> {
         let mut args_ = SmallMap::new();
         for (arg, def) in args.entries {
@@ -183,6 +199,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
             r#impl: implementation.0,
             description,
             group: group.items,
+            name,
         })
     }
 }

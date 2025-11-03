@@ -69,6 +69,7 @@ mod tests {
 
 <pre class="language-python"><code>def task(
     *,
+    name: '@link@ /lib/str @@ str @link@' = ...,
     implementation: typing.Callable[['@link@ /lib/task_context @@ task_context @link@'], None],
     args: dict['@link@ /lib/str @@ str @link@', '@link@ /lib/task_arg @@ task_arg @link@'],
     description: '@link@ /lib/str @@ str @link@' = ...,
@@ -80,7 +81,8 @@ Task type representing a Task.
 def _task_impl(ctx):
     pass
 
-build = task(
+build = 
+    name = "build",
     impl = _task_impl,
     task_args = {
         "target": args.string(),

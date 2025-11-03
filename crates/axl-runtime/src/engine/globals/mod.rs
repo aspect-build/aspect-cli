@@ -56,20 +56,7 @@ impl<'v> values::StarlarkValue<'v> for ClockIterator {
 
 #[starlark_module]
 pub fn register_toplevels(_: &mut GlobalsBuilder) {
-    /// Task type representing a Task.
-    ///
-    /// ```python
-    /// def _task_impl(ctx):
-    ///     pass
-    ///
-    /// build = task(
-    ///     impl = _task_impl,
-    ///     task_args = {
-    ///         "target": args.string(),
-    ///     }
-    ///     group = [],
-    /// )
-    /// ```
+    /// Forever clock iterator
     fn forever<'v>(#[starlark()] rate: u32) -> starlark::Result<ClockIterator> {
         Ok(ClockIterator {
             rate: rate as u64,

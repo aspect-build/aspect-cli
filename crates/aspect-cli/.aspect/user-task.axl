@@ -3,7 +3,8 @@ def _impl(ctx):
     return 0
 
 user_task = task(
+    name = "user-task",
+    group = ["user", "sub"],
     implementation = _impl,
     args = {},
-    group = ["user", "sub"],
 )
