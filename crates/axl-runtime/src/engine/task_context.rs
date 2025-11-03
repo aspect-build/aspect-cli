@@ -57,7 +57,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<task_args>")]
+#[display("<task_context>")]
 pub struct FrozenTaskContext {
     #[allocative(skip)]
     args: FrozenTaskArgs,
@@ -65,9 +65,9 @@ pub struct FrozenTaskContext {
 
 starlark_simple_value!(FrozenTaskContext);
 
-#[starlark_value(type = "task_args")]
+#[starlark_value(type = "task_context")]
 impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
-    type Canonical = TaskArgs<'v>;
+    type Canonical = TaskContext<'v>;
 }
 
 #[starlark_module]
