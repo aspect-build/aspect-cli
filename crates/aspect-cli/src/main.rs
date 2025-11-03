@@ -30,14 +30,14 @@ use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_pa
 // not be starved of cpu time to perform async tasks, its sole purpose is to
 // execute Rust code that drives the async runtime.
 //
-// Starlark thread which is spawned via spawn_blocking will allow Starlark code run on
-// a blocking thread pool separate from the threads that drive the async work.
+// Starlark thread (2) for command execution that is spawned via spawn_blocking will allow Starlark
+// code run on a blocking thread pool separate from the threads that drive the async work.
 //
 // On the other hand, all the other async tasks, including those spawned by Starlark
-// async machinery get to run on any of these worker threads until they are ready.
+// async machinery get to run on any of these worker threads (3+) until they are ready.
 //
 // As a special exception the build event machinery and build event sinks get
-// their own threads to react to IO streams in a timely manner.
+// their own threads (3+) to react to IO streams in a timely manner.
 //
 // TODO: create a diagram of how all this ties together.
 #[tokio::main(flavor = "multi_thread", worker_threads = 3)]
@@ -55,8 +55,6 @@ async fn main() -> miette::Result<ExitCode> {
     let disk_store = DiskStore::new(repo_dir.clone());
 
     let extension_eval = AxlModuleEvaluator::new(repo_dir.clone());
-
-    let mut cmd = Command::new("aspect");
 
     let _ = info_span!("expand_module_store").enter();
 
@@ -105,8 +103,12 @@ async fn main() -> miette::Result<ExitCode> {
 
     let espan = info_span!("eval");
 
+    // Starlark thread for command execution that is spawned via spawn_blocking will allow Starlark
+    // code run on a blocking thread pool separate from the threads that drive the async work.
     let out = spawn_blocking(move || {
         let _enter = espan.enter();
+
+        let mut cmd = Command::new("aspect");
 
         // Collect tasks into tree
         let mut tree = CommandTree::default();
