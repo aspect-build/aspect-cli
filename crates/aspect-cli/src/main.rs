@@ -223,10 +223,7 @@ async fn main() -> miette::Result<ExitCode> {
                         .into_diagnostic()?;
                 }
             }
-
-            assert!(tasks
-                .insert(path.to_str().unwrap().to_string(), script)
-                .is_none());
+            tasks.insert(path.to_str().unwrap().to_string(), script);
         }
 
         // Turn the command tree into a command with subcommands.
