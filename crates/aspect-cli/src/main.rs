@@ -75,12 +75,14 @@ async fn main() -> miette::Result<ExitCode> {
         .await
         .into_diagnostic()?;
 
+    // Gather all tasks from use_task calls in the repository root axl module
     let mut use_tasks = vec![(
         module_store.repo_name,
         module_store.repo_path,
         module_store.tasks.take(),
     )];
 
+    // Gather all tasks from use_task calls in the axl module deps
     for (name, root) in module_roots {
         let module_store = extension_eval.evaluate(name, root).into_diagnostic()?;
         use_tasks.push((
