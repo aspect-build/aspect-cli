@@ -5,6 +5,7 @@ use clap::{Arg, ArgMatches, Command};
 use thiserror::Error;
 
 const TASK_COMMAND_PATH_ID: &'static str = "@@@__AXL__PATH__@@@";
+const TASK_COMMAND_SYMBOL_ID: &'static str = "@@@__AXL__SYMBOL__@@@";
 
 // Clap's help generation sorts by (display_order, name)—-equal display_order values fall back to name-based sorting.
 const TASK_COMMAND_DISPLAY_ORDER: usize = 0;
@@ -101,9 +102,13 @@ impl CommandTree {
     }
 
     pub fn get_task_path(&self, matches: &ArgMatches) -> String {
-        println!("{:#?}", matches);
         assert!(matches.contains_id(TASK_COMMAND_PATH_ID));
         matches.get_one::<String>(TASK_COMMAND_PATH_ID).unwrap().clone()
+    }
+
+    pub fn get_task_symbol(&self, matches: &ArgMatches) -> String {
+        assert!(matches.contains_id(TASK_COMMAND_SYMBOL_ID));
+        matches.get_one::<String>(TASK_COMMAND_SYMBOL_ID).unwrap().clone()
     }
 }
 
@@ -111,6 +116,7 @@ pub fn make_command_from_task(
     name: &String,
     defined_in: &str,
     path: &PathBuf,
+    symbol: &String,
     task: &dyn TaskLike<'_>,
 ) -> Command {
     // Generate a default task description if none was provided by task
@@ -135,6 +141,16 @@ pub fn make_command_from_task(
                 .hide_possible_values(true)
                 .hide_long_help(true)
                 .default_value(path.as_os_str().to_string_lossy().to_string()),
+        )
+        .arg(
+            Arg::new(TASK_COMMAND_SYMBOL_ID)
+                .long(TASK_COMMAND_SYMBOL_ID)
+                .hide(true)
+                .hide_default_value(true)
+                .hide_short_help(true)
+                .hide_possible_values(true)
+                .hide_long_help(true)
+                .default_value(symbol),
         );
 
     for (name, arg) in task.args() {

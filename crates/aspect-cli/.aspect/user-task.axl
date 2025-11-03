@@ -1,5 +1,5 @@
 def _impl(ctx):
-    print("I'm a task in a subfolder .aspect folder")
+    print("I am an auto-discovered task in crates/aspect-cli/.aspect/user-task.axl")
     return 0
 
 user_task = task(

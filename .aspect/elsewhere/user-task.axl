@@ -1,5 +1,5 @@
 def _impl(ctx):
-    print("I'm a task that is not auto-discovered on the default search paths but instead manually registered in MODULE.aspect")
+    print("I am a task that is not auto-discovered but manually registered in MODULE.aspect instead")
     return 0
 
 user_task = task(

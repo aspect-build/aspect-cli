@@ -48,10 +48,13 @@ pub struct EvaluatedAxlScript {
 pub enum EvalError {
     #[error("{0}")]
     StarlarkError(starlark::Error),
-    #[error("task file {0} does not export the `{1}` symbol")]
+
+    #[error("task file {0:?} does not export the {1:?} symbol")]
     MissingSymbol(PathBuf, String),
+
     #[error(transparent)]
     UnknownError(#[from] anyhow::Error),
+
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 }

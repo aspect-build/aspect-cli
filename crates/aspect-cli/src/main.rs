@@ -125,6 +125,7 @@ async fn main() -> miette::Result<ExitCode> {
         let mut tree = CommandTree::default();
         let mut tasks: HashMap<String, EvaluatedAxlScript> = HashMap::new();
 
+        // First gather tasks from use_task calls in axl modules
         for (repo_name, repo_root, usetasks) in use_tasks {
             let te = AxlScriptEvaluator::new(repo_root.clone(), deps_path.clone());
 
@@ -146,7 +147,7 @@ async fn main() -> miette::Result<ExitCode> {
                         ));
                     };
 
-                    let name = if def.name().is_empty() { symbol } else { def.name().clone() };
+                    let name = if def.name().is_empty() { symbol.clone() } else { def.name().clone() };
                     let rel_path = &path
                         .strip_prefix(&repo_root)
                         .expect("failed make path relative")
@@ -155,15 +156,15 @@ async fn main() -> miette::Result<ExitCode> {
                         .expect("failed to encode path");
                     let group = def.group();
                     let defined_in = format!("@{}/{}", repo_name, rel_path);
-                    let cmd = make_command_from_task(&name, &defined_in, &path, def);
+                    let cmd = make_command_from_task(&name, &defined_in, &path, &symbol, def);
                     tree.insert(&name, &group, &group, &path, cmd).into_diagnostic()?;
                     tasks.insert(path.to_str().unwrap().to_string(), script);
                 }
             }
         }
 
+        // Next gather tasks from axl sources in the repository
         let te = AxlScriptEvaluator::new(repo_dir.clone(), deps_path.clone());
-
         for path in axl_sources.iter() {
             let rel_path = path
                 .strip_prefix(&repo_dir)
@@ -172,8 +173,8 @@ async fn main() -> miette::Result<ExitCode> {
 
             let script = te.eval(&rel_path).into_diagnostic()?;
 
-            'inner: for name in script.module.names() {
-                if let Some(task_val) = script.module.get(name.as_str()) {
+            'inner: for symbol in script.module.names() {
+                if let Some(task_val) = script.module.get(symbol.as_str()) {
                     let def = if let Some(task) = task_val.downcast_ref::<Task>() {
                         task.as_task()
                     } else if let Some(task) = task_val.downcast_ref::<FrozenTask>() {
@@ -182,7 +183,7 @@ async fn main() -> miette::Result<ExitCode> {
                         continue 'inner;
                     };
 
-                    let name = if def.name().is_empty() { name.as_str().to_string() } else { def.name().clone() };
+                    let name = if def.name().is_empty() { symbol.as_str().to_string() } else { def.name().clone() };
                     let group = def.group();
                     let defined_in = path
                         .strip_prefix(&repo_dir)
@@ -190,7 +191,7 @@ async fn main() -> miette::Result<ExitCode> {
                         .as_os_str()
                         .to_str()
                         .expect("failed to encode path");
-                    let cmd = make_command_from_task(&name, defined_in, path, def);
+                    let cmd = make_command_from_task(&name, defined_in, path, &symbol.as_str().to_string(), def);
                     tree.insert(&name, &group, &group, &path, cmd).into_diagnostic()?;
                 }
             }
@@ -220,64 +221,71 @@ async fn main() -> miette::Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
 
-        if let Some((name, cmdargs)) = matches.subcommand() {
-            let task_path = tree.get_task_path(&cmdargs);
-            let task = tasks.get(&task_path).unwrap();
-            let def = task.definition(name).into_diagnostic()?;
-
-            let span = info_span!("task", name = name, path = task_path);
-
-            let _enter = span.enter();
-            let exit_code = task
-                .execute(name, |heap| {
-                    let mut args = TaskArgs::new();
-                    for (k, v) in def.args().iter() {
-                        let val = match v {
-                            TaskArg::String { .. } => heap
-                                .alloc_str(
-                                    cmdargs
-                                        .get_one::<String>(k.as_str())
-                                        .unwrap_or(&String::new()),
-                                )
-                                .to_value(),
-                            TaskArg::Int { .. } => heap
-                                .alloc(
-                                    cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned(),
-                                )
-                                .to_value(),
-                            TaskArg::UInt { .. } => heap
-                                .alloc(
-                                    cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned(),
-                                )
-                                .to_value(),
-                            TaskArg::Boolean { .. } => heap.alloc(
-                                cmdargs
-                                    .get_one::<bool>(k.as_str())
-                                    .unwrap_or(&false)
-                                    .to_owned(),
-                            ),
-                            TaskArg::Positional { .. } => heap.alloc(TaskArgs::alloc_list(
-                                cmdargs
-                                    .get_many::<String>(k.as_str())
-                                    .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
-                            )),
-                            TaskArg::TrailingVarArgs => heap.alloc(TaskArgs::alloc_list(
-                                cmdargs
-                                    .get_many::<String>(k.as_str())
-                                    .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
-                            )),
-                        };
-                        args.insert(k.clone(), val);
-                    }
-                    args
-                })
-                .into_diagnostic()?;
-
-            return Ok(ExitCode::from(exit_code.unwrap_or(0)));
+        let cmd = matches.subcommand();
+        if cmd.is_none() {
+            eprintln!("unknown command {:?}", matches.subcommand_name());
+            return Ok(ExitCode::FAILURE);
+        }
+        let mut cmd = cmd.expect("failed to get command");
+        while let Some(subcmd) = cmd.1.subcommand() {
+            cmd = subcmd;
         }
 
-        eprintln!("unknown command {:?}", matches.subcommand_name());
-        return Ok(ExitCode::FAILURE);
+        let (name, cmdargs) = cmd;
+        let task_path = tree.get_task_path(&cmdargs);
+        let task_symbol = tree.get_task_symbol(&cmdargs);
+        let task = tasks.get(&task_path).unwrap();
+        let def = task.definition(&task_symbol).into_diagnostic()?;
+
+        let span = info_span!("task", name = name, path = task_path, symbol = task_symbol);
+
+        let _enter = span.enter();
+        let exit_code = task
+            .execute(&task_symbol, |heap| {
+                let mut args = TaskArgs::new();
+                for (k, v) in def.args().iter() {
+                    let val = match v {
+                        TaskArg::String { .. } => heap
+                            .alloc_str(
+                                cmdargs
+                                    .get_one::<String>(k.as_str())
+                                    .unwrap_or(&String::new()),
+                            )
+                            .to_value(),
+                        TaskArg::Int { .. } => heap
+                            .alloc(
+                                cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned(),
+                            )
+                            .to_value(),
+                        TaskArg::UInt { .. } => heap
+                            .alloc(
+                                cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned(),
+                            )
+                            .to_value(),
+                        TaskArg::Boolean { .. } => heap.alloc(
+                            cmdargs
+                                .get_one::<bool>(k.as_str())
+                                .unwrap_or(&false)
+                                .to_owned(),
+                        ),
+                        TaskArg::Positional { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(k.as_str())
+                                .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                        )),
+                        TaskArg::TrailingVarArgs => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(k.as_str())
+                                .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                        )),
+                    };
+                    args.insert(k.clone(), val);
+                }
+                args
+            })
+            .into_diagnostic()?;
+
+        return Ok(ExitCode::from(exit_code.unwrap_or(0)));
     });
 
     match out.await {
