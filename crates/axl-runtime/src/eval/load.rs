@@ -189,7 +189,7 @@ impl<'a> FileLoader for AxlLoader<'a> {
         };
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&new_loader);
-        eval.extra = Some(&self.script_evaluator.context);
+        eval.extra = Some(&self.script_evaluator.store);
         eval.eval_module(ast, &self.script_evaluator.globals)?;
         drop(eval);
         let frozen_module = module.freeze()?;

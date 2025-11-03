@@ -2,7 +2,7 @@ use starlark::{
     environment::GlobalsBuilder, eval::Evaluator, starlark_module, values::tuple::UnpackTuple,
 };
 
-use crate::engine::context::AxlContext;
+use crate::engine::store::AxlStore;
 
 use super::{future::StarlarkFuture, future_stream::FutureStream};
 
@@ -16,7 +16,7 @@ fn register_future_utils(_: &mut GlobalsBuilder) {
         #[starlark(args)] futures: UnpackTuple<StarlarkFuture>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<FutureStream> {
-        let ctx = AxlContext::from_eval(eval)?;
-        return Ok(FutureStream::new(ctx.rt, futures.items));
+        let store = AxlStore::from_eval(eval)?;
+        return Ok(FutureStream::new(store.rt, futures.items));
     }
 }

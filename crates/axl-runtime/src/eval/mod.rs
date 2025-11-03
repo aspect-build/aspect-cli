@@ -12,7 +12,7 @@ use starlark::syntax::{AstModule, Dialect, DialectTypes};
 use starlark::values::{Heap, ValueLike};
 use thiserror::Error;
 
-use crate::engine::context::AxlContext;
+use crate::engine::store::AxlStore;
 use crate::engine::task::{AsTaskLike, FrozenTask, TaskLike};
 use crate::engine::task_args::TaskArgs;
 use crate::engine::{self, task::Task};
@@ -20,7 +20,7 @@ use crate::eval::load::AxlLoader;
 use crate::helpers::{normalize_abs_path_lexically, sanitize_load_path_lexically};
 
 /// The core evaluator for .axl files, holding configuration like repository root,
-/// Starlark dialect, globals, and context. Used to evaluate .axl files securely.
+/// Starlark dialect, globals, and store. Used to evaluate .axl files securely.
 #[derive(Debug)]
 pub struct AxlScriptEvaluator {
     // Repo root is where the module boundary is.
@@ -29,16 +29,16 @@ pub struct AxlScriptEvaluator {
     deps_root: PathBuf,
     dialect: Dialect,
     globals: Globals,
-    context: AxlContext,
+    store: AxlStore,
 }
 
 /// Represents the result of evaluating an .axl script, encapsulating the module,
-/// path, and context for task definition retrieval and execution.
+/// path, and store for task definition retrieval and execution.
 #[derive(Debug, Clone)]
 pub struct EvaluatedAxlScript {
     pub path: PathBuf,
     pub module: Rc<Module>,
-    context: AxlContext,
+    store: AxlStore,
 }
 
 /// Enum representing possible errors during evaluation, including Starlark-specific errors,
@@ -97,11 +97,11 @@ impl From<starlark::Error> for EvalError {
 }
 
 impl EvaluatedAxlScript {
-    fn new(path: PathBuf, context: AxlContext, module: Module) -> Self {
+    fn new(path: PathBuf, store: AxlStore, module: Module) -> Self {
         Self {
             path,
             module: Rc::new(module),
-            context,
+            store,
         }
     }
 
@@ -135,7 +135,7 @@ impl EvaluatedAxlScript {
         let args = args(heap);
         let context = heap.alloc(engine::task_context::TaskContext::new(args));
         let mut eval = Evaluator::new(&self.module);
-        eval.extra = Some(&self.context);
+        eval.extra = Some(&self.store);
         let ret = if let Some(val) = def.downcast_ref::<Task>() {
             eval.eval_function(val.implementation(), &[context], &[])?
         } else if let Some(val) = def.downcast_ref::<FrozenTask>() {
@@ -178,7 +178,7 @@ impl AxlScriptEvaluator {
             deps_root,
             dialect: AxlScriptEvaluator::dialect(),
             globals: AxlScriptEvaluator::globals(),
-            context: AxlContext::new(),
+            store: AxlStore::new(),
         }
     }
 
@@ -226,7 +226,7 @@ impl AxlScriptEvaluator {
         let module = Module::new();
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
-        eval.extra = Some(&self.context);
+        eval.extra = Some(&self.store);
         eval.eval_module(ast, &self.globals)?;
         drop(eval);
 
@@ -236,7 +236,7 @@ impl AxlScriptEvaluator {
         // Return the evaluated script
         Ok(EvaluatedAxlScript::new(
             abs_script_path,
-            self.context.clone(),
+            self.store.clone(),
             module,
         ))
     }
