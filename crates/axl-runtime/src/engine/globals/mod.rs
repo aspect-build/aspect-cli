@@ -67,7 +67,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
     ///     task_args = {
     ///         "target": args.string(),
     ///     }
-    ///     groups = [],
+    ///     group = [],
     /// )
     /// ```
     fn forever<'v>(#[starlark()] rate: u32) -> starlark::Result<ClockIterator> {

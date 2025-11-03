@@ -32,15 +32,15 @@ pub enum TreeError {
 impl CommandTree {
     pub fn insert(
         &mut self,
-        groups: &[String],
+        group: &[String],
         name: String,
         path: &PathBuf,
         cmd: Command,
     ) -> Result<(), TreeError> {
-        if groups.len() > 5 {
+        if group.len() > 5 {
             return Err(TreeError::TooManyGroups(name, path.clone()));
         }
-        if groups.is_empty() {
+        if group.is_empty() {
             if self.subgroups.contains_key(&name) {
                 return Err(TreeError::TaskSubgroupConflict(name.clone()));
             }
@@ -48,12 +48,12 @@ impl CommandTree {
                 return Err(TreeError::DuplicateTask(name.clone()));
             }
         } else {
-            let first = &groups[0];
+            let first = &group[0];
             if self.subtasks.contains_key(first) {
                 return Err(TreeError::GroupConflictTask(first.clone()));
             }
             let subtree = self.subgroups.entry(first.clone()).or_default();
-            subtree.insert(&groups[1..], name, path, cmd)?;
+            subtree.insert(&group[1..], name, path, cmd)?;
         }
         Ok(())
     }

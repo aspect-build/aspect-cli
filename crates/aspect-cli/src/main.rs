@@ -140,10 +140,10 @@ async fn main() -> miette::Result<ExitCode> {
                         .as_os_str()
                         .to_str()
                         .expect("failed to encode path");
-                    let groups = def.groups();
+                    let group = def.group();
                     let defined_in = format!("@{}/{}", repo_name, rel_path);
                     let cmd = make_command(&name, &defined_in, &path, def);
-                    tree.insert(&groups, name, &path, cmd).into_diagnostic()?;
+                    tree.insert(&group, name, &path, cmd).into_diagnostic()?;
                     tasks.insert(path.to_str().unwrap().to_string(), script);
                 }
             }
@@ -170,7 +170,7 @@ async fn main() -> miette::Result<ExitCode> {
                     };
 
                     let name = name.as_str().to_string();
-                    let groups = def.groups();
+                    let group = def.group();
                     let defined_in = path
                         .strip_prefix(&repo_dir)
                         .expect("failed make path relative")
@@ -178,7 +178,7 @@ async fn main() -> miette::Result<ExitCode> {
                         .to_str()
                         .expect("failed to encode path");
                     let cmd = make_command(&name, defined_in, path, def);
-                    tree.insert(&groups, name, &path, cmd).into_diagnostic()?;
+                    tree.insert(&group, name, &path, cmd).into_diagnostic()?;
                 }
             }
 

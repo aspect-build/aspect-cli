@@ -5,5 +5,5 @@ def _impl(ctx):
 user_task = task(
     implementation = _impl,
     args = {},
-    groups = ["user", "elsewhere"],
+    group = ["user", "elsewhere"],
 )

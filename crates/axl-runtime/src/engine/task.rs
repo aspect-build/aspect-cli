@@ -23,7 +23,7 @@ use starlark::values::Value;
 pub trait TaskLike<'v>: 'v {
     fn args(&self) -> &SmallMap<String, TaskArg>;
     fn description(&self) -> &String;
-    fn groups(&self) -> &Vec<String>;
+    fn group(&self) -> &Vec<String>;
 }
 
 pub trait AsTaskLike<'v>: TaskLike<'v> {
@@ -46,7 +46,7 @@ pub struct Task<'v> {
     #[allocative(skip)]
     args: SmallMap<String, TaskArg>,
     description: String,
-    groups: Vec<String>,
+    group: Vec<String>,
 }
 
 impl<'v> Task<'v> {
@@ -59,8 +59,8 @@ impl<'v> Task<'v> {
     pub fn description(&self) -> &String {
         &self.description
     }
-    pub fn groups(&self) -> &Vec<String> {
-        &self.groups
+    pub fn group(&self) -> &Vec<String> {
+        &self.group
     }
 }
 
@@ -71,8 +71,8 @@ impl<'v> TaskLike<'v> for Task<'v> {
     fn description(&self) -> &String {
         &self.description
     }
-    fn groups(&self) -> &Vec<String> {
-        &self.groups
+    fn group(&self) -> &Vec<String> {
+        &self.group
     }
 }
 
@@ -93,7 +93,7 @@ impl<'v> values::Freeze for Task<'v> {
             args: self.args,
             r#impl: frozen_impl,
             description: self.description,
-            groups: self.groups,
+            group: self.group,
         })
     }
 }
@@ -105,7 +105,7 @@ pub struct FrozenTask {
     #[allocative(skip)]
     args: SmallMap<String, TaskArg>,
     description: String,
-    groups: Vec<String>,
+    group: Vec<String>,
 }
 
 starlark_simple_value!(FrozenTask);
@@ -128,8 +128,8 @@ impl<'v> TaskLike<'v> for FrozenTask {
     fn description(&self) -> &String {
         &self.description
     }
-    fn groups(&self) -> &Vec<String> {
-        &self.groups
+    fn group(&self) -> &Vec<String> {
+        &self.group
     }
 }
 
@@ -161,7 +161,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
     ///     task_args = {
     ///         "target": args.string(),
     ///     }
-    ///     groups = [],
+    ///     group = [],
     /// )
     /// ```
     fn task<'v>(
@@ -172,7 +172,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
         >,
         #[starlark(require = named)] args: values::dict::UnpackDictEntries<&'v str, TaskArg>,
         #[starlark(require = named, default = String::new())] description: String,
-        #[starlark(require = named, default = UnpackList::default())] groups: UnpackList<String>,
+        #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
     ) -> starlark::Result<Task<'v>> {
         let mut args_ = SmallMap::new();
         for (arg, def) in args.entries {
@@ -182,7 +182,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
             args: args_,
             r#impl: implementation.0,
             description,
-            groups: groups.items,
+            group: group.items,
         })
     }
 }
