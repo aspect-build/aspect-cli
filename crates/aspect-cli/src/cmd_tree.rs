@@ -8,10 +8,10 @@ const COMMAND_PATH_ID: &'static str = "@@@__AXL__PATH__@@@";
 
 #[derive(Default)]
 pub struct CommandTree {
-    // mapping of task group to tree that contains subcommand.
+    // mapping of task subgroup to tree that contains subcommand.
     pub(crate) subgroups: HashMap<String, CommandTree>,
     // mapping of task name to the path that defines the task
-    pub(crate) subtasks: HashMap<String, Command>,
+    pub(crate) tasks: HashMap<String, Command>,
 }
 
 #[derive(Error, Debug)]
@@ -46,12 +46,12 @@ impl CommandTree {
             if self.subgroups.contains_key(name) {
                 return Err(TreeError::TaskGroupConflict(name.to_string(), group.to_vec(), path.clone()));
             }
-            if self.subtasks.insert(name.to_string(), cmd).is_some() {
+            if self.tasks.insert(name.to_string(), cmd).is_some() {
                 return Err(TreeError::TaskConflict(name.to_string(), group.to_vec(), path.clone()));
             }
         } else {
             let first = &subgroup[0];
-            if self.subtasks.contains_key(first) {
+            if self.tasks.contains_key(first) {
                 return Err(TreeError::GroupConflictTask(first.clone(), name.to_string(), group.to_vec(), path.clone()));
             }
             let subtree = self.subgroups.entry(first.clone()).or_default();
@@ -67,18 +67,18 @@ impl CommandTree {
             let mut subcmd = Command::new(name.clone());
             subcmd = subtree.as_command(subcmd);
             // If the group has subcommands or tasks, require a subcommand
-            if !subtree.subgroups.is_empty() || !subtree.subtasks.is_empty() {
+            if !subtree.subgroups.is_empty() || !subtree.tasks.is_empty() {
                 subcmd = subcmd.subcommand_required(true);
             }
             current = current.subcommand(subcmd);
         }
 
-        for (_, subcmd) in &self.subtasks {
+        for (_, subcmd) in &self.tasks {
             current = current.subcommand(subcmd);
         }
 
         // For the root command, require subcommand if there are any
-        if !self.subgroups.is_empty() || !self.subtasks.is_empty() {
+        if !self.subgroups.is_empty() || !self.tasks.is_empty() {
             current = current.subcommand_required(true);
         }
 
