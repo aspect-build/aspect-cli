@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 use axl_runtime::engine::task::{TaskLike, MAX_TASK_GROUPS};
 use clap::{Arg, ArgMatches, Command};
@@ -25,18 +25,18 @@ pub enum TreeError {
     #[error(
         "task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined group"
     )]
-    TaskGroupConflict(String, Vec<String>, PathBuf),
+    TaskGroupConflict(String, Vec<String>, String),
 
     #[error("group {0:?} from task {1:?} in group {2:?} (defined in {3:?}) conflicts with a previously defined task")]
-    GroupConflictTask(String, String, Vec<String>, PathBuf),
+    GroupConflictTask(String, String, Vec<String>, String),
 
     #[error(
         "task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined task"
     )]
-    TaskConflict(String, Vec<String>, PathBuf),
+    TaskConflict(String, Vec<String>, String),
 
     #[error("task {0:?} (defined in {1:?}) cannot have more than {2:?} group levels")]
-    TooManyGroups(String, PathBuf, usize),
+    TooManyGroups(String, String, usize),
 
     #[error("task {0:?} in group {1:?} conflicts with a previously defined command")]
     TaskCommandConflict(String, Vec<String>),
@@ -51,7 +51,7 @@ impl CommandTree {
         name: &str,
         group: &[String],
         subgroup: &[String],
-        path: &PathBuf,
+        path: &String,
         cmd: Command,
     ) -> Result<(), TreeError> {
         if group.len() > MAX_TASK_GROUPS {
@@ -151,7 +151,7 @@ impl CommandTree {
 pub fn make_command_from_task(
     name: &String,
     defined_in: &str,
-    path: &PathBuf,
+    path: &String,
     symbol: &String,
     task: &dyn TaskLike<'_>,
 ) -> Command {
@@ -176,7 +176,7 @@ pub fn make_command_from_task(
                 .hide_short_help(true)
                 .hide_possible_values(true)
                 .hide_long_help(true)
-                .default_value(path.as_os_str().to_string_lossy().to_string()),
+                .default_value(path),
         )
         .arg(
             Arg::new(TASK_COMMAND_SYMBOL_ID)

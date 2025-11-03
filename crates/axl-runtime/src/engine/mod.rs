@@ -12,6 +12,7 @@ mod types;
 mod wasm;
 
 pub mod r#async;
+pub mod config_context;
 pub mod store;
 pub mod task;
 pub mod task_arg;
@@ -20,6 +21,8 @@ pub mod task_context;
 
 #[starlark_module]
 fn register_type_toplevels(builder: &mut GlobalsBuilder) {
+    const config_context: StarlarkValueAsType<config_context::ConfigContext> =
+        StarlarkValueAsType::new();
     const http_response: StarlarkValueAsType<http::HttpResponse> = StarlarkValueAsType::new();
     const http: StarlarkValueAsType<http::Http> = StarlarkValueAsType::new();
     const task_arg: StarlarkValueAsType<task_arg::TaskArg> = StarlarkValueAsType::new();

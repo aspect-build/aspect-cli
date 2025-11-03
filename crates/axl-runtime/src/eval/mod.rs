@@ -12,9 +12,11 @@ use starlark::syntax::{AstModule, Dialect, DialectTypes};
 use starlark::values::{Heap, ValueLike};
 use thiserror::Error;
 
+use crate::engine::config_context::ConfigContext;
 use crate::engine::store::AxlStore;
 use crate::engine::task::{AsTaskLike, FrozenTask, TaskLike};
 use crate::engine::task_args::TaskArgs;
+use crate::engine::task_context::TaskContext;
 use crate::engine::{self, task::Task};
 use crate::eval::load::AxlLoader;
 use crate::helpers::{normalize_abs_path_lexically, sanitize_load_path_lexically};
@@ -23,9 +25,8 @@ use crate::helpers::{normalize_abs_path_lexically, sanitize_load_path_lexically}
 /// Starlark dialect, globals, and store. Used to evaluate .axl files securely.
 #[derive(Debug)]
 pub struct AxlScriptEvaluator {
-    // Module root is where the module boundary is.
+    module_name: String,
     module_root: PathBuf,
-    // The deps root directory where module expander expanded all the modules.
     axl_deps_root: PathBuf,
     dialect: Dialect,
     globals: Globals,
@@ -36,7 +37,9 @@ pub struct AxlScriptEvaluator {
 /// path, and store for task definition retrieval and execution.
 #[derive(Debug, Clone)]
 pub struct EvaluatedAxlScript {
-    pub path: PathBuf,
+    pub script_path: PathBuf,
+    pub module_name: String,
+    pub module_subpath: String,
     pub module: Rc<Module>,
     store: AxlStore,
 }
@@ -49,7 +52,7 @@ pub enum EvalError {
     #[error("{0}")]
     StarlarkError(starlark::Error),
 
-    #[error("task file {0:?} does not export the {1:?} symbol")]
+    #[error("axl script {0:?} does not export {1:?} symbol")]
     MissingSymbol(PathBuf, String),
 
     #[error(transparent)]
@@ -97,9 +100,17 @@ impl From<starlark::Error> for EvalError {
 }
 
 impl EvaluatedAxlScript {
-    fn new(path: PathBuf, store: AxlStore, module: Module) -> Self {
+    fn new(
+        script_path: PathBuf,
+        module_name: String,
+        module_subpath: String,
+        store: AxlStore,
+        module: Module,
+    ) -> Self {
         Self {
-            path,
+            script_path,
+            module_name,
+            module_subpath,
             module: Rc::new(module),
             store,
         }
@@ -108,7 +119,7 @@ impl EvaluatedAxlScript {
     /// Retrieves a task definition from the evaluated module by symbol name.
     pub fn task_definition(&self, symbol: &str) -> Result<&dyn TaskLike, EvalError> {
         let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
-            self.path.clone(),
+            self.script_path.clone(),
             symbol.to_string(),
         ))?;
         if let Some(task) = def.downcast_ref::<Task>() {
@@ -127,13 +138,13 @@ impl EvaluatedAxlScript {
         args: impl FnOnce(&Heap) -> TaskArgs,
     ) -> Result<Option<u8>, EvalError> {
         let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
-            self.path.clone(),
+            self.script_path.clone(),
             symbol.to_string(),
         ))?;
 
         let heap = self.module.heap();
         let args = args(heap);
-        let context = heap.alloc(engine::task_context::TaskContext::new(args));
+        let context = heap.alloc(TaskContext::new(args));
         let mut eval = Evaluator::new(&self.module);
         eval.extra = Some(&self.store);
         let ret = if let Some(val) = def.downcast_ref::<Task>() {
@@ -142,10 +153,26 @@ impl EvaluatedAxlScript {
             eval.eval_function(val.implementation().to_value(), &[context], &[])?
         } else {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "expected value of type `Task`"
+                "expected value of type Task"
             )));
         };
         Ok(ret.unpack_i32().map(|ex| ex as u8))
+    }
+
+    /// Executes a config function from the module by symbol, providing
+    /// the config context.
+    pub fn execute_config(&self, symbol: &str) -> Result<(), EvalError> {
+        let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
+            self.script_path.clone(),
+            symbol.to_string(),
+        ))?;
+
+        let heap = self.module.heap();
+        let context = heap.alloc(ConfigContext::new());
+        let mut eval = Evaluator::new(&self.module);
+        eval.extra = Some(&self.store);
+        eval.eval_function(def, &[context], &[])?;
+        Ok(())
     }
 }
 
@@ -172,8 +199,9 @@ impl AxlScriptEvaluator {
     }
 
     /// Creates a new AxlScriptEvaluator with the given module root.
-    pub fn new(module_root: PathBuf, axl_deps_root: PathBuf) -> Self {
+    pub fn new(module_name: String, module_root: PathBuf, axl_deps_root: PathBuf) -> Self {
         Self {
+            module_name,
             module_root,
             axl_deps_root,
             dialect: AxlScriptEvaluator::dialect(),
@@ -198,7 +226,7 @@ impl AxlScriptEvaluator {
         }
 
         // Ensure that we're not evaluating a script outside of the module root
-        let abs_script_path = normalize_abs_path_lexically(&self.module_root.join(script_path))?;
+        let abs_script_path = normalize_abs_path_lexically(&self.module_root.join(&script_path))?;
         if !abs_script_path.starts_with(&self.module_root) {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
                 "axl script path {} resolves outside the module root {}",
@@ -237,6 +265,8 @@ impl AxlScriptEvaluator {
         // Return the evaluated script
         Ok(EvaluatedAxlScript::new(
             abs_script_path,
+            self.module_name.clone(),
+            script_path.as_os_str().to_string_lossy().to_string(),
             self.store.clone(),
             module,
         ))
