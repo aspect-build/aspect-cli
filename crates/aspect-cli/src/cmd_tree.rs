@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use axl_runtime::engine::task::TaskLike;
+use axl_runtime::engine::task::{TaskLike, MAX_TASK_GROUPS};
 use clap::{Arg, ArgMatches, Command};
 use thiserror::Error;
 
@@ -16,44 +16,46 @@ pub struct CommandTree {
 
 #[derive(Error, Debug)]
 pub enum TreeError {
-    #[error("task '{0}' clashes with a subgroup")]
-    TaskSubgroupConflict(String),
+    #[error("task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined group")]
+    TaskGroupConflict(String, Vec<String>, PathBuf),
 
-    #[error("group name '{0}' clashes with a task ")]
-    GroupConflictTask(String),
+    #[error("group {0:?} from task {1:?} in group {2:?} (defined in {3:?}) conflicts with a previously defined task")]
+    GroupConflictTask(String, String, Vec<String>, PathBuf),
 
-    #[error("duplicate task '{0}'")]
-    DuplicateTask(String),
+    #[error("task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined task")]
+    TaskConflict(String, Vec<String>, PathBuf),
 
-    #[error("task '{0}' defined in {1:?} cannot have more than 5 group levels.")]
-    TooManyGroups(String, PathBuf),
+    #[error("task {0:?} (defined in {1:?}) cannot have more than {2:?} group levels")]
+    TooManyGroups(String, PathBuf, usize),
 }
 
 impl CommandTree {
     pub fn insert(
         &mut self,
+        name: &str,
         group: &[String],
-        name: String,
+        subgroup: &[String],
         path: &PathBuf,
         cmd: Command,
     ) -> Result<(), TreeError> {
-        if group.len() > 5 {
-            return Err(TreeError::TooManyGroups(name, path.clone()));
+        if group.len() > MAX_TASK_GROUPS {
+            // This error is a defence-in-depth as the task evaluator should check for MAX_TASK_GROUPS
+            return Err(TreeError::TooManyGroups(name.to_string(), path.clone(), MAX_TASK_GROUPS));
         }
-        if group.is_empty() {
-            if self.subgroups.contains_key(&name) {
-                return Err(TreeError::TaskSubgroupConflict(name.clone()));
+        if subgroup.is_empty() {
+            if self.subgroups.contains_key(name) {
+                return Err(TreeError::TaskGroupConflict(name.to_string(), group.to_vec(), path.clone()));
             }
-            if self.subtasks.insert(name.clone(), cmd).is_some() {
-                return Err(TreeError::DuplicateTask(name.clone()));
+            if self.subtasks.insert(name.to_string(), cmd).is_some() {
+                return Err(TreeError::TaskConflict(name.to_string(), group.to_vec(), path.clone()));
             }
         } else {
-            let first = &group[0];
+            let first = &subgroup[0];
             if self.subtasks.contains_key(first) {
-                return Err(TreeError::GroupConflictTask(first.clone()));
+                return Err(TreeError::GroupConflictTask(first.clone(), name.to_string(), group.to_vec(), path.clone()));
             }
             let subtree = self.subgroups.entry(first.clone()).or_default();
-            subtree.insert(&group[1..], name, path, cmd)?;
+            subtree.insert(name, group, &subgroup[1..], path, cmd)?;
         }
         Ok(())
     }

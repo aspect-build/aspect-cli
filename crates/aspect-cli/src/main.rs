@@ -143,7 +143,7 @@ async fn main() -> miette::Result<ExitCode> {
                     let group = def.group();
                     let defined_in = format!("@{}/{}", repo_name, rel_path);
                     let cmd = make_command(&name, &defined_in, &path, def);
-                    tree.insert(&group, name, &path, cmd).into_diagnostic()?;
+                    tree.insert(&name, &group, &group, &path, cmd).into_diagnostic()?;
                     tasks.insert(path.to_str().unwrap().to_string(), script);
                 }
             }
@@ -178,7 +178,7 @@ async fn main() -> miette::Result<ExitCode> {
                         .to_str()
                         .expect("failed to encode path");
                     let cmd = make_command(&name, defined_in, path, def);
-                    tree.insert(&group, name, &path, cmd).into_diagnostic()?;
+                    tree.insert(&name, &group, &group, &path, cmd).into_diagnostic()?;
                 }
             }
 
