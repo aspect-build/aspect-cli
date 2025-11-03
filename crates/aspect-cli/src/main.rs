@@ -17,7 +17,7 @@ use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
 use clap::{Arg, Command};
 use miette::{miette, IntoDiagnostic};
 use starlark::values::ValueLike;
-use tokio::{fs, task};
+use tokio::task;
 use tokio::task::spawn_blocking;
 use tracing::info_span;
 
@@ -44,15 +44,7 @@ use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_pa
 async fn main() -> miette::Result<ExitCode> {
     let _ = task::spawn(telemetry::send_telemetry());
     let _tracing = trace::init();
-
     let _root = info_span!("root").entered();
-
-    let mut cmd = Command::new("aspect").arg(
-        Arg::new("version")
-            .short('v')
-            .long("version")
-            .action(clap::ArgAction::SetTrue),
-    );
 
     let current_work_dir = std::env::current_dir().into_diagnostic()?;
 
@@ -64,12 +56,29 @@ async fn main() -> miette::Result<ExitCode> {
 
     let extension_eval = AxlModuleEvaluator::new(repo_dir.clone());
 
+    let mut cmd = Command::new("aspect");
+
+    cmd = cmd.arg(
+        Arg::new("version")
+            .short('v')
+            .long("version")
+            .action(clap::ArgAction::SetTrue),
+    );
+
     let _ = info_span!("expand_module_store").enter();
 
+    // Creates the module store and evaluates the root MODULE.aspect (if it exists) for axl_*_deps, use_task, etc...
     let module_store = extension_eval
         .evaluate("_root_".to_string(), repo_dir.clone())
         .into_diagnostic()?;
 
+    // Expand all modules (including the builtin @aspect module) to the disk store and return the module roots on disk.
+    // This results in a Vec of (String, PathBuf) such as
+    // [
+    //     ( "aspect", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/aspect" ),
+    //     ( "experimental", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/experimental" ),
+    //     ( "local", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/local" ),
+    // ]
     let module_roots = disk_store
         .expand_store(&module_store)
         .await
@@ -102,6 +111,7 @@ async fn main() -> miette::Result<ExitCode> {
         .into_diagnostic()?;
 
     let espan = info_span!("eval");
+
     let out = spawn_blocking(move || {
         let _enter = espan.enter();
 
