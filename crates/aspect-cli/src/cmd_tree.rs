@@ -22,13 +22,17 @@ pub struct CommandTree {
 
 #[derive(Error, Debug)]
 pub enum TreeError {
-    #[error("task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined group")]
+    #[error(
+        "task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined group"
+    )]
     TaskGroupConflict(String, Vec<String>, PathBuf),
 
     #[error("group {0:?} from task {1:?} in group {2:?} (defined in {3:?}) conflicts with a previously defined task")]
     GroupConflictTask(String, String, Vec<String>, PathBuf),
 
-    #[error("task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined task")]
+    #[error(
+        "task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined task"
+    )]
     TaskConflict(String, Vec<String>, PathBuf),
 
     #[error("task {0:?} (defined in {1:?}) cannot have more than {2:?} group levels")]
@@ -52,19 +56,36 @@ impl CommandTree {
     ) -> Result<(), TreeError> {
         if group.len() > MAX_TASK_GROUPS {
             // This error is a defence-in-depth as the task evaluator should check for MAX_TASK_GROUPS
-            return Err(TreeError::TooManyGroups(name.to_string(), path.clone(), MAX_TASK_GROUPS));
+            return Err(TreeError::TooManyGroups(
+                name.to_string(),
+                path.clone(),
+                MAX_TASK_GROUPS,
+            ));
         }
         if subgroup.is_empty() {
             if self.subgroups.contains_key(name) {
-                return Err(TreeError::TaskGroupConflict(name.to_string(), group.to_vec(), path.clone()));
+                return Err(TreeError::TaskGroupConflict(
+                    name.to_string(),
+                    group.to_vec(),
+                    path.clone(),
+                ));
             }
             if self.tasks.insert(name.to_string(), cmd).is_some() {
-                return Err(TreeError::TaskConflict(name.to_string(), group.to_vec(), path.clone()));
+                return Err(TreeError::TaskConflict(
+                    name.to_string(),
+                    group.to_vec(),
+                    path.clone(),
+                ));
             }
         } else {
             let first = &subgroup[0];
             if self.tasks.contains_key(first) {
-                return Err(TreeError::GroupConflictTask(first.clone(), name.to_string(), group.to_vec(), path.clone()));
+                return Err(TreeError::GroupConflictTask(
+                    first.clone(),
+                    name.to_string(),
+                    group.to_vec(),
+                    path.clone(),
+                ));
             }
             let subtree = self.subgroups.entry(first.clone()).or_default();
             subtree.insert(name, group, &subgroup[1..], path, cmd)?;
@@ -94,7 +115,10 @@ impl CommandTree {
 
         for (name, subcmd) in &self.tasks {
             if current.find_subcommand(name).is_some() {
-                return Err(TreeError::TaskCommandConflict(name.to_string(), group.to_vec()));
+                return Err(TreeError::TaskCommandConflict(
+                    name.to_string(),
+                    group.to_vec(),
+                ));
             }
             current = current.subcommand(subcmd);
         }
@@ -109,12 +133,18 @@ impl CommandTree {
 
     pub fn get_task_path(&self, matches: &ArgMatches) -> String {
         assert!(matches.contains_id(TASK_COMMAND_PATH_ID));
-        matches.get_one::<String>(TASK_COMMAND_PATH_ID).unwrap().clone()
+        matches
+            .get_one::<String>(TASK_COMMAND_PATH_ID)
+            .unwrap()
+            .clone()
     }
 
     pub fn get_task_symbol(&self, matches: &ArgMatches) -> String {
         assert!(matches.contains_id(TASK_COMMAND_SYMBOL_ID));
-        matches.get_one::<String>(TASK_COMMAND_SYMBOL_ID).unwrap().clone()
+        matches
+            .get_one::<String>(TASK_COMMAND_SYMBOL_ID)
+            .unwrap()
+            .clone()
     }
 }
 

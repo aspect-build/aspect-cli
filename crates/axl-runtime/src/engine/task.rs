@@ -193,7 +193,11 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] name: String,
     ) -> starlark::Result<Task<'v>> {
         if group.items.len() > MAX_TASK_GROUPS {
-            return Err(anyhow::anyhow!("Task cannot have more than {} group levels", MAX_TASK_GROUPS).into());
+            return Err(anyhow::anyhow!(
+                "Task cannot have more than {} group levels",
+                MAX_TASK_GROUPS
+            )
+            .into());
         }
         let mut args_ = SmallMap::new();
         for (arg, def) in args.entries {

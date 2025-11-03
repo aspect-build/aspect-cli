@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aspect_config::cli_version;
+use axl_runtime::engine::task::{AsTaskLike, FrozenTask, Task};
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
-use axl_runtime::engine::task::{AsTaskLike, FrozenTask, Task};
 use axl_runtime::eval::{AxlScriptEvaluator, EvaluatedAxlScript};
 use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
 use clap::{Arg, ArgAction, Command};
@@ -21,7 +21,7 @@ use tokio::task;
 use tokio::task::spawn_blocking;
 use tracing::info_span;
 
-use crate::cmd_tree::{BUILTIN_COMMAND_DISPLAY_ORDER, make_command_from_task, CommandTree};
+use crate::cmd_tree::{make_command_from_task, CommandTree, BUILTIN_COMMAND_DISPLAY_ORDER};
 use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_paths};
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
@@ -99,9 +99,7 @@ async fn main() -> miette::Result<ExitCode> {
     // TODO: allow user to configure additonal search paths in the future?
 
     // Scan for .axl files in the search paths
-    let axl_sources = find_axl_scripts(&search_paths)
-        .await
-        .into_diagnostic()?;
+    let axl_sources = find_axl_scripts(&search_paths).await.into_diagnostic()?;
 
     let espan = info_span!("eval");
 
@@ -120,19 +118,19 @@ async fn main() -> miette::Result<ExitCode> {
             .subcommand_value_name("TASK")
             // handle --version and -v flags
             .version(cli_version())
-            .disable_version_flag(true)  // disable auto -V / --version
+            .disable_version_flag(true) // disable auto -V / --version
             .arg(
                 Arg::new("version")
                     .short('v')
                     .long("version")
                     .action(ArgAction::Version)
-                    .help("Print version")
+                    .help("Print version"),
             )
             // add version command
             .subcommand(
                 Command::new("version")
                     .about("Print version")
-                    .display_order(BUILTIN_COMMAND_DISPLAY_ORDER)
+                    .display_order(BUILTIN_COMMAND_DISPLAY_ORDER),
             );
 
         // Collect tasks into tree
@@ -161,7 +159,11 @@ async fn main() -> miette::Result<ExitCode> {
                         ));
                     };
 
-                    let name = if def.name().is_empty() { symbol.clone() } else { def.name().clone() };
+                    let name = if def.name().is_empty() {
+                        symbol.clone()
+                    } else {
+                        def.name().clone()
+                    };
                     let rel_path = &path
                         .strip_prefix(&repo_root)
                         .expect("failed make path relative")
@@ -171,7 +173,8 @@ async fn main() -> miette::Result<ExitCode> {
                     let group = def.group();
                     let defined_in = format!("@{}/{}", repo_name, rel_path);
                     let cmd = make_command_from_task(&name, &defined_in, &path, &symbol, def);
-                    tree.insert(&name, &group, &group, &path, cmd).into_diagnostic()?;
+                    tree.insert(&name, &group, &group, &path, cmd)
+                        .into_diagnostic()?;
                     tasks.insert(path.to_str().unwrap().to_string(), script);
                 }
             }
@@ -197,7 +200,11 @@ async fn main() -> miette::Result<ExitCode> {
                         continue 'inner;
                     };
 
-                    let name = if def.name().is_empty() { symbol.as_str().to_string() } else { def.name().clone() };
+                    let name = if def.name().is_empty() {
+                        symbol.as_str().to_string()
+                    } else {
+                        def.name().clone()
+                    };
                     let group = def.group();
                     let defined_in = path
                         .strip_prefix(&repo_dir)
@@ -205,8 +212,15 @@ async fn main() -> miette::Result<ExitCode> {
                         .as_os_str()
                         .to_str()
                         .expect("failed to encode path");
-                    let cmd = make_command_from_task(&name, defined_in, path, &symbol.as_str().to_string(), def);
-                    tree.insert(&name, &group, &group, &path, cmd).into_diagnostic()?;
+                    let cmd = make_command_from_task(
+                        &name,
+                        defined_in,
+                        path,
+                        &symbol.as_str().to_string(),
+                        def,
+                    );
+                    tree.insert(&name, &group, &group, &path, cmd)
+                        .into_diagnostic()?;
                 }
             }
 
@@ -239,7 +253,7 @@ async fn main() -> miette::Result<ExitCode> {
         // Drill down through all command groups
         while let Some(subcmd) = cmd.1.subcommand() {
             cmd = subcmd;
-        };
+        }
 
         let (name, cmdargs) = cmd;
         let task_path = tree.get_task_path(&cmdargs);
@@ -263,14 +277,10 @@ async fn main() -> miette::Result<ExitCode> {
                             )
                             .to_value(),
                         TaskArg::Int { .. } => heap
-                            .alloc(
-                                cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned(),
-                            )
+                            .alloc(cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned())
                             .to_value(),
                         TaskArg::UInt { .. } => heap
-                            .alloc(
-                                cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned(),
-                            )
+                            .alloc(cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned())
                             .to_value(),
                         TaskArg::Boolean { .. } => heap.alloc(
                             cmdargs

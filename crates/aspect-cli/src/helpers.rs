@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 
 use axl_runtime::module::BOUNDARY_FILE as AXL_BOUNDARY_FILE;
-use tracing::instrument;
 use tokio::fs;
+use tracing::instrument;
 
- // Constants for special directory names used in module resolution.
- // These define the structure for local modules (e.g., .aspect/axl/module_name).
- pub const DOT_ASPECT_FOLDER: &str = ".aspect";
+// Constants for special directory names used in module resolution.
+// These define the structure for local modules (e.g., .aspect/axl/module_name).
+pub const DOT_ASPECT_FOLDER: &str = ".aspect";
 
- pub const AXL_SCRIPT_EXTENSION: &str = "axl";
+pub const AXL_SCRIPT_EXTENSION: &str = "axl";
 
 /// Asynchronously finds the repository root starting from the given `current_work_dir`.
 /// It traverses the ancestors of `current_work_dir` from deepest to shallowest.
@@ -53,7 +53,10 @@ pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
 /// a ".aspect" component, the search stops at the parent directory of that ".aspect", excluding
 /// ".aspect" and any subdirectories from the results.
 #[instrument]
-pub fn get_default_axl_search_paths(current_work_dir: &PathBuf, repo_dir: &PathBuf) -> Vec<PathBuf> {
+pub fn get_default_axl_search_paths(
+    current_work_dir: &PathBuf,
+    repo_dir: &PathBuf,
+) -> Vec<PathBuf> {
     if let Ok(rel_path) = current_work_dir.strip_prefix(repo_dir) {
         let mut paths = vec![repo_dir.join(DOT_ASPECT_FOLDER)];
         let mut current = repo_dir.clone();
@@ -86,7 +89,12 @@ pub async fn find_axl_scripts(search_paths: &Vec<PathBuf>) -> Result<Vec<PathBuf
             let mut entries = fs::read_dir(&dir).await?;
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
-                if path.is_file() && path.extension().map(|e| e == AXL_SCRIPT_EXTENSION).unwrap_or(false) {
+                if path.is_file()
+                    && path
+                        .extension()
+                        .map(|e| e == AXL_SCRIPT_EXTENSION)
+                        .unwrap_or(false)
+                {
                     found.push(path);
                 }
             }
