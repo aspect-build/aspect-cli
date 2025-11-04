@@ -71,13 +71,17 @@ impl<'a> AxlLoader<'a> {
 
     fn resolve_axl_script(&self, script_path: &Path) -> starlark::Result<PathBuf> {
         let script_path_str = script_path.to_str().ok_or_else(|| {
-            starlark::Error::new_other(anyhow!("Path is not valid UTF-8: {}", script_path.display()))
+            starlark::Error::new_other(anyhow!(
+                "Path is not valid UTF-8: {}",
+                script_path.display()
+            ))
         })?;
-        let base: &PathBuf = if script_path_str.starts_with("./") || script_path_str.starts_with("../") {
-            &self.script_dir
-        } else {
-            &self.module_root
-        };
+        let base: &PathBuf =
+            if script_path_str.starts_with("./") || script_path_str.starts_with("../") {
+                &self.script_dir
+            } else {
+                &self.module_root
+            };
 
         let mut resolved_script_path = base.clone();
         for component in script_path.components() {
@@ -128,7 +132,11 @@ impl<'a> FileLoader for AxlLoader<'a> {
         // the load of a `root/.aspect/modules/foo/foo.axl` and of `modules_cache/foo/foo.axl` since
         // we want to allow overriding of individual files in modules as needed.
         if module_name.is_some() {
-            let module_path = format!("@{}/{}", module_name.as_ref().unwrap(), module_or_script_path.display());
+            let module_path = format!(
+                "@{}/{}",
+                module_name.as_ref().unwrap(),
+                module_or_script_path.display()
+            );
             if let Some(module) =
                 LOADED_MODULES.with(|modules| modules.borrow().get(&module_path).cloned())
             {
@@ -138,9 +146,15 @@ impl<'a> FileLoader for AxlLoader<'a> {
 
         // Resolve the load path to a file on disk
         let (resolved_script_path, module_root) = if module_name.is_some() {
-            self.resolve_axl_module_script(module_name.as_ref().unwrap().as_str(), &module_or_script_path)?
+            self.resolve_axl_module_script(
+                module_name.as_ref().unwrap().as_str(),
+                &module_or_script_path,
+            )?
         } else {
-            (self.resolve_axl_script(&module_or_script_path)?, self.module_root.clone())
+            (
+                self.resolve_axl_script(&module_or_script_path)?,
+                self.module_root.clone(),
+            )
         };
 
         // Cycle detection: Prevent loading the same file recursively.
@@ -195,7 +209,11 @@ impl<'a> FileLoader for AxlLoader<'a> {
 
         // Cache the load @module/path/to/file.axl so it can be re-used on subsequent loads
         if module_name.is_some() {
-            let module_path = format!("@{}/{}", module_name.as_ref().unwrap(), module_or_script_path.display());
+            let module_path = format!(
+                "@{}/{}",
+                module_name.as_ref().unwrap(),
+                module_or_script_path.display()
+            );
             LOADED_MODULES.with(|modules| {
                 modules
                     .borrow_mut()

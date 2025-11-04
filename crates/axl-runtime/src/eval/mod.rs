@@ -186,7 +186,8 @@ impl AxlScriptEvaluator {
     /// the evaluated script or an error. Performs security checks to ensure the script
     /// file is within the module root.
     pub fn eval(&self, script_path: &Path) -> Result<EvaluatedAxlScript, EvalError> {
-        let (module_name, script_path) = sanitize_load_path_lexically(script_path.to_str().unwrap())?;
+        let (module_name, script_path) =
+            sanitize_load_path_lexically(script_path.to_str().unwrap())?;
 
         // Don't allow evaluating script paths starting with @module names.
         if module_name.is_some() {

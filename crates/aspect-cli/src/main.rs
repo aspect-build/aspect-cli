@@ -256,7 +256,9 @@ async fn main() -> miette::Result<ExitCode> {
         let task_path = tree.get_task_path(&cmdargs);
         let task_symbol = tree.get_task_symbol(&cmdargs);
         let task_script = tasks.get(&task_path).unwrap();
-        let def = task_script.task_definition(&task_symbol).into_diagnostic()?;
+        let def = task_script
+            .task_definition(&task_symbol)
+            .into_diagnostic()?;
 
         let span = info_span!("task", name = name, path = task_path, symbol = task_symbol);
 

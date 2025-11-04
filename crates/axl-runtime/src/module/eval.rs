@@ -221,7 +221,10 @@ impl AxlModuleEvaluator {
         let axl_filename = if is_root_module {
             AXL_MODULE_FILE.to_string()
         } else {
-            module_root.join(AXL_MODULE_FILE).to_string_lossy().to_string()
+            module_root
+                .join(AXL_MODULE_FILE)
+                .to_string_lossy()
+                .to_string()
         };
 
         let module_boundary_path = &module_root.join(AXL_MODULE_FILE);
