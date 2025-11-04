@@ -19,14 +19,14 @@ use crate::engine::{self, task::Task};
 use crate::eval::load::AxlLoader;
 use crate::helpers::{normalize_abs_path_lexically, sanitize_load_path_lexically};
 
-/// The core evaluator for .axl files, holding configuration like repository root,
+/// The core evaluator for .axl files, holding configuration like module root,
 /// Starlark dialect, globals, and store. Used to evaluate .axl files securely.
 #[derive(Debug)]
 pub struct AxlScriptEvaluator {
-    // Repo root is where the module boundary is.
-    repo_root: PathBuf,
-    // Deps root is where module expander expanded all the modules.
-    deps_root: PathBuf,
+    // Module root is where the module boundary is.
+    module_root: PathBuf,
+    // The deps root directory where module expander expanded all the modules.
+    axl_deps_root: PathBuf,
     dialect: Dialect,
     globals: Globals,
     store: AxlStore,
@@ -171,38 +171,38 @@ impl AxlScriptEvaluator {
         get_globals().build()
     }
 
-    /// Creates a new AxlScriptEvaluator with the given repository root.
-    pub fn new(repo_root: PathBuf, deps_root: PathBuf) -> Self {
+    /// Creates a new AxlScriptEvaluator with the given module root.
+    pub fn new(module_root: PathBuf, axl_deps_root: PathBuf) -> Self {
         Self {
-            repo_root,
-            deps_root,
+            module_root,
+            axl_deps_root,
             dialect: AxlScriptEvaluator::dialect(),
             globals: AxlScriptEvaluator::globals(),
             store: AxlStore::new(),
         }
     }
 
-    /// Evaluates the given .axl script path relative to the repository root, returning
+    /// Evaluates the given .axl script path relative to the module root, returning
     /// the evaluated script or an error. Performs security checks to ensure the script
-    /// file is within the repository and isn't in a module directory.
-    pub fn eval(&self, load_path: &Path) -> Result<EvaluatedAxlScript, EvalError> {
-        let (module_name, load_path) = sanitize_load_path_lexically(load_path.to_str().unwrap())?;
+    /// file is within the module root.
+    pub fn eval(&self, script_path: &Path) -> Result<EvaluatedAxlScript, EvalError> {
+        let (module_name, script_path) = sanitize_load_path_lexically(script_path.to_str().unwrap())?;
 
-        // Don't allow evaluating scripts directly from modules (e.g., via @module/ paths)
+        // Don't allow evaluating script paths starting with @module names.
         if module_name.is_some() {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
                 "AXL scripts cannot be loaded directly from a module (load path starts with '@'): {}",
-                load_path.display(),
+                script_path.display(),
             )));
         }
 
-        // Ensure that we're not evaluating a script outside of the repository root
-        let abs_script_path = normalize_abs_path_lexically(&self.repo_root.join(load_path))?;
-        if !abs_script_path.starts_with(&self.repo_root) {
+        // Ensure that we're not evaluating a script outside of the module root
+        let abs_script_path = normalize_abs_path_lexically(&self.module_root.join(script_path))?;
+        if !abs_script_path.starts_with(&self.module_root) {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "AXL script path {} resolves outside the repository root {}",
+                "AXL script path {} resolves outside the module root {}",
                 abs_script_path.display(),
-                self.repo_root.display()
+                self.module_root.display()
             )));
         }
 
@@ -213,8 +213,8 @@ impl AxlScriptEvaluator {
                 .parent()
                 .expect("file path has parent")
                 .to_path_buf(),
-            root_dir: self.repo_root.clone(),
-            root_deps_dir: self.deps_root.clone(),
+            module_root: self.module_root.clone(),
+            axl_deps_root: self.axl_deps_root.clone(),
         };
 
         // Push the script path onto the LOAD_STACK (used to detect circular loads)

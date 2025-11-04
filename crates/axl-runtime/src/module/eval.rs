@@ -106,7 +106,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
 
         let mut abs_path = PathBuf::from(path);
         if !abs_path.is_absolute() {
-            abs_path = store.root_repo_path.join(&abs_path).canonicalize()?;
+            abs_path = store.repo_root.join(&abs_path).canonicalize()?;
         }
 
         let metadata = abs_path
@@ -149,7 +149,10 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
     }
 }
 
-pub const BOUNDARY_FILE: &str = "MODULE.aspect";
+pub const AXL_MODULE_FILE: &str = "MODULE.aspect";
+
+#[allow(dead_code)]
+pub const AXL_SCRIPT_EXTENSION: &str = "axl";
 
 /// Returns a GlobalsBuilder for MODULE.aspect specific AXL globals, extending
 /// various Starlark library extensions with custom top-level functions.
@@ -179,15 +182,15 @@ pub fn get_globals() -> Globals {
 /// Evaluator for MODULE.aspect
 #[derive(Debug)]
 pub struct AxlModuleEvaluator {
-    root_repo_path: PathBuf,
+    repo_root: PathBuf,
     dialect: Dialect,
     globals: Globals,
 }
 
 impl AxlModuleEvaluator {
-    pub fn new(root_repo_path: PathBuf) -> Self {
+    pub fn new(repo_root: PathBuf) -> Self {
         Self {
-            root_repo_path,
+            repo_root,
             dialect: AxlModuleEvaluator::dialect(),
             globals: get_globals(),
         }
@@ -211,22 +214,24 @@ impl AxlModuleEvaluator {
 
     pub fn evaluate(
         &self,
-        repo_name: String,
-        repo_root: PathBuf,
+        module_name: String,
+        module_root: PathBuf,
     ) -> Result<ModuleStore, EvalError> {
-        let name = if repo_root == self.root_repo_path {
-            BOUNDARY_FILE.to_string()
+        let is_root_module = module_root == self.repo_root;
+        let axl_filename = if is_root_module {
+            AXL_MODULE_FILE.to_string()
         } else {
-            repo_root.join(BOUNDARY_FILE).to_string_lossy().to_string()
+            module_root.join(AXL_MODULE_FILE).to_string_lossy().to_string()
         };
 
-        let boundary_path = &repo_root.join(BOUNDARY_FILE);
+        let module_boundary_path = &module_root.join(AXL_MODULE_FILE);
 
-        let store = ModuleStore::new(repo_name, repo_root, self.root_repo_path.to_path_buf());
+        let store = ModuleStore::new(self.repo_root.to_path_buf(), module_name, module_root);
 
-        if boundary_path.exists() {
-            let contents = fs::read_to_string(boundary_path)?;
-            let ast = AstModule::parse(&name, contents, &self.dialect)?;
+        if module_boundary_path.exists() {
+            let contents = fs::read_to_string(module_boundary_path)?;
+
+            let ast = AstModule::parse(&axl_filename, contents, &self.dialect)?;
 
             {
                 let module = Module::new();

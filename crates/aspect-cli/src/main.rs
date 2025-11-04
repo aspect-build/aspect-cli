@@ -48,19 +48,19 @@ async fn main() -> miette::Result<ExitCode> {
 
     let current_work_dir = std::env::current_dir().into_diagnostic()?;
 
-    let repo_dir = find_repo_root(&current_work_dir)
+    let repo_root = find_repo_root(&current_work_dir)
         .await
         .map_err(|_| miette!("Could not find repository root, running inside a module?"))?;
 
-    let disk_store = DiskStore::new(repo_dir.clone());
+    let disk_store = DiskStore::new(repo_root.clone());
 
-    let extension_eval = AxlModuleEvaluator::new(repo_dir.clone());
+    let extension_eval = AxlModuleEvaluator::new(repo_root.clone());
 
     let _ = info_span!("expand_module_store").enter();
 
     // Creates the module store and evaluates the root MODULE.aspect (if it exists) for axl_*_deps, use_task, etc...
     let module_store = extension_eval
-        .evaluate("_root_".to_string(), repo_dir.clone())
+        .evaluate("_root_".to_string(), repo_root.clone())
         .into_diagnostic()?;
 
     // Expand all modules (including the builtin @aspect module) to the disk store and return the module roots on disk.
@@ -77,8 +77,8 @@ async fn main() -> miette::Result<ExitCode> {
 
     // Gather all tasks from use_task calls in the repository root axl module
     let mut use_tasks = vec![(
-        module_store.repo_name,
-        module_store.repo_path,
+        module_store.module_name,
+        module_store.module_root,
         module_store.tasks.take(),
     )];
 
@@ -86,8 +86,8 @@ async fn main() -> miette::Result<ExitCode> {
     for (name, root) in module_roots {
         let module_store = extension_eval.evaluate(name, root).into_diagnostic()?;
         use_tasks.push((
-            module_store.repo_name,
-            module_store.repo_path,
+            module_store.module_name,
+            module_store.module_root,
             module_store.tasks.take(),
         ))
     }
@@ -95,7 +95,7 @@ async fn main() -> miette::Result<ExitCode> {
     let deps_path = disk_store.deps_path();
 
     // Get the default search paths given the current working directory and the repository root
-    let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_dir);
+    let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_root);
     // TODO: allow user to configure additonal search paths in the future?
 
     // Scan for .axl files in the search paths
@@ -138,11 +138,11 @@ async fn main() -> miette::Result<ExitCode> {
         let mut tasks: HashMap<String, EvaluatedAxlScript> = HashMap::new();
 
         // First gather tasks from use_task calls in axl modules
-        for (repo_name, repo_root, usetasks) in use_tasks {
-            let te = AxlScriptEvaluator::new(repo_root.clone(), deps_path.clone());
+        for (module_name, module_root, use_tasks) in use_tasks {
+            let te = AxlScriptEvaluator::new(module_root.clone(), deps_path.clone());
 
-            for (relative_path, symbol) in usetasks {
-                let path = repo_root.join(&relative_path);
+            for (relative_path, symbol) in use_tasks {
+                let path = module_root.join(&relative_path);
                 let script = te.eval(&PathBuf::from(&relative_path)).into_diagnostic()?;
                 if let Some(task_val) = script.module.get(symbol.as_str()) {
                     let def = if let Some(task) = task_val.downcast_ref::<Task>() {
@@ -154,8 +154,8 @@ async fn main() -> miette::Result<ExitCode> {
                             "invalid use_task({}, {}) call in {} at {:?}",
                             relative_path,
                             symbol,
-                            repo_name,
-                            repo_root
+                            module_name,
+                            module_root
                         ));
                     };
 
@@ -165,13 +165,13 @@ async fn main() -> miette::Result<ExitCode> {
                         def.name().clone()
                     };
                     let rel_path = &path
-                        .strip_prefix(&repo_root)
+                        .strip_prefix(&module_root)
                         .expect("failed make path relative")
                         .as_os_str()
                         .to_str()
                         .expect("failed to encode path");
                     let group = def.group();
-                    let defined_in = format!("@{}/{}", repo_name, rel_path);
+                    let defined_in = format!("@{}/{}", module_name, rel_path);
                     let cmd = make_command_from_task(&name, &defined_in, &path, &symbol, def);
                     tree.insert(&name, &group, &group, &path, cmd)
                         .into_diagnostic()?;
@@ -181,10 +181,10 @@ async fn main() -> miette::Result<ExitCode> {
         }
 
         // Next gather tasks from axl sources in the repository
-        let te = AxlScriptEvaluator::new(repo_dir.clone(), deps_path.clone());
+        let te = AxlScriptEvaluator::new(repo_root.clone(), deps_path.clone());
         for path in axl_sources.iter() {
             let rel_path = path
-                .strip_prefix(&repo_dir)
+                .strip_prefix(&repo_root)
                 .map(|p| p.to_path_buf())
                 .into_diagnostic()?;
 
@@ -207,7 +207,7 @@ async fn main() -> miette::Result<ExitCode> {
                     };
                     let group = def.group();
                     let defined_in = path
-                        .strip_prefix(&repo_dir)
+                        .strip_prefix(&repo_root)
                         .expect("failed make path relative")
                         .as_os_str()
                         .to_str()

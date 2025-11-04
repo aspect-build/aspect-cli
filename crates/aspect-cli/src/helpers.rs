@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use axl_runtime::module::BOUNDARY_FILE as AXL_BOUNDARY_FILE;
+use axl_runtime::module::{AXL_MODULE_FILE, AXL_SCRIPT_EXTENSION};
 use tokio::fs;
 use tracing::instrument;
 
@@ -8,12 +8,10 @@ use tracing::instrument;
 // These define the structure for local modules (e.g., .aspect/axl/module_name).
 pub const DOT_ASPECT_FOLDER: &str = ".aspect";
 
-pub const AXL_SCRIPT_EXTENSION: &str = "axl";
-
 /// Asynchronously finds the repository root starting from the given `current_work_dir`.
 /// It traverses the ancestors of `current_work_dir` from deepest to shallowest.
 /// The repository root is identified as the first (deepest) ancestor directory that contains
-/// at least one of the following boundary files: AXL_BOUNDARY_FILE, MODULE.bazel,
+/// at least one of the following boundary files: AXL_MODULE_FILE, MODULE.bazel,
 /// MODULE.bazel.lock, REPO.bazel, WORKSPACE, or WORKSPACE.bazel.
 /// If such a directory is found, it returns Ok with the PathBuf of that directory.
 /// If no repository root is found among the ancestors, it returns Err(()).
@@ -30,7 +28,7 @@ pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
 
     for ancestor in current_work_dir.ancestors().into_iter() {
         let result = tokio::try_join!(
-            err_if_exists(ancestor.join(AXL_BOUNDARY_FILE)),
+            err_if_exists(ancestor.join(AXL_MODULE_FILE)),
             err_if_exists(ancestor.join("MODULE.bazel")),
             err_if_exists(ancestor.join("MODULE.bazel.lock")),
             err_if_exists(ancestor.join("REPO.bazel")),
@@ -55,11 +53,11 @@ pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
 #[instrument]
 pub fn get_default_axl_search_paths(
     current_work_dir: &PathBuf,
-    repo_dir: &PathBuf,
+    repo_root: &PathBuf,
 ) -> Vec<PathBuf> {
-    if let Ok(rel_path) = current_work_dir.strip_prefix(repo_dir) {
-        let mut paths = vec![repo_dir.join(DOT_ASPECT_FOLDER)];
-        let mut current = repo_dir.clone();
+    if let Ok(rel_path) = current_work_dir.strip_prefix(repo_root) {
+        let mut paths = vec![repo_root.join(DOT_ASPECT_FOLDER)];
+        let mut current = repo_root.clone();
         for component in rel_path.components() {
             if component.as_os_str() == DOT_ASPECT_FOLDER {
                 break;

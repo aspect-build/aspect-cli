@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use aspect_config::ToolSpec;
-use dirs::cache_dir as get_cache_dir;
+use dirs::cache_dir;
 use miette::{miette, Context, IntoDiagnostic, Result};
 use std::fs;
 
@@ -16,7 +16,7 @@ impl AspectCache {
     }
 
     pub fn default() -> Result<AspectCache> {
-        let Some(data_dir) = get_cache_dir() else {
+        let Some(data_dir) = cache_dir() else {
             return Err(miette!("Unable to identify the user's cache directory"));
         };
 
@@ -31,13 +31,5 @@ impl AspectCache {
     pub fn tool_path(&self, tool: &dyn ToolSpec) -> PathBuf {
         self.root
             .join(format!("bin/{0}/{1}/{0}", tool.name(), tool.version()))
-    }
-
-    pub fn module_path(&self, name: impl AsRef<str>) -> PathBuf {
-        self.root.join(format!("modules/{0}", name.as_ref()))
-    }
-
-    pub fn module_cas_path(&self, sri: impl AsRef<str>) -> PathBuf {
-        self.root.join(format!("modules_cas/{0}", sri.as_ref()))
     }
 }
