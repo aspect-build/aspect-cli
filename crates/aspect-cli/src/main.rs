@@ -255,14 +255,14 @@ async fn main() -> miette::Result<ExitCode> {
         let (name, cmdargs) = cmd;
         let task_path = tree.get_task_path(&cmdargs);
         let task_symbol = tree.get_task_symbol(&cmdargs);
-        let task = tasks.get(&task_path).unwrap();
-        let def = task.definition(&task_symbol).into_diagnostic()?;
+        let task_script = tasks.get(&task_path).unwrap();
+        let def = task_script.task_definition(&task_symbol).into_diagnostic()?;
 
         let span = info_span!("task", name = name, path = task_path, symbol = task_symbol);
 
         let _enter = span.enter();
-        let exit_code = task
-            .execute(&task_symbol, |heap| {
+        let exit_code = task_script
+            .execute_task(&task_symbol, |heap| {
                 let mut args = TaskArgs::new();
                 for (k, v) in def.args().iter() {
                     let val = match v {

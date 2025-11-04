@@ -106,7 +106,7 @@ impl EvaluatedAxlScript {
     }
 
     /// Retrieves a task definition from the evaluated module by symbol name.
-    pub fn definition(&self, symbol: &str) -> Result<&dyn TaskLike, EvalError> {
+    pub fn task_definition(&self, symbol: &str) -> Result<&dyn TaskLike, EvalError> {
         let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
             self.path.clone(),
             symbol.to_string(),
@@ -121,7 +121,7 @@ impl EvaluatedAxlScript {
     }
 
     /// Executes a task from the module by symbol, providing arguments and returning the exit code.
-    pub fn execute(
+    pub fn execute_task(
         &self,
         symbol: &str,
         args: impl FnOnce(&Heap) -> TaskArgs,
