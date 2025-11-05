@@ -162,7 +162,7 @@ pub fn sanitize_load_path_lexically(
 
     Ok((
         module_name_option,
-        normalize_load_path_lexically(Path::new(path_to_validate)),
+        normalize_rel_path_lexically(Path::new(path_to_validate)),
     ))
 }
 
@@ -233,7 +233,7 @@ pub fn normalize_abs_path_lexically(path: &Path) -> starlark::Result<PathBuf> {
 /// Unresolvable '..' components (e.g., at the beginning or following other '..') are preserved to maintain the relative nature of the path.
 /// If the original path starts with './' and the normalized path does not begin with '.' or '..', the leading './' is preserved for explicit current directory reference.
 /// This normalization is purely syntactic and does not interact with the filesystem.
-fn normalize_load_path_lexically(path: &Path) -> PathBuf {
+fn normalize_rel_path_lexically(path: &Path) -> PathBuf {
     let starts_with_cur = path.components().next() == Some(Component::CurDir);
 
     let mut components = Vec::new();
