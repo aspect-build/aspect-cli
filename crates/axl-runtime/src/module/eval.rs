@@ -20,6 +20,7 @@ use crate::module::AxlLocalDep;
 use crate::module::Dep;
 
 use super::super::eval::EvalError;
+use super::super::helpers::validate_module_name;
 use super::store::{AxlArchiveDep, ModuleStore};
 
 #[starlark_module]
@@ -74,15 +75,20 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
                 AXL_ROOT_MODULE_NAME
             );
         }
+        validate_module_name(&name).map_err(|e| e.into_anyhow())?;
+
         if !dev {
             anyhow::bail!("axl_archive_dep does not support transitive dependencies yet.");
         }
+
         for url in &urls.items {
             if !url.ends_with(".tar.gz") {
                 anyhow::bail!("only .tar.gz archives are supported at the moment.")
             }
         }
+
         let store = ModuleStore::from_eval(eval)?;
+
         let prev_dep = store.deps.borrow_mut().insert(
             name.clone(),
             Dep::Remote(AxlArchiveDep {
@@ -111,6 +117,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
         if name == AXL_ROOT_MODULE_NAME {
             anyhow::bail!("axl_local_dep name {:?} not allowed.", AXL_ROOT_MODULE_NAME);
         }
+        validate_module_name(&name).map_err(|e| e.into_anyhow())?;
 
         let store = ModuleStore::from_eval(eval)?;
 
