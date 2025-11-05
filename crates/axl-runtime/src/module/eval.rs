@@ -68,8 +68,14 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] strip_prefix: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
+        if name == AXL_ROOT_MODULE_NAME {
+            anyhow::bail!(
+                "axl_archive_dep name {:?} not allowed.",
+                AXL_ROOT_MODULE_NAME
+            );
+        }
         if !dev {
-            anyhow::bail!("axl_dep does not support transitive dependencies yet.");
+            anyhow::bail!("axl_archive_dep does not support transitive dependencies yet.");
         }
         for url in &urls.items {
             if !url.ends_with(".tar.gz") {
@@ -102,6 +108,10 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
         #[starlark(require = named)] autouse: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
+        if name == AXL_ROOT_MODULE_NAME {
+            anyhow::bail!("axl_local_dep name {:?} not allowed.", AXL_ROOT_MODULE_NAME);
+        }
+
         let store = ModuleStore::from_eval(eval)?;
 
         let mut abs_path = PathBuf::from(path);
@@ -150,6 +160,8 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
 }
 
 pub const AXL_MODULE_FILE: &str = "MODULE.aspect";
+
+pub const AXL_ROOT_MODULE_NAME: &str = "__root__";
 
 #[allow(dead_code)]
 pub const AXL_SCRIPT_EXTENSION: &str = "axl";
@@ -217,7 +229,7 @@ impl AxlModuleEvaluator {
         module_name: String,
         module_root: PathBuf,
     ) -> Result<ModuleStore, EvalError> {
-        let is_root_module = module_root == self.repo_root;
+        let is_root_module = module_name == AXL_ROOT_MODULE_NAME;
         let axl_filename = if is_root_module {
             AXL_MODULE_FILE.to_string()
         } else {

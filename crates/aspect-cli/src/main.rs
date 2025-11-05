@@ -13,6 +13,7 @@ use axl_runtime::engine::task::{AsTaskLike, FrozenTask, Task};
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
 use axl_runtime::eval::{AxlScriptEvaluator, EvaluatedAxlScript};
+use axl_runtime::module::AXL_ROOT_MODULE_NAME;
 use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
 use clap::{Arg, ArgAction, Command};
 use miette::{miette, IntoDiagnostic};
@@ -60,7 +61,7 @@ async fn main() -> miette::Result<ExitCode> {
 
     // Creates the module store and evaluates the root MODULE.aspect (if it exists) for axl_*_deps, use_task, etc...
     let module_store = extension_eval
-        .evaluate("_root_".to_string(), repo_root.clone())
+        .evaluate(AXL_ROOT_MODULE_NAME.to_string(), repo_root.clone())
         .into_diagnostic()?;
 
     // Expand all modules (including the builtin @aspect module) to the disk store and return the module roots on disk.
