@@ -70,7 +70,7 @@ fn liquid_render(template: &str, data: &JsonValue) -> anyhow::Result<String> {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<template>")]
+#[display("<Template>")]
 pub struct Template {}
 
 impl Template {
@@ -81,7 +81,7 @@ impl Template {
 
 starlark_simple_value!(Template);
 
-#[starlark_value(type = "template")]
+#[starlark_value(type = "Template")]
 impl<'v> StarlarkValue<'v> for Template {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

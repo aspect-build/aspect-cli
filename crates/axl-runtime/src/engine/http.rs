@@ -16,7 +16,7 @@ use super::r#async::future::FutureAlloc;
 use super::r#async::future::StarlarkFuture;
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
-#[display("<http>")]
+#[display("<Http>")]
 pub struct Http {
     #[allocative(skip)]
     client: reqwest::Client,
@@ -35,7 +35,7 @@ impl Http {
     }
 }
 
-#[starlark_value(type = "http")]
+#[starlark_value(type = "Http")]
 impl<'v> StarlarkValue<'v> for Http {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -124,7 +124,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
 }
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
-#[display("<http_response {status}>")]
+#[display("<HttpResponse {status}>")]
 pub struct HttpResponse {
     status: u16,
     body: String,
@@ -145,7 +145,7 @@ impl From<&reqwest::Response> for HttpResponse {
     }
 }
 
-#[starlark_value(type = "http_response")]
+#[starlark_value(type = "HttpResponse")]
 impl<'v> values::StarlarkValue<'v> for HttpResponse {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

@@ -110,7 +110,7 @@ fn try_types(input: TokenStream) -> Result<TokenStream, Error> {
                         defs.entry(subpaths)
                             .or_insert_with(|| (vec![], vec![]))
                             .1
-                            .push(quote! { builder.namespace(#subidentstr, #subgenerator_fn); });
+                            .push(quote! { globals.namespace(#subidentstr, #subgenerator_fn); });
                     }
 
                     traverse(subpath, defs, &subitem)
@@ -155,11 +155,11 @@ fn try_types(input: TokenStream) -> Result<TokenStream, Error> {
 
         quote! {
             #[::starlark::starlark_module]
-            fn #ident_types(builder: &mut ::starlark::environment::GlobalsBuilder) {
+            fn #ident_types(globals: &mut ::starlark::environment::GlobalsBuilder) {
                  #(#defs)*
             }
-            pub fn #ident(builder: &mut ::starlark::environment::GlobalsBuilder) {
-                 #ident_types(builder);
+            pub fn #ident(globals: &mut ::starlark::environment::GlobalsBuilder) {
+                 #ident_types(globals);
                 #(#inherit)*
             }
         }

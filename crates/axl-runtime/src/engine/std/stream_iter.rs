@@ -17,20 +17,20 @@ use starlark::values::Trace;
 use super::stream;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<read_iter>")]
-pub struct ReadIterable {
+#[display("<ReadIterator>")]
+pub struct ReadIterator {
     #[allocative(skip)]
     readable: stream::Readable,
 }
 
-impl ReadIterable {
+impl ReadIterator {
     pub fn new(readable: stream::Readable) -> Self {
         Self { readable }
     }
 }
 
-#[starlark_value(type = "readable_iter")]
-impl<'v> values::StarlarkValue<'v> for ReadIterable {
+#[starlark_value(type = "ReadIterator")]
+impl<'v> values::StarlarkValue<'v> for ReadIterator {
     fn get_type_starlark_repr() -> Ty {
         Ty::iter(Ty::string())
     }
@@ -54,4 +54,4 @@ impl<'v> values::StarlarkValue<'v> for ReadIterable {
     unsafe fn iter_stop(&self) {}
 }
 
-starlark_simple_value!(ReadIterable);
+starlark_simple_value!(ReadIterator);

@@ -31,11 +31,12 @@ pub mod rt {
 }
 
 #[starlark_module]
-fn register_type_toplevels(builder: &mut GlobalsBuilder) {
-    const future: StarlarkValueAsType<future::StarlarkFuture> = StarlarkValueAsType::new();
+fn register_types(globals: &mut GlobalsBuilder) {
+    const Future: StarlarkValueAsType<future::StarlarkFuture> = StarlarkValueAsType::new();
 }
 
-pub fn register_toplevels(builder: &mut GlobalsBuilder) {
-    util::register_toplevels(builder);
-    register_type_toplevels(builder)
+pub fn register_globals(globals: &mut GlobalsBuilder) {
+    register_types(globals);
+
+    util::register_globals(globals);
 }

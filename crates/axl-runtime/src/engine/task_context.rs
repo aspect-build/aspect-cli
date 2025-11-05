@@ -23,7 +23,7 @@ use super::template;
 use super::wasm::Wasm;
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<task_context>")]
+#[display("<TaskContext>")]
 pub struct TaskContext<'v> {
     pub args: TaskArgs<'v>,
 }
@@ -34,7 +34,7 @@ impl<'v> TaskContext<'v> {
     }
 }
 
-#[starlark_value(type = "task_context")]
+#[starlark_value(type = "TaskContext")]
 impl<'v> values::StarlarkValue<'v> for TaskContext<'v> {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -56,7 +56,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<task_context>")]
+#[display("<TaskContext>")]
 pub struct FrozenTaskContext {
     #[allocative(skip)]
     args: FrozenTaskArgs,
@@ -64,7 +64,7 @@ pub struct FrozenTaskContext {
 
 starlark_simple_value!(FrozenTaskContext);
 
-#[starlark_value(type = "task_context")]
+#[starlark_value(type = "TaskContext")]
 impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
     type Canonical = TaskContext<'v>;
 }

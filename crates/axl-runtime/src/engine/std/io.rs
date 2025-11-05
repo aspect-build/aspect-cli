@@ -17,7 +17,7 @@ use starlark::values::ValueLike;
 use super::stream;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<stdio>")]
+#[display("<std.io.Stdio>")]
 pub struct Stdio {
     stdout: stream::Writable,
     stderr: stream::Writable,
@@ -34,7 +34,7 @@ impl Stdio {
     }
 }
 
-#[starlark_value(type = "stdio")]
+#[starlark_value(type = "std.io.Stdio")]
 impl<'v> values::StarlarkValue<'v> for Stdio {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

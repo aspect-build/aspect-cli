@@ -66,20 +66,20 @@ impl Dep {
 }
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
-#[display("axl_local_dep")]
+#[display("AxlLocalDep")]
 pub struct AxlLocalDep {
     pub name: String,
     pub path: PathBuf,
     pub auto_use_tasks: bool,
 }
 
-#[starlark_value(type = "axl_local_dep")]
+#[starlark_value(type = "AxlLocalDep")]
 impl<'v> StarlarkValue<'v> for AxlLocalDep {}
 
 starlark_simple_value!(AxlLocalDep);
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
-#[display("axl_archive_dep")]
+#[display("AxlArchiveDep")]
 pub struct AxlArchiveDep {
     pub urls: Vec<String>,
     #[allocative(skip)]
@@ -90,7 +90,7 @@ pub struct AxlArchiveDep {
     pub auto_use_tasks: bool,
 }
 
-#[starlark_value(type = "axl_archive_dep")]
+#[starlark_value(type = "AxlArchiveDep")]
 impl<'v> StarlarkValue<'v> for AxlArchiveDep {}
 
 starlark_simple_value!(AxlArchiveDep);

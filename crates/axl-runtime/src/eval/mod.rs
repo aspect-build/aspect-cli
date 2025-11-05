@@ -88,7 +88,7 @@ pub fn get_globals() -> GlobalsBuilder {
         LibraryExtension::StructType,
         LibraryExtension::Typing,
     ]);
-    engine::register_toplevels(&mut globals);
+    engine::register_globals(&mut globals);
     globals
 }
 

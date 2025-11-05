@@ -14,7 +14,7 @@ use starlark::values::Trace;
 use starlark::values::Value;
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<task_args>")]
+#[display("<TaskArgs>")]
 pub struct TaskArgs<'v> {
     #[allocative(skip)]
     args: SmallMap<String, values::Value<'v>>,
@@ -38,7 +38,7 @@ impl<'v> TaskArgs<'v> {
     }
 }
 
-#[starlark_value(type = "task_args")]
+#[starlark_value(type = "TaskArgs")]
 impl<'v> StarlarkValue<'v> for TaskArgs<'v> {
     fn get_attr(&self, key: &str, _heap: &'v Heap) -> Option<Value<'v>> {
         self.args.get(key).cloned()
@@ -65,7 +65,7 @@ impl<'v> values::Freeze for TaskArgs<'v> {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<task_args {args:?}>")]
+#[display("<TaskArgs {args:?}>")]
 pub struct FrozenTaskArgs {
     #[allocative(skip)]
     args: SmallMap<String, values::FrozenValue>,
@@ -73,7 +73,7 @@ pub struct FrozenTaskArgs {
 
 starlark_simple_value!(FrozenTaskArgs);
 
-#[starlark_value(type = "task_args")]
+#[starlark_value(type = "TaskArgs")]
 impl<'v> StarlarkValue<'v> for FrozenTaskArgs {
     type Canonical = TaskArgs<'v>;
 }

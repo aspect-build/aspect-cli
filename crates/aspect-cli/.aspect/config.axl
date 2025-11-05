@@ -1,2 +1,2 @@
-def config(ctx):
+def config(ctx: ConfigContext):
     pass

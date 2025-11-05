@@ -15,24 +15,24 @@ use super::future::StarlarkFuture;
 use super::rt::AsyncRuntime;
 
 #[derive(ProvidesStaticType, Display, NoSerialize, Allocative)]
-#[display("<future.iter>")]
-pub struct FutureStream {
+#[display("<FutureIterator>")]
+pub struct FutureIterator {
     #[allocative(skip)]
     pub(super) rt: AsyncRuntime,
     #[allocative(skip)]
     pub(super) stream: Arc<RwLock<JoinSet<super::future::FutOutput>>>,
 }
 
-impl std::fmt::Debug for FutureStream {
+impl std::fmt::Debug for FutureIterator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FutureStream")
+        f.debug_struct("FutureIterator")
             .field("rt", &self.rt)
             .field("stream", &self.stream)
             .finish()
     }
 }
 
-impl FutureStream {
+impl FutureIterator {
     pub fn new(rt: AsyncRuntime, futures: Vec<StarlarkFuture>) -> Self {
         let mut set = JoinSet::new();
         let guard = rt.enter();
@@ -47,24 +47,24 @@ impl FutureStream {
     }
 }
 
-unsafe impl<'v> Trace<'v> for FutureStream {
+unsafe impl<'v> Trace<'v> for FutureIterator {
     fn trace(&mut self, _tracer: &values::Tracer<'v>) {}
 }
 
-impl Clone for FutureStream {
+impl Clone for FutureIterator {
     fn clone(&self) -> Self {
         todo!()
     }
 }
 
-impl<'v> AllocValue<'v> for FutureStream {
+impl<'v> AllocValue<'v> for FutureIterator {
     fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
 
-#[starlark_value(type = "future_iter")]
-impl<'v> values::StarlarkValue<'v> for FutureStream {
+#[starlark_value(type = "FutureIterator")]
+impl<'v> values::StarlarkValue<'v> for FutureIterator {
     unsafe fn iterate(
         &self,
         me: values::Value<'v>,

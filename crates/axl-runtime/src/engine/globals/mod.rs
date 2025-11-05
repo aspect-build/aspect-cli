@@ -19,7 +19,7 @@ use starlark::typing::Ty;
 use starlark::values::Heap;
 
 #[derive(ProvidesStaticType, Display, Trace, NoSerialize, Allocative, Debug)]
-#[display("<clock_iterator>")]
+#[display("<ClockIterator>")]
 
 struct ClockIterator {
     rate: u64,
@@ -28,7 +28,7 @@ struct ClockIterator {
 
 starlark_simple_value!(ClockIterator);
 
-#[starlark_value(type = "clock_iterator")]
+#[starlark_value(type = "ClockIterator")]
 impl<'v> values::StarlarkValue<'v> for ClockIterator {
     fn eval_type(&self) -> Option<Ty> {
         Some(Ty::iter(
@@ -55,7 +55,7 @@ impl<'v> values::StarlarkValue<'v> for ClockIterator {
 }
 
 #[starlark_module]
-pub fn register_toplevels(_: &mut GlobalsBuilder) {
+pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Forever clock iterator
     fn forever<'v>(#[starlark()] rate: u32) -> starlark::Result<ClockIterator> {
         Ok(ClockIterator {

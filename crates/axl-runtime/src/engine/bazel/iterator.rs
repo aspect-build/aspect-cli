@@ -27,7 +27,7 @@ use starlark::values::ValueLike;
 use crate::engine::bazel::execlog_stream::{ExecLogIterator, RetryStream};
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<build_event_iterator>")]
+#[display("<bazel.build.BuildEventIterator>")]
 pub struct BuildEventIterator {
     #[allocative(skip)]
     recv: RefCell<Receiver<BuildEvent>>,
@@ -58,7 +58,7 @@ pub(crate) fn build_event_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-#[starlark_value(type = "build_event_iterator")]
+#[starlark_value(type = "bazel.build.BuildEventIterator")]
 impl<'v> values::StarlarkValue<'v> for BuildEventIterator {
     fn eval_type(&self) -> Option<Ty> {
         Some(Ty::iter(
@@ -93,7 +93,7 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIterator {
 }
 
 #[derive(ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<build_event_iterator>")]
+#[display("<bazel.build.ExecutionLogIterator>")]
 pub struct ExecutionLogIterator {
     #[allocative(skip)]
     execlog_iterator:
@@ -102,7 +102,7 @@ pub struct ExecutionLogIterator {
 
 impl Debug for ExecutionLogIterator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExecutionLogIterator")
+        f.debug_struct("bazel.build.ExecutionLogIterator")
             .field("execlog_iterator", &String::from("hidden"))
             .finish()
     }
@@ -128,7 +128,7 @@ impl<'v> AllocValue<'v> for ExecutionLogIterator {
     }
 }
 
-#[starlark_value(type = "build_event_iterator")]
+#[starlark_value(type = "bazel.build.ExecutionLogIterator")]
 impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
     fn eval_type(&self) -> Option<Ty> {
         Some(Ty::iter(

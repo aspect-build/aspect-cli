@@ -36,7 +36,7 @@ impl<'v> AllocValue<'v> for Box<dyn FutureAlloc> {
 pub type FutOutput = Result<Box<dyn FutureAlloc>, anyhow::Error>;
 
 #[derive(Display, Allocative, ProvidesStaticType, NoSerialize)]
-#[display("future")]
+#[display("Future")]
 pub struct StarlarkFuture {
     #[allocative(skip)]
     inner: Rc<RefCell<Option<BoxFuture<'static, FutOutput>>>>,
@@ -82,7 +82,7 @@ unsafe impl<'v> Trace<'v> for StarlarkFuture {
 
 impl Debug for StarlarkFuture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StarlarkFuture").finish()
+        f.debug_struct("Future").finish()
     }
 }
 
@@ -103,7 +103,7 @@ impl<'v> UnpackValue<'v> for StarlarkFuture {
     }
 }
 
-#[starlark_value(type = "future")]
+#[starlark_value(type = "Future")]
 impl<'v> values::StarlarkValue<'v> for StarlarkFuture {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

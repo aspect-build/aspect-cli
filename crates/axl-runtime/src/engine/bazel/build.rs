@@ -40,7 +40,7 @@ use super::stream_sink::GrpcEventStreamSink;
 use super::stream_tracing::TracingEventStreamSink;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<build_status>")]
+#[display("<bazel.build.BuildStatus>")]
 pub struct BuildStatus {
     success: bool,
     code: Option<i32>,
@@ -52,7 +52,7 @@ impl<'v> AllocValue<'v> for BuildStatus {
     }
 }
 
-#[starlark_value(type = "build_status")]
+#[starlark_value(type = "bazel.build.BuildStatus")]
 impl<'v> values::StarlarkValue<'v> for BuildStatus {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -75,7 +75,7 @@ pub(crate) fn build_status_methods(registry: &mut MethodsBuilder) {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative, Clone)]
-#[display("<build_event_sink>")]
+#[display("<bazel.build.BuildEventSink>")]
 pub enum BuildEventSink {
     Grpc {
         uri: String,
@@ -85,7 +85,7 @@ pub enum BuildEventSink {
 
 starlark_simple_value!(BuildEventSink);
 
-#[starlark_value(type = "build_event_sink")]
+#[starlark_value(type = "bazel.build.BuildEventSink")]
 impl<'v> values::StarlarkValue<'v> for BuildEventSink {}
 
 impl<'v> UnpackValue<'v> for BuildEventSink {
@@ -108,7 +108,7 @@ impl BuildEventSink {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
-#[display("<build>")]
+#[display("<bazel.build.Build>")]
 pub struct Build {
     #[allocative(skip)]
     event_stream: RefCell<Option<EventStream>>,
@@ -214,7 +214,7 @@ impl<'v> AllocValue<'v> for Build {
     }
 }
 
-#[starlark_value(type = "build")]
+#[starlark_value(type = "bazel.build.Build")]
 impl<'v> values::StarlarkValue<'v> for Build {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

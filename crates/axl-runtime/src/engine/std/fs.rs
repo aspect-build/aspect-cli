@@ -74,7 +74,7 @@ impl<'v> values::Freeze for DirEntry<'v> {
 starlark_simple_value!(FrozenDirEntry);
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<filesystem>")]
+#[display("<std.Filesystem>")]
 pub struct Filesystem {}
 
 impl Filesystem {
@@ -83,7 +83,7 @@ impl Filesystem {
     }
 }
 
-#[starlark_value(type = "filesystem")]
+#[starlark_value(type = "std.Filesystem")]
 impl<'v> values::StarlarkValue<'v> for Filesystem {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

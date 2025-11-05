@@ -24,7 +24,7 @@ use super::super::helpers::validate_module_name;
 use super::store::{AxlArchiveDep, ModuleStore};
 
 #[starlark_module]
-pub fn register_toplevels(_: &mut GlobalsBuilder) {
+pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn axl_dep<'v>(
         #[allow(unused)]
         #[starlark(require = named)]
@@ -195,7 +195,7 @@ pub fn get_globals() -> Globals {
         LibraryExtension::StructType,
         LibraryExtension::Typing,
     ]);
-    globals.with(register_toplevels).build()
+    globals.with(register_globals).build()
 }
 
 /// Evaluator for MODULE.aspect

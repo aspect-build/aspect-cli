@@ -98,7 +98,7 @@ impl<'v> starlark::values::AllocValue<'v> for Target {
 }
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<target_set {targets:?}>")]
+#[display("<bazel.query.TargetSet {targets:?}>")]
 pub struct TargetSet {
     #[allocative(skip)]
     targets: Vec<Target>,
@@ -110,7 +110,7 @@ impl<'v> AllocValue<'v> for TargetSet {
     }
 }
 
-#[starlark_value(type = "target_set")]
+#[starlark_value(type = "bazel.query.TargetSet")]
 impl<'v> values::StarlarkValue<'v> for TargetSet {
     fn get_type_starlark_repr() -> Ty {
         Ty::iter(Target::starlark_type_repr())
@@ -141,7 +141,7 @@ impl<'v> values::StarlarkValue<'v> for TargetSet {
 }
 
 #[derive(Dupe, Clone, Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
-#[display("<query>")]
+#[display("<bazel.query.Query>")]
 pub struct Query {
     #[allocative(skip)]
     // Expr here has to be mutable
@@ -204,7 +204,7 @@ impl<'v> AllocValue<'v> for Query {
     }
 }
 
-#[starlark_value(type = "query")]
+#[starlark_value(type = "bazel.query.Query")]
 /// The entry point for programmatic queries, providing methods to construct initial target sets.
 ///
 /// This builder allows creating starting points for queries, such as target patterns or explicit

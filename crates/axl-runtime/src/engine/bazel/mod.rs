@@ -38,12 +38,12 @@ mod stream_tracing;
 mod stream_util;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<bazel>")]
+#[display("<bazel.Bazel>")]
 pub struct Bazel {}
 
 starlark_simple_value!(Bazel);
 
-#[starlark_value(type = "bazel")]
+#[starlark_value(type = "bazel.Bazel")]
 impl<'v> values::StarlarkValue<'v> for Bazel {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -144,7 +144,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
 }
 
 #[starlark_module]
-fn sink_toplevels(builder: &mut GlobalsBuilder) {
+fn register_build_events(globals: &mut GlobalsBuilder) {
     #[starlark(as_type = build::BuildEventSink)]
     fn grpc(
         #[starlark(require = named)] uri: String,
@@ -160,40 +160,43 @@ fn sink_toplevels(builder: &mut GlobalsBuilder) {
 }
 
 #[starlark_module]
-fn build_toplevels(builder: &mut GlobalsBuilder) {
-    const build_events_iterator: StarlarkValueAsType<iterator::BuildEventIterator> =
+fn register_build_types(globals: &mut GlobalsBuilder) {
+    const Build: StarlarkValueAsType<build::Build> = StarlarkValueAsType::new();
+    const BuildEventIterator: StarlarkValueAsType<iterator::BuildEventIterator> =
         StarlarkValueAsType::new();
-    const execution_log_iterator: StarlarkValueAsType<iterator::ExecutionLogIterator> =
+    const BuildEventSink: StarlarkValueAsType<build::BuildEventSink> = StarlarkValueAsType::new();
+    const BuildStatus: StarlarkValueAsType<build::BuildStatus> = StarlarkValueAsType::new();
+    const ExecutionLogIterator: StarlarkValueAsType<iterator::ExecutionLogIterator> =
         StarlarkValueAsType::new();
-    const build: StarlarkValueAsType<build::Build> = StarlarkValueAsType::new();
-    const build_status: StarlarkValueAsType<build::BuildStatus> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]
-fn query_toplevels(builder: &mut GlobalsBuilder) {
-    const query: StarlarkValueAsType<query::Query> = StarlarkValueAsType::new();
-    const target_set: StarlarkValueAsType<query::TargetSet> = StarlarkValueAsType::new();
+fn register_query_types(globals: &mut GlobalsBuilder) {
+    const Query: StarlarkValueAsType<query::Query> = StarlarkValueAsType::new();
+    const TargetSet: StarlarkValueAsType<query::TargetSet> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]
-fn toplevels(builder: &mut GlobalsBuilder) {
-    const bazel: StarlarkValueAsType<Bazel> = StarlarkValueAsType::new();
+fn register_types(globals: &mut GlobalsBuilder) {
+    const Bazel: StarlarkValueAsType<Bazel> = StarlarkValueAsType::new();
 }
 
-pub fn register_toplevels(builder: &mut GlobalsBuilder) {
-    toplevels(builder);
-    builder.namespace("query", |builder| {
-        query_toplevels(builder);
-        axl_proto::blaze_query_toplevels(builder);
+pub fn register_globals(globals: &mut GlobalsBuilder) {
+    register_types(globals);
+
+    globals.namespace("query", |globals| {
+        register_query_types(globals);
+        axl_proto::blaze_query_toplevels(globals);
     });
 
-    builder.namespace("build", |builder| {
-        build_toplevels(builder);
-        builder.namespace("build_event", axl_proto::build_event_stream_toplevels);
-        builder.namespace("execution_log", axl_proto::tools_protos_toplevels);
+    globals.namespace("build", |globals| {
+        register_build_types(globals);
+
+        globals.namespace("build_event", axl_proto::build_event_stream_toplevels);
+        globals.namespace("execution_log", axl_proto::tools_protos_toplevels);
     });
 
-    builder.namespace("build_events", |builder| {
-        sink_toplevels(builder);
+    globals.namespace("build_events", |globals| {
+        register_build_events(globals);
     });
 }

@@ -29,7 +29,7 @@ use starlark::values::starlark_value;
 use super::stream;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<process>")]
+#[display("<std.process.Process>")]
 pub struct Process {}
 
 impl Process {
@@ -38,7 +38,7 @@ impl Process {
     }
 }
 
-#[starlark_value(type = "process")]
+#[starlark_value(type = "std.process.Process")]
 impl<'v> values::StarlarkValue<'v> for Process {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -61,7 +61,7 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
 }
 
 #[derive(Debug, Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<command>")]
+#[display("<std.process.Command>")]
 pub struct Command {
     #[allocative(skip)]
     inner: RefCell<process::Command>,
@@ -73,7 +73,7 @@ impl<'v> AllocValue<'v> for Command {
     }
 }
 
-#[starlark_value(type = "command")]
+#[starlark_value(type = "std.process.Command")]
 impl<'v> values::StarlarkValue<'v> for Command {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -188,7 +188,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 }
 
 #[derive(Debug, Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<child>")]
+#[display("<std.process.Child>")]
 pub struct Child {
     #[allocative(skip)]
     inner: Rc<RefCell<Option<process::Child>>>,
@@ -200,7 +200,7 @@ impl<'v> AllocValue<'v> for Child {
     }
 }
 
-#[starlark_value(type = "child")]
+#[starlark_value(type = "std.process.Child")]
 impl<'v> values::StarlarkValue<'v> for Child {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -337,10 +337,10 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<exit_status>")]
+#[display("<std.process.ExitStatus>")]
 pub struct ExitStatus(#[allocative(skip)] pub process::ExitStatus);
 
-#[starlark_value(type = "exit_status")]
+#[starlark_value(type = "std.process.ExitStatus")]
 impl<'v> values::StarlarkValue<'v> for ExitStatus {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -414,10 +414,10 @@ pub(crate) fn exit_status_methods(registry: &mut MethodsBuilder) {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<output>")]
+#[display("<std.process.Output>")]
 pub struct Output(#[allocative(skip)] pub process::Output);
 
-#[starlark_value(type = "output")]
+#[starlark_value(type = "std.process.Output")]
 impl<'v> values::StarlarkValue<'v> for Output {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

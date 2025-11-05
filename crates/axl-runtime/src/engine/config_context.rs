@@ -20,7 +20,7 @@ use super::template;
 use super::wasm::Wasm;
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<config_context>")]
+#[display("<ConfigContext>")]
 pub struct ConfigContext<'v> {
     _phantom: std::marker::PhantomData<&'v ()>,
 }
@@ -33,7 +33,7 @@ impl<'v> ConfigContext<'v> {
     }
 }
 
-#[starlark_value(type = "config_context")]
+#[starlark_value(type = "ConfigContext")]
 impl<'v> values::StarlarkValue<'v> for ConfigContext<'v> {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -55,12 +55,12 @@ impl<'v> values::Freeze for ConfigContext<'v> {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<config_context>")]
+#[display("<ConfigContext>")]
 pub struct FrozenConfigContext {}
 
 starlark_simple_value!(FrozenConfigContext);
 
-#[starlark_value(type = "config_context")]
+#[starlark_value(type = "ConfigContext")]
 impl<'v> values::StarlarkValue<'v> for FrozenConfigContext {
     type Canonical = ConfigContext<'v>;
 }

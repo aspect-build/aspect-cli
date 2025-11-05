@@ -43,7 +43,7 @@ where
 }
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<task>")]
+#[display("<Task>")]
 pub struct Task<'v> {
     r#impl: values::Value<'v>,
     #[allocative(skip)]
@@ -86,7 +86,7 @@ impl<'v> TaskLike<'v> for Task<'v> {
     }
 }
 
-#[starlark_value(type = "task")]
+#[starlark_value(type = "Task")]
 impl<'v> StarlarkValue<'v> for Task<'v> {}
 
 impl<'v> values::AllocValue<'v> for Task<'v> {
@@ -110,7 +110,7 @@ impl<'v> values::Freeze for Task<'v> {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<task>")]
+#[display("<Task>")]
 pub struct FrozenTask {
     r#impl: values::FrozenValue,
     #[allocative(skip)]
@@ -122,7 +122,7 @@ pub struct FrozenTask {
 
 starlark_simple_value!(FrozenTask);
 
-#[starlark_value(type = "task")]
+#[starlark_value(type = "Task")]
 impl<'v> StarlarkValue<'v> for FrozenTask {
     type Canonical = Task<'v>;
 }
@@ -164,7 +164,7 @@ impl StarlarkCallableParamSpec for TaskImpl {
 }
 
 #[starlark_module]
-pub fn register_toplevels(_: &mut GlobalsBuilder) {
+pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Task type representing a Task.
     ///
     /// ```python

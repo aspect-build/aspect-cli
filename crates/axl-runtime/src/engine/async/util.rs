@@ -4,19 +4,19 @@ use starlark::{
 
 use crate::engine::store::AxlStore;
 
-use super::{future::StarlarkFuture, future_stream::FutureStream};
+use super::{future::StarlarkFuture, future_stream::FutureIterator};
 
-pub fn register_toplevels(builder: &mut GlobalsBuilder) {
-    builder.namespace("futures", register_future_utils);
+pub fn register_globals(globals: &mut GlobalsBuilder) {
+    globals.namespace("futures", register_future_utils);
 }
 
 #[starlark_module]
-fn register_future_utils(_: &mut GlobalsBuilder) {
+fn register_future_utils(globals: &mut GlobalsBuilder) {
     fn iter<'v>(
         #[starlark(args)] futures: UnpackTuple<StarlarkFuture>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<FutureStream> {
+    ) -> starlark::Result<FutureIterator> {
         let store = AxlStore::from_eval(eval)?;
-        return Ok(FutureStream::new(store.rt, futures.items));
+        return Ok(FutureIterator::new(store.rt, futures.items));
     }
 }
