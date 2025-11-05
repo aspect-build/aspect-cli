@@ -55,12 +55,12 @@ async fn main() -> miette::Result<ExitCode> {
 
     let disk_store = DiskStore::new(repo_root.clone());
 
-    let extension_eval = AxlModuleEvaluator::new(repo_root.clone());
+    let module_eval = AxlModuleEvaluator::new(repo_root.clone());
 
     let _ = info_span!("expand_module_store").enter();
 
     // Creates the module store and evaluates the root MODULE.aspect (if it exists) for axl_*_deps, use_task, etc...
-    let module_store = extension_eval
+    let module_store = module_eval
         .evaluate(AXL_ROOT_MODULE_NAME.to_string(), repo_root.clone())
         .into_diagnostic()?;
 
@@ -85,7 +85,7 @@ async fn main() -> miette::Result<ExitCode> {
 
     // Gather all tasks from use_task calls in the axl module deps
     for (name, root) in module_roots {
-        let module_store = extension_eval.evaluate(name, root).into_diagnostic()?;
+        let module_store = module_eval.evaluate(name, root).into_diagnostic()?;
         use_tasks.push((
             module_store.module_name,
             module_store.module_root,
