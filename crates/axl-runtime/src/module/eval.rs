@@ -65,7 +65,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
         #[starlark(require = named)] integrity: String,
         #[starlark(require = named)] urls: UnpackList<String>,
         #[starlark(require = named)] dev: bool,
-        #[starlark(require = named)] autouse: bool,
+        #[starlark(require = named)] auto_use_tasks: bool,
         #[starlark(require = named, default = String::new())] strip_prefix: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
@@ -97,7 +97,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
                 urls: urls.items,
                 integrity: integrity.parse()?,
                 dev: true,
-                autouse,
+                auto_use_tasks,
             }),
         );
 
@@ -111,7 +111,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
     fn axl_local_dep<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] path: String,
-        #[starlark(require = named)] autouse: bool,
+        #[starlark(require = named)] auto_use_tasks: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
         if name == AXL_ROOT_MODULE_NAME {
@@ -139,7 +139,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
             Dep::Local(AxlLocalDep {
                 name: name.clone(),
                 path: abs_path,
-                autouse,
+                auto_use_tasks,
             }),
         );
 

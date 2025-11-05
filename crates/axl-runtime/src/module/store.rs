@@ -70,7 +70,7 @@ impl Dep {
 pub struct AxlLocalDep {
     pub name: String,
     pub path: PathBuf,
-    pub autouse: bool,
+    pub auto_use_tasks: bool,
 }
 
 #[starlark_value(type = "axl_local_dep")]
@@ -87,7 +87,7 @@ pub struct AxlArchiveDep {
     pub dev: bool,
     pub name: String,
     pub strip_prefix: String,
-    pub autouse: bool,
+    pub auto_use_tasks: bool,
 }
 
 #[starlark_value(type = "axl_archive_dep")]
