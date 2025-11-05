@@ -15,7 +15,6 @@ use starlark::values::Trace;
 use starlark::values::ValueLike;
 
 use super::bazel::Bazel;
-use super::delivery::DeliveryModule;
 use super::http::Http;
 use super::std::Std;
 use super::task_args::FrozenTaskArgs;
@@ -84,14 +83,6 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
         let ctx = this.downcast_ref_err::<TaskContext>()?;
         // TODO: don't do this.
         Ok(ctx.args.clone())
-    }
-
-    /// Access to Aspect Workflows Delivery Service
-    #[starlark(attribute)]
-    fn delivery<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<DeliveryModule> {
-        // DELIVERY_DB_ENDPOINT
-        //
-        Ok(DeliveryModule::new())
     }
 
     /// Expand template files.

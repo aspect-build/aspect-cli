@@ -4,7 +4,6 @@ use starlark::{
 };
 
 mod bazel;
-mod delivery;
 mod globals;
 mod http;
 mod std;
