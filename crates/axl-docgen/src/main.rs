@@ -26,7 +26,7 @@ fn snake(s: &str) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Generating docs");
+    println!("generating docs");
 
     let task = eval::get_globals().build().documentation();
 

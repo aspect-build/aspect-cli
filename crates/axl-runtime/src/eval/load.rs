@@ -44,7 +44,7 @@ impl<'a> AxlLoader<'a> {
         }
         if !module_root.exists() {
             return Err(starlark::Error::new_other(anyhow!(
-                "Failed to resolve load(\"@{}/{}\", ...): module '{}' not found (expected module directory at '{}')",
+                "failed to resolve load(\"@{}/{}\", ...): module '{}' not found (expected module directory at '{}')",
                 module_name,
                 module_path.display(),
                 module_name,
@@ -52,7 +52,7 @@ impl<'a> AxlLoader<'a> {
             )));
         } else if !module_root.is_dir() {
             return Err(starlark::Error::new_other(anyhow!(
-                "Failed to resolve load(\"@{}/{}\", ...): module '{}' root at '{}' exists but is not a directory",
+                "failed to resolve load(\"@{}/{}\", ...): module '{}' root at '{}' exists but is not a directory",
                 module_name,
                 module_path.display(),
                 module_name,
@@ -60,7 +60,7 @@ impl<'a> AxlLoader<'a> {
             )));
         } else {
             return Err(starlark::Error::new_other(anyhow!(
-                "Failed to resolve load(\"@{}/{}\", ...): script file not found in module '{}' (expected at '{}')",
+                "failed to resolve load(\"@{}/{}\", ...): script file not found in module '{}' (expected at '{}')",
                 module_name,
                 module_path.display(),
                 module_name,
@@ -72,7 +72,7 @@ impl<'a> AxlLoader<'a> {
     fn resolve_axl_script(&self, script_path: &Path) -> starlark::Result<PathBuf> {
         let script_path_str = script_path.to_str().ok_or_else(|| {
             starlark::Error::new_other(anyhow!(
-                "Path is not valid UTF-8: {}",
+                "path is not valid UTF-8: {}",
                 script_path.display()
             ))
         })?;
@@ -95,7 +95,7 @@ impl<'a> AxlLoader<'a> {
                 }
                 _ => {
                     return Err(starlark::Error::new_other(anyhow!(
-                        "Invalid path component in load path: {}",
+                        "invalid path component in load path: {}",
                         script_path.display()
                     )));
                 }
@@ -104,7 +104,7 @@ impl<'a> AxlLoader<'a> {
 
         if !resolved_script_path.starts_with(&self.module_root) {
             return Err(starlark::Error::new_other(anyhow!(
-                "Resolved path {} for load path {} escapes the module root directory {}",
+                "resolved path {} for load path {} escapes the module root directory {}",
                 resolved_script_path.display(),
                 script_path.display(),
                 self.module_root.display()
@@ -119,7 +119,7 @@ impl<'a> FileLoader for AxlLoader<'a> {
     fn load(&self, load_path: &str) -> starlark::Result<FrozenModule> {
         if !self.script_dir.starts_with(&self.module_root) {
             return Err(starlark::Error::new_other(anyhow!(
-                "Script directory {} is not a descendant of module root directory {}",
+                "script directory {} is not a descendant of module root directory {}",
                 self.script_dir.display(),
                 self.module_root.display()
             )));
@@ -168,7 +168,7 @@ impl<'a> FileLoader for AxlLoader<'a> {
                     .collect::<Vec<_>>()
                     .join("\n");
                 cycle_error = Some(starlark::Error::new_other(anyhow!(
-                    "Cycle detected in load path:\n{}\n(cycles back to {})",
+                    "cycle detected in load path:\n{}\n(cycles back to {})",
                     stack_str,
                     resolved_script_path.display()
                 )));
@@ -182,7 +182,7 @@ impl<'a> FileLoader for AxlLoader<'a> {
 
         // Read and parse the file content into an AST.
         let raw = fs::read_to_string(&resolved_script_path)
-            .context(format!("Failed to read {}", resolved_script_path.display()))?;
+            .context(format!("failed to read {}", resolved_script_path.display()))?;
         let ast = AstModule::parse(
             &resolved_script_path.to_string_lossy(),
             raw,

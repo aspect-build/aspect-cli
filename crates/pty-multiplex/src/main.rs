@@ -137,7 +137,7 @@ async fn main() -> std::io::Result<()> {
     init_panic_hook();
     let args = std::env::args();
     if args.len() < 2 {
-        eprintln!("Pass --spawn argument and --env --arg after --spawn");
+        eprintln!("pass --spawn argument and --env --arg after --spawn");
         exit(1);
     }
     let spawns = parse_args(args);
@@ -208,7 +208,7 @@ async fn run_smux(terminal: &mut DefaultTerminal, spawns: Vec<Spawn>) -> io::Res
         })?;
 
         if event::poll(Duration::from_millis(10))? {
-            tracing::info!("Terminal Size: {:?}", terminal.size());
+            tracing::info!("terminal Size: {:?}", terminal.size());
             match event::read()? {
                 Event::Key(key) => match key.code {
                     KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -223,7 +223,7 @@ async fn run_smux(terminal: &mut DefaultTerminal, spawns: Vec<Spawn>) -> io::Res
                     }
                 },
                 Event::Resize(cols, rows) => {
-                    tracing::info!("Resized to: rows: {} cols: {}", rows, cols);
+                    tracing::info!("resized to: rows: {} cols: {}", rows, cols);
                     size.rows = rows;
                     size.cols = cols;
                     let pane_size = calc_pane_size(size, panes.len());
@@ -481,12 +481,12 @@ fn init_panic_hook() {
     // Set the panic hook to log panic information before panicking
     std::panic::set_hook(Box::new(|panic| {
         let original_hook = std::panic::take_hook();
-        tracing::error!("Panic Error: {}", panic);
+        tracing::error!("panic error: {}", panic);
         ratatui::restore();
 
         original_hook(panic);
     }));
-    tracing::debug!("Set panic hook")
+    tracing::debug!("set panic hook")
 }
 
 impl fmt::Debug for PtyPane {

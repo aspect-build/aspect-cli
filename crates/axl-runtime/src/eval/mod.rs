@@ -192,7 +192,7 @@ impl AxlScriptEvaluator {
         // Don't allow evaluating script paths starting with @module names.
         if module_name.is_some() {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "AXL scripts cannot be loaded directly from a module (load path starts with '@'): {}",
+                "axl scripts cannot be loaded directly from a module (load path starts with '@'): {}",
                 script_path.display(),
             )));
         }
@@ -201,7 +201,7 @@ impl AxlScriptEvaluator {
         let abs_script_path = normalize_abs_path_lexically(&self.module_root.join(script_path))?;
         if !abs_script_path.starts_with(&self.module_root) {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "AXL script path {} resolves outside the module root {}",
+                "axl script path {} resolves outside the module root {}",
                 abs_script_path.display(),
                 self.module_root.display()
             )));

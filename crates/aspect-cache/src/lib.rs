@@ -17,13 +17,13 @@ impl AspectCache {
 
     pub fn default() -> Result<AspectCache> {
         let Some(data_dir) = cache_dir() else {
-            return Err(miette!("Unable to identify the user's cache directory"));
+            return Err(miette!("unable to identify the user's cache directory"));
         };
 
         let aspect_data_dir = data_dir.join(PathBuf::from("aspect"));
         fs::create_dir_all(&aspect_data_dir)
             .into_diagnostic()
-            .wrap_err("Unable to create `aspect` cache dir")?;
+            .wrap_err("unable to create `aspect` cache dir")?;
 
         Ok(AspectCache::from(aspect_data_dir))
     }

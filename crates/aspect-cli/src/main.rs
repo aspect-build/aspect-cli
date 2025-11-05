@@ -51,7 +51,7 @@ async fn main() -> miette::Result<ExitCode> {
 
     let repo_root = find_repo_root(&current_work_dir)
         .await
-        .map_err(|_| miette!("Could not find repository root, running inside a module?"))?;
+        .map_err(|_| miette!("could not find repository root, running inside a module?"))?;
 
     let disk_store = DiskStore::new(repo_root.clone());
 

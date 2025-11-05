@@ -194,7 +194,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
     ) -> starlark::Result<Task<'v>> {
         if group.items.len() > MAX_TASK_GROUPS {
             return Err(anyhow::anyhow!(
-                "Task cannot have more than {} group levels",
+                "task cannot have more than {} group levels",
                 MAX_TASK_GROUPS
             )
             .into());
