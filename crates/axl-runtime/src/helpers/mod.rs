@@ -103,16 +103,11 @@ pub fn sanitize_load_path_lexically(
         )));
     }
 
-    // Check that the path ends with /filename.axl
-    let last_slash_pos = match load_path.rfind('/') {
-        Some(pos) => pos,
-        None => {
-            return Err(starlark::Error::new_other(anyhow!(
-                "load path must contain at least one '/' separator and end with a filename ending in '.axl'"
-            )));
-        }
+    // Extract the filename as the part after the last '/', or the whole path if no '/'
+    let filename = match load_path.rfind('/') {
+        Some(pos) => &load_path[(pos + 1)..],
+        None => &load_path,
     };
-    let filename = &load_path[(last_slash_pos + 1)..];
     if filename.is_empty() || !filename.ends_with(".axl") {
         return Err(starlark::Error::new_other(anyhow!(
             "load path must end with a filename ending in '.axl'"
