@@ -35,10 +35,10 @@ impl<'a> AxlLoader<'a> {
     fn resolve_axl_module_script(
         &self,
         module_name: &str,
-        module_path: &Path,
+        module_subpath: &Path,
     ) -> starlark::Result<(PathBuf, PathBuf)> {
         let module_root = self.axl_deps_root.join(module_name);
-        let resolved_script_path = module_root.join(module_path);
+        let resolved_script_path = module_root.join(module_subpath);
         if resolved_script_path.is_file() {
             return Ok((resolved_script_path, module_root));
         }
@@ -46,7 +46,7 @@ impl<'a> AxlLoader<'a> {
             return Err(starlark::Error::new_other(anyhow!(
                 "failed to resolve load(\"@{}/{}\", ...): module '{}' not found (expected module directory at '{}')",
                 module_name,
-                module_path.display(),
+                module_subpath.display(),
                 module_name,
                 module_root.display()
             )));
@@ -54,7 +54,7 @@ impl<'a> AxlLoader<'a> {
             return Err(starlark::Error::new_other(anyhow!(
                 "failed to resolve load(\"@{}/{}\", ...): module '{}' root at '{}' exists but is not a directory",
                 module_name,
-                module_path.display(),
+                module_subpath.display(),
                 module_name,
                 module_root.display()
             )));
@@ -62,7 +62,7 @@ impl<'a> AxlLoader<'a> {
             return Err(starlark::Error::new_other(anyhow!(
                 "failed to resolve load(\"@{}/{}\", ...): script file not found in module '{}' (expected at '{}')",
                 module_name,
-                module_path.display(),
+                module_subpath.display(),
                 module_name,
                 resolved_script_path.display()
             )));
@@ -125,20 +125,20 @@ impl<'a> FileLoader for AxlLoader<'a> {
             )));
         }
 
-        let (module_name, module_or_script_path) = sanitize_load_path_lexically(load_path)?;
+        let (module_name, module_subpath_or_script_path) = sanitize_load_path_lexically(load_path)?;
 
         // Check if the @module/path/to/file.axl has been loaded before; if it has use the cached version.
         // NB: it is by design that a `root/sub/.aspect/modules/foo/foo.axl` can override
         // the load of a `root/.aspect/modules/foo/foo.axl` and of `modules_cache/foo/foo.axl` since
         // we want to allow overriding of individual files in modules as needed.
         if module_name.is_some() {
-            let module_path = format!(
+            let module_specifier = format!(
                 "@{}/{}",
                 module_name.as_ref().unwrap(),
-                module_or_script_path.display()
+                module_subpath_or_script_path.display()
             );
             if let Some(module) =
-                LOADED_MODULES.with(|modules| modules.borrow().get(&module_path).cloned())
+                LOADED_MODULES.with(|modules| modules.borrow().get(&module_specifier).cloned())
             {
                 return Ok(module);
             }
@@ -148,11 +148,11 @@ impl<'a> FileLoader for AxlLoader<'a> {
         let (resolved_script_path, module_root) = if module_name.is_some() {
             self.resolve_axl_module_script(
                 module_name.as_ref().unwrap().as_str(),
-                &module_or_script_path,
+                &module_subpath_or_script_path,
             )?
         } else {
             (
-                self.resolve_axl_script(&module_or_script_path)?,
+                self.resolve_axl_script(&module_subpath_or_script_path)?,
                 self.module_root.clone(),
             )
         };
@@ -209,15 +209,15 @@ impl<'a> FileLoader for AxlLoader<'a> {
 
         // Cache the load @module/path/to/file.axl so it can be re-used on subsequent loads
         if module_name.is_some() {
-            let module_path = format!(
+            let module_specifier = format!(
                 "@{}/{}",
                 module_name.as_ref().unwrap(),
-                module_or_script_path.display()
+                module_subpath_or_script_path.display()
             );
             LOADED_MODULES.with(|modules| {
                 modules
                     .borrow_mut()
-                    .insert(module_path, frozen_module.clone());
+                    .insert(module_specifier, frozen_module.clone());
             });
         }
 
