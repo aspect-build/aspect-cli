@@ -168,7 +168,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
 
 pub const AXL_MODULE_FILE: &str = "MODULE.aspect";
 
-pub const AXL_ROOT_MODULE_NAME: &str = "__root__";
+pub const AXL_ROOT_MODULE_NAME: &str = "root";
 
 #[allow(dead_code)]
 pub const AXL_SCRIPT_EXTENSION: &str = "axl";
