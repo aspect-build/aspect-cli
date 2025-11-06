@@ -2,11 +2,6 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::anyhow;
 
-// Constants for special directory names used in module resolution.
-// These define the structure for local modules (e.g., .aspect/axl/module_name).
-pub const ASPECT_ROOT: &str = ".aspect";
-pub const AXL_MODULE_DIR: &str = "modules";
-
 /// Validates a module name according to the following rules:
 /// - Must not be empty.
 /// - Must begin with a lowercase letter (a-z).
@@ -22,7 +17,7 @@ pub const AXL_MODULE_DIR: &str = "modules";
 pub fn validate_module_name(module_name: &str) -> starlark::Result<()> {
     if module_name.is_empty() {
         return Err(starlark::Error::new_other(anyhow!(
-            "Module name cannot be empty"
+            "module name cannot be empty"
         )));
     }
 
@@ -30,7 +25,7 @@ pub fn validate_module_name(module_name: &str) -> starlark::Result<()> {
     let first_char = module_name.chars().next().unwrap();
     if !first_char.is_ascii_lowercase() {
         return Err(starlark::Error::new_other(anyhow!(
-            "Module name must begin with a lowercase letter"
+            "module name must begin with a lowercase letter"
         )));
     }
 
@@ -38,7 +33,7 @@ pub fn validate_module_name(module_name: &str) -> starlark::Result<()> {
     let last_char = module_name.chars().last().unwrap();
     if !last_char.is_ascii_lowercase() && !last_char.is_ascii_digit() {
         return Err(starlark::Error::new_other(anyhow!(
-            "Module name must end with a lowercase letter or digit"
+            "module name must end with a lowercase letter or digit"
         )));
     }
 
@@ -47,7 +42,7 @@ pub fn validate_module_name(module_name: &str) -> starlark::Result<()> {
     for c in module_name.chars() {
         if !allowed.contains(c) {
             return Err(starlark::Error::new_other(anyhow!(
-                "Module name contains invalid character: '{}'",
+                "module name contains invalid character: '{}'",
                 c
             )));
         }
@@ -56,110 +51,116 @@ pub fn validate_module_name(module_name: &str) -> starlark::Result<()> {
     Ok(())
 }
 
+/// Enum representing a sanitized load path, which can be:
+/// - A full module specifier like "@module_name//path/to/file.axl".
+/// - A module subpath like "path/to/file.axl".
+/// - A relative path like "./path/to/file.axl" or "../path/to/file.axl".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadPath {
+    ModuleSpecifier { module: String, subpath: PathBuf },
+    ModuleSubpath(PathBuf),
+    RelativePath(PathBuf),
+}
+
 /// Sanitizes a load path string according to various rules and extracts components.
 /// Rules include:
 /// - No leading or trailing whitespace.
 /// - Does not start with '/'.
 /// - No '\' separators.
-/// - No double '//' separators.
+/// - No double '//' separators except as the module separator in full module specifiers.
 /// - Does not start with '@@'.
-/// - Must contain at least one '/' and end with '/filename.axl'.
-/// - If starts with '@', validates the module name after '@' and before first '/'.
-/// - Validates each path segment after the module (if present) as a valid filename.
+/// - Must end with a filename ending in '.axl'.
+/// - If a full module specifier (starts with '@module_name//'), validates the module name after '@' and before '//'.
+/// - Validates each path segment in the subpath as a valid filename.
 /// - Allows starting with a single './' and zero or more '../' in the initial relative prefix, but no multiple '.' segments and no '.' or '..' after normal segments.
 ///
 /// # Arguments
 /// * `load_path` - The load path string to validate.
 ///
 /// # Returns
-/// * `Ok((Option<String>, PathBuf))` where the first element is the module name if present,
-///   and the second is the normalized path with the module prefix stripped (if it was present).
+/// * `Ok(LoadPath)` containing the parsed and normalized load path.
 /// * `Err(starlark::Error)` with a descriptive error if any validation fails.
-pub fn sanitize_load_path_lexically(
-    load_path: &str,
-) -> starlark::Result<(Option<String>, PathBuf)> {
+pub fn sanitize_load_path_lexically(load_path: &str) -> starlark::Result<LoadPath> {
     if load_path.trim() != load_path {
         return Err(starlark::Error::new_other(anyhow!(
-            "Paths starting or ending with whitespace are disallowed"
+            "paths starting or ending with whitespace are disallowed"
         )));
     }
 
     if load_path.starts_with('/') {
         return Err(starlark::Error::new_other(anyhow!(
-            "Paths starting with '/' are disallowed"
+            "paths starting with '/' are disallowed"
         )));
     }
 
     if load_path.contains('\\') {
         return Err(starlark::Error::new_other(anyhow!(
-            "Paths containing '\\' separators are disallowed"
-        )));
-    }
-
-    if load_path.contains("//") {
-        return Err(starlark::Error::new_other(anyhow!(
-            "Load paths with double slashes '//' are disallowed"
+            "paths containing '\\' separators are disallowed"
         )));
     }
 
     if load_path.starts_with("@@") {
         return Err(starlark::Error::new_other(anyhow!(
-            "Paths starting with '@@' are disallowed"
+            "paths starting with '@@' are disallowed"
         )));
     }
 
-    // Check that the path ends with /filename.axl
-    let last_slash_pos = match load_path.rfind('/') {
-        Some(pos) => pos,
-        None => {
-            return Err(starlark::Error::new_other(anyhow!(
-                "Load path must contain at least one '/' separator and end with a filename ending in '.axl'"
-            )));
-        }
+    // Extract the filename as the part after the last '/', or the whole path if no '/'
+    let filename = match load_path.rfind('/') {
+        Some(pos) => &load_path[(pos + 1)..],
+        None => &load_path,
     };
-    let filename = &load_path[(last_slash_pos + 1)..];
     if filename.is_empty() || !filename.ends_with(".axl") {
         return Err(starlark::Error::new_other(anyhow!(
-            "Load path must end with a filename ending in '.axl'"
+            "load path must end with a filename ending in '.axl'"
         )));
     }
 
     let (module_name_option, path_to_validate): (Option<String>, &str) =
         if load_path.starts_with('@') {
-            // Must have at least one / (already checked via rfind above)
+            if let Some(double_pos) = load_path.find("//") {
+                let candidate_module = &load_path[1..double_pos];
+                if candidate_module.find('/').is_none() {
+                    validate_module_name(candidate_module)?;
 
-            // Extract module_name: between @ and first /
-            let first_slash_pos = load_path.find('/').unwrap(); // Safe due to prior check
-            let module_name = &load_path[1..first_slash_pos];
-
-            validate_module_name(module_name)?;
-
-            (
-                Some(module_name.to_string()),
-                &load_path[(first_slash_pos + 1)..],
-            )
+                    (
+                        Some(candidate_module.to_string()),
+                        &load_path[(double_pos + 2)..],
+                    )
+                } else {
+                    (None, load_path)
+                }
+            } else {
+                (None, load_path)
+            }
         } else {
             (None, load_path)
         };
 
+    // Check for disallowed double slashes
+    if module_name_option.is_some() {
+        if path_to_validate.contains("//") {
+            return Err(starlark::Error::new_other(anyhow!(
+                "load paths with double slashes '//' are disallowed except for the module separator"
+            )));
+        }
+    } else {
+        if load_path.contains("//") {
+            return Err(starlark::Error::new_other(anyhow!(
+                "load paths with double slashes '//' are disallowed"
+            )));
+        }
+    }
+
     // Validate path segments after module (if present)
     let mut allowing_relative = true;
     let mut seen_dot = false;
-    let mut aspect_root_count = 0;
     for segment in path_to_validate.split('/') {
-        if segment == ASPECT_ROOT {
-            aspect_root_count += 1;
-            if aspect_root_count > 1 {
-                return Err(starlark::Error::new_other(anyhow!(
-                    "Load paths with multiple '{ASPECT_ROOT}' segments are disallowed"
-                )));
-            }
-        }
         if allowing_relative {
             if segment == "." {
                 if seen_dot {
                     return Err(starlark::Error::new_other(anyhow!(
-                        "Multiple '.' relative segments are disallowed"
+                        "multiple '.' relative segments are disallowed"
                     )));
                 }
                 seen_dot = true;
@@ -174,10 +175,21 @@ pub fn sanitize_load_path_lexically(
         validate_path_segment(segment)?;
     }
 
-    Ok((
-        module_name_option,
-        normalize_load_path_lexically(Path::new(path_to_validate)),
-    ))
+    let normalized_path = normalize_rel_path_lexically(Path::new(path_to_validate));
+
+    if let Some(module) = module_name_option {
+        Ok(LoadPath::ModuleSpecifier {
+            module,
+            subpath: normalized_path,
+        })
+    } else {
+        let first_comp = normalized_path.components().next();
+        if matches!(first_comp, Some(Component::CurDir | Component::ParentDir)) {
+            Ok(LoadPath::RelativePath(normalized_path))
+        } else {
+            Ok(LoadPath::ModuleSubpath(normalized_path))
+        }
+    }
 }
 
 /// Normalizes an absolute path by removing redundant '.' components and resolving '..' components against preceding normal components where possible.
@@ -195,7 +207,7 @@ pub fn sanitize_load_path_lexically(
 pub fn normalize_abs_path_lexically(path: &Path) -> starlark::Result<PathBuf> {
     if !path.is_absolute() {
         return Err(starlark::Error::new_other(anyhow!(
-            "Path is not absolute: {}",
+            "path is not absolute: {}",
             path.display()
         )));
     }
@@ -204,14 +216,14 @@ pub fn normalize_abs_path_lexically(path: &Path) -> starlark::Result<PathBuf> {
 
     if iter.next() != Some(Component::RootDir) {
         return Err(starlark::Error::new_other(anyhow!(
-            "Path does not start with root directory"
+            "path does not start with root directory"
         )));
     }
 
     let next = iter.next();
     if matches!(next, Some(Component::CurDir) | Some(Component::ParentDir)) {
         return Err(starlark::Error::new_other(anyhow!(
-            "Absolute path starts with invalid segment '.' or '..'"
+            "absolute path starts with invalid segment '.' or '..'"
         )));
     }
 
@@ -247,7 +259,7 @@ pub fn normalize_abs_path_lexically(path: &Path) -> starlark::Result<PathBuf> {
 /// Unresolvable '..' components (e.g., at the beginning or following other '..') are preserved to maintain the relative nature of the path.
 /// If the original path starts with './' and the normalized path does not begin with '.' or '..', the leading './' is preserved for explicit current directory reference.
 /// This normalization is purely syntactic and does not interact with the filesystem.
-fn normalize_load_path_lexically(path: &Path) -> PathBuf {
+fn normalize_rel_path_lexically(path: &Path) -> PathBuf {
     let starts_with_cur = path.components().next() == Some(Component::CurDir);
 
     let mut components = Vec::new();
@@ -300,27 +312,27 @@ fn normalize_load_path_lexically(path: &Path) -> PathBuf {
 fn validate_path_segment(segment: &str) -> starlark::Result<()> {
     if segment.is_empty() {
         return Err(starlark::Error::new_other(anyhow!(
-            "Empty path segment disallowed"
+            "empty path segment disallowed"
         )));
     }
 
     if segment.trim() != segment {
         return Err(starlark::Error::new_other(anyhow!(
-            "Path segment '{}' contains leading or trailing whitespace, which is disallowed for cross-platform safety",
+            "path segment '{}' contains leading or trailing whitespace, which is disallowed for cross-platform safety",
             segment
         )));
     }
 
     if segment.as_bytes().len() > 255 {
         return Err(starlark::Error::new_other(anyhow!(
-            "Path segment '{}' exceeds 255 bytes",
+            "path segment '{}' exceeds 255 bytes",
             segment
         )));
     }
 
     if segment.ends_with(' ') || segment.ends_with('.') {
         return Err(starlark::Error::new_other(anyhow!(
-            "Path segment '{}' ends with disallowed character (space or dot)",
+            "path segment '{}' ends with disallowed character (space or dot)",
             segment
         )));
     }
@@ -339,7 +351,7 @@ fn validate_path_segment(segment: &str) -> starlark::Result<()> {
     ];
     if reserved.contains(&base) {
         return Err(starlark::Error::new_other(anyhow!(
-            "Reserved name '{}' disallowed in path segment",
+            "reserved name '{}' disallowed in path segment",
             segment
         )));
     }
@@ -347,7 +359,7 @@ fn validate_path_segment(segment: &str) -> starlark::Result<()> {
     for c in segment.chars() {
         if c.is_control() || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
             return Err(starlark::Error::new_other(anyhow!(
-                "Invalid character '{}' in path segment '{}'",
+                "invalid character '{}' in path segment '{}'",
                 c,
                 segment
             )));

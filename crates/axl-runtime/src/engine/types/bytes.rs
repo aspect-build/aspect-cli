@@ -17,7 +17,7 @@ use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<bytes>")]
+#[display("<Bytes>")]
 pub struct Bytes {
     #[allocative(skip)]
     buf: ArcBytes,
@@ -37,7 +37,7 @@ impl<'v> AllocValue<'v> for Bytes {
     }
 }
 
-#[starlark_value(type = "bytes")]
+#[starlark_value(type = "Bytes")]
 impl<'v> StarlarkValue<'v> for Bytes {
     // Spec: The built-in len function returns the number of elements (bytes) in a bytes.
     fn length(&self) -> starlark::Result<i32> {

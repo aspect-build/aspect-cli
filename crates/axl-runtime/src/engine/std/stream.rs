@@ -102,7 +102,7 @@ impl From<Stderr> for Writable {
     }
 }
 
-#[starlark_value(type = "readable")]
+#[starlark_value(type = "std.io.Readable")]
 impl<'v> values::StarlarkValue<'v> for Readable {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -114,7 +114,7 @@ impl<'v> values::StarlarkValue<'v> for Readable {
         _me: values::Value<'v>,
         heap: &'v Heap,
     ) -> starlark::Result<values::Value<'v>> {
-        Ok(heap.alloc_simple(stream_iter::ReadIterable::new(self.dupe())))
+        Ok(heap.alloc_simple(stream_iter::ReadIterator::new(self.dupe())))
     }
 }
 
@@ -168,7 +168,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-#[starlark_value(type = "writable")]
+#[starlark_value(type = "std.io.Writeble")]
 impl<'v> values::StarlarkValue<'v> for Writable {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

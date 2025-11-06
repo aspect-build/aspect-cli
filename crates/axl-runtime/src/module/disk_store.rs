@@ -194,8 +194,8 @@ impl DiskStore {
                         Dep::Local(AxlLocalDep {
                             name: name,
                             path: path,
-                            // Builtins are always autoused
-                            autouse: true,
+                            // Builtins tasks are always auto used
+                            auto_use_tasks: true,
                         }),
                     )
                 })
@@ -210,10 +210,10 @@ impl DiskStore {
             let dep_path = self.dep_path(&dep.name());
 
             match dep {
-                Dep::Local(local) if local.autouse => {
+                Dep::Local(local) if local.auto_use_tasks => {
                     module_roots.push((local.name.clone(), dep_path.clone()))
                 }
-                Dep::Remote(remote) if remote.autouse => {
+                Dep::Remote(remote) if remote.auto_use_tasks => {
                     module_roots.push((remote.name.clone(), dep_path.clone()))
                 }
                 _ => {}
@@ -236,7 +236,6 @@ impl DiskStore {
             if !dep_path.exists() {
                 match dep {
                     Dep::Local(local) => {
-                        eprintln!("hit");
                         self.link_dep(local)
                             .await
                             .map_err(|err| StoreError::LinkError(err))?;

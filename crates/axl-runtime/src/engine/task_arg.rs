@@ -46,7 +46,7 @@ pub enum TaskArg {
 }
 
 /// Documentation here
-#[starlark_value(type = "task_arg")]
+#[starlark_value(type = "args.TaskArg")]
 impl<'v> StarlarkValue<'v> for TaskArg {}
 
 starlark_simple_value!(TaskArg);
@@ -54,12 +54,12 @@ starlark_simple_value!(TaskArg);
 impl Display for TaskArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::String { .. } => write!(f, "<task_arg: string>"),
-            Self::Boolean { .. } => write!(f, "<task_arg: boolean>"),
-            Self::Int { .. } => write!(f, "<task_arg: int>"),
-            Self::UInt { .. } => write!(f, "<task_arg: uint>"),
-            Self::Positional { .. } => write!(f, "<task_arg: positional>"),
-            Self::TrailingVarArgs => write!(f, "<task_arg: trailing variable arguments>"),
+            Self::String { .. } => write!(f, "<args.TaskArg: string>"),
+            Self::Boolean { .. } => write!(f, "<args.TaskArg: boolean>"),
+            Self::Int { .. } => write!(f, "<args.TaskArg: int>"),
+            Self::UInt { .. } => write!(f, "<args.TaskArg: uint>"),
+            Self::Positional { .. } => write!(f, "<args.TaskArg: positional>"),
+            Self::TrailingVarArgs => write!(f, "<args.TaskArg: trailing variable arguments>"),
         }
     }
 }
@@ -72,13 +72,9 @@ impl<'v> UnpackValue<'v> for TaskArg {
     }
 }
 
-pub fn register_toplevels(b: &mut GlobalsBuilder) {
-    b.namespace("args", register_task_args_toplevels);
-}
-
 #[starlark_module]
-pub fn register_task_args_toplevels(_: &mut GlobalsBuilder) {
-    const args: StarlarkValueAsType<TaskArg> = StarlarkValueAsType::new();
+pub fn register_globals(globals: &mut GlobalsBuilder) {
+    const Args: StarlarkValueAsType<TaskArg> = StarlarkValueAsType::new();
 
     /// Defines a positional argument that accepts a range of values, with a required minimum
     /// number of values and an optional maximum number of values.

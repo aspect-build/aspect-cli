@@ -64,13 +64,13 @@ fn liquid_render(template: &str, data: &JsonValue) -> anyhow::Result<String> {
     let globals = if let LiquidValue::Object(obj) = json_to_liquid(data) {
         obj
     } else {
-        return Err(anyhow::anyhow!("Data is not an object"));
+        return Err(anyhow::anyhow!("data is not an object"));
     };
     template.render(&globals).map_err(|e| anyhow::anyhow!(e))
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<template>")]
+#[display("<Template>")]
 pub struct Template {}
 
 impl Template {
@@ -81,7 +81,7 @@ impl Template {
 
 starlark_simple_value!(Template);
 
-#[starlark_value(type = "template")]
+#[starlark_value(type = "Template")]
 impl<'v> StarlarkValue<'v> for Template {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

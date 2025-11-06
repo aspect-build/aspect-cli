@@ -24,12 +24,12 @@ mod stream;
 mod stream_iter;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<std>")]
+#[display("<std.Std>")]
 pub struct Std {}
 
 starlark_simple_value!(Std);
 
-#[starlark_value(type = "std")]
+#[starlark_value(type = "std.Std")]
 impl<'v> values::StarlarkValue<'v> for Std {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -61,31 +61,31 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
 }
 
 #[starlark_module]
-fn toplevels(builder: &mut GlobalsBuilder) {
-    const std: StarlarkValueAsType<Std> = StarlarkValueAsType::new();
-
-    const fs: StarlarkValueAsType<fs::Filesystem> = StarlarkValueAsType::new();
-    const env: StarlarkValueAsType<env::Env> = StarlarkValueAsType::new();
+fn register_types(globals: &mut GlobalsBuilder) {
+    const Env: StarlarkValueAsType<env::Env> = StarlarkValueAsType::new();
+    const FileSystem: StarlarkValueAsType<fs::Filesystem> = StarlarkValueAsType::new();
+    const Std: StarlarkValueAsType<Std> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]
-fn process_toplevels(builder: &mut GlobalsBuilder) {
-    const process: StarlarkValueAsType<process::Process> = StarlarkValueAsType::new();
-    const child: StarlarkValueAsType<process::Child> = StarlarkValueAsType::new();
-    const command: StarlarkValueAsType<process::Command> = StarlarkValueAsType::new();
-    const exit_status: StarlarkValueAsType<process::ExitStatus> = StarlarkValueAsType::new();
-    const output: StarlarkValueAsType<process::Output> = StarlarkValueAsType::new();
+fn register_process_types(globals: &mut GlobalsBuilder) {
+    const Child: StarlarkValueAsType<process::Child> = StarlarkValueAsType::new();
+    const Command: StarlarkValueAsType<process::Command> = StarlarkValueAsType::new();
+    const ExitStatus: StarlarkValueAsType<process::ExitStatus> = StarlarkValueAsType::new();
+    const Output: StarlarkValueAsType<process::Output> = StarlarkValueAsType::new();
+    const Process: StarlarkValueAsType<process::Process> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]
-fn io_toplevels(builder: &mut GlobalsBuilder) {
+fn register_io_types(globals: &mut GlobalsBuilder) {
+    const Readable: StarlarkValueAsType<stream::Readable> = StarlarkValueAsType::new();
     const Stdio: StarlarkValueAsType<io::Stdio> = StarlarkValueAsType::new();
-    const WritebleStream: StarlarkValueAsType<stream::Writable> = StarlarkValueAsType::new();
-    const ReadableStream: StarlarkValueAsType<stream::Readable> = StarlarkValueAsType::new();
+    const Writeble: StarlarkValueAsType<stream::Writable> = StarlarkValueAsType::new();
 }
 
-pub fn register_toplevels(builder: &mut GlobalsBuilder) {
-    toplevels(builder);
-    builder.namespace("process", process_toplevels);
-    builder.namespace("io", io_toplevels);
+pub fn register_globals(globals: &mut GlobalsBuilder) {
+    register_types(globals);
+
+    globals.namespace("process", register_process_types);
+    globals.namespace("io", register_io_types);
 }

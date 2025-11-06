@@ -50,12 +50,12 @@ async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Reque
         .try_next()
         .await
         .into_diagnostic()
-        .wrap_err("Failed to stream content")?
+        .wrap_err("failed to stream content")?
     {
         tokio::io::copy(&mut item.as_ref(), &mut tmp_writer)
             .await
             .into_diagnostic()
-            .wrap_err("Failed to slab stream to file")?;
+            .wrap_err("failed to slab stream to file")?;
     }
 
     // And move it into the cache
@@ -151,7 +151,7 @@ async fn configure_tool_task(
 
         if tool_dest_file.exists() {
             if debug_mode() {
-                eprintln!("Tool {tool:?} already in cache");
+                eprintln!("tool {tool:?} already in cache");
             };
             return Ok(());
         }
@@ -228,7 +228,7 @@ async fn configure_tool_task(
                         }
                     }
                     errs.push(Err(miette!(
-                        "Unable to find a matching release artifact in github!"
+                        "unable to find a matching release artifact in github!"
                     )));
                     continue;
                 }
@@ -257,14 +257,14 @@ async fn configure_tool_task(
             }
             if tool_dest_file.exists() {
                 if debug_mode() {
-                    eprintln!("Hit in {source:?}");
+                    eprintln!("hit in {source:?}");
                 };
                 return Ok(());
             }
         }
 
         Err(miette!(format!(
-            "Exhausted tool sources {:?}; errors occurred {:?}",
+            "exhausted tool sources {:?}; errors occurred {:?}",
             tool.sources(),
             errs
         )))
@@ -369,20 +369,20 @@ fn main() -> Result<ExitCode> {
                 // Wait for fetches
                 let cli = &config.tools.cli;
                 if debug_mode() {
-                    eprintln!("Attempting to provision {cli:?}");
+                    eprintln!("attempting to provision {cli:?}");
                 };
 
                 let _: Result<()> = cli_task.await.into_diagnostic()?;
 
                 let bazelisk = &config.tools.bazelisk;
                 if debug_mode() {
-                    eprintln!("Attempting to provision {bazelisk:?}");
+                    eprintln!("attempting to provision {bazelisk:?}");
                 };
                 let _: Result<()> = bazelisk_task.await.into_diagnostic()?;
 
                 let path = cache.tool_path(&config.tools.cli);
                 if debug_mode() {
-                    eprintln!("Attempting to run {path:?}");
+                    eprintln!("attempting to run {path:?}");
                 };
 
                 // Punt
@@ -392,7 +392,7 @@ fn main() -> Result<ExitCode> {
                 };
                 let err = cmd.exec();
                 Err::<(), _>(miette!(format!(
-                    "Failed to punt to the `aspect-cli`, {:?}",
+                    "failed to punt to the `aspect-cli`, {:?}",
                     err
                 )))
             })?;

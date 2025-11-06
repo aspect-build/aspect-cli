@@ -1,0 +1,10 @@
+def _impl(ctx):
+    print("I am an auto-discovered task in .aspect/user-task.axl")
+    return 0
+
+user_task = task(
+    name = "user-task",
+    group = ["user"],
+    implementation = _impl,
+    args = {},
+)

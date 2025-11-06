@@ -20,10 +20,11 @@ use crate::module::AxlLocalDep;
 use crate::module::Dep;
 
 use super::super::eval::EvalError;
+use super::super::helpers::validate_module_name;
 use super::store::{AxlArchiveDep, ModuleStore};
 
 #[starlark_module]
-pub fn register_toplevels(_: &mut GlobalsBuilder) {
+pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn axl_dep<'v>(
         #[allow(unused)]
         #[starlark(require = named)]
@@ -64,19 +65,30 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
         #[starlark(require = named)] integrity: String,
         #[starlark(require = named)] urls: UnpackList<String>,
         #[starlark(require = named)] dev: bool,
-        #[starlark(require = named)] autouse: bool,
+        #[starlark(require = named)] auto_use_tasks: bool,
         #[starlark(require = named, default = String::new())] strip_prefix: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
-        if !dev {
-            anyhow::bail!("axl_dep does not support transitive dependencies yet.");
+        if name == AXL_ROOT_MODULE_NAME {
+            anyhow::bail!(
+                "axl_archive_dep name {:?} not allowed.",
+                AXL_ROOT_MODULE_NAME
+            );
         }
+        validate_module_name(&name).map_err(|e| e.into_anyhow())?;
+
+        if !dev {
+            anyhow::bail!("axl_archive_dep does not support transitive dependencies yet.");
+        }
+
         for url in &urls.items {
             if !url.ends_with(".tar.gz") {
                 anyhow::bail!("only .tar.gz archives are supported at the moment.")
             }
         }
+
         let store = ModuleStore::from_eval(eval)?;
+
         let prev_dep = store.deps.borrow_mut().insert(
             name.clone(),
             Dep::Remote(AxlArchiveDep {
@@ -85,7 +97,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
                 urls: urls.items,
                 integrity: integrity.parse()?,
                 dev: true,
-                autouse,
+                auto_use_tasks,
             }),
         );
 
@@ -99,14 +111,19 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
     fn axl_local_dep<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] path: String,
-        #[starlark(require = named)] autouse: bool,
+        #[starlark(require = named)] auto_use_tasks: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
+        if name == AXL_ROOT_MODULE_NAME {
+            anyhow::bail!("axl_local_dep name {:?} not allowed.", AXL_ROOT_MODULE_NAME);
+        }
+        validate_module_name(&name).map_err(|e| e.into_anyhow())?;
+
         let store = ModuleStore::from_eval(eval)?;
 
         let mut abs_path = PathBuf::from(path);
         if !abs_path.is_absolute() {
-            abs_path = store.root_repo_path.join(&abs_path).canonicalize()?;
+            abs_path = store.repo_root.join(&abs_path).canonicalize()?;
         }
 
         let metadata = abs_path
@@ -122,7 +139,7 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
             Dep::Local(AxlLocalDep {
                 name: name.clone(),
                 path: abs_path,
-                autouse,
+                auto_use_tasks,
             }),
         );
 
@@ -149,7 +166,12 @@ pub fn register_toplevels(_: &mut GlobalsBuilder) {
     }
 }
 
-pub const BOUNDARY_FILE: &str = "MODULE.aspect";
+pub const AXL_MODULE_FILE: &str = "MODULE.aspect";
+
+pub const AXL_ROOT_MODULE_NAME: &str = "root";
+
+#[allow(dead_code)]
+pub const AXL_SCRIPT_EXTENSION: &str = "axl";
 
 /// Returns a GlobalsBuilder for MODULE.aspect specific AXL globals, extending
 /// various Starlark library extensions with custom top-level functions.
@@ -173,21 +195,21 @@ pub fn get_globals() -> Globals {
         LibraryExtension::StructType,
         LibraryExtension::Typing,
     ]);
-    globals.with(register_toplevels).build()
+    globals.with(register_globals).build()
 }
 
 /// Evaluator for MODULE.aspect
 #[derive(Debug)]
 pub struct AxlModuleEvaluator {
-    root_repo_path: PathBuf,
+    repo_root: PathBuf,
     dialect: Dialect,
     globals: Globals,
 }
 
 impl AxlModuleEvaluator {
-    pub fn new(root_repo_path: PathBuf) -> Self {
+    pub fn new(repo_root: PathBuf) -> Self {
         Self {
-            root_repo_path,
+            repo_root,
             dialect: AxlModuleEvaluator::dialect(),
             globals: get_globals(),
         }
@@ -211,22 +233,27 @@ impl AxlModuleEvaluator {
 
     pub fn evaluate(
         &self,
-        repo_name: String,
-        repo_root: PathBuf,
+        module_name: String,
+        module_root: PathBuf,
     ) -> Result<ModuleStore, EvalError> {
-        let name = if repo_root == self.root_repo_path {
-            BOUNDARY_FILE.to_string()
+        let is_root_module = module_name == AXL_ROOT_MODULE_NAME;
+        let axl_filename = if is_root_module {
+            AXL_MODULE_FILE.to_string()
         } else {
-            repo_root.join(BOUNDARY_FILE).to_string_lossy().to_string()
+            module_root
+                .join(AXL_MODULE_FILE)
+                .to_string_lossy()
+                .to_string()
         };
 
-        let boundary_path = &repo_root.join(BOUNDARY_FILE);
+        let module_boundary_path = &module_root.join(AXL_MODULE_FILE);
 
-        let store = ModuleStore::new(repo_name, repo_root, self.root_repo_path.to_path_buf());
+        let store = ModuleStore::new(self.repo_root.to_path_buf(), module_name, module_root);
 
-        if boundary_path.exists() {
-            let contents = fs::read_to_string(boundary_path)?;
-            let ast = AstModule::parse(&name, contents, &self.dialect)?;
+        if module_boundary_path.exists() {
+            let contents = fs::read_to_string(module_boundary_path)?;
+
+            let ast = AstModule::parse(&axl_filename, contents, &self.dialect)?;
 
             {
                 let module = Module::new();

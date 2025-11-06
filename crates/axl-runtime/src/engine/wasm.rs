@@ -35,7 +35,7 @@ use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 
 #[derive(Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<wasm_memory>")]
+#[display("<wasm.WasmMemory>")]
 pub struct WasmMemory {
     #[allocative(skip)]
     store: Rc<RefCell<wasmi::Store<WasiCtx>>>,
@@ -45,13 +45,13 @@ pub struct WasmMemory {
 
 impl Debug for WasmMemory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WasmMemory")
+        f.debug_struct("wasm.WasmMemory")
             .field("memory", &self.memory)
             .finish()
     }
 }
 
-#[starlark_value(type = "wasm_memory")]
+#[starlark_value(type = "wasm.WasmMemory")]
 impl<'v> values::StarlarkValue<'v> for WasmMemory {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -100,7 +100,7 @@ impl<'v> AllocValue<'v> for WasmMemory {
 }
 
 #[derive(Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<wasm_callable>")]
+#[display("<wasm.WasmCallable>")]
 pub struct WasmCallable {
     name: String,
     #[allocative(skip)]
@@ -111,13 +111,13 @@ pub struct WasmCallable {
 
 impl Debug for WasmCallable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WasmCallable")
+        f.debug_struct("wasm.WasmCallable")
             .field("instance", &self.instance)
             .finish()
     }
 }
 
-#[starlark_value(type = "wasm_callable")]
+#[starlark_value(type = "wasm.WasmCallable")]
 impl<'v> values::StarlarkValue<'v> for WasmCallable {
     fn invoke(
         &self,
@@ -234,7 +234,7 @@ impl<'v> AllocValue<'v> for WasmCallable {
 }
 
 #[derive(Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<wasm_binary.exports>")]
+#[display("<warm.WasmExports>")]
 pub struct WasmExports {
     #[allocative(skip)]
     module: Rc<RefCell<wasmi::Module>>,
@@ -246,14 +246,14 @@ pub struct WasmExports {
 
 impl Debug for WasmExports {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WasmInstanceExports")
+        f.debug_struct("wasm.WasmExports")
             .field("module", &self.module)
             .field("instance", &self.instance)
             .finish()
     }
 }
 
-#[starlark_value(type = "wasm_binary.exports")]
+#[starlark_value(type = "wasm.WasmExports")]
 impl<'v> values::StarlarkValue<'v> for WasmExports {
     fn get_attr(&self, _attribute: &str, heap: &'v Heap) -> Option<Value<'v>> {
         Some(heap.alloc(WasmCallable {
@@ -271,7 +271,7 @@ impl<'v> AllocValue<'v> for WasmExports {
 }
 
 #[derive(Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<wasm_binary>")]
+#[display("<wasm.WasmInstance>")]
 pub struct WasmInstance {
     #[allocative(skip)]
     module: Rc<RefCell<wasmi::Module>>,
@@ -283,14 +283,14 @@ pub struct WasmInstance {
 
 impl Debug for WasmInstance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WasmInstance")
+        f.debug_struct("wasm.WasmInstance")
             .field("module", &self.module)
             .field("instance", &self.instance)
             .finish()
     }
 }
 
-#[starlark_value(type = "wasm_binary")]
+#[starlark_value(type = "wasm.WasmInstance")]
 impl<'v> values::StarlarkValue<'v> for WasmInstance {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -347,7 +347,7 @@ pub(crate) fn wasm_instance_methods(registry: &mut MethodsBuilder) {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<wasm>")]
+#[display("<wasm.Wasm>")]
 pub struct Wasm {}
 
 impl Wasm {
@@ -356,7 +356,7 @@ impl Wasm {
     }
 }
 
-#[starlark_value(type = "Wasm")]
+#[starlark_value(type = "wasm.Wasm")]
 impl<'v> values::StarlarkValue<'v> for Wasm {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

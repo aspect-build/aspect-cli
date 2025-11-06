@@ -1,6 +1,6 @@
-use_task("./build.axl", "build")
-use_task("./test.axl", "test")
-use_task("./query.axl", "query")
+use_task("build.axl", "build")
+use_task("test.axl", "test")
+use_task("query.axl", "query")
 # TODO: aquery
 # TODO: cquery
 # TODO: bazel escape hatch

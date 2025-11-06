@@ -10,7 +10,7 @@ Improvements over 'bazel build' command:
 
 load("./common.axl", "tui")
 
-def impl(ctx: task_context) -> int:
+def impl(ctx: TaskContext) -> int:
     stdout = ctx.std.io.stdout
     stderr = ctx.std.io.stderr
 

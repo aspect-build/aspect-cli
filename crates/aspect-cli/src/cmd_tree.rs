@@ -1,100 +1,161 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
-use axl_runtime::engine::task::TaskLike;
+use axl_runtime::engine::task::{TaskLike, MAX_TASK_GROUPS};
 use clap::{Arg, ArgMatches, Command};
 use thiserror::Error;
 
-const COMMAND_PATH_ID: &'static str = "@@@__AXL__PATH__@@@";
+const TASK_COMMAND_PATH_ID: &'static str = "@@@__AXL__PATH__@@@";
+const TASK_COMMAND_SYMBOL_ID: &'static str = "@@@__AXL__SYMBOL__@@@";
+
+// Clap's help generation sorts by (display_order, name)—-equal display_order values fall back to name-based sorting.
+const TASK_COMMAND_DISPLAY_ORDER: usize = 0;
+const TASK_GROUP_DISPLAY_ORDER: usize = 1;
+pub const BUILTIN_COMMAND_DISPLAY_ORDER: usize = 2;
 
 #[derive(Default)]
 pub struct CommandTree {
-    // mapping of task group to tree that contains subcommand.
+    // mapping of task subgroup to tree that contains subcommand.
     pub(crate) subgroups: HashMap<String, CommandTree>,
     // mapping of task name to the path that defines the task
-    pub(crate) subtasks: HashMap<String, Command>,
+    pub(crate) tasks: HashMap<String, Command>,
 }
 
 #[derive(Error, Debug)]
 pub enum TreeError {
-    #[error("task '{0}' clashes with a subgroup")]
-    TaskSubgroupConflict(String),
+    #[error(
+        "task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined group"
+    )]
+    TaskGroupConflict(String, Vec<String>, String),
 
-    #[error("group name '{0}' clashes with a task ")]
-    GroupConflictTask(String),
+    #[error("group {0:?} from task {1:?} in group {2:?} (defined in {3:?}) conflicts with a previously defined task")]
+    GroupConflictTask(String, String, Vec<String>, String),
 
-    #[error("duplicate task '{0}'")]
-    DuplicateTask(String),
+    #[error(
+        "task {0:?} in group {1:?} (defined in {2:?}) conflicts with a previously defined task"
+    )]
+    TaskConflict(String, Vec<String>, String),
 
-    #[error("task '{0}' defined in {1:?} cannot have more than 5 group levels.")]
-    TooManyGroups(String, PathBuf),
+    #[error("task {0:?} (defined in {1:?}) cannot have more than {2:?} group levels")]
+    TooManyGroups(String, String, usize),
+
+    #[error("task {0:?} in group {1:?} conflicts with a previously defined command")]
+    TaskCommandConflict(String, Vec<String>),
+
+    #[error("group {0:?} conflicts with a previously defined command")]
+    GroupCommandConflict(Vec<String>),
 }
 
 impl CommandTree {
     pub fn insert(
         &mut self,
-        groups: &[String],
-        name: String,
-        path: &PathBuf,
+        name: &str,
+        group: &[String],
+        subgroup: &[String],
+        path: &String,
         cmd: Command,
     ) -> Result<(), TreeError> {
-        if groups.len() > 5 {
-            return Err(TreeError::TooManyGroups(name, path.clone()));
+        if group.len() > MAX_TASK_GROUPS {
+            // This error is a defence-in-depth as the task evaluator should check for MAX_TASK_GROUPS
+            return Err(TreeError::TooManyGroups(
+                name.to_string(),
+                path.clone(),
+                MAX_TASK_GROUPS,
+            ));
         }
-        if groups.is_empty() {
-            if self.subgroups.contains_key(&name) {
-                return Err(TreeError::TaskSubgroupConflict(name.clone()));
+        if subgroup.is_empty() {
+            if self.subgroups.contains_key(name) {
+                return Err(TreeError::TaskGroupConflict(
+                    name.to_string(),
+                    group.to_vec(),
+                    path.clone(),
+                ));
             }
-            if self.subtasks.insert(name.clone(), cmd).is_some() {
-                return Err(TreeError::DuplicateTask(name.clone()));
+            if self.tasks.insert(name.to_string(), cmd).is_some() {
+                return Err(TreeError::TaskConflict(
+                    name.to_string(),
+                    group.to_vec(),
+                    path.clone(),
+                ));
             }
         } else {
-            let first = &groups[0];
-            if self.subtasks.contains_key(first) {
-                return Err(TreeError::GroupConflictTask(first.clone()));
+            let first = &subgroup[0];
+            if self.tasks.contains_key(first) {
+                return Err(TreeError::GroupConflictTask(
+                    first.clone(),
+                    name.to_string(),
+                    group.to_vec(),
+                    path.clone(),
+                ));
             }
             let subtree = self.subgroups.entry(first.clone()).or_default();
-            subtree.insert(&groups[1..], name, path, cmd)?;
+            subtree.insert(name, group, &subgroup[1..], path, cmd)?;
         }
         Ok(())
     }
 
-    pub fn as_command(&self, mut current: Command) -> Command {
+    pub fn as_command(&self, mut current: Command, group: &[String]) -> Result<Command, TreeError> {
         // Collect all subcommand names (groups and tasks) and sort them alphabetically
 
         for (name, subtree) in &self.subgroups {
-            let mut subcmd = Command::new(name.clone());
-            subcmd = subtree.as_command(subcmd);
-            // If the group has subcommands or tasks, require a subcommand
-            if !subtree.subgroups.is_empty() || !subtree.subtasks.is_empty() {
-                subcmd = subcmd.subcommand_required(true);
+            let mut group = group.to_vec();
+            group.push(name.clone());
+            if current.find_subcommand(name).is_some() {
+                return Err(TreeError::GroupCommandConflict(group.to_vec()));
+            }
+            let mut subcmd = Command::new(name.clone())
+                // customize the subcommands section title to "Tasks:"
+                .subcommand_help_heading("Tasks")
+                // customize the usage string to use <TASK>
+                .subcommand_value_name("TASK")
+                .about(format!("\x1b[3m{}\x1b[0m task group", name))
+                .display_order(TASK_GROUP_DISPLAY_ORDER);
+            subcmd = subtree.as_command(subcmd, &group)?;
+            current = current.subcommand(subcmd);
+        }
+
+        for (name, subcmd) in &self.tasks {
+            if current.find_subcommand(name).is_some() {
+                return Err(TreeError::TaskCommandConflict(
+                    name.to_string(),
+                    group.to_vec(),
+                ));
             }
             current = current.subcommand(subcmd);
         }
 
-        for (_, subcmd) in &self.subtasks {
-            current = current.subcommand(subcmd);
-        }
-
-        // For the root command, require subcommand if there are any
-        if !self.subgroups.is_empty() || !self.subtasks.is_empty() {
+        // Require subcommand if are subgroups or tasks
+        if !self.subgroups.is_empty() || !self.tasks.is_empty() {
             current = current.subcommand_required(true);
         }
 
-        current
+        Ok(current)
     }
 
     pub fn get_task_path(&self, matches: &ArgMatches) -> String {
-        assert!(matches.contains_id(COMMAND_PATH_ID));
-        matches.get_one::<String>(COMMAND_PATH_ID).unwrap().clone()
+        assert!(matches.contains_id(TASK_COMMAND_PATH_ID));
+        matches
+            .get_one::<String>(TASK_COMMAND_PATH_ID)
+            .unwrap()
+            .clone()
+    }
+
+    pub fn get_task_symbol(&self, matches: &ArgMatches) -> String {
+        assert!(matches.contains_id(TASK_COMMAND_SYMBOL_ID));
+        matches
+            .get_one::<String>(TASK_COMMAND_SYMBOL_ID)
+            .unwrap()
+            .clone()
     }
 }
 
-pub fn make_command(
+pub fn make_command_from_task(
     name: &String,
     defined_in: &str,
-    path: &PathBuf,
+    path: &String,
+    symbol: &String,
     task: &dyn TaskLike<'_>,
 ) -> Command {
+    // Generate a default task description if none was provided by task
     let about = if task.description().is_empty() {
         format!(
             "\x1b[3m{}\x1b[0m task defined in \x1b[3m{}\x1b[0m",
@@ -104,21 +165,34 @@ pub fn make_command(
         task.description().clone()
     };
 
-    let mut subcmd = Command::new(name).about(about).arg(
-        Arg::new(COMMAND_PATH_ID)
-            .long(COMMAND_PATH_ID)
-            .hide(true)
-            .hide_default_value(true)
-            .hide_short_help(true)
-            .hide_possible_values(true)
-            .hide_long_help(true)
-            .default_value(path.as_os_str().to_string_lossy().to_string()),
-    );
+    let mut cmd = Command::new(name)
+        .about(about)
+        .display_order(TASK_COMMAND_DISPLAY_ORDER)
+        .arg(
+            Arg::new(TASK_COMMAND_PATH_ID)
+                .long(TASK_COMMAND_PATH_ID)
+                .hide(true)
+                .hide_default_value(true)
+                .hide_short_help(true)
+                .hide_possible_values(true)
+                .hide_long_help(true)
+                .default_value(path),
+        )
+        .arg(
+            Arg::new(TASK_COMMAND_SYMBOL_ID)
+                .long(TASK_COMMAND_SYMBOL_ID)
+                .hide(true)
+                .hide_default_value(true)
+                .hide_short_help(true)
+                .hide_possible_values(true)
+                .hide_long_help(true)
+                .default_value(symbol),
+        );
 
     for (name, arg) in task.args() {
         let arg = crate::flags::convert_arg(&name, arg);
-        subcmd = subcmd.arg(arg);
+        cmd = cmd.arg(arg);
     }
 
-    subcmd
+    cmd
 }

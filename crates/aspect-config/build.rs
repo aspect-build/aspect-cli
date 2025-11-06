@@ -19,7 +19,7 @@ fn main() {
         "i686-pc-windows-gnu" => ("windows", "x86_32"),
         // Add more mappings as needed for other target triples
         _ => {
-            panic!("Warning: Unknown target triple: {target}");
+            panic!("unknown target triple: {target}");
         }
     };
 
@@ -43,7 +43,7 @@ fn main() {
         "i686-pc-windows-gnu" => ("windows", "386"),
         // Add more mappings as needed for other target triples
         _ => {
-            panic!("Warning: Unknown target triple: {target}");
+            panic!("unknown target triple: {target}");
         }
     };
 

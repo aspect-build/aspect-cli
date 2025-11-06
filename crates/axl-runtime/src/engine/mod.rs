@@ -4,7 +4,6 @@ use starlark::{
 };
 
 mod bazel;
-mod delivery;
 mod globals;
 mod http;
 mod std;
@@ -13,38 +12,44 @@ mod types;
 mod wasm;
 
 pub mod r#async;
+pub mod config_context;
+pub mod store;
 pub mod task;
 pub mod task_arg;
 pub mod task_args;
 pub mod task_context;
 
 #[starlark_module]
-fn register_type_toplevels(builder: &mut GlobalsBuilder) {
-    const http_response: StarlarkValueAsType<http::HttpResponse> = StarlarkValueAsType::new();
-    const http: StarlarkValueAsType<http::Http> = StarlarkValueAsType::new();
-    const task_arg: StarlarkValueAsType<task_arg::TaskArg> = StarlarkValueAsType::new();
-    const task_args: StarlarkValueAsType<task_args::TaskArgs> = StarlarkValueAsType::new();
-    const task_context: StarlarkValueAsType<task_context::TaskContext> = StarlarkValueAsType::new();
-    const task: StarlarkValueAsType<task::Task> = StarlarkValueAsType::new();
-    const template: StarlarkValueAsType<template::Template> = StarlarkValueAsType::new();
+fn register_types(globals: &mut GlobalsBuilder) {
+    const ConfigContext: StarlarkValueAsType<config_context::ConfigContext> =
+        StarlarkValueAsType::new();
+    const Http: StarlarkValueAsType<http::Http> = StarlarkValueAsType::new();
+    const HttpResponse: StarlarkValueAsType<http::HttpResponse> = StarlarkValueAsType::new();
+    const Task: StarlarkValueAsType<task::Task> = StarlarkValueAsType::new();
+    const TaskArg: StarlarkValueAsType<task_arg::TaskArg> = StarlarkValueAsType::new();
+    const TaskArgs: StarlarkValueAsType<task_args::TaskArgs> = StarlarkValueAsType::new();
+    const TaskContext: StarlarkValueAsType<task_context::TaskContext> = StarlarkValueAsType::new();
+    const Template: StarlarkValueAsType<template::Template> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]
-fn wasm_toplevels(builder: &mut GlobalsBuilder) {
-    const wasm_callable: StarlarkValueAsType<wasm::WasmCallable> = StarlarkValueAsType::new();
-    const wasm_exports: StarlarkValueAsType<wasm::WasmExports> = StarlarkValueAsType::new();
-    const wasm_instance: StarlarkValueAsType<wasm::WasmInstance> = StarlarkValueAsType::new();
-    const wasm_memory: StarlarkValueAsType<wasm::WasmMemory> = StarlarkValueAsType::new();
-    const wasm: StarlarkValueAsType<wasm::Wasm> = StarlarkValueAsType::new();
+fn register_wasm_types(globals: &mut GlobalsBuilder) {
+    const Wasm: StarlarkValueAsType<wasm::Wasm> = StarlarkValueAsType::new();
+    const WasmCallable: StarlarkValueAsType<wasm::WasmCallable> = StarlarkValueAsType::new();
+    const WasmExports: StarlarkValueAsType<wasm::WasmExports> = StarlarkValueAsType::new();
+    const WasmInstance: StarlarkValueAsType<wasm::WasmInstance> = StarlarkValueAsType::new();
+    const WasmMemory: StarlarkValueAsType<wasm::WasmMemory> = StarlarkValueAsType::new();
 }
 
-pub fn register_toplevels(builder: &mut GlobalsBuilder) {
-    register_type_toplevels(builder);
-    r#async::register_toplevels(builder);
-    builder.namespace("bazel", bazel::register_toplevels);
-    builder.namespace("wasm", wasm_toplevels);
-    builder.namespace("std", std::register_toplevels);
-    task_arg::register_toplevels(builder);
-    task::register_toplevels(builder);
-    globals::register_toplevels(builder);
+pub fn register_globals(globals: &mut GlobalsBuilder) {
+    register_types(globals);
+
+    globals::register_globals(globals);
+    r#async::register_globals(globals);
+    task::register_globals(globals);
+
+    globals.namespace("args", task_arg::register_globals);
+    globals.namespace("bazel", bazel::register_globals);
+    globals.namespace("std", std::register_globals);
+    globals.namespace("wasm", register_wasm_types);
 }

@@ -1,9 +1,8 @@
 mod load;
 
 use std::cell::RefCell;
-use std::ffi::OsStr;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::anyhow;
@@ -13,35 +12,37 @@ use starlark::syntax::{AstModule, Dialect, DialectTypes};
 use starlark::values::{Heap, ValueLike};
 use thiserror::Error;
 
-use crate::engine::r#async::rt::AsyncRuntime;
+use crate::engine::config_context::ConfigContext;
+use crate::engine::store::AxlStore;
 use crate::engine::task::{AsTaskLike, FrozenTask, TaskLike};
 use crate::engine::task_args::TaskArgs;
+use crate::engine::task_context::TaskContext;
 use crate::engine::{self, task::Task};
 use crate::eval::load::AxlLoader;
-use crate::helpers::{
-    normalize_abs_path_lexically, sanitize_load_path_lexically, ASPECT_ROOT, AXL_MODULE_DIR,
-};
+use crate::helpers::{normalize_abs_path_lexically, sanitize_load_path_lexically, LoadPath};
+use crate::module::AXL_ROOT_MODULE_NAME;
 
-/// The core evaluator for .axl files, holding configuration like repository root,
-/// Starlark dialect, globals, and async runtime. Used to evaluate .axl files securely.
+/// The core evaluator for .axl files, holding configuration like module root,
+/// Starlark dialect, globals, and store. Used to evaluate .axl files securely.
 #[derive(Debug)]
 pub struct AxlScriptEvaluator {
-    // Repo root is where the module boundary is.
-    repo_root: PathBuf,
-    // Deps root is where module expander expanded all the modules.
-    deps_root: PathBuf,
+    module_name: String,
+    module_root: PathBuf,
+    axl_deps_root: PathBuf,
     dialect: Dialect,
     globals: Globals,
-    async_runtime: AsyncRuntime,
+    store: AxlStore,
 }
 
 /// Represents the result of evaluating an .axl script, encapsulating the module,
-/// path, and runtime for task definition retrieval and execution.
+/// path, and store for task definition retrieval and execution.
 #[derive(Debug, Clone)]
 pub struct EvaluatedAxlScript {
-    pub path: PathBuf,
+    pub script_path: PathBuf,
+    pub module_name: String,
+    pub module_subpath: String,
     pub module: Rc<Module>,
-    async_runtime: AsyncRuntime,
+    store: AxlStore,
 }
 
 /// Enum representing possible errors during evaluation, including Starlark-specific errors,
@@ -51,10 +52,13 @@ pub struct EvaluatedAxlScript {
 pub enum EvalError {
     #[error("{0}")]
     StarlarkError(starlark::Error),
-    #[error("task file {0} does not export the `{1}` symbol")]
+
+    #[error("axl script {0:?} does not export {1:?} symbol")]
     MissingSymbol(PathBuf, String),
+
     #[error(transparent)]
     UnknownError(#[from] anyhow::Error),
+
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 }
@@ -85,7 +89,7 @@ pub fn get_globals() -> GlobalsBuilder {
         LibraryExtension::StructType,
         LibraryExtension::Typing,
     ]);
-    engine::register_toplevels(&mut globals);
+    engine::register_globals(&mut globals);
     globals
 }
 
@@ -97,18 +101,26 @@ impl From<starlark::Error> for EvalError {
 }
 
 impl EvaluatedAxlScript {
-    fn new(path: PathBuf, async_runtime: AsyncRuntime, module: Module) -> Self {
+    fn new(
+        script_path: PathBuf,
+        module_name: String,
+        module_subpath: String,
+        store: AxlStore,
+        module: Module,
+    ) -> Self {
         Self {
-            path,
+            script_path,
+            module_name,
+            module_subpath,
             module: Rc::new(module),
-            async_runtime,
+            store,
         }
     }
 
     /// Retrieves a task definition from the evaluated module by symbol name.
-    pub fn definition(&self, symbol: &str) -> Result<&dyn TaskLike, EvalError> {
+    pub fn task_definition(&self, symbol: &str) -> Result<&dyn TaskLike, EvalError> {
         let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
-            self.path.clone(),
+            self.script_path.clone(),
             symbol.to_string(),
         ))?;
         if let Some(task) = def.downcast_ref::<Task>() {
@@ -121,31 +133,47 @@ impl EvaluatedAxlScript {
     }
 
     /// Executes a task from the module by symbol, providing arguments and returning the exit code.
-    pub fn execute(
+    pub fn execute_task(
         &self,
         symbol: &str,
         args: impl FnOnce(&Heap) -> TaskArgs,
     ) -> Result<Option<u8>, EvalError> {
         let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
-            self.path.clone(),
+            self.script_path.clone(),
             symbol.to_string(),
         ))?;
 
         let heap = self.module.heap();
         let args = args(heap);
-        let context = heap.alloc(engine::task_context::TaskContext::new(args));
+        let context = heap.alloc(TaskContext::new(args));
         let mut eval = Evaluator::new(&self.module);
-        eval.extra = Some(&self.async_runtime);
+        eval.extra = Some(&self.store);
         let ret = if let Some(val) = def.downcast_ref::<Task>() {
             eval.eval_function(val.implementation(), &[context], &[])?
         } else if let Some(val) = def.downcast_ref::<FrozenTask>() {
             eval.eval_function(val.implementation().to_value(), &[context], &[])?
         } else {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "expected value of type `Task`"
+                "expected value of type Task"
             )));
         };
         Ok(ret.unpack_i32().map(|ex| ex as u8))
+    }
+
+    /// Executes a config function from the module by symbol, providing
+    /// the config context.
+    pub fn execute_config(&self, symbol: &str) -> Result<(), EvalError> {
+        let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
+            self.script_path.clone(),
+            symbol.to_string(),
+        ))?;
+
+        let heap = self.module.heap();
+        let context = heap.alloc(ConfigContext::new());
+        let mut eval = Evaluator::new(&self.module);
+        eval.extra = Some(&self.store);
+        eval.eval_function(def, &[context], &[])?;
+        Ok(())
     }
 }
 
@@ -171,64 +199,43 @@ impl AxlScriptEvaluator {
         get_globals().build()
     }
 
-    /// Creates a new AxlScriptEvaluator with the given repository root.
-    pub fn new(repo_root: PathBuf, deps_root: PathBuf) -> Self {
+    /// Creates a new AxlScriptEvaluator with the given module root.
+    pub fn new(module_name: String, module_root: PathBuf, axl_deps_root: PathBuf) -> Self {
         Self {
-            repo_root,
-            deps_root,
+            module_name,
+            module_root,
+            axl_deps_root,
             dialect: AxlScriptEvaluator::dialect(),
             globals: AxlScriptEvaluator::globals(),
-            async_runtime: AsyncRuntime::new(),
+            store: AxlStore::new(),
         }
     }
 
-    // pub fn eval_label(
-    //     &self,
-    //     label: &String,
-    //     abs_script_path: PathBuf,
-    // ) -> Result<EvaluatedAxlScript, EvalError> {
-    //     let loader = AxlLoader {
-    //         script_evaluator: self,
-    //         script_dir: abs_script_path
-    //             .parent()
-    //             .expect("file path has parent")
-    //             .to_path_buf(),
-    //         in_module: false,
-    //         root_dir: self.repo_root.clone(),
-    //         root_deps_dir: self.deps_root.clone(),
-    //     };
-    //     let load = loader.load(label)?;
-    // }
-
-    /// Evaluates the given .axl script path relative to the repository root, returning
+    /// Evaluates the given .axl script path relative to the module root, returning
     /// the evaluated script or an error. Performs security checks to ensure the script
-    /// file is within the repository and isn't in a module directory.
-    pub fn eval(&self, load_path: &Path) -> Result<EvaluatedAxlScript, EvalError> {
-        let (module_name, load_path) = sanitize_load_path_lexically(load_path.to_str().unwrap())?;
+    /// file is within the module root.
+    pub fn eval(&self, script_path: &Path) -> Result<EvaluatedAxlScript, EvalError> {
+        let script_path = sanitize_load_path_lexically(script_path.to_str().unwrap())?;
 
-        // Don't allow evaluating scripts directly from modules (e.g., via @module/ paths)
-        if module_name.is_some() {
-            return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "AXL scripts cannot be loaded directly from a module (load path starts with '@'): {}",
-                load_path.display(),
-            )));
-        }
+        let script_subpath = match script_path {
+            LoadPath::ModuleSpecifier { module, subpath } => {
+                return Err(EvalError::UnknownError(anyhow::anyhow!(
+                    "axl scripts cannot be loaded directly from a module (load path starts with '@'): @{}//{}",
+                    module,
+                    subpath.display(),
+                )));
+            }
+            LoadPath::ModuleSubpath(subpath) | LoadPath::RelativePath(subpath) => subpath,
+        };
 
-        // Don't allow evaluating scripts from local module directories
-        if is_local_module_path(&load_path) {
+        // Ensure that we're not evaluating a script outside of the module root
+        let abs_script_path =
+            normalize_abs_path_lexically(&self.module_root.join(&script_subpath))?;
+        if !abs_script_path.starts_with(&self.module_root) {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "AXL scripts cannot be loaded from a local module directory: {}",
-                load_path.display(),
-            )));
-        }
-
-        // Ensure that we're not evaluating a script outside of the repository root
-        let abs_script_path = normalize_abs_path_lexically(&self.repo_root.join(load_path))?;
-        if !abs_script_path.starts_with(&self.repo_root) {
-            return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "AXL script path {} resolves outside the repository root {}",
+                "axl script path {} resolves outside the module root {}",
                 abs_script_path.display(),
-                self.repo_root.display()
+                self.module_root.display()
             )));
         }
 
@@ -239,9 +246,9 @@ impl AxlScriptEvaluator {
                 .parent()
                 .expect("file path has parent")
                 .to_path_buf(),
-            in_module: false,
-            root_dir: self.repo_root.clone(),
-            root_deps_dir: self.deps_root.clone(),
+            module_name: AXL_ROOT_MODULE_NAME.to_string(),
+            module_root: self.module_root.clone(),
+            axl_deps_root: self.axl_deps_root.clone(),
         };
 
         // Push the script path onto the LOAD_STACK (used to detect circular loads)
@@ -253,7 +260,7 @@ impl AxlScriptEvaluator {
         let module = Module::new();
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
-        eval.extra = Some(&self.async_runtime);
+        eval.extra = Some(&self.store);
         eval.eval_module(ast, &self.globals)?;
         drop(eval);
 
@@ -263,25 +270,10 @@ impl AxlScriptEvaluator {
         // Return the evaluated script
         Ok(EvaluatedAxlScript::new(
             abs_script_path,
-            self.async_runtime.clone(),
+            self.module_name.clone(),
+            script_subpath.display().to_string(),
+            self.store.clone(),
             module,
         ))
     }
-}
-
-/// Checks if the given script_path is within a local module
-pub fn is_local_module_path(script_path: &Path) -> bool {
-    let mut components = script_path.components().peekable();
-
-    while let Some(current) = components.next() {
-        if let (Component::Normal(curr), Some(Component::Normal(next))) =
-            (current, components.peek().cloned())
-        {
-            if curr == OsStr::new(ASPECT_ROOT) && next == OsStr::new(AXL_MODULE_DIR) {
-                return true;
-            }
-        }
-    }
-
-    false
 }

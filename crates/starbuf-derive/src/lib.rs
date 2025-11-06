@@ -110,7 +110,7 @@ fn try_types(input: TokenStream) -> Result<TokenStream, Error> {
                         defs.entry(subpaths)
                             .or_insert_with(|| (vec![], vec![]))
                             .1
-                            .push(quote! { builder.namespace(#subidentstr, #subgenerator_fn); });
+                            .push(quote! { globals.namespace(#subidentstr, #subgenerator_fn); });
                     }
 
                     traverse(subpath, defs, &subitem)
@@ -155,11 +155,11 @@ fn try_types(input: TokenStream) -> Result<TokenStream, Error> {
 
         quote! {
             #[::starlark::starlark_module]
-            fn #ident_types(builder: &mut ::starlark::environment::GlobalsBuilder) {
+            fn #ident_types(globals: &mut ::starlark::environment::GlobalsBuilder) {
                  #(#defs)*
             }
-            pub fn #ident(builder: &mut ::starlark::environment::GlobalsBuilder) {
-                 #ident_types(builder);
+            pub fn #ident(globals: &mut ::starlark::environment::GlobalsBuilder) {
+                 #ident_types(globals);
                 #(#inherit)*
             }
         }
@@ -189,8 +189,8 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
 
     let variant_data = match input.data {
         Data::Struct(variant_data) => variant_data,
-        Data::Enum(..) => bail!("Message can not be derived for an enum"),
-        Data::Union(..) => bail!("Message can not be derived for a union"),
+        Data::Enum(..) => bail!("message can not be derived for an enum"),
+        Data::Union(..) => bail!("message can not be derived for a union"),
     };
 
     let (_, fields) = match variant_data {
@@ -412,8 +412,8 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
 
     let variants = match input.data {
         Data::Enum(DataEnum { variants, .. }) => variants,
-        Data::Struct(..) => bail!("Oneof can not be derived for a struct"),
-        Data::Union(..) => bail!("Oneof can not be derived for a union"),
+        Data::Struct(..) => bail!("oneof can not be derived for a struct"),
+        Data::Union(..) => bail!("oneof can not be derived for a union"),
     };
 
     let mut fields: Vec<(FieldsUnnamed, Ident, ProstAttrs)> = Vec::new();
@@ -515,8 +515,8 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
 
     let punctuated_variants = match input.data {
         Data::Enum(DataEnum { variants, .. }) => variants,
-        Data::Struct(_) => bail!("Enumeration can not be derived for a struct"),
-        Data::Union(..) => bail!("Enumeration can not be derived for a union"),
+        Data::Struct(_) => bail!("enumeration can not be derived for a struct"),
+        Data::Union(..) => bail!("enumeration can not be derived for a union"),
     };
 
     // Map the variants into 'fields'.
@@ -531,12 +531,12 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
         match fields {
             Fields::Unit => (),
             Fields::Named(_) | Fields::Unnamed(_) => {
-                bail!("Enumeration variants may not have fields")
+                bail!("enumeration variants may not have fields")
             }
         }
         match discriminant {
             Some((_, expr)) => variants.push((ident, expr)),
-            None => bail!("Enumeration variants must have a discriminant"),
+            None => bail!("enumeration variants must have a discriminant"),
         }
     }
 

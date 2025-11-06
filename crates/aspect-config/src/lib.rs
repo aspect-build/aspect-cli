@@ -169,7 +169,7 @@ pub fn autoconf() -> (PathBuf, AspectConfig) {
         .next()
         .map(Path::to_path_buf)
     else {
-        panic!("Unable to identify a repository root dir");
+        panic!("unable to identify a repository root dir");
     };
 
     let aspect_config = repo_dir
@@ -194,7 +194,7 @@ pub async fn repo_root() -> (PathBuf, AspectConfig) {
         .next()
         .map(Path::to_path_buf)
     else {
-        panic!("Unable to identify a repository root dir");
+        panic!("unable to identify a repository root dir");
     };
 
     let aspect_config = repo_dir

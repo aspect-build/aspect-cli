@@ -12,77 +12,65 @@ use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
-use starlark::values::ValueLike;
 
 use super::bazel::Bazel;
 use super::http::Http;
 use super::std::Std;
-use super::task_args::FrozenTaskArgs;
-use super::task_args::TaskArgs;
 use super::template;
 use super::wasm::Wasm;
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<TaskContext>")]
-pub struct TaskContext<'v> {
-    pub args: TaskArgs<'v>,
+#[display("<ConfigContext>")]
+pub struct ConfigContext<'v> {
+    _phantom: std::marker::PhantomData<&'v ()>,
 }
 
-impl<'v> TaskContext<'v> {
-    pub fn new(args: TaskArgs<'v>) -> Self {
-        Self { args }
+impl<'v> ConfigContext<'v> {
+    pub fn new() -> Self {
+        Self {
+            _phantom: std::marker::PhantomData,
+        }
     }
 }
 
-#[starlark_value(type = "TaskContext")]
-impl<'v> values::StarlarkValue<'v> for TaskContext<'v> {
+#[starlark_value(type = "ConfigContext")]
+impl<'v> values::StarlarkValue<'v> for ConfigContext<'v> {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(task_context_methods)
+        RES.methods(config_context_methods)
     }
 }
 
-impl<'v> values::AllocValue<'v> for TaskContext<'v> {
+impl<'v> values::AllocValue<'v> for ConfigContext<'v> {
     fn alloc_value(self, heap: &'v values::Heap) -> values::Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-impl<'v> values::Freeze for TaskContext<'v> {
-    type Frozen = FrozenTaskContext;
+impl<'v> values::Freeze for ConfigContext<'v> {
+    type Frozen = FrozenConfigContext;
     fn freeze(self, _freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
         panic!("not implemented")
     }
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<TaskContext>")]
-pub struct FrozenTaskContext {
-    #[allocative(skip)]
-    args: FrozenTaskArgs,
-}
+#[display("<ConfigContext>")]
+pub struct FrozenConfigContext {}
 
-starlark_simple_value!(FrozenTaskContext);
+starlark_simple_value!(FrozenConfigContext);
 
-#[starlark_value(type = "TaskContext")]
-impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
-    type Canonical = TaskContext<'v>;
+#[starlark_value(type = "ConfigContext")]
+impl<'v> values::StarlarkValue<'v> for FrozenConfigContext {
+    type Canonical = ConfigContext<'v>;
 }
 
 #[starlark_module]
-pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
+pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     /// Standard library is the foundation of powerful AXL tasks.
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
         Ok(Std {})
-    }
-
-    /// Access to arguments provided by the caller.
-    #[starlark(attribute)]
-    fn args<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<TaskArgs<'v>> {
-        let ctx = this.downcast_ref_err::<TaskContext>()?;
-        // TODO: don't do this.
-        Ok(ctx.args.clone())
     }
 
     /// Expand template files.

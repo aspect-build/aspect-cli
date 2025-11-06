@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::fmt::Debug;
 use std::rc::Rc;
 
-use super::rt::AsyncRuntime;
+use crate::engine::store::AxlStore;
 
 pub trait FutureAlloc: Send {
     fn alloc_value_fut<'v>(self: Box<Self>, heap: &'v Heap) -> values::Value<'v>;
@@ -36,7 +36,7 @@ impl<'v> AllocValue<'v> for Box<dyn FutureAlloc> {
 pub type FutOutput = Result<Box<dyn FutureAlloc>, anyhow::Error>;
 
 #[derive(Display, Allocative, ProvidesStaticType, NoSerialize)]
-#[display("future")]
+#[display("Future")]
 pub struct StarlarkFuture {
     #[allocative(skip)]
     inner: Rc<RefCell<Option<BoxFuture<'static, FutOutput>>>>,
@@ -82,7 +82,7 @@ unsafe impl<'v> Trace<'v> for StarlarkFuture {
 
 impl Debug for StarlarkFuture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StarlarkFuture").finish()
+        f.debug_struct("Future").finish()
     }
 }
 
@@ -103,7 +103,7 @@ impl<'v> UnpackValue<'v> for StarlarkFuture {
     }
 }
 
-#[starlark_value(type = "future")]
+#[starlark_value(type = "Future")]
 impl<'v> values::StarlarkValue<'v> for StarlarkFuture {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -117,13 +117,13 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<values::Value<'v>> {
-        let rt = AsyncRuntime::from_eval(eval)?;
+        let store = AxlStore::from_eval(eval)?;
         let this = this.downcast_ref_err::<StarlarkFuture>()?;
         let fut = this
             .inner
             .replace(None)
             .ok_or(anyhow::anyhow!("future has already been awaited"))?;
-        let value = rt.block_on(fut)?;
+        let value = store.rt.block_on(fut)?;
         Ok(value.alloc_value_fut(eval.heap()))
     }
 }

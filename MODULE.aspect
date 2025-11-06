@@ -1,0 +1,7 @@
+axl_local_dep(
+    name = "local",
+    path = ".aspect/modules/local",
+    auto_use_tasks = True,
+)
+
+use_task(".aspect/elsewhere/user-task.axl", "user_task")

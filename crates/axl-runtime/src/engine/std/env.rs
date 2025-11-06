@@ -9,7 +9,7 @@ use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueOfUnchecked};
 use starlark::{starlark_module, starlark_simple_value, values};
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
-#[display("<env>")]
+#[display("<std.Env>")]
 pub struct Env {}
 
 impl Env {
@@ -19,7 +19,7 @@ impl Env {
 }
 
 /// Documentation here
-#[starlark_value(type = "env")]
+#[starlark_value(type = "std.Env")]
 impl<'v> StarlarkValue<'v> for Env {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
