@@ -21,6 +21,14 @@ The referenced set must not transitively contain any runfile trees.
 
 ***
 
+## RunfilesTree.legacy\_external\_runfiles
+
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">RunfilesTree</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">legacy_external_runfiles</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bool">bool</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
+
+Whether the runfiles tree contains external runfiles at their legacy locations (e.g. \_main/external/bazel\_tools/tools/bash/runfiles.bash) in addition to the default locations (e.g. bazel\_tools/tools/bash/runfiles.bash).
+
+***
+
 ## RunfilesTree.path
 
 <pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">RunfilesTree</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">path</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/str">str</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>

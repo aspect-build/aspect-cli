@@ -1,1 +1,2 @@
 **/*.axl linguist-language=Starlark
+docs/**/*.md linguist-generated=true

@@ -59,4 +59,3 @@ dirs = "6.0.0"
 sha256 = "1.6.0"
 tracing = "0.1.41"
 arc-slice = {version="0.1.0", features = ["std", "abort-on-refcount-overflow"]}
-ofiles = "0.2.0"

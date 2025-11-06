@@ -78,9 +78,9 @@ fn register_process_types(globals: &mut GlobalsBuilder) {
 
 #[starlark_module]
 fn register_io_types(globals: &mut GlobalsBuilder) {
-    const Readable: StarlarkValueAsType<stream::Readable> = StarlarkValueAsType::new();
     const Stdio: StarlarkValueAsType<io::Stdio> = StarlarkValueAsType::new();
-    const Writeble: StarlarkValueAsType<stream::Writable> = StarlarkValueAsType::new();
+    const Readable: StarlarkValueAsType<stream::Readable> = StarlarkValueAsType::new();
+    const Writable: StarlarkValueAsType<stream::Writable> = StarlarkValueAsType::new();
 }
 
 pub fn register_globals(globals: &mut GlobalsBuilder) {
