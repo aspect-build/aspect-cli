@@ -1,5 +1,5 @@
 def _fancy_tui(ctx: task_context, build) -> int:
-    events = build.events()
+    events = build.build_events()
     offset = 0
     in_flight = {}
     last_drawn_lines = 0
@@ -12,7 +12,7 @@ def _fancy_tui(ctx: task_context, build) -> int:
     tick_ms = 1000 // 60
 
     for timer in forever(tick_ms):
-        event = events.poll()
+        event = events.try_pop()
 
         if event != None:
             print(debug(event.kind))
@@ -67,4 +67,3 @@ def tui(ctx: task_context, build) -> int:
 
     else:
         return _simple_tui(ctx, build)
-

@@ -26,7 +26,6 @@ reqwest = { version="0.12.22", features = ["stream", "gzip", "zstd"] }
 prost = "0.14.1"
 zstd = "0.13.3"
 
-nix = { version = "0.30.1", features = ["fs"] }
 wasmi = "0.51.0"
 wasmi_wasi = "0.51.0"
 
@@ -48,7 +47,7 @@ aspect-config = { path = "../aspect-config" }
 aspect-cache = { path = "../aspect-cache" }
 axl-proto = { path = "../axl-proto" }
 build-event-stream = { path = "../build-event-stream" }
-
+galvanize = { path = "../galvanize" }
 
 uuid = { version = "1.18.1", features = ["v4"] }
 tonic = "0.14.2"
@@ -60,3 +59,4 @@ dirs = "6.0.0"
 sha256 = "1.6.0"
 tracing = "0.1.41"
 arc-slice = {version="0.1.0", features = ["std", "abort-on-refcount-overflow"]}
+ofiles = "0.2.0"

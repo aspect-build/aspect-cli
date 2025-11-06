@@ -17,3 +17,16 @@ include("//bazel/include:llvm.MODULE.bazel")
 include("//bazel/include:multitool.MODULE.bazel")
 include("//bazel/include:musl.MODULE.bazel")
 include("//bazel/include:rust.MODULE.bazel")
+
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+    name = "foo",
+    urls = [
+        "https://github.com/bazel-contrib/rules_oci/archive/refs/heads/main.zip"
+    ],
+    build_file_content = """\
+
+filegroup(name = "test", srcs = [])
+    """
+)

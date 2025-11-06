@@ -5,6 +5,7 @@ descriptor_set(
     visibility = ["//visibility:public"],
     deps = [
         "@bazel//src/main/java/com/google/devtools/build/lib/buildeventstream/proto:build_event_stream_proto",
+        "@bazel//src/main/java/com/google/devtools/build/lib/bazel/debug:workspace_log_proto",
         "@bazel//src/main/protobuf:action_cache_proto",
         "@bazel//src/main/protobuf:analysis_v2_proto",
         "@bazel//src/main/protobuf:spawn_proto",

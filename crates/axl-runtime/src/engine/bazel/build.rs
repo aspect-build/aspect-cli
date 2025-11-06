@@ -1,19 +1,16 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::env::temp_dir;
-use std::fs;
-use std::fs::File;
 
-use std::path::PathBuf;
+use std::io;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
+use std::rc::Rc;
 use std::thread::JoinHandle;
 
 use allocative::Allocative;
-use anyhow::Context;
+use anyhow::anyhow;
 use derive_more::Display;
-use nix::sys::stat::Mode;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -33,9 +30,13 @@ use starlark::values::ValueLike;
 
 use crate::engine::r#async::rt::AsyncRuntime;
 
-use super::iterator::BuildEventIterator;
-use super::iterator::ExecutionLogIterator;
-use super::stream::EventStream;
+use super::iter::BuildEventIterator;
+use super::iter::ExecutionLogIterator;
+use super::iter::WorkspaceEventIterator;
+
+use super::stream::BuildEventStream;
+use super::stream::ExecLogStream;
+use super::stream::WorkspaceEventStream;
 use super::stream_sink::GrpcEventStreamSink;
 use super::stream_tracing::TracingEventStreamSink;
 
@@ -98,7 +99,7 @@ impl<'v> UnpackValue<'v> for BuildEventSink {
 }
 
 impl BuildEventSink {
-    fn spawn(&self, rt: AsyncRuntime, stream: &EventStream) -> JoinHandle<()> {
+    fn spawn(&self, rt: AsyncRuntime, stream: &BuildEventStream) -> JoinHandle<()> {
         match self {
             BuildEventSink::Grpc { uri, metadata } => {
                 GrpcEventStreamSink::spawn(rt, stream.receiver(), uri.clone(), metadata.clone())
@@ -111,84 +112,103 @@ impl BuildEventSink {
 #[display("<build>")]
 pub struct Build {
     #[allocative(skip)]
-    event_stream: RefCell<Option<EventStream>>,
-    execlog_out: Option<PathBuf>,
+    build_event_stream: RefCell<Option<BuildEventStream>>,
+    #[allocative(skip)]
+    workspace_event_stream: RefCell<Option<WorkspaceEventStream>>,
+    #[allocative(skip)]
+    execlog_stream: RefCell<Option<ExecLogStream>>,
 
     #[allocative(skip)]
     sink_handles: RefCell<Vec<JoinHandle<()>>>,
 
     #[allocative(skip)]
-    child: RefCell<Child>,
+    child: Rc<RefCell<Child>>,
 
     #[allocative(skip)]
     span: RefCell<tracing::span::EnteredSpan>,
 }
 
 impl Build {
+    pub fn pid() -> io::Result<u32> {
+        let mut cmd = Command::new("bazel");
+        cmd.arg("info");
+        cmd.arg("server_pid");
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::null());
+        cmd.stdin(Stdio::null());
+        let c = cmd.spawn()?.wait_with_output()?;
+        if !c.status.success() {
+            return Err(io::Error::other(anyhow!("failed to determine Bazel pid")));
+        }
+        let bytes: [u8; 4] = c.stdout[0..4].try_into().unwrap();
+        Ok(u32::from_be_bytes(bytes))
+    }
+
     // TODO: this should return a thiserror::Error
     pub fn spawn(
         verb: &str,
         targets: impl IntoIterator<Item = String>,
-        (events, sinks): (bool, Vec<BuildEventSink>),
+        (build_events, sinks): (bool, Vec<BuildEventSink>),
         execution_logs: bool,
+        workspace_events: bool,
         flags: Vec<String>,
+        startup_flags: Vec<String>,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
+        let pid = Self::pid()?;
+
         let span = tracing::info_span!(
             "ctx.bazel.build",
-            events = events,
+            build_events = build_events,
+            workspace_events = workspace_events,
             execution_logs = execution_logs,
             flags = ?flags
         )
         .entered();
 
         let mut cmd = Command::new("bazel");
+        cmd.args(startup_flags);
         cmd.arg(verb);
 
-        let event_stream = if events {
-            let out = temp_dir().join("build_event_out.bin");
-            let _ = fs::remove_file(&out);
-            match nix::unistd::mkfifo(&out, Mode::S_IRWXO | Mode::S_IRWXU | Mode::S_IRWXG) {
-                Ok(_) => {}
-                Err(_) => todo!("failed to create pipe, implement the fallback mechanism"),
-            };
+        let build_event_stream = if build_events {
+            let (out, stream) = BuildEventStream::spawn_with_pipe(pid)?;
             cmd.arg("--build_event_publish_all_actions")
                 .arg("--build_event_binary_file_upload_mode=fully_async")
                 .arg("--build_event_binary_file")
                 .arg(&out);
-            Some(EventStream::spawn(out))
+            Some(stream)
         } else {
             None
         };
 
-        let mut sink_handles: Vec<JoinHandle<()>> = vec![];
+        let workspace_event_stream = if workspace_events {
+            let (out, stream) = WorkspaceEventStream::spawn_with_pipe(pid)?;
+            cmd.arg("--experimental_workspace_rules_log_file").arg(&out);
+            Some(stream)
+        } else {
+            None
+        };
 
+        let execlog_stream = if execution_logs {
+            let (out, stream) = ExecLogStream::spawn_with_pipe(pid)?;
+            cmd.arg("--execution_log_compact_file").arg(&out);
+            Some(stream)
+        } else {
+            None
+        };
+
+        // Build Event sinks for forwarding the build events
+        let mut sink_handles: Vec<JoinHandle<()>> = vec![];
         for sink in sinks {
-            let handle = sink.spawn(rt.clone(), event_stream.as_ref().unwrap());
+            let handle = sink.spawn(rt.clone(), build_event_stream.as_ref().unwrap());
             sink_handles.push(handle);
         }
-
-        if events {
+        if build_events {
             sink_handles.push(TracingEventStreamSink::spawn(
                 rt,
-                event_stream.as_ref().unwrap().receiver(),
+                build_event_stream.as_ref().unwrap().receiver(),
             ))
         }
-
-        let execlog_out = if execution_logs {
-            let out = temp_dir().join("compact_exec_log.bin");
-            let _ = fs::remove_file(&out);
-            // TODO: figure out async buffered reading in a separate read thread.
-            //
-            // match nix::unistd::mkfifo(&out, Mode::S_IRWXO | Mode::S_IRWXU | Mode::S_IRWXG) {
-            //     Ok(_) => {}
-            //     Err(_) => todo!("failed to create pipe, implement the fallback mechanism"),
-            // };
-            cmd.arg("--execution_log_compact_file").arg(&out);
-            Some(out)
-        } else {
-            None
-        };
 
         cmd.args(targets);
         cmd.args(flags);
@@ -199,10 +219,11 @@ impl Build {
         let child = cmd.spawn()?;
 
         Ok(Self {
-            child: RefCell::new(child),
-            event_stream: RefCell::new(event_stream),
+            child: Rc::new(RefCell::new(child)),
+            build_event_stream: RefCell::new(build_event_stream),
+            workspace_event_stream: RefCell::new(workspace_event_stream),
+            execlog_stream: RefCell::new(execlog_stream),
             sink_handles: RefCell::new(sink_handles),
-            execlog_out: execlog_out,
             span: RefCell::new(span),
         })
     }
@@ -224,16 +245,11 @@ impl<'v> values::StarlarkValue<'v> for Build {
 
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
-    fn events<'v>(this: values::Value<'v>) -> anyhow::Result<BuildEventIterator> {
+    fn build_events<'v>(this: values::Value<'v>) -> anyhow::Result<BuildEventIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
-        assert!(build
-            .child
-            .borrow_mut()
-            .try_wait()
-            .is_ok_and(|r| r.is_none()));
-        let event_stream = build.event_stream.borrow();
+        let event_stream = build.build_event_stream.borrow();
         let event_stream = event_stream.as_ref().ok_or(anyhow::anyhow!(
-            "call `ctx.bazel.build` with `events = true` in order to receive build events."
+            "call `ctx.bazel.build` with `build_events = true` in order to receive build events."
         ))?;
 
         Ok(BuildEventIterator::new(event_stream.receiver()))
@@ -241,13 +257,34 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
 
     fn execution_logs<'v>(this: values::Value<'v>) -> anyhow::Result<ExecutionLogIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
-        let stream_out = build.execlog_out.as_ref().ok_or(anyhow::anyhow!(
-            "call `ctx.bazel.build` with `execution_logs = true` in order to receive execution logs."
+        let execlog_stream = build.execlog_stream.borrow();
+        let execlog_stream = execlog_stream.as_ref().ok_or(anyhow::anyhow!(
+            "call `ctx.bazel.build` with `execution_logs = true` in order to receive build events."
         ))?;
-        // wait until bes file is created.
-        while !stream_out.exists() {}
-        let file = File::open(stream_out).context("failed to read execution logs")?;
-        Ok(ExecutionLogIterator::new(file)?)
+
+        Ok(ExecutionLogIterator::new(execlog_stream.receiver()))
+    }
+
+    fn workspace_events<'v>(this: values::Value<'v>) -> anyhow::Result<WorkspaceEventIterator> {
+        let build = this.downcast_ref::<Build>().unwrap();
+        let event_stream = build.workspace_event_stream.borrow();
+        let event_stream = event_stream.as_ref().ok_or(anyhow::anyhow!(
+            "call `ctx.bazel.build` with `workspace_events = true` in order to receive workspace events."
+        ))?;
+
+        Ok(WorkspaceEventIterator::new(event_stream.receiver()))
+    }
+
+    fn try_wait<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<BuildStatus>> {
+        let build = this.downcast_ref_err::<Build>()?;
+        let status = build.child.borrow_mut().try_wait()?;
+        Ok(match status {
+            Some(status) => NoneOr::Other(BuildStatus {
+                success: status.success(),
+                code: status.code(),
+            }),
+            None => NoneOr::None,
+        })
     }
 
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
@@ -255,15 +292,37 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let result = build.child.borrow_mut().wait()?;
 
         // TODO: consider adding a wait_events() method for granular control.
-        // Wait for BES sinks to complete thier tasks.
-        let event_stream = build.event_stream.take();
-        if let Some(event_stream) = event_stream {
+
+        // Wait for BES stream to complete.
+        let build_event_stream = build.build_event_stream.take();
+        if let Some(event_stream) = build_event_stream {
             match event_stream.join() {
                 Ok(_) => {}
                 // TODO: tell the user which one and why
-                Err(err) => anyhow::bail!("event stream thread failed: {}", err),
+                Err(err) => anyhow::bail!("build event stream thread error: {}", err),
             }
         };
+
+        // Wait for Workspace event stream to complete.
+        let workspace_event_stream = build.workspace_event_stream.take();
+        if let Some(workspace_event_stream) = workspace_event_stream {
+            match workspace_event_stream.join() {
+                Ok(_) => {}
+                // TODO: tell the user which one and why
+                Err(err) => anyhow::bail!("workspace event stream thread error: {}", err),
+            }
+        };
+
+        // Wait for Execlog stream to complete.
+        let execlog_stream = build.execlog_stream.take();
+        if let Some(execlog_stream) = execlog_stream {
+            match execlog_stream.join() {
+                Ok(_) => {}
+                // TODO: tell the user which one and why
+                Err(err) => anyhow::bail!("execlog stream thread error: {}", err),
+            }
+        };
+
         let handles = build.sink_handles.take();
         for handle in handles {
             match handle.join() {
@@ -273,7 +332,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             }
         }
         // BES ends here
-        //
+
         let span = build.span.replace(tracing::trace_span!("build").entered());
         span.exit();
         Ok(BuildStatus {

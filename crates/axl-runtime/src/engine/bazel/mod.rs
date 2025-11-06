@@ -1,9 +1,5 @@
 use std::collections::HashMap;
 
-use allocative::Allocative;
-use anyhow::Context;
-use derive_more::Display;
-
 use either::Either;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
@@ -18,24 +14,23 @@ use starlark::values::starlark_value;
 use starlark::values::tuple::UnpackTuple;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
-
 use starlark::{
     environment::GlobalsBuilder, starlark_module,
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
-use axl_proto;
-
 use crate::engine::r#async::rt::AsyncRuntime;
+use allocative::Allocative;
+use anyhow::Context;
+use axl_proto;
+use derive_more::Display;
 
 mod build;
-mod execlog_stream;
-mod iterator;
+mod iter;
 mod query;
 mod stream;
 mod stream_sink;
 mod stream_tracing;
-mod stream_util;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<bazel>")]
@@ -66,13 +61,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// # Examples
     ///
     /// ```python
-    /// def impl(ctx):
+    /// def _fancy_build_impl(ctx):
     ///     io = ctx.std.io
     ///     build = ctx.bazel.build(
     ///         "//target/to:build"
-    ///         events = True,
+    ///         build_events = True,
     ///     )
-    ///     for event in build.events():
+    ///     for event in build.build_events():
     ///         if event.type == "progress":
     ///             io.stdout.write(event.payload.stdout)
     ///             io.stderr.write(event.payload.stderr)
@@ -80,33 +75,38 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn build<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(args)] targets: UnpackTuple<values::StringValue>,
-        #[starlark(require = named, default = Either::Left(false))] events: Either<
+        #[starlark(require = named, default = Either::Left(false))] build_events: Either<
             bool,
             UnpackList<build::BuildEventSink>,
         >,
-
-        #[starlark(require = named, default = true)] execution_logs: bool,
-        #[starlark(require = named, default = UnpackList::default())] bazel_flags: UnpackList<
+        #[starlark(require = named, default = false)] workspace_events: bool,
+        #[starlark(require = named, default = false)] execution_logs: bool,
+        #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             values::StringValue,
         >,
-        #[starlark(require = named, default = NoneOr::None)] bazel_verb: NoneOr<
+        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
             values::StringValue,
         >,
+        #[starlark(require = named, default = NoneOr::None)] command: NoneOr<values::StringValue>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<build::Build> {
-        let events = match events {
+    ) -> anyhow::Result<build::Build> {
+        let build_events = match build_events {
             Either::Left(events) => (events, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
         let rt = AsyncRuntime::from_eval(eval)?;
+        let command = command.into_option().map_or("build", |verb| verb.as_str());
+        if command != "build" && command != "test" {
+            anyhow::bail!("command can only be set to `build` or `test`.")
+        }
         let build = build::Build::spawn(
-            bazel_verb
-                .into_option()
-                .map_or("build", |verb| verb.as_str()),
+            command,
             targets.items.iter().map(|f| f.as_str().to_string()),
-            events,
+            build_events,
             execution_logs,
-            bazel_flags
+            workspace_events,
+            flags.items.iter().map(|f| f.as_str().to_string()).collect(),
+            startup_flags
                 .items
                 .iter()
                 .map(|f| f.as_str().to_string())
@@ -161,9 +161,11 @@ fn sink_toplevels(builder: &mut GlobalsBuilder) {
 
 #[starlark_module]
 fn build_toplevels(builder: &mut GlobalsBuilder) {
-    const build_events_iterator: StarlarkValueAsType<iterator::BuildEventIterator> =
+    const build_event_iterator: StarlarkValueAsType<iter::BuildEventIterator> =
         StarlarkValueAsType::new();
-    const execution_log_iterator: StarlarkValueAsType<iterator::ExecutionLogIterator> =
+    const execution_log_iterator: StarlarkValueAsType<iter::ExecutionLogIterator> =
+        StarlarkValueAsType::new();
+    const workspace_event_iterator: StarlarkValueAsType<iter::WorkspaceEventIterator> =
         StarlarkValueAsType::new();
     const build: StarlarkValueAsType<build::Build> = StarlarkValueAsType::new();
     const build_status: StarlarkValueAsType<build::BuildStatus> = StarlarkValueAsType::new();
@@ -191,6 +193,7 @@ pub fn register_toplevels(builder: &mut GlobalsBuilder) {
         build_toplevels(builder);
         builder.namespace("build_event", axl_proto::build_event_stream_toplevels);
         builder.namespace("execution_log", axl_proto::tools_protos_toplevels);
+        builder.namespace("workspace_event", axl_proto::workspace_log_toplevels);
     });
 
     builder.namespace("build_events", |builder| {
