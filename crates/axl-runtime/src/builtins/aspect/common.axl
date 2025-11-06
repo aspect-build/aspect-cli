@@ -15,9 +15,6 @@ def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
         event = events.poll()
 
         if event != None:
-            print(debug(event.kind))
-            print(debug(event.id))
-
             if event.kind == "target_configured":
                 in_flight[event.id.label] = timer
 
@@ -59,11 +56,9 @@ def _simple_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
     exit = build.wait()
     return exit.code
 
-
 def tui(ctx: TaskContext, build: bazel.build.Build) -> int:
     stdout = ctx.std.io.stdout
     if stdout.is_tty:
         return _fancy_tui(ctx, build)
-
     else:
         return _simple_tui(ctx, build)
