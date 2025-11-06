@@ -12,7 +12,7 @@ def _test_impl(ctx):
             "--bes_outerr_chunk_size=1024",
             "--curses=yes"
         ],
-        *ctx.args.targets
+        *ctx.args.pattern
     )
     return tui(ctx, test)
 
