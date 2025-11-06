@@ -51,28 +51,36 @@ pub fn validate_module_name(module_name: &str) -> starlark::Result<()> {
     Ok(())
 }
 
+/// Enum representing a sanitized load path, which can be:
+/// - A full module specifier like "@module_name//path/to/file.axl".
+/// - A module subpath like "path/to/file.axl".
+/// - A relative path like "./path/to/file.axl" or "../path/to/file.axl".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadPath {
+    ModuleSpecifier { module: String, subpath: PathBuf },
+    ModuleSubpath(PathBuf),
+    RelativePath(PathBuf),
+}
+
 /// Sanitizes a load path string according to various rules and extracts components.
 /// Rules include:
 /// - No leading or trailing whitespace.
 /// - Does not start with '/'.
 /// - No '\' separators.
-/// - No double '//' separators.
+/// - No double '//' separators except as the module separator in full module specifiers.
 /// - Does not start with '@@'.
-/// - Must contain at least one '/' and end with '/filename.axl'.
-/// - If starts with '@', validates the module name after '@' and before first '/'.
-/// - Validates each path segment after the module (if present) as a valid filename.
+/// - Must end with a filename ending in '.axl'.
+/// - If a full module specifier (starts with '@module_name//'), validates the module name after '@' and before '//'.
+/// - Validates each path segment in the subpath as a valid filename.
 /// - Allows starting with a single './' and zero or more '../' in the initial relative prefix, but no multiple '.' segments and no '.' or '..' after normal segments.
 ///
 /// # Arguments
 /// * `load_path` - The load path string to validate.
 ///
 /// # Returns
-/// * `Ok((Option<String>, PathBuf))` where the first element is the module name if present,
-///   and the second is the normalized path with the module prefix stripped (if it was present).
+/// * `Ok(LoadPath)` containing the parsed and normalized load path.
 /// * `Err(starlark::Error)` with a descriptive error if any validation fails.
-pub fn sanitize_load_path_lexically(
-    load_path: &str,
-) -> starlark::Result<(Option<String>, PathBuf)> {
+pub fn sanitize_load_path_lexically(load_path: &str) -> starlark::Result<LoadPath> {
     if load_path.trim() != load_path {
         return Err(starlark::Error::new_other(anyhow!(
             "paths starting or ending with whitespace are disallowed"
@@ -88,12 +96,6 @@ pub fn sanitize_load_path_lexically(
     if load_path.contains('\\') {
         return Err(starlark::Error::new_other(anyhow!(
             "paths containing '\\' separators are disallowed"
-        )));
-    }
-
-    if load_path.contains("//") {
-        return Err(starlark::Error::new_other(anyhow!(
-            "load paths with double slashes '//' are disallowed"
         )));
     }
 
@@ -116,21 +118,39 @@ pub fn sanitize_load_path_lexically(
 
     let (module_name_option, path_to_validate): (Option<String>, &str) =
         if load_path.starts_with('@') {
-            // Must have at least one / (already checked via rfind above)
+            if let Some(double_pos) = load_path.find("//") {
+                let candidate_module = &load_path[1..double_pos];
+                if candidate_module.find('/').is_none() {
+                    validate_module_name(candidate_module)?;
 
-            // Extract module_name: between @ and first /
-            let first_slash_pos = load_path.find('/').unwrap(); // Safe due to prior check
-            let module_name = &load_path[1..first_slash_pos];
-
-            validate_module_name(module_name)?;
-
-            (
-                Some(module_name.to_string()),
-                &load_path[(first_slash_pos + 1)..],
-            )
+                    (
+                        Some(candidate_module.to_string()),
+                        &load_path[(double_pos + 2)..],
+                    )
+                } else {
+                    (None, load_path)
+                }
+            } else {
+                (None, load_path)
+            }
         } else {
             (None, load_path)
         };
+
+    // Check for disallowed double slashes
+    if module_name_option.is_some() {
+        if path_to_validate.contains("//") {
+            return Err(starlark::Error::new_other(anyhow!(
+                "load paths with double slashes '//' are disallowed except for the module separator"
+            )));
+        }
+    } else {
+        if load_path.contains("//") {
+            return Err(starlark::Error::new_other(anyhow!(
+                "load paths with double slashes '//' are disallowed"
+            )));
+        }
+    }
 
     // Validate path segments after module (if present)
     let mut allowing_relative = true;
@@ -155,10 +175,21 @@ pub fn sanitize_load_path_lexically(
         validate_path_segment(segment)?;
     }
 
-    Ok((
-        module_name_option,
-        normalize_rel_path_lexically(Path::new(path_to_validate)),
-    ))
+    let normalized_path = normalize_rel_path_lexically(Path::new(path_to_validate));
+
+    if let Some(module) = module_name_option {
+        Ok(LoadPath::ModuleSpecifier {
+            module,
+            subpath: normalized_path,
+        })
+    } else {
+        let first_comp = normalized_path.components().next();
+        if matches!(first_comp, Some(Component::CurDir | Component::ParentDir)) {
+            Ok(LoadPath::RelativePath(normalized_path))
+        } else {
+            Ok(LoadPath::ModuleSubpath(normalized_path))
+        }
+    }
 }
 
 /// Normalizes an absolute path by removing redundant '.' components and resolving '..' components against preceding normal components where possible.

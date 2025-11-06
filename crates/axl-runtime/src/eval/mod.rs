@@ -19,7 +19,8 @@ use crate::engine::task_args::TaskArgs;
 use crate::engine::task_context::TaskContext;
 use crate::engine::{self, task::Task};
 use crate::eval::load::AxlLoader;
-use crate::helpers::{normalize_abs_path_lexically, sanitize_load_path_lexically};
+use crate::helpers::{normalize_abs_path_lexically, sanitize_load_path_lexically, LoadPath};
+use crate::module::AXL_ROOT_MODULE_NAME;
 
 /// The core evaluator for .axl files, holding configuration like module root,
 /// Starlark dialect, globals, and store. Used to evaluate .axl files securely.
@@ -214,19 +215,22 @@ impl AxlScriptEvaluator {
     /// the evaluated script or an error. Performs security checks to ensure the script
     /// file is within the module root.
     pub fn eval(&self, script_path: &Path) -> Result<EvaluatedAxlScript, EvalError> {
-        let (module_name, script_path) =
-            sanitize_load_path_lexically(script_path.to_str().unwrap())?;
+        let script_path = sanitize_load_path_lexically(script_path.to_str().unwrap())?;
 
-        // Don't allow evaluating script paths starting with @module names.
-        if module_name.is_some() {
-            return Err(EvalError::UnknownError(anyhow::anyhow!(
-                "axl scripts cannot be loaded directly from a module (load path starts with '@'): {}",
-                script_path.display(),
-            )));
-        }
+        let script_subpath = match script_path {
+            LoadPath::ModuleSpecifier { module, subpath } => {
+                return Err(EvalError::UnknownError(anyhow::anyhow!(
+                    "axl scripts cannot be loaded directly from a module (load path starts with '@'): @{}//{}",
+                    module,
+                    subpath.display(),
+                )));
+            }
+            LoadPath::ModuleSubpath(subpath) | LoadPath::RelativePath(subpath) => subpath,
+        };
 
         // Ensure that we're not evaluating a script outside of the module root
-        let abs_script_path = normalize_abs_path_lexically(&self.module_root.join(&script_path))?;
+        let abs_script_path =
+            normalize_abs_path_lexically(&self.module_root.join(&script_subpath))?;
         if !abs_script_path.starts_with(&self.module_root) {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
                 "axl script path {} resolves outside the module root {}",
@@ -242,6 +246,7 @@ impl AxlScriptEvaluator {
                 .parent()
                 .expect("file path has parent")
                 .to_path_buf(),
+            module_name: AXL_ROOT_MODULE_NAME.to_string(),
             module_root: self.module_root.clone(),
             axl_deps_root: self.axl_deps_root.clone(),
         };
@@ -266,7 +271,7 @@ impl AxlScriptEvaluator {
         Ok(EvaluatedAxlScript::new(
             abs_script_path,
             self.module_name.clone(),
-            script_path.as_os_str().to_string_lossy().to_string(),
+            script_subpath.display().to_string(),
             self.store.clone(),
             module,
         ))

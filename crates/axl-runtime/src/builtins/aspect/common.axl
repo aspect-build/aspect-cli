@@ -67,4 +67,3 @@ def tui(ctx: TaskContext, build: bazel.build.Build) -> int:
 
     else:
         return _simple_tui(ctx, build)
-
