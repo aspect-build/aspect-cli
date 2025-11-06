@@ -236,7 +236,6 @@ impl DiskStore {
             if !dep_path.exists() {
                 match dep {
                     Dep::Local(local) => {
-                        eprintln!("hit");
                         self.link_dep(local)
                             .await
                             .map_err(|err| StoreError::LinkError(err))?;
