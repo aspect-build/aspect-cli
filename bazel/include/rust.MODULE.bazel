@@ -34,7 +34,7 @@ crate.from_cargo(
         "//crates/starbuf-derive:Cargo.toml",
         "//crates/starbuf-types:Cargo.toml",
         "//crates/build-event-stream:Cargo.toml",
-        "//crates/galvanize/Cargo.toml"
+        "//crates/galvanize:Cargo.toml"
     ],
     supported_platform_triples = [
         "aarch64-apple-darwin",
