@@ -122,13 +122,38 @@ pub fn load_config(path: &PathBuf) -> AspectConfig {
             return config;
         }
     }
+    default_config()
+}
+
+pub fn default_config() -> AspectConfig {
     // FIXME: Better way to fall back to an empty config?
     toml::from_str("[tools.cli]\n[tools.bazelisk]\n").unwrap()
 }
 
+/// Automatically determines the project root directory and loads the Aspect configuration.
+///
+/// This function starts from the current working directory and searches upwards through its ancestors
+/// for repository boundary marker files (such as `AXL_MODULE_FILE`, `MODULE.bazel`, `MODULE.bazel.lock`,
+/// `REPO.bazel`, `WORKSPACE`, or `WORKSPACE.bazel`). The first ancestor directory containing any of
+/// these files is considered the project root. If no such directory is found, the current directory
+/// is used as the root.
+///
+/// It then constructs the path to `.aspect/config.toml` within the root directory and loads the
+/// configuration using `load_config`.
+///
+/// # Returns
+///
+/// A tuple `(PathBuf, AspectConfig)` where:
+/// - The first element is the determined root directory.
+/// - The second element is the loaded `AspectConfig`.
+///
+/// # Panics
+///
+/// Panics if the current working directory cannot be obtained.
 pub fn autoconf() -> (PathBuf, AspectConfig) {
-    let Some(repo_dir) = current_dir()
-        .unwrap()
+    let current_dir = current_dir().expect("failed to get the current directory");
+
+    let root_dir = if let Some(repo_dir) = current_dir
         .ancestors()
         .filter(|dir| {
             dir.join(PathBuf::from(AXL_MODULE_FILE)).exists()
@@ -141,12 +166,14 @@ pub fn autoconf() -> (PathBuf, AspectConfig) {
         })
         .next()
         .map(Path::to_path_buf)
-    else {
-        panic!("unable to identify a repository root dir");
+    {
+        repo_dir
+    } else {
+        current_dir
     };
 
-    let aspect_telemetry = repo_dir
+    let config_toml = root_dir
         .join(PathBuf::from(".aspect/config.toml"))
         .to_path_buf();
-    (repo_dir, load_config(&aspect_telemetry))
+    (root_dir, load_config(&config_toml))
 }
