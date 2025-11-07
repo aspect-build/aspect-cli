@@ -3,6 +3,7 @@ mod flags;
 mod helpers;
 mod trace;
 
+use std::env::var;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,6 +25,13 @@ use tracing::info_span;
 
 use crate::cmd_tree::{make_command_from_task, CommandTree, BUILTIN_COMMAND_DISPLAY_ORDER};
 use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_paths};
+
+fn debug_mode() -> bool {
+    match var("ASPECT_DEBUG") {
+        Ok(val) => !val.is_empty(),
+        _ => false,
+    }
+}
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
 //
@@ -89,6 +97,9 @@ async fn main() -> miette::Result<ExitCode> {
 
     for (name, root) in module_roots {
         let module_store = module_eval.evaluate(name, root).into_diagnostic()?;
+        if debug_mode() {
+            eprintln!("module @{} at {:?}", module_store.module_name, module_store.module_root);
+        };
         modules.push((
             module_store.module_name,
             module_store.module_root,
