@@ -81,7 +81,7 @@ impl DiskStore {
 
         let req = Request::new(
             Method::GET,
-            Url::from_str(url.as_str()).expect("url should have been validated in axl_dep side"),
+            Url::from_str(url.as_str()).expect("url should have been validated in axl_archive_dep"),
         );
 
         let mut byte_stream = client
@@ -128,11 +128,6 @@ impl DiskStore {
                 // We don't know how to safely handle symlinks yet so forbid it
                 // for now.
                 // TODO: implement this with a chroot style symlink normalization.
-                eprintln!(
-                    "axl_dep {} contains a symlink at {}",
-                    dep.name,
-                    path.to_string_lossy(),
-                );
                 continue;
             }
 
