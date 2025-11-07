@@ -1,17 +1,8 @@
-use aspect_cache::AspectCache;
-use aspect_config::{
-    autoconf, cli_version, debug_mode, ToolSource, ToolSpec, BZLARCH, BZLOS, GOARCH, GOOS,
-    LLVM_TRIPLE, TELURL,
-};
-use clap::{arg, Arg, Command};
-use fork::{fork, Fork};
-use futures_util::TryStreamExt;
-use miette::{miette, Context, IntoDiagnostic, Result};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::redirect::Policy;
-use reqwest::{self, Client, Method, Request, RequestBuilder, StatusCode};
-use serde::Deserialize;
-use std::env::{self, var};
+mod cache;
+mod config;
+
+use std::env;
+use std::env::var;
 use std::fs;
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
@@ -20,9 +11,30 @@ use std::path::PathBuf;
 use std::process::Command as UnixCommand;
 use std::process::ExitCode;
 use std::str::FromStr;
-use std::time::Duration;
+
+use aspect_telemetry::{
+    cargo_pkg_short_version, do_not_track, send_telemetry, BZLARCH, BZLOS, GOARCH, GOOS,
+    LLVM_TRIPLE,
+};
+use clap::{arg, Arg, Command};
+use fork::{fork, Fork};
+use futures_util::TryStreamExt;
+use miette::{miette, Context, IntoDiagnostic, Result};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::{self, Client, Method, Request, RequestBuilder};
+use serde::Deserialize;
 use tokio::runtime;
 use tokio::task::{self, JoinHandle};
+
+use crate::cache::AspectCache;
+use crate::config::{autoconf, ToolSource, ToolSpec};
+
+fn debug_mode() -> bool {
+    match var("ASPECT_DEBUG") {
+        Ok(val) => !val.is_empty(),
+        _ => false,
+    }
+}
 
 async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Request) -> Result<()> {
     // Stream to a tempfile
@@ -151,7 +163,7 @@ async fn configure_tool_task(
 
         if tool_dest_file.exists() {
             if debug_mode() {
-                eprintln!("tool {tool:?} already in cache");
+                eprintln!("tool {tool:?} already in cache at {tool_dest_file:?}");
             };
             return Ok(());
         }
@@ -290,8 +302,8 @@ fn main() -> Result<ExitCode> {
     let matches = cmd.get_matches();
 
     if matches.get_flag("version") {
-        let v = cli_version();
-        println!("Aspect CLI Launcher {v:}");
+        let v = cargo_pkg_short_version();
+        println!("aspect launcher {v:}");
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -299,51 +311,14 @@ fn main() -> Result<ExitCode> {
     match fork().unwrap() {
         Fork::Child => {
             // Honor DO_NOT_TRACK
-            if var("DO_NOT_TRACK").is_ok() {
+            if do_not_track() {
                 return Ok(ExitCode::SUCCESS);
             }
-
+            // Report telemetry
             let threaded_rt = runtime::Runtime::new().into_diagnostic()?;
             threaded_rt.block_on(async {
-                // Report telemetry
-                let v = cli_version();
-                let body = format!(
-                    "{{\"cli\": {{\"version\": \"{v}\", \"os\": \"{BZLOS}\", \"arch\": \"{BZLARCH}\"}}}}"
-                );
-                let mut url = TELURL.to_string();
-                let client = reqwest::Client::builder().redirect(Policy::none()).build().unwrap();
-
-                loop {
-                    let req = client
-                        .request(Method::POST, &url)
-                        .query(&[("source", "aspect-cli")])
-                        .header(HeaderName::from_static("content-type"), "application/json")
-                        .header(HeaderName::from_static("user-agent"), "reqwest;aspect-cli")
-                        .body(body.clone())
-                        .timeout(Duration::from_secs(5));
-
-                    let send_res = req.send().await;
-
-                    let send_res = match send_res {
-                        Ok(r) => r,
-                        Err(_) => break,
-                    };
-
-                    match send_res.status() {
-                        StatusCode::FOUND | StatusCode::PERMANENT_REDIRECT | StatusCode::TEMPORARY_REDIRECT => {
-                            if let Some(loc) = send_res.headers().get("location") {
-                                if let Ok(loc_str) = loc.to_str() {
-                                    url = loc_str.to_owned();
-                                    continue;
-                                }
-                            }
-                            break;
-                        },
-                        _ => break
-                    };
-                }
+                let _ = send_telemetry().await;
             });
-
             Ok(ExitCode::SUCCESS)
         }
         Fork::Parent(_) => {

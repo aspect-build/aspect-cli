@@ -1,23 +1,5 @@
 {
   "$schema": "https://raw.githubusercontent.com/bazel-contrib/rules_multitool/main/lockfile.schema.json",
-  "aspect": {
-    "binaries": [
-      {
-        "kind": "file",
-        "url": "https://github.com/aspect-build/aspect-cli/releases/download/2025.42.1/aspect-cli_x86_64_unknown_linux_musl",
-        "os": "linux",
-        "cpu": "x86_64",
-        "sha256": "efdb4233fc840572ff3c5d67527a8b29ee5470b8535c9f8618f8fdf4d8556a20"
-      },
-      {
-        "kind": "file",
-        "url": "https://github.com/aspect-build/aspect-cli/releases/download/2025.42.1/aspect-cli_aarch64_apple_darwin",
-        "os": "macos",
-        "cpu": "arm64",
-        "sha256": "ca00dff41b39d51fd8ce76e99ce46d58a2f8c745732fdd7a342a773e6c56bc78"
-      }
-    ]
-  },
   "buildozer": {
     "binaries": [
       {

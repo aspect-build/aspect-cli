@@ -11,14 +11,13 @@ cargo_build_script(
         "DESCRIPTOR": "$(location :descriptor.bin)",
     },
     deps = [
-        "@crates//:tonic",
-        "@crates//:prost",
         "@crates//:prost-build",
         "@crates//:prost-types",
+        "@crates//:prost",
         "@crates//:tonic-prost-build",
+        "@crates//:tonic",
     ],
 )
-
 
 rust_library(
     name = "axl-proto",
@@ -30,13 +29,13 @@ rust_library(
         "@crates//:display_container",
         "@crates//:dupe",
         "@crates//:either",
-        "@crates//:starlark",
-        "@crates//:tonic",
-        "@crates//:tonic-prost",
-        "@crates//:prost",
         "@crates//:prost-types",
-        "@crates//:uuid",
+        "@crates//:prost",
+        "@crates//:starlark",
         "@crates//:tokio",
+        "@crates//:tonic-prost",
+        "@crates//:tonic",
+        "@crates//:uuid",
         ":build_script"
     ],
     proc_macro_deps = [

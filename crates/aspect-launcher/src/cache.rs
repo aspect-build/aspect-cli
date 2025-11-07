@@ -1,9 +1,10 @@
+use std::fs;
 use std::path::PathBuf;
 
-use aspect_config::ToolSpec;
 use dirs::cache_dir;
 use miette::{miette, Context, IntoDiagnostic, Result};
-use std::fs;
+
+use crate::config::ToolSpec;
 
 #[derive(Debug, Clone)]
 pub struct AspectCache {
@@ -20,7 +21,7 @@ impl AspectCache {
             return Err(miette!("unable to identify the user's cache directory"));
         };
 
-        let aspect_data_dir = data_dir.join(PathBuf::from("aspect"));
+        let aspect_data_dir = data_dir.join(PathBuf::from("aspect/launcher"));
         fs::create_dir_all(&aspect_data_dir)
             .into_diagnostic()
             .wrap_err("unable to create `aspect` cache dir")?;

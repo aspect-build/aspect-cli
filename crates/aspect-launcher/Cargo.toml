@@ -15,15 +15,15 @@ name = "aspect"
 path = "src/main.rs"
 
 [dependencies]
-aspect-config = {path = "../aspect-config" }
-aspect-cache = {path = "../aspect-cache" }
+aspect-telemetry = {path = "../aspect-telemetry" }
+clap = "4.5.41"
 dirs = "6.0.0"
+fork = "0.2.0"
 futures-util = { version = "0.3.31", features = ["tokio-io"] }
 liquid = "0.26.11"
 miette = { version = "7.6.0", features = ["fancy"] }
 reqwest = { version = "0.12.22", default-features = false, features = ["http2", "charset", "system-proxy", "rustls-tls", "stream", "json"] }
 serde = { version = "1.0.219", features = ["serde_derive"] }
-tokio = { version = "1.45.1", features = ["fs", "macros", "rt", "rt-multi-thread"] }
 tempfile = "3.20.0"
-clap = "4.5.41"
-fork = "0.2.0"
+tokio = { version = "1.45.1", features = ["fs", "macros", "rt", "rt-multi-thread"] }
+toml = "0.8.23"

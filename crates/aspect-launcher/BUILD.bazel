@@ -1,10 +1,13 @@
+load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
+load("//bazel/release:release.bzl", "release")
+load("//bazel/release/homebrew:multi_platform_brew_artifacts.bzl", "multi_platform_brew_artifacts")
 load("//bazel/rust:defs.bzl", "rust_binary")
 load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
-load("//bazel/release:release.bzl", "release")
 
 rust_binary(
     name = "aspect-launcher",
-    srcs = ["src/main.rs"],
+    version_key = "STABLE_MONOREPO_VERSION",
+    srcs = glob(["src/**/*.rs"]),
     deps = [
         "@crates//:clap",
         "@crates//:dirs",
@@ -16,9 +19,16 @@ rust_binary(
         "@crates//:serde",
         "@crates//:tempfile",
         "@crates//:tokio",
-        "//crates/aspect-config",
-        "//crates/aspect-cache",
+        "@crates//:toml",
+        "//crates/aspect-telemetry",
     ],
+    visibility = ["//:__pkg__"],
+)
+
+release(
+    name = "release",
+    targets = [":bins", ":brew"],
+    tags = ["no-macos"],
 )
 
 multi_platform_rust_binaries(
@@ -27,8 +37,35 @@ multi_platform_rust_binaries(
     tags = ["no-macos"],
 )
 
-release(
-    name = "release",
-    targets = [":bins"],
+multi_platform_brew_artifacts(
+    name = "brew",
+    bottle_root_url = "https://github.com/aspect-build/aspect-cli/releases/download/0.0.0-PLACEHOLDER",
+    desc = "Correct, fast, usable: choose three",
+    formula_name = "aspect",
+    homepage = "https://aspect.build",
+    license = "Apache-2.0",
+    binaries = {
+        "monterey": ":aspect-launcher_x86_64_apple_darwin_copy",
+        "arm64_monterey": ":aspect-launcher_aarch64_apple_darwin_copy",
+        "big_sur": ":aspect-launcher_x86_64_apple_darwin_copy",
+        "arm64_big_sur": ":aspect-launcher_aarch64_apple_darwin_copy",
+        "x86_64_linux": ":aspect-launcher_x86_64_unknown_linux_musl_copy",
+        "arm64_linux": ":aspect-launcher_aarch64_unknown_linux_musl_copy",
+    },
+    root_files = [
+        "//:LICENSE",
+        "//:README.md",
+    ],
+    url = "https://github.com/aspect-build/aspect-cli",
+    version_file = ":version_file",
     tags = ["no-macos"],
+)
+
+expand_template(
+    name = "version_file",
+    out = "version",
+    stamp_substitutions = {
+        "0.0.0-PLACEHOLDER": "{{STABLE_MONOREPO_SHORT_VERSION}}",
+    },
+    template = ["0.0.0-PLACEHOLDER"],
 )

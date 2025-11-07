@@ -4,11 +4,11 @@ rust_library(
     name = "build-event-stream",
     srcs = glob(["src/**/*.rs"]),
     deps = [
-        "@crates//:tonic",
-        "@crates//:thiserror",
         "@crates//:futures",
-        "@crates//:prost-types",
         "@crates//:http",
+        "@crates//:prost-types",
+        "@crates//:thiserror",
+        "@crates//:tonic",
         "//crates/axl-proto",
     ],
     visibility = [

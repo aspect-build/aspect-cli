@@ -4,6 +4,7 @@ load("//bazel/release:release.bzl", "release")
 
 rust_binary(
     name = "aspect-cli",
+    version_key = "STABLE_MONOREPO_VERSION",
     srcs = glob(["src/**/*.rs"]),
     deps = [
         "@crates//:clap",
@@ -20,7 +21,7 @@ rust_binary(
         "@crates//:opentelemetry",
         "@crates//:opentelemetry_sdk",
         "@crates//:opentelemetry-otlp",
-        "//crates/aspect-config",
+        "//crates/aspect-telemetry",
         "//crates/axl-runtime",
     ],
     visibility = ["//:__pkg__"],

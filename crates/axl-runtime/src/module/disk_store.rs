@@ -5,10 +5,12 @@ use anyhow::anyhow;
 use dirs::cache_dir;
 use flate2::read::GzDecoder;
 use futures_util::TryStreamExt;
+use rand::prelude::*;
 use reqwest::{self, Client, Method, Request, Url};
-use ssri::IntegrityChecker;
+use ssri::{Algorithm, Integrity, IntegrityChecker, IntegrityOpts};
 use thiserror::Error;
 use tokio::fs::{self, File};
+use tokio::io::AsyncWriteExt;
 
 use crate::builtins;
 
@@ -33,6 +35,37 @@ pub enum StoreError {
     UnpackError(std::io::Error),
     #[error("failed to link: {0}")]
     LinkError(std::io::Error),
+    #[error("missing integrity for module @{0}, set integrity = \"{1}\"")]
+    MissingIntegrity(String, Integrity),
+}
+
+enum Processor {
+    Check(IntegrityChecker),
+    Hash(IntegrityOpts),
+}
+
+impl Processor {
+    fn new_check(integrity: Integrity) -> Self {
+        Processor::Check(IntegrityChecker::new(integrity))
+    }
+
+    fn new_hash() -> Self {
+        Processor::Hash(IntegrityOpts::new().algorithm(Algorithm::Sha512))
+    }
+
+    fn update<B: AsRef<[u8]>>(&mut self, data: B) {
+        match self {
+            Processor::Check(checker) => checker.input(data),
+            Processor::Hash(opts) => opts.input(data),
+        }
+    }
+
+    fn finalize(self) -> Result<Option<Integrity>, ssri::Error> {
+        match self {
+            Processor::Check(checker) => checker.result().map(|_| None),
+            Processor::Hash(opts) => Ok(Some(opts.result())),
+        }
+    }
 }
 
 impl DiskStore {
@@ -46,6 +79,7 @@ impl DiskStore {
     fn root(&self) -> PathBuf {
         cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("aspect")
             .join("axl")
     }
 
@@ -61,9 +95,20 @@ impl DiskStore {
         self.deps_path().join(format!("{}@marker", dep.name()))
     }
 
-    fn cas_path(&self, dep: &AxlArchiveDep) -> PathBuf {
-        let hex = dep.integrity.to_hex();
+    fn cas_path_for_integrity(&self, integrity: &Integrity) -> PathBuf {
+        let hex = integrity.to_hex();
         self.root().join("cas").join(hex.0.to_string()).join(hex.1)
+    }
+
+    fn download_tmp_file(&self) -> PathBuf {
+        let mut rng = rand::thread_rng();
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        self.root()
+            .join("dl")
+            .join(hex_string)
+            .with_extension("tmp")
     }
 
     async fn fetch_dep(
@@ -71,16 +116,15 @@ impl DiskStore {
         client: &Client,
         dep: &AxlArchiveDep,
         url: &String,
-    ) -> Result<(), StoreError> {
-        let cas_path = self.cas_path(dep);
+    ) -> Result<Option<Integrity>, StoreError> {
+        let compute_integrity = dep.integrity.is_none();
 
-        // Stream to a tempfile
-        let tmp_file = cas_path.with_extension("tmp");
+        let tmp_file = self.download_tmp_file();
         let mut tmp = File::create(&tmp_file).await?;
 
         let req = Request::new(
             Method::GET,
-            Url::from_str(url.as_str()).expect("url should have been validated in axl_dep side"),
+            Url::from_str(url.as_str()).expect("url should have been validated in axl_archive_dep"),
         );
 
         let mut byte_stream = client
@@ -89,31 +133,40 @@ impl DiskStore {
             .error_for_status()?
             .bytes_stream();
 
-        let mut checker = IntegrityChecker::new(dep.integrity.clone());
+        let mut processor = if compute_integrity {
+            Processor::new_hash()
+        } else {
+            Processor::new_check(dep.integrity.clone().unwrap())
+        };
 
         while let Some(item) = byte_stream.try_next().await? {
-            checker.input(&item);
-            tokio::io::copy(&mut item.as_ref(), &mut tmp).await?;
+            processor.update(&item);
+            tmp.write_all(&item).await?;
         }
 
-        // Check integrity
-        match checker.result() {
-            Ok(_) => {}
+        let result = match processor.finalize() {
+            Ok(res) => res,
             Err(err) => {
                 let _ = fs::remove_file(&tmp_file).await;
                 return Err(StoreError::ChecksumError(err));
             }
+        };
+
+        if compute_integrity {
+            let _ = fs::remove_file(&tmp_file).await;
+            Ok(result)
+        } else {
+            let integrity = dep.integrity.as_ref().unwrap();
+            let cas_path = self.cas_path_for_integrity(integrity);
+            tokio::fs::rename(&tmp_file, &cas_path).await?;
+            Ok(None)
         }
-
-        // And move it into the cache
-        tokio::fs::rename(&tmp_file, &cas_path).await?;
-
-        Ok(())
     }
 
     async fn expand_dep(&self, dep: &AxlArchiveDep) -> Result<(), io::Error> {
         let dep_path = self.dep_path(&dep.name);
-        let cas_path = self.cas_path(dep);
+        let integrity = dep.integrity.as_ref().expect("integrity must be set");
+        let cas_path = self.cas_path_for_integrity(integrity);
         let raw = File::open(&cas_path).await?;
         let raw = raw.into_std().await;
         let decoder = GzDecoder::new(raw);
@@ -127,11 +180,6 @@ impl DiskStore {
                 // We don't know how to safely handle symlinks yet so forbid it
                 // for now.
                 // TODO: implement this with a chroot style symlink normalization.
-                eprintln!(
-                    "axl_dep {} contains a symlink at {}",
-                    dep.name,
-                    path.to_string_lossy(),
-                );
                 continue;
             }
 
@@ -181,6 +229,7 @@ impl DiskStore {
         fs::create_dir_all(&root).await?;
         fs::create_dir_all(self.deps_path()).await?;
         fs::create_dir_all(&root.join("cas")).await?;
+        fs::create_dir_all(&root.join("dl")).await?;
         fs::create_dir_all(&root.join("builtins")).await?;
 
         let client = reqwest::Client::new();
@@ -207,7 +256,7 @@ impl DiskStore {
 
         for dep in all.values() {
             let dep_marker_path = self.dep_marker_path(&dep);
-            let dep_path = self.dep_path(&dep.name());
+            let dep_path = self.dep_path(dep.name());
 
             match dep {
                 Dep::Local(local) if local.auto_use_tasks => {
@@ -222,13 +271,25 @@ impl DiskStore {
             let current_hash = match dep {
                 Dep::Local(dep) => sha256::digest(dep.path.to_str().unwrap()),
                 Dep::Remote(dep) => {
-                    sha256::digest(format!("{}{}", dep.integrity, dep.strip_prefix))
+                    if let Some(integrity) = &dep.integrity {
+                        sha256::digest(format!("{}{}", integrity, dep.strip_prefix))
+                    } else {
+                        "".to_string()
+                    }
                 }
             };
 
             if dep_marker_path.exists() {
                 let prev_hash = fs::read_to_string(&dep_marker_path).await?;
                 if prev_hash != current_hash {
+                    if dep_path.exists() {
+                        fs::remove_dir_all(&dep_path).await?;
+                    }
+                }
+            } else {
+                // if we have no marker file and the cas_path exists, the safest thing to do is to delete the
+                // current dep path and start over
+                if dep_path.exists() {
                     fs::remove_dir_all(&dep_path).await?;
                 }
             }
@@ -241,30 +302,50 @@ impl DiskStore {
                             .map_err(|err| StoreError::LinkError(err))?;
                     }
                     Dep::Remote(dep) => {
-                        let cas_path = self.cas_path(&dep);
-                        fs::create_dir_all(
-                            &cas_path
-                                .parent()
-                                .expect("unexpected: cas path did not have a parent. "),
-                        )
-                        .await?;
+                        let cas_path = dep
+                            .integrity
+                            .as_ref()
+                            .map(|integrity| self.cas_path_for_integrity(integrity));
 
-                        for (i, url) in dep.urls.iter().enumerate() {
-                            match self.fetch_dep(&client, &dep, url).await {
-                                Ok(_) => break,
-                                // If ran out of urls to try, then return the err.
-                                Err(err) if i == dep.urls.len() - 1 => {
-                                    return Err(err);
+                        let need_fetch = match &cas_path {
+                            Some(cas_path) => !tokio::fs::try_exists(cas_path).await?,
+                            None => true,
+                        };
+
+                        if need_fetch {
+                            if let Some(parent) = cas_path.as_ref().and_then(|p| p.parent()) {
+                                fs::create_dir_all(parent).await?;
+                            }
+
+                            let mut last_err: Option<StoreError> = None;
+                            let mut fetched = false;
+
+                            for (i, url) in dep.urls.iter().enumerate() {
+                                match self.fetch_dep(&client, dep, url).await {
+                                    Ok(Some(computed)) => {
+                                        return Err(StoreError::MissingIntegrity(
+                                            dep.name.clone(),
+                                            computed,
+                                        ));
+                                    }
+                                    Ok(None) => {
+                                        fetched = true;
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        if dep.urls.len() > 1 && i != dep.urls.len() - 1 {
+                                            eprintln!("failed to fetch `{url}`: {err}");
+                                        }
+                                        last_err = Some(err);
+                                        if i == dep.urls.len() - 1 {
+                                            return Err(last_err.unwrap());
+                                        }
+                                    }
                                 }
-                                // If have more than one url to try, then notify.
-                                Err(err) if dep.urls.len() > 1 => {
-                                    eprintln!("failed to fetch `{url}`: {err}");
-                                    continue;
-                                }
-                                // Still have urls to try because i != dep.urls.len() - 1
-                                Err(_) => {
-                                    continue;
-                                }
+                            }
+
+                            if !fetched {
+                                return Err(last_err.unwrap());
                             }
                         }
 
@@ -277,7 +358,9 @@ impl DiskStore {
             }
 
             // write the marker once the expansion is succesful
-            fs::write(&dep_marker_path, current_hash).await?;
+            if !current_hash.is_empty() {
+                fs::write(&dep_marker_path, current_hash).await?;
+            }
         }
 
         Ok(module_roots)

@@ -1,5 +1,5 @@
 [tools.cli]
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 sources = [
    # Try to use a dev build for dogfooding
    { path = "bazel-bin/crates/aspect-cli/aspect-cli" },

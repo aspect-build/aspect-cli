@@ -10,7 +10,7 @@ codegen-units = 1
 opt-level = "z"
 
 [workspace.package]
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 categories = ["development-tools"]
 homepage = "https://github.com/aspect-build/aspect-cli"
 repository = "https://github.com/aspect-build/aspect-cli"

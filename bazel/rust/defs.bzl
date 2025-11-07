@@ -28,9 +28,9 @@ def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [
         _expand_template(
             name = "{}_env_file".format(name),
             out = rustc_env_file,
-            stamp_substitutions = {"0.0.0-DEV": "{{%s}}" % (version_key)},
+            stamp_substitutions = {"0.0.0-dev": "{{%s}}" % (version_key)},
             template = [
-                "CARGO_PKG_VERSION=0.0.0-DEV",
+                "CARGO_PKG_VERSION=0.0.0-dev",
             ],
         )
         rustc_env_files = rustc_env_files + [rustc_env_file]
@@ -89,9 +89,9 @@ def rust_library(name, rustc_env_files = [], version_key = "", crate_features = 
         _expand_template(
             name = "{}_env_file".format(name),
             out = rustc_env_file,
-            stamp_substitutions = {"0.0.0-DEV": "{{%s}}" % (version_key)},
+            stamp_substitutions = {"0.0.0-dev": "{{%s}}" % (version_key)},
             template = [
-                "CARGO_PKG_VERSION=0.0.0-DEV",
+                "CARGO_PKG_VERSION=0.0.0-dev",
             ],
         )
         stamp = -1 # workaround https://github.com/bazelbuild/rules_rust/pull/3503

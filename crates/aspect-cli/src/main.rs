@@ -1,14 +1,14 @@
 mod cmd_tree;
 mod flags;
 mod helpers;
-mod telemetry;
 mod trace;
 
 use std::collections::HashMap;
+use std::env::var;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aspect_config::cli_version;
+use aspect_telemetry::{cargo_pkg_short_version, cargo_pkg_version, do_not_track, send_telemetry};
 use axl_runtime::engine::task::{FrozenTask, Task};
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
@@ -25,6 +25,13 @@ use tracing::info_span;
 
 use crate::cmd_tree::{make_command_from_task, CommandTree, BUILTIN_COMMAND_DISPLAY_ORDER};
 use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_paths};
+
+fn debug_mode() -> bool {
+    match var("ASPECT_DEBUG") {
+        Ok(val) => !val.is_empty(),
+        _ => false,
+    }
+}
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
 //
@@ -44,7 +51,11 @@ use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_pa
 // TODO: create a diagram of how all this ties together.
 #[tokio::main(flavor = "multi_thread", worker_threads = 3)]
 async fn main() -> miette::Result<ExitCode> {
-    let _ = task::spawn(telemetry::send_telemetry());
+    // Honor DO_NOT_TRACK
+    if !do_not_track() {
+        let _ = task::spawn(send_telemetry());
+    }
+
     let _tracing = trace::init();
     let _root = info_span!("root").entered();
 
@@ -86,6 +97,12 @@ async fn main() -> miette::Result<ExitCode> {
 
     for (name, root) in module_roots {
         let module_store = module_eval.evaluate(name, root).into_diagnostic()?;
+        if debug_mode() {
+            eprintln!(
+                "module @{} at {:?}",
+                module_store.module_name, module_store.module_root
+            );
+        };
         modules.push((
             module_store.module_name,
             module_store.module_root,
@@ -222,7 +239,7 @@ async fn main() -> miette::Result<ExitCode> {
             // customize the usage string to use <TASK>
             .subcommand_value_name("TASK")
             // handle --version and -v flags
-            .version(cli_version())
+            .version(cargo_pkg_short_version())
             .disable_version_flag(true) // disable auto -V / --version
             .arg(
                 Arg::new("version")
@@ -271,7 +288,7 @@ async fn main() -> miette::Result<ExitCode> {
 
         // If the top-level subcommand name is 'version' then print out the version information and exit success
         if let Some("version") = matches.subcommand_name() {
-            println!("Aspect CLI {:}", cli_version());
+            println!("Aspect CLI {:}", cargo_pkg_version());
             return Ok(ExitCode::SUCCESS);
         }
 

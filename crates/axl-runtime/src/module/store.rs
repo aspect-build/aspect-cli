@@ -83,7 +83,7 @@ starlark_simple_value!(AxlLocalDep);
 pub struct AxlArchiveDep {
     pub urls: Vec<String>,
     #[allocative(skip)]
-    pub integrity: Integrity,
+    pub integrity: Option<Integrity>,
     pub dev: bool,
     pub name: String,
     pub strip_prefix: String,
