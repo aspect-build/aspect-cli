@@ -3,12 +3,18 @@ name: Build Release Artifacts
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches: ["main", "staging"]
   workflow_call:
     outputs:
       linux:
         description: "Linux and MacOS binaries"
         value: ${{jobs.build.outputs.artifact}}
+
+concurrency:
+    # Cancel previous actions from the same PR or branch except 'main' branch.
+    # See https://docs.github.com/en/actions/using-jobs/using-concurrency and https://docs.github.com/en/actions/learn-github-actions/contexts for more info.
+    group: concurrency-group::${{ github.workflow }}::${{ github.event.pull_request.number > 0 && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}${{ github.ref_name == 'main' && format('::{0}', github.run_id) || ''}}
+    cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 permissions:
   id-token: write
@@ -45,8 +51,8 @@ jobs:
       - name: Build release artifacts
         run: |
           mkdir -p upload_root/assets
-          bazel run --config=release --config=ci //crates/aspect-cli:release -- "${PWD}/upload_root/assets"
           bazel run --config=release --config=ci //crates/aspect-launcher:release -- "${PWD}/upload_root/assets"
+          bazel run --config=release --config=ci //crates/aspect-cli:release -- "${PWD}/upload_root/assets"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
