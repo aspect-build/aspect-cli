@@ -1,8 +1,8 @@
 
 
-## template.handlebars
+## Template.handlebars
 
-<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">template</span></span>.<span class="entity name function python"><span class="meta generic-name python">handlebars</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
+<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Template</span></span>.<span class="entity name function python"><span class="meta generic-name python">handlebars</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
     <span class="variable parameter python">template</span></span><span class="meta function parameters annotation python"><span class="punctuation separator annotation parameter python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/str">str</a><span class="punctuation definition string end python">&#39;</span></span></span></span><span class="meta function parameters python"><span class="punctuation separator parameters python">,</span>
     /<span class="punctuation separator parameters python">,</span>
     *<span class="punctuation separator parameters python">,</span>
@@ -30,9 +30,9 @@ result = ctx.template.handlebars("Hello, {{name}}!", {"name": "World"})
 
 ***
 
-## template.jinja2
+## Template.jinja2
 
-<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">template</span></span>.<span class="entity name function python"><span class="meta generic-name python">jinja2</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
+<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Template</span></span>.<span class="entity name function python"><span class="meta generic-name python">jinja2</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
     <span class="variable parameter python">template</span></span><span class="meta function parameters annotation python"><span class="punctuation separator annotation parameter python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/str">str</a><span class="punctuation definition string end python">&#39;</span></span></span></span><span class="meta function parameters python"><span class="punctuation separator parameters python">,</span>
     /<span class="punctuation separator parameters python">,</span>
     *<span class="punctuation separator parameters python">,</span>
@@ -60,9 +60,9 @@ result = ctx.template.jinja2("Hello, {{ name }}!", {"name": "World"})
 
 ***
 
-## template.liquid
+## Template.liquid
 
-<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">template</span></span>.<span class="entity name function python"><span class="meta generic-name python">liquid</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
+<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Template</span></span>.<span class="entity name function python"><span class="meta generic-name python">liquid</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
     <span class="variable parameter python">template</span></span><span class="meta function parameters annotation python"><span class="punctuation separator annotation parameter python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/str">str</a><span class="punctuation definition string end python">&#39;</span></span></span></span><span class="meta function parameters python"><span class="punctuation separator parameters python">,</span>
     /<span class="punctuation separator parameters python">,</span>
     *<span class="punctuation separator parameters python">,</span>
