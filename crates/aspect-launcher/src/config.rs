@@ -47,7 +47,7 @@ fn default_bazelisk_sources() -> Vec<ToolSource> {
 }
 
 fn default_bazelisk_version() -> String {
-    "1.26.0".into()
+    "1.27.0".into()
 }
 
 #[derive(Deserialize, Debug, Clone)]
