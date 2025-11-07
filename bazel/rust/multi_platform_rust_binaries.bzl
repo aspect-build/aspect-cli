@@ -7,7 +7,7 @@ load("@rules_pkg//pkg:pkg.bzl", "pkg_tar", "pkg_zip")
 load("@with_cfg.bzl", "with_cfg")
 load("//bazel/release:hashes.bzl", "hashes")
 
-opt_filegroup, _opt_filegroup_internal = with_cfg(native.filegroup).set("compilation_mode", "opt").build()
+opt_filegroup, _ = with_cfg(native.filegroup).set("compilation_mode", "opt").build()
 
 TARGET_TRIPLES = [
     ("x86_64_unknown_linux_musl", "linux_x86_64_musl"),
@@ -52,7 +52,7 @@ def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEM
             tags = ["manual"],
         )
 
-        copy_name = "{}{}_{}".format(prefix, bin, target_naming)
+        copy_name = "{}{}-{}".format(prefix, bin, target_naming)
         copy_file(
             name = "{}_copy".format(copy_name),
             src = transition_build,

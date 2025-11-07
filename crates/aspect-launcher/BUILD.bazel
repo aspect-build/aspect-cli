@@ -45,12 +45,12 @@ multi_platform_brew_artifacts(
     homepage = "https://aspect.build",
     license = "Apache-2.0",
     binaries = {
-        "monterey": ":aspect-launcher_x86_64_apple_darwin_copy",
-        "arm64_monterey": ":aspect-launcher_aarch64_apple_darwin_copy",
-        "big_sur": ":aspect-launcher_x86_64_apple_darwin_copy",
-        "arm64_big_sur": ":aspect-launcher_aarch64_apple_darwin_copy",
-        "x86_64_linux": ":aspect-launcher_x86_64_unknown_linux_musl_copy",
-        "arm64_linux": ":aspect-launcher_aarch64_unknown_linux_musl_copy",
+        "monterey": ":aspect-launcher-x86_64_apple_darwin_copy",
+        "arm64_monterey": ":aspect-launcher-aarch64_apple_darwin_copy",
+        "big_sur": ":aspect-launcher-x86_64_apple_darwin_copy",
+        "arm64_big_sur": ":aspect-launcher-aarch64_apple_darwin_copy",
+        "x86_64_linux": ":aspect-launcher-x86_64_unknown_linux_musl_copy",
+        "arm64_linux": ":aspect-launcher-aarch64_unknown_linux_musl_copy",
     },
     root_files = [
         "//:LICENSE",
