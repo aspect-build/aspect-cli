@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
-use proc_pidinfo::*;
 
 pub struct Pipe {
     path: PathBuf,
@@ -36,11 +35,11 @@ impl Pipe {
         use procfs::process::{FDTarget, Process};
         let proc = Process::new(pid as i32).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        for fd in proc.fd()? {
-            let fd = fd?;
+        for fd in proc.fd().map_err(|err| io::Error::other(err))? {
+            let fd = fd.map_err(|err| io::Error::other(err))?;
             if let FDTarget::Path(fd_path) = fd.target {
                 // Resolve the path exactly as the kernel reports it
-                if fd_path == *path {
+                if fd_path == self.path {
                     return Ok(true);
                 }
             }
@@ -50,6 +49,7 @@ impl Pipe {
 
     #[cfg(target_os = "macos")]
     pub fn is_path_open(&self, pid: u32) -> io::Result<bool> {
+        use proc_pidinfo::*;
         let pid = Pid(pid);
         for fd in proc_pidinfo_list::<ProcFDInfo>(pid)? {
             match proc_pidfdinfo::<VnodeFdInfoWithPath>(pid, fd.proc_fd)? {
