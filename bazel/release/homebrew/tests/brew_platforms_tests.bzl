@@ -7,11 +7,11 @@ load("//bazel/release/homebrew:brew_platforms.bzl", "brew_platforms")
 def _new_test(ctx):
     env = unittest.begin(ctx)
 
-    go_platform = platforms.get(os = platforms.oss.MACOS, arch = platforms.archs.ARM64)
-    actual = brew_platforms.new(brew_platforms.names.MONTEREY_ARM64, go_platform)
+    rust_platform = platforms.get(os = platforms.oss.MACOS, arch = platforms.archs.ARM64)
+    actual = brew_platforms.new(brew_platforms.names.MONTEREY_ARM64, rust_platform)
     expected = struct(
         name = brew_platforms.names.MONTEREY_ARM64,
-        go_platform = go_platform,
+        rust_platform = rust_platform,
     )
     asserts.equals(env, expected, actual)
 

@@ -8,7 +8,7 @@ assertions_sh="$(rlocation "${assertions_sh_location}")" ||
 # shellcheck source=/dev/null
 source "${assertions_sh}"
 
-monterey_bottle_tar_gz_location=_main/release/homebrew/tests/monterey_bottle.tar.gz
+monterey_bottle_tar_gz_location=_main/bazel/release/homebrew/tests/monterey_bottle.tar.gz
 monterey_bottle_tar_gz="$(rlocation "${monterey_bottle_tar_gz_location}")" ||
     (echo >&2 "Failed to locate ${monterey_bottle_tar_gz_location}" && exit 1)
 
