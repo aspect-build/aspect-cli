@@ -43,16 +43,19 @@ fn default_cli_sources() -> Vec<ToolSource> {
     }]
 }
 
-pub fn cli_version() -> String {
+/// Pull the version of the currently running rust binary from CARGO_PKG_VERSION env.  This env
+/// is injected into the rust build artifacts with the version_key attribute on rust_library & rust_binary
+/// and is set for release builds with stamping. Defaults to "0.0.0-dev" on unstamped builds.
+pub fn cargo_pkg_version() -> String {
     option_env!("CARGO_PKG_VERSION")
         .map(|label| {
             if label == "{CARGO_PKG_VERSION}" {
-                "0.0.0-DEV"
+                "0.0.0-dev"
             } else {
                 label
             }
         })
-        .unwrap_or("0.0.0-DEV")
+        .unwrap_or("0.0.0-dev")
         .into()
 }
 
@@ -60,7 +63,7 @@ pub fn cli_version() -> String {
 pub struct CliConfig {
     #[serde(default = "default_cli_sources")]
     sources: Vec<ToolSource>,
-    #[serde(default = "cli_version")]
+    #[serde(default = "cargo_pkg_version")]
     version: String,
 }
 

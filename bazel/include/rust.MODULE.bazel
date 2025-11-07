@@ -21,7 +21,6 @@ crate.from_cargo(
     cargo_lockfile = "//:Cargo.lock",
     manifests = [
         "//:Cargo.toml",
-        "//crates/aspect-cache:Cargo.toml",
         "//crates/aspect-cli:Cargo.toml",
         "//crates/aspect-config:Cargo.toml",
         "//crates/aspect-launcher:Cargo.toml",

@@ -16,7 +16,6 @@ path = "src/main.rs"
 
 [dependencies]
 aspect-config = {path = "../aspect-config" }
-aspect-cache = {path = "../aspect-cache" }
 dirs = "6.0.0"
 futures-util = { version = "0.3.31", features = ["tokio-io"] }
 liquid = "0.26.11"

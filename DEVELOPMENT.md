@@ -7,7 +7,6 @@ This includes the most recent release of the `aspect` command.
 
 ## Crates
 
-- `aspect-cache` manages the Aspect CLI local download cache
 - `aspect-cli` (which is managed by the launcher) serves as an entrypoint to all other components
 - `aspect-launcher` (what is actually installed as `aspect` on the PATH) serves the functions of `bazelisk`
 - `axl-runtime` AXL engine for extending the CLI

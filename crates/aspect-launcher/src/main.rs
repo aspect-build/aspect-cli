@@ -1,16 +1,5 @@
-use aspect_cache::AspectCache;
-use aspect_config::{
-    autoconf, cli_version, debug_mode, ToolSource, ToolSpec, BZLARCH, BZLOS, GOARCH, GOOS,
-    LLVM_TRIPLE, TELURL,
-};
-use clap::{arg, Arg, Command};
-use fork::{fork, Fork};
-use futures_util::TryStreamExt;
-use miette::{miette, Context, IntoDiagnostic, Result};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::redirect::Policy;
-use reqwest::{self, Client, Method, Request, RequestBuilder, StatusCode};
-use serde::Deserialize;
+mod cache;
+
 use std::env::{self, var};
 use std::fs;
 use std::fs::File;
@@ -23,6 +12,21 @@ use std::str::FromStr;
 use std::time::Duration;
 use tokio::runtime;
 use tokio::task::{self, JoinHandle};
+
+use aspect_config::{
+    autoconf, cargo_pkg_version, debug_mode, ToolSource, ToolSpec, BZLARCH, BZLOS, GOARCH, GOOS,
+    LLVM_TRIPLE, TELURL,
+};
+use clap::{arg, Arg, Command};
+use fork::{fork, Fork};
+use futures_util::TryStreamExt;
+use miette::{miette, Context, IntoDiagnostic, Result};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::redirect::Policy;
+use reqwest::{self, Client, Method, Request, RequestBuilder, StatusCode};
+use serde::Deserialize;
+
+use crate::cache::AspectCache;
 
 async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Request) -> Result<()> {
     // Stream to a tempfile
@@ -290,7 +294,7 @@ fn main() -> Result<ExitCode> {
     let matches = cmd.get_matches();
 
     if matches.get_flag("version") {
-        let v = cli_version();
+        let v = cargo_pkg_version();
         println!("Aspect CLI Launcher {v:}");
         return Ok(ExitCode::SUCCESS);
     }
@@ -306,7 +310,7 @@ fn main() -> Result<ExitCode> {
             let threaded_rt = runtime::Runtime::new().into_diagnostic()?;
             threaded_rt.block_on(async {
                 // Report telemetry
-                let v = cli_version();
+                let v = cargo_pkg_version();
                 let body = format!(
                     "{{\"cli\": {{\"version\": \"{v}\", \"os\": \"{BZLOS}\", \"arch\": \"{BZLARCH}\"}}}}"
                 );

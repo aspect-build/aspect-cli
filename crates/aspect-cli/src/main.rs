@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aspect_config::cli_version;
+use aspect_config::cargo_pkg_version;
 use axl_runtime::engine::task::{FrozenTask, Task};
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
@@ -222,7 +222,7 @@ async fn main() -> miette::Result<ExitCode> {
             // customize the usage string to use <TASK>
             .subcommand_value_name("TASK")
             // handle --version and -v flags
-            .version(cli_version())
+            .version(cargo_pkg_version())
             .disable_version_flag(true) // disable auto -V / --version
             .arg(
                 Arg::new("version")
@@ -271,7 +271,7 @@ async fn main() -> miette::Result<ExitCode> {
 
         // If the top-level subcommand name is 'version' then print out the version information and exit success
         if let Some("version") = matches.subcommand_name() {
-            println!("Aspect CLI {:}", cli_version());
+            println!("Aspect CLI {:}", cargo_pkg_version());
             return Ok(ExitCode::SUCCESS);
         }
 

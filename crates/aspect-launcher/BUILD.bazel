@@ -6,7 +6,8 @@ load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binar
 
 rust_binary(
     name = "aspect-launcher",
-    srcs = ["src/main.rs"],
+    version_key = "STABLE_MONOREPO_VERSION",
+    srcs = glob(["src/**/*.rs"]),
     deps = [
         "@crates//:clap",
         "@crates//:dirs",
@@ -19,7 +20,6 @@ rust_binary(
         "@crates//:tempfile",
         "@crates//:tokio",
         "//crates/aspect-config",
-        "//crates/aspect-cache",
     ],
     visibility = ["//:__pkg__"],
 )

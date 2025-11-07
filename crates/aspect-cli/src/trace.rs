@@ -15,7 +15,7 @@ fn resource() -> Resource {
     Resource::builder()
         .with_service_name("aspect-cli")
         .with_schema_url(
-            [KeyValue::new(SERVICE_VERSION, aspect_config::cli_version())],
+            [KeyValue::new(SERVICE_VERSION, aspect_config::cargo_pkg_version())],
             SCHEMA_URL,
         )
         .build()

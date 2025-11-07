@@ -1,4 +1,4 @@
-use aspect_config::{cli_version, BZLARCH, BZLOS, TELURL};
+use aspect_config::{cargo_pkg_version, BZLARCH, BZLOS, TELURL};
 use reqwest::header::HeaderName;
 use reqwest::redirect::Policy;
 use reqwest::{self, Method};
@@ -12,7 +12,7 @@ pub async fn send_telemetry() -> std::result::Result<(), ()> {
     }
 
     // Report telemetry
-    let v = cli_version();
+    let v = cargo_pkg_version();
     let body = format!(
         "{{\"cli\": {{\"version\": \"{v}\", \"os\": \"{BZLOS}\", \"arch\": \"{BZLARCH}\"}}}}"
     );

@@ -189,17 +189,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "aspect-cache"
-version = "0.0.0-DEV"
-dependencies = [
- "aspect-config",
- "dirs",
- "miette 7.6.0",
-]
-
-[[package]]
 name = "aspect-cli"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "aspect-config",
  "axl-runtime",
@@ -221,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "aspect-config"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "serde",
  "toml",
@@ -229,9 +220,8 @@ dependencies = [
 
 [[package]]
 name = "aspect-launcher"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
- "aspect-cache",
  "aspect-config",
  "clap",
  "dirs",
@@ -283,7 +273,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "axl-docgen"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "axl-runtime",
@@ -297,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "axl-lsp"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "axl-runtime",
@@ -307,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "axl-proto"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "allocative",
  "anyhow",
@@ -328,12 +318,11 @@ dependencies = [
 
 [[package]]
 name = "axl-runtime"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "allocative",
  "anyhow",
  "arc-slice",
- "aspect-cache",
  "aspect-config",
  "axl-proto",
  "build-event-stream",
@@ -505,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "build-event-stream"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "axl-proto",
  "futures 0.3.31",
@@ -3045,7 +3034,7 @@ dependencies = [
 
 [[package]]
 name = "pty-multiplex"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "bytes 1.10.1",
  "crossterm 0.29.0",
@@ -3889,7 +3878,7 @@ checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
 
 [[package]]
 name = "starbuf-derive"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "darling 0.21.3",
@@ -3901,7 +3890,7 @@ dependencies = [
 
 [[package]]
 name = "starbuf-types"
-version = "0.0.0-DEV"
+version = "0.0.0-dev"
 dependencies = [
  "allocative",
  "derive_more 2.0.1",

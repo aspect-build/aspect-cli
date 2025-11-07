@@ -17,7 +17,6 @@ rust_library(
         ":build_rs"
     ],
     visibility = [
-        "//crates/aspect-cache:__pkg__",
         "//crates/aspect-cli:__pkg__",
         "//crates/axl-runtime:__pkg__",
         "//crates/aspect-launcher:__pkg__",
