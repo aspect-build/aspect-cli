@@ -10,6 +10,7 @@ pub use prost_types::Any;
 pub use prost_types::Duration;
 pub use prost_types::Timestamp;
 
+include!(concat!(env!("OUT_DIR"), "/workspace_log.rs"));
 include!(concat!(env!("OUT_DIR"), "/build_event_stream.rs"));
 include!(concat!(env!("OUT_DIR"), "/blaze_query.rs"));
 include!(concat!(env!("OUT_DIR"), "/tools.protos.rs"));

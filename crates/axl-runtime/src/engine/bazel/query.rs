@@ -17,7 +17,6 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 
-use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::Ty;
 use starlark::values;
@@ -163,12 +162,6 @@ impl Query {
         let out = temp_dir().join("query.bin");
         let _ = fs::remove_file(&out);
 
-        // TODO; make it efficient
-        // match nix::unistd::mkfifo(&out, Mode::S_IRWXO | Mode::S_IRWXU | Mode::S_IRWXG) {
-        //     Ok(_) => {}
-        //     Err(_) => todo!("failed to create pipe, implement the fallback mechanism"),
-        // };
-
         let outfile = File::create(&out)?;
 
         cmd.stderr(Stdio::null());
@@ -236,7 +229,6 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     fn raw<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] expr: values::StringValue,
-        _eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Query> {
         use dupe::Dupe;
         let query = this.downcast_ref_err::<Query>()?;

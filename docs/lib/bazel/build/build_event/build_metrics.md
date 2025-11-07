@@ -48,12 +48,6 @@
 
 ***
 
-## BuildMetrics.remote\_analysis\_cache\_statistics
-
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">BuildMetrics</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">remote_analysis_cache_statistics</span></span><span class="punctuation separator annotation variable python">:</span> <span class="constant language python">None</span> <span class="keyword operator arithmetic python">|</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bazel/build/build_event/build_metrics/remote_analysis_cache_statistics">remote_analysis_cache_statistics</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
-
-***
-
 ## BuildMetrics.target\_metrics
 
 <pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">BuildMetrics</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">target_metrics</span></span><span class="punctuation separator annotation variable python">:</span> <span class="constant language python">None</span> <span class="keyword operator arithmetic python">|</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bazel/build/build_event/build_metrics/target_metrics">target_metrics</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>

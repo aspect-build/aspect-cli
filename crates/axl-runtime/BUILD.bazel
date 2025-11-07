@@ -20,7 +20,6 @@ rust_library(
         "@crates//:liquid-core",
         "@crates//:liquid",
         "@crates//:minijinja",
-        "@crates//:nix",
         "@crates//:prost",
         "@crates//:rand",
         "@crates//:reqwest",
@@ -39,8 +38,10 @@ rust_library(
         "@crates//:wasmi",
         "@crates//:zstd",
         "//crates/axl-proto",
+
+        "//crates/build-event-stream",
+        "//crates/galvanize",
         "//crates/aspect-telemetry",
-        "//crates/build-event-stream"
     ],
     proc_macro_deps = [
         "@crates//:starlark_derive",

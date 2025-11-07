@@ -1,12 +1,3 @@
-axl_archive_dep(
-    name = "rules_lint",
-    urls = ["https://github.com/aspect-build/rules_lint/archive/56a314b9247faa0cf852fd7aa139e96305b776d6.tar.gz"],
-    integrity = "sha512-PeWKAMEYLy6thrgc5E5VYmHjd0T/v9xnnrMpJCxOGC7PYrN71+qH08OGYSIhkWfTdoByjQjIoQFFU/gU+JxSGw==",
-    strip_prefix = "rules_lint-56a314b9247faa0cf852fd7aa139e96305b776d6",
-    auto_use_tasks = True,
-    dev = True
-)
-
 axl_local_dep(
     name = "local",
     path = ".aspect/modules/local",

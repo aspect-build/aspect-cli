@@ -13,13 +13,13 @@ load("./common.axl", "tui")
 def impl(ctx: TaskContext) -> int:
     stdout = ctx.std.io.stdout
     stderr = ctx.std.io.stderr
-    events = True
 
+    build_events = True
     if ctx.args.bes_backend:
         if not ctx.args.bes_header:
             fail("--bes_header is required with --bes_backend")
         (k, _, v) = ctx.args.bes_header.partition("=")
-        events = [
+        build_events = [
             bazel.build_events.grpc(
                 uri = ctx.args.bes_backend,
                 metadata = {k: v}
@@ -27,8 +27,9 @@ def impl(ctx: TaskContext) -> int:
         ]
 
     build = ctx.bazel.build(
-        events = events,
-        bazel_flags = ["--isatty=" + str(int(stdout.is_tty))]
+        build_events = build_events,
+        flags = ["--isatty=" + str(int(stdout.is_tty))],
+        *ctx.args.targets
     )
     return tui(ctx, build)
 

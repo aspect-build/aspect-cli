@@ -1,0 +1,19 @@
+[package]
+name = "galvanize"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nix = { version = "0.30.1", features = ["fs"] }
+
+[target.'cfg(target_os="linux")'.dependencies]
+procfs = "0.18.0"
+
+[target.'cfg(target_os="macos")'.dependencies]
+proc_pidinfo = "0.1"

@@ -168,7 +168,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-#[starlark_value(type = "std.io.Writeble")]
+#[starlark_value(type = "std.io.Writable")]
 impl<'v> values::StarlarkValue<'v> for Writable {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

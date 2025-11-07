@@ -3,15 +3,11 @@ load("./common.axl", "tui")
 def _test_impl(ctx):
     stdout = ctx.std.io.stdout
     stderr = ctx.std.io.stderr
-    targets = ctx.args.targets or ["//..."]
     test = ctx.bazel.build(
-        bazel_flags = [
-            "--isatty=" + str(int(stdout.is_tty)),
-            "--curses=yes",
-        ],
-        events = True,
-        bazel_verb = "test",
-        *targets
+        build_events = True,
+        command = "test",
+        flags = ["--isatty=" + str(int(stdout.is_tty))],
+        *ctx.args.pattern
     )
     return tui(ctx, test)
 
@@ -20,6 +16,6 @@ test = task(
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
-        "targets": args.positional(minimum = 1, maximum = 512),
+        "pattern": args.positional(default = ["..."]),
     }
 )
