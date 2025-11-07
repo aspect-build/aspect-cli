@@ -162,7 +162,7 @@ async fn configure_tool_task(
 
         if tool_dest_file.exists() {
             if debug_mode() {
-                eprintln!("tool {tool:?} already in cache");
+                eprintln!("tool {tool:?} already in cache at {tool_dest_file:?}");
             };
             return Ok(());
         }

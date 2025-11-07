@@ -46,6 +46,7 @@ impl DiskStore {
     fn root(&self) -> PathBuf {
         cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("aspect")
             .join("axl")
     }
 
