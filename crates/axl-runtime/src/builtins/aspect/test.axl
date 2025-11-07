@@ -6,12 +6,7 @@ def _test_impl(ctx):
     test = ctx.bazel.build(
         build_events = True,
         command = "test",
-        flags = [
-            "--isatty=" + str(int(stdout.is_tty)),
-            "--bes_outerr_buffer_size=1024",
-            "--bes_outerr_chunk_size=1024",
-            "--curses=yes"
-        ],
+        flags = ["--isatty=" + str(int(stdout.is_tty))],
         *ctx.args.pattern
     )
     return tui(ctx, test)

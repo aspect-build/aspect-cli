@@ -19,7 +19,7 @@ def impl(ctx: TaskContext) -> int:
         if not ctx.args.bes_header:
             fail("--bes_header is required with --bes_backend")
         (k, _, v) = ctx.args.bes_header.partition("=")
-        events = [
+        build_events = [
             bazel.build_events.grpc(
                 uri = ctx.args.bes_backend,
                 metadata = {k: v}
@@ -27,15 +27,8 @@ def impl(ctx: TaskContext) -> int:
         ]
 
     build = ctx.bazel.build(
-        build_events = True,
-        workspace_events = True,
-        execution_logs = True,
-        flags = [
-            "--isatty=" + str(int(stdout.is_tty)),
-            "--bes_outerr_buffer_size=1024",
-            "--bes_outerr_chunk_size=1024",
-            "--curses=yes"
-        ],
+        build_events = build_events,
+        flags = ["--isatty=" + str(int(stdout.is_tty))],
         *ctx.args.targets
     )
     return tui(ctx, build)
