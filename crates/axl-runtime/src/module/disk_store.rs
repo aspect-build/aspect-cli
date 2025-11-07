@@ -105,7 +105,10 @@ impl DiskStore {
         let mut bytes = [0u8; 32];
         rng.fill_bytes(&mut bytes);
         let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-        self.root().join("dl").join(hex_string).with_extension("tmp")
+        self.root()
+            .join("dl")
+            .join(hex_string)
+            .with_extension("tmp")
     }
 
     async fn fetch_dep(
@@ -299,7 +302,10 @@ impl DiskStore {
                             .map_err(|err| StoreError::LinkError(err))?;
                     }
                     Dep::Remote(dep) => {
-                        let cas_path = dep.integrity.as_ref().map(|integrity| self.cas_path_for_integrity(integrity));
+                        let cas_path = dep
+                            .integrity
+                            .as_ref()
+                            .map(|integrity| self.cas_path_for_integrity(integrity));
 
                         let need_fetch = match &cas_path {
                             Some(cas_path) => !tokio::fs::try_exists(cas_path).await?,
@@ -317,7 +323,10 @@ impl DiskStore {
                             for (i, url) in dep.urls.iter().enumerate() {
                                 match self.fetch_dep(&client, dep, url).await {
                                     Ok(Some(computed)) => {
-                                        return Err(StoreError::MissingIntegrity(dep.name.clone(), computed));
+                                        return Err(StoreError::MissingIntegrity(
+                                            dep.name.clone(),
+                                            computed,
+                                        ));
                                     }
                                     Ok(None) => {
                                         fetched = true;

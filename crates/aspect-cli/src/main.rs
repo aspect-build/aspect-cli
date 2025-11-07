@@ -3,8 +3,8 @@ mod flags;
 mod helpers;
 mod trace;
 
-use std::env::var;
 use std::collections::HashMap;
+use std::env::var;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -98,7 +98,10 @@ async fn main() -> miette::Result<ExitCode> {
     for (name, root) in module_roots {
         let module_store = module_eval.evaluate(name, root).into_diagnostic()?;
         if debug_mode() {
-            eprintln!("module @{} at {:?}", module_store.module_name, module_store.module_root);
+            eprintln!(
+                "module @{} at {:?}",
+                module_store.module_name, module_store.module_root
+            );
         };
         modules.push((
             module_store.module_name,
