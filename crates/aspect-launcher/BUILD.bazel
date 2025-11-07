@@ -21,6 +21,7 @@ rust_binary(
         "//crates/aspect-config",
         "//crates/aspect-cache",
     ],
+    visibility = ["//:__pkg__"],
 )
 
 release(

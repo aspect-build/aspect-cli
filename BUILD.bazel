@@ -1,4 +1,9 @@
 alias(
+    name = "launcher",
+    actual = "//crates/aspect-launcher",
+)
+
+alias(
     name = "cli",
     actual = "//crates/aspect-cli",
 )
