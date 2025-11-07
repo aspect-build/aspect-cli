@@ -1,8 +1,8 @@
 axl_archive_dep(
-    name = "experimental",
-    urls = ["https://github.com/aspect-extensions/example/releases/download/v0.0.2/v0.0.2.tar.gz"],
-    integrity = "sha384-0msqclam8aGttoXIntaUFgzYK0N2PRzeqBLsqeNaIUnL6o1n3CU6dJqTF5rxkUBr",
-    strip_prefix = "modules/experimental",
+    name = "rules_lint",
+    urls = ["https://github.com/aspect-build/rules_lint/archive/56a314b9247faa0cf852fd7aa139e96305b776d6.tar.gz"],
+    integrity = "sha384-9mkxHHHUECT36BB5BAA0Wf7M/7560mys6zRqNrLnu7UAxZhwG6NE0hBIXgNCRbCz",
+    strip_prefix = "rules_lint-56a314b9247faa0cf852fd7aa139e96305b776d6",
     auto_use_tasks = True,
     dev = True
 )
