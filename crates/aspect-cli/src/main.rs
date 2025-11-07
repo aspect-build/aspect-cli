@@ -8,7 +8,7 @@ use std::env::var;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aspect_telemetry::{cargo_pkg_version, do_not_track, send_telemetry};
+use aspect_telemetry::{cargo_pkg_short_version, cargo_pkg_version, do_not_track, send_telemetry};
 use axl_runtime::engine::task::{FrozenTask, Task};
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
@@ -239,7 +239,7 @@ async fn main() -> miette::Result<ExitCode> {
             // customize the usage string to use <TASK>
             .subcommand_value_name("TASK")
             // handle --version and -v flags
-            .version(cargo_pkg_version())
+            .version(cargo_pkg_short_version())
             .disable_version_flag(true) // disable auto -V / --version
             .arg(
                 Arg::new("version")

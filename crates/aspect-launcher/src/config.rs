@@ -2,7 +2,7 @@ use std::env::current_dir;
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, fmt::Debug, fs};
 
-use aspect_telemetry::cargo_pkg_version;
+use aspect_telemetry::cargo_pkg_short_version;
 use serde::Deserialize;
 
 const AXL_MODULE_FILE: &str = "MODULE.aspect";
@@ -33,7 +33,7 @@ fn default_cli_sources() -> Vec<ToolSource> {
 pub struct CliConfig {
     #[serde(default = "default_cli_sources")]
     sources: Vec<ToolSource>,
-    #[serde(default = "cargo_pkg_version")]
+    #[serde(default = "cargo_pkg_short_version")]
     version: String,
 }
 

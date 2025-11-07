@@ -13,7 +13,8 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use aspect_telemetry::{
-    cargo_pkg_version, do_not_track, send_telemetry, BZLARCH, BZLOS, GOARCH, GOOS, LLVM_TRIPLE,
+    cargo_pkg_short_version, do_not_track, send_telemetry, BZLARCH, BZLOS, GOARCH, GOOS,
+    LLVM_TRIPLE,
 };
 use clap::{arg, Arg, Command};
 use fork::{fork, Fork};
@@ -301,8 +302,8 @@ fn main() -> Result<ExitCode> {
     let matches = cmd.get_matches();
 
     if matches.get_flag("version") {
-        let v = cargo_pkg_version();
-        println!("Aspect CLI Launcher {v:}");
+        let v = cargo_pkg_short_version();
+        println!("aspect launcher {v:}");
         return Ok(ExitCode::SUCCESS);
     }
 

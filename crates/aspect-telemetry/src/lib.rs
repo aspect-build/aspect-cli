@@ -31,6 +31,16 @@ pub fn cargo_pkg_version() -> String {
         .into()
 }
 
+/// A short variant of the monorepo version. For examples, 2025.34.0 if the monorepo
+/// version was 2025.34.0+201b9a8. See https://blog.aspect.build/versioning-releases-from-a-monorepo.
+pub fn cargo_pkg_short_version() -> String {
+    let s = cargo_pkg_version();
+    match s.find('+') {
+        Some(i) => s[..i].to_string(),
+        None => s,
+    }
+}
+
 pub fn do_not_track() -> bool {
     var("DO_NOT_TRACK").is_ok()
 }
