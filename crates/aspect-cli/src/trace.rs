@@ -17,7 +17,7 @@ fn resource() -> Resource {
         .with_schema_url(
             [KeyValue::new(
                 SERVICE_VERSION,
-                aspect_config::cargo_pkg_version(),
+                aspect_telemetry::cargo_pkg_version(),
             )],
             SCHEMA_URL,
         )

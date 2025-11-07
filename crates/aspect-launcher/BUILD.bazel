@@ -19,7 +19,8 @@ rust_binary(
         "@crates//:serde",
         "@crates//:tempfile",
         "@crates//:tokio",
-        "//crates/aspect-config",
+        "@crates//:toml",
+        "//crates/aspect-telemetry",
     ],
     visibility = ["//:__pkg__"],
 )

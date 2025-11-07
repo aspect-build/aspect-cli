@@ -29,6 +29,7 @@ pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
     for ancestor in current_work_dir.ancestors().into_iter() {
         let result = tokio::try_join!(
             err_if_exists(ancestor.join(AXL_MODULE_FILE)),
+            // Repository boundary marker files: https://bazel.build/external/overview#repository
             err_if_exists(ancestor.join("MODULE.bazel")),
             err_if_exists(ancestor.join("MODULE.bazel.lock")),
             err_if_exists(ancestor.join("REPO.bazel")),

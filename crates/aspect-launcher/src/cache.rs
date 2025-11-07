@@ -1,9 +1,10 @@
+use std::fs;
 use std::path::PathBuf;
 
-use aspect_config::ToolSpec;
 use dirs::cache_dir;
 use miette::{miette, Context, IntoDiagnostic, Result};
-use std::fs;
+
+use crate::config::ToolSpec;
 
 #[derive(Debug, Clone)]
 pub struct AspectCache {

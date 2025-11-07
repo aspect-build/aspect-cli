@@ -4,9 +4,9 @@ rust_binary(
     name = "axl-lsp",
     srcs = glob(["src/**/*.rs"]),
     deps = [
+        "@crates//:anyhow",
         "@crates//:starlark_lsp",
         "@crates//:starlark",
-        "@crates//:anyhow",
         "//crates/axl-runtime"
     ],
     proc_macro_deps = [

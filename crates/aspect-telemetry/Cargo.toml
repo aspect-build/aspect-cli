@@ -1,5 +1,5 @@
 [package]
-name = "aspect-config"
+name = "aspect-telemetry"
 version.workspace = true
 categories.workspace = true
 homepage.workspace = true
@@ -11,5 +11,3 @@ rust-version.workspace = true
 
 [dependencies]
 reqwest = { version = "0.12.22", default-features = false, features = ["http2", "charset", "system-proxy", "rustls-tls", "stream"] }
-serde = { version = "1.0.219", features = ["derive"] }
-toml = "0.8.23"

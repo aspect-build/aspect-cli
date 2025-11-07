@@ -1,6 +1,8 @@
 mod cache;
+mod config;
 
 use std::env;
+use std::env::var;
 use std::fs;
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
@@ -9,13 +11,9 @@ use std::path::PathBuf;
 use std::process::Command as UnixCommand;
 use std::process::ExitCode;
 use std::str::FromStr;
-use tokio::runtime;
-use tokio::task::{self, JoinHandle};
 
-use aspect_config::telemetry::{do_not_track, send_telemetry};
-use aspect_config::{
-    autoconf, cargo_pkg_version, debug_mode, ToolSource, ToolSpec, BZLARCH, BZLOS, GOARCH, GOOS,
-    LLVM_TRIPLE,
+use aspect_telemetry::{
+    cargo_pkg_version, do_not_track, send_telemetry, BZLARCH, BZLOS, GOARCH, GOOS, LLVM_TRIPLE,
 };
 use clap::{arg, Arg, Command};
 use fork::{fork, Fork};
@@ -24,8 +22,18 @@ use miette::{miette, Context, IntoDiagnostic, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{self, Client, Method, Request, RequestBuilder};
 use serde::Deserialize;
+use tokio::runtime;
+use tokio::task::{self, JoinHandle};
 
 use crate::cache::AspectCache;
+use crate::config::{autoconf, ToolSource, ToolSpec};
+
+fn debug_mode() -> bool {
+    match var("ASPECT_DEBUG") {
+        Ok(val) => !val.is_empty(),
+        _ => false,
+    }
+}
 
 async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Request) -> Result<()> {
     // Stream to a tempfile

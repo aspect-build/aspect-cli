@@ -20,7 +20,7 @@ pub fn expand_builtins(
     _repo_root: PathBuf,
     broot: PathBuf,
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
-    use aspect_config::cargo_pkg_version;
+    use aspect_telemetry::cargo_pkg_version;
     use std::fs;
 
     let builtins_root = broot.join(sha256::digest(cargo_pkg_version()));

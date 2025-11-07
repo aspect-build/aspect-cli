@@ -1,27 +1,11 @@
-pub mod telemetry;
-
-use serde::Deserialize;
-use std::env::{current_dir, var};
+use std::env::current_dir;
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, fmt::Debug, fs};
 
-// The Bazel arch and os per @platforms and //bazel/platforms
-pub static BZLOS: &str = env!("BUILD_BZLOS");
-pub static BZLARCH: &str = env!("BUILD_BZLARCH");
+use aspect_telemetry::cargo_pkg_version;
+use serde::Deserialize;
 
-// And the GOOS/GOARCH equivalents
-pub static GOOS: &str = env!("BUILD_GOOS");
-pub static GOARCH: &str = env!("BUILD_GOARCH");
-pub static LLVM_TRIPLE: &str = env!("LLVM_TRIPLE");
-
-pub static TELURL: &str = "https://telemetry2.aspect.build/ingest";
-
-pub fn debug_mode() -> bool {
-    match var("ASPECT_DEBUG") {
-        Ok(val) => !val.is_empty(),
-        _ => false,
-    }
-}
+const AXL_MODULE_FILE: &str = "MODULE.aspect";
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AspectConfig {
@@ -43,22 +27,6 @@ fn default_cli_sources() -> Vec<ToolSource> {
             artifact: "aspect-cli_{{ llvm_triple }}".into(),
         }
     }]
-}
-
-/// Pull the version of the currently running rust binary from CARGO_PKG_VERSION env.  This env
-/// is injected into the rust build artifacts with the version_key attribute on rust_library & rust_binary
-/// and is set for release builds with stamping. Defaults to "0.0.0-dev" on unstamped builds.
-pub fn cargo_pkg_version() -> String {
-    option_env!("CARGO_PKG_VERSION")
-        .map(|label| {
-            if label == "{CARGO_PKG_VERSION}" {
-                "0.0.0-dev"
-            } else {
-                label
-            }
-        })
-        .unwrap_or("0.0.0-dev")
-        .into()
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -163,8 +131,8 @@ pub fn autoconf() -> (PathBuf, AspectConfig) {
         .unwrap()
         .ancestors()
         .filter(|dir| {
-            // Repository boundary marker files: https://bazel.build/external/overview#repository
-            dir.join(PathBuf::from("MODULE.aspect")).exists()
+            dir.join(PathBuf::from(AXL_MODULE_FILE)).exists()
+                // Repository boundary marker files: https://bazel.build/external/overview#repository
                 || dir.join(PathBuf::from("MODULE.bazel")).exists()
                 || dir.join(PathBuf::from("MODULE.bazel.lock")).exists()
                 || dir.join(PathBuf::from("REPO.bazel")).exists()
@@ -177,33 +145,8 @@ pub fn autoconf() -> (PathBuf, AspectConfig) {
         panic!("unable to identify a repository root dir");
     };
 
-    let aspect_config = repo_dir
+    let aspect_telemetry = repo_dir
         .join(PathBuf::from(".aspect/config.toml"))
         .to_path_buf();
-    (repo_dir, load_config(&aspect_config))
-}
-
-pub async fn repo_root() -> (PathBuf, AspectConfig) {
-    let Some(repo_dir) = current_dir()
-        .unwrap()
-        .ancestors()
-        .filter(|dir| {
-            // Repository boundary marker files: https://bazel.build/external/overview#repository
-            dir.join(PathBuf::from("MODULE.aspect")).exists()
-                || dir.join(PathBuf::from("MODULE.bazel")).exists()
-                || dir.join(PathBuf::from("MODULE.bazel.lock")).exists()
-                || dir.join(PathBuf::from("REPO.bazel")).exists()
-                || dir.join(PathBuf::from("WORKSPACE")).exists()
-                || dir.join(PathBuf::from("WORKSPACE.bazel")).exists()
-        })
-        .next()
-        .map(Path::to_path_buf)
-    else {
-        panic!("unable to identify a repository root dir");
-    };
-
-    let aspect_config = repo_dir
-        .join(PathBuf::from(".aspect/config.toml"))
-        .to_path_buf();
-    (repo_dir, load_config(&aspect_config))
+    (repo_dir, load_config(&aspect_telemetry))
 }

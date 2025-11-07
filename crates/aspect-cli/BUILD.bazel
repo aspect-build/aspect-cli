@@ -21,7 +21,7 @@ rust_binary(
         "@crates//:opentelemetry",
         "@crates//:opentelemetry_sdk",
         "@crates//:opentelemetry-otlp",
-        "//crates/aspect-config",
+        "//crates/aspect-telemetry",
         "//crates/axl-runtime",
     ],
     visibility = ["//:__pkg__"],

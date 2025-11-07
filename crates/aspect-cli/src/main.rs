@@ -7,8 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aspect_config::cargo_pkg_version;
-use aspect_config::telemetry::{do_not_track, send_telemetry};
+use aspect_telemetry::{cargo_pkg_version, do_not_track, send_telemetry};
 use axl_runtime::engine::task::{FrozenTask, Task};
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;

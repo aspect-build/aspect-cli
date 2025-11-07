@@ -192,7 +192,7 @@ dependencies = [
 name = "aspect-cli"
 version = "0.0.0-dev"
 dependencies = [
- "aspect-config",
+ "aspect-telemetry",
  "axl-runtime",
  "clap",
  "miette 7.6.0",
@@ -211,19 +211,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "aspect-config"
-version = "0.0.0-dev"
-dependencies = [
- "reqwest",
- "serde",
- "toml",
-]
-
-[[package]]
 name = "aspect-launcher"
 version = "0.0.0-dev"
 dependencies = [
- "aspect-config",
+ "aspect-telemetry",
  "clap",
  "dirs",
  "fork",
@@ -234,6 +225,14 @@ dependencies = [
  "serde",
  "tempfile",
  "tokio",
+ "toml",
+]
+
+[[package]]
+name = "aspect-telemetry"
+version = "0.0.0-dev"
+dependencies = [
+ "reqwest",
 ]
 
 [[package]]
@@ -324,7 +323,7 @@ dependencies = [
  "allocative",
  "anyhow",
  "arc-slice",
- "aspect-config",
+ "aspect-telemetry",
  "axl-proto",
  "build-event-stream",
  "clap",

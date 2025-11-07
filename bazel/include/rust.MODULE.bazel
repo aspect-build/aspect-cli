@@ -22,7 +22,7 @@ crate.from_cargo(
     manifests = [
         "//:Cargo.toml",
         "//crates/aspect-cli:Cargo.toml",
-        "//crates/aspect-config:Cargo.toml",
+        "//crates/aspect-telemetry:Cargo.toml",
         "//crates/aspect-launcher:Cargo.toml",
         "//crates/example-tui:Cargo.toml",
         "//crates/pty-multiplex:Cargo.toml",

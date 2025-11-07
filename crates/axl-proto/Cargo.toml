@@ -14,12 +14,12 @@ allocative = "0.3.4"
 anyhow = "1.0.98"
 derive_more = { version = "2.0.1", features = ["full"] }
 display_container = "0.9.0"
-starlark = "0.13.0"
-starlark_derive = "0.13.0"
 prost = "0.14.1"
 prost-types = "0.14.1"
 starbuf-derive = { path = "../starbuf-derive" }
 starbuf-types = { path = "../starbuf-types" }
+starlark = "0.13.0"
+starlark_derive = "0.13.0"
 tonic = "0.14.2"
 tonic-prost = "0.14.2"
 
