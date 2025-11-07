@@ -7,15 +7,15 @@ This includes the most recent release of the `aspect` command.
 
 ## Crates
 
-- `aspect-cli` (which is managed by the launcher) serves as an entrypoint to all other components
-- `aspect-launcher` (what is actually installed as `aspect` on the PATH) serves the functions of `bazelisk`
+- `aspect-cli` the main Aspect CLI binary that serves as an entrypoint for all tasks (which is managed by the launcher)
+- `aspect-launcher` fetches and hands off control the version of the Aspect CLI binary configured in a repository (what is actually installed as `aspect` on the PATH)
 - `axl-runtime` AXL engine for extending the CLI
 
 ## Syntax highlight .axl files as Starlark
 
 ### Visual Studio Code
 
-Under Settings -> Files -> Associations add a `.axl` => `starlark` association.
+Under Settings -> Files -> Associations add `.axl` and `.aspect` to `starlark` associations.
 
 ## Build and run the CLI locally
 
