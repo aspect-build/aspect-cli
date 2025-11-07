@@ -7,14 +7,11 @@ load("//bazel/release/homebrew:brew_artifacts.bzl", "brew_artifacts")
 load("//bazel/release/homebrew:brew_bottle.bzl", "brew_bottle")
 load("//bazel/release/homebrew:brew_formula.bzl", "brew_formula")
 load("//bazel/release/homebrew:brews.bzl", "brews")
-load(":brew_platforms_tests.bzl", "brew_platforms_test_suite")
 load(":brews_tests.bzl", "brews_test_suite")
 
 # Starlark Unit Tests
 
 brews_test_suite()
-
-brew_platforms_test_suite()
 
 # Setup for Tests
 

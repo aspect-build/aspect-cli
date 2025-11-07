@@ -1,10 +1,8 @@
 """Implementation for `brew_release` macro.
 """
 
-load("//bazel/release:platforms.bzl", "platforms")
 load(":brew_artifacts.bzl", "brew_artifacts")
 load(":brew_bottle.bzl", "brew_bottle")
-load(":brew_platforms.bzl", "brew_platforms")
 load(":brews.bzl", "brews")
 
 def multi_platform_brew_artifacts(
