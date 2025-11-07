@@ -5,6 +5,7 @@ use anyhow::anyhow;
 use dirs::cache_dir;
 use flate2::read::GzDecoder;
 use futures_util::TryStreamExt;
+use rand::prelude::*;
 use reqwest::{self, Client, Method, Request, Url};
 use ssri::IntegrityChecker;
 use thiserror::Error;
@@ -67,16 +68,22 @@ impl DiskStore {
         self.root().join("cas").join(hex.0.to_string()).join(hex.1)
     }
 
+    fn download_tmp_file(&self) -> PathBuf {
+        let mut rng = rand::thread_rng();
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        self.root().join("dl").join(hex_string).with_extension("tmp")
+    }
+
     async fn fetch_dep(
         &self,
         client: &Client,
         dep: &AxlArchiveDep,
         url: &String,
     ) -> Result<(), StoreError> {
-        let cas_path = self.cas_path(dep);
-
         // Stream to a tempfile
-        let tmp_file = cas_path.with_extension("tmp");
+        let tmp_file = self.download_tmp_file();
         let mut tmp = File::create(&tmp_file).await?;
 
         let req = Request::new(
@@ -107,6 +114,7 @@ impl DiskStore {
         }
 
         // And move it into the cache
+        let cas_path = self.cas_path(dep);
         tokio::fs::rename(&tmp_file, &cas_path).await?;
 
         Ok(())
@@ -177,6 +185,7 @@ impl DiskStore {
         fs::create_dir_all(&root).await?;
         fs::create_dir_all(self.deps_path()).await?;
         fs::create_dir_all(&root.join("cas")).await?;
+        fs::create_dir_all(&root.join("dl")).await?;
         fs::create_dir_all(&root.join("builtins")).await?;
 
         let client = reqwest::Client::new();

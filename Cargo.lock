@@ -343,6 +343,7 @@ dependencies = [
  "minijinja",
  "nix 0.30.1",
  "prost",
+ "rand 0.8.5",
  "reqwest",
  "serde_json",
  "sha256",

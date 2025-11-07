@@ -22,6 +22,7 @@ rust_library(
         "@crates//:minijinja",
         "@crates//:nix",
         "@crates//:prost",
+        "@crates//:rand",
         "@crates//:reqwest",
         "@crates//:serde_json",
         "@crates//:sha256",
