@@ -48,8 +48,8 @@ pub async fn send_telemetry() -> std::result::Result<(), ()> {
                     }
                 }
                 break;
-            },
-            _ => break
+            }
+            _ => break,
         };
     }
     Ok(())
