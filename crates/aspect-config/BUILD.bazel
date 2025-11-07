@@ -8,12 +8,13 @@ cargo_build_script(
 
 rust_library(
     name = "aspect-config",
-    srcs = ["src/lib.rs"],
+    srcs = glob(["src/**/*.rs"]),
     version_key = "STABLE_MONOREPO_VERSION",
     deps = [
+        "@crates//:clap",
+        "@crates//:reqwest",
         "@crates//:serde",
         "@crates//:toml",
-        "@crates//:clap",
         ":build_rs"
     ],
     visibility = [

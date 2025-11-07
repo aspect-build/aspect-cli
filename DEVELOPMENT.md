@@ -40,7 +40,7 @@ When adding new Rust dependencies via Cargo, you must run repin to make them ava
 cargo add my_dependency
 
 # Then repin dependencies for Bazel
-CARGO_BAZEL_ISOLATED=1 CARGO_BAZEL_REPIN=1 bazel build //...
+CARGO_BAZEL_ISOLATED=1 CARGO_BAZEL_REPIN=1 bazel build //:cli //:launcher
 ```
 
 If you are adding a crate which is used in multiple `Cargo.toml` files strongly consider making the create a workspace dependency. 

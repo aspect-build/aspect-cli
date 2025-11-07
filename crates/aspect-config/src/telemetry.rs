@@ -1,13 +1,18 @@
-use aspect_config::{cargo_pkg_version, BZLARCH, BZLOS, TELURL};
 use reqwest::header::HeaderName;
 use reqwest::redirect::Policy;
 use reqwest::{self, Method, StatusCode};
 use std::env::var;
 use std::time::Duration;
 
+use crate::{cargo_pkg_version, BZLARCH, BZLOS, TELURL};
+
+pub fn do_not_track() -> bool {
+    var("DO_NOT_TRACK").is_ok()
+}
+
 pub async fn send_telemetry() -> std::result::Result<(), ()> {
     // Honor DO_NOT_TRACK
-    if var("DO_NOT_TRACK").is_ok() {
+    if do_not_track() {
         return Ok(());
     }
 

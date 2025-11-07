@@ -1,7 +1,6 @@
 mod cmd_tree;
 mod flags;
 mod helpers;
-mod telemetry;
 mod trace;
 
 use std::collections::HashMap;
@@ -9,6 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aspect_config::cargo_pkg_version;
+use aspect_config::telemetry::{do_not_track, send_telemetry};
 use axl_runtime::engine::task::{FrozenTask, Task};
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
@@ -44,7 +44,11 @@ use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_pa
 // TODO: create a diagram of how all this ties together.
 #[tokio::main(flavor = "multi_thread", worker_threads = 3)]
 async fn main() -> miette::Result<ExitCode> {
-    let _ = task::spawn(telemetry::send_telemetry());
+    // Honor DO_NOT_TRACK
+    if !do_not_track() {
+        let _ = task::spawn(send_telemetry());
+    }
+
     let _tracing = trace::init();
     let _root = info_span!("root").entered();
 

@@ -214,6 +214,7 @@ dependencies = [
 name = "aspect-config"
 version = "0.0.0-dev"
 dependencies = [
+ "reqwest",
  "serde",
  "toml",
 ]

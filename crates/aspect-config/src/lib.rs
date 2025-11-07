@@ -1,3 +1,5 @@
+pub mod telemetry;
+
 use serde::Deserialize;
 use std::env::{current_dir, var};
 use std::path::{Path, PathBuf};
