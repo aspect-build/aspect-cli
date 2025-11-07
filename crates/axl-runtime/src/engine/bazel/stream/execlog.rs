@@ -58,6 +58,8 @@ impl ExecLogStream {
                 out_raw.read_exact(&mut buf[0..size])?;
 
                 let entry = ExecLogEntry::decode(&buf[0..size])?;
+                // Send blocks until there is room in the buffer.
+                // https://docs.rs/fibre/latest/fibre/spmc/index.html
                 sender.send(entry)?;
 
                 Ok(())

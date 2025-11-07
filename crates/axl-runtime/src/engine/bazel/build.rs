@@ -245,6 +245,9 @@ impl<'v> values::StarlarkValue<'v> for Build {
 
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
+    // Creates an iterable `BuildEventIterator` type.
+    // Every call to this function will return a new iterator.
+    // TODO: explain backpressure and build events sinks falling behind on poor network conditions.
     fn build_events<'v>(this: values::Value<'v>) -> anyhow::Result<BuildEventIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
         let event_stream = build.build_event_stream.borrow();
@@ -255,6 +258,8 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         Ok(BuildEventIterator::new(event_stream.receiver()))
     }
 
+    // Creates an iterable `ExecutionLogIterator` type.
+    // Every call to this function will return a new iterator.
     fn execution_logs<'v>(this: values::Value<'v>) -> anyhow::Result<ExecutionLogIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
         let execlog_stream = build.execlog_stream.borrow();
@@ -265,6 +270,8 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         Ok(ExecutionLogIterator::new(execlog_stream.receiver()))
     }
 
+    // Creates an iterable `WorkspaceEventIterator` type.
+    // Every call to this function will return a new iterator.
     fn workspace_events<'v>(this: values::Value<'v>) -> anyhow::Result<WorkspaceEventIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
         let event_stream = build.workspace_event_stream.borrow();

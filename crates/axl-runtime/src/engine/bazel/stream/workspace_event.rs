@@ -64,6 +64,8 @@ impl WorkspaceEventStream {
 
                 let event = WorkspaceEvent::decode(&buf[0..size])?;
 
+                // Send blocks until there is room in the buffer.
+                // https://docs.rs/fibre/latest/fibre/spmc/index.html
                 sender.send(event)?;
 
                 Ok(())

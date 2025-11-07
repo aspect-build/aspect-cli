@@ -57,6 +57,9 @@ impl BuildEventStream {
 
                 let event = BuildEvent::decode(&buf[0..size])?;
                 let last_message = event.last_message;
+
+                // Send blocks until there is room in the buffer.
+                // https://docs.rs/fibre/latest/fibre/spmc/index.html
                 sender.send(event)?;
 
                 Ok(last_message)
