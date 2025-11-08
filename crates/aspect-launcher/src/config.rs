@@ -153,7 +153,7 @@ pub fn default_config() -> AspectConfig {
 pub fn autoconf() -> (PathBuf, AspectConfig) {
     let current_dir = current_dir().expect("failed to get the current directory");
 
-    let root_dir = if let Some(repo_dir) = current_dir
+    let root_dir = if let Some(repo_root) = current_dir
         .ancestors()
         .filter(|dir| {
             dir.join(PathBuf::from(AXL_MODULE_FILE)).exists()
@@ -167,7 +167,7 @@ pub fn autoconf() -> (PathBuf, AspectConfig) {
         .next()
         .map(Path::to_path_buf)
     {
-        repo_dir
+        repo_root
     } else {
         current_dir
     };

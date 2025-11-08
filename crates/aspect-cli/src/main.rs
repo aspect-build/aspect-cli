@@ -24,7 +24,7 @@ use tokio::task::spawn_blocking;
 use tracing::info_span;
 
 use crate::cmd_tree::{make_command_from_task, CommandTree, BUILTIN_COMMAND_DISPLAY_ORDER};
-use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_paths};
+use crate::helpers::{find_axl_scripts, find_root_dir, get_default_axl_search_paths};
 
 fn debug_mode() -> bool {
     match var("ASPECT_DEBUG") {
@@ -61,19 +61,19 @@ async fn main() -> miette::Result<ExitCode> {
 
     let current_work_dir = std::env::current_dir().into_diagnostic()?;
 
-    let repo_root = find_repo_root(&current_work_dir)
+    let root_dir = find_root_dir(&current_work_dir)
         .await
-        .map_err(|_| miette!("could not find repository root, running inside a module?"))?;
+        .map_err(|err| miette!("could not find root directory: {:?}", err))?;
 
-    let disk_store = DiskStore::new(repo_root.clone());
+    let disk_store = DiskStore::new(root_dir.clone());
 
-    let module_eval = AxlModuleEvaluator::new(repo_root.clone());
+    let module_eval = AxlModuleEvaluator::new(root_dir.clone());
 
     let _ = info_span!("expand_module_store").enter();
 
     // Creates the module store and evaluates the root MODULE.aspect (if it exists) for axl_*_deps, use_task, etc...
     let module_store = module_eval
-        .evaluate(AXL_ROOT_MODULE_NAME.to_string(), repo_root.clone())
+        .evaluate(AXL_ROOT_MODULE_NAME.to_string(), root_dir.clone())
         .into_diagnostic()?;
 
     // Expand all module deps (including the builtin @aspect module) to the disk store and return the module roots on disk.
@@ -113,7 +113,7 @@ async fn main() -> miette::Result<ExitCode> {
     let axl_deps_root = disk_store.deps_path();
 
     // Get the default search paths given the current working directory and the repository root
-    let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_root);
+    let search_paths = get_default_axl_search_paths(&current_work_dir, &root_dir);
     // TODO: allow user to configure additonal search paths in the future?
 
     // Scan for .axl files in the search paths
@@ -137,12 +137,12 @@ async fn main() -> miette::Result<ExitCode> {
         let mut configs: Vec<String> = Vec::new();
         let script_eval = AxlScriptEvaluator::new(
             AXL_ROOT_MODULE_NAME.to_string(),
-            repo_root.clone(),
+            root_dir.clone(),
             axl_deps_root.clone(),
         );
         for path in axl_sources.iter() {
             let rel_path = path
-                .strip_prefix(&repo_root)
+                .strip_prefix(&root_dir)
                 .map(|p| p.to_path_buf())
                 .into_diagnostic()?;
             let mut has_config = false;
