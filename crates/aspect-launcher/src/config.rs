@@ -24,7 +24,7 @@ fn default_cli_sources() -> Vec<ToolSource> {
             org: "aspect-build".into(),
             repo: "aspect-cli".into(),
             release: "v{{ version }}".into(),
-            artifact: "aspect-cli_{{ llvm_triple }}".into(),
+            artifact: "aspect-cli-{{ llvm_triple }}".into(),
         }
     }]
 }

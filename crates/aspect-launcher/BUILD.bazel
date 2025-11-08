@@ -39,7 +39,7 @@ multi_platform_rust_binaries(
 
 multi_platform_brew_artifacts(
     name = "brew",
-    bottle_root_url = "https://github.com/aspect-build/aspect-cli/releases/download/0.0.0-PLACEHOLDER",
+    bottle_root_url = "https://github.com/aspect-build/aspect-cli/releases/download/v0.0.0-PLACEHOLDER",
     desc = "Correct, fast, usable: choose three",
     formula_name = "aspect",
     homepage = "https://aspect.build",

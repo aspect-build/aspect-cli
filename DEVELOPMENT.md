@@ -59,9 +59,9 @@ To determine the release tag for a particular commit run,
 ./bazel/workspace_status.sh | grep STABLE_MONOREPO_SHORT_VERSION
 ```
 
-To cut a release, push resulting tag. For example,
+To cut a release, push resulting STABLE_MONOREPO_SHORT_VERSION prefixed with `v`. For example,
 
 ```
-git tag 2025.42.5
-git push origin 2025.42.5
+git tag v2025.42.5
+git push origin v2025.42.5
 ```
