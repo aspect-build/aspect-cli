@@ -1,2 +1,3 @@
 def config(ctx: ConfigContext):
+    print(ctx.tasks)
     pass

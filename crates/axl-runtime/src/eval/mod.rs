@@ -19,7 +19,7 @@ use crate::engine::task_args::TaskArgs;
 use crate::engine::task_context::TaskContext;
 use crate::engine::{self, task::Task};
 use crate::eval::load::AxlLoader;
-use crate::helpers::{normalize_abs_path_lexically, sanitize_load_path_lexically, LoadPath};
+use crate::helpers::{LoadPath, normalize_abs_path_lexically, sanitize_load_path_lexically};
 use crate::module::AXL_ROOT_MODULE_NAME;
 
 /// The core evaluator for .axl files, holding configuration like module root,
@@ -162,7 +162,11 @@ impl EvaluatedAxlScript {
 
     /// Executes a config function from the module by symbol, providing
     /// the config context.
-    pub fn execute_config(&self, symbol: &str) -> Result<(), EvalError> {
+    pub fn execute_config<'v>(
+        &self,
+        ctx: ConfigContext<'v>,
+        symbol: &str,
+    ) -> Result<ConfigContext<'v>, EvalError> {
         let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
             self.script_path.clone(),
             symbol.to_string(),
@@ -170,10 +174,14 @@ impl EvaluatedAxlScript {
 
         let heap = self.module.heap();
         let context = heap.alloc(ConfigContext::new());
-        let mut eval = Evaluator::new(&self.module);
-        eval.extra = Some(&self.store);
-        eval.eval_function(def, &[context], &[])?;
-        Ok(())
+        {
+            let mut eval = Evaluator::new(&self.module);
+            eval.extra = Some(&self.store);
+            eval.eval_function(def, &[context], &[])?;
+            drop(eval);
+        }
+
+        Ok(ctx)
     }
 }
 

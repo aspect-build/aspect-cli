@@ -9,21 +9,22 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aspect_telemetry::{cargo_pkg_short_version, cargo_pkg_version, do_not_track, send_telemetry};
+use axl_runtime::engine::config_context::ConfigContext;
 use axl_runtime::engine::task::{FrozenTask, Task};
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
 use axl_runtime::eval::{AxlScriptEvaluator, EvaluatedAxlScript};
 use axl_runtime::helpers::normalize_abs_path_lexically;
-use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
 use axl_runtime::module::{AXL_MODULE_FILE, AXL_ROOT_MODULE_NAME};
+use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
 use clap::{Arg, ArgAction, Command};
-use miette::{miette, IntoDiagnostic};
+use miette::{IntoDiagnostic, miette};
 use starlark::values::ValueLike;
 use tokio::task;
 use tokio::task::spawn_blocking;
 use tracing::info_span;
 
-use crate::cmd_tree::{make_command_from_task, CommandTree, BUILTIN_COMMAND_DISPLAY_ORDER};
+use crate::cmd_tree::{BUILTIN_COMMAND_DISPLAY_ORDER, CommandTree, make_command_from_task};
 use crate::helpers::{find_axl_scripts, find_repo_root, get_default_axl_search_paths};
 
 fn debug_mode() -> bool {
@@ -132,45 +133,43 @@ async fn main() -> miette::Result<ExitCode> {
         // 2. use_task in the root module
         // 3. auto_use_tasks from the @aspect built-in module (if not overloaded by an dep in the root MODULE.aspect)
         // 4. auto_use_tasks from axl module deps in the root MODULE.aspect
-        let mut scripts: HashMap<String, EvaluatedAxlScript> = HashMap::new();
+        let mut scripts: HashMap<PathBuf, EvaluatedAxlScript> = HashMap::new();
         let mut tasks: Vec<(String, String)> = Vec::new();
-        let mut configs: Vec<String> = Vec::new();
+        let mut configs: Vec<PathBuf> = Vec::new();
         let script_eval = AxlScriptEvaluator::new(
             AXL_ROOT_MODULE_NAME.to_string(),
             repo_root.clone(),
             axl_deps_root.clone(),
         );
-        for path in axl_sources.iter() {
+        for path in axl_sources.into_iter() {
+            if path.ends_with(".aspect/config.axl") {
+                configs.push(path);
+                continue;
+            }
+
             let rel_path = path
                 .strip_prefix(&repo_root)
                 .map(|p| p.to_path_buf())
                 .into_diagnostic()?;
-            let mut has_config = false;
-            let mut has_tasks = false;
-            if path.ends_with(".aspect/config.axl") {
-                configs.push(path.as_os_str().to_string_lossy().to_string());
-                has_config = true;
-            }
+
             let script = script_eval.eval(&rel_path).into_diagnostic()?;
             for symbol in script.module.names() {
-                if let Some(task_val) = script.module.get(symbol.as_str()) {
-                    if task_val.downcast_ref::<Task>().is_none()
-                        && task_val.downcast_ref::<FrozenTask>().is_none()
-                    {
-                        continue;
-                    }
-                    tasks.push((
-                        symbol.as_str().to_string(),
-                        path.as_os_str().to_string_lossy().to_string(),
-                    ));
-                    has_tasks = true;
+                let val = script.module.get(symbol.as_str()).unwrap();
+
+                if val.downcast_ref::<Task>().is_none()
+                    && val.downcast_ref::<FrozenTask>().is_none()
+                {
+                    continue;
                 }
+                tasks.push((
+                    symbol.as_str().to_string(),
+                    path.as_os_str().to_string_lossy().to_string(),
+                ));
             }
-            if has_config || has_tasks {
-                scripts
-                    .entry(path.as_os_str().to_string_lossy().to_string())
-                    .or_insert(script);
-            }
+
+            scripts
+                .entry(path.as_os_str().to_string_lossy().to_string())
+                .or_insert(script);
         }
         for (module_name, module_root, use_tasks) in modules.iter() {
             let script_eval = AxlScriptEvaluator::new(
@@ -219,13 +218,17 @@ async fn main() -> miette::Result<ExitCode> {
         }
 
         // Call config.axl config() functions
-        // TODO: pass tasks to the config function and allow them to be mutated
+
         for path in configs.iter() {
             let script = scripts
                 .get(path)
                 .expect(&format!("expected to find {:?} script", path));
-            script.execute_config("config").into_diagnostic()?;
+            config_ctx = script
+                .execute_config(config_ctx, "config")
+                .into_diagnostic()?;
         }
+
+        eprintln!("{:?}", config_ctx);
 
         // Iterate through tasks after any config mutations and create the command with make_command_from_task
         let mut tree = CommandTree::default();
@@ -255,9 +258,7 @@ async fn main() -> miette::Result<ExitCode> {
                     .display_order(BUILTIN_COMMAND_DISPLAY_ORDER),
             );
 
-        for task in tasks.iter() {
-            let symbol = &task.0;
-            let path = &task.1;
+        for (symbol, path) in tasks.iter() {
             let script = scripts
                 .get(path)
                 .expect(&format!("expected to find {:?} script", path));
