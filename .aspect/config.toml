@@ -8,3 +8,6 @@ sources = [
    # Fall back to release version
    { org = "aspect-build", repo = "aspect-cli", release = "v{{ version }}", artifact = "aspect-cli-{{ bzlos }}_{{ bzlarch }}" },
 ]
+
+[tools.bazelisk]
+version = "1.27.0"

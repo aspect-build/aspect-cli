@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::{collections::HashMap, fmt::Debug, fs};
 
 use aspect_telemetry::cargo_pkg_short_version;
+use miette::{miette, Result};
 use serde::Deserialize;
 
 const AXL_MODULE_FILE: &str = "MODULE.aspect";
@@ -113,16 +114,17 @@ impl ToolSpec for BazeliskConfig {
     }
 }
 
-pub fn load_config(path: &PathBuf) -> AspectConfig {
-    if fs::exists(path).is_ok()
-        && let Ok(content) = fs::read_to_string(path)
-    {
-        // FIXME: How to handle decode errors here?
-        if let Ok(config) = toml::from_str(content.as_str()) {
-            return config;
-        }
+pub fn load_config(path: &PathBuf) -> Result<AspectConfig> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(default_config()),
+        Err(e) => return Err(miette!("failed to read config file {:?}: {}", path, e)),
+    };
+
+    match toml::from_str(&content) {
+        Ok(config) => Ok(config),
+        Err(e) => Err(miette!("failed to parse config file {:?}: {}", path, e)),
     }
-    default_config()
 }
 
 pub fn default_config() -> AspectConfig {
@@ -143,15 +145,16 @@ pub fn default_config() -> AspectConfig {
 ///
 /// # Returns
 ///
-/// A tuple `(PathBuf, AspectConfig)` where:
+/// A `Result` containing a tuple `(PathBuf, AspectConfig)` where:
 /// - The first element is the determined root directory.
 /// - The second element is the loaded `AspectConfig`.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the current working directory cannot be obtained.
-pub fn autoconf() -> (PathBuf, AspectConfig) {
-    let current_dir = current_dir().expect("failed to get the current directory");
+/// Returns an error if the current working directory cannot be obtained or if loading the config fails.
+pub fn autoconf() -> Result<(PathBuf, AspectConfig)> {
+    let current_dir =
+        current_dir().map_err(|e| miette!("failed to get current directory: {}", e))?;
 
     let root_dir = if let Some(repo_root) = current_dir
         .ancestors()
@@ -175,5 +178,6 @@ pub fn autoconf() -> (PathBuf, AspectConfig) {
     let config_toml = root_dir
         .join(PathBuf::from(".aspect/config.toml"))
         .to_path_buf();
-    (root_dir, load_config(&config_toml))
+    let config = load_config(&config_toml)?;
+    Ok((root_dir, config))
 }

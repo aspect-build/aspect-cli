@@ -323,7 +323,7 @@ fn main() -> Result<ExitCode> {
         }
         Fork::Parent(_) => {
             // Deal with the config bits
-            let (repo_dir, config) = autoconf();
+            let (repo_dir, config) = autoconf()?;
             let cache: AspectCache = AspectCache::default()?;
 
             let threaded_rt = runtime::Runtime::new().into_diagnostic()?;
