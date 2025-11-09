@@ -43,6 +43,22 @@ pub enum TaskArg {
         default: Option<Vec<String>>,
     },
     TrailingVarArgs,
+    StringList {
+        required: bool,
+        default: Vec<String>,
+    },
+    BooleanList {
+        required: bool,
+        default: Vec<bool>,
+    },
+    IntList {
+        required: bool,
+        default: Vec<i32>,
+    },
+    UIntList {
+        required: bool,
+        default: Vec<u32>,
+    },
 }
 
 /// Documentation here
@@ -60,6 +76,10 @@ impl Display for TaskArg {
             Self::UInt { .. } => write!(f, "<args.TaskArg: uint>"),
             Self::Positional { .. } => write!(f, "<args.TaskArg: positional>"),
             Self::TrailingVarArgs => write!(f, "<args.TaskArg: trailing variable arguments>"),
+            Self::StringList { .. } => write!(f, "<args.TaskArg: string_list>"),
+            Self::BooleanList { .. } => write!(f, "<args.TaskArg: boolean_list>"),
+            Self::IntList { .. } => write!(f, "<args.TaskArg: int_list>"),
+            Self::UIntList { .. } => write!(f, "<args.TaskArg: uint_list>"),
         }
     }
 }
@@ -149,6 +169,31 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         })
     }
 
+    /// Defines a string list flag that can be specified multiple times as `--flag_name=flag_value`.
+    ///
+    /// # Examples
+    /// ```python
+    /// task(
+    ///   args = {
+    ///     "bes_headers": args.string_list(),
+    ///   }
+    /// )
+    /// ```
+    fn string_list<'v>(
+        #[starlark(require = named, default = false)] required: bool,
+        #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<String>>,
+    ) -> starlark::Result<TaskArg> {
+        if required && !default.is_none() {
+            return Err(starlark::Error::new_kind(ErrorKind::Function(
+                anyhow::anyhow!("`required` and `default` are both set."),
+            )));
+        }
+        Ok(TaskArg::StringList {
+            required,
+            default: default.into_option().map(|it| it.items).unwrap_or_default(),
+        })
+    }
+
     /// Defines a boolean flag that can be specified as `--flag_name=true|false`
     /// or simply `--flag_name`, which is equivalent to `--flag_name=true`.
     ///
@@ -173,6 +218,31 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::Boolean {
             required,
             default: default.unwrap_or_default(),
+        })
+    }
+
+    /// Defines a boolean list flag that can be specified multiple times as `--flag_name=true|false`.
+    ///
+    /// # Examples
+    /// ```python
+    /// task(
+    ///   args = {
+    ///     "flags": args.boolean_list(),
+    ///   }
+    /// )
+    /// ```
+    fn boolean_list<'v>(
+        #[starlark(require = named, default = false)] required: bool,
+        #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<bool>>,
+    ) -> starlark::Result<TaskArg> {
+        if required && !default.is_none() {
+            return Err(starlark::Error::new_kind(ErrorKind::Function(
+                anyhow::anyhow!("`required` and `default` are both set."),
+            )));
+        }
+        Ok(TaskArg::BooleanList {
+            required,
+            default: default.into_option().map(|it| it.items).unwrap_or_default(),
         })
     }
 
@@ -202,6 +272,31 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         })
     }
 
+    /// Defines an integer list flag that can be specified multiple times as `--flag_name=flag_value`.
+    ///
+    /// # Examples
+    /// ```python
+    /// task(
+    ///   args = {
+    ///     "numbers": args.int_list(),
+    ///   }
+    /// )
+    /// ```
+    fn int_list<'v>(
+        #[starlark(require = named, default = false)] required: bool,
+        #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<i32>>,
+    ) -> starlark::Result<TaskArg> {
+        if required && !default.is_none() {
+            return Err(starlark::Error::new_kind(ErrorKind::Function(
+                anyhow::anyhow!("`required` and `default` are both set."),
+            )));
+        }
+        Ok(TaskArg::IntList {
+            required,
+            default: default.into_option().map(|it| it.items).unwrap_or_default(),
+        })
+    }
+
     /// Defines an unsigned integer flag that can be specified using the format `--flag_name=flag_value`.
     ///
     /// # Examples
@@ -224,6 +319,31 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::UInt {
             required,
             default: default.unwrap_or_default(),
+        })
+    }
+
+    /// Defines an unsigned integer list flag that can be specified multiple times as `--flag_name=flag_value`.
+    ///
+    /// # Examples
+    /// ```python
+    /// task(
+    ///   args = {
+    ///     "ports": args.uint_list(),
+    ///   }
+    /// )
+    /// ```
+    fn uint_list<'v>(
+        #[starlark(require = named, default = false)] required: bool,
+        #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<u32>>,
+    ) -> starlark::Result<TaskArg> {
+        if required && !default.is_none() {
+            return Err(starlark::Error::new_kind(ErrorKind::Function(
+                anyhow::anyhow!("`required` and `default` are both set."),
+            )));
+        }
+        Ok(TaskArg::UIntList {
+            required,
+            default: default.into_option().map(|it| it.items).unwrap_or_default(),
         })
     }
 }

@@ -345,6 +345,34 @@ async fn main() -> miette::Result<ExitCode> {
                                 .get_many::<String>(k.as_str())
                                 .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
                         )),
+                        TaskArg::StringList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(k.as_str())
+                                .unwrap_or_default()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>(),
+                        )),
+                        TaskArg::BooleanList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<bool>(k.as_str())
+                                .unwrap_or_default()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )),
+                        TaskArg::IntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<i32>(k.as_str())
+                                .unwrap_or_default()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )),
+                        TaskArg::UIntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<u32>(k.as_str())
+                                .unwrap_or_default()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )),
                     };
                     args.insert(k.clone(), val);
                 }
