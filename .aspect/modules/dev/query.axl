@@ -1,15 +1,17 @@
+"""
+In development 'query' task.
+"""
+
 def _query_impl(ctx):
-    stdout = ctx.std.io.stdout
-    stderr = ctx.std.io.stderr
     build = ctx.bazel.query().raw(
         ctx.args.pattern[0],
     )
     for result in build.eval():
         print(result.name)
 
-
 query = task(
     implementation = _query_impl,
+    group = ["dev"],
     args = {
         "pattern": args.positional(default = ["..."]),
     }

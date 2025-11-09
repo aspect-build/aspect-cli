@@ -1,7 +1,7 @@
 [aspect-cli]
 version = "2025.45.60"
 sources = [
-   # Try to use a dev build for dogfooding
+   # Try to use a Bazel dev build for dogfooding
    { path = "bazel-bin/crates/aspect-cli/aspect-cli" },
    # Fallback to cargo
    { path = "target/debug/aspect-cli" },

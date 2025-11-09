@@ -24,6 +24,7 @@ use crate::engine::store::AxlStore;
 use axl_proto;
 
 mod build;
+mod helpers;
 mod iter;
 mod query;
 mod stream;
@@ -85,6 +86,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
             values::StringValue,
         >,
+        #[starlark(require = named, default = false)] inherit_stdout: bool,
+        #[starlark(require = named, default = true)] inherit_stderr: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = match build_events {
@@ -104,6 +107,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 .iter()
                 .map(|f| f.as_str().to_string())
                 .collect(),
+            inherit_stdout,
+            inherit_stderr,
             store.rt,
         )?;
         Ok(build)
@@ -148,6 +153,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
             values::StringValue,
         >,
+        #[starlark(require = named, default = false)] inherit_stdout: bool,
+        #[starlark(require = named, default = true)] inherit_stderr: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = match build_events {
@@ -167,6 +174,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 .iter()
                 .map(|f| f.as_str().to_string())
                 .collect(),
+            inherit_stdout,
+            inherit_stderr,
             store.rt,
         )?;
         Ok(test)

@@ -1,8 +1,6 @@
 """
-A 'test' task that wraps a 'bazel test' command.
+A default 'test' task that wraps a 'bazel test' command.
 """
-
-load("./common.axl", "tui")
 
 def _test_impl(ctx):
     stdout = ctx.std.io.stdout
@@ -22,20 +20,31 @@ def _test_impl(ctx):
             )
         )
 
+    bazel_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    for flag in ctx.args.bazel_flag:
+        bazel_flags.append(flag)
+
+    bazel_startup_flags = []
+    for flag in ctx.args.bazel_startup_flag:
+        bazel_startup_flags.append(flag)
+
     test = ctx.bazel.test(
         build_events = build_events,
-        flags = ["--isatty=" + str(int(stdout.is_tty))],
-        *ctx.args.pattern
+        flags = bazel_flags,
+        startup_flags = bazel_startup_flags,
+        *ctx.args.target_pattern
     )
 
-    return tui(ctx, test)
+    test.wait()
 
 test = task(
     implementation = _test_impl,
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
-        "pattern": args.positional(default = ["..."]),
+        "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
+        "bazel_flag": args.string_list(),
+        "bazel_startup_flag": args.string_list(),
         "bes_backend": args.string_list(),
         "bes_header": args.string_list()
     }

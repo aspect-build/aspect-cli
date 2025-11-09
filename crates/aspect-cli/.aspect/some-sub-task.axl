@@ -1,0 +1,10 @@
+def _impl(ctx):
+    print("I am an auto-discovered task in crates/aspect-cli/.aspect/some-sub-task.axl")
+    return 0
+
+some_task = task(
+    name = "some-sub-task",
+    group = ["testing", "testing"],
+    implementation = _impl,
+    args = {},
+)

@@ -1,13 +1,13 @@
-load("@local//answer.axl", "ANSWER")
+load("@demo//answer.axl", "ANSWER")
 
 def _impl(ctx):
     print("I am a task that is not auto-discovered but manually registered in MODULE.aspect instead")
     print("The answer is", ANSWER)
     return 0
 
-user_task = task(
-    name = "user-task",
-    group = ["user", "elsewhere"],
+some_task = task(
+    name = "some-task",
+    group = ["testing", "testing"],
     implementation = _impl,
     args = {},
 )

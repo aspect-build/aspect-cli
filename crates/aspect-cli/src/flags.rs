@@ -71,10 +71,7 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
                 .num_args(0..=1)
                 .default_missing_value("true");
             if !default.is_empty() {
-                let default: Vec<String> = default
-                    .iter()
-                    .map(|&b| b.to_string())
-                    .collect();
+                let default: Vec<String> = default.iter().map(|&b| b.to_string()).collect();
                 it = it.default_values(default);
             }
             it

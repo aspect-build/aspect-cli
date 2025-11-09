@@ -1,8 +1,6 @@
 """
-A 'build' task that wraps a 'bazel build' command.
+A default 'build' task that wraps a 'bazel build' command.
 """
-
-load("./common.axl", "tui")
 
 def impl(ctx: TaskContext) -> int:
     stdout = ctx.std.io.stdout
@@ -22,20 +20,31 @@ def impl(ctx: TaskContext) -> int:
             )
         )
 
+    bazel_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    for bazel_flag in ctx.args.bazel_flag:
+        bazel_flags.append(bazel_flag)
+
+    bazel_startup_flags = []
+    for flag in ctx.args.bazel_startup_flag:
+        bazel_startup_flags.append(flag)
+
     build = ctx.bazel.build(
         build_events = build_events,
-        flags = ["--isatty=" + str(int(stdout.is_tty))],
-        *ctx.args.pattern
+        flags = bazel_flags,
+        startup_flags = bazel_startup_flags,
+        *ctx.args.target_pattern
     )
 
-    return tui(ctx, build)
+    build.wait()
 
 build = task(
     implementation = impl,
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
-        "pattern": args.positional(default = ["..."]),
+        "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
+        "bazel_flag": args.string_list(),
+        "bazel_startup_flag": args.string_list(),
         "bes_backend": args.string_list(),
         "bes_header": args.string_list(),
     }
