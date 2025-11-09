@@ -377,12 +377,6 @@ fn main() -> Result<ExitCode> {
                     Box::new(config.cli.clone()),
                 )
                 .await;
-                let bazelisk_task = configure_tool_task(
-                    cache.clone(),
-                    root_dir.clone(),
-                    Box::new(config.bazelisk.clone()),
-                )
-                .await;
 
                 // Wait for fetches
                 let cli = &config.cli;
@@ -394,12 +388,6 @@ fn main() -> Result<ExitCode> {
                 if debug_mode() {
                     eprintln!("provisioned at {cli_path:?}");
                 };
-
-                let bazelisk = &config.bazelisk;
-                if debug_mode() {
-                    eprintln!("attempting to provision {bazelisk:?}");
-                };
-                let _ = bazelisk_task.await.into_diagnostic()??;
 
                 if debug_mode() {
                     eprintln!("attempting to run {cli_path:?}");

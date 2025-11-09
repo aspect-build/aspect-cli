@@ -11,15 +11,12 @@ const AXL_MODULE_FILE: &str = "MODULE.aspect";
 #[derive(Debug, Clone)]
 pub struct AspectConfig {
     pub cli: CliConfig,
-    pub bazelisk: BazeliskConfig,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 struct RawAspectConfig {
     #[serde(rename = "aspect-cli")]
     pub cli: Option<CliConfig>,
-    #[serde(rename = "bazelisk")]
-    pub bazelisk: Option<BazeliskConfig>,
 }
 
 fn default_cli_sources() -> Vec<ToolSource> {
@@ -38,27 +35,6 @@ pub struct CliConfig {
     #[serde(default = "default_cli_sources")]
     sources: Vec<ToolSource>,
     #[serde(default = "cargo_pkg_short_version")]
-    version: String,
-}
-
-fn default_bazelisk_sources() -> Vec<ToolSource> {
-    vec![{
-        ToolSource::Http {
-            url: "https://github.com/bazelbuild/bazelisk/releases/download/v{{ version }}/bazelisk-{{ goos }}-{{ goarch }}".into(),
-            headers: HashMap::new(),
-        }
-    }]
-}
-
-fn default_bazelisk_version() -> String {
-    "1.27.0".into()
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct BazeliskConfig {
-    #[serde(default = "default_bazelisk_sources")]
-    sources: Vec<ToolSource>,
-    #[serde(default = "default_bazelisk_version")]
     version: String,
 }
 
@@ -103,20 +79,6 @@ impl ToolSpec for CliConfig {
     }
 }
 
-impl ToolSpec for BazeliskConfig {
-    fn name(&self) -> String {
-        "bazelisk".to_owned()
-    }
-
-    fn sources(&self) -> &Vec<ToolSource> {
-        &self.sources
-    }
-
-    fn version(&self) -> &String {
-        &self.version
-    }
-}
-
 pub fn load_config(path: &PathBuf) -> Result<AspectConfig> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
@@ -131,7 +93,6 @@ pub fn load_config(path: &PathBuf) -> Result<AspectConfig> {
 
     let config = AspectConfig {
         cli: raw.cli.unwrap_or_else(default_cli_config),
-        bazelisk: raw.bazelisk.unwrap_or_else(default_bazelisk_config),
     };
 
     Ok(config)
@@ -144,17 +105,9 @@ fn default_cli_config() -> CliConfig {
     }
 }
 
-fn default_bazelisk_config() -> BazeliskConfig {
-    BazeliskConfig {
-        sources: default_bazelisk_sources(),
-        version: default_bazelisk_version(),
-    }
-}
-
 pub fn default_config() -> AspectConfig {
     AspectConfig {
         cli: default_cli_config(),
-        bazelisk: default_bazelisk_config(),
     }
 }
 
