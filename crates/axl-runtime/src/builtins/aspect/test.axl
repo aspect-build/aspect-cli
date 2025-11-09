@@ -35,7 +35,8 @@ def _test_impl(ctx):
         *ctx.args.target_pattern
     )
 
-    test.wait()
+    build_status = test.wait()
+    return build_status.code
 
 test = task(
     implementation = _test_impl,

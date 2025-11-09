@@ -53,8 +53,8 @@ def _simple_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
             ctx.std.io.stderr.write(event.payload.stderr)
             ctx.std.io.stderr.flush()
 
-    exit = build.wait()
-    return exit.code
+    build_status = build.wait()
+    return build_status.code
 
 def tui(ctx: TaskContext, build: bazel.build.Build) -> int:
     stdout = ctx.std.io.stdout

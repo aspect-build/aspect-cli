@@ -35,7 +35,8 @@ def impl(ctx: TaskContext) -> int:
         *ctx.args.target_pattern
     )
 
-    build.wait()
+    build_status = build.wait()
+    return build_status.code
 
 build = task(
     implementation = impl,
