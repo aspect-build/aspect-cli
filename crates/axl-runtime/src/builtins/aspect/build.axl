@@ -8,22 +8,26 @@ def impl(ctx: TaskContext) -> int:
     stdout = ctx.std.io.stdout
 
     build_events = True
-    if ctx.args.bes_backend:
-        if not ctx.args.bes_header:
-            fail("--bes_header is required with --bes_backend")
-        (k, _, v) = ctx.args.bes_header.partition("=")
-        build_events = [
+    for bes_backend in ctx.args.bes_backend:
+        metadata = {}
+        for bes_header in ctx.args.bes_header:
+            (k, _, v) = bes_header.partition("=")
+            metadata[k] = v
+        if type(build_events) != "list":
+            build_events = []
+        build_events.append(
             bazel.build_events.grpc(
-                uri = ctx.args.bes_backend,
-                metadata = {k: v}
+                uri = bes_backend,
+                metadata = metadata
             )
-        ]
+        )
 
     build = ctx.bazel.build(
         build_events = build_events,
         flags = ["--isatty=" + str(int(stdout.is_tty))],
         *ctx.args.pattern
     )
+
     return tui(ctx, build)
 
 build = task(
@@ -32,7 +36,7 @@ build = task(
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
         "pattern": args.positional(default = ["..."]),
-        "bes_backend": args.string(),
-        "bes_header": args.string()
+        "bes_backend": args.string_list(),
+        "bes_header": args.string_list(),
     }
 )
