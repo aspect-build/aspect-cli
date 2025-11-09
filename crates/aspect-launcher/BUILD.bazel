@@ -17,6 +17,7 @@ rust_binary(
         "@crates//:miette",
         "@crates//:reqwest",
         "@crates//:serde",
+        "@crates//:sha2",
         "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:toml",

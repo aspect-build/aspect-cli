@@ -1,13 +1,10 @@
-[tools.cli]
-version = "v2025.45.60"
+[aspect-cli]
+version = "2025.45.60"
 sources = [
    # Try to use a dev build for dogfooding
    { path = "bazel-bin/crates/aspect-cli/aspect-cli" },
    # Fallback to cargo
    { path = "target/debug/aspect-cli" },
    # Fall back to release version
-   { org = "aspect-build", repo = "aspect-cli", release = "v{{ version }}", artifact = "aspect-cli-{{ bzlos }}_{{ bzlarch }}" },
+   { org = "aspect-build", repo = "aspect-cli", release = "v{{ version }}", artifact = "aspect-cli-{{ llvm_triple }}" },
 ]
-
-[tools.bazelisk]
-version = "1.27.0"

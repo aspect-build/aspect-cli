@@ -8,15 +8,18 @@ use serde::Deserialize;
 
 const AXL_MODULE_FILE: &str = "MODULE.aspect";
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct AspectConfig {
-    pub tools: ToolsConfig,
+    pub cli: CliConfig,
+    pub bazelisk: BazeliskConfig,
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct ToolsConfig {
-    pub cli: CliConfig,
-    pub bazelisk: BazeliskConfig,
+struct RawAspectConfig {
+    #[serde(rename = "aspect-cli")]
+    pub cli: Option<CliConfig>,
+    #[serde(rename = "bazelisk")]
+    pub bazelisk: Option<BazeliskConfig>,
 }
 
 fn default_cli_sources() -> Vec<ToolSource> {
@@ -121,15 +124,38 @@ pub fn load_config(path: &PathBuf) -> Result<AspectConfig> {
         Err(e) => return Err(miette!("failed to read config file {:?}: {}", path, e)),
     };
 
-    match toml::from_str(&content) {
-        Ok(config) => Ok(config),
-        Err(e) => Err(miette!("failed to parse config file {:?}: {}", path, e)),
+    let raw: RawAspectConfig = match toml::from_str(&content) {
+        Ok(config) => config,
+        Err(e) => return Err(miette!("failed to parse config file {:?}: {}", path, e)),
+    };
+
+    let config = AspectConfig {
+        cli: raw.cli.unwrap_or_else(default_cli_config),
+        bazelisk: raw.bazelisk.unwrap_or_else(default_bazelisk_config),
+    };
+
+    Ok(config)
+}
+
+fn default_cli_config() -> CliConfig {
+    CliConfig {
+        sources: default_cli_sources(),
+        version: cargo_pkg_short_version(),
+    }
+}
+
+fn default_bazelisk_config() -> BazeliskConfig {
+    BazeliskConfig {
+        sources: default_bazelisk_sources(),
+        version: default_bazelisk_version(),
     }
 }
 
 pub fn default_config() -> AspectConfig {
-    // FIXME: Better way to fall back to an empty config?
-    toml::from_str("[tools.cli]\n[tools.bazelisk]\n").unwrap()
+    AspectConfig {
+        cli: default_cli_config(),
+        bazelisk: default_bazelisk_config(),
+    }
 }
 
 /// Automatically determines the project root directory and loads the Aspect configuration.

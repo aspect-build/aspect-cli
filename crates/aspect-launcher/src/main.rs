@@ -134,16 +134,13 @@ fn gh_request(client: &Client, url: String) -> RequestBuilder {
 
 async fn configure_tool_task(
     cache: AspectCache,
-    repo_dir: PathBuf,
+    root_dir: PathBuf,
     tool: Box<dyn ToolSpec + Send>,
-) -> JoinHandle<Result<()>> {
+) -> JoinHandle<Result<PathBuf>> {
     task::spawn((async move |cache: AspectCache,
-                             repo_dir: PathBuf,
+                             root_dir: PathBuf,
                              tool: Box<dyn ToolSpec + Send>|
-                -> Result<()> {
-        let tool_dest_file = cache.tool_path(&(*tool));
-        fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
-
+                -> Result<PathBuf> {
         let mut errs: Vec<Result<()>> = Vec::new();
 
         let client = reqwest::Client::new();
@@ -161,31 +158,48 @@ async fn configure_tool_task(
 
         let liquid_parser = liquid::ParserBuilder::new().build().into_diagnostic()?;
 
-        if tool_dest_file.exists() {
-            if debug_mode() {
-                eprintln!("tool {tool:?} already in cache at {tool_dest_file:?}");
-            };
-            return Ok(());
-        }
-
         for source in tool.sources() {
             match source {
                 ToolSource::Http { url, headers } => {
                     let url = liquid_parser
-                        .parse(url)
+                        .parse(&url)
                         .into_diagnostic()?
                         .render(&liquid_globals)
                         .into_diagnostic()?;
                     let req_headers = headermap_from_hashmap(headers.iter());
                     let req = client
-                        .request(Method::GET, url)
+                        .request(Method::GET, &url)
                         .headers(req_headers)
                         .build()
                         .into_diagnostic()?;
+                    let tool_dest_file = cache.tool_path(&tool.name(), &url);
+                    if tool_dest_file.exists() {
+                        if debug_mode() {
+                            eprintln!(
+                                "{:} source {:?} found in cache {:?}",
+                                tool.name(),
+                                source,
+                                url
+                            );
+                        };
+                        return Ok(tool_dest_file);
+                    }
+                    fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
+                    if debug_mode() {
+                        eprintln!(
+                            "{:} source {:?} downloading {:?} to {:?}",
+                            tool.name(),
+                            source,
+                            url,
+                            tool_dest_file
+                        );
+                    };
                     if let err @ Err(_) = _download_into_cache(&client, &tool_dest_file, req).await
                     {
                         errs.push(err);
+                        continue;
                     };
+                    return Ok(tool_dest_file);
                 }
                 ToolSource::Github {
                     org,
@@ -204,20 +218,32 @@ async fn configure_tool_task(
                         .render(&liquid_globals)
                         .into_diagnostic()?;
 
-                    let req = gh_request(
-                        &client,
-                        format!(
-                            "https://api.github.com/repos/{org}/{repo}/releases/tags/{release}"
-                        ),
-                    )
-                    .header(
-                        HeaderName::from_static("accept"),
-                        HeaderValue::from_static("application/vnd.github+json"),
-                    )
-                    .build()
-                    .into_diagnostic()?;
+                    let url = format!(
+                        "https://api.github.com/repos/{org}/{repo}/releases/tags/{release}"
+                    );
 
-                    // FIXME: Accumulate errors
+                    let tool_dest_file = cache.tool_path(&tool.name(), &url);
+                    if tool_dest_file.exists() {
+                        if debug_mode() {
+                            eprintln!(
+                                "{:} source {:?} found in cache {:?}",
+                                tool.name(),
+                                source,
+                                &url
+                            );
+                        };
+                        return Ok(tool_dest_file);
+                    }
+                    fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
+
+                    let req = gh_request(&client, url)
+                        .header(
+                            HeaderName::from_static("accept"),
+                            HeaderValue::from_static("application/vnd.github+json"),
+                        )
+                        .build()
+                        .into_diagnostic()?;
+
                     let resp = client
                         .execute(req.try_clone().unwrap())
                         .await
@@ -225,6 +251,15 @@ async fn configure_tool_task(
                     let release: Release = resp.json::<Release>().await.into_diagnostic()?;
                     for asset in release.assets {
                         if asset.name == *artifact {
+                            if debug_mode() {
+                                eprintln!(
+                                    "{:} source {:?} downloading {:?} to {:?}",
+                                    tool.name(),
+                                    source,
+                                    asset.url,
+                                    tool_dest_file
+                                );
+                            };
                             let req = gh_request(&client, asset.url)
                                 .header(
                                     HeaderName::from_static("accept"),
@@ -236,17 +271,21 @@ async fn configure_tool_task(
                                 _download_into_cache(&client, &tool_dest_file, req).await
                             {
                                 errs.push(err);
+                                break;
                             }
+                            return Ok(tool_dest_file);
                         }
                     }
-                    errs.push(Err(miette!(
-                        "unable to find a matching release artifact in github!"
-                    )));
+                    errs.push(Err(miette!("unable to find a release artifact in github!")));
                     continue;
                 }
                 ToolSource::Local { path } => {
-                    let path = repo_dir.join(path);
+                    let tool_dest_file = cache.tool_path(&tool.name(), &path);
+                    // Don't pull local sources from the cache since the local development flow will
+                    // always be to copy the latest
+                    fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
 
+                    let path = root_dir.join(path);
                     if fs::exists(&path).into_diagnostic()? {
                         if fs::exists(&tool_dest_file).into_diagnostic()? {
                             tokio::fs::remove_file(&tool_dest_file)
@@ -259,28 +298,32 @@ async fn configure_tool_task(
                             .await
                             .into_diagnostic()?;
 
+                        if debug_mode() {
+                            eprintln!(
+                                "{:} source {:?} copying from {:?} to {:?}",
+                                tool.name(),
+                                source,
+                                path,
+                                tool_dest_file
+                            );
+                        };
+
                         let metadata = fs::metadata(&tool_dest_file).into_diagnostic()?;
                         let mut permissions = metadata.permissions();
                         let new_mode = 0o755;
                         permissions.set_mode(new_mode);
                         fs::set_permissions(&tool_dest_file, permissions).into_diagnostic()?;
+                        return Ok(tool_dest_file);
                     }
                 }
             }
-            if tool_dest_file.exists() {
-                if debug_mode() {
-                    eprintln!("hit in {source:?}");
-                };
-                return Ok(());
-            }
         }
-
         Err(miette!(format!(
             "exhausted tool sources {:?}; errors occurred {:?}",
             tool.sources(),
             errs
         )))
-    })(cache.clone(), repo_dir.clone(), tool))
+    })(cache.clone(), root_dir.clone(), tool))
 }
 
 fn main() -> Result<ExitCode> {
@@ -323,45 +366,47 @@ fn main() -> Result<ExitCode> {
         }
         Fork::Parent(_) => {
             // Deal with the config bits
-            let (repo_dir, config) = autoconf()?;
+            let (root_dir, config) = autoconf()?;
             let cache: AspectCache = AspectCache::default()?;
 
             let threaded_rt = runtime::Runtime::new().into_diagnostic()?;
             threaded_rt.block_on(async {
                 let cli_task = configure_tool_task(
                     cache.clone(),
-                    repo_dir.clone(),
-                    Box::new(config.tools.cli.clone()),
+                    root_dir.clone(),
+                    Box::new(config.cli.clone()),
                 )
                 .await;
                 let bazelisk_task = configure_tool_task(
                     cache.clone(),
-                    repo_dir.clone(),
-                    Box::new(config.tools.bazelisk.clone()),
+                    root_dir.clone(),
+                    Box::new(config.bazelisk.clone()),
                 )
                 .await;
 
                 // Wait for fetches
-                let cli = &config.tools.cli;
+                let cli = &config.cli;
                 if debug_mode() {
                     eprintln!("attempting to provision {cli:?}");
                 };
 
-                let _: Result<()> = cli_task.await.into_diagnostic()?;
+                let cli_path = cli_task.await.into_diagnostic()??;
+                if debug_mode() {
+                    eprintln!("provisioned at {cli_path:?}");
+                };
 
-                let bazelisk = &config.tools.bazelisk;
+                let bazelisk = &config.bazelisk;
                 if debug_mode() {
                     eprintln!("attempting to provision {bazelisk:?}");
                 };
-                let _: Result<()> = bazelisk_task.await.into_diagnostic()?;
+                let _ = bazelisk_task.await.into_diagnostic()??;
 
-                let path = cache.tool_path(&config.tools.cli);
                 if debug_mode() {
-                    eprintln!("attempting to run {path:?}");
+                    eprintln!("attempting to run {cli_path:?}");
                 };
 
                 // Punt
-                let mut cmd = UnixCommand::new(&path);
+                let mut cmd = UnixCommand::new(&cli_path);
                 if let Some(args) = matches.get_many::<String>("args") {
                     cmd.args(args);
                 };

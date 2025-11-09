@@ -3,8 +3,7 @@ use std::path::PathBuf;
 
 use dirs::cache_dir;
 use miette::{miette, Context, IntoDiagnostic, Result};
-
-use crate::config::ToolSpec;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone)]
 pub struct AspectCache {
@@ -29,8 +28,11 @@ impl AspectCache {
         Ok(AspectCache::from(aspect_data_dir))
     }
 
-    pub fn tool_path(&self, tool: &dyn ToolSpec) -> PathBuf {
-        self.root
-            .join(format!("bin/{0}/{1}/{0}", tool.name(), tool.version()))
+    pub fn tool_path(&self, tool_name: &String, tool_source: &String) -> PathBuf {
+        let mut hasher = Sha256::new();
+        hasher.update(tool_name.as_bytes());
+        hasher.update(tool_source.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        self.root.join(format!("bin/{0}/{1}/{0}", tool_name, hash))
     }
 }
