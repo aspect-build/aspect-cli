@@ -264,7 +264,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let build = this.downcast_ref::<Build>().unwrap();
         let execlog_stream = build.execlog_stream.borrow();
         let execlog_stream = execlog_stream.as_ref().ok_or(anyhow::anyhow!(
-            "call `ctx.bazel.build` with `execution_logs = true` in order to receive build events."
+            "call `ctx.bazel.build` with `execution_logs = true` in order to receive execution log events."
         ))?;
 
         Ok(ExecutionLogIterator::new(execlog_stream.receiver()))
