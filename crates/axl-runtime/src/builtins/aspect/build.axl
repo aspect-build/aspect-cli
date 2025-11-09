@@ -1,18 +1,11 @@
 """
-Implement a 'build' task that wraps a build command.
-
-Improvements over 'bazel build' command:
-
-- customize some of the progess message text
-- CAN: supports multiple bes backends
-- CAN: process execlog in realtime
+A 'build' task that wraps a 'bazel build' command.
 """
 
 load("./common.axl", "tui")
 
 def impl(ctx: TaskContext) -> int:
     stdout = ctx.std.io.stdout
-    stderr = ctx.std.io.stderr
 
     build_events = True
     if ctx.args.bes_backend:
@@ -29,14 +22,16 @@ def impl(ctx: TaskContext) -> int:
     build = ctx.bazel.build(
         build_events = build_events,
         flags = ["--isatty=" + str(int(stdout.is_tty))],
-        *ctx.args.targets
+        *ctx.args.pattern
     )
     return tui(ctx, build)
 
 build = task(
     implementation = impl,
     args = {
-        "targets": args.positional(minimum = 1, maximum = 512),
+        # TODO: Support a long --pattern_file like bazel does (@./targets)
+        # TODO: Support - (list from stdin)
+        "pattern": args.positional(default = ["..."]),
         "bes_backend": args.string(),
         "bes_header": args.string()
     }

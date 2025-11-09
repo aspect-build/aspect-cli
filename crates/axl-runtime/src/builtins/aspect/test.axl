@@ -1,14 +1,30 @@
+"""
+A 'test' task that wraps a 'bazel test' command.
+"""
+
 load("./common.axl", "tui")
 
 def _test_impl(ctx):
     stdout = ctx.std.io.stdout
-    stderr = ctx.std.io.stderr
-    test = ctx.bazel.build(
-        build_events = True,
-        command = "test",
+
+    build_events = True
+    if ctx.args.bes_backend:
+        if not ctx.args.bes_header:
+            fail("--bes_header is required with --bes_backend")
+        (k, _, v) = ctx.args.bes_header.partition("=")
+        build_events = [
+            bazel.build_events.grpc(
+                uri = ctx.args.bes_backend,
+                metadata = {k: v}
+            )
+        ]
+
+    test = ctx.bazel.test(
+        build_events = build_events,
         flags = ["--isatty=" + str(int(stdout.is_tty))],
         *ctx.args.pattern
     )
+
     return tui(ctx, test)
 
 test = task(
@@ -17,5 +33,7 @@ test = task(
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
         "pattern": args.positional(default = ["..."]),
+        "bes_backend": args.string(),
+        "bes_header": args.string()
     }
 )
