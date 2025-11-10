@@ -46,7 +46,7 @@ def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
             offset = (offset + 1) % len(in_flight)
 
 def _simple_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
-    for event in build.events():
+    for event in build.build_events():
         if event.kind == "progress":
             ctx.std.io.stdout.write(event.payload.stdout)
             ctx.std.io.stdout.flush()
