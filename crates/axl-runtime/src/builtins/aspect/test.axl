@@ -2,7 +2,7 @@
 A default 'test' task that wraps a 'bazel test' command.
 """
 
-def _test_impl(ctx):
+def _test_impl(ctx: TaskContext) -> int:
     stdout = ctx.std.io.stdout
 
     build_events = True
