@@ -5,6 +5,7 @@ use std::env;
 use std::env::var;
 use std::fs;
 use std::fs::File;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -36,7 +37,7 @@ fn debug_mode() -> bool {
     }
 }
 
-async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Request) -> Result<()> {
+async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Request, download_msg: &str) -> Result<()> {
     // Stream to a tempfile
     let tmp_file = cache_entry.with_extension("tmp");
     let tmpf = File::create(&tmp_file)
@@ -50,13 +51,19 @@ async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Reque
     fs::set_permissions(&tmp_file, permissions).into_diagnostic()?;
 
     let mut tmp_writer = tokio::fs::File::from(tmpf);
-    let mut byte_stream = client
+    let response = client
         .execute(req)
         .await
         .into_diagnostic()?
         .error_for_status()
-        .into_diagnostic()?
-        .bytes_stream();
+        .into_diagnostic()?;
+
+    eprintln!("{}", download_msg);
+
+    let total_size = response.content_length();
+    let mut byte_stream = response.bytes_stream();
+
+    let mut downloaded: u64 = 0;
 
     while let Some(item) = byte_stream
         .try_next()
@@ -64,11 +71,25 @@ async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Reque
         .into_diagnostic()
         .wrap_err("failed to stream content")?
     {
+        let chunk_size = item.len() as u64;
         tokio::io::copy(&mut item.as_ref(), &mut tmp_writer)
             .await
             .into_diagnostic()
             .wrap_err("failed to slab stream to file")?;
+
+        downloaded += chunk_size;
+
+        if let Some(total) = total_size {
+            let percent = ((downloaded as f64 / total as f64) * 100.0) as u64;
+            eprint!("\r{:.0} / {:.0} KB ({}%)", downloaded as f64 / 1024.0, total as f64 / 1024.0, percent);
+            io::stderr().flush().into_diagnostic()?;
+        } else {
+            eprint!("\r{:.0} KB", downloaded as f64 / 1024.0);
+            io::stderr().flush().into_diagnostic()?;
+        }
     }
+
+    eprintln!();
 
     // And move it into the cache
     tokio::fs::rename(&tmp_file, &cache_entry)
@@ -194,7 +215,8 @@ async fn configure_tool_task(
                             tool_dest_file
                         );
                     };
-                    if let err @ Err(_) = _download_into_cache(&client, &tool_dest_file, req).await
+                    let download_msg = format!("downloading aspect cli from {}", url);
+                    if let err @ Err(_) = _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
                     {
                         errs.push(err);
                         continue;
@@ -248,8 +270,8 @@ async fn configure_tool_task(
                         .execute(req.try_clone().unwrap())
                         .await
                         .into_diagnostic()?;
-                    let release: Release = resp.json::<Release>().await.into_diagnostic()?;
-                    for asset in release.assets {
+                    let release_data: Release = resp.json::<Release>().await.into_diagnostic()?;
+                    for asset in release_data.assets {
                         if asset.name == *artifact {
                             if debug_mode() {
                                 eprintln!(
@@ -267,8 +289,9 @@ async fn configure_tool_task(
                                 )
                                 .build()
                                 .into_diagnostic()?;
+                            let download_msg = format!("downloading aspect cli version {} file {}", release, artifact);
                             if let err @ Err(_) =
-                                _download_into_cache(&client, &tool_dest_file, req).await
+                                _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
                             {
                                 errs.push(err);
                                 break;
