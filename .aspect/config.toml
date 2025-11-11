@@ -1,5 +1,5 @@
 [aspect-cli]
-version = "2025.45.71"
+version = "2025.46.6"
 sources = [
    # Try to use a Bazel dev build for dogfooding
    { path = "bazel-bin/crates/aspect-cli/aspect-cli" },
