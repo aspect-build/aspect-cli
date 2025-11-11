@@ -39,6 +39,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)]
         dev: bool,
         #[allow(unused)]
+        #[starlark(require = named, default = false)]
+        auto_use_tasks: bool,
+        #[allow(unused)]
         #[starlark(require = named, default = String::new())]
         strip_prefix: String,
     ) -> anyhow::Result<values::none::NoneType> {
