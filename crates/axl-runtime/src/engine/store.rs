@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use starlark::{eval::Evaluator, values::ProvidesStaticType};
 
 use super::r#async::rt::AsyncRuntime;
@@ -6,12 +8,14 @@ use super::r#async::rt::AsyncRuntime;
 /// to store shared data (runtime, tools, cache, ...) around the Starlark evaluation.
 #[derive(Debug, ProvidesStaticType, Clone)]
 pub struct AxlStore {
+    pub root_dir: PathBuf,
     pub rt: AsyncRuntime,
 }
 
 impl AxlStore {
-    pub fn new() -> Self {
+    pub fn new(root_dir: &PathBuf) -> Self {
         Self {
+            root_dir: root_dir.clone(),
             rt: AsyncRuntime::new(),
         }
     }
@@ -23,6 +27,7 @@ impl AxlStore {
             .downcast_ref::<AxlStore>()
             .ok_or(anyhow::anyhow!("failed to cast axl store"))?;
         Ok(AxlStore {
+            root_dir: value.root_dir.clone(),
             rt: value.rt.clone(),
         })
     }

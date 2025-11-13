@@ -10,8 +10,8 @@ pub const DOT_ASPECT_FOLDER: &str = ".aspect";
 
 /// Asynchronously finds the root directory starting from the given `current_work_dir`.
 /// It traverses the ancestors of `current_work_dir` from deepest to shallowest.
-/// The root dir is identified as the first (deepest) ancestor directory that contains
-/// at least one of the following boundary files: AXL_MODULE_FILE, MODULE.bazel,
+/// The root dir is identified as the first (deepest) ancestor directory of the current working
+/// directory that contains at least one of the following boundary files: MODULE.aspect, MODULE.bazel,
 /// MODULE.bazel.lock, REPO.bazel, WORKSPACE, or WORKSPACE.bazel.
 /// If such a directory is found, it returns Ok with the PathBuf of that directory.
 /// If no such directory is found, returns the `current_work_dir`

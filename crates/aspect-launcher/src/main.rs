@@ -37,7 +37,12 @@ fn debug_mode() -> bool {
     }
 }
 
-async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Request, download_msg: &str) -> Result<()> {
+async fn _download_into_cache(
+    client: &Client,
+    cache_entry: &PathBuf,
+    req: Request,
+    download_msg: &str,
+) -> Result<()> {
     // Stream to a tempfile
     let tmp_file = cache_entry.with_extension("tmp");
     let tmpf = File::create(&tmp_file)
@@ -81,7 +86,12 @@ async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Reque
 
         if let Some(total) = total_size {
             let percent = ((downloaded as f64 / total as f64) * 100.0) as u64;
-            eprint!("\r{:.0} / {:.0} KB ({}%)", downloaded as f64 / 1024.0, total as f64 / 1024.0, percent);
+            eprint!(
+                "\r{:.0} / {:.0} KB ({}%)",
+                downloaded as f64 / 1024.0,
+                total as f64 / 1024.0,
+                percent
+            );
             io::stderr().flush().into_diagnostic()?;
         } else {
             eprint!("\r{:.0} KB", downloaded as f64 / 1024.0);
@@ -216,7 +226,8 @@ async fn configure_tool_task(
                         );
                     };
                     let download_msg = format!("downloading aspect cli from {}", url);
-                    if let err @ Err(_) = _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
+                    if let err @ Err(_) =
+                        _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
                     {
                         errs.push(err);
                         continue;
@@ -289,9 +300,13 @@ async fn configure_tool_task(
                                 )
                                 .build()
                                 .into_diagnostic()?;
-                            let download_msg = format!("downloading aspect cli version {} file {}", release, artifact);
+                            let download_msg = format!(
+                                "downloading aspect cli version {} file {}",
+                                release, artifact
+                            );
                             if let err @ Err(_) =
-                                _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
+                                _download_into_cache(&client, &tool_dest_file, req, &download_msg)
+                                    .await
                             {
                                 errs.push(err);
                                 break;

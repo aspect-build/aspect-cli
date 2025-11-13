@@ -200,14 +200,19 @@ impl AxlScriptEvaluator {
     }
 
     /// Creates a new AxlScriptEvaluator with the given module root.
-    pub fn new(module_name: String, module_root: PathBuf, axl_deps_root: PathBuf) -> Self {
+    pub fn new(
+        module_name: String,
+        module_root: PathBuf,
+        axl_deps_root: PathBuf,
+        root_dir: PathBuf,
+    ) -> Self {
         Self {
             module_name,
             module_root,
             axl_deps_root,
             dialect: AxlScriptEvaluator::dialect(),
             globals: AxlScriptEvaluator::globals(),
-            store: AxlStore::new(),
+            store: AxlStore::new(&root_dir),
         }
     }
 

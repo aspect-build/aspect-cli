@@ -113,13 +113,12 @@ pub fn default_config() -> AspectConfig {
 
 /// Automatically determines the project root directory and loads the Aspect configuration.
 ///
-/// This function starts from the current working directory and searches upwards through its ancestors
-/// for repository boundary marker files (such as `AXL_MODULE_FILE`, `MODULE.bazel`, `MODULE.bazel.lock`,
-/// `REPO.bazel`, `WORKSPACE`, or `WORKSPACE.bazel`). The first ancestor directory containing any of
-/// these files is considered the project root. If no such directory is found, the current directory
-/// is used as the root.
+/// The root dir is identified as the first (deepest) ancestor directory of the current working
+/// directory that contains at least one of the following boundary files: MODULE.aspect, MODULE.bazel,
+/// MODULE.bazel.lock, REPO.bazel, WORKSPACE, or WORKSPACE.bazel. If no such directory is found, the
+/// current working directory is used as the project root.
 ///
-/// It then constructs the path to `.aspect/config.toml` within the root directory and loads the
+/// It then constructs the path to `.aspect/config.toml` within the project root directory and loads the
 /// configuration using `load_config`.
 ///
 /// # Returns

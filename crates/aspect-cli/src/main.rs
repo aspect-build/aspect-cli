@@ -139,6 +139,7 @@ async fn main() -> miette::Result<ExitCode> {
             AXL_ROOT_MODULE_NAME.to_string(),
             root_dir.clone(),
             axl_deps_root.clone(),
+            root_dir.clone(),
         );
         for path in axl_sources.iter() {
             let rel_path = path
@@ -177,6 +178,7 @@ async fn main() -> miette::Result<ExitCode> {
                 module_name.clone(),
                 module_root.clone(),
                 axl_deps_root.clone(),
+                root_dir.clone(),
             );
             for (rel_path, symbol) in use_tasks {
                 let script = script_eval
