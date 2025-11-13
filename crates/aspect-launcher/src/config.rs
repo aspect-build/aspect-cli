@@ -9,19 +9,19 @@ use serde::Deserialize;
 const AXL_MODULE_FILE: &str = "MODULE.aspect";
 
 #[derive(Debug, Clone)]
-pub struct AspectConfig {
-    pub cli: CliConfig,
+pub struct AspectLauncherConfig {
+    pub aspect_cli: AspectCliConfig,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 struct RawAspectConfig {
     #[serde(rename = "aspect-cli")]
-    pub cli: Option<CliConfig>,
+    pub aspect_cli: Option<AspectCliConfig>,
 }
 
 fn default_cli_sources() -> Vec<ToolSource> {
     vec![{
-        ToolSource::Github {
+        ToolSource::GitHub {
             org: "aspect-build".into(),
             repo: "aspect-cli".into(),
             release: "v{{ version }}".into(),
@@ -31,7 +31,7 @@ fn default_cli_sources() -> Vec<ToolSource> {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct CliConfig {
+pub struct AspectCliConfig {
     #[serde(default = "default_cli_sources")]
     sources: Vec<ToolSource>,
     #[serde(default = "cargo_pkg_short_version")]
@@ -41,7 +41,7 @@ pub struct CliConfig {
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum ToolSource {
-    Github {
+    GitHub {
         org: String,
         repo: String,
         release: String,
@@ -65,7 +65,7 @@ pub trait ToolSpec: Debug {
     fn sources(&self) -> &Vec<ToolSource>;
 }
 
-impl ToolSpec for CliConfig {
+impl ToolSpec for AspectCliConfig {
     fn name(&self) -> String {
         "aspect-cli".to_owned()
     }
@@ -79,7 +79,7 @@ impl ToolSpec for CliConfig {
     }
 }
 
-pub fn load_config(path: &PathBuf) -> Result<AspectConfig> {
+pub fn load_config(path: &PathBuf) -> Result<AspectLauncherConfig> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(default_config()),
@@ -91,23 +91,23 @@ pub fn load_config(path: &PathBuf) -> Result<AspectConfig> {
         Err(e) => return Err(miette!("failed to parse config file {:?}: {}", path, e)),
     };
 
-    let config = AspectConfig {
-        cli: raw.cli.unwrap_or_else(default_cli_config),
+    let config = AspectLauncherConfig {
+        aspect_cli: raw.aspect_cli.unwrap_or_else(default_aspect_cli_config),
     };
 
     Ok(config)
 }
 
-fn default_cli_config() -> CliConfig {
-    CliConfig {
+fn default_aspect_cli_config() -> AspectCliConfig {
+    AspectCliConfig {
         sources: default_cli_sources(),
         version: cargo_pkg_short_version(),
     }
 }
 
-pub fn default_config() -> AspectConfig {
-    AspectConfig {
-        cli: default_cli_config(),
+pub fn default_config() -> AspectLauncherConfig {
+    AspectLauncherConfig {
+        aspect_cli: default_aspect_cli_config(),
     }
 }
 
@@ -123,14 +123,14 @@ pub fn default_config() -> AspectConfig {
 ///
 /// # Returns
 ///
-/// A `Result` containing a tuple `(PathBuf, AspectConfig)` where:
+/// A `Result` containing a tuple `(PathBuf, AspectLauncherConfig)` where:
 /// - The first element is the determined root directory.
-/// - The second element is the loaded `AspectConfig`.
+/// - The second element is the loaded `AspectLauncherConfig`.
 ///
 /// # Errors
 ///
 /// Returns an error if the current working directory cannot be obtained or if loading the config fails.
-pub fn autoconf() -> Result<(PathBuf, AspectConfig)> {
+pub fn autoconf() -> Result<(PathBuf, AspectLauncherConfig)> {
     let current_dir =
         current_dir().map_err(|e| miette!("failed to get current directory: {}", e))?;
 
