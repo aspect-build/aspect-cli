@@ -23,4 +23,6 @@ curl -fsSL https://install.aspect.build | bash
 brew install aspect-build/aspect/aspect
 \`\`\`
 
+**Documentation**: https://docs.aspect.build/cli/overview
+**Additional installation instructions**: https://docs.aspect.build/cli/install
 EOF
