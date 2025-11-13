@@ -20,6 +20,19 @@ steps:
         --test_output=summary \
         --show_progress_rate_limit=1 \
         -- //...
+      echo "--- :bazel: bazel build //:launcher //:cli"
+      bazel \
+        --nohome_rc \
+        --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ \
+        --output_base=/mnt/ephemeral/output/aspect-cli/__main__ \
+        build \
+        --config=workflows \
+        --config=ci \
+        --test_output=summary \
+        --show_progress_rate_limit=1 \
+        -- //:launcher //:cli
+      echo "--- :aspect: aspect tests axl"
+      ./bazel-bin/crates/aspect-launcher/aspect-launcher tests axl
   - label: ":broom: Format"
     agents:
       queue: aspect-small
