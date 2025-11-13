@@ -1,12 +1,15 @@
 use allocative::Allocative;
 use derive_more::Display;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
+use starlark::eval::Evaluator;
 use starlark::values::list::{AllocList, UnpackList};
 use starlark::values::none::NoneOr;
 use starlark::values::tuple::{AllocTuple, UnpackTuple};
 use starlark::values::{starlark_value, StarlarkValue};
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueOfUnchecked};
 use starlark::{starlark_module, starlark_simple_value, values};
+
+use crate::engine::store::AxlStore;
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<std.Env>")]
@@ -171,5 +174,22 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
                 .to_str()
                 .ok_or(anyhow::anyhow!("current directory is non utf-8"))?,
         ))
+    }
+
+    /// Returns the project root directory.
+    ///
+    /// This project root directory is found starting at current working directory and searching upwards
+    /// through its ancestors for repository boundary marker files (such as `MODULE.aspect`, `MODULE.bazel`,
+    /// `MODULE.bazel.lock`, `REPO.bazel`, `WORKSPACE`, or `WORKSPACE.bazel`). The first ancestor directory
+    /// containing any of these files is considered the project root. If no such directory is found, the
+    /// current directory is used as the project root.
+    fn root_dir<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        let store = AxlStore::from_eval(eval)?;
+        Ok(eval
+            .heap()
+            .alloc_str(&store.root_dir.as_os_str().to_string_lossy().to_string()))
     }
 }
