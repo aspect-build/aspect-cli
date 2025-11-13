@@ -12,21 +12,24 @@ def test(tc, cond, msg) -> int:
 def test_env(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # Test current_exe
     current_exe = ctx.std.env.current_exe()
+    tc = test(tc, current_exe != None and current_exe != "", "current_exe should return a non-empty value")
+    tc = test(tc, type(current_exe) == "string", "current_exe should be a string")
     tc = test(tc, current_exe.endswith("/aspect-cli"), "current_exe should end with /aspect-cli")
 
     # Test home_dir
     home = ctx.std.env.home_dir()
-    tc = test(tc, home != None, "home_dir should return a value")
+    tc = test(tc, home != None and home != "", "home_dir should return a non-empty value")
     tc = test(tc, type(home) == "string", "home_dir should be a string")
 
     # Test current_dir
     current_dir = ctx.std.env.current_dir()
+    tc = test(tc, current_dir != None and current_dir != "", "current_dir should return a non-empty value")
     tc = test(tc, type(current_dir) == "string", "current_dir should be a string")
     tc = test(tc, ctx.std.fs.is_dir(current_dir), "current_dir should be a directory")
 
     # Test var for existing and non-existing variables
     path_var = ctx.std.env.var("PATH")
-    tc = test(tc, path_var != None, "PATH environment variable should exist")
+    tc = test(tc, path_var != None and path_var != "", "PATH environment variable should exist and by non-empty")
     tc = test(tc, type(path_var) == "string", "PATH should be a string")
     no_var = ctx.std.env.var("NO_SUCH_VAR_12345")
     tc = test(tc, no_var == None, "Non-existent variable should return None")
@@ -42,9 +45,10 @@ def test_env(ctx: TaskContext, tc: int, temp_dir: str) -> int:
         break
 
     # Test root_dir
-    root = ctx.std.env.root_dir()
-    tc = test(tc, type(root) == "string", "root_dir should be a string")
-    tc = test(tc, ctx.std.fs.is_dir(root), "root_dir should be a directory")
+    root_dir = ctx.std.env.root_dir()
+    tc = test(tc, root_dir != None and root_dir != "", "root_dir should return a non-empty value")
+    tc = test(tc, type(root_dir) == "string", "root_dir should be a string")
+    tc = test(tc, ctx.std.fs.is_dir(root_dir), "root_dir should be a directory")
 
     return tc
 
