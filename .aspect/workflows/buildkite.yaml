@@ -30,6 +30,7 @@ steps:
         --config=ci \
         --test_output=summary \
         --show_progress_rate_limit=1 \
+        --remote_download_outputs="toplevel" \
         -- //:launcher //:cli
       echo "--- :aspect: aspect tests axl"
       ./bazel-bin/crates/aspect-launcher/aspect-launcher tests axl
