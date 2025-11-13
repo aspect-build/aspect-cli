@@ -34,6 +34,15 @@ starlark_simple_value!(Env);
 
 #[starlark_module]
 pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
+    /// Returns the version of the Aspect CLI.
+    fn aspect_cli_version<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        let store = AxlStore::from_eval(eval)?;
+        Ok(eval.heap().alloc_str(&store.aspect_cli_version))
+    }
+
     /// Fetches the environment variable key from the current process.
     fn var<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -103,8 +112,9 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::StringValue<'v>> {
         Ok(heap.alloc_str(
             std::env::temp_dir()
+                // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
                 .to_str()
-                .ok_or(anyhow::anyhow!("failed to get tempdir"))?,
+                .ok_or(anyhow::anyhow!("temp directory is non utf-8"))?,
         ))
     }
 
@@ -141,8 +151,10 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         Ok(match std::env::home_dir() {
             Some(path) => NoneOr::Other(
                 heap.alloc_str(
-                    path.to_str()
-                        .ok_or(anyhow::anyhow!("failed to get tempdir"))?,
+                    path
+                        // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
+                        .to_str()
+                        .ok_or(anyhow::anyhow!("home directory is non utf-8"))?,
                 ),
             ),
             None => NoneOr::None,
@@ -172,7 +184,20 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         Ok(heap.alloc_str(
             std::env::current_dir()?
                 .to_str()
+                // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
                 .ok_or(anyhow::anyhow!("current directory is non utf-8"))?,
+        ))
+    }
+
+    fn current_exe<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        heap: &'v Heap,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        Ok(heap.alloc_str(
+            std::env::current_exe()?
+                .to_str()
+                // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
+                .ok_or(anyhow::anyhow!("current executable is non utf-8"))?,
         ))
     }
 
@@ -188,8 +213,12 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::StringValue<'v>> {
         let store = AxlStore::from_eval(eval)?;
-        Ok(eval
-            .heap()
-            .alloc_str(&store.root_dir.as_os_str().to_string_lossy().to_string()))
+        Ok(eval.heap().alloc_str(
+            &store
+                .root_dir
+                .to_str()
+                // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
+                .ok_or(anyhow::anyhow!("root dir is non utf-8"))?,
+        ))
     }
 }

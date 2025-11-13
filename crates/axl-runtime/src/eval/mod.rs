@@ -205,6 +205,7 @@ impl AxlScriptEvaluator {
         module_root: PathBuf,
         axl_deps_root: PathBuf,
         root_dir: PathBuf,
+        version: String,
     ) -> Self {
         Self {
             module_name,
@@ -212,7 +213,7 @@ impl AxlScriptEvaluator {
             axl_deps_root,
             dialect: AxlScriptEvaluator::dialect(),
             globals: AxlScriptEvaluator::globals(),
-            store: AxlStore::new(&root_dir),
+            store: AxlStore::new(&version, &root_dir),
         }
     }
 
