@@ -1,0 +1,205 @@
+"""
+Exercise axl
+"""
+
+def test(tc, cond, msg) -> int:
+    if not cond:
+        fail(msg)
+    else:
+        print(msg, "... OK")
+    return tc + 1
+
+def test_env(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    # Test current_exe
+    current_exe = ctx.std.env.current_exe()
+    tc = test(tc, current_exe.endswith("/aspect-cli"), "current_exe should end with /aspect-cli")
+
+    # Test home_dir
+    home = ctx.std.env.home_dir()
+    tc = test(tc, home != None, "home_dir should return a value")
+    tc = test(tc, type(home) == "string", "home_dir should be a string")
+
+    # Test current_dir
+    current_dir = ctx.std.env.current_dir()
+    tc = test(tc, type(current_dir) == "string", "current_dir should be a string")
+    tc = test(tc, ctx.std.fs.is_dir(current_dir), "current_dir should be a directory")
+
+    # Test var for existing and non-existing variables
+    path_var = ctx.std.env.var("PATH")
+    tc = test(tc, path_var != None, "PATH environment variable should exist")
+    tc = test(tc, type(path_var) == "string", "PATH should be a string")
+    no_var = ctx.std.env.var("NO_SUCH_VAR_12345")
+    tc = test(tc, no_var == None, "Non-existent variable should return None")
+
+    # Test vars
+    all_vars = ctx.std.env.vars()
+    tc = test(tc, type(all_vars) == "list", "vars should return a list")
+    tc = test(tc, len(all_vars) > 0, "vars should contain at least one entry")
+    # Check that vars entries are tuple of two strings
+    for var in all_vars:
+        tc = test(tc, type(var) == "tuple" and len(var) == 2, "Each var entry should be a tuple of length 2")
+        tc = test(tc, type(var[0]) == "string" and type(var[1]) == "string", "Var entries should be string pairs")
+        break
+
+    # Test root_dir
+    root = ctx.std.env.root_dir()
+    tc = test(tc, type(root) == "string", "root_dir should be a string")
+    tc = test(tc, ctx.std.fs.is_dir(root), "root_dir should be a directory")
+
+    return tc
+
+def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
+    # Test ctx.std.fs API in a temporary test directory
+
+    # Set up test directory in temp_dir
+    test_dir = temp_dir + "/axl_fs_test"
+    if ctx.std.fs.exists(test_dir):
+        ctx.std.fs.remove_dir_all(test_dir)
+    ctx.std.fs.create_dir(test_dir)
+    tc = test(tc, ctx.std.fs.exists(test_dir), "create_dir should create the directory")
+    tc = test(tc, ctx.std.fs.is_dir(test_dir), "created path should be a directory")
+    tc = test(tc, not ctx.std.fs.is_file(test_dir), "created path should not be a file")
+
+    # Test create_dir_all
+    deep_dir = test_dir + "/deep/a/b"
+    ctx.std.fs.create_dir_all(deep_dir)
+    tc = test(tc, ctx.std.fs.exists(deep_dir), "create_dir_all should create nested directories")
+    tc = test(tc, ctx.std.fs.is_dir(deep_dir), "nested path should be a directory")
+
+    # Test write and read_to_string
+    file_path = test_dir + "/test_file.txt"
+    ctx.std.fs.write(file_path, "hello world")
+    tc = test(tc, ctx.std.fs.exists(file_path), "write should create the file")
+    tc = test(tc, ctx.std.fs.is_file(file_path), "written path should be a file")
+    tc = test(tc, not ctx.std.fs.is_dir(file_path), "written path should not be a directory")
+    content = ctx.std.fs.read_to_string(file_path)
+    tc = test(tc, content == "hello world", "read_to_string should return the written content")
+
+    # Test metadata and symlink_metadata
+    meta = ctx.std.fs.metadata(file_path)
+    tc = test(tc, meta.is_file == True, "metadata.is_file should be True")
+    tc = test(tc, meta.is_dir == False, "metadata.is_dir should be False")
+    tc = test(tc, meta.is_symlink == False, "metadata.is_symlink should be False")
+    tc = test(tc, meta.size == 11, "metadata.size should match content length")
+    tc = test(tc, type(meta.modified) == "int" or meta.modified == None, "metadata.modified should be int or None")
+    tc = test(tc, type(meta.accessed) == "int" or meta.accessed == None, "metadata.accessed should be int or None")
+    tc = test(tc, type(meta.created) == "int" or meta.created == None, "metadata.created should be int or None")
+    tc = test(tc, type(meta.readonly) == "bool", "metadata.readonly should be bool")
+
+    sym_meta = ctx.std.fs.symlink_metadata(file_path)
+    tc = test(tc, sym_meta.is_file == True, "symlink_metadata.is_file should be True")
+    tc = test(tc, sym_meta.is_dir == False, "symlink_metadata.is_dir should be False")
+    tc = test(tc, sym_meta.is_symlink == False, "symlink_metadata.is_symlink should be False")
+
+    # Test copy
+    copy_path = test_dir + "/copy.txt"
+    ctx.std.fs.copy(file_path, copy_path)
+    tc = test(tc, ctx.std.fs.exists(copy_path), "copy should create the new file")
+    tc = test(tc, ctx.std.fs.read_to_string(copy_path) == "hello world", "copy should preserve content")
+
+    # Test rename
+    rename_path = test_dir + "/renamed.txt"
+    ctx.std.fs.rename(copy_path, rename_path)
+    tc = test(tc, not ctx.std.fs.exists(copy_path), "rename should remove old path")
+    tc = test(tc, ctx.std.fs.exists(rename_path), "rename should create new path")
+    tc = test(tc, ctx.std.fs.read_to_string(rename_path) == "hello world", "rename should preserve content")
+
+    # Test hard_link
+    hard_path = test_dir + "/hard_link.txt"
+    ctx.std.fs.hard_link(file_path, hard_path)
+    tc = test(tc, ctx.std.fs.exists(hard_path), "hard_link should create the link")
+    tc = test(tc, ctx.std.fs.read_to_string(hard_path) == "hello world", "hard_link should share content")
+    # Modify original and check link
+    ctx.std.fs.write(file_path, "updated")
+    tc = test(tc, ctx.std.fs.read_to_string(hard_path) == "updated", "hard_link should reflect changes")
+
+    # Test read_dir
+    entries = ctx.std.fs.read_dir(test_dir)
+    tc = test(tc, type(entries) == "list", "read_dir should return a list")
+    tc = test(tc, len(entries) > 0, "read_dir should find entries")
+    # Check for specific entries (basenames)
+    found_file = False
+    found_deep = False
+    for entry in entries:
+        tc = test(tc, type(entry.path) == "string", "DirEntry.path should be string")
+        tc = test(tc, type(entry.is_file) == "bool", "DirEntry.is_file should be bool")
+        tc = test(tc, type(entry.is_dir) == "bool", "DirEntry.is_dir should be bool")
+        if entry.path == "test_file.txt":
+            tc = test(tc, entry.is_file == True, "file entry should be file")
+            tc = test(tc, entry.is_dir == False, "file entry should not be dir")
+            found_file = True
+        if entry.path == "deep":
+            tc = test(tc, entry.is_dir == True, "deep entry should be dir")
+            tc = test(tc, entry.is_file == False, "deep entry should not be file")
+            found_deep = True
+    tc = test(tc, found_file, "read_dir should find test_file.txt")
+    tc = test(tc, found_deep, "read_dir should find deep")
+
+    # Test remove_file
+    ctx.std.fs.remove_file(rename_path)
+    tc = test(tc, not ctx.std.fs.exists(rename_path), "remove_file should delete the file")
+
+    # Test remove_dir_all
+    ctx.std.fs.remove_dir_all(test_dir)
+    tc = test(tc, not ctx.std.fs.exists(test_dir), "remove_dir_all should delete recursively")
+
+    # Test remove_dir on empty directory
+    empty_dir = temp_dir + "/axl_empty_test"
+    ctx.std.fs.create_dir(empty_dir)
+    tc = test(tc, ctx.std.fs.exists(empty_dir), "create_dir should work for empty test")
+    ctx.std.fs.remove_dir(empty_dir)
+    tc = test(tc, not ctx.std.fs.exists(empty_dir), "remove_dir should delete empty directory")
+
+    # Note: Skipping remove_dir on non-empty as we can't test the fail case in this context
+    # Note: Skipping read_link as there is no symlink creation API to test with
+    return tc
+
+def impl(ctx: TaskContext) -> int:
+    tc = 0
+
+    print("Aspect CLI", ctx.std.env.aspect_cli_version())
+    if ctx.std.env.var("ASPECT_LAUNCHER"):
+        print("aspect-launcher detected")
+    else:
+        print("aspect-launcher not detected")
+
+    # Test aspect_cli_version (on CI only)
+    if ctx.std.env.var("CI"):
+        print("CI enviroment detected")
+        tc = test(tc, ctx.std.env.aspect_cli_version() == "0.0.0-dev", "aspect-cli version should be 0.0.0-dev")
+        tc = test(tc, ctx.std.env.var("ASPECT_LAUNCHER") == "true", "ASPECT_LAUNCHER should be true")
+        tc = test(tc, ctx.std.env.var("ASPECT_LAUNCHER_VERSION") == "0.0.0-dev", "ASPECT_LAUNCHER_VERSION should be 0.0.0-dev")
+        tc = test(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_METHOD") == "local", "ASPECT_LAUNCHER_ASPECT_CLI_METHOD should be local")
+        tc = test(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_PATH") == "bazel-bin/crates/aspect-cli/aspect-cli", "ASPECT_LAUNCHER_ASPECT_CLI_PATH should be bazel-bin/crates/aspect-cli/aspect-cli")
+        tc = test(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_URL") == None, "ASPECT_LAUNCHER_ASPECT_CLI_URL should be None")
+        tc = test(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_ORG") == None, "ASPECT_LAUNCHER_ASPECT_CLI_ORG should be None")
+        tc = test(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_REPO") == None, "ASPECT_LAUNCHER_ASPECT_CLI_REPO should be None")
+        tc = test(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_RELEASE") == None, "ASPECT_LAUNCHER_ASPECT_CLI_RELEASE should be None")
+        tc = test(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT") == None, "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT should be None")
+    else:
+        print("local enviroment detected")
+        print("ASPECT_LAUNCHER_VERSION", ctx.std.env.var("ASPECT_LAUNCHER_VERSION"))
+        print("ASPECT_LAUNCHER_ASPECT_CLI_METHOD", ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_METHOD"))
+        print("ASPECT_LAUNCHER_ASPECT_CLI_PATH", ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_PATH"))
+        print("ASPECT_LAUNCHER_ASPECT_CLI_URL", ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_URL"))
+        print("ASPECT_LAUNCHER_ASPECT_CLI_ORG", ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_ORG"))
+        print("ASPECT_LAUNCHER_ASPECT_CLI_REPO", ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_REPO"))
+        print("ASPECT_LAUNCHER_ASPECT_CLI_RELEASE", ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_RELEASE"))
+        print("ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT", ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT"))
+
+    # Test temp_dir
+    temp_dir = ctx.std.env.temp_dir()
+    tc = test(tc, type(temp_dir) == "string", "temp_dir should be a string")
+    tc = test(tc, ctx.std.fs.is_dir(temp_dir), "temp_dir should be a directory")
+
+    tc = test_env(ctx, tc, temp_dir)
+    tc = test_fs(ctx, tc, temp_dir)
+
+    print(tc, "tests passed")
+    return 0
+
+axl = task(
+    group = ["tests"],
+    implementation = impl,
+    args = {}
+)
