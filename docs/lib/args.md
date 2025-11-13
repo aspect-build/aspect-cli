@@ -10,7 +10,7 @@
 
 Defines a boolean flag that can be specified as `--flag_name=true|false` or simply `--flag_name`, which is equivalent to `--flag_name=true`.
 
-# Examples
+**Examples**
 
 ```python
 task(
@@ -32,7 +32,7 @@ task(
 
 Defines a boolean list flag that can be specified multiple times as `--flag_name=true|false`.
 
-# Examples
+**Examples**
 
 ```python
 task(
@@ -54,7 +54,7 @@ task(
 
 Creates an integer flag that can be set as `--flag_name=flag_value` or `--flag_name=flag_value`.
 
-# Examples
+**Examples**
 
 ```python
 task(
@@ -76,7 +76,7 @@ task(
 
 Defines an integer list flag that can be specified multiple times as `--flag_name=flag_value`.
 
-# Examples
+**Examples**
 
 ```python
 task(
@@ -99,17 +99,17 @@ task(
 
 Defines a positional argument that accepts a range of values, with a required minimum number of values and an optional maximum number of values.
 
-# Examples
+**Examples**
 
 ```python
-# Take one positional argument with no dashes.
+**Take** one positional argument with no dashes.
 task(
  args = { "named": args.positional() }
 )
 ```
 
 ```python
-# Take two positional argument with no dashes.
+**Take** two positional argument with no dashes.
 task(
  args = { "named": args.positional(minimum = 2, maximum = 2) }
 )
@@ -127,7 +127,7 @@ task(
 
 Defines a string flag that can be specified as `--flag_name=flag_value`.
 
-# Examples
+**Examples**
 
 ```python
 task(
@@ -149,7 +149,7 @@ task(
 
 Defines a string list flag that can be specified multiple times as `--flag_name=flag_value`.
 
-# Examples
+**Examples**
 
 ```python
 task(
@@ -167,7 +167,7 @@ task(
 
 Defines a trailing variable argument that captures the remaining arguments without further parsing. Only one such argument is permitted, and it must be the last in the sequence.
 
-# Examples
+**Examples**
 
 ```python
 task(
@@ -192,7 +192,7 @@ task(
 
 Defines an unsigned integer flag that can be specified using the format `--flag_name=flag_value`.
 
-# Examples
+**Examples**
 
 ```python
 task(
@@ -214,7 +214,7 @@ task(
 
 Defines an unsigned integer list flag that can be specified multiple times as `--flag_name=flag_value`.
 
-# Examples
+**Examples**
 
 ```python
 task(

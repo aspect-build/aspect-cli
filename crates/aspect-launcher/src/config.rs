@@ -121,13 +121,13 @@ pub fn default_config() -> AspectLauncherConfig {
 /// It then constructs the path to `.aspect/config.toml` within the project root directory and loads the
 /// configuration using `load_config`.
 ///
-/// # Returns
+/// **Returns**
 ///
 /// A `Result` containing a tuple `(PathBuf, AspectLauncherConfig)` where:
 /// - The first element is the determined root directory.
 /// - The second element is the loaded `AspectLauncherConfig`.
 ///
-/// # Errors
+/// **Errors**
 ///
 /// Returns an error if the current working directory cannot be obtained or if loading the config fails.
 pub fn autoconf() -> Result<(PathBuf, AspectLauncherConfig)> {

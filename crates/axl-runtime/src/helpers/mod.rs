@@ -8,10 +8,10 @@ use anyhow::anyhow;
 /// - Must end with a lowercase letter (a-z) or digit (0-9).
 /// - Can only contain lowercase letters (a-z), digits (0-9), dots (.), hyphens (-), and underscores (_).
 ///
-/// # Arguments
+/// **Arguments**
 /// * `module_name` - The module name string to validate.
 ///
-/// # Returns
+/// **Returns**
 /// * `Ok(())` if the module name is valid.
 /// * `Err(starlark::Error)` with a descriptive error if invalid.
 pub fn validate_module_name(module_name: &str) -> starlark::Result<()> {
@@ -74,10 +74,10 @@ pub enum LoadPath {
 /// - Validates each path segment in the subpath as a valid filename.
 /// - Allows starting with a single './' and zero or more '../' in the initial relative prefix, but no multiple '.' segments and no '.' or '..' after normal segments.
 ///
-/// # Arguments
+/// **Arguments**
 /// * `load_path` - The load path string to validate.
 ///
-/// # Returns
+/// **Returns**
 /// * `Ok(LoadPath)` containing the parsed and normalized load path.
 /// * `Err(starlark::Error)` with a descriptive error if any validation fails.
 pub fn sanitize_load_path_lexically(load_path: &str) -> starlark::Result<LoadPath> {
@@ -198,10 +198,10 @@ pub fn sanitize_load_path_lexically(load_path: &str) -> starlark::Result<LoadPat
 /// This normalization is purely syntactic and does not interact with the filesystem.
 /// TODO: switch to Path.normalize_lexically in the future once it is in a stable Rust release: https://github.com/rust-lang/rust/issues/134694.
 ///
-/// # Arguments
+/// **Arguments**
 /// * `path` - The absolute path to normalize.
 ///
-/// # Returns
+/// **Returns**
 /// * `Ok(PathBuf)` containing the normalized path if valid.
 /// * `Err(starlark::Error)` if the path is not absolute or starts with an invalid segment after the root.
 pub fn normalize_abs_path_lexically(path: &Path) -> starlark::Result<PathBuf> {
@@ -303,10 +303,10 @@ fn normalize_rel_path_lexically(path: &Path) -> PathBuf {
 /// - No control characters or invalid characters: \, /, :, *, ?, ", <, >, |.
 /// - No leading or trailing whitespace for cross-platform safety.
 ///
-/// # Arguments
+/// **Arguments**
 /// * `segment` - The path segment string to validate.
 ///
-/// # Returns
+/// **Returns**
 /// * `Ok(())` if the segment is valid.
 /// * `Err(starlark::Error)` with a descriptive error if invalid.
 fn validate_path_segment(segment: &str) -> starlark::Result<()> {

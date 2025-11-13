@@ -93,14 +93,14 @@ impl<'v> StarlarkValue<'v> for Template {
 pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
     /// Renders a Handlebars template with the provided data.
     ///
-    /// # Parameters
+    /// **Parameters**
     /// - `template`: The Handlebars template string.
     /// - `data`: A dictionary of data to render the template with.
     ///
-    /// # Returns
+    /// **Returns**
     /// The rendered template as a string.
     ///
-    /// # Example
+    /// **Example**
     /// ```starlark
     /// result = ctx.template.handlebars("Hello, {{name}}!", {"name": "World"})
     /// ```
@@ -120,14 +120,14 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
 
     /// Renders a Jinja2 template with the provided data.
     ///
-    /// # Parameters
+    /// **Parameters**
     /// - `template`: The Jinja2 template string.
     /// - `data`: A dictionary of data to render the template with.
     ///
-    /// # Returns
+    /// **Returns**
     /// The rendered template as a string.
     ///
-    /// # Example
+    /// **Example**
     /// ```starlark
     /// result = ctx.template.jinja2("Hello, {{ name }}!", {"name": "World"})
     /// ```
@@ -147,14 +147,14 @@ pub(crate) fn template_methods(registry: &mut MethodsBuilder) {
 
     /// Renders a Liquid template with the provided data.
     ///
-    /// # Parameters
+    /// **Parameters**
     /// - `template`: The Liquid template string.
     /// - `data`: A dictionary of data to render the template with.
     ///
-    /// # Returns
+    /// **Returns**
     /// The rendered template as a string.
     ///
-    /// # Example
+    /// **Example**
     /// ```starlark
     /// result = ctx.template.liquid("Hello, {{ name }}!", {"name": "World"})
     /// ```

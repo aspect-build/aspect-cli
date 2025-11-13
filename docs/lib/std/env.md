@@ -14,12 +14,12 @@ Returns the version of the Aspect CLI.
 
 Returns the current working directory as a path.
 
-# Platform-specific behavior
+**Platform**-specific behavior
 
 This function currently corresponds to the `getcwd` function on Unix
 and the `GetCurrentDirectoryW` function on Windows.
 
-# Errors
+**Errors**
 
 Fails if the current working directory value is invalid.
 Possible cases:
@@ -48,7 +48,7 @@ For example, [XDG Base Directories] on Unix or the `LOCALAPPDATA` and `APPDATA` 
 
 [XDG Base Directories]: https://specifications.freedesktop.org/basedir-spec/latest/
 
-# Unix
+**Unix**
 
 * Returns the value of the 'HOME' environment variable if it is set
   (including to an empty string).
@@ -57,7 +57,7 @@ For example, [XDG Base Directories] on Unix or the `LOCALAPPDATA` and `APPDATA` 
   `getpwuid_r` function is considered to be a valid value.
 * Returns `None` if the current user has no entry in the /etc/passwd file.
 
-# Windows
+**Windows**
 
 * Returns the value of the 'USERPROFILE' environment variable if it is set, and is not an empty string.
 * Otherwise, [`GetUserProfileDirectory`][msdn] is used to return the path. This may change in the future.
@@ -97,7 +97,7 @@ using a crate that securely creates temporary files or directories.
 
 Note that the returned value may be a symbolic link, not a directory.
 
-# Platform-specific behavior
+**Platform**-specific behavior
 
 On Unix, returns the value of the `TMPDIR` environment variable if it is
 set, otherwise the value is OS-specific:

@@ -20,7 +20,7 @@ call `.wait()` on the `Build` object to wait until the invocation finishes.
 
 You can pass in a single target or target pattern to build.
 
-# Examples
+**Examples**
 
 ```python
 def _fancy_build_impl(ctx):
@@ -47,14 +47,14 @@ The entry point is `ctx.bazel.query()`, which returns a `query` for creating ini
 query expressions. Most operations operate on `query` objects, which represent
 sets of targets that can be filtered, transformed, and combined.
 
-# Example
+**Example**
 
 ```starlark
-# Query dependencies of a target
+**Query** dependencies of a target
 deps = ctx.bazel.query().targets("//myapp:main").deps()
 all_deps = deps.eval()
 
-# Chain multiple operations
+**Chain** multiple operations
 sources = ctx.bazel.query().targets("//myapp:main")
     .deps()
     .kind("source file")
@@ -83,7 +83,7 @@ call `.wait()` on the `Build` object to wait until the invocation finishes.
 
 You can pass in a single target or target pattern to test.
 
-# Examples
+**Examples**
 
 ```python
 def _fancy_test_impl(ctx):

@@ -14,10 +14,10 @@ Access to Bazel functionality.
 
 The `http` attribute provides a programmatic interface for making HTTP requests. It is used to fetch data from remote servers and can be used in conjunction with other aspects to perform complex data processing tasks.
 
-# Example
+**Example**
 
 ```starlark
-# Fetch data from a remote server
+**Fetch** data from a remote server
 data = ctx.http().get("https://example.com/data.json").block()
 ```
 

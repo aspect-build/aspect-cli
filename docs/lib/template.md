@@ -11,18 +11,15 @@
 
 Renders a Handlebars template with the provided data.
 
-#### Returns
-
-The rendered template as a string.
-
-#### Details
-
-# Parameters
+**Parameters**
 
 * `template`: The Handlebars template string.
 * `data`: A dictionary of data to render the template with.
 
-# Example
+**Returns**
+The rendered template as a string.
+
+**Example**
 
 ```starlark
 result = ctx.template.handlebars("Hello, {{name}}!", {"name": "World"})
@@ -41,18 +38,15 @@ result = ctx.template.handlebars("Hello, {{name}}!", {"name": "World"})
 
 Renders a Jinja2 template with the provided data.
 
-#### Returns
-
-The rendered template as a string.
-
-#### Details
-
-# Parameters
+**Parameters**
 
 * `template`: The Jinja2 template string.
 * `data`: A dictionary of data to render the template with.
 
-# Example
+**Returns**
+The rendered template as a string.
+
+**Example**
 
 ```starlark
 result = ctx.template.jinja2("Hello, {{ name }}!", {"name": "World"})
@@ -71,18 +65,15 @@ result = ctx.template.jinja2("Hello, {{ name }}!", {"name": "World"})
 
 Renders a Liquid template with the provided data.
 
-#### Returns
-
-The rendered template as a string.
-
-#### Details
-
-# Parameters
+**Parameters**
 
 * `template`: The Liquid template string.
 * `data`: A dictionary of data to render the template with.
 
-# Example
+**Returns**
+The rendered template as a string.
+
+**Example**
 
 ```starlark
 result = ctx.template.liquid("Hello, {{ name }}!", {"name": "World"})
