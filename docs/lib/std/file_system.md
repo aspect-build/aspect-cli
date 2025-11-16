@@ -134,6 +134,9 @@ This function will return an error in the following situations, but is not limit
 * The user lacks permissions to perform metadata call on path.
 * path does not exist.
 
+The modified, accessed, created fields of the Metadata result might not be available on all platforms, and will
+be set to None on platforms where they is not available.
+
 ***
 
 ## FileSystem.read\_dir
@@ -266,6 +269,9 @@ This function will return an error in the following situations, but is not limit
 
 * The user lacks permissions to perform metadata call on path.
 * path does not exist.
+
+The modified, accessed, created fields of the Metadata result might not be available on all platforms, and will
+be set to None on platforms where they is not available.
 
 ***
 

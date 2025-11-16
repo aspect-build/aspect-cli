@@ -293,6 +293,9 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     /// This function will return an error in the following situations, but is not limited to just these cases:
     /// - The user lacks permissions to perform metadata call on path.
     /// - path does not exist.
+    /// 
+    /// The modified, accessed, created fields of the Metadata result might not be available on all platforms, and will
+    /// be set to None on platforms where they is not available.
     fn metadata<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
@@ -435,6 +438,9 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     /// This function will return an error in the following situations, but is not limited to just these cases:
     /// - The user lacks permissions to perform metadata call on path.
     /// - path does not exist.
+    /// 
+    /// The modified, accessed, created fields of the Metadata result might not be available on all platforms, and will
+    /// be set to None on platforms where they is not available.
     fn symlink_metadata<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
