@@ -1,5 +1,5 @@
 [aspect-cli]
-version = "2025.46.6"
+version = "2025.46.20"
 sources = [
    # Try to use cargo build for dogfooding
    { path = "target/debug/aspect-cli" },
