@@ -88,7 +88,7 @@ def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
     tc = test_case(tc, meta.size == 11, "metadata.size should match content length")
     tc = test_case(tc, type(meta.modified) == "int" and meta.modified > at_least_epoch, "metadata.modified should be int and greater than at_least_epoch")
     tc = test_case(tc, type(meta.accessed) == "int" and meta.accessed > at_least_epoch, "metadata.accessed should be int and greater than at_least_epoch")
-    tc = test_case(tc, type(meta.created) == "int" and meta.created > at_least_epoch, "metadata.created should be int and greater than at_least_epoch")
+    tc = test_case(tc, (type(meta.created) == "NoneType" and meta.created == None) or (type(meta.created) == "int" and meta.created > at_least_epoch), "meta.created should be either None when creation time is not available on this platform currently or int and greater than at_least_epoch")
     tc = test_case(tc, type(meta.readonly) == "bool" and meta.readonly == False, "metadata.readonly should be bool and False")
 
     sym_meta = ctx.std.fs.symlink_metadata(file_path)
@@ -98,7 +98,7 @@ def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
     tc = test_case(tc, sym_meta.size == 11, "metadata.size should match content length")
     tc = test_case(tc, type(sym_meta.modified) == "int" and sym_meta.modified > at_least_epoch, "symlink_metadata.modified should be int and greater than at_least_epoch")
     tc = test_case(tc, type(sym_meta.accessed) == "int" and sym_meta.accessed > at_least_epoch, "symlink_metadata.accessed should be int and greater than at_least_epoch")
-    tc = test_case(tc, type(sym_meta.created) == None or (type(sym_meta.created) == "int" and sym_meta.created > at_least_epoch), "symlink_metadata.created should be either None when creation time is not available on this platform currently or int and greater than at_least_epoch")
+    tc = test_case(tc, (type(sym_meta.created) == "NoneType" and sym_meta.created == None) or (type(sym_meta.created) == "int" and sym_meta.created > at_least_epoch), "symlink_metadata.created should be either None when creation time is not available on this platform currently or int and greater than at_least_epoch")
     tc = test_case(tc, type(sym_meta.readonly) == "bool" and sym_meta.readonly == False, "symlink_metadata.readonly should be bool and False")
 
     # Test copy
