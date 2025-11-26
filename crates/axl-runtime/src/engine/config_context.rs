@@ -1,52 +1,98 @@
+use std::cell::Cell;
 use std::cell::RefCell;
 
 use allocative::Allocative;
 use anyhow::anyhow;
 use derive_more::Display;
 
-use starlark::ErrorKind;
-use starlark::collections::SmallSet;
+use dupe::Dupe;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 
+use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::values;
+use starlark::values::list::AllocList;
+use starlark::values::list::ListRef;
+use starlark::values::list::UnpackList;
+use starlark::values::none::NoneType;
+use starlark::values::starlark_value;
+use starlark::values::AllocValue;
+use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
+use starlark::values::UnpackValue;
 use starlark::values::ValueError;
 use starlark::values::ValueLike;
-use starlark::values::list::AllocList;
-use starlark::values::starlark_value;
+
+use crate::engine::task::Task;
 
 use super::http::Http;
 use super::std::Std;
-use super::task::{FrozenTask, Task};
 use super::template;
 use super::wasm::Wasm;
 
+#[derive(Debug, Clone, ProvidesStaticType, Trace, Display, NoSerialize, Allocative, Dupe)]
+#[display("<TaskList>")]
+pub struct TaskList<'v> {
+    #[allocative(skip)]
+    inner: Cell<values::ValueOfUnchecked<'v, &'v ListRef<'v>>>,
+}
+
+impl<'v> TaskList<'v> {}
+
+#[starlark_value(type = "TaskList")]
+impl<'v> values::StarlarkValue<'v> for TaskList<'v> {
+    fn iterate_collect(&self, _heap: &'v Heap) -> starlark::Result<Vec<values::Value<'v>>> {
+        let value = self.inner.get().get();
+        let list = UnpackList::<values::Value<'v>>::unpack_value(value)?;
+        Ok(list.unwrap().items)
+    }
+
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(task_list_methods)
+    }
+}
+
+#[starlark_module]
+pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
+    fn add<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark[require = pos]] task: values::Value<'v>,
+        #[starlark[require = named]] name: String,
+
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<NoneType> {
+        let mut this = this.downcast_ref_err::<TaskList>()?;
+        let this = this.inner.get_mut();
+        Ok(NoneType)
+    }
+}
+
+impl<'v> values::AllocValue<'v> for TaskList<'v> {
+    fn alloc_value(self, heap: &'v values::Heap) -> values::Value<'v> {
+        heap.alloc_complex_no_freeze(self)
+    }
+}
+
 #[derive(Debug, Clone, ProvidesStaticType, Trace, Display, NoSerialize, Allocative)]
-#[display("<TaskReg>")]
+#[display("<TaskMut>")]
 pub struct TaskMut<'v> {
-    name: String,
-    group: Vec<String>,
-    
-    Unfrozen(RefCell<Task<'v>>),
-    Frozen(RefCell<FrozenTask>),
+    name: RefCell<String>,
+    group: RefCell<Vec<String>>,
+    // config:
+    original: values::Value<'v>,
 }
 
 impl<'v> TaskMut<'v> {
-    fn set_name(&self, name: String) {
-        match self {
-            TaskMut::Unfrozen(task) => task.borrow_mut().name = name,
-            TaskMut::Frozen(task) => task.borrow_mut().name = name,
-        }
-    }
-    fn set_group(&self, group: Vec<String>) {
-        match self {
-            TaskMut::Unfrozen(task) => task.borrow_mut().group = group,
-            TaskMut::Frozen(task) => task.borrow_mut().implementation().to_value(),
+    pub fn new(name: String, group: Vec<String>, original: values::Value<'v>) -> Self {
+        TaskMut {
+            name: RefCell::new(name),
+            group: RefCell::new(group),
+            original,
         }
     }
 }
@@ -55,18 +101,33 @@ impl<'v> TaskMut<'v> {
 impl<'v> values::StarlarkValue<'v> for TaskMut<'v> {
     fn set_attr(&self, attribute: &str, value: values::Value<'v>) -> starlark::Result<()> {
         match attribute {
-            "name" => self.set_name(value.to_str()),
+            "name" => {
+                self.name.replace(value.to_str());
+            }
+            "group" => {
+                let unpack: UnpackList<String> = UnpackList::unpack_value(value)?
+                    .ok_or(anyhow!("groups must be a list of strings"))?;
+                self.group.replace(unpack.items);
+            }
             _ => return ValueError::unsupported(self, &format!(".{}=", attribute)),
         };
         Ok(())
+    }
+
+    fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<values::Value<'v>> {
+        match attribute {
+            "name" => Some(heap.alloc_str(self.name.borrow().as_str()).to_value()),
+            "group" => Some(heap.alloc(AllocList(self.group.borrow().iter()))),
+            _ => None,
+        }
     }
 
     fn dir_attr(&self) -> Vec<String> {
         vec![
             "group".into(),
             "name".into(),
-            "description".into(),
             "args".into(),
+            "config".into(),
         ]
     }
 }
@@ -81,13 +142,18 @@ impl<'v> values::AllocValue<'v> for TaskMut<'v> {
 #[display("<ConfigContext>")]
 pub struct ConfigContext<'v> {
     #[allocative(skip)]
-    tasks: SmallSet<TaskMut<'v>>,
+    tasks: TaskList<'v>,
 }
 
 impl<'v> ConfigContext<'v> {
-    pub fn new() -> Self {
+    pub fn new(tasks: Vec<TaskMut<'v>>, heap: &'v Heap) -> Self {
+        let tasks = heap.alloc_typed_unchecked(AllocList(
+            tasks.into_iter().map(|task| task.alloc_value(heap)),
+        ));
         Self {
-            tasks: SmallSet::new(),
+            tasks: TaskList {
+                inner: Cell::new(tasks.cast()),
+            },
         }
     }
 }
@@ -150,10 +216,8 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     }
 
     #[starlark(attribute)]
-    fn tasks<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-    ) -> starlark::Result<AllocList<SmallSet<TaskMut<'v>>>> {
+    fn tasks<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<TaskList<'v>> {
         let this = this.downcast_ref_err::<ConfigContext>()?;
-        Ok(AllocList(this.tasks.clone()))
+        Ok(this.tasks.dupe())
     }
 }

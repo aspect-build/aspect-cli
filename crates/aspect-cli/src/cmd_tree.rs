@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use axl_runtime::engine::task::{TaskLike, MAX_TASK_GROUPS};
 use clap::{Arg, ArgMatches, Command};
@@ -27,7 +27,9 @@ pub enum TreeError {
     )]
     TaskGroupConflict(String, Vec<String>, String),
 
-    #[error("group {0:?} from task {1:?} in group {2:?} (defined in {3:?}) conflicts with a previously defined task")]
+    #[error(
+        "group {0:?} from task {1:?} in group {2:?} (defined in {3:?}) conflicts with a previously defined task"
+    )]
     GroupConflictTask(String, String, Vec<String>, String),
 
     #[error(
@@ -151,7 +153,7 @@ impl CommandTree {
 pub fn make_command_from_task(
     name: &String,
     defined_in: &str,
-    path: &String,
+    path: &PathBuf,
     symbol: &String,
     task: &dyn TaskLike<'_>,
 ) -> Command {
@@ -176,7 +178,7 @@ pub fn make_command_from_task(
                 .hide_short_help(true)
                 .hide_possible_values(true)
                 .hide_long_help(true)
-                .default_value(path),
+                .default_value(path.to_string_lossy().to_string()),
         )
         .arg(
             Arg::new(TASK_COMMAND_SYMBOL_ID)

@@ -91,8 +91,7 @@ pub async fn find_axl_scripts(search_paths: &Vec<PathBuf>) -> Result<Vec<PathBuf
                 if path.is_file()
                     && path
                         .extension()
-                        .map(|e| e == AXL_SCRIPT_EXTENSION)
-                        .unwrap_or(false)
+                        .map_or(false, |e| e == AXL_SCRIPT_EXTENSION)
                 {
                     found.push(path);
                 }

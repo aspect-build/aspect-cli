@@ -19,8 +19,8 @@ use starlark::values::list_or_tuple::UnpackListOrTuple;
 use crate::module::AxlLocalDep;
 use crate::module::Dep;
 
-use super::super::eval::EvalError;
-use super::super::helpers::validate_module_name;
+use super::super::eval::{validate_module_name, EvalError};
+
 use super::store::{AxlArchiveDep, ModuleStore};
 
 #[starlark_module]
@@ -75,7 +75,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 AXL_ROOT_MODULE_NAME
             );
         }
-        validate_module_name(&name).map_err(|e| e.into_anyhow())?;
+        validate_module_name(&name)?;
 
         if !dev {
             anyhow::bail!("axl_archive_dep does not support transitive dependencies yet.");
@@ -123,7 +123,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         if name == AXL_ROOT_MODULE_NAME {
             anyhow::bail!("axl_local_dep name {:?} not allowed.", AXL_ROOT_MODULE_NAME);
         }
-        validate_module_name(&name).map_err(|e| e.into_anyhow())?;
+        validate_module_name(&name)?;
 
         let store = ModuleStore::from_eval(eval)?;
 
@@ -165,7 +165,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         let mut task = store.tasks.borrow_mut();
 
         for symbol in symbols {
-            task.push((label.clone(), symbol));
+            // TODO: validate that label does not escape.
+            task.push((store.module_root.join(&label), label.clone(), symbol));
         }
 
         Ok(values::none::NoneType)

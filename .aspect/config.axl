@@ -1,3 +1,20 @@
+def _task2(ctx):
+    print(ctx)
+
+task2 = task(
+    name = "task2",
+    implementation = _task2,
+    args = {}
+)
+
 def config(ctx: ConfigContext):
+    print("TASKS")
     print(ctx.tasks)
+    ctx.tasks.add(task2, name = "task")
+
+    # ctx.tasks.append(task2)
+
+    for task in ctx.tasks:
+        print(task.name, task.group)
+
     pass

@@ -7,3 +7,17 @@ user_task = task(
     implementation = _impl,
     args = {},
 )
+
+
+def _impl2(ctx):
+    print("I am an auto-discovered task in .aspect/user-task.axl")
+    return 0
+
+user_task3 = task(
+    group = ["user"],
+    implementation = _impl,
+    args = {},
+    # config = config.type(
+    #     callback = typing.Callable[[]],
+    # )
+)
