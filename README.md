@@ -1,6 +1,3 @@
-> [!TIP]
-> Meet the Aspect team at [BazelCon 2025, November 9-11](https://events.linuxfoundation.org/bazelcon/)-—we'll demo the CLI! Training & Community Day is November 9.
-
 > [!WARNING]
 > **Early Preview**<br>
 > This is an early preview of Aspect CLI. It is under active development, and API changes are expected. We plan to stabilize the API and release a stable version by the end of 2025.
