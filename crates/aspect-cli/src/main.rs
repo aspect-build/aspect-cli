@@ -62,19 +62,19 @@ async fn main() -> miette::Result<ExitCode> {
 
     let current_work_dir = std::env::current_dir().into_diagnostic()?;
 
-    let root_dir = find_root_dir(&current_work_dir)
+    let repo_root = find_repo_root(&current_work_dir)
         .await
         .map_err(|err| miette!("could not find root directory: {:?}", err))?;
 
-    let disk_store = DiskStore::new(root_dir.clone());
+    let disk_store = DiskStore::new(repo_root.clone());
 
-    let module_eval = AxlModuleEvaluator::new(root_dir.clone());
+    let module_eval = AxlModuleEvaluator::new(repo_root.clone());
 
     let _ = info_span!("expand_module_store").enter();
 
     // Creates the module store and evaluates the root MODULE.aspect (if it exists) for axl_*_deps, use_task, etc...
     let module_store = module_eval
-        .evaluate(AXL_ROOT_MODULE_NAME.to_string(), root_dir.clone())
+        .evaluate(AXL_ROOT_MODULE_NAME.to_string(), repo_root.clone())
         .into_diagnostic()?;
 
     // Expand all module deps (including the builtin @aspect module) to the disk store and return the module roots on disk.
@@ -114,7 +114,7 @@ async fn main() -> miette::Result<ExitCode> {
     let axl_deps_root = disk_store.deps_path();
 
     // Get the default search paths given the current working directory and the repository root
-    let search_paths = get_default_axl_search_paths(&current_work_dir, &root_dir);
+    let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_root);
     // TODO: allow user to configure additonal search paths in the future?
 
     // Scan for .axl files in the search paths
@@ -133,7 +133,8 @@ async fn main() -> miette::Result<ExitCode> {
         // 2. use_task in the root module
         // 3. auto_use_tasks from the @aspect built-in module (if not overloaded by an dep in the root MODULE.aspect)
         // 4. auto_use_tasks from axl module deps in the root MODULE.aspect
-        let loader = eval::Loader::new(&axl_deps_root);
+        let loader =
+            eval::Loader::new(cargo_pkg_short_version(), repo_root.clone(), &axl_deps_root);
         let eval = eval::task::TaskEvaluator::new(&loader);
         let ceval = eval::config::ConfigEvaluator::new(&loader);
 

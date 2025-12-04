@@ -40,12 +40,12 @@ pub struct AxlLoader<'p> {
 }
 
 impl<'p> AxlLoader<'p> {
-    pub fn new(deps_root: &'p PathBuf) -> Self {
+    pub fn new(cli_version: String, repo_root: PathBuf, deps_root: &'p PathBuf) -> Self {
         Self {
             deps_root,
             dialect: api::dialect(),
             globals: api::get_globals().build(),
-            store: AxlStore::new(),
+            store: AxlStore::new(cli_version, repo_root),
             load_stack: RefCell::new(vec![]),
             module_stack: RefCell::new(vec![]),
             loaded_modules: RefCell::new(HashMap::new()),

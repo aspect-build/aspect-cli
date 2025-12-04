@@ -8,16 +8,16 @@ use super::r#async::rt::AsyncRuntime;
 /// to store shared data (runtime, tools, cache, ...) around the Starlark evaluation.
 #[derive(Debug, ProvidesStaticType, Clone)]
 pub struct AxlStore {
-    pub aspect_cli_version: String,
-    pub root_dir: PathBuf,
-    pub rt: AsyncRuntime,
+    pub(crate) cli_version: String,
+    pub(crate) root_dir: PathBuf,
+    pub(crate) rt: AsyncRuntime,
 }
 
 impl AxlStore {
-    pub fn new(aspect_cli_version: &str, root_dir: &PathBuf) -> Self {
+    pub fn new(cli_version: String, root_dir: PathBuf) -> Self {
         Self {
-            aspect_cli_version: aspect_cli_version.to_string(),
-            root_dir: root_dir.clone(),
+            cli_version,
+            root_dir: root_dir,
             rt: AsyncRuntime::new(),
         }
     }
@@ -29,7 +29,7 @@ impl AxlStore {
             .downcast_ref::<AxlStore>()
             .ok_or(anyhow::anyhow!("failed to cast axl store"))?;
         Ok(AxlStore {
-            aspect_cli_version: value.aspect_cli_version.clone(),
+            cli_version: value.cli_version.clone(),
             root_dir: value.root_dir.clone(),
             rt: value.rt.clone(),
         })

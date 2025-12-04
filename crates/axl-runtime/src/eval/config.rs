@@ -6,7 +6,6 @@ use std::fs;
 use std::path::Path;
 
 use crate::engine::config::{ConfigContext, TaskMut};
-use crate::engine::store::AxlStore;
 use crate::eval::load::{AxlLoader, ModuleScope};
 
 use super::error::EvalError;
@@ -15,7 +14,6 @@ use super::error::EvalError;
 #[derive(Debug)]
 pub struct ConfigEvaluator<'l, 'p> {
     loader: &'l AxlLoader<'p>,
-    store: AxlStore,
     module: Module,
 }
 
@@ -24,7 +22,6 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
     pub fn new(loader: &'l AxlLoader<'p>) -> Self {
         Self {
             loader,
-            store: AxlStore::new(),
             module: Module::new(),
         }
     }
@@ -42,7 +39,7 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
         let mut eval = Evaluator::new(&self.module);
         eval.set_loader(self.loader);
-        eval.extra = Some(&self.store);
+        eval.extra = Some(self.loader.store());
 
         let heap = self.module.heap();
         let context = heap.alloc(ConfigContext::new(tasks, heap));

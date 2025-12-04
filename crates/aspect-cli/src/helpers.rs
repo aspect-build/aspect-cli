@@ -16,7 +16,7 @@ pub const DOT_ASPECT_FOLDER: &str = ".aspect";
 /// If such a directory is found, it returns Ok with the PathBuf of that directory.
 /// If no such directory is found, returns the `current_work_dir`
 #[instrument]
-pub async fn find_root_dir(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
+pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
     async fn err_if_exists(path: PathBuf) -> Result<(), ()> {
         match fs::try_exists(path).await {
             Ok(true) => Err(()),

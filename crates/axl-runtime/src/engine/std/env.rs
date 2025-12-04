@@ -40,7 +40,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::StringValue<'v>> {
         let store = AxlStore::from_eval(eval)?;
-        Ok(eval.heap().alloc_str(&store.aspect_cli_version))
+        Ok(eval.heap().alloc_str(&store.cli_version))
     }
 
     /// Fetches the environment variable key from the current process.
