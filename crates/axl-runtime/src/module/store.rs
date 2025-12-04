@@ -16,7 +16,7 @@ use starlark::values::StarlarkValue;
 
 #[derive(Debug, ProvidesStaticType, Default)]
 pub struct ModuleStore {
-    pub repo_root: PathBuf,
+    pub root_dir: PathBuf,
     pub module_name: String,
     pub module_root: PathBuf,
     pub deps: Rc<RefCell<HashMap<String, Dep>>>,
@@ -24,9 +24,9 @@ pub struct ModuleStore {
 }
 
 impl ModuleStore {
-    pub fn new(repo_root: PathBuf, module_name: String, module_root: PathBuf) -> Self {
+    pub fn new(root_dir: PathBuf, module_name: String, module_root: PathBuf) -> Self {
         Self {
-            repo_root,
+            root_dir,
             module_name,
             module_root,
             deps: Rc::new(RefCell::new(HashMap::new())),
@@ -41,7 +41,7 @@ impl ModuleStore {
             .downcast_ref::<ModuleStore>()
             .ok_or(anyhow::anyhow!("failed to cast module store"))?;
         Ok(ModuleStore {
-            repo_root: value.repo_root.clone(),
+            root_dir: value.root_dir.clone(),
             module_name: value.module_name.clone(),
             module_root: value.module_root.clone(),
             deps: Rc::clone(&value.deps),

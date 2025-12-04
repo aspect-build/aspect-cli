@@ -109,10 +109,10 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     /// It is used to fetch data from remote servers and can be used in conjunction with
     /// other aspects to perform complex data processing tasks.
     ///
-    /// # Example
+    /// **Example**
     ///
     /// ```starlark
-    /// # Fetch data from a remote server
+    /// **Fetch** data from a remote server
     /// data = ctx.http().get("https://example.com/data.json").block()
     /// ```
     fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {

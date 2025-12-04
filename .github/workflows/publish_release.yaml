@@ -3,7 +3,7 @@ name: Publish Release
 on:
   push:
     tags:
-      - '202[0-9].[0-9]+.[0-9]+'
+      - 'v202[0-9].[0-9]+.[0-9]+'
 
 permissions:
   id-token: write

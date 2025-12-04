@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-
+use std::env::var;
 use std::io;
 use std::process::Child;
 use std::process::Command;
@@ -30,15 +30,22 @@ use starlark::values::ValueLike;
 
 use crate::engine::r#async::rt::AsyncRuntime;
 
+use super::helpers::format_bazel_command;
 use super::iter::BuildEventIterator;
 use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
-
 use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
 use super::stream::WorkspaceEventStream;
 use super::stream_sink::GrpcEventStreamSink;
 use super::stream_tracing::TracingEventStreamSink;
+
+fn debug_mode() -> bool {
+    match var("ASPECT_DEBUG") {
+        Ok(val) => !val.is_empty(),
+        _ => false,
+    }
+}
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.BuildStatus>")]
@@ -153,6 +160,8 @@ impl Build {
         workspace_events: bool,
         flags: Vec<String>,
         startup_flags: Vec<String>,
+        inherit_stdout: bool,
+        inherit_stderr: bool,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
         let pid = Self::pid()?;
@@ -165,6 +174,15 @@ impl Build {
             flags = ?flags
         )
         .entered();
+
+        let targets: Vec<String> = targets.into_iter().collect();
+
+        if debug_mode() {
+            eprintln!(
+                "running {}",
+                format_bazel_command(&startup_flags, verb, &flags, &targets)
+            );
+        }
 
         let mut cmd = Command::new("bazel");
         cmd.args(startup_flags);
@@ -210,10 +228,21 @@ impl Build {
             ))
         }
 
-        cmd.args(targets);
         cmd.args(flags);
-        cmd.stderr(Stdio::null());
-        cmd.stdout(Stdio::null());
+        cmd.arg("--"); // separate flags from target patterns (not strictly necessary for build & test verbs but good form)
+        cmd.args(targets);
+
+        // TODO: if not inheriting, we should pipe and make the streams available to AXL
+        cmd.stdout(if inherit_stdout {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        });
+        cmd.stderr(if inherit_stderr {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        });
         cmd.stdin(Stdio::null());
 
         let child = cmd.spawn()?;
@@ -264,7 +293,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let build = this.downcast_ref::<Build>().unwrap();
         let execlog_stream = build.execlog_stream.borrow();
         let execlog_stream = execlog_stream.as_ref().ok_or(anyhow::anyhow!(
-            "call `ctx.bazel.build` with `execution_logs = true` in order to receive build events."
+            "call `ctx.bazel.build` with `execution_logs = true` in order to receive execution log events."
         ))?;
 
         Ok(ExecutionLogIterator::new(execlog_stream.receiver()))

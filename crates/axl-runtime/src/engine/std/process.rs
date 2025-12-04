@@ -428,7 +428,7 @@ starlark_simple_value!(Output);
 
 #[starlark_module]
 pub(crate) fn output_methods(registry: &mut MethodsBuilder) {
-    /// Returns the OS-assigned process identifier associated with this child.
+    /// The status (exit code) of the process.
     #[starlark(attribute)]
     fn status<'v>(this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
         let out = this.downcast_ref_err::<Output>()?;

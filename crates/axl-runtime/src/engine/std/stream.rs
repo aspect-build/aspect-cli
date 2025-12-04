@@ -122,6 +122,7 @@ starlark_simple_value!(Readable);
 
 #[starlark_module]
 fn readable_methods(registry: &mut MethodsBuilder) {
+    /// Returns true if the underlying stream is connected to a terminal/tty.
     #[starlark(attribute)]
     fn is_tty<'v>(this: values::Value) -> anyhow::Result<bool> {
         let io = this.downcast_ref_err::<Readable>()?;
@@ -132,6 +133,9 @@ fn readable_methods(registry: &mut MethodsBuilder) {
         })
     }
 
+    /// Reads all bytes until EOF in this source, placing them into a list of bytes.
+    ///
+    /// If successful, this function will return the list of bytes read.
     fn read<'v>(this: values::Value) -> anyhow::Result<AllocList<Vec<u32>>> {
         let io = this.downcast_ref_err::<Readable>()?;
         let mut buf = vec![];
@@ -147,6 +151,8 @@ fn readable_methods(registry: &mut MethodsBuilder) {
     }
 
     /// Reads all bytes until EOF in this source and returns a string.
+    ///
+    /// If successful, this function will return all bytes as a string.
     fn read_to_string<'v>(this: values::Value) -> anyhow::Result<String> {
         let io = this.downcast_ref_err::<Readable>()?;
         let mut buf = String::new();
@@ -180,6 +186,7 @@ starlark_simple_value!(Writable);
 
 #[starlark_module]
 fn writable_methods(registry: &mut MethodsBuilder) {
+    /// Returns true if the underlying stream is connected to a terminal/tty.
     #[starlark(attribute)]
     fn is_tty<'v>(this: values::Value) -> anyhow::Result<bool> {
         let io = this.downcast_ref_err::<Writable>()?;
@@ -190,6 +197,12 @@ fn writable_methods(registry: &mut MethodsBuilder) {
         })
     }
 
+    /// Writes a buffer into this writer, returning how many bytes were written.
+    ///
+    /// This function will attempt to write the entire contents of `buf`, but
+    /// the entire write may not succeed, or the write may also generate an
+    /// error. Typically data is written from the start of the buffer and then
+    /// caller should call `flush` to finish the write operation.
     fn write<'v>(
         this: values::Value,
         #[starlark(require = pos)] buf: values::StringValue,
@@ -216,6 +229,8 @@ fn writable_methods(registry: &mut MethodsBuilder) {
         }
     }
 
+    /// Flushes this output stream, ensuring that all intermediately buffered
+    /// contents reach their destination.
     fn flush<'v>(this: values::Value) -> anyhow::Result<NoneType> {
         let io = this.downcast_ref_err::<Writable>()?;
         match &*io {

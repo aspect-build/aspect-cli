@@ -1,10 +1,12 @@
 mod cache;
 mod config;
 
+use std::collections::HashMap;
 use std::env;
 use std::env::var;
 use std::fs;
 use std::fs::File;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -36,7 +38,16 @@ fn debug_mode() -> bool {
     }
 }
 
-async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Request) -> Result<()> {
+const ASPECT_LAUNCHER_METHOD_HTTP: &str = "http";
+const ASPECT_LAUNCHER_METHOD_GITHUB: &str = "github";
+const ASPECT_LAUNCHER_METHOD_LOCAL: &str = "local";
+
+async fn _download_into_cache(
+    client: &Client,
+    cache_entry: &PathBuf,
+    req: Request,
+    download_msg: &str,
+) -> Result<()> {
     // Stream to a tempfile
     let tmp_file = cache_entry.with_extension("tmp");
     let tmpf = File::create(&tmp_file)
@@ -50,13 +61,19 @@ async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Reque
     fs::set_permissions(&tmp_file, permissions).into_diagnostic()?;
 
     let mut tmp_writer = tokio::fs::File::from(tmpf);
-    let mut byte_stream = client
+    let response = client
         .execute(req)
         .await
         .into_diagnostic()?
         .error_for_status()
-        .into_diagnostic()?
-        .bytes_stream();
+        .into_diagnostic()?;
+
+    eprintln!("{}", download_msg);
+
+    let total_size = response.content_length();
+    let mut byte_stream = response.bytes_stream();
+
+    let mut downloaded: u64 = 0;
 
     while let Some(item) = byte_stream
         .try_next()
@@ -64,11 +81,30 @@ async fn _download_into_cache(client: &Client, cache_entry: &PathBuf, req: Reque
         .into_diagnostic()
         .wrap_err("failed to stream content")?
     {
+        let chunk_size = item.len() as u64;
         tokio::io::copy(&mut item.as_ref(), &mut tmp_writer)
             .await
             .into_diagnostic()
             .wrap_err("failed to slab stream to file")?;
+
+        downloaded += chunk_size;
+
+        if let Some(total) = total_size {
+            let percent = ((downloaded as f64 / total as f64) * 100.0) as u64;
+            eprint!(
+                "\r{:.0} / {:.0} KB ({}%)",
+                downloaded as f64 / 1024.0,
+                total as f64 / 1024.0,
+                percent
+            );
+            io::stderr().flush().into_diagnostic()?;
+        } else {
+            eprint!("\r{:.0} KB", downloaded as f64 / 1024.0);
+            io::stderr().flush().into_diagnostic()?;
+        }
     }
+
+    eprintln!();
 
     // And move it into the cache
     tokio::fs::rename(&tmp_file, &cache_entry)
@@ -134,16 +170,17 @@ fn gh_request(client: &Client, url: String) -> RequestBuilder {
 
 async fn configure_tool_task(
     cache: AspectCache,
-    repo_dir: PathBuf,
+    root_dir: PathBuf,
     tool: Box<dyn ToolSpec + Send>,
-) -> JoinHandle<Result<()>> {
+) -> JoinHandle<Result<(PathBuf, String, HashMap<String, String>)>> {
     task::spawn((async move |cache: AspectCache,
-                             repo_dir: PathBuf,
+                             root_dir: PathBuf,
                              tool: Box<dyn ToolSpec + Send>|
-                -> Result<()> {
-        let tool_dest_file = cache.tool_path(&(*tool));
-        fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
-
+                -> Result<(
+        PathBuf,
+        String,
+        HashMap<String, String>,
+    )> {
         let mut errs: Vec<Result<()>> = Vec::new();
 
         let client = reqwest::Client::new();
@@ -161,70 +198,135 @@ async fn configure_tool_task(
 
         let liquid_parser = liquid::ParserBuilder::new().build().into_diagnostic()?;
 
-        if tool_dest_file.exists() {
-            if debug_mode() {
-                eprintln!("tool {tool:?} already in cache at {tool_dest_file:?}");
-            };
-            return Ok(());
-        }
-
         for source in tool.sources() {
             match source {
                 ToolSource::Http { url, headers } => {
                     let url = liquid_parser
-                        .parse(url)
+                        .parse(&url)
                         .into_diagnostic()?
                         .render(&liquid_globals)
                         .into_diagnostic()?;
                     let req_headers = headermap_from_hashmap(headers.iter());
                     let req = client
-                        .request(Method::GET, url)
+                        .request(Method::GET, &url)
                         .headers(req_headers)
                         .build()
                         .into_diagnostic()?;
-                    if let err @ Err(_) = _download_into_cache(&client, &tool_dest_file, req).await
+                    let tool_dest_file = cache.tool_path(&tool.name(), &url);
+                    let mut extra_envs = HashMap::new();
+                    extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_URL".to_string(), url.clone());
+                    if tool_dest_file.exists() {
+                        if debug_mode() {
+                            eprintln!(
+                                "{:} source {:?} found in cache {:?}",
+                                tool.name(),
+                                source,
+                                url
+                            );
+                        };
+                        return Ok((
+                            tool_dest_file,
+                            ASPECT_LAUNCHER_METHOD_HTTP.to_string(),
+                            extra_envs,
+                        ));
+                    }
+                    fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
+                    if debug_mode() {
+                        eprintln!(
+                            "{:} source {:?} downloading {:?} to {:?}",
+                            tool.name(),
+                            source,
+                            url,
+                            tool_dest_file
+                        );
+                    };
+                    let download_msg = format!("downloading aspect cli from {}", url);
+                    if let err @ Err(_) =
+                        _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
                     {
                         errs.push(err);
+                        continue;
                     };
+                    return Ok((
+                        tool_dest_file,
+                        ASPECT_LAUNCHER_METHOD_HTTP.to_string(),
+                        extra_envs,
+                    ));
                 }
-                ToolSource::Github {
+                ToolSource::GitHub {
                     org,
                     repo,
                     release,
                     artifact,
                 } => {
                     let release = liquid_parser
-                        .parse(release)
+                        .parse(&release)
                         .into_diagnostic()?
                         .render(&liquid_globals)
                         .into_diagnostic()?;
                     let artifact = liquid_parser
-                        .parse(artifact)
+                        .parse(&artifact)
                         .into_diagnostic()?
                         .render(&liquid_globals)
                         .into_diagnostic()?;
 
-                    let req = gh_request(
-                        &client,
-                        format!(
-                            "https://api.github.com/repos/{org}/{repo}/releases/tags/{release}"
-                        ),
-                    )
-                    .header(
-                        HeaderName::from_static("accept"),
-                        HeaderValue::from_static("application/vnd.github+json"),
-                    )
-                    .build()
-                    .into_diagnostic()?;
+                    let url = format!(
+                        "https://api.github.com/repos/{org}/{repo}/releases/tags/{release}"
+                    );
 
-                    // FIXME: Accumulate errors
+                    let tool_dest_file = cache.tool_path(&tool.name(), &url);
+                    let mut extra_envs = HashMap::new();
+                    extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_ORG".to_string(), org.clone());
+                    extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_REPO".to_string(), repo.clone());
+                    extra_envs.insert(
+                        "ASPECT_LAUNCHER_ASPECT_CLI_RELEASE".to_string(),
+                        release.clone(),
+                    );
+                    extra_envs.insert(
+                        "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
+                        artifact.clone(),
+                    );
+                    if tool_dest_file.exists() {
+                        if debug_mode() {
+                            eprintln!(
+                                "{:} source {:?} found in cache {:?}",
+                                tool.name(),
+                                source,
+                                &url
+                            );
+                        };
+                        return Ok((
+                            tool_dest_file,
+                            ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
+                            extra_envs,
+                        ));
+                    }
+                    fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
+
+                    let req = gh_request(&client, url)
+                        .header(
+                            HeaderName::from_static("accept"),
+                            HeaderValue::from_static("application/vnd.github+json"),
+                        )
+                        .build()
+                        .into_diagnostic()?;
+
                     let resp = client
                         .execute(req.try_clone().unwrap())
                         .await
                         .into_diagnostic()?;
-                    let release: Release = resp.json::<Release>().await.into_diagnostic()?;
-                    for asset in release.assets {
+                    let release_data: Release = resp.json::<Release>().await.into_diagnostic()?;
+                    for asset in release_data.assets {
                         if asset.name == *artifact {
+                            if debug_mode() {
+                                eprintln!(
+                                    "{:} source {:?} downloading {:?} to {:?}",
+                                    tool.name(),
+                                    source,
+                                    asset.url,
+                                    tool_dest_file
+                                );
+                            };
                             let req = gh_request(&client, asset.url)
                                 .header(
                                     HeaderName::from_static("accept"),
@@ -232,22 +334,35 @@ async fn configure_tool_task(
                                 )
                                 .build()
                                 .into_diagnostic()?;
+                            let download_msg = format!(
+                                "downloading aspect cli version {} file {}",
+                                release, artifact
+                            );
                             if let err @ Err(_) =
-                                _download_into_cache(&client, &tool_dest_file, req).await
+                                _download_into_cache(&client, &tool_dest_file, req, &download_msg)
+                                    .await
                             {
                                 errs.push(err);
+                                break;
                             }
+                            return Ok((
+                                tool_dest_file,
+                                ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
+                                extra_envs,
+                            ));
                         }
                     }
-                    errs.push(Err(miette!(
-                        "unable to find a matching release artifact in github!"
-                    )));
+                    errs.push(Err(miette!("unable to find a release artifact in github!")));
                     continue;
                 }
                 ToolSource::Local { path } => {
-                    let path = repo_dir.join(path);
+                    let tool_dest_file = cache.tool_path(&tool.name(), path);
+                    // Don't pull local sources from the cache since the local development flow will
+                    // always be to copy the latest
+                    fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
 
-                    if fs::exists(&path).into_diagnostic()? {
+                    let full_path = root_dir.join(path);
+                    if fs::exists(&full_path).into_diagnostic()? {
                         if fs::exists(&tool_dest_file).into_diagnostic()? {
                             tokio::fs::remove_file(&tool_dest_file)
                                 .await
@@ -255,32 +370,43 @@ async fn configure_tool_task(
                         }
 
                         // We use copies because Bazel nukes the output tree on build errors and we want to resist that
-                        tokio::fs::copy(&path, &tool_dest_file)
+                        tokio::fs::copy(&full_path, &tool_dest_file)
                             .await
                             .into_diagnostic()?;
+
+                        if debug_mode() {
+                            eprintln!(
+                                "{:} source {:?} copying from {:?} to {:?}",
+                                tool.name(),
+                                source,
+                                full_path,
+                                tool_dest_file
+                            );
+                        };
 
                         let metadata = fs::metadata(&tool_dest_file).into_diagnostic()?;
                         let mut permissions = metadata.permissions();
                         let new_mode = 0o755;
                         permissions.set_mode(new_mode);
                         fs::set_permissions(&tool_dest_file, permissions).into_diagnostic()?;
+                        let mut extra_envs = HashMap::new();
+                        extra_envs
+                            .insert("ASPECT_LAUNCHER_ASPECT_CLI_PATH".to_string(), path.clone());
+                        return Ok((
+                            tool_dest_file,
+                            ASPECT_LAUNCHER_METHOD_LOCAL.to_string(),
+                            extra_envs,
+                        ));
                     }
                 }
             }
-            if tool_dest_file.exists() {
-                if debug_mode() {
-                    eprintln!("hit in {source:?}");
-                };
-                return Ok(());
-            }
         }
-
         Err(miette!(format!(
             "exhausted tool sources {:?}; errors occurred {:?}",
             tool.sources(),
             errs
         )))
-    })(cache.clone(), repo_dir.clone(), tool))
+    })(cache.clone(), root_dir.clone(), tool))
 }
 
 fn main() -> Result<ExitCode> {
@@ -323,45 +449,41 @@ fn main() -> Result<ExitCode> {
         }
         Fork::Parent(_) => {
             // Deal with the config bits
-            let (repo_dir, config) = autoconf();
+            let (root_dir, config) = autoconf()?;
             let cache: AspectCache = AspectCache::default()?;
 
             let threaded_rt = runtime::Runtime::new().into_diagnostic()?;
             threaded_rt.block_on(async {
                 let cli_task = configure_tool_task(
                     cache.clone(),
-                    repo_dir.clone(),
-                    Box::new(config.tools.cli.clone()),
-                )
-                .await;
-                let bazelisk_task = configure_tool_task(
-                    cache.clone(),
-                    repo_dir.clone(),
-                    Box::new(config.tools.bazelisk.clone()),
+                    root_dir.clone(),
+                    Box::new(config.aspect_cli.clone()),
                 )
                 .await;
 
                 // Wait for fetches
-                let cli = &config.tools.cli;
+                let cli = &config.aspect_cli;
                 if debug_mode() {
                     eprintln!("attempting to provision {cli:?}");
                 };
 
-                let _: Result<()> = cli_task.await.into_diagnostic()?;
-
-                let bazelisk = &config.tools.bazelisk;
+                let (cli_path, method, extra_envs) = cli_task.await.into_diagnostic()??;
                 if debug_mode() {
-                    eprintln!("attempting to provision {bazelisk:?}");
+                    eprintln!("provisioned at {cli_path:?}");
                 };
-                let _: Result<()> = bazelisk_task.await.into_diagnostic()?;
 
-                let path = cache.tool_path(&config.tools.cli);
                 if debug_mode() {
-                    eprintln!("attempting to run {path:?}");
+                    eprintln!("attempting to run {cli_path:?}");
                 };
 
                 // Punt
-                let mut cmd = UnixCommand::new(&path);
+                let mut cmd = UnixCommand::new(&cli_path);
+                cmd.env("ASPECT_LAUNCHER", "true");
+                cmd.env("ASPECT_LAUNCHER_VERSION", cargo_pkg_short_version());
+                cmd.env("ASPECT_LAUNCHER_ASPECT_CLI_METHOD", method);
+                for (k, v) in extra_envs {
+                    cmd.env(k, v);
+                }
                 if let Some(args) = matches.get_many::<String>("args") {
                     cmd.args(args);
                 };

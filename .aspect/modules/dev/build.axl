@@ -1,0 +1,22 @@
+"""
+In development 'build' task with an AXL powered UI.
+"""
+
+load("./lib/tui.axl", "tui")
+
+def _build_impl(ctx):
+    build = ctx.bazel.build(
+        build_events = True,
+        flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))],
+        inherit_stderr = False,
+        *ctx.args.target_pattern
+    )
+    return tui(ctx, build)
+
+build = task(
+    implementation = _build_impl,
+    group = ["dev"],
+    args = {
+        "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
+    }
+)

@@ -8,16 +8,15 @@ use tracing::instrument;
 // These define the structure for local modules (e.g., .aspect/axl/module_name).
 pub const DOT_ASPECT_FOLDER: &str = ".aspect";
 
-/// Asynchronously finds the repository root starting from the given `current_work_dir`.
+/// Asynchronously finds the root directory starting from the given `current_work_dir`.
 /// It traverses the ancestors of `current_work_dir` from deepest to shallowest.
-/// The repository root is identified as the first (deepest) ancestor directory that contains
-/// at least one of the following boundary files: AXL_MODULE_FILE, MODULE.bazel,
+/// The root dir is identified as the first (deepest) ancestor directory of the current working
+/// directory that contains at least one of the following boundary files: MODULE.aspect, MODULE.bazel,
 /// MODULE.bazel.lock, REPO.bazel, WORKSPACE, or WORKSPACE.bazel.
 /// If such a directory is found, it returns Ok with the PathBuf of that directory.
-/// If no repository root is found among the ancestors, it returns Err(()).
+/// If no such directory is found, returns the `current_work_dir`
 #[instrument]
-pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
-    // Returns an Err if the path exists
+pub async fn find_root_dir(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
     async fn err_if_exists(path: PathBuf) -> Result<(), ()> {
         match fs::try_exists(path).await {
             Ok(true) => Err(()),
@@ -27,7 +26,7 @@ pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
     }
 
     for ancestor in current_work_dir.ancestors().into_iter() {
-        let result = tokio::try_join!(
+        let repo_root = tokio::try_join!(
             err_if_exists(ancestor.join(AXL_MODULE_FILE)),
             // Repository boundary marker files: https://bazel.build/external/overview#repository
             err_if_exists(ancestor.join("MODULE.bazel")),
@@ -37,28 +36,28 @@ pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
             err_if_exists(ancestor.join("WORKSPACE.bazel")),
         );
         // No error means there was no match for any of the branches.
-        if result.is_ok() {
+        if repo_root.is_ok() {
             continue;
         } else {
             return Ok(ancestor.to_path_buf());
         }
     }
 
-    return Err(());
+    return Ok(current_work_dir.clone());
 }
 
-/// Returns a list of axl search paths by constructing paths from the `repo_root` up to the `current_dir`,
-/// appending ".aspect" to each path. If the relative path from `repo_root` to `current_dir` includes
+/// Returns a list of axl search paths by constructing paths from the `root_dir` up to the `current_dir`,
+/// appending ".aspect" to each path. If the relative path from `root_dir` to `current_dir` includes
 /// a ".aspect" component, the search stops at the parent directory of that ".aspect", excluding
 /// ".aspect" and any subdirectories from the results.
 #[instrument]
 pub fn get_default_axl_search_paths(
     current_work_dir: &PathBuf,
-    repo_root: &PathBuf,
+    root_dir: &PathBuf,
 ) -> Vec<PathBuf> {
-    if let Ok(rel_path) = current_work_dir.strip_prefix(repo_root) {
-        let mut paths = vec![repo_root.join(DOT_ASPECT_FOLDER)];
-        let mut current = repo_root.clone();
+    if let Ok(rel_path) = current_work_dir.strip_prefix(root_dir) {
+        let mut paths = vec![root_dir.join(DOT_ASPECT_FOLDER)];
+        let mut current = root_dir.clone();
         for component in rel_path.components() {
             if component.as_os_str() == DOT_ASPECT_FOLDER {
                 break;

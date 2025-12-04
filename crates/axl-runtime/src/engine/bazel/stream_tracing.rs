@@ -90,7 +90,7 @@ impl TracingEventStreamSink {
                                     pid = ?s.server_pid,
                                     uuid = ?s.uuid,
                                     current_dir = ?s.working_directory,
-                                    repo_root = ?s.workspace_directory,
+                                    root_dir = ?s.workspace_directory,
                                 )
                                 .entered()
                             )

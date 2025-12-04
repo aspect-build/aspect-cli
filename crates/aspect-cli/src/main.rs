@@ -62,19 +62,19 @@ async fn main() -> miette::Result<ExitCode> {
 
     let current_work_dir = std::env::current_dir().into_diagnostic()?;
 
-    let repo_root = find_repo_root(&current_work_dir)
+    let root_dir = find_root_dir(&current_work_dir)
         .await
-        .map_err(|_| miette!("could not find repository root, running inside a module?"))?;
+        .map_err(|err| miette!("could not find root directory: {:?}", err))?;
 
-    let disk_store = DiskStore::new(repo_root.clone());
+    let disk_store = DiskStore::new(root_dir.clone());
 
-    let module_eval = AxlModuleEvaluator::new(repo_root.clone());
+    let module_eval = AxlModuleEvaluator::new(root_dir.clone());
 
     let _ = info_span!("expand_module_store").enter();
 
     // Creates the module store and evaluates the root MODULE.aspect (if it exists) for axl_*_deps, use_task, etc...
     let module_store = module_eval
-        .evaluate(AXL_ROOT_MODULE_NAME.to_string(), repo_root.clone())
+        .evaluate(AXL_ROOT_MODULE_NAME.to_string(), root_dir.clone())
         .into_diagnostic()?;
 
     // Expand all module deps (including the builtin @aspect module) to the disk store and return the module roots on disk.
@@ -114,7 +114,7 @@ async fn main() -> miette::Result<ExitCode> {
     let axl_deps_root = disk_store.deps_path();
 
     // Get the default search paths given the current working directory and the repository root
-    let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_root);
+    let search_paths = get_default_axl_search_paths(&current_work_dir, &root_dir);
     // TODO: allow user to configure additonal search paths in the future?
 
     // Scan for .axl files in the search paths
@@ -385,6 +385,34 @@ async fn main() -> miette::Result<ExitCode> {
                             cmdargs
                                 .get_many::<String>(k.as_str())
                                 .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                        )),
+                        TaskArg::StringList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(k.as_str())
+                                .unwrap_or_default()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>(),
+                        )),
+                        TaskArg::BooleanList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<bool>(k.as_str())
+                                .unwrap_or_default()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )),
+                        TaskArg::IntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<i32>(k.as_str())
+                                .unwrap_or_default()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )),
+                        TaskArg::UIntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<u32>(k.as_str())
+                                .unwrap_or_default()
+                                .cloned()
+                                .collect::<Vec<_>>(),
                         )),
                     };
                     args.insert(k.clone(), val);

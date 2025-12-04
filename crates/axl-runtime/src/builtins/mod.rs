@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 #[cfg(debug_assertions)]
 pub fn expand_builtins(
-    repo_root: impl AsRef<Path>,
+    root_dir: impl AsRef<Path>,
     _broot: PathBuf,
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
     Ok(vec![(
         "aspect".to_string(),
-        repo_root
+        root_dir
             .as_ref()
             .join("crates/axl-runtime/src/builtins/aspect"),
     )])
@@ -17,7 +17,7 @@ pub fn expand_builtins(
 
 #[cfg(not(debug_assertions))]
 pub fn expand_builtins(
-    _repo_root: PathBuf,
+    _root_dir: PathBuf,
     broot: PathBuf,
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
     use aspect_telemetry::cargo_pkg_version;
@@ -28,8 +28,6 @@ pub fn expand_builtins(
 
     let builtins = vec![
         ("aspect/build.axl", include_str!("./aspect/build.axl")),
-        ("aspect/common.axl", include_str!("./aspect/common.axl")),
-        ("aspect/query.axl", include_str!("./aspect/query.axl")),
         ("aspect/test.axl", include_str!("./aspect/test.axl")),
         (
             "aspect/MODULE.aspect",

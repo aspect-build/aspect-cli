@@ -1,7 +1,22 @@
 axl_local_dep(
-    name = "local",
-    path = ".aspect/modules/local",
+    name = "demo",
+    path = ".aspect/modules/demo",
     auto_use_tasks = True,
 )
 
-use_task(".aspect/elsewhere/user-task.axl", "user_task")
+axl_local_dep(
+    name = "dev",
+    path = ".aspect/modules/dev",
+    auto_use_tasks = True,
+)
+
+axl_archive_dep(
+    name = "aspect_rules_lint",
+    urls = ["https://github.com/aspect-build/rules_lint/archive/65525d871f677071877d3ea1ec096499ff7dd147.tar.gz"],
+    integrity = "sha512-TGcxutWr8FwxrK3G+uthbEpuYM2oOVpHPOvaVPzLLuHkfPY0jn/GWFp9myQeFzDFsRZ4ilT0jAWfGZhTk/nesQ==",
+    strip_prefix = "rules_lint-65525d871f677071877d3ea1ec096499ff7dd147",
+    auto_use_tasks = True,
+    dev = True,
+)
+
+use_task(".aspect/testing/some-task.axl", "some_task")

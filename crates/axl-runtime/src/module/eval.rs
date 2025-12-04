@@ -39,6 +39,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)]
         dev: bool,
         #[allow(unused)]
+        #[starlark(require = named, default = false)]
+        auto_use_tasks: bool,
+        #[allow(unused)]
         #[starlark(require = named, default = String::new())]
         strip_prefix: String,
     ) -> anyhow::Result<values::none::NoneType> {
@@ -129,7 +132,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
         let mut abs_path = PathBuf::from(path);
         if !abs_path.is_absolute() {
-            abs_path = store.repo_root.join(&abs_path).canonicalize()?;
+            abs_path = store.root_dir.join(&abs_path).canonicalize()?;
         }
 
         let metadata = abs_path
@@ -209,15 +212,15 @@ pub fn get_globals() -> Globals {
 /// Evaluator for MODULE.aspect
 #[derive(Debug)]
 pub struct AxlModuleEvaluator {
-    repo_root: PathBuf,
+    root_dir: PathBuf,
     dialect: Dialect,
     globals: Globals,
 }
 
 impl AxlModuleEvaluator {
-    pub fn new(repo_root: PathBuf) -> Self {
+    pub fn new(root_dir: PathBuf) -> Self {
         Self {
-            repo_root,
+            root_dir,
             dialect: AxlModuleEvaluator::dialect(),
             globals: get_globals(),
         }
@@ -256,7 +259,7 @@ impl AxlModuleEvaluator {
 
         let module_boundary_path = &module_root.join(AXL_MODULE_FILE);
 
-        let store = ModuleStore::new(self.repo_root.to_path_buf(), module_name, module_root);
+        let store = ModuleStore::new(self.root_dir.to_path_buf(), module_name, module_root);
 
         if module_boundary_path.exists() {
             let contents = fs::read_to_string(module_boundary_path)?;

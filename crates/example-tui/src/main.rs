@@ -37,7 +37,7 @@ pub fn alloc(len: u32) -> *mut u8 {
 
 /// Deallocates the boxed slice allocated via [`init`].
 ///
-/// # Safety
+/// **Safety**
 ///
 /// It is the callers responsibility to assert that `len` is the same as given to [`init`].
 #[unsafe(no_mangle)]

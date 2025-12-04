@@ -10,10 +10,10 @@ load("//bazel/release:hashes.bzl", "hashes")
 opt_filegroup, _ = with_cfg(native.filegroup).set("compilation_mode", "opt").build()
 
 TARGET_TRIPLES = [
-    ("x86_64_unknown_linux_musl", "linux_x86_64_musl"),
-    ("aarch64_unknown_linux_musl", "linux_aarch64_musl"),
-    ("x86_64_apple_darwin", "macos_x86_64"),
-    ("aarch64_apple_darwin", "macos_aarch64"),
+    ("x86_64-unknown-linux-musl", "linux_x86_64_musl"),
+    ("aarch64-unknown-linux-musl", "linux_aarch64_musl"),
+    ("x86_64-apple-darwin", "macos_x86_64"),
+    ("aarch64-apple-darwin", "macos_aarch64"),
 ]
 
 # Map a Rust naming scheme to a custom name.
@@ -52,26 +52,26 @@ def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEM
             tags = ["manual"],
         )
 
-        copy_name = "{}{}-{}".format(prefix, bin, target_naming)
+        bin_name = "{}{}-{}".format(prefix, bin, target_naming)
         copy_file(
-            name = "{}_copy".format(copy_name),
+            name = "{}_bin".format(bin_name),
             src = transition_build,
-            out = copy_name,
+            out = bin_name,
             tags = ["manual"],
         )
 
-        bin_sha256 = "{}_bin_hash".format(copy_name)
+        bin_sha256 = "{}_bin_hash".format(bin_name)
         hashes(
             name = bin_sha256,
-            src = copy_name,
+            src = bin_name,
             tags = ["manual"],
         )
 
         pkged_files = "{}{}_{}_pkged_files".format(prefix, bin, target_naming)
         pkg_files(
             name = pkged_files,
-            srcs = [copy_name],
-            renames = {copy_name: bin},
+            srcs = [bin_name],
+            renames = {bin_name: bin},
             attributes = pkg_attributes(mode = "0744"),
             strip_prefix = "/",
             tags = ["manual"],
@@ -83,21 +83,21 @@ def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEM
             srcs = [
                 pkged_files,
             ],
-            out = "{}.{}".format(copy_name, pkg_type),
+            out = "{}.{}".format(bin_name, pkg_type),
             # Why is -1 not the default :/
             # This also sets the modified time in UTC.
             stamp = -1,
             tags = ["manual"],
         )
 
-        pkged_sha256 = "{}_pkged_hash".format(copy_name)
+        pkged_sha256 = "{}_pkged_hash".format(bin_name)
         hashes(
             name = pkged_sha256,
             src = pkged,
             tags = ["manual"],
         )
 
-        bin_outs = [copy_name, bin_sha256]
+        bin_outs = [bin_name, bin_sha256]
         pkged_outs = [pkged, pkged_sha256]
         if target_platform.startswith("linux"):
             linux_bins.extend(bin_outs)

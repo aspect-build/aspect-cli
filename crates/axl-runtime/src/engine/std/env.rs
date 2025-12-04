@@ -1,12 +1,15 @@
 use allocative::Allocative;
 use derive_more::Display;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
+use starlark::eval::Evaluator;
 use starlark::values::list::{AllocList, UnpackList};
 use starlark::values::none::NoneOr;
 use starlark::values::tuple::{AllocTuple, UnpackTuple};
 use starlark::values::{starlark_value, StarlarkValue};
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueOfUnchecked};
 use starlark::{starlark_module, starlark_simple_value, values};
+
+use crate::engine::store::AxlStore;
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<std.Env>")]
@@ -31,6 +34,15 @@ starlark_simple_value!(Env);
 
 #[starlark_module]
 pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
+    /// Returns the version of the Aspect CLI.
+    fn aspect_cli_version<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        let store = AxlStore::from_eval(eval)?;
+        Ok(eval.heap().alloc_str(&store.aspect_cli_version))
+    }
+
     /// Fetches the environment variable key from the current process.
     fn var<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -79,7 +91,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// Note that the returned value may be a symbolic link, not a directory.
     ///
     ///
-    /// # Platform-specific behavior
+    /// **Platform**-specific behavior
     ///
     /// On Unix, returns the value of the `TMPDIR` environment variable if it is
     /// set, otherwise the value is OS-specific:
@@ -100,8 +112,9 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<values::StringValue<'v>> {
         Ok(heap.alloc_str(
             std::env::temp_dir()
+                // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
                 .to_str()
-                .ok_or(anyhow::anyhow!("failed to get tempdir"))?,
+                .ok_or(anyhow::anyhow!("temp directory is non utf-8"))?,
         ))
     }
 
@@ -114,7 +127,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     ///
     /// [XDG Base Directories]: https://specifications.freedesktop.org/basedir-spec/latest/
     ///
-    /// # Unix
+    /// **Unix**
     ///
     /// - Returns the value of the 'HOME' environment variable if it is set
     ///   (including to an empty string).
@@ -123,7 +136,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     ///   `getpwuid_r` function is considered to be a valid value.
     /// - Returns `None` if the current user has no entry in the /etc/passwd file.
     ///
-    /// # Windows
+    /// **Windows**
     ///
     /// - Returns the value of the 'USERPROFILE' environment variable if it is set, and is not an empty string.
     /// - Otherwise, [`GetUserProfileDirectory`][msdn] is used to return the path. This may change in the future.
@@ -138,8 +151,10 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         Ok(match std::env::home_dir() {
             Some(path) => NoneOr::Other(
                 heap.alloc_str(
-                    path.to_str()
-                        .ok_or(anyhow::anyhow!("failed to get tempdir"))?,
+                    path
+                        // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
+                        .to_str()
+                        .ok_or(anyhow::anyhow!("home directory is non utf-8"))?,
                 ),
             ),
             None => NoneOr::None,
@@ -148,13 +163,13 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
 
     /// Returns the current working directory as a path.
     ///
-    /// # Platform-specific behavior
+    /// **Platform**-specific behavior
     ///
     /// This function currently corresponds to the `getcwd` function on Unix
     /// and the `GetCurrentDirectoryW` function on Windows.
     ///
     ///
-    /// # Errors
+    /// **Errors**
     ///
     /// Fails if the current working directory value is invalid.
     /// Possible cases:
@@ -169,7 +184,41 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         Ok(heap.alloc_str(
             std::env::current_dir()?
                 .to_str()
+                // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
                 .ok_or(anyhow::anyhow!("current directory is non utf-8"))?,
+        ))
+    }
+
+    fn current_exe<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        heap: &'v Heap,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        Ok(heap.alloc_str(
+            std::env::current_exe()?
+                .to_str()
+                // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
+                .ok_or(anyhow::anyhow!("current executable is non utf-8"))?,
+        ))
+    }
+
+    /// Returns the project root directory.
+    ///
+    /// This project root directory is found starting at current working directory and searching upwards
+    /// through its ancestors for repository boundary marker files (such as `MODULE.aspect`, `MODULE.bazel`,
+    /// `MODULE.bazel.lock`, `REPO.bazel`, `WORKSPACE`, or `WORKSPACE.bazel`). The first ancestor directory
+    /// containing any of these files is considered the project root. If no such directory is found, the
+    /// current directory is used as the project root.
+    fn root_dir<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        let store = AxlStore::from_eval(eval)?;
+        Ok(eval.heap().alloc_str(
+            &store
+                .root_dir
+                .to_str()
+                // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
+                .ok_or(anyhow::anyhow!("root dir is non utf-8"))?,
         ))
     }
 }

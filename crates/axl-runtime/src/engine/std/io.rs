@@ -46,16 +46,21 @@ starlark_simple_value!(Stdio);
 
 #[starlark_module]
 pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
+    /// Returns a writable stream for the standard output of the current process.
     #[starlark(attribute)]
     fn stdout<'v>(this: values::Value) -> anyhow::Result<stream::Writable> {
         let this = this.downcast_ref_err::<Stdio>()?;
         Ok(this.stdout.dupe())
     }
+
+    /// Returns a writable stream for the standard error of the current process.
     #[starlark(attribute)]
     fn stderr<'v>(this: values::Value) -> anyhow::Result<stream::Writable> {
         let this = this.downcast_ref_err::<Stdio>()?;
         Ok(this.stderr.dupe())
     }
+
+    /// Returns a readable stream for the standard input of the current process.
     #[starlark(attribute)]
     fn stdin<'v>(this: values::Value) -> anyhow::Result<stream::Readable> {
         let this = this.downcast_ref_err::<Stdio>()?;

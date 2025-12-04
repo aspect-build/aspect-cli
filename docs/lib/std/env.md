@@ -1,23 +1,37 @@
 
 
+## Env.aspect\_cli\_version
+
+<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Env</span></span>.<span class="entity name function python"><span class="meta generic-name python">aspect_cli_version</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python"><span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/str">str</a><span class="punctuation definition string end python">&#39;</span></span></span></span></span></code></pre>
+
+Returns the version of the Aspect CLI.
+
+***
+
 ## Env.current\_dir
 
 <pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Env</span></span>.<span class="entity name function python"><span class="meta generic-name python">current_dir</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python"><span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/str">str</a><span class="punctuation definition string end python">&#39;</span></span></span></span></span></code></pre>
 
 Returns the current working directory as a path.
 
-# Platform-specific behavior
+**Platform**-specific behavior
 
 This function currently corresponds to the `getcwd` function on Unix
 and the `GetCurrentDirectoryW` function on Windows.
 
-# Errors
+**Errors**
 
 Fails if the current working directory value is invalid.
 Possible cases:
 
 * Current directory does not exist.
 * There are insufficient permissions to access the current directory.
+
+***
+
+## Env.current\_exe
+
+<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Env</span></span>.<span class="entity name function python"><span class="meta generic-name python">current_exe</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python"><span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/str">str</a><span class="punctuation definition string end python">&#39;</span></span></span></span></span></code></pre>
 
 ***
 
@@ -34,7 +48,7 @@ For example, [XDG Base Directories] on Unix or the `LOCALAPPDATA` and `APPDATA` 
 
 [XDG Base Directories]: https://specifications.freedesktop.org/basedir-spec/latest/
 
-# Unix
+**Unix**
 
 * Returns the value of the 'HOME' environment variable if it is set
   (including to an empty string).
@@ -43,7 +57,7 @@ For example, [XDG Base Directories] on Unix or the `LOCALAPPDATA` and `APPDATA` 
   `getpwuid_r` function is considered to be a valid value.
 * Returns `None` if the current user has no entry in the /etc/passwd file.
 
-# Windows
+**Windows**
 
 * Returns the value of the 'USERPROFILE' environment variable if it is set, and is not an empty string.
 * Otherwise, [`GetUserProfileDirectory`][msdn] is used to return the path. This may change in the future.
@@ -51,6 +65,20 @@ For example, [XDG Base Directories] on Unix or the `LOCALAPPDATA` and `APPDATA` 
 [msdn]: https://docs.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-getuserprofiledirectorya
 
 In UWP (Universal Windows Platform) targets this function is unimplemented and always returns `None`.
+
+***
+
+## Env.root\_dir
+
+<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Env</span></span>.<span class="entity name function python"><span class="meta generic-name python">root_dir</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python"><span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/str">str</a><span class="punctuation definition string end python">&#39;</span></span></span></span></span></code></pre>
+
+Returns the project root directory.
+
+This project root directory is found starting at current working directory and searching upwards
+through its ancestors for repository boundary marker files (such as `MODULE.aspect`, `MODULE.bazel`,
+`MODULE.bazel.lock`, `REPO.bazel`, `WORKSPACE`, or `WORKSPACE.bazel`). The first ancestor directory
+containing any of these files is considered the project root. If no such directory is found, the
+current directory is used as the project root.
 
 ***
 
@@ -69,7 +97,7 @@ using a crate that securely creates temporary files or directories.
 
 Note that the returned value may be a symbolic link, not a directory.
 
-# Platform-specific behavior
+**Platform**-specific behavior
 
 On Unix, returns the value of the `TMPDIR` environment variable if it is
 set, otherwise the value is OS-specific:

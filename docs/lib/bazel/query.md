@@ -11,14 +11,14 @@ The entry point is `ctx.bazel.query()`, which returns a `query` for creating ini
 query expressions. Most operations operate on `query` objects, which represent
 sets of targets that can be filtered, transformed, and combined.
 
-# Example
+**Example**
 
 ```starlark
-# Query dependencies of a target
+**Query** dependencies of a target
 deps = ctx.bazel.query().targets("//myapp:main").deps()
 all_deps: target_set = deps.eval()
 
-# Chain multiple operations
+**Chain** multiple operations
 sources = ctx.bazel.query().targets("//myapp:main")
     .deps()
     .kind("source file")
@@ -40,12 +40,12 @@ This escape hatch allows direct use of the underlying query language for complex
 while still supporting further chaining.
 
 ```starlark
-# Complex intersection query
+**Complex** intersection query
 complex = ctx.bazel.query().raw("deps(//foo) intersect kind('test', //bar:*)")
 
-# Path-based query
+**Path**-based query
 path_query = ctx.bazel.query().raw("somepath(//start, //end)")
 
-# Chaining after raw
+**Chaining** after raw
 filtered = complex.kind("source file")
 ```

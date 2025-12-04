@@ -11,7 +11,6 @@ use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::dict::UnpackDictEntries;
 use starlark::values::list::UnpackList;
-use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 use starlark::values::tuple::UnpackTuple;
 use starlark::values::NoSerialize;
@@ -25,6 +24,7 @@ use crate::engine::store::AxlStore;
 use axl_proto;
 
 mod build;
+mod helpers;
 mod iter;
 mod query;
 mod stream;
@@ -47,17 +47,17 @@ impl<'v> values::StarlarkValue<'v> for Bazel {
 
 #[starlark_module]
 pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
-    /// Build targets within AXL with ctx.bazel.build().
-    /// The result is a `build`, which has `artifacts()` (TODO),
+    /// Build targets Bazel within AXL with ctx.bazel.build().
+    /// The result is a `Build` object, which has `artifacts()` (TODO),
     /// `failures()` (TODO), and a `events()` functions that provide
     /// iterators to the artifacts, failures, events respectively.
     ///
-    /// Running `ctx.bazel.build()` does not block the starlark thread. Explicitly
-    /// call `.wait()` on the `build` type to wait until the build finishes.
+    /// Running `ctx.bazel.build()` does not block the Starlark thread. Explicitly
+    /// call `.wait()` on the `Build` object to wait until the invocation finishes.
     ///
     /// You can pass in a single target or target pattern to build.
     ///
-    /// # Examples
+    /// **Examples**
     ///
     /// ```python
     /// def _fancy_build_impl(ctx):
@@ -86,7 +86,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
             values::StringValue,
         >,
-        #[starlark(require = named, default = NoneOr::None)] command: NoneOr<values::StringValue>,
+        #[starlark(require = named, default = false)] inherit_stdout: bool,
+        #[starlark(require = named, default = true)] inherit_stderr: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = match build_events {
@@ -94,12 +95,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Right(sinks) => (true, sinks.items),
         };
         let store = AxlStore::from_eval(eval)?;
-        let command = command.into_option().map_or("build", |verb| verb.as_str());
-        if command != "build" && command != "test" {
-            anyhow::bail!("command can only be set to `build` or `test`.")
-        }
         let build = build::Build::spawn(
-            command,
+            "build",
             targets.items.iter().map(|f| f.as_str().to_string()),
             build_events,
             execution_logs,
@@ -110,9 +107,78 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 .iter()
                 .map(|f| f.as_str().to_string())
                 .collect(),
+            inherit_stdout,
+            inherit_stderr,
             store.rt,
         )?;
         Ok(build)
+    }
+
+    /// Build & test Bazel targets within AXL with ctx.bazel.test().
+    /// The result is a `Build` object, which has `artifacts()` (TODO),
+    /// `failures()` (TODO), and a `events()` functions that provide
+    /// iterators to the artifacts, failures, events respectively.
+    ///
+    /// Running `ctx.bazel.test()` does not block the Starlark thread. Explicitly
+    /// call `.wait()` on the `Build` object to wait until the invocation finishes.
+    ///
+    /// You can pass in a single target or target pattern to test.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// def _fancy_test_impl(ctx):
+    ///     io = ctx.std.io
+    ///     test = ctx.bazel.test(
+    ///         "//target/to:test"
+    ///         build_events = True,
+    ///     )
+    ///     for event in test.build_events():
+    ///         if event.type == "progress":
+    ///             io.stdout.write(event.payload.stdout)
+    ///             io.stderr.write(event.payload.stderr)
+    /// ```
+    fn test<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(args)] targets: UnpackTuple<values::StringValue>,
+        #[starlark(require = named, default = Either::Left(false))] build_events: Either<
+            bool,
+            UnpackList<build::BuildEventSink>,
+        >,
+        #[starlark(require = named, default = false)] workspace_events: bool,
+        #[starlark(require = named, default = false)] execution_logs: bool,
+        #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
+            values::StringValue,
+        >,
+        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
+            values::StringValue,
+        >,
+        #[starlark(require = named, default = false)] inherit_stdout: bool,
+        #[starlark(require = named, default = true)] inherit_stderr: bool,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<build::Build> {
+        let build_events = match build_events {
+            Either::Left(events) => (events, vec![]),
+            Either::Right(sinks) => (true, sinks.items),
+        };
+        let store = AxlStore::from_eval(eval)?;
+        let test = build::Build::spawn(
+            "test",
+            targets.items.iter().map(|f| f.as_str().to_string()),
+            build_events,
+            execution_logs,
+            workspace_events,
+            flags.items.iter().map(|f| f.as_str().to_string()).collect(),
+            startup_flags
+                .items
+                .iter()
+                .map(|f| f.as_str().to_string())
+                .collect(),
+            inherit_stdout,
+            inherit_stderr,
+            store.rt,
+        )?;
+        Ok(test)
     }
 
     /// The query system provides a programmatic interface for analyzing build dependencies
@@ -123,14 +189,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// query expressions. Most operations operate on `query` objects, which represent
     /// sets of targets that can be filtered, transformed, and combined.
     ///
-    /// # Example
+    /// **Example**
     ///
     /// ```starlark
-    /// # Query dependencies of a target
+    /// **Query** dependencies of a target
     /// deps = ctx.bazel.query().targets("//myapp:main").deps()
     /// all_deps = deps.eval()
     ///
-    /// # Chain multiple operations
+    /// **Chain** multiple operations
     /// sources = ctx.bazel.query().targets("//myapp:main")
     ///     .deps()
     ///     .kind("source file")

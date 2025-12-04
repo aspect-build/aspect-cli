@@ -1,5 +1,5 @@
 use axl_runtime::engine::task_arg::TaskArg;
-use clap::{value_parser, Arg};
+use clap::{value_parser, Arg, ArgAction};
 
 pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
     match arg {
@@ -49,5 +49,58 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
             .allow_hyphen_values(true)
             .last(true)
             .num_args(0..),
+        TaskArg::StringList { required, default } => {
+            let mut it = Arg::new(name)
+                .long(name)
+                .value_name(name)
+                .action(ArgAction::Append)
+                .required(*required)
+                .value_parser(value_parser!(String));
+            if !default.is_empty() {
+                it = it.default_values(default.clone());
+            }
+            it
+        }
+        TaskArg::BooleanList { required, default } => {
+            let mut it = Arg::new(name)
+                .long(name)
+                .value_name(name)
+                .action(ArgAction::Append)
+                .required(*required)
+                .value_parser(value_parser!(bool))
+                .num_args(0..=1)
+                .default_missing_value("true");
+            if !default.is_empty() {
+                let default: Vec<String> = default.iter().map(|&b| b.to_string()).collect();
+                it = it.default_values(default);
+            }
+            it
+        }
+        TaskArg::IntList { required, default } => {
+            let mut it = Arg::new(name)
+                .long(name)
+                .value_name(name)
+                .action(ArgAction::Append)
+                .required(*required)
+                .value_parser(value_parser!(i32));
+            if !default.is_empty() {
+                let default: Vec<String> = default.iter().map(|&i| i.to_string()).collect();
+                it = it.default_values(default);
+            }
+            it
+        }
+        TaskArg::UIntList { required, default } => {
+            let mut it = Arg::new(name)
+                .long(name)
+                .value_name(name)
+                .action(ArgAction::Append)
+                .required(*required)
+                .value_parser(value_parser!(u32));
+            if !default.is_empty() {
+                let default: Vec<String> = default.iter().map(|&u| u.to_string()).collect();
+                it = it.default_values(default);
+            }
+            it
+        }
     }
 }
