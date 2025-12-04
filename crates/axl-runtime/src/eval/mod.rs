@@ -5,6 +5,7 @@ mod load;
 mod load_path;
 pub mod task;
 
+pub use api::get_globals;
 pub use error::EvalError;
 pub use load::AxlLoader as Loader;
 pub use load::ModuleScope;
