@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use thiserror::Error;
 
 /// Enum representing possible errors during evaluation, including Starlark-specific errors,
@@ -9,8 +8,11 @@ pub enum EvalError {
     #[error("{0}")]
     StarlarkError(starlark::Error),
 
-    #[error("axl script {0:?} does not export {1:?} symbol")]
-    MissingSymbol(PathBuf, String),
+    #[error("{0:?}")]
+    FreezeError(starlark::values::FreezeError),
+
+    #[error("script does not export {0:?} symbol")]
+    MissingSymbol(String),
 
     #[error(transparent)]
     UnknownError(#[from] anyhow::Error),
@@ -30,9 +32,10 @@ impl Into<starlark::Error> for EvalError {
     fn into(self) -> starlark::Error {
         match self {
             EvalError::StarlarkError(error) => error,
-            EvalError::MissingSymbol(_, _) => starlark::Error::new_other(self),
+            EvalError::MissingSymbol(_) => starlark::Error::new_other(self),
             EvalError::UnknownError(error) => starlark::Error::new_other(error),
             EvalError::IOError(error) => starlark::Error::new_other(error),
+            EvalError::FreezeError(error) => starlark::Error::new_other(error),
         }
     }
 }

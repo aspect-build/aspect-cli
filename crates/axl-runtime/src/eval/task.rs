@@ -1,11 +1,10 @@
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
-
 use anyhow::anyhow;
-use starlark::environment::{FrozenModule, Module};
+use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use starlark::values::{self, Heap, ValueLike};
+use starlark::values::{Heap, ValueLike};
+use std::path::Path;
 
+use crate::engine::config::TaskMut;
 use crate::engine::store::AxlStore;
 use crate::engine::task::Task;
 use crate::engine::task::{AsTaskLike, FrozenTask, TaskLike};
@@ -16,33 +15,25 @@ use super::error::EvalError;
 use super::load::{AxlLoader, ModuleScope};
 use super::load_path::join_confined;
 
-/// Represents the result of evaluating an .axl script, encapsulating the module,
-/// path, and store for task definition retrieval and execution.
-#[derive(Debug, Clone)]
-pub struct EvaluatedAxlScript {
-    // Relative path of the script inside ModuleScope
-    pub path: PathBuf,
-    pub scope: ModuleScope,
-    module: Rc<Module>,
-    store: AxlStore,
+pub trait TaskModuleLike {
+    fn tasks(&self) -> Vec<&str>;
+    fn has_task(&self, symbol: &str) -> bool;
+    fn has_name(&self, symbol: &str) -> bool;
+    /// Retrieves a task definition from the evaluated module by symbol name.
+    fn get_task(&self, symbol: &str) -> Result<&dyn TaskLike, EvalError>;
+    fn execute_task<'v>(
+        &'v self,
+        store: &AxlStore,
+        task: &TaskMut<'v>,
+        args: impl FnOnce(&Heap) -> TaskArgs,
+    ) -> Result<Option<u8>, EvalError>;
 }
 
-impl EvaluatedAxlScript {
-    fn new(scope: ModuleScope, path: PathBuf, store: AxlStore, module: Module) -> Self {
-        Self {
-            module: Rc::new(module),
-            scope,
-            path,
-            store,
-        }
-    }
-
-    /// Retrieves a task definition from the evaluated module by symbol name.
-    pub fn task_definition(&self, symbol: &str) -> Result<&dyn TaskLike, EvalError> {
-        let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
-            self.path.clone(),
-            symbol.to_string(),
-        ))?;
+impl TaskModuleLike for Module {
+    fn get_task(&self, symbol: &str) -> Result<&dyn TaskLike, EvalError> {
+        let def = self
+            .get(symbol)
+            .ok_or(EvalError::MissingSymbol(symbol.to_string()))?;
         if let Some(task) = def.downcast_ref::<Task>() {
             return Ok(task.as_task());
         } else if let Some(task) = def.downcast_ref::<FrozenTask>() {
@@ -52,16 +43,15 @@ impl EvaluatedAxlScript {
         }
     }
 
-    pub fn names(&self) -> Vec<&str> {
-        self.module
-            .names()
+    fn tasks(&self) -> Vec<&str> {
+        self.names()
             .filter(|symbol| self.has_task(symbol))
             .map(|sym| sym.as_str())
             .collect()
     }
 
-    pub fn has_task(&self, symbol: &str) -> bool {
-        let val = self.module.get(symbol);
+    fn has_task(&self, symbol: &str) -> bool {
+        let val = self.get(symbol);
         if let Some(val) = val {
             if val.downcast_ref::<Task>().is_none() && val.downcast_ref::<FrozenTask>().is_none() {
                 return false;
@@ -71,33 +61,25 @@ impl EvaluatedAxlScript {
         false
     }
 
-    pub fn has_name(&self, symbol: &str) -> bool {
-        self.module.get(symbol).is_some()
-    }
-
-    pub fn get_variable<'v>(&'v self, symbol: &str) -> Option<values::Value<'v>> {
-        self.module.get(symbol)
+    fn has_name(&self, symbol: &str) -> bool {
+        self.get(symbol).is_some()
     }
 
     /// Executes a task from the module by symbol, providing arguments and returning the exit code.
-    pub fn execute_task(
-        &self,
-        symbol: &str,
+    fn execute_task<'v>(
+        &'v self,
+        store: &AxlStore,
+        task: &TaskMut<'v>,
         args: impl FnOnce(&Heap) -> TaskArgs,
     ) -> Result<Option<u8>, EvalError> {
-        let def = self.module.get(symbol).ok_or(EvalError::MissingSymbol(
-            self.path.clone(),
-            symbol.to_string(),
-        ))?;
-
-        let heap = self.module.heap();
+        let heap = self.heap();
         let args = args(heap);
         let context = heap.alloc(TaskContext::new(args));
-        let mut eval = Evaluator::new(&self.module);
-        eval.extra = Some(&self.store);
-        let ret = if let Some(val) = def.downcast_ref::<Task>() {
+        let mut eval = Evaluator::new(self);
+        eval.extra = Some(&store);
+        let ret = if let Some(val) = task.original.downcast_ref::<Task>() {
             eval.eval_function(val.implementation(), &[context], &[])?
-        } else if let Some(val) = def.downcast_ref::<FrozenTask>() {
+        } else if let Some(val) = task.original.downcast_ref::<FrozenTask>() {
             eval.eval_function(val.implementation().to_value(), &[context], &[])?
         } else {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
@@ -124,13 +106,15 @@ impl<'l, 'p> TaskEvaluator<'l, 'p> {
     /// Evaluates the given .axl script path relative to the module root, returning
     /// the evaluated script or an error. Performs security checks to ensure the script
     /// file is within the module root.
-    pub fn eval(&self, scope: ModuleScope, path: &Path) -> Result<EvaluatedAxlScript, EvalError> {
+    pub fn eval(&self, scope: ModuleScope, path: &Path) -> Result<Module, EvalError> {
         assert!(path.is_relative());
 
         let abs_path = join_confined(&scope.path, path)?;
+        // push the current scope to stack
         self.loader.module_stack.borrow_mut().push(scope);
         let module = self.loader.eval_module(&abs_path)?;
-        let scope = self
+        // pop the current
+        let _scope = self
             .loader
             .module_stack
             .borrow_mut()
@@ -138,11 +122,6 @@ impl<'l, 'p> TaskEvaluator<'l, 'p> {
             .expect("just pushed a scope");
 
         // Return the evaluated script
-        Ok(EvaluatedAxlScript::new(
-            scope,
-            path.to_path_buf(),
-            self.loader.store.clone(),
-            module,
-        ))
+        Ok(module)
     }
 }

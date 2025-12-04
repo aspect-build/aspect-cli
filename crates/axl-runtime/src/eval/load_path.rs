@@ -83,51 +83,51 @@ pub fn validate_module_name(module_name: &str) -> anyhow::Result<()> {
 /// # Returns
 /// * `Ok(PathBuf)` containing the normalized path if valid.
 /// * `Err(starlark::Error)` if the path is not absolute or starts with an invalid segment after the root.
-pub fn normalize_abs_path_lexically(path: &Path) -> anyhow::Result<PathBuf> {
-    if !path.is_absolute() {
-        return Err(anyhow!("path is not absolute: {}", path.display()));
-    }
+// pub fn normalize_abs_path_lexically(path: &Path) -> anyhow::Result<PathBuf> {
+//     if !path.is_absolute() {
+//         return Err(anyhow!("path is not absolute: {}", path.display()));
+//     }
 
-    let mut iter = path.components();
+//     let mut iter = path.components();
 
-    if iter.next() != Some(Component::RootDir) {
-        return Err(anyhow!("path does not start with root directory"));
-    }
+//     if iter.next() != Some(Component::RootDir) {
+//         return Err(anyhow!("path does not start with root directory"));
+//     }
 
-    let next = iter.next();
-    if matches!(next, Some(Component::CurDir) | Some(Component::ParentDir)) {
-        return Err(anyhow!(
-            "absolute path starts with invalid segment '.' or '..'"
-        ));
-    }
+//     let next = iter.next();
+//     if matches!(next, Some(Component::CurDir) | Some(Component::ParentDir)) {
+//         return Err(anyhow!(
+//             "absolute path starts with invalid segment '.' or '..'"
+//         ));
+//     }
 
-    let mut components = vec![Component::RootDir];
+//     let mut components = vec![Component::RootDir];
 
-    if let Some(c) = next {
-        components.push(c);
-    }
+//     if let Some(c) = next {
+//         components.push(c);
+//     }
 
-    for component in iter {
-        match component {
-            Component::ParentDir => {
-                if !components.is_empty() && matches!(components.last(), Some(Component::Normal(_)))
-                {
-                    components.pop();
-                }
-                // Ignore if at root; do not push
-            }
-            Component::CurDir => {}
-            _ => components.push(component),
-        }
-    }
+//     for component in iter {
+//         match component {
+//             Component::ParentDir => {
+//                 if !components.is_empty() && matches!(components.last(), Some(Component::Normal(_)))
+//                 {
+//                     components.pop();
+//                 }
+//                 // Ignore if at root; do not push
+//             }
+//             Component::CurDir => {}
+//             _ => components.push(component),
+//         }
+//     }
 
-    let mut result = PathBuf::new();
-    for c in components {
-        result.push(c.as_os_str());
-    }
+//     let mut result = PathBuf::new();
+//     for c in components {
+//         result.push(c.as_os_str());
+//     }
 
-    Ok(result)
-}
+//     Ok(result)
+// }
 
 /// Normalizes a relative path by removing redundant '.' components and resolving '..' components against preceding normal components where possible.
 /// Unresolvable '..' components (e.g., at the beginning or following other '..') are preserved to maintain the relative nature of the path.

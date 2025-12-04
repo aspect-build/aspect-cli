@@ -1,13 +1,11 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-
 use anyhow::anyhow;
 use starlark::environment::{FrozenModule, Globals, Module};
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::{AstModule, Dialect};
-use starlark::values::Heap;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use super::api;
 use super::error::EvalError;
@@ -22,14 +20,6 @@ pub struct ModuleScope {
     // The module root directory that relative loads cannot escape
     pub path: PathBuf,
 }
-
-// #[derive(Debug, Clone)]
-// pub struct ScriptInfo {
-//     // The script path
-//     pub(super) path: PathBuf,
-//     // Module info which script belongs to
-//     pub(super) scope: ModuleScope,
-// }
 
 /// Internal loader for .axl files, handling path resolution, security checks, and recursive loading.
 #[derive(Debug)]
@@ -46,7 +36,7 @@ pub struct AxlLoader<'p> {
 
     pub(crate) module_stack: RefCell<Vec<ModuleScope>>,
 
-    loaded_modules: RefCell<HashMap<String, FrozenModule>>,
+    loaded_modules: RefCell<HashMap<PathBuf, FrozenModule>>,
 }
 
 impl<'p> AxlLoader<'p> {
@@ -62,6 +52,10 @@ impl<'p> AxlLoader<'p> {
         }
     }
 
+    pub fn store(&self) -> &AxlStore {
+        &self.store
+    }
+
     pub(super) fn eval_module(&self, path: &Path) -> Result<Module, EvalError> {
         assert!(path.is_absolute());
 
@@ -75,6 +69,7 @@ impl<'p> AxlLoader<'p> {
         eval.set_loader(self);
         eval.extra = Some(&self.store);
         eval.eval_module(ast, &self.globals)?;
+
         drop(eval);
 
         // Pop the script path off of the LOAD_STACK
@@ -142,23 +137,13 @@ impl<'p> FileLoader for AxlLoader<'p> {
             }
         };
 
-        // let module_specifier = {
-        //     let rel = resolved_script_path
-        //         .strip_prefix(&module_root)
-        //         .map_err(|e| {
-        //             starlark::Error::new_other(anyhow!("failed to strip prefix: {}", e))
-        //         })?;
-        //     let subpath_str = rel
-        //         .to_str()
-        //         .ok_or_else(|| starlark::Error::new_other(anyhow!("non-UTF8 path")))?
-        //         .replace('\\', "/");
-        //     format!("@{}//{}", target_module_name, subpath_str)
-        // };
-
-        let module_spec = resolved_script_path.to_string_lossy().to_string();
-
         // If the module is already loaded, then just return it.
-        if let Some(cached_module) = self.loaded_modules.borrow().get(&module_spec).cloned() {
+        if let Some(cached_module) = self
+            .loaded_modules
+            .borrow()
+            .get(&resolved_script_path)
+            .cloned()
+        {
             return Ok(cached_module);
         }
 
@@ -193,7 +178,7 @@ impl<'p> FileLoader for AxlLoader<'p> {
         // Cache the load @module//path/to/file.axl so it can be re-used on subsequent loads
         self.loaded_modules
             .borrow_mut()
-            .insert(module_spec, frozen_module.clone());
+            .insert(resolved_script_path, frozen_module.clone());
 
         Ok(frozen_module)
     }

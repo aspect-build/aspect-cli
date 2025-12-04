@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use axl_runtime::module::{AXL_MODULE_FILE, AXL_SCRIPT_EXTENSION};
+use axl_runtime::module::{AXL_CONFIG_EXTENSION, AXL_MODULE_FILE, AXL_SCRIPT_EXTENSION};
 use tokio::fs;
 use tracing::instrument;
 
@@ -78,8 +78,11 @@ pub fn get_default_axl_search_paths(
 /// filters for files with the specified extension.
 /// Returns a vector of `PathBuf` for the found files, or an error if a file system operation fails.
 #[instrument]
-pub async fn find_axl_scripts(search_paths: &Vec<PathBuf>) -> Result<Vec<PathBuf>, std::io::Error> {
+pub async fn search_sources(
+    search_paths: &Vec<PathBuf>,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), std::io::Error> {
     let mut found: Vec<PathBuf> = vec![];
+    let mut configs: Vec<PathBuf> = vec![];
 
     for dir in search_paths {
         let dir_metadata = fs::metadata(&dir).await;
@@ -88,10 +91,14 @@ pub async fn find_axl_scripts(search_paths: &Vec<PathBuf>) -> Result<Vec<PathBuf
             let mut entries = fs::read_dir(&dir).await?;
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
-                if path.is_file()
-                    && path
-                        .extension()
-                        .map_or(false, |e| e == AXL_SCRIPT_EXTENSION)
+                if !path.is_file() {
+                    continue;
+                }
+                if path.ends_with(AXL_CONFIG_EXTENSION) {
+                    configs.push(path);
+                } else if path
+                    .extension()
+                    .map_or(false, |e| e == AXL_SCRIPT_EXTENSION)
                 {
                     found.push(path);
                 }
@@ -99,5 +106,5 @@ pub async fn find_axl_scripts(search_paths: &Vec<PathBuf>) -> Result<Vec<PathBuf
         }
     }
 
-    Ok(found)
+    Ok((found, configs))
 }

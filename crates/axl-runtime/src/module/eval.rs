@@ -162,12 +162,12 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
         let store = ModuleStore::from_eval(eval)?;
-        let mut task = store.tasks.borrow_mut();
+        let mut tasks = store.tasks.borrow_mut();
+        let absolute_path = store.module_root.join(&label);
 
-        for symbol in symbols {
-            // TODO: validate that label does not escape.
-            task.push((store.module_root.join(&label), label.clone(), symbol));
-        }
+        let entry = tasks.entry(absolute_path).or_insert((label, vec![]));
+        // TODO: validate that label does not escape.
+        entry.1.extend(symbols);
 
         Ok(values::none::NoneType)
     }
@@ -177,8 +177,9 @@ pub const AXL_MODULE_FILE: &str = "MODULE.aspect";
 
 pub const AXL_ROOT_MODULE_NAME: &str = "root";
 
-#[allow(dead_code)]
 pub const AXL_SCRIPT_EXTENSION: &str = "axl";
+
+pub const AXL_CONFIG_EXTENSION: &str = "config.axl";
 
 /// Returns a GlobalsBuilder for MODULE.aspect specific AXL globals, extending
 /// various Starlark library extensions with custom top-level functions.

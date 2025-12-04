@@ -1,11 +1,11 @@
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use starlark::syntax::{AstModule, Dialect};
-use starlark::values;
+use starlark::syntax::AstModule;
+use starlark::values::ValueLike;
 use std::fs;
 use std::path::Path;
 
-use crate::engine::config_context::{ConfigContext, TaskMut};
+use crate::engine::config::{ConfigContext, TaskMut};
 use crate::engine::store::AxlStore;
 use crate::eval::load::{AxlLoader, ModuleScope};
 
@@ -37,7 +37,7 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
         scope: ModuleScope,
         paths: Vec<&Path>,
         tasks: Vec<TaskMut<'v>>,
-    ) -> Result<(), EvalError> {
+    ) -> Result<&'v ConfigContext<'v>, EvalError> {
         self.loader.module_stack.borrow_mut().push(scope);
 
         let mut eval = Evaluator::new(&self.module);
@@ -59,17 +59,17 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
             eval.eval_module(ast, &self.loader.globals)?;
 
-            let def = self.module.get("config").ok_or(EvalError::MissingSymbol(
-                path.to_path_buf(),
-                "config".into(),
-            ))?;
+            let def = self
+                .module
+                .get("config")
+                .ok_or(EvalError::MissingSymbol("config".into()))?;
             eval.eval_function(def, &[context], &[])?;
 
             // Pop the script path off of the LOAD_STACK
             self.loader.load_stack.borrow_mut().pop();
         }
-
         drop(eval);
-        Ok(())
+        let ctx = context.downcast_ref::<ConfigContext>().unwrap();
+        Ok(ctx)
     }
 }
