@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use axl_runtime::module::{AXL_MODULE_FILE, AXL_SCRIPT_EXTENSION};
+use axl_runtime::module::{AXL_CONFIG_EXTENSION, AXL_MODULE_FILE, AXL_SCRIPT_EXTENSION};
 use tokio::fs;
 use tracing::instrument;
 
@@ -16,7 +16,7 @@ pub const DOT_ASPECT_FOLDER: &str = ".aspect";
 /// If such a directory is found, it returns Ok with the PathBuf of that directory.
 /// If no such directory is found, returns the `current_work_dir`
 #[instrument]
-pub async fn find_root_dir(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
+pub async fn find_repo_root(current_work_dir: &PathBuf) -> Result<PathBuf, ()> {
     async fn err_if_exists(path: PathBuf) -> Result<(), ()> {
         match fs::try_exists(path).await {
             Ok(true) => Err(()),
@@ -77,8 +77,11 @@ pub fn get_default_axl_search_paths(
 /// filters for files with the specified extension.
 /// Returns a vector of `PathBuf` for the found files, or an error if a file system operation fails.
 #[instrument]
-pub async fn find_axl_scripts(search_paths: &Vec<PathBuf>) -> Result<Vec<PathBuf>, std::io::Error> {
+pub async fn search_sources(
+    search_paths: &Vec<PathBuf>,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), std::io::Error> {
     let mut found: Vec<PathBuf> = vec![];
+    let mut configs: Vec<PathBuf> = vec![];
 
     for dir in search_paths {
         let dir_metadata = fs::metadata(&dir).await;
@@ -87,11 +90,14 @@ pub async fn find_axl_scripts(search_paths: &Vec<PathBuf>) -> Result<Vec<PathBuf
             let mut entries = fs::read_dir(&dir).await?;
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
-                if path.is_file()
-                    && path
-                        .extension()
-                        .map(|e| e == AXL_SCRIPT_EXTENSION)
-                        .unwrap_or(false)
+                if !path.is_file() {
+                    continue;
+                }
+                if path.ends_with(AXL_CONFIG_EXTENSION) {
+                    configs.push(path);
+                } else if path
+                    .extension()
+                    .map_or(false, |e| e == AXL_SCRIPT_EXTENSION)
                 {
                     found.push(path);
                 }
@@ -99,5 +105,5 @@ pub async fn find_axl_scripts(search_paths: &Vec<PathBuf>) -> Result<Vec<PathBuf
         }
     }
 
-    Ok(found)
+    Ok((found, configs))
 }

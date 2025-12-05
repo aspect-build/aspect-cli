@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 
 use axl_runtime::engine::task::{TaskLike, MAX_TASK_GROUPS};
-use clap::{Arg, ArgMatches, Command};
+use clap::{value_parser, Arg, ArgMatches, Command};
 use thiserror::Error;
 
-const TASK_COMMAND_PATH_ID: &'static str = "@@@__AXL__PATH__@@@";
-const TASK_COMMAND_SYMBOL_ID: &'static str = "@@@__AXL__SYMBOL__@@@";
+const TASK_ID: &'static str = "@@@$'__AXL_TASK_ID__'$@@@";
 
 // Clap's help generation sorts by (display_order, name)—-equal display_order values fall back to name-based sorting.
 const TASK_COMMAND_DISPLAY_ORDER: usize = 0;
@@ -27,7 +26,9 @@ pub enum TreeError {
     )]
     TaskGroupConflict(String, Vec<String>, String),
 
-    #[error("group {0:?} from task {1:?} in group {2:?} (defined in {3:?}) conflicts with a previously defined task")]
+    #[error(
+        "group {0:?} from task {1:?} in group {2:?} (defined in {3:?}) conflicts with a previously defined task"
+    )]
     GroupConflictTask(String, String, Vec<String>, String),
 
     #[error(
@@ -131,28 +132,16 @@ impl CommandTree {
         Ok(current)
     }
 
-    pub fn get_task_path(&self, matches: &ArgMatches) -> String {
-        assert!(matches.contains_id(TASK_COMMAND_PATH_ID));
-        matches
-            .get_one::<String>(TASK_COMMAND_PATH_ID)
-            .unwrap()
-            .clone()
-    }
-
-    pub fn get_task_symbol(&self, matches: &ArgMatches) -> String {
-        assert!(matches.contains_id(TASK_COMMAND_SYMBOL_ID));
-        matches
-            .get_one::<String>(TASK_COMMAND_SYMBOL_ID)
-            .unwrap()
-            .clone()
+    pub fn get_task_id(&self, matches: &ArgMatches) -> usize {
+        assert!(matches.contains_id(TASK_ID));
+        matches.get_one::<usize>(TASK_ID).unwrap().to_owned()
     }
 }
 
 pub fn make_command_from_task(
     name: &String,
     defined_in: &str,
-    path: &String,
-    symbol: &String,
+    indice: String,
     task: &dyn TaskLike<'_>,
 ) -> Command {
     // Generate a default task description if none was provided by task
@@ -169,24 +158,15 @@ pub fn make_command_from_task(
         .about(about)
         .display_order(TASK_COMMAND_DISPLAY_ORDER)
         .arg(
-            Arg::new(TASK_COMMAND_PATH_ID)
-                .long(TASK_COMMAND_PATH_ID)
+            Arg::new(TASK_ID)
+                .long(TASK_ID)
                 .hide(true)
                 .hide_default_value(true)
                 .hide_short_help(true)
                 .hide_possible_values(true)
                 .hide_long_help(true)
-                .default_value(path),
-        )
-        .arg(
-            Arg::new(TASK_COMMAND_SYMBOL_ID)
-                .long(TASK_COMMAND_SYMBOL_ID)
-                .hide(true)
-                .hide_default_value(true)
-                .hide_short_help(true)
-                .hide_possible_values(true)
-                .hide_long_help(true)
-                .default_value(symbol),
+                .value_parser(value_parser!(usize))
+                .default_value(indice),
         );
 
     for (name, arg) in task.args() {

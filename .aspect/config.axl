@@ -1,2 +1,17 @@
+def _task2(ctx):
+    print(ctx)
+    print("i am a task added by config.axl")
+
+task2 = task(
+    name = "task2",
+    implementation = _task2,
+    args = {}
+)
+
 def config(ctx: ConfigContext):
+    ctx.tasks.add(task2, name = "added_by_config", group = [])
+    print("running config")
+    for task in ctx.tasks:
+        print(task.name, task.group)
+
     pass

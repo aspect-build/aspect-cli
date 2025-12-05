@@ -19,8 +19,8 @@ use starlark::values::list_or_tuple::UnpackListOrTuple;
 use crate::module::AxlLocalDep;
 use crate::module::Dep;
 
-use super::super::eval::EvalError;
-use super::super::helpers::validate_module_name;
+use super::super::eval::{validate_module_name, EvalError};
+
 use super::store::{AxlArchiveDep, ModuleStore};
 
 #[starlark_module]
@@ -78,7 +78,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 AXL_ROOT_MODULE_NAME
             );
         }
-        validate_module_name(&name).map_err(|e| e.into_anyhow())?;
+        validate_module_name(&name)?;
 
         if !dev {
             anyhow::bail!("axl_archive_dep does not support transitive dependencies yet.");
@@ -126,7 +126,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         if name == AXL_ROOT_MODULE_NAME {
             anyhow::bail!("axl_local_dep name {:?} not allowed.", AXL_ROOT_MODULE_NAME);
         }
-        validate_module_name(&name).map_err(|e| e.into_anyhow())?;
+        validate_module_name(&name)?;
 
         let store = ModuleStore::from_eval(eval)?;
 
@@ -165,11 +165,12 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
         let store = ModuleStore::from_eval(eval)?;
-        let mut task = store.tasks.borrow_mut();
+        let mut tasks = store.tasks.borrow_mut();
+        let absolute_path = store.module_root.join(&label);
 
-        for symbol in symbols {
-            task.push((label.clone(), symbol));
-        }
+        let entry = tasks.entry(absolute_path).or_insert((label, vec![]));
+        // TODO: validate that label does not escape.
+        entry.1.extend(symbols);
 
         Ok(values::none::NoneType)
     }
@@ -179,8 +180,9 @@ pub const AXL_MODULE_FILE: &str = "MODULE.aspect";
 
 pub const AXL_ROOT_MODULE_NAME: &str = "root";
 
-#[allow(dead_code)]
 pub const AXL_SCRIPT_EXTENSION: &str = "axl";
+
+pub const AXL_CONFIG_EXTENSION: &str = "config.axl";
 
 /// Returns a GlobalsBuilder for MODULE.aspect specific AXL globals, extending
 /// various Starlark library extensions with custom top-level functions.

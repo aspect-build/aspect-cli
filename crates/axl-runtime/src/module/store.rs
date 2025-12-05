@@ -20,7 +20,7 @@ pub struct ModuleStore {
     pub module_name: String,
     pub module_root: PathBuf,
     pub deps: Rc<RefCell<HashMap<String, Dep>>>,
-    pub tasks: Rc<RefCell<Vec<(String, String)>>>,
+    pub tasks: Rc<RefCell<HashMap<PathBuf, (String, Vec<String>)>>>,
 }
 
 impl ModuleStore {
@@ -30,7 +30,7 @@ impl ModuleStore {
             module_name,
             module_root,
             deps: Rc::new(RefCell::new(HashMap::new())),
-            tasks: Rc::new(RefCell::new(Vec::new())),
+            tasks: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 

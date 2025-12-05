@@ -47,10 +47,10 @@ where
 pub struct Task<'v> {
     r#impl: values::Value<'v>,
     #[allocative(skip)]
-    args: SmallMap<String, TaskArg>,
-    description: String,
-    group: Vec<String>,
-    name: String,
+    pub(super) args: SmallMap<String, TaskArg>,
+    pub(super) description: String,
+    pub(super) group: Vec<String>,
+    pub(super) name: String,
 }
 
 impl<'v> Task<'v> {
@@ -109,15 +109,15 @@ impl<'v> values::Freeze for Task<'v> {
     }
 }
 
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(Debug, Display, Clone, ProvidesStaticType, Trace, NoSerialize, Allocative)]
 #[display("<Task>")]
 pub struct FrozenTask {
     r#impl: values::FrozenValue,
     #[allocative(skip)]
-    args: SmallMap<String, TaskArg>,
-    description: String,
-    group: Vec<String>,
-    name: String,
+    pub(super) args: SmallMap<String, TaskArg>,
+    pub(super) description: String,
+    pub(super) group: Vec<String>,
+    pub(super) name: String,
 }
 
 starlark_simple_value!(FrozenTask);
