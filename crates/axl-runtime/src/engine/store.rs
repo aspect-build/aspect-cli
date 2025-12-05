@@ -26,7 +26,7 @@ impl AxlStore {
         let value = eval
             .extra
             .ok_or(anyhow::anyhow!("failed to get axl store"))?
-            .downcast_ref::<AxlStore>()
+            .downcast_ref::<&AxlStore>()
             .ok_or(anyhow::anyhow!("failed to cast axl store"))?;
         Ok(AxlStore {
             cli_version: value.cli_version.clone(),
