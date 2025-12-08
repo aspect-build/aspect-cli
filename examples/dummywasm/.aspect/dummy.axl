@@ -1,0 +1,38 @@
+"""Demo AXL script that loads a wasm binary and reads dummy JSON data from memory.
+
+This demonstrates calling wasm functions that return data via memory pointers.
+"""
+
+def impl(ctx) -> int:
+    wasm_path = ctx.std.env.current_dir() + "/dummy.wasm"
+
+    dummy = ctx.wasm.instantiate(wasm_path)
+    memory = dummy.get_memory("memory")
+
+    # Initialize Go runtime (required for Go wasip1 modules)
+    dummy.start()
+
+    # Get dummy JSON from wasm.
+    # Go's wasmexport doesn't support multiple return values, so the function
+    # packs ptr and length into a single uint64:
+    #   - lower 32 bits: memory pointer
+    #   - upper 32 bits: data length
+    #
+    # This works because starlark-rust uses arbitrary precision integers,
+    # not the 32-bit signed integers from the Starlark spec.
+    result = dummy.exports.get_dummy_json()
+    ptr = result & 0xFFFFFFFF
+    length = (result >> 32) & 0xFFFFFFFF
+    print("Pointer:", ptr)
+    print("Length:", length)
+
+    # Read the JSON data from wasm linear memory
+    json_bytes = memory.read(ptr, length)
+    print("JSON data:", str(json_bytes))
+
+    return 0
+
+dummy = task(
+    implementation = impl,
+    args = {},
+)

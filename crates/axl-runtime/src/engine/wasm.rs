@@ -34,6 +34,8 @@ use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 
+use crate::engine::types::bytes::Bytes;
+
 #[derive(Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<wasm.WasmMemory>")]
 pub struct WasmMemory {
@@ -70,6 +72,7 @@ pub(crate) fn wasm_memory_methods(registry: &mut MethodsBuilder) {
         let pages = mem.grow(wm.store.borrow_mut().as_context_mut(), by)?;
         Ok(pages)
     }
+
     fn write<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] offset: usize,
@@ -90,6 +93,38 @@ pub(crate) fn wasm_memory_methods(registry: &mut MethodsBuilder) {
                 .as_slice(),
         )?;
         Ok(NoneType)
+    }
+
+    /// Reads bytes from wasm linear memory.
+    ///
+    /// # Arguments
+    /// * `offset` - The byte offset in wasm memory to start reading from
+    /// * `length` - The number of bytes to read
+    ///
+    /// # Returns
+    /// A `Bytes` object containing the data read from memory.
+    ///
+    /// # Example
+    /// ```starlark
+    /// # Get pointer and length from a wasm function
+    /// result = wasm_instance.exports.get_data()
+    /// ptr = result & 0xFFFFFFFF
+    /// length = (result >> 32) & 0xFFFFFFFF
+    ///
+    /// # Read the data from wasm memory
+    /// data = memory.read(ptr, length)
+    /// print(str(data))
+    /// ```
+    fn read<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] offset: usize,
+        #[starlark(require = pos)] length: usize,
+    ) -> anyhow::Result<Bytes> {
+        let wm = this.downcast_ref::<WasmMemory>().unwrap();
+        let mem = wm.memory.borrow();
+        let mut buffer = vec![0u8; length];
+        mem.read(wm.store.borrow_mut().as_context_mut(), offset, &mut buffer)?;
+        Ok(Bytes::from(buffer.as_slice()))
     }
 }
 
