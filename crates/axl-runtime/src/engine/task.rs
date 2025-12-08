@@ -14,7 +14,6 @@ use starlark::values;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
-use starlark::values::record::Record;
 use starlark::values::starlark_value;
 use starlark::values::typing::StarlarkCallableParamSpec;
 use starlark::values::NoSerialize;

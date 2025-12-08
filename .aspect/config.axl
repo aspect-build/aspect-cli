@@ -10,8 +10,7 @@ task2 = task(
 
 def config(ctx: ConfigContext):
     ctx.tasks.add(task2, name = "added_by_config", group = [])
-    print("running config")
-    for task in ctx.tasks:
-        print(task.name, task.group, task.binding)
+    # for task in ctx.tasks:
+    #     print(task.name, task.group, task.binding)
 
     pass
