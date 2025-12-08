@@ -87,20 +87,25 @@ impl<'v> values::StarlarkValue<'v> for TaskMut<'v> {
     }
 
     fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<values::Value<'v>> {
+        eprintln!("{}", attribute == "binding");
         match attribute {
             "name" => Some(heap.alloc_str(self.name.borrow().as_str()).to_value()),
             "group" => Some(heap.alloc(AllocList(self.group.borrow().iter()))),
+            "binding" => {
+                if let Some(task) = self.original.downcast_ref::<Task>() {
+                    Some(task.binding())
+                } else if let Some(task) = self.original.downcast_ref::<FrozenTask>() {
+                    Some(task.binding())
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
 
     fn dir_attr(&self) -> Vec<String> {
-        vec![
-            "group".into(),
-            "name".into(),
-            "args".into(),
-            "config".into(),
-        ]
+        vec!["name".into(), "group".into(), "binding".into()]
     }
 }
 

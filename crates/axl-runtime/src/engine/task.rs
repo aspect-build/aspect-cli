@@ -5,13 +5,16 @@ use allocative::Allocative;
 use derive_more::Display;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
+use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::typing::ParamIsRequired;
 use starlark::typing::ParamSpec;
 use starlark::values;
 use starlark::values::list::UnpackList;
+use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
+use starlark::values::record::Record;
 use starlark::values::starlark_value;
 use starlark::values::typing::StarlarkCallableParamSpec;
 use starlark::values::NoSerialize;
@@ -27,6 +30,7 @@ pub trait TaskLike<'v>: 'v {
     fn description(&self) -> &String;
     fn group(&self) -> &Vec<String>;
     fn name(&self) -> &String;
+    fn binding(&self) -> values::Value<'v>;
 }
 
 pub trait AsTaskLike<'v>: TaskLike<'v> {
@@ -46,6 +50,7 @@ where
 #[display("<Task>")]
 pub struct Task<'v> {
     r#impl: values::Value<'v>,
+    binding: values::Value<'v>,
     #[allocative(skip)]
     pub(super) args: SmallMap<String, TaskArg>,
     pub(super) description: String,
@@ -56,6 +61,9 @@ pub struct Task<'v> {
 impl<'v> Task<'v> {
     pub fn implementation(&self) -> values::Value<'v> {
         self.r#impl
+    }
+    pub fn binding(&self) -> values::Value<'v> {
+        self.binding
     }
     pub fn args(&self) -> &SmallMap<String, TaskArg> {
         &self.args
@@ -72,9 +80,13 @@ impl<'v> Task<'v> {
 }
 
 impl<'v> TaskLike<'v> for Task<'v> {
+    fn binding(&self) -> values::Value<'v> {
+        self.binding
+    }
     fn args(&self) -> &SmallMap<String, TaskArg> {
         &self.args
     }
+
     fn description(&self) -> &String {
         &self.description
     }
@@ -99,8 +111,10 @@ impl<'v> values::Freeze for Task<'v> {
     type Frozen = FrozenTask;
     fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
         let frozen_impl = self.r#impl.freeze(freezer)?;
+        let binding = self.binding.freeze(freezer)?;
         Ok(FrozenTask {
             args: self.args,
+            binding: binding,
             r#impl: frozen_impl,
             description: self.description,
             group: self.group,
@@ -113,6 +127,7 @@ impl<'v> values::Freeze for Task<'v> {
 #[display("<Task>")]
 pub struct FrozenTask {
     r#impl: values::FrozenValue,
+    binding: values::FrozenValue,
     #[allocative(skip)]
     pub(super) args: SmallMap<String, TaskArg>,
     pub(super) description: String,
@@ -134,6 +149,9 @@ impl FrozenTask {
 }
 
 impl<'v> TaskLike<'v> for FrozenTask {
+    fn binding(&self) -> values::Value<'v> {
+        self.binding.to_value()
+    }
     fn args(&self) -> &SmallMap<String, TaskArg> {
         &self.args
     }
@@ -190,7 +208,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)] args: values::dict::UnpackDictEntries<&'v str, TaskArg>,
         #[starlark(require = named, default = String::new())] description: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
+        #[starlark(require = named, default = NoneOr::None)] binding: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = String::new())] name: String,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Task<'v>> {
         if group.items.len() > MAX_TASK_GROUPS {
             return Err(anyhow::anyhow!(
@@ -199,12 +219,19 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             )
             .into());
         }
+        let binding = if let Some(binding) = binding.into_option() {
+            eval.eval_function(binding, &[], &[])?
+        } else {
+            Value::new_none()
+        };
+
         let mut args_ = SmallMap::new();
         for (arg, def) in args.entries {
             args_.insert(arg.to_owned(), def.clone());
         }
         Ok(Task {
             args: args_,
+            binding,
             r#impl: implementation.0,
             description,
             group: group.items,
