@@ -20,7 +20,7 @@ use starlark::values::Trace;
 #[display("<Bytes>")]
 pub struct Bytes {
     #[allocative(skip)]
-    buf: ArcBytes,
+    pub(crate) buf: ArcBytes,
 }
 
 impl From<&[u8]> for Bytes {

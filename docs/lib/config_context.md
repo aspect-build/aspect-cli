@@ -1,13 +1,5 @@
 
 
-## ConfigContext.bazel
-
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ConfigContext</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">bazel</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bazel">bazel.Bazel</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
-
-Access to Bazel functionality.
-
-***
-
 ## ConfigContext.http
 
 <pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">ConfigContext</span></span>.<span class="entity name function python"><span class="meta generic-name python">http</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python"><span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/http">Http</a><span class="punctuation definition string end python">&#39;</span></span></span></span></span></code></pre>
@@ -28,6 +20,12 @@ data = ctx.http().get("https://example.com/data.json").block()
 <pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ConfigContext</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">std</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/std">std.Std</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
 
 Standard library is the foundation of powerful AXL tasks.
+
+***
+
+## ConfigContext.tasks
+
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ConfigContext</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">tasks</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta qualified-name python"><span class="support type python">list</span></span></span></code></pre>
 
 ***
 
