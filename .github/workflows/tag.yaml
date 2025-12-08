@@ -1,0 +1,28 @@
+# Tag a new release
+
+# This is easier than having to run manual `git` operations on a local clone,
+# and less error-prone (accidentally releasing with local state for example).
+
+name: Tag a Release
+on:
+  # Allow devs to tag manually through the GitHub UI.
+  # For example after landing a fix that customers are waiting for.
+  workflow_dispatch:
+jobs:
+  tag:
+    permissions:
+      contents: write # allow create tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          tag="v$(./bazel/workspace_status.sh | grep STABLE_MONOREPO_SHORT_VERSION | cut -d' ' -f2)"
+          curl --request POST \
+              --url https://api.github.com/repos/${{ github.repository }}/git/refs \
+              --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
+              --data @- << EOF
+          {
+              "ref": "refs/tags/${tag}",
+              "sha": "${{ github.sha }}"
+          }
+          EOF

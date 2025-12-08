@@ -51,15 +51,11 @@ cargo add --workspace-root YOUR_CRATE
 
 ## Releasing
 
-Releases are kicked off when a release tag is pushed.
+The simplest is to click the green button on
+https://github.com/aspect-build/aspect-cli/actions/workflows/tag.yaml
 
-To determine the release tag for a particular commit run,
-
-```
-./bazel/workspace_status.sh | grep STABLE_MONOREPO_SHORT_VERSION
-```
-
-To cut a release, push resulting STABLE_MONOREPO_SHORT_VERSION prefixed with `v`. For example,
+To manually override the release tag for a particular commit run,
+choose a version and do something like:
 
 ```
 git tag v2025.42.5
