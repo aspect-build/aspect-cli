@@ -20,12 +20,5 @@ jobs:
           fetch-depth: 0
       - run: |
           tag="v$(./bazel/workspace_status.sh | grep STABLE_MONOREPO_SHORT_VERSION | cut -d' ' -f2)"
-          curl --request POST \
-              --url https://api.github.com/repos/${{ github.repository }}/git/refs \
-              --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
-              --data @- << EOF
-          {
-              "ref": "refs/tags/${tag}",
-              "sha": "${{ github.sha }}"
-          }
-          EOF
+          git tag "$tag"
+          git push origin "$tag"
