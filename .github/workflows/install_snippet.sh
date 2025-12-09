@@ -7,10 +7,6 @@ set -o errexit -o nounset -o pipefail
 TAG=${GITHUB_REF_NAME}
 
 cat <<EOF
-> [!WARNING]
-> **Early Preview Release**<br>
-> This is an early preview release of the Aspect CLI rewritten in Rust. It is under active development, and API changes are expected. We plan to stabilize the API and release a stable version in November 2025.
-
 ### Install Aspect CLI (MacOS and Linux)
 
 \`\`\`sh
