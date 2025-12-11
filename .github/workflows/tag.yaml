@@ -13,12 +13,28 @@ jobs:
     permissions:
       contents: write # allow create tag
     runs-on: ubuntu-latest
+    outputs:
+      new-tag: ${{ steps.push_tag.outputs.new-tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           # Need enough history to find the prior weekly tag
           fetch-depth: 0
-      - run: |
+      - id: push_tag
+        run: |
           tag="v$(./bazel/workspace_status.sh | grep STABLE_MONOREPO_SHORT_VERSION | cut -d' ' -f2)"
-          git tag "$tag"
-          git push origin "$tag"
+          curl --request POST \
+              --url https://api.github.com/repos/${{ github.repository }}/git/refs \
+              --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
+              --data @- << EOF
+          {
+              "ref": "refs/tags/${tag}",
+              "sha": "${{ github.sha }}"
+          }
+          EOF
+          echo "new-tag=${tag}" >> $GITHUB_OUTPUT
+  release:
+    needs: tag
+    uses: ./.github/workflows/publish_release.yaml
+    with:
+      tag_name: ${{ needs.tag.outputs.new-tag }}
