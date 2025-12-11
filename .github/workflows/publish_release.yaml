@@ -1,6 +1,12 @@
 name: Publish Release
 
 on:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: 'The tag name for the release (e.g., v2024.1.0)'
+        required: true
+        type: string
   push:
     tags:
       - 'v202[0-9].[0-9]+.[0-9]+'
@@ -18,10 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build_release_artifacts
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-
+      - uses: actions/checkout@v6
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
@@ -34,11 +37,14 @@ jobs:
         run: shasum -a 256 assets/* > sha256
 
       - name: Prepare workspace snippet
+        env:
+          TAG: ${{ inputs.tag_name || github.ref_name }}
         run: .github/workflows/install_snippet.sh > release_notes.txt
 
       - name: Create GitHub draft release and upload artifacts
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
           # Use GH feature to populate the changelog automatically
           generate_release_notes: true
           body_path: release_notes.txt
