@@ -164,6 +164,58 @@ def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
     # Note: Skipping read_link as there is no symlink creation API to test with
     return tc
 
+def test_stream(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    # Test Writable.close() on child stdin
+    # Spawning cat with piped stdin/stdout, writing data, closing stdin (signals EOF),
+    # then verifying the output and exit code
+
+    # Test 1: Basic close on child stdin
+    child = ctx.std.process.command("cat").stdin("piped").stdout("piped").spawn()
+    stdin = child.stdin()
+    stdout = child.stdout()
+
+    stdin.write("Hello from AXL!\n")
+    stdin.flush()
+    stdin.close()
+
+    output = stdout.read_to_string()
+    status = child.wait()
+
+    tc = test_case(tc, output == "Hello from AXL!\n", "close on stdin should signal EOF, cat should echo input")
+    tc = test_case(tc, status.code == 0, "cat should exit with code 0 after stdin is closed")
+
+    # Test 2: Multiple writes then close
+    child2 = ctx.std.process.command("cat").stdin("piped").stdout("piped").spawn()
+    stdin2 = child2.stdin()
+    stdout2 = child2.stdout()
+
+    stdin2.write("Line 1\n")
+    stdin2.write("Line 2\n")
+    stdin2.write("Line 3\n")
+    stdin2.flush()
+    stdin2.close()
+
+    output2 = stdout2.read_to_string()
+    status2 = child2.wait()
+
+    tc = test_case(tc, output2 == "Line 1\nLine 2\nLine 3\n", "multiple writes before close should all be received")
+    tc = test_case(tc, status2.code == 0, "cat should exit with code 0 after multiple writes and close")
+
+    # Test 3: Close without any writes (empty input)
+    child3 = ctx.std.process.command("cat").stdin("piped").stdout("piped").spawn()
+    stdin3 = child3.stdin()
+    stdout3 = child3.stdout()
+
+    stdin3.close()
+
+    output3 = stdout3.read_to_string()
+    status3 = child3.wait()
+
+    tc = test_case(tc, output3 == "", "close without writes should result in empty output")
+    tc = test_case(tc, status3.code == 0, "cat should exit with code 0 after immediate close")
+
+    return tc
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -204,6 +256,7 @@ def impl(ctx: TaskContext) -> int:
 
     tc = test_env(ctx, tc, temp_dir)
     tc = test_fs(ctx, tc, temp_dir)
+    tc = test_stream(ctx, tc, temp_dir)
 
     print(tc, "tests passed")
     return 0

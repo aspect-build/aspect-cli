@@ -41,9 +41,9 @@ pub enum Readable {
 
 #[derive(Debug, ProvidesStaticType, Dupe, Clone, NoSerialize, Allocative)]
 pub enum Writable {
-    ChildStdin(#[allocative(skip)] Arc<Mutex<RefCell<ChildStdin>>>),
-    Stdout(#[allocative(skip)] Arc<Stdout>),
-    Stderr(#[allocative(skip)] Arc<Stderr>),
+    ChildStdin(#[allocative(skip)] Arc<Mutex<RefCell<Option<ChildStdin>>>>),
+    Stdout(#[allocative(skip)] Arc<Mutex<RefCell<Option<Stdout>>>>),
+    Stderr(#[allocative(skip)] Arc<Mutex<RefCell<Option<Stderr>>>>),
 }
 
 impl Display for Readable {
@@ -86,19 +86,19 @@ impl From<ChildStdout> for Readable {
 
 impl From<ChildStdin> for Writable {
     fn from(stdin: ChildStdin) -> Self {
-        Self::ChildStdin(Arc::new(Mutex::new(RefCell::new(stdin))))
+        Self::ChildStdin(Arc::new(Mutex::new(RefCell::new(Some(stdin)))))
     }
 }
 
 impl From<Stdout> for Writable {
     fn from(stdout: Stdout) -> Self {
-        Self::Stdout(Arc::new(stdout))
+        Self::Stdout(Arc::new(Mutex::new(RefCell::new(Some(stdout)))))
     }
 }
 
 impl From<Stderr> for Writable {
     fn from(stderr: Stderr) -> Self {
-        Self::Stderr(Arc::new(stderr))
+        Self::Stderr(Arc::new(Mutex::new(RefCell::new(Some(stderr)))))
     }
 }
 
@@ -192,8 +192,16 @@ fn writable_methods(registry: &mut MethodsBuilder) {
         let io = this.downcast_ref_err::<Writable>()?;
         Ok(match &*io {
             Writable::ChildStdin(_) => false,
-            Writable::Stdout(out) => out.is_terminal(),
-            Writable::Stderr(err) => err.is_terminal(),
+            Writable::Stdout(out) => {
+                let guard = out.lock().unwrap();
+                let borrowed = guard.borrow();
+                borrowed.as_ref().map(|s| s.is_terminal()).unwrap_or(false)
+            }
+            Writable::Stderr(err) => {
+                let guard = err.lock().unwrap();
+                let borrowed = guard.borrow();
+                borrowed.as_ref().map(|s| s.is_terminal()).unwrap_or(false)
+            }
         })
     }
 
@@ -209,23 +217,41 @@ fn writable_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<u32> {
         let io = this.downcast_ref_err::<Writable>()?;
         match &*io {
-            Writable::ChildStdin(stdin) => stdin
-                .lock()
-                .unwrap()
-                .borrow_mut()
-                .write(buf.as_bytes())
-                .map(|f| f as u32)
-                .map_err(|err| anyhow!(err)),
-            Writable::Stdout(stdout) => stdout
-                .lock()
-                .write(buf.as_bytes())
-                .map(|f| f as u32)
-                .map_err(|err| anyhow!(err)),
-            Writable::Stderr(stderr) => stderr
-                .lock()
-                .write(buf.as_bytes())
-                .map(|f| f as u32)
-                .map_err(|err| anyhow!(err)),
+            Writable::ChildStdin(stdin) => {
+                let guard = stdin.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                let inner = borrowed
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("stream is closed"))?;
+                inner
+                    .write(buf.as_bytes())
+                    .map(|f| f as u32)
+                    .map_err(|err| anyhow!(err))
+            }
+            Writable::Stdout(stdout) => {
+                let guard = stdout.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                let inner = borrowed
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("stream is closed"))?;
+                inner
+                    .lock()
+                    .write(buf.as_bytes())
+                    .map(|f| f as u32)
+                    .map_err(|err| anyhow!(err))
+            }
+            Writable::Stderr(stderr) => {
+                let guard = stderr.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                let inner = borrowed
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("stream is closed"))?;
+                inner
+                    .lock()
+                    .write(buf.as_bytes())
+                    .map(|f| f as u32)
+                    .map_err(|err| anyhow!(err))
+            }
         }
     }
 
@@ -234,9 +260,61 @@ fn writable_methods(registry: &mut MethodsBuilder) {
     fn flush<'v>(this: values::Value) -> anyhow::Result<NoneType> {
         let io = this.downcast_ref_err::<Writable>()?;
         match &*io {
-            Writable::ChildStdin(stdin) => stdin.lock().unwrap().borrow_mut().flush()?,
-            Writable::Stdout(stdout) => stdout.lock().flush()?,
-            Writable::Stderr(stderr) => stderr.lock().flush()?,
+            Writable::ChildStdin(stdin) => {
+                let guard = stdin.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                if let Some(inner) = borrowed.as_mut() {
+                    inner.flush()?;
+                }
+            }
+            Writable::Stdout(stdout) => {
+                let guard = stdout.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                if let Some(inner) = borrowed.as_mut() {
+                    inner.lock().flush()?;
+                }
+            }
+            Writable::Stderr(stderr) => {
+                let guard = stderr.lock().unwrap();
+                let mut borrowed = guard.borrow_mut();
+                if let Some(inner) = borrowed.as_mut() {
+                    inner.lock().flush()?;
+                }
+            }
+        };
+        Ok(NoneType)
+    }
+
+    /// Closes this output stream. This drops the underlying handle, and
+    /// subsequent writes will fail with "stream is closed".
+    fn close<'v>(this: values::Value) -> anyhow::Result<NoneType> {
+        let io = this.downcast_ref_err::<Writable>()?;
+        match &*io {
+            Writable::ChildStdin(stdin) => {
+                // Take the inner value out, replacing with None. Dropping it closes the stream.
+                stdin
+                    .lock()
+                    .unwrap()
+                    .borrow_mut()
+                    .take()
+                    .ok_or_else(|| anyhow!("stream is already closed"))?;
+            }
+            Writable::Stdout(stdout) => {
+                stdout
+                    .lock()
+                    .unwrap()
+                    .borrow_mut()
+                    .take()
+                    .ok_or_else(|| anyhow!("stream is already closed"))?;
+            }
+            Writable::Stderr(stderr) => {
+                stderr
+                    .lock()
+                    .unwrap()
+                    .borrow_mut()
+                    .take()
+                    .ok_or_else(|| anyhow!("stream is already closed"))?;
+            }
         };
         Ok(NoneType)
     }
