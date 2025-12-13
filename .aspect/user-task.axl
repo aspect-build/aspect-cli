@@ -13,11 +13,18 @@ def _impl2(ctx):
     print("I am an auto-discovered task in .aspect/user-task.axl")
     return 0
 
+bindings = record(
+    callback = field(typing.Callable[[int], None], lambda _: None),
+    test = field(int, 0)
+)
+
+def untyped_bindings():
+    return struct()
+
+
 user_task3 = task(
     group = ["user"],
     implementation = _impl,
     args = {},
-    # config = config.type(
-    #     callback = typing.Callable[[]],
-    # )
+    binding = untyped_bindings
 )
