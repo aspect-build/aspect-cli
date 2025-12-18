@@ -218,6 +218,8 @@ impl DiskStore {
 
     async fn link_dep(&self, dep: &AxlLocalDep) -> Result<(), io::Error> {
         let dep_path = self.dep_path(&dep.name);
+        // Remove any existing symlink before creating a new one
+        let _ = fs::remove_file(&dep_path).await;
         fs::symlink(&dep.path, dep_path).await
     }
 
@@ -282,19 +284,27 @@ impl DiskStore {
             if dep_marker_path.exists() {
                 let prev_hash = fs::read_to_string(&dep_marker_path).await?;
                 if prev_hash != current_hash {
-                    if dep_path.exists() {
-                        fs::remove_dir_all(&dep_path).await?;
+                    if let Ok(metadata) = fs::symlink_metadata(&dep_path).await {
+                        if metadata.is_symlink() {
+                            fs::remove_file(&dep_path).await?;
+                        } else {
+                            fs::remove_dir_all(&dep_path).await?;
+                        }
                     }
                 }
             } else {
                 // if we have no marker file and the cas_path exists, the safest thing to do is to delete the
                 // current dep path and start over
-                if dep_path.exists() {
-                    fs::remove_dir_all(&dep_path).await?;
+                if let Ok(metadata) = fs::symlink_metadata(&dep_path).await {
+                    if metadata.is_symlink() {
+                        fs::remove_file(&dep_path).await?;
+                    } else {
+                        fs::remove_dir_all(&dep_path).await?;
+                    }
                 }
             }
 
-            if !dep_path.exists() {
+            if fs::symlink_metadata(&dep_path).await.is_err() {
                 match dep {
                     Dep::Local(local) => {
                         self.link_dep(local)

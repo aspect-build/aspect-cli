@@ -221,4 +221,23 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
                 .ok_or(anyhow::anyhow!("root dir is non utf-8"))?,
         ))
     }
+
+    /// Returns the operating system name.
+    ///
+    /// Returns a string describing the operating system in use, such as
+    /// "linux", "macos", "windows", etc.
+    fn os<'v>(#[allow(unused)] this: values::Value<'v>, heap: &'v Heap) -> anyhow::Result<&'v str> {
+        Ok(std::env::consts::OS)
+    }
+
+    /// Returns the CPU architecture.
+    ///
+    /// Returns a string describing the CPU architecture, such as
+    /// "x86_64", "aarch64", etc.
+    fn arch<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        heap: &'v Heap,
+    ) -> anyhow::Result<&'v str> {
+        Ok(std::env::consts::ARCH)
+    }
 }

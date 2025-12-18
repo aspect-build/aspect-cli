@@ -16,7 +16,8 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
             .default_value(default.to_string())
             .value_parser(value_parser!(bool))
             .num_args(0..=1)
-            .default_missing_value(default.to_string()),
+            .require_equals(true)
+            .default_missing_value("true"),
         TaskArg::Int { required, default } => Arg::new(name)
             .long(name)
             .value_name(name)
