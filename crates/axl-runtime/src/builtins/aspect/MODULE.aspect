@@ -1,2 +1,3 @@
 use_task("build.axl", "build")
 use_task("test.axl", "test")
+use_task("axl_add.axl", "add")

@@ -95,7 +95,8 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
 
         let fut = async {
             let res = req.send().await?;
-            Ok(HttpResponse::from(&res))
+            let response = HttpResponse::from_response(res).await?;
+            Ok(response)
         };
 
         Ok(StarlarkFuture::from_future(fut.boxed()))
@@ -116,7 +117,8 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         req = req.body(data);
         let fut = async {
             let res = req.send().await?;
-            Ok(HttpResponse::from(&res))
+            let response = HttpResponse::from_response(res).await?;
+            Ok(response)
         };
 
         Ok(StarlarkFuture::from_future(fut))
@@ -129,6 +131,26 @@ pub struct HttpResponse {
     status: u16,
     body: String,
     headers: Vec<(String, String)>,
+}
+
+impl HttpResponse {
+    /// Creates an HttpResponse from a reqwest::Response, consuming the response
+    /// and reading the body.
+    pub async fn from_response(response: reqwest::Response) -> Result<Self, reqwest::Error> {
+        let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = response.text().await?;
+
+        Ok(Self {
+            status,
+            headers,
+            body,
+        })
+    }
 }
 
 impl From<&reqwest::Response> for HttpResponse {
