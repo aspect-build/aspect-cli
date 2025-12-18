@@ -1,17 +1,16 @@
-#[cfg(debug_assertions)]
-use std::path::Path;
 use std::path::PathBuf;
 
 #[cfg(debug_assertions)]
 pub fn expand_builtins(
-    root_dir: impl AsRef<Path>,
+    _root_dir: PathBuf,
     _broot: PathBuf,
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
+    // Use CARGO_MANIFEST_DIR to locate builtins relative to this crate's source,
+    // not the user's project root (which could be /tmp or anywhere)
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     Ok(vec![(
         "aspect".to_string(),
-        root_dir
-            .as_ref()
-            .join("crates/axl-runtime/src/builtins/aspect"),
+        manifest_dir.join("src/builtins/aspect"),
     )])
 }
 
