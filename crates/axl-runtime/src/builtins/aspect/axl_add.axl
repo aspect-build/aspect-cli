@@ -1,0 +1,236 @@
+"""
+Add AXL dependencies to MODULE.aspect from GitHub releases.
+
+Usage:
+  aspect axl add gh:owner/repo          # adds latest release
+  aspect axl add gh:owner/repo@latest   # same as above
+  aspect axl add gh:owner/repo@v1.0.0   # adds specific version
+"""
+
+def parse_dep_spec(spec: str) -> dict:
+    """
+    Parse a dependency specification like 'gh:owner/repo@version'.
+
+    Returns a dict with keys: source, owner, repo, version
+    """
+    if not spec.startswith("gh:"):
+        fail("Only GitHub dependencies (gh:owner/repo) are supported currently")
+
+    # Remove the 'gh:' prefix
+    remainder = spec[3:]
+
+    # Split by @ to get version
+    version = "latest"
+    if "@" in remainder:
+        parts = remainder.split("@")
+        remainder = parts[0]
+        version = parts[1] if len(parts) > 1 and parts[1] else "latest"
+
+    # Split by / to get owner and repo
+    if "/" not in remainder:
+        fail("Invalid dependency format. Expected: gh:owner/repo[@version]")
+
+    parts = remainder.split("/")
+    if len(parts) != 2:
+        fail("Invalid dependency format. Expected: gh:owner/repo[@version]")
+
+    owner = parts[0]
+    repo = parts[1]
+
+    if not owner or not repo:
+        fail("Owner and repo cannot be empty")
+
+    return {
+        "source": "github",
+        "owner": owner,
+        "repo": repo,
+        "version": version,
+    }
+
+def get_github_headers() -> dict:
+    """Return headers for GitHub API requests."""
+    return {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "AXL-CLI",
+    }
+
+def fetch_latest_release(ctx: TaskContext, owner: str, repo: str) -> dict:
+    """Fetch the latest release from GitHub API."""
+    url = "https://api.github.com/repos/" + owner + "/" + repo + "/releases/latest"
+
+    print("Fetching latest release from " + owner + "/" + repo + "...")
+    response = ctx.http().get(url = url, headers = get_github_headers()).block()
+
+    if response.status == 404:
+        fail("Repository " + owner + "/" + repo + " not found or has no releases")
+
+    if response.status != 200:
+        fail("Failed to fetch release info: HTTP " + str(response.status))
+
+    if not response.body:
+        fail("Empty response body from GitHub API")
+
+    return json.decode(response.body)
+
+def fetch_release_by_tag(ctx: TaskContext, owner: str, repo: str, tag: str) -> dict:
+    """Fetch a specific release by tag from GitHub API."""
+    url = "https://api.github.com/repos/" + owner + "/" + repo + "/releases/tags/" + tag
+
+    print("Fetching release " + tag + " from " + owner + "/" + repo + "...")
+    response = ctx.http().get(url = url, headers = get_github_headers()).block()
+
+    if response.status == 404:
+        fail("Release " + tag + " not found in " + owner + "/" + repo)
+
+    if response.status != 200:
+        fail("Failed to fetch release info: HTTP " + str(response.status))
+
+    return json.decode(response.body)
+
+def compute_integrity(ctx: TaskContext, url: str, temp_file: str) -> str:
+    """
+    Download a file and compute its SHA512 integrity hash in SSRI format.
+    """
+    print("Downloading archive to compute integrity...")
+
+    # Download the file
+    ctx.http().download(url = url, output = temp_file, mode = 0o644, headers = get_github_headers()).block()
+
+    # Compute SHA512 and base64 encode using a shell command
+    # Using sh -c to pipe the commands together
+    child = ctx.std.process.command("sh").args([
+        "-c",
+        "openssl dgst -sha512 -binary '" + temp_file + "' | openssl base64 -A"
+    ]).stdout("piped").stderr("piped").spawn()
+
+    base64_hash = child.stdout().read_to_string().strip()
+    stderr_output = child.stderr().read_to_string()
+    status = child.wait()
+
+    if status.code != 0:
+        fail("Failed to compute hash: " + stderr_output)
+
+    # Clean up temp file
+    ctx.std.fs.remove_file(temp_file)
+
+    return "sha512-" + base64_hash
+
+def sanitize_module_name(name: str) -> str:
+    """Convert a repository name to a valid module name."""
+    # Replace hyphens with underscores and ensure it's a valid identifier
+    return name.replace("-", "_").lower()
+
+def generate_axl_archive_dep(name: str, url: str, integrity: str, strip_prefix: str) -> str:
+    """Generate the axl_archive_dep() call to add to MODULE.aspect."""
+    lines = [
+        "",
+        "axl_archive_dep(",
+        "    name = \"" + name + "\",",
+        "    urls = [\"" + url + "\"],",
+        "    integrity = \"" + integrity + "\",",
+        "    strip_prefix = \"" + strip_prefix + "\",",
+        "    auto_use_tasks = True,",
+        "    dev = True,",
+        ")",
+    ]
+    return "\n".join(lines)
+
+def read_module_aspect(ctx: TaskContext) -> str:
+    """Read the current MODULE.aspect file content."""
+    module_path = ctx.std.env.root_dir() + "/MODULE.aspect"
+
+    if ctx.std.fs.exists(module_path):
+        return ctx.std.fs.read_to_string(module_path)
+
+    return ""
+
+def write_module_aspect(ctx: TaskContext, content: str):
+    """Write content to MODULE.aspect file."""
+    module_path = ctx.std.env.root_dir() + "/MODULE.aspect"
+    ctx.std.fs.write(module_path, content)
+
+def check_existing_dep(content: str, name: str) -> bool:
+    """Check if a dependency with this name already exists."""
+    # Simple check for the name in quotes
+    pattern = "name = \"" + name + "\""
+    return pattern in content
+
+def impl(ctx: TaskContext) -> int:
+    if len(ctx.args.dep_spec) == 0:
+        print("Error: No dependency specification provided")
+        print("")
+        print("Usage:")
+        print("  aspect axl add gh:owner/repo          # adds latest release")
+        print("  aspect axl add gh:owner/repo@latest   # same as above")
+        print("  aspect axl add gh:owner/repo@v1.0.0   # adds specific version")
+        return 1
+
+    spec = ctx.args.dep_spec[0]
+
+    # Parse the dependency spec
+    parsed = parse_dep_spec(spec)
+    owner = parsed["owner"]
+    repo = parsed["repo"]
+    version = parsed["version"]
+
+    # Determine the module name (can be overridden with --name flag)
+    module_name = ctx.args.name if ctx.args.name else sanitize_module_name(repo)
+
+    # Check if dependency already exists
+    current_content = read_module_aspect(ctx)
+    if check_existing_dep(current_content, module_name):
+        print("Error: A dependency named '" + module_name + "' already exists in MODULE.aspect")
+        print("Use a different name with --name=<name> or remove the existing dependency first")
+        return 1
+
+    # Fetch release info from GitHub
+    if version == "latest":
+        release = fetch_latest_release(ctx, owner, repo)
+    else:
+        release = fetch_release_by_tag(ctx, owner, repo, version)
+
+    tag_name = release["tag_name"]
+
+    # Use the direct GitHub archive URL format (more reliable than API URL)
+    tarball_url = "https://github.com/" + owner + "/" + repo + "/archive/refs/tags/" + tag_name + ".tar.gz"
+
+    # The strip_prefix is: repo-tag (without the 'v' prefix if present)
+    # GitHub's tarball extracts to: {repo}-{tag_without_v}/
+    tag_for_prefix = tag_name
+    if tag_for_prefix.startswith("v"):
+        tag_for_prefix = tag_for_prefix[1:]
+    strip_prefix = repo + "-" + tag_for_prefix
+
+    print("Release: " + tag_name)
+    print("Tarball URL: " + tarball_url)
+    print("Strip prefix: " + strip_prefix)
+
+    # Compute integrity hash
+    temp_dir = ctx.std.env.temp_dir()
+    temp_file = temp_dir + "/axl_add_" + module_name + ".tar.gz"
+
+    integrity = compute_integrity(ctx, tarball_url, temp_file)
+    print("Integrity: " + integrity)
+
+    # Generate the axl_archive_dep call
+    dep_code = generate_axl_archive_dep(module_name, tarball_url, integrity, strip_prefix)
+
+    # Append to MODULE.aspect
+    new_content = current_content.rstrip() + "\n" + dep_code + "\n"
+    write_module_aspect(ctx, new_content)
+
+    print("")
+    print("Successfully added " + module_name + " (" + tag_name + ") to MODULE.aspect")
+
+    return 0
+
+add = task(
+    group = ["axl"],
+    description = "Add an AXL dependency from GitHub to MODULE.aspect",
+    implementation = impl,
+    args = {
+        "dep_spec": args.positional(minimum = 0, maximum = 1),
+        "name": args.string(default = ""),
+    }
+)

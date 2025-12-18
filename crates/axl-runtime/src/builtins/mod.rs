@@ -29,6 +29,7 @@ pub fn expand_builtins(
     let builtins = vec![
         ("aspect/build.axl", include_str!("./aspect/build.axl")),
         ("aspect/test.axl", include_str!("./aspect/test.axl")),
+        ("aspect/axl_add.axl", include_str!("./aspect/axl_add.axl")),
         (
             "aspect/MODULE.aspect",
             include_str!("./aspect/MODULE.aspect"),
