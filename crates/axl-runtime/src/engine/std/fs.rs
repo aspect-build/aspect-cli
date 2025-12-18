@@ -284,6 +284,10 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<bool> {
+        println!(
+            r#"Deprecated: is_file is deprecated and will be removed in a future version of AXL.
+            Use `fs.metadata().is_file` instead."#
+        );
         let metadata = fs::metadata(path.as_str())?;
         Ok(metadata.is_file())
     }
