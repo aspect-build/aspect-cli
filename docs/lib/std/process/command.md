@@ -33,6 +33,21 @@
 <pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Command</span></span>.<span class="entity name function python"><span class="meta generic-name python">spawn</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
 <span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/std/process/child">std.process.Child</a><span class="punctuation definition string end python">&#39;</span></span></span></span></span></code></pre>
 
+Executes the command as a child process, returning a handle to it.
+
+By default, stdin, stdout and stderr are inherited from the parent.
+
+***
+
+## Command.status
+
+<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Command</span></span>.<span class="entity name function python"><span class="meta generic-name python">status</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
+<span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/std/process/exit_status">std.process.ExitStatus</a><span class="punctuation definition string end python">&#39;</span></span></span></span></span></code></pre>
+
+Executes a command as a child process, waiting for it to finish and collecting its status. Unlike `cmd.spawn().wait()` and `cmd.spawn().wait_with_output()`, this function does not close the stdin handle.
+
+By default, stdin, stdout and stderr are inherited from the parent.
+
 ***
 
 ## Command.stderr
