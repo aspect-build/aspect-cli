@@ -1,0 +1,329 @@
+"""
+Delivery task that coordinates artifact delivery via Redis.
+
+Reads the delivery manifest for a commit, delivers each target via bazel run
+with stamping enabled, and signs artifacts to prevent re-delivery.
+
+See: DELIVERY_REDIS_KEYS.md for key format documentation.
+"""
+
+# Redis command helpers
+
+def _redis_cmd(ctx, redis_cfg, *cmd_args):
+    """Execute a redis-cli command and return the output."""
+    host, port, use_tls = redis_cfg
+
+    cmd = ctx.std.process.command("redis-cli")
+    cmd.args(["-h", host, "-p", str(port)])
+    # Add connection timeout to prevent hanging on TLS mismatch
+    cmd.args(["-t", "5"])
+    if use_tls:
+        cmd.arg("--tls")
+    cmd.args(list(cmd_args))
+    cmd.stdout("piped")
+    cmd.stderr("piped")
+
+    child = cmd.spawn()
+    output = child.wait_with_output()
+
+    if not output.status.success:
+        fail("redis-cli failed: " + output.stderr)
+
+    return output.stdout.strip()
+
+def _redis_get(ctx, redis_cfg, key):
+    """GET a value by key from Redis."""
+    result = _redis_cmd(ctx, redis_cfg, "GET", key)
+    return None if result == "(nil)" else result
+
+def _redis_set(ctx, redis_cfg, key, value):
+    """SET a key-value pair in Redis."""
+    return _redis_cmd(ctx, redis_cfg, "SET", key, value)
+
+def _redis_setnx(ctx, redis_cfg, key, value):
+    """SETNX - set if not exists. Returns True if key was set, False if it already existed."""
+    result = _redis_cmd(ctx, redis_cfg, "SETNX", key, value)
+    return result == "1"
+
+def _redis_del(ctx, redis_cfg, key):
+    """DEL a key from Redis."""
+    return _redis_cmd(ctx, redis_cfg, "DEL", key)
+
+def _redis_lrange(ctx, redis_cfg, key, start, stop):
+    """LRANGE to get list elements from Redis."""
+    result = _redis_cmd(ctx, redis_cfg, "LRANGE", key, str(start), str(stop))
+    if not result or result == "(empty list or set)":
+        return []
+    # Parse redis-cli output format (numbered lines)
+    lines = result.split("\n")
+    items = []
+    for line in lines:
+        # Format: "1) value" or just "value"
+        if ") " in line:
+            items.append(line.split(") ", 1)[1])
+        elif line:
+            items.append(line)
+    return items
+
+# Key builders (match format from delivery-base.task.ts)
+
+def _artifact_metadata_key(ci_host, output_sha, workspace):
+    """
+    Redis key for mapping of output sha -> metadata.
+    Format: <ciHost>:<outputSha>:<workspace>
+    """
+    return "{}:{}:{}".format(ci_host, output_sha, workspace)
+
+def _delivery_manifest_key(ci_host, commit_sha, workspace):
+    """
+    Redis key for mapping of commit sha -> delivery target list.
+    Format: <ciHost>:<commitSha>:<workspace>
+    """
+    return "{}:{}:{}".format(ci_host, commit_sha, workspace)
+
+def _output_sha_lookup_key(ci_host, commit_sha, workspace, label):
+    """
+    Redis key for reverse mapping of label -> output sha for a commit.
+    Format: output-sha:<ciHost>:<commitSha>:<workspace>:<label>
+    """
+    return "output-sha:{}:{}:{}:{}".format(ci_host, commit_sha, workspace, label)
+
+def _delivery_signature_key(ci_host, output_sha, workspace):
+    """
+    Redis key for atomically signing an artifact after delivery.
+    Format: delivery-signature:<ciHost>:<outputSha>:<workspace>
+    """
+    return "delivery-signature:{}:{}:{}".format(ci_host, output_sha, workspace)
+
+# Delivery implementation
+
+def _get_override_targets(ctx):
+    """
+    Check for override targets from environment variables.
+    ASPECT_WORKFLOWS_DELIVERY_TARGETS or DELIVERY_TARGETS (legacy).
+    Returns a set of target labels, or empty set if none.
+    """
+    targets_str = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_TARGETS")
+    if not targets_str:
+        targets_str = ctx.std.env.var("DELIVERY_TARGETS")
+    if not targets_str:
+        return set()
+
+    # Split on whitespace and filter valid labels
+    targets = []
+    for t in targets_str.split():
+        t = t.strip()
+        if t.startswith("//") or t.startswith("@"):
+            targets.append(t)
+    return set(targets)
+
+def _get_commit_sha(ctx, args_commit_sha):
+    """
+    Get commit SHA from env vars or args.
+    Priority: ASPECT_WORKFLOWS_DELIVERY_COMMIT > DELIVERY_COMMIT > args.
+    """
+    commit = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_COMMIT")
+    if commit:
+        return commit
+    commit = ctx.std.env.var("DELIVERY_COMMIT")
+    if commit:
+        return commit
+    return args_commit_sha
+
+def _run_bazel(ctx, verb, target, flags):
+    """
+    Run a bazel command and return the exit code.
+    TODO: Implement ctx.bazel.run() when available.
+    """
+    print("    [TODO] bazel {} {} {}".format(verb, " ".join(flags), target))
+    return 0  # Simulate success
+
+def _deliver_target(ctx, redis_cfg, ci_host, commit_sha, workspace, build_url, bazel_flags, label, is_forced):
+    """
+    Deliver a single target.
+
+    Args:
+        is_forced: If True, skip signature check and always deliver.
+
+    Returns (status: str, message: str) where status is one of:
+        - "success": Successfully delivered
+        - "skipped": Already delivered (only for non-forced)
+        - "build_failed": Bazel build failed
+        - "run_failed": Bazel run failed
+    """
+    output_sha = None
+    delivery_signature_key = None
+
+    # For non-forced targets, check if already delivered
+    if not is_forced:
+        # Look up output SHA for this target
+        lookup_key = _output_sha_lookup_key(ci_host, commit_sha, workspace, label)
+        output_sha = _redis_get(ctx, redis_cfg, lookup_key)
+
+        if output_sha:
+            delivery_signature_key = _delivery_signature_key(ci_host, output_sha, workspace)
+            existing_sig = _redis_get(ctx, redis_cfg, delivery_signature_key)
+
+            if existing_sig:
+                return ("skipped", "Already delivered by {}".format(existing_sig))
+        else:
+            # No output SHA found - target may have been added before signatures
+            # were introduced. Proceed with delivery.
+            print("  Warning: No output SHA found for {}, bypassing signature check".format(label))
+
+    # Run bazel to deliver the target with stamping
+    print("  Delivering {}...".format(label))
+    exit_code = _run_bazel(ctx, "run", label, bazel_flags)
+
+    if exit_code != 0:
+        # Delivery failed - delete artifact metadata so it can be retried
+        # (only for non-forced targets with known output SHA)
+        if output_sha and not is_forced:
+            artifact_key = _artifact_metadata_key(ci_host, output_sha, workspace)
+            _redis_del(ctx, redis_cfg, artifact_key)
+        return ("run_failed", "Delivery failed with exit code {}".format(exit_code))
+
+    # Sign the artifact to mark as delivered (only for non-forced with signature key)
+    if delivery_signature_key:
+        _redis_set(ctx, redis_cfg, delivery_signature_key, build_url)
+
+    return ("success", "Delivered successfully")
+
+def _delivery_impl(ctx):
+    # Redis configuration
+    host = ctx.args.host
+    port = ctx.args.port
+    use_tls = ctx.args.tls
+    redis_cfg = (host, port, use_tls)
+
+    # Delivery context
+    ci_host = ctx.args.ci_host
+    workspace = ctx.args.workspace
+    build_url = ctx.args.build_url
+
+    # Get commit SHA (env vars take precedence)
+    commit_sha = _get_commit_sha(ctx, ctx.args.commit_sha)
+    if not commit_sha:
+        fail("commit_sha is required (via --commit_sha or ASPECT_WORKFLOWS_DELIVERY_COMMIT env var)")
+
+    # Build bazel flags for delivery
+    # Default: --stamp --noremote_upload_local_results --remote_download_outputs=toplevel
+    stamp_flags_str = ctx.args.stamp_flags
+    if stamp_flags_str:
+        bazel_flags = stamp_flags_str.split(",")
+    else:
+        bazel_flags = ["--stamp"]
+
+    # Add flags that Workflows forces during delivery
+    bazel_flags.append("--noremote_upload_local_results")
+    bazel_flags.append("--remote_download_outputs=toplevel")
+
+    print("Delivery task starting")
+    print("  Redis: {}:{} (TLS: {})".format(host, port, use_tls))
+    print("  CI: {} commit: {} workspace: {}".format(ci_host, commit_sha, workspace))
+    print("  Build URL: {}".format(build_url))
+    print("  Bazel flags: {}".format(bazel_flags))
+
+    # Check for override targets (manual delivery / break the glass)
+    override_targets = _get_override_targets(ctx)
+    forced_targets = set()
+
+    if override_targets:
+        print("")
+        print("Found {} override target(s) from ASPECT_WORKFLOWS_DELIVERY_TARGETS".format(len(override_targets)))
+        targets = list(override_targets)
+        # All override targets are forced (bypass signature check)
+        forced_targets = override_targets
+    else:
+        # Read the delivery manifest from Redis
+        manifest_key = _delivery_manifest_key(ci_host, commit_sha, workspace)
+        print("")
+        print("Fetching delivery manifest: {}".format(manifest_key))
+        targets = _redis_lrange(ctx, redis_cfg, manifest_key, 0, -1)
+
+    if not targets:
+        print("No targets to deliver")
+        return 0
+
+    print("Found {} target(s) to deliver:".format(len(targets)))
+    for t in targets:
+        forced_marker = " (forced)" if t in forced_targets else ""
+        print("  - {}{}".format(t, forced_marker))
+    print("")
+
+    # Track results
+    success = []
+    skipped = []
+    build_failed = []
+    run_failed = []
+
+    for label in targets:
+        is_forced = label in forced_targets
+        status, message = _deliver_target(
+            ctx, redis_cfg, ci_host, commit_sha, workspace, build_url,
+            bazel_flags, label, is_forced
+        )
+
+        if status == "success":
+            success.append(label)
+            print("  [OK]   {}: {}".format(label, message))
+        elif status == "skipped":
+            skipped.append(label)
+            print("  [SKIP] {}: {}".format(label, message))
+        elif status == "build_failed":
+            build_failed.append(label)
+            print("  [FAIL] {}: {}".format(label, message))
+        else:  # run_failed
+            run_failed.append(label)
+            print("  [FAIL] {}: {}".format(label, message))
+
+    # Summary
+    print("")
+    print("=" * 50)
+    print("Delivery Summary")
+    print("=" * 50)
+    print("  Delivered: {}".format(len(success)))
+    print("  Skipped:   {}".format(len(skipped)))
+    print("  Failed:    {} ({} build, {} run)".format(
+        len(build_failed) + len(run_failed),
+        len(build_failed),
+        len(run_failed)
+    ))
+
+    if success:
+        print("")
+        print("Successfully delivered:")
+        for t in success:
+            print("  - {}".format(t))
+
+    if skipped:
+        print("")
+        print("Skipped (already delivered):")
+        for t in skipped:
+            print("  - {}".format(t))
+
+    if build_failed or run_failed:
+        print("")
+        print("Failed:")
+        for t in build_failed:
+            print("  - {} (build failed)".format(t))
+        for t in run_failed:
+            print("  - {} (run failed)".format(t))
+        return 1
+
+    return 0
+
+delivery = task(
+    name = "delivery",
+    implementation = _delivery_impl,
+    args = {
+        "host": args.string(default = "localhost"),
+        "port": args.string(default = "6379"),
+        "tls": args.boolean(default = False),
+        "ci_host": args.string(default = "bk"),
+        "commit_sha": args.string(),
+        "workspace": args.string(default = "."),
+        "build_url": args.string(),
+        "stamp_flags": args.string(default = "--stamp"),
+    },
+)

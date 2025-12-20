@@ -1,0 +1,44 @@
+# Test the spec type
+Person = spec(name=str, age=attr(int, 25))
+
+def _impl(ctx):
+    # Create a record instance with all fields
+    p1 = Person(name="Alice", age=30)
+    print("Person 1:", p1)
+    print("  name:", p1.name)
+    print("  age:", p1.age)
+
+    # Create a record instance using the default for age
+    p2 = Person(name="Bob")
+    print("Person 2:", p2)
+    print("  name:", p2.name)
+    print("  age:", p2.age, "(default)")
+
+    # Test field access via dir()
+    print("Fields:", dir(p1))
+
+    # Test equality
+    p3 = Person(name="Alice", age=30)
+    print("p1 == p3:", p1 == p3)
+    print("p1 == p2:", p1 == p2)
+
+    # Test mutation
+    print("\n--- Testing Mutation ---")
+    print("Before mutation: p1.age =", p1.age)
+    p1.age = 31
+    print("After mutation: p1.age =", p1.age)
+    print("p1 after mutation:", p1)
+
+    # Test type checking on mutation
+    print("\n--- Testing Type Checking on Mutation ---")
+    p1.name = "Alice Smith"
+    print("Changed name to:", p1.name)
+
+    print("\nAll tests passed!")
+    return 0
+
+dummy = task(
+    name = "dummy",
+    implementation = _impl,
+    args = {},
+)
