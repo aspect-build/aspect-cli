@@ -111,8 +111,6 @@ async fn main() -> miette::Result<ExitCode> {
         ))
     }
 
-    let axl_deps_root = disk_store.deps_path();
-
     // Get the default search paths given the current working directory and the repository root
     let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_root);
     // TODO: allow user to configure additonal search paths in the future?
@@ -127,14 +125,16 @@ async fn main() -> miette::Result<ExitCode> {
     let out = spawn_blocking(move || {
         let _enter = espan.enter();
 
+        let axl_deps_root = disk_store.deps_path();
+        let cli_version = cargo_pkg_short_version();
+
         // Evaluate all scripts to find tasks and configs. The order of task discovery will be load bearing in the future
         // when task overloading is supported
         // 1. repository axl_sources
         // 2. use_task in the root module
         // 3. auto_use_tasks from the @aspect built-in module (if not overloaded by an dep in the root MODULE.aspect)
         // 4. auto_use_tasks from axl module deps in the root MODULE.aspect
-        let loader =
-            eval::Loader::new(cargo_pkg_short_version(), repo_root.clone(), &axl_deps_root);
+        let loader = eval::Loader::new(&cli_version, &repo_root, &axl_deps_root);
         let eval = eval::task::TaskEvaluator::new(&loader);
         let ceval = eval::config::ConfigEvaluator::new(&loader);
 
@@ -302,20 +302,29 @@ async fn main() -> miette::Result<ExitCode> {
             let def = task.as_task().unwrap();
 
             let group = def.group();
-            // let defined_in = if script.scope.name == AXL_ROOT_MODULE_NAME {
-            //     format!("{}", script.path.display())
-            // } else {
-            //     format!("@{}/{}", script.scope.name, script.path.display())
-            // };
-            let cmd = make_command_from_task(&name.to_string(), &String::new(), i.to_string(), def);
-            tree.insert(
-                &name,
-                group,
-                group,
-                &task.path.to_string_lossy().to_string(),
-                cmd,
-            )
-            .into_diagnostic()?;
+            let task_path = PathBuf::from(task.path.clone());
+            let rel_path = match task_path.strip_prefix(&repo_root) {
+                Ok(p) => p,
+                Err(_) => &task_path,
+            };
+            let mut found = None;
+            for (module_name, module_root, _) in &usemods {
+                if task_path.starts_with(module_root) {
+                    if module_name == AXL_ROOT_MODULE_NAME {
+                        continue;
+                    }
+                    found = Some((module_name.clone(), rel_path.to_path_buf()));
+                    break;
+                }
+            }
+            let defined_in = if let Some((module_name, rel_path)) = found {
+                format!("@{}/{}", module_name, rel_path.display())
+            } else {
+                format!("{}", rel_path.display())
+            };
+            let cmd = make_command_from_task(&name.to_string(), &defined_in, i.to_string(), def);
+            tree.insert(&name, group, group, &defined_in, cmd)
+                .into_diagnostic()?;
         }
 
         // Turn the command tree into a command with subcommands.
@@ -351,10 +360,12 @@ async fn main() -> miette::Result<ExitCode> {
 
         let span = info_span!("task", name = name);
 
+        let store = loader.store(task.path.clone());
+
         let _enter = span.enter();
         let exit_code = task
             .module
-            .execute_task(loader.store(), task, |heap| {
+            .execute_task(store, task, |heap| {
                 let mut args = TaskArgs::new();
                 for (k, v) in definition.args().iter() {
                     let val = match v {

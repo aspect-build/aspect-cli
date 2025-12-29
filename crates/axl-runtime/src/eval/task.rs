@@ -23,7 +23,7 @@ pub trait TaskModuleLike {
     fn get_task(&self, symbol: &str) -> Result<&dyn TaskLike, EvalError>;
     fn execute_task<'v>(
         &'v self,
-        store: &AxlStore,
+        store: AxlStore,
         task: &TaskMut<'v>,
         args: impl FnOnce(&Heap) -> TaskArgs,
     ) -> Result<Option<u8>, EvalError>;
@@ -68,7 +68,7 @@ impl TaskModuleLike for Module {
     /// Executes a task from the module by symbol, providing arguments and returning the exit code.
     fn execute_task<'v>(
         &'v self,
-        store: &AxlStore,
+        store: AxlStore,
         task: &TaskMut<'v>,
         args: impl FnOnce(&Heap) -> TaskArgs,
     ) -> Result<Option<u8>, EvalError> {
@@ -86,6 +86,7 @@ impl TaskModuleLike for Module {
                 "expected value of type Task"
             )));
         };
+        drop(eval);
         Ok(ret.unpack_i32().map(|ex| ex as u8))
     }
 }
