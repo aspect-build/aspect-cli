@@ -24,36 +24,38 @@ pub struct ModuleScope {
 /// Internal loader for .axl files, handling path resolution, security checks, and recursive loading.
 #[derive(Debug)]
 pub struct AxlLoader<'p> {
+    pub(super) cli_version: &'p String,
+    pub(super) repo_root: &'p PathBuf,
+
     // The deps root directory where module expander expanded all the modules.
     pub(super) deps_root: &'p PathBuf,
-    pub(super) store: AxlStore,
 
     pub(crate) dialect: Dialect,
     pub(crate) globals: Globals,
 
     // stack variables
     pub(crate) load_stack: RefCell<Vec<PathBuf>>,
-
     pub(crate) module_stack: RefCell<Vec<ModuleScope>>,
 
     loaded_modules: RefCell<HashMap<PathBuf, FrozenModule>>,
 }
 
 impl<'p> AxlLoader<'p> {
-    pub fn new(cli_version: String, repo_root: PathBuf, deps_root: &'p PathBuf) -> Self {
+    pub fn new(cli_version: &'p String, repo_root: &'p PathBuf, deps_root: &'p PathBuf) -> Self {
         Self {
+            cli_version,
+            repo_root,
             deps_root,
             dialect: api::dialect(),
             globals: api::get_globals().build(),
-            store: AxlStore::new(cli_version, repo_root),
             load_stack: RefCell::new(vec![]),
             module_stack: RefCell::new(vec![]),
             loaded_modules: RefCell::new(HashMap::new()),
         }
     }
 
-    pub fn store(&self) -> &AxlStore {
-        &self.store
+    pub fn store(&self, path: PathBuf) -> AxlStore {
+        AxlStore::new(self.cli_version.clone(), self.repo_root.clone(), path)
     }
 
     pub(super) fn eval_module(&self, path: &Path) -> Result<Module, EvalError> {
@@ -65,12 +67,14 @@ impl<'p> AxlLoader<'p> {
         let raw = fs::read_to_string(&path)?;
         let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.dialect)?;
         let module = Module::new();
+
+        let store = self.store(path.to_path_buf());
         let mut eval = Evaluator::new(&module);
         eval.set_loader(self);
-        eval.extra = Some(&self.store);
+        eval.extra = Some(&store);
         eval.eval_module(ast, &self.globals)?;
-
         drop(eval);
+        drop(store);
 
         // Pop the script path off of the LOAD_STACK
         self.load_stack.borrow_mut().pop();

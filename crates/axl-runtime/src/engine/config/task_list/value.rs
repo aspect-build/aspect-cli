@@ -26,6 +26,8 @@ use starlark::values::ValueLike;
 use super::r#ref::TaskListMut;
 use super::task_mut::TaskMut;
 
+use crate::engine::store::AxlStore;
+
 #[derive(Clone, Default, Trace, Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct TaskListGen<T>(pub(crate) T);
 
@@ -44,11 +46,11 @@ pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
         #[starlark[require = named, default = UnpackList::default()]] group: UnpackList<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<NoneType> {
+        let store = AxlStore::from_eval(eval)?;
         let mut this = TaskListMut::from_value(this)?;
-
         this.aref.content.push(eval.heap().alloc(TaskMut::new(
             eval.module(),
-            String::new(),
+            store.script_path.to_string_lossy().to_string(),
             name,
             group.items,
             task,

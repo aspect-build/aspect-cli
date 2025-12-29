@@ -263,15 +263,11 @@ impl AxlModuleEvaluator {
 
         if module_boundary_path.exists() {
             let contents = fs::read_to_string(module_boundary_path)?;
-
             let ast = AstModule::parse(&axl_filename, contents, &self.dialect)?;
-
-            {
-                let module = Module::new();
-                let mut eval = Evaluator::new(&module);
-                eval.extra = Some(&store);
-                eval.eval_module(ast, &self.globals)?;
-            }
+            let module = Module::new();
+            let mut eval = Evaluator::new(&module);
+            eval.extra = Some(&store);
+            eval.eval_module(ast, &self.globals)?;
         }
 
         Ok(store)

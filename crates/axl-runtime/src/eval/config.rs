@@ -37,10 +37,6 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
     ) -> Result<&'v ConfigContext<'v>, EvalError> {
         self.loader.module_stack.borrow_mut().push(scope);
 
-        let mut eval = Evaluator::new(&self.module);
-        eval.set_loader(self.loader);
-        eval.extra = Some(self.loader.store());
-
         let heap = self.module.heap();
         let context = heap.alloc(ConfigContext::new(tasks, heap));
 
@@ -54,18 +50,22 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
             let raw = fs::read_to_string(&path)?;
             let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.loader.dialect)?;
 
+            let store = self.loader.store(path.to_path_buf());
+            let mut eval = Evaluator::new(&self.module);
+            eval.set_loader(self.loader);
+            eval.extra = Some(&store);
             eval.eval_module(ast, &self.loader.globals)?;
-
             let def = self
                 .module
                 .get("config")
                 .ok_or(EvalError::MissingSymbol("config".into()))?;
             eval.eval_function(def, &[context], &[])?;
+            drop(eval);
+            drop(store);
 
             // Pop the script path off of the LOAD_STACK
             self.loader.load_stack.borrow_mut().pop();
         }
-        drop(eval);
         let ctx = context.downcast_ref::<ConfigContext>().unwrap();
         Ok(ctx)
     }
