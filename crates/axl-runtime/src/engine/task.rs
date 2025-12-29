@@ -11,6 +11,7 @@ use starlark::typing::ParamIsRequired;
 use starlark::typing::ParamSpec;
 use starlark::values;
 use starlark::values::list::UnpackList;
+use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 use starlark::values::typing::StarlarkCallableParamSpec;
@@ -51,6 +52,7 @@ pub struct Task<'v> {
     pub(super) description: String,
     pub(super) group: Vec<String>,
     pub(super) name: String,
+    pub(super) config: values::Value<'v>,
 }
 
 impl<'v> Task<'v> {
@@ -68,6 +70,9 @@ impl<'v> Task<'v> {
     }
     pub fn name(&self) -> &String {
         &self.name
+    }
+    pub fn config(&self) -> values::Value<'v> {
+        self.config
     }
 }
 
@@ -99,12 +104,14 @@ impl<'v> values::Freeze for Task<'v> {
     type Frozen = FrozenTask;
     fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
         let frozen_impl = self.r#impl.freeze(freezer)?;
+        let frozen_config = self.config.freeze(freezer)?;
         Ok(FrozenTask {
             args: self.args,
             r#impl: frozen_impl,
             description: self.description,
             group: self.group,
             name: self.name,
+            config: frozen_config,
         })
     }
 }
@@ -118,6 +125,7 @@ pub struct FrozenTask {
     pub(super) description: String,
     pub(super) group: Vec<String>,
     pub(super) name: String,
+    pub(super) config: values::FrozenValue,
 }
 
 starlark_simple_value!(FrozenTask);
@@ -130,6 +138,9 @@ impl<'v> StarlarkValue<'v> for FrozenTask {
 impl FrozenTask {
     pub fn implementation(&self) -> values::FrozenValue {
         self.r#impl
+    }
+    pub fn config(&self) -> values::FrozenValue {
+        self.config
     }
 }
 
@@ -178,7 +189,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///     description = "build task",
     ///     task_args = {
     ///         "target": args.string(),
-    ///     }
+    ///     },
+    ///     config = None  # Optional user-defined config (e.g., a record); defaults to None if not provided
     /// )
     /// ```
     fn task<'v>(
@@ -191,6 +203,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] description: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         #[starlark(require = named, default = String::new())] name: String,
+        #[starlark(require = named, default = NoneOr::None)] config: NoneOr<values::Value<'v>>,
     ) -> starlark::Result<Task<'v>> {
         if group.items.len() > MAX_TASK_GROUPS {
             return Err(anyhow::anyhow!(
@@ -209,6 +222,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             description,
             group: group.items,
             name,
+            config: config.into_option().unwrap_or(values::Value::new_none()),
         })
     }
 }

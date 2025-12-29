@@ -5,6 +5,7 @@ use allocative::Allocative;
 use anyhow::anyhow;
 use derive_more::Display;
 
+use starlark::environment::FrozenModule;
 use starlark::environment::Module;
 use starlark::values;
 use starlark::values::list::AllocList;
@@ -15,6 +16,7 @@ use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
+use starlark::values::Value;
 use starlark::values::ValueError;
 use starlark::values::ValueLike;
 
@@ -26,45 +28,67 @@ use crate::engine::task::TaskLike;
 #[derive(Debug, Clone, ProvidesStaticType, Display, NoSerialize, Allocative)]
 #[display("<TaskMut>")]
 pub struct TaskMut<'v> {
-    #[allocative(skip)]
-    pub module: &'v Module,
-    pub path: PathBuf,
     pub name: RefCell<String>,
     pub group: RefCell<Vec<String>>,
-    // pub config: values::Value<'v>,
-    pub original: values::Value<'v>,
+    pub config: RefCell<Value<'v>>,
+    pub symbol: String,
+    pub path: PathBuf,
+    #[allocative(skip)]
+    pub module: &'v Module,
+    #[allocative(skip)]
+    pub frozen_config_module: RefCell<Option<FrozenModule>>,
 }
 
 unsafe impl<'v> Trace<'v> for TaskMut<'v> {
     fn trace(&mut self, tracer: &values::Tracer<'v>) {
-        tracer.trace(&mut self.original);
+        tracer.trace(&mut *self.config.borrow_mut());
     }
 }
 
 impl<'v> TaskMut<'v> {
     pub fn new(
         module: &'v Module,
+        symbol: String,
         path: String,
         name: String,
         group: Vec<String>,
-        original: values::Value<'v>,
     ) -> Self {
         TaskMut {
-            module,
-            path: PathBuf::from(path),
             name: RefCell::new(name),
             group: RefCell::new(group),
-            original,
+            config: RefCell::new(Value::new_none()),
+            symbol,
+            path: PathBuf::from(path),
+            module,
+            frozen_config_module: RefCell::new(None),
         }
     }
 
     pub fn as_task(&'v self) -> Option<&'v dyn TaskLike<'v>> {
-        if let Some(task) = self.original.downcast_ref::<Task>() {
+        let original = self
+            .module
+            .get(&self.symbol)
+            .expect("symbol should have been defined.");
+        if let Some(task) = original.downcast_ref::<Task<'v>>() {
             return Some(task.as_task());
-        } else if let Some(task) = self.original.downcast_ref::<FrozenTask>() {
+        } else if let Some(task) = original.downcast_ref::<FrozenTask>() {
             return Some(task.as_task());
         } else {
             return None;
+        }
+    }
+
+    pub fn initial_config(&self) -> Value<'v> {
+        let original = self
+            .module
+            .get(&self.symbol)
+            .expect("symbol should have been defined.");
+        if let Some(task) = original.downcast_ref::<Task<'v>>() {
+            task.config
+        } else if let Some(task) = original.downcast_ref::<FrozenTask>() {
+            task.config.to_value()
+        } else {
+            Value::new_none()
         }
     }
 }
@@ -81,6 +105,20 @@ impl<'v> values::StarlarkValue<'v> for TaskMut<'v> {
                     .ok_or(anyhow!("groups must be a list of strings"))?;
                 self.group.replace(unpack.items);
             }
+            "config" => {
+                // Use a frozen version of the config value passed in so that it can be safely referenced across
+                // Starlark modules as the value is set in the config module but will used by the task that owns
+                // the config which is most often in a different module.
+                let temp_module = Module::new();
+                let short_value: Value = unsafe { std::mem::transmute(value) };
+                temp_module.set("temp", short_value);
+                let frozen = temp_module.freeze().expect("freeze failed");
+                let frozen_val: Value<'v> =
+                    unsafe { std::mem::transmute(frozen.get("temp").expect("get").value()) };
+                self.config.replace(frozen_val);
+                // Store the frozen module so the frozen heap that backs the config value is not lost.
+                *self.frozen_config_module.borrow_mut() = Some(frozen);
+            }
             _ => return ValueError::unsupported(self, &format!(".{}=", attribute)),
         };
         Ok(())
@@ -90,6 +128,7 @@ impl<'v> values::StarlarkValue<'v> for TaskMut<'v> {
         match attribute {
             "name" => Some(heap.alloc_str(self.name.borrow().as_str()).to_value()),
             "group" => Some(heap.alloc(AllocList(self.group.borrow().iter()))),
+            "config" => Some(*self.config.borrow()),
             _ => None,
         }
     }

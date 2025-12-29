@@ -54,7 +54,7 @@ impl<'p> AxlLoader<'p> {
         }
     }
 
-    pub fn store(&self, path: PathBuf) -> AxlStore {
+    pub fn new_store(&self, path: PathBuf) -> AxlStore {
         AxlStore::new(self.cli_version.clone(), self.repo_root.clone(), path)
     }
 
@@ -68,7 +68,7 @@ impl<'p> AxlLoader<'p> {
         let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.dialect)?;
         let module = Module::new();
 
-        let store = self.store(path.to_path_buf());
+        let store = self.new_store(path.to_path_buf());
         let mut eval = Evaluator::new(&module);
         eval.set_loader(self);
         eval.extra = Some(&store);
