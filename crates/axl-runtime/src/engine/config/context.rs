@@ -77,7 +77,7 @@ impl<'v> values::AllocValue<'v> for ConfigContext<'v> {
 impl<'v> values::Freeze for ConfigContext<'v> {
     type Frozen = ConfigContext<'v>;
     fn freeze(self, _freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
-        Ok(self)
+        panic!("not implemented")
     }
 }
 
