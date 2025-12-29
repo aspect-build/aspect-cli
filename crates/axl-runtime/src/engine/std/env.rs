@@ -226,7 +226,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     ///
     /// Returns a string describing the operating system in use, such as
     /// "linux", "macos", "windows", etc.
-    fn os<'v>(#[allow(unused)] this: values::Value<'v>, heap: &'v Heap) -> anyhow::Result<&'v str> {
+    fn os<'v>(#[allow(unused)] this: values::Value<'v>, _heap: &'v Heap) -> anyhow::Result<&'v str> {
         Ok(std::env::consts::OS)
     }
 
@@ -236,7 +236,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// "x86_64", "aarch64", etc.
     fn arch<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        heap: &'v Heap,
+        _heap: &'v Heap,
     ) -> anyhow::Result<&'v str> {
         Ok(std::env::consts::ARCH)
     }
