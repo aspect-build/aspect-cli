@@ -222,7 +222,6 @@ def impl(ctx: TaskContext) -> int:
 
     print("")
     print("Successfully added " + module_name + " (" + tag_name + ") to MODULE.aspect")
-
     return 0
 
 add = task(

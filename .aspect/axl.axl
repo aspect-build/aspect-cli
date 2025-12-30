@@ -1,6 +1,8 @@
 """
 Exercise axl
 """
+load("@demo//answer.axl", "ANSWER")
+load("./lambda.axl", "lambda_with_global_bind")
 
 def test_case(tc, cond, msg) -> int:
     if not cond:
@@ -216,6 +218,11 @@ def test_stream(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
     return tc
 
+def test_starlark(tc: int) -> int:
+    tc = test_case(tc, lambda_with_global_bind()("testing") == "%testing%", "should be able to call a lambda bound to a global from another module")
+    tc = test_case(tc, ANSWER == 42, "should be able to load the answer to Life the Universe and Everything from an axl module")
+    return tc
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -257,6 +264,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_env(ctx, tc, temp_dir)
     tc = test_fs(ctx, tc, temp_dir)
     tc = test_stream(ctx, tc, temp_dir)
+    tc = test_starlark(tc)
 
     print(tc, "tests passed")
     return 0

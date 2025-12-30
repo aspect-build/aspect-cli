@@ -1,0 +1,10 @@
+def _impl(ctx: TaskContext) -> int:
+    print("I am a task that is manually registered in MODULE.aspect instead of being auto-discovered from an .axl file in the root of an .aspect directory")
+    return 0
+
+user_task_manual = task(
+    name = "user-task-manual",
+    group = ["user"],
+    implementation = _impl,
+    args = {},
+)

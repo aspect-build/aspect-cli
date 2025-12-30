@@ -1,23 +1,30 @@
-def _impl(ctx):
-    print("I am an auto-discovered task in .aspect/user-task.axl")
+load("./lambda.axl", "lambda_with_global_bind")
+
+UserTaskConfig = record(
+    message=field(str, "hello world"),
+    count=field(int, 1),
+    customize_message = field(typing.Callable[[str], str], default = lambda s: s),
+)
+
+def _impl(ctx: TaskContext) -> int:
+    print("I am a task that is auto-discovered as it is defined in an .axl file in the root of the root .aspect directory")
+
+    # assert we can call a lambda with a global bind from another module in a task script
+    lambda_with_global_bind()("assert")
+
+    # do something that makes uses the task config
+    print(ctx)
+    print(ctx.config)
+    print(ctx.config.count)
+    print(ctx.config.message)
+    print(ctx.config.customize_message)
+    for i in range(ctx.config.count):
+        print(ctx.config.customize_message(ctx.config.message))
     return 0
 
 user_task = task(
     group = ["user"],
     implementation = _impl,
     args = {},
-)
-
-
-def _impl2(ctx):
-    print("I am an auto-discovered task in .aspect/user-task.axl")
-    return 0
-
-user_task3 = task(
-    group = ["user"],
-    implementation = _impl,
-    args = {},
-    # config = config.type(
-    #     callback = typing.Callable[[]],
-    # )
+    config = UserTaskConfig(),
 )
