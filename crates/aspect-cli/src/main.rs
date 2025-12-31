@@ -308,7 +308,6 @@ async fn main() -> miette::Result<ExitCode> {
         for (i, task) in tasks.iter().enumerate() {
             let name = task.name.borrow();
             let def = task.as_task().unwrap();
-
             let group = def.group();
             let task_path = PathBuf::from(task.path.clone());
             let rel_path = match task_path.strip_prefix(&repo_root) {

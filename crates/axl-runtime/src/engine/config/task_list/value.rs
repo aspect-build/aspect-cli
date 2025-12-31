@@ -11,7 +11,6 @@ use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::Ty;
-use starlark::values::list::UnpackList;
 use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 use starlark::values::type_repr::StarlarkTypeRepr;
@@ -27,6 +26,7 @@ use super::r#ref::TaskListMut;
 use super::task_mut::TaskMut;
 
 use crate::engine::store::AxlStore;
+use crate::engine::task::{AsTaskLike, FrozenTask, Task, TaskLike};
 
 #[derive(Clone, Default, Trace, Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct TaskListGen<T>(pub(crate) T);
@@ -42,20 +42,33 @@ pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
     fn add<'v>(
         #[allow(unused)] this: Value<'v>,
         #[starlark(require = pos)] task: Value<'v>,
-        #[starlark(require = named)] name: String,
-        #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<NoneType> {
         let store = AxlStore::from_eval(eval)?;
         let mut this = TaskListMut::from_value(this)?;
         let symbol = format!("__added_task_{}", this.aref.content.len());
         eval.module().set(&symbol, task);
+        let task_like: &dyn TaskLike = if let Some(t) = task.downcast_ref::<Task>() {
+            t.as_task()
+        } else if let Some(t) = task.downcast_ref::<FrozenTask>() {
+            t.as_task()
+        } else {
+            return Err(anyhow::anyhow!(
+                "expected value of type 'Task', got '{}'",
+                task.get_type()
+            )
+            .into());
+        };
+        let name = task_like.name().to_owned();
+        if name.len() == 0 {
+            return Err(anyhow::anyhow!("Task name required").into());
+        }
         this.aref.content.push(eval.heap().alloc(TaskMut::new(
             &eval.module(),
             symbol,
             store.script_path.to_string_lossy().to_string(),
             name,
-            group.items,
+            task_like.group().to_vec(),
         )));
         Ok(NoneType)
     }

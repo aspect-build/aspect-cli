@@ -6,6 +6,7 @@ def _user_task_impl(ctx: TaskContext) -> int:
     return 0
 
 _user_task = task(
+    name = "user-task-added-by-config",
     group = ["user"],
     implementation = _user_task_impl,
     args = {}
@@ -19,7 +20,7 @@ def config(ctx: ConfigContext):
     lambda_with_global_bind()("assert")
 
     # add a new task
-    ctx.tasks.add(_user_task, name = "user-task-added-by-config")
+    ctx.tasks.add(_user_task)
 
     # customize a task
     for task in ctx.tasks:
