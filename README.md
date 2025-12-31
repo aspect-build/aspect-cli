@@ -1,6 +1,6 @@
 > [!WARNING]
 > **Early Preview**<br>
-> This is an early preview of Aspect CLI. It is under active development, and API changes are expected. We plan to stabilize the API and release a stable version by the end of 2025.
+> This is an early preview of Aspect CLI. It is under active development, and API changes are expected. We plan to stabilize the API and release a stable version in early 2026.
 
 # Aspect CLI
 
