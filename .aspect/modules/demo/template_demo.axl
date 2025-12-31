@@ -1,4 +1,4 @@
-def _impl(ctx):
+def _impl(ctx: TaskContext) -> int:
     data = {
         "name": "Alice",
         "age": 30,

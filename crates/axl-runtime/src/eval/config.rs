@@ -1,12 +1,12 @@
+use anyhow::anyhow;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use starlark::syntax::AstModule;
-use starlark::values::ValueLike;
-use std::fs;
+use starlark::values::{Heap, Value, ValueLike};
 use std::path::Path;
 
 use crate::engine::config::{ConfigContext, TaskMut};
 use crate::eval::load::{AxlLoader, ModuleScope};
+use crate::eval::load_path::join_confined;
 
 use super::error::EvalError;
 
@@ -14,16 +14,35 @@ use super::error::EvalError;
 #[derive(Debug)]
 pub struct ConfigEvaluator<'l, 'p> {
     loader: &'l AxlLoader<'p>,
-    module: Module,
 }
 
 impl<'l, 'p> ConfigEvaluator<'l, 'p> {
     /// Creates a new AxlScriptEvaluator with the given module root.
     pub fn new(loader: &'l AxlLoader<'p>) -> Self {
-        Self {
-            loader,
-            module: Module::new(),
-        }
+        Self { loader }
+    }
+
+    /// Evaluates the given .axl script path relative to the module root, returning
+    /// the evaluated script or an error. Performs security checks to ensure the script
+    /// file is within the module root.
+    pub fn eval(&self, scope: ModuleScope, path: &Path) -> Result<Module, EvalError> {
+        assert!(path.is_relative());
+
+        let abs_path = join_confined(&scope.path, path)?;
+
+        // push the current scope to stack
+        self.loader.module_stack.borrow_mut().push(scope);
+        let module = self.loader.eval_module(&abs_path)?;
+        // pop the current
+        let _scope = self
+            .loader
+            .module_stack
+            .borrow_mut()
+            .pop()
+            .expect("just pushed a scope");
+
+        // Return the evaluated script
+        Ok(module)
     }
 
     /// Evaluates the given .axl script path relative to the module root, returning
@@ -35,38 +54,73 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
         paths: Vec<&Path>,
         tasks: Vec<TaskMut<'v>>,
     ) -> Result<&'v ConfigContext<'v>, EvalError> {
-        self.loader.module_stack.borrow_mut().push(scope);
+        self.loader.module_stack.borrow_mut().push(scope.clone());
 
-        let heap = self.module.heap();
+        let eval_module = Box::leak(Box::new(Module::new()));
+        let context_module = Box::leak(Box::new(Module::new()));
+        let heap: &'v Heap =
+            unsafe { std::mem::transmute::<&Heap, &'v Heap>(context_module.heap()) };
         let context = heap.alloc(ConfigContext::new(tasks, heap));
+        let ctx = context.downcast_ref::<ConfigContext<'v>>().unwrap();
 
         for path in paths {
             assert!(path.is_absolute());
 
-            // Push the script path onto the LOAD_STACK (used to detect circular loads)
-            self.loader.load_stack.borrow_mut().push(path.to_path_buf());
+            let rel_path = path
+                .strip_prefix(&scope.path)
+                .map_err(|e| EvalError::UnknownError(anyhow!("Failed to strip prefix: {e}")))?
+                .to_path_buf();
 
-            // Load and evaluate the script
-            let raw = fs::read_to_string(&path)?;
-            let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.loader.dialect)?;
+            let config_module = self.eval(scope.clone(), &rel_path)?;
 
-            let store = self.loader.store(path.to_path_buf());
-            let mut eval = Evaluator::new(&self.module);
+            let frozen = config_module
+                .freeze()
+                .map_err(|e| EvalError::UnknownError(anyhow!(e)))?;
+
+            let def = frozen
+                .get("config")
+                .map_err(|_| EvalError::MissingSymbol("config".into()))?;
+
+            let func = def.value();
+
+            // Adjust the lifetime of func to 'v so it can be used within eval.eval_function below.
+            // This is necessary because the type system prevents mixing Values from different heaps
+            // without it, but in this case for the lifetime of frozen function called for side effects
+            // on a shared context, it is safe in practice.
+            let func = unsafe { std::mem::transmute::<Value, Value<'v>>(func) };
+
+            let store = self.loader.new_store(path.to_path_buf());
+            let mut eval = Evaluator::new(eval_module);
             eval.set_loader(self.loader);
             eval.extra = Some(&store);
-            eval.eval_module(ast, &self.loader.globals)?;
-            let def = self
-                .module
-                .get("config")
-                .ok_or(EvalError::MissingSymbol("config".into()))?;
-            eval.eval_function(def, &[context], &[])?;
+            eval.eval_function(func, &[context], &[])?;
             drop(eval);
             drop(store);
 
-            // Pop the script path off of the LOAD_STACK
-            self.loader.load_stack.borrow_mut().pop();
+            ctx.add_config_module(frozen);
         }
-        let ctx = context.downcast_ref::<ConfigContext>().unwrap();
+
+        // Set and freeze initial configs if not set
+        let mut to_set: Vec<(&'v TaskMut<'v>, Value<'v>)> = Vec::new();
+        for task in ctx.tasks() {
+            let config = *task.config.borrow();
+            if config.is_none() {
+                let initial = task.initial_config();
+                to_set.push((task, initial));
+            }
+        }
+        for (task, initial) in to_set {
+            let temp_module = Module::new();
+            let short_initial: Value = unsafe { std::mem::transmute(initial) };
+            temp_module.set("temp", short_initial);
+            let frozen = temp_module.freeze().expect("freeze failed");
+            let frozen_val: Value<'v> =
+                unsafe { std::mem::transmute(frozen.get("temp").expect("get").value()) };
+            task.config.replace(frozen_val);
+            *task.frozen_config_module.borrow_mut() = Some(frozen);
+        }
+
+        self.loader.module_stack.borrow_mut().pop();
         Ok(ctx)
     }
 }

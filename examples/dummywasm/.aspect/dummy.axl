@@ -3,7 +3,7 @@
 This demonstrates calling wasm functions that return data via memory pointers.
 """
 
-def impl(ctx) -> int:
+def impl(ctx: TaskContext) -> int:
     wasm_path = ctx.std.env.current_dir() + "/dummy.wasm"
 
     dummy = ctx.wasm.instantiate(wasm_path)
@@ -29,7 +29,6 @@ def impl(ctx) -> int:
     # Read the JSON data from wasm linear memory
     json_bytes = memory.read(ptr, length)
     print("JSON data:", str(json_bytes))
-
     return 0
 
 dummy = task(

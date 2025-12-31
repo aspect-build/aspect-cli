@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use allocative::Allocative;
 use derive_more::Display;
 
+use starlark::environment::FrozenModule;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -35,6 +36,8 @@ use super::task_list::value::TaskList;
 pub struct ConfigContext<'v> {
     #[allocative(skip)]
     tasks: values::Value<'v>,
+    #[allocative(skip)]
+    config_modules: RefCell<Vec<FrozenModule>>,
 }
 
 impl<'v> ConfigContext<'v> {
@@ -46,6 +49,7 @@ impl<'v> ConfigContext<'v> {
         let x = TaskListGen(RefCell::new(TaskList::new(tasks)));
         Self {
             tasks: heap.alloc_complex_no_freeze(x),
+            config_modules: RefCell::new(vec![]),
         }
     }
 
@@ -57,6 +61,10 @@ impl<'v> ConfigContext<'v> {
             .iter()
             .map(|m| m.downcast_ref::<TaskMut>().unwrap())
             .collect()
+    }
+
+    pub fn add_config_module(&self, module: FrozenModule) {
+        self.config_modules.borrow_mut().push(module);
     }
 }
 

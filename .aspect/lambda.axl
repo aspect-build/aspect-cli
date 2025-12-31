@@ -1,0 +1,9 @@
+def _global_function(s):
+    return "%" + s + "%"
+
+# This returns a lambda to that binds to a global function in this module. This
+# pattern tests that binds to globals in one module can be used in another module.
+# For this to work, the module with the global must be frozen since only frozen values
+# are safe to use across Rust Starlark module heaps.
+def lambda_with_global_bind():
+    return lambda s: _global_function(s)

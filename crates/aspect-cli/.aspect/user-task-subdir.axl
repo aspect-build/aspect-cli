@@ -1,0 +1,10 @@
+def _impl(ctx: TaskContext) -> int:
+    print("I am a task that is auto-discovered only when the Aspect CLI is run from within the crates/aspect-cli directory as it is defined in an .axl file in the crates/aspect-cli/.aspect directory")
+    return 0
+
+user_task = task(
+    name = "user-task-subdir",
+    group = ["user"],
+    implementation = _impl,
+    args = {},
+)

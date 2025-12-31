@@ -26,11 +26,12 @@ use super::wasm::Wasm;
 #[display("<TaskContext>")]
 pub struct TaskContext<'v> {
     pub args: TaskArgs<'v>,
+    pub config: values::Value<'v>,
 }
 
 impl<'v> TaskContext<'v> {
-    pub fn new(args: TaskArgs<'v>) -> Self {
-        Self { args }
+    pub fn new(args: TaskArgs<'v>, config: values::Value<'v>) -> Self {
+        Self { args, config }
     }
 }
 
@@ -60,6 +61,8 @@ impl<'v> values::Freeze for TaskContext<'v> {
 pub struct FrozenTaskContext {
     #[allocative(skip)]
     args: FrozenTaskArgs,
+    #[allocative(skip)]
+    config: values::FrozenValue,
 }
 
 starlark_simple_value!(FrozenTaskContext);
@@ -83,6 +86,13 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
         let ctx = this.downcast_ref_err::<TaskContext>()?;
         // TODO: don't do this.
         Ok(ctx.args.clone())
+    }
+
+    /// Access to the task configuration.
+    #[starlark(attribute)]
+    fn config<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(ctx.config)
     }
 
     /// Expand template files.

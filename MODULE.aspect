@@ -19,4 +19,4 @@ axl_archive_dep(
     dev = True,
 )
 
-use_task(".aspect/testing/some-task.axl", "some_task")
+use_task(".aspect/user/user-task-manual.axl", "user_task_manual")

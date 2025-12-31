@@ -41,19 +41,21 @@ impl<'v, T: TaskListLike<'v>> Display for TaskListGen<T> {
 pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
     fn add<'v>(
         #[allow(unused)] this: Value<'v>,
-        #[starlark[require = pos]] task: Value<'v>,
-        #[starlark[require = named]] name: String,
-        #[starlark[require = named, default = UnpackList::default()]] group: UnpackList<String>,
+        #[starlark(require = pos)] task: Value<'v>,
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<NoneType> {
         let store = AxlStore::from_eval(eval)?;
         let mut this = TaskListMut::from_value(this)?;
+        let symbol = format!("__added_task_{}", this.aref.content.len());
+        eval.module().set(&symbol, task);
         this.aref.content.push(eval.heap().alloc(TaskMut::new(
-            eval.module(),
+            &eval.module(),
+            symbol,
             store.script_path.to_string_lossy().to_string(),
             name,
             group.items,
-            task,
         )));
         Ok(NoneType)
     }

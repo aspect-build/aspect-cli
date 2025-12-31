@@ -1,7 +1,8 @@
 use anyhow::anyhow;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use starlark::values::{Heap, ValueLike};
+use starlark::values::Heap;
+use starlark::values::ValueLike;
 use std::path::Path;
 
 use crate::engine::config::TaskMut;
@@ -74,12 +75,16 @@ impl TaskModuleLike for Module {
     ) -> Result<Option<u8>, EvalError> {
         let heap = self.heap();
         let args = args(heap);
-        let context = heap.alloc(TaskContext::new(args));
+        let config = *task.config.borrow();
+        let context = heap.alloc(TaskContext::new(args, config));
         let mut eval = Evaluator::new(self);
         eval.extra = Some(&store);
-        let ret = if let Some(val) = task.original.downcast_ref::<Task>() {
+        let original = self
+            .get(&task.symbol)
+            .expect("symbol should have been defined.");
+        let ret = if let Some(val) = original.downcast_ref::<Task>() {
             eval.eval_function(val.implementation(), &[context], &[])?
-        } else if let Some(val) = task.original.downcast_ref::<FrozenTask>() {
+        } else if let Some(val) = original.downcast_ref::<FrozenTask>() {
             eval.eval_function(val.implementation().to_value(), &[context], &[])?
         } else {
             return Err(EvalError::UnknownError(anyhow::anyhow!(
@@ -109,12 +114,14 @@ impl<'l, 'p> TaskEvaluator<'l, 'p> {
     /// file is within the module root.
     pub fn eval(&self, scope: ModuleScope, path: &Path) -> Result<Module, EvalError> {
         assert!(path.is_relative());
-
         let abs_path = join_confined(&scope.path, path)?;
+
         // push the current scope to stack
         self.loader.module_stack.borrow_mut().push(scope);
+
         let module = self.loader.eval_module(&abs_path)?;
-        // pop the current
+
+        // pop the current scope off the stack
         let _scope = self
             .loader
             .module_stack

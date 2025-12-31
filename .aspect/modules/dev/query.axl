@@ -2,12 +2,13 @@
 In development 'query' task.
 """
 
-def _query_impl(ctx):
+def _query_impl(ctx: TaskContext) -> int:
     build = ctx.bazel.query().raw(
         ctx.args.pattern[0],
     )
     for result in build.eval():
         print(result.name)
+    return 0
 
 query = task(
     implementation = _query_impl,
