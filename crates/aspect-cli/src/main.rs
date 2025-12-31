@@ -321,12 +321,16 @@ async fn main() -> miette::Result<ExitCode> {
                     if module_name == AXL_ROOT_MODULE_NAME {
                         continue;
                     }
-                    found = Some((module_name.clone(), rel_path.to_path_buf()));
+                    let module_rel_path = match task_path.strip_prefix(&module_root) {
+                        Ok(p) => p,
+                        Err(_) => &task_path,
+                    };
+                    found = Some((module_name.clone(), module_rel_path.to_path_buf()));
                     break;
                 }
             }
             let defined_in = if let Some((module_name, rel_path)) = found {
-                format!("@{}/{}", module_name, rel_path.display())
+                format!("@{}//{}", module_name, rel_path.display())
             } else {
                 format!("{}", rel_path.display())
             };
