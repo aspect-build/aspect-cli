@@ -1,6 +1,7 @@
 # Apply a tag to HEAD at the beginning of each week.
 # We can use this to create semver-looking tags for releases like
 # 2020.44.123+abc1234
+# Follows https://blog.aspect.build/versioning-releases-from-a-monorepo
 name: Weekly Monorepo Tag
 on:
   schedule:
@@ -10,14 +11,17 @@ jobs:
   tagger:
     runs-on: ubuntu-latest
     steps:
-      - name: tag HEAD with date +%Y.%V
+      # Use %G which is ISO week year instead of %Y so that we don't roll the week over to `01` before we roll the
+      # year over (for example %Y.%V will result in `2025.01` on Dec 29, 2025 where it should actually be `2026.01` as
+      # the days December 29–31, 2025, belong to week 1 of 2026)
+      - name: tag HEAD with date +%G.%V
         run: |
           curl --request POST \
               --url https://api.github.com/repos/${{ github.repository }}/git/refs \
               --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
               --data @- << EOF
           {
-              "ref": "refs/tags/$(date +%Y.%V)",
+              "ref": "refs/tags/$(date +%G.%V)",
               "sha": "${{ github.sha }}"
           }
           EOF
