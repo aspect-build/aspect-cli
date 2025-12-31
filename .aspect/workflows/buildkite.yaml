@@ -34,6 +34,29 @@ steps:
         -- //:launcher //:cli
       echo "--- :aspect: aspect tests axl"
       ./bazel-bin/crates/aspect-launcher/aspect-launcher tests axl
+      echo "--- :aspect: aspect demo template-demo"
+      ./bazel-bin/crates/aspect-launcher/aspect-launcher demo template-demo
+      echo "--- :aspect: aspect user user_task"
+      ./bazel-bin/crates/aspect-launcher/aspect-launcher user user_task
+      echo "--- :aspect: aspect user user_task_reexport"
+      ./bazel-bin/crates/aspect-launcher/aspect-launcher user user_task_reexport
+      echo "--- :aspect: aspect user user-task-manual"
+      ./bazel-bin/crates/aspect-launcher/aspect-launcher user user-task-manual
+      echo "--- :aspect: aspect user user-task-added-by-config"
+      ./bazel-bin/crates/aspect-launcher/aspect-launcher user user-task-added-by-config
+      echo "--- :aspect: aspect user user-task-subdir (in crates/aspect-cli)"
+      (
+        cd crates/aspect-cli
+        ../../bazel-bin/crates/aspect-launcher/aspect-launcher user user-task-subdir
+      )
+      echo "--- :aspect: aspect help"
+      ./bazel-bin/crates/aspect-launcher/aspect-launcher help
+      echo "--- :aspect: aspect-launcher --version"
+      ./bazel-bin/crates/aspect-launcher/aspect-launcher --version
+      echo "--- :aspect: aspect-cli --version"
+      ./bazel-bin/crates/aspect-cli/aspect-cli --version
+      echo "--- :aspect: aspect version"
+      ./bazel-bin/crates/aspect-launcher/aspect-launcher version
   - label: ":broom: Format"
     agents:
       queue: aspect-small
