@@ -8,7 +8,7 @@ readonly git_commit
 # Monorepo version. For example, 2025.34.0+201b9a8.
 # Follows https://blog.aspect.build/versioning-releases-from-a-monorepo
 monorepo_version=$(
-    git describe --tags --long --match="[0-9][0-9][0-9][0-9].[0-9][0-9]" |
+    git describe --tags --long --match="2[0-9][0-9][0-9].[1-9]" --match="2[0-9][0-9][0-9].[1-5][0-9]" |
         sed -e 's/-/./;s/-g/+/'
 )
 

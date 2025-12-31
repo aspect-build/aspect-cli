@@ -14,14 +14,14 @@ jobs:
       # Use %G which is ISO week year instead of %Y so that we don't roll the week over to `01` before we roll the
       # year over (for example %Y.%V will result in `2025.01` on Dec 29, 2025 where it should actually be `2026.01` as
       # the days December 29–31, 2025, belong to week 1 of 2026)
-      - name: tag HEAD with date +%G.%V
+      - name: tag HEAD with date +%G.%-V
         run: |
           curl --request POST \
               --url https://api.github.com/repos/${{ github.repository }}/git/refs \
               --header 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
               --data @- << EOF
           {
-              "ref": "refs/tags/$(date +%G.%V)",
+              "ref": "refs/tags/$(date +%G.%-V)",
               "sha": "${{ github.sha }}"
           }
           EOF
