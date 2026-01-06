@@ -1,10 +1,12 @@
 {
     "search.exclude": {
-        "bazel-*": true
+        "**/bazel-*": true
     },
     "files.watcherExclude": {
-        "bazel-*/**": true,
-        
+        "**/bazel-*/**": true,
+    },
+    "files.associations": {
+        "*.axl": "starlark"
     },
     "C_Cpp.workspaceParsingPriority": "medium",
     "bazel.buildifierFixOnFormat": true,
