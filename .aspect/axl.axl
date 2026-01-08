@@ -223,6 +223,51 @@ def test_starlark(tc: int) -> int:
     tc = test_case(tc, ANSWER == 42, "should be able to load the answer to Life the Universe and Everything from an axl module")
     return tc
 
+def test_http(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    # Test HTTP download with integrity/sha256 verification
+    # Using a well-known static file: LICENSE from this repo's GitHub
+    test_dir = temp_dir + "/axl_http_test"
+    if ctx.std.fs.exists(test_dir):
+        ctx.std.fs.remove_dir_all(test_dir)
+    ctx.std.fs.create_dir(test_dir)
+
+    # URL to a small, stable file (Apache 2.0 license text from GitHub)
+    url = "https://raw.githubusercontent.com/aspect-build/aspect-cli/refs/heads/main/LICENSE"
+    # SHA-256 of Apache 2.0 license file
+    expected_sha256 = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    expected_integrity = "sha256-DVQuDIgE45qn836wDaWnYhSdxoLXgpRRKH4RuTjpRZQ="
+
+    # Test 1: Download with correct sha256 (hex format like Bazel)
+    output1 = test_dir + "/license_sha256.txt"
+    resp1 = ctx.http().download(url = url, output = output1, mode = 0o644, sha256 = expected_sha256).block()
+    tc = test_case(tc, resp1.status == 200, "download with sha256 should return status 200")
+    tc = test_case(tc, ctx.std.fs.exists(output1), "download with sha256 should create the file")
+    content1 = ctx.std.fs.read_to_string(output1)
+    tc = test_case(tc, "Apache License" in content1, "downloaded file should contain Apache License text")
+
+    # Test 2: Download with correct integrity (SRI format)
+    output2 = test_dir + "/license_integrity.txt"
+    resp2 = ctx.http().download(url = url, output = output2, mode = 0o644, integrity = expected_integrity).block()
+    tc = test_case(tc, resp2.status == 200, "download with integrity should return status 200")
+    tc = test_case(tc, ctx.std.fs.exists(output2), "download with integrity should create the file")
+    content2 = ctx.std.fs.read_to_string(output2)
+    tc = test_case(tc, content1 == content2, "both downloads should have identical content")
+
+    # Test 3: Download without checksum (should succeed)
+    output3 = test_dir + "/license_no_check.txt"
+    resp3 = ctx.http().download(url = url, output = output3, mode = 0o644).block()
+    tc = test_case(tc, resp3.status == 200, "download without checksum should return status 200")
+    tc = test_case(tc, ctx.std.fs.exists(output3), "download without checksum should create the file")
+
+    # Note: Cannot test checksum mismatch without try/catch in Starlark.
+    # The checksum verification is tested implicitly - if hashes didn't match,
+    # the tests above would have failed.
+
+    # Cleanup
+    ctx.std.fs.remove_dir_all(test_dir)
+
+    return tc
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -265,6 +310,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_fs(ctx, tc, temp_dir)
     tc = test_stream(ctx, tc, temp_dir)
     tc = test_starlark(tc)
+    tc = test_http(ctx, tc, temp_dir)
 
     print(tc, "tests passed")
     return 0
