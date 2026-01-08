@@ -3,12 +3,14 @@ use derive_more::Display;
 use futures::FutureExt;
 use futures::TryStreamExt;
 use reqwest::redirect::Policy;
+use ssri::{Integrity, IntegrityChecker};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::values::dict::UnpackDictEntries;
 use starlark::values::AllocValue;
 use starlark::values::{starlark_value, StarlarkValue};
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueLike};
 use starlark::{starlark_module, starlark_simple_value, values};
+use std::str::FromStr;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
@@ -45,8 +47,67 @@ impl<'v> StarlarkValue<'v> for Http {
 
 starlark_simple_value!(Http);
 
+/// Converts a hex-encoded SHA-256 hash to an SRI Integrity object.
+fn sha256_hex_to_integrity(hex: &str) -> Result<Integrity, String> {
+    // Decode hex to bytes
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .map_err(|e| format!("invalid hex in sha256: {}", e))?;
+
+    if bytes.len() != 32 {
+        return Err(format!(
+            "sha256 must be 64 hex characters (32 bytes), got {} characters",
+            hex.len()
+        ));
+    }
+
+    // Base64 encode and create SRI string
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let b64 = STANDARD.encode(&bytes);
+    let sri_string = format!("sha256-{}", b64);
+
+    Integrity::from_str(&sri_string).map_err(|e| format!("failed to create integrity: {}", e))
+}
+
+/// Processor for streaming checksum verification.
+enum ChecksumProcessor {
+    /// Verify against a known integrity value.
+    Check(IntegrityChecker),
+    /// No checksum processing.
+    None,
+}
+
+impl ChecksumProcessor {
+    fn new_check(integrity: Integrity) -> Self {
+        ChecksumProcessor::Check(IntegrityChecker::new(integrity))
+    }
+
+    fn update<B: AsRef<[u8]>>(&mut self, data: B) {
+        match self {
+            ChecksumProcessor::Check(checker) => checker.input(data),
+            ChecksumProcessor::None => {}
+        }
+    }
+
+    fn finalize(self) -> Result<(), String> {
+        match self {
+            ChecksumProcessor::Check(checker) => checker
+                .result()
+                .map(|_| ())
+                .map_err(|e| format!("checksum mismatch: {}", e)),
+            ChecksumProcessor::None => Ok(()),
+        }
+    }
+}
+
 #[starlark_module]
 pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
+    /// Downloads a file from a URL to a local path.
+    ///
+    /// If both `integrity` and `sha256` are specified, `integrity` takes precedence.
+    /// The checksum is verified in a streaming fashion during download.
     fn download<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named)] url: values::StringValue,
@@ -54,6 +115,8 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] mode: u32,
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
+        #[starlark(require = named)] integrity: Option<String>,
+        #[starlark(require = named)] sha256: Option<String>,
     ) -> starlark::Result<StarlarkFuture> {
         let client = &this.downcast_ref_err::<Http>()?.client;
         let mut req = client.get(url.as_str().to_string());
@@ -61,20 +124,45 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             req = req.header(key.as_str(), value.as_str());
         }
 
+        // Parse the integrity value from either the SRI string or hex sha256
+        let expected_integrity: Option<Integrity> = if let Some(ref sri) = integrity {
+            Some(
+                Integrity::from_str(sri)
+                    .map_err(|e| anyhow::anyhow!("invalid integrity string: {}", e))?,
+            )
+        } else if let Some(ref hex) = sha256 {
+            Some(sha256_hex_to_integrity(hex).map_err(|e| anyhow::anyhow!("{}", e))?)
+        } else {
+            None
+        };
+
         let fut = async move {
             let res = req.send().await?.error_for_status()?;
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
                 .mode(mode)
-                .open(output)
+                .open(&output)
                 .await?;
             let response = HttpResponse::from(&res);
             let mut stream = res.bytes_stream();
 
+            // Create processor based on whether we have an expected integrity
+            let mut processor = match expected_integrity {
+                Some(integrity) => ChecksumProcessor::new_check(integrity),
+                None => ChecksumProcessor::None,
+            };
+
             while let Some(bytes) = stream.try_next().await? {
+                processor.update(&bytes);
                 file.write_all(&bytes).await?;
             }
+
+            // Verify checksum after download completes
+            processor
+                .finalize()
+                .map_err(|e| anyhow::anyhow!("{}: {}", output, e))?;
+
             Ok(response)
         };
 

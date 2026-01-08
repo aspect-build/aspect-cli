@@ -37,8 +37,8 @@ rust_library(
         "@crates//:wasmi_wasi",
         "@crates//:wasmi",
         "@crates//:zstd",
+        "@crates//:base64",
         "//crates/axl-proto",
-
         "//crates/build-event-stream",
         "//crates/galvanize",
         "//crates/aspect-telemetry",

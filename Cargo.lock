@@ -326,6 +326,7 @@ dependencies = [
  "arc-slice",
  "aspect-telemetry",
  "axl-proto",
+ "base64 0.22.1",
  "build-event-stream",
  "clap",
  "derive_more 2.0.1",
