@@ -10,3 +10,7 @@ pub use error::EvalError;
 pub use load::AxlLoader as Loader;
 pub use load::ModuleScope;
 pub(crate) use load_path::validate_module_name;
+
+// New frozen module support (Buck2 pattern)
+pub use task::execute_frozen_task;
+pub use task::FrozenTaskModuleLike;

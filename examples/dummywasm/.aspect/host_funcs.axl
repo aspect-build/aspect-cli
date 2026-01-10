@@ -1,0 +1,15 @@
+"""Host functions for WASM modules.
+
+These functions can be imported by WASM modules via the `imports` parameter.
+They are defined in a separate file so they are frozen and can be safely
+stored in the WASM runtime.
+"""
+
+def get_magic_number(ctx, memory) -> int:
+    """Host function that returns a magic number."""
+    return 42
+
+def add_numbers(ctx, memory, a, b) -> int:
+    """Host function that adds two numbers."""
+    print("ctx:", ctx)
+    return a + b

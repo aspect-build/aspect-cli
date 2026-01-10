@@ -12,6 +12,7 @@ use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
+use starlark::values::Value;
 use starlark::values::ValueLike;
 
 use super::bazel::Bazel;
@@ -51,25 +52,12 @@ impl<'v> values::AllocValue<'v> for TaskContext<'v> {
 
 impl<'v> values::Freeze for TaskContext<'v> {
     type Frozen = FrozenTaskContext;
-    fn freeze(self, _freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
-        panic!("not implemented")
+    fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
+        Ok(FrozenTaskContext {
+            args: self.args.freeze(freezer)?,
+            config: self.config.freeze(freezer)?,
+        })
     }
-}
-
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<TaskContext>")]
-pub struct FrozenTaskContext {
-    #[allocative(skip)]
-    args: FrozenTaskArgs,
-    #[allocative(skip)]
-    config: values::FrozenValue,
-}
-
-starlark_simple_value!(FrozenTaskContext);
-
-#[starlark_value(type = "TaskContext")]
-impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
-    type Canonical = TaskContext<'v>;
 }
 
 #[starlark_module]
@@ -125,6 +113,60 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     /// **Fetch** data from a remote server
     /// data = ctx.http().get("https://example.com/data.json").block()
     /// ```
+    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
+        Ok(Http::new())
+    }
+}
+
+#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[display("<TaskContext>")]
+pub struct FrozenTaskContext {
+    #[allocative(skip)]
+    args: FrozenTaskArgs,
+    #[allocative(skip)]
+    config: values::FrozenValue,
+}
+
+starlark_simple_value!(FrozenTaskContext);
+
+#[starlark_value(type = "TaskContext")]
+impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
+    type Canonical = TaskContext<'v>;
+}
+
+#[starlark_module]
+fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
+    #[starlark(attribute)]
+    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
+        Ok(Std {})
+    }
+
+    #[starlark(attribute)]
+    fn args<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+        // TODO: fix this
+        // let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        // Ok(ctx.args.to_value())
+        Ok(Value::new_none())
+    }
+
+    #[starlark(attribute)]
+    fn config<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(ctx.config.to_value())
+    }
+
+    #[starlark(attribute)]
+    fn template<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+    ) -> starlark::Result<template::Template> {
+        Ok(template::Template::new())
+    }
+
+    #[starlark(attribute)]
+    fn bazel<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Bazel> {
+        Ok(Bazel {})
+    }
+
     fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
         Ok(Http::new())
     }
