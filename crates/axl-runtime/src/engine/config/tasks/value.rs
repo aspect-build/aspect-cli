@@ -2,12 +2,14 @@ use std::cell::RefCell;
 use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::path::PathBuf;
 
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
+use starlark::environment::Module;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::Ty;
@@ -17,13 +19,14 @@ use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::OwnedFrozenValue;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLike;
 
+use super::configured_task::ConfiguredTask;
 use super::r#ref::TaskListMut;
-use super::task_mut::TaskMut;
 
 use crate::engine::store::AxlStore;
 use crate::engine::task::{AsTaskLike, FrozenTask, Task, TaskLike};
@@ -47,7 +50,8 @@ pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
         let store = AxlStore::from_eval(eval)?;
         let mut this = TaskListMut::from_value(this)?;
         let symbol = format!("__added_task_{}", this.aref.content.len());
-        eval.module().set(&symbol, task);
+
+        // Get task metadata
         let task_like: &dyn TaskLike = if let Some(t) = task.downcast_ref::<Task>() {
             t.as_task()
         } else if let Some(t) = task.downcast_ref::<FrozenTask>() {
@@ -59,17 +63,41 @@ pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
             )
             .into());
         };
+
         let name = task_like.name().to_owned();
-        if name.len() == 0 {
+        if name.is_empty() {
             return Err(anyhow::anyhow!("Task name required").into());
         }
-        this.aref.content.push(eval.heap().alloc(TaskMut::new(
-            &eval.module(),
+
+        // Freeze the task value to create OwnedFrozenValue
+        let temp_module = Module::new();
+        let short_task: Value = unsafe { std::mem::transmute(task) };
+        temp_module.set(&symbol, short_task);
+        let frozen = temp_module
+            .freeze()
+            .map_err(|e| anyhow::anyhow!("failed to freeze task: {:?}", e))?;
+        let task_def = frozen
+            .get(&symbol)
+            .map_err(|e| anyhow::anyhow!("failed to get frozen task: {:?}", e))?;
+
+        // Get initial config from the frozen task
+        let frozen_task = task_def
+            .value()
+            .downcast_ref::<FrozenTask>()
+            .ok_or_else(|| anyhow::anyhow!("expected FrozenTask after freeze"))?;
+        let initial_config = OwnedFrozenValue::alloc(frozen_task.config);
+
+        // Create ConfiguredTask with frozen values
+        let task_mut = ConfiguredTask {
+            task_def,
+            name: RefCell::new(name),
+            group: RefCell::new(task_like.group().to_vec()),
+            config: RefCell::new(initial_config),
             symbol,
-            store.script_path.to_string_lossy().to_string(),
-            name,
-            task_like.group().to_vec(),
-        )));
+            path: PathBuf::from(store.script_path.to_string_lossy().to_string()),
+        };
+
+        this.aref.content.push(eval.heap().alloc(task_mut));
         Ok(NoneType)
     }
 }
@@ -102,7 +130,7 @@ pub struct TaskList<'v> {
 
 impl<'v> TaskList<'v> {
     pub fn new(content: Vec<Value<'v>>) -> Self {
-        return TaskList { content };
+        TaskList { content }
     }
 }
 

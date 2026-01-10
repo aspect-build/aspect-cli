@@ -9,15 +9,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aspect_telemetry::{cargo_pkg_short_version, cargo_pkg_version, do_not_track, send_telemetry};
-use axl_runtime::engine::config::TaskMut;
+use axl_runtime::engine::config::ConfiguredTask;
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
-use axl_runtime::eval::{self, task::TaskModuleLike, ModuleScope};
+use axl_runtime::eval::{self, execute_task_with_args, FrozenTaskModuleLike, ModuleScope};
 use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
 use axl_runtime::module::{AXL_MODULE_FILE, AXL_ROOT_MODULE_NAME};
 use clap::{Arg, ArgAction, Command};
 use miette::{miette, IntoDiagnostic};
-use starlark::environment::Module;
+use starlark::environment::FrozenModule;
 
 use starlark::values::ValueLike;
 use tokio::task;
@@ -86,12 +86,6 @@ async fn main() -> miette::Result<ExitCode> {
         .into_diagnostic()?;
 
     // Expand all module dependencies (including the builtin @aspect module) to the disk store and collect their root paths.
-    // This results in a Vec of (String, PathBuf) such as
-    // [
-    //     ( "aspect", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/aspect" ),
-    //     ( "experimental", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/experimental" ),
-    //     ( "local", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/local" ),
-    // ]
     let module_roots = disk_store
         .expand_store(&root_module_store)
         .await
@@ -137,18 +131,14 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Evaluate all scripts to find tasks and configs. The order of task discovery will be load bearing in the future
         // when task overloading is supported
-        // 1. repository axl_sources
-        // 2. use_task in the root module
-        // 3. auto_use_tasks from the @aspect built-in module (if not overloaded by an dep in the root MODULE.aspect)
-        // 4. auto_use_tasks from axl module deps in the root MODULE.aspect
         let axl_loader = eval::Loader::new(&cli_version, &repo_root, &axl_deps_root);
 
         // Create evaluators for tasks and configs.
         let task_eval = eval::task::TaskEvaluator::new(&axl_loader);
         let config_eval = eval::config::ConfigEvaluator::new(&axl_loader);
 
-        // Evaluate auto-discovered AXL scripts to scan for tasks
-        let task_modules: Vec<Module> = scripts
+        // Evaluate auto-discovered AXL scripts to scan for tasks (returns FrozenModule)
+        let task_modules: Vec<FrozenModule> = scripts
             .iter()
             .map(|path| {
                 let rel_path = path.strip_prefix(&repo_root).unwrap().to_path_buf();
@@ -167,14 +157,14 @@ async fn main() -> miette::Result<ExitCode> {
         let mut use_task_modules: Vec<(
             String,
             PathBuf,
-            HashMap<PathBuf, (Module, String, Vec<String>)>,
+            HashMap<PathBuf, (FrozenModule, String, Vec<String>)>,
         )> = vec![];
 
         for (module_name, module_root, map) in modules.into_iter() {
             let mut mmap = HashMap::new();
             for (path, (label, symbols)) in map.into_iter() {
                 let rel_path = path.strip_prefix(&module_root).unwrap().to_path_buf();
-                let module = task_eval
+                let frozen_module = task_eval
                     .eval(
                         ModuleScope {
                             name: module_name.clone(),
@@ -183,41 +173,29 @@ async fn main() -> miette::Result<ExitCode> {
                         &rel_path,
                     )
                     .into_diagnostic()?;
-                mmap.insert(path, (module, label, symbols));
+                mmap.insert(path, (frozen_module, label, symbols));
             }
             use_task_modules.push((module_name, module_root, mmap));
         }
 
         // Collect tasks from evaluated scripts.
-        let mut tasks: Vec<TaskMut> = Vec::new();
+        let mut tasks: Vec<ConfiguredTask> = Vec::new();
 
-        for (i, module) in task_modules.iter().enumerate() {
+        for (i, frozen_module) in task_modules.iter().enumerate() {
             let path = scripts.get(i).unwrap();
-            for symbol in module.tasks() {
-                let def = module
-                    .get_task(symbol)
-                    .expect("symbol should have been defined.");
-                let name = if def.name().is_empty() {
-                    symbol.to_string()
-                } else {
-                    def.name().clone()
-                };
-
-                tasks.push(TaskMut::new(
-                    &module,
-                    symbol.to_string(),
-                    path.to_string_lossy().to_string(),
-                    name,
-                    def.group().clone(),
-                ));
+            for symbol in frozen_module.tasks() {
+                let task_mut =
+                    ConfiguredTask::from_frozen_module(frozen_module, &symbol, path.clone())
+                        .into_diagnostic()?;
+                tasks.push(task_mut);
             }
         }
 
         for (module_name, module_root, map) in use_task_modules.iter() {
-            for (path, (module, label, symbols)) in map.iter() {
+            for (path, (frozen_module, label, symbols)) in map.iter() {
                 for symbol in symbols {
-                    if module.has_name(&symbol) {
-                        if !module.has_task(&symbol) {
+                    if frozen_module.has_name(symbol) {
+                        if !frozen_module.has_task(symbol) {
                             return Err(miette!(
                                 "invalid use_task({:?}, {:?}) call in @{} module at {}/{}",
                                 label,
@@ -227,22 +205,10 @@ async fn main() -> miette::Result<ExitCode> {
                                 AXL_MODULE_FILE
                             ));
                         };
-                        let def = module
-                            .get_task(symbol.as_str())
-                            .expect("symbol should have been defined.");
-                        let name = if def.name().is_empty() {
-                            symbol.as_str().to_string()
-                        } else {
-                            def.name().clone()
-                        };
-
-                        tasks.push(TaskMut::new(
-                            &module,
-                            symbol.to_string(),
-                            path.to_string_lossy().to_string(),
-                            name,
-                            def.group().clone(),
-                        ));
+                        let task_mut =
+                            ConfiguredTask::from_frozen_module(frozen_module, symbol, path.clone())
+                                .into_diagnostic()?;
+                        tasks.push(task_mut);
                     } else {
                         return Err(miette!(
                             "task symbol {:?} not found in @{} module use_task({:?}, {:?}) at {}/{}",
@@ -258,38 +224,29 @@ async fn main() -> miette::Result<ExitCode> {
             }
         }
 
-        // Run all config functions, passing in vector of mutable tasks for configuration
-        let config = config_eval
+        // Run all config functions, passing in vector of tasks for configuration
+        let tasks = config_eval
             .run_all(
                 ModuleScope {
                     name: AXL_ROOT_MODULE_NAME.to_string(),
                     path: repo_root.clone(),
                 },
-                configs.iter().map(|p| p.as_path()).collect(),
+                configs.clone(),
                 tasks,
             )
             .into_diagnostic()?;
-
-        // Get updated list of tasks after evaluating all config functions.
-        let tasks = config.tasks();
 
         // Build the command tree from the evaluated and configured tasks.
         let mut tree = CommandTree::default();
 
         // Create the base Clap command for the 'aspect' CLI.
-        // TODO: add .about()
         let cmd = Command::new("aspect")
-            // set binary name to "aspect" in help
             .bin_name("aspect")
-            // add an about string
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
-            // customize the subcommands section title to "Tasks:"
             .subcommand_help_heading("Tasks")
-            // customize the usage string to use <TASK>
             .subcommand_value_name("TASK")
-            // handle --version and -v flags
             .version(cargo_pkg_short_version())
-            .disable_version_flag(true) // disable auto -V / --version
+            .disable_version_flag(true)
             .arg(
                 Arg::new("version")
                     .short('v')
@@ -297,7 +254,6 @@ async fn main() -> miette::Result<ExitCode> {
                     .action(ArgAction::Version)
                     .help("Print version"),
             )
-            // add version command
             .subcommand(
                 Command::new("version")
                     .about("Print version")
@@ -306,13 +262,13 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Convert each task into a Clap subcommand and insert into the command tree.
         for (i, task) in tasks.iter().enumerate() {
-            let name = task.name.borrow();
+            let name = task.get_name();
             let def = task.as_task().unwrap();
             let group = def.group();
-            let task_path = PathBuf::from(task.path.clone());
+            let task_path = task.path.clone();
             let rel_path = match task_path.strip_prefix(&repo_root) {
-                Ok(p) => p,
-                Err(_) => &task_path,
+                Ok(p) => p.to_path_buf(),
+                Err(_) => task_path.clone(),
             };
             let mut found = None;
             for (module_name, module_root, _) in &use_task_modules {
@@ -320,11 +276,11 @@ async fn main() -> miette::Result<ExitCode> {
                     if module_name == AXL_ROOT_MODULE_NAME {
                         continue;
                     }
-                    let module_rel_path = match task_path.strip_prefix(&module_root) {
-                        Ok(p) => p,
-                        Err(_) => &task_path,
+                    let module_rel_path = match task_path.strip_prefix(module_root) {
+                        Ok(p) => p.to_path_buf(),
+                        Err(_) => task_path.clone(),
                     };
-                    found = Some((module_name.clone(), module_rel_path.to_path_buf()));
+                    found = Some((module_name.clone(), module_rel_path));
                     break;
                 }
             }
@@ -333,7 +289,7 @@ async fn main() -> miette::Result<ExitCode> {
             } else {
                 format!("{}", rel_path.display())
             };
-            let cmd = make_command_from_task(&name.to_string(), &defined_in, i.to_string(), def);
+            let cmd = make_command_from_task(&name, &defined_in, i.to_string(), def);
             tree.insert(&name, group, group, &defined_in, cmd)
                 .into_diagnostic()?;
         }
@@ -364,7 +320,7 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Get the task name and arguments from the final subcommand.
         let (name, cmdargs) = cmd;
-        let id: usize = tree.get_task_id(&cmdargs);
+        let id: usize = tree.get_task_id(cmdargs);
         let task = tasks.get(id).expect("task must exist at the indice");
         let definition = task.as_task().unwrap();
 
@@ -375,78 +331,76 @@ async fn main() -> miette::Result<ExitCode> {
         // Create an AxlStore for task execution
         let store = axl_loader.new_store(task.path.clone());
 
-        // Execute the selected task, passing in parsed arguments.
-        let exit_code = task
-            .module
-            .execute_task(store, task, |heap| {
-                let mut args = TaskArgs::new();
-                for (k, v) in definition.args().iter() {
-                    let val = match v {
-                        TaskArg::String { .. } => heap
-                            .alloc_str(
-                                cmdargs
-                                    .get_one::<String>(k.as_str())
-                                    .unwrap_or(&String::new()),
-                            )
-                            .to_value(),
-                        TaskArg::Int { .. } => heap
-                            .alloc(cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned())
-                            .to_value(),
-                        TaskArg::UInt { .. } => heap
-                            .alloc(cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned())
-                            .to_value(),
-                        TaskArg::Boolean { .. } => heap.alloc(
+        // Execute the selected task using the new execution function
+        let exit_code = execute_task_with_args(task, store, |heap| {
+            let mut args = TaskArgs::new();
+            for (k, v) in definition.args().iter() {
+                let val = match v {
+                    TaskArg::String { .. } => heap
+                        .alloc_str(
                             cmdargs
-                                .get_one::<bool>(k.as_str())
-                                .unwrap_or(&false)
-                                .to_owned(),
-                        ),
-                        TaskArg::Positional { .. } => heap.alloc(TaskArgs::alloc_list(
-                            cmdargs
-                                .get_many::<String>(k.as_str())
-                                .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
-                        )),
-                        TaskArg::TrailingVarArgs => heap.alloc(TaskArgs::alloc_list(
-                            cmdargs
-                                .get_many::<String>(k.as_str())
-                                .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
-                        )),
-                        TaskArg::StringList { .. } => heap.alloc(TaskArgs::alloc_list(
-                            cmdargs
-                                .get_many::<String>(k.as_str())
-                                .unwrap_or_default()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>(),
-                        )),
-                        TaskArg::BooleanList { .. } => heap.alloc(TaskArgs::alloc_list(
-                            cmdargs
-                                .get_many::<bool>(k.as_str())
-                                .unwrap_or_default()
-                                .cloned()
-                                .collect::<Vec<_>>(),
-                        )),
-                        TaskArg::IntList { .. } => heap.alloc(TaskArgs::alloc_list(
-                            cmdargs
-                                .get_many::<i32>(k.as_str())
-                                .unwrap_or_default()
-                                .cloned()
-                                .collect::<Vec<_>>(),
-                        )),
-                        TaskArg::UIntList { .. } => heap.alloc(TaskArgs::alloc_list(
-                            cmdargs
-                                .get_many::<u32>(k.as_str())
-                                .unwrap_or_default()
-                                .cloned()
-                                .collect::<Vec<_>>(),
-                        )),
-                    };
-                    args.insert(k.clone(), val);
-                }
-                args
-            })
-            .into_diagnostic()?;
+                                .get_one::<String>(k.as_str())
+                                .unwrap_or(&String::new()),
+                        )
+                        .to_value(),
+                    TaskArg::Int { .. } => heap
+                        .alloc(cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned())
+                        .to_value(),
+                    TaskArg::UInt { .. } => heap
+                        .alloc(cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned())
+                        .to_value(),
+                    TaskArg::Boolean { .. } => heap.alloc(
+                        cmdargs
+                            .get_one::<bool>(k.as_str())
+                            .unwrap_or(&false)
+                            .to_owned(),
+                    ),
+                    TaskArg::Positional { .. } => heap.alloc(TaskArgs::alloc_list(
+                        cmdargs
+                            .get_many::<String>(k.as_str())
+                            .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                    )),
+                    TaskArg::TrailingVarArgs => heap.alloc(TaskArgs::alloc_list(
+                        cmdargs
+                            .get_many::<String>(k.as_str())
+                            .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                    )),
+                    TaskArg::StringList { .. } => heap.alloc(TaskArgs::alloc_list(
+                        cmdargs
+                            .get_many::<String>(k.as_str())
+                            .unwrap_or_default()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>(),
+                    )),
+                    TaskArg::BooleanList { .. } => heap.alloc(TaskArgs::alloc_list(
+                        cmdargs
+                            .get_many::<bool>(k.as_str())
+                            .unwrap_or_default()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    )),
+                    TaskArg::IntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                        cmdargs
+                            .get_many::<i32>(k.as_str())
+                            .unwrap_or_default()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    )),
+                    TaskArg::UIntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                        cmdargs
+                            .get_many::<u32>(k.as_str())
+                            .unwrap_or_default()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    )),
+                };
+                args.insert(k.clone(), val);
+            }
+            args
+        })
+        .into_diagnostic()?;
 
-        return Ok(ExitCode::from(exit_code.unwrap_or(0)));
+        Ok(ExitCode::from(exit_code.unwrap_or(0)))
     });
 
     // Await the blocking task result and handle any join errors.

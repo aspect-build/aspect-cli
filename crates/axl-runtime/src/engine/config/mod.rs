@@ -1,5 +1,6 @@
 mod context;
-mod task_list;
+mod tasks;
 
 pub use context::ConfigContext;
-pub use task_list::task_mut::TaskMut;
+pub use tasks::configured_task::ConfiguredTask;
+pub use tasks::frozen::freeze_value;

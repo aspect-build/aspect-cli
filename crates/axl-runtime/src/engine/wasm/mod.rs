@@ -7,6 +7,7 @@ mod types;
 use starlark::environment::GlobalsBuilder;
 use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::FrozenValue;
+use starlark::values::OwnedFrozenValue;
 
 use allocative::Allocative;
 use anyhow::Context;
@@ -22,6 +23,7 @@ use starlark::values::list::UnpackList;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Value;
+use starlark::values::ValueLike;
 use starlark::values::{self, starlark_value};
 use wasmi_wasi::ambient_authority;
 
@@ -41,11 +43,21 @@ pub fn register_wasm_types(globals: &mut GlobalsBuilder) {
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<wasm.Wasm>")]
-pub struct Wasm {}
+pub struct Wasm {
+    /// Frozen TaskContext for passing to host functions
+    #[allocative(skip)]
+    context: Option<OwnedFrozenValue>,
+}
 
 impl Wasm {
     pub fn new() -> Self {
-        Self {}
+        Self { context: None }
+    }
+
+    pub fn with_context(context: OwnedFrozenValue) -> Self {
+        Self {
+            context: Some(context),
+        }
     }
 }
 
@@ -118,7 +130,7 @@ pub(crate) fn wasm_methods(registry: &mut MethodsBuilder) {
     ///
     /// Return values are converted back to WASM types. Use tuples for multi-value returns.
     fn instantiate<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
         #[starlark(require = named, default = UnpackList::default())] args: UnpackList<String>,
         #[starlark(require = named, default = UnpackDictEntries::default())] env: UnpackDictEntries<
@@ -132,6 +144,12 @@ pub(crate) fn wasm_methods(registry: &mut MethodsBuilder) {
             'v,
         >,
     ) -> anyhow::Result<instance::Instance> {
+        // Extract frozen context from the Wasm object
+        let wasm = this
+            .downcast_ref::<Wasm>()
+            .ok_or_else(|| anyhow::anyhow!("expected Wasm"))?;
+        let owned_context = wasm.context.clone();
+
         let mut wasi = wasmi_wasi::WasiCtxBuilder::new();
 
         if inherit_stdio {
@@ -165,10 +183,10 @@ pub(crate) fn wasm_methods(registry: &mut MethodsBuilder) {
 
         if has_imports {
             // Use host function path with WasmStoreCtx
-            instantiate_with_imports(wasi_ctx, &bytes, imports)
+            instantiate_with_imports(wasi_ctx, &bytes, imports, owned_context)
         } else {
             // Use simple path (also uses WasmStoreCtx for consistency)
-            instantiate_simple(wasi_ctx, &bytes)
+            instantiate_simple(wasi_ctx, &bytes, owned_context)
         }
     }
 }
@@ -179,13 +197,15 @@ pub(crate) fn wasm_methods(registry: &mut MethodsBuilder) {
 fn instantiate_simple(
     wasi: wasmi_wasi::WasiCtx,
     bytes: &[u8],
+    owned_context: Option<OwnedFrozenValue>,
 ) -> anyhow::Result<instance::Instance> {
     let mut config = wasmi::Config::default();
     config.compilation_mode(wasmi::CompilationMode::Eager);
     let engine = wasmi::Engine::new(&config);
 
-    // Create store context (no host functions)
-    let store_ctx = WasmStoreCtx::new(wasi);
+    // Create store context with frozen TaskContext
+    let mut store_ctx = WasmStoreCtx::new(wasi);
+    store_ctx.set_owned_context(owned_context);
     let mut store = wasmi::Store::new(&engine, store_ctx);
 
     let module = wasmi::Module::new(store.engine(), bytes)?;
@@ -229,13 +249,15 @@ fn instantiate_with_imports<'v>(
     wasi: wasmi_wasi::WasiCtx,
     bytes: &[u8],
     imports: HostImports<'v>,
+    owned_context: Option<OwnedFrozenValue>,
 ) -> anyhow::Result<instance::Instance> {
     let mut config = wasmi::Config::default();
     config.compilation_mode(wasmi::CompilationMode::Eager);
     let engine = wasmi::Engine::new(&config);
 
-    // Create store context
+    // Create store context with frozen TaskContext
     let mut store_ctx = WasmStoreCtx::new(wasi);
+    store_ctx.set_owned_context(owned_context);
 
     // Collect host function names for linker registration
     let mut func_keys: Vec<(String, String)> = Vec::new();

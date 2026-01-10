@@ -289,13 +289,17 @@ fn process_pending_host_call<'v>(
         None => Value::new_none(),
     };
 
+    // Get frozen TaskContext from store context (FrozenValue is Copy + 'static)
+    let frozen_ctx = store.data().frozen_context();
+    let ctx_val = frozen_ctx
+        .map(|c| c.to_value())
+        .unwrap_or(Value::new_none());
+
     // Must drop borrows before calling eval_function
     drop(instance);
     drop(store);
 
     // Args: [ctx, memory, ...wasm_args]
-    // ctx is None for now (reserved for future TaskContext support)
-    let ctx_val = Value::new_none();
     let mut starlark_args = vec![ctx_val, memory_val];
     starlark_args.extend(wasm_vals_to_starlark(&pending.args, heap));
 

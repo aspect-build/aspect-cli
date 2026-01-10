@@ -64,5 +64,7 @@ def impl(ctx: TaskContext) -> int:
 host_test = task(
     group = ["tests"],
     implementation = impl,
-    args = {},
+    args = {
+        "test": args.string()
+    },
 )
