@@ -7,7 +7,6 @@ mod types;
 use starlark::environment::GlobalsBuilder;
 use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::FrozenValue;
-use starlark::values::OwnedFrozenValue;
 
 use allocative::Allocative;
 use anyhow::Context;
@@ -44,9 +43,11 @@ pub fn register_wasm_types(globals: &mut GlobalsBuilder) {
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<wasm.Wasm>")]
 pub struct Wasm {
-    /// Frozen TaskContext for passing to host functions
+    /// Frozen TaskContext for passing to host functions.
+    /// This is a FrozenValue (not OwnedFrozenValue) because the heap is kept
+    /// alive by the AxlStore during task execution.
     #[allocative(skip)]
-    context: Option<OwnedFrozenValue>,
+    context: Option<FrozenValue>,
 }
 
 impl Wasm {
@@ -54,7 +55,7 @@ impl Wasm {
         Self { context: None }
     }
 
-    pub fn with_context(context: OwnedFrozenValue) -> Self {
+    pub fn with_context(context: FrozenValue) -> Self {
         Self {
             context: Some(context),
         }
@@ -148,7 +149,7 @@ pub(crate) fn wasm_methods(registry: &mut MethodsBuilder) {
         let wasm = this
             .downcast_ref::<Wasm>()
             .ok_or_else(|| anyhow::anyhow!("expected Wasm"))?;
-        let owned_context = wasm.context.clone();
+        let frozen_context = wasm.context;
 
         let mut wasi = wasmi_wasi::WasiCtxBuilder::new();
 
@@ -183,10 +184,10 @@ pub(crate) fn wasm_methods(registry: &mut MethodsBuilder) {
 
         if has_imports {
             // Use host function path with WasmStoreCtx
-            instantiate_with_imports(wasi_ctx, &bytes, imports, owned_context)
+            instantiate_with_imports(wasi_ctx, &bytes, imports, frozen_context)
         } else {
             // Use simple path (also uses WasmStoreCtx for consistency)
-            instantiate_simple(wasi_ctx, &bytes, owned_context)
+            instantiate_simple(wasi_ctx, &bytes, frozen_context)
         }
     }
 }
@@ -197,7 +198,7 @@ pub(crate) fn wasm_methods(registry: &mut MethodsBuilder) {
 fn instantiate_simple(
     wasi: wasmi_wasi::WasiCtx,
     bytes: &[u8],
-    owned_context: Option<OwnedFrozenValue>,
+    frozen_context: Option<FrozenValue>,
 ) -> anyhow::Result<instance::Instance> {
     let mut config = wasmi::Config::default();
     config.compilation_mode(wasmi::CompilationMode::Eager);
@@ -205,7 +206,7 @@ fn instantiate_simple(
 
     // Create store context with frozen TaskContext
     let mut store_ctx = WasmStoreCtx::new(wasi);
-    store_ctx.set_owned_context(owned_context);
+    store_ctx.set_frozen_context(frozen_context);
     let mut store = wasmi::Store::new(&engine, store_ctx);
 
     let module = wasmi::Module::new(store.engine(), bytes)?;
@@ -249,7 +250,7 @@ fn instantiate_with_imports<'v>(
     wasi: wasmi_wasi::WasiCtx,
     bytes: &[u8],
     imports: HostImports<'v>,
-    owned_context: Option<OwnedFrozenValue>,
+    frozen_context: Option<FrozenValue>,
 ) -> anyhow::Result<instance::Instance> {
     let mut config = wasmi::Config::default();
     config.compilation_mode(wasmi::CompilationMode::Eager);
@@ -257,7 +258,7 @@ fn instantiate_with_imports<'v>(
 
     // Create store context with frozen TaskContext
     let mut store_ctx = WasmStoreCtx::new(wasi);
-    store_ctx.set_owned_context(owned_context);
+    store_ctx.set_frozen_context(frozen_context);
 
     // Collect host function names for linker registration
     let mut func_keys: Vec<(String, String)> = Vec::new();

@@ -18,8 +18,8 @@ impl AxlStore {
     pub fn new(cli_version: String, root_dir: PathBuf, script_path: PathBuf) -> Self {
         Self {
             cli_version,
-            root_dir: root_dir,
-            script_path: script_path,
+            root_dir,
+            script_path,
             rt: AsyncRuntime::new(),
         }
     }

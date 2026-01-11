@@ -67,6 +67,9 @@ impl FrozenTaskModuleLike for FrozenModule {
 /// 1. Keep task implementations frozen (immutable, thread-safe)
 /// 2. Allocate execution-time values on a temporary heap
 /// 3. Drop the temporary heap after execution
+///
+/// The TaskContext is pre-frozen so WASM can access it directly via
+/// `ctx.wasm` without needing runtime freezing.
 pub fn execute_task(
     task: &ConfiguredTask,
     store: AxlStore,
@@ -81,23 +84,37 @@ pub fn execute_task(
         .implementation()
         .ok_or_else(|| EvalError::UnknownError(anyhow!("task has no implementation")))?;
 
-    // Create temporary Module for execution heap (Buck2 pattern)
-    let temp_module = Module::new();
-    let mut eval = Evaluator::new(&temp_module);
-    eval.extra = Some(&store);
-
-    // Create TaskContext on temp_module's heap
-    let heap = temp_module.heap();
+    // Create a module for TaskContext and freeze it immediately
+    // This allows WASM to access ctx directly without runtime freezing
+    let ctx_module = Module::new();
+    let heap = ctx_module.heap();
     let task_args = TaskArgs::from_map(args, heap);
     let context = heap.alloc(TaskContext::new(task_args, config_value));
+    ctx_module.set("__ctx__", context);
 
-    // Call frozen task implementation with unfrozen context
-    let ret = eval.eval_function(task_impl.value(), &[context], &[])?;
+    let frozen_ctx_module = ctx_module
+        .freeze()
+        .map_err(|e| EvalError::UnknownError(anyhow!("{:?}", e)))?;
+    // OwnedFrozenValue keeps the frozen heap alive for the duration of this function
+    let frozen_context = frozen_ctx_module
+        .get("__ctx__")
+        .map_err(|e| EvalError::UnknownError(anyhow!("failed to get frozen context: {:?}", e)))?;
+
+    // Create execution module for the evaluator
+    let exec_module = Module::new();
+    let mut eval = Evaluator::new(&exec_module);
+    eval.extra = Some(&store);
+
+    // Call frozen task implementation with frozen context
+    let ret = eval.eval_function(task_impl.value(), &[frozen_context.value()], &[])?;
 
     Ok(ret.unpack_i32().map(|ex| ex as u8))
 }
 
 /// Executes a task with pre-built TaskArgs.
+///
+/// The TaskContext is pre-frozen so WASM can access it directly via
+/// `ctx.wasm` without needing runtime freezing.
 pub fn execute_task_with_args(
     task: &ConfiguredTask,
     store: AxlStore,
@@ -112,18 +129,29 @@ pub fn execute_task_with_args(
         .implementation()
         .ok_or_else(|| EvalError::UnknownError(anyhow!("task has no implementation")))?;
 
-    // Create temporary Module for execution heap
-    let temp_module = Module::new();
-    let mut eval = Evaluator::new(&temp_module);
-    eval.extra = Some(&store);
-
-    // Create TaskContext on temp_module's heap
-    let heap = temp_module.heap();
+    // Create a module for TaskContext and freeze it immediately
+    // This allows WASM to access ctx directly without runtime freezing
+    let ctx_module = Module::new();
+    let heap = ctx_module.heap();
     let task_args = args_builder(heap);
     let context = heap.alloc(TaskContext::new(task_args, config_value));
+    ctx_module.set("__ctx__", context);
 
-    // Call frozen task implementation with unfrozen context
-    let ret = eval.eval_function(task_impl.value(), &[context], &[])?;
+    let frozen_ctx_module = ctx_module
+        .freeze()
+        .map_err(|e| EvalError::UnknownError(anyhow!("{:?}", e)))?;
+    // OwnedFrozenValue keeps the frozen heap alive for the duration of this function
+    let frozen_context = frozen_ctx_module
+        .get("__ctx__")
+        .map_err(|e| EvalError::UnknownError(anyhow!("failed to get frozen context: {:?}", e)))?;
+
+    // Create execution module for the evaluator
+    let exec_module = Module::new();
+    let mut eval = Evaluator::new(&exec_module);
+    eval.extra = Some(&store);
+
+    // Call frozen task implementation with frozen context
+    let ret = eval.eval_function(task_impl.value(), &[frozen_context.value()], &[])?;
 
     Ok(ret.unpack_i32().map(|ex| ex as u8))
 }

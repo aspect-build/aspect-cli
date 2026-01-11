@@ -86,6 +86,12 @@ async fn main() -> miette::Result<ExitCode> {
         .into_diagnostic()?;
 
     // Expand all module dependencies (including the builtin @aspect module) to the disk store and collect their root paths.
+    // This results in a Vec of (String, PathBuf) such as
+    // [
+    //     ( "aspect", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/aspect" ),
+    //     ( "experimental", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/experimental" ),
+    //     ( "local", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/local" ),
+    // ]
     let module_roots = disk_store
         .expand_store(&root_module_store)
         .await
@@ -131,6 +137,10 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Evaluate all scripts to find tasks and configs. The order of task discovery will be load bearing in the future
         // when task overloading is supported
+        // 1. repository axl_sources
+        // 2. use_task in the root module
+        // 3. auto_use_tasks from the @aspect built-in module (if not overloaded by an dep in the root MODULE.aspect)
+        // 4. auto_use_tasks from axl module deps in the root MODULE.aspect
         let axl_loader = eval::Loader::new(&cli_version, &repo_root, &axl_deps_root);
 
         // Create evaluators for tasks and configs.
@@ -240,13 +250,19 @@ async fn main() -> miette::Result<ExitCode> {
         let mut tree = CommandTree::default();
 
         // Create the base Clap command for the 'aspect' CLI.
+        // TODO: add .about()
         let cmd = Command::new("aspect")
+            // set binary name to "aspect" in help
             .bin_name("aspect")
+            // add an about string
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
+            // customize the subcommands section title to "Tasks:"
             .subcommand_help_heading("Tasks")
+            // customize the usage string to use <TASK>
             .subcommand_value_name("TASK")
+            // handle --version and -v flags
             .version(cargo_pkg_short_version())
-            .disable_version_flag(true)
+            .disable_version_flag(true) // disable auto -V / --version
             .arg(
                 Arg::new("version")
                     .short('v')
@@ -254,6 +270,7 @@ async fn main() -> miette::Result<ExitCode> {
                     .action(ArgAction::Version)
                     .help("Print version"),
             )
+            // add version command
             .subcommand(
                 Command::new("version")
                     .about("Print version")

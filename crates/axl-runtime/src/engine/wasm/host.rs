@@ -19,30 +19,14 @@
 //! - Memory access works because we have owned `Rc<RefCell<Store>>`
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use starlark::values::float::UnpackFloat;
 use starlark::values::FrozenValue;
 use starlark::values::Heap;
-use starlark::values::OwnedFrozenValue;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use wasmi::Caller;
 use wasmi_wasi::WasiCtx;
-
-/// Static data extracted from TaskContext for host function access.
-///
-/// This contains data that host functions may need, extracted at instantiation time
-/// so it can be stored in the `'static` `WasmStoreCtx`.
-#[derive(Clone, Debug, Default)]
-pub struct TaskData {
-    /// Current working directory
-    pub cwd: Option<PathBuf>,
-    /// Task name for debugging
-    pub task_name: Option<String>,
-    /// Frozen TaskContext value (if available)
-    pub context: Option<FrozenValue>,
-}
 
 /// Marker for the host call trap used by the trampoline.
 pub const HOST_CALL_TRAP_MARKER: &str = "__HOST_CALL_PENDING__";
@@ -60,17 +44,18 @@ pub struct PendingHostCall {
 ///
 /// All fields are `'static` - no lifetime parameters needed.
 /// This is the data type used for `wasmi::Store<WasmStoreCtx>`.
+///
+/// Note: The frozen context is a `FrozenValue` (not `OwnedFrozenValue`) because
+/// the heap is kept alive by the `OwnedFrozenValue` in `execute_task_with_args`.
 pub struct WasmStoreCtx {
     /// WASI context for system calls
     pub wasi: WasiCtx,
     /// Host functions indexed by (module, name)
     pub host_funcs: HashMap<(String, String), FrozenValue>,
-    /// Static task data for host function access
-    pub task_data: Option<TaskData>,
+    /// Frozen TaskContext for host function access
+    pub frozen_context: Option<FrozenValue>,
     /// Pending host function call for trampoline pattern
     pub pending_call: Option<PendingHostCall>,
-    /// Owned TaskContext value - keeps the frozen heap alive
-    owned_context: Option<OwnedFrozenValue>,
 }
 
 impl WasmStoreCtx {
@@ -79,46 +64,25 @@ impl WasmStoreCtx {
         Self {
             wasi,
             host_funcs: HashMap::new(),
-            task_data: None,
+            frozen_context: None,
             pending_call: None,
-            owned_context: None,
         }
     }
 
     /// Set the frozen TaskContext.
-    /// This keeps the frozen heap alive for the lifetime of the store.
-    /// Also extracts and caches the FrozenValue in task_data for easy access.
-    pub fn set_owned_context(&mut self, context: Option<OwnedFrozenValue>) {
-        // Extract FrozenValue from OwnedFrozenValue before storing
-        // unpack_frozen() returns Option<FrozenValue> which is Copy + 'static
-        let frozen_context = context.as_ref().and_then(|c| c.value().unpack_frozen());
-
-        // Store the owned value to keep the heap alive
-        self.owned_context = context;
-
-        // Store the FrozenValue in task_data for easy access
-        self.task_data = Some(TaskData {
-            context: frozen_context,
-            cwd: None,
-            task_name: None,
-        });
+    /// The heap is kept alive by OwnedFrozenValue in execute_task_with_args.
+    pub fn set_frozen_context(&mut self, context: Option<FrozenValue>) {
+        self.frozen_context = context;
     }
 
     /// Get the frozen TaskContext value (if set).
     pub fn frozen_context(&self) -> Option<FrozenValue> {
-        self.task_data.as_ref().and_then(|td| td.context)
+        self.frozen_context
     }
 
     /// Register a host function.
     pub fn register_func(&mut self, module: String, name: String, func: FrozenValue) {
         self.host_funcs.insert((module, name), func);
-    }
-
-    /// Get a registered host function.
-    pub fn get_func(&self, module: &str, name: &str) -> Option<FrozenValue> {
-        self.host_funcs
-            .get(&(module.to_string(), name.to_string()))
-            .copied()
     }
 }
 
