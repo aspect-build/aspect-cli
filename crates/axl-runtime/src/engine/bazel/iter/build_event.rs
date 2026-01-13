@@ -1,7 +1,7 @@
 use std::cell::RefCell;
+use std::sync::mpsc::{RecvError, TryRecvError};
 
 use allocative::Allocative;
-use fibre::RecvError;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -19,17 +19,18 @@ use starlark::values::ValueLike;
 
 use axl_proto::build_event_stream::BuildEvent;
 use derive_more::Display;
-use fibre::spmc::Receiver;
+
+use super::super::stream::Subscriber;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<build_event_iterator>")]
 pub struct BuildEventIterator {
     #[allocative(skip)]
-    recv: RefCell<Receiver<BuildEvent>>,
+    recv: RefCell<Subscriber<BuildEvent>>,
 }
 
 impl BuildEventIterator {
-    pub fn new(recv: Receiver<BuildEvent>) -> Self {
+    pub fn new(recv: Subscriber<BuildEvent>) -> Self {
         Self {
             recv: RefCell::new(recv),
         }
@@ -45,12 +46,12 @@ impl<'v> AllocValue<'v> for BuildEventIterator {
 #[starlark_module]
 pub(crate) fn build_event_methods(registry: &mut MethodsBuilder) {
     /// Returns `BuildEvent` if event buffer is not empty.
-    /// Maximum `1000` events is buffered at once.
     fn try_pop<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<BuildEvent>> {
         let this = this.downcast_ref_err::<BuildEventIterator>()?;
         match this.recv.borrow_mut().try_recv() {
             Ok(it) => Ok(NoneOr::Other(it)),
-            Err(_) => Ok(NoneOr::None),
+            Err(TryRecvError::Empty) => Ok(NoneOr::None),
+            Err(TryRecvError::Disconnected) => Ok(NoneOr::None),
         }
     }
 
@@ -87,7 +88,7 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIterator {
     unsafe fn iter_next(&self, _index: usize, heap: &'v Heap) -> Option<values::Value<'v>> {
         match self.recv.borrow_mut().recv() {
             Ok(ev) => Some(ev.alloc_value(heap)),
-            Err(RecvError::Disconnected) => None,
+            Err(RecvError) => None,
         }
     }
     unsafe fn iter_stop(&self) {}

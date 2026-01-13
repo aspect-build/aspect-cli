@@ -1,0 +1,6 @@
+"""Reproducer for https://github.com/aspect-build/aspect-cli/issues/919"""
+
+module(
+    name = "large_bes_reproducer",
+    version = "0.0.0",
+)

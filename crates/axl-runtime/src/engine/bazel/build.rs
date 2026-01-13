@@ -109,7 +109,7 @@ impl BuildEventSink {
     fn spawn(&self, rt: AsyncRuntime, stream: &BuildEventStream) -> JoinHandle<()> {
         match self {
             BuildEventSink::Grpc { uri, metadata } => {
-                GrpcEventStreamSink::spawn(rt, stream.receiver(), uri.clone(), metadata.clone())
+                GrpcEventStreamSink::spawn(rt, stream.subscribe(), uri.clone(), metadata.clone())
             }
         }
     }
@@ -224,7 +224,7 @@ impl Build {
         if build_events {
             sink_handles.push(TracingEventStreamSink::spawn(
                 rt,
-                build_event_stream.as_ref().unwrap().receiver(),
+                build_event_stream.as_ref().unwrap().subscribe(),
             ))
         }
 
@@ -284,7 +284,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             "call `ctx.bazel.build` with `build_events = true` in order to receive build events."
         ))?;
 
-        Ok(BuildEventIterator::new(event_stream.receiver()))
+        Ok(BuildEventIterator::new(event_stream.subscribe()))
     }
 
     // Creates an iterable `ExecutionLogIterator` type.

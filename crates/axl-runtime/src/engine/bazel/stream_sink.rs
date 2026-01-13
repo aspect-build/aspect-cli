@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    sync::mpsc::RecvError,
     thread::{self, JoinHandle},
 };
 
@@ -12,17 +13,17 @@ use build_event_stream::{
     client::{Client, ClientError},
     lifecycle,
 };
-use fibre::spmc::{Receiver, RecvError};
 
 use thiserror::Error;
 use tokio::{sync::mpsc::error::SendError, task};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
 use super::super::r#async::rt::AsyncRuntime;
+use super::stream::Subscriber;
 
 #[derive(Error, Debug)]
 pub enum SinkError {
-    #[error(transparent)]
+    #[error("channel disconnected")]
     RecvError(#[from] RecvError),
     #[error(transparent)]
     ClientError(#[from] ClientError),
@@ -36,7 +37,7 @@ pub struct GrpcEventStreamSink {}
 impl GrpcEventStreamSink {
     pub fn spawn(
         rt: AsyncRuntime,
-        recv: Receiver<BuildEvent>,
+        recv: Subscriber<BuildEvent>,
         endpoint: String,
         headers: HashMap<String, String>,
     ) -> JoinHandle<()> {
@@ -52,7 +53,7 @@ impl GrpcEventStreamSink {
     }
 
     pub async fn task_spawn(
-        recv: Receiver<BuildEvent>,
+        recv: Subscriber<BuildEvent>,
         endpoint: String,
         headers: HashMap<String, String>,
     ) -> task::JoinHandle<Result<(), SinkError>> {
@@ -60,13 +61,11 @@ impl GrpcEventStreamSink {
     }
 
     async fn work(
-        recv: Receiver<BuildEvent>,
+        recv: Subscriber<BuildEvent>,
         endpoint: String,
         headers: HashMap<String, String>,
     ) -> Result<(), SinkError> {
         let mut client = Client::new(endpoint, headers).await?;
-
-        let recv = recv.clone();
 
         let uuid = uuid::Uuid::new_v4().to_string();
         let build_id = uuid.to_string();
@@ -86,7 +85,7 @@ impl GrpcEventStreamSink {
             ))
             .await?;
 
-        let mut seq = 0;
+        let seq = 0;
 
         let (sender, receiver) =
             tokio::sync::mpsc::channel::<PublishBuildToolEventStreamRequest>(1);
@@ -94,8 +93,12 @@ impl GrpcEventStreamSink {
         let rstream = ReceiverStream::new(receiver);
         let stream = client.publish_build_tool_event_stream(rstream);
 
+        // Clone for use in async block
+        let build_id_for_events = build_id.clone();
+        let invocation_id_for_events = invocation_id.clone();
+
         let (a, b): (Result<(), SinkError>, Result<(), SinkError>) = tokio::join!(
-            async {
+            async move {
                 let mut stream = stream.await?.into_inner();
                 while let Some(event) = stream.next().await {
                     match event {
@@ -108,7 +111,8 @@ impl GrpcEventStreamSink {
                 }
                 Ok(())
             },
-            async {
+            async move {
+                let mut seq = seq;
                 loop {
                     seq += 1;
                     let event = recv.recv();
@@ -119,8 +123,8 @@ impl GrpcEventStreamSink {
 
                     sender
                         .send(build_tool::bazel_event(
-                            build_id.to_string(),
-                            invocation_id.to_string(),
+                            build_id_for_events.to_string(),
+                            invocation_id_for_events.to_string(),
                             seq,
                             &event,
                         ))

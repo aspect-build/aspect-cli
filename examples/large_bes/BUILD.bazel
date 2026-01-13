@@ -1,0 +1,28 @@
+"""Reproducer for https://github.com/aspect-build/aspect-cli/issues/919
+
+This BUILD file generates 1000+ targets to trigger the BES pipe buffer overflow
+that causes `aspect build //...` to hang on large builds.
+
+To reproduce:
+  cd examples/large_bes
+  aspect build //...
+
+Expected: Build completes and aspect exits cleanly
+Actual: aspect hangs after "Build completed successfully" due to BEP pipe deadlock
+"""
+
+# Generate 1000 genrule targets to produce enough BEP events to overflow the pipe buffer
+[
+    genrule(
+        name = "target_{}".format(i),
+        outs = ["out_{}.txt".format(i)],
+        cmd = "echo 'Generated output {}' > $@".format(i),
+    )
+    for i in range(100000)
+]
+
+# Create a target that depends on all generated targets
+filegroup(
+    name = "all_targets",
+    srcs = [":target_{}".format(i) for i in range(1000)],
+)
