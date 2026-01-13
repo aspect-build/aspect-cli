@@ -15,6 +15,7 @@ use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
+use starlark::values::ValueLike;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<Bytes>")]
@@ -82,4 +83,12 @@ impl<'v> StarlarkValue<'v> for Bytes {
 }
 
 #[starlark_module]
-fn bytes_methods(registry: &mut MethodsBuilder) {}
+fn bytes_methods(registry: &mut MethodsBuilder) {
+    /// Decodes the bytes as a UTF-8 string.
+    ///
+    /// Invalid UTF-8 sequences are replaced with the Unicode replacement character (U+FFFD).
+    fn decode<'v>(this: values::Value) -> anyhow::Result<String> {
+        let bytes = this.downcast_ref_err::<Bytes>()?;
+        Ok(String::from_utf8_lossy(&bytes.buf).into_owned())
+    }
+}
