@@ -9,11 +9,11 @@ use axl_proto::{
     Timestamp,
 };
 
-use fibre::spmc::Receiver;
 use tokio::task;
 use tracing::{span::EnteredSpan, Level, Span};
 
 use super::super::r#async::rt::AsyncRuntime;
+use super::stream::Subscriber;
 
 #[derive(Debug)]
 pub struct TracingEventStreamSink {}
@@ -31,7 +31,7 @@ fn timestamp_or_now(timestamp: Option<&Timestamp>) -> i64 {
 }
 
 impl TracingEventStreamSink {
-    pub fn spawn(rt: AsyncRuntime, recv: Receiver<BuildEvent>) -> JoinHandle<()> {
+    pub fn spawn(rt: AsyncRuntime, recv: Subscriber<BuildEvent>) -> JoinHandle<()> {
         let span = tracing::info_span!("events");
         thread::spawn(move || {
             rt.block_on(async { TracingEventStreamSink::task_spawn(span, recv).await.await })
@@ -39,12 +39,14 @@ impl TracingEventStreamSink {
         })
     }
 
-    pub async fn task_spawn(span: Span, recv: Receiver<BuildEvent>) -> task::JoinHandle<()> {
+    pub async fn task_spawn(span: Span, recv: Subscriber<BuildEvent>) -> task::JoinHandle<()> {
         tokio::task::spawn(async move {
             let _guard = span.enter();
             let mut spans: HashMap<&str, EnteredSpan> = HashMap::new();
+
             loop {
                 let event = recv.recv();
+
                 if event.is_err() {
                     break;
                 }
