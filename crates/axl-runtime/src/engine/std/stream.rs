@@ -1,5 +1,4 @@
 use anyhow::anyhow;
-use starlark::values::list::AllocList;
 use starlark::values::Heap;
 
 use std::cell::RefCell;
@@ -31,6 +30,7 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::ValueLike;
 
 use crate::engine::std::stream_iter;
+use crate::engine::types::bytes::Bytes;
 
 #[derive(Debug, ProvidesStaticType, Dupe, Clone, NoSerialize, Allocative)]
 pub enum Readable {
@@ -133,21 +133,47 @@ fn readable_methods(registry: &mut MethodsBuilder) {
         })
     }
 
-    /// Reads all bytes until EOF in this source, placing them into a list of bytes.
+    /// Reads bytes from this source.
     ///
-    /// If successful, this function will return the list of bytes read.
-    fn read<'v>(this: values::Value) -> anyhow::Result<AllocList<Vec<u32>>> {
+    /// If `size` is provided, reads up to that many bytes.
+    /// If `size` is not provided, reads until EOF.
+    /// Returns the bytes read.
+    fn read<'v>(
+        this: values::Value,
+        #[starlark(require=pos, default = -1)] size: i32,
+    ) -> anyhow::Result<Bytes> {
         let io = this.downcast_ref_err::<Readable>()?;
-        let mut buf = vec![];
-        let _size = match &*io {
-            Readable::Stdin(stdin) => stdin.lock().read(&mut buf)?,
-            Readable::ChildStderr(stderr) => stderr.lock().unwrap().borrow_mut().read(&mut buf)?,
-            Readable::ChildStdout(stdout) => stdout.lock().unwrap().borrow_mut().read(&mut buf)?,
-        };
 
-        Ok(AllocList(
-            buf.iter().map(|b| *b as u32).collect::<Vec<u32>>(),
-        ))
+        if size < 0 {
+            // Read until EOF
+            let mut buf = Vec::new();
+            match &*io {
+                Readable::Stdin(stdin) => {
+                    stdin.lock().read_to_end(&mut buf)?;
+                }
+                Readable::ChildStderr(stderr) => {
+                    stderr.lock().unwrap().borrow_mut().read_to_end(&mut buf)?;
+                }
+                Readable::ChildStdout(stdout) => {
+                    stdout.lock().unwrap().borrow_mut().read_to_end(&mut buf)?;
+                }
+            };
+            Ok(Bytes::from(buf.as_slice()))
+        } else {
+            // Read up to size bytes
+            let mut buf = vec![0u8; size as usize];
+            let bytes_read = match &*io {
+                Readable::Stdin(stdin) => stdin.lock().read(&mut buf)?,
+                Readable::ChildStderr(stderr) => {
+                    stderr.lock().unwrap().borrow_mut().read(&mut buf)?
+                }
+                Readable::ChildStdout(stdout) => {
+                    stdout.lock().unwrap().borrow_mut().read(&mut buf)?
+                }
+            };
+            buf.truncate(bytes_read);
+            Ok(Bytes::from(buf.as_slice()))
+        }
     }
 
     /// Reads all bytes until EOF in this source and returns a string.

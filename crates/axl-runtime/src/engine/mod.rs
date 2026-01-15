@@ -31,15 +31,6 @@ fn register_types(globals: &mut GlobalsBuilder) {
     const Template: StarlarkValueAsType<template::Template> = StarlarkValueAsType::new();
 }
 
-#[starlark_module]
-fn register_wasm_types(globals: &mut GlobalsBuilder) {
-    const Wasm: StarlarkValueAsType<wasm::Wasm> = StarlarkValueAsType::new();
-    const WasmCallable: StarlarkValueAsType<wasm::WasmCallable> = StarlarkValueAsType::new();
-    const WasmExports: StarlarkValueAsType<wasm::WasmExports> = StarlarkValueAsType::new();
-    const WasmInstance: StarlarkValueAsType<wasm::WasmInstance> = StarlarkValueAsType::new();
-    const WasmMemory: StarlarkValueAsType<wasm::WasmMemory> = StarlarkValueAsType::new();
-}
-
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
 
@@ -50,5 +41,5 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals.namespace("args", task_arg::register_globals);
     globals.namespace("bazel", bazel::register_globals);
     globals.namespace("std", std::register_globals);
-    globals.namespace("wasm", register_wasm_types);
+    globals.namespace("wasm", wasm::register_wasm_types);
 }

@@ -19,18 +19,23 @@ use starlark::values::Trace;
 use starlark::values::ValueLike;
 use starlark::values::ValueOfUnchecked;
 
-use crate::engine::config::task_list::value::MutableTaskList;
-use crate::engine::config::task_list::value::TaskListGen;
+use crate::engine::config::tasks::value::MutableTaskList;
+use crate::engine::config::tasks::value::TaskListGen;
 
 use super::super::http::Http;
 use super::super::std::Std;
 use super::super::template;
 use super::super::wasm::Wasm;
 
-use super::task_list::r#ref::TaskListRef;
-use super::task_list::task_mut::TaskMut;
-use super::task_list::value::TaskList;
+use super::tasks::configured_task::ConfiguredTask;
+use super::tasks::r#ref::TaskListRef;
+use super::tasks::value::TaskList;
 
+/// Config context for evaluating config.axl files.
+///
+/// This context holds the list of tasks that config functions can modify.
+/// Tasks are stored as `ConfiguredTask` which use `OwnedFrozenValue` internally,
+/// so no lifetime parameter is needed on this type.
 #[derive(Debug, Clone, ProvidesStaticType, Trace, Display, NoSerialize, Allocative)]
 #[display("<ConfigContext>")]
 pub struct ConfigContext<'v> {
@@ -41,7 +46,8 @@ pub struct ConfigContext<'v> {
 }
 
 impl<'v> ConfigContext<'v> {
-    pub fn new(tasks: Vec<TaskMut<'v>>, heap: &'v Heap) -> Self {
+    /// Create a new ConfigContext with the given tasks.
+    pub fn new(tasks: Vec<ConfiguredTask>, heap: &'v Heap) -> Self {
         let tasks: Vec<values::Value<'v>> = tasks
             .into_iter()
             .map(|task| task.alloc_value(heap))
@@ -53,16 +59,18 @@ impl<'v> ConfigContext<'v> {
         }
     }
 
-    pub fn tasks(&'v self) -> Vec<&'v TaskMut<'v>> {
+    /// Get references to the tasks.
+    pub fn tasks(&self) -> Vec<&ConfiguredTask> {
         let list = self.tasks.downcast_ref::<MutableTaskList>().unwrap();
         list.0
             .borrow()
             .content
             .iter()
-            .map(|m| m.downcast_ref::<TaskMut>().unwrap())
+            .map(|m| m.downcast_ref::<ConfiguredTask>().unwrap())
             .collect()
     }
 
+    /// Add a config module for lifetime management.
     pub fn add_config_module(&self, module: FrozenModule) {
         self.config_modules.borrow_mut().push(module);
     }

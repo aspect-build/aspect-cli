@@ -1,0 +1,20 @@
+"""Host functions for WASM modules.
+
+These functions can be imported by WASM modules via the `imports` parameter.
+They are defined in a separate file so they are frozen and can be safely
+stored in the WASM runtime.
+
+Host functions receive:
+- ctx: The frozen TaskContext (has access to ctx.std, ctx.config, ctx.bazel, etc.)
+- memory: wasm.Memory for reading/writing WASM memory
+- additional args: WASM function arguments
+"""
+
+def get_magic_number(ctx, memory) -> int:
+    """Host function that returns a magic number."""
+    print("context: ", ctx.args.test)
+    return 42
+
+def add_numbers(ctx, memory, a, b) -> int:
+    """Host function that adds two numbers."""
+    return a + b

@@ -17,7 +17,6 @@ use starlark::values::ValueLike;
 use super::bazel::Bazel;
 use super::http::Http;
 use super::std::Std;
-use super::task_args::FrozenTaskArgs;
 use super::task_args::TaskArgs;
 use super::template;
 use super::wasm::Wasm;
@@ -51,25 +50,16 @@ impl<'v> values::AllocValue<'v> for TaskContext<'v> {
 
 impl<'v> values::Freeze for TaskContext<'v> {
     type Frozen = FrozenTaskContext;
-    fn freeze(self, _freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
-        panic!("not implemented")
+    fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
+        // Freeze args by first freezing TaskArgs to FrozenTaskArgs, then allocating on frozen heap
+        let frozen_args = self.args.freeze(freezer)?;
+        let args_value = freezer.frozen_heap().alloc_simple(frozen_args);
+
+        Ok(FrozenTaskContext {
+            args: args_value,
+            config: self.config.freeze(freezer)?,
+        })
     }
-}
-
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<TaskContext>")]
-pub struct FrozenTaskContext {
-    #[allocative(skip)]
-    args: FrozenTaskArgs,
-    #[allocative(skip)]
-    config: values::FrozenValue,
-}
-
-starlark_simple_value!(FrozenTaskContext);
-
-#[starlark_value(type = "TaskContext")]
-impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
-    type Canonical = TaskContext<'v>;
 }
 
 #[starlark_module]
@@ -103,12 +93,6 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
         Ok(template::Template::new())
     }
 
-    /// EXPERIMENTAL! Run wasm programs within tasks.
-    #[starlark(attribute)]
-    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Wasm> {
-        Ok(Wasm::new())
-    }
-
     /// Access to Bazel functionality.
     #[starlark(attribute)]
     fn bazel<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Bazel> {
@@ -127,5 +111,74 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     /// ```
     fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
         Ok(Http::new())
+    }
+}
+
+#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[display("<TaskContext>")]
+pub struct FrozenTaskContext {
+    #[allocative(skip)]
+    args: values::FrozenValue,
+    #[allocative(skip)]
+    config: values::FrozenValue,
+}
+
+starlark_simple_value!(FrozenTaskContext);
+
+#[starlark_value(type = "TaskContext")]
+impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
+    type Canonical = TaskContext<'v>;
+
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(frozen_task_context_methods)
+    }
+}
+
+#[starlark_module]
+fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
+    #[starlark(attribute)]
+    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
+        Ok(Std {})
+    }
+
+    #[starlark(attribute)]
+    fn args<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(ctx.args.to_value())
+    }
+
+    #[starlark(attribute)]
+    fn config<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(ctx.config.to_value())
+    }
+
+    #[starlark(attribute)]
+    fn template<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+    ) -> starlark::Result<template::Template> {
+        Ok(template::Template::new())
+    }
+
+    #[starlark(attribute)]
+    fn bazel<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Bazel> {
+        Ok(Bazel {})
+    }
+
+    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
+        Ok(Http::new())
+    }
+
+    /// EXPERIMENTAL! Run wasm programs within tasks.
+    ///
+    /// The frozen context is passed directly from `this` - no need to go through
+    /// the store since `this` IS the frozen TaskContext.
+    #[starlark(attribute)]
+    fn wasm<'v>(this: values::Value<'v>) -> starlark::Result<Wasm> {
+        let frozen_ctx = this
+            .unpack_frozen()
+            .ok_or_else(|| anyhow::anyhow!("TaskContext must be frozen for wasm access"))?;
+        Ok(Wasm::with_context(frozen_ctx))
     }
 }

@@ -1,0 +1,70 @@
+"""Test AXL script for WASM host function imports.
+
+This demonstrates importing Starlark functions from a separate file
+and using them as WASM host functions.
+"""
+
+# Import host functions from a separate file (they must be frozen)
+load("./host_funcs.axl", "get_magic_number", "add_numbers")
+
+def test_case(tc, cond, msg) -> int:
+    if not cond:
+        fail(msg)
+    else:
+        print(msg, "... OK")
+    return tc + 1
+
+def impl(ctx: TaskContext) -> int:
+    tc = 0
+    wasm_path = ctx.std.env.current_dir() + "/host_test.wasm"
+
+    print("Testing WASM host function imports...")
+    print("WASM path:", wasm_path)
+
+    # Instantiate WASM module with host function imports
+    instance = ctx.wasm.instantiate(
+        wasm_path,
+        imports = {
+            "env": {
+                "get_magic_number": get_magic_number,
+                "add_numbers": add_numbers,
+            }
+        },
+    )
+
+    # Initialize Go runtime (required for Go wasip1 modules)
+    instance.start()
+
+    # List exports to verify the module loaded correctly
+    exports = instance.list_exports()
+    print("Exports:", exports)
+    tc = test_case(tc, "call_get_magic" in exports, "call_get_magic should be exported")
+    tc = test_case(tc, "call_add" in exports, "call_add should be exported")
+    tc = test_case(tc, "get_magic_plus_sum" in exports, "get_magic_plus_sum should be exported")
+
+    # Test 1: Call get_magic_number host function via WASM
+    magic = instance.exports.call_get_magic()
+    print("call_get_magic() =", magic)
+    tc = test_case(tc, magic == 42, "get_magic_number should return 42")
+
+    # Test 2: Call add_numbers host function via WASM
+    sum_result = instance.exports.call_add(10, 32)
+    print("call_add(10, 32) =", sum_result)
+    tc = test_case(tc, sum_result == 42, "add_numbers(10, 32) should return 42")
+
+    # Test 3: Call combined function that uses both host functions
+    combined = instance.exports.get_magic_plus_sum(5, 3)
+    print("get_magic_plus_sum(5, 3) =", combined)
+    tc = test_case(tc, combined == 50, "get_magic_plus_sum(5, 3) should return 50 (42 + 5 + 3)")
+
+    print("")
+    print(tc, "tests passed")
+    return 0
+
+host_test = task(
+    group = ["tests"],
+    implementation = impl,
+    args = {
+        "test": args.string()
+    },
+)
