@@ -178,12 +178,26 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         Ok(this)
     }
 
+    /// Executes the command as a child process, returning a handle to it.
+    ///
+    /// By default, stdin, stdout and stderr are inherited from the parent.
     fn spawn<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Child> {
         let cmd = this.downcast_ref_err::<Command>()?;
         let child = cmd.inner.borrow_mut().spawn()?;
         Ok(Child {
             inner: Rc::new(RefCell::new(Some(child))),
         })
+    }
+
+    /// Executes a command as a child process, waiting for it to finish and collecting its status.
+    /// Unlike `cmd.spawn().wait()` and `cmd.spawn().wait_with_output()`, this function does not
+    /// close the stdin handle.
+    ///
+    /// By default, stdin, stdout and stderr are inherited from the parent.
+    fn status<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
+        let cmd = this.downcast_ref_err::<Command>()?;
+        let status = cmd.inner.borrow_mut().status()?;
+        Ok(ExitStatus(status))
     }
 }
 
