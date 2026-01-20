@@ -109,7 +109,14 @@ impl BuildEventSink {
     fn spawn(&self, rt: AsyncRuntime, stream: &BuildEventStream) -> JoinHandle<()> {
         match self {
             BuildEventSink::Grpc { uri, metadata } => {
-                GrpcEventStreamSink::spawn(rt, stream.subscribe(), uri.clone(), metadata.clone())
+                // Use subscribe_realtime() since sinks subscribe at stream creation
+                // and don't need history replay.
+                GrpcEventStreamSink::spawn(
+                    rt,
+                    stream.subscribe_realtime(),
+                    uri.clone(),
+                    metadata.clone(),
+                )
             }
         }
     }
@@ -222,9 +229,11 @@ impl Build {
             sink_handles.push(handle);
         }
         if build_events {
+            // Use subscribe_realtime() since this subscribes at stream creation
+            // and doesn't need history replay.
             sink_handles.push(TracingEventStreamSink::spawn(
                 rt,
-                build_event_stream.as_ref().unwrap().subscribe(),
+                build_event_stream.as_ref().unwrap().subscribe_realtime(),
             ))
         }
 
@@ -330,14 +339,15 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         // TODO: consider adding a wait_events() method for granular control.
 
         // Wait for BES stream to complete.
-        let build_event_stream = build.build_event_stream.take();
-        if let Some(event_stream) = build_event_stream {
+        // Note: We don't take() the stream here so that build_events() can still
+        // be called after wait() to get historical events.
+        if let Some(ref mut event_stream) = *build.build_event_stream.borrow_mut() {
             match event_stream.join() {
                 Ok(_) => {}
                 // TODO: tell the user which one and why
                 Err(err) => anyhow::bail!("build event stream thread error: {}", err),
             }
-        };
+        }
 
         // Wait for Workspace event stream to complete.
         let workspace_event_stream = build.workspace_event_stream.take();

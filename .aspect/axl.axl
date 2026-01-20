@@ -223,6 +223,112 @@ def test_starlark(tc: int) -> int:
     tc = test_case(tc, ANSWER == 42, "should be able to load the answer to Life the Universe and Everything from an axl module")
     return tc
 
+def test_build_events(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    # Test build_events() API including late subscription support
+
+    # Test 1: Normal subscription - subscribe immediately and iterate
+    build1 = ctx.bazel.build(
+        "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild"],  # Fast - just analysis phase
+        build_events = True,
+    )
+
+    events1 = []
+    for event in build1.build_events():
+        events1.append(event.kind)
+
+    status1 = build1.wait()
+    tc = test_case(tc, len(events1) > 0, "normal subscription should receive events")
+    tc = test_case(tc, "build_started" in events1, "normal subscription should receive build_started event")
+    tc = test_case(tc, type(status1.code) == "int", "wait() should return status with code")
+
+    # Test 2: Late subscription - call build_events() after wait()
+    build2 = ctx.bazel.build(
+        "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild"],
+        build_events = True,
+    )
+
+    # Wait for build to complete FIRST
+    status2 = build2.wait()
+    tc = test_case(tc, type(status2.code) == "int", "wait() should return status")
+
+    # Now call build_events() AFTER wait() - this should still work
+    events2 = []
+    for event in build2.build_events():
+        events2.append(event.kind)
+
+    tc = test_case(tc, len(events2) > 0, "late subscription (after wait) should receive events")
+    tc = test_case(tc, "build_started" in events2, "late subscription should receive build_started event")
+
+    # Test 3: Multiple subscriptions - both should get all events
+    build3 = ctx.bazel.build(
+        "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild"],
+        build_events = True,
+    )
+
+    # Create first iterator immediately
+    iter1 = build3.build_events()
+
+    # Consume a few events from iter1
+    events3a = []
+    count = 0
+    for event in iter1:
+        events3a.append(event.kind)
+        count += 1
+        if count >= 3:
+            break
+
+    # Create second iterator (late subscriber)
+    iter2 = build3.build_events()
+
+    # Consume remaining events from iter1
+    for event in iter1:
+        events3a.append(event.kind)
+
+    # Consume all events from iter2
+    events3b = []
+    for event in iter2:
+        events3b.append(event.kind)
+
+    build3.wait()
+
+    tc = test_case(tc, len(events3a) > 0, "first iterator should receive events")
+    tc = test_case(tc, len(events3b) > 0, "second (late) iterator should receive events")
+    tc = test_case(tc, len(events3a) == len(events3b), "both iterators should receive same number of events (late subscriber gets full history)")
+    tc = test_case(tc, "build_started" in events3b, "late iterator should receive build_started via history replay")
+
+    return tc
+
+def test_large_bes(ctx: TaskContext, tc: int, temp_dir: str) -> int:
+    # Test that large BES streams don't cause deadlock (issue #919)
+    # The examples/large_bes directory generates many targets to stress test BES handling
+
+    # Build a subset of targets with --nobuild to generate BES events quickly
+    # The :all_targets filegroup depends on 1000 targets
+    build = ctx.bazel.build(
+        "//examples/large_bes:all_targets",
+        build_events = True,
+    )
+
+    # Iterate through all build events - this would hang before the fix
+    event_count = 0
+    event_kinds = set()
+    for event in build.build_events():
+        event_count += 1
+        event_kinds.add(event.kind)
+
+    status = build.wait()
+
+    # its important to hit the buffer size which is 1000
+    tc = test_case(tc, event_count > 1000, "large_bes should generate BES events (got {})".format(event_count))
+    tc = test_case(tc, "build_started" in event_kinds, "large_bes should have build_started event")
+    tc = test_case(tc, "configuration" in event_kinds or "configured" in event_kinds or "target_configured" in event_kinds, "large_bes should have configuration/configured events")
+    tc = test_case(tc, type(status.code) == "int", "large_bes build should complete with exit code")
+
+    return tc
+
 def test_http(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # Test HTTP download with integrity/sha256 verification
     # Using a well-known static file: LICENSE from this repo's GitHub
@@ -310,6 +416,8 @@ def impl(ctx: TaskContext) -> int:
     tc = test_fs(ctx, tc, temp_dir)
     tc = test_stream(ctx, tc, temp_dir)
     tc = test_starlark(tc)
+    tc = test_build_events(ctx, tc, temp_dir)
+    tc = test_large_bes(ctx, tc, temp_dir)
     tc = test_http(ctx, tc, temp_dir)
 
     print(tc, "tests passed")
