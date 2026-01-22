@@ -11,6 +11,7 @@ use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::dict::UnpackDictEntries;
 use starlark::values::list::UnpackList;
+use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 use starlark::values::tuple::UnpackTuple;
 use starlark::values::NoSerialize;
@@ -88,6 +89,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = false)] inherit_stdout: bool,
         #[starlark(require = named, default = true)] inherit_stderr: bool,
+        #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = match build_events {
@@ -109,6 +111,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 .collect(),
             inherit_stdout,
             inherit_stderr,
+            current_dir.into_option(),
             store.rt,
         )?;
         Ok(build)
@@ -155,6 +158,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = false)] inherit_stdout: bool,
         #[starlark(require = named, default = true)] inherit_stderr: bool,
+        #[starlark(require = named, default = NoneOr::None)] current_dir: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = match build_events {
@@ -176,6 +180,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
                 .collect(),
             inherit_stdout,
             inherit_stderr,
+            current_dir.into_option(),
             store.rt,
         )?;
         Ok(test)

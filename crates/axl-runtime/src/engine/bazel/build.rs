@@ -169,6 +169,7 @@ impl Build {
         startup_flags: Vec<String>,
         inherit_stdout: bool,
         inherit_stderr: bool,
+        current_dir: Option<String>,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
         let pid = Self::pid()?;
@@ -194,6 +195,10 @@ impl Build {
         let mut cmd = Command::new("bazel");
         cmd.args(startup_flags);
         cmd.arg(verb);
+
+        if let Some(current_dir) = current_dir {
+            cmd.current_dir(current_dir);
+        }
 
         let build_event_stream = if build_events {
             let (out, stream) = BuildEventStream::spawn_with_pipe(pid)?;

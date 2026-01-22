@@ -307,11 +307,12 @@ def test_large_bes(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
     # Build targets to generate many BES events
     # The :all_targets filegroup depends on 1000 targets
-    # Use --noremote_accept_cached to force fresh execution on CI (avoid remote cache)
+    # Disable all caching to force fresh execution and generate >1000 BES events
     build = ctx.bazel.build(
-        "//examples/large_bes:all_targets",
+        "//...",
         flags = ["--noremote_accept_cached"],
         build_events = True,
+        current_dir = "./examples/large_bes"
     )
 
     # Iterate through all build events - this would hang before the fix
