@@ -422,10 +422,10 @@ async fn main() -> miette::Result<ExitCode> {
 
     // Await the blocking task result and handle any join errors.
     match out.await {
-        Ok(err) => {
+        Ok(result) => {
             drop(_root);
             drop(_tracing);
-            err
+            result
         }
         Err(err) => panic!("{:?}", err),
     }

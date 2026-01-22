@@ -32,31 +32,35 @@ steps:
         --show_progress_rate_limit=1 \
         --remote_download_outputs="toplevel" \
         -- //:launcher //:cli
+      # Use cquery to get the actual output paths (handles platform transitions on Linux)
+      WORKSPACE_ROOT=$$(pwd)
+      LAUNCHER=$$WORKSPACE_ROOT/$$(bazel --nohome_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__ cquery --config=workflows --config=ci --output=files //crates/aspect-launcher)
+      CLI=$$WORKSPACE_ROOT/$$(bazel --nohome_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__ cquery --config=workflows --config=ci --output=files //crates/aspect-cli)
       echo "--- :aspect: aspect tests axl"
-      ./bazel-bin/crates/aspect-launcher/aspect-launcher tests axl
+      $$LAUNCHER tests axl
       echo "--- :aspect: aspect demo template-demo"
-      ./bazel-bin/crates/aspect-launcher/aspect-launcher demo template-demo
+      $$LAUNCHER demo template-demo
       echo "--- :aspect: aspect user user_task"
-      ./bazel-bin/crates/aspect-launcher/aspect-launcher user user_task
+      $$LAUNCHER user user_task
       echo "--- :aspect: aspect user user_task_reexport"
-      ./bazel-bin/crates/aspect-launcher/aspect-launcher user user_task_reexport
+      $$LAUNCHER user user_task_reexport
       echo "--- :aspect: aspect user user-task-manual"
-      ./bazel-bin/crates/aspect-launcher/aspect-launcher user user-task-manual
+      $$LAUNCHER user user-task-manual
       echo "--- :aspect: aspect user user-task-added-by-config"
-      ./bazel-bin/crates/aspect-launcher/aspect-launcher user user-task-added-by-config
+      $$LAUNCHER user user-task-added-by-config
       echo "--- :aspect: aspect user user-task-subdir (in crates/aspect-cli)"
       (
         cd crates/aspect-cli
-        ../../bazel-bin/crates/aspect-launcher/aspect-launcher user user-task-subdir
+        $$LAUNCHER user user-task-subdir
       )
       echo "--- :aspect: aspect help"
-      ./bazel-bin/crates/aspect-launcher/aspect-launcher help
+      $$LAUNCHER help
       echo "--- :aspect: aspect-launcher --version"
-      ./bazel-bin/crates/aspect-launcher/aspect-launcher --version
+      $$LAUNCHER --version
       echo "--- :aspect: aspect-cli --version"
-      ./bazel-bin/crates/aspect-cli/aspect-cli --version
+      $$CLI --version
       echo "--- :aspect: aspect version"
-      ./bazel-bin/crates/aspect-launcher/aspect-launcher version
+      $$LAUNCHER version
   - label: ":broom: Format"
     agents:
       queue: aspect-small
