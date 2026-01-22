@@ -906,6 +906,93 @@ mod tests {
         assert!(sub.recv().is_err());
     }
 
+    /// Regression test for the bug in c35c9d5b where dropping a cloned broadcaster
+    /// without calling close() left subscribers hanging forever.
+    ///
+    /// The bug: BuildEventStream kept two Broadcaster clones:
+    /// 1. `broadcaster` in the holder (for subscribe() calls)
+    /// 2. `broadcaster_for_thread` in the BES thread (for sending events)
+    ///
+    /// When the BES thread finished, it just returned without calling close().
+    /// Since both clones share the same `inner` Arc, dropping `broadcaster_for_thread`
+    /// only decremented the refcount - it didn't drop the senders in `inner.subscribers`.
+    /// The senders were only dropped when `join()` took the broadcaster from the holder.
+    /// But by then, `wait()` was already blocked waiting for TracingEventStreamSink
+    /// to finish, which was blocked on `recv()` that never saw disconnect.
+    ///
+    /// The fix: Always call `close()` before returning from the BES thread.
+    /// `close()` explicitly clears all senders, notifying all receivers immediately.
+    #[test]
+    fn test_drop_without_close_does_not_disconnect_subscribers() {
+        let broadcaster: Broadcaster<i32> = Broadcaster::new();
+        let broadcaster_clone = broadcaster.clone();
+
+        let sub = broadcaster.subscribe();
+
+        // Send an event
+        broadcaster_clone.send(42);
+        assert_eq!(sub.recv().unwrap(), 42);
+
+        // Drop the clone WITHOUT calling close() - simulates BES thread returning
+        // without closing the broadcaster (the bug in c35c9d5b)
+        drop(broadcaster_clone);
+
+        // Subscriber should NOT be disconnected yet! The original broadcaster
+        // still holds a reference to `inner`, so senders are still alive.
+        // This is a non-blocking check.
+        assert!(
+            !sub.is_closed(),
+            "Subscriber should NOT be disconnected when only one clone is dropped"
+        );
+
+        // Now close the original broadcaster - this is what the fix does
+        broadcaster.close();
+
+        // NOW the subscriber should be disconnected
+        assert!(
+            sub.is_closed(),
+            "Subscriber should be disconnected after close() is called"
+        );
+        assert!(sub.recv().is_err());
+    }
+
+    /// Test that demonstrates why explicit close() is necessary.
+    /// Without close(), subscribers only disconnect when ALL broadcaster clones are dropped.
+    #[test]
+    fn test_subscribers_disconnect_only_when_all_clones_dropped() {
+        let broadcaster: Broadcaster<i32> = Broadcaster::new();
+        let clone1 = broadcaster.clone();
+        let clone2 = broadcaster.clone();
+
+        let sub = broadcaster.subscribe();
+        broadcaster.send(1);
+
+        // Drop original - subscriber should still work (clone1 and clone2 exist)
+        drop(broadcaster);
+        // Verify subscriber still receives events
+        assert_eq!(sub.recv().unwrap(), 1);
+
+        // Send from clone1
+        clone1.send(2);
+
+        // Drop clone1 - subscriber should still work (clone2 exists)
+        drop(clone1);
+        assert_eq!(sub.recv().unwrap(), 2);
+
+        // Send from clone2
+        clone2.send(3);
+
+        // Drop clone2 - now all clones are gone, subscriber should disconnect
+        drop(clone2);
+
+        // Can still drain buffered event
+        assert_eq!(sub.recv().unwrap(), 3);
+
+        // NOW disconnected (buffer empty and all senders dropped)
+        assert!(sub.recv().is_err());
+        assert!(sub.is_closed());
+    }
+
     // =========================================================================
     // Tests for late subscription scenarios (simulating ctx.bazel.build()
     // followed by late .build_events() call)
