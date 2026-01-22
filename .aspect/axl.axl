@@ -305,10 +305,12 @@ def test_large_bes(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # Test that large BES streams don't cause deadlock (issue #919)
     # The examples/large_bes directory generates many targets to stress test BES handling
 
-    # Build a subset of targets with --nobuild to generate BES events quickly
+    # Build targets to generate many BES events
     # The :all_targets filegroup depends on 1000 targets
+    # Use --noremote_accept_cached to force fresh execution on CI (avoid remote cache)
     build = ctx.bazel.build(
         "//examples/large_bes:all_targets",
+        flags = ["--noremote_accept_cached"],
         build_events = True,
     )
 
