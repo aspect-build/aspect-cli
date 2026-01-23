@@ -95,7 +95,10 @@ build =
             .to_string(),
         )?;
 
-        assert_eq!(out, "test");
+        // Verify the output contains expected highlighted content with links
+        assert!(out.contains(r#"<a href="/lib/str">str</a>"#));
+        assert!(out.contains(r#"<a href="/lib/task_context">task_context</a>"#));
+        assert!(out.contains(r#"<a href="/lib/task_arg">task_arg</a>"#));
 
         Ok(())
     }

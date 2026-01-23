@@ -39,5 +39,5 @@ markdown_extensions:
     separator: ___
   pymdownx.snippets:
 
-hooks:
-  - postprocess.py
+# hooks:
+#   - postprocess.py
