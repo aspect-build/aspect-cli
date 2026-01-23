@@ -1,11 +1,10 @@
 use crate::type_registry::TypeRegistry;
-use starlark::docs::{DocFunction, DocItem, DocMember, DocModule, DocProperty};
+use starlark::docs::{DocFunction, DocItem, DocMember, DocModule, DocProperty, DocString};
 use std::collections::HashMap;
 
 /// Represents a documentation page with all its items.
 #[derive(Debug, Clone)]
 pub struct DocPage {
-    pub path: String,
     pub items: Vec<DocPageItem>,
 }
 
@@ -21,6 +20,16 @@ pub enum DocPageItem {
         name: String,
         parent_type: Option<String>,
         prop: DocProperty,
+    },
+    /// A type that belongs to a module (shown on the module's page)
+    Type {
+        name: String,
+        docs: Option<DocString>,
+    },
+    /// A submodule that belongs to a module (shown on the module's page)
+    Module {
+        name: String,
+        docs: Option<DocString>,
     },
 }
 
@@ -76,6 +85,12 @@ fn traverse_module(
                 let snake_name = to_snake_case(name);
                 registry.register(&snake_name, &submodule_path);
 
+                // Add module reference to parent module's page
+                module_items.push(DocPageItem::Module {
+                    name: name.clone(),
+                    docs: submodule.docs.clone(),
+                });
+
                 // Recurse into submodule
                 traverse_module(submodule, &submodule_path, pages, registry);
             }
@@ -83,10 +98,16 @@ fn traverse_module(
                 // Calculate the type path and normalize it
                 let type_path = normalize_path(&format!("{}/{}", path, to_snake_case(name)));
 
-                // Register both original and snake_case names
+                // Register only the original name for types (not snake_case)
+                // to avoid conflicts with module names (e.g., type Bazel shouldn't
+                // overwrite module bazel's registration)
                 registry.register(name, &type_path);
-                let snake_name = to_snake_case(name);
-                registry.register(&snake_name, &type_path);
+
+                // Add type reference to parent module's page
+                module_items.push(DocPageItem::Type {
+                    name: name.clone(),
+                    docs: doc_type.docs.clone(),
+                });
 
                 // Collect type members for the type's page
                 let mut type_items = Vec::new();
@@ -120,11 +141,8 @@ fn traverse_module(
                     func: func.clone(),
                 });
 
-                // Also register the function for linking
-                let func_path = normalize_path(&format!("{}/{}", path, to_snake_case(name)));
-                registry.register(name, &func_path);
-                let snake_name = to_snake_case(name);
-                registry.register(&snake_name, &func_path);
+                // Register function with the module's path (since it's documented there)
+                registry.register(name, path);
             }
             DocItem::Member(DocMember::Property(prop)) => {
                 // Add property to current module's page
@@ -134,11 +152,8 @@ fn traverse_module(
                     prop: prop.clone(),
                 });
 
-                // Also register the property for linking
-                let prop_path = normalize_path(&format!("{}/{}", path, to_snake_case(name)));
-                registry.register(name, &prop_path);
-                let snake_name = to_snake_case(name);
-                registry.register(&snake_name, &prop_path);
+                // Register property with the module's path (since it's documented there)
+                registry.register(name, path);
             }
         }
     }
@@ -156,26 +171,14 @@ fn add_page(pages: &mut HashMap<String, DocPage>, path: String, items: Vec<DocPa
         existing.items.extend(items);
     } else {
         // Create new page
-        pages.insert(path.clone(), DocPage { path, items });
+        pages.insert(path, DocPage { items });
     }
 }
 
-/// Normalize a path to handle index modules.
-/// E.g., "lib/std/std" becomes "lib/std" since we don't want separate index pages.
+/// Convert path components to snake_case.
 fn normalize_path(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').collect();
     let snake_parts: Vec<String> = parts.iter().map(|p| to_snake_case(p)).collect();
-
-    if path != "lib" && snake_parts.len() > 2 {
-        if let (Some(last), Some(second_last)) =
-            (snake_parts.last(), snake_parts.get(snake_parts.len() - 2))
-        {
-            if last == second_last {
-                return snake_parts[..snake_parts.len() - 1].join("/");
-            }
-        }
-    }
-
     snake_parts.join("/")
 }
 
@@ -210,7 +213,7 @@ mod tests {
 
     #[test]
     fn test_normalize_path() {
-        assert_eq!(normalize_path("lib/std/std"), "lib/std");
+        assert_eq!(normalize_path("lib/std/std"), "lib/std/std");
         assert_eq!(normalize_path("lib/std"), "lib/std");
         assert_eq!(normalize_path("lib"), "lib");
         assert_eq!(

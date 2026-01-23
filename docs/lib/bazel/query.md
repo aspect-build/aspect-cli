@@ -1,50 +1,59 @@
 
 
-## Query.eval
+`type` [TargetSet](/lib/bazel/query/target_set)
 
-<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Query</span></span>.<span class="entity name function python"><span class="meta generic-name python">eval</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python"><span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/typing">typing.Iterable</a><span class="punctuation definition string end python">&#39;</span></span></span><span class="meta item-access python"><span class="punctuation section brackets begin python">[</span></span><span class="meta item-access arguments python"><span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bazel/query/generated_file">generated_file</a><span class="punctuation definition string end python">&#39;</span></span></span> <span class="keyword operator arithmetic python">|</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bazel/query/package_group">package_group</a><span class="punctuation definition string end python">&#39;</span></span></span> <span class="keyword operator arithmetic python">|</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bazel/query/rule">rule</a><span class="punctuation definition string end python">&#39;</span></span></span> <span class="keyword operator arithmetic python">|</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bazel/query/source_file">source_file</a><span class="punctuation definition string end python">&#39;</span></span></span></span><span class="meta item-access python"><span class="punctuation section brackets end python">]</span></span></span></span></code></pre>
+`type` [Query](/lib/bazel/query/query)
 
-The query system provides a programmatic interface for analyzing build dependencies and target relationships. Queries are constructed using a chain API and are lazily evaluated only when `.eval()` is explicitly called.
+`type` [RuleDefinition](/lib/bazel/query/rule_definition)
 
-The entry point is `ctx.bazel.query()`, which returns a `query` for creating initial
-query expressions. Most operations operate on `query` objects, which represent
-sets of targets that can be filtered, transformed, and combined.
+`type` [FilesetEntry](/lib/bazel/query/fileset_entry)
 
-**Example**
+`type` [LabelListDictEntry](/lib/bazel/query/label_list_dict_entry)
 
-```starlark
-**Query** dependencies of a target
-deps = ctx.bazel.query().targets("//myapp:main").deps()
-all_deps: target_set = deps.eval()
+`type` [BuildLanguage](/lib/bazel/query/build_language)
 
-**Chain** multiple operations
-sources = ctx.bazel.query().targets("//myapp:main")
-    .deps()
-    .kind("source file")
-    .eval()
-```
+`type` [AttributeDefinition](/lib/bazel/query/attribute_definition)
 
-***
+`type` [GeneratedFile](/lib/bazel/query/generated_file)
 
-## Query.raw
+`type` [AllowedRuleClassInfo](/lib/bazel/query/allowed_rule_class_info)
 
-<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">Query</span></span>.<span class="entity name function python"><span class="meta generic-name python">raw</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
-    <span class="variable parameter python">expr</span></span><span class="meta function parameters annotation python"><span class="punctuation separator annotation parameter python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/str">str</a><span class="punctuation definition string end python">&#39;</span></span></span></span><span class="meta function parameters python"><span class="punctuation separator parameters python">,</span>
-    /
-<span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bazel">bazel.query.Query</a><span class="punctuation definition string end python">&#39;</span></span></span></span></span></code></pre>
+`type` [AttributeValue](/lib/bazel/query/attribute_value)
 
-Replaces the query `expression` with a raw query expression string.
+`type` [ConfiguredRuleInput](/lib/bazel/query/configured_rule_input)
 
-This escape hatch allows direct use of the underlying query language for complex cases,
-while still supporting further chaining.
+`type` [PackageGroup](/lib/bazel/query/package_group)
 
-```starlark
-**Complex** intersection query
-complex = ctx.bazel.query().raw("deps(//foo) intersect kind('test', //bar:*)")
+`type` [RuleSummary](/lib/bazel/query/rule_summary)
 
-**Path**-based query
-path_query = ctx.bazel.query().raw("somepath(//start, //end)")
+`type` [EnvironmentGroup](/lib/bazel/query/environment_group)
 
-**Chaining** after raw
-filtered = complex.kind("source file")
-```
+`type` [StringListDictEntry](/lib/bazel/query/string_list_dict_entry)
+
+`type` [StringDictEntry](/lib/bazel/query/string_dict_entry)
+
+`type` [LabelDictUnaryEntry](/lib/bazel/query/label_dict_unary_entry)
+
+`type` [QueryResult](/lib/bazel/query/query_result)
+
+`type` [Target](/lib/bazel/query/target)
+
+`type` [LabelKeyedStringDictEntry](/lib/bazel/query/label_keyed_string_dict_entry)
+
+`type` [SourceFile](/lib/bazel/query/source_file)
+
+`type` [Rule](/lib/bazel/query/rule)
+
+`type` [Attribute](/lib/bazel/query/attribute)
+
+`type` [License](/lib/bazel/query/license)
+
+`module` [fileset\_entry](/lib/bazel/query/fileset_entry)
+
+`module` [attribute](/lib/bazel/query/attribute)
+
+`module` [target](/lib/bazel/query/target)
+
+`module` [allowed\_rule\_class\_info](/lib/bazel/query/allowed_rule_class_info)
+
+`module` [attribute\_value](/lib/bazel/query/attribute_value)

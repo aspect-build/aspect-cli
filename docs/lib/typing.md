@@ -1,23 +1,17 @@
 
 
-## Any
+`property` **Any**
 
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">Any</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/typing">typing.Any</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">Any</span></span><span class="punctuation separator annotation variable python">:</span> <a href="/lib/typing">typing</a><span class="punctuation accessor dot python">.</span><a href="/lib/typing">Any</a></span></code></pre>
 
-***
+`property` **Never**
 
-## Never
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">Never</span></span><span class="punctuation separator annotation variable python">:</span> <a href="/lib/typing">typing</a><span class="punctuation accessor dot python">.</span><a href="/lib/typing">Never</a></span></code></pre>
 
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">Never</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/typing">typing.Never</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
+`property` **Callable**
 
-***
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">Callable</span></span><span class="punctuation separator annotation variable python">:</span> <a href="/lib/typing">typing</a><span class="punctuation accessor dot python">.</span><a href="/lib/wasm/callable">Callable</a></span></code></pre>
 
-## Callable
+`property` **Iterable**
 
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">Callable</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/typing">typing.Callable</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
-
-***
-
-## Iterable
-
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">Iterable</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/typing">typing.Iterable</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">Iterable</span></span><span class="punctuation separator annotation variable python">:</span> <a href="/lib/typing">typing</a><span class="punctuation accessor dot python">.</span><a href="/lib/typing">Iterable</a></span></code></pre>

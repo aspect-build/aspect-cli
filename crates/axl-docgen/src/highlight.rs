@@ -13,7 +13,23 @@ pub fn highlight(md: &String) -> Result<String> {
     let mut md = markdown::to_mdast(md.as_str(), &markdown::ParseOptions::default()).unwrap();
 
     fn traverse(nodes: &mut Vec<mdast::Node>) {
-        let regex = Regex::new(r"(?m)@link@ ([\w/]+) @@ ([\w\.]+) @link@").unwrap();
+        // Match link markers: @link@ /path @@ Name @link@
+        // The markers are wrapped in quotes in the source so Python syntax highlighting
+        // treats them as string literals. The regex matches just the marker content,
+        // since the quotes get separated by HTML span tags during highlighting.
+        let link_regex = Regex::new(r"@link@ ([\w/]+) @@ ([\w\.]+) @link@").unwrap();
+
+        // After replacing link markers, we need to remove the quote spans that surround
+        // the anchor tags. The pattern is:
+        // <span class="...string..."><span class="...string..."><span class="...begin...">&#39;</span></span></span>
+        // ...content (now an <a> tag)...
+        // <span class="...end...">&#39;</span></span></span>
+        let opening_quote_regex = Regex::new(
+            r#"<span class="[^"]*string[^"]*"><span class="[^"]*string[^"]*"><span class="[^"]*begin[^"]*">&#39;</span></span></span><span class="[^"]*string[^"]*"><span class="[^"]*string[^"]*">"#
+        ).unwrap();
+        let closing_quote_regex =
+            Regex::new(r#"<span class="[^"]*end[^"]*">&#39;</span></span></span>"#).unwrap();
+
         nodes.iter_mut().for_each(|node| match node {
             mdast::Node::Html(html) => {
                 let html_raw = html.value.clone();
@@ -37,7 +53,14 @@ pub fn highlight(md: &String) -> Result<String> {
                             .unwrap();
                     }
                     let out = html_generator.finalize();
-                    let out = regex.replace_all(out.as_str(), r#"<a href="$1">$2</a>"#);
+
+                    // Replace link markers with anchor tags
+                    let out = link_regex.replace_all(out.as_str(), r#"<a href="$1">$2</a>"#);
+
+                    // Remove surrounding quote spans from anchor tags
+                    let out = opening_quote_regex.replace_all(&out, "");
+                    let out = closing_quote_regex.replace_all(&out, "");
+
                     html.value = format!("{}{}{}", PREDULE, out, POSTDULE);
                 }
             }
@@ -70,7 +93,7 @@ mod tests {
 <pre class="language-python"><code>def task(
     *,
     name: '@link@ /lib/str @@ str @link@' = ...,
-    implementation: typing.Callable[['@link@ /lib/task_context @@ task_context @link@'], None],
+    implementation: typing.Callable[['@link@ /lib/task_context @@ TaskContext @link@'], None],
     args: dict['@link@ /lib/str @@ str @link@', '@link@ /lib/task_arg @@ task_arg @link@'],
     description: '@link@ /lib/str @@ str @link@' = ...,
 ) -> Task</code></pre>
@@ -81,7 +104,7 @@ Task type representing a Task.
 def _task_impl(ctx):
     pass
 
-build = 
+build =
     name = "build",
     impl = _task_impl,
     task_args = {
@@ -97,7 +120,7 @@ build =
 
         // Verify the output contains expected highlighted content with links
         assert!(out.contains(r#"<a href="/lib/str">str</a>"#));
-        assert!(out.contains(r#"<a href="/lib/task_context">task_context</a>"#));
+        assert!(out.contains(r#"<a href="/lib/task_context">TaskContext</a>"#));
         assert!(out.contains(r#"<a href="/lib/task_arg">task_arg</a>"#));
 
         Ok(())

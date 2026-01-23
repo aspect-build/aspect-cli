@@ -22,26 +22,56 @@ impl<'a> Renderer<'a> {
         // Add a placeholder heading that will be removed by main.rs
         output.push_str("# Placeholder\n\n");
 
-        for (i, item) in page.items.iter().enumerate() {
-            if i > 0 {
-                output.push_str("***\n\n");
-            }
+        // Separate items by category for ordered rendering
+        let mut types = Vec::new();
+        let mut modules = Vec::new();
+        let mut functions = Vec::new();
+        let mut properties = Vec::new();
 
+        for item in page.items.iter() {
             match item {
-                DocPageItem::Function {
-                    name,
-                    parent_type,
-                    func,
-                } => {
-                    output.push_str(&self.render_function(name, parent_type.as_deref(), func));
-                }
-                DocPageItem::Property {
-                    name,
-                    parent_type,
-                    prop,
-                } => {
-                    output.push_str(&self.render_property(name, parent_type.as_deref(), prop));
-                }
+                DocPageItem::Type { .. } => types.push(item),
+                DocPageItem::Module { .. } => modules.push(item),
+                DocPageItem::Function { .. } => functions.push(item),
+                DocPageItem::Property { .. } => properties.push(item),
+            }
+        }
+
+        // Render types first (no separators)
+        for item in &types {
+            if let DocPageItem::Type { name, docs } = item {
+                output.push_str(&self.render_type(name, docs.as_ref()));
+            }
+        }
+
+        // Render modules (no separators)
+        for item in &modules {
+            if let DocPageItem::Module { name, docs } = item {
+                output.push_str(&self.render_module(name, docs.as_ref()));
+            }
+        }
+
+        // Render functions (no separators, with expandable docs)
+        for item in &functions {
+            if let DocPageItem::Function {
+                name,
+                parent_type,
+                func,
+            } = item
+            {
+                output.push_str(&self.render_function(name, parent_type.as_deref(), func));
+            }
+        }
+
+        // Render properties (no separators, with expandable docs)
+        for item in &properties {
+            if let DocPageItem::Property {
+                name,
+                parent_type,
+                prop,
+            } = item
+            {
+                output.push_str(&self.render_property(name, parent_type.as_deref(), prop));
             }
         }
 
@@ -51,13 +81,18 @@ impl<'a> Renderer<'a> {
     fn render_function(&self, name: &str, parent: Option<&str>, func: &DocFunction) -> String {
         let mut output = String::new();
 
-        // Heading with escaped underscores
+        // Display name for the function
         let display_name = if let Some(p) = parent {
             format!("{}.{}", p, name)
         } else {
             name.to_string()
         };
-        output.push_str(&format!("## {}\n\n", escape_underscores(&display_name)));
+
+        // Render as: `function` **name**
+        output.push_str(&format!(
+            "`function` **{}**\n\n",
+            escape_underscores(&display_name)
+        ));
 
         // Code block with signature
         output.push_str(PRELUDE);
@@ -76,13 +111,18 @@ impl<'a> Renderer<'a> {
     fn render_property(&self, name: &str, parent: Option<&str>, prop: &DocProperty) -> String {
         let mut output = String::new();
 
-        // Heading with escaped underscores
+        // Display name for the property
         let display_name = if let Some(p) = parent {
             format!("{}.{}", p, name)
         } else {
             name.to_string()
         };
-        output.push_str(&format!("## {}\n\n", escape_underscores(&display_name)));
+
+        // Render as: `property` **name**
+        output.push_str(&format!(
+            "`property` **{}**\n\n",
+            escape_underscores(&display_name)
+        ));
 
         // Code block with property type
         output.push_str(PRELUDE);
@@ -214,6 +254,24 @@ impl<'a> Renderer<'a> {
             format!("{}.{}: {}", p, name, type_str)
         } else {
             format!("{}: {}", name, type_str)
+        }
+    }
+
+    fn render_type(&self, name: &str, _docs: Option<&starlark::docs::DocString>) -> String {
+        // Render as simple line: `type` [TypeName](path)
+        if let Some(path) = self.linker.get_path(name) {
+            format!("`type` [{}](/{})\n\n", name, path)
+        } else {
+            format!("`type` {}\n\n", name)
+        }
+    }
+
+    fn render_module(&self, name: &str, _docs: Option<&starlark::docs::DocString>) -> String {
+        // Render as simple line: `module` [name](path)
+        if let Some(path) = self.linker.get_path(name) {
+            format!("`module` [{}](/{})\n\n", name, path)
+        } else {
+            format!("`module` {}\n\n", name)
         }
     }
 }
