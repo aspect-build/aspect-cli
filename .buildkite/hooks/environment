@@ -1,0 +1,2 @@
+#!/bin/sh
+export PATH="$HOME/.aspect/bin:$PATH"
