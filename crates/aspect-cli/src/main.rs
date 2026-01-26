@@ -25,7 +25,9 @@ use tokio::task::spawn_blocking;
 use tracing::info_span;
 
 use crate::cmd_tree::{BUILTIN_COMMAND_DISPLAY_ORDER, CommandTree, make_command_from_task};
-use crate::helpers::{find_repo_root, get_default_axl_search_paths, search_sources};
+use crate::helpers::{
+    find_repo_root, get_default_axl_search_paths, parse_axl_config_env, search_sources,
+};
 
 // Helper function to check if debug mode is enabled based on the ASPECT_DEBUG environment variable.
 fn debug_mode() -> bool {
@@ -123,6 +125,9 @@ async fn main() -> miette::Result<ExitCode> {
     // (based on current directory and repo root).
     let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_root);
     let (scripts, configs) = search_sources(&search_paths).await.into_diagnostic()?;
+
+    // Get additional configs from AXL_CONFIG environment variable
+    let env_configs = parse_axl_config_env().await.into_diagnostic()?;
 
     // Enter a tracing span for evaluation of scripts and configs.
     let espan = info_span!("eval");
@@ -245,6 +250,31 @@ async fn main() -> miette::Result<ExitCode> {
                 tasks,
             )
             .into_diagnostic()?;
+
+        // Run environment configs, each with scope derived from parent directory
+        if debug_mode() && !env_configs.is_empty() {
+            eprintln!("AXL_CONFIG configs:");
+            for path in &env_configs {
+                eprintln!(
+                    "  - {} (scope: {})",
+                    path.display(),
+                    path.parent()
+                        .map_or("repo root".to_string(), |p| p.display().to_string())
+                );
+            }
+        }
+
+        let mut tasks = tasks;
+        for config_path in env_configs.iter() {
+            let parent = config_path.parent().unwrap_or(&repo_root);
+            let scope = ModuleScope {
+                name: AXL_ROOT_MODULE_NAME.to_string(),
+                path: parent.to_path_buf(),
+            };
+            tasks = config_eval
+                .run_all(scope, vec![config_path.clone()], tasks)
+                .into_diagnostic()?;
+        }
 
         // Build the command tree from the evaluated and configured tasks.
         let mut tree = CommandTree::default();

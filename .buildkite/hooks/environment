@@ -1,2 +1,3 @@
 #!/bin/sh
 export PATH="$HOME/.aspect/bin:$PATH"
+export AXL_CONFIG=axel-f/config.axl
