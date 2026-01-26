@@ -15,7 +15,7 @@ Actual: aspect hangs after "Build completed successfully" due to BEP pipe deadlo
 [
     genrule(
         name = "target_{}".format(i),
-        outs = ["out_{}.txt".format(i)],
+        outs = ["out__{}.txt".format(i)],
         cmd = "echo 'Generated output {}' > $@".format(i),
     )
     for i in range(100000)

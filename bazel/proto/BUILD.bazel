@@ -15,6 +15,9 @@ descriptor_set(
         "@bazel//src/main/protobuf:failure_details_proto",
         "@bazel//src/main/protobuf:invocation_policy_proto",
         "@bazel//src/main/protobuf:build_proto",
+        "@bazel//src/main/protobuf:remote_execution_log_proto",
+        "@remoteapis//:build_bazel_remote_execution_v2_remote_execution_proto",
+        "@remoteapis//:build_bazel_remote_asset_v1_remote_asset_proto",
         "@googleapis//google/devtools/build/v1:build_proto"
     ],
 )
