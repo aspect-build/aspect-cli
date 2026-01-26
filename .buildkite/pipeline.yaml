@@ -8,8 +8,6 @@ steps:
     agents:
       queue: aspect-default
     timeout_in_minutes: 60
-    env:
-      ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config_aws.yaml
     command:
       - 'echo "--- :bazel: Lint"'
       - aspect lint
@@ -26,8 +24,6 @@ steps:
     agents:
       queue: aspect-default
     timeout_in_minutes: 60
-    env:
-      ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config_aws.yaml
     command:
       - 'echo "--- :bazel: Format"'
       - aspect format
@@ -44,8 +40,6 @@ steps:
     agents:
       queue: aspect-default
     timeout_in_minutes: 60
-    env:
-      ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config_aws.yaml
     command:
       - 'echo "--- :bazel: Buildifier"'
       - aspect buildifier
@@ -78,9 +72,6 @@ steps:
     agents:
       queue: aspect-default
     timeout_in_minutes: 60
-    env:
-      ASPECT_WORKFLOWS_CONFIG: .aspect/workflows/config_aws.yaml
-      ASPECT_BEP_USE_PIPE: "1"
     command:
       - "vmstat -a -S M -t 5 2>&1 > vmstat.out &"
       - 'echo "--- :bazel: Test"'
