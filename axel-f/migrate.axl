@@ -1,0 +1,741 @@
+"""
+CI Config Generator Task
+
+Generates CI workflow files (GitHub Actions, Buildkite, etc.) from
+.aspect/workflows/config.yaml.
+
+Usage:
+    aspect workflows migrate --host=github --config=.aspect/workflows/config.yaml
+
+This generates a standalone workflow file at .github/workflows/aspect-workflows.yaml
+"""
+
+# Task types that should generate CI jobs
+BAZEL_TASK_TYPES = [
+    "build",
+    "test",
+    "lint",
+    "format",
+    "configure",
+    "gazelle",
+    "buildifier",
+]
+
+# Task types that are pre-task hooks
+PRE_TASK_TYPES = [
+    "checkout",
+    "bazel_health_probe",
+]
+
+# Task types that are post-task hooks
+POST_TASK_TYPES = [
+    "finalization",
+    "delivery_manifest",
+]
+
+# Task types that are CI infrastructure (not Bazel tasks, not hooks)
+EXCLUDED_TASK_TYPES = [
+    "delivery",
+    "warming",
+    "noop",
+]
+
+# Tasks that need deeper git history for diff operations
+NEEDS_DEEP_CHECKOUT = [
+    "lint",
+    "format",
+]
+
+# Default timeout in minutes for tasks
+DEFAULT_TIMEOUT = 60
+
+
+def parse_yaml(ctx, content: str) -> dict:
+    """Parse YAML content to a dictionary using yq."""
+    child = ctx.std.process.command("yq") \
+        .arg("-o=json") \
+        .arg(".") \
+        .stdin("piped") \
+        .stdout("piped") \
+        .stderr("piped") \
+        .spawn()
+
+    stdin = child.stdin()
+    stdin.write(content)
+    stdin.close()
+
+    stdout = child.stdout()
+    json_output = stdout.read_to_string()
+
+    status = child.wait()
+    if status.code != 0:
+        stderr = child.stderr()
+        error_msg = stderr.read_to_string()
+        fail("Failed to parse YAML: " + error_msg)
+
+    return json.decode(json_output)
+
+
+def get_task_entry(task_def: dict) -> tuple:
+    """
+    Extract task name, type, and config from a task definition.
+
+    Returns:
+        Tuple of (task_name, task_type, task_config)
+    """
+    if type(task_def) != "dict" or len(task_def) == 0:
+        return (None, None, None)
+
+    for task_name, task_config in task_def.items():
+        task_type = task_name
+        parts = task_name.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            task_type = parts[0]
+
+        if task_config == None:
+            task_config = {}
+
+        return (task_name, task_type, task_config)
+
+    return (None, None, None)
+
+
+def find_task_config(tasks: list, task_type: str):
+    """Find a task config by type in the tasks list. Returns None if not found or disabled."""
+    for task_def in tasks:
+        name, ttype, config = get_task_entry(task_def)
+        if ttype == task_type:
+            # Check if task is disabled
+            if config.get("without", False):
+                return None
+            return config
+    return None
+
+
+def generate_checkout_step(task_type: str) -> list:
+    """
+    Generate checkout step for a job.
+
+    Args:
+        task_type: The main task type (affects fetch-depth)
+
+    Returns:
+        List of YAML lines for checkout step
+    """
+    lines = []
+
+    # Determine fetch-depth based on task type
+    # lint/format need 2 commits for diff comparison
+    fetch_depth = 1
+    if task_type in NEEDS_DEEP_CHECKOUT:
+        fetch_depth = 2
+
+    lines.append("- uses: actions/checkout@v4")
+    if fetch_depth != 1:
+        lines.append("  with:")
+        lines.append("    fetch-depth: " + str(fetch_depth))
+
+    return lines
+
+
+def generate_pre_hooks(tasks: list, task_type: str) -> list:
+    """
+    Generate pre-task hook steps.
+
+    Args:
+        tasks: Full tasks list from config
+        task_type: The main task type
+
+    Returns:
+        List of YAML lines for pre-hook steps
+    """
+    lines = []
+
+    # Note: checkout task with update_strategy (rebase/merge) is handled by
+    # the Aspect Workflows infrastructure via branch_freshness_strategy binary.
+    # In standalone GitHub Actions, this is not available - users should
+    # configure branch protection rules or use GitHub's merge queue instead.
+
+    # Check for bazel_health_probe task
+    health_config = find_task_config(tasks, "bazel_health_probe")
+    if health_config != None:
+        timeout = health_config.get("timeout_in_minutes", 10)
+        lines.append("- name: Bazel health check")
+        lines.append("  run: aspect bazel_health_probe")
+        lines.append("  timeout-minutes: " + str(timeout))
+
+    return lines
+
+
+def generate_post_hooks(tasks: list, task_name: str) -> list:
+    """
+    Generate post-task hook steps.
+
+    Args:
+        tasks: Full tasks list from config
+        task_name: The main task name (for delivery manifest)
+
+    Returns:
+        List of YAML lines for post-hook steps
+    """
+    lines = []
+
+    # Check for delivery_manifest task
+    manifest_config = find_task_config(tasks, "delivery_manifest")
+    if manifest_config != None:
+        timeout = manifest_config.get("timeout_in_minutes", 10)
+        lines.append("- name: Delivery manifest")
+        lines.append("  if: success()")
+        lines.append("  run: aspect delivery_manifest --data TARGETS_SOURCE=" + task_name)
+        lines.append("  timeout-minutes: " + str(timeout))
+
+    # Check for finalization task
+    finalize_config = find_task_config(tasks, "finalization")
+    if finalize_config != None:
+        timeout = finalize_config.get("timeout_in_minutes", 10)
+        lines.append("- name: Finalization")
+        lines.append("  if: always()")
+        lines.append("  run: aspect finalization")
+        lines.append("  timeout-minutes: " + str(timeout))
+
+    return lines
+
+
+def generate_task_hooks(task_config: dict, hook_type: str) -> list:
+    """
+    Generate task-specific hook steps (before_task or after_task).
+
+    Args:
+        task_config: The task's configuration dict
+        hook_type: Either "before_task" or "after_task"
+
+    Returns:
+        List of YAML lines for hook steps
+    """
+    lines = []
+
+    hooks = task_config.get("hooks", [])
+    if type(hooks) != "list":
+        return lines
+
+    hook_index = 0
+    for hook in hooks:
+        if type(hook) != "dict":
+            continue
+
+        if hook.get("type") != hook_type:
+            continue
+
+        command = hook.get("command", "")
+        if not command:
+            continue
+
+        hook_index += 1
+        hook_name = hook_type.replace("_", " ").title()
+        if hook_index > 1:
+            hook_name = hook_name + " " + str(hook_index)
+
+        # Check if command is multiline
+        if "\n" in command:
+            lines.append("- name: " + hook_name)
+            lines.append("  run: |")
+            for cmd_line in command.split("\n"):
+                lines.append("    " + cmd_line)
+        else:
+            lines.append("- name: " + hook_name)
+            lines.append("  run: " + command)
+
+    return lines
+
+
+def generate_github_workflow(ctx, config_data: dict, config_path: str, workflow_name: str) -> str:
+    """
+    Generate a GitHub Actions workflow YAML from config data.
+
+    Args:
+        ctx: TaskContext
+        config_data: Parsed config.yaml data
+        config_path: Path to config file (for reference in workflow)
+        workflow_name: Name for the workflow
+
+    Returns:
+        Generated workflow YAML as string
+    """
+    tasks = config_data.get("tasks", [])
+    workspaces = config_data.get("workspaces", ["."])
+    env_vars = config_data.get("env", {})
+    default_queue = config_data.get("queue", "aspect-default")
+
+    # Normalize workspaces to list
+    if type(workspaces) != "list":
+        workspaces = ["."]
+
+    # Build the workflow structure
+    lines = []
+    lines.append("# Generated by: aspect workflows migrate --host=github")
+    lines.append("# Source: " + config_path)
+    lines.append("# DO NOT EDIT - regenerate with 'aspect workflows migrate'")
+    lines.append("")
+    lines.append("name: " + workflow_name)
+    lines.append("")
+    lines.append("on:")
+    lines.append("  push:")
+    lines.append("    branches: [main]")
+    lines.append("  pull_request:")
+    lines.append("    branches: [main]")
+    lines.append("  workflow_dispatch:")
+    lines.append("")
+
+    # Add global env vars if present
+    if env_vars and len(env_vars) > 0:
+        lines.append("env:")
+        for key, value in env_vars.items():
+            lines.append("  " + key + ": " + json.encode(str(value)))
+        lines.append("")
+
+    lines.append("jobs:")
+
+    # Generate a job for each Bazel task
+    job_count = 0
+    for task_def in tasks:
+        task_name, task_type, task_config = get_task_entry(task_def)
+
+        if task_name == None:
+            continue
+
+        # Skip non-Bazel tasks and hooks (hooks are embedded in jobs)
+        if task_type in EXCLUDED_TASK_TYPES:
+            continue
+        if task_type in PRE_TASK_TYPES:
+            continue
+        if task_type in POST_TASK_TYPES:
+            continue
+
+        if task_type not in BAZEL_TASK_TYPES:
+            print("Warning: Unknown task type '{}', skipping".format(task_type))
+            continue
+
+        # Check if task is disabled
+        if task_config.get("without", False):
+            continue
+
+        # Get task-specific config
+        timeout = task_config.get("timeout_in_minutes", DEFAULT_TIMEOUT)
+        queue = task_config.get("queue", default_queue)
+        nice_name = task_config.get("name", task_name.replace("_", " ").title())
+
+        # Get task-specific hooks
+        before_task_hooks = generate_task_hooks(task_config, "before_task")
+        after_task_hooks = generate_task_hooks(task_config, "after_task")
+
+        # Get task-specific env vars
+        task_env = task_config.get("env", {})
+        if task_env == None:
+            task_env = {}
+
+        # Get task-specific artifact paths
+        artifact_paths = task_config.get("artifact_paths", [])
+        if artifact_paths == None:
+            artifact_paths = []
+
+        # Determine if using matrix for multiple workspaces
+        use_matrix = len(workspaces) > 1
+
+        job_id = task_name.replace("-", "_")
+        lines.append("")
+        lines.append("  " + job_id + ":")
+
+        if use_matrix:
+            lines.append("    name: " + nice_name + " (${{ matrix.workspace }})")
+        else:
+            lines.append("    name: " + nice_name)
+
+        lines.append("    runs-on: [self-hosted, aspect-workflows, " + queue + "]")
+
+        if use_matrix:
+            lines.append("    strategy:")
+            lines.append("      fail-fast: false")
+            lines.append("      matrix:")
+            lines.append("        workspace:")
+            for ws in workspaces:
+                lines.append("          - " + json.encode(ws))
+            lines.append("    defaults:")
+            lines.append("      run:")
+            lines.append("        working-directory: ${{ matrix.workspace }}")
+        else:
+            workspace = workspaces[0]
+            if workspace != ".":
+                lines.append("    defaults:")
+                lines.append("      run:")
+                lines.append("        working-directory: " + workspace)
+
+        lines.append("    steps:")
+
+        # 1. Checkout step
+        checkout_lines = generate_checkout_step(task_type)
+        for line in checkout_lines:
+            lines.append("      " + line)
+
+        # 2. Pre-task hooks (checkout, health probe)
+        pre_hook_lines = generate_pre_hooks(tasks, task_type)
+        for line in pre_hook_lines:
+            lines.append("      " + line)
+
+        # 3. Task-specific before_task hooks
+        for line in before_task_hooks:
+            lines.append("      " + line)
+
+        # 4. Main task
+        lines.append("      - name: " + nice_name)
+        lines.append("        run: aspect " + task_name)
+        lines.append("        timeout-minutes: " + str(timeout))
+        if task_env and len(task_env) > 0:
+            lines.append("        env:")
+            for env_key, env_value in task_env.items():
+                lines.append("          " + env_key + ": " + json.encode(str(env_value)))
+
+        # 5. Task-specific after_task hooks
+        for line in after_task_hooks:
+            lines.append("      " + line)
+
+        # 6. Post-task hooks (delivery manifest, finalization)
+        post_hook_lines = generate_post_hooks(tasks, task_name)
+        for line in post_hook_lines:
+            lines.append("      " + line)
+
+        # 7. Upload artifacts (always, even on failure)
+        lines.append("      - name: Upload artifacts")
+        lines.append("        if: always()")
+        lines.append("        uses: actions/upload-artifact@v4")
+        lines.append("        with:")
+        lines.append("          name: " + task_name + "-artifacts")
+        lines.append("          path: |")
+        lines.append("            bazel-out/**/testlogs/**")
+        lines.append("            bazel-out/**/test.log")
+        # Add custom artifact paths
+        for artifact_path in artifact_paths:
+            lines.append("            " + artifact_path)
+        lines.append("          if-no-files-found: ignore")
+
+        job_count += 1
+
+    if job_count == 0:
+        fail("No Bazel tasks found in config. Expected tasks like: build, test, lint, format, configure, gazelle, buildifier")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def generate_buildkite_pipeline(ctx, config_data: dict, config_path: str) -> str:
+    """
+    Generate a Buildkite pipeline YAML from config data.
+
+    Args:
+        ctx: TaskContext
+        config_data: Parsed config.yaml data
+        config_path: Path to config file (for reference)
+
+    Returns:
+        Generated pipeline YAML as string
+    """
+    tasks = config_data.get("tasks", [])
+    workspaces = config_data.get("workspaces", ["."])
+    env_vars = config_data.get("env", {})
+    default_queue = config_data.get("queue", "aspect-default")
+
+    # Normalize workspaces to list of strings
+    workspace_list = []
+    if type(workspaces) == "list":
+        for ws in workspaces:
+            if type(ws) == "str":
+                workspace_list.append(ws)
+            elif type(ws) == "dict":
+                for ws_name in ws.keys():
+                    workspace_list.append(ws_name)
+    else:
+        workspace_list = ["."]
+
+    lines = []
+    lines.append("# Generated by: aspect workflows migrate --host=buildkite")
+    lines.append("# Source: " + config_path)
+    lines.append("# DO NOT EDIT - regenerate with 'aspect workflows migrate'")
+    lines.append("")
+    lines.append("steps:")
+
+    # Collect step keys for finalization depends_on
+    step_keys = []
+
+    # Generate steps for each task and workspace combination
+    for task_def in tasks:
+        task_name, task_type, task_config = get_task_entry(task_def)
+
+        if task_name == None:
+            continue
+
+        # Skip non-Bazel tasks and hooks
+        if task_type in EXCLUDED_TASK_TYPES:
+            continue
+        if task_type in PRE_TASK_TYPES:
+            continue
+        if task_type in POST_TASK_TYPES:
+            continue
+
+        if task_type not in BAZEL_TASK_TYPES:
+            print("Warning: Unknown task type '{}', skipping".format(task_type))
+            continue
+
+        # Check if task is disabled
+        if task_config.get("without", False):
+            continue
+
+        # Get task-specific config
+        timeout = task_config.get("timeout_in_minutes", DEFAULT_TIMEOUT)
+        queue = task_config.get("queue", default_queue)
+        nice_name = task_config.get("name", task_name.replace("_", " ").title())
+        icon = task_config.get("icon", "bazel")
+
+        # Get task-specific env, hooks, and artifact paths
+        task_env = task_config.get("env", {})
+        if task_env == None:
+            task_env = {}
+        before_hooks = get_task_hook_commands(task_config, "before_task")
+        after_hooks = get_task_hook_commands(task_config, "after_task")
+        artifact_paths = task_config.get("artifact_paths", [])
+        if artifact_paths == None:
+            artifact_paths = []
+
+        # Generate step for each workspace
+        for workspace in workspace_list:
+            workspace_key = workspace.replace("/", "-").replace(".", "__main__")
+            step_key = workspace_key + "::" + task_name
+            step_keys.append(step_key)
+
+            # Label with workspace suffix if multiple workspaces
+            if len(workspace_list) > 1 and workspace != ".":
+                label = ":{}: {} - {}".format(icon, nice_name, workspace)
+            else:
+                label = ":{}: {}".format(icon, nice_name)
+
+            lines.append("  - key: " + step_key)
+            lines.append("    label: \"" + label + "\"")
+            lines.append("    agents:")
+            lines.append("      queue: " + queue)
+            lines.append("    timeout_in_minutes: " + str(timeout))
+
+            # Environment variables
+            lines.append("    env:")
+            lines.append("      ASPECT_WORKFLOWS_CONFIG: " + config_path)
+            for key, value in env_vars.items():
+                lines.append("      " + key + ": " + json.encode(str(value)))
+            for key, value in task_env.items():
+                lines.append("      " + key + ": " + json.encode(str(value)))
+
+            # Commands
+            lines.append("    command:")
+
+            # Before task hooks
+            for cmd in before_hooks:
+                if "\n" in cmd:
+                    lines.append("      - |")
+                    for cmd_line in cmd.split("\n"):
+                        lines.append("        " + cmd_line)
+                else:
+                    lines.append("      - " + json.encode(cmd))
+
+            # Main task command
+            if workspace != ".":
+                lines.append("      - 'echo \"--- :{}: {}\"'".format(icon, nice_name))
+                lines.append("      - aspect " + task_name + " --workspace " + workspace)
+            else:
+                lines.append("      - 'echo \"--- :{}: {}\"'".format(icon, nice_name))
+                lines.append("      - aspect " + task_name)
+
+            # After task hooks
+            for cmd in after_hooks:
+                if "\n" in cmd:
+                    lines.append("      - |")
+                    for cmd_line in cmd.split("\n"):
+                        lines.append("        " + cmd_line)
+                else:
+                    lines.append("      - " + json.encode(cmd))
+
+            # Artifact paths
+            if len(artifact_paths) > 0:
+                lines.append("    artifact_paths:")
+                for path in artifact_paths:
+                    lines.append("      - " + json.encode(path))
+
+            # Retry config
+            lines.append("    retry:")
+            lines.append("      automatic:")
+            lines.append("        - exit_status: -1")
+            lines.append("          limit: 1")
+            lines.append("      manual:")
+            lines.append("        allowed: true")
+            lines.append("        permit_on_passed: false")
+            lines.append("")
+
+    # Add finalization step if configured
+    finalize_config = find_task_config(tasks, "finalization")
+    if finalize_config != None and len(step_keys) > 0:
+        timeout = finalize_config.get("timeout_in_minutes", 10)
+        lines.append("  - key: finalization")
+        lines.append("    label: \":checkered_flag: Finalization\"")
+        lines.append("    agents:")
+        lines.append("      queue: " + default_queue)
+        lines.append("    timeout_in_minutes: " + str(timeout))
+        lines.append("    command:")
+        lines.append("      - aspect finalization")
+        lines.append("    depends_on:")
+        for key in step_keys:
+            lines.append("      - step: " + key)
+            lines.append("        allow_failure: true")
+        lines.append("    soft_fail: true")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def get_task_hook_commands(task_config: dict, hook_type: str) -> list:
+    """
+    Get list of commands from task hooks.
+
+    Args:
+        task_config: Task configuration dict
+        hook_type: Either "before_task" or "after_task"
+
+    Returns:
+        List of command strings
+    """
+    commands = []
+    hooks = task_config.get("hooks", [])
+    if type(hooks) != "list":
+        return commands
+
+    for hook in hooks:
+        if type(hook) != "dict":
+            continue
+        if hook.get("type") != hook_type:
+            continue
+        command = hook.get("command", "")
+        if command:
+            commands.append(command)
+
+    return commands
+
+
+def _migrate_impl(ctx: TaskContext) -> int:
+    """
+    Implementation of the migrate task.
+
+    Reads config.yaml and generates CI workflow files.
+    """
+    host = ctx.args.host
+    config_path = ctx.args.config
+    output = ctx.args.output
+    workflow_name = ctx.args.name
+
+    # Validate host
+    supported_hosts = ["github", "buildkite"]
+    if host not in supported_hosts:
+        print("Error: Unsupported host '{}'. Supported hosts: {}".format(
+            host, ", ".join(supported_hosts)
+        ))
+        return 1
+
+    # Resolve config path
+    root = ctx.std.env.root_dir()
+    if not config_path.startswith("/"):
+        full_config_path = root + "/" + config_path
+    else:
+        full_config_path = config_path
+
+    # Check if config exists
+    if not ctx.std.fs.exists(full_config_path):
+        print("Error: Config file not found: " + full_config_path)
+        return 1
+
+    # Read and parse config
+    print("Reading config: " + full_config_path)
+    content = ctx.std.fs.read_to_string(full_config_path)
+    config_data = parse_yaml(ctx, content)
+
+    # Determine output path
+    if not output:
+        if host == "github":
+            output = root + "/.github/workflows/aspect-workflows.yaml"
+        elif host == "buildkite":
+            output = root + "/.buildkite/pipeline.yaml"
+
+    # Ensure output directory exists
+    output_dir = output.rsplit("/", 1)[0]
+    if not ctx.std.fs.exists(output_dir):
+        ctx.std.fs.create_dir_all(output_dir)
+
+    # Generate workflow
+    print("Generating {} workflow...".format(host))
+
+    workflow_content = ""
+    if host == "github":
+        workflow_content = generate_github_workflow(
+            ctx,
+            config_data,
+            config_path,  # Use original relative path in comment
+            workflow_name,
+        )
+    elif host == "buildkite":
+        workflow_content = generate_buildkite_pipeline(
+            ctx,
+            config_data,
+            config_path,
+        )
+
+    # Write output
+    print("Writing: " + output)
+    ctx.std.fs.write(output, workflow_content)
+
+    print("")
+    print("Generated workflow file: " + output)
+    print("")
+    print("Features enabled:")
+
+    # Report what hooks were detected
+    tasks = config_data.get("tasks", [])
+    if find_task_config(tasks, "bazel_health_probe") != None:
+        print("  - Bazel health probe")
+    if find_task_config(tasks, "finalization") != None:
+        print("  - Finalization hook (runs on success/failure)")
+    if find_task_config(tasks, "delivery_manifest") != None:
+        print("  - Delivery manifest generation")
+
+    # Warn about features not supported in standalone mode
+    if find_task_config(tasks, "checkout") != None:
+        print("")
+        print("Note: 'checkout' task with update_strategy is not supported in standalone mode.")
+        print("      Use GitHub branch protection rules or merge queue instead.")
+
+    print("")
+    print("To use this workflow:")
+    print("  1. Commit the generated file to your repository")
+    print("  2. Push to trigger the workflow")
+    print("")
+
+    return 0
+
+
+# Register the migrate task
+migrate = task(
+    name = "migrate",
+    group = ["workflows"],
+    implementation = _migrate_impl,
+    args = {
+        # CI host platform
+        "host": args.string(default = "github"),
+        # Path to workflows config.yaml
+        "config": args.string(default = ".aspect/workflows/config.yaml"),
+        # Output file path (auto-detected if not specified)
+        "output": args.string(default = ""),
+        # Workflow name
+        "name": args.string(default = "Aspect Workflows"),
+    },
+)
