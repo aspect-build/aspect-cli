@@ -1,0 +1,80 @@
+"""
+Gazelle Task Implementation
+
+Runs 'bazel run <target>' to check if Gazelle-managed BUILD files are up-to-date.
+This is the AXL equivalent of rosetta's gazelle.task.ts.
+"""
+
+# Default targets for gazelle check and fix
+DEFAULT_CHECK_TARGET = "//:gazelle.check"
+DEFAULT_FIX_TARGET = "//:gazelle"
+
+
+def _gazelle_impl(ctx: TaskContext) -> int:
+    """
+    Implementation of the gazelle task.
+
+    Runs 'bazel run <target>' which executes the gazelle check target.
+    This target should be configured to run gazelle in diff/check mode
+    and exit non-zero if there are changes needed.
+
+    Args:
+        ctx: TaskContext with access to std library and args
+
+    Returns:
+        Exit code (0 for success, non-zero for failure)
+    """
+    # Get the target to run (from args or default)
+    target = ctx.args.target
+    if not target:
+        target = DEFAULT_CHECK_TARGET
+
+    fix_target = ctx.args.fix_target
+    if not fix_target:
+        fix_target = DEFAULT_FIX_TARGET
+
+    # Build startup flags
+    startup_flags = []
+    for flag in ctx.args.bazel_startup_flag:
+        startup_flags.append(flag)
+
+    # Build command flags
+    cmd_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    for flag in ctx.args.bazel_flag:
+        cmd_flags.append(flag)
+
+    # Run bazel run with the gazelle target
+    build = ctx.bazel.build(
+        target,
+        flags = cmd_flags,
+        startup_flags = startup_flags,
+    )
+
+    # Wait for completion
+    status = build.wait()
+
+    # Handle exit codes
+    if status.code == 0:
+        print("Gazelle check passed - BUILD files are up-to-date")
+        return 0
+    else:
+        print("Gazelle check failed - BUILD files need updating")
+        print("Run 'bazel run {}' to apply the suggested fixes".format(fix_target))
+        return status.code
+
+
+# Register the gazelle task
+gazelle = task(
+    name = "gazelle",
+    implementation = _gazelle_impl,
+    args = {
+        # The target to run for the check (default: //:gazelle.check)
+        "target": args.string(default = DEFAULT_CHECK_TARGET),
+        # The target to run for fixing (shown in error message)
+        "fix_target": args.string(default = DEFAULT_FIX_TARGET),
+        # Additional bazel flags
+        "bazel_flag": args.string_list(),
+        # Bazel startup flags
+        "bazel_startup_flag": args.string_list(),
+    },
+)
