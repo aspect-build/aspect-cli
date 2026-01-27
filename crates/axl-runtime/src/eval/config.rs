@@ -47,8 +47,9 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
     ///
     /// This method:
     /// 1. Creates a ConfigContext with the tasks
-    /// 2. Evaluates each config file, calling its `config` function
-    /// 3. Returns references to the modified tasks
+    /// 2. Evaluates config bindings for all tasks (lazy evaluation)
+    /// 3. Evaluates each config file, calling its `config` function
+    /// 4. Returns references to the modified tasks
     ///
     /// The tasks are modified in place via set_attr calls from config functions.
     pub fn run_all(
@@ -66,6 +67,18 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
         let ctx = context_value
             .downcast_ref::<ConfigContext>()
             .expect("just allocated ConfigContext");
+
+        // Evaluate config bindings for all tasks (lazy evaluation)
+        {
+            let mut eval = Evaluator::new(eval_module);
+            eval.set_loader(self.loader);
+            for task_value in ctx.task_values() {
+                let task = task_value
+                    .downcast_ref::<ConfiguredTask>()
+                    .expect("task_values should contain ConfiguredTask");
+                task.evaluate_config(&mut eval)?;
+            }
+        }
 
         // Evaluate each config file with its associated scope
         for (scope, path) in &scoped_configs {

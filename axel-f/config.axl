@@ -13,7 +13,8 @@ load("./platform-config.axl",
 PLATFORM_DIR = "/etc/aspect/workflows/platform"
 
 def config(ctx: ConfigContext):
-    print(ctx.tasks)
+    if ctx.std.env.var("BUILDKITE"):
+        print("--- Configuring Workflows")
 
     # Read platform config from disk
     platform_config = read_platform_config(
@@ -36,9 +37,17 @@ def config(ctx: ConfigContext):
         workspace = ".",
     )
 
+    ctx.std.fs.write("/tmp/bazelrc", content)
+
+    for task in ctx.tasks:
+        if task.name == "build" and task.path.endswith("aspect/build.axl"):
+            task.config.startup_flags = lambda flags: flags + ["--bazelrc=/tmp/bazelrc"]
+            task.config.flags = lambda flags: flags
+            task.config.build_start = lambda: print("+++ Building")
+            task.config.build_end = lambda status: print(f"--- Build done {status}")
     print(content)
 
-    # ctx.tasks.add(configure)
-    # ctx.tasks.add(gazelle)
-    # ctx.tasks.add(buildifier)
-    # ctx.tasks.add(migrate)
+    ctx.tasks.add(configure)
+    ctx.tasks.add(gazelle)
+    ctx.tasks.add(buildifier)
+    ctx.tasks.add(migrate)

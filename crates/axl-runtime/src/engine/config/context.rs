@@ -70,6 +70,12 @@ impl<'v> ConfigContext<'v> {
             .collect()
     }
 
+    /// Get task values for iteration (used during config evaluation).
+    pub fn task_values(&self) -> Vec<values::Value<'v>> {
+        let list = self.tasks.downcast_ref::<MutableTaskList>().unwrap();
+        list.0.borrow().content.clone()
+    }
+
     /// Add a config module for lifetime management.
     pub fn add_config_module(&self, module: FrozenModule) {
         self.config_modules.borrow_mut().push(module);

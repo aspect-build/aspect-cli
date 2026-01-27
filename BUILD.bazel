@@ -3,6 +3,13 @@ alias(
     actual = "//crates/aspect-launcher",
 )
 
+genrule(
+    name = "hello",
+    srcs = [],
+    outs = ["hello.txt"],
+    cmd = "echo 'Hello, World!' > $@",
+)
+
 alias(
     name = "cli",
     actual = "//crates/aspect-cli",

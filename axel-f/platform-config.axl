@@ -437,7 +437,7 @@ def _sanitize_filename(name):
         return ""
 
     result = ""
-    for c in name:
+    for c in name.elems():
         if c.isalnum() or c in "-_.":
             result += c
         else:

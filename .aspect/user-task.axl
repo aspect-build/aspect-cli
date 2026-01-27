@@ -26,5 +26,5 @@ user_task = task(
     group = ["user"],
     implementation = _impl,
     args = {},
-    config = UserTaskConfig(),
+    config = UserTaskConfig,
 )
