@@ -1,180 +1,44 @@
-"""
-AXL Configuration Loader
+"""Workflows Configuration"""
 
-Reads .aspect/workflows/config.yaml and registers tasks dynamically.
-This replaces rosetta's task registration with AXL-native task definitions.
-"""
+load("./configure.axl", "configure")
+load("./gazelle.axl", "gazelle")
+load("./buildifier.axl", "buildifier")
+load("./migrate.axl", "migrate")
+load("./platform-config.axl",
+    "read_platform_config",
+    "read_host_config",
+    "get_bazelrc_content",
+)
 
-# Load pre-installed task implementations from @aspect
-load("@aspect//build.axl", "build")
-load("@aspect//test.axl", "test")
-
-# Load custom task implementations from this module
-load("@axel-f//configure.axl", "configure")
-load("@axel-f//gazelle.axl", "gazelle")
-load("@axel-f//buildifier.axl", "buildifier")
-load("@axel-f//migrate.axl", "migrate")
-
-# Task type to implementation mapping
-# Maps config.yaml task types to AXL task implementations
-TASK_IMPLS = {
-    "build": build,
-    "test": test,
-    "configure": configure,
-    "gazelle": gazelle,
-    "buildifier": buildifier,
-    # lint and format are handled by @aspect-build/rules_lint if available
-    # "lint": lint,
-    # "format": format,
-}
-
-# Tasks that are NOT Bazel-related and should be skipped
-# These are handled by static CI config generation
-EXCLUDED_TASK_TYPES = [
-    "checkout",
-    "delivery",
-    "delivery_manifest",
-    "warming",
-    "bazel_health_probe",
-    "finalization",
-    "noop",
-]
-
-
-def parse_yaml(ctx, content: str) -> dict:
-    """
-    Parse YAML content to a dictionary using yq.
-
-    Args:
-        ctx: ConfigContext with access to std library
-        content: YAML content as string
-
-    Returns:
-        Parsed dictionary from YAML
-    """
-    child = ctx.std.process.command("yq") \
-        .arg("-o=json") \
-        .arg(".") \
-        .stdin("piped") \
-        .stdout("piped") \
-        .stderr("piped") \
-        .spawn()
-
-    stdin = child.stdin()
-    stdin.write(content)
-    stdin.close()
-
-    stdout = child.stdout()
-    json_output = stdout.read_to_string()
-
-    status = child.wait()
-    if status.code != 0:
-        stderr = child.stderr()
-        error_msg = stderr.read_to_string()
-        fail("Failed to parse YAML: " + error_msg)
-
-    return json.decode(json_output)
-
-
-def get_task_entry(task_def: dict) -> tuple:
-    """
-    Extract task name, type, and config from a task definition.
-
-    Config.yaml tasks are structured as:
-    - task_type: {config...}   OR
-    - task_type_N: {config...}   (for multiple tasks of same type, e.g., build_2)
-
-    Args:
-        task_def: A single task entry from the tasks array
-
-    Returns:
-        Tuple of (task_name, task_type, task_config)
-    """
-    if type(task_def) != "dict" or len(task_def) == 0:
-        return (None, None, None)
-
-    # Get the first (and only) key-value pair
-    for task_name, task_config in task_def.items():
-        # Extract base task type from name (e.g., "build_2" -> "build")
-        task_type = task_name
-
-        # Check for numbered suffix pattern (e.g., build_2, test_3)
-        parts = task_name.rsplit("_", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            task_type = parts[0]
-
-        # Handle case where config might be None or empty
-        if task_config == None:
-            task_config = {}
-
-        return (task_name, task_type, task_config)
-
-    return (None, None, None)
-
-
-def register_task(ctx, task_name: str, task_type: str, task_config: dict):
-    """
-    Register a task with the AXL task system.
-
-    Args:
-        ctx: ConfigContext with tasks attribute
-        task_name: Name to register the task under (e.g., "build_2")
-        task_type: Base type of the task (e.g., "build")
-        task_config: Configuration dict for the task
-    """
-    # Skip non-Bazel tasks
-    if task_type in EXCLUDED_TASK_TYPES:
-        return
-
-    # Get the implementation for this task type
-    impl = TASK_IMPLS.get(task_type)
-    if impl == None:
-        # Unknown task type - skip with a warning
-        print("Warning: Unknown task type '{}' for task '{}', skipping".format(task_type, task_name))
-        return
-
-    # Find and customize the task in ctx.tasks
-    for task in ctx.tasks:
-        if task.name == task_type:
-            # Found the base task, customize if needed
-            # Note: In the future, we may want to clone and rename tasks
-            # For now, the built-in tasks are already registered
-            return
-
-    # Task not found in defaults - it should already be registered by the load statements
-    # The load() statements at the top register the tasks automatically
-
+PLATFORM_DIR = "/etc/aspect/workflows/platform"
 
 def config(ctx: ConfigContext):
-    """
-    Main configuration function called by aspect-cli.
+    print(ctx.tasks)
 
-    Reads the workflows config.yaml and registers tasks dynamically.
-    """
-    root = ctx.std.env.root_dir()
+    # Read platform config from disk
+    platform_config = read_platform_config(
+        ctx.std.fs,
+        platform_dir = PLATFORM_DIR,
+    )
+    print(platform_config)
 
-    # Path to the legacy config.yaml
-    config_path = root + "/.aspect/workflows/config.yaml"
+    # Read host config from environment
+    host_config = read_host_config(ctx.std.env, ctx.std.io)
 
-    # Check if config file exists
-    if not ctx.std.fs.exists(config_path):
-        # No config file - nothing to configure
-        # The default build/test tasks from @aspect are still available
-        return
+    print(host_config)
 
-    # Read the config file
-    content = ctx.std.fs.read_to_string(config_path)
+    # Generate bazelrc content
+    content = get_bazelrc_content(
+        platform_config = platform_config,
+        host_config = host_config,
+        bazel_version = "7.0.0",
+        task_types = ["build"],
+        workspace = ".",
+    )
 
-    # Parse YAML to get task definitions
-    config_data = parse_yaml(ctx, content)
+    print(content)
 
-    # Get the tasks array
-    tasks = config_data.get("tasks", [])
-    if type(tasks) != "list":
-        tasks = []
-
-    # Register each task
-    for task_def in tasks:
-        task_name, task_type, task_config = get_task_entry(task_def)
-        if task_name != None:
-            register_task(ctx, task_name, task_type, task_config)
+    # ctx.tasks.add(configure)
+    # ctx.tasks.add(gazelle)
+    # ctx.tasks.add(buildifier)
+    # ctx.tasks.add(migrate)
