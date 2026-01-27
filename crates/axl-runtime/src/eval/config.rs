@@ -53,12 +53,9 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
     /// The tasks are modified in place via set_attr calls from config functions.
     pub fn run_all(
         &self,
-        scope: ModuleScope,
-        config_paths: Vec<PathBuf>,
+        scoped_configs: Vec<(ModuleScope, PathBuf)>,
         tasks: Vec<ConfiguredTask>,
     ) -> Result<Vec<ConfiguredTask>, EvalError> {
-        self.loader.module_stack.borrow_mut().push(scope.clone());
-
         // Create temporary modules for evaluation
         let eval_module = Box::leak(Box::new(Module::new()));
         let context_module = Box::leak(Box::new(Module::new()));
@@ -70,8 +67,10 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
             .downcast_ref::<ConfigContext>()
             .expect("just allocated ConfigContext");
 
-        // Evaluate each config file
-        for path in &config_paths {
+        // Evaluate each config file with its associated scope
+        for (scope, path) in &scoped_configs {
+            self.loader.module_stack.borrow_mut().push(scope.clone());
+
             let rel_path = path
                 .strip_prefix(&scope.path)
                 .map_err(|e| EvalError::UnknownError(anyhow!("Failed to strip prefix: {e}")))?
@@ -107,12 +106,13 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
             // Keep the frozen module alive for the duration
             ctx.add_config_module(frozen);
+
+            self.loader.module_stack.borrow_mut().pop();
         }
 
         // Clone tasks from the context to return
         let result_tasks: Vec<ConfiguredTask> = ctx.tasks().iter().map(|t| (*t).clone()).collect();
 
-        self.loader.module_stack.borrow_mut().pop();
         Ok(result_tasks)
     }
 }

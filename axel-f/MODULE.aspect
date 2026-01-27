@@ -1,4 +1,0 @@
-use_task("configure.axl", "configure")
-use_task("gazelle.axl", "gazelle")
-use_task("buildifier.axl", "buildifier")
-use_task("migrate.axl", "migrate")

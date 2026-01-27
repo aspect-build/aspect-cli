@@ -239,17 +239,16 @@ async fn main() -> miette::Result<ExitCode> {
             }
         }
 
-        // Run all config functions, passing in vector of tasks for configuration
-        let tasks = config_eval
-            .run_all(
-                ModuleScope {
-                    name: AXL_ROOT_MODULE_NAME.to_string(),
-                    path: repo_root.clone(),
-                },
-                configs.clone(),
-                tasks,
-            )
-            .into_diagnostic()?;
+        // Build scoped configs list combining regular configs and env configs
+        let root_scope = ModuleScope {
+            name: AXL_ROOT_MODULE_NAME.to_string(),
+            path: repo_root.clone(),
+        };
+
+        let mut scoped_configs: Vec<(ModuleScope, PathBuf)> = configs
+            .iter()
+            .map(|path| (root_scope.clone(), path.clone()))
+            .collect();
 
         // Run environment configs, each with scope derived from parent directory
         if debug_mode() && !env_configs.is_empty() {
@@ -264,17 +263,19 @@ async fn main() -> miette::Result<ExitCode> {
             }
         }
 
-        let mut tasks = tasks;
         for config_path in env_configs.iter() {
             let parent = config_path.parent().unwrap_or(&repo_root);
             let scope = ModuleScope {
-                name: AXL_ROOT_MODULE_NAME.to_string(),
+                name: "".to_string(),
                 path: parent.to_path_buf(),
             };
-            tasks = config_eval
-                .run_all(scope, vec![config_path.clone()], tasks)
-                .into_diagnostic()?;
+            scoped_configs.push((scope, config_path.clone()));
         }
+
+        // Run all config functions, passing in vector of tasks for configuration
+        let tasks = config_eval
+            .run_all(scoped_configs, tasks)
+            .into_diagnostic()?;
 
         // Build the command tree from the evaluated and configured tasks.
         let mut tree = CommandTree::default();
