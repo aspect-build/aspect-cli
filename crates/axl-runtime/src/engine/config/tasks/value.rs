@@ -16,7 +16,6 @@ use starlark::typing::Ty;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
-use starlark::values::OwnedFrozenValue;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
@@ -80,22 +79,33 @@ pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
             .get(&symbol)
             .map_err(|e| anyhow::anyhow!("failed to get frozen task: {:?}", e))?;
 
-        // Get initial config from the frozen task
+        // Get config binding from the frozen task and evaluate it
         let frozen_task = task_def
             .value()
             .downcast_ref::<FrozenTask>()
             .ok_or_else(|| anyhow::anyhow!("expected FrozenTask after freeze"))?;
-        let initial_config = OwnedFrozenValue::alloc(frozen_task.config);
 
-        // Create ConfiguredTask with frozen values
-        let task_mut = ConfiguredTask {
-            task_def,
-            name: RefCell::new(name),
-            group: RefCell::new(task_like.group().to_vec()),
-            config: RefCell::new(initial_config),
-            symbol,
-            path: PathBuf::from(store.script_path.to_string_lossy().to_string()),
+        // Get the config binding as OwnedFrozenValue
+        let config_binding = task_def.map(|_| frozen_task.config());
+
+        // Evaluate the config binding (always a callable)
+        let binding = frozen_task.config();
+        let config_value = if binding.to_value().is_none() {
+            binding.to_value()
+        } else {
+            eval.eval_function(binding.to_value(), &[], &[])?
         };
+
+        // Create ConfiguredTask with evaluated config
+        let task_mut = ConfiguredTask::new_with_evaluated_config(
+            task_def,
+            config_binding,
+            name,
+            task_like.group().to_vec(),
+            config_value,
+            symbol,
+            PathBuf::from(store.script_path.to_string_lossy().to_string()),
+        );
 
         this.aref.content.push(eval.heap().alloc(task_mut));
         Ok(NoneType)

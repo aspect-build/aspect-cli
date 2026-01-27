@@ -2,6 +2,15 @@
 A default 'build' task that wraps a 'bazel build' command.
 """
 
+BuildConfig = spec(
+    startup_flags = attr(typing.Callable[[list[str]], list[str]], lambda flags: flags),
+    flags = attr(typing.Callable[[list[str]], list[str]], lambda flags: flags),
+    # TODO: build event sinks configuration
+    # Lifecycle
+    build_start = attr(typing.Callable[[], None], lambda: None),
+    build_end = attr(typing.Callable[[int], None], lambda status: None)
+)
+
 def impl(ctx: TaskContext) -> int:
     stdout = ctx.std.io.stdout
 
@@ -28,6 +37,12 @@ def impl(ctx: TaskContext) -> int:
     for flag in ctx.args.bazel_startup_flag:
         bazel_startup_flags.append(flag)
 
+    # Apply flags and startup flags by config
+    bazel_flags = ctx.config.flags(bazel_flags)
+    bazel_startup_flags = ctx.config.startup_flags(bazel_startup_flags)
+
+    ctx.config.build_start()
+
     build = ctx.bazel.build(
         build_events = build_events,
         flags = bazel_flags,
@@ -36,16 +51,22 @@ def impl(ctx: TaskContext) -> int:
     )
 
     build_status = build.wait()
+
+    ctx.config.build_end(build_status.code)
+
     return build_status.code
 
 build = task(
     implementation = impl,
+    config = BuildConfig,
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
         "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
         "bazel_flag": args.string_list(),
         "bazel_startup_flag": args.string_list(),
+        "remote_executor": args.string(),
+        "remote_cache": args.string(),
         "bes_backend": args.string_list(),
         "bes_header": args.string_list(),
     }
