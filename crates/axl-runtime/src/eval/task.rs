@@ -75,9 +75,8 @@ pub fn execute_task(
     store: AxlStore,
     args: HashMap<String, String>,
 ) -> Result<Option<u8>, EvalError> {
-    // Get config first - it needs to outlive the evaluator
-    let config = task.get_config();
-    let config_value = config.value();
+    // Get config value
+    let config_value = task.get_config();
 
     // Get the task implementation function
     let task_impl = task
@@ -120,9 +119,8 @@ pub fn execute_task_with_args(
     store: AxlStore,
     args_builder: impl FnOnce(&Heap) -> TaskArgs,
 ) -> Result<Option<u8>, EvalError> {
-    // Get config first - it needs to outlive the evaluator
-    let config = task.get_config();
-    let config_value = config.value();
+    // Get config value
+    let config_value = task.get_config();
 
     // Get the task implementation function
     let task_impl = task
