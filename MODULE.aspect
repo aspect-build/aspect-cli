@@ -10,12 +10,6 @@ axl_local_dep(
     auto_use_tasks = True,
 )
 
-axl_local_dep(
-    name = "axel-f",
-    path = "axel-f",
-    auto_use_tasks = True,
-)
-
 axl_archive_dep(
     name = "aspect_rules_lint",
     urls = ["https://github.com/aspect-build/rules_lint/archive/65525d871f677071877d3ea1ec096499ff7dd147.tar.gz"],
