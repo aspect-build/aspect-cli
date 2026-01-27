@@ -14,7 +14,7 @@ PLATFORM_DIR = "/etc/aspect/workflows/platform"
 
 def config(ctx: ConfigContext):
     if ctx.std.env.var("BUILDKITE"):
-        print("--- Configuring Workflows")
+        print("--- :aspect-build: Configuring Workflows")
 
     # Read platform config from disk
     platform_config = read_platform_config(

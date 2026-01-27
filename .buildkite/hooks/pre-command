@@ -3,6 +3,10 @@ set -eu
 
 ASPECT_BIN_DIR="$HOME/.aspect/bin"
 
+# Bazel startup options for CI
+BAZEL_STARTUP_OPTS="--nohome_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
+BAZEL_BUILD_OPTS="--config=workflows --config=ci --show_progress_rate_limit=1"
+
 # Skip if bazel is not installed
 if ! command -v bazel >/dev/null 2>&1; then
   exit 0
@@ -18,13 +22,17 @@ if [ -x "$ASPECT_BIN_DIR/aspect" ]; then
   rm -f "$ASPECT_BIN_DIR/aspect"
 fi
 
+# Generate workflows bazelrc
+rosetta bazelrc > /etc/bazel.bazelrc
+
+
 # Build aspect-cli and install
 echo "--- Building aspect-cli"
-bazel build //:cli
+bazel $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS //:cli
 
 # Create target directory and copy binary
 mkdir -p "$ASPECT_BIN_DIR"
-cp -f "$(bazel cquery --output=files //:cli 2>/dev/null)" "$ASPECT_BIN_DIR/aspect"
+cp -f "$(bazel $BAZEL_STARTUP_OPTS cquery $BAZEL_BUILD_OPTS --output=files //:cli 2>/dev/null)" "$ASPECT_BIN_DIR/aspect"
 chmod 0755 "$ASPECT_BIN_DIR/aspect"
 
 # Add to PATH for subsequent commands
