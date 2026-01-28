@@ -17,22 +17,25 @@ def _deliveryd_query(ctx, socket_path, ci_host, commit_sha, workspace):
     http = ctx.http()
     response = http.post(
         "http://localhost/query",
-        unix_socket=socket_path,
-        json={
+        headers={"Content-Type": "application/json"},
+        data=json.encode({
             "ci_host": ci_host,
             "commit_sha": commit_sha,
             "workspace": workspace,
-        },
-    )
+        }),
+        unix_socket=socket_path,
+    ).block()
 
-    if not response.ok:
-        fail("deliveryd query failed: " + response.text)
 
-    data = response.json()
+    if response.status < 200 or response.status >= 300:
+        fail("deliveryd query failed: " + response.body)
 
+    data = json.decode(response.body)
+
+    targets = data.get("targets", []) or []
     # Build lookup dict by label
     result = {}
-    for target in data.get("targets", []):
+    for target in targets:
         result[target["label"]] = {
             "output_sha": target["output_sha"],
             "delivered": target["delivered"],
@@ -47,17 +50,40 @@ def _deliveryd_deliver(ctx, socket_path, ci_host, output_sha, workspace, signatu
     http = ctx.http()
     response = http.post(
         "http://localhost/deliver",
-        unix_socket=socket_path,
-        json={
+        headers={"Content-Type": "application/json"},
+        data=json.encode({
             "ci_host": ci_host,
             "output_sha": output_sha,
             "workspace": workspace,
             "signature": signature,
-        },
-    )
+        }),
+        unix_socket=socket_path,
+    ).block()
 
-    if not response.ok:
-        fail("deliveryd deliver failed: " + response.text)
+    if response.status < 200 or response.status >= 300:
+        fail("deliveryd deliver failed: " + response.body)
+
+def _deliveryd_record(ctx, socket_path, ci_host, commit_sha, workspace, label, output_sha):
+    """
+    Record a target's output SHA with deliveryd.
+    This must be called before the target can be queried or delivered.
+    """
+    http = ctx.http()
+    response = http.post(
+        "http://localhost/record",
+        headers={"Content-Type": "application/json"},
+        data=json.encode({
+            "ci_host": ci_host,
+            "commit_sha": commit_sha,
+            "workspace": workspace,
+            "label": label,
+            "output_sha": output_sha,
+        }),
+        unix_socket=socket_path,
+    ).block()
+
+    if response.status < 200 or response.status >= 300:
+        fail("deliveryd record failed: " + response.body)
 
 def _deliveryd_delete_artifact(ctx, socket_path, ci_host, output_sha, workspace):
     """
@@ -66,16 +92,17 @@ def _deliveryd_delete_artifact(ctx, socket_path, ci_host, output_sha, workspace)
     http = ctx.http()
     response = http.post(
         "http://localhost/artifact/delete",
-        unix_socket=socket_path,
-        json={
+        headers={"Content-Type": "application/json"},
+        data=json.encode({
             "ci_host": ci_host,
             "output_sha": output_sha,
             "workspace": workspace,
-        },
-    )
+        }),
+        unix_socket=socket_path,
+    ).block()
 
-    if not response.ok:
-        fail("deliveryd artifact delete failed: " + response.text)
+    if response.status < 200 or response.status >= 300:
+        fail("deliveryd artifact delete failed: " + response.body)
 
 # Delivery implementation
 
@@ -224,6 +251,15 @@ def _delivery_impl(ctx):
     for t in targets:
         forced_marker = " (forced)" if t in forced_targets else ""
         print("  - {}{}".format(t, forced_marker))
+    print("")
+
+    # Record each target with deliveryd (so they can be queried/signed)
+    print("Recording targets with deliveryd...")
+    for label in targets:
+        # Use hash of commit_sha + label as output_sha
+        output_sha = hash(commit_sha + label)
+        _deliveryd_record(ctx, socket_path, ci_host, commit_sha, workspace, label, str(output_sha))
+    print("  Recorded {} target(s)".format(len(targets)))
     print("")
 
     # Query deliveryd for delivery state of all targets

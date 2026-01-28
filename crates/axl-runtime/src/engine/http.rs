@@ -10,6 +10,7 @@ use reqwest::redirect::Policy;
 use ssri::{Integrity, IntegrityChecker};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::values::dict::UnpackDictEntries;
+use starlark::values::none::NoneOr;
 use starlark::values::AllocValue;
 use starlark::values::{starlark_value, StarlarkValue};
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueLike};
@@ -178,7 +179,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] url: values::StringValue,
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
-        #[starlark(require = named, default = None)] unix_socket: Option<String>,
+        #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
     ) -> starlark::Result<StarlarkFuture> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
@@ -187,7 +188,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
             .collect();
 
-        match unix_socket {
+        match unix_socket.into_option() {
             Some(socket) => {
                 let fut = async move {
                     let client = HyperClient::unix();
@@ -252,7 +253,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         data: String,
-        #[starlark(require = named, default = None)] unix_socket: Option<String>,
+        #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
     ) -> starlark::Result<StarlarkFuture> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
@@ -261,7 +262,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
             .collect();
 
-        match unix_socket {
+        match unix_socket.into_option() {
             Some(socket) => {
                 let fut = async move {
                     let client = HyperClient::unix();
