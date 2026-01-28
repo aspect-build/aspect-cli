@@ -1,3 +1,2 @@
 def config(ctx: ConfigContext):
-    print("running crates/aspect-cli/.aspect/config.axl")
     pass
