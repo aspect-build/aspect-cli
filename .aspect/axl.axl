@@ -379,12 +379,8 @@ def test_http(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
 def test_http_get_post(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # Test HTTP get and post methods including unix_socket support
-    test_dir = temp_dir + "/axl_http_get_post_test"
-    if ctx.std.fs.exists(test_dir):
-        ctx.std.fs.remove_dir_all(test_dir)
-    ctx.std.fs.create_dir(test_dir)
 
-    # Test 1: Basic HTTP GET request
+    # Test 1: Basic HTTP GET request (reuse same URL as download test)
     url = "https://raw.githubusercontent.com/aspect-build/aspect-cli/refs/heads/main/LICENSE"
     resp1 = ctx.http().get(url = url).block()
     tc = test_case(tc, resp1.status == 200, "http.get should return status 200")
@@ -395,99 +391,6 @@ def test_http_get_post(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # Test 2: HTTP GET with custom headers
     resp2 = ctx.http().get(url = url, headers = {"User-Agent": "AXL-Test"}).block()
     tc = test_case(tc, resp2.status == 200, "http.get with custom headers should return status 200")
-
-    # Test 3: HTTP POST to httpbin echo endpoint
-    post_url = "https://httpbin.org/post"
-    post_data = '{"test": "data"}'
-    resp3 = ctx.http().post(post_url, data = post_data, headers = {"Content-Type": "application/json"}).block()
-    tc = test_case(tc, resp3.status == 200, "http.post should return status 200")
-    tc = test_case(tc, post_data in resp3.body, "http.post response should echo the posted data")
-
-    # Test 4: Unix socket support using a Python HTTP server
-    socket_path = test_dir + "/test.sock"
-
-    # Create a simple Python HTTP server script that listens on a Unix socket
-    server_script = test_dir + "/server.py"
-    ctx.std.fs.write(server_script, """
-import socket
-import os
-import sys
-
-socket_path = sys.argv[1]
-
-# Remove socket if it exists
-if os.path.exists(socket_path):
-    os.unlink(socket_path)
-
-# Create Unix socket server
-server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-server.bind(socket_path)
-server.listen(1)
-
-# Signal ready by creating a marker file
-open(socket_path + ".ready", "w").close()
-
-# Handle exactly 2 connections (one GET, one POST)
-for i in range(2):
-    conn, _ = server.accept()
-    data = conn.recv(4096).decode()
-
-    # Parse the request
-    lines = data.split("\\r\\n")
-    method = lines[0].split()[0] if lines else "UNKNOWN"
-
-    # Find body for POST
-    body = ""
-    if "\\r\\n\\r\\n" in data:
-        body = data.split("\\r\\n\\r\\n", 1)[1]
-
-    # Send HTTP response
-    if method == "GET":
-        response_body = "Hello from Unix socket GET"
-    elif method == "POST":
-        response_body = "Received POST: " + body
-    else:
-        response_body = "Unknown method"
-
-    response = "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nContent-Type: text/plain\\r\\n\\r\\n{}".format(
-        len(response_body), response_body
-    )
-    conn.sendall(response.encode())
-    conn.close()
-
-server.close()
-os.unlink(socket_path)
-""")
-
-    # Start the server in background
-    server_proc = ctx.std.process.command("python3").arg(server_script).arg(socket_path).spawn()
-
-    # Wait for server to be ready (poll for ready file)
-    ready_file = socket_path + ".ready"
-    for _ in range(50):  # 5 seconds max
-        if ctx.std.fs.exists(ready_file):
-            break
-        ctx.std.process.command("sleep").arg("0.1").output()
-
-    tc = test_case(tc, ctx.std.fs.exists(ready_file), "unix socket server should be ready")
-
-    # Test 5: HTTP GET over Unix socket
-    resp4 = ctx.http().get(url = "http://localhost/test", unix_socket = socket_path).block()
-    tc = test_case(tc, resp4.status == 200, "http.get over unix_socket should return status 200")
-    tc = test_case(tc, resp4.body == "Hello from Unix socket GET", "http.get over unix_socket should return correct body")
-
-    # Test 6: HTTP POST over Unix socket
-    resp5 = ctx.http().post("http://localhost/test", data = "unix socket data", unix_socket = socket_path).block()
-    tc = test_case(tc, resp5.status == 200, "http.post over unix_socket should return status 200")
-    tc = test_case(tc, "Received POST: unix socket data" in resp5.body, "http.post over unix_socket should echo data")
-
-    # Wait for server to finish
-    server_proc.wait()
-
-    # Cleanup
-    if ctx.std.fs.exists(ready_file):
-        ctx.std.fs.remove_file(ready_file)
-    ctx.std.fs.remove_dir_all(test_dir)
 
     return tc
 

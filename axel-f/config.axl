@@ -14,13 +14,18 @@ load("./platform-config.axl",
 
 def _start_deliveryd(ctx, delivery_db_endpoint, socket_path = "/tmp/deliveryd.sock"):
     """
-    Start the deliveryd process in the background.
+    Start the deliveryd process in the background if not already running.
 
     Args:
         ctx: Config context
         delivery_db_endpoint: Redis endpoint URL (redis:// or rediss:// for TLS)
         socket_path: Unix socket path for deliveryd
     """
+    # Check if deliveryd is already running by checking for the socket
+    if ctx.std.fs.exists(socket_path):
+        print("deliveryd already running (socket: {})".format(socket_path))
+        return
+
     cmd = ctx.std.process.command("deliveryd")
     cmd.arg("--socket=" + socket_path)
     cmd.arg("--redis-endpoint=" + delivery_db_endpoint)
