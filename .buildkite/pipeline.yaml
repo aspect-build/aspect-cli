@@ -9,7 +9,7 @@ steps:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
-      - aspect build
+      - aspect build ...
     artifact_paths:
       - "vmstat.out"
       - "workflows-etc-bazel.bazelrc"
