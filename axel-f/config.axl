@@ -50,7 +50,6 @@ def config(ctx: ConfigContext):
             task.config.startup_flags = lambda f: flags(f, "startup")
             task.config.flags = lambda f: flags(f, "build")
             task.config.build_start = lambda: print("+++ :bazel: Building")
-            task.config.build_end = lambda status: print(f"--- :bazel: Done {status}")
 
 
     ctx.tasks.add(configure)
