@@ -3,80 +3,13 @@
 # DO NOT EDIT - regenerate with 'aspect workflows migrate'
 
 steps:
-  - key: __main__::lint
-    label: ":bazel: Lint"
+  - key: __main__::build
+    label: ":bazel: Build"
     agents:
       queue: aspect-default
-    timeout_in_minutes: 60
+    timeout_in_minutes: 20
     command:
-      - 'echo "--- :bazel: Lint"'
-      - aspect lint
-    retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
-      manual:
-        allowed: true
-        permit_on_passed: false
-
-  - key: __main__::format
-    label: ":bazel: Format"
-    agents:
-      queue: aspect-default
-    timeout_in_minutes: 60
-    command:
-      - 'echo "--- :bazel: Format"'
-      - aspect format
-    retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
-      manual:
-        allowed: true
-        permit_on_passed: false
-
-  - key: __main__::buildifier
-    label: ":bazel: Buildifier"
-    agents:
-      queue: aspect-default
-    timeout_in_minutes: 60
-    command:
-      - 'echo "--- :bazel: Buildifier"'
-      - aspect buildifier
-    retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
-      manual:
-        allowed: true
-        permit_on_passed: false
-
-  - key: __main__::gazelle
-    label: ":bazel: Gazelle"
-    agents:
-      queue: aspect-default
-    timeout_in_minutes: 60
-    command:
-      - 'echo "--- :bazel: Gazelle"'
-      - aspect gazelle
-    retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
-      manual:
-        allowed: true
-        permit_on_passed: false
-
-  - key: __main__::test
-    label: ":bazel: Test"
-    agents:
-      queue: aspect-default
-    timeout_in_minutes: 60
-    command:
-      - "vmstat -a -S M -t 5 2>&1 > vmstat.out &"
-      - 'echo "--- :bazel: Test"'
-      - aspect test
-      - "cp /etc/bazel.bazelrc workflows-etc-bazel.bazelrc"
+      - aspect build
     artifact_paths:
       - "vmstat.out"
       - "workflows-etc-bazel.bazelrc"
