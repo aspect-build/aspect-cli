@@ -24,11 +24,11 @@ fi
 
 # Build aspect-cli and install
 echo "--- Building aspect-cli"
-bazel $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS --remote_download_toplevel //:cli
+bazel $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel //:cli
 
 # Create target directory and copy binary
 mkdir -p "$ASPECT_BIN_DIR"
-CLI_PATH="$(bazel $BAZEL_STARTUP_OPTS cquery $BAZEL_BUILD_OPTS --output=files //:cli 2>/dev/null)"
+CLI_PATH="$(bazel $BAZEL_STARTUP_OPTS cquery $BAZEL_BUILD_OPTS -c dbg --output=files //:cli 2>/dev/null)"
 ls -la "$CLI_PATH" 2>&1 || echo "DEBUG: File does not exist!"
 cp -f "$CLI_PATH" "$ASPECT_BIN_DIR/aspect"
 chmod 0755 "$ASPECT_BIN_DIR/aspect"
