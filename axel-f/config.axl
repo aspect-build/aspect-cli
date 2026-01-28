@@ -7,7 +7,7 @@ load("./migrate.axl", "migrate")
 load("./platform-config.axl",
     "read_platform_config",
     "read_host_config",
-    "get_bazelrc_content",
+    "get_bazelrc_flags",
 )
 
 PLATFORM_DIR = "/etc/aspect/workflows/platform"
@@ -21,31 +21,38 @@ def config(ctx: ConfigContext):
         ctx.std.fs,
         platform_dir = PLATFORM_DIR,
     )
-    print(platform_config)
 
     # Read host config from environment
     host_config = read_host_config(ctx.std.env, ctx.std.io)
 
-    print(host_config)
-
     # Generate bazelrc content
-    content = get_bazelrc_content(
+    flags = get_bazelrc_flags(
         platform_config = platform_config,
         host_config = host_config,
         bazel_version = "7.0.0",
-        task_types = ["build"],
-        workspace = ".",
     )
 
-    ctx.std.fs.write("/tmp/bazelrc", content)
+    # Debugging information
+    print(platform_config)
+    print(host_config)
+    print(flags)
+
+    print("~~~ :aspect-build: Configuring Workflows")
+
+    user = ctx.std.env.var("USER")
+
+    def flags(flags, type):
+        if user != "thesayyn" and type in flags:
+            flags += flags[type]
+        return flags
 
     for task in ctx.tasks:
         if task.name == "build" and task.path.endswith("aspect/build.axl"):
-            task.config.startup_flags = lambda flags: flags + ["--bazelrc=/tmp/bazelrc"]
-            task.config.flags = lambda flags: flags
+            task.config.startup_flags = lambda f: flags(f, "startup")
+            task.config.flags = lambda f: flags(f, "build")
             task.config.build_start = lambda: print("+++ Building")
             task.config.build_end = lambda status: print(f"--- Build done {status}")
-    print(content)
+
 
     ctx.tasks.add(configure)
     ctx.tasks.add(gazelle)
