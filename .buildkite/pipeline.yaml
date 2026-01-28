@@ -13,6 +13,7 @@ steps:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
+      - which aspect
       - aspect build ...
     artifact_paths:
       - "vmstat.out"
