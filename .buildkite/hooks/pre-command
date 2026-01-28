@@ -38,12 +38,13 @@ if [ -x "$ASPECT_BIN_DIR/deliveryd" ]; then
   echo "DEBUG: Found existing deliveryd binary"
 else
   echo "--- Building deliveryd"
-  DELIVERYD_STARTUP_OPTS="--nohome_rc --output_user_root=/mnt/ephemeral/bazel/deliveryd/__main__ --output_base=/mnt/ephemeral/output/deliveryd/__main__"
+  DELIVERYD_STARTUP_OPTS="--nohome_rc --bazelrc=/etc/bazel.bazelrc --output_user_root=/mnt/ephemeral/bazel/deliveryd/__main__ --output_base=/mnt/ephemeral/output/deliveryd/__main__"
+  DELIVERYD_BUILD_OPTS="--show_progress_rate_limit=1"
 
   (
     cd examples/deliveryd
-    bazel $DELIVERYD_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel //:deliveryd
-    DELIVERYD_PATH="$(bazel $DELIVERYD_STARTUP_OPTS cquery $BAZEL_BUILD_OPTS -c dbg --output=files //:deliveryd 2>/dev/null)"
+    bazel $DELIVERYD_STARTUP_OPTS build $DELIVERYD_BUILD_OPTS -c dbg --remote_download_toplevel //:deliveryd
+    DELIVERYD_PATH="$(bazel $DELIVERYD_STARTUP_OPTS cquery $DELIVERYD_BUILD_OPTS -c dbg --output=files //:deliveryd 2>/dev/null)"
     ls -la "$DELIVERYD_PATH" 2>&1 || echo "DEBUG: File does not exist!"
     cp -f "$DELIVERYD_PATH" "$ASPECT_BIN_DIR/deliveryd"
     chmod 0755 "$ASPECT_BIN_DIR/deliveryd"
