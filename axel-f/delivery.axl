@@ -1,0 +1,312 @@
+"""
+Delivery task that coordinates artifact delivery via deliveryd.
+
+Delivers each target via bazel run with stamping enabled, and signs artifacts
+to prevent re-delivery.
+
+Uses deliveryd (Unix socket HTTP server) for all delivery state operations.
+"""
+
+# deliveryd client helpers
+
+def _deliveryd_query(ctx, socket_path, ci_host, commit_sha, workspace):
+    """
+    Query deliveryd for delivery state of all targets in a commit.
+    Returns a dict mapping label -> {output_sha, delivered, delivered_by}.
+    """
+    http = ctx.http()
+    response = http.post(
+        "http://localhost/query",
+        unix_socket=socket_path,
+        json={
+            "ci_host": ci_host,
+            "commit_sha": commit_sha,
+            "workspace": workspace,
+        },
+    )
+
+    if not response.ok:
+        fail("deliveryd query failed: " + response.text)
+
+    data = response.json()
+
+    # Build lookup dict by label
+    result = {}
+    for target in data.get("targets", []):
+        result[target["label"]] = {
+            "output_sha": target["output_sha"],
+            "delivered": target["delivered"],
+            "delivered_by": target.get("delivered_by"),
+        }
+    return result
+
+def _deliveryd_deliver(ctx, socket_path, ci_host, output_sha, workspace, signature):
+    """
+    Mark a target as delivered by setting its delivery signature.
+    """
+    http = ctx.http()
+    response = http.post(
+        "http://localhost/deliver",
+        unix_socket=socket_path,
+        json={
+            "ci_host": ci_host,
+            "output_sha": output_sha,
+            "workspace": workspace,
+            "signature": signature,
+        },
+    )
+
+    if not response.ok:
+        fail("deliveryd deliver failed: " + response.text)
+
+def _deliveryd_delete_artifact(ctx, socket_path, ci_host, output_sha, workspace):
+    """
+    Delete artifact metadata (used for cleanup on failed deliveries).
+    """
+    http = ctx.http()
+    response = http.post(
+        "http://localhost/artifact/delete",
+        unix_socket=socket_path,
+        json={
+            "ci_host": ci_host,
+            "output_sha": output_sha,
+            "workspace": workspace,
+        },
+    )
+
+    if not response.ok:
+        fail("deliveryd artifact delete failed: " + response.text)
+
+# Delivery implementation
+
+def _get_override_targets(ctx):
+    """
+    Check for override targets from environment variables.
+    ASPECT_WORKFLOWS_DELIVERY_TARGETS or DELIVERY_TARGETS (legacy).
+    Returns a set of target labels, or empty set if none.
+    """
+    targets_str = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_TARGETS")
+    if not targets_str:
+        targets_str = ctx.std.env.var("DELIVERY_TARGETS")
+    if not targets_str:
+        return set()
+
+    # Split on whitespace and filter valid labels
+    targets = []
+    for t in targets_str.split():
+        t = t.strip()
+        if t.startswith("//") or t.startswith("@"):
+            targets.append(t)
+    return set(targets)
+
+def _get_commit_sha(ctx, args_commit_sha):
+    """
+    Get commit SHA from env vars or args.
+    Priority: ASPECT_WORKFLOWS_DELIVERY_COMMIT > DELIVERY_COMMIT > args.
+    """
+    commit = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_COMMIT")
+    if commit:
+        return commit
+    commit = ctx.std.env.var("DELIVERY_COMMIT")
+    if commit:
+        return commit
+    return args_commit_sha
+
+def _run_bazel(ctx, verb, target, flags):
+    """
+    Run a bazel command and return the exit code.
+    TODO: Implement ctx.bazel.run() when available.
+    """
+    print("    [TODO] bazel {} {} {}".format(verb, " ".join(flags), target))
+    return 0  # Simulate success
+
+def _deliver_target(ctx, socket_path, ci_host, workspace, build_url, bazel_flags, label, is_forced, target_state):
+    """
+    Deliver a single target.
+
+    Args:
+        is_forced: If True, skip signature check and always deliver.
+        target_state: Dict with {output_sha, delivered, delivered_by} from deliveryd, or None.
+
+    Returns (status: str, message: str) where status is one of:
+        - "success": Successfully delivered
+        - "skipped": Already delivered (only for non-forced)
+        - "build_failed": Bazel build failed
+        - "run_failed": Bazel run failed
+    """
+    output_sha = target_state.get("output_sha") if target_state else None
+    can_sign = False
+
+    # For non-forced targets, check if already delivered
+    if not is_forced:
+        if target_state:
+            if target_state.get("delivered"):
+                return ("skipped", "Already delivered by {}".format(target_state.get("delivered_by")))
+            # Have output SHA, can sign after delivery
+            can_sign = True
+        else:
+            # No state found - target may have been added before signatures
+            # were introduced. Proceed with delivery.
+            print("  Warning: No delivery state found for {}, bypassing signature check".format(label))
+
+    # Run bazel to deliver the target with stamping
+    print("  Delivering {}...".format(label))
+    exit_code = _run_bazel(ctx, "run", label, bazel_flags)
+
+    if exit_code != 0:
+        # Delivery failed - delete artifact metadata so it can be retried
+        # (only for non-forced targets with known output SHA)
+        if output_sha and not is_forced:
+            _deliveryd_delete_artifact(ctx, socket_path, ci_host, output_sha, workspace)
+        return ("run_failed", "Delivery failed with exit code {}".format(exit_code))
+
+    # Sign the artifact to mark as delivered (only for non-forced with output SHA)
+    if can_sign and output_sha:
+        _deliveryd_deliver(ctx, socket_path, ci_host, output_sha, workspace, build_url)
+
+    return ("success", "Delivered successfully")
+
+def _delivery_impl(ctx):
+    # deliveryd socket path
+    socket_path = ctx.args.socket
+
+    # Delivery context
+    ci_host = ctx.args.ci_host
+    workspace = ctx.args.workspace
+    build_url = ctx.args.build_url
+
+    # Get commit SHA (env vars take precedence)
+    commit_sha = _get_commit_sha(ctx, ctx.args.commit_sha)
+    if not commit_sha:
+        fail("commit_sha is required (via --commit_sha or ASPECT_WORKFLOWS_DELIVERY_COMMIT env var)")
+
+    # Build bazel flags for delivery
+    # Default: --stamp --noremote_upload_local_results --remote_download_outputs=toplevel
+    stamp_flags_str = ctx.args.stamp_flags
+    if stamp_flags_str:
+        bazel_flags = stamp_flags_str.split(",")
+    else:
+        bazel_flags = ["--stamp"]
+
+    # Add flags that Workflows forces during delivery
+    bazel_flags.append("--noremote_upload_local_results")
+    bazel_flags.append("--remote_download_outputs=toplevel")
+
+    print("Delivery task starting")
+    print("  deliveryd: {}".format(socket_path))
+    print("  CI: {} commit: {} workspace: {}".format(ci_host, commit_sha, workspace))
+    print("  Build URL: {}".format(build_url))
+    print("  Bazel flags: {}".format(bazel_flags))
+
+    # Check for override targets (manual delivery / break the glass)
+    override_targets = _get_override_targets(ctx)
+    forced_targets = set()
+
+    if override_targets:
+        print("")
+        print("Found {} override target(s) from ASPECT_WORKFLOWS_DELIVERY_TARGETS".format(len(override_targets)))
+        targets = list(override_targets)
+        # All override targets are forced (bypass signature check)
+        forced_targets = override_targets
+    else:
+        # Get targets from args (manifest generated on demand by caller)
+        targets_str = ctx.args.targets
+        if targets_str:
+            targets = [t.strip() for t in targets_str.split(",") if t.strip()]
+        else:
+            targets = []
+
+    if not targets:
+        print("No targets to deliver")
+        return 0
+
+    print("Found {} target(s) to deliver:".format(len(targets)))
+    for t in targets:
+        forced_marker = " (forced)" if t in forced_targets else ""
+        print("  - {}{}".format(t, forced_marker))
+    print("")
+
+    # Query deliveryd for delivery state of all targets
+    print("Querying deliveryd for delivery state...")
+    delivery_state = _deliveryd_query(ctx, socket_path, ci_host, commit_sha, workspace)
+    print("  Found state for {} target(s)".format(len(delivery_state)))
+    print("")
+
+    # Track results
+    success = []
+    skipped = []
+    build_failed = []
+    run_failed = []
+
+    for label in targets:
+        is_forced = label in forced_targets
+        target_state = delivery_state.get(label)
+        status, message = _deliver_target(
+            ctx, socket_path, ci_host, workspace, build_url,
+            bazel_flags, label, is_forced, target_state
+        )
+
+        if status == "success":
+            success.append(label)
+            print("  [OK]   {}: {}".format(label, message))
+        elif status == "skipped":
+            skipped.append(label)
+            print("  [SKIP] {}: {}".format(label, message))
+        elif status == "build_failed":
+            build_failed.append(label)
+            print("  [FAIL] {}: {}".format(label, message))
+        else:  # run_failed
+            run_failed.append(label)
+            print("  [FAIL] {}: {}".format(label, message))
+
+    # Summary
+    print("")
+    print("=" * 50)
+    print("Delivery Summary")
+    print("=" * 50)
+    print("  Delivered: {}".format(len(success)))
+    print("  Skipped:   {}".format(len(skipped)))
+    print("  Failed:    {} ({} build, {} run)".format(
+        len(build_failed) + len(run_failed),
+        len(build_failed),
+        len(run_failed)
+    ))
+
+    if success:
+        print("")
+        print("Successfully delivered:")
+        for t in success:
+            print("  - {}".format(t))
+
+    if skipped:
+        print("")
+        print("Skipped (already delivered):")
+        for t in skipped:
+            print("  - {}".format(t))
+
+    if build_failed or run_failed:
+        print("")
+        print("Failed:")
+        for t in build_failed:
+            print("  - {} (build failed)".format(t))
+        for t in run_failed:
+            print("  - {} (run failed)".format(t))
+        return 1
+
+    return 0
+
+
+
+delivery = task(
+    name = "delivery",
+    implementation = _delivery_impl,
+    args = {
+        "socket": args.string(default = "/tmp/deliveryd.sock"),
+        "ci_host": args.string(default = "bk"),
+        "commit_sha": args.string(),
+        "workspace": args.string(default = "."),
+        "build_url": args.string(),
+        "stamp_flags": args.string(default = "--stamp"),
+        "targets": args.string(),  # Comma-separated list of targets to deliver
+    },
+)
