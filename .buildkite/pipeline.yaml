@@ -4,7 +4,7 @@
 
 env:
   PATH: "$HOME/.aspect/bin:$PATH"
-  AXL_CONFIG: "$PWD/axel-f/config.axl"
+  AXL_CONFIG: "/mnt/ephemeral/workdir/aspect-build/aspect-cli/axel-f/config.axl"
   ASPECT_DEBUG: "1"
 steps:
   - key: __main__::build
@@ -13,8 +13,6 @@ steps:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
-      - env
-      - stat $AXL_CONFIG
       - aspect build ...
     artifact_paths:
       - "vmstat.out"
