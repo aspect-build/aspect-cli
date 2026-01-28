@@ -4,6 +4,7 @@ load("./configure.axl", "configure")
 load("./gazelle.axl", "gazelle")
 load("./buildifier.axl", "buildifier")
 load("./migrate.axl", "migrate")
+load("./delivery.axl", "delivery")
 load("./platform-config.axl",
     "read_platform_config",
     "read_host_config",
@@ -11,13 +12,43 @@ load("./platform-config.axl",
     "DEFAULT_PLATFORM_DIR"
 )
 
+def _start_deliveryd(ctx, delivery_db_endpoint, socket_path = "/tmp/deliveryd.sock"):
+    """
+    Start the deliveryd process in the background.
+
+    Args:
+        ctx: Config context
+        delivery_db_endpoint: Redis endpoint URL (redis:// or rediss:// for TLS)
+        socket_path: Unix socket path for deliveryd
+    """
+    cmd = ctx.std.process.command("deliveryd")
+    cmd.arg("--socket=" + socket_path)
+    cmd.arg("--redis-endpoint=" + delivery_db_endpoint)
+
+    # Run in background
+    cmd.stdout("null")
+    cmd.stderr("null")
+    cmd.spawn()
+
+    print("Started deliveryd (socket: {}, endpoint: {})".format(socket_path, delivery_db_endpoint))
+
 def config(ctx: ConfigContext):
+    ctx.tasks.add(configure)
+    ctx.tasks.add(gazelle)
+    ctx.tasks.add(buildifier)
+    ctx.tasks.add(migrate)
+    ctx.tasks.add(delivery)
 
     if ctx.std.env.var("BUILDKITE"):
         print("--- :aspect-build: Configuring Workflows")
 
     # Read platform config from disk
     platform_config = read_platform_config(ctx.std.fs)
+
+    # Start deliveryd if delivery_db_endpoint is configured
+    delivery_db_endpoint = platform_config.get("delivery_db_endpoint")
+    if delivery_db_endpoint:
+        _start_deliveryd(ctx, delivery_db_endpoint)
 
     # Read host config from environment
     host_config = read_host_config(ctx.std.env, ctx.std.io)
@@ -58,9 +89,3 @@ def config(ctx: ConfigContext):
             task.config.flags = lambda f: flags(f, "build")
             task.config.build_start = lambda: print("+++ :bazel: Building")
             task.config.build_event_sinks = build_event_sinks
-
-
-    ctx.tasks.add(configure)
-    ctx.tasks.add(gazelle)
-    ctx.tasks.add(buildifier)
-    ctx.tasks.add(migrate)

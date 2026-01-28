@@ -16,21 +16,33 @@ fi
 # Generate workflows bazelrc
 rosetta bazelrc > /etc/bazel.bazelrc
 
-# Check if aspect binary exists
+# Create target directory
+mkdir -p "$ASPECT_BIN_DIR"
+
+# Build and install aspect-cli if not present
 if [ -x "$ASPECT_BIN_DIR/aspect" ]; then
   echo "DEBUG: Found existing aspect binary"
-  exit 0
+else
+  echo "--- Building aspect-cli"
+  bazel $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel //:cli
+
+  CLI_PATH="$(bazel $BAZEL_STARTUP_OPTS cquery $BAZEL_BUILD_OPTS -c dbg --output=files //:cli 2>/dev/null)"
+  ls -la "$CLI_PATH" 2>&1 || echo "DEBUG: File does not exist!"
+  cp -f "$CLI_PATH" "$ASPECT_BIN_DIR/aspect"
+  chmod 0755 "$ASPECT_BIN_DIR/aspect"
+  echo "aspect-cli installed to $ASPECT_BIN_DIR/aspect"
 fi
 
-# Build aspect-cli and install
-echo "--- Building aspect-cli"
-bazel $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel //:cli
+# Build and install deliveryd if not present
+if [ -x "$ASPECT_BIN_DIR/deliveryd" ]; then
+  echo "DEBUG: Found existing deliveryd binary"
+else
+  echo "--- Building deliveryd"
+  bazel $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel //examples/deliveryd
 
-# Create target directory and copy binary
-mkdir -p "$ASPECT_BIN_DIR"
-CLI_PATH="$(bazel $BAZEL_STARTUP_OPTS cquery $BAZEL_BUILD_OPTS -c dbg --output=files //:cli 2>/dev/null)"
-ls -la "$CLI_PATH" 2>&1 || echo "DEBUG: File does not exist!"
-cp -f "$CLI_PATH" "$ASPECT_BIN_DIR/aspect"
-chmod 0755 "$ASPECT_BIN_DIR/aspect"
-
-echo "aspect-cli installed to $ASPECT_BIN_DIR/aspect"
+  DELIVERYD_PATH="$(bazel $BAZEL_STARTUP_OPTS cquery $BAZEL_BUILD_OPTS -c dbg --output=files //examples/deliveryd 2>/dev/null)"
+  ls -la "$DELIVERYD_PATH" 2>&1 || echo "DEBUG: File does not exist!"
+  cp -f "$DELIVERYD_PATH" "$ASPECT_BIN_DIR/deliveryd"
+  chmod 0755 "$ASPECT_BIN_DIR/deliveryd"
+  echo "deliveryd installed to $ASPECT_BIN_DIR/deliveryd"
+fi
