@@ -7,36 +7,20 @@ ASPECT_BIN_DIR="/home/aspect-runner/.aspect/bin"
 BAZEL_STARTUP_OPTS="--nohome_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
 BAZEL_BUILD_OPTS="--config=workflows --config=ci --show_progress_rate_limit=1"
 
-echo "=== pre-command hook debug ==="
-echo "ASPECT_BIN_DIR: $ASPECT_BIN_DIR"
-echo "PWD: $(pwd)"
-
 # Skip if bazel is not installed
 if ! command -v bazel >/dev/null 2>&1; then
   echo "DEBUG: bazel not found, skipping"
   exit 0
 fi
 
-# Check if aspect binary exists
-if [ -x "$ASPECT_BIN_DIR/aspect" ]; then
-  echo "DEBUG: Found existing aspect binary"
-  echo "DEBUG: Existing version:"
-  "$ASPECT_BIN_DIR/aspect" --version 2>&1 || true
-  # Skip if it's the new version (contains "programmable" in help)
-  if "$ASPECT_BIN_DIR/aspect" --help 2>&1 | grep -q programmable; then
-    echo "DEBUG: New version detected (has 'programmable'), skipping build"
-    exit 0
-  fi
-  echo "DEBUG: Old version detected, removing"
-  # Remove old version
-  rm -f "$ASPECT_BIN_DIR/aspect"
-else
-  echo "DEBUG: No existing aspect binary at $ASPECT_BIN_DIR/aspect"
-fi
-
 # Generate workflows bazelrc
 rosetta bazelrc > /etc/bazel.bazelrc
 
+# Check if aspect binary exists
+if [ -x "$ASPECT_BIN_DIR/aspect" ]; then
+  echo "DEBUG: Found existing aspect binary"
+  exit 0
+fi
 
 # Build aspect-cli and install
 echo "--- Building aspect-cli"
