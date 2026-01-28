@@ -37,8 +37,6 @@ def config(ctx: ConfigContext):
     print(host_config)
     print(flags)
 
-    print("~~~ :aspect-build: Configuring Workflows")
-
     user = ctx.std.env.var("USER")
 
     def flags(flags, type):
