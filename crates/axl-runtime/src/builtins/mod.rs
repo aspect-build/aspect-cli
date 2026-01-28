@@ -19,13 +19,9 @@ pub fn expand_builtins(
     _root_dir: PathBuf,
     broot: PathBuf,
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
-    use aspect_telemetry::cargo_pkg_version;
     use std::fs;
 
-    let builtins_root = broot.join(sha256::digest(cargo_pkg_version()));
-    fs::create_dir_all(&builtins_root)?;
-
-    let builtins = vec![
+    const BUILTINS: &[(&str, &str)] = &[
         ("aspect/build.axl", include_str!("./aspect/build.axl")),
         ("aspect/test.axl", include_str!("./aspect/test.axl")),
         ("aspect/axl_add.axl", include_str!("./aspect/axl_add.axl")),
@@ -35,10 +31,26 @@ pub fn expand_builtins(
         ),
     ];
 
-    for (path, content) in builtins {
-        let out_path = &builtins_root.join(path);
-        fs::create_dir_all(&out_path.parent().unwrap())?;
-        fs::write(out_path, content)?;
+    // Hash content to ensure staleness is detected when files change,
+    // even without a version bump
+    let content_hash = {
+        let mut combined = String::new();
+        for (path, content) in BUILTINS {
+            combined.push_str(path);
+            combined.push_str(content);
+        }
+        sha256::digest(combined)
+    };
+
+    let builtins_root = broot.join(content_hash);
+
+    // Only write if directory doesn't exist - content hash guarantees correctness
+    if !builtins_root.join("aspect").exists() {
+        for (path, content) in BUILTINS {
+            let out_path = builtins_root.join(path);
+            fs::create_dir_all(out_path.parent().unwrap())?;
+            fs::write(&out_path, content)?;
+        }
     }
 
     Ok(vec![("aspect".to_string(), builtins_root.join("aspect"))])
