@@ -4,7 +4,7 @@
 
 env:
   PATH: "$HOME/.aspect/bin:$PATH"
-
+  ASPECT_DEBUG: "1"
 steps:
   - key: __main__::build
     label: ":bazel: Build"
