@@ -187,7 +187,7 @@ impl Build {
 
         if debug_mode() {
             eprintln!(
-                "running {}",
+                "exec: {}",
                 format_bazel_command(&startup_flags, verb, &flags, &targets)
             );
         }
