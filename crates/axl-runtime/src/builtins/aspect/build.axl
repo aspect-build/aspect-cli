@@ -41,8 +41,10 @@ def impl(ctx: TaskContext) -> int:
     bazel_flags = ctx.config.flags(bazel_flags)
     bazel_startup_flags = ctx.config.startup_flags(bazel_startup_flags)
 
-    print(ctx.config.build_start)
+
     ctx.config.build_start()
+
+    print(ctx.config.build_start)
 
     build = ctx.bazel.build(
         build_events = build_events,
