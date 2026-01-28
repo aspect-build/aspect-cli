@@ -27,7 +27,7 @@ rosetta bazelrc > /etc/bazel.bazelrc
 
 
 # Build aspect-cli and install
-echo "--- Building aspect-cli"
+# echo "--- Building aspect-cli"
 bazel $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS //:cli
 
 # Create target directory and copy binary

@@ -1,123 +1,41 @@
 """
-Platform Configuration and Bazelrc Flag Generation Library
+Platform Configuration and Bazelrc Generation Library
 
-A pure Starlark library for generating .bazelrc content for Aspect Workflows.
-All functions are pure and take explicit parameters - no side effects or implicit
-environment reading.
-
-This is a library, not a task. All configuration is passed as function parameters.
-
-Usage:
-    load("@axel-f//platform-config.axl",
-        "read_platform_config",
-        "read_host_config",
-        "get_bazelrc_content",
-    )
-
-    # In a task implementation:
-    platform_config = read_platform_config(ctx.std.fs)
-    host_config = read_host_config(ctx.std.env, ctx.std.io)
-    content = get_bazelrc_content(platform_config, host_config)
+Pure functions for reading platform/host configuration and generating bazelrc content.
+This is the AXL equivalent of rosetta's bazel/flags.ts and related modules.
 """
 
-# =============================================================================
 # Constants
-# =============================================================================
-
 DEFAULT_STORAGE_PATH = "/mnt/ephemeral"
 DEFAULT_PLATFORM_DIR = "/etc/aspect/workflows/platform"
 
-# Map of logical config keys to filenames in the platform directory
+# Map of logical keys to filenames
 PLATFORM_CONFIG_KEYS = {
     "remote_cache_endpoint": "remote_cache_endpoint",
     "remote_cache_address": "remote_cache_address",
     "storage_path": "storage_path",
 }
 
-# All Bazel commands
+# Bazel command lists
 BAZEL_COMMANDS_ALL = [
-    "analyze-profile",
-    "aquery",
-    "build",
-    "canonicalize-flags",
-    "clean",
-    "config",
-    "coverage",
-    "cquery",
-    "dump",
-    "fetch",
-    "help",
-    "info",
-    "license",
-    "mobile-install",
-    "print_action",
-    "query",
-    "run",
-    "shutdown",
-    "sync",
-    "test",
-    "version",
+    "analyze-profile", "aquery", "build", "canonicalize-flags", "clean",
+    "config", "coverage", "cquery", "dump", "fetch", "help", "info",
+    "license", "mobile-install", "print_action", "query", "run",
+    "shutdown", "sync", "test", "version",
 ]
 
-# Commands that involve building
 BAZEL_COMMANDS_BUILD = [
-    "aquery",
-    "build",
-    "canonicalize-flags",
-    "clean",
-    "config",
-    "coverage",
-    "cquery",
-    "fetch",
-    "info",
-    "mobile-install",
-    "print_action",
-    "query",
-    "run",
-    "sync",
-    "test",
+    "aquery", "build", "canonicalize-flags", "clean", "config", "coverage",
+    "cquery", "fetch", "info", "mobile-install", "print_action", "query",
+    "run", "sync", "test",
 ]
 
-# Commands for action-related flags
-BAZEL_COMMANDS_ACTIONS = [
-    "aquery",
-    "build",
-    "canonicalize-flags",
-    "clean",
-    "config",
-    "coverage",
-    "cquery",
-    "info",
-    "mobile-install",
-    "print_action",
-    "run",
-    "test",
+BAZEL_COMMANDS_BUILD_TEST = [
+    "aquery", "build", "canonicalize-flags", "clean", "config", "coverage",
+    "cquery", "info", "mobile-install", "print_action", "run", "test",
 ]
 
-# Commands with symlink support
-BAZEL_COMMANDS_SYMLINK = [
-    "aquery",
-    "build",
-    "canonicalize-flags",
-    "clean",
-    "config",
-    "coverage",
-    "cquery",
-    "info",
-    "mobile-install",
-    "print_action",
-    "run",
-    "test",
-]
-
-# Commands for jobs flag
-BAZEL_COMMANDS_JOBS = [
-    "build",
-    "coverage",
-    "cquery",
-    "run",
-    "test",
-]
+BAZEL_COMMANDS_JOBS = ["build", "coverage", "cquery", "run", "test"]
 
 # =============================================================================
 # Flag Definitions
@@ -131,12 +49,13 @@ STATIC_BOOLEAN_FLAGS = [
     {"name": "keep_going", "commands": BAZEL_COMMANDS_BUILD},
     {"name": "generate_json_trace_profile", "commands": BAZEL_COMMANDS_ALL},
     {"name": "experimental_profile_include_target_label", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "incompatible_strict_action_env", "commands": BAZEL_COMMANDS_ACTIONS},
+    {"name": "incompatible_strict_action_env", "commands": BAZEL_COMMANDS_BUILD_TEST},
     {"name": "experimental_repository_cache_hardlinks", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "incompatible_exclusive_test_sandboxed", "commands": BAZEL_COMMANDS_ACTIONS},
-    {"name": "experimental_reuse_sandbox_directories", "commands": BAZEL_COMMANDS_ACTIONS},
-    {"name": "incompatible_default_to_explicit_init_py", "commands": BAZEL_COMMANDS_ACTIONS},
+    {"name": "incompatible_exclusive_test_sandboxed", "commands": BAZEL_COMMANDS_BUILD_TEST},
+    {"name": "experimental_reuse_sandbox_directories", "commands": BAZEL_COMMANDS_BUILD_TEST},
+    {"name": "incompatible_default_to_explicit_init_py", "commands": BAZEL_COMMANDS_BUILD_TEST},
     {"name": "remote_accept_cached", "commands": BAZEL_COMMANDS_BUILD},
+    {"name": "incompatible_remote_results_ignore_disk", "commands": BAZEL_COMMANDS_BUILD, "versions": "< 7"},
 ]
 
 # Static value flags
@@ -146,26 +65,20 @@ STATIC_VALUE_FLAGS = [
     {"name": "isatty", "value": "0", "commands": BAZEL_COMMANDS_ALL},
     {"name": "terminal_columns", "value": "143", "commands": BAZEL_COMMANDS_ALL},
     {"name": "disk_cache", "value": "", "commands": BAZEL_COMMANDS_BUILD},
-    {"name": "symlink_prefix", "value": "bazel-", "commands": BAZEL_COMMANDS_SYMLINK},
-    {"name": "experimental_convenience_symlinks", "value": "normal", "commands": BAZEL_COMMANDS_SYMLINK},
-    {"name": "max_config_changes_to_show", "value": "-1", "commands": BAZEL_COMMANDS_ACTIONS},
+    {"name": "symlink_prefix", "value": "bazel-", "commands": BAZEL_COMMANDS_BUILD_TEST},
+    {"name": "experimental_convenience_symlinks", "value": "normal", "commands": BAZEL_COMMANDS_BUILD_TEST},
+    {"name": "max_config_changes_to_show", "value": "-1", "commands": BAZEL_COMMANDS_BUILD_TEST},
     {"name": "remote_timeout", "value": "3600", "commands": BAZEL_COMMANDS_BUILD},
     {"name": "remote_retries", "value": "360", "commands": BAZEL_COMMANDS_BUILD},
     {"name": "grpc_keepalive_timeout", "value": "30s", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "bes_upload_mode", "value": "wait_for_upload_complete", "commands": BAZEL_COMMANDS_ALL},
     {"name": "experimental_repository_downloader_retries", "value": "2", "commands": BAZEL_COMMANDS_ALL},
-]
-
-# Version-specific static flags
-VERSION_SPECIFIC_FLAGS = [
-    # incompatible_remote_results_ignore_disk removed in Bazel 7
-    {"name": "incompatible_remote_results_ignore_disk", "commands": BAZEL_COMMANDS_BUILD, "versions": "< 7"},
-    # Build event upload flag renamed in Bazel 7
+    {"name": "bes_upload_mode", "value": "wait_for_upload_complete", "commands": BAZEL_COMMANDS_ALL},
+    # Version-specific flags
     {"name": "experimental_remote_build_event_upload", "value": "minimal", "commands": BAZEL_COMMANDS_BUILD, "versions": ">= 6 < 7"},
     {"name": "remote_build_event_upload", "value": "minimal", "commands": BAZEL_COMMANDS_BUILD, "versions": ">= 7"},
-    # Cache compression flag renamed in Bazel 8
-    {"name": "noexperimental_remote_cache_compression", "commands": BAZEL_COMMANDS_BUILD, "versions": "< 8"},
-    {"name": "noremote_cache_compression", "commands": BAZEL_COMMANDS_BUILD, "versions": ">= 8"},
+    # Cache compression flags (BuildBarn doesn't support compression)
+    {"name": "noexperimental_remote_cache_compression", "value": None, "commands": BAZEL_COMMANDS_BUILD, "versions": "< 8"},
+    {"name": "noremote_cache_compression", "value": None, "commands": BAZEL_COMMANDS_BUILD, "versions": ">= 8"},
 ]
 
 # Dynamic flags - value resolved from config dicts
@@ -175,7 +88,7 @@ DYNAMIC_FLAGS = [
     {"name": "repository_cache", "value": "dynamic:computed.repository_cache", "commands": BAZEL_COMMANDS_ALL},
     {"name": "curses", "value": "dynamic:host.curses", "commands": BAZEL_COMMANDS_ALL},
     {"name": "show_progress_rate_limit", "value": "dynamic:host.progress_rate_limit", "commands": BAZEL_COMMANDS_ALL},
-    # RBE flags (omit if not configured)
+    # RBE flags
     {"name": "remote_executor", "value": "dynamic:rbe.remote_executor", "commands": BAZEL_COMMANDS_BUILD, "omit_if_none": True},
     {"name": "jobs", "value": "dynamic:rbe.jobs", "commands": BAZEL_COMMANDS_JOBS, "omit_if_none": True},
 ]
@@ -186,126 +99,8 @@ STARTUP_FLAGS = [
     {"name": "output_base", "value": "dynamic:computed.output_base"},
 ]
 
-
 # =============================================================================
-# Version Comparison Functions
-# =============================================================================
-
-def parse_version(version_str):
-    """
-    Parse version string to tuple (major, minor, patch).
-
-    Args:
-        version_str: Version string like "7.0.0" or "7.1.2-rc1"
-
-    Returns:
-        Tuple of (major, minor, patch) as integers
-    """
-    if not version_str:
-        return (0, 0, 0)
-
-    parts = version_str.split(".")
-    major = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 0
-
-    minor = 0
-    if len(parts) > 1:
-        minor_part = parts[1]
-        if minor_part.isdigit():
-            minor = int(minor_part)
-
-    patch = 0
-    if len(parts) > 2:
-        # Handle versions like "7.0.0-rc1"
-        patch_part = parts[2].split("-")[0]
-        if patch_part.isdigit():
-            patch = int(patch_part)
-
-    return (major, minor, patch)
-
-
-def _compare_versions(v1, v2):
-    """
-    Compare two version tuples.
-
-    Returns:
-        -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
-    """
-    for i in range(3):
-        if v1[i] < v2[i]:
-            return -1
-        elif v1[i] > v2[i]:
-            return 1
-    return 0
-
-
-def version_satisfies(version, constraint):
-    """
-    Check if version satisfies semver constraint.
-
-    Args:
-        version: Version string like "7.0.0" or None
-        constraint: Semver constraint like "< 7", ">= 6 < 7", ">= 8", or "*"
-
-    Returns:
-        True if version satisfies constraint, False otherwise
-
-    Examples:
-        version_satisfies("7.0.0", "< 8") -> True
-        version_satisfies("7.0.0", ">= 7") -> True
-        version_satisfies("6.5.0", ">= 7") -> False
-        version_satisfies("6.5.0", ">= 6 < 7") -> True
-        version_satisfies(None, "< 7") -> True (no version means include all)
-    """
-    if not version or constraint == "*" or not constraint:
-        return True
-
-    v = parse_version(version)
-
-    # Parse constraint like "< 7", ">= 6 < 7", ">= 8"
-    # Tokenize the constraint string
-    tokens = []
-    current = ""
-    for c in constraint.elems():
-        if c == " ":
-            if current:
-                tokens.append(current)
-                current = ""
-        else:
-            current += c
-    if current:
-        tokens.append(current)
-
-    # Process tokens in pairs (operator, version)
-    # Tokens are like [">=", "6", "<", "7"] for ">= 6 < 7"
-    num_pairs = len(tokens) // 2
-    for pair_idx in range(num_pairs):
-        i = pair_idx * 2
-        op = tokens[i]
-        target_str = tokens[i + 1]
-        target = parse_version(target_str)
-        cmp = _compare_versions(v, target)
-
-        if op == "<":
-            if cmp >= 0:
-                return False
-        elif op == "<=":
-            if cmp > 0:
-                return False
-        elif op == ">":
-            if cmp <= 0:
-                return False
-        elif op == ">=":
-            if cmp < 0:
-                return False
-        elif op == "=":
-            if cmp != 0:
-                return False
-
-    return True
-
-
-# =============================================================================
-# Configuration Reader Functions
+# Configuration Readers
 # =============================================================================
 
 def read_platform_config(fs, platform_dir = DEFAULT_PLATFORM_DIR):
@@ -317,7 +112,7 @@ def read_platform_config(fs, platform_dir = DEFAULT_PLATFORM_DIR):
         platform_dir: Path to platform config directory
 
     Returns:
-        dict with keys: remote_cache_endpoint, remote_cache_address, storage_path
+        dict with keys: remote_cache_endpoint, remote_cache_address, storage_path, etc.
     """
     config = {}
 
@@ -347,95 +142,98 @@ def read_host_config(env, io):
         dict with keys: supports_curses, scm_repo_name, ci_host
     """
     config = {
-        "supports_curses": io.stdout.is_tty if hasattr(io, "stdout") else False,
+        "supports_curses": io.stdout.is_tty,
         "scm_repo_name": None,
         "ci_host": None,
     }
 
     # Detect CI host and repo name
-    # BuildKite
-    buildkite_repo = env.var("BUILDKITE_REPO")
-    if buildkite_repo:
+    if env.var("BUILDKITE_REPO"):
         config["ci_host"] = "buildkite"
-        config["scm_repo_name"] = _parse_git_url_name(buildkite_repo)
+        config["scm_repo_name"] = _parse_git_url_name(env.var("BUILDKITE_REPO"))
         config["supports_curses"] = True  # BuildKite supports curses
-        return config
-
-    # GitHub Actions
-    github_repo = env.var("GITHUB_REPOSITORY")
-    if github_repo:
+    elif env.var("GITHUB_REPOSITORY"):
         config["ci_host"] = "github"
-        if "/" in github_repo:
-            config["scm_repo_name"] = github_repo.split("/")[-1]
-        else:
-            config["scm_repo_name"] = github_repo
-        return config
-
-    # CircleCI
-    circle_repo = env.var("CIRCLE_PROJECT_REPONAME")
-    if circle_repo:
+        repo = env.var("GITHUB_REPOSITORY")
+        config["scm_repo_name"] = repo.split("/")[-1] if "/" in repo else repo
+    elif env.var("CIRCLE_PROJECT_REPONAME"):
         config["ci_host"] = "circleci"
-        config["scm_repo_name"] = circle_repo
-        return config
-
-    # GitLab CI
-    gitlab_project = env.var("CI_PROJECT_NAME")
-    if gitlab_project:
+        config["scm_repo_name"] = env.var("CIRCLE_PROJECT_REPONAME")
+    elif env.var("CI_PROJECT_NAME"):
         config["ci_host"] = "gitlab"
-        config["scm_repo_name"] = gitlab_project
-        return config
+        config["scm_repo_name"] = env.var("CI_PROJECT_NAME")
 
     return config
 
 
 def _parse_git_url_name(url):
-    """
-    Extract repo name from git URL.
-
-    Args:
-        url: Git URL like "git@github.com:org/repo.git" or "https://github.com/org/repo"
-
-    Returns:
-        Repository name or None
-    """
+    """Extract repo name from git URL."""
     if not url:
         return None
-
     name = url.rstrip("/")
-
-    # Remove .git suffix
     if name.endswith(".git"):
         name = name[:-4]
+    return name.split("/")[-1].split(":")[-1]
 
-    # Handle SSH URLs like git@github.com:org/repo
-    if ":" in name and "@" in name:
-        # Split by : and take last part
-        name = name.split(":")[-1]
+# =============================================================================
+# Version Comparison
+# =============================================================================
 
-    # Handle HTTP URLs - take last path segment
-    if "/" in name:
-        name = name.split("/")[-1]
+def parse_version(version_str):
+    """Parse version string to tuple (major, minor, patch)."""
+    parts = version_str.split(".")
+    major = int(parts[0]) if len(parts) > 0 else 0
+    minor = int(parts[1]) if len(parts) > 1 else 0
+    patch_str = parts[2].split("-")[0] if len(parts) > 2 else "0"
+    patch = int(patch_str) if patch_str else 0
+    return (major, minor, patch)
 
-    return name
 
+def version_satisfies(version, constraint):
+    """
+    Check if version satisfies semver constraint.
+
+    Args:
+        version: Version string like "7.0.0"
+        constraint: Constraint like "< 7", ">= 6 < 7", ">= 8"
+
+    Returns:
+        True if version satisfies the constraint
+    """
+    if not version or constraint == "*":
+        return True
+
+    v = parse_version(version)
+
+    # Parse constraint like "< 7", ">= 6 < 7", ">= 8"
+    parts = constraint.split()
+    for i in range(0, len(parts), 2):
+        if i + 1 >= len(parts):
+            break
+        op = parts[i]
+        target = parse_version(parts[i + 1])
+
+        if op == "<" and not (v < target):
+            return False
+        elif op == "<=" and not (v <= target):
+            return False
+        elif op == ">" and not (v > target):
+            return False
+        elif op == ">=" and not (v >= target):
+            return False
+        elif op == "=" and v != target:
+            return False
+
+    return True
 
 # =============================================================================
 # Dynamic Value Resolution
 # =============================================================================
 
 def _sanitize_filename(name):
-    """
-    Sanitize string for use in filesystem paths.
-
-    Args:
-        name: Input string
-
-    Returns:
-        Sanitized string with only alphanumeric, dash, underscore, and dot
-    """
+    """Sanitize string for use in filesystem paths."""
     if not name:
         return ""
-
     result = ""
     for c in name.elems():
         if c.isalnum() or c in "-_.":
@@ -446,25 +244,11 @@ def _sanitize_filename(name):
 
 
 def _compute_output_path(platform_config, host_config, segment, workspace):
-    """
-    Compute output_base or output_user_root path.
-
-    Args:
-        platform_config: Platform configuration dict
-        host_config: Host configuration dict
-        segment: Path segment ("bazel" or "output")
-        workspace: Workspace name
-
-    Returns:
-        Computed path string
-    """
+    """Compute output_base or output_user_root path."""
     mount = platform_config.get("storage_path", DEFAULT_STORAGE_PATH)
 
     # Normalize workspace name
-    if workspace == "." or not workspace:
-        subdir = "__main__"
-    else:
-        subdir = workspace.replace("/", "_")
+    subdir = "__main__" if workspace == "." else workspace.replace("/", "_")
 
     # Include repo name if available
     repo_name = host_config.get("scm_repo_name")
@@ -474,7 +258,7 @@ def _compute_output_path(platform_config, host_config, segment, workspace):
         return mount + "/" + segment + "/" + subdir
 
 
-def resolve_dynamic_value(key, platform_config, host_config, workspace, rbe_config = None):
+def resolve_dynamic_value(key, platform_config, host_config, rbe_config, workspace):
     """
     Resolve a dynamic value from config dicts.
 
@@ -482,8 +266,8 @@ def resolve_dynamic_value(key, platform_config, host_config, workspace, rbe_conf
         key: Dynamic key like "platform.remote_cache_endpoint" or "computed.repository_cache"
         platform_config: Platform configuration dict
         host_config: Host configuration dict
+        rbe_config: RBE configuration dict (may be None)
         workspace: Workspace name
-        rbe_config: Optional RBE configuration dict with "enabled" and "jobs" keys
 
     Returns:
         Resolved value string or None
@@ -511,11 +295,11 @@ def resolve_dynamic_value(key, platform_config, host_config, workspace, rbe_conf
             return _compute_output_path(platform_config, host_config, "output", workspace)
 
     elif key.startswith("rbe."):
-        if not rbe_config or not rbe_config.get("enabled"):
+        if not rbe_config:
             return None
         rbe_key = key[len("rbe."):]
         if rbe_key == "remote_executor":
-            # When RBE is enabled, use the remote cache endpoint as the executor
+            # RBE uses the same endpoint as remote cache
             return platform_config.get("remote_cache_endpoint")
         elif rbe_key == "jobs":
             jobs = rbe_config.get("jobs")
@@ -523,12 +307,11 @@ def resolve_dynamic_value(key, platform_config, host_config, workspace, rbe_conf
 
     return None
 
-
 # =============================================================================
-# Flag Resolution Functions
+# Flag Resolution
 # =============================================================================
 
-def resolve_flag_value(flag_def, platform_config, host_config, workspace, rbe_config = None):
+def resolve_flag_value(flag_def, platform_config, host_config, rbe_config, workspace):
     """
     Resolve a flag's value from config dicts.
 
@@ -536,11 +319,11 @@ def resolve_flag_value(flag_def, platform_config, host_config, workspace, rbe_co
         flag_def: Flag definition dict
         platform_config: Platform configuration dict
         host_config: Host configuration dict
+        rbe_config: RBE configuration dict (may be None)
         workspace: Workspace name
-        rbe_config: Optional RBE configuration dict
 
     Returns:
-        Resolved value string or None (for boolean flags)
+        Resolved value string or None
     """
     value = flag_def.get("value")
 
@@ -549,121 +332,91 @@ def resolve_flag_value(flag_def, platform_config, host_config, workspace, rbe_co
 
     if type(value) == "string" and value.startswith("dynamic:"):
         dynamic_key = value[len("dynamic:"):]
-        return resolve_dynamic_value(dynamic_key, platform_config, host_config, workspace, rbe_config)
+        return resolve_dynamic_value(dynamic_key, platform_config, host_config, rbe_config, workspace)
 
     return value  # Static value
 
 
 def stringify_flag(name, value):
-    """
-    Convert flag name and value to string.
-
-    Args:
-        name: Flag name
-        value: Flag value or None for boolean flags
-
-    Returns:
-        Flag string like "--name=value" or "--name"
-    """
+    """Convert flag name and value to string."""
     if value == None:
         return "--" + name
     return "--" + name + "=" + str(value)
 
 
-def should_include_flag(flag_def, version, task_types):
+def should_include_flag(flag_def, version):
     """
-    Check if flag should be included based on version and task types.
+    Check if flag should be included based on version.
 
     Args:
         flag_def: Flag definition dict
-        version: Bazel version string or None
-        task_types: List of task type strings
+        version: Bazel version string (e.g., "7.0.0") or None
 
     Returns:
-        True if flag should be included, False otherwise
+        True if flag should be included
     """
-    # Check version constraint
     constraint = flag_def.get("versions", "*")
-    if not version_satisfies(version, constraint):
-        return False
-
-    # Check task type requirement
-    required_types = flag_def.get("task_types")
-    if required_types:
-        for t in required_types:
-            if t in task_types:
-                return True
-        return False
-
-    return True
-
+    return version_satisfies(version, constraint)
 
 # =============================================================================
-# Main Bazelrc Generation Function
+# Bazelrc Generation
 # =============================================================================
 
-def get_bazelrc_content(
-    platform_config,
-    host_config,
-    bazel_version = None,
-    task_types = None,
-    workspace = ".",
-    rbe_config = None,
-):
+def get_bazelrc_flags(platform_config, host_config, bazel_version = None, rbe_config = None, workspace = ".", verbs = None):
     """
-    Generate complete .bazelrc content.
+    Generate bazelrc flags organized by verb.
 
     Args:
         platform_config: dict from read_platform_config()
         host_config: dict from read_host_config()
         bazel_version: str like "7.0.0" or None
-        task_types: list of task type strings (e.g., ["lint", "test"])
+        rbe_config: dict with RBE config (e.g., {"jobs": 50}) or None
         workspace: workspace name (default ".")
-        rbe_config: Optional dict with RBE configuration {"enabled": bool, "jobs": int}
+        verbs: list of verbs to generate flags for (default: all verbs)
 
     Returns:
-        str: Complete .bazelrc file content
+        dict: Flags organized by verb, e.g.:
+            {
+                "build": ["--flag1", "--flag2"],
+                "test": ["--flag1", "--test_flag"],
+                "startup": ["--output_base=...", "--output_user_root=..."],
+            }
     """
-    if task_types == None:
-        task_types = []
+    if verbs == None:
+        verbs = BAZEL_COMMANDS_ALL
 
-    lines = [
-        "#### Aspect Workflows",
-        "#### Generated bazelrc file, do not edit",
-        "",
-        "#### Common Flags",
-        "",
-    ]
+    result = {}
 
-    # Combine all flag lists
-    all_flags = STATIC_BOOLEAN_FLAGS + STATIC_VALUE_FLAGS + VERSION_SPECIFIC_FLAGS + DYNAMIC_FLAGS
+    all_flags = STATIC_BOOLEAN_FLAGS + STATIC_VALUE_FLAGS + DYNAMIC_FLAGS
 
     for flag_def in all_flags:
-        if not should_include_flag(flag_def, bazel_version, task_types):
+        if not should_include_flag(flag_def, bazel_version):
             continue
 
-        value = resolve_flag_value(flag_def, platform_config, host_config, workspace, rbe_config)
+        value = resolve_flag_value(flag_def, platform_config, host_config, rbe_config, workspace)
 
-        # Skip if omit_if_none and value is None (for dynamic flags)
+        # Skip if omit_if_none and value is None (for dynamic flags that may not resolve)
         if flag_def.get("omit_if_none") and value == None:
             continue
 
-        # For boolean flags without explicit value, value will be None which is correct
         flag_str = stringify_flag(flag_def["name"], value)
 
-        # Add for each applicable command
+        # Add for each applicable command that's in the requested verbs
         for cmd in flag_def.get("commands", ["build"]):
-            lines.append(cmd + " " + flag_str)
+            if cmd not in verbs:
+                continue
+            if cmd not in result:
+                result[cmd] = []
+            result[cmd].append(flag_str)
 
-    # Add startup flags section
-    lines.append("")
-    lines.append("#### Startup Flags")
-    lines.append("")
-
+    # Add startup flags
+    startup_flags = []
     for flag_def in STARTUP_FLAGS:
-        value = resolve_flag_value(flag_def, platform_config, host_config, workspace, rbe_config)
+        value = resolve_flag_value(flag_def, platform_config, host_config, rbe_config, workspace)
         if value:
-            lines.append("startup " + stringify_flag(flag_def["name"], value))
+            startup_flags.append(stringify_flag(flag_def["name"], value))
 
-    lines.append("")
-    return "\n".join(lines)
+    if startup_flags:
+        result["startup"] = startup_flags
+
+    return result
