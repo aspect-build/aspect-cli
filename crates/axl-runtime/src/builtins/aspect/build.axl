@@ -46,14 +46,14 @@ def impl(ctx: TaskContext) -> int:
 
     print(ctx.config.build_start)
 
-    build = ctx.bazel.build(
-        build_events = build_events,
-        flags = bazel_flags,
-        startup_flags = bazel_startup_flags,
-        *ctx.args.target_pattern
-    )
+    # build = ctx.bazel.build(
+    #     build_events = build_events,
+    #     flags = bazel_flags,
+    #     startup_flags = bazel_startup_flags,
+    #     *ctx.args.target_pattern
+    # )
 
-    build_status = build.wait()
+    # build_status = build.wait()
 
     ctx.config.build_end(build_status.code)
 
