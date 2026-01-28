@@ -2,6 +2,10 @@
 # Source: .aspect/workflows/config_aws.yaml
 # DO NOT EDIT - regenerate with 'aspect workflows migrate'
 
+env:
+  PATH: "$HOME/.aspect/bin:$PATH"
+  AXL_CONFIG: "$PWD/axel-f/config.axl"
+
 steps:
   - key: __main__::build
     label: ":bazel: Build"
@@ -9,6 +13,7 @@ steps:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
+      - env
       - aspect build ...
     artifact_paths:
       - "vmstat.out"
