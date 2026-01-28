@@ -33,6 +33,4 @@ ls -la "$CLI_PATH" 2>&1 || echo "DEBUG: File does not exist!"
 cp -f "$CLI_PATH" "$ASPECT_BIN_DIR/aspect"
 chmod 0755 "$ASPECT_BIN_DIR/aspect"
 
-
-"$ASPECT_BIN_DIR/aspect" --version 2>&1 || true
 echo "aspect-cli installed to $ASPECT_BIN_DIR/aspect"
