@@ -33,17 +33,16 @@ else
   echo "aspect-cli installed to $ASPECT_BIN_DIR/aspect"
 fi
 
-# Build and install deliveryd if not present (separate module)
+# Build and install deliveryd if not present (local_path_override in root module)
 if [ -x "$ASPECT_BIN_DIR/deliveryd" ]; then
   echo "DEBUG: Found existing deliveryd binary"
 else
   echo "--- Building deliveryd"
-  (
-    cd examples/deliveryd
-    bazel build //:deliveryd
-    DELIVERYD_PATH="$(bazel cquery --output=files //:deliveryd 2>/dev/null)"
-    cp -f "$DELIVERYD_PATH" "$ASPECT_BIN_DIR/deliveryd"
-    chmod 0755 "$ASPECT_BIN_DIR/deliveryd"
-  )
+  bazel $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel @deliveryd//:deliveryd
+
+  DELIVERYD_PATH="$(bazel $BAZEL_STARTUP_OPTS cquery $BAZEL_BUILD_OPTS -c dbg --output=files @deliveryd//:deliveryd 2>/dev/null)"
+  ls -la "$DELIVERYD_PATH" 2>&1 || echo "DEBUG: File does not exist!"
+  cp -f "$DELIVERYD_PATH" "$ASPECT_BIN_DIR/deliveryd"
+  chmod 0755 "$ASPECT_BIN_DIR/deliveryd"
   echo "deliveryd installed to $ASPECT_BIN_DIR/deliveryd"
 fi
