@@ -13,4 +13,5 @@ steps:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
+      - ls /etc/aspect/workflows/platform
       - aspect build ...
