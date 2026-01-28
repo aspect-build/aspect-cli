@@ -53,6 +53,7 @@ def config(ctx: ConfigContext):
 
     for task in ctx.tasks:
         if task.name == "build" and task.path.endswith("aspect/build.axl"):
+            print(task.config)
             task.config.startup_flags = lambda f: flags(f, "startup")
             task.config.flags = lambda f: flags(f, "build")
             task.config.build_start = lambda: print("+++ :bazel: Building")
