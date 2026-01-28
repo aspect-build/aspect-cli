@@ -340,6 +340,10 @@ dependencies = [
  "galvanize",
  "getargs",
  "handlebars",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "hyperlocal",
  "liquid",
  "liquid-core",
  "minijinja",
@@ -359,6 +363,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tracing",
+ "url",
  "uuid",
  "wasmi",
  "wasmi_wasi",
@@ -1765,6 +1770,21 @@ dependencies = [
  "tower-service",
  "tracing",
  "windows-registry",
+]
+
+[[package]]
+name = "hyperlocal"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "986c5ce3b994526b3cd75578e62554abd09f0899d6206de48b3e96ab34ccc8c7"
+dependencies = [
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "tokio",
+ "tower-service",
 ]
 
 [[package]]
