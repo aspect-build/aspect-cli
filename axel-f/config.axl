@@ -45,10 +45,10 @@ def config(ctx: ConfigContext):
     def build_event_sinks():
         sinks = []
         if user != "thesayyn" and bessie_endpoint:
-            sinks += bazel.build_events.grpc(
+            sinks.append(bazel.build_events.grpc(
                 uri = bessie_endpoint,
                 metadata = {} # TODO: how does bessie authenticate?
-            )
+            ))
         return sinks
 
     for task in ctx.tasks:
