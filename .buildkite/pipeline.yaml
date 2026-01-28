@@ -4,6 +4,7 @@
 
 env:
   PATH: "$HOME/.aspect/bin:$PATH"
+  AXL_CONFIG: "$PWD/axel-f/config.axl"
   ASPECT_DEBUG: "1"
 steps:
   - key: __main__::build
@@ -13,7 +14,8 @@ steps:
     timeout_in_minutes: 20
     command:
       - env
-      - AXL_CONFIG="$PWD/axel-f/config.axl" aspect build ...
+      - stat $AXL_CONFIG
+      - aspect build ...
     artifact_paths:
       - "vmstat.out"
       - "workflows-etc-bazel.bazelrc"
