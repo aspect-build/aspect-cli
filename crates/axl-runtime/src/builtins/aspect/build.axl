@@ -5,6 +5,7 @@ A default 'build' task that wraps a 'bazel build' command.
 BuildConfig = spec(
     startup_flags = attr(typing.Callable[[list[str]], list[str]], lambda flags: flags),
     flags = attr(typing.Callable[[list[str]], list[str]], lambda flags: flags),
+    build_event_sinks = attr(typing.Callable[[], list[bazel.build.BuildEventSink]], lambda: []),
     # TODO: build event sinks configuration
     # Lifecycle
     build_start = attr(typing.Callable[[], None], lambda: None),
@@ -28,6 +29,12 @@ def impl(ctx: TaskContext) -> int:
                 metadata = metadata
             )
         )
+
+    extra_sinks = ctx.config.build_event_sinks()
+    if extra_sinks:
+        if type(build_events) != "list":
+            build_events = []
+        build_events.extend(extra_sinks)
 
     bazel_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
     for bazel_flag in ctx.args.bazel_flag:
