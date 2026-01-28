@@ -3,7 +3,7 @@
 # DO NOT EDIT - regenerate with 'aspect workflows migrate'
 
 env:
-  PATH: "$HOME/.aspect/bin:$PATH"
+  PATH: "/home/aspect-runner/.aspect/bin:$PATH"
   AXL_CONFIG: "/mnt/ephemeral/workdir/aspect-build/aspect-cli/axel-f/config.axl"
   ASPECT_DEBUG: "1"
 steps:

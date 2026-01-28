@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ASPECT_BIN_DIR="/root/.aspect/bin"
+ASPECT_BIN_DIR="/home/aspect-runner/.aspect/bin"
 
 # Bazel startup options for CI
 BAZEL_STARTUP_OPTS="--nohome_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
