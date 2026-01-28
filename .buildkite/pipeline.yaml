@@ -13,19 +13,4 @@ steps:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
-      - echo $PATH
-      - which aspect
       - aspect build ...
-    artifact_paths:
-      - "vmstat.out"
-      - "workflows-etc-bazel.bazelrc"
-      - "bes.pb"
-      - "bes.json"
-      - "compact.exec.log"
-    retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
-      manual:
-        allowed: true
-        permit_on_passed: false
