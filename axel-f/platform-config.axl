@@ -15,6 +15,7 @@ PLATFORM_CONFIG_KEYS = {
     "remote_cache_address": "remote_cache_address",
     "storage_path": "storage_path",
     "bessie_endpoint": "bessie_endpoint",
+    "build_result_ui_base_url": "build_result_ui_base_url"
 }
 
 # Bazel command lists
