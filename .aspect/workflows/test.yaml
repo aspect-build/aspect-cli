@@ -1,7 +1,7 @@
 name: Test Check Runs API
 
 on:
-  pull_request:
+  push:
   workflow_dispatch:
 
 permissions:
@@ -41,4 +41,69 @@ jobs:
         run: |
           echo "Building..."
           sleep 3
-          echo "Build co
+          echo "Build complete"
+
+      - name: Update Check Run - Build Done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X PATCH \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "status": "in_progress",
+              "output": {
+                "title": "Running Tests",
+                "summary": "## Task Status\n\n| Task | Status | Duration |\n|------|--------|----------|\n| build | ✅ Pass | 3s |\n| test | 🔄 Running | - |\n| lint | ⏳ Pending | - |\n\n### Current Step\nExecuting test suite..."
+              }
+            }'
+
+      - name: Simulate Test Step
+        run: |
+          echo "Testing..."
+          sleep 3
+          echo "Tests complete"
+
+      - name: Update Check Run - Tests Done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X PATCH \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "status": "in_progress",
+              "output": {
+                "title": "Running Lint",
+                "summary": "## Task Status\n\n| Task | Status | Duration |\n|------|--------|----------|\n| build | ✅ Pass | 3s |\n| test | ✅ Pass | 3s |\n| lint | 🔄 Running | - |\n\n### Current Step\nChecking code style..."
+              }
+            }'
+
+      - name: Simulate Lint Step
+        run: |
+          echo "Linting..."
+          sleep 2
+          echo "Lint complete"
+
+      - name: Complete Check Run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X PATCH \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "status": "completed",
+              "conclusion": "success",
+              "output": {
+                "title": "All Checks Passed",
+                "summary": "## Task Status ✅\n\n| Task | Status | Duration |\n|------|--------|----------|\n| build | ✅ Pass | 3s |\n| test | ✅ Pass | 3s |\n| lint | ✅ Pass | 2s |\n\n**Total time:** 8s\n\n### Summary\nAll tasks completed successfully!",
+                "text": "### Detailed Logs\n\n```\n[build] Compiling 42 files...\n[build] Done in 3s\n[test] Running 156 tests...\n[test] All tests passed\n[lint] Checking style...\n[lint] No issues found\n```"
+              }
+            }'
