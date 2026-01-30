@@ -22,3 +22,5 @@ site
 
 # macOS desktop services files
 .DS_Store
+
+.workflows
