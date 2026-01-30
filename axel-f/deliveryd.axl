@@ -1,0 +1,104 @@
+"""
+Client library for communicating with deliveryd.
+
+deliveryd is a Unix socket HTTP server that manages delivery state,
+tracking which artifacts have been delivered and preventing re-delivery.
+"""
+
+def query(ctx, socket_path, ci_host, commit_sha, workspace):
+    """
+    Query deliveryd for delivery state of all targets in a commit.
+    Returns a dict mapping label -> {output_sha, delivered, delivered_by}.
+    """
+    http = ctx.http()
+    response = http.post(
+        "http://localhost/query",
+        headers={"Content-Type": "application/json"},
+        data=json.encode({
+            "ci_host": ci_host,
+            "commit_sha": commit_sha,
+            "workspace": workspace,
+        }),
+        unix_socket=socket_path,
+    ).block()
+
+
+    if response.status < 200 or response.status >= 300:
+        fail("deliveryd query failed: " + response.body)
+
+    data = json.decode(response.body)
+
+    targets = data.get("targets", []) or []
+    # Build lookup dict by label
+    result = {}
+    for target in targets:
+        result[target["label"]] = {
+            "output_sha": target["output_sha"],
+            "delivered": target["delivered"],
+            "delivered_by": target.get("delivered_by"),
+        }
+    return result
+
+def deliver(ctx, socket_path, ci_host, output_sha, workspace, signature):
+    """
+    Mark a target as delivered by setting its delivery signature.
+    """
+    http = ctx.http()
+    response = http.post(
+        "http://localhost/deliver",
+        headers={"Content-Type": "application/json"},
+        data=json.encode({
+            "ci_host": ci_host,
+            "output_sha": output_sha,
+            "workspace": workspace,
+            "signature": signature,
+        }),
+        unix_socket=socket_path,
+    ).block()
+
+    if response.status < 200 or response.status >= 300:
+        fail("deliveryd deliver failed: " + response.body)
+
+def record(ctx, socket_path, ci_host, commit_sha, workspace, label, output_sha):
+    """
+    Record a target's output SHA with deliveryd.
+    This must be called before the target can be queried or delivered.
+    """
+    http = ctx.http()
+    response = http.post(
+        "http://localhost/record",
+        headers={"Content-Type": "application/json"},
+        data=json.encode({
+            "ci_host": ci_host,
+            "commit_sha": commit_sha,
+            "workspace": workspace,
+            "label": label,
+            "output_sha": output_sha,
+        }),
+        unix_socket=socket_path,
+    ).map_err(lambda e: e).block()
+
+    if type(response) == "string":
+        fail("deliveryd record failed: " + response)
+
+    if response.status < 200 or response.status >= 300:
+        fail("deliveryd record failed: " + response.body)
+
+def delete_artifact(ctx, socket_path, ci_host, output_sha, workspace):
+    """
+    Delete artifact metadata (used for cleanup on failed deliveries).
+    """
+    http = ctx.http()
+    response = http.post(
+        "http://localhost/artifact/delete",
+        headers={"Content-Type": "application/json"},
+        data=json.encode({
+            "ci_host": ci_host,
+            "output_sha": output_sha,
+            "workspace": workspace,
+        }),
+        unix_socket=socket_path,
+    ).block()
+
+    if response.status < 200 or response.status >= 300:
+        fail("deliveryd artifact delete failed: " + response.body)
