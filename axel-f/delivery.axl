@@ -84,6 +84,11 @@ def _delivery_impl(ctx):
     # Check if terminal supports colors
     is_tty = ctx.std.io.stdout.is_tty
 
+    is_ci = ctx.std.env.var("BUILDKITE")
+
+    if is_ci:
+        print("--- :bazel: Delivery")
+
     # deliveryd socket path
     socket_path = ctx.args.socket
 
