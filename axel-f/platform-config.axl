@@ -16,7 +16,10 @@ PLATFORM_CONFIG_KEYS = {
     "storage_path": "storage_path",
     "bessie_endpoint": "bessie_endpoint",
     "build_result_ui_base_url": "build_result_ui_base_url",
-    "delivery_db_endpoint": "delivery_db_endpoint"
+    "delivery_db_endpoint": "delivery_db_endpoint",
+    "api_key": "api_key",
+    "api_client_id": "api_client_id",
+    "brs_api_endpoint": "brs_api_endpoint",
 }
 
 # Bazel command lists
@@ -115,7 +118,8 @@ def read_platform_config(fs, platform_dir = DEFAULT_PLATFORM_DIR):
         platform_dir: Path to platform config directory
 
     Returns:
-        dict with keys: remote_cache_endpoint, remote_cache_address, storage_path, etc.
+        dict with keys: remote_cache_endpoint, remote_cache_address, storage_path,
+        api_key, api_client_id, brs_api_endpoint, token, refresh_token, etc.
     """
     config = {}
 
@@ -125,6 +129,13 @@ def read_platform_config(fs, platform_dir = DEFAULT_PLATFORM_DIR):
             content = fs.read_to_string(path)
             if content:
                 config[key] = content.strip()
+
+    # Read rosetta_api_tokens (JSON file with token and refresh_token)
+    tokens_path = platform_dir + "/rosetta_api_tokens"
+    if fs.exists(tokens_path):
+        content = fs.read_to_string(tokens_path)
+        if content:
+            config["rosetta_api_tokens"] = json.decode(content)
 
     # Apply defaults
     if "storage_path" not in config:

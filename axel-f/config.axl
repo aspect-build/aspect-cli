@@ -5,6 +5,7 @@ load("./gazelle.axl", "gazelle")
 load("./buildifier.axl", "buildifier")
 load("./migrate.axl", "migrate")
 load("./delivery.axl", "delivery")
+load("./marvinecho.axl", "marvinecho")
 load("./platform-config.axl",
     "read_platform_config",
     "read_host_config",
@@ -67,6 +68,7 @@ def config(ctx: ConfigContext):
     ctx.tasks.add(buildifier)
     ctx.tasks.add(migrate)
     ctx.tasks.add(delivery)
+    ctx.tasks.add(marvinecho)
 
     CI = ctx.std.env.var("BUILDKITE")
 
