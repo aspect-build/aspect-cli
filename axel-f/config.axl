@@ -12,6 +12,24 @@ load("./platform-config.axl",
     "DEFAULT_PLATFORM_DIR"
 )
 
+def _check_deliveryd_health(ctx, socket_path):
+    """
+    Check if deliveryd is healthy by calling the /health endpoint.
+
+    Returns:
+        True if healthy, False otherwise
+    """
+    http = ctx.http()
+    response = http.get(
+        url="http://localhost/health",
+        unix_socket=socket_path,
+    )
+
+    result = response.map_err(lambda e: str(e)).block()
+    if type(result) == "string":
+        return False
+    return result.status >= 200 and result.status < 300
+
 def _start_deliveryd(ctx, delivery_db_endpoint, socket_path = "/tmp/deliveryd.sock"):
     """
     Start the deliveryd process in the background if not already running.
@@ -23,8 +41,14 @@ def _start_deliveryd(ctx, delivery_db_endpoint, socket_path = "/tmp/deliveryd.so
     """
     # Check if deliveryd is already running by checking for the socket
     if ctx.std.fs.exists(socket_path):
-        print("deliveryd already running (socket: {})".format(socket_path))
-        return
+        # Socket exists, check if the instance is healthy
+        if _check_deliveryd_health(ctx, socket_path):
+            print("deliveryd already running and healthy (socket: {})".format(socket_path))
+            return
+        else:
+            # Stale socket, remove it
+            print("deliveryd socket exists but instance is unhealthy, removing stale socket")
+            ctx.std.fs.remove_file(socket_path)
 
     cmd = ctx.std.process.command("deliveryd")
     cmd.arg("--socket=" + socket_path)
@@ -44,7 +68,9 @@ def config(ctx: ConfigContext):
     ctx.tasks.add(migrate)
     ctx.tasks.add(delivery)
 
-    if ctx.std.env.var("BUILDKITE"):
+    CI = ctx.std.env.var("BUILDKITE")
+
+    if CI:
         print("--- :aspect-build: Configuring Workflows")
 
     # Read platform config from disk
@@ -66,9 +92,10 @@ def config(ctx: ConfigContext):
     )
 
     # Debugging information
-    print(platform_config)
-    print(host_config)
-    print(flags)
+    if CI:
+        print(platform_config)
+        print(host_config)
+        print(flags)
 
     user = ctx.std.env.var("USER")
 
@@ -89,7 +116,6 @@ def config(ctx: ConfigContext):
 
     for task in ctx.tasks:
         if task.name == "build" and task.path.endswith("aspect/build.axl"):
-            print(task.config)
             task.config.startup_flags = lambda f: flags(f, "startup")
             task.config.flags = lambda f: flags(f, "build")
             task.config.build_start = lambda: print("+++ :bazel: Building")

@@ -16,10 +16,10 @@ steps:
       - ls /etc/aspect/workflows/platform
       - aspect build ...
   - key: __main__::delivery
-    label: ":bazel: Delivery"
+    label: ":ship: :package: :bazel: Delivery"
     agents:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
       - ls /tmp
-      - aspect delivery --commit_sha deadbeef --targets hello
+      - aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
