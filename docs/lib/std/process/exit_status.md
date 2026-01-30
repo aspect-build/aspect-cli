@@ -1,8 +1,8 @@
 
 
-## ExitStatus.code
+`property` **ExitStatus.code**
 
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ExitStatus</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">code</span></span><span class="punctuation separator annotation variable python">:</span> <span class="constant language python">None</span> <span class="keyword operator arithmetic python">|</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/int">int</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ExitStatus</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">code</span></span><span class="punctuation separator annotation variable python">:</span> <a href="/lib">None</a> <span class="keyword operator arithmetic python">|</span> <a href="/lib/int">int</a></span></code></pre>
 
 Returns the exit code of the process, if any.
 
@@ -13,11 +13,9 @@ runtime system (often, for example, 255, 254, 127 or 126).
 
 On Unix, this will return `None` if the process was terminated by a signal.
 
-***
+`property` **ExitStatus.signal**
 
-## ExitStatus.signal
-
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ExitStatus</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">signal</span></span><span class="punctuation separator annotation variable python">:</span> <span class="constant language python">None</span> <span class="keyword operator arithmetic python">|</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/int">int</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ExitStatus</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">signal</span></span><span class="punctuation separator annotation variable python">:</span> <a href="/lib">None</a> <span class="keyword operator arithmetic python">|</span> <a href="/lib/int">int</a></span></code></pre>
 
 If the process was terminated by a signal, returns that signal.
 
@@ -25,11 +23,9 @@ In other words, if `WIFSIGNALED`, this returns `WTERMSIG`.
 
 Avability: UNIX
 
-***
+`property` **ExitStatus.stopped\_signal**
 
-## ExitStatus.stopped\_signal
-
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ExitStatus</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">stopped_signal</span></span><span class="punctuation separator annotation variable python">:</span> <span class="constant language python">None</span> <span class="keyword operator arithmetic python">|</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/int">int</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ExitStatus</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">stopped_signal</span></span><span class="punctuation separator annotation variable python">:</span> <a href="/lib">None</a> <span class="keyword operator arithmetic python">|</span> <a href="/lib/int">int</a></span></code></pre>
 
 If the process was stopped by a signal, returns that signal.
 
@@ -38,10 +34,8 @@ a `wait` system call which was passed `WUNTRACED`, and was then converted into a
 
 Avability: UNIX
 
-***
+`property` **ExitStatus.success**
 
-## ExitStatus.success
-
-<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ExitStatus</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">success</span></span><span class="punctuation separator annotation variable python">:</span> <span class="meta string python"><span class="string quoted single python"><span class="punctuation definition string begin python">&#39;</span></span></span><span class="meta string python"><span class="string quoted single python"><a href="/lib/bool">bool</a><span class="punctuation definition string end python">&#39;</span></span></span></span></code></pre>
+<pre class="language-python"><code><span class="source python"><span class="meta qualified-name python"><span class="meta generic-name python">ExitStatus</span><span class="punctuation accessor dot python">.</span><span class="meta generic-name python">success</span></span><span class="punctuation separator annotation variable python">:</span> <a href="/lib/bool">bool</a></span></code></pre>
 
 Was termination successful? Signal termination is not considered a success, and success is defined as a zero exit status.
