@@ -120,3 +120,5 @@ def config(ctx: ConfigContext):
             task.config.flags = lambda f: flags(f, "build")
             task.config.build_start = lambda: print("+++ :bazel: Building")
             task.config.build_event_sinks = build_event_sinks
+        if task.name == "delivery":
+            task.config.delivery_start = lambda: print("--- :bazel: Delivery")
