@@ -13,6 +13,11 @@ steps:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
+      - |
+        echo "--- :aspect-build: Workflows environment"
+        /etc/aspect/workflows/bin/configure_workflows_env
+        echo "--- :stethoscope: Agent health check"
+        /etc/aspect/workflows/bin/agent_health_check
       - ls /etc/aspect/workflows/platform
       - aspect build ...
   - key: __main__::delivery
@@ -21,5 +26,10 @@ steps:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
+      - |
+        echo "--- :aspect-build: Workflows environment"
+        /etc/aspect/workflows/bin/configure_workflows_env
+        echo "--- :stethoscope: Agent health check"
+        /etc/aspect/workflows/bin/agent_health_check
       - ls /tmp
       - aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2

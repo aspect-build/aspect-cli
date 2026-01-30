@@ -15,6 +15,7 @@ load(
     deliveryd_delete_artifact = "delete_artifact",
 )
 
+
 # ANSI codes
 _BOLD = "\033[1m"
 _GREEN = "\033[32m"
@@ -35,6 +36,11 @@ def _run_bazel(ctx, verb, target, flags):
     """
     print("    [TODO] bazel {} {} {}".format(verb, " ".join(flags), target))
     return 0  # Simulate success
+
+# Helper to pad string to width
+def pad(s, width):
+    return s + " " * (width - len(s))
+
 
 def _deliver_target(ctx, socket_path, ci_host, workspace, build_url, bazel_flags, label, is_forced, target_state, is_tty):
     """
@@ -81,13 +87,10 @@ def _deliver_target(ctx, socket_path, ci_host, workspace, build_url, bazel_flags
     return ("success", "Delivered successfully")
 
 def _delivery_impl(ctx):
+    ctx.config.delivery_start()
+
     # Check if terminal supports colors
     is_tty = ctx.std.io.stdout.is_tty
-
-    is_ci = ctx.std.env.var("BUILDKITE")
-
-    if is_ci:
-        print("--- :bazel: Delivery")
 
     # deliveryd socket path
     socket_path = ctx.args.socket
@@ -155,6 +158,8 @@ def _delivery_impl(ctx):
             bazel_flags, label, is_forced, target_state, is_tty
         )
 
+        ctx.config.deliver_target(label, is_forced)
+
         forced_marker = " (FORCED)" if is_forced else ""
         if status == "success":
             success_count += 1
@@ -173,9 +178,6 @@ def _delivery_impl(ctx):
         if len(label) > max_label_width:
             max_label_width = len(label)
 
-    # Helper to pad string to width
-    def pad(s, width):
-        return s + " " * (width - len(s))
 
     # Calculate status column width
     max_status_width = len("STATUS")
@@ -205,6 +207,8 @@ def _delivery_impl(ctx):
     ]
     print("{} {}".format(_style("Summary:", _BOLD, is_tty), ", ".join(summary_parts)))
 
+    ctx.config.delivery_end()
+
     if failed_count > 0:
         return 1
 
@@ -212,9 +216,16 @@ def _delivery_impl(ctx):
 
 
 
+DeliveryConfig = spec(
+    delivery_start = attr(typing.Callable[[], None], lambda: None),
+    delivery_end = attr(typing.Callable[[], None], lambda: None),
+    deliver_target = attr(typing.Callable[[str, bool], None], lambda label, is_forced: None),
+)
+
 delivery = task(
     name = "delivery",
     implementation = _delivery_impl,
+    config = DeliveryConfig,
     args = {
         "socket": args.string(default = "/tmp/deliveryd.sock"),
         "ci_host": args.string(default = "bk"),
@@ -223,6 +234,6 @@ delivery = task(
         "build_url": args.string(default = "-"),
         "bazel_flag": args.string(),
         "force_target": args.string_list(default = []),
-        "targets": args.trailing_var_args(),  # Comma-separated list of targets to deliver
+        "targets": args.trailing_var_args()
     },
 )
