@@ -1,4 +1,4 @@
-name: Test Check Runs API
+name: Concurrent Check Run Test
 
 on:
   push:
@@ -9,101 +9,262 @@ permissions:
   contents: read
 
 jobs:
-  test-check-run:
+  setup:
     runs-on: ubuntu-latest
+    outputs:
+      check_run_id: ${{ steps.create.outputs.check_run_id }}
     steps:
-      - name: Create Check Run with Markdown
+      - name: Create Check Run
+        id: create
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Create initial check run (in_progress)
           RESPONSE=$(curl -s -X POST \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs" \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             -d '{
-              "name": "CI Status Report",
-              "head_sha": "${{ github.event.pull_request.head.sha || github.sha }}",
+              "name": "CI Status Dashboard",
+              "head_sha": "${{ github.sha }}",
               "status": "in_progress",
               "output": {
-                "title": "Build in Progress",
-                "summary": "## Task Status\n\n| Task | Status | Duration |\n|------|--------|----------|\n| build | 🔄 Running | - |\n| test | ⏳ Pending | - |\n| lint | ⏳ Pending | - |\n\n### Current Step\nCompiling source files..."
+                "title": "Starting tasks...",
+                "summary": "## Task Status\n\n| Task | Status | Duration | Details |\n|------|--------|----------|---------|"
               }
             }')
 
           CHECK_RUN_ID=$(echo "$RESPONSE" | jq -r '.id')
-          echo "CHECK_RUN_ID=$CHECK_RUN_ID" >> $GITHUB_ENV
+          echo "check_run_id=$CHECK_RUN_ID" >> $GITHUB_OUTPUT
           echo "Created check run: $CHECK_RUN_ID"
-          echo "$RESPONSE" | jq .
 
-      - name: Simulate Build Step
+  task-build:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Status - Running
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECK_RUN_ID: ${{ needs.setup.outputs.check_run_id }}
         run: |
-          echo "Building..."
-          sleep 3
-          echo "Build complete"
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"pending","context":"task/build","description":"🔄 Building..."}'
 
-      - name: Update Check Run - Build Done
+      - name: Run Build
+        run: |
+          echo "Compiling source files..."
+          sleep $((RANDOM % 5 + 3))
+          echo "Build complete!"
+
+      - name: Update Status - Done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"success","context":"task/build","description":"✅ Build passed (5s)"}'
+
+  task-test-unit:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Status - Running
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"pending","context":"task/test-unit","description":"🔄 Running unit tests..."}'
+
+      - name: Run Unit Tests
+        run: |
+          echo "Running unit tests..."
+          for i in {1..10}; do
+            echo "Test $i/10 passed"
+            sleep 0.5
+          done
+          echo "All unit tests passed!"
+
+      - name: Update Status - Done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"success","context":"task/test-unit","description":"✅ 10/10 tests passed (5s)"}'
+
+  task-test-integration:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Status - Running
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"pending","context":"task/test-integration","description":"🔄 Running integration tests..."}'
+
+      - name: Run Integration Tests
+        run: |
+          echo "Running integration tests..."
+          sleep $((RANDOM % 8 + 5))
+          echo "Integration tests passed!"
+
+      - name: Update Status - Done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"success","context":"task/test-integration","description":"✅ Integration tests passed (8s)"}'
+
+  task-lint:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Status - Running
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"pending","context":"task/lint","description":"🔄 Linting..."}'
+
+      - name: Run Linter
+        run: |
+          echo "Running linter..."
+          sleep $((RANDOM % 3 + 2))
+          echo "No lint errors!"
+
+      - name: Update Status - Done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"success","context":"task/lint","description":"✅ No issues found (3s)"}'
+
+  task-security:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Status - Running
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"pending","context":"task/security","description":"🔄 Scanning for vulnerabilities..."}'
+
+      - name: Run Security Scan
+        run: |
+          echo "Scanning dependencies..."
+          sleep $((RANDOM % 4 + 3))
+          echo "No vulnerabilities found!"
+
+      - name: Update Status - Done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/${{ github.sha }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state":"success","context":"task/security","description":"✅ No vulnerabilities (4s)"}'
+
+  finalize:
+    needs:
+      [
+        setup,
+        task-build,
+        task-test-unit,
+        task-test-integration,
+        task-lint,
+        task-security,
+      ]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Gather Results and Update Check Run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECK_RUN_ID: ${{ needs.setup.outputs.check_run_id }}
+        run: |
+          # Fetch all task statuses
+          STATUSES=$(curl -s \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/${{ github.sha }}/statuses" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json")
+
+          # Build markdown table from statuses
+          TABLE="## Task Status\n\n| Task | Status | Details |\n|------|--------|---------|"
+
+          while IFS= read -r line; do
+            CONTEXT=$(echo "$line" | jq -r '.context')
+            STATE=$(echo "$line" | jq -r '.state')
+            DESC=$(echo "$line" | jq -r '.description')
+
+            if [[ "$CONTEXT" == task/* ]]; then
+              TASK_NAME="${CONTEXT#task/}"
+              case "$STATE" in
+                success) ICON="✅" ;;
+                failure) ICON="❌" ;;
+                pending) ICON="🔄" ;;
+                *) ICON="❓" ;;
+              esac
+              TABLE="$TABLE\n| $TASK_NAME | $ICON | $DESC |"
+            fi
+          done <<< "$(echo "$STATUSES" | jq -c '.[]')"
+
+          # Determine overall conclusion
+          FAILED=$(echo "$STATUSES" | jq '[.[] | select(.context | startswith("task/")) | select(.state == "failure")] | length')
+          if [ "$FAILED" -gt 0 ]; then
+            CONCLUSION="failure"
+            TITLE="❌ $FAILED task(s) failed"
+          else
+            CONCLUSION="success"
+            TITLE="✅ All tasks passed"
+          fi
+
+          # Update the check run with final summary
+          SUMMARY=$(printf "%b" "$TABLE")
+
           curl -s -X PATCH \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
-            -d '{
-              "status": "in_progress",
-              "output": {
-                "title": "Running Tests",
-                "summary": "## Task Status\n\n| Task | Status | Duration |\n|------|--------|----------|\n| build | ✅ Pass | 3s |\n| test | 🔄 Running | - |\n| lint | ⏳ Pending | - |\n\n### Current Step\nExecuting test suite..."
-              }
-            }'
+            -d "$(jq -n \
+              --arg title "$TITLE" \
+              --arg summary "$SUMMARY" \
+              --arg conclusion "$CONCLUSION" \
+              '{
+                status: "completed",
+                conclusion: $conclusion,
+                output: {
+                  title: $title,
+                  summary: $summary
+                }
+              }')"
 
-      - name: Simulate Test Step
-        run: |
-          echo "Testing..."
-          sleep 3
-          echo "Tests complete"
-
-      - name: Update Check Run - Tests Done
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl -s -X PATCH \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "status": "in_progress",
-              "output": {
-                "title": "Running Lint",
-                "summary": "## Task Status\n\n| Task | Status | Duration |\n|------|--------|----------|\n| build | ✅ Pass | 3s |\n| test | ✅ Pass | 3s |\n| lint | 🔄 Running | - |\n\n### Current Step\nChecking code style..."
-              }
-            }'
-
-      - name: Simulate Lint Step
-        run: |
-          echo "Linting..."
-          sleep 2
-          echo "Lint complete"
-
-      - name: Complete Check Run
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl -s -X PATCH \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "status": "completed",
-              "conclusion": "success",
-              "output": {
-                "title": "All Checks Passed",
-                "summary": "## Task Status ✅\n\n| Task | Status | Duration |\n|------|--------|----------|\n| build | ✅ Pass | 3s |\n| test | ✅ Pass | 3s |\n| lint | ✅ Pass | 2s |\n\n**Total time:** 8s\n\n### Summary\nAll tasks completed successfully!",
-                "text": "### Detailed Logs\n\n```\n[build] Compiling 42 files...\n[build] Done in 3s\n[test] Running 156 tests...\n[test] All tests passed\n[lint] Checking style...\n[lint] No issues found\n```"
-              }
-            }'
+          echo "Check run finalized with conclusion: $CONCLUSION"
