@@ -122,7 +122,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named)] integrity: Option<String>,
         #[starlark(require = named)] sha256: Option<String>,
-    ) -> starlark::Result<StarlarkFuture> {
+    ) -> starlark::Result<StarlarkFuture<'v>> {
         let client = &this.downcast_ref_err::<Http>()?.client;
         let mut req = client.get(url.as_str().to_string());
         for (key, value) in headers.entries {
@@ -180,7 +180,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> starlark::Result<StarlarkFuture> {
+    ) -> starlark::Result<StarlarkFuture<'v>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -254,7 +254,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         data: String,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> starlark::Result<StarlarkFuture> {
+    ) -> starlark::Result<StarlarkFuture<'v>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries

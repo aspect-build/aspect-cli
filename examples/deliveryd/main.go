@@ -17,7 +17,7 @@ func main() {
 
 	redisClient, err := NewRedisClientFromEndpoint(*redisEndpoint)
 	if err != nil {
-		log.Fatalf("Failed to parse Redis endpoint: %v", err)
+		log.Fatalf("Failed to parse Rediss endpoint: %v", err)
 	}
 	defer redisClient.Close()
 

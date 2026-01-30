@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -20,13 +21,19 @@ type RedisClient struct {
 //   - rediss://host:port (TLS)
 //   - host:port
 func NewRedisClientFromEndpoint(endpoint string) (*RedisClient, error) {
-	useTLS := false
+	// TLS is enabled by default (matches the old TypeScript behavior)
+	useTLS := true
 	addr := endpoint
 
 	// Parse protocol prefix
+	// - rediss:// explicitly enables TLS (default)
+	// - redis+insecure:// explicitly disables TLS (for local development)
+	// - redis:// uses TLS by default (AWS MemoryDB requires TLS)
 	if strings.HasPrefix(endpoint, "rediss://") {
-		useTLS = true
 		addr = strings.TrimPrefix(endpoint, "rediss://")
+	} else if strings.HasPrefix(endpoint, "redis+insecure://") {
+		useTLS = false
+		addr = strings.TrimPrefix(endpoint, "redis+insecure://")
 	} else if strings.HasPrefix(endpoint, "redis://") {
 		addr = strings.TrimPrefix(endpoint, "redis://")
 	}
@@ -37,7 +44,10 @@ func NewRedisClientFromEndpoint(endpoint string) (*RedisClient, error) {
 	}
 
 	opts := &redis.Options{
-		Addr: addr,
+		Addr:         addr,
+		DialTimeout:  2 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
 	}
 	if useTLS {
 		opts.TLSConfig = &tls.Config{
