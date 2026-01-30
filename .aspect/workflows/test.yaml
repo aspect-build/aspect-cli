@@ -1,0 +1,44 @@
+name: Test Check Runs API
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  checks: write
+  contents: read
+
+jobs:
+  test-check-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Check Run with Markdown
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create initial check run (in_progress)
+          RESPONSE=$(curl -s -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "name": "CI Status Report",
+              "head_sha": "${{ github.event.pull_request.head.sha || github.sha }}",
+              "status": "in_progress",
+              "output": {
+                "title": "Build in Progress",
+                "summary": "## Task Status\n\n| Task | Status | Duration |\n|------|--------|----------|\n| build | 🔄 Running | - |\n| test | ⏳ Pending | - |\n| lint | ⏳ Pending | - |\n\n### Current Step\nCompiling source files..."
+              }
+            }')
+
+          CHECK_RUN_ID=$(echo "$RESPONSE" | jq -r '.id')
+          echo "CHECK_RUN_ID=$CHECK_RUN_ID" >> $GITHUB_ENV
+          echo "Created check run: $CHECK_RUN_ID"
+          echo "$RESPONSE" | jq .
+
+      - name: Simulate Build Step
+        run: |
+          echo "Building..."
+          sleep 3
+          echo "Build co
