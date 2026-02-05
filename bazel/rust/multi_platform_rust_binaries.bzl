@@ -48,7 +48,7 @@ def multi_platform_rust_binaries(name, target, name_scheme = TARGET_NAMING_SCHEM
         platform_transition_filegroup(
             name = transition_build,
             srcs = [target],
-            target_platform = "//bazel/platforms:{}".format(target_platform),
+            target_platform = "@rules_rs//rs/experimental/platforms:" + target_triple,
             tags = ["manual"],
         )
 

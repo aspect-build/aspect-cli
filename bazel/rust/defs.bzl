@@ -3,14 +3,6 @@
 load("@aspect_bazel_lib//lib:expand_template.bzl", _expand_template = "expand_template")
 load("@rules_rust//rust:defs.bzl", _rust_binary = "rust_binary", _rust_library = "rust_library", _rust_proc_macro = "rust_proc_macro", _rust_test = "rust_test")
 
-_default_platform = select({
-    # Force Linux binaries to be built with musl
-    "//bazel/platforms/config:linux_aarch64": "//bazel/platforms:linux_aarch64_musl",
-    "//bazel/platforms/config:linux_x86_64": "//bazel/platforms:linux_x86_64_musl",
-    # Non-Linux binaries should just build with their default platforms
-    "//conditions:default": None,
-})
-
 def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [], **kwargs):
     """
     Macro for rust_binary defaults.
@@ -35,8 +27,6 @@ def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [
         )
         rustc_env_files = rustc_env_files + [rustc_env_file]
 
-    platform = kwargs.pop("platform", _default_platform)
-
     _rust_binary(
         name = name,
         rustc_env_files = rustc_env_files,
@@ -53,17 +43,13 @@ def rust_binary(name, rustc_env_files = [], version_key = "", crate_features = [
             ],
         }),
         crate_features = crate_features + ["bazel"],
-        platform = platform,
         **kwargs
     )
 
 def rust_test(name, crate_features = [], **kwargs):
-    platform = kwargs.pop("platform", _default_platform)
-
     _rust_test(
         name = name,
         crate_features = crate_features + ["bazel"],
-        platform = platform,
         rustc_flags = select({
             "//conditions:default": [
                 "-Copt-level=0",

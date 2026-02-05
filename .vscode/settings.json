@@ -11,8 +11,6 @@
     "C_Cpp.workspaceParsingPriority": "medium",
     "bazel.buildifierFixOnFormat": true,
     "bazel.enableCodeLens": true,
-    "bazel.buildifierExecutable": "./bazel-out/bazel_env-opt/bin/tools/bazel_env/bin/buildifier",
-    "bazel.lsp.command": "./bazel-out/bazel_env-opt/bin/tools/bazel_env/bin/starpls",
     "bazel.queriesShareServer": false,
     "bazel.lsp.args": [
         "server",

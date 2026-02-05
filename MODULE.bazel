@@ -1,32 +1,111 @@
 "Bazel dependencies"
 
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
 bazel_dep(name = "aspect_bazel_lib", version = "2.21.1")
 bazel_dep(name = "aspect_rules_lint", version = "1.9.1")
-bazel_dep(name = "bazel_env.bzl", version = "0.5.0")
-bazel_dep(name = "bazel_skylib", version = "1.8.1")
+bazel_dep(name = "rules_nodejs", version = "6.7.3")  # Transitive dep; bump for bazel9
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "bazelrc-preset.bzl", version = "1.4.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2")
 bazel_dep(name = "gazelle", version = "0.45.0")
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "rules_go", version = "0.57.0")
+bazel_dep(name = "rules_cc", version = "0.2.16")
+bazel_dep(name = "rules_go", version = "0.59.0")
 bazel_dep(name = "rules_pkg", version = "1.1.0")
-bazel_dep(name = "rules_shell", version = "0.6.0")
-bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "with_cfg.bzl", version = "0.12.0")
+bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.4.1")
+archive_override(
+    module_name = "toolchains_llvm_bootstrapped",
+    integrity = "sha256-J4ekCiJS48Bhl68FjHr9O9t86Z38hJbUt7ZqoayE9LY=",
+    patch_strip = 1,
+    patches = ["//tools/patches:toolchains_llvm_bootstrapped_static_link.patch"],
+    strip_prefix = "toolchains_llvm_bootstrapped-f54e81bad5e404d8c00a21904e7df9ac0d592a62",
+    url = "https://github.com/cerisier/toolchains_llvm_bootstrapped/archive/f54e81bad5e404d8c00a21904e7df9ac0d592a62.tar.gz",
+)
 
-include("//bazel/include:llvm.MODULE.bazel")
-include("//bazel/include:multitool.MODULE.bazel")
-include("//bazel/include:musl.MODULE.bazel")
-include("//bazel/include:rust.MODULE.bazel")
+register_toolchains("@toolchains_llvm_bootstrapped//toolchain:all")
 
+bazel_dep(name = "rules_rs", version = "0.0.27")
 
-http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+# Special toolchains branch
+archive_override(
+    module_name = "rules_rs",
+    integrity = "sha256-qGysMHIjJdD8ZoQZ5eYt8qnhGwymduNM2GrUEU5PTXM=",
+    strip_prefix = "rules_rs-8368adcea62426d37dec99f3c384d72d1aeed009",
+    url = "https://github.com/dzbarsky/rules_rs/archive/8368adcea62426d37dec99f3c384d72d1aeed009.tar.gz",
+)
+
+rules_rust = use_extension("@rules_rs//rs/experimental:rules_rust.bzl", "rules_rust")
+use_repo(rules_rust, "rules_rust")
+
+toolchains = use_extension("@rules_rs//rs/experimental/toolchains:module_extension.bzl", "toolchains")
+toolchains.toolchain(
+    edition = "2024",
+    version = "1.88.0",
+)
+use_repo(
+    toolchains,
+    "experimental_rust_toolchains_1_88_0",
+    "rust_toolchain_artifacts_macos_aarch64_1_88_0",
+)
+
+register_toolchains("@experimental_rust_toolchains_1_88_0//:all")
+
+crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lock = "//:Cargo.lock",
+    cargo_toml = "//:Cargo.toml",
+    platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-musl",
+    ],
+)
+
+bazel_dep(name = "openssl", version = "3.3.1.bcr.6")
+
+crate.annotation(
+    build_script_data = ["@openssl//:gen_dir"],
+    build_script_env = {
+        "OPENSSL_STATIC": "1",
+        "OPENSSL_DIR": "$(location @openssl//:gen_dir)",
+    },
+    crate = "openssl-sys",
+)
+
+inject_repo(crate, "openssl")
+
+bazel_dep(name = "zstd", version = "1.5.7")
+
+crate.annotation(
+    crate = "zstd-sys",
+    gen_build_script = "off",
+    deps = ["@zstd"],
+)
+
+inject_repo(crate, "zstd")
+
+use_repo(crate, "crates")
+
+bazel_dep(name = "rules_multitool", version = "1.9.0")
+
+multitool = use_extension("@rules_multitool//multitool:extension.bzl", "multitool")
+multitool.hub(lockfile = "//tools:tools.lock.json")
+use_repo(multitool, "multitool")
+
 http_archive(
     name = "foo",
-    urls = [
-        "https://github.com/bazel-contrib/rules_oci/archive/refs/heads/main.zip"
-    ],
     build_file_content = """\
 
 filegroup(name = "test", srcs = [])
-    """
+    """,
+    urls = [
+        "https://github.com/bazel-contrib/rules_oci/archive/refs/heads/main.zip",
+    ],
 )

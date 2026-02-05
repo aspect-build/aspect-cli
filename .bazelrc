@@ -1,22 +1,20 @@
 import %workspace%/bazel/defaults.bazelrc
 
-# Don't try and auto detect the cc toolchain, as we use our own gcc toolchains.
-common --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
-common --incompatible_enable_cc_toolchain_resolution
+common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+common --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
 
 # Check local dev setup
 common --workspace_status_command=tools/githooks/check-config.sh
 
-# Don't link against libunwind on macos as it causes linking failures (https://github.com/bazel-contrib/toolchains_llvm/pull/346)
-common:macos --@toolchains_llvm//toolchain/config:libunwind=False
 common:macos --build_tag_filters=-no-macos
+common:linux --host_platform=//bazel/platforms:linux_host_platform
+
+common --@rules_cc//cc/toolchains/args/archiver_flags:use_libtool_on_macos=False
+common --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
 
 common:release --stamp
 common:release --workspace_status_command "${PWD}/bazel/workspace_status.sh"
 common:release --compilation_mode=opt
 
+common --test_output=errors
 common --@rules_rust//rust/settings:lto=fat
-
-# Speed up local development by using the non-hermetic CPP toolchain.
-common:nollvm --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=0
-common:nollvm --noincompatible_enable_cc_toolchain_resolution
