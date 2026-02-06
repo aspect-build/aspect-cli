@@ -1,30 +1,29 @@
-load("//bazel/platforms/config:defs.bzl", "linker_suffix", "platforms")
-
-[platform(
-    name = "{}_{}{}".format(
-        p.os,
-        p.cpu,
-        linker_suffix(
-            "_",
-            p.linker,
-        ),
-    ),
-    constraint_values = [
-        "@platforms//os:{}".format(p.os),
-        "@platforms//cpu:{}".format(p.cpu),
-        "@//bazel/platforms/linkers:{}".format(p.linker),
-    ],
-    visibility = ["//visibility:public"],
-) for p in platforms]
+package(default_visibility = ["//visibility:public"])
 
 alias(
     name = "linux_amd64",
-    actual = ":linux_x86_64",
-    visibility = ["//visibility:public"],
+    actual = "@toolchains_llvm_bootstrapped//platforms:linux_amd64_musl",
 )
 
 alias(
     name = "linux_arm64",
-    actual = ":linux_aarch64",
-    visibility = ["//visibility:public"],
+    actual = "@toolchains_llvm_bootstrapped//platforms:linux_arm64_musl",
+)
+
+alias(
+    name = "macos_amd64",
+    actual = "@toolchains_llvm_bootstrapped//platforms:macos_amd64",
+)
+
+alias(
+    name = "macos_arm64",
+    actual = "@toolchains_llvm_bootstrapped//platforms:macos_arm64",
+)
+
+platform(
+    name = "linux_host_platform",
+    parents = ["@platforms//host"],
+    constraint_values = [
+        "@toolchains_llvm_bootstrapped//constraints/libc:gnu.2.28",
+    ],
 )

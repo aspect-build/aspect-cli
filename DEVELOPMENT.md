@@ -27,20 +27,15 @@ bazel-bin/crates/aspect-cli/aspect-cli <command>
 ## Update docs
 
 ```
-bazel build //tools:bazel_env
 (cd crates/axl-docgen && cargo run)
 ```
 
 ## Managing Dependencies
 
-When adding new Rust dependencies via Cargo, you must run repin to make them available to Bazel:
+Just add dependency to your Cargo.toml.
 
-```bash
-# First, add dependency to your Cargo.toml
+```
 cargo add my_dependency
-
-# Then repin dependencies for Bazel
-CARGO_BAZEL_ISOLATED=1 CARGO_BAZEL_REPIN=1 bazel build //:cli //:launcher
 ```
 
 If you are adding a crate which is used in multiple `Cargo.toml` files strongly consider making the create a workspace dependency. 

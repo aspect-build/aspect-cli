@@ -174,8 +174,12 @@ sh_test(
     data = [
         ":monterey_bottle",
     ],
+    env = {
+        "ASSERTIONS_LIB": "$(rlocationpath @aspect_bazel_lib//shlib/lib:assertions)",
+    },
     deps = [
         "@aspect_bazel_lib//shlib/lib:assertions",  # keep
+        "@rules_shell//shell/runfiles",
     ],
 )
 
@@ -185,8 +189,12 @@ sh_test(
     data = [
         "//bazel/release/homebrew:generate_formula",
     ],
+    env = {
+        "ASSERTIONS_LIB": "$(rlocationpath @aspect_bazel_lib//shlib/lib:assertions)",
+    },
     deps = [
         "@aspect_bazel_lib//shlib/lib:assertions",  # keep
+        "@rules_shell//shell/runfiles",
     ],
 )
 
