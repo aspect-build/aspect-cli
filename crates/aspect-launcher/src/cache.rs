@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use dirs::cache_dir;
-use miette::{miette, Context, IntoDiagnostic, Result};
+use miette::{Context, IntoDiagnostic, Result, miette};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone)]

@@ -4,15 +4,15 @@ use derive_more::Display;
 
 use starlark::eval::Arguments;
 use starlark::eval::Evaluator;
-use starlark::values::float::UnpackFloat;
-use starlark::values::tuple::AllocTuple;
-use starlark::values::tuple::UnpackTuple;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
+use starlark::values::float::UnpackFloat;
+use starlark::values::tuple::AllocTuple;
+use starlark::values::tuple::UnpackTuple;
 use starlark::values::{self, starlark_value};
 use starlark_derive::Trace;
 use wasmi::AsContext;
@@ -23,7 +23,7 @@ use std::cell::RefCell;
 use std::fmt::Debug;
 use std::rc::Rc;
 
-use super::host::{starlark_to_wasm_results, wasm_vals_to_starlark, WasmStoreCtx};
+use super::host::{WasmStoreCtx, starlark_to_wasm_results, wasm_vals_to_starlark};
 use super::memory::Memory;
 
 /// A callable WASM function that can be invoked from Starlark.

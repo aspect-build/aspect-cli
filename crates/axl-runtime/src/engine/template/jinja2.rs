@@ -1,4 +1,4 @@
-use minijinja::{value::Value as MinijinjaValue, Environment as MinijinjaEnvironment};
+use minijinja::{Environment as MinijinjaEnvironment, value::Value as MinijinjaValue};
 
 use serde_json::Value as JsonValue;
 

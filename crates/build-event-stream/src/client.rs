@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
 use axl_proto::google::devtools::build::v1::{
-    publish_build_event_client::PublishBuildEventClient, PublishBuildToolEventStreamRequest,
-    PublishBuildToolEventStreamResponse, PublishLifecycleEventRequest,
+    PublishBuildToolEventStreamRequest, PublishBuildToolEventStreamResponse,
+    PublishLifecycleEventRequest, publish_build_event_client::PublishBuildEventClient,
 };
 use futures::Stream;
 use http::uri::InvalidUri;
 use tonic::{
+    Request, Response, Streaming,
     service::interceptor::InterceptedService,
     transport::{Channel, ClientTlsConfig},
-    Request, Response, Streaming,
 };
 
 use crate::auth::AuthInterceptor;
@@ -78,18 +78,18 @@ mod tests {
 
     use axl_proto::{
         build_event_stream::{
+            BuildEvent, BuildEventId, BuildFinished, BuildMetadata, BuildStarted, OptionsParsed,
+            Progress, UnstructuredCommandLine, WorkspaceConfig,
             build_event::Payload,
             build_event_id::{
                 BuildFinishedId, BuildMetadataId, BuildStartedId, Id, OptionsParsedId, ProgressId,
                 StructuredCommandLineId, UnstructuredCommandLineId, WorkspaceConfigId,
             },
             build_finished::ExitCode,
-            BuildEvent, BuildEventId, BuildFinished, BuildMetadata, BuildStarted, OptionsParsed,
-            Progress, UnstructuredCommandLine, WorkspaceConfig,
         },
         command_line::{
-            command_line_section::SectionType, ChunkList, CommandLine, CommandLineSection,
-            Option as BazelOption, OptionList,
+            ChunkList, CommandLine, CommandLineSection, Option as BazelOption, OptionList,
+            command_line_section::SectionType,
         },
         google::devtools::build::v1::BuildStatus,
     };

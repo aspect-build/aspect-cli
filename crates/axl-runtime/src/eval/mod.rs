@@ -12,6 +12,6 @@ pub use load::ModuleScope;
 pub(crate) use load_path::validate_module_name;
 
 // Task execution and introspection
+pub use task::FrozenTaskModuleLike;
 pub use task::execute_task;
 pub use task::execute_task_with_args;
-pub use task::FrozenTaskModuleLike;
