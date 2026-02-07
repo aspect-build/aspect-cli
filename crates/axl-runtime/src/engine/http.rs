@@ -5,10 +5,10 @@ use futures::TryStreamExt;
 use reqwest::redirect::Policy;
 use ssri::{Integrity, IntegrityChecker};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
-use starlark::values::dict::UnpackDictEntries;
 use starlark::values::AllocValue;
-use starlark::values::{starlark_value, StarlarkValue};
+use starlark::values::dict::UnpackDictEntries;
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueLike};
+use starlark::values::{StarlarkValue, starlark_value};
 use starlark::{starlark_module, starlark_simple_value, values};
 use std::str::FromStr;
 use tokio::fs::OpenOptions;
@@ -64,7 +64,7 @@ fn sha256_hex_to_integrity(hex: &str) -> Result<Integrity, String> {
     }
 
     // Base64 encode and create SRI string
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
     let b64 = STANDARD.encode(&bytes);
     let sri_string = format!("sha256-{}", b64);
 

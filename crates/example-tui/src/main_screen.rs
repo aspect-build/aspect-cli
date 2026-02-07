@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::*;
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{List, ListDirection, ListState, Paragraph};
-use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
 const LOGO: &'static str = include_str!("./bazel.txt");

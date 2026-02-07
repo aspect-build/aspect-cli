@@ -727,12 +727,14 @@ mod tests {
             .into_iter()
             .zip(received_counts.iter().cloned())
             .map(|(sub, count)| {
-                thread::spawn(move || loop {
-                    match sub.recv() {
-                        Ok(_) => {
-                            count.fetch_add(1, Ordering::SeqCst);
+                thread::spawn(move || {
+                    loop {
+                        match sub.recv() {
+                            Ok(_) => {
+                                count.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Err(_) => break,
                         }
-                        Err(_) => break,
                     }
                 })
             })

@@ -20,11 +20,11 @@
 
 use std::collections::HashMap;
 
-use starlark::values::float::UnpackFloat;
 use starlark::values::FrozenValue;
 use starlark::values::Heap;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
+use starlark::values::float::UnpackFloat;
 use wasmi::Caller;
 use wasmi_wasi::WasiCtx;
 
@@ -220,9 +220,9 @@ pub fn create_host_callback(
     module_name: String,
     func_name: String,
 ) -> impl Fn(Caller<'_, WasmStoreCtx>, &[wasmi::Val], &mut [wasmi::Val]) -> Result<(), wasmi::Error>
-       + Send
-       + Sync
-       + 'static {
++ Send
++ Sync
++ 'static {
     move |mut caller, args, results| {
         let store_ctx = caller.data_mut();
 

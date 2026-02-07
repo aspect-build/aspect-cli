@@ -19,7 +19,7 @@ use starlark::values::list_or_tuple::UnpackListOrTuple;
 use crate::module::AxlLocalDep;
 use crate::module::Dep;
 
-use super::super::eval::{validate_module_name, EvalError};
+use super::super::eval::{EvalError, validate_module_name};
 
 use super::store::{AxlArchiveDep, ModuleStore};
 

@@ -1,5 +1,5 @@
 use axl_runtime::engine::task_arg::TaskArg;
-use clap::{value_parser, Arg, ArgAction};
+use clap::{Arg, ArgAction, value_parser};
 
 pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
     match arg {

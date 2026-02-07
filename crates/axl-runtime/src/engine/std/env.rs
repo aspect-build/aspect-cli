@@ -5,8 +5,8 @@ use starlark::eval::Evaluator;
 use starlark::values::list::{AllocList, UnpackList};
 use starlark::values::none::NoneOr;
 use starlark::values::tuple::{AllocTuple, UnpackTuple};
-use starlark::values::{starlark_value, StarlarkValue};
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueOfUnchecked};
+use starlark::values::{StarlarkValue, starlark_value};
 use starlark::{starlark_module, starlark_simple_value, values};
 
 use crate::engine::store::AxlStore;

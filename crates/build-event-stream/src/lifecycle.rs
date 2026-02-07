@@ -1,11 +1,11 @@
 use std::time::SystemTime;
 
 use axl_proto::google::devtools::build::v1::{
+    BuildEvent, BuildStatus, OrderedBuildEvent, PublishLifecycleEventRequest,
     build_event::{
         BuildEnqueued, BuildFinished, Event, InvocationAttemptFinished, InvocationAttemptStarted,
     },
     publish_lifecycle_event_request::ServiceLevel,
-    BuildEvent, BuildStatus, OrderedBuildEvent, PublishLifecycleEventRequest,
 };
 use prost_types::Timestamp;
 

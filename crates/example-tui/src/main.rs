@@ -5,7 +5,7 @@ mod main_screen;
 use once_cell::sync::Lazy;
 use peak_alloc::PeakAlloc;
 use ratatui::backend::CrosstermBackend;
-use ratatui::{crossterm, Terminal};
+use ratatui::{Terminal, crossterm};
 use std::ffi::CStr;
 use std::io::Stdout;
 use std::sync::RwLock;
@@ -86,7 +86,7 @@ pub extern "C" fn sleep(sleep: u32) {
 pub extern "C" fn restore_terminal() {
     use crossterm::execute;
     use ratatui::crossterm::event::DisableMouseCapture;
-    use ratatui::crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
+    use ratatui::crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
     let mut terminal = TERMINAL.write().unwrap();
     let terminal = terminal.as_mut().unwrap();
 

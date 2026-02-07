@@ -10,7 +10,6 @@ use starlark::environment::MethodsStatic;
 
 use starlark::starlark_module;
 use starlark::values;
-use starlark::values::starlark_value;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
@@ -18,6 +17,7 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::ValueLike;
 use starlark::values::ValueOfUnchecked;
+use starlark::values::starlark_value;
 
 use crate::engine::config::tasks::value::MutableTaskList;
 use crate::engine::config::tasks::value::TaskListGen;
