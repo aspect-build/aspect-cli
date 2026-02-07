@@ -16,7 +16,7 @@ use build_event_stream::{
 
 use thiserror::Error;
 use tokio::{sync::mpsc::error::SendError, task};
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
 use super::super::r#async::rt::AsyncRuntime;
 use super::stream::Subscriber;

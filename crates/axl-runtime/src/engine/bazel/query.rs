@@ -20,14 +20,14 @@ use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::typing::Ty;
 use starlark::values;
-use starlark::values::starlark_value;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::ValueLike;
+use starlark::values::starlark_value;
+use starlark::values::type_repr::StarlarkTypeRepr;
 
 use axl_proto::blaze_query as query;
 use prost::Message;

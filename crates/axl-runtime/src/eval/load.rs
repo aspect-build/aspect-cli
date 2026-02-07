@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::api;
 use super::error::EvalError;
-use super::load_path::{join_confined, LoadPath};
+use super::load_path::{LoadPath, join_confined};
 use crate::engine::store::AxlStore;
 
 #[derive(Debug, Clone)]

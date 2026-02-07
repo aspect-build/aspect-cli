@@ -3,7 +3,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, List, ListDirection, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
-use ratatui::{layout::*, Frame, Terminal};
+use ratatui::{Frame, Terminal, layout::*};
 
 #[derive(Debug, Clone, Default)]
 pub struct ActionScreen {}

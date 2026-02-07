@@ -12,11 +12,11 @@ use aspect_telemetry::{cargo_pkg_short_version, cargo_pkg_version, do_not_track,
 use axl_runtime::engine::config::ConfiguredTask;
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
-use axl_runtime::eval::{self, execute_task_with_args, FrozenTaskModuleLike, ModuleScope};
-use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
+use axl_runtime::eval::{self, FrozenTaskModuleLike, ModuleScope, execute_task_with_args};
 use axl_runtime::module::{AXL_MODULE_FILE, AXL_ROOT_MODULE_NAME};
+use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
 use clap::{Arg, ArgAction, Command};
-use miette::{miette, IntoDiagnostic};
+use miette::{IntoDiagnostic, miette};
 use starlark::environment::FrozenModule;
 
 use starlark::values::ValueLike;
@@ -24,7 +24,7 @@ use tokio::task;
 use tokio::task::spawn_blocking;
 use tracing::info_span;
 
-use crate::cmd_tree::{make_command_from_task, CommandTree, BUILTIN_COMMAND_DISPLAY_ORDER};
+use crate::cmd_tree::{BUILTIN_COMMAND_DISPLAY_ORDER, CommandTree, make_command_from_task};
 use crate::helpers::{find_repo_root, get_default_axl_search_paths, search_sources};
 
 // Helper function to check if debug mode is enabled based on the ASPECT_DEBUG environment variable.

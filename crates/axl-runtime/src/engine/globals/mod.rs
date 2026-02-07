@@ -4,10 +4,10 @@ use starlark::environment::GlobalsBuilder;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
-use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
+use starlark::values::starlark_value;
 
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU64;

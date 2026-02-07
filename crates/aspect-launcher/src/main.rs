@@ -15,13 +15,13 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use aspect_telemetry::{
-    cargo_pkg_short_version, do_not_track, send_telemetry, BZLARCH, BZLOS, GOARCH, GOOS,
-    LLVM_TRIPLE,
+    BZLARCH, BZLOS, GOARCH, GOOS, LLVM_TRIPLE, cargo_pkg_short_version, do_not_track,
+    send_telemetry,
 };
-use clap::{arg, Arg, Command};
-use fork::{fork, Fork};
+use clap::{Arg, Command, arg};
+use fork::{Fork, fork};
 use futures_util::TryStreamExt;
-use miette::{miette, Context, IntoDiagnostic, Result};
+use miette::{Context, IntoDiagnostic, Result, miette};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{self, Client, Method, Request, RequestBuilder};
 use serde::Deserialize;
@@ -29,7 +29,7 @@ use tokio::runtime;
 use tokio::task::{self, JoinHandle};
 
 use crate::cache::AspectCache;
-use crate::config::{autoconf, ToolSource, ToolSpec};
+use crate::config::{ToolSource, ToolSpec, autoconf};
 
 fn debug_mode() -> bool {
     match var("ASPECT_DEBUG") {

@@ -1,5 +1,5 @@
 use axl_proto::tools::protos::ExecLogEntry;
-use fibre::spmc::{bounded, Receiver};
+use fibre::spmc::{Receiver, bounded};
 use fibre::{CloseError, SendError};
 use prost::Message;
 use std::fmt::Debug;

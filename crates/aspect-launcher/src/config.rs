@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::{collections::HashMap, fmt::Debug, fs};
 
 use aspect_telemetry::cargo_pkg_short_version;
-use miette::{miette, Result};
+use miette::{Result, miette};
 use serde::Deserialize;
 
 const AXL_MODULE_FILE: &str = "MODULE.aspect";
