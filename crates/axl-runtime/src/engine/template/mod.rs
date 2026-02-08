@@ -8,9 +8,9 @@ use serde_json::{Map, Value as JsonValue};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::dict::UnpackDictEntries;
 use starlark::values::StringValue;
-use starlark::values::{starlark_value, NoSerialize, ProvidesStaticType, StarlarkValue, Value};
+use starlark::values::dict::UnpackDictEntries;
+use starlark::values::{NoSerialize, ProvidesStaticType, StarlarkValue, Value, starlark_value};
 
 use crate::engine::template::handlebars::handlebars_render;
 // use crate::engine::template::jinja2::jinja2_render;
@@ -18,7 +18,7 @@ use crate::engine::template::handlebars::handlebars_render;
 
 use liquid::ParserBuilder as LiquidParserBuilder;
 use liquid_core::model::{KString, Object as LiquidObject, Value as LiquidValue};
-use minijinja::{value::Value as MinijinjaValue, Environment as MinijinjaEnvironment};
+use minijinja::{Environment as MinijinjaEnvironment, value::Value as MinijinjaValue};
 
 pub(super) fn jinja2_render(template: &str, data: &JsonValue) -> anyhow::Result<String> {
     let mut env = MinijinjaEnvironment::new();

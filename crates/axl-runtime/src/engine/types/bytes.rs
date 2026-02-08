@@ -9,13 +9,13 @@ use starlark::values::AllocValue;
 use starlark::values::Value;
 
 use starlark::values;
-use starlark::values::starlark_value;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::ValueLike;
+use starlark::values::starlark_value;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<Bytes>")]

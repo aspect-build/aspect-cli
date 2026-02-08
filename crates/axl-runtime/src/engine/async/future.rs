@@ -1,15 +1,15 @@
 use allocative::Allocative;
 use derive_more::Display;
 
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::Ty;
 use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::{self, AllocValue, Heap, Trace, Tracer, UnpackValue, ValueLike};
-use starlark::values::{starlark_value, NoSerialize, ProvidesStaticType};
+use starlark::values::{NoSerialize, ProvidesStaticType, starlark_value};
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::rc::Rc;

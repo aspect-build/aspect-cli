@@ -1,11 +1,11 @@
-use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
-use opentelemetry_otlp::{tonic_types::transport::ClientTlsConfig, WithTonicConfig};
+use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
+use opentelemetry_otlp::{WithTonicConfig, tonic_types::transport::ClientTlsConfig};
 use opentelemetry_sdk::{
+    Resource,
     metrics::{MeterProviderBuilder, PeriodicReader, SdkMeterProvider},
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
-    Resource,
 };
-use opentelemetry_semantic_conventions::{attribute::SERVICE_VERSION, SCHEMA_URL};
+use opentelemetry_semantic_conventions::{SCHEMA_URL, attribute::SERVICE_VERSION};
 use tracing_core::Level;
 use tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

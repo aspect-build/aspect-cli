@@ -8,7 +8,7 @@ use dupe::Dupe;
 use either::Either;
 use starlark::{
     typing::Ty,
-    values::{type_repr::StarlarkTypeRepr, UnpackValue, Value, ValueError, ValueLike},
+    values::{UnpackValue, Value, ValueError, ValueLike, type_repr::StarlarkTypeRepr},
 };
 
 use super::value::{TaskList, TaskListGen};

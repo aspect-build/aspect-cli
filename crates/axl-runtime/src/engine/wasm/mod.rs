@@ -5,8 +5,8 @@ mod memory;
 mod types;
 
 use starlark::environment::GlobalsBuilder;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::FrozenValue;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 use allocative::Allocative;
 use anyhow::Context;
@@ -17,12 +17,12 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::dict::UnpackDictEntries;
-use starlark::values::list::UnpackList;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Value;
 use starlark::values::ValueLike;
+use starlark::values::dict::UnpackDictEntries;
+use starlark::values::list::UnpackList;
 use starlark::values::{self, starlark_value};
 use wasmi_wasi::ambient_authority;
 

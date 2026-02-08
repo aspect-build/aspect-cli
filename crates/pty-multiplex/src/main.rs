@@ -4,25 +4,25 @@ use std::{
     path::PathBuf,
     process::exit,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
 use bytes::Bytes;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::{
+    DefaultTerminal,
     layout::Rect,
     style::{Color, Style, Stylize},
     text::Line,
     widgets::{Block, BorderType, Borders, Padding},
-    DefaultTerminal,
 };
 use std::collections::HashMap;
 use tokio::{
-    sync::mpsc::{channel, Sender},
+    sync::mpsc::{Sender, channel},
     task::spawn_blocking,
 };
 use tracing::Level;

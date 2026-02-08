@@ -18,8 +18,6 @@ use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
-use starlark::values::none::NoneOr;
-use starlark::values::starlark_value;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
@@ -27,6 +25,8 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::ValueLike;
+use starlark::values::none::NoneOr;
+use starlark::values::starlark_value;
 
 use crate::engine::r#async::rt::AsyncRuntime;
 

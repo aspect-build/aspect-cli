@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use axl_proto::{
     build_event_stream::BuildEvent as BazelBuildEvent,
     google::devtools::build::v1::{
-        build_event::Event, BuildEvent, OrderedBuildEvent, PublishBuildToolEventStreamRequest,
+        BuildEvent, OrderedBuildEvent, PublishBuildToolEventStreamRequest, build_event::Event,
     },
 };
 use prost_types::{Any, Timestamp};
