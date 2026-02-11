@@ -3,77 +3,85 @@ A default 'build' task that wraps a 'bazel build' command.
 """
 
 BuildConfig = spec(
-    startup_flags = attr(typing.Callable[[list[str]], list[str]], lambda flags: flags),
-    flags = attr(typing.Callable[[list[str]], list[str]], lambda flags: flags),
-    build_event_sinks = attr(typing.Callable[[], list[bazel.build.BuildEventSink]], lambda: []),
+    # Declarative data — composable, zero-cost reads
+    extra_flags = attr(list[str], []),
+    extra_startup_flags = attr(list[str], []),
+    build_event_sinks = attr(list[bazel.build.BuildEventSink], []),
 
-    # Lifecycle
-    build_start = attr(typing.Callable[[], None], lambda: None),
+    # Optional transforms — only called when set
+    flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
+    startup_flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
+
+    # Lifecycle — only called when set
+    build_start = attr(typing.Callable[[], None] | None, None),
     build_event = attr(typing.Callable[[dict, str, str], None] | None, None),
-    build_end = attr(typing.Callable[[int], None], lambda status: None)
+    build_end = attr(typing.Callable[[int], None] | None, None),
 )
 
-def impl(ctx: TaskContext) -> int:
-    stdout = ctx.std.io.stdout
-
-    build_events = True
+def _collect_bes_from_args(ctx):
+    """Collect BES sinks from CLI args (--bes_backend/--bes_header)."""
+    sinks = []
     for bes_backend in ctx.args.bes_backend:
         metadata = {}
         for bes_header in ctx.args.bes_header:
             (k, _, v) = bes_header.partition("=")
             metadata[k] = v
-        if type(build_events) != "list":
-            build_events = []
-        build_events.append(
+        sinks.append(
             bazel.build_events.grpc(
                 uri = bes_backend,
-                metadata = metadata
+                metadata = metadata,
             )
         )
+    return sinks
 
-    extra_sinks = ctx.config.build_event_sinks()
-    if extra_sinks:
-        if type(build_events) != "list":
-            build_events = []
-        build_events.extend(extra_sinks)
+def impl(ctx: TaskContext) -> int:
+    # Flags: accumulate data, then optionally transform
+    flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    flags.extend(ctx.args.bazel_flag)
+    flags.extend(ctx.config.extra_flags)
+    if ctx.config.flags:
+        flags = ctx.config.flags(flags)
 
-    if ctx.config.build_event:
-        # flip build_events to true
-        # when its a list, it is automatically enabled.
-        if type(build_events) == "bool":
+    startup_flags = list(ctx.args.bazel_startup_flag)
+    startup_flags.extend(ctx.config.extra_startup_flags)
+    if ctx.config.startup_flags:
+        startup_flags = ctx.config.startup_flags(startup_flags)
+
+    # BES: merge arg-based sinks with config sinks
+    build_events = _collect_bes_from_args(ctx)
+    if ctx.config.build_event_sinks:
+        build_events.extend(ctx.config.build_event_sinks)
+
+    # Coerce to bool/list for ctx.bazel.build:
+    # - non-empty list → stream to those sinks + build_events() iterator.
+    # - True → stream without explicit sinks (build_event handler only)
+    # - False → no BEP stream at all
+    if not build_events:
+        if ctx.config.build_event:
             build_events = True
+        else:
+            build_events = False
 
-
-    bazel_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
-    for bazel_flag in ctx.args.bazel_flag:
-        bazel_flags.append(bazel_flag)
-
-    bazel_startup_flags = []
-    for flag in ctx.args.bazel_startup_flag:
-        bazel_startup_flags.append(flag)
-
-    # Apply flags and startup flags by config
-    bazel_flags = ctx.config.flags(bazel_flags)
-    bazel_startup_flags = ctx.config.startup_flags(bazel_startup_flags)
-
-    ctx.config.build_start()
+    if ctx.config.build_start:
+        ctx.config.build_start()
 
     build = ctx.bazel.build(
         build_events = build_events,
-        flags = bazel_flags,
-        startup_flags = bazel_startup_flags,
-        *ctx.args.target_pattern
+        flags = flags,
+        startup_flags = startup_flags,
+        *ctx.args.target_pattern,
     )
 
     if ctx.config.build_event:
-        build_event = ctx.config.build_event
-        state = dict()
+        handler = ctx.config.build_event
+        state = {}
         for event in build.build_events():
-            build_event(ctx, state, event)
+            handler(ctx, state, event)
 
     build_status = build.wait()
 
-    ctx.config.build_end(build_status.code)
+    if ctx.config.build_end:
+        ctx.config.build_end(build_status.code)
 
     return build_status.code
 
@@ -81,8 +89,6 @@ build = task(
     implementation = impl,
     config = BuildConfig,
     args = {
-        # TODO: Support a long --pattern_file like bazel does (@./targets)
-        # TODO: Support - (list from stdin)
         "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
         "bazel_flag": args.string_list(),
         "bazel_startup_flag": args.string_list(),
@@ -90,5 +96,5 @@ build = task(
         "remote_cache": args.string(),
         "bes_backend": args.string_list(),
         "bes_header": args.string_list(),
-    }
+    },
 )

@@ -119,25 +119,19 @@ def configure_builtins(ctx: ConfigContext):
 
     user = ctx.std.env.var("USER")
 
-    def flags(flags, type):
-        if user != "thesayyn" and type in flags:
-            flags += flags[type]
-        return flags
-
     bessie_endpoint = platform_config.get("bessie_endpoint", None)
-    def build_event_sinks():
-        sinks = []
-        if user != "thesayyn" and bessie_endpoint:
-            sinks.append(bazel.build_events.grpc(
-                uri = bessie_endpoint,
-                metadata = {} # TODO: how does bessie authenticate?
-            ))
-        return sinks
+    bessie_sinks = []
+    if user != "thesayyn" and bessie_endpoint:
+        bessie_sinks.append(bazel.build_events.grpc(
+            uri = bessie_endpoint,
+            metadata = {} # TODO: how does bessie authenticate?
+        ))
 
     for task in ctx.tasks:
         if task.name == "build" and task.path.endswith("aspect/build.axl"):
-            task.config.startup_flags = lambda f: flags(f, "startup")
-            task.config.flags = lambda f: flags(f, "build")
+            if user != "thesayyn":
+                task.config.extra_startup_flags.extend(flags.get("startup", []))
+                task.config.extra_flags.extend(flags.get("build", []))
             task.config.build_start = lambda: print("+++ :bazel: Building")
-            task.config.build_event_sinks = build_event_sinks
+            task.config.build_event_sinks.extend(bessie_sinks)
             task.config.build_event = on_build_event
