@@ -15,11 +15,74 @@ It does not define its own tasks. Instead, it provides a `config.axl` that confi
 axel-f is an external package, shipped with the CLI by default but resolved through `MODULE.aspect` like any other dependency. The architecture:
 
 1. **Rust runtime** - Starlark interpreter + native APIs (`ctx.bazel`, `ctx.http()`, `ctx.std.*`)
-2. **Builtins** (compiled into the binary) - `build`, `test`, `axl add`
-3. **External packages** (via `MODULE.aspect`) - axel-f, `aspect_rules_lint`, etc.
+2. **Builtins** (compiled into the binary) - `@aspect` (build, test, axl add) and `@axel-f` (config)
+3. **External packages** (via `MODULE.aspect`) - `aspect_rules_lint`, etc.
 4. **Customer config** (`.aspect/config.axl`, optional) - customer-specific overrides and customization
 
 axel-f and packages like `aspect_rules_lint` are peers in the dependency graph. axel-f is the "batteries included" package that makes the built-in tasks work seamlessly in the Aspect Workflows environment.
+
+## Packaging and embedding
+
+axel-f is a separate Rust crate that lives in its own repository. It is embedded into the CLI binary at compile time.
+
+### Crate structure
+
+```
+axel-f/
+├── Cargo.toml          # crate definition
+├── src/lib.rs          # exports all .axl files via include_str!
+├── MODULE.aspect       # use_config() declarations
+├── config.axl          # main config function
+├── lint_strategy.axl   # lint strategy (GitHub-aware hold-the-line)
+├── github.axl          # GitHub API integration
+├── sarif.axl           # SARIF parsing
+├── delivery.axl        # artifact delivery
+├── deliveryd.axl       # delivery daemon client
+├── migrate.axl         # migration tooling
+└── platform-config.axl # platform environment discovery
+```
+
+`src/lib.rs` is minimal — it exports a single constant:
+
+```rust
+pub const FILES: &[(&str, &str)] = &[
+    ("MODULE.aspect", include_str!("../MODULE.aspect")),
+    ("config.axl", include_str!("../config.axl")),
+    // ... all .axl files
+];
+```
+
+### How it ships
+
+The CLI's builtin system (`crates/axl-runtime/src/builtins/mod.rs`) treats axel-f the same as the `@aspect` builtin:
+
+- **Debug builds**: reads .axl files directly from the source tree (no extraction needed)
+- **Release builds**: uses the `axel_f::FILES` constant (compiled into the binary via `include_str!`), extracts files to a content-hashed cache directory at runtime
+
+Both builtins are defined as `Builtin { name, files }` entries in a unified `ALL` array. A single loop handles hashing and extraction for all builtins.
+
+### Dependency tracking
+
+During development, the CLI workspace references axel-f as a local path dependency:
+
+```toml
+# crates/axl-runtime/Cargo.toml
+axel-f = { path = "../../axel-f" }
+```
+
+When axel-f moves to its own repo, this changes to a git reference:
+
+```toml
+axel-f = { git = "https://github.com/aspect-build/axel-f", tag = "v0.1.0" }
+```
+
+The CLI can also use a git submodule pointing to the axel-f repo, with the Cargo.toml path pointing at the submodule checkout. This gives reproducible builds with a pinned commit SHA while keeping the repos independent.
+
+### Auto-enable
+
+Both `@aspect` and `@axel-f` builtins are auto-enabled for `use_config`. This is set in `disk_store.rs` where builtin deps are constructed with `use_config: true`. Customers don't need to declare anything — builtin configs just work. External packages (non-builtins) still require explicit `use_config = True` on the dep declaration in the customer's `MODULE.aspect`.
+
+If a customer explicitly declares a dep with the same name as a builtin (e.g. `axl_archive_dep(name = "axel-f", ...)`), the customer's dep overrides the builtin. In that case, the customer controls the `use_config` flag — the auto-enable only applies to the default builtin version.
 
 ## What it does NOT do
 
@@ -33,7 +96,7 @@ axel-f and packages like `aspect_rules_lint` are peers in the dependency graph. 
 
 ## Opt-in via use_config
 
-Config evaluation from external packages is **never automatic**. A package having a `config.axl` file does nothing on its own. Two explicit declarations are required:
+Config evaluation from external packages requires explicit opt-in. A package having a `config.axl` file does nothing on its own. Two declarations are required (builtins like `@aspect` and `@axel-f` are the exception — they are auto-enabled):
 
 ### Package side: declaring config availability
 
@@ -102,7 +165,7 @@ Without `use_config = True`, the package's `use_config()` directives are ignored
 
 ### axel-f is auto-enabled
 
-axel-f ships with the CLI as the default configuration package. Its `use_config` is automatically enabled - customers do not need to set `use_config = True` for it. Customers can disable it if needed.
+axel-f ships with the CLI as a builtin (see [Packaging and embedding](#packaging-and-embedding)). Its `use_config` is automatically enabled via `disk_store.rs` — customers do not need to set `use_config = True` for it. If a customer overrides the builtin by declaring their own `axl_archive_dep(name = "axel-f", ...)`, auto-enable is replaced by the customer's explicit `use_config` flag.
 
 ### Config activation is not transitive
 

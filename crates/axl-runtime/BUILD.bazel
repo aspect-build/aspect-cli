@@ -47,6 +47,7 @@ rust_library(
         "//crates/build-event-stream",
         "//crates/galvanize",
         "//crates/aspect-telemetry",
+        "//axel-f"
     ],
     proc_macro_deps = [
         "@crates//:starlark_derive",

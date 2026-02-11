@@ -1,15 +1,16 @@
-"""Workflows Configuration"""
+"""Configures builtin tasks for Workflows"""
 
-load("./migrate.axl", "migrate")
-load("./delivery.axl", "delivery")
-load("./platform-config.axl",
+load("../tasks/migrate.axl", "migrate")
+
+load("../lib/platform.axl",
     "read_platform_config",
     "read_host_config",
     "get_bazelrc_flags",
     "DEFAULT_PLATFORM_DIR"
 )
+
 load(
-    "./github.axl",
+    "../lib/github.axl",
     "create_check_run",
     "update_check_run",
     "complete_check_run",
@@ -18,66 +19,6 @@ load(
     "create_review",
     "build_suggestion",
 )
-load(
-    "./sarif.axl",
-    "sarif_to_annotations",
-    "get_sarif_summary"
-)
-load(
-    "@aspect_rules_lint//lint/lint.axl",
-    "StrategyHoldTheLine",
-)
-load("./lint_strategy.axl", "make_github_strategy", "make_github_changed_files_provider")
-
-def _check_deliveryd_health(ctx, socket_path):
-    """
-    Check if deliveryd is healthy by calling the /health endpoint.
-
-    Returns:
-        True if healthy, False otherwise
-    """
-    http = ctx.http()
-    response = http.get(
-        url="http://localhost/health",
-        unix_socket=socket_path,
-    )
-
-    result = response.map_err(lambda e: str(e)).block()
-    if type(result) == "string":
-        return False
-    return result.status >= 200 and result.status < 300
-
-def _start_deliveryd(ctx, delivery_db_endpoint, socket_path = "/tmp/deliveryd.sock"):
-    """
-    Start the deliveryd process in the background if not already running.
-
-    Args:
-        ctx: Config context
-        delivery_db_endpoint: Redis endpoint URL (redis:// or rediss:// for TLS)
-        socket_path: Unix socket path for deliveryd
-    """
-    # Check if deliveryd is already running by checking for the socket
-    if ctx.std.fs.exists(socket_path):
-        # Socket exists, check if the instance is healthy
-        if _check_deliveryd_health(ctx, socket_path):
-            print("deliveryd already running and healthy (socket: {})".format(socket_path))
-            return
-        else:
-            # Stale socket, remove it
-            print("deliveryd socket exists but instance is unhealthy, removing stale socket")
-            ctx.std.fs.remove_file(socket_path)
-
-    cmd = ctx.std.process.command("deliveryd")
-    cmd.arg("--socket=" + socket_path)
-    cmd.arg("--redis-endpoint=" + delivery_db_endpoint)
-
-    # Run in background
-    cmd.stdout("null")
-    cmd.stderr("null")
-    cmd.spawn()
-
-    print("Started deliveryd (socket: {}, endpoint: {})".format(socket_path, delivery_db_endpoint))
-
 
 def _format_build_state(build_state):
     md = """
@@ -153,27 +94,13 @@ def on_build_event(ctx: TaskContext, build_state: dict, event):
         print(r)
 
 
-# =============================================================================
-# Config
-# =============================================================================
-
-def config(ctx: ConfigContext):
+def configure_builtins(ctx: ConfigContext):
     ctx.tasks.add(migrate)
-    ctx.tasks.add(delivery)
 
     CI = ctx.std.env.var("BUILDKITE")
 
-    if CI:
-        print("--- :aspect-build: Configuring Workflows")
-
     # Read platform config from disk
     platform_config = read_platform_config(ctx.std.fs)
-
-    # Start deliveryd if delivery_db_endpoint is configured
-    delivery_db_endpoint = platform_config.get("delivery_db_endpoint")
-    if delivery_db_endpoint:
-        _start_deliveryd(ctx, delivery_db_endpoint)
-
     # Read host config from environment
     host_config = read_host_config(ctx.std.env, ctx.std.io)
 
@@ -214,27 +141,3 @@ def config(ctx: ConfigContext):
             task.config.build_start = lambda: print("+++ :bazel: Building")
             task.config.build_event_sinks = build_event_sinks
             task.config.build_event = on_build_event
-        if task.name == "delivery":
-            task.config.delivery_start = lambda: print("--- :bazel: Delivery")
-        if task.name == "lint":
-            github_token = ctx.std.env.var("GITHUB_TOKEN")
-            if github_token:
-                # CI mode: GitHub-aware strategy with hold-the-line
-                github_repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
-                repo_parts = github_repository.split("/")
-                gh_owner = repo_parts[0] if len(repo_parts) >= 2 else ""
-                gh_repo = repo_parts[1] if len(repo_parts) >= 2 else ""
-
-                task.config.strategy = make_github_strategy(
-                    StrategyHoldTheLine,
-                    token = github_token,
-                    owner = gh_owner,
-                    repo = gh_repo,
-                    mode = "streaming",
-                )
-                task.config.changed_files_provider = make_github_changed_files_provider(
-                    token = github_token,
-                    owner = gh_owner,
-                    repo = gh_repo,
-                )
-            # else: local dev uses defaults (StrategyHoldTheLine + GitDiffProvider)
