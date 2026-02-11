@@ -8,7 +8,7 @@ Uses deliveryd (Unix socket HTTP server) for all delivery state operations.
 """
 
 load(
-    "./deliveryd.axl",
+    "../lib/deliveryd.axl",
     deliveryd_query = "query",
     deliveryd_deliver = "deliver",
     deliveryd_record = "record",

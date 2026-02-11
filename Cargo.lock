@@ -272,6 +272,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "axel-f"
+version = "0.0.1"
+
+[[package]]
 name = "axl-docgen"
 version = "0.0.0-dev"
 dependencies = [
@@ -324,6 +328,7 @@ dependencies = [
  "anyhow",
  "arc-slice",
  "aspect-telemetry",
+ "axel-f",
  "axl-proto",
  "base64 0.22.1",
  "build-event-stream",
@@ -351,6 +356,7 @@ dependencies = [
  "prost",
  "rand 0.8.5",
  "reqwest",
+ "semver",
  "serde_json",
  "sha256",
  "ssri",
@@ -3702,6 +3708,12 @@ dependencies = [
  "libc",
  "windows-sys 0.60.2",
 ]
+
+[[package]]
+name = "semver"
+version = "1.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "serde"

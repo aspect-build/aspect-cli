@@ -3,7 +3,7 @@ mod flags;
 mod helpers;
 mod trace;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,7 +14,7 @@ use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
 use axl_runtime::eval::{self, FrozenTaskModuleLike, ModuleScope, execute_task_with_args};
 use axl_runtime::module::{AXL_MODULE_FILE, AXL_ROOT_MODULE_NAME};
-use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
+use axl_runtime::module::{AxlModuleEvaluator, DiskStore, UseConfigEntry};
 use clap::{Arg, ArgAction, Command};
 use miette::{IntoDiagnostic, miette};
 use starlark::environment::FrozenModule;
@@ -87,26 +87,29 @@ async fn main() -> miette::Result<ExitCode> {
         .evaluate(AXL_ROOT_MODULE_NAME.to_string(), repo_root.clone())
         .into_diagnostic()?;
 
-    // Expand all module dependencies (including the builtin @aspect module) to the disk store and collect their root paths.
-    // This results in a Vec of (String, PathBuf) such as
-    // [
-    //     ( "aspect", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/aspect" ),
-    //     ( "experimental", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/experimental" ),
-    //     ( "local", "/Users/username/Library/Caches/axl/deps/27e6d838c365a7c5d79674a7b6c7ec7b8d22f686dbcc8088a8d1454a6489a9ae/local" ),
-    // ]
+    // Expand all module dependencies (including builtins) to the disk store.
+    // Returns (name, path, use_config) for each module.
     let module_roots = disk_store
         .expand_store(&root_module_store)
         .await
         .into_diagnostic()?;
 
-    // Collect root and dependency modules into a vector of modules with exported tasks.
+    // Build the set of deps with use_config enabled (as determined by disk_store)
+    let use_config_deps: HashSet<String> = module_roots
+        .iter()
+        .filter(|(_, _, use_config)| *use_config)
+        .map(|(name, _, _)| name.clone())
+        .collect();
+
+    // Collect root and dependency modules into a vector of modules with exported tasks and configs.
     let mut modules = vec![(
         root_module_store.module_name,
         root_module_store.module_root,
         root_module_store.tasks.take(),
+        root_module_store.configs.take(),
     )];
 
-    for (name, root) in module_roots {
+    for (name, root, _) in module_roots {
         let module_store = module_eval.evaluate(name, root).into_diagnostic()?;
         if debug_mode() {
             eprintln!(
@@ -118,6 +121,7 @@ async fn main() -> miette::Result<ExitCode> {
             module_store.module_name,
             module_store.module_root,
             module_store.tasks.take(),
+            module_store.configs.take(),
         ))
     }
 
@@ -175,7 +179,11 @@ async fn main() -> miette::Result<ExitCode> {
             HashMap<PathBuf, (FrozenModule, String, Vec<String>)>,
         )> = vec![];
 
-        for (module_name, module_root, map) in modules.into_iter() {
+        // Collect configs from each module for use_config processing
+        let mut module_configs: Vec<(String, PathBuf, Vec<UseConfigEntry>)> = vec![];
+
+        for (module_name, module_root, map, configs) in modules.into_iter() {
+            module_configs.push((module_name.clone(), module_root.clone(), configs));
             let mut mmap = HashMap::new();
             for (path, (label, symbols)) in map.into_iter() {
                 let rel_path = path.strip_prefix(&module_root).unwrap().to_path_buf();
@@ -239,18 +247,74 @@ async fn main() -> miette::Result<ExitCode> {
             }
         }
 
-        // Build scoped configs list combining regular configs and env configs
+        // Build scoped configs: package configs first (from use_config), then customer configs last
         let root_scope = ModuleScope {
             name: AXL_ROOT_MODULE_NAME.to_string(),
             path: repo_root.clone(),
         };
 
-        let mut scoped_configs: Vec<(ModuleScope, PathBuf)> = configs
+        // Collect resolved package names for requires/conflicts checking
+        let resolved_packages: HashSet<String> = module_configs
             .iter()
-            .map(|path| (root_scope.clone(), path.clone()))
+            .map(|(name, _, _)| name.clone())
             .collect();
 
-        // Run environment configs, each with scope derived from parent directory
+        // Build package configs from use_config() declarations (dependency order, leaves first)
+        let mut scoped_configs: Vec<(ModuleScope, PathBuf, String)> = vec![];
+
+        for (module_name, module_root, configs_entries) in &module_configs {
+            // Skip if root module didn't enable use_config for this dep (root module is always allowed)
+            if module_name != AXL_ROOT_MODULE_NAME && !use_config_deps.contains(module_name) {
+                continue;
+            }
+            for entry in configs_entries {
+                // Check requires: all referenced packages must be present
+                let requires_met = entry.requires.iter().all(|(pkg, version_constraint)| {
+                    if !resolved_packages.contains(pkg) {
+                        return false;
+                    }
+                    // Version constraint checking deferred until modules carry version metadata
+                    if version_constraint.is_some() {
+                        // TODO: implement version constraint checking with semver crate
+                        // For now, presence check is sufficient
+                    }
+                    true
+                });
+                // Check conflicts: all referenced packages must be absent
+                let conflicts_clear = entry
+                    .conflicts
+                    .iter()
+                    .all(|pkg| !resolved_packages.contains(pkg));
+
+                if requires_met && conflicts_clear {
+                    let scope = ModuleScope {
+                        name: module_name.clone(),
+                        path: module_root.clone(),
+                    };
+                    let abs_path = module_root.join(&entry.path);
+                    scoped_configs.push((scope, abs_path, entry.function.clone()));
+
+                    if debug_mode() {
+                        eprintln!(
+                            "use_config: @{} -> {} (fn: {})",
+                            module_name, entry.path, entry.function
+                        );
+                    }
+                } else if debug_mode() {
+                    eprintln!(
+                        "use_config: @{} -> {} SKIPPED (requires={}, conflicts={})",
+                        module_name, entry.path, requires_met, conflicts_clear
+                    );
+                }
+            }
+        }
+
+        // Append customer configs (filesystem-discovered) — always last
+        for path in configs.iter() {
+            scoped_configs.push((root_scope.clone(), path.clone(), "config".to_string()));
+        }
+
+        // Append environment configs, each with scope derived from parent directory
         if debug_mode() && !env_configs.is_empty() {
             eprintln!("AXL_CONFIG configs:");
             for path in &env_configs {
@@ -269,7 +333,7 @@ async fn main() -> miette::Result<ExitCode> {
                 name: "".to_string(),
                 path: parent.to_path_buf(),
             };
-            scoped_configs.push((scope, config_path.clone()));
+            scoped_configs.push((scope, config_path.clone(), "config".to_string()));
         }
 
         // Run all config functions, passing in vector of tasks for configuration

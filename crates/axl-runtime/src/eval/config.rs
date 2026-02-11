@@ -54,7 +54,7 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
     /// The tasks are modified in place via set_attr calls from config functions.
     pub fn run_all(
         &self,
-        scoped_configs: Vec<(ModuleScope, PathBuf)>,
+        scoped_configs: Vec<(ModuleScope, PathBuf, String)>,
         tasks: Vec<ConfiguredTask>,
     ) -> Result<Vec<ConfiguredTask>, EvalError> {
         // Create temporary modules for evaluation
@@ -81,7 +81,7 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
         }
 
         // Evaluate each config file with its associated scope
-        for (scope, path) in &scoped_configs {
+        for (scope, path, function_name) in &scoped_configs {
             self.loader.module_stack.borrow_mut().push(scope.clone());
 
             let rel_path = path
@@ -99,8 +99,8 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
             // Get the config function
             let def = frozen
-                .get("config")
-                .map_err(|_| EvalError::MissingSymbol("config".into()))?;
+                .get(function_name)
+                .map_err(|_| EvalError::MissingSymbol(function_name.clone()))?;
 
             let func = def.value();
 
