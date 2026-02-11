@@ -1,0 +1,228 @@
+"""
+SARIF (Static Analysis Results Interchange Format) GitHub Translation
+
+Converts SARIF output from linters into GitHub PR review comments and annotations.
+Base parsing utilities (parse_sarif, get_sarif_summary) are loaded from rules_lint.
+"""
+
+load("@aspect_rules_lint//lint/sarif.axl", "parse_sarif", "get_sarif_summary")
+
+
+def _get_level_emoji(level):
+    """Map SARIF level to display text."""
+    if level == "error":
+        return "error"
+    elif level == "warning":
+        return "warning"
+    elif level == "note":
+        return "note"
+    return level or "warning"
+
+
+def sarif_result_to_comment(result, tool_name):
+    """
+    Convert a single SARIF result to a GitHub review comment dict.
+
+    Args:
+        result: A single result from runs[].results[]
+        tool_name: Name of the tool (from runs[].tool.driver.name)
+
+    Returns:
+        dict suitable for create_review comments list, or None if invalid
+    """
+    locations = result.get("locations", [])
+    if not locations:
+        return None
+
+    location = locations[0]
+    physical = location.get("physicalLocation")
+    if not physical:
+        return None
+
+    artifact = physical.get("artifactLocation", {})
+    path = artifact.get("uri")
+    if not path:
+        return None
+
+    region = physical.get("region", {})
+    start_line = region.get("startLine")
+    end_line = region.get("endLine", start_line)
+
+    if not start_line:
+        return None
+
+    # Build comment body
+    level = _get_level_emoji(result.get("level", "warning"))
+    message_obj = result.get("message", {})
+    message = message_obj.get("text", "")
+
+    body = "**{}** ({})".format(tool_name, level)
+    if message:
+        body = body + "\n\n" + message
+
+    comment = {
+        "path": path,
+        "line": end_line,
+        "side": "RIGHT",
+        "body": body,
+    }
+
+    # Multi-line comment if start != end
+    if start_line != end_line:
+        comment["start_line"] = start_line
+        comment["start_side"] = "RIGHT"
+
+    # Extract fix hints from relatedLocations
+    related = result.get("relatedLocations", [])
+    fixes = []
+    for loc in related:
+        msg = loc.get("message", {}).get("text", "")
+        if not msg.startswith("try"):
+            continue
+        region = loc.get("physicalLocation", {}).get("region", {})
+        byte_offset = region.get("byteOffset")
+        byte_length = region.get("byteLength")
+        if byte_offset == None or byte_length == None:
+            continue
+        # Parse replacement text from "try" message
+        if msg == "try":
+            replacement = ""
+        else:
+            text = msg[4:]  # strip "try "
+            # Strip decorative outer quotes (clippy wraps replacements in quotes)
+            if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+                text = text[1:-1]
+            replacement = text
+        fixes.append({
+            "byteOffset": byte_offset,
+            "byteLength": byte_length,
+            "replacement": replacement,
+        })
+    if fixes:
+        comment["_fixes"] = fixes
+
+    return comment
+
+
+def sarif_to_review_comments(sarif):
+    """
+    Convert SARIF output to GitHub review comments.
+
+    Args:
+        sarif: Parsed SARIF dict (or JSON string)
+
+    Returns:
+        List of comment dicts suitable for create_review
+    """
+    if type(sarif) == "string":
+        sarif = json.decode(sarif)
+
+    comments = []
+    runs = sarif.get("runs", [])
+
+    for run in runs:
+        tool = run.get("tool", {})
+        driver = tool.get("driver", {})
+        tool_name = driver.get("name", "Linter")
+
+        results = run.get("results", [])
+        for result in results:
+            comment = sarif_result_to_comment(result, tool_name)
+            if comment:
+                comments.append(comment)
+
+    return comments
+
+
+def sarif_to_annotations(sarif):
+    """
+    Convert SARIF output to GitHub Check Run annotations.
+
+    Args:
+        sarif: Parsed SARIF dict (or JSON string)
+
+    Returns:
+        List of annotation dicts suitable for build_output
+    """
+    if type(sarif) == "string":
+        sarif = json.decode(sarif)
+
+    annotations = []
+    runs = sarif.get("runs", [])
+
+    for run in runs:
+        tool = run.get("tool", {})
+        driver = tool.get("driver", {})
+        tool_name = driver.get("name", "Linter")
+
+        results = run.get("results", [])
+        for result in results:
+            annotation = sarif_result_to_annotation(result, tool_name)
+            if annotation:
+                annotations.append(annotation)
+
+    return annotations
+
+
+def sarif_result_to_annotation(result, tool_name):
+    """
+    Convert a single SARIF result to a GitHub Check Run annotation.
+
+    Args:
+        result: A single result from runs[].results[]
+        tool_name: Name of the tool
+
+    Returns:
+        dict suitable for check run annotations list, or None if invalid
+    """
+    locations = result.get("locations", [])
+    if not locations:
+        return None
+
+    location = locations[0]
+    physical = location.get("physicalLocation")
+    if not physical:
+        return None
+
+    artifact = physical.get("artifactLocation", {})
+    path = artifact.get("uri")
+    if not path:
+        return None
+
+    region = physical.get("region", {})
+    start_line = region.get("startLine")
+    end_line = region.get("endLine", start_line)
+
+    if not start_line:
+        return None
+
+    # Map SARIF level to GitHub annotation level
+    sarif_level = result.get("level", "warning")
+    if sarif_level == "error":
+        annotation_level = "failure"
+    elif sarif_level == "warning":
+        annotation_level = "warning"
+    else:
+        annotation_level = "notice"
+
+    message_obj = result.get("message", {})
+    message = message_obj.get("text", "")
+
+    annotation = {
+        "path": path,
+        "start_line": start_line,
+        "end_line": end_line,
+        "annotation_level": annotation_level,
+        "message": message,
+        "title": tool_name,
+    }
+
+    # Add column info if available
+    start_column = region.get("startColumn")
+    end_column = region.get("endColumn")
+    if start_column:
+        annotation["start_column"] = start_column
+    if end_column:
+        annotation["end_column"] = end_column
+
+    return annotation

@@ -58,6 +58,12 @@ impl<'p> AxlLoader<'p> {
         AxlStore::new(self.cli_version.clone(), self.repo_root.clone(), path)
     }
 
+    /// Caches a frozen module by its absolute path so that subsequent `load()` calls
+    /// for the same path return the cached module instead of re-evaluating.
+    pub fn cache_module(&self, path: PathBuf, module: FrozenModule) {
+        self.loaded_modules.borrow_mut().insert(path, module);
+    }
+
     pub(super) fn eval_module(&self, path: &Path) -> Result<Module, EvalError> {
         assert!(path.is_absolute());
 
@@ -124,15 +130,29 @@ impl<'p> FileLoader for AxlLoader<'p> {
             .last()
             .expect("module name stack should not be empty");
 
+        // Track whether we need to push/pop a new module scope for dependency loads.
+        let new_module_scope = match &load_path {
+            LoadPath::ModuleSpecifier { module, .. } => Some(ModuleScope {
+                name: module.clone(),
+                path: self.deps_root.join(module),
+            }),
+            _ => None,
+        };
+
         let resolved_script_path = match &load_path {
             LoadPath::ModuleSpecifier { module, subpath } => {
                 self.resolve_in_deps_root(&module, &subpath)?
             }
             LoadPath::ModuleSubpath(subpath) => self.resolve(&module_info.path, subpath)?,
             LoadPath::RelativePath(relpath) => {
-                let parent = parent_script_path
-                    .strip_prefix(&module_info.path)
-                    .expect("parent script path should have same prefix as current module");
+                let parent = parent_script_path.strip_prefix(&module_info.path).expect(
+                    format!(
+                        "parent script path {} should have same prefix as current module {}",
+                        parent_script_path.display(),
+                        module_info.path.display(),
+                    )
+                    .as_str(),
+                );
                 if let Some(parent) = parent.parent() {
                     self.resolve(&module_info.path, &parent.join(relpath))?
                 } else {
@@ -167,14 +187,24 @@ impl<'p> FileLoader for AxlLoader<'p> {
 
         drop(load_stack);
 
-        // Push the resolved path to the stack so that relative imports from the file still works.
-        // load_stack.push(resolved_script_path.clone());
+        // If loading a dependency module, push its scope so relative imports resolve correctly.
+        if let Some(scope) = &new_module_scope {
+            drop(module_stack);
+            self.module_stack.borrow_mut().push(scope.clone());
+        } else {
+            drop(module_stack);
+        }
 
         // Read and parse the file content into an AST.
         let frozen_module = self
             .eval_module(&resolved_script_path)
             .map_err(|e| Into::<starlark::Error>::into(e))?
             .freeze()?;
+
+        // Pop the dependency module scope if we pushed one.
+        if new_module_scope.is_some() {
+            self.module_stack.borrow_mut().pop();
+        }
 
         // Pop the load stack after successful load
         // self.load_stack.borrow_mut().pop();

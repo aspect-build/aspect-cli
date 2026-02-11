@@ -14,20 +14,21 @@ use starlark::values::{
 };
 use starlark_map::small_map::SmallMap;
 
-static RECORD_TYPE_ID: AtomicU64 = AtomicU64::new(0);
+static SPEC_TYPE_ID: AtomicU64 = AtomicU64::new(0);
 
-fn next_record_type_id() -> u64 {
-    RECORD_TYPE_ID.fetch_add(1, Ordering::SeqCst)
+fn next_spec_type_id() -> u64 {
+    SPEC_TYPE_ID.fetch_add(1, Ordering::SeqCst)
 }
 
 // -----------------------------------------------------------------------------
 // Field
 // -----------------------------------------------------------------------------
 
-/// A field definition for a record, containing a type and optional default value.
+/// A field definition for a spec, containing a type and optional default value.
 #[derive(Debug, Clone, ProvidesStaticType, Allocative)]
 pub struct Field<'v> {
     pub(crate) typ: TypeCompiled<Value<'v>>,
+    pub(crate) typ_value: Value<'v>,
     pub(crate) default: Option<Value<'v>>,
 }
 
@@ -43,6 +44,7 @@ impl<'v> Display for Field<'v> {
 unsafe impl<'v> Trace<'v> for Field<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         self.typ.trace(tracer);
+        self.typ_value.trace(tracer);
         if let Some(ref mut d) = self.default {
             d.trace(tracer);
         }
@@ -53,6 +55,7 @@ impl<'v> Field<'v> {
     pub fn freeze(self, freezer: &Freezer) -> Result<FrozenField, FreezeError> {
         Ok(FrozenField {
             typ: self.typ.freeze(freezer)?,
+            typ_value: self.typ_value.freeze(freezer)?,
             default: self.default.map(|d| d.freeze(freezer)).transpose()?,
         })
     }
@@ -62,6 +65,7 @@ impl<'v> Field<'v> {
 #[derive(Debug, Clone, ProvidesStaticType, Allocative)]
 pub struct FrozenField {
     pub(crate) typ: TypeCompiled<FrozenValue>,
+    pub(crate) typ_value: FrozenValue,
     pub(crate) default: Option<FrozenValue>,
 }
 
@@ -81,6 +85,7 @@ impl Display for FrozenField {
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct FieldValue<'v> {
     pub(crate) typ: TypeCompiled<Value<'v>>,
+    pub(crate) typ_value: Value<'v>,
     pub(crate) default: Option<Value<'v>>,
 }
 
@@ -96,6 +101,7 @@ impl<'v> Display for FieldValue<'v> {
 unsafe impl<'v> Trace<'v> for FieldValue<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         self.typ.trace(tracer);
+        self.typ_value.trace(tracer);
         if let Some(ref mut d) = self.default {
             d.trace(tracer);
         }
@@ -119,6 +125,7 @@ impl<'v> StarlarkValue<'v> for FieldValue<'v> {
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct FrozenFieldValue {
     pub(crate) typ: TypeCompiled<FrozenValue>,
+    pub(crate) typ_value: FrozenValue,
     pub(crate) default: Option<FrozenValue>,
 }
 
@@ -158,37 +165,50 @@ impl Freeze for FieldValue<'_> {
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         Ok(FrozenFieldValue {
             typ: self.typ.freeze(freezer)?,
+            typ_value: self.typ_value.freeze(freezer)?,
             default: self.default.map(|d| d.freeze(freezer)).transpose()?,
         })
     }
 }
 
+/// Create fresh TypeCompiled values from field type values at runtime.
+/// This ensures type checking works correctly for types like starlark Records
+/// whose frozen TypeCompiled matchers may not function properly.
+fn build_type_checkers<'v>(
+    fields: impl Iterator<Item = Value<'v>>,
+    heap: &'v Heap,
+) -> starlark::Result<Vec<TypeCompiled<Value<'v>>>> {
+    fields
+        .map(|typ_value| TypeCompiled::new(typ_value, heap).map_err(starlark::Error::new_other))
+        .collect()
+}
+
 // -----------------------------------------------------------------------------
-// RecordType
+// SpecType
 // -----------------------------------------------------------------------------
 
-/// The type of a record, created by `record(field1=type1, field2=type2, ...)`.
-/// Calling this type creates a `Record` instance.
+/// The type of a spec, created by `spec(field1=type1, field2=type2, ...)`.
+/// Calling this type creates a `Spec` instance.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct RecordType<'v> {
-    /// Unique identifier for this record type
+pub struct SpecType<'v> {
+    /// Unique identifier for this spec type
     pub(crate) id: u64,
-    /// Name of the record type (set when assigned to a variable)
+    /// Name of the spec type (set when assigned to a variable)
     pub(crate) name: Option<String>,
     /// Fields with their types and optional defaults
     pub(crate) fields: SmallMap<String, Field<'v>>,
 }
 
-impl<'v> Display for RecordType<'v> {
+impl<'v> Display for SpecType<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.name {
-            Some(name) => write!(f, "record[{}]", name),
-            None => write!(f, "record[anon]"),
+            Some(name) => write!(f, "spec[{}]", name),
+            None => write!(f, "spec[anon]"),
         }
     }
 }
 
-unsafe impl<'v> Trace<'v> for RecordType<'v> {
+unsafe impl<'v> Trace<'v> for SpecType<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         for (_, field) in self.fields.iter_mut() {
             field.trace(tracer);
@@ -196,14 +216,14 @@ unsafe impl<'v> Trace<'v> for RecordType<'v> {
     }
 }
 
-impl<'v> AllocValue<'v> for RecordType<'v> {
+impl<'v> AllocValue<'v> for SpecType<'v> {
     fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-#[starlark_value(type = "record_type")]
-impl<'v> StarlarkValue<'v> for RecordType<'v> {
+#[starlark_value(type = "spec")]
+impl<'v> StarlarkValue<'v> for SpecType<'v> {
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
@@ -213,7 +233,7 @@ impl<'v> StarlarkValue<'v> for RecordType<'v> {
         variable_name: &str,
         _eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> starlark::Result<()> {
-        // This is called when the record type is assigned to a variable.
+        // This is called when the spec type is assigned to a variable.
         // We use unsafe to mutate the name, which is safe because this is only
         // called during module loading.
         let this = self as *const Self as *mut Self;
@@ -229,6 +249,10 @@ impl<'v> StarlarkValue<'v> for RecordType<'v> {
         args: &starlark::eval::Arguments<'v, '_>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
+        // Build fresh type checkers from the original type values
+        let type_checkers =
+            build_type_checkers(self.fields.values().map(|f| f.typ_value), eval.heap())?;
+
         // Parse the arguments according to our field definitions
         let mut values: Vec<Cell<Value<'v>>> = Vec::with_capacity(self.fields.len());
 
@@ -237,7 +261,7 @@ impl<'v> StarlarkValue<'v> for RecordType<'v> {
         let kwargs = args.names_map()?;
 
         // Build values in field order
-        for (field_name, field) in self.fields.iter() {
+        for ((field_name, field), tc) in self.fields.iter().zip(type_checkers.iter()) {
             let value = if let Some(v) = kwargs.get(field_name.as_str()) {
                 *v
             } else if let Some(default) = field.default {
@@ -250,12 +274,12 @@ impl<'v> StarlarkValue<'v> for RecordType<'v> {
                 )));
             };
 
-            // Type check the value
-            if !field.typ.matches(value) {
+            // Type check the value using the fresh TypeCompiled
+            if !tc.matches(value) {
                 return Err(starlark::Error::new_other(anyhow::anyhow!(
                     "Field `{}` expected type `{}`, got `{}`",
                     field_name,
-                    field.typ,
+                    tc,
                     value.get_type()
                 )));
             }
@@ -274,58 +298,59 @@ impl<'v> StarlarkValue<'v> for RecordType<'v> {
             }
         }
 
-        let record = Record {
+        let spec = Spec {
             typ: _me,
             values: values.into_boxed_slice(),
+            type_checkers: type_checkers.into_boxed_slice(),
         };
-        Ok(eval.heap().alloc(record))
+        Ok(eval.heap().alloc(spec))
     }
 
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(record_type_methods)
+        RES.methods(spec_type_methods)
     }
 }
 
 #[starlark_module]
-fn record_type_methods(_builder: &mut MethodsBuilder) {}
+fn spec_type_methods(_builder: &mut MethodsBuilder) {}
 
 // -----------------------------------------------------------------------------
-// FrozenRecordType
+// FrozenSpecType
 // -----------------------------------------------------------------------------
 
-/// Frozen version of RecordType.
+/// Frozen version of SpecType.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FrozenRecordType {
+pub struct FrozenSpecType {
     pub(crate) id: u64,
     pub(crate) name: Option<String>,
     pub(crate) fields: SmallMap<String, FrozenField>,
 }
 
-impl Display for FrozenRecordType {
+impl Display for FrozenSpecType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.name {
-            Some(name) => write!(f, "record[{}]", name),
-            None => write!(f, "record[anon]"),
+            Some(name) => write!(f, "spec[{}]", name),
+            None => write!(f, "spec[anon]"),
         }
     }
 }
 
-unsafe impl<'v> Trace<'v> for FrozenRecordType {
+unsafe impl<'v> Trace<'v> for FrozenSpecType {
     fn trace(&mut self, _tracer: &Tracer<'v>) {
         // Frozen values don't need tracing
     }
 }
 
-impl AllocFrozenValue for FrozenRecordType {
+impl AllocFrozenValue for FrozenSpecType {
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         heap.alloc_simple(self)
     }
 }
 
-#[starlark_value(type = "record_type")]
-impl<'v> StarlarkValue<'v> for FrozenRecordType {
-    type Canonical = RecordType<'v>;
+#[starlark_value(type = "spec")]
+impl<'v> StarlarkValue<'v> for FrozenSpecType {
+    type Canonical = SpecType<'v>;
 
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
@@ -337,12 +362,18 @@ impl<'v> StarlarkValue<'v> for FrozenRecordType {
         args: &starlark::eval::Arguments<'v, '_>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
+        // Build fresh type checkers from the original type values
+        let type_checkers = build_type_checkers(
+            self.fields.values().map(|f| f.typ_value.to_value()),
+            eval.heap(),
+        )?;
+
         let mut values: Vec<Cell<Value<'v>>> = Vec::with_capacity(self.fields.len());
 
         args.no_positional_args(eval.heap())?;
         let kwargs = args.names_map()?;
 
-        for (field_name, field) in self.fields.iter() {
+        for ((field_name, field), tc) in self.fields.iter().zip(type_checkers.iter()) {
             let value = if let Some(v) = kwargs.get(field_name.as_str()) {
                 *v
             } else if let Some(default) = field.default {
@@ -355,12 +386,12 @@ impl<'v> StarlarkValue<'v> for FrozenRecordType {
                 )));
             };
 
-            // Type check using matches on the value representation
-            if !field.typ.matches(value) {
+            // Type check using the fresh TypeCompiled
+            if !tc.matches(value) {
                 return Err(starlark::Error::new_other(anyhow::anyhow!(
                     "Field `{}` expected type `{}`, got `{}`",
                     field_name,
-                    field.typ,
+                    tc,
                     value.get_type()
                 )));
             }
@@ -378,28 +409,29 @@ impl<'v> StarlarkValue<'v> for FrozenRecordType {
             }
         }
 
-        let record = Record {
+        let spec = Spec {
             typ: _me,
             values: values.into_boxed_slice(),
+            type_checkers: type_checkers.into_boxed_slice(),
         };
-        Ok(eval.heap().alloc(record))
+        Ok(eval.heap().alloc(spec))
     }
 
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(record_type_methods)
+        RES.methods(spec_type_methods)
     }
 }
 
-impl Freeze for RecordType<'_> {
-    type Frozen = FrozenRecordType;
+impl Freeze for SpecType<'_> {
+    type Frozen = FrozenSpecType;
 
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         let mut frozen_fields = SmallMap::with_capacity(self.fields.len());
         for (name, field) in self.fields.into_iter() {
             frozen_fields.insert(name, field.freeze(freezer)?);
         }
-        Ok(FrozenRecordType {
+        Ok(FrozenSpecType {
             id: self.id,
             name: self.name,
             fields: frozen_fields,
@@ -408,32 +440,36 @@ impl Freeze for RecordType<'_> {
 }
 
 // -----------------------------------------------------------------------------
-// Record
+// Spec
 // -----------------------------------------------------------------------------
 
-/// An instance of a record type, containing field values.
+/// An instance of a spec type, containing field values.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct Record<'v> {
-    /// The record type this instance belongs to
+pub struct Spec<'v> {
+    /// The spec type this instance belongs to
     pub(crate) typ: Value<'v>,
     /// Field values in the same order as the type's field definitions (mutable via Cell)
     #[allocative(skip)]
     pub(crate) values: Box<[Cell<Value<'v>>]>,
+    /// Fresh type checkers created at construction time for runtime type checking.
+    /// These are re-derived from the field type values to avoid issues with frozen TypeCompiled.
+    #[allocative(skip)]
+    pub(crate) type_checkers: Box<[TypeCompiled<Value<'v>>]>,
 }
 
-impl<'v> Display for Record<'v> {
+impl<'v> Display for Spec<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(", self.typ)?;
-        if let Some(record_type) = self.typ.downcast_ref::<RecordType>() {
+        if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
             let mut first = true;
-            for ((name, _), value) in record_type.fields.iter().zip(self.values.iter()) {
+            for ((name, _), value) in spec_type.fields.iter().zip(self.values.iter()) {
                 if !first {
                     write!(f, ", ")?;
                 }
                 first = false;
                 write!(f, "{}={}", name, value.get())?;
             }
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenRecordType>() {
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
             let mut first = true;
             for ((name, _), value) in frozen_type.fields.iter().zip(self.values.iter()) {
                 if !first {
@@ -447,7 +483,7 @@ impl<'v> Display for Record<'v> {
     }
 }
 
-unsafe impl<'v> Trace<'v> for Record<'v> {
+unsafe impl<'v> Trace<'v> for Spec<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         self.typ.trace(tracer);
         for cell in self.values.iter() {
@@ -455,20 +491,23 @@ unsafe impl<'v> Trace<'v> for Record<'v> {
             v.trace(tracer);
             cell.set(v);
         }
+        for tc in self.type_checkers.iter_mut() {
+            tc.trace(tracer);
+        }
     }
 }
 
-impl<'v> AllocValue<'v> for Record<'v> {
+impl<'v> AllocValue<'v> for Spec<'v> {
     fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-impl<'v> Record<'v> {
+impl<'v> Spec<'v> {
     fn get_field_names(&self) -> Vec<&str> {
-        if let Some(record_type) = self.typ.downcast_ref::<RecordType>() {
-            record_type.fields.keys().map(|s| s.as_str()).collect()
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenRecordType>() {
+        if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
+            spec_type.fields.keys().map(|s| s.as_str()).collect()
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
             frozen_type.fields.keys().map(|s| s.as_str()).collect()
         } else {
             vec![]
@@ -476,18 +515,18 @@ impl<'v> Record<'v> {
     }
 }
 
-#[starlark_value(type = "record")]
-impl<'v> StarlarkValue<'v> for Record<'v> {
+#[starlark_value(type = "spec")]
+impl<'v> StarlarkValue<'v> for Spec<'v> {
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 
     fn get_attr(&self, attribute: &str, _heap: &'v Heap) -> Option<Value<'v>> {
-        if let Some(record_type) = self.typ.downcast_ref::<RecordType>() {
-            if let Some(idx) = record_type.fields.get_index_of(attribute) {
+        if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
+            if let Some(idx) = spec_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].get());
             }
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenRecordType>() {
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
             if let Some(idx) = frozen_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].get());
             }
@@ -496,50 +535,35 @@ impl<'v> StarlarkValue<'v> for Record<'v> {
     }
 
     fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
-        // Get field info and index
-        let (idx, field_typ) = if let Some(record_type) = self.typ.downcast_ref::<RecordType>() {
-            if let Some(idx) = record_type.fields.get_index_of(attribute) {
-                (idx, &record_type.fields.get_index(idx).unwrap().1.typ)
-            } else {
-                return Err(starlark::Error::new_other(anyhow::anyhow!(
-                    "Record {} has no field `{}`",
-                    self.typ,
-                    attribute
-                )));
-            }
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenRecordType>() {
-            if let Some(idx) = frozen_type.fields.get_index_of(attribute) {
-                // For frozen types, we need to check against the frozen field's type
-                let field = frozen_type.fields.get_index(idx).unwrap().1;
-                if !field.typ.matches(value) {
-                    return Err(starlark::Error::new_other(anyhow::anyhow!(
-                        "Field `{}` expected type `{}`, got `{}`",
-                        attribute,
-                        field.typ,
-                        value.get_type()
-                    )));
-                }
-                self.values[idx].set(value);
-                return Ok(());
-            } else {
-                return Err(starlark::Error::new_other(anyhow::anyhow!(
-                    "Record {} has no field `{}`",
-                    self.typ,
-                    attribute
-                )));
-            }
+        // Get field index
+        let idx = if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
+            spec_type.fields.get_index_of(attribute)
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+            frozen_type.fields.get_index_of(attribute)
         } else {
             return Err(starlark::Error::new_other(anyhow::anyhow!(
-                "Invalid record type"
+                "Invalid spec type"
             )));
         };
 
-        // Type check the value
-        if !field_typ.matches(value) {
+        let idx = match idx {
+            Some(idx) => idx,
+            None => {
+                return Err(starlark::Error::new_other(anyhow::anyhow!(
+                    "Spec {} has no field `{}`",
+                    self.typ,
+                    attribute
+                )));
+            }
+        };
+
+        // Type check using the fresh type checker created at construction time
+        let tc = &self.type_checkers[idx];
+        if !tc.matches(value) {
             return Err(starlark::Error::new_other(anyhow::anyhow!(
                 "Field `{}` expected type `{}`, got `{}`",
                 attribute,
-                field_typ,
+                tc,
                 value.get_type()
             )));
         }
@@ -550,9 +574,9 @@ impl<'v> StarlarkValue<'v> for Record<'v> {
     }
 
     fn has_attr(&self, attribute: &str, _heap: &'v Heap) -> bool {
-        if let Some(record_type) = self.typ.downcast_ref::<RecordType>() {
-            record_type.fields.contains_key(attribute)
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenRecordType>() {
+        if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
+            spec_type.fields.contains_key(attribute)
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
             frozen_type.fields.contains_key(attribute)
         } else {
             false
@@ -567,21 +591,21 @@ impl<'v> StarlarkValue<'v> for Record<'v> {
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
-        if let Some(other_record) = other.downcast_ref::<Record>() {
-            // Check that they have the same record type
+        if let Some(other_spec) = other.downcast_ref::<Spec>() {
+            // Check that they have the same spec type
             let self_id = self
                 .typ
-                .downcast_ref::<RecordType>()
+                .downcast_ref::<SpecType>()
                 .map(|t| t.id)
-                .or_else(|| self.typ.downcast_ref::<FrozenRecordType>().map(|t| t.id));
-            let other_id = other_record
+                .or_else(|| self.typ.downcast_ref::<FrozenSpecType>().map(|t| t.id));
+            let other_id = other_spec
                 .typ
-                .downcast_ref::<RecordType>()
+                .downcast_ref::<SpecType>()
                 .map(|t| t.id)
                 .or_else(|| {
-                    other_record
+                    other_spec
                         .typ
-                        .downcast_ref::<FrozenRecordType>()
+                        .downcast_ref::<FrozenSpecType>()
                         .map(|t| t.id)
                 });
 
@@ -590,24 +614,24 @@ impl<'v> StarlarkValue<'v> for Record<'v> {
             }
 
             // Compare all values
-            if self.values.len() != other_record.values.len() {
+            if self.values.len() != other_spec.values.len() {
                 return Ok(false);
             }
-            for (a, b) in self.values.iter().zip(other_record.values.iter()) {
+            for (a, b) in self.values.iter().zip(other_spec.values.iter()) {
                 if !a.get().equals(b.get())? {
                     return Ok(false);
                 }
             }
             Ok(true)
-        } else if let Some(other_frozen) = other.downcast_ref::<FrozenRecord>() {
+        } else if let Some(other_frozen) = other.downcast_ref::<FrozenSpec>() {
             let self_id = self
                 .typ
-                .downcast_ref::<RecordType>()
+                .downcast_ref::<SpecType>()
                 .map(|t| t.id)
-                .or_else(|| self.typ.downcast_ref::<FrozenRecordType>().map(|t| t.id));
+                .or_else(|| self.typ.downcast_ref::<FrozenSpecType>().map(|t| t.id));
             let other_id = other_frozen
                 .typ
-                .downcast_ref::<FrozenRecordType>()
+                .downcast_ref::<FrozenSpecType>()
                 .map(|t| t.id);
 
             if self_id != other_id {
@@ -630,20 +654,20 @@ impl<'v> StarlarkValue<'v> for Record<'v> {
 }
 
 // -----------------------------------------------------------------------------
-// FrozenRecord
+// FrozenSpec
 // -----------------------------------------------------------------------------
 
-/// Frozen version of Record.
+/// Frozen version of Spec.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FrozenRecord {
+pub struct FrozenSpec {
     pub(crate) typ: FrozenValue,
     pub(crate) values: Box<[FrozenValue]>,
 }
 
-impl Display for FrozenRecord {
+impl Display for FrozenSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(", self.typ)?;
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenRecordType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
             let mut first = true;
             for ((name, _), value) in frozen_type.fields.iter().zip(self.values.iter()) {
                 if !first {
@@ -657,28 +681,28 @@ impl Display for FrozenRecord {
     }
 }
 
-unsafe impl<'v> Trace<'v> for FrozenRecord {
+unsafe impl<'v> Trace<'v> for FrozenSpec {
     fn trace(&mut self, _tracer: &Tracer<'v>) {
         // Frozen values don't need tracing
     }
 }
 
-impl AllocFrozenValue for FrozenRecord {
+impl AllocFrozenValue for FrozenSpec {
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         heap.alloc_simple(self)
     }
 }
 
-#[starlark_value(type = "record")]
-impl<'v> StarlarkValue<'v> for FrozenRecord {
-    type Canonical = Record<'v>;
+#[starlark_value(type = "spec")]
+impl<'v> StarlarkValue<'v> for FrozenSpec {
+    type Canonical = Spec<'v>;
 
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 
     fn get_attr(&self, attribute: &str, _heap: &'v Heap) -> Option<Value<'v>> {
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenRecordType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
             if let Some(idx) = frozen_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].to_value());
             }
@@ -687,7 +711,7 @@ impl<'v> StarlarkValue<'v> for FrozenRecord {
     }
 
     fn has_attr(&self, attribute: &str, _heap: &'v Heap) -> bool {
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenRecordType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
             frozen_type.fields.contains_key(attribute)
         } else {
             false
@@ -695,7 +719,7 @@ impl<'v> StarlarkValue<'v> for FrozenRecord {
     }
 
     fn dir_attr(&self) -> Vec<String> {
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenRecordType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
             frozen_type.fields.keys().map(|s| s.to_string()).collect()
         } else {
             vec![]
@@ -703,11 +727,11 @@ impl<'v> StarlarkValue<'v> for FrozenRecord {
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
-        if let Some(other_frozen) = other.downcast_ref::<FrozenRecord>() {
-            let self_id = self.typ.downcast_ref::<FrozenRecordType>().map(|t| t.id);
+        if let Some(other_frozen) = other.downcast_ref::<FrozenSpec>() {
+            let self_id = self.typ.downcast_ref::<FrozenSpecType>().map(|t| t.id);
             let other_id = other_frozen
                 .typ
-                .downcast_ref::<FrozenRecordType>()
+                .downcast_ref::<FrozenSpecType>()
                 .map(|t| t.id);
 
             if self_id != other_id {
@@ -723,16 +747,16 @@ impl<'v> StarlarkValue<'v> for FrozenRecord {
                 }
             }
             Ok(true)
-        } else if let Some(other_record) = other.downcast_ref::<Record>() {
-            let self_id = self.typ.downcast_ref::<FrozenRecordType>().map(|t| t.id);
-            let other_id = other_record
+        } else if let Some(other_spec) = other.downcast_ref::<Spec>() {
+            let self_id = self.typ.downcast_ref::<FrozenSpecType>().map(|t| t.id);
+            let other_id = other_spec
                 .typ
-                .downcast_ref::<RecordType>()
+                .downcast_ref::<SpecType>()
                 .map(|t| t.id)
                 .or_else(|| {
-                    other_record
+                    other_spec
                         .typ
-                        .downcast_ref::<FrozenRecordType>()
+                        .downcast_ref::<FrozenSpecType>()
                         .map(|t| t.id)
                 });
 
@@ -740,10 +764,10 @@ impl<'v> StarlarkValue<'v> for FrozenRecord {
                 return Ok(false);
             }
 
-            if self.values.len() != other_record.values.len() {
+            if self.values.len() != other_spec.values.len() {
                 return Ok(false);
             }
-            for (a, b) in self.values.iter().zip(other_record.values.iter()) {
+            for (a, b) in self.values.iter().zip(other_spec.values.iter()) {
                 if !a.to_value().equals(b.get())? {
                     return Ok(false);
                 }
@@ -755,8 +779,8 @@ impl<'v> StarlarkValue<'v> for FrozenRecord {
     }
 }
 
-impl Freeze for Record<'_> {
-    type Frozen = FrozenRecord;
+impl Freeze for Spec<'_> {
+    type Frozen = FrozenSpec;
 
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         let typ = self.typ.freeze(freezer)?;
@@ -765,7 +789,7 @@ impl Freeze for Record<'_> {
             .iter()
             .map(|v| v.get().freeze(freezer))
             .collect();
-        Ok(FrozenRecord {
+        Ok(FrozenSpec {
             typ,
             values: values?.into_boxed_slice(),
         })
@@ -778,19 +802,19 @@ impl Freeze for Record<'_> {
 
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
-    /// Creates a record type with the given fields.
+    /// Creates a spec type with the given fields.
     ///
     /// Example:
     /// ```starlark
-    /// MyRecord = spec(host=str, port=int)
-    /// r = MyRecord(host="localhost", port=80)
+    /// MySpec = spec(host=str, port=int)
+    /// r = MySpec(host="localhost", port=80)
     /// print(r.host)  # "localhost"
     /// print(r.port)  # 80
     /// ```
     fn spec<'v>(
         #[starlark(kwargs)] kwargs: SmallMap<&str, Value<'v>>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<RecordType<'v>> {
+    ) -> starlark::Result<SpecType<'v>> {
         let mut fields = SmallMap::with_capacity(kwargs.len());
 
         for (name, value) in kwargs.into_iter() {
@@ -798,18 +822,23 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 // It's already a field() definition
                 Field {
                     typ: field_value.typ.dupe(),
+                    typ_value: field_value.typ_value,
                     default: field_value.default,
                 }
             } else {
                 // It's a type, convert to a field without default
                 let typ = TypeCompiled::new(value, eval.heap())?;
-                Field { typ, default: None }
+                Field {
+                    typ,
+                    typ_value: value,
+                    default: None,
+                }
             };
             fields.insert(name.to_string(), field);
         }
 
-        Ok(RecordType {
-            id: next_record_type_id(),
+        Ok(SpecType {
+            id: next_spec_type_id(),
             name: None,
             fields,
         })
@@ -819,8 +848,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///
     /// Example:
     /// ```starlark
-    /// MyRecord = spec(host=str, port=attr(int, 80))
-    /// r = MyRecord(host="localhost")  # port defaults to 80
+    /// MySpec = spec(host=str, port=attr(int, 80))
+    /// r = MySpec(host="localhost")  # port defaults to 80
     /// ```
     fn attr<'v>(
         #[starlark(require = pos)] typ: Value<'v>,
@@ -842,6 +871,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
         Ok(FieldValue {
             typ: compiled_type,
+            typ_value: typ,
             default,
         })
     }
