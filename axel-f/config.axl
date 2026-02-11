@@ -1,17 +1,33 @@
 """Workflows Configuration"""
 
-load("./configure.axl", "configure")
-load("./gazelle.axl", "gazelle")
-load("./buildifier.axl", "buildifier")
 load("./migrate.axl", "migrate")
 load("./delivery.axl", "delivery")
-load("./marvinecho.axl", "marvinecho")
 load("./platform-config.axl",
     "read_platform_config",
     "read_host_config",
     "get_bazelrc_flags",
     "DEFAULT_PLATFORM_DIR"
 )
+load(
+    "./github.axl",
+    "create_check_run",
+    "update_check_run",
+    "complete_check_run",
+    "build_output",
+    "build_annotation",
+    "create_review",
+    "build_suggestion",
+)
+load(
+    "./sarif.axl",
+    "sarif_to_annotations",
+    "get_sarif_summary"
+)
+load(
+    "@aspect_rules_lint//lint/lint.axl",
+    "StrategyHoldTheLine",
+)
+load("./lint_strategy.axl", "make_github_strategy", "make_github_changed_files_provider")
 
 def _check_deliveryd_health(ctx, socket_path):
     """
@@ -62,13 +78,88 @@ def _start_deliveryd(ctx, delivery_db_endpoint, socket_path = "/tmp/deliveryd.so
 
     print("Started deliveryd (socket: {}, endpoint: {})".format(socket_path, delivery_db_endpoint))
 
+
+def _format_build_state(build_state):
+    md = """
+# Build Summary
+Total: {}
+Failed targets: {}
+State: {}
+
+""".format(
+        build_state["total"],
+        len(build_state["failures"]),
+        "failure" if len(build_state["failures"]) else "success"
+    )
+    for target, failure in build_state["failures"].items():
+        md += "## {}\n\n```{}```\n".format(target, failure.message)
+    return md
+
+
+def on_build_event(ctx: TaskContext, build_state: dict, event):
+    if not build_state:
+        build_state["total"] = 0
+        build_state["failures"] = {}
+    if event.kind == "target_completed":
+        build_state["total"] += 1
+        if not event.payload.success:
+            build_state["failures"][event.id.label] = event.payload.failure_detail
+            annotations = [
+                build_annotation(
+                    path = "README.md",      # NOT "./README.md"
+                    start_line = 6,          # target the deleted lines
+                    end_line = 6,
+                    message = "Unused variable 'foo'",
+                    annotation_level = "warning",
+                ),
+            ]
+            r = create_check_run(
+                ctx,
+                token = "",
+                owner = "thesayyn",
+                repo = "wasp",
+                name = "Build 2",
+                head_sha = "86fadc736fc76303a82f8ba05feff0f77e942847",
+                status = "in_progress",
+                output = build_output(
+                    title = "build failed",
+                    summary = "failed",
+                    text = _format_build_state(build_state),
+                    annotations = annotations
+                )
+            )
+            print(r)
+    elif event.kind == "build_finished":
+        print(_format_build_state(build_state))
+        suggestions = [
+            build_suggestion(
+                path = "README.md",
+                line = 7,
+                suggested_code = "fixed line 5",
+                message = "Lint: trailing whitespace",
+            ),
+        ]
+
+        r = create_review(
+            ctx,
+            token = "",
+            owner = "thesayyn",
+            repo = "lint_example",
+            pull_number = 1,
+            body = "Lint findings",
+            event = "COMMENT",
+            comments = suggestions,
+        )
+        print(r)
+
+
+# =============================================================================
+# Config
+# =============================================================================
+
 def config(ctx: ConfigContext):
-    ctx.tasks.add(configure)
-    ctx.tasks.add(gazelle)
-    ctx.tasks.add(buildifier)
     ctx.tasks.add(migrate)
     ctx.tasks.add(delivery)
-    ctx.tasks.add(marvinecho)
 
     CI = ctx.std.env.var("BUILDKITE")
 
@@ -122,5 +213,28 @@ def config(ctx: ConfigContext):
             task.config.flags = lambda f: flags(f, "build")
             task.config.build_start = lambda: print("+++ :bazel: Building")
             task.config.build_event_sinks = build_event_sinks
+            task.config.build_event = on_build_event
         if task.name == "delivery":
             task.config.delivery_start = lambda: print("--- :bazel: Delivery")
+        if task.name == "lint":
+            github_token = ctx.std.env.var("GITHUB_TOKEN")
+            if github_token:
+                # CI mode: GitHub-aware strategy with hold-the-line
+                github_repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
+                repo_parts = github_repository.split("/")
+                gh_owner = repo_parts[0] if len(repo_parts) >= 2 else ""
+                gh_repo = repo_parts[1] if len(repo_parts) >= 2 else ""
+
+                task.config.strategy = make_github_strategy(
+                    StrategyHoldTheLine,
+                    token = github_token,
+                    owner = gh_owner,
+                    repo = gh_repo,
+                    mode = "streaming",
+                )
+                task.config.changed_files_provider = make_github_changed_files_provider(
+                    token = github_token,
+                    owner = gh_owner,
+                    repo = gh_repo,
+                )
+            # else: local dev uses defaults (StrategyHoldTheLine + GitDiffProvider)

@@ -7,7 +7,7 @@ genrule(
     name = "hello",
     srcs = [],
     outs = ["hello.txt"],
-    cmd = "echo 'Hello, World!' > $@",
+    cmd = "echo 'Hello, World!' > $@; exit 1",
 )
 
 alias(

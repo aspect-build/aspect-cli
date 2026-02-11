@@ -190,8 +190,15 @@ impl<'l, 'p> TaskEvaluator<'l, 'p> {
             .expect("just pushed a scope");
 
         // Freeze immediately
-        module
+        let frozen = module
             .freeze()
-            .map_err(|e| EvalError::UnknownError(anyhow!(e)))
+            .map_err(|e| EvalError::UnknownError(anyhow!(e)))?;
+
+        // Cache the frozen module so that subsequent load() calls for the same
+        // path (e.g., from config files) return this module instead of
+        // re-evaluating and creating new type instances with different IDs.
+        self.loader.cache_module(abs_path, frozen.clone());
+
+        Ok(frozen)
     }
 }

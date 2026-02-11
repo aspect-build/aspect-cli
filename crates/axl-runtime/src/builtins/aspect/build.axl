@@ -6,9 +6,10 @@ BuildConfig = spec(
     startup_flags = attr(typing.Callable[[list[str]], list[str]], lambda flags: flags),
     flags = attr(typing.Callable[[list[str]], list[str]], lambda flags: flags),
     build_event_sinks = attr(typing.Callable[[], list[bazel.build.BuildEventSink]], lambda: []),
-    # TODO: build event sinks configuration
+
     # Lifecycle
     build_start = attr(typing.Callable[[], None], lambda: None),
+    build_event = attr(typing.Callable[[dict, str, str], None] | None, None),
     build_end = attr(typing.Callable[[int], None], lambda status: None)
 )
 
@@ -36,6 +37,13 @@ def impl(ctx: TaskContext) -> int:
             build_events = []
         build_events.extend(extra_sinks)
 
+    if ctx.config.build_event:
+        # flip build_events to true
+        # when its a list, it is automatically enabled.
+        if type(build_events) == "bool":
+            build_events = True
+
+
     bazel_flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
     for bazel_flag in ctx.args.bazel_flag:
         bazel_flags.append(bazel_flag)
@@ -56,6 +64,12 @@ def impl(ctx: TaskContext) -> int:
         startup_flags = bazel_startup_flags,
         *ctx.args.target_pattern
     )
+
+    if ctx.config.build_event:
+        build_event = ctx.config.build_event
+        state = dict()
+        for event in build.build_events():
+            build_event(ctx, state, event)
 
     build_status = build.wait()
 
