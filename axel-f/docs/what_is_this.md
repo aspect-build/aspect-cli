@@ -27,21 +27,6 @@ axel-f is a separate Rust crate that lives in its own repository. It is embedded
 
 ### Crate structure
 
-```
-axel-f/
-├── Cargo.toml          # crate definition
-├── src/lib.rs          # exports all .axl files via include_str!
-├── MODULE.aspect       # use_config() declarations
-├── config.axl          # main config function
-├── lint_strategy.axl   # lint strategy (GitHub-aware hold-the-line)
-├── github.axl          # GitHub API integration
-├── sarif.axl           # SARIF parsing
-├── delivery.axl        # artifact delivery
-├── deliveryd.axl       # delivery daemon client
-├── migrate.axl         # migration tooling
-└── platform-config.axl # platform environment discovery
-```
-
 `src/lib.rs` is minimal — it exports a single constant:
 
 ```rust

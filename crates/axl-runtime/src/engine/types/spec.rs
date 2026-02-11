@@ -6,11 +6,13 @@ use allocative::Allocative;
 use dupe::Dupe;
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
+use starlark::values::dict::AllocDict;
+use starlark::values::list::AllocList;
 use starlark::values::typing::TypeCompiled;
 use starlark::values::{
-    starlark_value, AllocFrozenValue, AllocValue, Freeze, FreezeError, Freezer, FrozenHeap,
-    FrozenValue, Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Trace, Tracer, Value,
-    ValueLike,
+    AllocFrozenValue, AllocValue, Freeze, FreezeError, Freezer, FrozenHeap, FrozenValue, Heap,
+    NoSerialize, ProvidesStaticType, StarlarkValue, Trace, Tracer, Value, ValueLike,
+    starlark_value,
 };
 use starlark_map::small_map::SmallMap;
 
@@ -171,6 +173,30 @@ impl Freeze for FieldValue<'_> {
     }
 }
 
+/// Deep-copy a default value if it's a mutable container (list or dict).
+/// This ensures each spec instance gets its own mutable copy rather than
+/// sharing the (potentially frozen) default.
+fn copy_default_value<'v>(value: Value<'v>, heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    match value.get_type() {
+        "list" => {
+            let items: Vec<Value<'v>> = value.iterate(heap)?.collect();
+            Ok(heap.alloc(AllocList(items)))
+        }
+        "dict" => {
+            let keys: Vec<Value<'v>> = value.iterate(heap)?.collect();
+            let items: Vec<(Value<'v>, Value<'v>)> = keys
+                .into_iter()
+                .map(|k| {
+                    let v = value.at(k, heap)?;
+                    Ok((k, v))
+                })
+                .collect::<starlark::Result<_>>()?;
+            Ok(heap.alloc(AllocDict(items)))
+        }
+        _ => Ok(value),
+    }
+}
+
 /// Create fresh TypeCompiled values from field type values at runtime.
 /// This ensures type checking works correctly for types like starlark Records
 /// whose frozen TypeCompiled matchers may not function properly.
@@ -265,7 +291,7 @@ impl<'v> StarlarkValue<'v> for SpecType<'v> {
             let value = if let Some(v) = kwargs.get(field_name.as_str()) {
                 *v
             } else if let Some(default) = field.default {
-                default
+                copy_default_value(default, eval.heap())?
             } else {
                 return Err(starlark::Error::new_other(anyhow::anyhow!(
                     "Missing required field `{}` for {}",
@@ -377,7 +403,7 @@ impl<'v> StarlarkValue<'v> for FrozenSpecType {
             let value = if let Some(v) = kwargs.get(field_name.as_str()) {
                 *v
             } else if let Some(default) = field.default {
-                default.to_value()
+                copy_default_value(default.to_value(), eval.heap())?
             } else {
                 return Err(starlark::Error::new_other(anyhow::anyhow!(
                     "Missing required field `{}` for {}",
@@ -804,12 +830,25 @@ impl Freeze for Spec<'_> {
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Creates a spec type with the given fields.
     ///
+    /// Each field can be a bare type (required, no default) or an `attr()`
+    /// definition (with type and optional default).
+    ///
+    /// Mutable defaults (lists, dicts) are deep-copied per instance, so each
+    /// instance gets its own independent copy. No `default_factory` needed.
+    ///
     /// Example:
     /// ```starlark
     /// MySpec = spec(host=str, port=int)
     /// r = MySpec(host="localhost", port=80)
     /// print(r.host)  # "localhost"
     /// print(r.port)  # 80
+    ///
+    /// # Mutable defaults are safe:
+    /// ListSpec = spec(items=attr(list[str], []))
+    /// a = ListSpec()
+    /// b = ListSpec()
+    /// a.items.append("x")
+    /// print(b.items)  # [] — each instance has its own list
     /// ```
     fn spec<'v>(
         #[starlark(kwargs)] kwargs: SmallMap<&str, Value<'v>>,
@@ -846,10 +885,17 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
     /// Creates a field definition with a type and optional default value.
     ///
+    /// Mutable defaults (lists, dicts) are deep-copied when a spec instance is
+    /// created, so each instance gets its own independent copy.
+    ///
     /// Example:
     /// ```starlark
     /// MySpec = spec(host=str, port=attr(int, 80))
     /// r = MySpec(host="localhost")  # port defaults to 80
+    ///
+    /// # Mutable defaults are copied per instance:
+    /// attr(list[str], [])   # each instance gets a fresh []
+    /// attr(dict[str, int], {})  # each instance gets a fresh {}
     /// ```
     fn attr<'v>(
         #[starlark(require = pos)] typ: Value<'v>,
