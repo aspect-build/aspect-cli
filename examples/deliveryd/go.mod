@@ -1,6 +1,6 @@
 module github.com/aspect-build/deliveryd
 
-go 1.22
+go 1.26.0
 
 require github.com/redis/go-redis/v9 v9.7.0
 
