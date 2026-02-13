@@ -6,8 +6,12 @@ common --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
 # Check local dev setup
 common --workspace_status_command=tools/githooks/check-config.sh
 
+common --toolchain_resolution_debug='\Q@@rules_rs++rules_rust+rules_rust//rust:toolchain_type\E'
+
 common:macos --build_tag_filters=-no-macos
 common:linux --host_platform=//bazel/platforms:linux_host_platform
+
+common --@rules_go//go/toolchain:source=bootstrapped
 
 common --@rules_cc//cc/toolchains/args/archiver_flags:use_libtool_on_macos=False
 common --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
