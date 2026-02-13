@@ -1,6 +1,7 @@
 """
 A default 'build' task that wraps a 'bazel build' command.
 """
+load("./bazel.axl", "default_retry")
 
 BuildConfig = spec(
     # Declarative data — composable, zero-cost reads
@@ -15,6 +16,7 @@ BuildConfig = spec(
     # Lifecycle — only called when set
     build_start = attr(typing.Callable[[], None] | None, None),
     build_event = attr(typing.Callable[[dict, str, str], None] | None, None),
+    build_retry = attr(typing.Callable[[int], bool], default_retry),
     build_end = attr(typing.Callable[[int], None] | None, None),
 )
 
@@ -65,20 +67,24 @@ def impl(ctx: TaskContext) -> int:
     if ctx.config.build_start:
         ctx.config.build_start()
 
-    build = ctx.bazel.build(
-        build_events = build_events,
-        flags = flags,
-        startup_flags = startup_flags,
-        *ctx.args.target_pattern,
-    )
+    for _ in range(10):
+        build = ctx.bazel.build(
+            build_events = build_events,
+            flags = flags,
+            startup_flags = startup_flags,
+            *ctx.args.target_pattern,
+        )
 
-    if ctx.config.build_event:
-        handler = ctx.config.build_event
-        state = {}
-        for event in build.build_events():
-            handler(ctx, state, event)
+        if ctx.config.build_event:
+            handler = ctx.config.build_event
+            state = {}
+            for event in build.build_events():
+                handler(ctx, state, event)
 
-    build_status = build.wait()
+        build_status = build.wait()
+
+        if build_status.code == 0 or not ctx.config.build_retry(build_status.code):
+            break
 
     if ctx.config.build_end:
         ctx.config.build_end(build_status.code)

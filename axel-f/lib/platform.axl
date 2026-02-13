@@ -8,6 +8,7 @@ This is the AXL equivalent of rosetta's bazel/flags.ts and related modules.
 # Constants
 DEFAULT_STORAGE_PATH = "/mnt/ephemeral"
 DEFAULT_PLATFORM_DIR = "/etc/aspect/workflows/platform"
+DEFAULT_BIN_DIR = "/etc/aspect/workflows/bin"
 
 # Map of logical keys to filenames
 PLATFORM_CONFIG_KEYS = {
@@ -140,6 +141,34 @@ def read_platform_config(fs, platform_dir = DEFAULT_PLATFORM_DIR):
     # Apply defaults
     if "storage_path" not in config:
         config["storage_path"] = DEFAULT_STORAGE_PATH
+
+    return config
+
+
+def read_warming_config(fs, platform_dir = DEFAULT_PLATFORM_DIR):
+    """
+    Read warming-specific configuration from platform config files.
+
+    Args:
+        fs: Filesystem interface (ctx.std.fs)
+        platform_dir: Path to platform config directory
+
+    Returns:
+        dict with optional keys: warming_bucket, warming_additional_paths
+    """
+    config = {}
+
+    bucket_path = platform_dir + "/warming_bucket"
+    if fs.exists(bucket_path):
+        content = fs.read_to_string(bucket_path)
+        if content:
+            config["warming_bucket"] = content.strip()
+
+    paths_path = platform_dir + "/warming_additional_paths"
+    if fs.exists(paths_path):
+        content = fs.read_to_string(paths_path)
+        if content:
+            config["warming_additional_paths"] = content.strip()
 
     return config
 
