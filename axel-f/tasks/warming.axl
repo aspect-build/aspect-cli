@@ -1,0 +1,139 @@
+"""
+Warming tasks for archiving and restoring Bazel caches on CI runners.
+
+These tasks wrap the existing warming shell scripts that handle tarring up
+caches (repository cache, bazel server, output base) and streaming them
+to/from cloud storage (S3 or GCS).
+
+- update: Archives the current caches and uploads to cloud storage after
+  a `bazel build --nobuild` warming pass (which is a separate concern).
+- restore: Downloads and extracts cached archives during runner bootstrap
+  so subsequent builds start warm.
+
+Both tasks require the Aspect Workflows runner infrastructure to be present.
+"""
+
+load(
+    "../lib/platform.axl",
+    "read_warming_config",
+    "DEFAULT_BIN_DIR",
+    "DEFAULT_PLATFORM_DIR",
+)
+
+
+def _is_workflows_runner(fs, platform_dir):
+    """Check if we are running on an Aspect Workflows runner."""
+    return fs.exists(platform_dir + "/aws") or fs.exists(platform_dir + "/gcp")
+
+
+def _warmup_update_impl(ctx):
+    """Archive warming caches and upload to cloud storage."""
+    platform_dir = ctx.args.platform_dir
+    bin_dir = ctx.args.bin_dir
+    archive_bin = bin_dir + "/warming_archive"
+
+    if not _is_workflows_runner(ctx.std.fs, platform_dir):
+        print("Error: Not running on an Aspect Workflows runner.")
+        print("The warming update task requires the Workflows runner infrastructure.")
+        return 1
+
+    if not ctx.std.fs.exists(archive_bin):
+        print("Error: warming archive binary not found at: " + archive_bin)
+        print("Ensure the Workflows runner bootstrap has completed.")
+        return 1
+
+    print("Archiving warming caches...")
+
+    child = ctx.std.process.command(archive_bin) \
+        .stdout("inherit") \
+        .stderr("inherit") \
+        .spawn()
+
+    status = child.wait()
+
+    if status.code != 0:
+        print("Error: warming archive failed with exit code " + str(status.code))
+
+    return status.code
+
+
+update = task(
+    name = "update",
+    implementation = _warmup_update_impl,
+    group = ["workflows", "runner", "warming"],
+    args = {
+        "bin_dir": args.string(default = DEFAULT_BIN_DIR),
+        "platform_dir": args.string(default = DEFAULT_PLATFORM_DIR),
+    },
+)
+
+
+def _warmup_restore_impl(ctx):
+    """Restore warming caches from cloud storage."""
+    platform_dir = ctx.args.platform_dir
+    bin_dir = ctx.args.bin_dir
+    restore_bin = bin_dir + "/warming_restore"
+
+    if not _is_workflows_runner(ctx.std.fs, platform_dir):
+        print("Error: Not running on an Aspect Workflows runner.")
+        print("The warming restore task requires the Workflows runner infrastructure.")
+        return 1
+
+    if not ctx.std.fs.exists(restore_bin):
+        print("Error: warming restore binary not found at: " + restore_bin)
+        print("Ensure the Workflows runner bootstrap has completed.")
+        return 1
+
+    # Resolve bucket: CLI arg > platform config file
+    bucket = ctx.args.bucket
+    additional_paths = ctx.args.additional_paths
+
+    if not bucket or not additional_paths:
+        warming_config = read_warming_config(ctx.std.fs, platform_dir)
+        if not bucket:
+            bucket = warming_config.get("warming_bucket", "")
+        if not additional_paths:
+            additional_paths = warming_config.get("warming_additional_paths", "")
+
+    if not bucket:
+        print("Error: warming bucket not specified.")
+        print("Use --bucket=<name> or write the bucket name to " + platform_dir + "/warming_bucket")
+        return 1
+
+    print("Restoring warming caches from bucket: " + bucket)
+
+    child = ctx.std.process.command(restore_bin) \
+        .arg(bucket) \
+        .arg(additional_paths) \
+        .stdout("inherit") \
+        .stderr("inherit") \
+        .spawn()
+
+    status = child.wait()
+
+    if status.code != 0:
+        print("Warning: warming restore exited with code " + str(status.code))
+        # Exit codes 10, 11 mean the agent is warm but from a fallback.
+        # Exit codes 20-24 mean the agent is cold.
+        if status.code in [10, 11]:
+            print("Agent is warm (restored from fallback cache).")
+        elif status.code in [20, 21, 23, 24]:
+            print("Agent is cold (cache restore failed).")
+        else:
+            print("Unexpected exit code from warming restore.")
+
+    return status.code
+
+
+# aspect runner warming restore
+restore = task(
+    name = "restore",
+    implementation = _warmup_restore_impl,
+    group = ["workflows", "runner", "warming"],
+    args = {
+        "bin_dir": args.string(default = DEFAULT_BIN_DIR),
+        "platform_dir": args.string(default = DEFAULT_PLATFORM_DIR),
+        "bucket": args.string(default = ""),
+        "additional_paths": args.string(default = ""),
+    },
+)

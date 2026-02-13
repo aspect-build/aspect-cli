@@ -2,11 +2,16 @@ use allocative::Allocative;
 use derive_more::Display;
 use futures::FutureExt;
 use futures::TryStreamExt;
+use http_body_util::{BodyExt, Empty, Full};
+use hyper::body::Bytes;
+use hyper_util::client::legacy::Client as HyperClient;
+use hyperlocal::{UnixClientExt, Uri as UnixUri};
 use reqwest::redirect::Policy;
 use ssri::{Integrity, IntegrityChecker};
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::values::AllocValue;
 use starlark::values::dict::UnpackDictEntries;
+use starlark::values::none::NoneOr;
 use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueLike};
 use starlark::values::{StarlarkValue, starlark_value};
 use starlark::{starlark_module, starlark_simple_value, values};
@@ -117,7 +122,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named)] integrity: Option<String>,
         #[starlark(require = named)] sha256: Option<String>,
-    ) -> starlark::Result<StarlarkFuture> {
+    ) -> starlark::Result<StarlarkFuture<'v>> {
         let client = &this.downcast_ref_err::<Http>()?.client;
         let mut req = client.get(url.as_str().to_string());
         for (key, value) in headers.entries {
@@ -170,46 +175,224 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
     }
 
     fn get<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         #[starlark(require = named)] url: values::StringValue,
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
-    ) -> starlark::Result<StarlarkFuture> {
-        let client = &this.downcast_ref_err::<Http>()?.client;
-        let mut req = client.get(url.as_str().to_string());
-        for (key, value) in headers.entries {
-            req = req.header(key.as_str(), value.as_str());
+        #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
+    ) -> starlark::Result<StarlarkFuture<'v>> {
+        let url_str = url.as_str().to_string();
+        let headers_vec: Vec<(String, String)> = headers
+            .entries
+            .into_iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+            .collect();
+
+        match unix_socket.into_option() {
+            Some(socket) => {
+                let fut = async move {
+                    let client = HyperClient::unix();
+                    let parsed = url::Url::parse(&url_str)
+                        .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
+                    let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
+
+                    let mut req = hyper::Request::builder().method("GET").uri(uri);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    let req = req
+                        .body(Empty::<Bytes>::new())
+                        .map_err(|e| anyhow::anyhow!("failed to build request: {}", e))?;
+
+                    let res = client
+                        .request(req)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("request failed: {}", e))?;
+
+                    let status = res.status().as_u16();
+                    let resp_headers: Vec<(String, String)> = res
+                        .headers()
+                        .iter()
+                        .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
+                        .collect();
+                    let body = res
+                        .into_body()
+                        .collect()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to read body: {}", e))?
+                        .to_bytes();
+                    let body = String::from_utf8_lossy(&body).to_string();
+
+                    Ok(HttpResponse {
+                        status,
+                        headers: resp_headers,
+                        body,
+                    })
+                };
+                Ok(StarlarkFuture::from_future(fut.boxed()))
+            }
+            None => {
+                let client = this.downcast_ref_err::<Http>()?.client.clone();
+                let fut = async move {
+                    let mut req = client.get(&url_str);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    let res = req.send().await?;
+                    let response = HttpResponse::from_response(res).await?;
+                    Ok(response)
+                };
+                Ok(StarlarkFuture::from_future(fut.boxed()))
+            }
         }
+    }
 
-        let fut = async {
-            let res = req.send().await?;
-            let response = HttpResponse::from_response(res).await?;
-            Ok(response)
-        };
+    fn delete<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named)] url: values::StringValue,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        headers: UnpackDictEntries<values::StringValue, values::StringValue>,
+        #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
+    ) -> starlark::Result<StarlarkFuture<'v>> {
+        let url_str = url.as_str().to_string();
+        let headers_vec: Vec<(String, String)> = headers
+            .entries
+            .into_iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+            .collect();
 
-        Ok(StarlarkFuture::from_future(fut.boxed()))
+        match unix_socket.into_option() {
+            Some(socket) => {
+                let fut = async move {
+                    let client = HyperClient::unix();
+                    let parsed = url::Url::parse(&url_str)
+                        .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
+                    let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
+
+                    let mut req = hyper::Request::builder().method("DELETE").uri(uri);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    let req = req
+                        .body(Empty::<Bytes>::new())
+                        .map_err(|e| anyhow::anyhow!("failed to build request: {}", e))?;
+
+                    let res = client
+                        .request(req)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("request failed: {}", e))?;
+
+                    let status = res.status().as_u16();
+                    let resp_headers: Vec<(String, String)> = res
+                        .headers()
+                        .iter()
+                        .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
+                        .collect();
+                    let body = res
+                        .into_body()
+                        .collect()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to read body: {}", e))?
+                        .to_bytes();
+                    let body = String::from_utf8_lossy(&body).to_string();
+
+                    Ok(HttpResponse {
+                        status,
+                        headers: resp_headers,
+                        body,
+                    })
+                };
+                Ok(StarlarkFuture::from_future(fut.boxed()))
+            }
+            None => {
+                let client = this.downcast_ref_err::<Http>()?.client.clone();
+                let fut = async move {
+                    let mut req = client.delete(&url_str);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    let res = req.send().await?;
+                    let response = HttpResponse::from_response(res).await?;
+                    Ok(response)
+                };
+                Ok(StarlarkFuture::from_future(fut.boxed()))
+            }
+        }
     }
 
     fn post<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         url: values::StringValue,
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         data: String,
-    ) -> starlark::Result<StarlarkFuture> {
-        let client = &this.downcast_ref_err::<Http>()?.client;
-        let mut req = client.post(url.as_str().to_string());
-        for (key, value) in headers.entries {
-            req = req.header(key.as_str(), value.as_str());
-        }
-        req = req.body(data);
-        let fut = async {
-            let res = req.send().await?;
-            let response = HttpResponse::from_response(res).await?;
-            Ok(response)
-        };
+        #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
+    ) -> starlark::Result<StarlarkFuture<'v>> {
+        let url_str = url.as_str().to_string();
+        let headers_vec: Vec<(String, String)> = headers
+            .entries
+            .into_iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+            .collect();
 
-        Ok(StarlarkFuture::from_future(fut))
+        match unix_socket.into_option() {
+            Some(socket) => {
+                let fut = async move {
+                    let client = HyperClient::unix();
+                    let parsed = url::Url::parse(&url_str)
+                        .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
+                    let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
+
+                    let mut req = hyper::Request::builder().method("POST").uri(uri);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    let req = req
+                        .body(Full::new(Bytes::from(data)))
+                        .map_err(|e| anyhow::anyhow!("failed to build request: {}", e))?;
+
+                    let res = client
+                        .request(req)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("request failed: {}", e))?;
+
+                    let status = res.status().as_u16();
+                    let resp_headers: Vec<(String, String)> = res
+                        .headers()
+                        .iter()
+                        .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
+                        .collect();
+                    let body = res
+                        .into_body()
+                        .collect()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to read body: {}", e))?
+                        .to_bytes();
+                    let body = String::from_utf8_lossy(&body).to_string();
+
+                    Ok(HttpResponse {
+                        status,
+                        headers: resp_headers,
+                        body,
+                    })
+                };
+                Ok(StarlarkFuture::from_future(fut))
+            }
+            None => {
+                let client = this.downcast_ref_err::<Http>()?.client.clone();
+                let fut = async move {
+                    let mut req = client.post(&url_str);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    req = req.body(data);
+                    let res = req.send().await?;
+                    let response = HttpResponse::from_response(res).await?;
+                    Ok(response)
+                };
+                Ok(StarlarkFuture::from_future(fut))
+            }
+        }
     }
 }
 

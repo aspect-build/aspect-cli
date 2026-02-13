@@ -226,7 +226,7 @@ impl DiskStore {
     pub async fn expand_store(
         &self,
         store: &ModuleStore,
-    ) -> Result<Vec<(String, PathBuf)>, StoreError> {
+    ) -> Result<Vec<(String, PathBuf, bool)>, StoreError> {
         let root = self.root();
         fs::create_dir_all(&root).await?;
         fs::create_dir_all(self.deps_path()).await?;
@@ -247,6 +247,7 @@ impl DiskStore {
                             path: path,
                             // Builtins tasks are always auto used
                             auto_use_tasks: true,
+                            use_config: true,
                         }),
                     )
                 })
@@ -261,11 +262,11 @@ impl DiskStore {
             let dep_path = self.dep_path(dep.name());
 
             match dep {
-                Dep::Local(local) if local.auto_use_tasks => {
-                    module_roots.push((local.name.clone(), dep_path.clone()))
+                Dep::Local(local) if local.auto_use_tasks || local.use_config => {
+                    module_roots.push((local.name.clone(), dep_path.clone(), local.use_config))
                 }
-                Dep::Remote(remote) if remote.auto_use_tasks => {
-                    module_roots.push((remote.name.clone(), dep_path.clone()))
+                Dep::Remote(remote) if remote.auto_use_tasks || remote.use_config => {
+                    module_roots.push((remote.name.clone(), dep_path.clone(), remote.use_config))
                 }
                 _ => {}
             };

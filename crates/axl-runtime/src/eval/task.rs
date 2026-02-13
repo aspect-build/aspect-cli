@@ -75,9 +75,8 @@ pub fn execute_task(
     store: AxlStore,
     args: HashMap<String, String>,
 ) -> Result<Option<u8>, EvalError> {
-    // Get config first - it needs to outlive the evaluator
-    let config = task.get_config();
-    let config_value = config.value();
+    // Get config value
+    let config_value = task.get_config();
 
     // Get the task implementation function
     let task_impl = task
@@ -120,9 +119,8 @@ pub fn execute_task_with_args(
     store: AxlStore,
     args_builder: impl FnOnce(&Heap) -> TaskArgs,
 ) -> Result<Option<u8>, EvalError> {
-    // Get config first - it needs to outlive the evaluator
-    let config = task.get_config();
-    let config_value = config.value();
+    // Get config value
+    let config_value = task.get_config();
 
     // Get the task implementation function
     let task_impl = task
@@ -192,8 +190,15 @@ impl<'l, 'p> TaskEvaluator<'l, 'p> {
             .expect("just pushed a scope");
 
         // Freeze immediately
-        module
+        let frozen = module
             .freeze()
-            .map_err(|e| EvalError::UnknownError(anyhow!(e)))
+            .map_err(|e| EvalError::UnknownError(anyhow!(e)))?;
+
+        // Cache the frozen module so that subsequent load() calls for the same
+        // path (e.g., from config files) return this module instead of
+        // re-evaluating and creating new type instances with different IDs.
+        self.loader.cache_module(abs_path, frozen.clone());
+
+        Ok(frozen)
     }
 }

@@ -190,7 +190,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///     task_args = {
     ///         "target": args.string(),
     ///     },
-    ///     config = None  # Optional user-defined config (e.g., a record); defaults to None if not provided
+    ///     config = lambda: MyConfig(key = "value")  # Optional lambda that returns config; evaluated at task creation
     /// )
     /// ```
     fn task<'v>(
@@ -222,7 +222,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             description,
             group: group.items,
             name,
-            config: config.into_option().unwrap_or(values::Value::new_none()),
+            config: config.into_option().unwrap_or(Value::new_none()),
         })
     }
 }
