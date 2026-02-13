@@ -11,6 +11,7 @@ struct Builtin {
 const ASPECT: Builtin = Builtin {
     name: "aspect",
     files: &[
+        ("bazel.axl", include_str!("./aspect/bazel.axl")),
         ("build.axl", include_str!("./aspect/build.axl")),
         ("test.axl", include_str!("./aspect/test.axl")),
         ("axl_add.axl", include_str!("./aspect/axl_add.axl")),

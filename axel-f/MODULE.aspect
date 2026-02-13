@@ -1,7 +1,10 @@
-# Configure delivery task
+# Register warming tasks.
+use_task("tasks/warming.axl", "restore", "update")
+
+# Configure delivery
 use_config("config/delivery.axl", "configure_delivery")
 
-# Configure builtins for Workflows environment
+# Configure builtins
 use_config("config/builtins.axl", "configure_builtins")
 
 # Configure rules_lint if its declared by user
