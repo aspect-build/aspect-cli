@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "axel-f"]
+members = ["crates/*"]
 exclude = ["crates/example-tui", "examples/lint"]
 default-members = ["crates/aspect-cli"]
 resolver = "2"

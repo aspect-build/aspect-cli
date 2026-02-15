@@ -1,0 +1,25 @@
+def _img_impl(ctx):
+    ac = remote.execution.ActionCache(
+        uri = "grpcs://testing.buildbuddy.io",
+        headers = {},
+        timeout = 10000,
+    )
+    ac.connect(ctx)
+
+    req = remote.execution.GetActionResultRequest(
+        instance_name = "example-instance",
+        action_digest = remote.execution.Digest(
+            hash = "0123456789abcdef",
+            size_bytes = 123,
+        ),
+        inline_stdout = True,
+        inline_stderr = True,
+    )
+
+    result = ac.GetActionResult(req)
+    print("action result:", result)
+
+imagine = task(
+    implementation = _img_impl,
+    args = {}
+)

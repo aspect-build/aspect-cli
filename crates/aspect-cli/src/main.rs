@@ -61,7 +61,7 @@ async fn main() -> miette::Result<ExitCode> {
     }
 
     // Initialize tracing for logging and instrumentation.
-    let _tracing = trace::init();
+    // let _tracing = trace::init();
     // Enter the root tracing span for the entire application.
     let _root = info_span!("root").entered();
 
@@ -519,7 +519,7 @@ async fn main() -> miette::Result<ExitCode> {
     match out.await {
         Ok(result) => {
             drop(_root);
-            drop(_tracing);
+            // drop(_tracing);
             result
         }
         Err(err) => panic!("{:?}", err),

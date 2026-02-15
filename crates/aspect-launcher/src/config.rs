@@ -249,16 +249,10 @@ fn parse_version_axl(content: &str) -> Result<AspectLauncherConfig> {
 
     for arg in &args.args {
         match &arg.node {
-            ArgumentP::Positional(expr) => {
-                if version.is_none() {
-                    version = Some(extract_string_literal(expr)?.to_owned());
-                } else {
-                    return Err(miette!(
-                        "version() accepts only one positional argument (the version string)"
-                    ));
-                }
-            }
             ArgumentP::Named(name, expr) => match name.node.as_str() {
+                "use" => {
+                    version = Some(extract_string_literal(expr)?.to_owned());
+                }
                 "sources" => {
                     if let Expr::List(items) = &expr.node {
                         let mut src_list = Vec::new();
@@ -275,7 +269,7 @@ fn parse_version_axl(content: &str) -> Result<AspectLauncherConfig> {
                 }
             },
             _ => {
-                return Err(miette!("unexpected *args or **kwargs in version() call"));
+                return Err(miette!("version() only accepts named arguments (use, sources)"));
             }
         }
     }

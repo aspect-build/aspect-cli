@@ -16,17 +16,61 @@ const ASPECT: Builtin = Builtin {
         ("test.axl", include_str!("./aspect/test.axl")),
         ("axl_add.axl", include_str!("./aspect/axl_add.axl")),
         ("MODULE.aspect", include_str!("./aspect/MODULE.aspect")),
+        // config/
+        (
+            "config/builtins.axl",
+            include_str!("./aspect/config/builtins.axl"),
+        ),
+        (
+            "config/delivery.axl",
+            include_str!("./aspect/config/delivery.axl"),
+        ),
+        ("config/lint.axl", include_str!("./aspect/config/lint.axl")),
+        (
+            "config/nolint.axl",
+            include_str!("./aspect/config/nolint.axl"),
+        ),
+        // tasks/
+        (
+            "tasks/delivery.axl",
+            include_str!("./aspect/tasks/delivery.axl"),
+        ),
+        (
+            "tasks/dummy_lint.axl",
+            include_str!("./aspect/tasks/dummy_lint.axl"),
+        ),
+        (
+            "tasks/dummy_format.axl",
+            include_str!("./aspect/tasks/dummy_format.axl"),
+        ),
+        (
+            "tasks/migrate.axl",
+            include_str!("./aspect/tasks/migrate.axl"),
+        ),
+        (
+            "tasks/warming.axl",
+            include_str!("./aspect/tasks/warming.axl"),
+        ),
+        // lib/
+        (
+            "lib/deliveryd.axl",
+            include_str!("./aspect/lib/deliveryd.axl"),
+        ),
+        ("lib/github.axl", include_str!("./aspect/lib/github.axl")),
+        (
+            "lib/linting.axl",
+            include_str!("./aspect/lib/linting.axl"),
+        ),
+        (
+            "lib/platform.axl",
+            include_str!("./aspect/lib/platform.axl"),
+        ),
+        ("lib/sarif.axl", include_str!("./aspect/lib/sarif.axl")),
     ],
 };
 
 #[cfg(not(debug_assertions))]
-const AXEL_F: Builtin = Builtin {
-    name: "axel-f",
-    files: axel_f::FILES,
-};
-
-#[cfg(not(debug_assertions))]
-const ALL: &[&Builtin] = &[&ASPECT, &AXEL_F];
+const ALL: &[&Builtin] = &[&ASPECT];
 
 #[cfg(debug_assertions)]
 pub fn expand_builtins(
@@ -34,13 +78,10 @@ pub fn expand_builtins(
     _broot: PathBuf,
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    Ok(vec![
-        (
-            "aspect".to_string(),
-            manifest_dir.join("src/builtins/aspect"),
-        ),
-        ("axel-f".to_string(), manifest_dir.join("../../axel-f")),
-    ])
+    Ok(vec![(
+        "aspect".to_string(),
+        manifest_dir.join("src/builtins/aspect"),
+    )])
 }
 
 #[cfg(not(debug_assertions))]
