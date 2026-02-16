@@ -18,9 +18,6 @@ PLATFORM_CONFIG_KEYS = {
     "bessie_endpoint": "bessie_endpoint",
     "build_result_ui_base_url": "build_result_ui_base_url",
     "delivery_db_endpoint": "delivery_db_endpoint",
-    "api_key": "api_key",
-    "api_client_id": "api_client_id",
-    "brs_api_endpoint": "brs_api_endpoint",
 }
 
 # Bazel command lists
