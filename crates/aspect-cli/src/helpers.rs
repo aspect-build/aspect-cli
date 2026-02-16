@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use axl_runtime::module::{AXL_CONFIG_EXTENSION, AXL_MODULE_FILE, AXL_SCRIPT_EXTENSION};
+use axl_runtime::module::{
+    AXL_CONFIG_EXTENSION, AXL_MODULE_FILE, AXL_SCRIPT_EXTENSION, AXL_VERSION_EXTENSION,
+};
 use tokio::fs;
 use tracing::instrument;
 
@@ -93,7 +95,9 @@ pub async fn search_sources(
                 if !path.is_file() {
                     continue;
                 }
-                if path.ends_with(AXL_CONFIG_EXTENSION) {
+                if path.ends_with(AXL_VERSION_EXTENSION) {
+                    // version.axl files are not evaluated
+                } else if path.ends_with(AXL_CONFIG_EXTENSION) {
                     configs.push(path);
                 } else if path
                     .extension()

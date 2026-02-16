@@ -1,0 +1,11 @@
+version(
+    "2025.46.20",
+    sources = [
+        local("target/debug/aspect-cli"),
+        local("bazel-bin/crates/aspect-cli/aspect-cli"),
+        github(
+            org = "aspect-build",
+            repo = "aspect-cli",
+        ),
+    ],
+)
