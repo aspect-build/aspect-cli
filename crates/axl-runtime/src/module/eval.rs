@@ -184,6 +184,8 @@ pub const AXL_SCRIPT_EXTENSION: &str = "axl";
 
 pub const AXL_CONFIG_EXTENSION: &str = "config.axl";
 
+pub const AXL_VERSION_EXTENSION: &str = "version.axl";
+
 /// Returns a GlobalsBuilder for MODULE.aspect specific AXL globals, extending
 /// various Starlark library extensions with custom top-level functions.
 pub fn get_globals() -> Globals {

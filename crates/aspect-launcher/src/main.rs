@@ -15,8 +15,7 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use aspect_telemetry::{
-    BZLARCH, BZLOS, GOARCH, GOOS, LLVM_TRIPLE, cargo_pkg_short_version, do_not_track,
-    send_telemetry,
+    BZLARCH, GOOS, LLVM_TRIPLE, cargo_pkg_short_version, do_not_track, send_telemetry,
 };
 use clap::{Arg, Command, arg};
 use fork::{Fork, fork};
@@ -30,6 +29,15 @@ use tokio::task::{self, JoinHandle};
 
 use crate::cache::AspectCache;
 use crate::config::{ToolSource, ToolSpec, autoconf};
+
+/// Replace `{var}` placeholders in a string with platform values.
+/// Supported variables: version, os, arch, target.
+fn replace_vars(s: &str, version: &str) -> String {
+    s.replace("{version}", version)
+        .replace("{os}", GOOS)
+        .replace("{arch}", BZLARCH)
+        .replace("{target}", LLVM_TRIPLE)
+}
 
 fn debug_mode() -> bool {
     match var("ASPECT_DEBUG") {
@@ -185,27 +193,10 @@ async fn configure_tool_task(
 
         let client = reqwest::Client::new();
 
-        let liquid_globals = liquid::object!({
-            "version": tool.version(),
-            // Per @platforms, sigh
-            "bzlos": BZLOS.to_string(),
-            "bzlarch": BZLARCH.to_string(),
-            // Per golang
-            "goos": GOOS.to_string(),
-            "goarch": GOARCH.to_string(),
-            "llvm_triple": LLVM_TRIPLE.to_string(),
-        });
-
-        let liquid_parser = liquid::ParserBuilder::new().build().into_diagnostic()?;
-
         for source in tool.sources() {
             match source {
                 ToolSource::Http { url, headers } => {
-                    let url = liquid_parser
-                        .parse(&url)
-                        .into_diagnostic()?
-                        .render(&liquid_globals)
-                        .into_diagnostic()?;
+                    let url = replace_vars(url, tool.version());
                     let req_headers = headermap_from_hashmap(headers.iter());
                     let req = client
                         .request(Method::GET, &url)
@@ -256,32 +247,28 @@ async fn configure_tool_task(
                 ToolSource::GitHub {
                     org,
                     repo,
-                    release,
+                    tag,
                     artifact,
                 } => {
-                    let release = liquid_parser
-                        .parse(&release)
-                        .into_diagnostic()?
-                        .render(&liquid_globals)
-                        .into_diagnostic()?;
-                    let artifact = liquid_parser
-                        .parse(&artifact)
-                        .into_diagnostic()?
-                        .render(&liquid_globals)
-                        .into_diagnostic()?;
+                    let tag = if tag.is_empty() {
+                        format!("v{}", tool.version())
+                    } else {
+                        replace_vars(tag, tool.version())
+                    };
+                    let artifact = if artifact.is_empty() {
+                        format!("{}-{}", repo, LLVM_TRIPLE)
+                    } else {
+                        replace_vars(artifact, tool.version())
+                    };
 
-                    let url = format!(
-                        "https://api.github.com/repos/{org}/{repo}/releases/tags/{release}"
-                    );
+                    let url =
+                        format!("https://api.github.com/repos/{org}/{repo}/releases/tags/{tag}");
 
                     let tool_dest_file = cache.tool_path(&tool.name(), &url);
                     let mut extra_envs = HashMap::new();
                     extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_ORG".to_string(), org.clone());
                     extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_REPO".to_string(), repo.clone());
-                    extra_envs.insert(
-                        "ASPECT_LAUNCHER_ASPECT_CLI_RELEASE".to_string(),
-                        release.clone(),
-                    );
+                    extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(), tag.clone());
                     extra_envs.insert(
                         "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
                         artifact.clone(),
@@ -334,10 +321,8 @@ async fn configure_tool_task(
                                 )
                                 .build()
                                 .into_diagnostic()?;
-                            let download_msg = format!(
-                                "downloading aspect cli version {} file {}",
-                                release, artifact
-                            );
+                            let download_msg =
+                                format!("downloading aspect cli version {} file {}", tag, artifact);
                             if let err @ Err(_) =
                                 _download_into_cache(&client, &tool_dest_file, req, &download_msg)
                                     .await
