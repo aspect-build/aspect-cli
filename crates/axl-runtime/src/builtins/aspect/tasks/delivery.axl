@@ -92,8 +92,10 @@ def _delivery_impl(ctx):
     # Check if terminal supports colors
     is_tty = ctx.std.io.stdout.is_tty
 
-    # deliveryd socket path
-    socket_path = ctx.args.socket
+    # deliveryd socket path (runners start deliveryd automatically and expose the socket via env)
+    socket_path = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
+    if not socket_path:
+        fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. deliveryd must be running.")
 
     # Delivery context
     ci_host = ctx.args.ci_host
@@ -227,7 +229,6 @@ delivery = task(
     implementation = _delivery_impl,
     config = DeliveryConfig,
     args = {
-        "socket": args.string(default = "/tmp/deliveryd.sock"),
         "ci_host": args.string(default = "bk"),
         "commit_sha": args.string(),
         "workspace": args.string(default = "."),

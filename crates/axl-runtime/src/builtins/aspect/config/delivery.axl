@@ -26,37 +26,6 @@ def _check_deliveryd_health(ctx, socket_path):
         return False
     return result.status >= 200 and result.status < 300
 
-def _start_deliveryd(ctx, delivery_db_endpoint, socket_path = "/tmp/deliveryd.sock"):
-    """
-    Start the deliveryd process in the background if not already running.
-
-    Args:
-        ctx: Config context
-        delivery_db_endpoint: Redis endpoint URL (redis:// or rediss:// for TLS)
-        socket_path: Unix socket path for deliveryd
-    """
-    # Check if deliveryd is already running by checking for the socket
-    if ctx.std.fs.exists(socket_path):
-        # Socket exists, check if the instance is healthy
-        if _check_deliveryd_health(ctx, socket_path):
-            print("deliveryd already running and healthy (socket: {})".format(socket_path))
-            return
-        else:
-            # Stale socket, remove it
-            print("deliveryd socket exists but instance is unhealthy, removing stale socket")
-            ctx.std.fs.remove_file(socket_path)
-
-    cmd = ctx.std.process.command("deliveryd")
-    cmd.arg("--socket=" + socket_path)
-    cmd.arg("--redis-endpoint=" + delivery_db_endpoint)
-
-    # Run in background
-    cmd.stdout("null")
-    cmd.stderr("null")
-    cmd.spawn()
-
-    print("Started deliveryd (socket: {}, endpoint: {})".format(socket_path, delivery_db_endpoint))
-
 def configure_delivery(ctx: ConfigContext):
     # Add a delivery verb
     ctx.tasks.add(delivery)
@@ -66,13 +35,14 @@ def configure_delivery(ctx: ConfigContext):
     if CI:
         print("--- :aspect-build: Configuring Workflows")
 
+    # Check deliveryd health if the endpoint is available
+    delivery_endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
+    if delivery_endpoint:
+        if not _check_deliveryd_health(ctx, delivery_endpoint):
+            fail("deliveryd is not healthy (socket: {})".format(delivery_endpoint))
+
     # Read platform config from disk
     platform_config = read_platform_config(ctx.std.fs)
-
-    # Start deliveryd if delivery_db_endpoint is configured
-    delivery_db_endpoint = platform_config.get("delivery_db_endpoint")
-    if delivery_db_endpoint:
-        _start_deliveryd(ctx, delivery_db_endpoint)
 
     # Read host config from environment
     host_config = read_host_config(ctx.std.env, ctx.std.io)
