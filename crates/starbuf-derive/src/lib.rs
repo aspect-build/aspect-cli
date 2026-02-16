@@ -102,10 +102,7 @@ fn try_types(input: TokenStream) -> Result<TokenStream, Error> {
                         let subpath = quote! {#subpath::#subident};
                         let sub_key = subpath.to_string();
                         let subgenerator_fn = Ident::new(
-                            &format!(
-                                "{}_toplevels",
-                                sub_key.replace("::", "_").replace(" ", "")
-                            ),
+                            &format!("{}_toplevels", sub_key.replace("::", "_").replace(" ", "")),
                             Span::call_site(),
                         );
                         let subidentstr = subident.to_string();
@@ -138,10 +135,8 @@ fn try_types(input: TokenStream) -> Result<TokenStream, Error> {
                         starlark::values::starlark_value_as_type::StarlarkValueAsType::new();
                     });
                 let ident_snake = snake(ident.to_string());
-                let constructor_fn = Ident::new(
-                    &format!("{}_constructor", ident_snake),
-                    ident.span(),
-                );
+                let constructor_fn =
+                    Ident::new(&format!("{}_constructor", ident_snake), ident.span());
                 defs.entry(subpaths)
                     .or_insert_with(|| (vec![], vec![]))
                     .1
@@ -498,7 +493,8 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         }
     });
 
-    let ident_snake = snake(ident.to_string());
+    let ident_str = ident.to_string();
+    let ident_snake = snake(ident_str.clone());
     let methods_ident = Ident::new(&format!("{}_methods", &ident_snake), ident.span());
     let constructor_fn_ident = Ident::new(&format!("{}_constructor", &ident_snake), ident.span());
 
@@ -633,7 +629,286 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         })
         .collect();
 
+    let repr_fields: Vec<TokenStream> = fields
+        .iter()
+        .filter_map(|(field, sattrs, attrs, _)| {
+            let has_deprecated = field.attrs.iter().any(|v| v.path().is_ident("deprecated"));
+            if sattrs.skip
+                || has_deprecated
+                || sattrs.any
+                || sattrs.duration
+                || sattrs.timestamp
+                || attrs.bytes.is_some()
+            {
+                return None;
+            }
+
+            let field_ident = field.ident.as_ref()?;
+            let display_name = if let Some(ref rename) = sattrs.rename {
+                rename.clone()
+            } else {
+                field_ident.to_string()
+            };
+
+            let value_fmt = if attrs.oneof.is_some() {
+                quote! {
+                    match &self.#field_ident {
+                        Some(v) => { write!(f, "{:?}", v)?; },
+                        None => f.write_str("None")?,
+                    }
+                }
+            } else if attrs.map.is_some() {
+                quote! {
+                    f.write_str("{")?;
+                    let mut __map_first = true;
+                    for (k, v) in &self.#field_ident {
+                        if !__map_first { f.write_str(", ")?; }
+                        __map_first = false;
+                        write!(f, "{:?}: {:?}", k, v)?;
+                    }
+                    f.write_str("}")?;
+                }
+            } else if attrs.repeated {
+                let item_fmt = if attrs.string {
+                    quote! { write!(f, "\"{}\"", item)?; }
+                } else if attrs.bool {
+                    quote! { f.write_str(if *item { "True" } else { "False" })?; }
+                } else if attrs.message {
+                    quote! { write!(f, "{}", item)?; }
+                } else {
+                    quote! { write!(f, "{}", item)?; }
+                };
+                quote! {
+                    f.write_str("[")?;
+                    for (i, item) in self.#field_ident.iter().enumerate() {
+                        if i > 0 { f.write_str(", ")?; }
+                        #item_fmt
+                    }
+                    f.write_str("]")?;
+                }
+            } else if attrs.optional {
+                let some_fmt = if attrs.string {
+                    quote! { write!(f, "\"{}\"", v)?; }
+                } else if attrs.bool {
+                    quote! { f.write_str(if *v { "True" } else { "False" })?; }
+                } else if attrs.message {
+                    quote! { write!(f, "{}", v)?; }
+                } else {
+                    quote! { write!(f, "{}", v)?; }
+                };
+                quote! {
+                    match &self.#field_ident {
+                        Some(v) => { #some_fmt },
+                        None => f.write_str("None")?,
+                    }
+                }
+            } else if attrs.string {
+                quote! { write!(f, "\"{}\"", &self.#field_ident)?; }
+            } else if attrs.bool {
+                quote! { f.write_str(if self.#field_ident { "True" } else { "False" })?; }
+            } else if attrs.int32 || attrs.uint32 || attrs.int64 || attrs.uint64 {
+                quote! { write!(f, "{}", self.#field_ident)?; }
+            } else if attrs.enumeration.is_some() {
+                quote! { write!(f, "{}", self.#field_ident)?; }
+            } else if attrs.message {
+                quote! { write!(f, "{}", self.#field_ident)?; }
+            } else {
+                return None;
+            };
+
+            Some(quote! {
+                if !__repr_first { f.write_str(", ")?; }
+                __repr_first = false;
+                f.write_str(#display_name)?;
+                f.write_str("=")?;
+                #value_fmt
+            })
+        })
+        .collect();
+
+    let display_body = if repr_fields.is_empty() {
+        quote! {
+            f.write_str(#ident_str)?;
+            f.write_str("()")?;
+            Ok(())
+        }
+    } else {
+        quote! {
+            f.write_str(#ident_str)?;
+            f.write_str("(")?;
+            let mut __repr_first = true;
+            #(#repr_fields)*
+            f.write_str(")")?;
+            Ok(())
+        }
+    };
+
+    let repr_fields_pretty: Vec<TokenStream> = fields
+        .iter()
+        .filter_map(|(field, sattrs, attrs, _)| {
+            let has_deprecated = field.attrs.iter().any(|v| v.path().is_ident("deprecated"));
+            if sattrs.skip
+                || has_deprecated
+                || sattrs.any
+                || sattrs.duration
+                || sattrs.timestamp
+                || attrs.bytes.is_some()
+            {
+                return None;
+            }
+
+            let field_ident = field.ident.as_ref()?;
+            let display_name = if let Some(ref rename) = sattrs.rename {
+                rename.clone()
+            } else {
+                field_ident.to_string()
+            };
+
+            let value_fmt = if attrs.oneof.is_some() {
+                quote! {
+                    match &self.#field_ident {
+                        Some(v) => { write!(__col, "{:?}", v).unwrap(); },
+                        None => __col.push_str("None"),
+                    }
+                }
+            } else if attrs.map.is_some() {
+                quote! {
+                    if self.#field_ident.is_empty() {
+                        __col.push_str("{}");
+                    } else {
+                        __col.push_str("{");
+                        let mut __map_first = true;
+                        for (k, v) in &self.#field_ident {
+                            if !__map_first { __col.push_str(","); }
+                            __map_first = false;
+                            __col.push_str("\n");
+                            for _ in 0..(__inner + 2) { __col.push(' '); }
+                            write!(__col, "{:?}: {:?}", k, v).unwrap();
+                        }
+                        __col.push_str("\n");
+                        for _ in 0..__inner { __col.push(' '); }
+                        __col.push_str("}");
+                    }
+                }
+            } else if attrs.repeated && attrs.message {
+                quote! {
+                    if self.#field_ident.is_empty() {
+                        __col.push_str("[]");
+                    } else {
+                        __col.push_str("[");
+                        for (__i, __item) in self.#field_ident.iter().enumerate() {
+                            if __i > 0 { __col.push_str(","); }
+                            __col.push_str("\n");
+                            for _ in 0..(__inner + 2) { __col.push(' '); }
+                            __item.__starbuf_pretty(__col, __inner + 2);
+                        }
+                        __col.push_str("\n");
+                        for _ in 0..__inner { __col.push(' '); }
+                        __col.push_str("]");
+                    }
+                }
+            } else if attrs.repeated {
+                let item_fmt = if attrs.string {
+                    quote! { write!(__col, "\"{}\"", __item).unwrap(); }
+                } else if attrs.bool {
+                    quote! { __col.push_str(if *__item { "True" } else { "False" }); }
+                } else {
+                    quote! { write!(__col, "{}", __item).unwrap(); }
+                };
+                quote! {
+                    __col.push_str("[");
+                    for (__i, __item) in self.#field_ident.iter().enumerate() {
+                        if __i > 0 { __col.push_str(", "); }
+                        #item_fmt
+                    }
+                    __col.push_str("]");
+                }
+            } else if attrs.optional {
+                let is_real_message = attrs.message && {
+                    let is_scalar =
+                        extract_inner_type(&field.ty, "core::option::Option").map_or(false, |ty| {
+                            let s = ty.to_token_stream().to_string().replace(' ', "");
+                            matches!(
+                                s.as_str(),
+                                "u32" | "i32" | "u64" | "i64" | "f32" | "f64" | "bool"
+                            )
+                        });
+                    !is_scalar
+                };
+                let some_fmt = if is_real_message {
+                    quote! { v.__starbuf_pretty(__col, __inner); }
+                } else if attrs.string {
+                    quote! { write!(__col, "\"{}\"", v).unwrap(); }
+                } else if attrs.bool {
+                    quote! { __col.push_str(if *v { "True" } else { "False" }); }
+                } else {
+                    quote! { write!(__col, "{}", v).unwrap(); }
+                };
+                quote! {
+                    match &self.#field_ident {
+                        Some(v) => { #some_fmt },
+                        None => __col.push_str("None"),
+                    }
+                }
+            } else if attrs.string {
+                quote! { write!(__col, "\"{}\"", &self.#field_ident).unwrap(); }
+            } else if attrs.bool {
+                quote! { __col.push_str(if self.#field_ident { "True" } else { "False" }); }
+            } else if attrs.int32 || attrs.uint32 || attrs.int64 || attrs.uint64 {
+                quote! { write!(__col, "{}", self.#field_ident).unwrap(); }
+            } else if attrs.enumeration.is_some() {
+                quote! { write!(__col, "{}", self.#field_ident).unwrap(); }
+            } else if attrs.message {
+                quote! { self.#field_ident.__starbuf_pretty(__col, __inner); }
+            } else {
+                return None;
+            };
+
+            Some(quote! {
+                if !__repr_first { __col.push_str(","); }
+                __repr_first = false;
+                __col.push_str("\n");
+                for _ in 0..__inner { __col.push(' '); }
+                __col.push_str(#display_name);
+                __col.push_str("=");
+                #value_fmt
+            })
+        })
+        .collect();
+
+    let pretty_body = if repr_fields_pretty.is_empty() {
+        quote! {
+            __col.push_str(#ident_str);
+            __col.push_str("()");
+        }
+    } else {
+        quote! {
+            use ::std::fmt::Write;
+            let __inner = __indent + 2;
+            __col.push_str(#ident_str);
+            __col.push_str("(");
+            let mut __repr_first = true;
+            #(#repr_fields_pretty)*
+            __col.push_str("\n");
+            for _ in 0..__indent { __col.push(' '); }
+            __col.push_str(")");
+        }
+    };
+
     let expanded = quote! {
+        impl #ident {
+            #[doc(hidden)]
+            pub fn __starbuf_pretty(&self, __col: &mut String, __indent: usize) {
+                #pretty_body
+            }
+        }
+
+        impl ::std::fmt::Display for #ident {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                #display_body
+            }
+        }
+
         impl<'v> ::starlark::values::AllocValue<'v> for #ident {
             fn alloc_value(self, heap: &'v ::starlark::values::Heap) -> ::starlark::values::Value<'v> {
                 heap.alloc_simple(self)
@@ -646,6 +921,10 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 static RES: ::starlark::environment::MethodsStatic =
                     ::starlark::environment::MethodsStatic::new();
                 RES.methods(#methods_ident)
+            }
+
+            fn collect_repr(&self, collector: &mut String) {
+                self.__starbuf_pretty(collector, 0);
             }
         }
 
@@ -995,7 +1274,7 @@ fn try_service(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Erro
                     .timeout(handle.timeout);
 
                 let ep = if uri.starts_with("https://") {
-                    ep.tls_config(::tonic::transport::ClientTlsConfig::new())
+                    ep.tls_config(::tonic::transport::ClientTlsConfig::new().with_native_roots())
                         .map_err(|e| ::anyhow::anyhow!("TLS config error: {}", e))?
                 } else {
                     ep

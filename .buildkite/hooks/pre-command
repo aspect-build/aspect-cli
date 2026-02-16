@@ -22,11 +22,11 @@ mkdir -p "$ASPECT_BIN_DIR"
 # Get current commit
 CURRENT_COMMIT="$(git rev-parse HEAD)"
 
-# Check if crates/ or examples/deliveryd/ changed between two commits
+# Check if crates/ changed between two commits
 crates_changed() {
   local old_commit="$1"
   local new_commit="$2"
-  git diff --name-only "$old_commit" "$new_commit" -- crates/ examples/deliveryd/ | grep -q .
+  git diff --name-only "$old_commit" "$new_commit" -- crates/ | grep -q .
 }
 
 # Build and install aspect-cli if not present or crates/ changed
@@ -48,27 +48,4 @@ else
   chmod 0755 "$ASPECT_BIN_DIR/aspect"
   echo "$CURRENT_COMMIT" > "$ASPECT_COMMIT_FILE"
   echo "aspect-cli installed to $ASPECT_BIN_DIR/aspect (commit: $CURRENT_COMMIT)"
-fi
-
-# Build and install deliveryd if not present or crates/ changed (local_path_override in root module)
-DELIVERYD_COMMIT_FILE="$ASPECT_BIN_DIR/deliveryd.commit"
-CACHED_DELIVERYD_COMMIT=""
-if [ -f "$DELIVERYD_COMMIT_FILE" ]; then
-  CACHED_DELIVERYD_COMMIT="$(cat "$DELIVERYD_COMMIT_FILE")"
-fi
-
-if [ -x "$ASPECT_BIN_DIR/deliveryd" ] && [ -n "$CACHED_DELIVERYD_COMMIT" ] && ! crates_changed "$CACHED_DELIVERYD_COMMIT" "$CURRENT_COMMIT"; then
-  echo "DEBUG: Found existing deliveryd binary (no crates/ changes since $CACHED_DELIVERYD_COMMIT)"
-else
-  echo "--- Building deliveryd"
-  # Kill any running deliveryd instances before rebuilding
-  pkill -9 deliveryd 2>/dev/null || true
-  bazel $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel @deliveryd//:deliveryd
-
-  DELIVERYD_PATH="$(bazel $BAZEL_STARTUP_OPTS cquery $BAZEL_BUILD_OPTS -c dbg --output=files @deliveryd//:deliveryd 2>/dev/null)"
-  ls -la "$DELIVERYD_PATH" 2>&1 || echo "DEBUG: File does not exist!"
-  cp -f "$DELIVERYD_PATH" "$ASPECT_BIN_DIR/deliveryd"
-  chmod 0755 "$ASPECT_BIN_DIR/deliveryd"
-  echo "$CURRENT_COMMIT" > "$DELIVERYD_COMMIT_FILE"
-  echo "deliveryd installed to $ASPECT_BIN_DIR/deliveryd (commit: $CURRENT_COMMIT)"
 fi

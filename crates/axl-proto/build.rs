@@ -75,20 +75,15 @@ fn main() -> Result<(), std::io::Error> {
             }
             config.type_attribute(
                 format!("{}.{}", prefix, desc.name()),
-                format!(
-                    r#"
+                r#"
 #[derive(
     ::starlark::values::ProvidesStaticType,
-    ::derive_more::Display,
     ::starlark::values::Trace,
     ::starlark::values::NoSerialize,
     ::allocative::Allocative,
     ::starbuf_derive::Message
 )]
-#[display("{}")]
          "#,
-                    desc.name()
-                ),
             );
 
             for oneof in &desc.oneof_decl {
@@ -184,9 +179,7 @@ pub mod protos {{
         ),
     )?;
 
-    let v2 = fs::read_to_string(format!(
-        "{out_dir}/build.bazel.remote.execution.v2.rs"
-    ))?;
+    let v2 = fs::read_to_string(format!("{out_dir}/build.bazel.remote.execution.v2.rs"))?;
 
     fs::write(
         format!("{out_dir}/build.bazel.remote.execution.v2.rs"),

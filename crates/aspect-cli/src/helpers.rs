@@ -6,50 +6,6 @@ use axl_runtime::module::{
 use tokio::fs;
 use tracing::instrument;
 
-/// Parse the AXL_CONFIG environment variable for additional config paths.
-/// Supports both individual .config.axl files and directories to scan.
-/// Paths are separated by ':' on Unix and ';' on Windows.
-pub async fn parse_axl_config_env() -> Result<Vec<PathBuf>, std::io::Error> {
-    let separator = if cfg!(windows) { ';' } else { ':' };
-
-    let env_val = match std::env::var("AXL_CONFIG") {
-        Ok(val) if !val.is_empty() => val,
-        _ => return Ok(vec![]),
-    };
-
-    let mut configs = Vec::new();
-
-    for path_str in env_val.split(separator) {
-        let path = PathBuf::from(path_str.trim());
-
-        if !path.exists() {
-            eprintln!(
-                "warning: AXL_CONFIG path does not exist: {}",
-                path.display()
-            );
-            continue;
-        }
-
-        if path.is_file() {
-            // Check it's a .config.axl file
-            if path.to_string_lossy().ends_with(AXL_CONFIG_EXTENSION) {
-                configs.push(path);
-            } else {
-                eprintln!(
-                    "warning: AXL_CONFIG file is not a .config.axl file: {}",
-                    path.display()
-                );
-            }
-        } else if path.is_dir() {
-            // Scan directory for .config.axl files
-            let (_, dir_configs) = search_sources(&vec![path]).await?;
-            configs.extend(dir_configs);
-        }
-    }
-
-    Ok(configs)
-}
-
 // Constants for special directory names used in module resolution.
 // These define the structure for local modules (e.g., .aspect/axl/module_name).
 pub const DOT_ASPECT_FOLDER: &str = ".aspect";

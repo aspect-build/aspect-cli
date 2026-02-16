@@ -25,9 +25,7 @@ use tokio::task::spawn_blocking;
 use tracing::info_span;
 
 use crate::cmd_tree::{BUILTIN_COMMAND_DISPLAY_ORDER, CommandTree, make_command_from_task};
-use crate::helpers::{
-    find_repo_root, get_default_axl_search_paths, parse_axl_config_env, search_sources,
-};
+use crate::helpers::{find_repo_root, get_default_axl_search_paths, search_sources};
 
 // Helper function to check if debug mode is enabled based on the ASPECT_DEBUG environment variable.
 fn debug_mode() -> bool {
@@ -129,9 +127,6 @@ async fn main() -> miette::Result<ExitCode> {
     // (based on current directory and repo root).
     let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_root);
     let (scripts, configs) = search_sources(&search_paths).await.into_diagnostic()?;
-
-    // Get additional configs from AXL_CONFIG environment variable
-    let env_configs = parse_axl_config_env().await.into_diagnostic()?;
 
     // Enter a tracing span for evaluation of scripts and configs.
     let espan = info_span!("eval");
@@ -312,28 +307,6 @@ async fn main() -> miette::Result<ExitCode> {
         // Append customer configs (filesystem-discovered) — always last
         for path in configs.iter() {
             scoped_configs.push((root_scope.clone(), path.clone(), "config".to_string()));
-        }
-
-        // Append environment configs, each with scope derived from parent directory
-        if debug_mode() && !env_configs.is_empty() {
-            eprintln!("AXL_CONFIG configs:");
-            for path in &env_configs {
-                eprintln!(
-                    "  - {} (scope: {})",
-                    path.display(),
-                    path.parent()
-                        .map_or("repo root".to_string(), |p| p.display().to_string())
-                );
-            }
-        }
-
-        for config_path in env_configs.iter() {
-            let parent = config_path.parent().unwrap_or(&repo_root);
-            let scope = ModuleScope {
-                name: "".to_string(),
-                path: parent.to_path_buf(),
-            };
-            scoped_configs.push((scope, config_path.clone(), "config".to_string()));
         }
 
         // Run all config functions, passing in vector of tasks for configuration
