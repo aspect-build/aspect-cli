@@ -1,30 +1,13 @@
 """Configures delivery task for Workflows"""
 
 load("../tasks/delivery.axl", "delivery")
+load("../lib/deliveryd.axl", deliveryd_health = "health")
 load("../lib/platform.axl",
     "read_platform_config",
     "read_host_config",
     "get_bazelrc_flags",
     "DEFAULT_PLATFORM_DIR"
 )
-
-def _check_deliveryd_health(ctx, socket_path):
-    """
-    Check if deliveryd is healthy by calling the /health endpoint.
-
-    Returns:
-        True if healthy, False otherwise
-    """
-    http = ctx.http()
-    response = http.get(
-        url="http://localhost/health",
-        unix_socket=socket_path,
-    )
-
-    result = response.map_err(lambda e: str(e)).block()
-    if type(result) == "string":
-        return False
-    return result.status >= 200 and result.status < 300
 
 def configure_delivery(ctx: ConfigContext):
     # Add a delivery verb
@@ -38,7 +21,7 @@ def configure_delivery(ctx: ConfigContext):
     # Check deliveryd health if the endpoint is available
     delivery_endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
     if delivery_endpoint:
-        if not _check_deliveryd_health(ctx, delivery_endpoint):
+        if not deliveryd_health(ctx, delivery_endpoint):
             fail("deliveryd is not healthy (socket: {})".format(delivery_endpoint))
 
     # Read platform config from disk

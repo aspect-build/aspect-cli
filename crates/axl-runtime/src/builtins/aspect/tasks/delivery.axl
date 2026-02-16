@@ -42,7 +42,7 @@ def pad(s, width):
     return s + " " * (width - len(s))
 
 
-def _deliver_target(ctx, socket_path, ci_host, workspace, build_url, bazel_flags, label, is_forced, target_state, is_tty):
+def _deliver_target(ctx, endpoint, ci_host, workspace, build_url, bazel_flags, label, is_forced, target_state, is_tty):
     """
     Deliver a single target.
 
@@ -77,12 +77,12 @@ def _deliver_target(ctx, socket_path, ci_host, workspace, build_url, bazel_flags
     if exit_code != 0:
         # Delivery failed - delete artifact metadata so it can be retried
         if output_sha:
-            deliveryd_delete_artifact(ctx, socket_path, ci_host, output_sha, workspace)
+            deliveryd_delete_artifact(ctx, endpoint, ci_host, output_sha, workspace)
         return ("run_failed", "Delivery failed with exit code {}".format(exit_code))
 
     # Sign the artifact to mark as delivered
     if output_sha:
-        deliveryd_deliver(ctx, socket_path, ci_host, output_sha, workspace, build_url)
+        deliveryd_deliver(ctx, endpoint, ci_host, output_sha, workspace, build_url)
 
     return ("success", "Delivered successfully")
 
@@ -93,8 +93,8 @@ def _delivery_impl(ctx):
     is_tty = ctx.std.io.stdout.is_tty
 
     # deliveryd socket path (runners start deliveryd automatically and expose the socket via env)
-    socket_path = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
-    if not socket_path:
+    endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
+    if not endpoint:
         fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. deliveryd must be running.")
 
     # Delivery context
@@ -114,7 +114,7 @@ def _delivery_impl(ctx):
     bazel_flags.append("--remote_download_outputs=toplevel")
 
     print(_style("Delivery:", _BOLD, is_tty))
-    print("  {}: {}".format(_style("deliveryd", _BOLD, is_tty), socket_path))
+    print("  {}: {}".format(_style("deliveryd", _BOLD, is_tty), endpoint))
     print("  {}: {}".format(_style("Host", _BOLD, is_tty), ci_host))
     print("  {}: {}".format(_style("Commit", _BOLD, is_tty), commit_sha))
     print("  {}: {}".format(_style("Workspace", _BOLD, is_tty), workspace))
@@ -141,10 +141,10 @@ def _delivery_impl(ctx):
         # Use hash of commit_sha + label as output_sha
         # TODO: query remote-cache action key to determine target hash.
         output_sha = hash(commit_sha + label)
-        deliveryd_record(ctx, socket_path, ci_host, commit_sha, workspace, label, str(output_sha))
+        deliveryd_record(ctx, endpoint, ci_host, commit_sha, workspace, label, str(output_sha))
 
     # Query deliveryd for delivery state of all targets
-    delivery_state = deliveryd_query(ctx, socket_path, ci_host, commit_sha, workspace)
+    delivery_state = deliveryd_query(ctx, endpoint, ci_host, commit_sha, workspace)
 
     # Track results
     results = []  # List of (label, status, delivered_by)
@@ -156,7 +156,7 @@ def _delivery_impl(ctx):
         is_forced = label in forced_targets
         target_state = delivery_state.get(label)
         status, message = _deliver_target(
-            ctx, socket_path, ci_host, workspace, build_url,
+            ctx, endpoint, ci_host, workspace, build_url,
             bazel_flags, label, is_forced, target_state, is_tty
         )
 
