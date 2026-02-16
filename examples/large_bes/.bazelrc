@@ -1,4 +1,0 @@
-common --remote_cache=grpcs://testing.buildbuddy.io
-common --remote_executor=grpcs://testing.buildbuddy.io
-common --remote_timeout=10m
-common --remote_header=x-buildbuddy-api-key=2YOwUz70LEWxbJhh0h96
