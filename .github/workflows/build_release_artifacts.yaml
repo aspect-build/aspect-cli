@@ -3,8 +3,14 @@ name: Build Release Artifacts
 on:
   workflow_dispatch:
   push:
-    branches: ["main", "staging"]
+    branches: ["staging"]
   workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to checkout and build'
+        required: false
+        type: string
+        default: ''
     outputs:
       linux:
         description: "Linux and MacOS binaries"
@@ -31,6 +37,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref || '' }}
           fetch-depth: 0 # need to see tags (https://github.com/actions/checkout?tab=readme-ov-file#fetch-all-history-for-all-tags-and-branches)
 
       - name: Setup bazelisk

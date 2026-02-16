@@ -1,0 +1,29 @@
+name: Pre-release Cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # Sanitize branch name with same rules as prerelease_build.yaml
+          SANITIZED="$(printf '%s' "$BRANCH" | tr -cs 'a-zA-Z0-9._/-' '-' | sed 's/--*/-/g; s/^-//; s/-$//')"
+          if [ -z "$SANITIZED" ]; then
+            exit 0
+          fi
+          TAG="prerelease/${SANITIZED}"
+
+          # Delete release and tag if they exist; silent success if not
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true

@@ -1,0 +1,96 @@
+name: Pre-release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch name to build (e.g. my-feature)'
+        required: true
+        type: string
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prerelease-build-${{ inputs.branch || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build_release_artifacts.yaml
+    with:
+      ref: ${{ inputs.branch || '' }}
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Calculate checksums
+        run: |
+          cd artifacts/artifact/assets
+          shasum -a 256 * > SHASUM256.txt
+
+      - name: Create pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ inputs.branch || github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          # Sanitize branch name: only allow safe characters, collapse repeated hyphens
+          SANITIZED="$(printf '%s' "$BRANCH" | tr -cs 'a-zA-Z0-9._/-' '-' | sed 's/--*/-/g; s/^-//; s/-$//')"
+          if [ -z "$SANITIZED" ]; then
+            echo "::error::Branch name sanitized to empty string"
+            exit 1
+          fi
+          TAG="prerelease/${SANITIZED}"
+
+          # For dispatch builds, resolve the actual HEAD of the branch
+          if [ -n "${{ inputs.branch }}" ]; then
+            HEAD_SHA="$(gh api "repos/${GH_REPO}/git/ref/heads/${BRANCH}" --jq '.object.sha')"
+          fi
+
+          # Delete existing release+tag if present
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+
+          # Build release body
+          BODY="$(cat <<BODYEOF
+          > [!WARNING]
+          > This is an unstable pre-release build. Do not use in production.
+
+          **Branch:** \`${BRANCH}\`
+          **Commit:** \`${HEAD_SHA}\`
+          **Built:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          ### Usage
+
+          Add to \`.aspect/version.axl\`:
+          \`\`\`starlark
+          version(
+              "0.0.0",
+              sources = [
+                  github(org = "aspect-build", repo = "aspect-cli", tag = "${TAG}"),
+              ],
+          )
+          \`\`\`
+          BODYEOF
+          )"
+
+          # Create pre-release with all assets
+          gh release create "$TAG" \
+            --target "$HEAD_SHA" \
+            --prerelease \
+            --title "Pre-release: ${BRANCH}" \
+            --notes "$BODY" \
+            artifacts/artifact/assets/*
