@@ -3,47 +3,10 @@
 load("../tasks/delivery.axl", "delivery")
 load("../fragments.axl", "DeliveryFragment")
 load("../lib/deliveryd.axl", deliveryd_health = "health")
-load("../lib/platform.axl",
-    "read_platform_config",
-    "read_host_config",
-    "get_bazelrc_flags",
-    "DEFAULT_PLATFORM_DIR"
-)
 
 def configure_delivery(ctx: ConfigContext):
     # Add a delivery verb
     ctx.tasks.add(delivery)
-
-    CI = ctx.std.env.var("BUILDKITE")
-
-    if CI:
-        print("--- :aspect-build: Configuring Workflows")
-
-    # Check deliveryd health if the endpoint is available
-    delivery_endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
-    if delivery_endpoint:
-        if not deliveryd_health(ctx, delivery_endpoint):
-            fail("deliveryd is not healthy (socket: {})".format(delivery_endpoint))
-
-    # Read platform config from disk
-    platform_config = read_platform_config(ctx.std.fs)
-
-    # Read host config from environment
-    host_config = read_host_config(ctx.std.env, ctx.std.io)
-
-    # Generate bazelrc content
-    # TODO: use these flags?
-    flags = get_bazelrc_flags(
-        platform_config = platform_config,
-        host_config = host_config,
-        bazel_version = "7.0.0",
-    )
-
-    # Debugging information
-    if CI:
-        print(platform_config)
-        print(host_config)
-        print(flags)
 
     # Configure DeliveryFragment fragment globally
     ctx.fragments[DeliveryFragment].delivery_start = lambda: print("--- :bazel: Delivery")

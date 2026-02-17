@@ -8,9 +8,11 @@ load("../lib/platform.axl",
     "DEFAULT_PLATFORM_DIR"
 )
 load("../lib/health_check.axl", "agent_health_check")
+load("../lib/environment.axl", "configure_workflows_env")
 load("../fragments.axl", "BazelFragment")
 
 def configure_builtins(ctx: ConfigContext):
+    configure_workflows_env(ctx.std.fs)
     ctx.tasks.add(migrate)
 
     # Read platform config from disk

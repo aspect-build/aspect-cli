@@ -30,27 +30,6 @@ load("../lib/linting.axl", "make_github_strategy", "make_github_changed_files_pr
 
 
 def configure_rules_lint(ctx: ConfigContext):
-    CI = ctx.std.env.var("BUILDKITE")
-
-    # Read platform config from disk
-    platform_config = read_platform_config(ctx.std.fs)
-
-    # Read host config from environment
-    host_config = read_host_config(ctx.std.env, ctx.std.io)
-
-    # Generate bazelrc content
-    flags = get_bazelrc_flags(
-        platform_config = platform_config,
-        host_config = host_config,
-        bazel_version = "7.0.0",
-    )
-
-    # Debugging information
-    if CI:
-        print(platform_config)
-        print(host_config)
-        print(flags)
-
 
     for task in ctx.tasks:
         if task.name == "lint":
