@@ -62,5 +62,5 @@ def configure_builtins(ctx: ConfigContext):
         else:
             bazel_fragment.post_health_check = agent_health_check
 
-        # Wire artifact uploads last so it wraps existing hooks
-        configure_artifacts(ctx)
+    # Wire artifact uploads last so it wraps existing hooks
+    configure_artifacts(ctx)

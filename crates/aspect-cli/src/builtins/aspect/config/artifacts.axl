@@ -83,8 +83,6 @@ def _upload_group(ctx, group, dir_path, name_prefix):
     if current_count == 0 or current_count == group["last_count"]:
         return False
 
-    print("artifact upload: " + name_prefix + " has " + str(current_count) + " files (was " + str(group["last_count"]) + ")")
-
     # Create archive of the full directory
     archive_path = "/tmp/axl_" + name_prefix.replace("-", "_") + ".tar.gz"
     if not _tar_directory(ctx, dir_path, archive_path):
@@ -94,7 +92,6 @@ def _upload_group(ctx, group, dir_path, name_prefix):
     # Upload with a versioned name
     group["version"] += 1
     artifact_name = name_prefix + "-v" + str(group["version"])
-    print("artifact upload: uploading " + artifact_name + " from " + archive_path)
     result = upload_file(ctx, archive_path, name = artifact_name)
 
     # Clean up local archive
@@ -102,10 +99,8 @@ def _upload_group(ctx, group, dir_path, name_prefix):
         ctx.std.fs.remove_file(archive_path)
 
     if result["success"]:
-        print("artifact upload: " + artifact_name + " uploaded successfully")
         # Delete previous version
         if group["prev_ref"]:
-            print("artifact upload: deleting previous version " + group["prev_ref"])
             delete_artifact(ctx, group["prev_ref"])
         group["prev_ref"] = result["artifact_ref"]
         group["last_count"] = current_count
@@ -126,7 +121,14 @@ def _maybe_upload_group(ctx, group, dir_path, name_prefix):
     _upload_group(ctx, group, dir_path, name_prefix)
 
 
-def _stage_test_files(ctx, event):
+def _file_uri_to_path(uri):
+    """Convert a file:// URI to a local filesystem path."""
+    if uri and uri.startswith("file://"):
+        return uri[len("file://"):]
+    return uri
+
+
+def _stage_test_files(ctx, state, event, dry_run):
     """Copy test output files from a test_result event into the testlogs staging directory.
 
     Extracts file paths from the event's test_action_output and copies each file
@@ -134,7 +136,9 @@ def _stage_test_files(ctx, event):
 
     Args:
         ctx: TaskContext
+        state: dict - shared mutable state
         event: BuildEvent
+        dry_run: bool - if True, only track files without copying
     """
     if event.kind != "test_result":
         return
@@ -142,19 +146,26 @@ def _stage_test_files(ctx, event):
     label = event.id.label  # e.g. "//foo/bar:baz_test"
     # Convert label to a directory path: "//foo/bar:baz_test" -> "foo/bar/baz_test"
     label_path = label.lstrip("/").replace(":", "/")
-    print("artifact staging: test_result for " + label + " (" + str(len(event.payload.test_action_output)) + " files)")
 
     for file in event.payload.test_action_output:
-        src = "/".join(file.path_prefix) + "/" + file.name
-        if not ctx.std.fs.exists(src):
-            print("artifact staging: skipping " + src + " (not found)")
+        src = _file_uri_to_path(file.file)
+        if not src:
+            # Fallback: construct from path_prefix + name
+            src = "/".join(file.path_prefix) + "/" + file.name
+        if not src or not ctx.std.fs.exists(src):
             continue
 
         dest_dir = _TESTLOGS_DIR + "/" + label_path
-        ctx.std.fs.create_dir_all(dest_dir)
         dest = dest_dir + "/" + file.name
-        ctx.std.fs.copy(src, dest)
-        print("artifact staging: copied " + src + " -> " + dest)
+
+        if not dry_run:
+            ctx.std.fs.create_dir_all(dest_dir)
+            ctx.std.fs.copy(src, dest)
+
+        # Track staged files for debug summary
+        if "_staged_files" not in state:
+            state["_staged_files"] = []
+        state["_staged_files"].append({"src": src, "dest": dest, "label": label})
 
 
 def _init_upload_state(state):
@@ -176,27 +187,46 @@ def configure_artifacts(ctx):
         ctx: ConfigContext
     """
     ci = detect_ci(ctx.std.env)
-    if not ci:
-        print("artifact upload: no CI environment detected, skipping")
-        return
+    is_local = not ci
+    if is_local:
+        ci = "local"
 
     fragment = ctx.fragments[BazelFragment]
     job_prefix = _artifact_name_prefix(ctx.std.env)
-    print("artifact upload: configured for " + ci + " (prefix=" + job_prefix + ", batch_size=" + str(_BATCH_SIZE) + ")")
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
 
     def _on_build_event(ctx, state, event):
-        _stage_test_files(ctx, event)
-        _init_upload_state(state)
-        upload_state = state["_artifact_upload"]
-        _maybe_upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
-        _maybe_upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, job_prefix + "-artifacts")
+        _stage_test_files(ctx, state, event, dry_run = is_local)
+        if not is_local:
+            _init_upload_state(state)
+            upload_state = state["_artifact_upload"]
+            _maybe_upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
+            _maybe_upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, job_prefix + "-artifacts")
 
     def _on_build_end(ctx, state, exit_code):
-        print("artifact upload: build ended (exit_code=" + str(exit_code) + "), flushing remaining files")
-        _init_upload_state(state)
-        upload_state = state["_artifact_upload"]
-        _upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
-        _upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, job_prefix + "-artifacts")
+        if not is_local:
+            _init_upload_state(state)
+            upload_state = state["_artifact_upload"]
+            _upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
+            _upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, job_prefix + "-artifacts")
+
+        if debug:
+            staged = state.get("_staged_files", [])
+            print("")
+            print("--- artifact upload debug summary ---")
+            print("ci: " + ci)
+            print("job_prefix: " + job_prefix)
+            print("staged files: " + str(len(staged)))
+            for f in staged:
+                print("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
+            if not is_local:
+                testlog_count = _count_files(ctx, _TESTLOGS_DIR)
+                artifact_count = _count_files(ctx, _ARTIFACTS_DIR)
+                print("testlogs dir (" + _TESTLOGS_DIR + "): " + str(testlog_count) + " files")
+                print("artifacts dir (" + _ARTIFACTS_DIR + "): " + str(artifact_count) + " files")
+            else:
+                print("no CI detected, uploads skipped (dry run)")
+            print("------------------------------------")
 
     fragment.build_event.append(_on_build_event)
     fragment.build_end.append(_on_build_end)
