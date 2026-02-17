@@ -33,36 +33,6 @@ def _url_encode(s):
     return result
 
 
-def _aws_bootstrap_log_url(meta):
-    """Construct AWS CloudWatch Logs URL for bootstrap logs."""
-    region = meta["region"]
-    instance_id = meta["instance_id"]
-    escaped_log_group = AWS_LOG_GROUP.replace("/", "%252F")
-    return (
-        "https://" + region + ".console.aws.amazon.com/cloudwatch/home"
-        + "?region=" + region
-        + "#logsV2:log-groups/log-group/" + escaped_log_group
-        + "/log-events/" + instance_id
-    )
-
-
-def _gcp_bootstrap_log_url(meta):
-    """Construct GCP Cloud Logging URL for bootstrap logs."""
-    instance_id = meta["instance_id"]
-    account_id = meta["account_id"]
-    query = (
-        'resource.type="gce_instance"\n'
-        + "resource.labels.instance_id=" + instance_id + "\n"
-        + 'log_name="projects/' + account_id + '/logs/google_metadata_script_runner"'
-    )
-    return (
-        "https://console.cloud.google.com/logs/query"
-        + ";query=" + _url_encode(query)
-        + ";duration=P30D"
-        + "?referrer=search&project=" + account_id
-    )
-
-
 def _read_file(fs, path):
     """Read a text file and strip whitespace, or return empty string if missing."""
     if fs.exists(path):
@@ -103,7 +73,6 @@ def _print_aws_info(meta):
     print("\tInstance Name: " + meta["instance_name"])
     print("\tInstance Type: " + meta["instance_type"])
     print("\tSpot Instance: " + ("yes" if meta["preemptible"] else "no"))
-    print("\tBootstrap Log URL: " + _aws_bootstrap_log_url(meta))
     print("\tCLI: 'aws logs tail \"/aw/runner/cloud-init/output\" --log-stream-names \"" + meta["instance_id"] + "\" --since=30d'")
 
 
@@ -117,7 +86,6 @@ def _print_gcp_info(meta):
     print("\tInstance Name: " + meta["instance_name"])
     print("\tInstance Type: " + meta["instance_type"])
     print("\tPreemptible: " + ("yes" if meta["preemptible"] else "no"))
-    print("\tBootstrap Log URL: " + _gcp_bootstrap_log_url(meta))
     print("\tCLI: 'gcloud logging read --project " + meta["account_id"] + " \"resource.type=gce_instance resource.labels.instance_id=" + meta["instance_id"] + " log_name=projects/" + meta["account_id"] + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
 
 
