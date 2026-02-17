@@ -1,105 +1,17 @@
 """Configures builtin tasks for Workflows"""
 
 load("../tasks/migrate.axl", "migrate")
-
 load("../lib/platform.axl",
     "read_platform_config",
     "read_host_config",
     "get_bazelrc_flags",
     "DEFAULT_PLATFORM_DIR"
 )
-
-load(
-    "../lib/github.axl",
-    "create_check_run",
-    "update_check_run",
-    "complete_check_run",
-    "build_output",
-    "build_annotation",
-    "create_review",
-    "build_suggestion",
-)
-
+load("../lib/health_check.axl", "agent_health_check")
 load("../fragments.axl", "BazelFragment")
-
-def _format_build_state(build_state):
-    md = """
-# Build Summary
-Total: {}
-Failed targets: {}
-State: {}
-
-""".format(
-        build_state["total"],
-        len(build_state["failures"]),
-        "failure" if len(build_state["failures"]) else "success"
-    )
-    for target, failure in build_state["failures"].items():
-        md += "## {}\n\n```{}```\n".format(target, failure.message)
-    return md
-
-
-def on_build_event(ctx: TaskContext, build_state: dict, event):
-    if not build_state:
-        build_state["total"] = 0
-        build_state["failures"] = {}
-    if event.kind == "target_completed":
-        build_state["total"] += 1
-        if not event.payload.success:
-            build_state["failures"][event.id.label] = event.payload.failure_detail
-            annotations = [
-                build_annotation(
-                    path = "README.md",      # NOT "./README.md"
-                    start_line = 6,          # target the deleted lines
-                    end_line = 6,
-                    message = "Unused variable 'foo'",
-                    annotation_level = "warning",
-                ),
-            ]
-            r = create_check_run(
-                ctx,
-                token = "",
-                owner = "thesayyn",
-                repo = "wasp",
-                name = "Build 2",
-                head_sha = "86fadc736fc76303a82f8ba05feff0f77e942847",
-                status = "in_progress",
-                output = build_output(
-                    title = "build failed",
-                    summary = "failed",
-                    text = _format_build_state(build_state),
-                    annotations = annotations
-                )
-            )
-            print(r)
-    elif event.kind == "build_finished":
-        print(_format_build_state(build_state))
-        suggestions = [
-            build_suggestion(
-                path = "README.md",
-                line = 7,
-                suggested_code = "fixed line 5",
-                message = "Lint: trailing whitespace",
-            ),
-        ]
-
-        r = create_review(
-            ctx,
-            token = "",
-            owner = "thesayyn",
-            repo = "lint_example",
-            pull_number = 1,
-            body = "Lint findings",
-            event = "COMMENT",
-            comments = suggestions,
-        )
-        print(r)
-
 
 def configure_builtins(ctx: ConfigContext):
     ctx.tasks.add(migrate)
-
-    CI = ctx.std.env.var("BUILDKITE")
 
     # Read platform config from disk
     platform_config = read_platform_config(ctx.std.fs)
@@ -113,17 +25,9 @@ def configure_builtins(ctx: ConfigContext):
         bazel_version = "7.0.0",
     )
 
-    # Debugging information
-    if CI:
-        print(platform_config)
-        print(host_config)
-        print(flags)
-
-    user = ctx.std.env.var("USER")
-
     bessie_endpoint = platform_config.get("bessie_endpoint", None)
     bessie_sinks = []
-    if user != "thesayyn" and bessie_endpoint:
+    if bessie_endpoint:
         bessie_sinks.append(bazel.build_events.grpc(
             uri = bessie_endpoint,
             metadata = {} # TODO: how does bessie authenticate?
@@ -131,13 +35,9 @@ def configure_builtins(ctx: ConfigContext):
 
     # Configure BazelFragment globally
     bazel_fragment = ctx.fragments[BazelFragment]
-    if user != "thesayyn":
-        bazel_fragment.extra_startup_flags.extend(flags.get("startup", []))
-        bazel_fragment.extra_flags.extend(flags.get("build", []))
+    bazel_fragment.extra_startup_flags.extend(flags.get("startup", []))
+    bazel_fragment.extra_flags.extend(flags.get("build", []))
     bazel_fragment.build_start = lambda: print("+++ :bazel: Building")
     bazel_fragment.build_event_sinks.extend(bessie_sinks)
-    bazel_fragment.build_event = on_build_event
-
-    for test in ctx.tasks:
-        if test.name.startswith("test"):
-            test.fragments[BazelFragment].extra_flags.extend(flags.get("test", []))
+    if ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION"):
+        bazel_fragment.post_health_check = agent_health_check
