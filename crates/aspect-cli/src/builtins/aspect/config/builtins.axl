@@ -49,6 +49,10 @@ def configure_builtins(ctx: ConfigContext):
     bazel_fragment = ctx.fragments[BazelFragment]
 
     if UNDER_WORKFLOWS:
+        bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
+        if "aspect" in bazel_version_output.stdout:
+            bazel_fragment.extra_startup_flags.append("--aspect:disable_plugins")
+
         bazel_fragment.extra_startup_flags.extend(flags.get("startup", []))
         bazel_fragment.extra_flags.extend(flags.get("build", []))
         bazel_fragment.build_start.append(lambda ctx, state: print("+++ :bazel: Building"))
