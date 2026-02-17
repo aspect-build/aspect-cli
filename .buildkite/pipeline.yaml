@@ -8,7 +8,7 @@ steps:
   - key: __main__::warm
     label: ":aspect: Building CLI"
     agents:
-      queue: aspect-default
+      queue: aspect-huge
     timeout_in_minutes: 20
     command:
       - echo "Pre-command builds and uploads CLI to remote cache"
@@ -17,7 +17,7 @@ steps:
       - __main__::warm
     label: ":aspect: Test"
     agents:
-      queue: aspect-huge
+      queue: aspect-default
     timeout_in_minutes: 20
     command:
       - |
