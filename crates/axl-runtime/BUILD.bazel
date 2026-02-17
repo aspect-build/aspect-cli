@@ -36,6 +36,7 @@ rust_library(
         "@crates//:tar",
         "@crates//:thiserror",
         "@crates//:tokio-stream",
+        "@crates//:tokio-util",
         "@crates//:tokio",
         "@crates//:tracing",
         "@crates//:url",
