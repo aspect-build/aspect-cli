@@ -12,6 +12,10 @@ load("../lib/environment.axl", "configure_workflows_env")
 load("../fragments.axl", "BazelFragment")
 load("./artifacts.axl", "configure_artifacts")
 
+def _post_health_check(ctx, health):
+    print("--- :aspect: Agent Health Check")
+    agent_health_check(ctx, health)
+
 def configure_builtins(ctx: ConfigContext):
     UNDER_WORKFLOWS = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION")
     is_buildkite = bool(ctx.std.env.var("BUILDKITE"))
@@ -43,18 +47,16 @@ def configure_builtins(ctx: ConfigContext):
 
     # Configure BazelFragment globally
     bazel_fragment = ctx.fragments[BazelFragment]
-    bazel_fragment.extra_startup_flags.extend(flags.get("startup", []))
-    bazel_fragment.extra_flags.extend(flags.get("build", []))
-    bazel_fragment.build_start.append(lambda ctx, state: print("+++ :bazel: Building"))
-    bazel_fragment.build_event_sinks.extend(bessie_sinks)
+
     if UNDER_WORKFLOWS:
+        bazel_fragment.extra_startup_flags.extend(flags.get("startup", []))
+        bazel_fragment.extra_flags.extend(flags.get("build", []))
+        bazel_fragment.build_start.append(lambda ctx, state: print("+++ :bazel: Building"))
+        bazel_fragment.build_event_sinks.extend(bessie_sinks)
         if is_buildkite:
-            def _post_health_check(ctx, health):
-                print("--- :aspect: Agent Health Check")
-                agent_health_check(ctx, health)
             bazel_fragment.post_health_check = _post_health_check
         else:
             bazel_fragment.post_health_check = agent_health_check
 
-    # Wire artifact uploads last so it wraps existing hooks
-    configure_artifacts(ctx)
+        # Wire artifact uploads last so it wraps existing hooks
+        configure_artifacts(ctx)

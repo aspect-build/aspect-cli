@@ -121,6 +121,33 @@ def _maybe_upload_group(ctx, group, dir_path, name_prefix):
     _upload_group(ctx, group, dir_path, name_prefix)
 
 
+def _stage_test_files(ctx, event):
+    """Copy test output files from a test_result event into the testlogs staging directory.
+
+    Extracts file paths from the event's test_action_output and copies each file
+    into _TESTLOGS_DIR, preserving the target label as the directory structure.
+
+    Args:
+        ctx: TaskContext
+        event: BuildEvent
+    """
+    if event.kind != "test_result":
+        return
+
+    label = event.id.label  # e.g. "//foo/bar:baz_test"
+    # Convert label to a directory path: "//foo/bar:baz_test" -> "foo/bar/baz_test"
+    label_path = label.lstrip("/").replace(":", "/")
+
+    for file in event.payload.test_action_output:
+        src = "/".join(file.path_prefix) + "/" + file.name
+        if not ctx.std.fs.exists(src):
+            continue
+
+        dest_dir = _TESTLOGS_DIR + "/" + label_path
+        ctx.std.fs.create_dir_all(dest_dir)
+        ctx.std.fs.copy(src, dest_dir + "/" + file.name)
+
+
 def _init_upload_state(state):
     """Ensure the upload state is initialized in the shared state dict."""
     if "_artifact_upload" not in state:
@@ -133,7 +160,7 @@ def _init_upload_state(state):
 def configure_artifacts(ctx):
     """Wire interval-based artifact upload into BazelFragment lifecycle hooks.
 
-    - build_event: upload every BATCH_SIZE new files (interval)
+    - build_event: stage testlog files + upload every BATCH_SIZE new files (interval)
     - build_end: final flush of any remaining files
 
     Args:
@@ -147,6 +174,7 @@ def configure_artifacts(ctx):
     job_prefix = _artifact_name_prefix(ctx.std.env)
 
     def _on_build_event(ctx, state, event):
+        _stage_test_files(ctx, event)
         _init_upload_state(state)
         upload_state = state["_artifact_upload"]
         _maybe_upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
