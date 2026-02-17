@@ -16,7 +16,7 @@ def configure_builtins(ctx: ConfigContext):
     is_buildkite = bool(ctx.std.env.var("BUILDKITE"))
     if UNDER_WORKFLOWS:
         if is_buildkite:
-            print("--- :aspect-workflows: Configure Workflows Environment")
+            print("--- :aspect: Configure Workflows Environment")
         configure_workflows_env(ctx.std.fs)
     ctx.tasks.add(migrate)
 
@@ -49,7 +49,7 @@ def configure_builtins(ctx: ConfigContext):
     if UNDER_WORKFLOWS:
         if is_buildkite:
             def _post_health_check(ctx, health):
-                print("--- :aspect-workflows: Agent Health Check")
+                print("--- :aspect: Agent Health Check")
                 agent_health_check(ctx, health)
             bazel_fragment.post_health_check = _post_health_check
         else:
