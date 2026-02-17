@@ -23,4 +23,4 @@ fi
 # Build aspect-cli so version.axl can pick it up from bazel-bin/
 echo "--- Building aspect-cli"
 # bazel in aspect workflows runners is actually old aspect-cli.
-bazel --aspect:disable_plugins $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel //:cli
+bazel --aspect:disable_plugins $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel --show_progress_rate_limit=1 //:cli
