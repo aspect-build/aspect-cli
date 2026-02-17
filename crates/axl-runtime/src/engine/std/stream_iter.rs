@@ -41,6 +41,7 @@ impl<'v> values::StarlarkValue<'v> for ReadIterator {
             stream::Readable::Stdin(stdin) => stdin.lock().read(&mut buf),
             stream::Readable::ChildStderr(err) => err.lock().unwrap().borrow_mut().read(&mut buf),
             stream::Readable::ChildStdout(out) => out.lock().unwrap().borrow_mut().read(&mut buf),
+            stream::Readable::File(file) => file.lock().unwrap().read(&mut buf),
         };
         if r.is_err() {
             return None;

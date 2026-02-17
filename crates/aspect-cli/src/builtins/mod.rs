@@ -31,6 +31,10 @@ const ASPECT: Builtin = Builtin {
             "config/nolint.axl",
             include_str!("./aspect/config/nolint.axl"),
         ),
+        (
+            "config/artifacts.axl",
+            include_str!("./aspect/config/artifacts.axl"),
+        ),
         // tasks/
         (
             "tasks/delivery.axl",
@@ -67,6 +71,10 @@ const ASPECT: Builtin = Builtin {
         (
             "lib/health_check.axl",
             include_str!("./aspect/lib/health_check.axl"),
+        ),
+        (
+            "lib/artifacts.axl",
+            include_str!("./aspect/lib/artifacts.axl"),
         ),
         (
             "lib/environment.axl",

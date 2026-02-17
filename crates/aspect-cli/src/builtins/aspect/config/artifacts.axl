@@ -1,0 +1,162 @@
+"""Configures mid-job artifact uploads for CI environments.
+
+Uploads artifacts on an interval (every BATCH_SIZE new files) during the build
+via the build_event handler. Each upload is a tar.gz archive of the entire
+staging directory, and the previous version is deleted after a successful upload
+(rolling replacement). Two artifact groups: testlogs and artifacts.
+
+CircleCI is excluded — artifacts are staged at /workflows/testlogs for
+CircleCI's native store_artifacts / store_test_results steps.
+"""
+
+load("../lib/artifacts.axl", "detect_ci", "upload_file", "delete_artifact")
+load("../fragments.axl", "BazelFragment")
+
+
+# Upload every N new files per group
+_BATCH_SIZE = 5
+
+# Artifact staging root, matching Rosetta conventions
+_ARTIFACTS_ROOT = "/workflows"
+_ARTIFACTS_DIR = _ARTIFACTS_ROOT + "/artifacts"
+_TESTLOGS_DIR = _ARTIFACTS_ROOT + "/testlogs"
+
+
+def _artifact_name_prefix(env):
+    """Derive artifact name prefix from CI environment."""
+    return env.var("GITHUB_JOB") or env.var("BUILDKITE_LABEL") or env.var("CI_JOB_NAME") or "aspect"
+
+
+def _count_files(ctx, dir_path):
+    """Count files recursively in a directory.
+
+    Args:
+        ctx: Context with ctx.std.process
+        dir_path: str - directory to count
+
+    Returns:
+        int - number of files
+    """
+    if not ctx.std.fs.exists(dir_path):
+        return 0
+    child = ctx.std.process.command("find").args([
+        dir_path, "-type", "f",
+    ]).stdout("piped").stderr("piped").spawn()
+    output = child.stdout().read_to_string()
+    child.wait()
+    if not output or not output.strip():
+        return 0
+    return len(output.strip().split("\n"))
+
+
+def _tar_directory(ctx, dir_path, archive_path):
+    """Create a tar.gz archive of a directory's contents.
+
+    Args:
+        ctx: Context with ctx.std.process
+        dir_path: str - directory to archive
+        archive_path: str - output tar.gz path
+
+    Returns:
+        bool - True on success
+    """
+    child = ctx.std.process.command("tar").args([
+        "czf", archive_path, "-C", dir_path, ".",
+    ]).stdout("inherit").stderr("inherit").spawn()
+    status = child.wait()
+    return status.code == 0
+
+
+def _upload_group(ctx, group, dir_path, name_prefix):
+    """Archive a staging directory and upload it. On success, delete the previous version.
+
+    Args:
+        ctx: TaskContext
+        group: dict - mutable state for this group
+        dir_path: str - staging directory path
+        name_prefix: str - artifact name prefix (e.g. "build-testlogs")
+
+    Returns:
+        bool - True if an upload was performed
+    """
+    current_count = _count_files(ctx, dir_path)
+    if current_count == 0 or current_count == group["last_count"]:
+        return False
+
+    # Create archive of the full directory
+    archive_path = "/tmp/axl_" + name_prefix.replace("-", "_") + ".tar.gz"
+    if not _tar_directory(ctx, dir_path, archive_path):
+        print("artifact upload: failed to create archive for " + name_prefix)
+        return False
+
+    # Upload with a versioned name
+    group["version"] += 1
+    artifact_name = name_prefix + "-v" + str(group["version"])
+    result = upload_file(ctx, archive_path, name = artifact_name)
+
+    # Clean up local archive
+    if ctx.std.fs.exists(archive_path):
+        ctx.std.fs.remove_file(archive_path)
+
+    if result["success"]:
+        # Delete previous version
+        if group["prev_ref"]:
+            delete_artifact(ctx, group["prev_ref"])
+        group["prev_ref"] = result["artifact_ref"]
+        group["last_count"] = current_count
+        return True
+    else:
+        # Revert version bump on failure so next attempt retries
+        group["version"] -= 1
+        for err in result["errors"]:
+            print("artifact upload error: " + err)
+        return False
+
+
+def _maybe_upload_group(ctx, group, dir_path, name_prefix):
+    """Upload only when enough new files have accumulated (BATCH_SIZE threshold)."""
+    current_count = _count_files(ctx, dir_path)
+    if current_count < group["last_count"] + _BATCH_SIZE:
+        return
+    _upload_group(ctx, group, dir_path, name_prefix)
+
+
+def _init_upload_state(state):
+    """Ensure the upload state is initialized in the shared state dict."""
+    if "_artifact_upload" not in state:
+        state["_artifact_upload"] = {
+            "testlogs": {"last_count": 0, "version": 0, "prev_ref": None},
+            "artifacts": {"last_count": 0, "version": 0, "prev_ref": None},
+        }
+
+
+def configure_artifacts(ctx):
+    """Wire interval-based artifact upload into BazelFragment lifecycle hooks.
+
+    - build_event: upload every BATCH_SIZE new files (interval)
+    - build_end: final flush of any remaining files
+
+    Args:
+        ctx: ConfigContext
+    """
+    ci = detect_ci(ctx.std.env)
+    if not ci:
+        return
+
+    fragment = ctx.fragments[BazelFragment]
+    job_prefix = _artifact_name_prefix(ctx.std.env)
+
+    def _on_build_event(ctx, state, event):
+        _init_upload_state(state)
+        upload_state = state["_artifact_upload"]
+        _maybe_upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
+        _maybe_upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, job_prefix + "-artifacts")
+
+    def _on_build_end(ctx, state, exit_code):
+        _init_upload_state(state)
+        upload_state = state["_artifact_upload"]
+        _upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
+        _upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, job_prefix + "-artifacts")
+
+    fragment.build_event.append(_on_build_event)
+    fragment.build_end.append(_on_build_end)

@@ -43,6 +43,7 @@ futures = "0.3.31"
 futures-util = "0.3.31"
 tokio = { version = "1.45.1", features = ["fs", "macros", "rt", "rt-multi-thread", "signal"], default-features = false }
 tokio-stream = { version = "0.1.17", features = ["io-util", "signal", "sync", "tokio-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
 
 handlebars = "6.3.2"
 liquid = "0.26.11"

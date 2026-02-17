@@ -10,6 +10,7 @@ load("../lib/platform.axl",
 load("../lib/health_check.axl", "agent_health_check")
 load("../lib/environment.axl", "configure_workflows_env")
 load("../fragments.axl", "BazelFragment")
+load("./artifacts.axl", "configure_artifacts")
 
 def configure_builtins(ctx: ConfigContext):
     UNDER_WORKFLOWS = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION")
@@ -44,7 +45,7 @@ def configure_builtins(ctx: ConfigContext):
     bazel_fragment = ctx.fragments[BazelFragment]
     bazel_fragment.extra_startup_flags.extend(flags.get("startup", []))
     bazel_fragment.extra_flags.extend(flags.get("build", []))
-    bazel_fragment.build_start = lambda: print("+++ :bazel: Building")
+    bazel_fragment.build_start.append(lambda ctx, state: print("+++ :bazel: Building"))
     bazel_fragment.build_event_sinks.extend(bessie_sinks)
     if UNDER_WORKFLOWS:
         if is_buildkite:
@@ -54,3 +55,6 @@ def configure_builtins(ctx: ConfigContext):
             bazel_fragment.post_health_check = _post_health_check
         else:
             bazel_fragment.post_health_check = agent_health_check
+
+    # Wire artifact uploads last so it wraps existing hooks
+    configure_artifacts(ctx)

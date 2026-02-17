@@ -16,8 +16,21 @@ use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueLike};
 use starlark::values::{StarlarkValue, starlark_value};
 use starlark::{starlark_module, starlark_simple_value, values};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use tokio::fs::OpenOptions;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
+
+use crate::engine::std::stream::Readable as StdReadable;
+
+/// How to build the request body — determined synchronously before entering the async block.
+enum BodyKind {
+    String(String),
+    File(Arc<Mutex<std::fs::File>>),
+    SyncReadable(StdReadable),
+    Empty,
+}
 
 use super::r#async::future::FutureAlloc;
 use super::r#async::future::StarlarkFuture;
@@ -325,7 +338,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         url: values::StringValue,
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
-        data: String,
+        #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
     ) -> starlark::Result<StarlarkFuture<'v>> {
         let url_str = url.as_str().to_string();
@@ -335,6 +348,8 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
             .collect();
 
+        let body_kind = build_body_kind(data)?;
+
         match unix_socket.into_option() {
             Some(socket) => {
                 let fut = async move {
@@ -343,12 +358,14 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
                     let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
 
+                    let body_bytes = body_kind_to_bytes(body_kind).await?;
+
                     let mut req = hyper::Request::builder().method("POST").uri(uri);
                     for (key, value) in &headers_vec {
                         req = req.header(key.as_str(), value.as_str());
                     }
                     let req = req
-                        .body(Full::new(Bytes::from(data)))
+                        .body(Full::new(Bytes::from(body_bytes)))
                         .map_err(|e| anyhow::anyhow!("failed to build request: {}", e))?;
 
                     let res = client
@@ -385,7 +402,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     for (key, value) in &headers_vec {
                         req = req.header(key.as_str(), value.as_str());
                     }
-                    req = req.body(data);
+                    req = apply_body_kind(req, body_kind).await?;
                     let res = req.send().await?;
                     let response = HttpResponse::from_response(res).await?;
                     Ok(response)
@@ -394,6 +411,168 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
             }
         }
     }
+
+    fn put<'v>(
+        this: values::Value<'v>,
+        url: values::StringValue,
+        #[starlark(require = named, default = UnpackDictEntries::default())]
+        headers: UnpackDictEntries<values::StringValue, values::StringValue>,
+        #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
+        #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
+    ) -> starlark::Result<StarlarkFuture<'v>> {
+        let url_str = url.as_str().to_string();
+        let headers_vec: Vec<(String, String)> = headers
+            .entries
+            .into_iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+            .collect();
+
+        let body_kind = build_body_kind(data)?;
+
+        match unix_socket.into_option() {
+            Some(socket) => {
+                let fut = async move {
+                    let client = HyperClient::unix();
+                    let parsed = url::Url::parse(&url_str)
+                        .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
+                    let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
+
+                    let body_bytes = body_kind_to_bytes(body_kind).await?;
+
+                    let mut req = hyper::Request::builder().method("PUT").uri(uri);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    let req = req
+                        .body(Full::new(Bytes::from(body_bytes)))
+                        .map_err(|e| anyhow::anyhow!("failed to build request: {}", e))?;
+
+                    let res = client
+                        .request(req)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("request failed: {}", e))?;
+
+                    let status = res.status().as_u16();
+                    let resp_headers: Vec<(String, String)> = res
+                        .headers()
+                        .iter()
+                        .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
+                        .collect();
+                    let body = res
+                        .into_body()
+                        .collect()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to read body: {}", e))?
+                        .to_bytes();
+                    let body = String::from_utf8_lossy(&body).to_string();
+
+                    Ok(HttpResponse {
+                        status,
+                        headers: resp_headers,
+                        body,
+                    })
+                };
+                Ok(StarlarkFuture::from_future(fut))
+            }
+            None => {
+                let client = this.downcast_ref_err::<Http>()?.client.clone();
+                let fut = async move {
+                    let mut req = client.put(&url_str);
+                    for (key, value) in &headers_vec {
+                        req = req.header(key.as_str(), value.as_str());
+                    }
+                    req = apply_body_kind(req, body_kind).await?;
+                    let res = req.send().await?;
+                    let response = HttpResponse::from_response(res).await?;
+                    Ok(response)
+                };
+                Ok(StarlarkFuture::from_future(fut))
+            }
+        }
+    }
+}
+
+/// Converts a Starlark `data` parameter value into a `BodyKind` synchronously.
+fn build_body_kind(data: NoneOr<values::Value<'_>>) -> starlark::Result<BodyKind> {
+    match data.into_option() {
+        None => Ok(BodyKind::Empty),
+        Some(val) => {
+            if let Some(s) = val.unpack_str() {
+                Ok(BodyKind::String(s.to_owned()))
+            } else if let Ok(readable) = val.downcast_ref_err::<StdReadable>() {
+                match &*readable {
+                    StdReadable::File(arc) => Ok(BodyKind::File(arc.clone())),
+                    r => Ok(BodyKind::SyncReadable(r.clone())),
+                }
+            } else {
+                Err(starlark::Error::new_other(anyhow::anyhow!(
+                    "data: expected str or Readable, got {}",
+                    val.get_type()
+                )))
+            }
+        }
+    }
+}
+
+/// Converts a `BodyKind` into raw bytes (used for the unix-socket / hyper path).
+async fn body_kind_to_bytes(body_kind: BodyKind) -> anyhow::Result<Vec<u8>> {
+    match body_kind {
+        BodyKind::Empty => Ok(Vec::new()),
+        BodyKind::String(s) => Ok(s.into_bytes()),
+        BodyKind::File(arc) => {
+            let std_file = arc.lock().unwrap().try_clone()?;
+            let mut tokio_file = tokio::fs::File::from_std(std_file);
+            let mut buf = Vec::new();
+            tokio_file.read_to_end(&mut buf).await?;
+            Ok(buf)
+        }
+        BodyKind::SyncReadable(readable) => {
+            let bytes = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                match &readable {
+                    StdReadable::Stdin(s) => {
+                        s.lock().read_to_end(&mut buf)?;
+                    }
+                    StdReadable::ChildStdout(s) => {
+                        s.lock().unwrap().borrow_mut().read_to_end(&mut buf)?;
+                    }
+                    StdReadable::ChildStderr(s) => {
+                        s.lock().unwrap().borrow_mut().read_to_end(&mut buf)?;
+                    }
+                    StdReadable::File(_) => unreachable!(),
+                }
+                Ok(buf)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking error: {}", e))??;
+            Ok(bytes)
+        }
+    }
+}
+
+/// Applies a `BodyKind` to a reqwest `RequestBuilder`.
+/// For `File`, streams the content; for others, buffers into memory.
+async fn apply_body_kind(
+    mut req: reqwest::RequestBuilder,
+    body_kind: BodyKind,
+) -> anyhow::Result<reqwest::RequestBuilder> {
+    match body_kind {
+        BodyKind::Empty => {}
+        BodyKind::String(s) => {
+            req = req.body(s);
+        }
+        BodyKind::File(arc) => {
+            let std_file = arc.lock().unwrap().try_clone()?;
+            let tokio_file = tokio::fs::File::from_std(std_file);
+            req = req.body(reqwest::Body::wrap_stream(ReaderStream::new(tokio_file)));
+        }
+        BodyKind::SyncReadable(readable) => {
+            let bytes = body_kind_to_bytes(BodyKind::SyncReadable(readable)).await?;
+            req = req.body(bytes);
+        }
+    }
+    Ok(req)
 }
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]

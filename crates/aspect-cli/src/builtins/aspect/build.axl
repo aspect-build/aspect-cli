@@ -56,8 +56,11 @@ def impl(ctx: TaskContext) -> int:
         else:
             build_events = False
 
-    if fragment.build_start:
-        fragment.build_start()
+    # Shared mutable state across build_start / build_event / build_end
+    state = {}
+
+    for handler in fragment.build_start:
+        handler(ctx, state)
 
     for _ in range(10):
         build = ctx.bazel.build(
@@ -68,18 +71,17 @@ def impl(ctx: TaskContext) -> int:
         )
 
         if fragment.build_event:
-            handler = fragment.build_event
-            state = {}
             for event in build.build_events():
-                handler(ctx, state, event)
+                for handler in fragment.build_event:
+                    handler(ctx, state, event)
 
         build_status = build.wait()
 
         if build_status.code == 0 or not fragment.build_retry(build_status.code):
             break
 
-    if fragment.build_end:
-        fragment.build_end(build_status.code)
+    for handler in fragment.build_end:
+        handler(ctx, state, build_status.code)
 
     return build_status.code
 

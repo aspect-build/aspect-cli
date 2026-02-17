@@ -20,7 +20,7 @@ mod env;
 mod fs;
 mod io;
 mod process;
-mod stream;
+pub mod stream;
 mod stream_iter;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]

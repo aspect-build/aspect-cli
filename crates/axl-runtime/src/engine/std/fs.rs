@@ -7,7 +7,10 @@ use starlark::values::ValueOfUnchecked;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneType;
 use std::fs;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
+
+use super::stream;
 
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
@@ -466,6 +469,19 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         fs::write(path.as_str(), content.as_str())?;
         Ok(NoneType)
+    }
+
+    /// Opens a file for reading and returns it as a readable stream.
+    ///
+    /// The returned stream can be passed directly as the `data` argument to
+    /// `ctx.http().post()` or `ctx.http().put()` for streaming uploads, or
+    /// iterated over / read directly.
+    fn open<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+    ) -> anyhow::Result<stream::Readable> {
+        let file = fs::File::open(path.as_str())?;
+        Ok(stream::Readable::File(Arc::new(Mutex::new(file))))
     }
 }
 
