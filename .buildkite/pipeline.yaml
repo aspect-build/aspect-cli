@@ -17,7 +17,7 @@ steps:
       - __main__::warm
     label: ":aspect: Test"
     agents:
-      queue: aspect-default
+      queue: aspect-huge
     timeout_in_minutes: 20
     command:
       - |
