@@ -23,6 +23,15 @@ steps:
       - |
         echo "--- :bazel: aspect test //..."
         aspect test //...
+  - key: __main__::build
+    depends_on:
+      - __main__::warm
+    label: ":aspect: Build"
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 20
+    command:
+      - |
         echo "--- :bazel: aspect build //:launcher //:cli"
         aspect build //:launcher //:cli
         # Use cquery to get the actual output paths (handles platform transitions on Linux)
