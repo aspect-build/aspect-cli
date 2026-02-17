@@ -83,6 +83,8 @@ def _upload_group(ctx, group, dir_path, name_prefix):
     if current_count == 0 or current_count == group["last_count"]:
         return False
 
+    print("artifact upload: " + name_prefix + " has " + str(current_count) + " files (was " + str(group["last_count"]) + ")")
+
     # Create archive of the full directory
     archive_path = "/tmp/axl_" + name_prefix.replace("-", "_") + ".tar.gz"
     if not _tar_directory(ctx, dir_path, archive_path):
@@ -92,6 +94,7 @@ def _upload_group(ctx, group, dir_path, name_prefix):
     # Upload with a versioned name
     group["version"] += 1
     artifact_name = name_prefix + "-v" + str(group["version"])
+    print("artifact upload: uploading " + artifact_name + " from " + archive_path)
     result = upload_file(ctx, archive_path, name = artifact_name)
 
     # Clean up local archive
@@ -99,8 +102,10 @@ def _upload_group(ctx, group, dir_path, name_prefix):
         ctx.std.fs.remove_file(archive_path)
 
     if result["success"]:
+        print("artifact upload: " + artifact_name + " uploaded successfully")
         # Delete previous version
         if group["prev_ref"]:
+            print("artifact upload: deleting previous version " + group["prev_ref"])
             delete_artifact(ctx, group["prev_ref"])
         group["prev_ref"] = result["artifact_ref"]
         group["last_count"] = current_count
@@ -137,15 +142,19 @@ def _stage_test_files(ctx, event):
     label = event.id.label  # e.g. "//foo/bar:baz_test"
     # Convert label to a directory path: "//foo/bar:baz_test" -> "foo/bar/baz_test"
     label_path = label.lstrip("/").replace(":", "/")
+    print("artifact staging: test_result for " + label + " (" + str(len(event.payload.test_action_output)) + " files)")
 
     for file in event.payload.test_action_output:
         src = "/".join(file.path_prefix) + "/" + file.name
         if not ctx.std.fs.exists(src):
+            print("artifact staging: skipping " + src + " (not found)")
             continue
 
         dest_dir = _TESTLOGS_DIR + "/" + label_path
         ctx.std.fs.create_dir_all(dest_dir)
-        ctx.std.fs.copy(src, dest_dir + "/" + file.name)
+        dest = dest_dir + "/" + file.name
+        ctx.std.fs.copy(src, dest)
+        print("artifact staging: copied " + src + " -> " + dest)
 
 
 def _init_upload_state(state):
@@ -168,10 +177,12 @@ def configure_artifacts(ctx):
     """
     ci = detect_ci(ctx.std.env)
     if not ci:
+        print("artifact upload: no CI environment detected, skipping")
         return
 
     fragment = ctx.fragments[BazelFragment]
     job_prefix = _artifact_name_prefix(ctx.std.env)
+    print("artifact upload: configured for " + ci + " (prefix=" + job_prefix + ", batch_size=" + str(_BATCH_SIZE) + ")")
 
     def _on_build_event(ctx, state, event):
         _stage_test_files(ctx, event)
@@ -181,6 +192,7 @@ def configure_artifacts(ctx):
         _maybe_upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, job_prefix + "-artifacts")
 
     def _on_build_end(ctx, state, exit_code):
+        print("artifact upload: build ended (exit_code=" + str(exit_code) + "), flushing remaining files")
         _init_upload_state(state)
         upload_state = state["_artifact_upload"]
         _upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
