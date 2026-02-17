@@ -22,7 +22,7 @@ steps:
     command:
       - |
         echo "--- :bazel: aspect test //..."
-        aspect test //...
+        ASPECT_DEBUG=1 aspect test //... --bazel_flag=--build_tests_only
   - key: __main__::build
     depends_on:
       - __main__::warm
