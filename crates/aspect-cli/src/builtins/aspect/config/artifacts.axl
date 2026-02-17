@@ -16,6 +16,9 @@ load("../fragments.axl", "BazelFragment")
 # Upload every N new files per group
 _BATCH_SIZE = 5
 
+# bb_clientd FUSE mount root for resolving bytestream:// URIs
+_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
+
 # Artifact staging root, matching Rosetta conventions
 _ARTIFACTS_ROOT = "/workflows"
 _ARTIFACTS_DIR = _ARTIFACTS_ROOT + "/artifacts"
@@ -122,9 +125,26 @@ def _maybe_upload_group(ctx, group, dir_path, name_prefix):
 
 
 def _file_uri_to_path(uri):
-    """Convert a file:// URI to a local filesystem path."""
-    if uri and uri.startswith("file://"):
+    """Convert a file:// or bytestream:// URI to a local filesystem path.
+
+    bytestream:// URIs are resolved via the bb_clientd FUSE mount:
+      bytestream://host:port/blobs/<hash>/<size>
+      -> {_BB_CLIENTD_ROOT}/cas/{host}/blobs/sha256/file/{hash}-{size}
+    """
+    if not uri:
+        return uri
+    if uri.startswith("file://"):
         return uri[len("file://"):]
+    if uri.startswith("bytestream://"):
+        # bytestream://host:port/blobs/<hash>/<size>
+        rest = uri[len("bytestream://"):]  # host:port/blobs/<hash>/<size>
+        parts = rest.split("/")
+        # parts = ["host:port", "blobs", "<hash>", "<size>"]
+        host_port = parts[0]
+        host = host_port.split(":")[0]
+        blob_hash = parts[2]
+        blob_size = parts[3]
+        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
     return uri
 
 
