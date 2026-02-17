@@ -20,6 +20,8 @@ load(
     "build_suggestion",
 )
 
+load("../fragments.axl", "BazelFragment")
+
 def _format_build_state(build_state):
     md = """
 # Build Summary
@@ -127,11 +129,15 @@ def configure_builtins(ctx: ConfigContext):
             metadata = {} # TODO: how does bessie authenticate?
         ))
 
-    for task in ctx.tasks:
-        if task.name == "build" and task.path.endswith("aspect/build.axl"):
-            if user != "thesayyn":
-                task.config.extra_startup_flags.extend(flags.get("startup", []))
-                task.config.extra_flags.extend(flags.get("build", []))
-            task.config.build_start = lambda: print("+++ :bazel: Building")
-            task.config.build_event_sinks.extend(bessie_sinks)
-            task.config.build_event = on_build_event
+    # Configure BazelFragment globally
+    bazel_fragment = ctx.fragments[BazelFragment]
+    if user != "thesayyn":
+        bazel_fragment.extra_startup_flags.extend(flags.get("startup", []))
+        bazel_fragment.extra_flags.extend(flags.get("build", []))
+    bazel_fragment.build_start = lambda: print("+++ :bazel: Building")
+    bazel_fragment.build_event_sinks.extend(bessie_sinks)
+    bazel_fragment.build_event = on_build_event
+
+    for test in ctx.tasks:
+        if test.name.startswith("test"):
+            test.fragments[BazelFragment].extra_flags.extend(flags.get("test", []))

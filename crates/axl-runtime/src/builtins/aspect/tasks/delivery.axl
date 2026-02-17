@@ -7,6 +7,8 @@ to prevent re-delivery.
 Uses deliveryd (Unix socket HTTP server) for all delivery state operations.
 """
 
+load("../fragments.axl", "DeliveryFragment")
+
 load(
     "../lib/deliveryd.axl",
     deliveryd_query = "query",
@@ -87,7 +89,8 @@ def _deliver_target(ctx, endpoint, ci_host, workspace, build_url, bazel_flags, l
     return ("success", "Delivered successfully")
 
 def _delivery_impl(ctx):
-    ctx.config.delivery_start()
+    fragment = ctx.fragments[DeliveryFragment]
+    fragment.delivery_start()
 
     # Check if terminal supports colors
     is_tty = ctx.std.io.stdout.is_tty
@@ -160,7 +163,7 @@ def _delivery_impl(ctx):
             bazel_flags, label, is_forced, target_state, is_tty
         )
 
-        ctx.config.deliver_target(label, is_forced)
+        fragment.deliver_target(label, is_forced)
 
         forced_marker = " (FORCED)" if is_forced else ""
         if status == "success":
@@ -209,7 +212,7 @@ def _delivery_impl(ctx):
     ]
     print("{} {}".format(_style("Summary:", _BOLD, is_tty), ", ".join(summary_parts)))
 
-    ctx.config.delivery_end()
+    fragment.delivery_end()
 
     if failed_count > 0:
         return 1
@@ -218,16 +221,10 @@ def _delivery_impl(ctx):
 
 
 
-DeliveryConfig = spec(
-    delivery_start = attr(typing.Callable[[], None], lambda: None),
-    delivery_end = attr(typing.Callable[[], None], lambda: None),
-    deliver_target = attr(typing.Callable[[str, bool], None], lambda label, is_forced: None),
-)
-
 delivery = task(
     name = "delivery",
     implementation = _delivery_impl,
-    config = DeliveryConfig,
+    fragments = [DeliveryFragment],
     args = {
         "ci_host": args.string(default = "bk"),
         "commit_sha": args.string(),

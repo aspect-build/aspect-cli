@@ -59,7 +59,7 @@ async fn main() -> miette::Result<ExitCode> {
     }
 
     // Initialize tracing for logging and instrumentation.
-    // let _tracing = trace::init();
+    let _tracing = trace::init();
     // Enter the root tracing span for the entire application.
     let _root = info_span!("root").entered();
 
@@ -310,9 +310,11 @@ async fn main() -> miette::Result<ExitCode> {
         }
 
         // Run all config functions, passing in vector of tasks for configuration
-        let tasks = config_eval
+        let config_result = config_eval
             .run_all(scoped_configs, tasks)
             .into_diagnostic()?;
+        let tasks = config_result.tasks;
+        let fragment_data = config_result.fragment_data;
 
         // Build the command tree from the evaluated and configured tasks.
         let mut tree = CommandTree::default();
@@ -417,7 +419,7 @@ async fn main() -> miette::Result<ExitCode> {
         let store = axl_loader.new_store(task.path.clone());
 
         // Execute the selected task using the new execution function
-        let exit_code = execute_task_with_args(task, store, |heap| {
+        let exit_code = execute_task_with_args(task, store, &fragment_data, |heap| {
             let mut args = TaskArgs::new();
             for (k, v) in definition.args().iter() {
                 let val = match v {
@@ -492,7 +494,7 @@ async fn main() -> miette::Result<ExitCode> {
     match out.await {
         Ok(result) => {
             drop(_root);
-            // drop(_tracing);
+            drop(_tracing);
             result
         }
         Err(err) => panic!("{:?}", err),

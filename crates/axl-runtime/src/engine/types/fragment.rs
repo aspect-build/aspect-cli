@@ -16,17 +16,17 @@ use starlark::values::{
 };
 use starlark_map::small_map::SmallMap;
 
-static SPEC_TYPE_ID: AtomicU64 = AtomicU64::new(0);
+static FRAGMENT_TYPE_ID: AtomicU64 = AtomicU64::new(0);
 
-fn next_spec_type_id() -> u64 {
-    SPEC_TYPE_ID.fetch_add(1, Ordering::SeqCst)
+fn next_fragment_type_id() -> u64 {
+    FRAGMENT_TYPE_ID.fetch_add(1, Ordering::SeqCst)
 }
 
 // -----------------------------------------------------------------------------
 // Field
 // -----------------------------------------------------------------------------
 
-/// A field definition for a spec, containing a type and optional default value.
+/// A field definition for a fragment, containing a type and optional default value.
 #[derive(Debug, Clone, ProvidesStaticType, Allocative)]
 pub struct Field<'v> {
     pub(crate) typ: TypeCompiled<Value<'v>>,
@@ -174,7 +174,7 @@ impl Freeze for FieldValue<'_> {
 }
 
 /// Deep-copy a default value if it's a mutable container (list or dict).
-/// This ensures each spec instance gets its own mutable copy rather than
+/// This ensures each fragment instance gets its own mutable copy rather than
 /// sharing the (potentially frozen) default.
 fn copy_default_value<'v>(value: Value<'v>, heap: &'v Heap) -> starlark::Result<Value<'v>> {
     match value.get_type() {
@@ -210,31 +210,31 @@ fn build_type_checkers<'v>(
 }
 
 // -----------------------------------------------------------------------------
-// SpecType
+// FragmentType
 // -----------------------------------------------------------------------------
 
-/// The type of a spec, created by `spec(field1=type1, field2=type2, ...)`.
-/// Calling this type creates a `Spec` instance.
+/// The type of a fragment, created by `fragment(field1=type1, field2=type2, ...)`.
+/// Calling this type creates a `FragmentInstance` instance.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct SpecType<'v> {
-    /// Unique identifier for this spec type
+pub struct FragmentType<'v> {
+    /// Unique identifier for this fragment type
     pub(crate) id: u64,
-    /// Name of the spec type (set when assigned to a variable)
+    /// Name of the fragment type (set when assigned to a variable)
     pub(crate) name: Option<String>,
     /// Fields with their types and optional defaults
     pub(crate) fields: SmallMap<String, Field<'v>>,
 }
 
-impl<'v> Display for SpecType<'v> {
+impl<'v> Display for FragmentType<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.name {
-            Some(name) => write!(f, "spec[{}]", name),
-            None => write!(f, "spec[anon]"),
+            Some(name) => write!(f, "fragment[{}]", name),
+            None => write!(f, "fragment[anon]"),
         }
     }
 }
 
-unsafe impl<'v> Trace<'v> for SpecType<'v> {
+unsafe impl<'v> Trace<'v> for FragmentType<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         for (_, field) in self.fields.iter_mut() {
             field.trace(tracer);
@@ -242,14 +242,14 @@ unsafe impl<'v> Trace<'v> for SpecType<'v> {
     }
 }
 
-impl<'v> AllocValue<'v> for SpecType<'v> {
+impl<'v> AllocValue<'v> for FragmentType<'v> {
     fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-#[starlark_value(type = "spec")]
-impl<'v> StarlarkValue<'v> for SpecType<'v> {
+#[starlark_value(type = "fragment")]
+impl<'v> StarlarkValue<'v> for FragmentType<'v> {
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
@@ -259,7 +259,7 @@ impl<'v> StarlarkValue<'v> for SpecType<'v> {
         variable_name: &str,
         _eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> starlark::Result<()> {
-        // This is called when the spec type is assigned to a variable.
+        // This is called when the fragment type is assigned to a variable.
         // We use unsafe to mutate the name, which is safe because this is only
         // called during module loading.
         let this = self as *const Self as *mut Self;
@@ -324,59 +324,59 @@ impl<'v> StarlarkValue<'v> for SpecType<'v> {
             }
         }
 
-        let spec = Spec {
+        let instance = FragmentInstance {
             typ: _me,
             values: values.into_boxed_slice(),
             type_checkers: type_checkers.into_boxed_slice(),
         };
-        Ok(eval.heap().alloc(spec))
+        Ok(eval.heap().alloc(instance))
     }
 
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(spec_type_methods)
+        RES.methods(fragment_type_methods)
     }
 }
 
 #[starlark_module]
-fn spec_type_methods(_builder: &mut MethodsBuilder) {}
+fn fragment_type_methods(_builder: &mut MethodsBuilder) {}
 
 // -----------------------------------------------------------------------------
-// FrozenSpecType
+// FrozenFragmentType
 // -----------------------------------------------------------------------------
 
-/// Frozen version of SpecType.
+/// Frozen version of FragmentType.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FrozenSpecType {
+pub struct FrozenFragmentType {
     pub(crate) id: u64,
     pub(crate) name: Option<String>,
     pub(crate) fields: SmallMap<String, FrozenField>,
 }
 
-impl Display for FrozenSpecType {
+impl Display for FrozenFragmentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.name {
-            Some(name) => write!(f, "spec[{}]", name),
-            None => write!(f, "spec[anon]"),
+            Some(name) => write!(f, "fragment[{}]", name),
+            None => write!(f, "fragment[anon]"),
         }
     }
 }
 
-unsafe impl<'v> Trace<'v> for FrozenSpecType {
+unsafe impl<'v> Trace<'v> for FrozenFragmentType {
     fn trace(&mut self, _tracer: &Tracer<'v>) {
         // Frozen values don't need tracing
     }
 }
 
-impl AllocFrozenValue for FrozenSpecType {
+impl AllocFrozenValue for FrozenFragmentType {
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         heap.alloc_simple(self)
     }
 }
 
-#[starlark_value(type = "spec")]
-impl<'v> StarlarkValue<'v> for FrozenSpecType {
-    type Canonical = SpecType<'v>;
+#[starlark_value(type = "fragment")]
+impl<'v> StarlarkValue<'v> for FrozenFragmentType {
+    type Canonical = FragmentType<'v>;
 
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
@@ -435,29 +435,29 @@ impl<'v> StarlarkValue<'v> for FrozenSpecType {
             }
         }
 
-        let spec = Spec {
+        let instance = FragmentInstance {
             typ: _me,
             values: values.into_boxed_slice(),
             type_checkers: type_checkers.into_boxed_slice(),
         };
-        Ok(eval.heap().alloc(spec))
+        Ok(eval.heap().alloc(instance))
     }
 
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(spec_type_methods)
+        RES.methods(fragment_type_methods)
     }
 }
 
-impl Freeze for SpecType<'_> {
-    type Frozen = FrozenSpecType;
+impl Freeze for FragmentType<'_> {
+    type Frozen = FrozenFragmentType;
 
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         let mut frozen_fields = SmallMap::with_capacity(self.fields.len());
         for (name, field) in self.fields.into_iter() {
             frozen_fields.insert(name, field.freeze(freezer)?);
         }
-        Ok(FrozenSpecType {
+        Ok(FrozenFragmentType {
             id: self.id,
             name: self.name,
             fields: frozen_fields,
@@ -466,13 +466,13 @@ impl Freeze for SpecType<'_> {
 }
 
 // -----------------------------------------------------------------------------
-// Spec
+// FragmentInstance
 // -----------------------------------------------------------------------------
 
-/// An instance of a spec type, containing field values.
+/// An instance of a fragment type, containing field values.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct Spec<'v> {
-    /// The spec type this instance belongs to
+pub struct FragmentInstance<'v> {
+    /// The fragment type this instance belongs to
     pub(crate) typ: Value<'v>,
     /// Field values in the same order as the type's field definitions (mutable via Cell)
     #[allocative(skip)]
@@ -483,19 +483,19 @@ pub struct Spec<'v> {
     pub(crate) type_checkers: Box<[TypeCompiled<Value<'v>>]>,
 }
 
-impl<'v> Display for Spec<'v> {
+impl<'v> Display for FragmentInstance<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(", self.typ)?;
-        if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
+        if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
             let mut first = true;
-            for ((name, _), value) in spec_type.fields.iter().zip(self.values.iter()) {
+            for ((name, _), value) in frag_type.fields.iter().zip(self.values.iter()) {
                 if !first {
                     write!(f, ", ")?;
                 }
                 first = false;
                 write!(f, "{}={}", name, value.get())?;
             }
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             let mut first = true;
             for ((name, _), value) in frozen_type.fields.iter().zip(self.values.iter()) {
                 if !first {
@@ -509,7 +509,7 @@ impl<'v> Display for Spec<'v> {
     }
 }
 
-unsafe impl<'v> Trace<'v> for Spec<'v> {
+unsafe impl<'v> Trace<'v> for FragmentInstance<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         self.typ.trace(tracer);
         for cell in self.values.iter() {
@@ -523,17 +523,17 @@ unsafe impl<'v> Trace<'v> for Spec<'v> {
     }
 }
 
-impl<'v> AllocValue<'v> for Spec<'v> {
+impl<'v> AllocValue<'v> for FragmentInstance<'v> {
     fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-impl<'v> Spec<'v> {
+impl<'v> FragmentInstance<'v> {
     fn get_field_names(&self) -> Vec<&str> {
-        if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
-            spec_type.fields.keys().map(|s| s.as_str()).collect()
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+        if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
+            frag_type.fields.keys().map(|s| s.as_str()).collect()
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             frozen_type.fields.keys().map(|s| s.as_str()).collect()
         } else {
             vec![]
@@ -541,18 +541,18 @@ impl<'v> Spec<'v> {
     }
 }
 
-#[starlark_value(type = "spec")]
-impl<'v> StarlarkValue<'v> for Spec<'v> {
+#[starlark_value(type = "fragment")]
+impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 
     fn get_attr(&self, attribute: &str, _heap: &'v Heap) -> Option<Value<'v>> {
-        if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
-            if let Some(idx) = spec_type.fields.get_index_of(attribute) {
+        if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
+            if let Some(idx) = frag_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].get());
             }
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             if let Some(idx) = frozen_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].get());
             }
@@ -562,13 +562,13 @@ impl<'v> StarlarkValue<'v> for Spec<'v> {
 
     fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
         // Get field index
-        let idx = if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
-            spec_type.fields.get_index_of(attribute)
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+        let idx = if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
+            frag_type.fields.get_index_of(attribute)
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             frozen_type.fields.get_index_of(attribute)
         } else {
             return Err(starlark::Error::new_other(anyhow::anyhow!(
-                "Invalid spec type"
+                "Invalid fragment type"
             )));
         };
 
@@ -576,7 +576,7 @@ impl<'v> StarlarkValue<'v> for Spec<'v> {
             Some(idx) => idx,
             None => {
                 return Err(starlark::Error::new_other(anyhow::anyhow!(
-                    "Spec {} has no field `{}`",
+                    "Fragment {} has no field `{}`",
                     self.typ,
                     attribute
                 )));
@@ -600,9 +600,9 @@ impl<'v> StarlarkValue<'v> for Spec<'v> {
     }
 
     fn has_attr(&self, attribute: &str, _heap: &'v Heap) -> bool {
-        if let Some(spec_type) = self.typ.downcast_ref::<SpecType>() {
-            spec_type.fields.contains_key(attribute)
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+        if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
+            frag_type.fields.contains_key(attribute)
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             frozen_type.fields.contains_key(attribute)
         } else {
             false
@@ -617,21 +617,21 @@ impl<'v> StarlarkValue<'v> for Spec<'v> {
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
-        if let Some(other_spec) = other.downcast_ref::<Spec>() {
-            // Check that they have the same spec type
+        if let Some(other_instance) = other.downcast_ref::<FragmentInstance>() {
+            // Check that they have the same fragment type
             let self_id = self
                 .typ
-                .downcast_ref::<SpecType>()
+                .downcast_ref::<FragmentType>()
                 .map(|t| t.id)
-                .or_else(|| self.typ.downcast_ref::<FrozenSpecType>().map(|t| t.id));
-            let other_id = other_spec
+                .or_else(|| self.typ.downcast_ref::<FrozenFragmentType>().map(|t| t.id));
+            let other_id = other_instance
                 .typ
-                .downcast_ref::<SpecType>()
+                .downcast_ref::<FragmentType>()
                 .map(|t| t.id)
                 .or_else(|| {
-                    other_spec
+                    other_instance
                         .typ
-                        .downcast_ref::<FrozenSpecType>()
+                        .downcast_ref::<FrozenFragmentType>()
                         .map(|t| t.id)
                 });
 
@@ -640,24 +640,24 @@ impl<'v> StarlarkValue<'v> for Spec<'v> {
             }
 
             // Compare all values
-            if self.values.len() != other_spec.values.len() {
+            if self.values.len() != other_instance.values.len() {
                 return Ok(false);
             }
-            for (a, b) in self.values.iter().zip(other_spec.values.iter()) {
+            for (a, b) in self.values.iter().zip(other_instance.values.iter()) {
                 if !a.get().equals(b.get())? {
                     return Ok(false);
                 }
             }
             Ok(true)
-        } else if let Some(other_frozen) = other.downcast_ref::<FrozenSpec>() {
+        } else if let Some(other_frozen) = other.downcast_ref::<FrozenFragmentInstance>() {
             let self_id = self
                 .typ
-                .downcast_ref::<SpecType>()
+                .downcast_ref::<FragmentType>()
                 .map(|t| t.id)
-                .or_else(|| self.typ.downcast_ref::<FrozenSpecType>().map(|t| t.id));
+                .or_else(|| self.typ.downcast_ref::<FrozenFragmentType>().map(|t| t.id));
             let other_id = other_frozen
                 .typ
-                .downcast_ref::<FrozenSpecType>()
+                .downcast_ref::<FrozenFragmentType>()
                 .map(|t| t.id);
 
             if self_id != other_id {
@@ -680,20 +680,20 @@ impl<'v> StarlarkValue<'v> for Spec<'v> {
 }
 
 // -----------------------------------------------------------------------------
-// FrozenSpec
+// FrozenFragmentInstance
 // -----------------------------------------------------------------------------
 
-/// Frozen version of Spec.
+/// Frozen version of FragmentInstance.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FrozenSpec {
+pub struct FrozenFragmentInstance {
     pub(crate) typ: FrozenValue,
     pub(crate) values: Box<[FrozenValue]>,
 }
 
-impl Display for FrozenSpec {
+impl Display for FrozenFragmentInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(", self.typ)?;
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             let mut first = true;
             for ((name, _), value) in frozen_type.fields.iter().zip(self.values.iter()) {
                 if !first {
@@ -707,28 +707,28 @@ impl Display for FrozenSpec {
     }
 }
 
-unsafe impl<'v> Trace<'v> for FrozenSpec {
+unsafe impl<'v> Trace<'v> for FrozenFragmentInstance {
     fn trace(&mut self, _tracer: &Tracer<'v>) {
         // Frozen values don't need tracing
     }
 }
 
-impl AllocFrozenValue for FrozenSpec {
+impl AllocFrozenValue for FrozenFragmentInstance {
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         heap.alloc_simple(self)
     }
 }
 
-#[starlark_value(type = "spec")]
-impl<'v> StarlarkValue<'v> for FrozenSpec {
-    type Canonical = Spec<'v>;
+#[starlark_value(type = "fragment")]
+impl<'v> StarlarkValue<'v> for FrozenFragmentInstance {
+    type Canonical = FragmentInstance<'v>;
 
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 
     fn get_attr(&self, attribute: &str, _heap: &'v Heap) -> Option<Value<'v>> {
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             if let Some(idx) = frozen_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].to_value());
             }
@@ -737,7 +737,7 @@ impl<'v> StarlarkValue<'v> for FrozenSpec {
     }
 
     fn has_attr(&self, attribute: &str, _heap: &'v Heap) -> bool {
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             frozen_type.fields.contains_key(attribute)
         } else {
             false
@@ -745,7 +745,7 @@ impl<'v> StarlarkValue<'v> for FrozenSpec {
     }
 
     fn dir_attr(&self) -> Vec<String> {
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenSpecType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             frozen_type.fields.keys().map(|s| s.to_string()).collect()
         } else {
             vec![]
@@ -753,11 +753,11 @@ impl<'v> StarlarkValue<'v> for FrozenSpec {
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
-        if let Some(other_frozen) = other.downcast_ref::<FrozenSpec>() {
-            let self_id = self.typ.downcast_ref::<FrozenSpecType>().map(|t| t.id);
+        if let Some(other_frozen) = other.downcast_ref::<FrozenFragmentInstance>() {
+            let self_id = self.typ.downcast_ref::<FrozenFragmentType>().map(|t| t.id);
             let other_id = other_frozen
                 .typ
-                .downcast_ref::<FrozenSpecType>()
+                .downcast_ref::<FrozenFragmentType>()
                 .map(|t| t.id);
 
             if self_id != other_id {
@@ -773,16 +773,16 @@ impl<'v> StarlarkValue<'v> for FrozenSpec {
                 }
             }
             Ok(true)
-        } else if let Some(other_spec) = other.downcast_ref::<Spec>() {
-            let self_id = self.typ.downcast_ref::<FrozenSpecType>().map(|t| t.id);
-            let other_id = other_spec
+        } else if let Some(other_instance) = other.downcast_ref::<FragmentInstance>() {
+            let self_id = self.typ.downcast_ref::<FrozenFragmentType>().map(|t| t.id);
+            let other_id = other_instance
                 .typ
-                .downcast_ref::<SpecType>()
+                .downcast_ref::<FragmentType>()
                 .map(|t| t.id)
                 .or_else(|| {
-                    other_spec
+                    other_instance
                         .typ
-                        .downcast_ref::<FrozenSpecType>()
+                        .downcast_ref::<FrozenFragmentType>()
                         .map(|t| t.id)
                 });
 
@@ -790,10 +790,10 @@ impl<'v> StarlarkValue<'v> for FrozenSpec {
                 return Ok(false);
             }
 
-            if self.values.len() != other_spec.values.len() {
+            if self.values.len() != other_instance.values.len() {
                 return Ok(false);
             }
-            for (a, b) in self.values.iter().zip(other_spec.values.iter()) {
+            for (a, b) in self.values.iter().zip(other_instance.values.iter()) {
                 if !a.to_value().equals(b.get())? {
                     return Ok(false);
                 }
@@ -805,8 +805,8 @@ impl<'v> StarlarkValue<'v> for FrozenSpec {
     }
 }
 
-impl Freeze for Spec<'_> {
-    type Frozen = FrozenSpec;
+impl Freeze for FragmentInstance<'_> {
+    type Frozen = FrozenFragmentInstance;
 
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         let typ = self.typ.freeze(freezer)?;
@@ -815,10 +815,25 @@ impl Freeze for Spec<'_> {
             .iter()
             .map(|v| v.get().freeze(freezer))
             .collect();
-        Ok(FrozenSpec {
+        Ok(FrozenFragmentInstance {
             typ,
             values: values?.into_boxed_slice(),
         })
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Helper: extract fragment type ID from a Value
+// -----------------------------------------------------------------------------
+
+/// Extract the fragment type ID from a Value that is either a FragmentType or FrozenFragmentType.
+pub fn extract_fragment_type_id(value: Value) -> Option<u64> {
+    if let Some(ft) = value.downcast_ref::<FragmentType>() {
+        Some(ft.id)
+    } else if let Some(ft) = value.downcast_ref::<FrozenFragmentType>() {
+        Some(ft.id)
+    } else {
+        None
     }
 }
 
@@ -828,7 +843,7 @@ impl Freeze for Spec<'_> {
 
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
-    /// Creates a spec type with the given fields.
+    /// Creates a fragment type with the given fields.
     ///
     /// Each field can be a bare type (required, no default) or an `attr()`
     /// definition (with type and optional default).
@@ -838,22 +853,15 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///
     /// Example:
     /// ```starlark
-    /// MySpec = spec(host=str, port=int)
-    /// r = MySpec(host="localhost", port=80)
-    /// print(r.host)  # "localhost"
-    /// print(r.port)  # 80
-    ///
-    /// # Mutable defaults are safe:
-    /// ListSpec = spec(items=attr(list[str], []))
-    /// a = ListSpec()
-    /// b = ListSpec()
-    /// a.items.append("x")
-    /// print(b.items)  # [] — each instance has its own list
+    /// BazelFragment = fragment(
+    ///     extra_flags = attr(list[str], []),
+    ///     extra_startup_flags = attr(list[str], []),
+    /// )
     /// ```
-    fn spec<'v>(
+    fn fragment<'v>(
         #[starlark(kwargs)] kwargs: SmallMap<&str, Value<'v>>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<SpecType<'v>> {
+    ) -> starlark::Result<FragmentType<'v>> {
         let mut fields = SmallMap::with_capacity(kwargs.len());
 
         for (name, value) in kwargs.into_iter() {
@@ -876,8 +884,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             fields.insert(name.to_string(), field);
         }
 
-        Ok(SpecType {
-            id: next_spec_type_id(),
+        Ok(FragmentType {
+            id: next_fragment_type_id(),
             name: None,
             fields,
         })
@@ -885,17 +893,13 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
     /// Creates a field definition with a type and optional default value.
     ///
-    /// Mutable defaults (lists, dicts) are deep-copied when a spec instance is
+    /// Mutable defaults (lists, dicts) are deep-copied when a fragment instance is
     /// created, so each instance gets its own independent copy.
     ///
     /// Example:
     /// ```starlark
-    /// MySpec = spec(host=str, port=attr(int, 80))
-    /// r = MySpec(host="localhost")  # port defaults to 80
-    ///
-    /// # Mutable defaults are copied per instance:
-    /// attr(list[str], [])   # each instance gets a fresh []
-    /// attr(dict[str, int], {})  # each instance gets a fresh {}
+    /// BazelFragment = fragment(host=str, port=attr(int, 80))
+    /// r = BazelFragment(host="localhost")  # port defaults to 80
     /// ```
     fn attr<'v>(
         #[starlark(require = pos)] typ: Value<'v>,

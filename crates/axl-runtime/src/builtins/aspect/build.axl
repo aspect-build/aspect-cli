@@ -1,24 +1,7 @@
 """
 A default 'build' task that wraps a 'bazel build' command.
 """
-load("./bazel.axl", "default_retry")
-
-BuildConfig = spec(
-    # Declarative data — composable, zero-cost reads
-    extra_flags = attr(list[str], []),
-    extra_startup_flags = attr(list[str], []),
-    build_event_sinks = attr(list[bazel.build.BuildEventSink], []),
-
-    # Optional transforms — only called when set
-    flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
-    startup_flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
-
-    # Lifecycle — only called when set
-    build_start = attr(typing.Callable[[], None] | None, None),
-    build_event = attr(typing.Callable[[dict, str, str], None] | None, None),
-    build_retry = attr(typing.Callable[[int], bool], default_retry),
-    build_end = attr(typing.Callable[[int], None] | None, None),
-)
+load("./fragments.axl", "BazelFragment")
 
 def _collect_bes_from_args(ctx):
     """Collect BES sinks from CLI args (--bes_backend/--bes_header)."""
@@ -37,35 +20,41 @@ def _collect_bes_from_args(ctx):
     return sinks
 
 def impl(ctx: TaskContext) -> int:
+    health = ctx.bazel.health_check()
+    if health.outcome == "unhealthy":
+        fail("Bazel server is unhealthy: " + health.message)
+
+    fragment = ctx.fragments[BazelFragment]
+
     # Flags: accumulate data, then optionally transform
     flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
     flags.extend(ctx.args.bazel_flag)
-    flags.extend(ctx.config.extra_flags)
-    if ctx.config.flags:
-        flags = ctx.config.flags(flags)
+    flags.extend(fragment.extra_flags)
+    if fragment.flags:
+        flags = fragment.flags(flags)
 
     startup_flags = list(ctx.args.bazel_startup_flag)
-    startup_flags.extend(ctx.config.extra_startup_flags)
-    if ctx.config.startup_flags:
-        startup_flags = ctx.config.startup_flags(startup_flags)
+    startup_flags.extend(fragment.extra_startup_flags)
+    if fragment.startup_flags:
+        startup_flags = fragment.startup_flags(startup_flags)
 
-    # BES: merge arg-based sinks with config sinks
+    # BES: merge arg-based sinks with fragment sinks
     build_events = _collect_bes_from_args(ctx)
-    if ctx.config.build_event_sinks:
-        build_events.extend(ctx.config.build_event_sinks)
+    if fragment.build_event_sinks:
+        build_events.extend(fragment.build_event_sinks)
 
     # Coerce to bool/list for ctx.bazel.build:
     # - non-empty list → stream to those sinks + build_events() iterator.
     # - True → stream without explicit sinks (build_event handler only)
     # - False → no BEP stream at all
     if not build_events:
-        if ctx.config.build_event:
+        if fragment.build_event:
             build_events = True
         else:
             build_events = False
 
-    if ctx.config.build_start:
-        ctx.config.build_start()
+    if fragment.build_start:
+        fragment.build_start()
 
     for _ in range(10):
         build = ctx.bazel.build(
@@ -75,25 +64,27 @@ def impl(ctx: TaskContext) -> int:
             *ctx.args.target_pattern,
         )
 
-        if ctx.config.build_event:
-            handler = ctx.config.build_event
+        if fragment.build_event:
+            handler = fragment.build_event
             state = {}
             for event in build.build_events():
                 handler(ctx, state, event)
 
         build_status = build.wait()
 
-        if build_status.code == 0 or not ctx.config.build_retry(build_status.code):
+        if build_status.code == 0 or not fragment.build_retry(build_status.code):
             break
 
-    if ctx.config.build_end:
-        ctx.config.build_end(build_status.code)
+    if fragment.build_end:
+        fragment.build_end(build_status.code)
 
     return build_status.code
 
 build = task(
     implementation = impl,
-    config = BuildConfig,
+    fragments = [
+        BazelFragment
+    ],
     args = {
         "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
         "bazel_flag": args.string_list(),

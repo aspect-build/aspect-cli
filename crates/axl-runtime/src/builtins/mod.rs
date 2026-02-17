@@ -13,6 +13,7 @@ const ASPECT: Builtin = Builtin {
     files: &[
         ("bazel.axl", include_str!("./aspect/bazel.axl")),
         ("build.axl", include_str!("./aspect/build.axl")),
+        ("fragments.axl", include_str!("./aspect/fragments.axl")),
         ("test.axl", include_str!("./aspect/test.axl")),
         ("axl_add.axl", include_str!("./aspect/axl_add.axl")),
         ("MODULE.aspect", include_str!("./aspect/MODULE.aspect")),
@@ -57,10 +58,7 @@ const ASPECT: Builtin = Builtin {
             include_str!("./aspect/lib/deliveryd.axl"),
         ),
         ("lib/github.axl", include_str!("./aspect/lib/github.axl")),
-        (
-            "lib/linting.axl",
-            include_str!("./aspect/lib/linting.axl"),
-        ),
+        ("lib/linting.axl", include_str!("./aspect/lib/linting.axl")),
         (
             "lib/platform.axl",
             include_str!("./aspect/lib/platform.axl"),

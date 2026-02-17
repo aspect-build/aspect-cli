@@ -1,0 +1,26 @@
+"""Fragment type definitions for builtin tasks."""
+
+load("./bazel.axl", "default_retry")
+
+BazelFragment = fragment(
+    # Declarative data — composable, zero-cost reads
+    extra_flags = attr(list[str], []),
+    extra_startup_flags = attr(list[str], []),
+    build_event_sinks = attr(list[bazel.build.BuildEventSink], []),
+
+    # Optional transforms — only called when set
+    flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
+    startup_flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
+
+    # Lifecycle — only called when set
+    build_start = attr(typing.Callable[[], None] | None, None),
+    build_event = attr(typing.Callable[[dict, str, str], None] | None, None),
+    build_retry = attr(typing.Callable[[int], bool], default_retry),
+    build_end = attr(typing.Callable[[int], None] | None, None),
+)
+
+DeliveryFragment = fragment(
+    delivery_start = attr(typing.Callable[[], None], lambda: None),
+    delivery_end = attr(typing.Callable[[], None], lambda: None),
+    deliver_target = attr(typing.Callable[[str, bool], None], lambda label, is_forced: None),
+)

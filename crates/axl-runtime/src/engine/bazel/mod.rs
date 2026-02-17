@@ -25,6 +25,7 @@ use crate::engine::store::AxlStore;
 use axl_proto;
 
 mod build;
+mod health_check;
 mod helpers;
 mod iter;
 mod query;
@@ -210,6 +211,30 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn query<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<query::Query> {
         Ok(query::Query::new())
     }
+
+    /// Probe the Bazel server to determine whether it is responsive.
+    ///
+    /// Runs `bazel --noblock_for_lock info server_pid`. If the server is
+    /// unresponsive, attempts recovery by killing the server process and
+    /// re-checking.
+    ///
+    /// Returns a `HealthCheckResult` with `.success`, `.healthy`, `.message`,
+    /// and `.exit_code` attributes.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// def _health_probe_impl(ctx):
+    ///     result = ctx.bazel.health_check()
+    ///     if not result.healthy:
+    ///         fail("Bazel server is unhealthy")
+    /// ```
+    fn health_check<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] output_base: NoneOr<String>,
+    ) -> anyhow::Result<health_check::HealthCheckResult> {
+        Ok(health_check::run(output_base.into_option().as_deref()))
+    }
 }
 
 #[starlark_module]
@@ -250,6 +275,8 @@ fn register_query_types(globals: &mut GlobalsBuilder) {
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
     const Bazel: StarlarkValueAsType<Bazel> = StarlarkValueAsType::new();
+    const HealthCheckResult: StarlarkValueAsType<health_check::HealthCheckResult> =
+        StarlarkValueAsType::new();
 }
 
 pub fn register_globals(globals: &mut GlobalsBuilder) {

@@ -1,6 +1,7 @@
 """Configures delivery task for Workflows"""
 
 load("../tasks/delivery.axl", "delivery")
+load("../fragments.axl", "DeliveryFragment")
 load("../lib/deliveryd.axl", deliveryd_health = "health")
 load("../lib/platform.axl",
     "read_platform_config",
@@ -44,7 +45,5 @@ def configure_delivery(ctx: ConfigContext):
         print(host_config)
         print(flags)
 
-
-    for task in ctx.tasks:
-        if task.name == "delivery":
-            task.config.delivery_start = lambda: print("--- :bazel: Delivery")
+    # Configure DeliveryFragment fragment globally
+    ctx.fragments[DeliveryFragment].delivery_start = lambda: print("--- :bazel: Delivery")
