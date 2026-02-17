@@ -1,3 +1,4 @@
+mod builtins;
 mod cmd_tree;
 mod flags;
 mod helpers;
@@ -85,10 +86,14 @@ async fn main() -> miette::Result<ExitCode> {
         .evaluate(AXL_ROOT_MODULE_NAME.to_string(), repo_root.clone())
         .into_diagnostic()?;
 
+    // Expand builtins to disk and pass them to the store expander.
+    let builtins = builtins::expand_builtins(repo_root.clone(), disk_store.builtins_path())
+        .into_diagnostic()?;
+
     // Expand all module dependencies (including builtins) to the disk store.
     // Returns (name, path, use_config) for each module.
     let module_roots = disk_store
-        .expand_store(&root_module_store)
+        .expand_store(&root_module_store, builtins)
         .await
         .into_diagnostic()?;
 

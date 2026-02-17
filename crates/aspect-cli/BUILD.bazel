@@ -10,6 +10,7 @@ rust_binary(
         "@crates//:clap",
         "@crates//:miette",
         "@crates//:reqwest",
+        "@crates//:sha256",
         "@crates//:starlark",
         "@crates//:tokio",
         "@crates//:thiserror",
@@ -24,6 +25,10 @@ rust_binary(
         "//crates/aspect-telemetry",
         "//crates/axl-runtime",
     ],
+    compile_data = glob([
+        "src/builtins/**/*.axl",
+        "src/builtins/**/*.aspect",
+    ]),
     visibility = ["//:__pkg__"],
 )
 

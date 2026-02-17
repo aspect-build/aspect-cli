@@ -12,8 +12,6 @@ use thiserror::Error;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 
-use crate::builtins;
-
 use super::store::ModuleStore;
 use super::{AxlArchiveDep, AxlLocalDep, Dep};
 
@@ -223,35 +221,38 @@ impl DiskStore {
         fs::symlink(&dep.path, dep_path).await
     }
 
+    pub fn builtins_path(&self) -> PathBuf {
+        self.root().join("builtins")
+    }
+
     pub async fn expand_store(
         &self,
         store: &ModuleStore,
+        builtins: Vec<(String, PathBuf)>,
     ) -> Result<Vec<(String, PathBuf, bool)>, StoreError> {
         let root = self.root();
         fs::create_dir_all(&root).await?;
         fs::create_dir_all(self.deps_path()).await?;
         fs::create_dir_all(&root.join("cas")).await?;
         fs::create_dir_all(&root.join("dl")).await?;
-        fs::create_dir_all(&root.join("builtins")).await?;
 
         let client = reqwest::Client::new();
 
-        let mut all: HashMap<String, Dep> =
-            builtins::expand_builtins(self.root.clone(), root.join("builtins"))?
-                .into_iter()
-                .map(|(name, path)| {
-                    (
-                        name.clone(),
-                        Dep::Local(AxlLocalDep {
-                            name: name,
-                            path: path,
-                            // Builtins tasks are always auto used
-                            auto_use_tasks: true,
-                            use_config: true,
-                        }),
-                    )
-                })
-                .collect();
+        let mut all: HashMap<String, Dep> = builtins
+            .into_iter()
+            .map(|(name, path)| {
+                (
+                    name.clone(),
+                    Dep::Local(AxlLocalDep {
+                        name: name,
+                        path: path,
+                        // Builtins tasks are always auto used
+                        auto_use_tasks: true,
+                        use_config: true,
+                    }),
+                )
+            })
+            .collect();
 
         all.extend(store.deps.take());
 
