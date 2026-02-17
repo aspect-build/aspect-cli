@@ -55,9 +55,7 @@ STATIC_BOOLEAN_FLAGS = [
     {"name": "show_timestamps", "commands": BAZEL_COMMANDS_ALL},
     {"name": "remote_upload_local_results", "commands": BAZEL_COMMANDS_BUILD},
     {"name": "heap_dump_on_oom", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "keep_going", "commands": BAZEL_COMMANDS_BUILD},
     {"name": "generate_json_trace_profile", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "experimental_profile_include_target_label", "commands": BAZEL_COMMANDS_ALL},
     {"name": "incompatible_strict_action_env", "commands": BAZEL_COMMANDS_BUILD_TEST},
     {"name": "experimental_repository_cache_hardlinks", "commands": BAZEL_COMMANDS_ALL},
     {"name": "incompatible_exclusive_test_sandboxed", "commands": BAZEL_COMMANDS_BUILD_TEST},
@@ -69,22 +67,10 @@ STATIC_BOOLEAN_FLAGS = [
 
 # Static value flags
 STATIC_VALUE_FLAGS = [
-    {"name": "tool_tag", "value": "aspect-workflows", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "color", "value": "yes", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "isatty", "value": "0", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "terminal_columns", "value": "143", "commands": BAZEL_COMMANDS_ALL},
     {"name": "disk_cache", "value": "", "commands": BAZEL_COMMANDS_BUILD},
-    {"name": "symlink_prefix", "value": "bazel-", "commands": BAZEL_COMMANDS_BUILD_TEST},
-    {"name": "experimental_convenience_symlinks", "value": "normal", "commands": BAZEL_COMMANDS_BUILD_TEST},
-    {"name": "max_config_changes_to_show", "value": "-1", "commands": BAZEL_COMMANDS_BUILD_TEST},
     {"name": "remote_timeout", "value": "3600", "commands": BAZEL_COMMANDS_BUILD},
     {"name": "remote_retries", "value": "360", "commands": BAZEL_COMMANDS_BUILD},
     {"name": "grpc_keepalive_timeout", "value": "30s", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "experimental_repository_downloader_retries", "value": "2", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "bes_upload_mode", "value": "wait_for_upload_complete", "commands": BAZEL_COMMANDS_ALL},
-    # Version-specific flags
-    {"name": "experimental_remote_build_event_upload", "value": "minimal", "commands": BAZEL_COMMANDS_BUILD, "versions": ">= 6 < 7"},
-    {"name": "remote_build_event_upload", "value": "minimal", "commands": BAZEL_COMMANDS_BUILD, "versions": ">= 7"},
     # Cache compression flags (BuildBarn doesn't support compression)
     {"name": "noexperimental_remote_cache_compression", "value": None, "commands": BAZEL_COMMANDS_BUILD, "versions": "< 8"},
     {"name": "noremote_cache_compression", "value": None, "commands": BAZEL_COMMANDS_BUILD, "versions": ">= 8"},
@@ -95,11 +81,10 @@ DYNAMIC_FLAGS = [
     {"name": "remote_cache", "value": "dynamic:platform.remote_cache_endpoint", "commands": BAZEL_COMMANDS_BUILD},
     {"name": "remote_bytestream_uri_prefix", "value": "dynamic:platform.remote_cache_address", "commands": BAZEL_COMMANDS_BUILD},
     {"name": "repository_cache", "value": "dynamic:computed.repository_cache", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "curses", "value": "dynamic:host.curses", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "show_progress_rate_limit", "value": "dynamic:host.progress_rate_limit", "commands": BAZEL_COMMANDS_ALL},
     # RBE flags
-    {"name": "remote_executor", "value": "dynamic:rbe.remote_executor", "commands": BAZEL_COMMANDS_BUILD, "omit_if_none": True},
-    {"name": "jobs", "value": "dynamic:rbe.jobs", "commands": BAZEL_COMMANDS_JOBS, "omit_if_none": True},
+    # TODO: Implement RBE flags
+    # {"name": "remote_executor", "value": "dynamic:rbe.remote_executor", "commands": BAZEL_COMMANDS_BUILD, "omit_if_none": True},
+    # {"name": "jobs", "value": "dynamic:rbe.jobs", "commands": BAZEL_COMMANDS_JOBS, "omit_if_none": True},
 ]
 
 # Startup flags

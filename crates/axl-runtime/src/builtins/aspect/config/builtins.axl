@@ -12,7 +12,9 @@ load("../lib/environment.axl", "configure_workflows_env")
 load("../fragments.axl", "BazelFragment")
 
 def configure_builtins(ctx: ConfigContext):
-    configure_workflows_env(ctx.std.fs)
+    UNDER_WORKFLOWS = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION")
+    if UNDER_WORKFLOWS:
+        configure_workflows_env(ctx.std.fs)
     ctx.tasks.add(migrate)
 
     # Read platform config from disk
@@ -41,5 +43,5 @@ def configure_builtins(ctx: ConfigContext):
     bazel_fragment.extra_flags.extend(flags.get("build", []))
     bazel_fragment.build_start = lambda: print("+++ :bazel: Building")
     bazel_fragment.build_event_sinks.extend(bessie_sinks)
-    if ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION"):
+    if UNDER_WORKFLOWS:
         bazel_fragment.post_health_check = agent_health_check
