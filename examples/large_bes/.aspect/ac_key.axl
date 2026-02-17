@@ -1,0 +1,89 @@
+def _idea_impl(ctx):
+    # client = remote_cache.Client(
+    #     ctx.args.remote_cache_url,
+    #     ctx.args.remote_cache_token,
+    # )
+
+    # action_keys = ctx.bazel.rquery(
+    #     targets = ctx.args.targets,
+    # )
+
+    # client.get_action_result(action_keys[0])
+
+
+
+    build = ctx.bazel.build(
+        "//:target_99999",
+        # current_dir = "examples/large_bes",
+        flags = [
+            "--experimental_remote_require_cached",
+            # "--disk_cache=",
+            # "--noremote_accept_cached",
+            # ignore whats been built locally
+            "--nouse_action_cache",
+            # skyframe keeps a cache
+            "--nokeep_state_after_build",
+           # "--experimental_remote_cache_ttl=0s",
+            "--remote_grpc_log=test.log",
+        ],
+        inherit_stderr = False
+    )
+    r = build.wait()
+
+    command = ctx.std.process.command("python3");
+    command.arg(".aspect/decode.py")
+    command.arg("test.log")
+    command.stdout("piped")
+    child = command.spawn()
+    output = child.wait_with_output()
+    print(output)
+    log = json.decode(output.stdout)
+
+    for entry in log:
+        if entry["method_name"] == "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
+            metadata = entry["metadata"]
+            status = entry["status"]
+            result = entry["details"]["get_action_result"]
+            req = result["request"]
+
+            output_files = ""
+
+            if "response" in result:
+                res = result["response"]
+                output_files = "\n".join([
+                    "{} ({})".format(
+                        file['path'],
+                        file['digest']['hash']
+                    )
+                    for file in res["output_files"]
+                ])
+                output_files += "\n"
+
+            print(r"""
+Target: {}
+Digest: {}/{} ({})
+Configuration: {}
+Mnemonic: {}
+
+Status:
+    {}
+
+{}
+            """.format(
+                metadata["target_id"],
+                req["action_digest"]["hash"],
+                req["action_digest"]["size_bytes"],
+                req["digest_function"],
+                metadata["configuration_id"],
+                metadata["action_mnemonic"],
+                status["message"] if "message" in status else "cache hit",
+                output_files
+            ))
+
+ac_key = task(
+    name = "ac_key",
+    implementation = _idea_impl,
+    args = {
+        "target": args.positional()
+    }
+)
