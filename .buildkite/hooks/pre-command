@@ -2,17 +2,23 @@
 set -eu
 
 # Bazel startup options for CI
-BAZEL_STARTUP_OPTS="--nohome_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
-BAZEL_BUILD_OPTS="--config=workflows --config=ci --show_progress_rate_limit=1"
+export BAZEL_STARTUP_OPTS="--nohome_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
+
+# Build bazel remote flags from environment variables set by configure_workflows_env
+BAZEL_REMOTE_FLAGS=""
+[ -n "${ASPECT_WORKFLOWS_BES_BACKEND:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_backend=${ASPECT_WORKFLOWS_BES_BACKEND}"
+[ -n "${ASPECT_WORKFLOWS_BES_RESULTS_URL:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_results_url=${ASPECT_WORKFLOWS_BES_RESULTS_URL}"
+[ -n "${ASPECT_WORKFLOWS_REMOTE_CACHE:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=${ASPECT_WORKFLOWS_REMOTE_CACHE}"
+[ -n "${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_bytestream_uri_prefix=${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX}"
+export BAZEL_REMOTE_FLAGS
+
+export BAZEL_BUILD_OPTS="--config=ci ${BAZEL_REMOTE_FLAGS}"
 
 # Skip if bazel is not installed
 if ! command -v bazel >/dev/null 2>&1; then
   echo "DEBUG: bazel not found, skipping"
   exit 0
 fi
-
-# Generate workflows bazelrc
-rosetta bazelrc > /etc/bazel.bazelrc
 
 # Build aspect-cli so version.axl can pick it up from bazel-bin/
 echo "--- Building aspect-cli"
