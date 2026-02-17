@@ -5,37 +5,16 @@
 env:
   ASPECT_DEBUG: "1"
 steps:
-  - key: __main__::debug
-    label: ":bazel: Debug"
+  - key: __main__::warm
+    label: ":fire: Warm Remote Cache"
     agents:
       queue: aspect-default
     timeout_in_minutes: 20
     command:
-      - cat /etc/aspect/workflows/platform/rosetta_api_tokens
-      - echo ""
-      - cat /etc/aspect/workflows/platform/api_client_id
-      - echo ""
-      - cat /etc/aspect/workflows/platform/api_key
-      - echo ""
-      - cat /etc/aspect/workflows/platform/brs_api_endpoint
-      - echo ""
-      - cat /etc/aspect/workflows/platform/az
-      - echo ""
-      - ls /etc/aspect/workflows/bin
-  - key: __main__::build
-    label: ":bazel: Build"
-    agents:
-      queue: aspect-default
-    timeout_in_minutes: 20
-    command:
-      - |
-        echo "--- :aspect-build: Workflows environment"
-        /etc/aspect/workflows/bin/configure_workflows_env
-        echo "--- :stethoscope: Agent health check"
-        /etc/aspect/workflows/bin/agent_health_check
-      - ls /etc/aspect/workflows/platform
-      - aspect build ...
+      - echo "Pre-command builds and uploads CLI to remote cache"
   - key: __main__::test
+    depends_on:
+      - __main__::warm
     label: ":aspect: Test"
     agents:
       queue: aspect-default
@@ -81,6 +60,8 @@ steps:
         $$LAUNCHER version
   - key: __main__::format
     label: ":broom: Format"
+    depends_on:
+      - __main__::warm
     agents:
       queue: aspect-default
     timeout_in_minutes: 20
@@ -95,6 +76,8 @@ steps:
         bazel $$BAZEL_STARTUP_OPTS run $$BAZEL_BUILD_OPTS //tools/format:format.check
   - key: __main__::delivery
     label: ":ship: :package: :bazel: Delivery"
+    depends_on:
+      - __main__::warm
     agents:
       queue: aspect-default
     timeout_in_minutes: 20
