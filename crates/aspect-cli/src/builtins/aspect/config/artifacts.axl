@@ -147,12 +147,22 @@ def _stage_test_files(ctx, state, event, dry_run):
     # Convert label to a directory path: "//foo/bar:baz_test" -> "foo/bar/baz_test"
     label_path = label.lstrip("/").replace(":", "/")
 
+    if "_staged_files" not in state:
+        state["_staged_files"] = []
+    if "_skipped_files" not in state:
+        state["_skipped_files"] = []
+
     for file in event.payload.test_action_output:
-        src = _file_uri_to_path(file.file)
+        raw_uri = file.file
+        src = _file_uri_to_path(raw_uri)
         if not src:
             # Fallback: construct from path_prefix + name
             src = "/".join(file.path_prefix) + "/" + file.name
-        if not src or not ctx.std.fs.exists(src):
+        if not src:
+            state["_skipped_files"].append({"label": label, "name": file.name, "reason": "no path", "raw": repr(raw_uri)})
+            continue
+        if not ctx.std.fs.exists(src):
+            state["_skipped_files"].append({"label": label, "name": file.name, "reason": "not found", "raw": src})
             continue
 
         dest_dir = _TESTLOGS_DIR + "/" + label_path
@@ -162,9 +172,6 @@ def _stage_test_files(ctx, state, event, dry_run):
             ctx.std.fs.create_dir_all(dest_dir)
             ctx.std.fs.copy(src, dest)
 
-        # Track staged files for debug summary
-        if "_staged_files" not in state:
-            state["_staged_files"] = []
         state["_staged_files"].append({"src": src, "dest": dest, "label": label})
 
 
@@ -212,6 +219,7 @@ def configure_artifacts(ctx):
 
         if debug:
             staged = state.get("_staged_files", [])
+            skipped = state.get("_skipped_files", [])
             print("")
             print("--- artifact upload debug summary ---")
             print("ci: " + ci)
@@ -219,6 +227,10 @@ def configure_artifacts(ctx):
             print("staged files: " + str(len(staged)))
             for f in staged:
                 print("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
+            if skipped:
+                print("skipped files: " + str(len(skipped)))
+                for f in skipped:
+                    print("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
             if not is_local:
                 testlog_count = _count_files(ctx, _TESTLOGS_DIR)
                 artifact_count = _count_files(ctx, _ARTIFACTS_DIR)
