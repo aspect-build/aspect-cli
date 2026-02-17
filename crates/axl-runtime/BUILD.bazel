@@ -24,6 +24,7 @@ rust_library(
         "@crates//:liquid-core",
         "@crates//:liquid",
         "@crates//:minijinja",
+        "@crates//:nix",
         "@crates//:prost",
         "@crates//:rand",
         "@crates//:reqwest",
