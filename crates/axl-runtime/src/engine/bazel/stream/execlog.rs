@@ -87,13 +87,27 @@ impl ExecLogStream {
         compact_sink_paths: Vec<String>,
         has_file_sinks: bool,
     ) -> io::Result<Self> {
+        let debug = env::var("ASPECT_DEBUG").is_ok_and(|v| !v.is_empty());
         let (mut sender, recv) = bounded::<ExecLogEntry>(1000);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // 10 is the maximum size of a varint so start with that size.
             buf.resize(10, 0);
+
+            if debug {
+                eprintln!(
+                    "[execlog] thread started (has_file_sinks={}, pipe={:?})",
+                    has_file_sinks, path
+                );
+            }
+
             let out_raw =
                 galvanize::Pipe::new(path.clone(), galvanize::RetryPolicy::IfOpenForPid(pid))?;
+
+            if debug {
+                eprintln!("[execlog] pipe opened");
+            }
+
             let writers = compact_sink_paths
                 .iter()
                 .map(|p| Ok(BufWriter::new(File::create(p)?)))
@@ -107,6 +121,8 @@ impl ExecLogStream {
             // Only used in the try_send path (no file sinks).
             // Set to false when try_send returns Closed, skipping future decodes.
             let mut has_readers = true;
+            let mut entries_read: u64 = 0;
+            let mut entries_dropped: u64 = 0;
 
             let mut read = || -> Result<(), ExecLogStreamError> {
                 // varint size can be somewhere between 1 to 10 bytes.
@@ -116,18 +132,36 @@ impl ExecLogStream {
                 }
 
                 out_raw.read_exact(&mut buf[0..size])?;
+                entries_read += 1;
 
                 if has_file_sinks {
                     let entry = ExecLogEntry::decode(&buf[0..size])?;
+                    if debug && sender.is_full() {
+                        eprintln!("[execlog] channel full, blocking (entry #{})", entries_read);
+                    }
                     sender.send(entry)?;
                 } else if has_readers {
                     let entry = ExecLogEntry::decode(&buf[0..size])?;
                     match sender.try_send(entry) {
                         Ok(()) => {}
                         // Channel full: iterator consumer is slow, drop entry.
-                        Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Full(_)) => {
+                            entries_dropped += 1;
+                            if debug {
+                                eprintln!(
+                                    "[execlog] channel full, dropping entry #{} ({} dropped so far)",
+                                    entries_read, entries_dropped
+                                );
+                            }
+                        }
                         // No receivers left: skip decoding for remaining entries.
                         Err(TrySendError::Closed(_)) => {
+                            if debug {
+                                eprintln!(
+                                    "[execlog] no receivers, skipping decode from entry #{}",
+                                    entries_read
+                                );
+                            }
                             has_readers = false;
                         }
                         Err(TrySendError::Sent(_)) => {}
@@ -148,6 +182,12 @@ impl ExecLogStream {
                 match result.unwrap_err() {
                     // this marks the end of the stream
                     ExecLogStreamError::IO(err) if err.kind() == io::ErrorKind::BrokenPipe => {
+                        if debug {
+                            eprintln!(
+                                "[execlog] stream ended (read={}, dropped={})",
+                                entries_read, entries_dropped
+                            );
+                        }
                         sender.close()?;
                         return Ok(());
                     }
