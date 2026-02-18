@@ -367,8 +367,30 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         })
     }
 
+    /// Block until the Bazel invocation finishes and return a `BuildStatus`.
+    ///
+    /// After `wait()` returns, the execution log pipe has been closed and the
+    /// producer thread has exited. Calling `execution_logs()` after `wait()`
+    /// will fail — the stream is consumed as part of the wait. Iterate
+    /// `execution_logs()` **before** calling `wait()` if you need to process
+    /// entries.
+    ///
+    /// `build_events()` remains usable after `wait()` for replaying historical
+    /// events, because the build event stream retains its buffer.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
         let build = this.downcast_ref_err::<Build>()?;
+
+        // Drop the internal execlog subscriber before waiting for the child to
+        // exit. All file-sink threads called receiver() earlier and hold their
+        // own clones, so this only removes the unconsumed "ghost" subscriber.
+        // With it gone, if no external subscribers remain the producer thread's
+        // next try_send returns Closed, it sets has_readers=false, and drains
+        // the remaining pipe bytes without proto decoding — letting Bazel flush
+        // and exit orders of magnitude faster.
+        if let Some(ref mut stream) = *build.execlog_stream.borrow_mut() {
+            stream.abandon_receiver();
+        }
+
         let result = build.child.borrow_mut().wait()?;
 
         // TODO: consider adding a wait_events() method for granular control.

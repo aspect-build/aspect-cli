@@ -49,7 +49,14 @@ impl<R: Read> Read for MultiTeeReader<R> {
 #[derive(Debug)]
 pub struct ExecLogStream {
     handle: JoinHandle<Result<(), ExecLogStreamError>>,
-    recv: Receiver<ExecLogEntry>,
+    // Holds the initial subscriber clone. Kept as Option so it can be explicitly
+    // dropped via abandon_receiver() before wait/join. In fibre's SPMC broadcast
+    // ring buffer every Receiver clone is an independent subscriber whose tail
+    // the sender must not lap; an unconsumed clone caps throughput at channel
+    // capacity (1000) and prevents the Closed signal that tells the producer
+    // thread to stop decoding. Dropping this before joining lets the thread
+    // detect no-subscribers early and switch to raw reads, which is ~100x faster.
+    recv: Option<Receiver<ExecLogEntry>>,
 }
 
 impl ExecLogStream {
@@ -195,11 +202,29 @@ impl ExecLogStream {
                 }
             }
         });
-        Ok(Self { handle, recv })
+        Ok(Self {
+            handle,
+            recv: Some(recv),
+        })
     }
 
     pub fn receiver(&self) -> Receiver<ExecLogEntry> {
-        self.recv.clone()
+        self.recv
+            .as_ref()
+            .expect("receiver already abandoned")
+            .clone()
+    }
+
+    /// Drop the internal subscriber before joining.
+    ///
+    /// Call this at the start of `wait()`, after all file-sink threads have
+    /// already called `receiver()` and hold their own clones. With the internal
+    /// clone gone, if no external subscribers remain the producer thread's next
+    /// `try_send` returns `Closed`, `has_readers` flips to `false`, and all
+    /// remaining pipe bytes are drained without proto decoding — letting Bazel
+    /// flush and exit orders of magnitude faster.
+    pub fn abandon_receiver(&mut self) {
+        self.recv.take();
     }
 
     pub fn join(self) -> Result<(), ExecLogStreamError> {
