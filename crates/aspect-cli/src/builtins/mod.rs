@@ -76,6 +76,7 @@ const ASPECT: Builtin = Builtin {
             "lib/artifacts.axl",
             include_str!("./aspect/lib/artifacts.axl"),
         ),
+        ("lib/tar.axl", include_str!("./aspect/lib/tar.axl")),
         (
             "lib/environment.axl",
             include_str!("./aspect/lib/environment.axl"),

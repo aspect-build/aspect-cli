@@ -1,0 +1,101 @@
+"""Prebuilt bsdtar binary download and execution helper.
+
+Downloads a platform-appropriate bsdtar binary from
+https://github.com/aspect-build/bsdtar-prebuilt and caches it locally.
+"""
+
+_VERSION = "v3.8.1-fix.1"
+_BASE_URL = "https://github.com/aspect-build/bsdtar-prebuilt/releases/download/" + _VERSION
+
+_SHA256 = {
+    "darwin-amd64": "e8893f7d775d070a333dc386b2aab70dfa43411fcd890222c81212724be7de25",
+    "darwin-arm64": "48c1bd214aac26487eaf623d17b77ebce4db3249be851a54edcc940d09d50999",
+    "linux-amd64": "fff8f72758a52e60fe82beae64b18e7996467013ffe8bec09173d1ba6b66e490",
+    "linux-arm64": "683468ae45d371e4f392b0e5a524440f6f4507d7da0db60d03ff31f3cf951fc3",
+}
+
+_ARCH_MAP = {"x86_64": "amd64", "aarch64": "arm64"}
+_OS_MAP = {"macos": "darwin", "linux": "linux"}
+
+
+def _platform_key(ctx):
+    os = _OS_MAP.get(ctx.std.env.os())
+    arch = _ARCH_MAP.get(ctx.std.env.arch())
+    if not os or not arch:
+        fail("unsupported platform: " + ctx.std.env.os() + "/" + ctx.std.env.arch())
+    return os, arch
+
+
+def _cache_dir(ctx):
+    home = ctx.std.env.home_dir()
+    if not home:
+        return None
+    return home + "/.cache/aspect/bsdtar/" + _VERSION
+
+
+def bsdtar(ctx):
+    """Return the path to a cached bsdtar binary, downloading if necessary."""
+    cache = _cache_dir(ctx)
+    if not cache:
+        fail("cannot determine home directory for bsdtar cache")
+
+    os, arch = _platform_key(ctx)
+    bin_path = cache + "/tar"
+
+    if ctx.std.fs.exists(bin_path):
+        return bin_path
+
+    asset = "tar_" + os + "_" + arch
+    url = _BASE_URL + "/" + asset
+    sha256 = _SHA256.get(os + "-" + arch)
+
+    ctx.std.fs.create_dir_all(cache)
+    ctx.http().download(url = url, output = bin_path, mode = 0o755, sha256 = sha256).block()
+
+    return bin_path
+
+
+def tar_create_from_dir(ctx, archive_path, dir_path):
+    """Create a tar.gz archive of a directory's contents.
+
+    Args:
+        ctx: TaskContext
+        archive_path: str - output .tar.gz path
+        dir_path: str - directory to archive
+
+    Returns:
+        bool - True on success
+    """
+    bin_path = bsdtar(ctx)
+    child = ctx.std.process.command(bin_path).args([
+        "czf", archive_path, "-C", dir_path, ".",
+    ]).stdout("inherit").stderr("inherit").spawn()
+    status = child.wait()
+    return status.code == 0
+
+
+def tar_create(ctx, archive_path, mtree_spec):
+    """Create a tar.gz archive from an mtree spec string.
+
+    Args:
+        ctx: TaskContext
+        archive_path: str - output .tar.gz path
+        mtree_spec: str - mtree spec content mapping archive paths to source files
+
+    Returns:
+        bool - True on success
+    """
+    bin_path = bsdtar(ctx)
+    mtree_path = archive_path + ".mtree"
+
+    ctx.std.fs.write(mtree_path, mtree_spec)
+
+    child = ctx.std.process.command(bin_path).args([
+        "czf", archive_path, "@" + mtree_path,
+    ]).stdout("inherit").stderr("inherit").spawn()
+    status = child.wait()
+
+    if ctx.std.fs.exists(mtree_path):
+        ctx.std.fs.remove_file(mtree_path)
+
+    return status.code == 0

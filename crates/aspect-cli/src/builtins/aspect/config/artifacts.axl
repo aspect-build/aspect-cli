@@ -1,15 +1,16 @@
 """Configures mid-job artifact uploads for CI environments.
 
 Uploads artifacts on an interval (every BATCH_SIZE new files) during the build
-via the build_event handler. Each upload is a tar.gz archive of the entire
-staging directory, and the previous version is deleted after a successful upload
-(rolling replacement). Two artifact groups: testlogs and artifacts.
+via the build_event handler. Each upload is a tar.gz archive, and the previous
+version is deleted after a successful upload (rolling replacement).
+Two artifact groups: testlogs (built via mtree) and system (from a directory).
 
 CircleCI is excluded — artifacts are staged at /workflows/testlogs for
 CircleCI's native store_artifacts / store_test_results steps.
 """
 
 load("../lib/artifacts.axl", "detect_ci", "upload_file", "delete_artifact")
+load("../lib/tar.axl", "tar_create", "tar_create_from_dir")
 load("../fragments.axl", "BazelFragment")
 
 
@@ -22,7 +23,6 @@ _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 # Artifact staging root, matching Rosetta conventions
 _ARTIFACTS_ROOT = "/workflows"
 _ARTIFACTS_DIR = _ARTIFACTS_ROOT + "/artifacts"
-_TESTLOGS_DIR = _ARTIFACTS_ROOT + "/testlogs"
 
 
 def _artifact_name_prefix(env):
@@ -31,15 +31,7 @@ def _artifact_name_prefix(env):
 
 
 def _count_files(ctx, dir_path):
-    """Count files recursively in a directory.
-
-    Args:
-        ctx: Context with ctx.std.process
-        dir_path: str - directory to count
-
-    Returns:
-        int - number of files
-    """
+    """Count files recursively in a directory."""
     if not ctx.std.fs.exists(dir_path):
         return 0
     child = ctx.std.process.command("find").args([
@@ -52,76 +44,43 @@ def _count_files(ctx, dir_path):
     return len(output.strip().split("\n"))
 
 
-def _tar_directory(ctx, dir_path, archive_path):
-    """Create a tar.gz archive of a directory's contents.
-
-    Args:
-        ctx: Context with ctx.std.process
-        dir_path: str - directory to archive
-        archive_path: str - output tar.gz path
-
-    Returns:
-        bool - True on success
-    """
-    child = ctx.std.process.command("tar").args([
-        "czf", archive_path, "-C", dir_path, ".",
-    ]).stdout("inherit").stderr("inherit").spawn()
-    status = child.wait()
-    return status.code == 0
-
-
-def _upload_group(ctx, group, dir_path, name_prefix):
-    """Archive a staging directory and upload it. On success, delete the previous version.
-
-    Args:
-        ctx: TaskContext
-        group: dict - mutable state for this group
-        dir_path: str - staging directory path
-        name_prefix: str - artifact name prefix (e.g. "build-testlogs")
-
-    Returns:
-        bool - True if an upload was performed
-    """
+def _upload_dir_group(ctx, group, dir_path, name):
+    """Archive a directory and upload it. On success, delete the previous version."""
     current_count = _count_files(ctx, dir_path)
     if current_count == 0 or current_count == group["last_count"]:
         return False
 
-    # Create archive in the staging root (not /tmp)
-    archive_path = _ARTIFACTS_ROOT + "/" + name_prefix + ".tar.gz"
-    if not _tar_directory(ctx, dir_path, archive_path):
-        print("artifact upload: failed to create archive for " + name_prefix)
+    archive_path = _ARTIFACTS_ROOT + "/" + name + ".tar.gz"
+    if not tar_create_from_dir(ctx, archive_path, dir_path):
+        print("artifact upload: failed to create archive for " + name)
         return False
 
-    # Upload with a versioned name
     group["version"] += 1
-    artifact_name = name_prefix + "-v" + str(group["version"])
+    artifact_name = name + "-v" + str(group["version"])
     result = upload_file(ctx, archive_path, name = artifact_name)
 
-    # Clean up local archive
     if ctx.std.fs.exists(archive_path):
         ctx.std.fs.remove_file(archive_path)
 
     if result["success"]:
-        # Delete previous version
         if group["prev_ref"]:
             delete_artifact(ctx, group["prev_ref"])
         group["prev_ref"] = result["artifact_ref"]
         group["last_count"] = current_count
         return True
     else:
-        # Revert version bump on failure so next attempt retries
         group["version"] -= 1
         for err in result["errors"]:
             print("artifact upload error: " + err)
         return False
 
 
-def _maybe_upload_group(ctx, group, dir_path, name_prefix):
-    """Upload only when enough new files have accumulated (BATCH_SIZE threshold)."""
+def _maybe_upload_dir_group(ctx, group, dir_path, name):
+    """Upload directory group only when enough new files have accumulated."""
     current_count = _count_files(ctx, dir_path)
     if current_count < group["last_count"] + _BATCH_SIZE:
         return
-    _upload_group(ctx, group, dir_path, name_prefix)
+    _upload_dir_group(ctx, group, dir_path, name)
 
 
 def _file_uri_to_path(uri):
@@ -136,10 +95,8 @@ def _file_uri_to_path(uri):
     if uri.startswith("file://"):
         return uri[len("file://"):]
     if uri.startswith("bytestream://"):
-        # bytestream://host:port/blobs/<hash>/<size>
-        rest = uri[len("bytestream://"):]  # host:port/blobs/<hash>/<size>
+        rest = uri[len("bytestream://"):]
         parts = rest.split("/")
-        # parts = ["host:port", "blobs", "<hash>", "<size>"]
         host_port = parts[0]
         host = host_port.split(":")[0]
         blob_hash = parts[2]
@@ -148,27 +105,20 @@ def _file_uri_to_path(uri):
     return uri
 
 
-def _stage_test_files(ctx, state, event, dry_run):
-    """Copy test output files from a test_result event into the testlogs staging directory.
+def _collect_test_files(ctx, state, event):
+    """Collect test output file paths from a test_result event.
 
-    Extracts file paths from the event's test_action_output and copies each file
-    into _TESTLOGS_DIR, preserving the target label as the directory structure.
-
-    Args:
-        ctx: TaskContext
-        state: dict - shared mutable state
-        event: BuildEvent
-        dry_run: bool - if True, only track files without copying
+    Records source paths and desired archive paths in state without copying.
+    The archive is built later via mtree + bsdtar.
     """
     if event.kind != "test_result":
         return
 
-    label = event.id.label  # e.g. "//foo/bar:baz_test"
-    # Convert label to a directory path: "//foo/bar:baz_test" -> "foo/bar/baz_test"
+    label = event.id.label
     label_path = label.lstrip("/").replace(":", "/")
 
-    if "_staged_files" not in state:
-        state["_staged_files"] = []
+    if "_test_entries" not in state:
+        state["_test_entries"] = []
     if "_skipped_files" not in state:
         state["_skipped_files"] = []
 
@@ -176,7 +126,6 @@ def _stage_test_files(ctx, state, event, dry_run):
         raw_uri = file.file
         src = _file_uri_to_path(raw_uri)
         if not src:
-            # Fallback: construct from path_prefix + name
             src = "/".join(file.path_prefix) + "/" + file.name
         if not src:
             state["_skipped_files"].append({"label": label, "name": file.name, "reason": "no path", "raw": repr(raw_uri)})
@@ -185,14 +134,56 @@ def _stage_test_files(ctx, state, event, dry_run):
             state["_skipped_files"].append({"label": label, "name": file.name, "reason": "not found", "raw": src})
             continue
 
-        dest_dir = _TESTLOGS_DIR + "/" + label_path
-        dest = dest_dir + "/" + file.name
+        dest = label_path + "/" + file.name
+        state["_test_entries"].append({"src": src, "dest": dest, "label": label})
 
-        if not dry_run:
-            ctx.std.fs.create_dir_all(dest_dir)
-            ctx.std.fs.copy(src, dest)
 
-        state["_staged_files"].append({"src": src, "dest": dest, "label": label})
+def _build_mtree(entries):
+    """Build an mtree spec string mapping source files to archive paths."""
+    lines = ["#mtree"]
+    for entry in entries:
+        lines.append("./" + entry["dest"] + " contents=" + entry["src"])
+    return "\n".join(lines) + "\n"
+
+
+def _upload_testlogs(ctx, group, entries, name):
+    """Build and upload testlogs archive directly from source files via mtree."""
+    count = len(entries)
+    if count == 0 or count == group["last_count"]:
+        return False
+
+    archive_path = _ARTIFACTS_ROOT + "/" + name + ".tar.gz"
+
+    ctx.std.fs.create_dir_all(_ARTIFACTS_ROOT)
+    if not tar_create(ctx, archive_path, _build_mtree(entries)):
+        print("artifact upload: failed to create archive for " + name)
+        return False
+
+    group["version"] += 1
+    artifact_name = name + "-v" + str(group["version"])
+    result = upload_file(ctx, archive_path, name = artifact_name)
+
+    if ctx.std.fs.exists(archive_path):
+        ctx.std.fs.remove_file(archive_path)
+
+    if result["success"]:
+        if group["prev_ref"]:
+            delete_artifact(ctx, group["prev_ref"])
+        group["prev_ref"] = result["artifact_ref"]
+        group["last_count"] = count
+        return True
+    else:
+        group["version"] -= 1
+        for err in result["errors"]:
+            print("artifact upload error: " + err)
+        return False
+
+
+def _maybe_upload_testlogs(ctx, group, entries, name):
+    """Upload testlogs only when enough new entries have accumulated."""
+    if len(entries) < group["last_count"] + _BATCH_SIZE:
+        return
+    _upload_testlogs(ctx, group, entries, name)
 
 
 def _init_upload_state(state):
@@ -200,7 +191,7 @@ def _init_upload_state(state):
     if "_artifact_upload" not in state:
         state["_artifact_upload"] = {
             "testlogs": {"last_count": 0, "version": 0, "prev_ref": None},
-            "artifacts": {"last_count": 0, "version": 0, "prev_ref": None},
+            "system": {"last_count": 0, "version": 0, "prev_ref": None},
         }
 
 
@@ -220,13 +211,10 @@ def _artifact_names(ci, env, task_name):
 def configure_artifacts(ctx):
     """Wire interval-based artifact upload into BazelFragment lifecycle hooks.
 
-    - build_event: stage testlog files + upload every BATCH_SIZE new files (interval)
+    - build_event: collect testlog entries + upload every BATCH_SIZE new files
     - build_end: final flush of any remaining files
 
     Expects state["_task_name"] to be set by the task implementation (e.g. "build", "test").
-
-    Args:
-        ctx: ConfigContext
     """
     ci = detect_ci(ctx.std.env)
     is_local = not ci
@@ -237,39 +225,37 @@ def configure_artifacts(ctx):
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
 
     def _on_build_event(ctx, state, event):
-        _stage_test_files(ctx, state, event, dry_run = is_local)
+        _collect_test_files(ctx, state, event)
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
             testlogs_name, system_name = _artifact_names(ci, ctx.std.env, state.get("_task_name", "unknown"))
-            _maybe_upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, testlogs_name)
-            _maybe_upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, system_name)
+            _maybe_upload_testlogs(ctx, upload_state["testlogs"], state.get("_test_entries", []), testlogs_name)
+            _maybe_upload_dir_group(ctx, upload_state["system"], _ARTIFACTS_DIR, system_name)
 
     def _on_build_end(ctx, state, exit_code):
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
             testlogs_name, system_name = _artifact_names(ci, ctx.std.env, state.get("_task_name", "unknown"))
-            _upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, testlogs_name)
-            _upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, system_name)
+            _upload_testlogs(ctx, upload_state["testlogs"], state.get("_test_entries", []), testlogs_name)
+            _upload_dir_group(ctx, upload_state["system"], _ARTIFACTS_DIR, system_name)
 
         if debug:
-            staged = state.get("_staged_files", [])
+            entries = state.get("_test_entries", [])
             skipped = state.get("_skipped_files", [])
             print("")
             print("--- artifact upload debug summary ---")
             print("ci: " + ci)
-            print("staged files: " + str(len(staged)))
-            for f in staged:
+            print("testlog entries: " + str(len(entries)))
+            for f in entries:
                 print("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
             if skipped:
                 print("skipped files: " + str(len(skipped)))
                 for f in skipped:
                     print("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
             if not is_local:
-                testlog_count = _count_files(ctx, _TESTLOGS_DIR)
                 artifact_count = _count_files(ctx, _ARTIFACTS_DIR)
-                print("testlogs dir (" + _TESTLOGS_DIR + "): " + str(testlog_count) + " files")
                 print("artifacts dir (" + _ARTIFACTS_DIR + "): " + str(artifact_count) + " files")
             else:
                 print("no CI detected, uploads skipped (dry run)")
