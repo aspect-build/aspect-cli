@@ -1,6 +1,6 @@
 use axl_proto::tools::protos::ExecLogEntry;
 use fibre::spmc::{Receiver, bounded};
-use fibre::{CloseError, SendError};
+use fibre::{CloseError, SendError, TrySendError};
 use prost::Message;
 use std::fmt::Debug;
 use std::fs::File;
@@ -56,13 +56,37 @@ impl ExecLogStream {
     pub fn spawn_with_pipe(
         pid: u32,
         compact_sink_paths: Vec<String>,
+        has_file_sinks: bool,
     ) -> io::Result<(PathBuf, Self)> {
         let out = env::temp_dir().join(format!("execlog-out-{}.bin", uuid::Uuid::new_v4()));
-        let stream = Self::spawn(out.clone(), pid, compact_sink_paths)?;
+        let stream = Self::spawn(out.clone(), pid, compact_sink_paths, has_file_sinks)?;
         Ok((out, stream))
     }
 
-    pub fn spawn(path: PathBuf, pid: u32, compact_sink_paths: Vec<String>) -> io::Result<Self> {
+    /// Spawn the execlog reader thread.
+    ///
+    /// ## Send strategy
+    ///
+    /// `has_file_sinks` controls how decoded entries are sent to the channel:
+    ///
+    /// - `true` — blocking [`Sender::send`]. File-sink threads must receive every entry
+    ///   to produce a complete output file, so the producer waits for the channel to drain
+    ///   rather than dropping entries. The build may slow under sustained I/O pressure, but
+    ///   it will not deadlock because the sink threads are always consuming.
+    ///
+    /// - `false` — non-blocking [`Sender::try_send`]. Used when the only consumer is the
+    ///   optional `execution_logs()` iterator. A full channel means the caller is not
+    ///   consuming fast enough; entries are dropped rather than stalling the build.
+    ///   Once all receiver clones are gone (`Closed`), decoding is skipped entirely.
+    ///
+    /// `CompactFile` sinks are unaffected by this flag — raw bytes are always tee'd
+    /// by `MultiTeeReader` before decoding.
+    pub fn spawn(
+        path: PathBuf,
+        pid: u32,
+        compact_sink_paths: Vec<String>,
+        has_file_sinks: bool,
+    ) -> io::Result<Self> {
         let (mut sender, recv) = bounded::<ExecLogEntry>(1000);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
@@ -80,6 +104,10 @@ impl ExecLogStream {
             };
             let mut out_raw = Decoder::new(out_raw)?;
 
+            // Only used in the try_send path (no file sinks).
+            // Set to false when try_send returns Closed, skipping future decodes.
+            let mut has_readers = true;
+
             let mut read = || -> Result<(), ExecLogStreamError> {
                 // varint size can be somewhere between 1 to 10 bytes.
                 let size = read_varint(&mut out_raw)?;
@@ -89,10 +117,22 @@ impl ExecLogStream {
 
                 out_raw.read_exact(&mut buf[0..size])?;
 
-                let entry = ExecLogEntry::decode(&buf[0..size])?;
-                // Send blocks until there is room in the buffer.
-                // https://docs.rs/fibre/latest/fibre/spmc/index.html
-                sender.send(entry)?;
+                if has_file_sinks {
+                    let entry = ExecLogEntry::decode(&buf[0..size])?;
+                    sender.send(entry)?;
+                } else if has_readers {
+                    let entry = ExecLogEntry::decode(&buf[0..size])?;
+                    match sender.try_send(entry) {
+                        Ok(()) => {}
+                        // Channel full: iterator consumer is slow, drop entry.
+                        Err(TrySendError::Full(_)) => {}
+                        // No receivers left: skip decoding for remaining entries.
+                        Err(TrySendError::Closed(_)) => {
+                            has_readers = false;
+                        }
+                        Err(TrySendError::Sent(_)) => {}
+                    }
+                }
 
                 Ok(())
             };

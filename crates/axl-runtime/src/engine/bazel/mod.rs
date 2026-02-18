@@ -60,6 +60,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// You can pass in a single target or target pattern to build.
     ///
+    /// # Arguments
+    /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
+    ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
+    ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
+    ///   to write the log to one or more files. Sinks and the iterator can be combined:
+    ///   passing a list of sinks still allows calling `build.execution_logs()` to iterate
+    ///   entries in-process.
+    ///
     /// **Examples**
     ///
     /// ```python
@@ -135,6 +143,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// call `.wait()` on the `Build` object to wait until the invocation finishes.
     ///
     /// You can pass in a single target or target pattern to test.
+    ///
+    /// # Arguments
+    /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
+    ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
+    ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
+    ///   to write the log to one or more files. Sinks and the iterator can be combined:
+    ///   passing a list of sinks still allows calling `build.execution_logs()` to iterate
+    ///   entries in-process.
     ///
     /// **Examples**
     ///

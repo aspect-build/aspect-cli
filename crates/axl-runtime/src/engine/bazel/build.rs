@@ -239,7 +239,8 @@ impl Build {
         }
 
         let execlog_stream = if execution_logs {
-            let (out, stream) = ExecLogStream::spawn_with_pipe(pid, compact_paths)?;
+            let (out, stream) =
+                ExecLogStream::spawn_with_pipe(pid, compact_paths, !decoded_sinks.is_empty())?;
             cmd.arg("--execution_log_compact_file").arg(&out);
             Some(stream)
         } else {
