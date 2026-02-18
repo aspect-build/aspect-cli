@@ -45,13 +45,24 @@ impl WorkspaceEventStream {
 
     pub fn spawn(path: PathBuf, pid: u32) -> io::Result<Self> {
         let (mut sender, recv) = bounded::<WorkspaceEvent>(1000);
+        let debug = env::var("ASPECT_DEBUG").is_ok_and(|v| !v.is_empty());
         let handle: JoinHandle<Result<(), WorkspaceEventError>> = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // 10 is the maximum size of a varint so start with that size.
             buf.resize(10, 0);
 
+            if debug {
+                eprintln!("[workspace] thread started (pipe={:?})", path);
+            }
+
             let mut out_raw =
                 galvanize::Pipe::new(path.clone(), galvanize::RetryPolicy::IfOpenForPid(pid))?;
+
+            if debug {
+                eprintln!("[workspace] pipe opened");
+            }
+
+            let mut events_read: u64 = 0;
 
             let mut read = || -> Result<(), WorkspaceEventError> {
                 // varint size can be somewhere between 1 to 10 bytes.
@@ -63,6 +74,14 @@ impl WorkspaceEventStream {
                 out_raw.read_exact(&mut buf[0..size])?;
 
                 let event = WorkspaceEvent::decode(&buf[0..size])?;
+                events_read += 1;
+
+                if debug && sender.is_full() {
+                    eprintln!(
+                        "[workspace] channel full, blocking (event #{})",
+                        events_read
+                    );
+                }
 
                 // Send blocks until there is room in the buffer.
                 // https://docs.rs/fibre/latest/fibre/spmc/index.html
@@ -82,6 +101,9 @@ impl WorkspaceEventStream {
                 match result.unwrap_err() {
                     // this marks the end of the stream
                     WorkspaceEventError::IO(err) if err.kind() == ErrorKind::BrokenPipe => {
+                        if debug {
+                            eprintln!("[workspace] stream ended (events_read={})", events_read);
+                        }
                         sender.close()?;
                         return Ok(());
                     }

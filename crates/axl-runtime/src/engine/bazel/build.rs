@@ -379,6 +379,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// events, because the build event stream retains its buffer.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
         let build = this.downcast_ref_err::<Build>()?;
+        let debug = debug_mode();
 
         // Drop the internal execlog subscriber before waiting for the child to
         // exit. All file-sink threads called receiver() earlier and hold their
@@ -387,11 +388,20 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         // next try_send returns Closed, it sets has_readers=false, and drains
         // the remaining pipe bytes without proto decoding — letting Bazel flush
         // and exit orders of magnitude faster.
+        if debug {
+            eprintln!("[wait] abandon_receiver");
+        }
         if let Some(ref mut stream) = *build.execlog_stream.borrow_mut() {
             stream.abandon_receiver();
         }
 
+        if debug {
+            eprintln!("[wait] child.wait()");
+        }
         let result = build.child.borrow_mut().wait()?;
+        if debug {
+            eprintln!("[wait] child.wait() done (exit_code={:?})", result.code());
+        }
 
         // TODO: consider adding a wait_events() method for granular control.
 
@@ -399,42 +409,66 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         // Note: We don't take() the stream here so that build_events() can still
         // be called after wait() to get historical events.
         if let Some(ref mut event_stream) = *build.build_event_stream.borrow_mut() {
+            if debug {
+                eprintln!("[wait] BES stream join");
+            }
             match event_stream.join() {
                 Ok(_) => {}
-                // TODO: tell the user which one and why
                 Err(err) => anyhow::bail!("build event stream thread error: {}", err),
+            }
+            if debug {
+                eprintln!("[wait] BES stream join done");
             }
         }
 
         // Wait for Workspace event stream to complete.
         let workspace_event_stream = build.workspace_event_stream.take();
         if let Some(workspace_event_stream) = workspace_event_stream {
+            if debug {
+                eprintln!("[wait] workspace event stream join");
+            }
             match workspace_event_stream.join() {
                 Ok(_) => {}
-                // TODO: tell the user which one and why
                 Err(err) => anyhow::bail!("workspace event stream thread error: {}", err),
+            }
+            if debug {
+                eprintln!("[wait] workspace event stream join done");
             }
         };
 
         // Wait for Execlog stream to complete.
         let execlog_stream = build.execlog_stream.take();
         if let Some(execlog_stream) = execlog_stream {
+            if debug {
+                eprintln!("[wait] execlog stream join");
+            }
             match execlog_stream.join() {
                 Ok(_) => {}
-                // TODO: tell the user which one and why
                 Err(err) => anyhow::bail!("execlog stream thread error: {}", err),
+            }
+            if debug {
+                eprintln!("[wait] execlog stream join done");
             }
         };
 
         let handles = build.sink_handles.take();
-        for handle in handles {
+        for (i, handle) in handles.into_iter().enumerate() {
+            if debug {
+                eprintln!("[wait] sink_handle[{}] join", i);
+            }
             match handle.join() {
-                Ok(_) => continue,
-                // TODO: tell the user which one and why
+                Ok(_) => {
+                    if debug {
+                        eprintln!("[wait] sink_handle[{}] done", i);
+                    }
+                    continue;
+                }
                 Err(err) => anyhow::bail!("one of the sinks failed: {:#?}", err),
             }
         }
-        // BES ends here
+        if debug {
+            eprintln!("[wait] all done");
+        }
 
         let span = build.span.replace(tracing::trace_span!("build").entered());
         span.exit();

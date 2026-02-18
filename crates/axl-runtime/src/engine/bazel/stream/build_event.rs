@@ -111,12 +111,22 @@ impl BuildEventStream {
         let broadcaster_holder = Arc::new(Mutex::new(Some(broadcaster)));
         let history: Arc<Mutex<Vec<BuildEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let history_for_thread = history.clone();
+        let debug = env::var("ASPECT_DEBUG").is_ok_and(|v| !v.is_empty());
 
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             buf.resize(10, 0);
+
+            if debug {
+                eprintln!("[bes] thread started (pipe={:?})", path);
+            }
+
             let mut out_raw =
                 galvanize::Pipe::new(path.clone(), galvanize::RetryPolicy::IfOpenForPid(pid))?;
+
+            if debug {
+                eprintln!("[bes] pipe opened");
+            }
 
             let read_event = |buf: &mut Vec<u8>,
                               out_raw: &mut galvanize::Pipe|
@@ -130,10 +140,13 @@ impl BuildEventStream {
                 Ok(event)
             };
 
+            let mut events_read: u64 = 0;
+
             loop {
                 match read_event(&mut buf, &mut out_raw) {
                     Ok(event) => {
                         let last_message = event.last_message;
+                        events_read += 1;
 
                         // Store event in history for late subscribers
                         history_for_thread.lock().unwrap().push(event.clone());
@@ -142,15 +155,30 @@ impl BuildEventStream {
                         broadcaster_for_thread.send(event);
 
                         if last_message {
+                            if debug {
+                                eprintln!(
+                                    "[bes] last_message received (events_read={})",
+                                    events_read
+                                );
+                            }
                             broadcaster_for_thread.close();
                             return Ok(());
                         }
                     }
                     Err(BuildEventStreamError::IO(err)) if err.kind() == ErrorKind::BrokenPipe => {
+                        if debug {
+                            eprintln!(
+                                "[bes] stream ended via BrokenPipe (events_read={})",
+                                events_read
+                            );
+                        }
                         broadcaster_for_thread.close();
                         return Ok(());
                     }
                     Err(err) => {
+                        if debug {
+                            eprintln!("[bes] stream error after {} events: {}", events_read, err);
+                        }
                         broadcaster_for_thread.close();
                         return Err(err);
                     }
