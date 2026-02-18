@@ -154,10 +154,10 @@ impl ExecLogStream {
                         // Channel full: iterator consumer is slow, drop entry.
                         Err(TrySendError::Full(_)) => {
                             entries_dropped += 1;
-                            if debug {
+                            if debug && entries_dropped % 10000 == 1 {
                                 eprintln!(
-                                    "[execlog] channel full, dropping entry #{} ({} dropped so far)",
-                                    entries_read, entries_dropped
+                                    "[execlog] channel full, dropped {} entries so far (entry #{})",
+                                    entries_dropped, entries_read
                                 );
                             }
                         }
