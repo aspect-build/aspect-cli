@@ -204,11 +204,26 @@ def _init_upload_state(state):
         }
 
 
+def _artifact_names(ci, env, task_name):
+    """Derive testlogs/system artifact names from CI and task context.
+
+    Buildkite groups artifacts by job, so the task name is sufficient.
+    Other CIs need a CI job prefix to disambiguate across jobs.
+    """
+    if ci == "buildkite":
+        prefix = task_name
+    else:
+        prefix = _artifact_name_prefix(env) + "-" + task_name
+    return prefix + "-testlogs", prefix + "-system"
+
+
 def configure_artifacts(ctx):
     """Wire interval-based artifact upload into BazelFragment lifecycle hooks.
 
     - build_event: stage testlog files + upload every BATCH_SIZE new files (interval)
     - build_end: final flush of any remaining files
+
+    Expects state["_task_name"] to be set by the task implementation (e.g. "build", "test").
 
     Args:
         ctx: ConfigContext
@@ -221,21 +236,12 @@ def configure_artifacts(ctx):
     fragment = ctx.fragments[BazelFragment]
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
 
-    # Buildkite groups artifacts by job already, so use clean names.
-    # Other CIs need a job prefix to disambiguate.
-    if ci == "buildkite":
-        testlogs_name = "testlogs"
-        system_name = "system"
-    else:
-        job_prefix = _artifact_name_prefix(ctx.std.env)
-        testlogs_name = job_prefix + "-testlogs"
-        system_name = job_prefix + "-system"
-
     def _on_build_event(ctx, state, event):
         _stage_test_files(ctx, state, event, dry_run = is_local)
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
+            testlogs_name, system_name = _artifact_names(ci, ctx.std.env, state.get("_task_name", "unknown"))
             _maybe_upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, testlogs_name)
             _maybe_upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, system_name)
 
@@ -243,6 +249,7 @@ def configure_artifacts(ctx):
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
+            testlogs_name, system_name = _artifact_names(ci, ctx.std.env, state.get("_task_name", "unknown"))
             _upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, testlogs_name)
             _upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, system_name)
 

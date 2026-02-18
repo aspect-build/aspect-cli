@@ -30,31 +30,31 @@ def configure_builtins(ctx: ConfigContext):
     # Read host config from environment
     host_config = read_host_config(ctx.std.env, ctx.std.io)
 
-    # Generate bazelrc content
-    flags = get_bazelrc_flags(
-        platform_config = platform_config,
-        host_config = host_config,
-        bazel_version = "7.0.0",
-    )
-
-    bessie_endpoint = platform_config.get("bessie_endpoint", None)
-    bessie_sinks = []
-    if bessie_endpoint:
-        bessie_sinks.append(bazel.build_events.grpc(
-            uri = bessie_endpoint,
-            metadata = {} # TODO: how does bessie authenticate?
-        ))
-
     # Configure BazelFragment globally
     bazel_fragment = ctx.fragments[BazelFragment]
 
     if UNDER_WORKFLOWS:
+        # Generate bazelrc content
+        (startup_flags, build_flags) = get_bazelrc_flags(
+            platform_config = platform_config,
+            host_config = host_config,
+            bazel_version = "9.0.0",
+        )
+
+        bessie_endpoint = platform_config.get("bessie_endpoint", None)
+        bessie_sinks = []
+        if bessie_endpoint:
+            bessie_sinks.append(bazel.build_events.grpc(
+                uri = bessie_endpoint,
+                metadata = {} # TODO: how does bessie authenticate?
+            ))
+
         bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
         if "aspect" in bazel_version_output.stdout:
             bazel_fragment.extra_startup_flags.append("--aspect:disable_plugins")
 
-        bazel_fragment.extra_startup_flags.extend(flags.get("startup", []))
-        bazel_fragment.extra_flags.extend(flags.get("build", []))
+        bazel_fragment.extra_startup_flags.extend(startup_flags)
+        bazel_fragment.extra_flags.extend(build_flags)
         bazel_fragment.build_start.append(lambda ctx, state: print("+++ :bazel: Building"))
         bazel_fragment.build_event_sinks.extend(bessie_sinks)
         if is_buildkite:

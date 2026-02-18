@@ -1,101 +1,26 @@
 """
 Platform Configuration and Bazelrc Generation Library
 
-Pure functions for reading platform/host configuration and generating bazelrc content.
-This is the AXL equivalent of rosetta's bazel/flags.ts and related modules.
+Pure functions for reading platform/host configuration and generating bazelrc flags.
 """
 
-# Constants
 DEFAULT_WORKFLOWS_DIR = "/etc/aspect/workflows"
 DEFAULT_STORAGE_PATH = "/mnt/ephemeral"
 DEFAULT_PLATFORM_DIR = DEFAULT_WORKFLOWS_DIR + "/platform"
 DEFAULT_BIN_DIR = DEFAULT_WORKFLOWS_DIR + "/bin"
 
-# Map of logical keys to filenames
 PLATFORM_CONFIG_KEYS = {
     "remote_cache_endpoint": "remote_cache_endpoint",
     "remote_cache_address": "remote_cache_address",
     "storage_path": "storage_path",
     "bessie_endpoint": "bessie_endpoint",
     "build_result_ui_base_url": "build_result_ui_base_url",
-    "delivery_db_endpoint": "delivery_db_endpoint",
     "instance_id": "instance_id",
     "instance_name": "instance_name",
     "account": "account",
     "region": "region",
 }
 
-# Bazel command lists
-BAZEL_COMMANDS_ALL = [
-    "analyze-profile", "aquery", "build", "canonicalize-flags", "clean",
-    "config", "coverage", "cquery", "dump", "fetch", "help", "info",
-    "license", "mobile-install", "print_action", "query", "run",
-    "shutdown", "sync", "test", "version",
-]
-
-BAZEL_COMMANDS_BUILD = [
-    "aquery", "build", "canonicalize-flags", "clean", "config", "coverage",
-    "cquery", "fetch", "info", "mobile-install", "print_action", "query",
-    "run", "sync", "test",
-]
-
-BAZEL_COMMANDS_BUILD_TEST = [
-    "aquery", "build", "canonicalize-flags", "clean", "config", "coverage",
-    "cquery", "info", "mobile-install", "print_action", "run", "test",
-]
-
-BAZEL_COMMANDS_JOBS = ["build", "coverage", "cquery", "run", "test"]
-
-# =============================================================================
-# Flag Definitions
-# =============================================================================
-
-# Static boolean flags (no value)
-STATIC_BOOLEAN_FLAGS = [
-    {"name": "show_timestamps", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "remote_upload_local_results", "commands": BAZEL_COMMANDS_BUILD},
-    {"name": "heap_dump_on_oom", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "generate_json_trace_profile", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "incompatible_strict_action_env", "commands": BAZEL_COMMANDS_BUILD_TEST},
-    {"name": "experimental_repository_cache_hardlinks", "commands": BAZEL_COMMANDS_ALL},
-    {"name": "incompatible_exclusive_test_sandboxed", "commands": BAZEL_COMMANDS_BUILD_TEST},
-    {"name": "experimental_reuse_sandbox_directories", "commands": BAZEL_COMMANDS_BUILD_TEST},
-    {"name": "incompatible_default_to_explicit_init_py", "commands": BAZEL_COMMANDS_BUILD_TEST},
-    {"name": "remote_accept_cached", "commands": BAZEL_COMMANDS_BUILD},
-    {"name": "incompatible_remote_results_ignore_disk", "commands": BAZEL_COMMANDS_BUILD, "versions": "< 7"},
-]
-
-# Static value flags
-STATIC_VALUE_FLAGS = [
-    {"name": "disk_cache", "value": "", "commands": BAZEL_COMMANDS_BUILD},
-    {"name": "remote_timeout", "value": "3600", "commands": BAZEL_COMMANDS_BUILD},
-    {"name": "remote_retries", "value": "360", "commands": BAZEL_COMMANDS_BUILD},
-    {"name": "grpc_keepalive_timeout", "value": "30s", "commands": BAZEL_COMMANDS_ALL},
-    # Cache compression flags (BuildBarn doesn't support compression)
-    {"name": "noexperimental_remote_cache_compression", "value": None, "commands": BAZEL_COMMANDS_BUILD, "versions": "< 8"},
-    {"name": "noremote_cache_compression", "value": None, "commands": BAZEL_COMMANDS_BUILD, "versions": ">= 8"},
-]
-
-# Dynamic flags - value resolved from config dicts
-DYNAMIC_FLAGS = [
-    {"name": "remote_cache", "value": "dynamic:platform.remote_cache_endpoint", "commands": BAZEL_COMMANDS_BUILD},
-    {"name": "remote_bytestream_uri_prefix", "value": "dynamic:platform.remote_cache_address", "commands": BAZEL_COMMANDS_BUILD},
-    {"name": "repository_cache", "value": "dynamic:computed.repository_cache", "commands": BAZEL_COMMANDS_ALL},
-    # RBE flags
-    # TODO: Implement RBE flags
-    # {"name": "remote_executor", "value": "dynamic:rbe.remote_executor", "commands": BAZEL_COMMANDS_BUILD, "omit_if_none": True},
-    # {"name": "jobs", "value": "dynamic:rbe.jobs", "commands": BAZEL_COMMANDS_JOBS, "omit_if_none": True},
-]
-
-# Startup flags
-STARTUP_FLAGS = [
-    {"name": "output_user_root", "value": "dynamic:computed.output_user_root"},
-    {"name": "output_base", "value": "dynamic:computed.output_base"},
-]
-
-# =============================================================================
-# Configuration Readers
-# =============================================================================
 
 def read_platform_config(fs, platform_dir = DEFAULT_PLATFORM_DIR):
     """
@@ -106,8 +31,7 @@ def read_platform_config(fs, platform_dir = DEFAULT_PLATFORM_DIR):
         platform_dir: Path to platform config directory
 
     Returns:
-        dict with keys: remote_cache_endpoint, remote_cache_address, storage_path,
-        api_key, api_client_id, brs_api_endpoint, token, refresh_token, etc.
+        dict with platform config keys
     """
     config = {}
 
@@ -118,14 +42,12 @@ def read_platform_config(fs, platform_dir = DEFAULT_PLATFORM_DIR):
             if content:
                 config[key] = content.strip()
 
-    # Read rosetta_api_tokens (JSON file with token and refresh_token)
     tokens_path = platform_dir + "/rosetta_api_tokens"
     if fs.exists(tokens_path):
         content = fs.read_to_string(tokens_path)
         if content:
             config["rosetta_api_tokens"] = json.decode(content)
 
-    # Apply defaults
     if "storage_path" not in config:
         config["storage_path"] = DEFAULT_STORAGE_PATH
 
@@ -177,11 +99,10 @@ def read_host_config(env, io):
         "ci_host": None,
     }
 
-    # Detect CI host and repo name
     if env.var("BUILDKITE_REPO"):
         config["ci_host"] = "buildkite"
         config["scm_repo_name"] = _parse_git_url_name(env.var("BUILDKITE_REPO"))
-        config["supports_curses"] = True  # BuildKite supports curses
+        config["supports_curses"] = True
     elif env.var("GITHUB_REPOSITORY"):
         config["ci_host"] = "github"
         repo = env.var("GITHUB_REPOSITORY")
@@ -197,7 +118,6 @@ def read_host_config(env, io):
 
 
 def _parse_git_url_name(url):
-    """Extract repo name from git URL."""
     if not url:
         return None
     name = url.rstrip("/")
@@ -205,12 +125,8 @@ def _parse_git_url_name(url):
         name = name[:-4]
     return name.split("/")[-1].split(":")[-1]
 
-# =============================================================================
-# Version Comparison
-# =============================================================================
 
 def parse_version(version_str):
-    """Parse version string to tuple (major, minor, patch)."""
     parts = version_str.split(".")
     major = int(parts[0]) if len(parts) > 0 else 0
     minor = int(parts[1]) if len(parts) > 1 else 0
@@ -220,22 +136,10 @@ def parse_version(version_str):
 
 
 def version_satisfies(version, constraint):
-    """
-    Check if version satisfies semver constraint.
-
-    Args:
-        version: Version string like "7.0.0"
-        constraint: Constraint like "< 7", ">= 6 < 7", ">= 8"
-
-    Returns:
-        True if version satisfies the constraint
-    """
     if not version or constraint == "*":
         return True
 
     v = parse_version(version)
-
-    # Parse constraint like "< 7", ">= 6 < 7", ">= 8"
     parts = constraint.split()
     for i in range(0, len(parts), 2):
         if i + 1 >= len(parts):
@@ -256,12 +160,8 @@ def version_satisfies(version, constraint):
 
     return True
 
-# =============================================================================
-# Dynamic Value Resolution
-# =============================================================================
 
 def _sanitize_filename(name):
-    """Sanitize string for use in filesystem paths."""
     if not name:
         return ""
     result = ""
@@ -273,180 +173,62 @@ def _sanitize_filename(name):
     return result
 
 
-def _compute_output_path(platform_config, host_config, segment, workspace):
-    """Compute output_base or output_user_root path."""
-    mount = platform_config.get("storage_path", DEFAULT_STORAGE_PATH)
-
-    # Normalize workspace name
-    subdir = "__main__" if workspace == "." else workspace.replace("/", "_")
-
-    # Include repo name if available
-    repo_name = host_config.get("scm_repo_name")
-    if repo_name:
-        return mount + "/" + segment + "/" + _sanitize_filename(repo_name) + "/" + subdir
-    else:
-        return mount + "/" + segment + "/" + subdir
-
-
-def resolve_dynamic_value(key, platform_config, host_config, rbe_config, workspace):
+def get_bazelrc_flags(platform_config, host_config, bazel_version = None, workspace = "."):
     """
-    Resolve a dynamic value from config dicts.
-
-    Args:
-        key: Dynamic key like "platform.remote_cache_endpoint" or "computed.repository_cache"
-        platform_config: Platform configuration dict
-        host_config: Host configuration dict
-        rbe_config: RBE configuration dict (may be None)
-        workspace: Workspace name
-
-    Returns:
-        Resolved value string or None
-    """
-    if key.startswith("platform."):
-        config_key = key[len("platform."):]
-        return platform_config.get(config_key)
-
-    elif key.startswith("host."):
-        host_key = key[len("host."):]
-        if host_key == "curses":
-            return "yes" if host_config.get("supports_curses") else "no"
-        elif host_key == "progress_rate_limit":
-            return "5" if host_config.get("supports_curses") else "60"
-        return host_config.get(host_key)
-
-    elif key.startswith("computed."):
-        computed_key = key[len("computed."):]
-        if computed_key == "repository_cache":
-            mount = platform_config.get("storage_path", DEFAULT_STORAGE_PATH)
-            return mount + "/caches/repository"
-        elif computed_key == "output_user_root":
-            return _compute_output_path(platform_config, host_config, "bazel", workspace)
-        elif computed_key == "output_base":
-            return _compute_output_path(platform_config, host_config, "output", workspace)
-
-    elif key.startswith("rbe."):
-        if not rbe_config:
-            return None
-        rbe_key = key[len("rbe."):]
-        if rbe_key == "remote_executor":
-            # RBE uses the same endpoint as remote cache
-            return platform_config.get("remote_cache_endpoint")
-        elif rbe_key == "jobs":
-            jobs = rbe_config.get("jobs")
-            return str(jobs) if jobs else None
-
-    return None
-
-# =============================================================================
-# Flag Resolution
-# =============================================================================
-
-def resolve_flag_value(flag_def, platform_config, host_config, rbe_config, workspace):
-    """
-    Resolve a flag's value from config dicts.
-
-    Args:
-        flag_def: Flag definition dict
-        platform_config: Platform configuration dict
-        host_config: Host configuration dict
-        rbe_config: RBE configuration dict (may be None)
-        workspace: Workspace name
-
-    Returns:
-        Resolved value string or None
-    """
-    value = flag_def.get("value")
-
-    if value == None:
-        return None  # Boolean flag, no value
-
-    if type(value) == "string" and value.startswith("dynamic:"):
-        dynamic_key = value[len("dynamic:"):]
-        return resolve_dynamic_value(dynamic_key, platform_config, host_config, rbe_config, workspace)
-
-    return value  # Static value
-
-
-def stringify_flag(name, value):
-    """Convert flag name and value to string."""
-    if value == None:
-        return "--" + name
-    return "--" + name + "=" + str(value)
-
-
-def should_include_flag(flag_def, version):
-    """
-    Check if flag should be included based on version.
-
-    Args:
-        flag_def: Flag definition dict
-        version: Bazel version string (e.g., "7.0.0") or None
-
-    Returns:
-        True if flag should be included
-    """
-    constraint = flag_def.get("versions", "*")
-    return version_satisfies(version, constraint)
-
-# =============================================================================
-# Bazelrc Generation
-# =============================================================================
-
-def get_bazelrc_flags(platform_config, host_config, bazel_version = None, rbe_config = None, workspace = ".", verbs = None):
-    """
-    Generate bazelrc flags organized by verb.
+    Generate bazelrc flags from platform and host configuration.
 
     Args:
         platform_config: dict from read_platform_config()
         host_config: dict from read_host_config()
         bazel_version: str like "7.0.0" or None
-        rbe_config: dict with RBE config (e.g., {"jobs": 50}) or None
         workspace: workspace name (default ".")
-        verbs: list of verbs to generate flags for (default: all verbs)
 
     Returns:
-        dict: Flags organized by verb, e.g.:
-            {
-                "build": ["--flag1", "--flag2"],
-                "test": ["--flag1", "--test_flag"],
-                "startup": ["--output_base=...", "--output_user_root=..."],
-            }
+        (startup_flags, build_flags): two lists of flag strings
     """
-    if verbs == None:
-        verbs = BAZEL_COMMANDS_ALL
+    storage_path = platform_config.get("storage_path", DEFAULT_STORAGE_PATH)
+    repo_name = host_config.get("scm_repo_name")
+    subdir = "__main__" if workspace == "." else workspace.replace("/", "_")
 
-    result = {}
+    build_flags = []
 
-    all_flags = STATIC_BOOLEAN_FLAGS + STATIC_VALUE_FLAGS + DYNAMIC_FLAGS
+    build_flags.append("--remote_upload_local_results")
+    build_flags.append("--heap_dump_on_oom")
+    build_flags.append("--generate_json_trace_profile")
+    build_flags.append("--experimental_repository_cache_hardlinks")
+    build_flags.append("--remote_accept_cached")
 
-    for flag_def in all_flags:
-        if not should_include_flag(flag_def, bazel_version):
-            continue
+    if version_satisfies(bazel_version, "< 7"):
+        build_flags.append("--incompatible_remote_results_ignore_disk")
 
-        value = resolve_flag_value(flag_def, platform_config, host_config, rbe_config, workspace)
+    build_flags.append("--disk_cache=")
+    build_flags.append("--remote_timeout=3600")
+    build_flags.append("--remote_retries=360")
+    build_flags.append("--grpc_keepalive_timeout=30s")
 
-        # Skip if omit_if_none and value is None (for dynamic flags that may not resolve)
-        if flag_def.get("omit_if_none") and value == None:
-            continue
+    if version_satisfies(bazel_version, "< 8"):
+        build_flags.append("--noexperimental_remote_cache_compression")
+    else:
+        build_flags.append("--noremote_cache_compression")
 
-        flag_str = stringify_flag(flag_def["name"], value)
+    remote_cache_endpoint = platform_config.get("remote_cache_endpoint")
+    if remote_cache_endpoint:
+        build_flags.append("--remote_cache=" + remote_cache_endpoint)
 
-        # Add for each applicable command that's in the requested verbs
-        for cmd in flag_def.get("commands", ["build"]):
-            if cmd not in verbs:
-                continue
-            if cmd not in result:
-                result[cmd] = []
-            result[cmd].append(flag_str)
+    remote_cache_address = platform_config.get("remote_cache_address")
+    if remote_cache_address:
+        build_flags.append("--remote_bytestream_uri_prefix=" + remote_cache_address)
 
-    # Add startup flags
+    build_flags.append("--repository_cache=" + storage_path + "/caches/repository")
+
     startup_flags = []
-    for flag_def in STARTUP_FLAGS:
-        value = resolve_flag_value(flag_def, platform_config, host_config, rbe_config, workspace)
-        if value:
-            startup_flags.append(stringify_flag(flag_def["name"], value))
 
-    if startup_flags:
-        result["startup"] = startup_flags
+    if repo_name:
+        sanitized = _sanitize_filename(repo_name)
+        startup_flags.append("--output_user_root=" + storage_path + "/bazel/" + sanitized + "/" + subdir)
+        startup_flags.append("--output_base=" + storage_path + "/output/" + sanitized + "/" + subdir)
+    else:
+        startup_flags.append("--output_user_root=" + storage_path + "/bazel/" + subdir)
+        startup_flags.append("--output_base=" + storage_path + "/output/" + subdir)
 
-    return result
+    return (startup_flags, build_flags)
