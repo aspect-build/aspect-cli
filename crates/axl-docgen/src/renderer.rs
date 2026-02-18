@@ -1,6 +1,6 @@
 use crate::traversal::{DocPage, DocPageItem};
 use crate::type_linker::TypeLinker;
-use starlark::docs::{DocFunction, DocProperty};
+use starlark::docs::{DocFunction, DocParam, DocProperty};
 
 const PRELUDE: &str = r#"<pre class="language-python"><code>"#;
 const POSTLUDE: &str = r#"</code></pre>"#;
@@ -103,6 +103,13 @@ impl<'a> Renderer<'a> {
         // Documentation
         if let Some(docs) = &func.docs {
             output.push_str(&render_docstring(docs));
+        }
+
+        // Parameter documentation
+        if let Some(params_md) = render_param_docs(func) {
+            output.push_str("**Parameters**\n\n");
+            output.push_str(&params_md);
+            output.push('\n');
         }
 
         output
@@ -273,6 +280,53 @@ impl<'a> Renderer<'a> {
         } else {
             format!("`module` {}\n\n", name)
         }
+    }
+}
+
+/// Render per-parameter documentation as a markdown list.
+/// Returns `None` if no parameter has docs attached.
+fn render_param_docs(func: &DocFunction) -> Option<String> {
+    let p = &func.params;
+
+    // Collect (display_name, DocParam) in declaration order, matching starlark-rust's
+    // doc_params_with_starred_names() logic (which is pub(crate)).
+    let mut pairs: Vec<(String, &DocParam)> = Vec::new();
+    for param in &p.pos_only {
+        pairs.push((param.name.clone(), param));
+    }
+    for param in &p.pos_or_named {
+        pairs.push((param.name.clone(), param));
+    }
+    if let Some(args) = &p.args {
+        pairs.push((format!("*{}", args.name), args));
+    }
+    for param in &p.named_only {
+        pairs.push((param.name.clone(), param));
+    }
+    if let Some(kwargs) = &p.kwargs {
+        pairs.push((format!("**{}", kwargs.name), kwargs));
+    }
+
+    let mut output = String::new();
+    for (display_name, param) in &pairs {
+        let Some(docs) = &param.docs else { continue };
+        let doc_text = match &docs.details {
+            Some(details) => format!("{}\n\n{}", docs.summary, details),
+            None => docs.summary.clone(),
+        };
+        let mut lines = doc_text.lines();
+        if let Some(first) = lines.next() {
+            output.push_str(&format!("* `{}`: {}\n", display_name, first));
+            for line in lines {
+                output.push_str(&format!("  {}\n", line));
+            }
+        }
+    }
+
+    if output.is_empty() {
+        None
+    } else {
+        Some(output)
     }
 }
 

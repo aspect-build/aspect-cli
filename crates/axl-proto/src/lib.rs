@@ -14,6 +14,38 @@ include!(concat!(env!("OUT_DIR"), "/workspace_log.rs"));
 include!(concat!(env!("OUT_DIR"), "/build_event_stream.rs"));
 include!(concat!(env!("OUT_DIR"), "/blaze_query.rs"));
 include!(concat!(env!("OUT_DIR"), "/tools.protos.rs"));
+pub mod build {
+    pub mod bazel {
+        pub mod semver {
+            include!(concat!(env!("OUT_DIR"), "/build.bazel.semver.rs"));
+        }
+        pub mod remote {
+            pub mod execution {
+                include!(concat!(
+                    env!("OUT_DIR"),
+                    "/build.bazel.remote.execution.v2.rs"
+                ));
+
+                #[starbuf_derive::service(
+                    client = "crate::build::bazel::remote::execution::v2::action_cache_client::ActionCacheClient",
+                    methods(
+                        name = "GetActionResult",
+                        method = "get_action_result",
+                        request = "crate::build::bazel::remote::execution::v2::GetActionResultRequest",
+                        response = "crate::build::bazel::remote::execution::v2::ActionResult",
+                    ),
+                    methods(
+                        name = "UpdateActionResult",
+                        method = "update_action_result",
+                        request = "crate::build::bazel::remote::execution::v2::UpdateActionResultRequest",
+                        response = "crate::build::bazel::remote::execution::v2::ActionResult",
+                    )
+                )]
+                pub struct ActionCache;
+            }
+        }
+    }
+}
 
 #[path = "./pb_impl.rs"]
 mod pb_impl;
@@ -25,6 +57,12 @@ pub mod google {
                 include!(concat!(env!("OUT_DIR"), "/google.devtools.build.v1.rs"));
             }
         }
+    }
+    pub mod rpc {
+        include!(concat!(env!("OUT_DIR"), "/google.rpc.rs"));
+    }
+    pub mod longrunning {
+        include!(concat!(env!("OUT_DIR"), "/google.longrunning.rs"));
     }
 }
 

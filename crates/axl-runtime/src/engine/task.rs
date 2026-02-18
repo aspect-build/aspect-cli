@@ -1,4 +1,5 @@
 use crate::engine::task_context::TaskContext;
+use crate::engine::types::fragment::{FragmentType, FrozenFragmentType, extract_fragment_type_id};
 
 use super::task_arg::TaskArg;
 use allocative::Allocative;
@@ -15,8 +16,8 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
+use starlark::values::ValueLike;
 use starlark::values::list::UnpackList;
-use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 use starlark::values::typing::StarlarkCallableParamSpec;
@@ -52,7 +53,7 @@ pub struct Task<'v> {
     pub(super) description: String,
     pub(super) group: Vec<String>,
     pub(super) name: String,
-    pub(super) config: values::Value<'v>,
+    pub(super) fragments: Vec<values::Value<'v>>,
 }
 
 impl<'v> Task<'v> {
@@ -71,8 +72,8 @@ impl<'v> Task<'v> {
     pub fn name(&self) -> &String {
         &self.name
     }
-    pub fn config(&self) -> values::Value<'v> {
-        self.config
+    pub fn fragments(&self) -> &[values::Value<'v>] {
+        &self.fragments
     }
 }
 
@@ -104,14 +105,15 @@ impl<'v> values::Freeze for Task<'v> {
     type Frozen = FrozenTask;
     fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
         let frozen_impl = self.r#impl.freeze(freezer)?;
-        let frozen_config = self.config.freeze(freezer)?;
+        let frozen_fragments: Result<Vec<_>, _> =
+            self.fragments.iter().map(|f| f.freeze(freezer)).collect();
         Ok(FrozenTask {
             args: self.args,
             r#impl: frozen_impl,
             description: self.description,
             group: self.group,
             name: self.name,
-            config: frozen_config,
+            fragments: frozen_fragments?,
         })
     }
 }
@@ -125,7 +127,7 @@ pub struct FrozenTask {
     pub(super) description: String,
     pub(super) group: Vec<String>,
     pub(super) name: String,
-    pub(super) config: values::FrozenValue,
+    pub(super) fragments: Vec<values::FrozenValue>,
 }
 
 starlark_simple_value!(FrozenTask);
@@ -139,8 +141,15 @@ impl FrozenTask {
     pub fn implementation(&self) -> values::FrozenValue {
         self.r#impl
     }
-    pub fn config(&self) -> values::FrozenValue {
-        self.config
+    pub fn fragments(&self) -> &[values::FrozenValue] {
+        &self.fragments
+    }
+    /// Get fragment type IDs this task opts into.
+    pub fn fragment_type_ids(&self) -> Vec<u64> {
+        self.fragments
+            .iter()
+            .filter_map(|f| extract_fragment_type_id(f.to_value()))
+            .collect()
     }
 }
 
@@ -190,7 +199,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///     task_args = {
     ///         "target": args.string(),
     ///     },
-    ///     config = None  # Optional user-defined config (e.g., a record); defaults to None if not provided
+    ///     fragments = [BazelFragment]  # Optional list of fragment types
     /// )
     /// ```
     fn task<'v>(
@@ -203,7 +212,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] description: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         #[starlark(require = named, default = String::new())] name: String,
-        #[starlark(require = named, default = NoneOr::None)] config: NoneOr<values::Value<'v>>,
+        #[starlark(require = named, default = UnpackList::default())] fragments: UnpackList<
+            Value<'v>,
+        >,
     ) -> starlark::Result<Task<'v>> {
         if group.items.len() > MAX_TASK_GROUPS {
             return Err(anyhow::anyhow!(
@@ -216,13 +227,28 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         for (arg, def) in args.entries {
             args_.insert(arg.to_owned(), def.clone());
         }
+
+        // Validate each element is a FragmentType or FrozenFragmentType
+        let all_fragments = fragments.items;
+        for frag in &all_fragments {
+            if frag.downcast_ref::<FragmentType>().is_none()
+                && frag.downcast_ref::<FrozenFragmentType>().is_none()
+            {
+                return Err(anyhow::anyhow!(
+                    "fragments list must contain fragment types, got '{}'",
+                    frag.get_type()
+                )
+                .into());
+            }
+        }
+
         Ok(Task {
             args: args_,
             r#impl: implementation.0,
             description,
             group: group.items,
             name,
-            config: config.into_option().unwrap_or(values::Value::new_none()),
+            fragments: all_fragments,
         })
     }
 }

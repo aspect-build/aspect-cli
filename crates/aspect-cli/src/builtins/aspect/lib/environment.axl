@@ -1,0 +1,105 @@
+"""
+Configure Workflows Environment Library
+
+Prints debug/diagnostic information about the runner: the Workflows product
+version, whether warming is enabled, and cloud platform metadata (region,
+instance type, spot/preemptible status, bootstrap log URLs, etc.).
+
+This is purely informational output for debugging — no side effects.
+"""
+
+load("./platform.axl", "DEFAULT_PLATFORM_DIR")
+
+# AWS CloudWatch log group
+AWS_LOG_GROUP = "/aw/runner/cloud-init/output"
+
+
+def _url_encode(s):
+    """Percent-encode a string for use in URLs."""
+    result = ""
+    for c in s.elems():
+        if c == " ":
+            result += "%20"
+        elif c == "\"":
+            result += "%22"
+        elif c == "\n":
+            result += "%0A"
+        elif c == "=":
+            result += "%3D"
+        elif c == "/":
+            result += "%2F"
+        else:
+            result += c
+    return result
+
+
+def _read_file(fs, path):
+    """Read a text file and strip whitespace, or return empty string if missing."""
+    if fs.exists(path):
+        return fs.read_to_string(path).strip()
+    return ""
+
+
+def _read_platform_metadata(fs):
+    """Read all platform metadata from files."""
+    return {
+        "region": _read_file(fs, DEFAULT_PLATFORM_DIR + "/region"),
+        "az": _read_file(fs, DEFAULT_PLATFORM_DIR + "/az"),
+        "instance_id": _read_file(fs, DEFAULT_PLATFORM_DIR + "/instance_id"),
+        "instance_name": _read_file(fs, DEFAULT_PLATFORM_DIR + "/instance_name"),
+        "instance_type": _read_file(fs, DEFAULT_PLATFORM_DIR + "/instance_type"),
+        "account_id": _read_file(fs, DEFAULT_PLATFORM_DIR + "/account"),
+        "preemptible": fs.exists(DEFAULT_PLATFORM_DIR + "/preemptible"),
+    }
+
+
+def _print_workflows_info(fs):
+    """Print Workflows version and warming status."""
+    version = _read_file(fs, DEFAULT_PLATFORM_DIR + "/product_version")
+    warming_enabled = fs.exists(DEFAULT_PLATFORM_DIR + "/warming_enabled")
+
+    print("Workflows Information")
+    print("\tVersion: " + version)
+    print("\tWarming enabled: " + ("true" if warming_enabled else "false"))
+
+
+def _print_aws_info(meta):
+    """Print AWS-specific runner information."""
+    print("AWS Information")
+    print("\tRegion: " + meta["region"])
+    print("\tAvailability Zone: " + meta["az"])
+    print("\tAccount ID: " + meta["account_id"])
+    print("\tInstance ID: " + meta["instance_id"])
+    print("\tInstance Name: " + meta["instance_name"])
+    print("\tInstance Type: " + meta["instance_type"])
+    print("\tSpot Instance: " + ("yes" if meta["preemptible"] else "no"))
+    print("\tCLI: 'aws logs tail \"/aw/runner/cloud-init/output\" --log-stream-names \"" + meta["instance_id"] + "\" --since=30d'")
+
+
+def _print_gcp_info(meta):
+    """Print GCP-specific runner information."""
+    print("GCP Information")
+    print("\tRegion: " + meta["region"])
+    print("\tAvailability Zone: " + meta["az"])
+    print("\tProject ID: " + meta["account_id"])
+    print("\tInstance ID: " + meta["instance_id"])
+    print("\tInstance Name: " + meta["instance_name"])
+    print("\tInstance Type: " + meta["instance_type"])
+    print("\tPreemptible: " + ("yes" if meta["preemptible"] else "no"))
+    print("\tCLI: 'gcloud logging read --project " + meta["account_id"] + " \"resource.type=gce_instance resource.labels.instance_id=" + meta["instance_id"] + " log_name=projects/" + meta["account_id"] + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
+
+
+def configure_workflows_env(fs):
+    """
+    Print debug/diagnostic information about the runner environment.
+
+    Args:
+        fs: Filesystem interface (ctx.std.fs)
+    """
+    _print_workflows_info(fs)
+    meta = _read_platform_metadata(fs)
+
+    if fs.exists(DEFAULT_PLATFORM_DIR + "/aws"):
+        _print_aws_info(meta)
+    elif fs.exists(DEFAULT_PLATFORM_DIR + "/gcp"):
+        _print_gcp_info(meta)

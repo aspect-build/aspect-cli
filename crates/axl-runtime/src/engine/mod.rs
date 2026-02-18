@@ -1,3 +1,4 @@
+use axl_proto::build::bazel::remote::execution as remote_execution;
 use starlark::{
     environment::GlobalsBuilder, starlark_module,
     values::starlark_value_as_type::StarlarkValueAsType,
@@ -8,7 +9,7 @@ mod globals;
 mod http;
 mod std;
 mod template;
-mod types;
+pub mod types;
 mod wasm;
 
 pub mod r#async;
@@ -37,9 +38,16 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals::register_globals(globals);
     r#async::register_globals(globals);
     task::register_globals(globals);
+    types::fragment::register_globals(globals);
 
     globals.namespace("args", task_arg::register_globals);
     globals.namespace("bazel", bazel::register_globals);
+    globals.namespace("remote", |g| {
+        g.namespace("execution", |g| {
+            remote_execution::action_cache_service(g);
+            remote_execution::v2_toplevels(g);
+        });
+    });
     globals.namespace("std", std::register_globals);
     globals.namespace("wasm", wasm::register_wasm_types);
 }

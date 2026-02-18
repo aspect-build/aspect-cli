@@ -50,6 +50,8 @@
 
 `module` [json](/lib/json)
 
+`module` [remote](/lib/remote)
+
 `module` [std](/lib/std)
 
 `module` [typing](/lib/typing)
@@ -108,6 +110,30 @@ any([0, 1]) == True
 any([0, 1, True]) == True
 any([0, 0]) == False
 any([0, False]) == False
+```
+
+`function` **attr**
+
+<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">attr</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
+    <span class="variable parameter python">typ</span></span><span class="meta function parameters annotation python"><span class="punctuation separator annotation parameter python">:</span> <a href="/lib/typing">typing</a><span class="punctuation accessor dot python">.</span><a href="/lib/typing">Any</a></span><span class="meta function parameters python"><span class="punctuation separator parameters python">,</span>
+    <span class="variable parameter python">default</span></span><span class="meta function parameters annotation python"><span class="punctuation separator annotation parameter python">:</span> <a href="/lib/typing">typing</a><span class="punctuation accessor dot python">.</span><a href="/lib/typing">Any</a> </span><span class="meta function parameters default-value python"><span class="keyword operator assignment python">=</span> <span class="constant language python">...</span></span><span class="meta function parameters python"><span class="punctuation separator parameters python">,</span>
+    /
+<span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <a href="/lib">field</a></span></span></code></pre>
+
+Creates a field definition with a type and optional default value.
+
+Mutable defaults (lists, dicts) are deep-copied when a spec instance is
+created, so each instance gets its own independent copy.
+
+Example:
+
+```starlark
+MySpec = spec(host=str, port=attr(int, 80))
+r = MySpec(host="localhost")  # port defaults to 80
+
+# Mutable defaults are copied per instance:
+attr(list[str], [])   # each instance gets a fresh []
+attr(dict[str, int], {})  # each instance gets a fresh {}
 ```
 
 `function` **breakpoint**
@@ -627,6 +653,36 @@ sorted(["two", "three", "four"], key=len)                == ["two", "four", "thr
 sorted(["two", "three", "four"], key=len, reverse=True)  == ["three", "four", "two"] # longest to shortest
 ```
 
+`function` **spec**
+
+<pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">spec</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
+    **<span class="variable parameter python">kwargs</span></span><span class="meta function parameters annotation python"><span class="punctuation separator annotation parameter python">:</span> <a href="/lib/typing">typing</a><span class="punctuation accessor dot python">.</span><a href="/lib/typing">Any</a>
+</span><span class="meta function parameters python"><span class="punctuation section parameters end python">)</span></span><span class="meta function python"> </span><span class="meta function annotation return python"><span class="punctuation separator annotation return python">-&gt;</span> <a href="/lib">spec</a></span></span></code></pre>
+
+Creates a spec type with the given fields.
+
+Each field can be a bare type (required, no default) or an `attr()`
+definition (with type and optional default).
+
+Mutable defaults (lists, dicts) are deep-copied per instance, so each
+instance gets its own independent copy. No `default_factory` needed.
+
+Example:
+
+```starlark
+MySpec = spec(host=str, port=int)
+r = MySpec(host="localhost", port=80)
+print(r.host)  # "localhost"
+print(r.port)  # 80
+
+# Mutable defaults are safe:
+ListSpec = spec(items=attr(list[str], []))
+a = ListSpec()
+b = ListSpec()
+a.items.append("x")
+print(b.items)  # [] — each instance has its own list
+```
+
 `function` **task**
 
 <pre class="language-python"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">task</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python">
@@ -653,7 +709,7 @@ build = task(
     task_args = {
         "target": args.string(),
     },
-    config = None  # Optional user-defined config (e.g., a record); defaults to None if not provided
+    config = lambda: MyConfig(key = "value")  # Optional lambda that returns config; evaluated at task creation
 )
 ```
 

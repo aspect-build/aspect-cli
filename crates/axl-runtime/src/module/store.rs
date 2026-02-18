@@ -14,6 +14,14 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkValue;
 use starlark::values::starlark_value;
 
+#[derive(Clone, Debug)]
+pub struct UseConfigEntry {
+    pub path: String,
+    pub function: String,
+    pub requires: Vec<(String, Option<String>)>,
+    pub conflicts: Vec<String>,
+}
+
 #[derive(Debug, ProvidesStaticType, Default)]
 pub struct ModuleStore {
     pub root_dir: PathBuf,
@@ -21,6 +29,7 @@ pub struct ModuleStore {
     pub module_root: PathBuf,
     pub deps: Rc<RefCell<HashMap<String, Dep>>>,
     pub tasks: Rc<RefCell<HashMap<PathBuf, (String, Vec<String>)>>>,
+    pub configs: Rc<RefCell<Vec<UseConfigEntry>>>,
 }
 
 impl ModuleStore {
@@ -31,6 +40,7 @@ impl ModuleStore {
             module_root,
             deps: Rc::new(RefCell::new(HashMap::new())),
             tasks: Rc::new(RefCell::new(HashMap::new())),
+            configs: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -46,6 +56,7 @@ impl ModuleStore {
             module_root: value.module_root.clone(),
             deps: Rc::clone(&value.deps),
             tasks: Rc::clone(&value.tasks),
+            configs: Rc::clone(&value.configs),
         })
     }
 }
@@ -63,6 +74,13 @@ impl Dep {
             Dep::Remote(remote) => &remote.name,
         }
     }
+
+    pub fn use_config(&self) -> bool {
+        match self {
+            Dep::Local(local) => local.use_config,
+            Dep::Remote(remote) => remote.use_config,
+        }
+    }
 }
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
@@ -71,6 +89,7 @@ pub struct AxlLocalDep {
     pub name: String,
     pub path: PathBuf,
     pub auto_use_tasks: bool,
+    pub use_config: bool,
 }
 
 #[starlark_value(type = "AxlLocalDep")]
@@ -88,6 +107,7 @@ pub struct AxlArchiveDep {
     pub name: String,
     pub strip_prefix: String,
     pub auto_use_tasks: bool,
+    pub use_config: bool,
 }
 
 #[starlark_value(type = "AxlArchiveDep")]

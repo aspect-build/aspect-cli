@@ -1,0 +1,2 @@
+- Documentation for AXL can be found in /docs/lib
+- AXL is a starlark runtime that is built to be a frontend for Bazel.
