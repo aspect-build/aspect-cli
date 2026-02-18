@@ -3,8 +3,9 @@ use fibre::spmc::{Receiver, bounded};
 use fibre::{CloseError, SendError};
 use prost::Message;
 use std::fmt::Debug;
+use std::fs::File;
 use std::io;
-use std::io::Read;
+use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::{env, thread};
@@ -25,6 +26,26 @@ pub enum ExecLogStreamError {
     Close(#[from] CloseError),
 }
 
+/// Wraps a `Read` source and tees every byte read to one or more `BufWriter<File>` sinks.
+///
+/// Used to intercept the raw zstd-compressed bytes coming from Bazel's named pipe
+/// *before* decompression, allowing `CompactFile` sinks to capture Bazel-compatible
+/// `--execution_log_compact_file` output without a second compression step.
+struct MultiTeeReader<R: Read> {
+    inner: R,
+    writers: Vec<BufWriter<File>>,
+}
+
+impl<R: Read> Read for MultiTeeReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        for w in &mut self.writers {
+            w.write_all(&buf[..n])?;
+        }
+        Ok(n)
+    }
+}
+
 #[derive(Debug)]
 pub struct ExecLogStream {
     handle: JoinHandle<Result<(), ExecLogStreamError>>,
@@ -32,13 +53,16 @@ pub struct ExecLogStream {
 }
 
 impl ExecLogStream {
-    pub fn spawn_with_pipe(pid: u32) -> io::Result<(PathBuf, Self)> {
+    pub fn spawn_with_pipe(
+        pid: u32,
+        compact_sink_paths: Vec<String>,
+    ) -> io::Result<(PathBuf, Self)> {
         let out = env::temp_dir().join(format!("execlog-out-{}.bin", uuid::Uuid::new_v4()));
-        let stream = Self::spawn(out.clone(), pid)?;
+        let stream = Self::spawn(out.clone(), pid, compact_sink_paths)?;
         Ok((out, stream))
     }
 
-    pub fn spawn(path: PathBuf, pid: u32) -> io::Result<Self> {
+    pub fn spawn(path: PathBuf, pid: u32, compact_sink_paths: Vec<String>) -> io::Result<Self> {
         let (mut sender, recv) = bounded::<ExecLogEntry>(1000);
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
@@ -46,6 +70,14 @@ impl ExecLogStream {
             buf.resize(10, 0);
             let out_raw =
                 galvanize::Pipe::new(path.clone(), galvanize::RetryPolicy::IfOpenForPid(pid))?;
+            let writers = compact_sink_paths
+                .iter()
+                .map(|p| Ok(BufWriter::new(File::create(p)?)))
+                .collect::<io::Result<Vec<_>>>()?;
+            let out_raw = MultiTeeReader {
+                inner: out_raw,
+                writers,
+            };
             let mut out_raw = Decoder::new(out_raw)?;
 
             let mut read = || -> Result<(), ExecLogStreamError> {

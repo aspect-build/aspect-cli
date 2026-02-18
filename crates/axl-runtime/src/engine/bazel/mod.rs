@@ -25,6 +25,7 @@ use crate::engine::store::AxlStore;
 use axl_proto;
 
 mod build;
+mod execlog_sink;
 mod health_check;
 mod helpers;
 mod iter;
@@ -81,7 +82,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             UnpackList<build::BuildEventSink>,
         >,
         #[starlark(require = named, default = false)] workspace_events: bool,
-        #[starlark(require = named, default = false)] execution_logs: bool,
+        #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
+            bool,
+            UnpackList<execlog_sink::ExecLogSink>,
+        >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             values::StringValue,
         >,
@@ -97,12 +101,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(events) => (events, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
+        let execution_log = match execution_log {
+            Either::Left(b) => (b, vec![]),
+            Either::Right(sinks) => (true, sinks.items),
+        };
         let store = AxlStore::from_eval(eval)?;
         let build = build::Build::spawn(
             "build",
             targets.items.iter().map(|f| f.as_str().to_string()),
             build_events,
-            execution_logs,
+            execution_log,
             workspace_events,
             flags.items.iter().map(|f| f.as_str().to_string()).collect(),
             startup_flags
@@ -150,7 +158,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             UnpackList<build::BuildEventSink>,
         >,
         #[starlark(require = named, default = false)] workspace_events: bool,
-        #[starlark(require = named, default = false)] execution_logs: bool,
+        #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
+            bool,
+            UnpackList<execlog_sink::ExecLogSink>,
+        >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             values::StringValue,
         >,
@@ -166,12 +177,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(events) => (events, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
+        let execution_log = match execution_log {
+            Either::Left(b) => (b, vec![]),
+            Either::Right(sinks) => (true, sinks.items),
+        };
         let store = AxlStore::from_eval(eval)?;
         let test = build::Build::spawn(
             "test",
             targets.items.iter().map(|f| f.as_str().to_string()),
             build_events,
-            execution_logs,
+            execution_log,
             workspace_events,
             flags.items.iter().map(|f| f.as_str().to_string()).collect(),
             startup_flags
@@ -251,6 +266,26 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
             metadata: HashMap::from_iter(metadata.entries),
         })
     }
+
+    fn file(#[starlark(require = named)] path: String) -> starlark::Result<build::BuildEventSink> {
+        Ok(build::BuildEventSink::File { path })
+    }
+}
+
+#[starlark_module]
+fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
+    #[starlark(as_type = execlog_sink::ExecLogSink)]
+    fn file(
+        #[starlark(require = named)] path: String,
+    ) -> starlark::Result<execlog_sink::ExecLogSink> {
+        Ok(execlog_sink::ExecLogSink::File { path })
+    }
+
+    fn compact_file(
+        #[starlark(require = named)] path: String,
+    ) -> starlark::Result<execlog_sink::ExecLogSink> {
+        Ok(execlog_sink::ExecLogSink::CompactFile { path })
+    }
 }
 
 #[starlark_module]
@@ -264,6 +299,11 @@ fn register_build_types(globals: &mut GlobalsBuilder) {
         StarlarkValueAsType::new();
     const WorkspaceEventIterator: StarlarkValueAsType<iter::WorkspaceEventIterator> =
         StarlarkValueAsType::new();
+}
+
+#[starlark_module]
+fn register_execlog_types(globals: &mut GlobalsBuilder) {
+    const ExecLogSink: StarlarkValueAsType<execlog_sink::ExecLogSink> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]
@@ -296,5 +336,10 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
     globals.namespace("build_events", |globals| {
         register_build_events(globals);
+    });
+
+    globals.namespace("execution_log", |globals| {
+        register_execlog_types(globals);
+        register_execlog_sinks(globals);
     });
 }

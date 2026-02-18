@@ -65,6 +65,7 @@ def impl(ctx: TaskContext) -> int:
     for _ in range(10):
         build = ctx.bazel.build(
             build_events = build_events,
+            execution_log = fragment.execution_log_sinks if fragment.execution_log_sinks else False,
             flags = flags,
             startup_flags = startup_flags,
             *ctx.args.target_pattern,

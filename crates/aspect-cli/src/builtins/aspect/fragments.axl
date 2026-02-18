@@ -7,6 +7,7 @@ BazelFragment = fragment(
     extra_flags = attr(list[str], []),
     extra_startup_flags = attr(list[str], []),
     build_event_sinks = attr(list[bazel.build.BuildEventSink], []),
+    execution_log_sinks = attr(list[bazel.execution_log.ExecLogSink], []),
 
     # Optional transforms — only called when set
     flags = attr(typing.Callable[[list[str]], list[str]] | None, None),

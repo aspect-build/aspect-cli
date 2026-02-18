@@ -222,6 +222,8 @@ def configure_artifacts(ctx):
     child.wait()
 
     profile_path = "/tmp/" + uuid + ".profile.gz"
+    execlog_path = "/tmp/" + uuid + ".execlog.zstd"
+    bep_path = "/tmp/" + uuid + ".bep.bin"
 
     # Add profiling and heap dump flags
     fragment.extra_flags.extend([
@@ -230,6 +232,14 @@ def configure_artifacts(ctx):
         "--profile=" + profile_path,
         "--heap_dump_on_oom",
     ])
+
+    # Add execution log and build event file sinks
+    fragment.execution_log_sinks.append(
+        bazel.execution_log.compact_file(path = execlog_path),
+    )
+    fragment.build_event_sinks.append(
+        bazel.build_events.file(path = bep_path),
+    )
 
     def _on_build_event(ctx, state, event):
         _collect_test_files(ctx, state, event)
@@ -254,11 +264,16 @@ def configure_artifacts(ctx):
                 prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
                 _upload_testlogs(ctx, upload_state["testlogs"], entries, prefix + "-testlogs")
 
-            # Upload profile if it exists
+            # Upload diagnostic artifacts
             task_name = state.get("_task_name", "unknown")
-            if ctx.std.fs.exists(profile_path):
-                upload_file(ctx, profile_path, name = task_name + ".profile.gz")
-                ctx.std.fs.remove_file(profile_path)
+            for src, artifact_name in [
+                (profile_path, task_name + ".profile.gz"),
+                (execlog_path, task_name + ".execlog.zstd"),
+                (bep_path, task_name + ".bep.bin"),
+            ]:
+                if ctx.std.fs.exists(src):
+                    upload_file(ctx, src, name = artifact_name)
+                    ctx.std.fs.remove_file(src)
 
         if debug:
             entries = state.get("_test_entries", [])

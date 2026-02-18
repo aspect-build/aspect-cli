@@ -30,12 +30,14 @@ use starlark::values::starlark_value;
 
 use crate::engine::r#async::rt::AsyncRuntime;
 
+use super::execlog_sink::ExecLogSink;
 use super::helpers::format_bazel_command;
 use super::iter::BuildEventIterator;
 use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
 use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
+use super::stream::FileBuildEventSink;
 use super::stream::WorkspaceEventStream;
 use super::stream_sink::GrpcEventStreamSink;
 use super::stream_tracing::TracingEventStreamSink;
@@ -89,6 +91,9 @@ pub enum BuildEventSink {
         uri: String,
         metadata: HashMap<String, String>,
     },
+    File {
+        path: String,
+    },
 }
 
 starlark_simple_value!(BuildEventSink);
@@ -117,6 +122,9 @@ impl BuildEventSink {
                     uri.clone(),
                     metadata.clone(),
                 )
+            }
+            BuildEventSink::File { path } => {
+                FileBuildEventSink::spawn(stream.subscribe_realtime(), path.clone())
             }
         }
     }
@@ -163,7 +171,7 @@ impl Build {
         verb: &str,
         targets: impl IntoIterator<Item = String>,
         (build_events, sinks): (bool, Vec<BuildEventSink>),
-        execution_logs: bool,
+        (execution_logs, execlog_sinks): (bool, Vec<ExecLogSink>),
         workspace_events: bool,
         flags: Vec<String>,
         startup_flags: Vec<String>,
@@ -219,8 +227,19 @@ impl Build {
             None
         };
 
+        // Split execlog sinks: compact paths go to the tee reader inside the stream thread;
+        // decoded File sinks are spawned separately against the decoded receiver.
+        let mut compact_paths: Vec<String> = vec![];
+        let mut decoded_sinks: Vec<ExecLogSink> = vec![];
+        for sink in execlog_sinks {
+            match &sink {
+                ExecLogSink::CompactFile { path } => compact_paths.push(path.clone()),
+                ExecLogSink::File { .. } => decoded_sinks.push(sink),
+            }
+        }
+
         let execlog_stream = if execution_logs {
-            let (out, stream) = ExecLogStream::spawn_with_pipe(pid)?;
+            let (out, stream) = ExecLogStream::spawn_with_pipe(pid, compact_paths)?;
             cmd.arg("--execution_log_compact_file").arg(&out);
             Some(stream)
         } else {
@@ -232,6 +251,16 @@ impl Build {
         for sink in sinks {
             let handle = sink.spawn(rt.clone(), build_event_stream.as_ref().unwrap());
             sink_handles.push(handle);
+        }
+
+        // Decoded ExecLog File sinks — spawned after the execlog stream so the
+        // receiver is valid. They disconnect naturally when execlog_stream is joined.
+        for sink in decoded_sinks {
+            if let ExecLogSink::File { path } = sink {
+                let handle =
+                    ExecLogSink::spawn_file(execlog_stream.as_ref().unwrap().receiver(), path);
+                sink_handles.push(handle);
+            }
         }
         if build_events {
             // Use subscribe_realtime() since this subscribes at stream creation
