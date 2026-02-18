@@ -133,6 +133,54 @@ def _maybe_upload_testlogs(ctx, group, entries, name):
     _upload_testlogs(ctx, group, entries, name)
 
 
+def _upload_testlogs_buildkite(ctx, group, entries):
+    """Upload test files individually to Buildkite via a symlink tree.
+
+    Creates a temp directory with symlinks matching the desired archive paths,
+    then uploads everything with buildkite-agent. Only uploads entries added
+    since the last successful upload.
+    """
+    count = len(entries)
+    if count == 0 or count == group["last_count"]:
+        return False
+
+    new_entries = entries[group["last_count"]:]
+
+    child = ctx.std.process.command("mktemp").args(["-d"]).stdout("piped").stderr("piped").spawn()
+    tmp_dir = child.stdout().read_to_string().strip()
+    child.wait()
+
+    for entry in new_entries:
+        dest_path = tmp_dir + "/" + entry["dest"]
+        dest_dir = dest_path.rsplit("/", 1)[0]
+        ctx.std.fs.create_dir_all(dest_dir)
+        ctx.std.process.command("ln").args(["-s", entry["src"], dest_path]).spawn().wait()
+
+    child = ctx.std.process.command("buildkite-agent") \
+        .args(["artifact", "upload", "**/*"]) \
+        .current_dir(tmp_dir) \
+        .stdout("inherit") \
+        .stderr("inherit") \
+        .spawn()
+
+    status = child.wait()
+    ctx.std.process.command("rm").args(["-rf", tmp_dir]).spawn().wait()
+
+    if status.code == 0:
+        group["last_count"] = count
+        return True
+
+    print("artifact upload: buildkite-agent exit " + str(status.code))
+    return False
+
+
+def _maybe_upload_testlogs_buildkite(ctx, group, entries):
+    """Upload testlogs to Buildkite only when enough new entries have accumulated."""
+    if len(entries) < group["last_count"] + _BATCH_SIZE:
+        return
+    _upload_testlogs_buildkite(ctx, group, entries)
+
+
 def _init_upload_state(state):
     """Ensure the upload state is initialized in the shared state dict."""
     if "_artifact_upload" not in state:
@@ -188,20 +236,29 @@ def configure_artifacts(ctx):
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
-            prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
-            _maybe_upload_testlogs(ctx, upload_state["testlogs"], state.get("_test_entries", []), prefix + "-testlogs")
+            entries = state.get("_test_entries", [])
+            if ci == "buildkite":
+                _maybe_upload_testlogs_buildkite(ctx, upload_state["testlogs"], entries)
+            else:
+                prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
+                _maybe_upload_testlogs(ctx, upload_state["testlogs"], entries, prefix + "-testlogs")
 
     def _on_build_end(ctx, state, exit_code):
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
-            prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
-            _upload_testlogs(ctx, upload_state["testlogs"], state.get("_test_entries", []), prefix + "-testlogs")
+            entries = state.get("_test_entries", [])
+            if ci == "buildkite":
+                _upload_testlogs_buildkite(ctx, upload_state["testlogs"], entries)
+            else:
+                prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
+                _upload_testlogs(ctx, upload_state["testlogs"], entries, prefix + "-testlogs")
 
             # Upload profile if it exists
             task_name = state.get("_task_name", "unknown")
             if ctx.std.fs.exists(profile_path):
                 upload_file(ctx, profile_path, name = task_name + ".profile.gz")
+                ctx.std.fs.remove_file(profile_path)
 
         if debug:
             entries = state.get("_test_entries", [])
