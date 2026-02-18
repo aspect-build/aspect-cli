@@ -9,6 +9,7 @@ load("../lib/platform.axl",
 )
 load("../lib/health_check.axl", "agent_health_check")
 load("../lib/environment.axl", "configure_workflows_env")
+load("../lib/build_metadata.axl", "get_build_metadata_flags")
 load("../fragments.axl", "BazelFragment")
 load("./artifacts.axl", "configure_artifacts")
 
@@ -55,6 +56,8 @@ def configure_builtins(ctx: ConfigContext):
 
         bazel_fragment.extra_startup_flags.extend(startup_flags)
         bazel_fragment.extra_flags.extend(build_flags)
+        metadata_flags = get_build_metadata_flags(ctx.std.env, ctx.std.process, workspace = ".")
+        bazel_fragment.extra_flags.extend(metadata_flags)
         bazel_fragment.build_start.append(lambda ctx, state: print("+++ :bazel: Building"))
         bazel_fragment.build_event_sinks.extend(bessie_sinks)
         if is_buildkite:

@@ -75,7 +75,7 @@ steps:
         echo "--- :bazel: bazel run //tools/format:format.check"
         bazel $$BAZEL_STARTUP_OPTS run $$BAZEL_BUILD_OPTS //tools/format:format.check
   - key: __main__::delivery
-    label: ":ship: :package: :bazel: Delivery"
+    label: ":package: Delivery"
     depends_on:
       - __main__::warm
     agents:
