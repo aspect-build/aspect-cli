@@ -3,14 +3,15 @@
 Uploads artifacts on an interval (every BATCH_SIZE new files) during the build
 via the build_event handler. Each upload is a tar.gz archive, and the previous
 version is deleted after a successful upload (rolling replacement).
-Two artifact groups: testlogs (built via mtree) and system (from a directory).
+
+Also configures Bazel profiling flags and uploads the profile at build_end.
 
 CircleCI is excluded — artifacts are staged at /workflows/testlogs for
 CircleCI's native store_artifacts / store_test_results steps.
 """
 
 load("../lib/artifacts.axl", "detect_ci", "upload_file", "delete_artifact")
-load("../lib/tar.axl", "tar_create", "tar_create_from_dir")
+load("../lib/tar.axl", "tar_create")
 load("../fragments.axl", "BazelFragment")
 
 
@@ -22,65 +23,11 @@ _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
 # Artifact staging root, matching Rosetta conventions
 _ARTIFACTS_ROOT = "/workflows"
-_ARTIFACTS_DIR = _ARTIFACTS_ROOT + "/artifacts"
 
 
 def _artifact_name_prefix(env):
     """Derive artifact name prefix from CI environment."""
     return env.var("GITHUB_JOB") or env.var("CI_JOB_NAME") or "aspect"
-
-
-def _count_files(ctx, dir_path):
-    """Count files recursively in a directory."""
-    if not ctx.std.fs.exists(dir_path):
-        return 0
-    child = ctx.std.process.command("find").args([
-        dir_path, "-type", "f",
-    ]).stdout("piped").stderr("piped").spawn()
-    output = child.stdout().read_to_string()
-    child.wait()
-    if not output or not output.strip():
-        return 0
-    return len(output.strip().split("\n"))
-
-
-def _upload_dir_group(ctx, group, dir_path, name):
-    """Archive a directory and upload it. On success, delete the previous version."""
-    current_count = _count_files(ctx, dir_path)
-    if current_count == 0 or current_count == group["last_count"]:
-        return False
-
-    archive_path = _ARTIFACTS_ROOT + "/" + name + ".tar.gz"
-    if not tar_create_from_dir(ctx, archive_path, dir_path):
-        print("artifact upload: failed to create archive for " + name)
-        return False
-
-    group["version"] += 1
-    artifact_name = name + "-v" + str(group["version"])
-    result = upload_file(ctx, archive_path, name = artifact_name)
-
-    if ctx.std.fs.exists(archive_path):
-        ctx.std.fs.remove_file(archive_path)
-
-    if result["success"]:
-        if group["prev_ref"]:
-            delete_artifact(ctx, group["prev_ref"])
-        group["prev_ref"] = result["artifact_ref"]
-        group["last_count"] = current_count
-        return True
-    else:
-        group["version"] -= 1
-        for err in result["errors"]:
-            print("artifact upload error: " + err)
-        return False
-
-
-def _maybe_upload_dir_group(ctx, group, dir_path, name):
-    """Upload directory group only when enough new files have accumulated."""
-    current_count = _count_files(ctx, dir_path)
-    if current_count < group["last_count"] + _BATCH_SIZE:
-        return
-    _upload_dir_group(ctx, group, dir_path, name)
 
 
 def _file_uri_to_path(uri):
@@ -191,28 +138,25 @@ def _init_upload_state(state):
     if "_artifact_upload" not in state:
         state["_artifact_upload"] = {
             "testlogs": {"last_count": 0, "version": 0, "prev_ref": None},
-            "system": {"last_count": 0, "version": 0, "prev_ref": None},
         }
 
 
-def _artifact_names(ci, env, task_name):
-    """Derive testlogs/system artifact names from CI and task context.
+def _artifact_prefix(ci, env, task_name):
+    """Derive artifact name prefix from CI and task context.
 
     Buildkite groups artifacts by job, so the task name is sufficient.
     Other CIs need a CI job prefix to disambiguate across jobs.
     """
     if ci == "buildkite":
-        prefix = task_name
-    else:
-        prefix = _artifact_name_prefix(env) + "-" + task_name
-    return prefix + "-testlogs", prefix + "-system"
+        return task_name
+    return _artifact_name_prefix(env) + "-" + task_name
 
 
 def configure_artifacts(ctx):
     """Wire interval-based artifact upload into BazelFragment lifecycle hooks.
 
     - build_event: collect testlog entries + upload every BATCH_SIZE new files
-    - build_end: final flush of any remaining files
+    - build_end: final flush of any remaining files + upload profile
 
     Expects state["_task_name"] to be set by the task implementation (e.g. "build", "test").
     """
@@ -224,22 +168,44 @@ def configure_artifacts(ctx):
     fragment = ctx.fragments[BazelFragment]
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
 
+    # Resolve output_base for profile storage
+    child = ctx.std.process.command("bazel").args(["info", "output_base"]).stdout("piped").stderr("piped").spawn()
+    output_base = child.stdout().read_to_string().strip()
+    child.wait()
+
+    # Generate unique profile filename
+    child = ctx.std.process.command("uuidgen").stdout("piped").stderr("piped").spawn()
+    uuid = child.stdout().read_to_string().strip()
+    child.wait()
+
+    profile_path = output_base + "/" + uuid + ".profile.gz"
+
+    # Add profiling and heap dump flags
+    fragment.extra_flags.extend([
+        "--generate_json_trace_profile",
+        "--experimental_profile_include_target_label",
+        "--profile=" + profile_path,
+        "--heap_dump_on_oom",
+    ])
+
     def _on_build_event(ctx, state, event):
         _collect_test_files(ctx, state, event)
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
-            testlogs_name, system_name = _artifact_names(ci, ctx.std.env, state.get("_task_name", "unknown"))
-            _maybe_upload_testlogs(ctx, upload_state["testlogs"], state.get("_test_entries", []), testlogs_name)
-            _maybe_upload_dir_group(ctx, upload_state["system"], _ARTIFACTS_DIR, system_name)
+            prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
+            _maybe_upload_testlogs(ctx, upload_state["testlogs"], state.get("_test_entries", []), prefix + "-testlogs")
 
     def _on_build_end(ctx, state, exit_code):
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
-            testlogs_name, system_name = _artifact_names(ci, ctx.std.env, state.get("_task_name", "unknown"))
-            _upload_testlogs(ctx, upload_state["testlogs"], state.get("_test_entries", []), testlogs_name)
-            _upload_dir_group(ctx, upload_state["system"], _ARTIFACTS_DIR, system_name)
+            prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
+            _upload_testlogs(ctx, upload_state["testlogs"], state.get("_test_entries", []), prefix + "-testlogs")
+
+            # Upload profile if it exists
+            if ctx.std.fs.exists(profile_path):
+                upload_file(ctx, profile_path, name = prefix + "-profile")
 
         if debug:
             entries = state.get("_test_entries", [])
@@ -247,6 +213,7 @@ def configure_artifacts(ctx):
             print("")
             print("--- artifact upload debug summary ---")
             print("ci: " + ci)
+            print("profile: " + profile_path)
             print("testlog entries: " + str(len(entries)))
             for f in entries:
                 print("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
@@ -254,10 +221,7 @@ def configure_artifacts(ctx):
                 print("skipped files: " + str(len(skipped)))
                 for f in skipped:
                     print("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
-            if not is_local:
-                artifact_count = _count_files(ctx, _ARTIFACTS_DIR)
-                print("artifacts dir (" + _ARTIFACTS_DIR + "): " + str(artifact_count) + " files")
-            else:
+            if is_local:
                 print("no CI detected, uploads skipped (dry run)")
             print("------------------------------------")
 
