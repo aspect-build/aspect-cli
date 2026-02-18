@@ -168,17 +168,12 @@ def configure_artifacts(ctx):
     fragment = ctx.fragments[BazelFragment]
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
 
-    # Resolve output_base for profile storage
-    child = ctx.std.process.command("bazel").args(["info", "output_base"]).stdout("piped").stderr("piped").spawn()
-    output_base = child.stdout().read_to_string().strip()
-    child.wait()
-
-    # Generate unique profile filename
+    # Generate unique profile path in /tmp
     child = ctx.std.process.command("uuidgen").stdout("piped").stderr("piped").spawn()
     uuid = child.stdout().read_to_string().strip()
     child.wait()
 
-    profile_path = output_base + "/" + uuid + ".profile.gz"
+    profile_path = "/tmp/" + uuid + ".profile.gz"
 
     # Add profiling and heap dump flags
     fragment.extra_flags.extend([
@@ -204,8 +199,9 @@ def configure_artifacts(ctx):
             _upload_testlogs(ctx, upload_state["testlogs"], state.get("_test_entries", []), prefix + "-testlogs")
 
             # Upload profile if it exists
+            task_name = state.get("_task_name", "unknown")
             if ctx.std.fs.exists(profile_path):
-                upload_file(ctx, profile_path, name = prefix + "-profile")
+                upload_file(ctx, profile_path, name = task_name + ".profile.gz")
 
         if debug:
             entries = state.get("_test_entries", [])
