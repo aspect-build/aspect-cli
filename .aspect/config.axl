@@ -27,5 +27,3 @@ def config(ctx: ConfigContext):
 
     # add a new task
     ctx.tasks.add(_user_task)
-
-    ctx.fragments[BazelFragment].extra_startup_flags.append("--some-flag")
