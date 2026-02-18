@@ -142,7 +142,7 @@ def _build_mtree(entries):
     """Build an mtree spec string mapping source files to archive paths."""
     lines = ["#mtree"]
     for entry in entries:
-        lines.append("./" + entry["dest"] + " contents=" + entry["src"])
+        lines.append("./" + entry["dest"] + " type=file contents=" + entry["src"])
     return "\n".join(lines) + "\n"
 
 
