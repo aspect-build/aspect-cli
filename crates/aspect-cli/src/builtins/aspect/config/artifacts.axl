@@ -27,7 +27,7 @@ _TESTLOGS_DIR = _ARTIFACTS_ROOT + "/testlogs"
 
 def _artifact_name_prefix(env):
     """Derive artifact name prefix from CI environment."""
-    return env.var("GITHUB_JOB") or env.var("BUILDKITE_LABEL") or env.var("CI_JOB_NAME") or "aspect"
+    return env.var("GITHUB_JOB") or env.var("CI_JOB_NAME") or "aspect"
 
 
 def _count_files(ctx, dir_path):
@@ -86,8 +86,8 @@ def _upload_group(ctx, group, dir_path, name_prefix):
     if current_count == 0 or current_count == group["last_count"]:
         return False
 
-    # Create archive of the full directory
-    archive_path = "/tmp/axl_" + name_prefix.replace("-", "_") + ".tar.gz"
+    # Create archive in the staging root (not /tmp)
+    archive_path = _ARTIFACTS_ROOT + "/" + name_prefix + ".tar.gz"
     if not _tar_directory(ctx, dir_path, archive_path):
         print("artifact upload: failed to create archive for " + name_prefix)
         return False
@@ -219,23 +219,32 @@ def configure_artifacts(ctx):
         ci = "local"
 
     fragment = ctx.fragments[BazelFragment]
-    job_prefix = _artifact_name_prefix(ctx.std.env)
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+
+    # Buildkite groups artifacts by job already, so use clean names.
+    # Other CIs need a job prefix to disambiguate.
+    if ci == "buildkite":
+        testlogs_name = "testlogs"
+        system_name = "system"
+    else:
+        job_prefix = _artifact_name_prefix(ctx.std.env)
+        testlogs_name = job_prefix + "-testlogs"
+        system_name = job_prefix + "-system"
 
     def _on_build_event(ctx, state, event):
         _stage_test_files(ctx, state, event, dry_run = is_local)
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
-            _maybe_upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
-            _maybe_upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, job_prefix + "-artifacts")
+            _maybe_upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, testlogs_name)
+            _maybe_upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, system_name)
 
     def _on_build_end(ctx, state, exit_code):
         if not is_local:
             _init_upload_state(state)
             upload_state = state["_artifact_upload"]
-            _upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, job_prefix + "-testlogs")
-            _upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, job_prefix + "-artifacts")
+            _upload_group(ctx, upload_state["testlogs"], _TESTLOGS_DIR, testlogs_name)
+            _upload_group(ctx, upload_state["artifacts"], _ARTIFACTS_DIR, system_name)
 
         if debug:
             staged = state.get("_staged_files", [])
@@ -243,7 +252,6 @@ def configure_artifacts(ctx):
             print("")
             print("--- artifact upload debug summary ---")
             print("ci: " + ci)
-            print("job_prefix: " + job_prefix)
             print("staged files: " + str(len(staged)))
             for f in staged:
                 print("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
