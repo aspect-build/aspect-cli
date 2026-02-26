@@ -5,14 +5,47 @@ use std::path::{Path, PathBuf};
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
 
-/// Returns `false` only when the process definitively does not exist (ESRCH).
+/// Returns `false` when the process does not exist (ESRCH) or is a zombie.
 /// EPERM (process exists but we can't signal it) is treated as alive.
 fn is_pid_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) is the standard POSIX existence check. Signal 0 is
     // never delivered; the call only validates the pid and our permission to
     // signal it.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    rc == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    if rc != 0 {
+        return io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    }
+    // kill(pid, 0) succeeds for zombie processes: they still hold a PID slot
+    // until the parent calls waitpid, but they have already exited and will
+    // never create new files. Treat them as dead so callers don't spin forever.
+    !is_pid_zombie(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn is_pid_zombie(pid: u32) -> bool {
+    use procfs::process::Process;
+    Process::new(pid as i32)
+        .and_then(|p| p.stat())
+        .map(|s| s.state == 'Z')
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn is_pid_zombie(pid: u32) -> bool {
+    // proc_pidinfo(PROC_PIDTBSDINFO) fills proc_bsdinfo; pbi_status holds the
+    // process state where SZOMB == 5 per <sys/proc_info.h>.
+    use std::mem;
+    unsafe {
+        let mut info: libc::proc_bsdinfo = mem::zeroed();
+        let ret = libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+        );
+        ret > 0 && info.pbi_status == 5
+    }
 }
 
 #[cfg(target_os = "linux")]
