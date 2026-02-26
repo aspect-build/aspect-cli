@@ -12,7 +12,6 @@ rust-version.workspace = true
 [dependencies]
 allocative = "0.3.4"
 anyhow = "1.0.98"
-derive_more = { version = "2.0.1", features = ["full"] }
 display_container = "0.9.0"
 prost = "0.14.1"
 prost-types = "0.14.1"
@@ -20,8 +19,9 @@ starbuf-derive = { path = "../starbuf-derive" }
 starbuf-types = { path = "../starbuf-types" }
 starlark = "0.13.0"
 starlark_derive = "0.13.0"
-tonic = "0.14.2"
+tonic = { version = "0.14.2", features = ["transport", "tls-native-roots"] }
 tonic-prost = "0.14.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [build-dependencies]
 prost-build = "0.14.1"
