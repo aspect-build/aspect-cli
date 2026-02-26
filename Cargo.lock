@@ -201,7 +201,6 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "reqwest",
- "sha256",
  "starlark",
  "thiserror 2.0.17",
  "tokio",
@@ -341,10 +340,6 @@ dependencies = [
  "galvanize",
  "getargs",
  "handlebars",
- "http-body-util",
- "hyper",
- "hyper-util",
- "hyperlocal",
  "liquid",
  "liquid-core",
  "minijinja",
@@ -352,7 +347,6 @@ dependencies = [
  "prost",
  "rand 0.8.5",
  "reqwest",
- "semver",
  "serde_json",
  "sha256",
  "ssri",
@@ -363,10 +357,8 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tokio-stream",
- "tokio-util",
  "tonic",
  "tracing",
- "url",
  "uuid",
  "wasmi",
  "wasmi_wasi",
@@ -1497,7 +1489,6 @@ dependencies = [
 name = "galvanize"
 version = "0.0.0-dev"
 dependencies = [
- "libc",
  "nix 0.30.1",
  "proc_pidinfo",
  "procfs",
@@ -1774,21 +1765,6 @@ dependencies = [
  "tower-service",
  "tracing",
  "windows-registry",
-]
-
-[[package]]
-name = "hyperlocal"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "986c5ce3b994526b3cd75578e62554abd09f0899d6206de48b3e96ab34ccc8c7"
-dependencies = [
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "pin-project-lite",
- "tokio",
- "tower-service",
 ]
 
 [[package]]
@@ -3706,12 +3682,6 @@ dependencies = [
  "libc",
  "windows-sys 0.60.2",
 ]
-
-[[package]]
-name = "semver"
-version = "1.0.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "serde"

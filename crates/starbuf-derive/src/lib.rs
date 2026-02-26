@@ -536,7 +536,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 }
             } else if attrs.optional && (attrs.int32 || attrs.uint32 || attrs.int64 || attrs.uint64) {
                 quote! {
-                    result.#fident = Some(<i32 as ::starlark::values::UnpackValue>::unpack_value(value)?
+                    result.#fident = Some(<i64 as ::starlark::values::UnpackValue>::unpack_value(value)?
                         .ok_or_else(|| ::anyhow::anyhow!("expected int"))? as _);
                 }
             } else if attrs.optional && attrs.bool {
@@ -574,7 +574,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                     let list = ::starlark::values::list::ListRef::from_value(value)
                         .ok_or_else(|| ::anyhow::anyhow!("field '{}' expects a list", #fident_str))?;
                     for item in list.iter() {
-                        result.#fident.push(<i32 as ::starlark::values::UnpackValue>::unpack_value(item)?
+                        result.#fident.push(<i64 as ::starlark::values::UnpackValue>::unpack_value(item)?
                             .ok_or_else(|| ::anyhow::anyhow!("expected int"))? as _);
                     }
                 }
@@ -600,12 +600,12 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 }
             } else if attrs.int32 || attrs.uint32 {
                 quote! {
-                    result.#fident = <i32 as ::starlark::values::UnpackValue>::unpack_value(value)?
+                    result.#fident = <i64 as ::starlark::values::UnpackValue>::unpack_value(value)?
                         .ok_or_else(|| ::anyhow::anyhow!("expected int"))? as _;
                 }
             } else if attrs.int64 || attrs.uint64 {
                 quote! {
-                    result.#fident = <i32 as ::starlark::values::UnpackValue>::unpack_value(value)?
+                    result.#fident = <i64 as ::starlark::values::UnpackValue>::unpack_value(value)?
                         .ok_or_else(|| ::anyhow::anyhow!("expected int"))? as _;
                 }
             } else if attrs.enumeration.is_some() {
