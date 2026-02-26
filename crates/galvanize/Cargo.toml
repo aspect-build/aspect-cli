@@ -10,7 +10,8 @@ readme.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-nix = { version = "0.30.1", features = ["fs"] }
+libc = "0.2"
+nix = { version = "0.30.1", features = ["fs", "poll"] }
 
 [target.'cfg(target_os="linux")'.dependencies]
 procfs = "0.18.0"
