@@ -6,6 +6,22 @@ via output groups.
 Based on https://github.com/bazelbuild/examples/blob/main/rules/implicit_output/hash.bzl
 """
 
+_COREUTILS_TOOLCHAIN = "@aspect_bazel_lib//lib:coreutils_toolchain_type"
+
+def _hash_action(ctx, coreutils, algorithm, src, out):
+    ctx.actions.run_shell(
+        outputs = [out],
+        inputs = [src],
+        tools = [coreutils.bin],
+        command = "{coreutils} hashsum --{algorithm} {src} > {out}".format(
+            coreutils = coreutils.bin.path,
+            algorithm = algorithm,
+            src = src.path,
+            out = out.path,
+        ),
+        toolchain = _COREUTILS_TOOLCHAIN,
+    )
+
 def _impl(ctx):
     # Create actions to generate the three output files.
     # Actions are run only when the corresponding file is requested.
@@ -13,32 +29,16 @@ def _impl(ctx):
     if ctx.file.src.is_directory:
         fail("src expected to be a file but got a directory")
 
+    coreutils = ctx.toolchains[_COREUTILS_TOOLCHAIN].coreutils_info
+
     md5out = ctx.actions.declare_file("{}.md5".format(ctx.file.src.basename))
-    ctx.actions.run_shell(
-        outputs = [md5out],
-        inputs = [ctx.file.src],
-        command = "ROOT=$PWD && cd {} && md5sum {} > $ROOT/{}".format(ctx.file.src.dirname, ctx.file.src.basename, md5out.path),
-    )
+    _hash_action(ctx, coreutils, "md5", ctx.file.src, md5out)
 
     sha1out = ctx.actions.declare_file("{}.sha1".format(ctx.file.src.basename))
-    ctx.actions.run_shell(
-        outputs = [sha1out],
-        inputs = [ctx.file.src],
-        command = "ROOT=$PWD && cd {} && sha1sum {} > $ROOT/{}".format(ctx.file.src.dirname, ctx.file.src.basename, sha1out.path),
-    )
+    _hash_action(ctx, coreutils, "sha1", ctx.file.src, sha1out)
 
     sha256out = ctx.actions.declare_file("{}.sha256".format(ctx.file.src.basename))
-    ctx.actions.run_shell(
-        outputs = [sha256out],
-        inputs = [ctx.file.src],
-        command = "ROOT=$PWD && cd {dirname} && $ROOT/{sha256sum} {basename} > $ROOT/{path}".format(
-            dirname = ctx.file.src.dirname,
-            sha256sum = ctx.executable._sha256sum.path,
-            basename = ctx.file.src.basename,
-            path = sha256out.path,
-        ),
-        tools = [ctx.executable._sha256sum],
-    )
+    _hash_action(ctx, coreutils, "sha256", ctx.file.src, sha256out)
 
     # By default (if you run `bazel build` on this target, or if you use it as a
     # source of another target), only the sha256 is computed.
@@ -60,12 +60,8 @@ _hashes = rule(
             allow_single_file = True,
             mandatory = True,
         ),
-        "_sha256sum": attr.label(
-            executable = True,
-            cfg = "exec",
-            default = "//bazel/release/sha256sum",
-        ),
     },
+    toolchains = [_COREUTILS_TOOLCHAIN],
 )
 
 def hashes(name, src, **kwargs):
