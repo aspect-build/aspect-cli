@@ -14,7 +14,8 @@ rust_library(
     name = "galvanize",
     srcs = glob(["src/**/*.rs"]),
     deps = [
-        "@crates//:nix"
+        "@crates//:nix",
+        "@crates//:libc"
     ] + select({
         ":macos": ["@crates//:proc_pidinfo"],
         ":linux": ["@crates//:procfs"],
