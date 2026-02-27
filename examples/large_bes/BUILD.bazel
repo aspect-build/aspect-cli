@@ -18,7 +18,7 @@ Actual: aspect hangs after "Build completed successfully" due to BEP pipe deadlo
         outs = ["out_{}.txt".format(i)],
         cmd = "echo 'Generated output {}' > $@".format(i),
     )
-    for i in range(1000)
+    for i in range(10000)
 ]
 
 # Create a target that depends on all generated targets
