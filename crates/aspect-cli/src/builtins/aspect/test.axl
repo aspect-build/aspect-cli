@@ -1,7 +1,7 @@
 """
 A default 'test' task that wraps a 'bazel test' command.
 """
-load("./fragments.axl", "BazelFragment")
+load("./fragments.axl", "BazelFragment", "HealthCheckFragment")
 
 def _collect_bes_from_args(ctx):
     """Collect BES sinks from CLI args (--bes_backend/--bes_header)."""
@@ -20,14 +20,16 @@ def _collect_bes_from_args(ctx):
     return sinks
 
 def _test_impl(ctx: TaskContext) -> int:
-    health = ctx.bazel.health_check()
+    hc_fragment = ctx.fragments[HealthCheckFragment]
     fragment = ctx.fragments[BazelFragment]
 
-    if fragment.post_health_check:
-        fragment.post_health_check(ctx, health)
+    for hook in hc_fragment.pre_health_check:
+        hook(ctx)
 
-    if health.outcome == "unhealthy":
-        fail("Bazel server is unhealthy: " + health.message)
+    for hook in hc_fragment.post_health_check:
+        result = hook(ctx)
+        if result != None:
+            fail(result)
 
     # Flags: accumulate data, then optionally transform
     flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
@@ -89,7 +91,8 @@ def _test_impl(ctx: TaskContext) -> int:
 test = task(
     implementation = _test_impl,
     fragments = [
-        BazelFragment
+        BazelFragment,
+        HealthCheckFragment,
     ],
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)

@@ -7,14 +7,14 @@ load("../lib/platform.axl",
     "DEFAULT_PLATFORM_DIR"
 )
 load("../lib/health_check.axl", "agent_health_check")
-load("../lib/environment.axl", "configure_workflows_env")
+load("../lib/environment.axl", "workflows_runner_env")
 load("../lib/build_metadata.axl", "get_build_metadata_flags")
-load("../fragments.axl", "BazelFragment")
+load("../fragments.axl", "BazelFragment", "HealthCheckFragment")
 load("./artifacts.axl", "configure_artifacts")
 
-def _post_health_check(ctx, health):
+def _post_health_check(ctx):
     print("--- :aspect: Agent Health Check")
-    agent_health_check(ctx, health)
+    return agent_health_check(ctx)
 
 def configure_builtins(ctx: ConfigContext):
     UNDER_WORKFLOWS = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION")
@@ -22,14 +22,15 @@ def configure_builtins(ctx: ConfigContext):
     if UNDER_WORKFLOWS:
         if is_buildkite:
             print("--- :aspect: Workflows Runner Environment")
-        configure_workflows_env(ctx.std.fs)
+        workflows_runner_env(ctx.std.fs)
     # Read platform config from disk
     platform_config = read_platform_config(ctx.std.fs)
     # Read host config from environment
     host_config = read_host_config(ctx.std.env, ctx.std.io)
 
-    # Configure BazelFragment globally
+    # Configure fragments globally
     bazel_fragment = ctx.fragments[BazelFragment]
+    hc_fragment = ctx.fragments[HealthCheckFragment]
 
     if UNDER_WORKFLOWS:
         # Generate bazelrc content
@@ -59,9 +60,9 @@ def configure_builtins(ctx: ConfigContext):
         bazel_fragment.build_start.append(lambda ctx, state: print("+++ :bazel: Building"))
         bazel_fragment.build_event_sinks.extend(bessie_sinks)
         if is_buildkite:
-            bazel_fragment.post_health_check = _post_health_check
+            hc_fragment.post_health_check.append(_post_health_check)
         else:
-            bazel_fragment.post_health_check = agent_health_check
+            hc_fragment.post_health_check.append(agent_health_check)
 
     # Wire artifact uploads last so it wraps existing hooks
     configure_artifacts(ctx)

@@ -7,10 +7,10 @@ to prevent re-delivery.
 Uses deliveryd (Unix socket HTTP server) for all delivery state operations.
 """
 
-load("../fragments.axl", "DeliveryFragment")
+load("./fragments.axl", "DeliveryFragment", "HealthCheckFragment")
 
 load(
-    "../lib/deliveryd.axl",
+    "./lib/deliveryd.axl",
     deliveryd_query = "query",
     deliveryd_deliver = "deliver",
     deliveryd_record = "record",
@@ -89,6 +89,16 @@ def _deliver_target(ctx, endpoint, ci_host, workspace, build_url, bazel_flags, l
     return ("success", "Delivered successfully")
 
 def _delivery_impl(ctx):
+    hc_fragment = ctx.fragments[HealthCheckFragment]
+
+    for hook in hc_fragment.pre_health_check:
+        hook(ctx)
+
+    for hook in hc_fragment.post_health_check:
+        result = hook(ctx)
+        if result != None:
+            fail(result)
+
     fragment = ctx.fragments[DeliveryFragment]
     fragment.delivery_start()
 
@@ -224,7 +234,7 @@ def _delivery_impl(ctx):
 delivery = task(
     name = "delivery",
     implementation = _delivery_impl,
-    fragments = [DeliveryFragment],
+    fragments = [DeliveryFragment, HealthCheckFragment],
     args = {
         "ci_host": args.string(default = "bk"),
         "commit_sha": args.string(),
