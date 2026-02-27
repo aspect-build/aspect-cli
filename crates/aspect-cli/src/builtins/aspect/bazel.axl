@@ -1,0 +1,41 @@
+"""
+Bazel exit code constants.
+
+These correspond to the exit codes defined in Bazel's ExitCode.java:
+https://github.com/bazelbuild/bazel/blob/master/src/main/java/com/google/devtools/build/lib/util/ExitCode.java
+"""
+
+exit_codes = struct(
+    SUCCESS = 0,
+    BUILD_FAILURE = 1,
+    PARSING_FAILURE = 1,
+    COMMAND_LINE_ERROR = 2,
+    TESTS_FAILED = 3,
+    PARTIAL_ANALYSIS_FAILURE = 3,
+    NO_TESTS_FOUND = 4,
+    RUN_FAILURE = 6,
+    ANALYSIS_FAILURE = 7,
+    INTERRUPTED = 8,
+    LOCK_HELD_NOBLOCK_FOR_LOCK = 9,
+    REMOTE_ENVIRONMENTAL_ERROR = 32,
+    OOM_ERROR = 33,
+    REMOTE_ERROR = 34,
+    LOCAL_ENVIRONMENTAL_ERROR = 36,
+    BLAZE_INTERNAL_ERROR = 37,
+    TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR = 38,
+    REMOTE_CACHE_EVICTED = 39,
+    PERSISTENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR = 45,
+    EXTERNAL_DEPS_ERROR = 48,
+)
+
+# https://bazel.build/run/scripts#exit-codes
+def default_retry(code: int) -> bool:
+    """Returns True if the given exit code is retryable.
+
+    Retryable codes are those indicating transient infrastructure failures
+    where re-running the command may succeed:
+      - BLAZE_INTERNAL_ERROR (37): Bazel server crash.
+      - LOCAL_ENVIRONMENTAL_ERROR (36): Local env failure, often caused by
+        a queued command failing because the server is crashing.
+    """
+    return code == exit_codes.BLAZE_INTERNAL_ERROR or code == exit_codes.LOCAL_ENVIRONMENTAL_ERROR

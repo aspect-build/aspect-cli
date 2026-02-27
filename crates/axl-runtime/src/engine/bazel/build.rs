@@ -30,7 +30,7 @@ use starlark::values::starlark_value;
 
 use crate::engine::r#async::rt::AsyncRuntime;
 
-use super::helpers::format_bazel_command;
+use super::execlog_sink::ExecLogSink;
 use super::iter::BuildEventIterator;
 use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
@@ -89,6 +89,9 @@ pub enum BuildEventSink {
         uri: String,
         metadata: HashMap<String, String>,
     },
+    File {
+        path: String,
+    },
 }
 
 starlark_simple_value!(BuildEventSink);
@@ -117,6 +120,9 @@ impl BuildEventSink {
                     uri.clone(),
                     metadata.clone(),
                 )
+            }
+            BuildEventSink::File { .. } => {
+                unreachable!("File sinks are handled as raw file paths, not subscriber threads")
             }
         }
     }
@@ -154,8 +160,11 @@ impl Build {
         if !c.status.success() {
             return Err(io::Error::other(anyhow!("failed to determine Bazel pid")));
         }
-        let bytes: [u8; 4] = c.stdout[0..4].try_into().unwrap();
-        Ok(u32::from_be_bytes(bytes))
+        let text = std::str::from_utf8(&c.stdout)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+            .trim();
+        text.parse::<u32>()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
     // TODO: this should return a thiserror::Error
@@ -163,7 +172,7 @@ impl Build {
         verb: &str,
         targets: impl IntoIterator<Item = String>,
         (build_events, sinks): (bool, Vec<BuildEventSink>),
-        execution_logs: bool,
+        (execution_logs, execlog_sinks): (bool, Vec<ExecLogSink>),
         workspace_events: bool,
         flags: Vec<String>,
         startup_flags: Vec<String>,
@@ -185,23 +194,29 @@ impl Build {
 
         let targets: Vec<String> = targets.into_iter().collect();
 
-        if debug_mode() {
-            eprintln!(
-                "running {}",
-                format_bazel_command(&startup_flags, verb, &flags, &targets)
-            );
-        }
-
         let mut cmd = Command::new("bazel");
         cmd.args(startup_flags);
         cmd.arg(verb);
+        cmd.args(flags);
 
         if let Some(current_dir) = current_dir {
             cmd.current_dir(current_dir);
         }
 
+        // Split BES sinks: File sinks accumulate raw pipe bytes in memory and
+        // are written after the FIFO closes; subscriber sinks (Grpc, etc.) get
+        // a real-time channel subscription.
+        let mut bes_file_paths: Vec<String> = vec![];
+        let mut bes_subscriber_sinks: Vec<BuildEventSink> = vec![];
+        for sink in sinks {
+            match &sink {
+                BuildEventSink::File { path } => bes_file_paths.push(path.clone()),
+                _ => bes_subscriber_sinks.push(sink),
+            }
+        }
+
         let build_event_stream = if build_events {
-            let (out, stream) = BuildEventStream::spawn_with_pipe(pid)?;
+            let (out, stream) = BuildEventStream::spawn_with_pipe(pid, bes_file_paths)?;
             cmd.arg("--build_event_publish_all_actions")
                 .arg("--build_event_binary_file_upload_mode=fully_async")
                 .arg("--build_event_binary_file")
@@ -219,8 +234,31 @@ impl Build {
             None
         };
 
+        // Split execlog sinks: compact paths go to the tee reader inside the stream thread;
+        // decoded File sinks are spawned separately against the decoded receiver.
+        let mut compact_paths: Vec<String> = vec![];
+        let mut decoded_sinks: Vec<ExecLogSink> = vec![];
+        for sink in execlog_sinks {
+            match &sink {
+                ExecLogSink::CompactFile { path } => compact_paths.push(path.clone()),
+                ExecLogSink::File { .. } => decoded_sinks.push(sink),
+            }
+        }
+
         let execlog_stream = if execution_logs {
-            let (out, stream) = ExecLogStream::spawn_with_pipe(pid)?;
+            // If there is a CompactFile sink, let Bazel write directly to its path
+            // so no separate temp file or tee step is needed for that copy.
+            let direct_path = if compact_paths.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(compact_paths.remove(0)))
+            };
+            let (out, stream) = ExecLogStream::spawn_with_file(
+                pid,
+                direct_path,
+                compact_paths,
+                !decoded_sinks.is_empty(),
+            )?;
             cmd.arg("--execution_log_compact_file").arg(&out);
             Some(stream)
         } else {
@@ -229,9 +267,19 @@ impl Build {
 
         // Build Event sinks for forwarding the build events
         let mut sink_handles: Vec<JoinHandle<()>> = vec![];
-        for sink in sinks {
+        for sink in bes_subscriber_sinks {
             let handle = sink.spawn(rt.clone(), build_event_stream.as_ref().unwrap());
             sink_handles.push(handle);
+        }
+
+        // Decoded ExecLog File sinks — spawned after the execlog stream so the
+        // receiver is valid. They disconnect naturally when execlog_stream is joined.
+        for sink in decoded_sinks {
+            if let ExecLogSink::File { path } = sink {
+                let handle =
+                    ExecLogSink::spawn_file(execlog_stream.as_ref().unwrap().receiver(), path);
+                sink_handles.push(handle);
+            }
         }
         if build_events {
             // Use subscribe_realtime() since this subscribes at stream creation
@@ -242,9 +290,12 @@ impl Build {
             ))
         }
 
-        cmd.args(flags);
         cmd.arg("--"); // separate flags from target patterns (not strictly necessary for build & test verbs but good form)
         cmd.args(targets);
+
+        if debug_mode() {
+            eprintln!("exec: {:?}", cmd.get_args());
+        }
 
         // TODO: if not inheriting, we should pipe and make the streams available to AXL
         cmd.stdout(if inherit_stdout {
@@ -307,7 +358,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let build = this.downcast_ref::<Build>().unwrap();
         let execlog_stream = build.execlog_stream.borrow();
         let execlog_stream = execlog_stream.as_ref().ok_or(anyhow::anyhow!(
-            "call `ctx.bazel.build` with `execution_logs = true` in order to receive execution log events."
+            "call `ctx.bazel.build` with `execution_log = true` in order to receive execution log events."
         ))?;
 
         Ok(ExecutionLogIterator::new(execlog_stream.receiver()))
@@ -337,8 +388,19 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         })
     }
 
+    /// Block until the Bazel invocation finishes and return a `BuildStatus`.
+    ///
+    /// After `wait()` returns, the execution log pipe has been closed and the
+    /// producer thread has exited. Calling `execution_logs()` after `wait()`
+    /// will fail — the stream is consumed as part of the wait. Iterate
+    /// `execution_logs()` **before** calling `wait()` if you need to process
+    /// entries.
+    ///
+    /// `build_events()` remains usable after `wait()` for replaying historical
+    /// events, because the build event stream retains its buffer.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
         let build = this.downcast_ref_err::<Build>()?;
+
         let result = build.child.borrow_mut().wait()?;
 
         // TODO: consider adding a wait_events() method for granular control.
@@ -349,7 +411,6 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         if let Some(ref mut event_stream) = *build.build_event_stream.borrow_mut() {
             match event_stream.join() {
                 Ok(_) => {}
-                // TODO: tell the user which one and why
                 Err(err) => anyhow::bail!("build event stream thread error: {}", err),
             }
         }
@@ -359,7 +420,6 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         if let Some(workspace_event_stream) = workspace_event_stream {
             match workspace_event_stream.join() {
                 Ok(_) => {}
-                // TODO: tell the user which one and why
                 Err(err) => anyhow::bail!("workspace event stream thread error: {}", err),
             }
         };
@@ -369,7 +429,6 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         if let Some(execlog_stream) = execlog_stream {
             match execlog_stream.join() {
                 Ok(_) => {}
-                // TODO: tell the user which one and why
                 Err(err) => anyhow::bail!("execlog stream thread error: {}", err),
             }
         };
@@ -378,14 +437,13 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         for handle in handles {
             match handle.join() {
                 Ok(_) => continue,
-                // TODO: tell the user which one and why
                 Err(err) => anyhow::bail!("one of the sinks failed: {:#?}", err),
             }
         }
-        // BES ends here
 
         let span = build.span.replace(tracing::trace_span!("build").entered());
         span.exit();
+
         Ok(BuildStatus {
             success: result.success(),
             code: result.code(),

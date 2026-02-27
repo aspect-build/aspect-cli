@@ -9,7 +9,7 @@ mod globals;
 mod http;
 mod std;
 mod template;
-mod types;
+pub mod types;
 mod wasm;
 
 pub mod r#async;
@@ -40,6 +40,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals::register_globals(globals);
     r#async::register_globals(globals);
     task::register_globals(globals);
+    types::fragment::register_globals(globals);
 
     globals.namespace("args", task_arg::register_globals);
     globals.namespace("bazel", bazel::register_globals);
