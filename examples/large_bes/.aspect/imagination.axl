@@ -1,9 +1,7 @@
 def _img_impl(ctx):
     ac = remote.execution.ActionCache(
-        uri = "grpcs://testing.buildbuddy.io",
-        headers = {
-            "x-buildbuddy-api-key": "2YOwUz70LEWxbJhh0h96"
-        },
+        uri = "",
+        headers = {},
         timeout = 10000,
     )
     ac.connect(ctx)
