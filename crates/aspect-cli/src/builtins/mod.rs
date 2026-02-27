@@ -16,6 +16,7 @@ const ASPECT: Builtin = Builtin {
         ("fragments.axl", include_str!("./aspect/fragments.axl")),
         ("test.axl", include_str!("./aspect/test.axl")),
         ("axl_add.axl", include_str!("./aspect/axl_add.axl")),
+        ("delivery.axl", include_str!("./aspect/delivery.axl")),
         ("MODULE.aspect", include_str!("./aspect/MODULE.aspect")),
         // config/
         (
@@ -29,11 +30,6 @@ const ASPECT: Builtin = Builtin {
         (
             "config/artifacts.axl",
             include_str!("./aspect/config/artifacts.axl"),
-        ),
-        // tasks/
-        (
-            "tasks/delivery.axl",
-            include_str!("./aspect/tasks/delivery.axl"),
         ),
         // lib/
         (

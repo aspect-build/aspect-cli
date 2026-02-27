@@ -1,6 +1,6 @@
 """Configures delivery task for Workflows"""
 
-load("../tasks/delivery.axl", "delivery")
+load("../delivery.axl", "delivery")
 load("../fragments.axl", "DeliveryFragment")
 load("../lib/deliveryd.axl", deliveryd_health = "health")
 

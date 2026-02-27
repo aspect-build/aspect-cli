@@ -14,11 +14,15 @@ BazelFragment = fragment(
     startup_flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
 
     # Lifecycle hooks — lists of callables, all receive (ctx, state, ...)
-    post_health_check = attr(typing.Callable | None, None),
     build_start = attr(list[typing.Callable[[TaskContext, dict], None]], []),
     build_event = attr(list[typing.Callable[[TaskContext, dict, dict], None]], []),
     build_retry = attr(typing.Callable[[int], bool], default_retry),
     build_end = attr(list[typing.Callable[[TaskContext, dict, int], None]], []),
+)
+
+HealthCheckFragment = fragment(
+    pre_health_check = attr(list[typing.Callable[[TaskContext], None]], []),
+    post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], []),
 )
 
 DeliveryFragment = fragment(

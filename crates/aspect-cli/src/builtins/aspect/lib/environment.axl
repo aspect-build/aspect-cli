@@ -89,7 +89,7 @@ def _print_gcp_info(meta):
     print("\tCLI: 'gcloud logging read --project " + meta["account_id"] + " \"resource.type=gce_instance resource.labels.instance_id=" + meta["instance_id"] + " log_name=projects/" + meta["account_id"] + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
 
 
-def configure_workflows_env(fs):
+def workflows_runner_env(fs):
     """
     Print debug/diagnostic information about the runner environment.
 

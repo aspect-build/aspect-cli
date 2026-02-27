@@ -157,20 +157,27 @@ def _display_runner_health(fs):
     print(data["output"])
 
 
-def agent_health_check(ctx, health):
+def agent_health_check(ctx):
     """
-    Post health check hook for BazelFragment.
+    Post health check hook for HealthCheckFragment.
 
     Runs the agent health check at the start of every job:
     1. Waits for warming to complete
     2. Displays the last runner health check
+    3. Runs the Bazel health check and displays the result
 
     Args:
         ctx: TaskContext
-        health: bazel.HealthCheckResult from the built-in health check
+
+    Returns:
+        None if healthy, or a str error message if the Bazel server is unhealthy.
     """
     fs = ctx.std.fs
     config = read_platform_config(fs)
     _wait_for_warming(fs, config)
     _display_runner_health(fs)
+    health = ctx.bazel.health_check()
     _display_bazel_health(health)
+    if health.outcome == "unhealthy":
+        return health.message or "Bazel server is unhealthy"
+    return None
