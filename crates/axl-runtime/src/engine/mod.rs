@@ -19,6 +19,7 @@ pub mod task;
 pub mod task_arg;
 pub mod task_args;
 pub mod task_context;
+pub mod task_info;
 
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
@@ -29,6 +30,7 @@ fn register_types(globals: &mut GlobalsBuilder) {
     const TaskArg: StarlarkValueAsType<task_arg::TaskArg> = StarlarkValueAsType::new();
     const TaskArgs: StarlarkValueAsType<task_args::TaskArgs> = StarlarkValueAsType::new();
     const TaskContext: StarlarkValueAsType<task_context::TaskContext> = StarlarkValueAsType::new();
+    const TaskInfo: StarlarkValueAsType<task_info::TaskInfo> = StarlarkValueAsType::new();
     const Template: StarlarkValueAsType<template::Template> = StarlarkValueAsType::new();
 }
 

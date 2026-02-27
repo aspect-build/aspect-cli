@@ -13,6 +13,7 @@ use crate::engine::store::AxlStore;
 use crate::engine::task::FrozenTask;
 use crate::engine::task_args::TaskArgs;
 use crate::engine::task_context::TaskContext;
+use crate::engine::task_info::TaskInfo;
 
 use super::error::EvalError;
 use super::load::{AxlLoader, ModuleScope};
@@ -89,7 +90,11 @@ pub fn execute_task(
     let ctx_module = Module::new();
     let heap = ctx_module.heap();
     let task_args = TaskArgs::from_map(args, heap);
-    let context = heap.alloc(TaskContext::new(task_args, config_value));
+    let task_info = TaskInfo {
+        name: task.get_name(),
+        group: task.get_group(),
+    };
+    let context = heap.alloc(TaskContext::new(task_args, config_value, task_info));
     ctx_module.set("__ctx__", context);
 
     let frozen_ctx_module = ctx_module
@@ -134,7 +139,11 @@ pub fn execute_task_with_args(
     let ctx_module = Module::new();
     let heap = ctx_module.heap();
     let task_args = args_builder(heap);
-    let context = heap.alloc(TaskContext::new(task_args, config_value));
+    let task_info = TaskInfo {
+        name: task.get_name(),
+        group: task.get_group(),
+    };
+    let context = heap.alloc(TaskContext::new(task_args, config_value, task_info));
     ctx_module.set("__ctx__", context);
 
     let frozen_ctx_module = ctx_module
