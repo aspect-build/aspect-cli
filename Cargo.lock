@@ -301,7 +301,6 @@ version = "0.0.0-dev"
 dependencies = [
  "allocative",
  "anyhow",
- "derive_more 2.0.1",
  "display_container",
  "prost",
  "prost-build",
@@ -310,6 +309,7 @@ dependencies = [
  "starbuf-types",
  "starlark",
  "starlark_derive",
+ "tokio",
  "tonic",
  "tonic-build",
  "tonic-prost",
