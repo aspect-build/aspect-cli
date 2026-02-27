@@ -207,7 +207,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let client = HyperClient::unix();
                     let parsed = url::Url::parse(&url_str)
                         .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
-                    let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
+                    let path_and_query = match parsed.query() {
+                        Some(q) => format!("{}?{}", parsed.path(), q),
+                        None => parsed.path().to_owned(),
+                    };
+                    let uri: hyper::Uri = UnixUri::new(&socket, &path_and_query).into();
 
                     let mut req = hyper::Request::builder().method("GET").uri(uri);
                     for (key, value) in &headers_vec {
@@ -280,7 +284,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let client = HyperClient::unix();
                     let parsed = url::Url::parse(&url_str)
                         .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
-                    let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
+                    let path_and_query = match parsed.query() {
+                        Some(q) => format!("{}?{}", parsed.path(), q),
+                        None => parsed.path().to_owned(),
+                    };
+                    let uri: hyper::Uri = UnixUri::new(&socket, &path_and_query).into();
 
                     let mut req = hyper::Request::builder().method("DELETE").uri(uri);
                     for (key, value) in &headers_vec {
@@ -356,7 +364,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let client = HyperClient::unix();
                     let parsed = url::Url::parse(&url_str)
                         .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
-                    let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
+                    let path_and_query = match parsed.query() {
+                        Some(q) => format!("{}?{}", parsed.path(), q),
+                        None => parsed.path().to_owned(),
+                    };
+                    let uri: hyper::Uri = UnixUri::new(&socket, &path_and_query).into();
 
                     let body_bytes = body_kind_to_bytes(body_kind).await?;
 
@@ -435,7 +447,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let client = HyperClient::unix();
                     let parsed = url::Url::parse(&url_str)
                         .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
-                    let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
+                    let path_and_query = match parsed.query() {
+                        Some(q) => format!("{}?{}", parsed.path(), q),
+                        None => parsed.path().to_owned(),
+                    };
+                    let uri: hyper::Uri = UnixUri::new(&socket, &path_and_query).into();
 
                     let body_bytes = body_kind_to_bytes(body_kind).await?;
 
@@ -514,7 +530,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                     let client = HyperClient::unix();
                     let parsed = url::Url::parse(&url_str)
                         .map_err(|e| anyhow::anyhow!("invalid url: {}", e))?;
-                    let uri: hyper::Uri = UnixUri::new(&socket, parsed.path()).into();
+                    let path_and_query = match parsed.query() {
+                        Some(q) => format!("{}?{}", parsed.path(), q),
+                        None => parsed.path().to_owned(),
+                    };
+                    let uri: hyper::Uri = UnixUri::new(&socket, &path_and_query).into();
 
                     let body_bytes = body_kind_to_bytes(body_kind).await?;
 
