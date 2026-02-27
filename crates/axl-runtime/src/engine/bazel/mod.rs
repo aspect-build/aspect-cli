@@ -25,7 +25,8 @@ use crate::engine::store::AxlStore;
 use axl_proto;
 
 mod build;
-mod helpers;
+mod execlog_sink;
+mod health_check;
 mod iter;
 mod query;
 mod stream;
@@ -58,6 +59,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// You can pass in a single target or target pattern to build.
     ///
+    /// # Arguments
+    /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
+    ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
+    ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
+    ///   to write the log to one or more files. Sinks and the iterator can be combined:
+    ///   passing a list of sinks still allows calling `build.execution_logs()` to iterate
+    ///   entries in-process.
+    ///
     /// **Examples**
     ///
     /// ```python
@@ -80,7 +89,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             UnpackList<build::BuildEventSink>,
         >,
         #[starlark(require = named, default = false)] workspace_events: bool,
-        #[starlark(require = named, default = false)] execution_logs: bool,
+        #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
+            bool,
+            UnpackList<execlog_sink::ExecLogSink>,
+        >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             values::StringValue,
         >,
@@ -96,12 +108,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(events) => (events, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
+        let execution_log = match execution_log {
+            Either::Left(b) => (b, vec![]),
+            Either::Right(sinks) => (true, sinks.items),
+        };
         let store = AxlStore::from_eval(eval)?;
         let build = build::Build::spawn(
             "build",
             targets.items.iter().map(|f| f.as_str().to_string()),
             build_events,
-            execution_logs,
+            execution_log,
             workspace_events,
             flags.items.iter().map(|f| f.as_str().to_string()).collect(),
             startup_flags
@@ -127,6 +143,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///
     /// You can pass in a single target or target pattern to test.
     ///
+    /// # Arguments
+    /// * `execution_log`: Enable Bazel execution log collection. Pass `True` to
+    ///   enable the in-memory decoded iterator (accessible via `build.execution_logs()`),
+    ///   or pass a list of sinks such as `[execution_log.compact_file(path = "out.binpb.zst")]`
+    ///   to write the log to one or more files. Sinks and the iterator can be combined:
+    ///   passing a list of sinks still allows calling `build.execution_logs()` to iterate
+    ///   entries in-process.
+    ///
     /// **Examples**
     ///
     /// ```python
@@ -149,7 +173,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             UnpackList<build::BuildEventSink>,
         >,
         #[starlark(require = named, default = false)] workspace_events: bool,
-        #[starlark(require = named, default = false)] execution_logs: bool,
+        #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
+            bool,
+            UnpackList<execlog_sink::ExecLogSink>,
+        >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             values::StringValue,
         >,
@@ -165,12 +192,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(events) => (events, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
+        let execution_log = match execution_log {
+            Either::Left(b) => (b, vec![]),
+            Either::Right(sinks) => (true, sinks.items),
+        };
         let store = AxlStore::from_eval(eval)?;
         let test = build::Build::spawn(
             "test",
             targets.items.iter().map(|f| f.as_str().to_string()),
             build_events,
-            execution_logs,
+            execution_log,
             workspace_events,
             flags.items.iter().map(|f| f.as_str().to_string()).collect(),
             startup_flags
@@ -210,6 +241,30 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn query<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<query::Query> {
         Ok(query::Query::new())
     }
+
+    /// Probe the Bazel server to determine whether it is responsive.
+    ///
+    /// Runs `bazel --noblock_for_lock info server_pid`. If the server is
+    /// unresponsive, attempts recovery by killing the server process and
+    /// re-checking.
+    ///
+    /// Returns a `HealthCheckResult` with `.success`, `.healthy`, `.message`,
+    /// and `.exit_code` attributes.
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// def _health_probe_impl(ctx):
+    ///     result = ctx.bazel.health_check()
+    ///     if not result.healthy:
+    ///         fail("Bazel server is unhealthy")
+    /// ```
+    fn health_check<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] output_base: NoneOr<String>,
+    ) -> anyhow::Result<health_check::HealthCheckResult> {
+        Ok(health_check::run(output_base.into_option().as_deref()))
+    }
 }
 
 #[starlark_module]
@@ -225,6 +280,26 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
             uri: uri.replace("grpcs://", "https://"),
             metadata: HashMap::from_iter(metadata.entries),
         })
+    }
+
+    fn file(#[starlark(require = named)] path: String) -> starlark::Result<build::BuildEventSink> {
+        Ok(build::BuildEventSink::File { path })
+    }
+}
+
+#[starlark_module]
+fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
+    #[starlark(as_type = execlog_sink::ExecLogSink)]
+    fn file(
+        #[starlark(require = named)] path: String,
+    ) -> starlark::Result<execlog_sink::ExecLogSink> {
+        Ok(execlog_sink::ExecLogSink::File { path })
+    }
+
+    fn compact_file(
+        #[starlark(require = named)] path: String,
+    ) -> starlark::Result<execlog_sink::ExecLogSink> {
+        Ok(execlog_sink::ExecLogSink::CompactFile { path })
     }
 }
 
@@ -242,6 +317,11 @@ fn register_build_types(globals: &mut GlobalsBuilder) {
 }
 
 #[starlark_module]
+fn register_execlog_types(globals: &mut GlobalsBuilder) {
+    const ExecLogSink: StarlarkValueAsType<execlog_sink::ExecLogSink> = StarlarkValueAsType::new();
+}
+
+#[starlark_module]
 fn register_query_types(globals: &mut GlobalsBuilder) {
     const Query: StarlarkValueAsType<query::Query> = StarlarkValueAsType::new();
     const TargetSet: StarlarkValueAsType<query::TargetSet> = StarlarkValueAsType::new();
@@ -250,6 +330,8 @@ fn register_query_types(globals: &mut GlobalsBuilder) {
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
     const Bazel: StarlarkValueAsType<Bazel> = StarlarkValueAsType::new();
+    const HealthCheckResult: StarlarkValueAsType<health_check::HealthCheckResult> =
+        StarlarkValueAsType::new();
 }
 
 pub fn register_globals(globals: &mut GlobalsBuilder) {
@@ -269,5 +351,10 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
     globals.namespace("build_events", |globals| {
         register_build_events(globals);
+    });
+
+    globals.namespace("execution_log", |globals| {
+        register_execlog_types(globals);
+        register_execlog_sinks(globals);
     });
 }

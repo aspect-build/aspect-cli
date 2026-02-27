@@ -1,0 +1,271 @@
+"""
+Build Metadata Flag Generation
+
+Generates --build_metadata=KEY=VALUE flags for Bazel invocations.
+These feed the Build Event Stream (BES) and are queryable in Bessie.
+"""
+
+
+def _git_show(process):
+    """Run git show HEAD and return a dict of commit fields."""
+    out = process.command("git").arg("show").arg("HEAD") \
+        .arg("--format=%H\n%aN\n%aE\n%s\n%aI\n%D").arg("--no-patch") \
+        .stdout("piped").stderr("piped").spawn().wait_with_output()
+
+    if not out.stdout:
+        return {}
+
+    lines = out.stdout.strip().split("\n")
+    result = {}
+
+    if len(lines) >= 1 and lines[0].strip():
+        result["COMMIT_SHA"] = lines[0].strip()
+    if len(lines) >= 2 and lines[1].strip():
+        result["COMMIT_AUTHOR"] = lines[1].strip()
+    if len(lines) >= 3 and lines[2].strip():
+        result["COMMIT_AUTHOR_EMAIL"] = lines[2].strip()
+    if len(lines) >= 4 and lines[3].strip():
+        msg = lines[3].strip()
+        if len(msg) > 80:
+            msg = msg[:80]
+        result["COMMIT_MESSAGE"] = msg
+    if len(lines) >= 5 and lines[4].strip():
+        result["COMMIT_TIMESTAMP"] = lines[4].strip()
+    if len(lines) >= 6 and lines[5].strip():
+        # Parse refs for tag: <name>
+        for ref in lines[5].split(","):
+            ref = ref.strip()
+            if ref.startswith("tag: "):
+                result["TAG"] = ref[5:]
+                break
+
+    return result
+
+
+def _parse_git_remote_url(url):
+    """Parse git remote URL to extract REPO_OWNER, REPO, and VCS keys."""
+    if not url:
+        return {}
+
+    result = {}
+
+    # Detect VCS host
+    if "github.com" in url:
+        result["VCS"] = "github"
+    elif "gitlab.com" in url:
+        result["VCS"] = "gitlab"
+    elif "bitbucket.org" in url:
+        result["VCS"] = "bitbucket"
+
+    # Parse owner/repo from URL
+    path = None
+    if url.startswith("git@"):
+        # SSH: git@github.com:owner/repo.git
+        colon_idx = url.find(":")
+        if colon_idx >= 0:
+            path = url[colon_idx + 1:]
+    else:
+        scheme_end = url.find("://")
+        if scheme_end >= 0:
+            # HTTPS (possibly with credentials): https://[token@]host/owner/repo.git
+            rest = url[scheme_end + 3:]
+            slash_idx = rest.find("/")
+            if slash_idx >= 0:
+                path = rest[slash_idx + 1:]
+
+    if path:
+        if path.endswith(".git"):
+            path = path[:-4]
+        parts = path.split("/")
+        if len(parts) >= 2:
+            result["REPO_OWNER"] = parts[0]
+            result["REPO"] = parts[1]
+        elif len(parts) == 1 and parts[0]:
+            result["REPO"] = parts[0]
+
+    return result
+
+
+def _collect_github(env, meta):
+    """Fill meta dict from GitHub Actions environment variables."""
+    meta["CI"] = "github"
+    meta["VCS"] = "github"
+
+    sha = env.var("GITHUB_SHA")
+    if sha:
+        meta["COMMIT_SHA"] = sha
+
+    actor = env.var("GITHUB_ACTOR")
+    if actor:
+        meta["USER"] = actor
+
+    # Branch detection: GITHUB_HEAD_REF is set on PR events, otherwise parse GITHUB_REF
+    head_ref = env.var("GITHUB_HEAD_REF")
+    if head_ref:
+        meta["BRANCH"] = head_ref
+    else:
+        ref = env.var("GITHUB_REF")
+        if ref and ref.startswith("refs/heads/"):
+            meta["BRANCH"] = ref[11:]
+        elif ref and ref.startswith("refs/tags/"):
+            meta["TAG"] = ref[10:]
+
+    repo = env.var("GITHUB_REPOSITORY")
+    if repo:
+        if "/" in repo:
+            parts = repo.split("/")
+            meta["REPO_OWNER"] = parts[0]
+            meta["REPO"] = parts[-1]
+        else:
+            meta["REPO"] = repo
+
+
+def _collect_buildkite(env, meta):
+    """Fill meta dict from Buildkite environment variables."""
+    meta["CI"] = "buildkite"
+
+    commit = env.var("BUILDKITE_COMMIT")
+    if commit:
+        meta["COMMIT_SHA"] = commit
+
+    creator = env.var("BUILDKITE_BUILD_CREATOR")
+    if creator:
+        meta["USER"] = creator
+
+    branch = env.var("BUILDKITE_BRANCH")
+    if branch:
+        meta["BRANCH"] = branch
+
+    tag = env.var("BUILDKITE_TAG")
+    if tag:
+        meta["TAG"] = tag
+
+    repo_url = env.var("BUILDKITE_REPO")
+    if repo_url:
+        parsed = _parse_git_remote_url(repo_url)
+        for k, v in parsed.items():
+            meta[k] = v
+
+
+def _collect_circleci(env, meta):
+    """Fill meta dict from CircleCI environment variables."""
+    meta["CI"] = "circleci"
+
+    sha = env.var("CIRCLE_SHA1")
+    if sha:
+        meta["COMMIT_SHA"] = sha
+
+    username = env.var("CIRCLE_USERNAME")
+    if username:
+        meta["USER"] = username
+
+    branch = env.var("CIRCLE_BRANCH")
+    if branch:
+        meta["BRANCH"] = branch
+
+    tag = env.var("CIRCLE_TAG")
+    if tag:
+        meta["TAG"] = tag
+
+    owner = env.var("CIRCLE_PROJECT_USERNAME")
+    if owner:
+        meta["REPO_OWNER"] = owner
+
+    repo = env.var("CIRCLE_PROJECT_REPONAME")
+    if repo:
+        meta["REPO"] = repo
+
+    repo_url = env.var("CIRCLE_REPOSITORY_URL")
+    if repo_url:
+        parsed = _parse_git_remote_url(repo_url)
+        for k, v in parsed.items():
+            if k not in meta:
+                meta[k] = v
+
+
+def _collect_gitlab(env, meta):
+    """Fill meta dict from GitLab CI environment variables."""
+    meta["CI"] = "gitlab"
+
+    sha = env.var("CI_COMMIT_SHA")
+    if sha:
+        meta["COMMIT_SHA"] = sha
+
+    user = env.var("GITLAB_USER_NAME")
+    if user:
+        meta["USER"] = user
+
+    branch = env.var("CI_COMMIT_BRANCH")
+    if branch:
+        meta["BRANCH"] = branch
+
+    tag = env.var("CI_COMMIT_TAG")
+    if tag:
+        meta["TAG"] = tag
+
+    namespace = env.var("CI_PROJECT_NAMESPACE")
+    if namespace:
+        meta["REPO_OWNER"] = namespace
+
+    project = env.var("CI_PROJECT_NAME")
+    if project:
+        meta["REPO"] = project
+
+    repo_url = env.var("CI_REPOSITORY_URL")
+    if repo_url:
+        parsed = _parse_git_remote_url(repo_url)
+        for k, v in parsed.items():
+            if k not in meta:
+                meta[k] = v
+
+
+def get_build_metadata_flags(env, process, workspace, task_id = None, task_name = None):
+    """
+    Generate --build_metadata=KEY=VALUE flags for Bazel invocations.
+
+    Args:
+        env: Environment interface (ctx.std.env)
+        process: Process interface (ctx.std.process)
+        workspace: Workspace name (e.g. ".")
+        task_id: Optional task ID string
+        task_name: Optional task name string
+
+    Returns:
+        list of --build_metadata=KEY=VALUE strings (empty values are skipped)
+    """
+    meta = {}
+
+    # Step 1: Collect CI host metadata (provides CI-specific fields as fallback)
+    if env.var("GITHUB_ACTIONS"):
+        _collect_github(env, meta)
+    elif env.var("BUILDKITE"):
+        _collect_buildkite(env, meta)
+    elif env.var("CIRCLECI"):
+        _collect_circleci(env, meta)
+    elif env.var("GITLAB_CI"):
+        _collect_gitlab(env, meta)
+
+    # Step 2: Run git show and overwrite commit fields (git is the primary source)
+    git_data = _git_show(process)
+    for k, v in git_data.items():
+        meta[k] = v
+
+    # Step 3: If no USER was set by CI, fall back to git author name
+    if not meta.get("USER") and meta.get("COMMIT_AUTHOR"):
+        meta["USER"] = meta["COMMIT_AUTHOR"]
+
+    # Step 4: Set workspace and task context if provided
+    if workspace:
+        meta["WORKSPACE"] = workspace
+    if task_id:
+        meta["ASPECT_TASK_ID"] = task_id
+    if task_name:
+        meta["ASPECT_TASK_NAME"] = task_name
+
+    # Step 5: Build --build_metadata=KEY=VALUE strings, skipping empty values
+    flags = []
+    for key, value in meta.items():
+        if value:
+            flags.append("--build_metadata=" + key + "=" + value)
+
+    return flags

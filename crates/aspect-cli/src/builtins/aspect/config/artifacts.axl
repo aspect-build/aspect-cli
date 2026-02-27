@@ -1,0 +1,299 @@
+"""Configures mid-job artifact uploads for CI environments.
+
+Uploads artifacts on an interval (every BATCH_SIZE new files) during the build
+via the build_event handler. Each upload is a tar.gz archive, and the previous
+version is deleted after a successful upload (rolling replacement).
+
+Also configures Bazel profiling flags and uploads the profile at build_end.
+
+CircleCI is excluded — artifacts are staged at /workflows/testlogs for
+CircleCI's native store_artifacts / store_test_results steps.
+"""
+
+load("../lib/artifacts.axl", "detect_ci", "upload_file", "delete_artifact")
+load("../lib/tar.axl", "tar_create")
+load("../fragments.axl", "BazelFragment")
+
+
+# Upload every N new files per group
+_BATCH_SIZE = 5
+
+# bb_clientd FUSE mount root for resolving bytestream:// URIs
+_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
+
+# Artifact staging root, matching Rosetta conventions
+_ARTIFACTS_ROOT = "/workflows"
+
+
+def _artifact_name_prefix(env):
+    """Derive artifact name prefix from CI environment."""
+    return env.var("GITHUB_JOB") or env.var("CI_JOB_NAME") or "aspect"
+
+
+def _file_uri_to_path(uri):
+    """Convert a file:// or bytestream:// URI to a local filesystem path.
+
+    bytestream:// URIs are resolved via the bb_clientd FUSE mount:
+      bytestream://host:port/blobs/<hash>/<size>
+      -> {_BB_CLIENTD_ROOT}/cas/{host}/blobs/sha256/file/{hash}-{size}
+    """
+    if not uri:
+        return uri
+    if uri.startswith("file://"):
+        return uri[len("file://"):]
+    if uri.startswith("bytestream://"):
+        rest = uri[len("bytestream://"):]
+        parts = rest.split("/")
+        host_port = parts[0]
+        host = host_port.split(":")[0]
+        blob_hash = parts[2]
+        blob_size = parts[3]
+        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
+    return uri
+
+
+def _collect_test_files(ctx, state, event):
+    """Collect test output file paths from a test_result event.
+
+    Records source paths and desired archive paths in state without copying.
+    The archive is built later via mtree + bsdtar.
+    """
+    if event.kind != "test_result":
+        return
+
+    label = event.id.label
+    label_path = label.lstrip("/").replace(":", "/")
+
+    if "_test_entries" not in state:
+        state["_test_entries"] = []
+    if "_skipped_files" not in state:
+        state["_skipped_files"] = []
+
+    for file in event.payload.test_action_output:
+        raw_uri = file.file
+        src = _file_uri_to_path(raw_uri)
+        if not src:
+            src = "/".join(file.path_prefix) + "/" + file.name
+        if not src:
+            state["_skipped_files"].append({"label": label, "name": file.name, "reason": "no path", "raw": repr(raw_uri)})
+            continue
+        if not ctx.std.fs.exists(src):
+            state["_skipped_files"].append({"label": label, "name": file.name, "reason": "not found", "raw": src})
+            continue
+
+        dest = label_path + "/" + file.name
+        state["_test_entries"].append({"src": src, "dest": dest, "label": label})
+
+
+def _build_mtree(entries):
+    """Build an mtree spec string mapping source files to archive paths."""
+    lines = ["#mtree"]
+    for entry in entries:
+        lines.append("./" + entry["dest"] + " type=file contents=" + entry["src"])
+    return "\n".join(lines) + "\n"
+
+
+def _upload_testlogs(ctx, group, entries, name):
+    """Build and upload testlogs archive directly from source files via mtree."""
+    count = len(entries)
+    if count == 0 or count == group["last_count"]:
+        return False
+
+    archive_path = _ARTIFACTS_ROOT + "/" + name + ".tar.gz"
+
+    ctx.std.fs.create_dir_all(_ARTIFACTS_ROOT)
+    if not tar_create(ctx, archive_path, _build_mtree(entries)):
+        print("artifact upload: failed to create archive for " + name)
+        return False
+
+    group["version"] += 1
+    artifact_name = name + "-v" + str(group["version"])
+    result = upload_file(ctx, archive_path, name = artifact_name)
+
+    if ctx.std.fs.exists(archive_path):
+        ctx.std.fs.remove_file(archive_path)
+
+    if result["success"]:
+        if group["prev_ref"]:
+            delete_artifact(ctx, group["prev_ref"])
+        group["prev_ref"] = result["artifact_ref"]
+        group["last_count"] = count
+        return True
+    else:
+        group["version"] -= 1
+        for err in result["errors"]:
+            print("artifact upload error: " + err)
+        return False
+
+
+def _maybe_upload_testlogs(ctx, group, entries, name):
+    """Upload testlogs only when enough new entries have accumulated."""
+    if len(entries) < group["last_count"] + _BATCH_SIZE:
+        return
+    _upload_testlogs(ctx, group, entries, name)
+
+
+def _upload_testlogs_buildkite(ctx, group, entries):
+    """Upload test files individually to Buildkite via a symlink tree.
+
+    Creates a temp directory with symlinks matching the desired archive paths,
+    then uploads everything with buildkite-agent. Only uploads entries added
+    since the last successful upload.
+    """
+    count = len(entries)
+    if count == 0 or count == group["last_count"]:
+        return False
+
+    new_entries = entries[group["last_count"]:]
+
+    child = ctx.std.process.command("mktemp").args(["-d"]).stdout("piped").stderr("piped").spawn()
+    tmp_dir = child.stdout().read_to_string().strip()
+    child.wait()
+
+    for entry in new_entries:
+        dest_path = tmp_dir + "/" + entry["dest"]
+        dest_dir = dest_path.rsplit("/", 1)[0]
+        ctx.std.fs.create_dir_all(dest_dir)
+        ctx.std.process.command("ln").args(["-s", entry["src"], dest_path]).spawn().wait()
+
+    child = ctx.std.process.command("buildkite-agent") \
+        .args(["artifact", "upload", "**/*"]) \
+        .current_dir(tmp_dir) \
+        .stdout("inherit") \
+        .stderr("inherit") \
+        .spawn()
+
+    status = child.wait()
+    ctx.std.process.command("rm").args(["-rf", tmp_dir]).spawn().wait()
+
+    if status.code == 0:
+        group["last_count"] = count
+        return True
+
+    print("artifact upload: buildkite-agent exit " + str(status.code))
+    return False
+
+
+def _maybe_upload_testlogs_buildkite(ctx, group, entries):
+    """Upload testlogs to Buildkite only when enough new entries have accumulated."""
+    if len(entries) < group["last_count"] + _BATCH_SIZE:
+        return
+    _upload_testlogs_buildkite(ctx, group, entries)
+
+
+def _init_upload_state(state):
+    """Ensure the upload state is initialized in the shared state dict."""
+    if "_artifact_upload" not in state:
+        state["_artifact_upload"] = {
+            "testlogs": {"last_count": 0, "version": 0, "prev_ref": None},
+        }
+
+
+def _artifact_prefix(ci, env, task_name):
+    """Derive artifact name prefix from CI and task context.
+
+    Buildkite groups artifacts by job, so the task name is sufficient.
+    Other CIs need a CI job prefix to disambiguate across jobs.
+    """
+    if ci == "buildkite":
+        return task_name
+    return _artifact_name_prefix(env) + "-" + task_name
+
+
+def configure_artifacts(ctx):
+    """Wire interval-based artifact upload into BazelFragment lifecycle hooks.
+
+    - build_event: collect testlog entries + upload every BATCH_SIZE new files
+    - build_end: final flush of any remaining files + upload profile
+
+    Expects state["_task_name"] to be set by the task implementation (e.g. "build", "test").
+    """
+    ci = detect_ci(ctx.std.env)
+    is_local = not ci
+    if is_local:
+        ci = "local"
+
+    fragment = ctx.fragments[BazelFragment]
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+
+    # Generate unique profile path in /tmp
+    child = ctx.std.process.command("uuidgen").stdout("piped").stderr("piped").spawn()
+    uuid = child.stdout().read_to_string().strip()
+    child.wait()
+
+    profile_path = "/tmp/" + uuid + ".profile.gz"
+    execlog_path = "/tmp/" + uuid + ".execlog.zstd"
+    bep_path = "/tmp/" + uuid + ".bep.bin"
+
+    # Add profiling and heap dump flags
+    fragment.extra_flags.extend([
+        "--generate_json_trace_profile",
+        "--experimental_profile_include_target_label",
+        "--profile=" + profile_path,
+        "--heap_dump_on_oom",
+    ])
+
+    # Add execution log and build event file sinks
+    fragment.execution_log_sinks.append(
+        bazel.execution_log.compact_file(path = execlog_path),
+    )
+    fragment.build_event_sinks.append(
+        bazel.build_events.file(path = bep_path),
+    )
+
+    def _on_build_event(ctx, state, event):
+        _collect_test_files(ctx, state, event)
+        if not is_local:
+            _init_upload_state(state)
+            upload_state = state["_artifact_upload"]
+            entries = state.get("_test_entries", [])
+            if ci == "buildkite":
+                _maybe_upload_testlogs_buildkite(ctx, upload_state["testlogs"], entries)
+            else:
+                prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
+                _maybe_upload_testlogs(ctx, upload_state["testlogs"], entries, prefix + "-testlogs")
+
+    def _on_build_end(ctx, state, exit_code):
+        if debug:
+            entries = state.get("_test_entries", [])
+            skipped = state.get("_skipped_files", [])
+            print("")
+            print("--- artifact upload debug summary ---")
+            print("ci: " + ci)
+            print("profile: " + profile_path)
+            print("execlog: " + execlog_path)
+            print("bes/bep: " + bep_path)
+            print("testlog entries: " + str(len(entries)))
+            for f in entries:
+                print("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
+            if skipped:
+                print("skipped files: " + str(len(skipped)))
+                for f in skipped:
+                    print("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
+            if is_local:
+                print("no CI detected, uploads skipped (dry run)")
+            print("------------------------------------")
+
+        if not is_local:
+            _init_upload_state(state)
+            upload_state = state["_artifact_upload"]
+            entries = state.get("_test_entries", [])
+            if ci == "buildkite":
+                _upload_testlogs_buildkite(ctx, upload_state["testlogs"], entries)
+            else:
+                prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
+                _upload_testlogs(ctx, upload_state["testlogs"], entries, prefix + "-testlogs")
+
+            # Upload diagnostic artifacts
+            task_name = state.get("_task_name", "unknown")
+            for src, artifact_name in [
+                (profile_path, task_name + ".profile.gz"),
+                (execlog_path, task_name + ".execlog.zstd"),
+                (bep_path, task_name + ".bep.bin"),
+            ]:
+                if ctx.std.fs.exists(src):
+                    upload_file(ctx, src, name = artifact_name)
+                    ctx.std.fs.remove_file(src)
+
+    fragment.build_event.append(_on_build_event)
+    fragment.build_end.append(_on_build_end)

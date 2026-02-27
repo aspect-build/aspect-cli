@@ -24,6 +24,7 @@ rust_library(
         "@crates//:liquid-core",
         "@crates//:liquid",
         "@crates//:minijinja",
+        "@crates//:nix",
         "@crates//:prost",
         "@crates//:rand",
         "@crates//:reqwest",
@@ -56,8 +57,4 @@ rust_library(
         "//crates/aspect-cli:__pkg__",
         "//crates/axl-lsp:__pkg__",
     ],
-    compile_data = glob([
-        "src/builtins/**/*.axl",
-        "src/builtins/**/*.aspect",
-    ]),
 )

@@ -1,9 +1,9 @@
 load("./lambda.axl", "lambda_with_global_bind")
 
-UserTaskConfig = record(
-    message=field(str, "hello world"),
-    count=field(int, 1),
-    customize_message = field(typing.Callable[[str], str], default = lambda s: s),
+UserTaskConfig = fragment(
+    message=attr(str, "hello world"),
+    count=attr(int, 1),
+    customize_message = attr(typing.Callable[[str], str], lambda s: s),
 )
 
 def _impl(ctx: TaskContext) -> int:
@@ -13,18 +13,19 @@ def _impl(ctx: TaskContext) -> int:
     lambda_with_global_bind()("assert")
 
     # do something that makes uses the task config
+    config = ctx.fragments[UserTaskConfig]
     print(ctx)
-    print(ctx.config)
-    print(ctx.config.count)
-    print(ctx.config.message)
-    print(ctx.config.customize_message)
-    for i in range(ctx.config.count):
-        print(ctx.config.customize_message(ctx.config.message))
+    print(config)
+    print(config.count)
+    print(config.message)
+    print(config.customize_message)
+    for i in range(config.count):
+        print(config.customize_message(config.message))
     return 0
 
 user_task = task(
     group = ["user"],
     implementation = _impl,
     args = {},
-    config = UserTaskConfig(),
+    fragments = [UserTaskConfig],
 )

@@ -33,28 +33,36 @@ use super::tasks::value::TaskList;
 
 /// Config context for evaluating config.axl files.
 ///
-/// This context holds the list of tasks that config functions can modify.
-/// Tasks are stored as `ConfiguredTask` which use `OwnedFrozenValue` internally,
-/// so no lifetime parameter is needed on this type.
+/// This context holds the list of tasks and the fragment map that config functions can modify.
 #[derive(Debug, Clone, ProvidesStaticType, Trace, Display, NoSerialize, Allocative)]
 #[display("<ConfigContext>")]
 pub struct ConfigContext<'v> {
     #[allocative(skip)]
     tasks: values::Value<'v>,
     #[allocative(skip)]
+    fragment_map: values::Value<'v>,
+    #[allocative(skip)]
     config_modules: RefCell<Vec<FrozenModule>>,
 }
 
 impl<'v> ConfigContext<'v> {
-    /// Create a new ConfigContext with the given tasks.
-    pub fn new(tasks: Vec<ConfiguredTask>, heap: &'v Heap) -> Self {
+    /// Create a new ConfigContext with the given tasks and fragment map.
+    pub fn new(
+        tasks: Vec<ConfiguredTask>,
+        fragment_map: values::Value<'v>,
+        heap: &'v Heap,
+    ) -> Self {
         let tasks: Vec<values::Value<'v>> = tasks
             .into_iter()
             .map(|task| task.alloc_value(heap))
             .collect();
-        let x = TaskListGen(RefCell::new(TaskList::new(tasks)));
+        let x = TaskListGen(RefCell::new(TaskList::new_with_fragment_map(
+            tasks,
+            fragment_map,
+        )));
         Self {
             tasks: heap.alloc_complex_no_freeze(x),
+            fragment_map,
             config_modules: RefCell::new(vec![]),
         }
     }
@@ -68,6 +76,17 @@ impl<'v> ConfigContext<'v> {
             .iter()
             .map(|m| m.downcast_ref::<ConfiguredTask>().unwrap())
             .collect()
+    }
+
+    /// Get task values for iteration (used during config evaluation).
+    pub fn task_values(&self) -> Vec<values::Value<'v>> {
+        let list = self.tasks.downcast_ref::<MutableTaskList>().unwrap();
+        list.0.borrow().content.clone()
+    }
+
+    /// Get the fragment map value.
+    pub fn fragment_map_value(&self) -> values::Value<'v> {
+        self.fragment_map
     }
 
     /// Add a config module for lifetime management.
@@ -139,5 +158,17 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<ValueOfUnchecked<'v, &'v TaskListRef<'v>>> {
         let this = this.downcast_ref_err::<ConfigContext>()?;
         Ok(ValueOfUnchecked::new(this.tasks))
+    }
+
+    /// Access to the fragment map for configuring fragment instances.
+    ///
+    /// Usage:
+    /// ```starlark
+    /// ctx.fragments[BazelFragment].extra_flags = ["--config=ci"]
+    /// ```
+    #[starlark(attribute)]
+    fn fragments<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+        let ctx = this.downcast_ref_err::<ConfigContext>()?;
+        Ok(ctx.fragment_map)
     }
 }

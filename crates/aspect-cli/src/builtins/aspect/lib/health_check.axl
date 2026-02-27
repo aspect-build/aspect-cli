@@ -1,0 +1,176 @@
+"""
+Agent Health Check Library
+
+Implements the runner agent health check step that runs at the start of every
+job. It does two things:
+
+1. Waits for warming — polls until the runner's cache warming completes, then
+   reports the result.
+2. Displays the last runner health check — reads the JSON file written by the
+   fleet service between jobs and prints its contents.
+"""
+
+load("./platform.axl", "DEFAULT_WORKFLOWS_DIR", "DEFAULT_PLATFORM_DIR", "read_platform_config")
+
+# AWS CloudWatch log group
+AWS_LOG_GROUP = "/aw/runner/cloud-init/output"
+
+
+def _url_encode(s):
+    """Percent-encode a string for use in URLs."""
+    result = ""
+    for c in s.elems():
+        if c == " ":
+            result += "%20"
+        elif c == "\"":
+            result += "%22"
+        elif c == "\n":
+            result += "%0A"
+        elif c == "=":
+            result += "%3D"
+        elif c == "/":
+            result += "%2F"
+        else:
+            result += c
+    return result
+
+
+def _bootstrap_log_url(fs, config):
+    """
+    Construct the bootstrap log URL based on the cloud provider.
+
+    Returns the URL string, or None if the provider cannot be determined.
+    """
+    if fs.exists(DEFAULT_PLATFORM_DIR + "/aws"):
+        return _aws_bootstrap_log_url(config)
+    elif fs.exists(DEFAULT_PLATFORM_DIR + "/gcp"):
+        return _gcp_bootstrap_log_url(config)
+    return None
+
+
+def _aws_bootstrap_log_url(config):
+    """Construct AWS CloudWatch Logs URL for bootstrap logs."""
+    region = config["region"]
+    instance_id = config["instance_id"]
+
+    # URL-encode the log group: replace "/" with "%252F" (double-encoded)
+    escaped_log_group = AWS_LOG_GROUP.replace("/", "%252F")
+
+    return (
+        "https://" + region + ".console.aws.amazon.com/cloudwatch/home"
+        + "?region=" + region
+        + "#logsV2:log-groups/log-group/" + escaped_log_group
+        + "/log-events/" + instance_id
+    )
+
+
+def _gcp_bootstrap_log_url(config):
+    """Construct GCP Cloud Logging URL for bootstrap logs."""
+    instance_id = config["instance_id"]
+    project_id = config["account"]
+
+    query = (
+        'resource.type="gce_instance"\n'
+        + 'resource.labels.instance_id=' + instance_id + '\n'
+        + 'log_name="projects/' + project_id + '/logs/google_metadata_script_runner"'
+    )
+
+    return (
+        "https://console.cloud.google.com/logs/query"
+        + ";query=" + _url_encode(query)
+        + ";duration=P30D"
+        + "?referrer=search&project=" + project_id
+    )
+
+
+def _wait_for_warming(fs, config):
+    """
+    Wait for warming to complete and report the result.
+
+    If warming is not configured, returns immediately.
+    """
+    # If warming is not configured, skip entirely
+    if not fs.exists(DEFAULT_PLATFORM_DIR + "/warming_enabled"):
+        return
+
+    # If warming hasn't completed yet, block until it does.
+    # The bootstrap process runs concurrently. If it hits a critical error,
+    # it terminates the runner — so this loop will not hang indefinitely.
+    if not fs.exists(DEFAULT_PLATFORM_DIR + "/warming_complete"):
+        print("Waiting for warming to complete...")
+        for _ in forever(1000):
+            if fs.exists(DEFAULT_PLATFORM_DIR + "/warming_complete"):
+                break
+
+    # Report warming result
+    cache_version_file = DEFAULT_WORKFLOWS_DIR + "/warming_current_cache"
+    job_history_file = DEFAULT_PLATFORM_DIR + "/runner_job_history"
+
+    if fs.exists(cache_version_file):
+        version = fs.read_to_string(cache_version_file).strip()
+        print("Runner warmed from cache version: " + version + "\n")
+    elif fs.exists(job_history_file) and fs.metadata(job_history_file).size == 0:
+        # This is the first job on the runner and warming failed.
+        # On subsequent jobs, previous work has already populated caches,
+        # so no warning is needed.
+        print("Warming was unsuccessful. This first build on this runner will be cold.")
+        url = _bootstrap_log_url(fs, config)
+        if url:
+            print("See bootstrap logs for more details:")
+            print(url + "\n")
+
+
+def _display_bazel_health(health):
+    """
+    Display the bazel health check result.
+    """
+    if health.outcome == "healthy":
+        print("\n\u2022 Bazel Health")
+        print("\t\u2713 bazel health check passed")
+    elif health.outcome == "unhealthy":
+        print("\n\u2022 Bazel Health")
+        print("\t\u2717 bazel health check failed: " + (health.message or "unknown error"))
+    elif health.outcome == "inconclusive":
+        print("\n\u2022 Bazel Health")
+        print("\t? bazel health check inconclusive: " + (health.message or "unknown"))
+
+
+def _display_runner_health(fs):
+    """
+    Display the last runner health check results.
+
+    Reads the JSON file written by the fleet service between jobs.
+    """
+    print("\x1b[1;4;34mRunner Health\x1b[0m")
+
+    last_health_check_file = DEFAULT_PLATFORM_DIR + "/last_health_check"
+    if not fs.exists(last_health_check_file):
+        print("Health check has not yet been run on this runner")
+        return
+
+    content = fs.read_to_string(last_health_check_file)
+    data = json.decode(content)
+
+    # data.timestamp is a unix epoch integer
+    # data.output is a pre-formatted multi-line string
+    print("Last run on " + str(data["timestamp"]) + "\n")
+    print(data["output"])
+
+
+def agent_health_check(ctx, health):
+    """
+    Post health check hook for BazelFragment.
+
+    Runs the agent health check at the start of every job:
+    1. Waits for warming to complete
+    2. Displays the last runner health check
+
+    Args:
+        ctx: TaskContext
+        health: bazel.HealthCheckResult from the built-in health check
+    """
+    fs = ctx.std.fs
+    config = read_platform_config(fs)
+    _wait_for_warming(fs, config)
+    _display_runner_health(fs)
+    _display_bazel_health(health)

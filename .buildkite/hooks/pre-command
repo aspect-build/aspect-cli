@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+# Bazel startup options for CI
+export BAZEL_STARTUP_OPTS="--nohome_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
+
+# Build bazel remote flags from environment variables set by configure_workflows_env
+BAZEL_REMOTE_FLAGS=""
+[ -n "${ASPECT_WORKFLOWS_BES_BACKEND:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_backend=${ASPECT_WORKFLOWS_BES_BACKEND}"
+[ -n "${ASPECT_WORKFLOWS_BES_RESULTS_URL:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_results_url=${ASPECT_WORKFLOWS_BES_RESULTS_URL}"
+[ -n "${ASPECT_WORKFLOWS_REMOTE_CACHE:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=${ASPECT_WORKFLOWS_REMOTE_CACHE}"
+[ -n "${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_bytestream_uri_prefix=${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX}"
+export BAZEL_REMOTE_FLAGS
+
+export BAZEL_BUILD_OPTS="--config=ci ${BAZEL_REMOTE_FLAGS}"
+
+# Skip if bazel is not installed
+if ! command -v bazel >/dev/null 2>&1; then
+  echo "DEBUG: bazel not found, skipping"
+  exit 0
+fi
+
+# If the bazel server is busy, the runner is in a bad state — reap it so the autoscaler
+# replaces it with a fresh instance.
+reap_runner() {
+  echo "--- Bazel server is unhealthy, reaping runner"
+  REGION=$(cat /etc/aspect/workflows/platform/region)
+  INSTANCE_ID=$(cat /etc/aspect/workflows/platform/instance_id)
+  /etc/aspect/workflows/lib/aws.sh autoscaling set-instance-health \
+    --region "${REGION}" \
+    --instance-id "${INSTANCE_ID}" \
+    --health-status Unhealthy \
+    --no-should-respect-grace-period
+}
+
+# We use a short timeout so we capture the "Another command (pid=X)" message without
+# blocking indefinitely.
+LOCK_OUTPUT=$(timeout 5 bazel $BAZEL_STARTUP_OPTS info 2>&1) || true
+BUSY_PID=$(echo "$LOCK_OUTPUT" | grep -o '(pid=[0-9]*)' | grep -o '[0-9]*') || true
+if [ -n "$BUSY_PID" ]; then
+  reap_runner
+  exit 78
+fi
+
+# Build aspect-cli so version.axl can pick it up from bazel-bin/
+echo "--- Building aspect-cli"
+# bazel in aspect workflows runners is actually old aspect-cli.
+bazel --aspect:disable_plugins $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel --show_progress_rate_limit=1 //:cli
