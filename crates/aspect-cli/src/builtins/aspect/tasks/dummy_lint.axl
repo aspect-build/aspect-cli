@@ -1,0 +1,22 @@
+"""
+A stub 'lint' task registered when aspect_rules_lint is not installed.
+Prints a helpful message directing the user to install the lint package.
+"""
+
+def _lint_impl(ctx: TaskContext) -> int:
+    ctx.std.io.stderr.write("Error: The lint task requires the aspect_rules_lint package.\n")
+    ctx.std.io.stderr.write("\n")
+    ctx.std.io.stderr.write("Install it by running:\n")
+    ctx.std.io.stderr.write("\n")
+    ctx.std.io.stderr.write("    aspect axl add gh:aspect-build/rules_lint\n")
+    ctx.std.io.stderr.write("\n")
+    return 1
+
+lint = task(
+    name = "lint",
+    implementation = _lint_impl,
+    description = "Run linters (requires aspect_rules_lint)",
+    args = {
+        "all": args.positional(minimum = 0, maximum = 1000)
+    }
+)
