@@ -1,18 +1,20 @@
 use axl_proto::build_event_stream::BuildEvent;
 use prost::Message;
+use std::fs::File;
+use std::io::BufWriter;
 use std::io::ErrorKind;
 use std::sync::mpsc::RecvError;
 use std::sync::{Arc, Mutex};
 use std::{env, io};
 use std::{
-    io::Read,
+    io::{Read, Write},
     path::PathBuf,
     thread::{self, JoinHandle},
 };
 use thiserror::Error;
 
 use super::broadcaster::{Broadcaster, Subscriber};
-use super::util::read_varint;
+use super::util::{MultiTeeReader, read_varint};
 
 #[derive(Error, Debug)]
 pub enum BuildEventStreamError {
@@ -99,13 +101,16 @@ pub struct BuildEventStream {
 }
 
 impl BuildEventStream {
-    pub fn spawn_with_pipe(pid: u32) -> io::Result<(PathBuf, Self)> {
+    pub fn spawn_with_pipe(
+        pid: u32,
+        raw_file_sink_paths: Vec<String>,
+    ) -> io::Result<(PathBuf, Self)> {
         let out = env::temp_dir().join(format!("build-event-out-{}.bin", uuid::Uuid::new_v4()));
-        let stream = Self::spawn(out.clone(), pid)?;
+        let stream = Self::spawn(out.clone(), pid, raw_file_sink_paths)?;
         Ok((out, stream))
     }
 
-    pub fn spawn(path: PathBuf, pid: u32) -> io::Result<Self> {
+    pub fn spawn(path: PathBuf, pid: u32, raw_file_sink_paths: Vec<String>) -> io::Result<Self> {
         let broadcaster = Broadcaster::new();
         let broadcaster_for_thread = broadcaster.clone();
         let broadcaster_holder = Arc::new(Mutex::new(Some(broadcaster)));
@@ -115,23 +120,31 @@ impl BuildEventStream {
         let handle = thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             buf.resize(10, 0);
-            let mut out_raw =
+            let pipe =
                 galvanize::Pipe::new(path.clone(), galvanize::RetryPolicy::IfOpenForPid(pid))?;
+            let writers = raw_file_sink_paths
+                .iter()
+                .map(|p| Ok(BufWriter::new(File::create(p)?)))
+                .collect::<io::Result<Vec<_>>>()?;
+            let mut reader = MultiTeeReader {
+                inner: pipe,
+                writers,
+            };
 
             let read_event = |buf: &mut Vec<u8>,
-                              out_raw: &mut galvanize::Pipe|
+                              reader: &mut MultiTeeReader<galvanize::Pipe>|
              -> Result<BuildEvent, BuildEventStreamError> {
-                let size = read_varint(out_raw)?;
+                let size = read_varint(reader)?;
                 if size > buf.len() {
                     buf.resize(size, 0);
                 }
-                out_raw.read_exact(&mut buf[0..size])?;
+                reader.read_exact(&mut buf[0..size])?;
                 let event = BuildEvent::decode(&buf[0..size])?;
                 Ok(event)
             };
 
             loop {
-                match read_event(&mut buf, &mut out_raw) {
+                match read_event(&mut buf, &mut reader) {
                     Ok(event) => {
                         let last_message = event.last_message;
 
@@ -143,11 +156,13 @@ impl BuildEventStream {
 
                         if last_message {
                             broadcaster_for_thread.close();
+                            reader.flush()?;
                             return Ok(());
                         }
                     }
                     Err(BuildEventStreamError::IO(err)) if err.kind() == ErrorKind::BrokenPipe => {
                         broadcaster_for_thread.close();
+                        reader.flush()?;
                         return Ok(());
                     }
                     Err(err) => {

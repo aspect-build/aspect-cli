@@ -2,14 +2,26 @@ use anyhow::anyhow;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
 use starlark::values::{Value, ValueLike};
+use starlark_map::small_map::SmallMap;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::engine::config::fragment_map::{FragmentMap, construct_fragments};
 use crate::engine::config::{ConfigContext, ConfiguredTask};
+use crate::engine::types::fragment::extract_fragment_type_id;
 use crate::eval::load::{AxlLoader, ModuleScope};
 use crate::eval::load_path::join_confined;
 
 use super::error::EvalError;
+
+/// Result of running all config evaluations.
+pub struct ConfigResult {
+    /// The configured tasks.
+    pub tasks: Vec<ConfiguredTask>,
+    /// Fragment type IDs mapped to their (type_value, instance_value) pairs.
+    /// These are the globally-configured fragment instances that tasks will use.
+    pub fragment_data: Vec<(u64, Value<'static>, Value<'static>)>,
+}
 
 /// Evaluator for running config.axl files.
 #[derive(Debug)]
@@ -46,32 +58,58 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
     /// Evaluates all config files with the given tasks.
     ///
     /// This method:
-    /// 1. Creates a ConfigContext with the tasks
-    /// 2. Evaluates each config file, calling its `config` function
-    /// 3. Returns references to the modified tasks
-    ///
-    /// The tasks are modified in place via set_attr calls from config functions.
+    /// 1. Collects fragment types from all tasks
+    /// 2. Auto-constructs default fragment instances
+    /// 3. Creates a FragmentMap and ConfigContext
+    /// 4. Evaluates each config file, calling its `config` function
+    /// 5. Returns the modified tasks and fragment data
     pub fn run_all(
         &self,
-        scope: ModuleScope,
-        config_paths: Vec<PathBuf>,
+        scoped_configs: Vec<(ModuleScope, PathBuf, String)>,
         tasks: Vec<ConfiguredTask>,
-    ) -> Result<Vec<ConfiguredTask>, EvalError> {
-        self.loader.module_stack.borrow_mut().push(scope.clone());
-
+    ) -> Result<ConfigResult, EvalError> {
         // Create temporary modules for evaluation
         let eval_module = Box::leak(Box::new(Module::new()));
         let context_module = Box::leak(Box::new(Module::new()));
 
-        // Create ConfigContext with tasks
         let heap = context_module.heap();
-        let context_value = heap.alloc(ConfigContext::new(tasks, heap));
+
+        // Collect fragment types from all tasks
+        let mut fragment_types: SmallMap<u64, Value> = SmallMap::new();
+        for task in &tasks {
+            let frozen_task = task
+                .as_frozen_task()
+                .expect("tasks should be frozen at this point");
+            for frag_fv in frozen_task.fragments() {
+                let frag_value = frag_fv.to_value();
+                if let Some(id) = extract_fragment_type_id(frag_value) {
+                    fragment_types.entry(id).or_insert(frag_value);
+                }
+            }
+        }
+
+        // Auto-construct default fragment instances
+        let fragment_pairs: Vec<(u64, Value)> =
+            fragment_types.into_iter().map(|(id, v)| (id, v)).collect();
+
+        let fragment_map = {
+            let mut eval = Evaluator::new(eval_module);
+            eval.set_loader(self.loader);
+            construct_fragments(&fragment_pairs, &mut eval, heap)?
+        };
+
+        let fragment_map_value = heap.alloc(fragment_map);
+
+        // Create ConfigContext with tasks and fragment map
+        let context_value = heap.alloc(ConfigContext::new(tasks, fragment_map_value, heap));
         let ctx = context_value
             .downcast_ref::<ConfigContext>()
             .expect("just allocated ConfigContext");
 
-        // Evaluate each config file
-        for path in &config_paths {
+        // Evaluate each config file with its associated scope
+        for (scope, path, function_name) in &scoped_configs {
+            self.loader.module_stack.borrow_mut().push(scope.clone());
+
             let rel_path = path
                 .strip_prefix(&scope.path)
                 .map_err(|e| EvalError::UnknownError(anyhow!("Failed to strip prefix: {e}")))?
@@ -87,8 +125,8 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
             // Get the config function
             let def = frozen
-                .get("config")
-                .map_err(|_| EvalError::MissingSymbol("config".into()))?;
+                .get(function_name)
+                .map_err(|_| EvalError::MissingSymbol(function_name.clone()))?;
 
             let func = def.value();
 
@@ -107,12 +145,31 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
             // Keep the frozen module alive for the duration
             ctx.add_config_module(frozen);
+
+            self.loader.module_stack.borrow_mut().pop();
         }
 
         // Clone tasks from the context to return
         let result_tasks: Vec<ConfiguredTask> = ctx.tasks().iter().map(|t| (*t).clone()).collect();
 
-        self.loader.module_stack.borrow_mut().pop();
-        Ok(result_tasks)
+        // Extract fragment data from the FragmentMap
+        let fmap = fragment_map_value
+            .downcast_ref::<FragmentMap>()
+            .expect("just allocated FragmentMap");
+        let fragment_data: Vec<(u64, Value<'static>, Value<'static>)> = fmap
+            .entries()
+            .into_iter()
+            .map(|(id, tv, iv)| {
+                // SAFETY: These values live on context_module's leaked heap
+                let tv: Value<'static> = unsafe { std::mem::transmute(tv) };
+                let iv: Value<'static> = unsafe { std::mem::transmute(iv) };
+                (id, tv, iv)
+            })
+            .collect();
+
+        Ok(ConfigResult {
+            tasks: result_tasks,
+            fragment_data,
+        })
     }
 }

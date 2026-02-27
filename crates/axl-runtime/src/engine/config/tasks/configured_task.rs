@@ -1,7 +1,4 @@
-//! ConfiguredTask - A task with its configuration, using frozen values.
-//!
-//! This type uses `OwnedFrozenValue` to manage heap lifetimes automatically,
-//! following Buck2's pattern for safe frozen value management.
+//! ConfiguredTask - A task with its fragment type IDs.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -9,7 +6,6 @@ use std::path::PathBuf;
 use allocative::Allocative;
 use anyhow::anyhow;
 use derive_more::Display;
-use starlark::environment::FrozenModule;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -32,16 +28,14 @@ use crate::engine::task::FrozenTask;
 use crate::engine::task::TaskLike;
 use crate::eval::EvalError;
 
-use super::frozen::freeze_value;
-
-/// A task bundled with its configuration, using frozen values for safe heap management.
+/// A task bundled with its fragment type IDs.
 ///
 /// This type:
 /// - Has no lifetime parameter (easy to store and pass around)
-/// - Uses `OwnedFrozenValue` to keep heaps alive automatically
+/// - Uses `OwnedFrozenValue` for frozen values (task definition)
+/// - Stores fragment type IDs for fragment map scoping
 /// - Is a `StarlarkValue` that config functions can modify via `set_attr`
-/// - Can be created from a `FrozenModule`
-#[derive(Debug, Clone, ProvidesStaticType, Display, NoSerialize, Allocative)]
+#[derive(Debug, ProvidesStaticType, Display, NoSerialize, Allocative, Clone)]
 #[display("<ConfiguredTask>")]
 pub struct ConfiguredTask {
     /// The frozen task definition (contains implementation function)
@@ -51,28 +45,24 @@ pub struct ConfiguredTask {
     pub name: RefCell<String>,
     /// Task group (may be overridden by config)
     pub group: RefCell<Vec<String>>,
-    /// Configured config value
-    #[allocative(skip)]
-    pub config: RefCell<OwnedFrozenValue>,
+    /// Fragment type IDs this task opts into
+    pub fragment_type_ids: Vec<u64>,
     /// Symbol name in the module
     pub symbol: String,
     /// Path to the .axl file
     pub path: PathBuf,
 }
 
-// ConfiguredTask doesn't need tracing since it only contains frozen values
 unsafe impl Trace<'_> for ConfiguredTask {
     fn trace(&mut self, _tracer: &values::Tracer<'_>) {
-        // OwnedFrozenValue manages its own heap lifetime, no tracing needed
+        // OwnedFrozenValue manages its own lifetime.
     }
 }
 
 impl ConfiguredTask {
     /// Create a ConfiguredTask from a FrozenModule.
-    ///
-    /// Extracts the task definition and initial config from the frozen module.
     pub fn from_frozen_module(
-        frozen: &FrozenModule,
+        frozen: &starlark::environment::FrozenModule,
         symbol: &str,
         path: PathBuf,
     ) -> Result<Self, EvalError> {
@@ -94,16 +84,35 @@ impl ConfiguredTask {
             frozen_task.name.clone()
         };
         let group = frozen_task.group.clone();
-        let initial_config = OwnedFrozenValue::alloc(frozen_task.config);
+        let fragment_type_ids = frozen_task.fragment_type_ids();
 
         Ok(ConfiguredTask {
             task_def,
             name: RefCell::new(name),
             group: RefCell::new(group),
-            config: RefCell::new(initial_config),
+            fragment_type_ids,
             symbol: symbol.to_string(),
             path,
         })
+    }
+
+    /// Create a ConfiguredTask with known fragment type IDs.
+    pub fn new_with_fragments(
+        task_def: OwnedFrozenValue,
+        name: String,
+        group: Vec<String>,
+        fragment_type_ids: Vec<u64>,
+        symbol: String,
+        path: PathBuf,
+    ) -> Self {
+        ConfiguredTask {
+            task_def,
+            name: RefCell::new(name),
+            group: RefCell::new(group),
+            fragment_type_ids,
+            symbol,
+            path,
+        }
     }
 
     /// Get a reference to the underlying FrozenTask.
@@ -120,11 +129,6 @@ impl ConfiguredTask {
     pub fn implementation(&self) -> Option<OwnedFrozenValue> {
         let task = self.as_frozen_task()?;
         Some(self.task_def.map(|_| task.implementation()))
-    }
-
-    /// Get the current config value.
-    pub fn get_config(&self) -> OwnedFrozenValue {
-        self.config.borrow().clone()
     }
 
     /// Get the current name.
@@ -150,12 +154,6 @@ impl<'v> values::StarlarkValue<'v> for ConfiguredTask {
                     .ok_or_else(|| anyhow!("groups must be a list of strings"))?;
                 self.group.replace(unpack.items);
             }
-            "config" => {
-                // Freeze the config value so it can be safely stored
-                let frozen =
-                    freeze_value(value).map_err(|e| anyhow!("failed to freeze config: {:?}", e))?;
-                self.config.replace(frozen);
-            }
             _ => return ValueError::unsupported(self, &format!(".{}=", attribute)),
         };
         Ok(())
@@ -165,14 +163,6 @@ impl<'v> values::StarlarkValue<'v> for ConfiguredTask {
         match attribute {
             "name" => Some(heap.alloc_str(&self.name.borrow()).to_value()),
             "group" => Some(heap.alloc(AllocList(self.group.borrow().iter()))),
-            "config" => {
-                // Return the frozen config value
-                let config = self.config.borrow();
-                let value = config.value();
-                // SAFETY: The OwnedFrozenValue keeps its heap alive, and we're
-                // returning a Value that will be used within this evaluation.
-                Some(unsafe { std::mem::transmute::<Value<'_>, Value<'v>>(value) })
-            }
             "symbol" => Some(heap.alloc_str(&self.symbol).to_value()),
             "path" => Some(heap.alloc_str(&self.path.to_string_lossy()).to_value()),
             _ => None,
@@ -183,7 +173,6 @@ impl<'v> values::StarlarkValue<'v> for ConfiguredTask {
         vec![
             "name".into(),
             "group".into(),
-            "config".into(),
             "symbol".into(),
             "path".into(),
         ]

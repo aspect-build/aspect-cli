@@ -1,0 +1,103 @@
+"""
+A default 'build' task that wraps a 'bazel build' command.
+"""
+load("./fragments.axl", "BazelFragment")
+
+def _collect_bes_from_args(ctx):
+    """Collect BES sinks from CLI args (--bes_backend/--bes_header)."""
+    sinks = []
+    for bes_backend in ctx.args.bes_backend:
+        metadata = {}
+        for bes_header in ctx.args.bes_header:
+            (k, _, v) = bes_header.partition("=")
+            metadata[k] = v
+        sinks.append(
+            bazel.build_events.grpc(
+                uri = bes_backend,
+                metadata = metadata,
+            )
+        )
+    return sinks
+
+def impl(ctx: TaskContext) -> int:
+    health = ctx.bazel.health_check()
+    fragment = ctx.fragments[BazelFragment]
+
+    if fragment.post_health_check:
+        fragment.post_health_check(ctx, health)
+
+    if health.outcome == "unhealthy":
+        fail("Bazel server is unhealthy: " + health.message)
+
+    # Flags: accumulate data, then optionally transform
+    flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    flags.extend(ctx.args.bazel_flag)
+    flags.extend(fragment.extra_flags)
+    if fragment.flags:
+        flags = fragment.flags(flags)
+
+    startup_flags = list(ctx.args.bazel_startup_flag)
+    startup_flags.extend(fragment.extra_startup_flags)
+    if fragment.startup_flags:
+        startup_flags = fragment.startup_flags(startup_flags)
+
+    # BES: merge arg-based sinks with fragment sinks
+    build_events = _collect_bes_from_args(ctx)
+    if fragment.build_event_sinks:
+        build_events.extend(fragment.build_event_sinks)
+
+    # Coerce to bool/list for ctx.bazel.build:
+    # - non-empty list → stream to those sinks + build_events() iterator.
+    # - True → stream without explicit sinks (build_event handler only)
+    # - False → no BEP stream at all
+    if not build_events:
+        if fragment.build_event:
+            build_events = True
+        else:
+            build_events = False
+
+    # Shared mutable state across build_start / build_event / build_end
+    state = {"_task_name": "build"}
+
+    for handler in fragment.build_start:
+        handler(ctx, state)
+
+    for _ in range(10):
+        build = ctx.bazel.build(
+            build_events = build_events,
+            execution_log = fragment.execution_log_sinks or False,
+            flags = flags,
+            startup_flags = startup_flags,
+            *ctx.args.target_pattern,
+        )
+
+        if fragment.build_event:
+            for event in build.build_events():
+                for handler in fragment.build_event:
+                    handler(ctx, state, event)
+
+        build_status = build.wait()
+
+        if build_status.code == 0 or not fragment.build_retry(build_status.code):
+            break
+
+    for handler in fragment.build_end:
+        handler(ctx, state, build_status.code)
+
+    return build_status.code
+
+build = task(
+    implementation = impl,
+    fragments = [
+        BazelFragment
+    ],
+    args = {
+        "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
+        "bazel_flag": args.string_list(),
+        "bazel_startup_flag": args.string_list(),
+        "remote_executor": args.string(),
+        "remote_cache": args.string(),
+        "bes_backend": args.string_list(),
+        "bes_header": args.string_list(),
+    },
+)

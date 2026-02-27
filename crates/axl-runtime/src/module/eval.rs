@@ -21,7 +21,7 @@ use crate::module::Dep;
 
 use super::super::eval::{EvalError, validate_module_name};
 
-use super::store::{AxlArchiveDep, ModuleStore};
+use super::store::{AxlArchiveDep, ModuleStore, UseConfigEntry};
 
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
@@ -69,6 +69,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)] urls: UnpackList<String>,
         #[starlark(require = named)] dev: bool,
         #[starlark(require = named, default = false)] auto_use_tasks: bool,
+        #[starlark(require = named, default = false)] use_config: bool,
         #[starlark(require = named, default = String::new())] strip_prefix: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
@@ -107,6 +108,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 integrity,
                 dev: true,
                 auto_use_tasks,
+                use_config,
             }),
         );
 
@@ -121,6 +123,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] path: String,
         #[starlark(require = named, default = false)] auto_use_tasks: bool,
+        #[starlark(require = named, default = false)] use_config: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
         if name == AXL_ROOT_MODULE_NAME {
@@ -149,6 +152,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                 name: name.clone(),
                 path: abs_path,
                 auto_use_tasks,
+                use_config,
             }),
         );
 
@@ -171,6 +175,59 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         let entry = tasks.entry(absolute_path).or_insert((label, vec![]));
         // TODO: validate that label does not escape.
         entry.1.extend(symbols);
+
+        Ok(values::none::NoneType)
+    }
+
+    fn use_config<'v>(
+        #[starlark(require = pos)] path: String,
+        #[starlark(require = pos)] function: String,
+        #[starlark(require = named, default = UnpackList::default())] requires: UnpackList<
+            values::Value<'v>,
+        >,
+        #[starlark(require = named, default = UnpackList::default())] conflicts: UnpackList<String>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<values::none::NoneType> {
+        let store = ModuleStore::from_eval(eval)?;
+        let heap = eval.heap();
+
+        let mut parsed_requires = Vec::new();
+        for req in requires.items {
+            if let Some(s) = req.unpack_str() {
+                parsed_requires.push((s.to_string(), None));
+            } else if req.get_type() == "tuple" {
+                let len = req.length().map_err(|e| anyhow::anyhow!("{}", e))?;
+                if len != 2 {
+                    anyhow::bail!(
+                        "requires tuple must have exactly 2 elements (package, version_constraint)"
+                    );
+                }
+                let pkg = req
+                    .at(heap.alloc(0), heap)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                let constraint = req
+                    .at(heap.alloc(1), heap)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                let pkg = pkg.unpack_str().ok_or_else(|| {
+                    anyhow::anyhow!("requires tuple first element must be a string")
+                })?;
+                let constraint = constraint.unpack_str().ok_or_else(|| {
+                    anyhow::anyhow!("requires tuple second element must be a string")
+                })?;
+                parsed_requires.push((pkg.to_string(), Some(constraint.to_string())));
+            } else {
+                anyhow::bail!(
+                    "requires elements must be strings or tuples of (package, version_constraint)"
+                );
+            }
+        }
+
+        store.configs.borrow_mut().push(UseConfigEntry {
+            path,
+            function,
+            requires: parsed_requires,
+            conflicts: conflicts.items,
+        });
 
         Ok(values::none::NoneType)
     }
