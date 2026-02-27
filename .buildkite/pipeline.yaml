@@ -4,6 +4,8 @@
 
 env:
   ASPECT_DEBUG: "1"
+secrets:
+  - ASPECT_API_TOKEN
 steps:
   - key: __main__::warm
     label: ":aspect: Building CLI"

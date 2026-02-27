@@ -1,3 +1,4 @@
+mod auth;
 mod builtins;
 mod cmd_tree;
 mod flags;
@@ -63,6 +64,29 @@ async fn main() -> miette::Result<ExitCode> {
     let _tracing = trace::init();
     // Enter the root tracing span for the entire application.
     let _root = info_span!("root").entered();
+
+    // First positional (non-flag) argument, skipping the program name.
+    let args: Vec<String> = std::env::args().collect();
+    let subcommand = args.iter().skip(1).find(|a| !a.starts_with('-'));
+
+    // Early intercept for built-in commands.
+    // These run before Starlark evaluation because they:
+    // 1. Don't need any project context (no .aspect/ directory required)
+    // 2. Need async I/O for the localhost OAuth callback server
+    // 3. Must work outside any repository
+    // Only match --version/-v when they appear before the first positional arg (i.e. top-level).
+    let flags_before_subcommand = args.iter().skip(1).take_while(|a| a.starts_with('-'));
+    if flags_before_subcommand.into_iter().any(|a| a == "--version" || a == "-v") {
+        println!("aspect {:}", cargo_pkg_version());
+        return Ok(ExitCode::SUCCESS);
+    }
+    if subcommand.map(|s| s.as_str()) == Some("version") {
+        println!("Aspect CLI {:}", cargo_pkg_version());
+        return Ok(ExitCode::SUCCESS);
+    }
+    if subcommand.map(|s| s.as_str()) == Some("auth") {
+        return auth::handle(args).await;
+    }
 
     // Get the current working directory.
     let current_work_dir = std::env::current_dir().into_diagnostic()?;
@@ -325,18 +349,14 @@ async fn main() -> miette::Result<ExitCode> {
         let mut tree = CommandTree::default();
 
         // Create the base Clap command for the 'aspect' CLI.
-        // TODO: add .about()
         let cmd = Command::new("aspect")
-            // set binary name to "aspect" in help
             .bin_name("aspect")
-            // add an about string
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
             // customize the usage string to use <TASK>
             .subcommand_value_name("TASK|GROUP|COMMAND")
             .disable_help_subcommand(true)
-            // handle --version and -v flags
             .version(cargo_pkg_short_version())
-            .disable_version_flag(true) // disable auto -V / --version
+            .disable_version_flag(true)
             .arg(
                 Arg::new("version")
                     .short('v')
@@ -354,7 +374,8 @@ async fn main() -> miette::Result<ExitCode> {
                 Command::new("help")
                     .about("Print this message or the help of the given subcommand(s)")
                     .hide(true),
-            );
+            )
+            .subcommand(auth::command().hide(true));
 
         // Convert each task into a Clap subcommand and insert into the command tree.
         for (i, task) in tasks.iter().enumerate() {
@@ -417,6 +438,7 @@ async fn main() -> miette::Result<ExitCode> {
 \x1b[1;4mTasks:\x1b[0m
 {{subcommands}}{task_groups_section}
 \x1b[1;4mCommands:\x1b[0m
+  \x1b[1mauth\x1b[0m     Authenticate with Aspect
   \x1b[1mversion\x1b[0m  Print version
   \x1b[1mhelp\x1b[0m     Print this message or the help of the given subcommand(s)
 
@@ -441,10 +463,8 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Handle built-in commands.
         match matches.subcommand_name() {
-            Some("version") => {
-                println!("Aspect CLI {:}", cargo_pkg_version());
-                return Ok(ExitCode::SUCCESS);
-            }
+            // Early-intercepted before AXL parsing; unreachable.
+            Some("version") | Some("auth") => unreachable!(),
             Some("help") => {
                 cmd_for_help.print_help().into_diagnostic()?;
                 return Ok(ExitCode::SUCCESS);
@@ -470,6 +490,9 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Create an AxlStore for task execution
         let store = axl_loader.new_store(task.path.clone());
+
+        // Auto-login with ASPECT_API_ACCESS_TOKEN if set (tolerant of failures)
+        axl_runtime::engine::auth::try_auto_login(&store);
 
         // Execute the selected task using the new execution function
         let exit_code = execute_task_with_args(task, store, &fragment_data, |heap| {

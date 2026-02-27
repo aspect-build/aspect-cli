@@ -20,11 +20,12 @@ starlark_derive = "0.13.0"
 starlark_map = "0.13.0"
 
 anyhow = "1.0.98"
+serde = { version = "1", features = ["derive"] }
 semver = "1"
 thiserror = "2.0.12"
 
 prost = "0.14.1"
-reqwest = { version="0.12.22", features = ["stream", "gzip", "zstd"] }
+reqwest = { version="0.12.22", features = ["json", "stream", "gzip", "zstd"] }
 hyper = "1.6.0"
 hyper-util = { version = "0.1.12", features = ["client-legacy", "tokio", "http1"] }
 hyperlocal = "0.9.1"

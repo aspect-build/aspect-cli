@@ -14,6 +14,7 @@ use starlark::values::Trace;
 use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
+use super::auth::Auth;
 use super::bazel::Bazel;
 use super::http::Http;
 use super::std::Std;
@@ -72,6 +73,12 @@ impl<'v> values::Freeze for TaskContext<'v> {
 
 #[starlark_module]
 pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
+    /// Authentication and credential management.
+    #[starlark(attribute)]
+    fn auth<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Auth> {
+        Ok(Auth)
+    }
+
     /// Standard library is the foundation of powerful AXL tasks.
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
@@ -153,6 +160,11 @@ impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
 
 #[starlark_module]
 fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
+    #[starlark(attribute)]
+    fn auth<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Auth> {
+        Ok(Auth)
+    }
+
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
         Ok(Std {})

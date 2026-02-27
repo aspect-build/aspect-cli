@@ -28,6 +28,7 @@ rust_library(
         "@crates//:prost",
         "@crates//:rand",
         "@crates//:reqwest",
+        "@crates//:serde",
         "@crates//:serde_json",
         "@crates//:sha256",
         "@crates//:ssri",
