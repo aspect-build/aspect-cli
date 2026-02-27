@@ -19,14 +19,11 @@ def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
 
+    # Configure the UserTaskConfig fragment globally
+    user_config = ctx.fragments[UserTaskConfig]
+    user_config.message = "hello axl"
+    user_config.count = 2
+    user_config.customize_message = lambda s: _customize_message(s, "!")
+
     # add a new task
     ctx.tasks.add(_user_task)
-
-    # customize a task
-    for task in ctx.tasks:
-        if task.name == "user_task" and task.group == ["user"]:
-            task.config = UserTaskConfig(
-                message = "hello axl",
-                count = 2,
-                customize_message = lambda s: _customize_message(s, "!")
-            )

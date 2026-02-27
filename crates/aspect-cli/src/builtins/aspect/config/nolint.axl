@@ -1,0 +1,8 @@
+"""Configures a dummy lint verb for migration."""
+
+load("../tasks/dummy_lint.axl", "lint")
+load("../tasks/dummy_format.axl", "format")
+
+def configure_dummy_lint(ctx: ConfigContext):
+    ctx.tasks.add(lint)
+    ctx.tasks.add(format)
