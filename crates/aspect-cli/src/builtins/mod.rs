@@ -26,11 +26,6 @@ const ASPECT: Builtin = Builtin {
             "config/delivery.axl",
             include_str!("./aspect/config/delivery.axl"),
         ),
-        ("config/lint.axl", include_str!("./aspect/config/lint.axl")),
-        (
-            "config/nolint.axl",
-            include_str!("./aspect/config/nolint.axl"),
-        ),
         (
             "config/artifacts.axl",
             include_str!("./aspect/config/artifacts.axl"),
@@ -40,26 +35,15 @@ const ASPECT: Builtin = Builtin {
             "tasks/delivery.axl",
             include_str!("./aspect/tasks/delivery.axl"),
         ),
-        (
-            "tasks/dummy_lint.axl",
-            include_str!("./aspect/tasks/dummy_lint.axl"),
-        ),
-        (
-            "tasks/dummy_format.axl",
-            include_str!("./aspect/tasks/dummy_format.axl"),
-        ),
         // lib/
         (
             "lib/deliveryd.axl",
             include_str!("./aspect/lib/deliveryd.axl"),
         ),
-        ("lib/github.axl", include_str!("./aspect/lib/github.axl")),
-        ("lib/linting.axl", include_str!("./aspect/lib/linting.axl")),
         (
             "lib/platform.axl",
             include_str!("./aspect/lib/platform.axl"),
         ),
-        ("lib/sarif.axl", include_str!("./aspect/lib/sarif.axl")),
         (
             "lib/health_check.axl",
             include_str!("./aspect/lib/health_check.axl"),
