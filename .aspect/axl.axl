@@ -218,6 +218,20 @@ def test_stream(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
     return tc
 
+def test_task_info(ctx: TaskContext, tc: int) -> int:
+    info = ctx.task
+
+    # name should be the symbol name "axl" (no explicit name= was given)
+    tc = test_case(tc, type(info.name) == "string", "ctx.task.name should be a string")
+    tc = test_case(tc, info.name == "axl", "ctx.task.name should equal the symbol name 'axl'")
+
+    # group should be the list declared in task(group=[...])
+    tc = test_case(tc, type(info.group) == "list", "ctx.task.group should be a list")
+    tc = test_case(tc, len(info.group) == 1, "ctx.task.group should have one entry")
+    tc = test_case(tc, info.group[0] == "tests", "ctx.task.group[0] should be 'tests'")
+
+    return tc
+
 def test_starlark(tc: int) -> int:
     tc = test_case(tc, lambda_with_global_bind()("testing") == "%testing%", "should be able to call a lambda bound to a global from another module")
     tc = test_case(tc, ANSWER == 42, "should be able to load the answer to Life the Universe and Everything from an axl module")
@@ -415,6 +429,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_case(tc, type(temp_dir) == "string", "temp_dir should be a string")
     tc = test_case(tc, ctx.std.fs.is_dir(temp_dir), "temp_dir should be a directory")
 
+    tc = test_task_info(ctx, tc)
     tc = test_env(ctx, tc, temp_dir)
     tc = test_fs(ctx, tc, temp_dir)
     tc = test_stream(ctx, tc, temp_dir)

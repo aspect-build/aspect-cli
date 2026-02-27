@@ -18,6 +18,7 @@ use super::bazel::Bazel;
 use super::http::Http;
 use super::std::Std;
 use super::task_args::TaskArgs;
+use super::task_info::TaskInfo;
 use super::template;
 use super::wasm::Wasm;
 
@@ -26,11 +27,13 @@ use super::wasm::Wasm;
 pub struct TaskContext<'v> {
     pub args: TaskArgs<'v>,
     pub config: values::Value<'v>,
+    #[trace(unsafe_ignore)]
+    pub task: TaskInfo,
 }
 
 impl<'v> TaskContext<'v> {
-    pub fn new(args: TaskArgs<'v>, config: values::Value<'v>) -> Self {
-        Self { args, config }
+    pub fn new(args: TaskArgs<'v>, config: values::Value<'v>, task: TaskInfo) -> Self {
+        Self { args, config, task }
     }
 }
 
@@ -58,6 +61,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
         Ok(FrozenTaskContext {
             args: args_value,
             config: self.config.freeze(freezer)?,
+            task: self.task,
         })
     }
 }
@@ -68,6 +72,13 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
         Ok(Std {})
+    }
+
+    /// Identity information for this task (name and group).
+    #[starlark(attribute)]
+    fn task<'v>(this: values::Value<'v>) -> starlark::Result<TaskInfo> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(ctx.task.clone())
     }
 
     /// Access to arguments provided by the caller.
@@ -121,6 +132,7 @@ pub struct FrozenTaskContext {
     args: values::FrozenValue,
     #[allocative(skip)]
     config: values::FrozenValue,
+    task: TaskInfo,
 }
 
 starlark_simple_value!(FrozenTaskContext);
@@ -140,6 +152,12 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
         Ok(Std {})
+    }
+
+    #[starlark(attribute)]
+    fn task<'v>(this: values::Value<'v>) -> starlark::Result<TaskInfo> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(ctx.task.clone())
     }
 
     #[starlark(attribute)]
