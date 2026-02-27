@@ -1,3 +1,4 @@
 # Cargo output directory
 target/
 bazel/proto/
+examples/large_bes
