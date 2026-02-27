@@ -346,6 +346,32 @@ def test_large_bes(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
     return tc
 
+def test_bazel_info(ctx: TaskContext, tc: int) -> int:
+    info = ctx.bazel.info()
+
+    # Should return a dict
+    tc = test_case(tc, type(info) == "dict", "bazel.info() should return a dict")
+    tc = test_case(tc, len(info) > 0, "bazel.info() dict should be non-empty")
+
+    # Common keys should be present
+    for key in ["output_base", "execution_root", "workspace", "bazel-bin", "bazel-genfiles", "bazel-testlogs"]:
+        tc = test_case(tc, key in info, "bazel.info() should contain key: " + key)
+        tc = test_case(tc, type(info[key]) == "string", "bazel.info()[" + key + "] should be a string")
+        tc = test_case(tc, info[key] != "", "bazel.info()[" + key + "] should be non-empty")
+
+    # output_base should be an absolute path
+    tc = test_case(tc, info["output_base"].startswith("/"), "output_base should be an absolute path")
+
+    # workspace should match root_dir
+    root_dir = ctx.std.env.root_dir()
+    tc = test_case(tc, info["workspace"] == root_dir, "bazel.info()['workspace'] should match ctx.std.env.root_dir()")
+
+    # workdir override: pointing at the same workspace should give the same output_base
+    info2 = ctx.bazel.info(workdir = root_dir)
+    tc = test_case(tc, info2["output_base"] == info["output_base"], "bazel.info(workdir=root_dir) should return same output_base")
+
+    return tc
+
 def test_http(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # Test HTTP download with integrity/sha256 verification
     # Using a well-known static file: LICENSE from this repo's GitHub
@@ -437,6 +463,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_build_events(ctx, tc, temp_dir)
     tc = test_large_bes(ctx, tc, temp_dir)
     tc = test_http(ctx, tc, temp_dir)
+    tc = test_bazel_info(ctx, tc)
 
     print(tc, "tests passed")
     return 0
