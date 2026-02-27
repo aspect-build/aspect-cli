@@ -228,7 +228,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         .iter()
                         .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
                         .collect();
-                    let body = res
+                    let body: Bytes = res
                         .into_body()
                         .collect()
                         .await
@@ -301,7 +301,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         .iter()
                         .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
                         .collect();
-                    let body = res
+                    let body: Bytes = res
                         .into_body()
                         .collect()
                         .await
@@ -379,7 +379,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         .iter()
                         .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
                         .collect();
-                    let body = res
+                    let body: Bytes = res
                         .into_body()
                         .collect()
                         .await
@@ -458,7 +458,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         .iter()
                         .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
                         .collect();
-                    let body = res
+                    let body: Bytes = res
                         .into_body()
                         .collect()
                         .await
@@ -537,7 +537,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                         .iter()
                         .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
                         .collect();
-                    let body = res
+                    let body: Bytes = res
                         .into_body()
                         .collect()
                         .await
