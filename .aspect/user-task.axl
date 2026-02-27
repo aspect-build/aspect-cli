@@ -23,7 +23,7 @@ def _impl(ctx: TaskContext) -> int:
     return 0
 
 user_task = task(
-    group = ["user"],
+    group = ["user", "nested"],
     implementation = _impl,
     args = {},
     config = UserTaskConfig(),

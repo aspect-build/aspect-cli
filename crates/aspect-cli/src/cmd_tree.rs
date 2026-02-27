@@ -9,7 +9,8 @@ const TASK_ID: &'static str = "@@@$'__AXL_TASK_ID__'$@@@";
 // Clap's help generation sorts by (display_order, name)—-equal display_order values fall back to name-based sorting.
 const TASK_COMMAND_DISPLAY_ORDER: usize = 0;
 const TASK_GROUP_DISPLAY_ORDER: usize = 1;
-pub const BUILTIN_COMMAND_DISPLAY_ORDER: usize = 2;
+// No longer used — builtin commands are rendered via help_template in main.rs
+// pub const BUILTIN_COMMAND_DISPLAY_ORDER: usize = 2;
 
 #[derive(Default)]
 pub struct CommandTree {
@@ -103,13 +104,38 @@ impl CommandTree {
             if current.find_subcommand(name).is_some() {
                 return Err(TreeError::GroupCommandConflict(group.to_vec()));
             }
+
+            // Build a custom help_template for this group with separate Tasks / Task Groups sections
+            let sub_group_names = subtree.group_names();
+            let mut template = String::from("{about-with-newline}\n{usage-heading} {usage}");
+
+            if !subtree.tasks.is_empty() {
+                template.push_str("\n\n\x1b[1;4mTasks:\x1b[0m\n{subcommands}");
+            }
+
+            if !sub_group_names.is_empty() {
+                let max_len = sub_group_names.iter().map(|n| n.len()).max().unwrap_or(0);
+                template.push_str("\n\n\x1b[1;4mTask Groups:\x1b[0m\n");
+                for gname in &sub_group_names {
+                    let padding = " ".repeat(max_len - gname.len() + 2);
+                    template.push_str(&format!(
+                        "  \x1b[1m{}\x1b[0m{}\x1b[3m{}\x1b[0m task group\n",
+                        gname, padding, gname
+                    ));
+                }
+            }
+
+            let template = format!(
+                "{}\n\n\x1b[1;4mOptions:\x1b[0m\n{{options}}",
+                template.trim_end()
+            );
+
             let mut subcmd = Command::new(name.clone())
-                // customize the subcommands section title to "Tasks:"
-                .subcommand_help_heading("Tasks")
-                // customize the usage string to use <TASK>
-                .subcommand_value_name("TASK")
+                .subcommand_value_name("TASK|GROUP")
                 .about(format!("\x1b[3m{}\x1b[0m task group", name))
-                .display_order(TASK_GROUP_DISPLAY_ORDER);
+                .display_order(TASK_GROUP_DISPLAY_ORDER)
+                .hide(true)
+                .help_template(template);
             subcmd = subtree.as_command(subcmd, &group)?;
             current = current.subcommand(subcmd);
         }
@@ -124,12 +150,19 @@ impl CommandTree {
             current = current.subcommand(subcmd);
         }
 
-        // Require subcommand if are subgroups or tasks
+        // Print help if no subcommand is given (instead of erroring)
         if !self.subgroups.is_empty() || !self.tasks.is_empty() {
-            current = current.subcommand_required(true);
+            current = current.arg_required_else_help(true);
         }
 
         Ok(current)
+    }
+
+    /// Returns sorted list of top-level task group names.
+    pub fn group_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.subgroups.keys().map(|s| s.as_str()).collect();
+        names.sort();
+        names
     }
 
     pub fn get_task_id(&self, matches: &ArgMatches) -> usize {
