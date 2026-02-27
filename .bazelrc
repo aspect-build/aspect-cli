@@ -15,6 +15,6 @@ common --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
 common:release --stamp
 common:release --workspace_status_command "${PWD}/bazel/workspace_status.sh"
 common:release --compilation_mode=opt
+common:release --@rules_rust//rust/settings:lto=fat
 
 common --test_output=errors
-common --@rules_rust//rust/settings:lto=fat
