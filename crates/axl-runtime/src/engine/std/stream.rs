@@ -37,6 +37,7 @@ pub enum Readable {
     Stdin(#[allocative(skip)] Arc<Stdin>),
     ChildStderr(#[allocative(skip)] Arc<Mutex<RefCell<ChildStderr>>>),
     ChildStdout(#[allocative(skip)] Arc<Mutex<RefCell<ChildStdout>>>),
+    File(#[allocative(skip)] Arc<Mutex<std::fs::File>>),
 }
 
 #[derive(Debug, ProvidesStaticType, Dupe, Clone, NoSerialize, Allocative)]
@@ -52,6 +53,7 @@ impl Display for Readable {
             Self::Stdin(_) => write!(f, "stream<stdin>"),
             Self::ChildStderr(_) => write!(f, "stream<child_stderr>"),
             Self::ChildStdout(_) => write!(f, "stream<child_stdout>"),
+            Self::File(_) => write!(f, "stream<file>"),
         }
     }
 }
@@ -130,6 +132,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
             Readable::Stdin(stdin) => stdin.is_terminal(),
             Readable::ChildStderr(_) => false,
             Readable::ChildStdout(_) => false,
+            Readable::File(_) => false,
         })
     }
 
@@ -157,6 +160,9 @@ fn readable_methods(registry: &mut MethodsBuilder) {
                 Readable::ChildStdout(stdout) => {
                     stdout.lock().unwrap().borrow_mut().read_to_end(&mut buf)?;
                 }
+                Readable::File(file) => {
+                    file.lock().unwrap().read_to_end(&mut buf)?;
+                }
             };
             Ok(Bytes::from(buf.as_slice()))
         } else {
@@ -170,6 +176,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
                 Readable::ChildStdout(stdout) => {
                     stdout.lock().unwrap().borrow_mut().read(&mut buf)?
                 }
+                Readable::File(file) => file.lock().unwrap().read(&mut buf)?,
             };
             buf.truncate(bytes_read);
             Ok(Bytes::from(buf.as_slice()))
@@ -194,6 +201,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
                 .unwrap()
                 .borrow_mut()
                 .read_to_string(&mut buf)?,
+            Readable::File(file) => file.lock().unwrap().read_to_string(&mut buf)?,
         };
 
         Ok(buf)
