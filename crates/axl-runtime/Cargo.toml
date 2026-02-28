@@ -20,6 +20,7 @@ starlark_derive = "0.13.0"
 starlark_map = "0.13.0"
 
 anyhow = "1.0.98"
+semver = "1"
 thiserror = "2.0.12"
 
 prost = "0.14.1"

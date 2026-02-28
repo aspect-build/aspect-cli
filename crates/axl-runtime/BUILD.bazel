@@ -44,6 +44,7 @@ rust_library(
         "@crates//:wasmi",
         "@crates//:zstd",
         "@crates//:base64",
+        "@crates//:semver",
         "//crates/axl-proto",
         "//crates/build-event-stream",
         "//crates/galvanize",

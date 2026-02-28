@@ -143,19 +143,60 @@ pub struct Build {
 }
 
 impl Build {
-    pub fn pid() -> io::Result<u32> {
+    pub fn server_info() -> io::Result<(u32, semver::Version)> {
         let mut cmd = Command::new("bazel");
         cmd.arg("info");
         cmd.arg("server_pid");
+        cmd.arg("release");
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::null());
         cmd.stdin(Stdio::null());
         let c = cmd.spawn()?.wait_with_output()?;
         if !c.status.success() {
-            return Err(io::Error::other(anyhow!("failed to determine Bazel pid")));
+            return Err(io::Error::other(anyhow!(
+                "failed to determine Bazel server info"
+            )));
         }
-        let bytes: [u8; 4] = c.stdout[0..4].try_into().unwrap();
-        Ok(u32::from_be_bytes(bytes))
+
+        // When bazel info is called with multiple keys it emits "key: value" lines.
+        let stdout = String::from_utf8_lossy(&c.stdout);
+        let mut pid: Option<u32> = None;
+        let mut version: Option<semver::Version> = None;
+        for line in stdout.lines() {
+            if let Some((key, value)) = line.split_once(": ") {
+                match key.trim() {
+                    "server_pid" => {
+                        pid = value.trim().parse::<u32>().ok();
+                    }
+                    "release" => {
+                        // Value is like "release 9.0.0" or "release 9.0.0-rc1"
+                        let ver_str = value.trim().trim_start_matches("release ").trim();
+                        // Strip pre-release suffix: "9.0.0-rc1" -> "9.0.0"
+                        let ver_str = ver_str.split('-').next().unwrap_or(ver_str);
+                        version = semver::Version::parse(ver_str)
+                            .map_err(|e| {
+                                io::Error::other(anyhow!(
+                                    "failed to parse Bazel version '{}': {}",
+                                    ver_str,
+                                    e
+                                ))
+                            })
+                            .ok();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let pid =
+            pid.ok_or_else(|| io::Error::other(anyhow!("bazel info did not return server_pid")))?;
+        let version = version.ok_or_else(|| {
+            io::Error::other(anyhow!(
+                "bazel info did not return a parseable release version"
+            ))
+        })?;
+
+        Ok((pid, version))
     }
 
     // TODO: this should return a thiserror::Error
@@ -172,7 +213,7 @@ impl Build {
         current_dir: Option<String>,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let pid = Self::pid()?;
+        let (pid, _) = Self::server_info()?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
