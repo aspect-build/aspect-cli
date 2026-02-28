@@ -296,8 +296,8 @@ fn instantiate_with_imports<'v>(
         // If WASM doesn't import this function, that's OK - just skip
     }
 
-    // Use instantiate() instead of instantiate_and_start() so that _start
-    // is not called automatically. The user should call instance.start() manually.
+    // Use the deprecated instantiate() instead of instantiate_and_start() so
+    // that _start is not called automatically — we need ensure_no_start().
     #[allow(deprecated)]
     let pre_instance = linker.instantiate(&mut store, &module)?;
     let instance = pre_instance.ensure_no_start(&mut store).map_err(|e| {

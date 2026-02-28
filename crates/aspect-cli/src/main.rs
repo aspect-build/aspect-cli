@@ -1,3 +1,4 @@
+mod auth;
 mod cmd_tree;
 mod flags;
 mod helpers;
@@ -24,7 +25,7 @@ use tokio::task;
 use tokio::task::spawn_blocking;
 use tracing::info_span;
 
-use crate::cmd_tree::{BUILTIN_COMMAND_DISPLAY_ORDER, CommandTree, make_command_from_task};
+use crate::cmd_tree::{make_command_from_task, CommandTree};
 use crate::helpers::{find_repo_root, get_default_axl_search_paths, search_sources};
 
 // Helper function to check if debug mode is enabled based on the ASPECT_DEBUG environment variable.
@@ -62,6 +63,16 @@ async fn main() -> miette::Result<ExitCode> {
     let _tracing = trace::init();
     // Enter the root tracing span for the entire application.
     let _root = info_span!("root").entered();
+
+    // Early intercept for built-in auth commands.
+    // These run before Starlark evaluation because they:
+    // 1. Don't need any project context (no .aspect/ directory required)
+    // 2. Need async I/O for the localhost OAuth callback server
+    // 3. Must work outside any repository
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("auth") {
+        return auth::handle(args).await;
+    }
 
     // Get the current working directory.
     let current_work_dir = std::env::current_dir().into_diagnostic()?;
@@ -250,19 +261,14 @@ async fn main() -> miette::Result<ExitCode> {
         let mut tree = CommandTree::default();
 
         // Create the base Clap command for the 'aspect' CLI.
-        // TODO: add .about()
         let cmd = Command::new("aspect")
-            // set binary name to "aspect" in help
             .bin_name("aspect")
-            // add an about string
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
-            // customize the subcommands section title to "Tasks:"
-            .subcommand_help_heading("Tasks")
             // customize the usage string to use <TASK>
-            .subcommand_value_name("TASK")
-            // handle --version and -v flags
+            .subcommand_value_name("TASK|GROUP|COMMAND")
+            .disable_help_subcommand(true)
             .version(cargo_pkg_short_version())
-            .disable_version_flag(true) // disable auto -V / --version
+            .disable_version_flag(true)
             .arg(
                 Arg::new("version")
                     .short('v')
@@ -270,12 +276,18 @@ async fn main() -> miette::Result<ExitCode> {
                     .action(ArgAction::Version)
                     .help("Print version"),
             )
-            // add version command
+            // Built-in commands (hidden from Tasks, shown in Commands via help_template)
             .subcommand(
                 Command::new("version")
                     .about("Print version")
-                    .display_order(BUILTIN_COMMAND_DISPLAY_ORDER),
-            );
+                    .hide(true),
+            )
+            .subcommand(
+                Command::new("help")
+                    .about("Print this message or the help of the given subcommand(s)")
+                    .hide(true),
+            )
+            .subcommand(auth::command().hide(true));
 
         // Convert each task into a Clap subcommand and insert into the command tree.
         for (i, task) in tasks.iter().enumerate() {
@@ -311,8 +323,44 @@ async fn main() -> miette::Result<ExitCode> {
                 .into_diagnostic()?;
         }
 
+        // Build the "Task Groups:" section from the tree before converting.
+        let group_names = tree.group_names();
+        let task_groups_section = if group_names.is_empty() {
+            String::new()
+        } else {
+            // Find the longest group name for column alignment
+            let max_len = group_names.iter().map(|n| n.len()).max().unwrap_or(0);
+            let mut section = String::from("\n\n\x1b[1;4mTask Groups:\x1b[0m\n");
+            for name in &group_names {
+                let padding = " ".repeat(max_len - name.len() + 2);
+                section.push_str(&format!(
+                    "  \x1b[1m{}\x1b[0m{}\x1b[3m{}\x1b[0m task group\n",
+                    name, padding, name
+                ));
+            }
+            section
+        };
+
+        // Inject task groups into the help template.
+        let cmd = cmd.help_template(format!("\
+{{about-with-newline}}
+{{usage-heading}} {{usage}}
+
+\x1b[1;4mTasks:\x1b[0m
+{{subcommands}}{task_groups_section}
+\x1b[1;4mCommands:\x1b[0m
+  \x1b[1mauth\x1b[0m     Authenticate with Aspect
+  \x1b[1mversion\x1b[0m  Print version
+  \x1b[1mhelp\x1b[0m     Print this message or the help of the given subcommand(s)
+
+\x1b[1;4mOptions:\x1b[0m
+{{options}}"));
+
         // Convert the command tree into a full Clap command with subcommands.
         let cmd = tree.as_command(cmd, &[]).into_diagnostic()?;
+
+        // Clone before try_get_matches consumes cmd (needed for "aspect help")
+        let mut cmd_for_help = cmd.clone();
 
         // Parse command-line arguments against the Clap command structure.
         let matches = match cmd.try_get_matches() {
@@ -323,10 +371,17 @@ async fn main() -> miette::Result<ExitCode> {
             }
         };
 
-        // Handle the built-in 'version' subcommand if present.
-        if let Some("version") = matches.subcommand_name() {
-            println!("Aspect CLI {:}", cargo_pkg_version());
-            return Ok(ExitCode::SUCCESS);
+        // Handle built-in commands.
+        match matches.subcommand_name() {
+            Some("version") => {
+                println!("Aspect CLI {:}", cargo_pkg_version());
+                return Ok(ExitCode::SUCCESS);
+            }
+            Some("help") => {
+                cmd_for_help.print_help().into_diagnostic()?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            _ => {}
         }
 
         // Extract the deepest subcommand from the matches (drilling down through groups).
