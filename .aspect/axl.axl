@@ -417,6 +417,32 @@ def test_http(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
     return tc
 
+def test_conditional_flags(ctx: TaskContext, tc: int) -> int:
+    # Test 1: plain string flags still work (backward compat)
+    build1 = ctx.bazel.build(
+        "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild"],
+    )
+    tc = test_case(tc, build1.wait().success, "plain flags should still work")
+
+    # Test 2: always-matching conditional flag is applied
+    # ("--nobuild", ">=1") should always match; build completes with analysis only
+    build2 = ctx.bazel.build(
+        "//crates/aspect-cli:aspect-cli",
+        flags = [("--nobuild", ">=1")],
+    )
+    tc = test_case(tc, build2.wait().success, "always-matching conditional flag should be applied")
+
+    # Test 3: never-matching conditional flag is dropped
+    # "--ASPECT_NEVER_MATCH_FLAG_XYZ" would cause a hard bazel error if NOT dropped
+    build3 = ctx.bazel.build(
+        "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild", ("--ASPECT_NEVER_MATCH_FLAG_XYZ", ">=99999")],
+    )
+    tc = test_case(tc, build3.wait().success, "never-matching conditional flag should be silently dropped")
+
+    return tc
+
 def test_http_get_post(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     # Test HTTP get and post methods including unix_socket support
 
@@ -482,6 +508,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_http(ctx, tc, temp_dir)
     tc = test_bazel_info(ctx, tc)
     tc = test_http_get_post(ctx, tc, temp_dir)
+    tc = test_conditional_flags(ctx, tc)
 
     print(tc, "tests passed")
     return 0

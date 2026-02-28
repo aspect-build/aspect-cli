@@ -26,6 +26,36 @@ use starlark::{
 use crate::engine::store::AxlStore;
 use axl_proto;
 
+/// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
+/// a `Vec<String>`. Returns only the flags whose semver constraint matches `version`.
+/// When `version` is `None` all items must be plain strings (i.e. `Either::Left`).
+fn resolve_flags<'v>(
+    items: &[Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>],
+    version: Option<&semver::Version>,
+) -> anyhow::Result<Vec<String>> {
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Either::Left(s) => result.push(s.as_str().to_string()),
+            Either::Right((flag, constraint)) => {
+                let version =
+                    version.expect("server_info must be called when conditional flags are present");
+                let req = semver::VersionReq::parse(constraint.as_str()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "invalid version constraint '{}': {}",
+                        constraint.as_str(),
+                        e
+                    )
+                })?;
+                if req.matches(version) {
+                    result.push(flag.as_str().to_string());
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
 mod build;
 mod helpers;
 mod iter;
@@ -50,29 +80,47 @@ impl<'v> values::StarlarkValue<'v> for Bazel {
 
 #[starlark_module]
 pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
-    /// Build targets Bazel within AXL with ctx.bazel.build().
-    /// The result is a `Build` object, which has `artifacts()` (TODO),
-    /// `failures()` (TODO), and a `events()` functions that provide
-    /// iterators to the artifacts, failures, events respectively.
+    /// Build one or more Bazel targets.
     ///
-    /// Running `ctx.bazel.build()` does not block the Starlark thread. Explicitly
-    /// call `.wait()` on the `Build` object to wait until the invocation finishes.
+    /// Returns a `Build` object. The call does not block — use `.wait()` to
+    /// wait for the invocation to finish and retrieve its exit status.
     ///
-    /// You can pass in a single target or target pattern to build.
+    /// # Arguments
+    ///
+    /// * `targets` - One or more Bazel target patterns to build.
+    /// * `flags` - Bazel flags. Each element is either a plain `str` that is
+    ///   always included, or a `(flag, constraint)` tuple that is included only
+    ///   when the running Bazel version satisfies the
+    ///   [semver](https://semver.org) constraint. Pre-release versions are
+    ///   normalised before matching, so `8.0.0-rc1` is matched by `>=8`. An
+    ///   invalid constraint is a hard error.
+    /// * `startup_flags` - Bazel startup flags. Accepts the same plain string
+    ///   and `(flag, constraint)` tuple format as `flags`.
+    /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
+    ///   or a list of `BuildEventSink` values to forward events to remote sinks.
+    /// * `workspace_events` - Enable the workspace events stream.
+    /// * `execution_logs` - Enable the execution logs stream.
+    /// * `inherit_stdout` - Inherit stdout from the parent process.
+    /// * `inherit_stderr` - Inherit stderr from the parent process. Defaults to `True`.
+    /// * `current_dir` - Working directory for the Bazel invocation.
     ///
     /// **Examples**
     ///
     /// ```python
-    /// def _fancy_build_impl(ctx):
-    ///     io = ctx.std.io
-    ///     build = ctx.bazel.build(
-    ///         "//target/to:build"
-    ///         build_events = True,
-    ///     )
-    ///     for event in build.build_events():
-    ///         if event.type == "progress":
-    ///             io.stdout.write(event.payload.stdout)
-    ///             io.stderr.write(event.payload.stderr)
+    /// build = ctx.bazel.build("//my/pkg:target", flags = ["--config=release"])
+    /// status = build.wait()
+    /// ```
+    ///
+    /// ```python
+    /// build = ctx.bazel.build(
+    ///     "//my/pkg:target",
+    ///     flags = [
+    ///         "--config=release",
+    ///         ("--notmp_sandbox", ">=8"),
+    ///         ("--some_legacy_flag", "<7"),
+    ///     ],
+    /// )
+    /// status = build.wait()
     /// ```
     fn build<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -84,10 +132,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = false)] execution_logs: bool,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
-            values::StringValue,
+            Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
         #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
-            values::StringValue,
+            Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
         #[starlark(require = named, default = false)] inherit_stdout: bool,
         #[starlark(require = named, default = true)] inherit_stderr: bool,
@@ -98,6 +146,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(events) => (events, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
+        let has_conditional = flags.items.iter().any(|f| f.is_right())
+            || startup_flags.items.iter().any(|f| f.is_right());
+        let bazel_version = if has_conditional {
+            let (_, version) = build::Build::server_info()
+                .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
+            Some(version)
+        } else {
+            None
+        };
+        let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
+        let resolved_startup_flags = resolve_flags(&startup_flags.items, bazel_version.as_ref())?;
         let store = AxlStore::from_eval(eval)?;
         let build = build::Build::spawn(
             "build",
@@ -105,12 +164,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             build_events,
             execution_logs,
             workspace_events,
-            flags.items.iter().map(|f| f.as_str().to_string()).collect(),
-            startup_flags
-                .items
-                .iter()
-                .map(|f| f.as_str().to_string())
-                .collect(),
+            resolved_flags,
+            resolved_startup_flags,
             inherit_stdout,
             inherit_stderr,
             current_dir.into_option(),
@@ -119,29 +174,47 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(build)
     }
 
-    /// Build & test Bazel targets within AXL with ctx.bazel.test().
-    /// The result is a `Build` object, which has `artifacts()` (TODO),
-    /// `failures()` (TODO), and a `events()` functions that provide
-    /// iterators to the artifacts, failures, events respectively.
+    /// Build and test one or more Bazel targets.
     ///
-    /// Running `ctx.bazel.test()` does not block the Starlark thread. Explicitly
-    /// call `.wait()` on the `Build` object to wait until the invocation finishes.
+    /// Returns a `Build` object. The call does not block — use `.wait()` to
+    /// wait for the invocation to finish and retrieve its exit status.
     ///
-    /// You can pass in a single target or target pattern to test.
+    /// # Arguments
+    ///
+    /// * `targets` - One or more Bazel target patterns to test.
+    /// * `flags` - Bazel flags. Each element is either a plain `str` that is
+    ///   always included, or a `(flag, constraint)` tuple that is included only
+    ///   when the running Bazel version satisfies the
+    ///   [semver](https://semver.org) constraint. Pre-release versions are
+    ///   normalised before matching, so `8.0.0-rc1` is matched by `>=8`. An
+    ///   invalid constraint is a hard error.
+    /// * `startup_flags` - Bazel startup flags. Accepts the same plain string
+    ///   and `(flag, constraint)` tuple format as `flags`.
+    /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
+    ///   or a list of `BuildEventSink` values to forward events to remote sinks.
+    /// * `workspace_events` - Enable the workspace events stream.
+    /// * `execution_logs` - Enable the execution logs stream.
+    /// * `inherit_stdout` - Inherit stdout from the parent process.
+    /// * `inherit_stderr` - Inherit stderr from the parent process. Defaults to `True`.
+    /// * `current_dir` - Working directory for the Bazel invocation.
     ///
     /// **Examples**
     ///
     /// ```python
-    /// def _fancy_test_impl(ctx):
-    ///     io = ctx.std.io
-    ///     test = ctx.bazel.test(
-    ///         "//target/to:test"
-    ///         build_events = True,
-    ///     )
-    ///     for event in test.build_events():
-    ///         if event.type == "progress":
-    ///             io.stdout.write(event.payload.stdout)
-    ///             io.stderr.write(event.payload.stderr)
+    /// test = ctx.bazel.test("//my/pkg:test", flags = ["--test_output=errors"])
+    /// status = test.wait()
+    /// ```
+    ///
+    /// ```python
+    /// test = ctx.bazel.test(
+    ///     "//my/pkg:test",
+    ///     flags = [
+    ///         "--test_output=errors",
+    ///         ("--notmp_sandbox", ">=8"),
+    ///         ("--some_legacy_flag", "<7"),
+    ///     ],
+    /// )
+    /// status = test.wait()
     /// ```
     fn test<'v>(
         #[allow(unused)] this: values::Value<'v>,
@@ -153,10 +226,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = false)] execution_logs: bool,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
-            values::StringValue,
+            Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
         #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
-            values::StringValue,
+            Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
         #[starlark(require = named, default = false)] inherit_stdout: bool,
         #[starlark(require = named, default = true)] inherit_stderr: bool,
@@ -167,6 +240,17 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(events) => (events, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
+        let has_conditional = flags.items.iter().any(|f| f.is_right())
+            || startup_flags.items.iter().any(|f| f.is_right());
+        let bazel_version = if has_conditional {
+            let (_, version) = build::Build::server_info()
+                .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
+            Some(version)
+        } else {
+            None
+        };
+        let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
+        let resolved_startup_flags = resolve_flags(&startup_flags.items, bazel_version.as_ref())?;
         let store = AxlStore::from_eval(eval)?;
         let test = build::Build::spawn(
             "test",
@@ -174,12 +258,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             build_events,
             execution_logs,
             workspace_events,
-            flags.items.iter().map(|f| f.as_str().to_string()).collect(),
-            startup_flags
-                .items
-                .iter()
-                .map(|f| f.as_str().to_string())
-                .collect(),
+            resolved_flags,
+            resolved_startup_flags,
             inherit_stdout,
             inherit_stderr,
             current_dir.into_option(),
