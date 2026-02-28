@@ -1,0 +1,12 @@
+use_task("build.axl", "build")
+use_task("test.axl", "test")
+use_task("axl_add.axl", "add")
+
+# Configure delivery
+use_config("config/delivery.axl", "configure_delivery")
+
+# Configure builtins
+use_config("config/builtins.axl", "configure_builtins")
+
+# Configure artifact uploads
+use_config("config/artifacts.axl", "configure_artifacts")

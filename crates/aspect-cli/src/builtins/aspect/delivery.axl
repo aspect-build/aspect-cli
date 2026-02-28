@@ -1,0 +1,247 @@
+"""
+Delivery task that coordinates artifact delivery via deliveryd.
+
+Delivers each target via bazel run with stamping enabled, and signs artifacts
+to prevent re-delivery.
+
+Uses deliveryd (Unix socket HTTP server) for all delivery state operations.
+"""
+
+load("./fragments.axl", "DeliveryFragment", "HealthCheckFragment")
+
+load(
+    "./lib/deliveryd.axl",
+    deliveryd_query = "query",
+    deliveryd_deliver = "deliver",
+    deliveryd_record = "record",
+    deliveryd_delete_artifact = "delete_artifact",
+)
+
+
+# ANSI codes
+_BOLD = "\033[1m"
+_GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_RED = "\033[31m"
+_RESET = "\033[0m"
+
+def _style(text, codes, is_tty):
+    """Wrap text in ANSI codes if terminal is TTY."""
+    if is_tty:
+        return codes + text + _RESET
+    return text
+
+def _run_bazel(ctx, verb, target, flags):
+    """
+    Run a bazel command and return the exit code.
+    TODO: Implement ctx.bazel.run() when available.
+    """
+    print("    [TODO] bazel {} {} {}".format(verb, " ".join(flags), target))
+    return 0  # Simulate success
+
+# Helper to pad string to width
+def pad(s, width):
+    return s + " " * (width - len(s))
+
+
+def _deliver_target(ctx, endpoint, ci_host, workspace, build_url, bazel_flags, label, is_forced, target_state, is_tty):
+    """
+    Deliver a single target.
+
+    Args:
+        is_forced: If True, skip signature check and always deliver.
+        target_state: Dict with {output_sha, delivered, delivered_by} from deliveryd, or None.
+        is_tty: Whether terminal supports colors.
+
+    Returns (status: str, message: str) where status is one of:
+        - "success": Successfully delivered
+        - "skipped": Already delivered (only for non-forced)
+        - "build_failed": Bazel build failed
+        - "run_failed": Bazel run failed
+    """
+    output_sha = target_state.get("output_sha") if target_state else None
+
+    # For non-forced targets, check if already delivered
+    if not is_forced:
+        if target_state:
+            if target_state.get("delivered"):
+                return ("skipped", "Already delivered by {}".format(target_state.get("delivered_by")))
+        else:
+            # No state found - target may have been added before signatures
+            # were introduced. Proceed with delivery.
+            print("  {}: No delivery state found for {}, bypassing signature check".format(
+                _style("Warning", _BOLD + _YELLOW, is_tty), label))
+
+    # Run bazel to deliver the target with stamping
+    print("  {} {}...".format(_style("Delivering", _BOLD, is_tty), label))
+    exit_code = _run_bazel(ctx, "run", label, bazel_flags)
+
+    if exit_code != 0:
+        # Delivery failed - delete artifact metadata so it can be retried
+        if output_sha:
+            deliveryd_delete_artifact(ctx, endpoint, ci_host, output_sha, workspace)
+        return ("run_failed", "Delivery failed with exit code {}".format(exit_code))
+
+    # Sign the artifact to mark as delivered
+    if output_sha:
+        deliveryd_deliver(ctx, endpoint, ci_host, output_sha, workspace, build_url)
+
+    return ("success", "Delivered successfully")
+
+def _delivery_impl(ctx):
+    hc_fragment = ctx.fragments[HealthCheckFragment]
+
+    for hook in hc_fragment.pre_health_check:
+        hook(ctx)
+
+    for hook in hc_fragment.post_health_check:
+        result = hook(ctx)
+        if result != None:
+            fail(result)
+
+    fragment = ctx.fragments[DeliveryFragment]
+    fragment.delivery_start()
+
+    # Check if terminal supports colors
+    is_tty = ctx.std.io.stdout.is_tty
+
+    # deliveryd socket path (runners start deliveryd automatically and expose the socket via env)
+    endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
+    if not endpoint:
+        fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. deliveryd must be running.")
+
+    # Delivery context
+    ci_host = ctx.args.ci_host
+    workspace = ctx.args.workspace
+    build_url = ctx.args.build_url
+    commit_sha = ctx.args.commit_sha
+
+    # Build bazel flags for delivery
+    # Default: --stamp --noremote_upload_local_results --remote_download_outputs=toplevel
+    bazel_flags = ctx.args.bazel_flag
+    if not bazel_flags:
+        bazel_flags = ["--stamp"]
+
+    # Add flags that Workflows forces during delivery
+    bazel_flags.append("--noremote_upload_local_results")
+    bazel_flags.append("--remote_download_outputs=toplevel")
+
+    print(_style("Delivery:", _BOLD, is_tty))
+    print("  {}: {}".format(_style("deliveryd", _BOLD, is_tty), endpoint))
+    print("  {}: {}".format(_style("Host", _BOLD, is_tty), ci_host))
+    print("  {}: {}".format(_style("Commit", _BOLD, is_tty), commit_sha))
+    print("  {}: {}".format(_style("Workspace", _BOLD, is_tty), workspace))
+    print("  {}: {}".format(_style("URL", _BOLD, is_tty), build_url))
+    print("  {}: {}".format(_style("Flags", _BOLD, is_tty), bazel_flags))
+    print()
+
+
+    targets = ctx.args.targets
+    forced_targets = ctx.args.force_target
+
+    if not targets:
+        print(_style("No targets to deliver", _BOLD + _YELLOW, is_tty))
+        return 0
+
+    print(_style("Found {} target(s) to deliver:".format(len(targets)), _BOLD, is_tty))
+    for t in targets:
+        forced_marker = _style(" (forced)", _YELLOW, is_tty) if t in forced_targets else ""
+        print("  - {}{}".format(t, forced_marker))
+    print("")
+
+    # Record each target with deliveryd (so they can be queried/signed)
+    for label in targets:
+        # Use hash of commit_sha + label as output_sha
+        # TODO: query remote-cache action key to determine target hash.
+        output_sha = hash(commit_sha + label)
+        deliveryd_record(ctx, endpoint, ci_host, commit_sha, workspace, label, str(output_sha))
+
+    # Query deliveryd for delivery state of all targets
+    delivery_state = deliveryd_query(ctx, endpoint, ci_host, commit_sha, workspace)
+
+    # Track results
+    results = []  # List of (label, status, delivered_by)
+    success_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    for label in targets:
+        is_forced = label in forced_targets
+        target_state = delivery_state.get(label)
+        status, message = _deliver_target(
+            ctx, endpoint, ci_host, workspace, build_url,
+            bazel_flags, label, is_forced, target_state, is_tty
+        )
+
+        fragment.deliver_target(label, is_forced)
+
+        forced_marker = " (FORCED)" if is_forced else ""
+        if status == "success":
+            success_count += 1
+            results.append((label, "OK" + forced_marker, "ok", "-"))
+        elif status == "skipped":
+            skipped_count += 1
+            delivered_by = target_state.get("delivered_by") if target_state else "-"
+            results.append((label, "SKIP", "skip", delivered_by or "-"))
+        else:  # build_failed or run_failed
+            failed_count += 1
+            results.append((label, "FAIL" + forced_marker, "fail", "-"))
+
+    # Calculate column width for alignment
+    max_label_width = len("TARGET")
+    for label, _, _, _ in results:
+        if len(label) > max_label_width:
+            max_label_width = len(label)
+
+
+    # Calculate status column width
+    max_status_width = len("STATUS")
+    for _, status_text, _, _ in results:
+        if len(status_text) > max_status_width:
+            max_status_width = len(status_text)
+
+    # Style mapping for status types (bold + color)
+    status_styles = {"ok": _BOLD + _GREEN, "skip": _BOLD + _YELLOW, "fail": _BOLD + _RED}
+
+    # Print table header (bold)
+    print("")
+    header = "  {}  {}  {}".format(pad("TARGET", max_label_width), pad("STATUS", max_status_width), "DELIVERED BY")
+    print(_style(header, _BOLD, is_tty))
+    for label, status_text, status_type, delivered_by in results:
+        styled_status = _style(status_text, status_styles[status_type], is_tty)
+        # Pad based on original text length, then apply style
+        padding = " " * (max_status_width - len(status_text))
+        print("  {}  {}{}  {}".format(pad(label, max_label_width), styled_status, padding, delivered_by))
+
+    # Summary (single line with bold colors)
+    print("")
+    summary_parts = [
+        _style("{} delivered".format(success_count), _BOLD + _GREEN, is_tty),
+        _style("{} skipped".format(skipped_count), _BOLD + _YELLOW, is_tty),
+        _style("{} failed".format(failed_count), _BOLD + _RED, is_tty),
+    ]
+    print("{} {}".format(_style("Summary:", _BOLD, is_tty), ", ".join(summary_parts)))
+
+    fragment.delivery_end()
+
+    if failed_count > 0:
+        return 1
+
+    return 0
+
+
+
+delivery = task(
+    name = "delivery",
+    implementation = _delivery_impl,
+    fragments = [DeliveryFragment, HealthCheckFragment],
+    args = {
+        "ci_host": args.string(default = "bk"),
+        "commit_sha": args.string(),
+        "workspace": args.string(default = "."),
+        "build_url": args.string(default = "-"),
+        "bazel_flag": args.string_list(default = []),
+        "force_target": args.string_list(default = []),
+        "targets": args.trailing_var_args()
+    },
+)

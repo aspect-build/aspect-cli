@@ -1,0 +1,46 @@
+"""Configures builtin tasks for Workflows"""
+
+load("../lib/environment.axl",
+    "get_environment",
+    "get_bazelrc_flags",
+    "print_environment_info",
+)
+load("../lib/health_check.axl", "agent_health_check")
+load("../lib/build_metadata.axl", "get_build_metadata_flags")
+load("../fragments.axl", "BazelFragment", "HealthCheckFragment")
+
+def configure_builtins(ctx: ConfigContext):
+    environment = get_environment(ctx.std)
+
+    # Configure fragments globally
+    bazel_fragment = ctx.fragments[BazelFragment]
+    hc_fragment = ctx.fragments[HealthCheckFragment]
+
+    if environment:
+        hc_fragment.pre_health_check.append(lambda ctx: print_environment_info(environment))
+        hc_fragment.pre_health_check.append(lambda ctx: agent_health_check(ctx, environment))
+
+        # Flags to optimize build & test
+        (startup_flags, build_flags) = get_bazelrc_flags(
+            environment = environment,
+            root_dir = ctx.std.env.root_dir(),
+        )
+
+        metadata_flags = get_build_metadata_flags(ctx.std)
+
+        bessie_endpoint = environment.build_events.backend
+        bessie_sinks = []
+        if bessie_endpoint:
+            bessie_sinks.append(bazel.build_events.grpc(
+                uri = bessie_endpoint,
+                metadata = {} # TODO: how does bessie authenticate?
+            ))
+
+        bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
+        if "aspect" in bazel_version_output.stdout:
+            bazel_fragment.extra_startup_flags.append("--aspect:disable_plugins")
+
+        bazel_fragment.extra_startup_flags.extend(startup_flags)
+        bazel_fragment.extra_flags.extend(build_flags)
+        bazel_fragment.extra_flags.extend(metadata_flags)
+        bazel_fragment.build_event_sinks.extend(bessie_sinks)

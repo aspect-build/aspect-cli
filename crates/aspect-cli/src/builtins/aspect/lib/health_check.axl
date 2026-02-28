@@ -1,0 +1,188 @@
+"""
+Agent Health Check Library
+
+Implements the runner agent health check step that runs at the start of every
+job. It does two things:
+
+1. Waits for warming — polls until the runner's cache warming completes, then
+   reports the result.
+2. Displays the last runner health check — reads the JSON file written by the
+   fleet service between jobs and prints its contents.
+"""
+
+load("./environment.axl", "AWS_LOG_GROUP", "DEFAULT_BIN_DIR", "get_environment", "is_warming_complete")
+
+
+def _url_encode(s):
+    """Percent-encode a string for use in URLs."""
+    result = ""
+    for c in s.elems():
+        if c == " ":
+            result += "%20"
+        elif c == "\"":
+            result += "%22"
+        elif c == "\n":
+            result += "%0A"
+        elif c == "=":
+            result += "%3D"
+        elif c == "/":
+            result += "%2F"
+        else:
+            result += c
+    return result
+
+
+def _bootstrap_log_url(environment):
+    """
+    Construct the bootstrap log URL based on the cloud provider.
+
+    Returns the URL string, or None if the provider cannot be determined.
+    """
+    if environment.cloud_provider == "aws":
+        return _aws_bootstrap_log_url(environment)
+    elif environment.cloud_provider == "gcp":
+        return _gcp_bootstrap_log_url(environment)
+    return None
+
+
+def _aws_bootstrap_log_url(environment):
+    """Construct AWS CloudWatch Logs URL for bootstrap logs."""
+    region = environment.region
+    instance_id = environment.instance_id
+
+    # URL-encode the log group: replace "/" with "%252F" (double-encoded)
+    escaped_log_group = AWS_LOG_GROUP.replace("/", "%252F")
+
+    return (
+        "https://" + region + ".console.aws.amazon.com/cloudwatch/home"
+        + "?region=" + region
+        + "#logsV2:log-groups/log-group/" + escaped_log_group
+        + "/log-events/" + instance_id
+    )
+
+
+def _gcp_bootstrap_log_url(environment):
+    """Construct GCP Cloud Logging URL for bootstrap logs."""
+    instance_id = environment.instance_id
+    project_id = environment.account
+
+    query = (
+        'resource.type="gce_instance"\n'
+        + 'resource.labels.instance_id=' + instance_id + '\n'
+        + 'log_name="projects/' + project_id + '/logs/google_metadata_script_runner"'
+    )
+
+    return (
+        "https://console.cloud.google.com/logs/query"
+        + ";query=" + _url_encode(query)
+        + ";duration=P30D"
+        + "?referrer=search&project=" + project_id
+    )
+
+
+def _wait_for_warming(std, environment):
+    """
+    Wait for warming to complete and report the result.
+
+    If warming is not configured, returns immediately.
+    """
+    # If warming is not configured, skip entirely
+    if not environment.runner.warming_enabled:
+        return environment
+
+    # If warming hasn't completed yet, block until it does.
+    # The bootstrap process runs concurrently. If it hits a critical error,
+    # it terminates the runner — so this loop will not hang indefinitely.
+    if not environment.runner.warming_complete:
+        print("Waiting for warming to complete...")
+        for _ in forever(1000):
+            if is_warming_complete(std):
+                break
+
+    # Re-read environment to pick up warming result fields.
+    # TODO: replace with agent http api call once available
+    environment = get_environment(std)
+
+    # Report warming result
+    if environment.runner.warming_current_cache:
+        print("Runner warmed from cache version: " + environment.runner.warming_current_cache + "\n")
+    elif environment.runner.runner_job_history == "":
+        # This is the first job on the runner and warming failed.
+        # On subsequent jobs, previous work has already populated caches,
+        # so no warning is needed.
+        print("Warming was unsuccessful. This first build on this runner will be cold.")
+        url = _bootstrap_log_url(environment.runner)
+        if url:
+            print("See bootstrap logs for more details:")
+            print(url + "\n")
+
+    return environment
+
+
+def _display_bazel_health(health):
+    """
+    Display the bazel health check result.
+    """
+    if health.outcome == "healthy":
+        print("\n\u2022 Bazel Health")
+        print("\t\u2713 bazel health check passed")
+    elif health.outcome == "unhealthy":
+        print("\n\u2022 Bazel Health")
+        print("\t\u2717 bazel health check failed: " + (health.message or "unknown error"))
+    elif health.outcome == "inconclusive":
+        print("\n\u2022 Bazel Health")
+        print("\t? bazel health check inconclusive: " + (health.message or "unknown"))
+
+
+def _display_runner_health(environment):
+    """
+    Display the last runner health check results.
+
+    Reads the JSON file written by the fleet service between jobs.
+    """
+    print("\x1b[1;4;34mRunner Health\x1b[0m")
+
+    if not environment.runner.last_health_check:
+        print("Health check has not yet been run on this runner")
+        return
+
+    data = json.decode(environment.runner.last_health_check)
+
+    # data.timestamp is a unix epoch integer
+    # data.output is a pre-formatted multi-line string
+    print("Last run on " + str(data["timestamp"]) + "\n")
+    print(data["output"])
+
+
+def agent_health_check(ctx, environment):
+    """
+    Post health check hook for HealthCheckFragment.
+
+    Runs the agent health check at the start of every job:
+    1. Waits for warming to complete
+    2. Displays the last runner health check
+    3. Runs the Bazel health check and displays the result
+
+    Args:
+        ctx: TaskContext
+
+    Returns:
+        None if healthy, or a str error message if the Bazel server is unhealthy.
+    """
+    if environment.ci.host == "buildkite":
+        print("--- :aspect: Runner Health Check")
+
+    environment = _wait_for_warming(ctx.std, environment)
+    _display_runner_health(environment)
+    health = ctx.bazel.health_check()
+    _display_bazel_health(health)
+
+    if environment.ci.host == "buildkite":
+        print("--- :bazel: Running %s" % ctx.task.name)
+
+    if health.outcome == "unhealthy":
+        signal_bin = DEFAULT_BIN_DIR + "/signal_instance_unhealthy"
+        if ctx.std.fs.exists(signal_bin):
+            ctx.std.process.command(signal_bin).spawn().wait()
+        return health.message or "Bazel server is unhealthy"
+    return None
