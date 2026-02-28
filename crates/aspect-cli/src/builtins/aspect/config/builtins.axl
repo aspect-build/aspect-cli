@@ -1,47 +1,34 @@
 """Configures builtin tasks for Workflows"""
 
-load("../lib/platform.axl",
-    "read_platform_config",
-    "read_host_config",
+load("../lib/environment.axl",
+    "get_environment",
     "get_bazelrc_flags",
-    "DEFAULT_PLATFORM_DIR"
+    "print_environment_info",
 )
 load("../lib/health_check.axl", "agent_health_check")
-load("../lib/environment.axl", "workflows_runner_env")
 load("../lib/build_metadata.axl", "get_build_metadata_flags")
 load("../fragments.axl", "BazelFragment", "HealthCheckFragment")
-load("./artifacts.axl", "configure_artifacts")
-
-def _post_health_check(ctx):
-    print("--- :aspect: Agent Health Check")
-    return agent_health_check(ctx)
 
 def configure_builtins(ctx: ConfigContext):
-    UNDER_WORKFLOWS = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION")
-    is_buildkite = bool(ctx.std.env.var("BUILDKITE"))
-    if UNDER_WORKFLOWS:
-        if is_buildkite:
-            print("--- :aspect: Workflows Runner Environment")
-        workflows_runner_env(ctx.std.fs)
-    # Read platform config from disk
-    platform_config = read_platform_config(ctx.std.fs)
-    # Read host config from environment
-    host_config = read_host_config(ctx.std.env, ctx.std.io)
+    environment = get_environment(ctx.std)
 
     # Configure fragments globally
     bazel_fragment = ctx.fragments[BazelFragment]
     hc_fragment = ctx.fragments[HealthCheckFragment]
 
-    if UNDER_WORKFLOWS:
-        # Generate bazelrc content
+    if environment:
+        hc_fragment.pre_health_check.append(lambda ctx: print_environment_info(environment))
+        hc_fragment.pre_health_check.append(lambda ctx: agent_health_check(ctx, environment))
+
+        # Flags to optimize build & test
         (startup_flags, build_flags) = get_bazelrc_flags(
-            platform_config = platform_config,
-            host_config = host_config,
-            bazel_version = "9.0.0",
-            root_dir = ctx.std.env.root_dir,
+            environment = environment,
+            root_dir = ctx.std.env.root_dir(),
         )
 
-        bessie_endpoint = platform_config.get("bessie_endpoint", None)
+        metadata_flags = get_build_metadata_flags(ctx.std)
+
+        bessie_endpoint = environment.build_events.backend
         bessie_sinks = []
         if bessie_endpoint:
             bessie_sinks.append(bazel.build_events.grpc(
@@ -55,14 +42,5 @@ def configure_builtins(ctx: ConfigContext):
 
         bazel_fragment.extra_startup_flags.extend(startup_flags)
         bazel_fragment.extra_flags.extend(build_flags)
-        metadata_flags = get_build_metadata_flags(ctx.std.env, ctx.std.process, workspace = ".")
         bazel_fragment.extra_flags.extend(metadata_flags)
-        bazel_fragment.build_start.append(lambda ctx, state: print("+++ :bazel: Building"))
         bazel_fragment.build_event_sinks.extend(bessie_sinks)
-        if is_buildkite:
-            hc_fragment.post_health_check.append(_post_health_check)
-        else:
-            hc_fragment.post_health_check.append(agent_health_check)
-
-    # Wire artifact uploads last so it wraps existing hooks
-    configure_artifacts(ctx)

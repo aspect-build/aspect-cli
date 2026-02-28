@@ -219,16 +219,12 @@ def _collect_gitlab(env, meta):
                 meta[k] = v
 
 
-def get_build_metadata_flags(env, process, workspace, task_id = None, task_name = None):
+def get_build_metadata_flags(std):
     """
     Generate --build_metadata=KEY=VALUE flags for Bazel invocations.
 
     Args:
-        env: Environment interface (ctx.std.env)
-        process: Process interface (ctx.std.process)
-        workspace: Workspace name (e.g. ".")
-        task_id: Optional task ID string
-        task_name: Optional task name string
+        std: Standard context (ctx.std)
 
     Returns:
         list of --build_metadata=KEY=VALUE strings (empty values are skipped)
@@ -236,17 +232,17 @@ def get_build_metadata_flags(env, process, workspace, task_id = None, task_name 
     meta = {}
 
     # Step 1: Collect CI host metadata (provides CI-specific fields as fallback)
-    if env.var("GITHUB_ACTIONS"):
-        _collect_github(env, meta)
-    elif env.var("BUILDKITE"):
-        _collect_buildkite(env, meta)
-    elif env.var("CIRCLECI"):
-        _collect_circleci(env, meta)
-    elif env.var("GITLAB_CI"):
-        _collect_gitlab(env, meta)
+    if std.env.var("GITHUB_ACTIONS"):
+        _collect_github(std.env, meta)
+    elif std.env.var("BUILDKITE"):
+        _collect_buildkite(std.env, meta)
+    elif std.env.var("CIRCLECI"):
+        _collect_circleci(std.env, meta)
+    elif std.env.var("GITLAB_CI"):
+        _collect_gitlab(std.env, meta)
 
     # Step 2: Run git show and overwrite commit fields (git is the primary source)
-    git_data = _git_show(process)
+    git_data = _git_show(std.process)
     for k, v in git_data.items():
         meta[k] = v
 
@@ -254,15 +250,7 @@ def get_build_metadata_flags(env, process, workspace, task_id = None, task_name 
     if not meta.get("USER") and meta.get("COMMIT_AUTHOR"):
         meta["USER"] = meta["COMMIT_AUTHOR"]
 
-    # Step 4: Set workspace and task context if provided
-    if workspace:
-        meta["WORKSPACE"] = workspace
-    if task_id:
-        meta["ASPECT_TASK_ID"] = task_id
-    if task_name:
-        meta["ASPECT_TASK_NAME"] = task_name
-
-    # Step 5: Build --build_metadata=KEY=VALUE strings, skipping empty values
+    # Step 4: Build --build_metadata=KEY=VALUE strings, skipping empty values
     flags = []
     for key, value in meta.items():
         if value:

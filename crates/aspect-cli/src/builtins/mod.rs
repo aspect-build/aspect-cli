@@ -37,10 +37,6 @@ const ASPECT: Builtin = Builtin {
             include_str!("./aspect/lib/deliveryd.axl"),
         ),
         (
-            "lib/platform.axl",
-            include_str!("./aspect/lib/platform.axl"),
-        ),
-        (
             "lib/health_check.axl",
             include_str!("./aspect/lib/health_check.axl"),
         ),
