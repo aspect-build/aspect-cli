@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::process::Stdio;
 
 use allocative::Allocative;
 use derive_more::Display;
 use either::Either;
+use starlark::collections::SmallMap;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -209,6 +211,59 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// ```
     fn query<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<query::Query> {
         Ok(query::Query::new())
+    }
+
+    /// Run `bazel info` and return all key/value pairs as a dict.
+    ///
+    /// Blocks until the command completes. Raises an error if Bazel exits
+    /// with a non-zero code.
+    ///
+    /// # Arguments
+    /// * `workdir`: workspace root to run `bazel info` in (default: inferred from ctx)
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// def _show_info_impl(ctx):
+    ///     info = ctx.bazel.info()
+    ///     print(info["output_base"])
+    ///     print(info["execution_root"])
+    /// ```
+    fn info<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] workdir: NoneOr<String>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<SmallMap<String, String>> {
+        let store = AxlStore::from_eval(eval)?;
+        let workdir = workdir
+            .into_option()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| store.root_dir.clone());
+
+        let output = std::process::Command::new("bazel")
+            .arg("info")
+            .current_dir(&workdir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "bazel info failed with exit code {:?}",
+                output.status.code()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut map = SmallMap::new();
+        for line in stdout.lines() {
+            if let Some((key, value)) = line.split_once(": ") {
+                map.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+        Ok(map)
     }
 }
 
