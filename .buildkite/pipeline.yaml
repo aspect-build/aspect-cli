@@ -5,6 +5,7 @@ steps:
     command: |
       echo "--- :aspect-build: Workflows environment"
       /etc/aspect/workflows/bin/configure_workflows_env
+      env | sort | grep ^ASPECT_WORKFLOWS_
       echo "--- :stethoscope: Agent health check"
       /etc/aspect/workflows/bin/agent_health_check
       echo "--- :bazel: bazel test //..."
@@ -67,6 +68,7 @@ steps:
     command: |
       echo "--- :aspect-build: Workflows environment"
       /etc/aspect/workflows/bin/configure_workflows_env
+      env | sort | grep ^ASPECT_WORKFLOWS_
       echo "--- :stethoscope: Agent health check"
       /etc/aspect/workflows/bin/agent_health_check
       echo "--- :bazel: bazel run //tools/format:format.check"
