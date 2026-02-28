@@ -1,20 +1,315 @@
 """
-Configure Workflows Environment Library
+Workflows Environment Library
 
-Prints debug/diagnostic information about the runner: the Workflows product
-version, whether warming is enabled, and cloud platform metadata (region,
-instance type, spot/preemptible status, bootstrap log URLs, etc.).
-
-This is purely informational output for debugging — no side effects.
+Reads runner environment from environment variables and exposes it as typed
+records. Also provides bazelrc flag generation and host/CI detection.
 """
 
-load("./platform.axl", "DEFAULT_PLATFORM_DIR")
+DEFAULT_WORKFLOWS_DIR = "/etc/aspect/workflows"
+DEFAULT_STORAGE_PATH = "/mnt/ephemeral"
+DEFAULT_PLATFORM_DIR = DEFAULT_WORKFLOWS_DIR + "/platform"
+DEFAULT_BIN_DIR = DEFAULT_WORKFLOWS_DIR + "/bin"
 
 # AWS CloudWatch log group
 AWS_LOG_GROUP = "/aw/runner/cloud-init/output"
 
 
-def _url_encode(s):
+_ENV_VARS = {
+    "bessie_endpoint": "ASPECT_WORKFLOWS_BES_BACKEND",
+    "build_result_ui_base_url": "ASPECT_WORKFLOWS_BES_RESULTS_URL",
+    "remote_cache_address": "ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX",
+    "remote_cache_endpoint": "ASPECT_WORKFLOWS_REMOTE_CACHE",
+    "storage_path": "ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH",
+    "instance_id": "ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID",
+    "instance_name": "ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME",
+    "instance_type": "ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE",
+    "account": "ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT",
+    "region": "ASPECT_WORKFLOWS_RUNNER_REGION",
+    "az": "ASPECT_WORKFLOWS_RUNNER_AZ",
+    "product_version": "ASPECT_WORKFLOWS_RUNNER_VERSION",
+}
+
+_MARKER_ENV_VARS = {
+    "preemptible": "ASPECT_WORKFLOWS_RUNNER_PREEMPTIBLE",
+    "warming_enabled": "ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED",
+}
+
+_CLOUD_PROVIDER_ENV = "ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER"
+
+RemoteCache = record(
+    endpoint = field(str, default = ""),
+    address = field(str, default = ""),
+)
+
+BuildEvents = record(
+    backend = field(str, default = ""),
+    results_url = field(str, default = ""),
+)
+
+Runner = record(
+    storage_path = field(str, default = DEFAULT_STORAGE_PATH),
+    product_version = field(str, default = ""),
+    instance_id = field(str, default = ""),
+    instance_name = field(str, default = ""),
+    instance_type = field(str, default = ""),
+    account = field(str, default = ""),
+    region = field(str, default = ""),
+    az = field(str, default = ""),
+    preemptible = field(bool, default = False),
+    warming_enabled = field(bool, default = False),
+    cloud_provider = field(str, default = ""),
+    # TODO: replace with agent http api call once available
+    warming_complete = field(bool, default = False),
+    warming_current_cache = field(str, default = ""),
+    runner_job_history = field(str, default = ""),
+    last_health_check = field(str, default = ""),
+)
+
+CI = record(
+    host = field(str, default = ""),
+    scm_repo_name = field(str, default = ""),
+    supports_curses = field(bool, default = False),
+)
+
+Environment = record(
+    remote_cache = RemoteCache,
+    build_events = BuildEvents,
+    runner = Runner,
+    ci = CI,
+)
+
+# --- Reading environment ---
+
+def _read_ci(std) -> CI:
+    ci_host = ""
+    ci_scm_repo_name = ""
+    ci_supports_curses = std.io.stdout.is_tty
+    if std.env.var("BUILDKITE_REPO"):
+        ci_host = "buildkite"
+        ci_scm_repo_name = _parse_git_url_name(std.env.var("BUILDKITE_REPO"))
+        ci_supports_curses = True
+    elif std.env.var("GITHUB_REPOSITORY"):
+        ci_host = "github"
+        repo = std.env.var("GITHUB_REPOSITORY")
+        ci_scm_repo_name = repo.split("/")[-1] if "/" in repo else repo
+    elif std.env.var("CIRCLE_PROJECT_REPONAME"):
+        ci_host = "circleci"
+        ci_scm_repo_name = std.env.var("CIRCLE_PROJECT_REPONAME")
+    elif std.env.var("CI_PROJECT_NAME"):
+        ci_host = "gitlab"
+        ci_scm_repo_name = std.env.var("CI_PROJECT_NAME")
+    return CI(
+        host = ci_host,
+        scm_repo_name = ci_scm_repo_name,
+        supports_curses = ci_supports_curses,
+    )
+
+
+def _build_environment(config: dict, ci: CI = CI()) -> Environment:
+    return Environment(
+        remote_cache = RemoteCache(
+            endpoint = config.get("remote_cache_endpoint", ""),
+            address = config.get("remote_cache_address", ""),
+        ),
+        build_events = BuildEvents(
+            backend = config.get("bessie_endpoint", ""),
+            results_url = config.get("build_result_ui_base_url", ""),
+        ),
+        runner = Runner(
+            storage_path = config.get("storage_path", DEFAULT_STORAGE_PATH),
+            product_version = config.get("product_version", ""),
+            instance_id = config.get("instance_id", ""),
+            instance_name = config.get("instance_name", ""),
+            instance_type = config.get("instance_type", ""),
+            account = config.get("account", ""),
+            region = config.get("region", ""),
+            az = config.get("az", ""),
+            preemptible = bool(config.get("preemptible")),
+            warming_enabled = bool(config.get("warming_enabled")),
+            cloud_provider = config.get("cloud_provider", ""),
+            warming_complete = bool(config.get("warming_complete")),
+            warming_current_cache = config.get("warming_current_cache", ""),
+            runner_job_history = config.get("runner_job_history"),
+            last_health_check = config.get("last_health_check", ""),
+        ),
+        ci = ci,
+    )
+
+
+# TODO: flip legacy default to False once all deployments expose ASPECT_WORKFLOWS_* env vars.
+def get_environment(std, legacy: bool = True, platform_dir: str = DEFAULT_PLATFORM_DIR) -> Environment | None:
+    """
+    Build an Environment from environment variables, or from the platform
+    directory when legacy = True.
+
+    Args:
+        std: Standard context (ctx.std)
+        legacy: when True, reads from platform directory files instead of env vars
+        platform_dir: Path to platform config directory; only used when legacy = True
+
+    Returns:
+        Environment record
+    """
+    if not std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION"):
+        return None
+
+    if legacy:
+        return legacy_get_environment(std, platform_dir)
+
+    config = {}
+
+    for key, env_var in _ENV_VARS.items():
+        value = std.env.var(env_var)
+        if value:
+            config[key] = value
+
+    for key, env_var in _MARKER_ENV_VARS.items():
+        if std.env.var(env_var):
+            config[key] = "1"
+
+    cloud_provider = std.env.var(_CLOUD_PROVIDER_ENV)
+    if cloud_provider:
+        config["cloud_provider"] = cloud_provider
+
+    if "storage_path" not in config:
+        config["storage_path"] = DEFAULT_STORAGE_PATH
+
+    return _build_environment(config, _read_ci(std))
+
+
+def legacy_get_environment(std, platform_dir: str = DEFAULT_PLATFORM_DIR) -> Environment:
+    """
+    Build an Environment by reading from the platform directory.
+
+    Deprecated: prefer get_environment(legacy = False) which reads from
+    environment variables instead.
+
+    Args:
+        std: Standard context (ctx.std)
+        platform_dir: Path to platform config directory
+
+    Returns:
+        Environment record
+    """
+    config = {}
+
+    for key in _ENV_VARS:
+        path = platform_dir + "/" + key
+        if std.fs.exists(path):
+            content = std.fs.read_to_string(path)
+            if content:
+                config[key] = content.strip()
+
+    if "storage_path" not in config:
+        config["storage_path"] = DEFAULT_STORAGE_PATH
+
+    for key in _MARKER_ENV_VARS:
+        if std.fs.exists(platform_dir + "/" + key):
+            config[key] = "1"
+
+    if std.fs.exists(platform_dir + "/aws"):
+        config["cloud_provider"] = "aws"
+    elif std.fs.exists(platform_dir + "/gcp"):
+        config["cloud_provider"] = "gcp"
+
+    # TODO: replace with agent http api call once available
+    warming_complete = std.fs.exists(platform_dir + "/warming_complete")
+    if warming_complete:
+        config["warming_complete"] = True
+    warming_current_cache_path = DEFAULT_WORKFLOWS_DIR + "/warming_current_cache"
+    if std.fs.exists(warming_current_cache_path):
+        config["warming_current_cache"] = std.fs.read_to_string(warming_current_cache_path).strip()
+    runner_job_history_path = platform_dir + "/runner_job_history"
+    if std.fs.exists(runner_job_history_path):
+        config["runner_job_history"] = std.fs.read_to_string(runner_job_history_path)
+    last_health_check_path = platform_dir + "/last_health_check"
+    if std.fs.exists(last_health_check_path):
+        config["last_health_check"] = std.fs.read_to_string(last_health_check_path)
+
+    return _build_environment(config, _read_ci(std))
+
+
+def is_warming_complete(std, platform_dir: str = DEFAULT_PLATFORM_DIR) -> bool:
+    """Check whether cache warming has completed, without reading full environment."""
+    return std.fs.exists(platform_dir + "/warming_complete")
+
+
+def _parse_git_url_name(url: str) -> str:
+    if not url:
+        return None
+    name = url.rstrip("/")
+    if name.endswith(".git"):
+        name = name[:-4]
+    return name.split("/")[-1].split(":")[-1]
+
+
+def _sanitize_filename(name: str) -> str:
+    if not name:
+        return ""
+    result = ""
+    for c in name.elems():
+        if c.isalnum() or c in "-_.":
+            result += c
+        else:
+            result += "_"
+    return result
+
+
+def get_bazelrc_flags(environment: Environment, root_dir: str) -> (list, list):
+    """
+    Generate bazelrc flags from platform configuration.
+
+    Args:
+        environment: Environment from read_environment()
+        root_dir: absolute path to the workspace root directory
+
+    Returns:
+        (startup_flags, build_flags): two lists of flag strings
+    """
+    storage_path = environment.runner.storage_path
+    repo_name = environment.ci.scm_repo_name
+    subdir = _sanitize_filename(root_dir.rstrip("/").split("/")[-1]) if root_dir else "__main__"
+
+    build_flags = []
+
+    build_flags.append("--remote_upload_local_results")
+    build_flags.append("--heap_dump_on_oom")
+    build_flags.append("--generate_json_trace_profile")
+    build_flags.append("--experimental_repository_cache_hardlinks")
+    build_flags.append("--remote_accept_cached")
+    build_flags.append("--disk_cache=")
+    build_flags.append("--remote_timeout=3600")
+    build_flags.append("--remote_retries=360")
+    build_flags.append("--grpc_keepalive_timeout=30s")
+    build_flags.append(("--noexperimental_remote_cache_compression", "<8.0.0"))
+    build_flags.append(("--noremote_cache_compression", ">=8.0.0"))
+    build_flags.append(("--incompatible_remote_results_ignore_disk", "<7.0.0"))
+
+    if environment.remote_cache.endpoint:
+        build_flags.append("--remote_cache=" + environment.remote_cache.endpoint)
+
+    if environment.remote_cache.address:
+        build_flags.append("--remote_bytestream_uri_prefix=" + environment.remote_cache.address)
+
+    build_flags.append("--repository_cache=" + storage_path + "/caches/repository")
+
+    startup_flags = []
+
+    if repo_name:
+        sanitized = _sanitize_filename(repo_name)
+        startup_flags.append("--output_user_root=" + storage_path + "/bazel/" + sanitized + "/" + subdir)
+        startup_flags.append("--output_base=" + storage_path + "/output/" + sanitized + "/" + subdir)
+    else:
+        startup_flags.append("--output_user_root=" + storage_path + "/bazel/" + subdir)
+        startup_flags.append("--output_base=" + storage_path + "/output/" + subdir)
+
+    return (startup_flags, build_flags)
+
+
+
+# --- Display helpers ---
+
+def _url_encode(s: str) -> str:
     """Percent-encode a string for use in URLs."""
     result = ""
     for c in s.elems():
@@ -33,73 +328,51 @@ def _url_encode(s):
     return result
 
 
-def _read_file(fs, path):
-    """Read a text file and strip whitespace, or return empty string if missing."""
-    if fs.exists(path):
-        return fs.read_to_string(path).strip()
-    return ""
-
-
-def _read_platform_metadata(fs):
-    """Read all platform metadata from files."""
-    return {
-        "region": _read_file(fs, DEFAULT_PLATFORM_DIR + "/region"),
-        "az": _read_file(fs, DEFAULT_PLATFORM_DIR + "/az"),
-        "instance_id": _read_file(fs, DEFAULT_PLATFORM_DIR + "/instance_id"),
-        "instance_name": _read_file(fs, DEFAULT_PLATFORM_DIR + "/instance_name"),
-        "instance_type": _read_file(fs, DEFAULT_PLATFORM_DIR + "/instance_type"),
-        "account_id": _read_file(fs, DEFAULT_PLATFORM_DIR + "/account"),
-        "preemptible": fs.exists(DEFAULT_PLATFORM_DIR + "/preemptible"),
-    }
-
-
-def _print_workflows_info(fs):
+def _print_workflows_info(env: Environment) -> None:
     """Print Workflows version and warming status."""
-    version = _read_file(fs, DEFAULT_PLATFORM_DIR + "/product_version")
-    warming_enabled = fs.exists(DEFAULT_PLATFORM_DIR + "/warming_enabled")
-
+    if env.ci.host == "buildkite":
+        print("--- :aspect: Workflows Runner Environment")
     print("Workflows Information")
-    print("\tVersion: " + version)
-    print("\tWarming enabled: " + ("true" if warming_enabled else "false"))
+    print("\tVersion: " + env.runner.product_version)
+    print("\tWarming enabled: " + ("true" if env.runner.warming_enabled else "false"))
 
 
-def _print_aws_info(meta):
+def _print_aws_info(env: Environment) -> None:
     """Print AWS-specific runner information."""
     print("AWS Information")
-    print("\tRegion: " + meta["region"])
-    print("\tAvailability Zone: " + meta["az"])
-    print("\tAccount ID: " + meta["account_id"])
-    print("\tInstance ID: " + meta["instance_id"])
-    print("\tInstance Name: " + meta["instance_name"])
-    print("\tInstance Type: " + meta["instance_type"])
-    print("\tSpot Instance: " + ("yes" if meta["preemptible"] else "no"))
-    print("\tCLI: 'aws logs tail \"/aw/runner/cloud-init/output\" --log-stream-names \"" + meta["instance_id"] + "\" --since=30d'")
+    print("\tRegion: " + env.runner.region)
+    print("\tAvailability Zone: " + env.runner.az)
+    print("\tAccount ID: " + env.runner.account)
+    print("\tInstance ID: " + env.runner.instance_id)
+    print("\tInstance Name: " + env.runner.instance_name)
+    print("\tInstance Type: " + env.runner.instance_type)
+    print("\tSpot Instance: " + ("yes" if env.runner.preemptible else "no"))
+    print("\tCLI: 'aws logs tail \"/aw/runner/cloud-init/output\" --log-stream-names \"" + env.runner.instance_id + "\" --since=30d'")
 
 
-def _print_gcp_info(meta):
+def _print_gcp_info(env: Environment) -> None:
     """Print GCP-specific runner information."""
     print("GCP Information")
-    print("\tRegion: " + meta["region"])
-    print("\tAvailability Zone: " + meta["az"])
-    print("\tProject ID: " + meta["account_id"])
-    print("\tInstance ID: " + meta["instance_id"])
-    print("\tInstance Name: " + meta["instance_name"])
-    print("\tInstance Type: " + meta["instance_type"])
-    print("\tPreemptible: " + ("yes" if meta["preemptible"] else "no"))
-    print("\tCLI: 'gcloud logging read --project " + meta["account_id"] + " \"resource.type=gce_instance resource.labels.instance_id=" + meta["instance_id"] + " log_name=projects/" + meta["account_id"] + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
+    print("\tRegion: " + env.runner.region)
+    print("\tAvailability Zone: " + env.runner.az)
+    print("\tProject ID: " + env.runner.account)
+    print("\tInstance ID: " + env.runner.instance_id)
+    print("\tInstance Name: " + env.runner.instance_name)
+    print("\tInstance Type: " + env.runner.instance_type)
+    print("\tPreemptible: " + ("yes" if env.runner.preemptible else "no"))
+    print("\tCLI: 'gcloud logging read --project " + env.runner.account + " \"resource.type=gce_instance resource.labels.instance_id=" + env.runner.instance_id + " log_name=projects/" + env.runner.account + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
 
 
-def workflows_runner_env(fs):
+def print_environment_info(env: Environment) -> None:
     """
     Print debug/diagnostic information about the runner environment.
 
     Args:
-        fs: Filesystem interface (ctx.std.fs)
+        env: Environment
     """
-    _print_workflows_info(fs)
-    meta = _read_platform_metadata(fs)
+    _print_workflows_info(env)
 
-    if fs.exists(DEFAULT_PLATFORM_DIR + "/aws"):
-        _print_aws_info(meta)
-    elif fs.exists(DEFAULT_PLATFORM_DIR + "/gcp"):
-        _print_gcp_info(meta)
+    if env.runner.cloud_provider == "aws":
+        _print_aws_info(env)
+    elif env.runner.cloud_provider == "gcp":
+        _print_gcp_info(env)

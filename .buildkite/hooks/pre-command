@@ -20,26 +20,13 @@ if ! command -v bazel >/dev/null 2>&1; then
   exit 0
 fi
 
-# If the bazel server is busy, the runner is in a bad state — reap it so the autoscaler
-# replaces it with a fresh instance.
-reap_runner() {
-  echo "--- Bazel server is unhealthy, reaping runner"
-  REGION=$(cat /etc/aspect/workflows/platform/region)
-  INSTANCE_ID=$(cat /etc/aspect/workflows/platform/instance_id)
-  /etc/aspect/workflows/lib/aws.sh autoscaling set-instance-health \
-    --region "${REGION}" \
-    --instance-id "${INSTANCE_ID}" \
-    --health-status Unhealthy \
-    --no-should-respect-grace-period
-}
-
 # We use a short timeout so we capture the "Another command (pid=X)" message without
 # blocking indefinitely.
 LOCK_OUTPUT=$(timeout 5 bazel $BAZEL_STARTUP_OPTS info 2>&1) || true
 BUSY_PID=$(echo "$LOCK_OUTPUT" | grep -o '(pid=[0-9]*)' | grep -o '[0-9]*') || true
 if [ -n "$BUSY_PID" ]; then
-  reap_runner
-  exit 78
+    /etc/aspect/workflows/bin/signal_instance_unhealthy
+    exit 78
 fi
 
 # Build aspect-cli so version.axl can pick it up from bazel-bin/
