@@ -5,36 +5,12 @@ Reads runner environment from environment variables and exposes it as typed
 records. Also provides bazelrc flag generation and host/CI detection.
 """
 
-DEFAULT_WORKFLOWS_DIR = "/etc/aspect/workflows"
+# Default storage path on Workflows Runners
 DEFAULT_STORAGE_PATH = "/mnt/ephemeral"
-DEFAULT_PLATFORM_DIR = DEFAULT_WORKFLOWS_DIR + "/platform"
-DEFAULT_BIN_DIR = DEFAULT_WORKFLOWS_DIR + "/bin"
 
 # AWS CloudWatch log group
 AWS_LOG_GROUP = "/aw/runner/cloud-init/output"
 
-
-_ENV_VARS = {
-    "bessie_endpoint": "ASPECT_WORKFLOWS_BES_BACKEND",
-    "build_result_ui_base_url": "ASPECT_WORKFLOWS_BES_RESULTS_URL",
-    "remote_cache_address": "ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX",
-    "remote_cache_endpoint": "ASPECT_WORKFLOWS_REMOTE_CACHE",
-    "storage_path": "ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH",
-    "instance_id": "ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID",
-    "instance_name": "ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME",
-    "instance_type": "ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE",
-    "account": "ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT",
-    "region": "ASPECT_WORKFLOWS_RUNNER_REGION",
-    "az": "ASPECT_WORKFLOWS_RUNNER_AZ",
-    "product_version": "ASPECT_WORKFLOWS_RUNNER_VERSION",
-}
-
-_MARKER_ENV_VARS = {
-    "preemptible": "ASPECT_WORKFLOWS_RUNNER_PREEMPTIBLE",
-    "warming_enabled": "ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED",
-}
-
-_CLOUD_PROVIDER_ENV = "ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER"
 
 RemoteCache = record(
     endpoint = field(str, default = ""),
@@ -58,6 +34,8 @@ Runner = record(
     preemptible = field(bool, default = False),
     warming_enabled = field(bool, default = False),
     cloud_provider = field(str, default = ""),
+    data_dir = field(str, default = ""),
+    has_nvme_storage = field(bool, default = False),
     # TODO: replace with agent http api call once available
     warming_complete = field(bool, default = False),
     warming_current_cache = field(str, default = ""),
@@ -105,133 +83,77 @@ def _read_ci(std) -> CI:
     )
 
 
-def _build_environment(config: dict, ci: CI = CI()) -> Environment:
+def get_environment(std) -> Environment | None:
+    """
+    Build an Environment from environment variables.
+
+    Args:
+        std: Standard context (ctx.std)
+
+    Returns:
+        Environment record, or None if not running on a Workflows runner
+    """
+    if not std.env.var("ASPECT_WORKFLOWS_RUNNER"):
+        return None
+
+    # Read dynamic state from files at env-var-provided paths
+    # TODO: replace with agent http api call once available
+    warming_complete = False
+    warming_complete_path = std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE")
+    if warming_complete_path and std.fs.exists(warming_complete_path):
+        warming_complete = True
+
+    warming_current_cache = ""
+    cache_path = std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE")
+    if cache_path and std.fs.exists(cache_path):
+        warming_current_cache = std.fs.read_to_string(cache_path).strip()
+
+    runner_job_history = ""
+    job_history_path = std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE")
+    if job_history_path and std.fs.exists(job_history_path):
+        runner_job_history = std.fs.read_to_string(job_history_path)
+
+    last_health_check = ""
+    last_hc_path = std.env.var("ASPECT_WORKFLOWS_RUNNER_LAST_HEALTH_CHECK_FILE")
+    if last_hc_path and std.fs.exists(last_hc_path):
+        last_health_check = std.fs.read_to_string(last_hc_path)
+
     return Environment(
         remote_cache = RemoteCache(
-            endpoint = config.get("remote_cache_endpoint", ""),
-            address = config.get("remote_cache_address", ""),
+            endpoint = std.env.var("ASPECT_WORKFLOWS_REMOTE_CACHE") or "",
+            address = std.env.var("ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX") or "",
         ),
         build_events = BuildEvents(
-            backend = config.get("bessie_endpoint", ""),
-            results_url = config.get("build_result_ui_base_url", ""),
+            backend = std.env.var("ASPECT_WORKFLOWS_BES_BACKEND") or "",
+            results_url = std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL") or "",
         ),
         runner = Runner(
-            storage_path = config.get("storage_path", DEFAULT_STORAGE_PATH),
-            product_version = config.get("product_version", ""),
-            instance_id = config.get("instance_id", ""),
-            instance_name = config.get("instance_name", ""),
-            instance_type = config.get("instance_type", ""),
-            account = config.get("account", ""),
-            region = config.get("region", ""),
-            az = config.get("az", ""),
-            preemptible = bool(config.get("preemptible")),
-            warming_enabled = bool(config.get("warming_enabled")),
-            cloud_provider = config.get("cloud_provider", ""),
-            warming_complete = bool(config.get("warming_complete")),
-            warming_current_cache = config.get("warming_current_cache", ""),
-            runner_job_history = config.get("runner_job_history"),
-            last_health_check = config.get("last_health_check", ""),
+            storage_path = std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH") or DEFAULT_STORAGE_PATH,
+            product_version = std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION") or "",
+            instance_id = std.env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID") or "",
+            instance_name = std.env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME") or "",
+            instance_type = std.env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE") or "",
+            account = std.env.var("ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT") or "",
+            region = std.env.var("ASPECT_WORKFLOWS_RUNNER_REGION") or "",
+            az = std.env.var("ASPECT_WORKFLOWS_RUNNER_AZ") or "",
+            preemptible = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_PREEMPTIBLE")),
+            warming_enabled = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED")),
+            cloud_provider = std.env.var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER") or "",
+            data_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_DATA_DIR") or "",
+            has_nvme_storage = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE")),
+            warming_complete = warming_complete,
+            warming_current_cache = warming_current_cache,
+            runner_job_history = runner_job_history,
+            last_health_check = last_health_check,
         ),
-        ci = ci,
+        ci = _read_ci(std),
     )
 
 
-# TODO: flip legacy default to False once all deployments expose ASPECT_WORKFLOWS_* env vars.
-def get_environment(std, legacy: bool = True, platform_dir: str = DEFAULT_PLATFORM_DIR) -> Environment | None:
-    """
-    Build an Environment from environment variables, or from the platform
-    directory when legacy = True.
-
-    Args:
-        std: Standard context (ctx.std)
-        legacy: when True, reads from platform directory files instead of env vars
-        platform_dir: Path to platform config directory; only used when legacy = True
-
-    Returns:
-        Environment record
-    """
-    if not std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION"):
-        return None
-
-    if legacy:
-        return legacy_get_environment(std, platform_dir)
-
-    config = {}
-
-    for key, env_var in _ENV_VARS.items():
-        value = std.env.var(env_var)
-        if value:
-            config[key] = value
-
-    for key, env_var in _MARKER_ENV_VARS.items():
-        if std.env.var(env_var):
-            config[key] = "1"
-
-    cloud_provider = std.env.var(_CLOUD_PROVIDER_ENV)
-    if cloud_provider:
-        config["cloud_provider"] = cloud_provider
-
-    if "storage_path" not in config:
-        config["storage_path"] = DEFAULT_STORAGE_PATH
-
-    return _build_environment(config, _read_ci(std))
-
-
-def legacy_get_environment(std, platform_dir: str = DEFAULT_PLATFORM_DIR) -> Environment:
-    """
-    Build an Environment by reading from the platform directory.
-
-    Deprecated: prefer get_environment(legacy = False) which reads from
-    environment variables instead.
-
-    Args:
-        std: Standard context (ctx.std)
-        platform_dir: Path to platform config directory
-
-    Returns:
-        Environment record
-    """
-    config = {}
-
-    for key in _ENV_VARS:
-        path = platform_dir + "/" + key
-        if std.fs.exists(path):
-            content = std.fs.read_to_string(path)
-            if content:
-                config[key] = content.strip()
-
-    if "storage_path" not in config:
-        config["storage_path"] = DEFAULT_STORAGE_PATH
-
-    for key in _MARKER_ENV_VARS:
-        if std.fs.exists(platform_dir + "/" + key):
-            config[key] = "1"
-
-    if std.fs.exists(platform_dir + "/aws"):
-        config["cloud_provider"] = "aws"
-    elif std.fs.exists(platform_dir + "/gcp"):
-        config["cloud_provider"] = "gcp"
-
-    # TODO: replace with agent http api call once available
-    warming_complete = std.fs.exists(platform_dir + "/warming_complete")
-    if warming_complete:
-        config["warming_complete"] = True
-    warming_current_cache_path = DEFAULT_WORKFLOWS_DIR + "/warming_current_cache"
-    if std.fs.exists(warming_current_cache_path):
-        config["warming_current_cache"] = std.fs.read_to_string(warming_current_cache_path).strip()
-    runner_job_history_path = platform_dir + "/runner_job_history"
-    if std.fs.exists(runner_job_history_path):
-        config["runner_job_history"] = std.fs.read_to_string(runner_job_history_path)
-    last_health_check_path = platform_dir + "/last_health_check"
-    if std.fs.exists(last_health_check_path):
-        config["last_health_check"] = std.fs.read_to_string(last_health_check_path)
-
-    return _build_environment(config, _read_ci(std))
-
-
-def is_warming_complete(std, platform_dir: str = DEFAULT_PLATFORM_DIR) -> bool:
+def is_warming_complete(std) -> bool:
     """Check whether cache warming has completed, without reading full environment."""
-    return std.fs.exists(platform_dir + "/warming_complete")
+    path = std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE")
+    return bool(path) and std.fs.exists(path)
 
 
 def _parse_git_url_name(url: str) -> str:
