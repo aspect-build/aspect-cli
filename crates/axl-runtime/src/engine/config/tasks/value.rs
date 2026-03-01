@@ -16,7 +16,6 @@ use starlark::typing::Ty;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
-use starlark::values::OwnedFrozenValue;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
@@ -28,8 +27,10 @@ use starlark::values::type_repr::StarlarkTypeRepr;
 use super::configured_task::ConfiguredTask;
 use super::r#ref::TaskListMut;
 
+use crate::engine::config::fragment_map::FragmentMap;
 use crate::engine::store::AxlStore;
 use crate::engine::task::{AsTaskLike, FrozenTask, Task, TaskLike};
+use crate::engine::types::fragment::extract_fragment_type_id;
 
 #[derive(Clone, Default, Trace, Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct TaskListGen<T>(pub(crate) T);
@@ -80,22 +81,44 @@ pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
             .get(&symbol)
             .map_err(|e| anyhow::anyhow!("failed to get frozen task: {:?}", e))?;
 
-        // Get initial config from the frozen task
+        // Get fragment type IDs from the frozen task
         let frozen_task = task_def
             .value()
             .downcast_ref::<FrozenTask>()
             .ok_or_else(|| anyhow::anyhow!("expected FrozenTask after freeze"))?;
-        let initial_config = OwnedFrozenValue::alloc(frozen_task.config);
+        let fragment_type_ids = frozen_task.fragment_type_ids();
 
-        // Create ConfiguredTask with frozen values
-        let task_mut = ConfiguredTask {
+        // Auto-register any new fragment types into the FragmentMap
+        if let Some(fmap_value) = this.aref.fragment_map {
+            if let Some(fmap) = fmap_value.downcast_ref::<FragmentMap>() {
+                for frag_fv in frozen_task.fragments() {
+                    let frag_value = frag_fv.to_value();
+                    if let Some(id) = extract_fragment_type_id(frag_value) {
+                        if !fmap.contains(id) {
+                            // Auto-construct default instance by calling the fragment type with no args
+                            let instance = eval.eval_function(frag_value, &[], &[]).map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to construct default fragment instance for {}: {:?}",
+                                    frag_value,
+                                    e
+                                )
+                            })?;
+                            fmap.insert(id, frag_value, instance);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create ConfiguredTask with fragment type IDs
+        let task_mut = ConfiguredTask::new_with_fragments(
             task_def,
-            name: RefCell::new(name),
-            group: RefCell::new(task_like.group().to_vec()),
-            config: RefCell::new(initial_config),
+            name,
+            task_like.group().to_vec(),
+            fragment_type_ids,
             symbol,
-            path: PathBuf::from(store.script_path.to_string_lossy().to_string()),
-        };
+            PathBuf::from(store.script_path.to_string_lossy().to_string()),
+        );
 
         this.aref.content.push(eval.heap().alloc(task_mut));
         Ok(NoneType)
@@ -123,14 +146,27 @@ pub(crate) type MutableTaskList<'v> = TaskListGen<RefCell<TaskList<'v>>>;
 
 /// Unfrozen TaskList
 #[derive(Clone, Trace, Debug, ProvidesStaticType, Allocative)]
-#[repr(transparent)]
 pub struct TaskList<'v> {
     pub(crate) content: Vec<Value<'v>>,
+    /// Optional reference to the FragmentMap for auto-registering fragments
+    /// when tasks are added dynamically via ctx.tasks.add().
+    #[allocative(skip)]
+    pub(crate) fragment_map: Option<Value<'v>>,
 }
 
 impl<'v> TaskList<'v> {
     pub fn new(content: Vec<Value<'v>>) -> Self {
-        TaskList { content }
+        TaskList {
+            content,
+            fragment_map: None,
+        }
+    }
+
+    pub fn new_with_fragment_map(content: Vec<Value<'v>>, fragment_map: Value<'v>) -> Self {
+        TaskList {
+            content,
+            fragment_map: Some(fragment_map),
+        }
     }
 }
 

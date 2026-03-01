@@ -26,14 +26,18 @@ use super::wasm::Wasm;
 #[display("<TaskContext>")]
 pub struct TaskContext<'v> {
     pub args: TaskArgs<'v>,
-    pub config: values::Value<'v>,
+    pub fragments: values::Value<'v>,
     #[trace(unsafe_ignore)]
     pub task: TaskInfo,
 }
 
 impl<'v> TaskContext<'v> {
-    pub fn new(args: TaskArgs<'v>, config: values::Value<'v>, task: TaskInfo) -> Self {
-        Self { args, config, task }
+    pub fn new(args: TaskArgs<'v>, fragments: values::Value<'v>, task: TaskInfo) -> Self {
+        Self {
+            args,
+            fragments,
+            task,
+        }
     }
 }
 
@@ -60,7 +64,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
 
         Ok(FrozenTaskContext {
             args: args_value,
-            config: self.config.freeze(freezer)?,
+            fragments: self.fragments.freeze(freezer)?,
             task: self.task,
         })
     }
@@ -89,11 +93,11 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
         Ok(ctx.args.clone())
     }
 
-    /// Access to the task configuration.
+    /// Access to the fragment map for reading configured fragment values.
     #[starlark(attribute)]
-    fn config<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+    fn fragments<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
         let ctx = this.downcast_ref_err::<TaskContext>()?;
-        Ok(ctx.config)
+        Ok(ctx.fragments)
     }
 
     /// Expand template files.
@@ -131,7 +135,7 @@ pub struct FrozenTaskContext {
     #[allocative(skip)]
     args: values::FrozenValue,
     #[allocative(skip)]
-    config: values::FrozenValue,
+    fragments: values::FrozenValue,
     task: TaskInfo,
 }
 
@@ -167,9 +171,9 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     }
 
     #[starlark(attribute)]
-    fn config<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
+    fn fragments<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
         let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
-        Ok(ctx.config.to_value())
+        Ok(ctx.fragments.to_value())
     }
 
     #[starlark(attribute)]

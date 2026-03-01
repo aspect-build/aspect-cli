@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::sync::mpsc::{RecvError, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 
 use allocative::Allocative;
 use starlark::environment::Methods;
@@ -88,7 +88,7 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIterator {
     unsafe fn iter_next(&self, _index: usize, heap: &'v Heap) -> Option<values::Value<'v>> {
         match self.recv.borrow_mut().recv() {
             Ok(ev) => Some(ev.alloc_value(heap)),
-            Err(RecvError) => None,
+            Err(_) => None,
         }
     }
     unsafe fn iter_stop(&self) {}
