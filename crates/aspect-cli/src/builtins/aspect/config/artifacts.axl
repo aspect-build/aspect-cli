@@ -157,7 +157,7 @@ def _upload_testlogs_buildkite(ctx, group, entries):
         ctx.std.process.command("ln").args(["-s", entry["src"], dest_path]).spawn().wait()
 
     child = ctx.std.process.command("buildkite-agent") \
-        .args(["artifact", "upload", "**/*"]) \
+        .args(["artifact", "upload", "**/*", "--log-level=warn"]) \
         .current_dir(tmp_dir) \
         .stdout("inherit") \
         .stderr("inherit") \
