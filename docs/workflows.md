@@ -16,6 +16,7 @@ override any of these behaviors through the fragment API.
 Workflows Runner (EC2/GCE instance)
   │
   │  ASPECT_WORKFLOWS_* env vars
+  │  deliveryd daemon
   ▼
 aspect CLI
   ├── config phase  ──► builtins.axl + artifacts.axl + delivery.axl
