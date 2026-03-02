@@ -54,10 +54,10 @@ steps:
         $$LAUNCHER tests axl
         echo "--- :aspect: aspect demo template-demo"
         $$LAUNCHER demo template-demo
-        echo "--- :aspect: aspect user user_task"
-        $$LAUNCHER user user_task
-        echo "--- :aspect: aspect user user_task_reexport"
-        $$LAUNCHER user user_task_reexport
+        echo "--- :aspect: aspect user nested user_task"
+        $$LAUNCHER user nested user_task
+        echo "--- :aspect: aspect user nested user_task_reexport"
+        $$LAUNCHER user nested user_task_reexport
         echo "--- :aspect: aspect user user-task-manual"
         $$LAUNCHER user user-task-manual
         echo "--- :aspect: aspect user user-task-added-by-config"
