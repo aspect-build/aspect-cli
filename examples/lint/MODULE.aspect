@@ -1,0 +1,20 @@
+# Declares the aspect_rules_lint AXL package, which provides the LintFragment type
+# and integrates with aspect-cli's built-in lint task.
+#
+# The builtin MODULE.aspect conditionally enables configure_rules_lint when this dep is present:
+#   use_config("config/lint.axl", "configure_rules_lint", requires = ["aspect_rules_lint"])
+axl_local_dep(
+    name = "aspect_rules_lint",
+    path = "../../../rules_lint",
+    auto_use_tasks = True,
+)
+
+# To use the published archive instead of a local checkout, replace the above with:
+# axl_archive_dep(
+#     name = "aspect_rules_lint",
+#     urls = ["https://github.com/aspect-build/rules_lint/archive/refs/tags/v2.0.0-beta.0.tar.gz"],
+#     integrity = "sha512-9n8t2IF52U/OlF+Lwx/rbsKbmGQFKfIsE+XKfdTD5zhXQWRYJ+h8RpeUXZKePjKd5PQtKdNGAdYAMo7tq8vRJg==",
+#     strip_prefix = "rules_lint-2.0.0-beta.0",
+#     dev = True,
+#     auto_use_tasks = True,
+# )

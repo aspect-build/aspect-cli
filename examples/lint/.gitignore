@@ -1,0 +1,6 @@
+# User-specific settings file for this repo. May contain secrets such as API tokens.
+user.bazelrc
+.env
+
+# Symlinks created by Bazel into the output tree
+/bazel-*
