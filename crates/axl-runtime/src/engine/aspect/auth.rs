@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
+use starlark::values::none::NoneOr;
 use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::{self, NoSerialize, ProvidesStaticType, ValueLike, starlark_value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -736,10 +737,14 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     fn persist<'v>(
         #[allow(unused)] this: values::Value<'v>,
         creds: values::Value<'v>,
-        #[starlark(require = named)] profile: Option<&str>,
+        #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
     ) -> starlark::Result<values::Value<'v>> {
         let creds = creds.downcast_ref_err::<AuthCredentials>()?;
-        let profile = profile.filter(|p| !p.is_empty()).unwrap_or("default");
+        let profile_opt = profile.into_option();
+        let profile = profile_opt
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .unwrap_or("default");
         let mut map = load_all_credentials()?;
         map.insert(profile.to_string(), creds.to_entry());
         save_all_credentials(&map)?;
@@ -748,9 +753,13 @@ fn auth_methods(registry: &mut MethodsBuilder) {
 
     fn logout<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = named)] profile: Option<&str>,
+        #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
     ) -> starlark::Result<values::Value<'v>> {
-        let profile = profile.filter(|p| !p.is_empty()).unwrap_or("default");
+        let profile_opt = profile.into_option();
+        let profile = profile_opt
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .unwrap_or("default");
         let mut map = load_all_credentials()?;
         map.remove(profile);
         save_all_credentials(&map)?;
@@ -759,10 +768,14 @@ fn auth_methods(registry: &mut MethodsBuilder) {
 
     fn credentials<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = named)] profile: Option<&str>,
+        #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
         heap: &'v values::Heap,
     ) -> starlark::Result<values::Value<'v>> {
-        let profile = profile.filter(|p| !p.is_empty()).unwrap_or("default");
+        let profile_opt = profile.into_option();
+        let profile = profile_opt
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .unwrap_or("default");
         let map = load_all_credentials()?;
         let Some(entry) = map.get(profile).cloned() else {
             // Fall back to ASPECT_API_TOKEN env var

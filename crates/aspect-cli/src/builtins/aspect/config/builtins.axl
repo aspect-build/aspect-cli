@@ -7,12 +7,7 @@ load("../lib/environment.axl",
 )
 load("../lib/health_check.axl", "agent_health_check")
 load("../lib/build_metadata.axl", "get_build_metadata_flags")
-load("../lib/github_status.axl",
-    "detect_commit_sha",
-    "detect_github_repo",
-    "github_status_start",
-    "github_status_end",
-)
+load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
 load("../fragments.axl", "BazelFragment", "HealthCheckFragment")
 
 def configure_builtins(ctx: ConfigContext):
@@ -51,24 +46,29 @@ def configure_builtins(ctx: ConfigContext):
         bazel_fragment.extra_flags.extend(metadata_flags)
         bazel_fragment.build_event_sinks.extend(bessie_sinks)
 
-    # GitHub commit status posting (requires ASPECT_API_TOKEN for auto-login)
-    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
-    api_token = ctx.std.env.var("ASPECT_API_TOKEN")
-    if debug:
-        print("github_status: ASPECT_API_TOKEN set = " + str(bool(api_token)))
-    if api_token:
-        sha = detect_commit_sha(ctx.std.env)
-        if debug:
-            print("github_status: commit sha = " + repr(sha))
-        if sha:
-            (owner, repo) = detect_github_repo(ctx.std)
-            if debug:
-                print("github_status: owner = " + repr(owner) + ", repo = " + repr(repo))
-            if owner and repo:
-                # Populate state dict with repo info so hooks can access it
-                def _init_github_status(ctx, state):
-                    state["_github_status"] = {"owner": owner, "repo": repo, "sha": sha}
+    # GitHub check run posting
+    sha = detect_commit_sha(ctx.std.env)
+    if sha:
+        (owner, repo) = detect_github_repo(ctx.std)
+        if owner and repo:
+            def _build_start(ctx, state):
+                token = github.authenticate(ctx, ctx.std.env, owner = owner, repo = repo)
+                if not token:
+                    return
+                state["_github_token"] = token
+                result = github.status_checks.create(ctx, token, owner, repo, sha, "aspect/build")
+                if result["success"]:
+                    state["_check_run_id"] = result["check_run_id"]
 
-                bazel_fragment.build_start.append(_init_github_status)
-                bazel_fragment.build_start.append(github_status_start)
-                bazel_fragment.build_end.append(github_status_end)
+            def _build_end(ctx, state, exit_code):
+                token = state.get("_github_token")
+                check_run_id = state.get("_check_run_id")
+                if not token or not check_run_id:
+                    return
+                if exit_code == 0:
+                    github.status_checks.complete(ctx, token, owner, repo, check_run_id)
+                else:
+                    github.status_checks.fail(ctx, token, owner, repo, check_run_id)
+
+            bazel_fragment.build_start.append(_build_start)
+            bazel_fragment.build_end.append(_build_end)

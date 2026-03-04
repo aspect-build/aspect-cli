@@ -55,10 +55,7 @@ const ASPECT: Builtin = Builtin {
             "lib/build_metadata.axl",
             include_str!("./aspect/lib/build_metadata.axl"),
         ),
-        (
-            "lib/github_status.axl",
-            include_str!("./aspect/lib/github_status.axl"),
-        ),
+        ("lib/github.axl", include_str!("./aspect/lib/github.axl")),
     ],
 };
 
