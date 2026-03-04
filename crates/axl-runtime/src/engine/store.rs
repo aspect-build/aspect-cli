@@ -1,9 +1,7 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use starlark::{eval::Evaluator, values::ProvidesStaticType};
 
-use super::auth::Credentials;
 use super::r#async::rt::AsyncRuntime;
 
 /// A store object which we pass to the Starlark interpreter which allows us
@@ -14,9 +12,6 @@ pub struct AxlStore {
     pub(crate) root_dir: PathBuf,
     pub(crate) script_path: PathBuf,
     pub(crate) rt: AsyncRuntime,
-    /// In-memory credentials from `ctx.auth.login_with_api_token()`.
-    /// Scoped to this execution — not persisted to disk.
-    pub(crate) credentials: Arc<Mutex<Option<Credentials>>>,
 }
 
 impl AxlStore {
@@ -26,7 +21,6 @@ impl AxlStore {
             root_dir,
             script_path,
             rt: AsyncRuntime::new(),
-            credentials: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -44,7 +38,6 @@ impl AxlStore {
                 root_dir: store_ref.root_dir.clone(),
                 script_path: store_ref.script_path.clone(),
                 rt: store_ref.rt.clone(),
-                credentials: store_ref.credentials.clone(),
             });
         }
 
@@ -54,7 +47,6 @@ impl AxlStore {
                 root_dir: store_owned.root_dir.clone(),
                 script_path: store_owned.script_path.clone(),
                 rt: store_owned.rt.clone(),
-                credentials: store_owned.credentials.clone(),
             });
         }
 

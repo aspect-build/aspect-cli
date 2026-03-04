@@ -276,6 +276,53 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     Handle::current().block_on(fut)
 }
 
+async fn exchange_api_token(
+    client_id: &str,
+    secret: &str,
+    env: AuthEnv,
+) -> starlark::Result<CredentialsEntry> {
+    #[derive(Deserialize)]
+    struct ApiTokenResponse {
+        #[serde(rename = "accessToken", alias = "access_token")]
+        access_token: String,
+    }
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{}/identity/resources/auth/v1/api-token",
+            env.domain
+        ))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "clientId": client_id, "secret": secret }))
+        .send()
+        .await
+        .map_err(|e| {
+            starlark::Error::new_other(anyhow::anyhow!("API token exchange failed: {}", e))
+        })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(starlark::Error::new_other(anyhow::anyhow!(
+            "API token exchange failed (HTTP {}): {}",
+            status,
+            body
+        )));
+    }
+    let data: ApiTokenResponse = resp.json().await.map_err(|e| {
+        starlark::Error::new_other(anyhow::anyhow!("failed to parse API token response: {}", e))
+    })?;
+    let claims = decode_jwt_claims(&data.access_token)?;
+    Ok(CredentialsEntry {
+        access_token: data.access_token,
+        refresh_token: String::new(),
+        email: claims.email.unwrap_or_else(|| "api-token".to_string()),
+        name: claims.name.unwrap_or_else(|| "Unknown".to_string()),
+        tenant_id: claims.tenant_id,
+        auth_domain: None,
+        auth_client_id: None,
+    })
+}
+
 async fn accept_callback(listener: TcpListener) -> starlark::Result<String> {
     let (mut stream, _addr) = listener.accept().await.map_err(|e| {
         starlark::Error::new_other(anyhow::anyhow!("failed to accept OAuth callback: {}", e))
@@ -651,56 +698,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                     "invalid API token format: expected client_id:secret"
                 ))
             })?;
-            let client_id = client_id.to_string();
-            let secret = secret.to_string();
-            let entry = block_on(async move {
-                #[derive(Deserialize)]
-                struct ApiTokenResponse {
-                    #[serde(rename = "accessToken", alias = "access_token")]
-                    access_token: String,
-                }
-                let client = reqwest::Client::new();
-                let resp = client
-                    .post(format!(
-                        "{}/identity/resources/auth/v1/api-token",
-                        env.domain
-                    ))
-                    .header("Content-Type", "application/json")
-                    .json(&serde_json::json!({ "clientId": client_id, "secret": secret }))
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        starlark::Error::new_other(anyhow::anyhow!(
-                            "API token exchange failed: {}",
-                            e
-                        ))
-                    })?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(starlark::Error::new_other(anyhow::anyhow!(
-                        "API token exchange failed (HTTP {}): {}",
-                        status,
-                        body
-                    )));
-                }
-                let data: ApiTokenResponse = resp.json().await.map_err(|e| {
-                    starlark::Error::new_other(anyhow::anyhow!(
-                        "failed to parse API token response: {}",
-                        e
-                    ))
-                })?;
-                let claims = decode_jwt_claims(&data.access_token)?;
-                Ok::<CredentialsEntry, starlark::Error>(CredentialsEntry {
-                    access_token: data.access_token,
-                    refresh_token: String::new(),
-                    email: claims.email.unwrap_or_else(|| "api-token".to_string()),
-                    name: claims.name.unwrap_or_else(|| "Unknown".to_string()),
-                    tenant_id: claims.tenant_id,
-                    auth_domain: None,
-                    auth_client_id: None,
-                })
-            })?;
+            let entry = block_on(exchange_api_token(client_id, secret, env))?;
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
         }
 
@@ -767,6 +765,16 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         let profile = profile.filter(|p| !p.is_empty()).unwrap_or("default");
         let map = load_all_credentials()?;
         let Some(entry) = map.get(profile).cloned() else {
+            // Fall back to ASPECT_API_TOKEN env var
+            if let Ok(token) = std::env::var("ASPECT_API_TOKEN") {
+                if let Some((client_id, secret)) = token.split_once(':') {
+                    if let Ok(entry) =
+                        block_on(exchange_api_token(client_id, secret, ENV_PRODUCTION))
+                    {
+                        return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
+                    }
+                }
+            }
             return Ok(values::Value::new_none());
         };
         // Auto-refresh if expired and refreshable

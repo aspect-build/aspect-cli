@@ -9,7 +9,7 @@ use std::env::var;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aspect_telemetry::{cargo_pkg_short_version, cargo_pkg_version, do_not_track, send_telemetry};
+use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
 use axl_runtime::engine::config::ConfiguredTask;
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
@@ -465,9 +465,6 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Create an AxlStore for task execution
         let store = axl_loader.new_store(task.path.clone());
-
-        // Auto-login with ASPECT_API_ACCESS_TOKEN if set (tolerant of failures)
-        axl_runtime::engine::auth::try_auto_login(&store);
 
         // Execute the selected task using the new execution function
         let exit_code = execute_task_with_args(task, store, &fragment_data, |heap| {
