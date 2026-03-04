@@ -1,0 +1,27 @@
+"""Lint example: scaffolded from https://github.com/bazel-starters/shell
+
+Demonstrates aspect_rules_lint integration with aspect-cli.
+"""
+
+module(
+    name = "lint_example",
+    version = "0.0.0",
+)
+
+# Currently bazel-lib is only load()ed when platforms is used.
+bazel_dep(name = "bazel_lib", version = "3.1.1")
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5", repo_name = None)  # force a recent version that works with v3
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "apple_support", version = "2.2.0")
+bazel_dep(name = "aspect_rules_lint", version = "2.0.0")
+bazel_dep(name = "buildifier_prebuilt", version = "8.2.1.1")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
+bazel_dep(name = "rules_multitool", version = "1.11.1")
+bazel_dep(name = "bazelrc-preset.bzl", version = "1.8.0")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+
+multitool = use_extension("@rules_multitool//multitool:extension.bzl", "multitool")
+multitool.hub(lockfile = "//tools:tools.lock.json")
+use_repo(multitool, "multitool")
+
+register_toolchains("//tools/toolchains:all")
