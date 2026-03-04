@@ -1,0 +1,68 @@
+def _token_impl(ctx: TaskContext) -> int:
+    repo_args = ctx.args.repo
+    if len(repo_args) == 0:
+        print("Error: repo argument is required (format: OWNER/REPO)")
+        return 1
+    (owner, sep, repo_name) = repo_args[0].partition("/")
+    if not sep or not owner or not repo_name:
+        print("Error: repo must be in owner/repo format (e.g. my-org/my-repo)")
+        return 1
+
+    creds = ctx.aspect.auth.credentials(profile=ctx.args.profile)
+    if creds == None:
+        print("Error: not logged in. Run `aspect auth login` to authenticate.")
+        return 1
+
+    api_url = ctx.args.api_url if ctx.args.api_url else "https://api.aspect.build"
+
+    body_parts = ['{"owner":"', owner, '","repo":"', repo_name, '"']
+    if ctx.args.permissions:
+        body_parts.append(',"permissions":{')
+        first = True
+        for pair in ctx.args.permissions.split(","):
+            (k, _, v) = pair.strip().partition("=")
+            if k and v:
+                if not first:
+                    body_parts.append(",")
+                body_parts.append('"' + k + '":"' + v + '"')
+                first = False
+        body_parts.append("}")
+    body_parts.append("}")
+    body = "".join(body_parts)
+
+    resp = ctx.http().post(
+        url = api_url + "/github/token",
+        headers = {
+            "Authorization": "Bearer " + creds.access_token,
+            "Content-Type": "application/json",
+        },
+        data = body,
+    ).block()
+
+    if resp.status == 401:
+        print("Error: authentication failed. Run `aspect auth login` to re-authenticate.")
+        return 1
+    if resp.status == 403:
+        print("Error: access denied. %s" % resp.body)
+        return 1
+    if resp.status == 404:
+        print("Error: GitHub App not installed. See https://docs.aspect.build/github-app")
+        return 1
+    if resp.status < 200 or resp.status >= 300:
+        print("Error: API request failed (HTTP " + str(resp.status) + "): " + resp.body)
+        return 1
+
+    parsed = json.decode(resp.body)
+    print(parsed["token"])
+    return 0
+
+token = task(
+    group = ["github"],
+    implementation = _token_impl,
+    args = {
+        "repo":        args.positional(minimum = 1, maximum = 1),
+        "permissions": args.string(),
+        "api_url":     args.string(),
+        "profile":     args.string(),
+    },
+)

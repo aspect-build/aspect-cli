@@ -4,7 +4,7 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
-pub mod auth;
+pub mod aspect;
 mod bazel;
 mod globals;
 mod http;
@@ -24,10 +24,8 @@ pub mod task_info;
 
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
-    const Auth: StarlarkValueAsType<auth::Auth> = StarlarkValueAsType::new();
     const ConfigContext: StarlarkValueAsType<config::ConfigContext> = StarlarkValueAsType::new();
     const Http: StarlarkValueAsType<http::Http> = StarlarkValueAsType::new();
-    const WhoAmI: StarlarkValueAsType<auth::WhoAmI> = StarlarkValueAsType::new();
     const HttpResponse: StarlarkValueAsType<http::HttpResponse> = StarlarkValueAsType::new();
     const Task: StarlarkValueAsType<task::Task> = StarlarkValueAsType::new();
     const TaskArg: StarlarkValueAsType<task_arg::TaskArg> = StarlarkValueAsType::new();
@@ -53,6 +51,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             remote_execution::v2_toplevels(g);
         });
     });
+    globals.namespace("aspect", aspect::register_globals);
     globals.namespace("std", std::register_globals);
     globals.namespace("wasm", wasm::register_wasm_types);
 }

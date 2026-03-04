@@ -11,8 +11,10 @@ struct Builtin {
 const ASPECT: Builtin = Builtin {
     name: "aspect",
     files: &[
+        ("auth.axl", include_str!("./aspect/auth.axl")),
         ("bazel.axl", include_str!("./aspect/bazel.axl")),
         ("build.axl", include_str!("./aspect/build.axl")),
+        ("github.axl", include_str!("./aspect/github.axl")),
         ("fragments.axl", include_str!("./aspect/fragments.axl")),
         ("test.axl", include_str!("./aspect/test.axl")),
         ("axl_add.axl", include_str!("./aspect/axl_add.axl")),

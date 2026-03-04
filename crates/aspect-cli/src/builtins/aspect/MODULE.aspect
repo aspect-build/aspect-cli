@@ -1,4 +1,8 @@
+use_task("auth.axl", "login")
+use_task("auth.axl", "logout")
+use_task("auth.axl", "whoami")
 use_task("build.axl", "build")
+use_task("github.axl", "token")
 use_task("test.axl", "test")
 use_task("axl_add.axl", "add")
 

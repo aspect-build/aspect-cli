@@ -1,0 +1,76 @@
+def _login_impl(ctx: TaskContext) -> int:
+    if ctx.args.with_token and ctx.args.with_api_token:
+        print("Error: --with-token and --with-api-token are mutually exclusive")
+        return 1
+    elif ctx.args.with_token:
+        token = ctx.std.io.stdin.read_to_string().strip()
+        if not token:
+            print("Error: no token on stdin")
+            return 1
+        creds = ctx.aspect.auth.login(token=token, environment=ctx.args.environment)
+        ctx.aspect.auth.persist(creds, profile=ctx.args.profile)
+        print("Logged in as " + creds.name + " (" + creds.email + ")")
+    elif ctx.args.with_api_token:
+        inp = ctx.std.io.stdin.read_to_string().strip()
+        if not inp:
+            print("Error: no API token on stdin")
+            return 1
+        creds = ctx.aspect.auth.login(api_token=inp, environment=ctx.args.environment)
+        ctx.aspect.auth.persist(creds, profile=ctx.args.profile)
+        print("Logged in as " + creds.name + " (" + creds.email + ")")
+    else:
+        session = ctx.aspect.auth.login(environment=ctx.args.environment)
+        result = ctx.std.process.command("open").arg(session.url).spawn().wait()
+        if not result.success:
+            print("Open this URL to log in:")
+            print("  " + session.url)
+        else:
+            print("Browser opened. Waiting for authentication...")
+        creds = session.wait()
+        ctx.aspect.auth.persist(creds, profile=ctx.args.profile)
+        print("Logged in as " + creds.name + " (" + creds.email + ")")
+    return 0
+
+login = task(
+    group = ["auth"],
+    implementation = _login_impl,
+    args = {
+        "with_token":     args.boolean(default = False),
+        "with_api_token": args.boolean(default = False),
+        "environment":    args.string(),
+        "profile":        args.string(),
+    },
+)
+
+def _logout_impl(ctx: TaskContext) -> int:
+    ctx.aspect.auth.logout(profile=ctx.args.profile)
+    print("Logged out.")
+    return 0
+
+logout = task(
+    group = ["auth"],
+    implementation = _logout_impl,
+    args = {
+        "profile": args.string(),
+    },
+)
+
+def _whoami_impl(ctx: TaskContext) -> int:
+    creds = ctx.aspect.auth.credentials(profile=ctx.args.profile)
+    if creds == None:
+        print("Not logged in. Run `aspect auth login` to authenticate.")
+        return 1
+    print("Logged in as:")
+    print("  Name:   " + creds.name)
+    print("  Email:  " + creds.email)
+    print("  Tenant: " + creds.tenant_id)
+    print("  Token:  " + creds.token_status)
+    return 0
+
+whoami = task(
+    group = ["auth"],
+    implementation = _whoami_impl,
+    args = {
+        "profile": args.string(),
+    },
+)

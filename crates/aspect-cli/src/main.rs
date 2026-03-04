@@ -1,4 +1,3 @@
-mod auth;
 mod builtins;
 mod cmd_tree;
 mod flags;
@@ -64,29 +63,6 @@ async fn main() -> miette::Result<ExitCode> {
     let _tracing = trace::init();
     // Enter the root tracing span for the entire application.
     let _root = info_span!("root").entered();
-
-    // First positional (non-flag) argument, skipping the program name.
-    let args: Vec<String> = std::env::args().collect();
-    let subcommand = args.iter().skip(1).find(|a| !a.starts_with('-'));
-
-    // Early intercept for built-in commands.
-    // These run before Starlark evaluation because they:
-    // 1. Don't need any project context (no .aspect/ directory required)
-    // 2. Need async I/O for the localhost OAuth callback server
-    // 3. Must work outside any repository
-    // Only match --version/-v when they appear before the first positional arg (i.e. top-level).
-    let flags_before_subcommand = args.iter().skip(1).take_while(|a| a.starts_with('-'));
-    if flags_before_subcommand.into_iter().any(|a| a == "--version" || a == "-v") {
-        println!("aspect {:}", cargo_pkg_version());
-        return Ok(ExitCode::SUCCESS);
-    }
-    if subcommand.map(|s| s.as_str()) == Some("version") {
-        println!("Aspect CLI {:}", cargo_pkg_version());
-        return Ok(ExitCode::SUCCESS);
-    }
-    if subcommand.map(|s| s.as_str()) == Some("auth") {
-        return auth::handle(args).await;
-    }
 
     // Get the current working directory.
     let current_work_dir = std::env::current_dir().into_diagnostic()?;
@@ -375,7 +351,7 @@ async fn main() -> miette::Result<ExitCode> {
                     .about("Print this message or the help of the given subcommand(s)")
                     .hide(true),
             )
-            .subcommand(auth::command().hide(true));
+            ;
 
         // Convert each task into a Clap subcommand and insert into the command tree.
         for (i, task) in tasks.iter().enumerate() {
@@ -438,7 +414,6 @@ async fn main() -> miette::Result<ExitCode> {
 \x1b[1;4mTasks:\x1b[0m
 {{subcommands}}{task_groups_section}
 \x1b[1;4mCommands:\x1b[0m
-  \x1b[1mauth\x1b[0m     Authenticate with Aspect
   \x1b[1mversion\x1b[0m  Print version
   \x1b[1mhelp\x1b[0m     Print this message or the help of the given subcommand(s)
 

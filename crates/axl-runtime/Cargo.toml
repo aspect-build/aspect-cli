@@ -25,7 +25,7 @@ semver = "1"
 thiserror = "2.0.12"
 
 prost = "0.14.1"
-reqwest = { version="0.12.22", features = ["json", "stream", "gzip", "zstd"] }
+reqwest = { version="0.12.22", features = ["stream", "gzip", "zstd", "json"] }
 hyper = "1.6.0"
 hyper-util = { version = "0.1.12", features = ["client-legacy", "tokio", "http1"] }
 hyperlocal = "0.9.1"
@@ -39,11 +39,13 @@ wasmi_wasi = "0.51.0"
 
 clap = "4.5.47"
 getargs = "0.5.0"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.145"
+sha2 = "0.10"
 
 futures = "0.3.31"
 futures-util = "0.3.31"
-tokio = { version = "1.45.1", features = ["fs", "macros", "rt", "rt-multi-thread", "signal"], default-features = false }
+tokio = { version = "1.45.1", features = ["fs", "macros", "net", "io-util", "rt", "rt-multi-thread", "signal"], default-features = false }
 tokio-stream = { version = "0.1.17", features = ["io-util", "signal", "sync", "tokio-util"] }
 tokio-util = { version = "0.7", features = ["io"] }
 
