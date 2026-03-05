@@ -33,7 +33,7 @@ def _do_request(ctx, method, url, token, payload = None):
 # Authentication
 # =============================================================================
 
-def _authenticate(ctx, env, owner = None, repo = None, api_url = None, profile = None):
+def _authenticate(ctx, env, owner = None, repo = None, api_url = None, profile = None, roles = None):
     """Resolve a GitHub token using the following priority:
 
     1. ASPECT_WORKFLOWS_PR_GITHUB_TOKEN env var
@@ -59,8 +59,11 @@ def _authenticate(ctx, env, owner = None, repo = None, api_url = None, profile =
         return None
 
     api = api_url or _DEFAULT_ASPECT_API
+    url = api + "/github/token"
+    if roles:
+        url = url + "?roles=" + roles
     resp = ctx.http().post(
-        url = api + "/github/token",
+        url = url,
         headers = {
             "Authorization": "Bearer " + creds.access_token,
             "Content-Type": "application/json",

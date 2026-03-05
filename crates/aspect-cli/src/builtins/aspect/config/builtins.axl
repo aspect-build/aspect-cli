@@ -52,7 +52,7 @@ def configure_builtins(ctx: ConfigContext):
         (owner, repo) = detect_github_repo(ctx.std)
         if owner and repo:
             def _build_start(ctx, state):
-                token = github.authenticate(ctx, ctx.std.env, owner = owner, repo = repo)
+                token = github.authenticate(ctx, ctx.std.env, owner = owner, repo = repo, roles = "checks.write,statuses.write,prs.write")
                 if not token:
                     return
                 state["_github_token"] = token
