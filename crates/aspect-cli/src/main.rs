@@ -438,8 +438,10 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Handle built-in commands.
         match matches.subcommand_name() {
-            // Early-intercepted before AXL parsing; unreachable.
-            Some("version") | Some("auth") => unreachable!(),
+            Some("version") => {
+                println!("{}", cargo_pkg_short_version());
+                return Ok(ExitCode::SUCCESS);
+            }
             Some("help") => {
                 cmd_for_help.print_help().into_diagnostic()?;
                 return Ok(ExitCode::SUCCESS);
