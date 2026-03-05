@@ -1,7 +1,6 @@
 """GitHub API client library."""
 
 DEFAULT_GITHUB_API = "https://api.github.com"
-_DEFAULT_ASPECT_API = "https://api.aspect.build"
 
 
 # =============================================================================
@@ -33,7 +32,7 @@ def _do_request(ctx, method, url, token, payload = None):
 # Authentication
 # =============================================================================
 
-def _authenticate(ctx, env, owner = None, repo = None, api_url = None, profile = None, roles = None):
+def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = None):
     """Resolve a GitHub token using the following priority:
 
     1. ASPECT_WORKFLOWS_PR_GITHUB_TOKEN env var
@@ -58,8 +57,7 @@ def _authenticate(ctx, env, owner = None, repo = None, api_url = None, profile =
     if not owner or not repo:
         return None
 
-    api = api_url or _DEFAULT_ASPECT_API
-    url = api + "/github/token"
+    url = ctx.aspect.auth.api_url + "/github/token"
     if roles:
         url = url + "?roles=" + roles
     resp = ctx.http().post(

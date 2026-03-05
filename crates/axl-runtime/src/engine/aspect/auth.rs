@@ -44,6 +44,10 @@ const ENV_DEV: AuthEnv = AuthEnv {
     api_url: "https://api-dev.aspect.build",
 };
 
+fn resolve_aspect_env() -> starlark::Result<AuthEnv> {
+    resolve_auth_env(std::env::var("__ASPECT_ENVIRONMENT__").ok().as_deref())
+}
+
 fn resolve_auth_env(env: Option<&str>) -> starlark::Result<AuthEnv> {
     match env {
         None | Some("") | Some("production") | Some("prod") => Ok(ENV_PRODUCTION),
@@ -670,14 +674,18 @@ impl<'v> values::StarlarkValue<'v> for Auth {
 
 #[starlark_module]
 fn auth_methods(registry: &mut MethodsBuilder) {
+    #[starlark(attribute)]
+    fn api_url<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<String> {
+        Ok(resolve_aspect_env()?.api_url.to_string())
+    }
+
     fn login<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named)] token: Option<&str>,
         #[starlark(require = named)] api_token: Option<&str>,
-        #[starlark(require = named)] environment: Option<&str>,
         heap: &'v values::Heap,
     ) -> starlark::Result<values::Value<'v>> {
-        let env = resolve_auth_env(environment)?;
+        let env = resolve_aspect_env()?;
 
         if let Some(token) = token {
             let claims = decode_jwt_claims(token)?;
@@ -781,10 +789,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             // Fall back to ASPECT_API_TOKEN env var
             if let Ok(token) = std::env::var("ASPECT_API_TOKEN") {
                 if let Some((client_id, secret)) = token.split_once(':') {
-                    if let Ok(entry) =
-                        block_on(exchange_api_token(client_id, secret, ENV_PRODUCTION))
-                    {
-                        return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
+                    if let Ok(env) = resolve_aspect_env() {
+                        if let Ok(entry) = block_on(exchange_api_token(client_id, secret, env)) {
+                            return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
+                        }
                     }
                 }
             }
