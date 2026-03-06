@@ -99,6 +99,7 @@ impl DiskStore {
     }
 
     fn download_tmp_file(&self) -> PathBuf {
+        #[allow(deprecated)]
         let mut rng = rand::thread_rng();
         let mut bytes = [0u8; 32];
         rng.fill_bytes(&mut bytes);

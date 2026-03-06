@@ -1,0 +1,189 @@
+"""GitHub API client library."""
+
+DEFAULT_GITHUB_API = "https://api.github.com"
+
+
+# =============================================================================
+# Internal helpers
+# =============================================================================
+
+def _do_request(ctx, method, url, token, payload = None):
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    data = json.encode(payload) if payload else None
+    if method == "POST":
+        response = ctx.http().post(url = url, headers = headers, data = data).block()
+    elif method == "PATCH":
+        response = ctx.http().patch(url = url, headers = headers, data = data).block()
+    else:
+        return (False, 0, "unsupported method: " + method)
+    success = response.status >= 200 and response.status < 300
+    body = response.body
+    if body:
+        body = json.decode(body)
+    return (success, response.status, body)
+
+
+# =============================================================================
+# Authentication
+# =============================================================================
+
+def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = None):
+    """Resolve a GitHub token using the following priority:
+
+    1. ASPECT_WORKFLOWS_PR_GITHUB_TOKEN env var
+    2. GITHUB_TOKEN env var
+    3. Exchange Aspect credentials for a GitHub token via the Aspect API
+       (requires owner and repo to be provided)
+
+    Returns the token string, or None if authentication is not possible.
+    """
+    token = env.var("ASPECT_WORKFLOWS_PR_GITHUB_TOKEN")
+    if token:
+        return token
+
+    token = env.var("GITHUB_TOKEN")
+    if token:
+        return token
+
+    creds = ctx.aspect.auth.credentials(profile = profile)
+    if not creds:
+        return None
+
+    if not owner or not repo:
+        return None
+
+    url = ctx.aspect.auth.api_url + "/github/token"
+    if roles:
+        url = url + "?roles=" + roles
+    resp = ctx.http().post(
+        url = url,
+        headers = {
+            "Authorization": "Bearer " + creds.access_token,
+            "Content-Type": "application/json",
+        },
+        data = json.encode({"owner": owner, "repo": repo}),
+    ).block()
+
+    if resp.status >= 200 and resp.status < 300:
+        return json.decode(resp.body)["token"]
+
+    return None
+
+
+# =============================================================================
+# Check Runs
+# =============================================================================
+
+def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, output = None, api_base = DEFAULT_GITHUB_API):
+    """Create a new check run on a commit."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/check-runs"
+    payload = {"name": name, "head_sha": head_sha}
+    if status:
+        payload["status"] = status
+    if output:
+        payload["output"] = output
+    success, status_code, body = _do_request(ctx, "POST", url, token, payload)
+    if success:
+        return {"success": True, "check_run_id": body.get("id"), "html_url": body.get("html_url")}
+    error_msg = "request failed: " + str(status_code)
+    if body and type(body) == "dict" and body.get("message"):
+        error_msg = error_msg + " - " + body["message"]
+    return {"success": False, "error": error_msg, "status": status_code}
+
+
+def update_check_run(ctx, token, owner, repo, check_run_id, status = None, conclusion = None, output = None, api_base = DEFAULT_GITHUB_API):
+    """Update an existing check run."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/check-runs/" + str(check_run_id)
+    payload = {}
+    if status:
+        payload["status"] = status
+    if conclusion:
+        payload["conclusion"] = conclusion
+    if output:
+        payload["output"] = output
+    success, status_code, body = _do_request(ctx, "PATCH", url, token, payload)
+    if success:
+        return {"success": True, "check_run_id": body.get("id"), "html_url": body.get("html_url")}
+    error_msg = "request failed: " + str(status_code)
+    if body and type(body) == "dict" and body.get("message"):
+        error_msg = error_msg + " - " + body["message"]
+    return {"success": False, "error": error_msg, "status": status_code}
+
+
+def complete_check_run(ctx, token, owner, repo, check_run_id, conclusion, output = None, api_base = DEFAULT_GITHUB_API):
+    """Complete a check run with a conclusion."""
+    return update_check_run(
+        ctx, token, owner, repo, check_run_id,
+        status = "completed",
+        conclusion = conclusion,
+        output = output,
+        api_base = api_base,
+    )
+
+
+# =============================================================================
+# CI environment detection
+# =============================================================================
+
+def detect_commit_sha(env):
+    """Detect commit SHA from CI environment variables."""
+    return (
+        env.var("GITHUB_SHA") or
+        env.var("BUILDKITE_COMMIT") or
+        env.var("CIRCLE_SHA1") or
+        env.var("CI_COMMIT_SHA") or
+        ""
+    )
+
+
+def detect_github_repo(std):
+    """Detect (owner, repo) from git remote origin, or ("", "") on failure."""
+    result = std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code != 0:
+        return ("", "")
+    url = result.stdout.strip()
+
+    if url.startswith("git@github.com:"):
+        path = url[len("git@github.com:"):]
+    elif "github.com/" in url:
+        path = url[url.index("github.com/") + len("github.com/"):]
+    else:
+        return ("", "")
+
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.split("/", 1)
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return (parts[0], parts[1])
+    return ("", "")
+
+
+# =============================================================================
+# Struct-based API
+# =============================================================================
+
+def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT_GITHUB_API):
+    return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
+
+
+def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
+    return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "success", output = output, api_base = api_base)
+
+
+def _status_checks_fail(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
+    return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "failure", output = output, api_base = api_base)
+
+
+github = struct(
+    authenticate = _authenticate,
+    status_checks = struct(
+        create   = _status_checks_create,
+        complete = _status_checks_complete,
+        fail     = _status_checks_fail,
+    ),
+)

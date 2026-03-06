@@ -4,6 +4,7 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
+pub mod aspect;
 mod bazel;
 mod globals;
 mod http;
@@ -50,6 +51,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             remote_execution::v2_toplevels(g);
         });
     });
+    globals.namespace("aspect", aspect::register_globals);
     globals.namespace("std", std::register_globals);
     globals.namespace("wasm", wasm::register_wasm_types);
 }

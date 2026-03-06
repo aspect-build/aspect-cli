@@ -9,7 +9,7 @@ use std::env::var;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aspect_telemetry::{cargo_pkg_short_version, cargo_pkg_version, do_not_track, send_telemetry};
+use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
 use axl_runtime::engine::config::ConfiguredTask;
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
@@ -325,18 +325,14 @@ async fn main() -> miette::Result<ExitCode> {
         let mut tree = CommandTree::default();
 
         // Create the base Clap command for the 'aspect' CLI.
-        // TODO: add .about()
         let cmd = Command::new("aspect")
-            // set binary name to "aspect" in help
             .bin_name("aspect")
-            // add an about string
             .about("Aspect's programmable task runner built on top of Bazel\n{ Correct, Fast, Usable } -- Choose three")
             // customize the usage string to use <TASK>
             .subcommand_value_name("TASK|GROUP|COMMAND")
             .disable_help_subcommand(true)
-            // handle --version and -v flags
             .version(cargo_pkg_short_version())
-            .disable_version_flag(true) // disable auto -V / --version
+            .disable_version_flag(true)
             .arg(
                 Arg::new("version")
                     .short('v')
@@ -354,7 +350,8 @@ async fn main() -> miette::Result<ExitCode> {
                 Command::new("help")
                     .about("Print this message or the help of the given subcommand(s)")
                     .hide(true),
-            );
+            )
+            ;
 
         // Convert each task into a Clap subcommand and insert into the command tree.
         for (i, task) in tasks.iter().enumerate() {
@@ -442,7 +439,7 @@ async fn main() -> miette::Result<ExitCode> {
         // Handle built-in commands.
         match matches.subcommand_name() {
             Some("version") => {
-                println!("Aspect CLI {:}", cargo_pkg_version());
+                println!("{}", cargo_pkg_short_version());
                 return Ok(ExitCode::SUCCESS);
             }
             Some("help") => {
