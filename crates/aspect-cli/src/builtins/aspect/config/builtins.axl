@@ -56,7 +56,7 @@ def configure_builtins(ctx: ConfigContext):
                 if not token:
                     return
                 state["_github_token"] = token
-                result = github.status_checks.create(ctx, token, owner, repo, sha, "aspect/build")
+                result = github.status_checks.create(ctx, token, owner, repo, sha, "aspect/%s" % ctx.task.name)
                 if result["success"]:
                     state["_check_run_id"] = result["check_run_id"]
 
