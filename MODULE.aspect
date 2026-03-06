@@ -13,7 +13,7 @@ axl_local_dep(
 axl_archive_dep(
     name = "aspect_rules_lint",
     urls = ["https://github.com/aspect-build/rules_lint/archive/65525d871f677071877d3ea1ec096499ff7dd147.tar.gz"],
-    integrity = "sha512-IKsrPMgaNuzHAkHzyKbJexzt8ObepFhtzyurirppI1XNHgMKrLMuPXXVFeOpoVws5o2EMUSY4ZisCz9SLFKbhg==",
+    integrity = "sha512-TGcxutWr8FwxrK3G+uthbEpuYM2oOVpHPOvaVPzLLuHkfPY0jn/GWFp9myQeFzDFsRZ4ilT0jAWfGZhTk/nesQ== sha512-IKsrPMgaNuzHAkHzyKbJexzt8ObepFhtzyurirppI1XNHgMKrLMuPXXVFeOpoVws5o2EMUSY4ZisCz9SLFKbhg==",
     strip_prefix = "rules_lint-65525d871f677071877d3ea1ec096499ff7dd147",
     auto_use_tasks = True,
     dev = True,
