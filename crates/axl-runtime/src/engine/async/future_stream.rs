@@ -58,7 +58,7 @@ impl Clone for FutureIterator {
 }
 
 impl<'v> AllocValue<'v> for FutureIterator {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -68,11 +68,11 @@ impl<'v> values::StarlarkValue<'v> for FutureIterator {
     unsafe fn iterate(
         &self,
         me: values::Value<'v>,
-        _heap: &'v Heap,
+        _heap: Heap<'v>,
     ) -> starlark::Result<values::Value<'v>> {
         Ok(me)
     }
-    unsafe fn iter_next(&self, _index: usize, heap: &'v Heap) -> Option<values::Value<'v>> {
+    unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         let stream: Arc<RwLock<JoinSet<_>>> = Arc::clone(&self.stream);
         let out = self.rt.block_on(async {
             tokio::task::spawn(async move {

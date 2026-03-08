@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use allocative::Allocative;
 use fibre::RecvError;
 use fibre::TryRecvError;
+use starlark::StarlarkResultExt;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -38,7 +39,7 @@ impl ExecutionLogIterator {
 }
 
 impl<'v> AllocValue<'v> for ExecutionLogIterator {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -48,7 +49,9 @@ pub(crate) fn execlog_methods(registry: &mut MethodsBuilder) {
     /// Returns `ExecLogEntry` if event buffer is not empty.
     /// Maximum `1000` events is buffered at once.
     fn try_pop<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<ExecLogEntry>> {
-        let this = this.downcast_ref_err::<ExecutionLogIterator>()?;
+        let this = this
+            .downcast_ref_err::<ExecutionLogIterator>()
+            .into_anyhow_result()?;
         match this.recv.borrow_mut().try_recv() {
             Ok(it) => Ok(NoneOr::Other(it)),
             Err(TryRecvError::Empty) => Ok(NoneOr::None),
@@ -59,7 +62,9 @@ pub(crate) fn execlog_methods(registry: &mut MethodsBuilder) {
     /// Returns `True` if stream is complete and all the events are received via `for`
     /// or calling `try_pop` repeatedly.
     fn done<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
-        let this = this.downcast_ref_err::<ExecutionLogIterator>()?;
+        let this = this
+            .downcast_ref_err::<ExecutionLogIterator>()
+            .into_anyhow_result()?;
         Ok(this.recv.borrow().is_closed())
     }
 }
@@ -82,11 +87,11 @@ impl<'v> values::StarlarkValue<'v> for ExecutionLogIterator {
     unsafe fn iterate(
         &self,
         me: values::Value<'v>,
-        _heap: &'v Heap,
+        _heap: Heap<'v>,
     ) -> starlark::Result<values::Value<'v>> {
         Ok(me)
     }
-    unsafe fn iter_next(&self, _index: usize, heap: &'v Heap) -> Option<values::Value<'v>> {
+    unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         match self.recv.borrow_mut().recv() {
             Ok(ev) => Some(ev.alloc_value(heap)),
             Err(RecvError::Disconnected) => None,

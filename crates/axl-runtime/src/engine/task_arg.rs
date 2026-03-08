@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::u32;
 
 use allocative::Allocative;
-use starlark::ErrorKind;
+
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
@@ -118,7 +118,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = 0)] minimum: u32,
         #[starlark(require = named, default = 1)] maximum: u32,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<String>>,
-    ) -> starlark::Result<TaskArg> {
+    ) -> anyhow::Result<TaskArg> {
         Ok(TaskArg::Positional {
             minimum: minimum,
             maximum: maximum,
@@ -140,7 +140,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///   }
     /// )
     /// ```
-    fn trailing_var_args<'v>() -> starlark::Result<TaskArg> {
+    fn trailing_var_args<'v>() -> anyhow::Result<TaskArg> {
         Ok(TaskArg::TrailingVarArgs {})
     }
 
@@ -159,7 +159,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)] default: Option<String>,
     ) -> starlark::Result<TaskArg> {
         if required && default.is_some() {
-            return Err(starlark::Error::new_kind(ErrorKind::Function(
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
                 anyhow::anyhow!("`required` and `default` are both set."),
             )));
         }
@@ -184,7 +184,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<String>>,
     ) -> starlark::Result<TaskArg> {
         if required && !default.is_none() {
-            return Err(starlark::Error::new_kind(ErrorKind::Function(
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
                 anyhow::anyhow!("`required` and `default` are both set."),
             )));
         }
@@ -211,7 +211,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         _eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<TaskArg> {
         if required && default.is_some() {
-            return Err(starlark::Error::new_kind(ErrorKind::Function(
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
                 anyhow::anyhow!("`required` and `default` are both set."),
             )));
         }
@@ -236,7 +236,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<bool>>,
     ) -> starlark::Result<TaskArg> {
         if required && !default.is_none() {
-            return Err(starlark::Error::new_kind(ErrorKind::Function(
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
                 anyhow::anyhow!("`required` and `default` are both set."),
             )));
         }
@@ -262,7 +262,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)] default: Option<i32>,
     ) -> starlark::Result<TaskArg> {
         if required && default.is_some() {
-            return Err(starlark::Error::new_kind(ErrorKind::Function(
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
                 anyhow::anyhow!("`required` and `default` are both set."),
             )));
         }
@@ -287,7 +287,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<i32>>,
     ) -> starlark::Result<TaskArg> {
         if required && !default.is_none() {
-            return Err(starlark::Error::new_kind(ErrorKind::Function(
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
                 anyhow::anyhow!("`required` and `default` are both set."),
             )));
         }
@@ -312,7 +312,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)] default: Option<u32>,
     ) -> starlark::Result<TaskArg> {
         if required && default.is_some() {
-            return Err(starlark::Error::new_kind(ErrorKind::Function(
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
                 anyhow::anyhow!("`required` and `default` are both set."),
             )));
         }
@@ -337,7 +337,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<u32>>,
     ) -> starlark::Result<TaskArg> {
         if required && !default.is_none() {
-            return Err(starlark::Error::new_kind(ErrorKind::Function(
+            return Err(starlark::Error::new_kind(starlark::ErrorKind::Function(
                 anyhow::anyhow!("`required` and `default` are both set."),
             )));
         }

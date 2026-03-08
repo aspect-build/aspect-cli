@@ -40,22 +40,22 @@ impl<'v> values::StarlarkValue<'v> for Std {
 #[starlark_module]
 pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
-    fn env<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<env::Env> {
+    fn env<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<env::Env> {
         Ok(env::Env::new())
     }
 
     #[starlark(attribute)]
-    fn io<'v>(this: values::Value<'v>) -> starlark::Result<io::Stdio> {
+    fn io<'v>(this: values::Value<'v>) -> anyhow::Result<io::Stdio> {
         Ok(io::Stdio::new())
     }
 
     #[starlark(attribute)]
-    fn fs<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<fs::Filesystem> {
+    fn fs<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<fs::Filesystem> {
         Ok(fs::Filesystem::new())
     }
 
     #[starlark(attribute)]
-    fn process<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<process::Process> {
+    fn process<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<process::Process> {
         Ok(process::Process::new())
     }
 }

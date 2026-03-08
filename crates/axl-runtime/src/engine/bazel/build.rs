@@ -5,7 +5,6 @@ use std::io;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
-use std::rc::Rc;
 use std::thread::JoinHandle;
 
 use allocative::Allocative;
@@ -15,6 +14,7 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 
+use starlark::StarlarkResultExt;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
@@ -55,7 +55,7 @@ pub struct BuildStatus {
 }
 
 impl<'v> AllocValue<'v> for BuildStatus {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_simple(self)
     }
 }
@@ -103,7 +103,9 @@ impl<'v> UnpackValue<'v> for BuildEventSink {
     type Error = anyhow::Error;
 
     fn unpack_value_impl(value: values::Value<'v>) -> Result<Option<Self>, Self::Error> {
-        let value = value.downcast_ref_err::<BuildEventSink>()?;
+        let value = value
+            .downcast_ref_err::<BuildEventSink>()
+            .into_anyhow_result()?;
         Ok(Some(value.clone()))
     }
 }
@@ -142,10 +144,10 @@ pub struct Build {
     sink_handles: RefCell<Vec<JoinHandle<()>>>,
 
     #[allocative(skip)]
-    child: Rc<RefCell<Child>>,
+    child: RefCell<Child>,
 
     #[allocative(skip)]
-    span: RefCell<tracing::span::EnteredSpan>,
+    span: RefCell<tracing::Span>,
 }
 
 impl Build {
@@ -227,8 +229,8 @@ impl Build {
             workspace_events = workspace_events,
             execution_logs = execution_logs,
             flags = ?flags
-        )
-        .entered();
+        );
+        let _enter = span.enter();
 
         let targets: Vec<String> = targets.into_iter().collect();
 
@@ -350,8 +352,9 @@ impl Build {
 
         let child = cmd.spawn()?;
 
+        drop(_enter);
         Ok(Self {
-            child: Rc::new(RefCell::new(child)),
+            child: RefCell::new(child),
             build_event_stream: RefCell::new(build_event_stream),
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
@@ -362,7 +365,7 @@ impl Build {
 }
 
 impl<'v> AllocValue<'v> for Build {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -415,7 +418,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     }
 
     fn try_wait<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<BuildStatus>> {
-        let build = this.downcast_ref_err::<Build>()?;
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         let status = build.child.borrow_mut().try_wait()?;
         Ok(match status {
             Some(status) => NoneOr::Other(BuildStatus {
@@ -437,7 +440,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// `build_events()` remains usable after `wait()` for replaying historical
     /// events, because the build event stream retains its buffer.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
-        let build = this.downcast_ref_err::<Build>()?;
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
 
         let result = build.child.borrow_mut().wait()?;
 
@@ -479,8 +482,8 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             }
         }
 
-        let span = build.span.replace(tracing::trace_span!("build").entered());
-        span.exit();
+        // Drop the span to end the trace
+        drop(build.span.replace(tracing::Span::none()));
 
         Ok(BuildStatus {
             success: result.success(),

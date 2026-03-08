@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::sync::mpsc::TryRecvError;
 
 use allocative::Allocative;
+use starlark::StarlarkResultExt;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -38,7 +39,7 @@ impl BuildEventIterator {
 }
 
 impl<'v> AllocValue<'v> for BuildEventIterator {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -47,7 +48,9 @@ impl<'v> AllocValue<'v> for BuildEventIterator {
 pub(crate) fn build_event_methods(registry: &mut MethodsBuilder) {
     /// Returns `BuildEvent` if event buffer is not empty.
     fn try_pop<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<BuildEvent>> {
-        let this = this.downcast_ref_err::<BuildEventIterator>()?;
+        let this = this
+            .downcast_ref_err::<BuildEventIterator>()
+            .into_anyhow_result()?;
         match this.recv.borrow_mut().try_recv() {
             Ok(it) => Ok(NoneOr::Other(it)),
             Err(TryRecvError::Empty) => Ok(NoneOr::None),
@@ -58,7 +61,9 @@ pub(crate) fn build_event_methods(registry: &mut MethodsBuilder) {
     /// Returns `True` if stream is complete and all the events are received via `for`
     /// or calling `try_pop` repeatedly.
     fn done<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
-        let this = this.downcast_ref_err::<BuildEventIterator>()?;
+        let this = this
+            .downcast_ref_err::<BuildEventIterator>()
+            .into_anyhow_result()?;
         Ok(this.recv.borrow().is_closed())
     }
 }
@@ -81,11 +86,11 @@ impl<'v> values::StarlarkValue<'v> for BuildEventIterator {
     unsafe fn iterate(
         &self,
         me: values::Value<'v>,
-        _heap: &'v Heap,
+        _heap: Heap<'v>,
     ) -> starlark::Result<values::Value<'v>> {
         Ok(me)
     }
-    unsafe fn iter_next(&self, _index: usize, heap: &'v Heap) -> Option<values::Value<'v>> {
+    unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         match self.recv.borrow_mut().recv() {
             Ok(ev) => Some(ev.alloc_value(heap)),
             Err(_) => None,

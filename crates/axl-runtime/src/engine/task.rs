@@ -96,7 +96,7 @@ impl<'v> TaskLike<'v> for Task<'v> {
 impl<'v> StarlarkValue<'v> for Task<'v> {}
 
 impl<'v> values::AllocValue<'v> for Task<'v> {
-    fn alloc_value(self, heap: &'v values::Heap) -> Value<'v> {
+    fn alloc_value(self, heap: values::Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -215,7 +215,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] fragments: UnpackList<
             Value<'v>,
         >,
-    ) -> starlark::Result<Task<'v>> {
+    ) -> anyhow::Result<Task<'v>> {
         if group.items.len() > MAX_TASK_GROUPS {
             return Err(anyhow::anyhow!(
                 "task cannot have more than {} group levels",

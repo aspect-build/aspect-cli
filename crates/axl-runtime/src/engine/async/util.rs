@@ -15,7 +15,7 @@ fn register_future_utils(globals: &mut GlobalsBuilder) {
     fn iter<'v>(
         #[starlark(args)] futures: UnpackTuple<StarlarkFuture>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<FutureIterator> {
+    ) -> anyhow::Result<FutureIterator> {
         let store = AxlStore::from_eval(eval)?;
         return Ok(FutureIterator::new(store.rt, futures.items));
     }

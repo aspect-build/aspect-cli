@@ -47,7 +47,7 @@ pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: Value<'v>,
         #[starlark(require = pos)] task: Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<NoneType> {
+    ) -> anyhow::Result<NoneType> {
         let store = AxlStore::from_eval(eval)?;
         let mut this = TaskListMut::from_value(this)?;
         let symbol = format!("__added_task_{}", this.aref.content.len());
@@ -71,15 +71,17 @@ pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
         }
 
         // Freeze the task value to create OwnedFrozenValue
-        let temp_module = Module::new();
-        let short_task: Value = unsafe { std::mem::transmute(task) };
-        temp_module.set(&symbol, short_task);
-        let frozen = temp_module
-            .freeze()
-            .map_err(|e| anyhow::anyhow!("failed to freeze task: {:?}", e))?;
-        let task_def = frozen
-            .get(&symbol)
-            .map_err(|e| anyhow::anyhow!("failed to get frozen task: {:?}", e))?;
+        let (_frozen_module, task_def) = Module::with_temp_heap(|temp_module| {
+            let short_task: Value = unsafe { std::mem::transmute(task) };
+            temp_module.set(&symbol, short_task);
+            let frozen = temp_module
+                .freeze()
+                .map_err(|e| anyhow::anyhow!("failed to freeze task: {:?}", e))?;
+            let task_def = frozen
+                .get(&symbol)
+                .map_err(|e| anyhow::anyhow!("failed to get frozen task: {:?}", e))?;
+            Ok::<_, anyhow::Error>((frozen, task_def))
+        })?;
 
         // Get fragment type IDs from the frozen task
         let frozen_task = task_def
@@ -137,8 +139,10 @@ where
         RES.methods(task_list_methods)
     }
 
-    fn iterate_collect(&self, heap: &'v Heap) -> starlark::Result<Vec<Value<'v>>> {
-        self.0.iterate_collect(heap)
+    fn iterate_collect(&self, heap: Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
+        self.0
+            .iterate_collect(heap)
+            .map_err(starlark::Error::new_other)
     }
 }
 
@@ -184,17 +188,17 @@ impl<'v> StarlarkTypeRepr for TaskList<'v> {
 }
 
 impl<'v> AllocValue<'v> for TaskList<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(TaskListGen(RefCell::new(self)))
     }
 }
 
 trait TaskListLike<'v>: Debug + Allocative {
-    fn iterate_collect(&self, _heap: &'v Heap) -> starlark::Result<Vec<Value<'v>>>;
+    fn iterate_collect(&self, _heap: Heap<'v>) -> anyhow::Result<Vec<Value<'v>>>;
 }
 
 impl<'v> TaskListLike<'v> for RefCell<TaskList<'v>> {
-    fn iterate_collect(&self, _heap: &'v Heap) -> starlark::Result<Vec<Value<'v>>> {
+    fn iterate_collect(&self, _heap: Heap<'v>) -> anyhow::Result<Vec<Value<'v>>> {
         Ok(self
             .borrow()
             .content

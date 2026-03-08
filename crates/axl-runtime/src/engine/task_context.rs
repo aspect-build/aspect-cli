@@ -5,6 +5,7 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 
+use starlark::StarlarkResultExt;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
@@ -51,7 +52,7 @@ impl<'v> values::StarlarkValue<'v> for TaskContext<'v> {
 }
 
 impl<'v> values::AllocValue<'v> for TaskContext<'v> {
-    fn alloc_value(self, heap: &'v values::Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: values::Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -75,35 +76,41 @@ impl<'v> values::Freeze for TaskContext<'v> {
 pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     /// Aspect platform APIs (auth, etc.).
     #[starlark(attribute)]
-    fn aspect<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Aspect> {
+    fn aspect<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Aspect> {
         Ok(Aspect {})
     }
 
     /// Standard library is the foundation of powerful AXL tasks.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
+    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
         Ok(Std {})
     }
 
     /// Identity information for this task (name and group).
     #[starlark(attribute)]
-    fn task<'v>(this: values::Value<'v>) -> starlark::Result<TaskInfo> {
-        let ctx = this.downcast_ref_err::<TaskContext>()?;
+    fn task<'v>(this: values::Value<'v>) -> anyhow::Result<TaskInfo> {
+        let ctx = this
+            .downcast_ref_err::<TaskContext>()
+            .into_anyhow_result()?;
         Ok(ctx.task.clone())
     }
 
     /// Access to arguments provided by the caller.
     #[starlark(attribute)]
-    fn args<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<TaskArgs<'v>> {
-        let ctx = this.downcast_ref_err::<TaskContext>()?;
+    fn args<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<TaskArgs<'v>> {
+        let ctx = this
+            .downcast_ref_err::<TaskContext>()
+            .into_anyhow_result()?;
         // TODO: don't do this.
         Ok(ctx.args.clone())
     }
 
     /// Access to the fragment map for reading configured fragment values.
     #[starlark(attribute)]
-    fn fragments<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
-        let ctx = this.downcast_ref_err::<TaskContext>()?;
+    fn fragments<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
+            .downcast_ref_err::<TaskContext>()
+            .into_anyhow_result()?;
         Ok(ctx.fragments)
     }
 
@@ -111,13 +118,13 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn template<'v>(
         #[allow(unused)] this: values::Value<'v>,
-    ) -> starlark::Result<template::Template> {
+    ) -> anyhow::Result<template::Template> {
         Ok(template::Template::new())
     }
 
     /// Access to Bazel functionality.
     #[starlark(attribute)]
-    fn bazel<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Bazel> {
+    fn bazel<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Bazel> {
         Ok(Bazel {})
     }
 
@@ -131,7 +138,7 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
     /// **Fetch** data from a remote server
     /// data = ctx.http().get("https://example.com/data.json").block()
     /// ```
-    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
+    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Http> {
         Ok(Http::new())
     }
 }
@@ -161,46 +168,52 @@ impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
 #[starlark_module]
 fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
-    fn aspect<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Aspect> {
+    fn aspect<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Aspect> {
         Ok(Aspect {})
     }
 
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
+    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
         Ok(Std {})
     }
 
     #[starlark(attribute)]
-    fn task<'v>(this: values::Value<'v>) -> starlark::Result<TaskInfo> {
-        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+    fn task<'v>(this: values::Value<'v>) -> anyhow::Result<TaskInfo> {
+        let ctx = this
+            .downcast_ref_err::<FrozenTaskContext>()
+            .into_anyhow_result()?;
         Ok(ctx.task.clone())
     }
 
     #[starlark(attribute)]
-    fn args<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
-        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+    fn args<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
+            .downcast_ref_err::<FrozenTaskContext>()
+            .into_anyhow_result()?;
         Ok(ctx.args.to_value())
     }
 
     #[starlark(attribute)]
-    fn fragments<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
-        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+    fn fragments<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
+            .downcast_ref_err::<FrozenTaskContext>()
+            .into_anyhow_result()?;
         Ok(ctx.fragments.to_value())
     }
 
     #[starlark(attribute)]
     fn template<'v>(
         #[allow(unused)] this: values::Value<'v>,
-    ) -> starlark::Result<template::Template> {
+    ) -> anyhow::Result<template::Template> {
         Ok(template::Template::new())
     }
 
     #[starlark(attribute)]
-    fn bazel<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Bazel> {
+    fn bazel<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Bazel> {
         Ok(Bazel {})
     }
 
-    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
+    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Http> {
         Ok(Http::new())
     }
 
@@ -209,7 +222,7 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     /// The frozen context is passed directly from `this` - no need to go through
     /// the store since `this` IS the frozen TaskContext.
     #[starlark(attribute)]
-    fn wasm<'v>(this: values::Value<'v>) -> starlark::Result<Wasm> {
+    fn wasm<'v>(this: values::Value<'v>) -> anyhow::Result<Wasm> {
         let frozen_ctx = this
             .unpack_frozen()
             .ok_or_else(|| anyhow::anyhow!("TaskContext must be frozen for wasm access"))?;

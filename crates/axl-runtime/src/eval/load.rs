@@ -64,7 +64,7 @@ impl<'p> AxlLoader<'p> {
         self.loaded_modules.borrow_mut().insert(path, module);
     }
 
-    pub(super) fn eval_module(&self, path: &Path) -> Result<Module, EvalError> {
+    pub(super) fn eval_module(&self, path: &Path) -> Result<FrozenModule, EvalError> {
         assert!(path.is_absolute());
 
         // Push the script path onto the LOAD_STACK (used to detect circular loads)
@@ -73,21 +73,24 @@ impl<'p> AxlLoader<'p> {
         let raw =
             fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
         let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.dialect)?;
-        let module = Module::new();
-
-        let store = self.new_store(path.to_path_buf());
-        let mut eval = Evaluator::new(&module);
-        eval.set_loader(self);
-        eval.extra = Some(&store);
-        eval.eval_module(ast, &self.globals)?;
-        drop(eval);
-        drop(store);
+        let frozen = Module::with_temp_heap(|module| {
+            let store = self.new_store(path.to_path_buf());
+            let mut eval = Evaluator::new(&module);
+            eval.set_loader(self);
+            eval.extra = Some(&store);
+            eval.eval_module(ast, &self.globals)?;
+            drop(eval);
+            drop(store);
+            module
+                .freeze()
+                .map_err(|e| EvalError::UnknownError(anyhow!("{:?}", e)))
+        })?;
 
         // Pop the script path off of the LOAD_STACK
         self.load_stack.borrow_mut().pop();
 
         // Return the evaluated script
-        Ok(module)
+        Ok(frozen)
     }
 
     fn resolve_in_deps_root(
@@ -199,8 +202,7 @@ impl<'p> FileLoader for AxlLoader<'p> {
         // Read and parse the file content into an AST.
         let frozen_module = self
             .eval_module(&resolved_script_path)
-            .map_err(|e| Into::<starlark::Error>::into(e))?
-            .freeze()?;
+            .map_err(|e| Into::<starlark::Error>::into(e))?;
 
         // Pop the dependency module scope if we pushed one.
         if new_module_scope.is_some() {

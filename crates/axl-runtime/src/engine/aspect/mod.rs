@@ -32,7 +32,7 @@ impl<'v> values::StarlarkValue<'v> for Aspect {
 #[starlark_module]
 pub(crate) fn aspect_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
-    fn auth<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<auth::Auth> {
+    fn auth<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<auth::Auth> {
         Ok(auth::Auth {})
     }
 }

@@ -159,7 +159,7 @@ impl<'v> values::StarlarkValue<'v> for ConfiguredTask {
         Ok(())
     }
 
-    fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         match attribute {
             "name" => Some(heap.alloc_str(&self.name.borrow()).to_value()),
             "group" => Some(heap.alloc(AllocList(self.group.borrow().iter()))),
@@ -190,7 +190,7 @@ fn configured_task_methods(_builder: &mut MethodsBuilder) {
 }
 
 impl<'v> values::AllocValue<'v> for ConfiguredTask {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }

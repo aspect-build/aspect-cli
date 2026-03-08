@@ -1,3 +1,13 @@
+[patch.crates-io]
+starlark = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+starlark_derive = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+starlark_lsp = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+starlark_syntax = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+starlark_map = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+allocative = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+allocative_derive = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+dupe = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+
 [workspace]
 members = ["crates/*"]
 exclude = ["crates/example-tui"]

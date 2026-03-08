@@ -16,7 +16,7 @@
 //! This design is completely safe - no `unsafe` code is needed because:
 //! - `FrozenValue` is `'static` and `Copy`
 //! - The trampoline returns ownership to Callable::invoke before calling Starlark
-//! - Memory access works because we have owned `Rc<RefCell<Store>>`
+//! - Memory access works because we have owned `Arc<RefCell<Store>>`
 
 use std::collections::HashMap;
 
@@ -103,7 +103,7 @@ pub fn get_import_signature(
 }
 
 /// Convert WASM values to Starlark values.
-pub fn wasm_vals_to_starlark<'v>(vals: &[wasmi::Val], heap: &'v Heap) -> Vec<Value<'v>> {
+pub fn wasm_vals_to_starlark<'v>(vals: &[wasmi::Val], heap: Heap<'v>) -> Vec<Value<'v>> {
     vals.iter()
         .map(|val| match val {
             wasmi::Val::I32(v) => heap.alloc(*v),
@@ -171,7 +171,7 @@ pub fn convert_single_value(val: Value<'_>, result: &mut wasmi::Val) -> Result<(
 pub fn starlark_to_wasm_results<'v>(
     val: Value<'v>,
     results: &mut [wasmi::Val],
-    heap: &'v Heap,
+    heap: Heap<'v>,
 ) -> Result<(), wasmi::Error> {
     if val.is_none() {
         return Ok(());

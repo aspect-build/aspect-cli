@@ -17,6 +17,7 @@ use std::sync::Mutex;
 use allocative::Allocative;
 use dupe::Dupe;
 
+use starlark::StarlarkResultExt;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -114,7 +115,7 @@ impl<'v> values::StarlarkValue<'v> for Readable {
     unsafe fn iterate(
         &self,
         _me: values::Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<values::Value<'v>> {
         Ok(heap.alloc_simple(stream_iter::ReadIterator::new(self.dupe())))
     }
@@ -127,7 +128,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
     /// Returns true if the underlying stream is connected to a terminal/tty.
     #[starlark(attribute)]
     fn is_tty<'v>(this: values::Value) -> anyhow::Result<bool> {
-        let io = this.downcast_ref_err::<Readable>()?;
+        let io = this.downcast_ref_err::<Readable>().into_anyhow_result()?;
         Ok(match &*io {
             Readable::Stdin(stdin) => stdin.is_terminal(),
             Readable::ChildStderr(_) => false,
@@ -145,7 +146,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
         this: values::Value,
         #[starlark(require=pos, default = -1)] size: i32,
     ) -> anyhow::Result<Bytes> {
-        let io = this.downcast_ref_err::<Readable>()?;
+        let io = this.downcast_ref_err::<Readable>().into_anyhow_result()?;
 
         if size < 0 {
             // Read until EOF
@@ -164,7 +165,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
                     file.lock().unwrap().read_to_end(&mut buf)?;
                 }
             };
-            Ok(Bytes::from(buf.as_slice()))
+            Ok(Bytes::new(buf.as_slice()))
         } else {
             // Read up to size bytes
             let mut buf = vec![0u8; size as usize];
@@ -179,7 +180,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
                 Readable::File(file) => file.lock().unwrap().read(&mut buf)?,
             };
             buf.truncate(bytes_read);
-            Ok(Bytes::from(buf.as_slice()))
+            Ok(Bytes::new(buf.as_slice()))
         }
     }
 
@@ -187,7 +188,7 @@ fn readable_methods(registry: &mut MethodsBuilder) {
     ///
     /// If successful, this function will return all bytes as a string.
     fn read_to_string<'v>(this: values::Value) -> anyhow::Result<String> {
-        let io = this.downcast_ref_err::<Readable>()?;
+        let io = this.downcast_ref_err::<Readable>().into_anyhow_result()?;
         let mut buf = String::new();
         let _size = match &*io {
             Readable::Stdin(stdin) => stdin.lock().read_to_string(&mut buf)?,
@@ -223,7 +224,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
     /// Returns true if the underlying stream is connected to a terminal/tty.
     #[starlark(attribute)]
     fn is_tty<'v>(this: values::Value) -> anyhow::Result<bool> {
-        let io = this.downcast_ref_err::<Writable>()?;
+        let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;
         Ok(match &*io {
             Writable::ChildStdin(_) => false,
             Writable::Stdout(out) => {
@@ -249,7 +250,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
         this: values::Value,
         #[starlark(require = pos)] buf: values::StringValue,
     ) -> anyhow::Result<u32> {
-        let io = this.downcast_ref_err::<Writable>()?;
+        let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;
         match &*io {
             Writable::ChildStdin(stdin) => {
                 let guard = stdin.lock().unwrap();
@@ -292,7 +293,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
     /// Flushes this output stream, ensuring that all intermediately buffered
     /// contents reach their destination.
     fn flush<'v>(this: values::Value) -> anyhow::Result<NoneType> {
-        let io = this.downcast_ref_err::<Writable>()?;
+        let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;
         match &*io {
             Writable::ChildStdin(stdin) => {
                 let guard = stdin.lock().unwrap();
@@ -322,7 +323,7 @@ fn writable_methods(registry: &mut MethodsBuilder) {
     /// Closes this output stream. This drops the underlying handle, and
     /// subsequent writes will fail with "stream is closed".
     fn close<'v>(this: values::Value) -> anyhow::Result<NoneType> {
-        let io = this.downcast_ref_err::<Writable>()?;
+        let io = this.downcast_ref_err::<Writable>().into_anyhow_result()?;
         match &*io {
             Writable::ChildStdin(stdin) => {
                 // Take the inner value out, replacing with None. Dropping it closes the stream.

@@ -8,6 +8,7 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 
+use starlark::StarlarkResultExt;
 use starlark::starlark_module;
 use starlark::values;
 use starlark::values::AllocValue;
@@ -50,7 +51,7 @@ impl<'v> ConfigContext<'v> {
     pub fn new(
         tasks: Vec<ConfiguredTask>,
         fragment_map: values::Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> Self {
         let tasks: Vec<values::Value<'v>> = tasks
             .into_iter()
@@ -104,7 +105,7 @@ impl<'v> values::StarlarkValue<'v> for ConfigContext<'v> {
 }
 
 impl<'v> values::AllocValue<'v> for ConfigContext<'v> {
-    fn alloc_value(self, heap: &'v values::Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: values::Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -120,7 +121,7 @@ impl<'v> values::Freeze for ConfigContext<'v> {
 pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     /// Standard library is the foundation of powerful AXL tasks.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
+    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
         Ok(Std {})
     }
 
@@ -128,13 +129,13 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn template<'v>(
         #[allow(unused)] this: values::Value<'v>,
-    ) -> starlark::Result<template::Template> {
+    ) -> anyhow::Result<template::Template> {
         Ok(template::Template::new())
     }
 
     /// EXPERIMENTAL! Run wasm programs within tasks.
     #[starlark(attribute)]
-    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Wasm> {
+    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Wasm> {
         Ok(Wasm::new())
     }
 
@@ -148,7 +149,7 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     /// **Fetch** data from a remote server
     /// data = ctx.http().get("https://example.com/data.json").block()
     /// ```
-    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
+    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Http> {
         Ok(Http::new())
     }
 
@@ -156,7 +157,9 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     fn tasks<'v>(
         #[allow(unused)] this: values::Value<'v>,
     ) -> anyhow::Result<ValueOfUnchecked<'v, &'v TaskListRef<'v>>> {
-        let this = this.downcast_ref_err::<ConfigContext>()?;
+        let this = this
+            .downcast_ref_err::<ConfigContext>()
+            .into_anyhow_result()?;
         Ok(ValueOfUnchecked::new(this.tasks))
     }
 
@@ -167,8 +170,10 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     /// ctx.fragments[BazelFragment].extra_flags = ["--config=ci"]
     /// ```
     #[starlark(attribute)]
-    fn fragments<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
-        let ctx = this.downcast_ref_err::<ConfigContext>()?;
+    fn fragments<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
+            .downcast_ref_err::<ConfigContext>()
+            .into_anyhow_result()?;
         Ok(ctx.fragment_map)
     }
 }

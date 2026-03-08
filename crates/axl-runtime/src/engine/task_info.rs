@@ -32,13 +32,13 @@ impl<'v> values::StarlarkValue<'v> for TaskInfo {
 fn task_info_methods(registry: &mut MethodsBuilder) {
     /// The name of the task.
     #[starlark(attribute)]
-    fn name(this: &TaskInfo) -> starlark::Result<String> {
+    fn name(this: &TaskInfo) -> anyhow::Result<String> {
         Ok(this.name.clone())
     }
 
     /// The group(s) this task belongs to.
     #[starlark(attribute)]
-    fn group(this: &TaskInfo) -> starlark::Result<Vec<String>> {
+    fn group(this: &TaskInfo) -> anyhow::Result<Vec<String>> {
         Ok(this.group.clone())
     }
 }

@@ -3,6 +3,7 @@ use derive_more::Display;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use starlark::StarlarkResultExt;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
@@ -12,12 +13,11 @@ use starlark::values::{self, AllocValue, Heap, Trace, Tracer, UnpackValue, Value
 use starlark::values::{NoSerialize, ProvidesStaticType, starlark_value};
 use std::cell::RefCell;
 use std::fmt::Debug;
-use std::rc::Rc;
 
 use crate::engine::store::AxlStore;
 
 pub trait FutureAlloc: Send {
-    fn alloc_value_fut<'v>(self: Box<Self>, heap: &'v Heap) -> values::Value<'v>;
+    fn alloc_value_fut<'v>(self: Box<Self>, heap: Heap<'v>) -> values::Value<'v>;
 }
 
 impl StarlarkTypeRepr for Box<dyn FutureAlloc> {
@@ -29,7 +29,7 @@ impl StarlarkTypeRepr for Box<dyn FutureAlloc> {
 }
 
 impl<'v> AllocValue<'v> for Box<dyn FutureAlloc> {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         self.alloc_value_fut(heap)
     }
 }
@@ -49,9 +49,9 @@ pub enum Transform<'v> {
 #[display("Future")]
 pub struct StarlarkFuture<'v> {
     #[allocative(skip)]
-    inner: Rc<RefCell<Option<BoxFuture<'static, FutOutput>>>>,
+    inner: RefCell<Option<BoxFuture<'static, FutOutput>>>,
     #[allocative(skip)]
-    transforms: Rc<RefCell<Vec<Transform<'v>>>>,
+    transforms: RefCell<Vec<Transform<'v>>>,
 }
 
 impl<'v> StarlarkFuture<'v> {
@@ -60,16 +60,16 @@ impl<'v> StarlarkFuture<'v> {
     ) -> Self {
         use futures::TryFutureExt;
         Self {
-            inner: Rc::new(RefCell::new(Some(
+            inner: RefCell::new(Some(
                 fut.map_ok_or_else(|e| Err(e), |r| Ok(Box::new(r) as Box<dyn FutureAlloc>))
                     .boxed(),
-            ))),
-            transforms: Rc::new(RefCell::new(Vec::new())),
+            )),
+            transforms: RefCell::new(Vec::new()),
         }
     }
 
     pub fn as_fut(&self) -> impl Future<Output = FutOutput> + Send + 'static {
-        let inner = self.inner.replace(None);
+        let inner = self.inner.borrow_mut().take();
         let r = inner
             .ok_or(anyhow::anyhow!("future has already been awaited"))
             .unwrap();
@@ -81,8 +81,9 @@ impl<'v> StarlarkFuture<'v> {
         let mut new_transforms = self.transforms.borrow().clone();
         new_transforms.push(transform);
         Self {
-            inner: self.inner.clone(),
-            transforms: Rc::new(RefCell::new(new_transforms)),
+            // Move the inner future to the new chained future, consuming the original.
+            inner: RefCell::new(self.inner.borrow_mut().take()),
+            transforms: RefCell::new(new_transforms),
         }
     }
 }
@@ -94,7 +95,7 @@ impl<'v> Future for StarlarkFuture<'v> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        self.inner.take().unwrap().poll_unpin(cx)
+        self.inner.borrow_mut().take().unwrap().poll_unpin(cx)
     }
 }
 
@@ -120,7 +121,7 @@ impl<'v> Debug for StarlarkFuture<'v> {
 }
 
 impl<'v> AllocValue<'v> for StarlarkFuture<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -129,10 +130,13 @@ impl<'v> UnpackValue<'v> for StarlarkFuture<'v> {
     type Error = anyhow::Error;
 
     fn unpack_value_impl(value: values::Value<'v>) -> Result<Option<Self>, Self::Error> {
-        let fut = value.downcast_ref_err::<StarlarkFuture>()?;
+        let fut = value
+            .downcast_ref_err::<StarlarkFuture>()
+            .into_anyhow_result()?;
         Ok(Some(Self {
-            inner: fut.inner.clone(),
-            transforms: fut.transforms.clone(),
+            // Move the inner future out of the original, consuming it.
+            inner: RefCell::new(fut.inner.borrow_mut().take()),
+            transforms: RefCell::new(fut.transforms.borrow().clone()),
         }))
     }
 }
@@ -149,7 +153,7 @@ fn apply_transforms<'v>(
     result: FutOutput,
     transforms: &[Transform<'v>],
     eval: &mut Evaluator<'v, '_, '_>,
-) -> starlark::Result<values::Value<'v>> {
+) -> anyhow::Result<values::Value<'v>> {
     let heap = eval.heap();
     let mut current: Result<values::Value<'v>, anyhow::Error> =
         result.map(|boxed| boxed.alloc_value_fut(heap));
@@ -179,7 +183,7 @@ fn apply_transforms<'v>(
         };
     }
 
-    current.map_err(|e| starlark::Error::from(anyhow::anyhow!("{}", e)))
+    current
 }
 
 #[starlark_module]
@@ -187,13 +191,16 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
     fn block<'v>(
         this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<values::Value<'v>> {
+    ) -> anyhow::Result<values::Value<'v>> {
         let store = AxlStore::from_eval(eval)?;
-        let this = this.downcast_ref_err::<StarlarkFuture>()?;
+        let this = this
+            .downcast_ref_err::<StarlarkFuture>()
+            .into_anyhow_result()?;
 
         let fut = this
             .inner
-            .replace(None)
+            .borrow_mut()
+            .take()
             .ok_or(anyhow::anyhow!("future has already been awaited"))?;
         let transforms = this.transforms.borrow().clone();
 
@@ -204,16 +211,20 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
     fn map_ok<'v>(
         this: values::Value<'v>,
         callable: values::Value<'v>,
-    ) -> starlark::Result<StarlarkFuture<'v>> {
-        let this_fut = this.downcast_ref_err::<StarlarkFuture>()?;
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
+        let this_fut = this
+            .downcast_ref_err::<StarlarkFuture>()
+            .into_anyhow_result()?;
         Ok(this_fut.with_transform(Transform::MapOk(callable)))
     }
 
     fn map_err<'v>(
         this: values::Value<'v>,
         callable: values::Value<'v>,
-    ) -> starlark::Result<StarlarkFuture<'v>> {
-        let this_fut = this.downcast_ref_err::<StarlarkFuture>()?;
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
+        let this_fut = this
+            .downcast_ref_err::<StarlarkFuture>()
+            .into_anyhow_result()?;
         Ok(this_fut.with_transform(Transform::MapErr(callable)))
     }
 
@@ -221,8 +232,10 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = named)] map_ok: values::Value<'v>,
         #[starlark(require = named)] map_err: values::Value<'v>,
-    ) -> starlark::Result<StarlarkFuture<'v>> {
-        let this_fut = this.downcast_ref_err::<StarlarkFuture>()?;
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
+        let this_fut = this
+            .downcast_ref_err::<StarlarkFuture>()
+            .into_anyhow_result()?;
         Ok(this_fut.with_transform(Transform::MapOkOrElse { map_ok, map_err }))
     }
 }

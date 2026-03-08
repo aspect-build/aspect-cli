@@ -8,6 +8,7 @@ use allocative::Allocative;
 use derive_more::Display;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use starlark::StarlarkResultExt;
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
@@ -44,19 +45,19 @@ const ENV_DEV: AuthEnv = AuthEnv {
     api_url: "https://api-dev.aspect.build",
 };
 
-fn resolve_aspect_env() -> starlark::Result<AuthEnv> {
+fn resolve_aspect_env() -> anyhow::Result<AuthEnv> {
     resolve_auth_env(std::env::var("__ASPECT_ENVIRONMENT__").ok().as_deref())
 }
 
-fn resolve_auth_env(env: Option<&str>) -> starlark::Result<AuthEnv> {
+fn resolve_auth_env(env: Option<&str>) -> anyhow::Result<AuthEnv> {
     match env {
         None | Some("") | Some("production") | Some("prod") => Ok(ENV_PRODUCTION),
         Some("staging") => Ok(ENV_STAGING),
         Some("dev") | Some("development") => Ok(ENV_DEV),
-        Some(other) => Err(starlark::Error::new_other(anyhow::anyhow!(
+        Some(other) => Err(anyhow::anyhow!(
             "unknown environment: {:?}\n\nValid values: production (default), staging, dev",
             other
-        ))),
+        )),
     }
 }
 
@@ -74,14 +75,13 @@ struct CredentialsEntry {
     auth_client_id: Option<String>,
 }
 
-fn credentials_path() -> starlark::Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| {
-        starlark::Error::new_other(anyhow::anyhow!("unable to determine home directory"))
-    })?;
+fn credentials_path() -> anyhow::Result<PathBuf> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("unable to determine home directory"))?;
     Ok(home.join(".aspect").join("credentials.json"))
 }
 
-fn load_all_credentials() -> starlark::Result<HashMap<String, CredentialsEntry>> {
+fn load_all_credentials() -> anyhow::Result<HashMap<String, CredentialsEntry>> {
     let path = credentials_path()?;
     match fs::read_to_string(&path) {
         Ok(content) => {
@@ -95,44 +95,31 @@ fn load_all_credentials() -> starlark::Result<HashMap<String, CredentialsEntry>>
                 map.insert("default".to_string(), entry);
                 return Ok(map);
             }
-            Err(starlark::Error::new_other(anyhow::anyhow!(
+            Err(anyhow::anyhow!(
                 "failed to parse credentials file: unrecognized format"
-            )))
+            ))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
-        Err(e) => Err(starlark::Error::new_other(anyhow::anyhow!(
-            "failed to read credentials: {}",
-            e
-        ))),
+        Err(e) => Err(anyhow::anyhow!("failed to read credentials: {}", e)),
     }
 }
 
-fn save_all_credentials(map: &HashMap<String, CredentialsEntry>) -> starlark::Result<()> {
+fn save_all_credentials(map: &HashMap<String, CredentialsEntry>) -> anyhow::Result<()> {
     let path = credentials_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            starlark::Error::new_other(anyhow::anyhow!(
-                "failed to create ~/.aspect directory: {}",
-                e
-            ))
-        })?;
+        fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("failed to create ~/.aspect directory: {}", e))?;
     }
-    let json = serde_json::to_string_pretty(map).map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to serialize credentials: {}", e))
-    })?;
-    fs::write(&path, &json).map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to write credentials file: {}", e))
-    })?;
+    let json = serde_json::to_string_pretty(map)
+        .map_err(|e| anyhow::anyhow!("failed to serialize credentials: {}", e))?;
+    fs::write(&path, &json)
+        .map_err(|e| anyhow::anyhow!("failed to write credentials file: {}", e))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms).map_err(|e| {
-            starlark::Error::new_other(anyhow::anyhow!(
-                "failed to set credentials permissions: {}",
-                e
-            ))
-        })?;
+        fs::set_permissions(&path, perms)
+            .map_err(|e| anyhow::anyhow!("failed to set credentials permissions: {}", e))?;
     }
     Ok(())
 }
@@ -146,23 +133,22 @@ struct JwtClaims {
     exp: Option<u64>,
 }
 
-fn decode_jwt_claims(token: &str) -> starlark::Result<JwtClaims> {
+fn decode_jwt_claims(token: &str) -> anyhow::Result<JwtClaims> {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
-        return Err(starlark::Error::new_other(anyhow::anyhow!(
+        return Err(anyhow::anyhow!(
             "invalid JWT: expected 3 parts, got {}",
             parts.len()
-        )));
+        ));
     }
-    let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to decode JWT payload: {}", e))
-    })?;
-    serde_json::from_slice(&payload_bytes).map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to parse JWT claims: {}", e))
-    })
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|e| anyhow::anyhow!("failed to decode JWT payload: {}", e))?;
+    serde_json::from_slice(&payload_bytes)
+        .map_err(|e| anyhow::anyhow!("failed to parse JWT claims: {}", e))
 }
 
 fn format_token_status(exp: Option<u64>) -> String {
@@ -285,7 +271,7 @@ async fn exchange_api_token(
     client_id: &str,
     secret: &str,
     env: AuthEnv,
-) -> starlark::Result<CredentialsEntry> {
+) -> anyhow::Result<CredentialsEntry> {
     #[derive(Deserialize)]
     struct ApiTokenResponse {
         #[serde(rename = "accessToken", alias = "access_token")]
@@ -301,21 +287,20 @@ async fn exchange_api_token(
         .json(&serde_json::json!({ "clientId": client_id, "secret": secret }))
         .send()
         .await
-        .map_err(|e| {
-            starlark::Error::new_other(anyhow::anyhow!("API token exchange failed: {}", e))
-        })?;
+        .map_err(|e| anyhow::anyhow!("API token exchange failed: {}", e))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(starlark::Error::new_other(anyhow::anyhow!(
+        return Err(anyhow::anyhow!(
             "API token exchange failed (HTTP {}): {}",
             status,
             body
-        )));
+        ));
     }
-    let data: ApiTokenResponse = resp.json().await.map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to parse API token response: {}", e))
-    })?;
+    let data: ApiTokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to parse API token response: {}", e))?;
     let claims = decode_jwt_claims(&data.access_token)?;
     Ok(CredentialsEntry {
         access_token: data.access_token,
@@ -328,25 +313,29 @@ async fn exchange_api_token(
     })
 }
 
-async fn accept_callback(listener: TcpListener) -> starlark::Result<String> {
-    let (mut stream, _addr) = listener.accept().await.map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to accept OAuth callback: {}", e))
-    })?;
+async fn accept_callback(listener: TcpListener) -> anyhow::Result<String> {
+    let (mut stream, _addr) = listener
+        .accept()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to accept OAuth callback: {}", e))?;
     let mut buf = vec![0u8; 4096];
-    let n = stream.read(&mut buf).await.map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to read OAuth callback: {}", e))
-    })?;
+    let n = stream
+        .read(&mut buf)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read OAuth callback: {}", e))?;
     let request = String::from_utf8_lossy(&buf[..n]);
-    let first_line = request.lines().next().ok_or_else(|| {
-        starlark::Error::new_other(anyhow::anyhow!("empty HTTP request from browser callback"))
-    })?;
-    let path = first_line.split_whitespace().nth(1).ok_or_else(|| {
-        starlark::Error::new_other(anyhow::anyhow!("malformed HTTP request line"))
-    })?;
+    let first_line = request
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty HTTP request from browser callback"))?;
+    let path = first_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("malformed HTTP request line"))?;
     let code = extract_query_param(path, "code").ok_or_else(|| {
         let error = extract_query_param(path, "error").unwrap_or_else(|| "unknown".to_string());
         let desc = extract_query_param(path, "error_description").unwrap_or_default();
-        starlark::Error::new_other(anyhow::anyhow!("authentication failed: {} {}", error, desc))
+        anyhow::anyhow!("authentication failed: {} {}", error, desc)
     })?;
     let html = r##"<!DOCTYPE html>
 <html lang="en">
@@ -405,9 +394,10 @@ async fn accept_callback(listener: TcpListener) -> starlark::Result<String> {
         html.len(),
         html
     );
-    stream.write_all(response.as_bytes()).await.map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to write OAuth response: {}", e))
-    })?;
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to write OAuth response: {}", e))?;
     Ok(code)
 }
 
@@ -422,7 +412,7 @@ async fn exchange_code(
     redirect_uri: &str,
     code_verifier: &str,
     env: AuthEnv,
-) -> starlark::Result<OAuthTokenResponse> {
+) -> anyhow::Result<OAuthTokenResponse> {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{}/oauth/token", env.domain))
@@ -435,30 +425,30 @@ async fn exchange_code(
         ])
         .send()
         .await
-        .map_err(|e| {
-            starlark::Error::new_other(anyhow::anyhow!("token exchange request failed: {}", e))
-        })?;
+        .map_err(|e| anyhow::anyhow!("token exchange request failed: {}", e))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(starlark::Error::new_other(anyhow::anyhow!(
+        return Err(anyhow::anyhow!(
             "token exchange failed (HTTP {}): {}",
             status,
             body
-        )));
+        ));
     }
-    resp.json::<OAuthTokenResponse>().await.map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to parse token response: {}", e))
-    })
+    resp.json::<OAuthTokenResponse>()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to parse token response: {}", e))
 }
 
-async fn refresh_access_token(entry: &CredentialsEntry) -> starlark::Result<CredentialsEntry> {
-    let auth_domain = entry.auth_domain.as_deref().ok_or_else(|| {
-        starlark::Error::new_other(anyhow::anyhow!("no auth_domain stored — cannot refresh"))
-    })?;
-    let client_id = entry.auth_client_id.as_deref().ok_or_else(|| {
-        starlark::Error::new_other(anyhow::anyhow!("no auth_client_id stored — cannot refresh"))
-    })?;
+async fn refresh_access_token(entry: &CredentialsEntry) -> anyhow::Result<CredentialsEntry> {
+    let auth_domain = entry
+        .auth_domain
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("no auth_domain stored — cannot refresh"))?;
+    let client_id = entry
+        .auth_client_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("no auth_client_id stored — cannot refresh"))?;
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{}/oauth/token", auth_domain))
@@ -469,21 +459,20 @@ async fn refresh_access_token(entry: &CredentialsEntry) -> starlark::Result<Cred
         ])
         .send()
         .await
-        .map_err(|e| {
-            starlark::Error::new_other(anyhow::anyhow!("token refresh request failed: {}", e))
-        })?;
+        .map_err(|e| anyhow::anyhow!("token refresh request failed: {}", e))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(starlark::Error::new_other(anyhow::anyhow!(
+        return Err(anyhow::anyhow!(
             "token refresh failed (HTTP {}): {}",
             status,
             body
-        )));
+        ));
     }
-    let token_resp: OAuthTokenResponse = resp.json().await.map_err(|e| {
-        starlark::Error::new_other(anyhow::anyhow!("failed to parse refresh response: {}", e))
-    })?;
+    let token_resp: OAuthTokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to parse refresh response: {}", e))?;
     let claims = decode_jwt_claims(&token_resp.access_token)?;
     Ok(CredentialsEntry {
         access_token: token_resp.access_token,
@@ -523,35 +512,46 @@ impl<'v> values::StarlarkValue<'v> for AuthCredentials {
 #[starlark_module]
 fn auth_credentials_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
-    fn email<'v>(this: values::Value<'v>) -> starlark::Result<String> {
-        Ok(this.downcast_ref_err::<AuthCredentials>()?.email.clone())
-    }
-
-    #[starlark(attribute)]
-    fn name<'v>(this: values::Value<'v>) -> starlark::Result<String> {
-        Ok(this.downcast_ref_err::<AuthCredentials>()?.name.clone())
-    }
-
-    #[starlark(attribute)]
-    fn tenant_id<'v>(this: values::Value<'v>) -> starlark::Result<String> {
+    fn email<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         Ok(this
-            .downcast_ref_err::<AuthCredentials>()?
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?
+            .email
+            .clone())
+    }
+
+    #[starlark(attribute)]
+    fn name<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        Ok(this
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?
+            .name
+            .clone())
+    }
+
+    #[starlark(attribute)]
+    fn tenant_id<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        Ok(this
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?
             .tenant_id
             .clone())
     }
 
     #[starlark(attribute)]
-    fn access_token<'v>(this: values::Value<'v>) -> starlark::Result<String> {
+    fn access_token<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         Ok(this
-            .downcast_ref_err::<AuthCredentials>()?
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?
             .access_token
             .clone())
     }
 
     #[starlark(attribute)]
-    fn token_status<'v>(this: values::Value<'v>) -> starlark::Result<String> {
+    fn token_status<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         Ok(this
-            .downcast_ref_err::<AuthCredentials>()?
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?
             .token_status
             .clone())
     }
@@ -622,29 +622,34 @@ impl<'v> values::StarlarkValue<'v> for AuthSession {
 #[starlark_module]
 fn auth_session_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
-    fn url<'v>(this: values::Value<'v>) -> starlark::Result<String> {
-        Ok(this.downcast_ref_err::<AuthSession>()?.url.clone())
+    fn url<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
+        Ok(this
+            .downcast_ref_err::<AuthSession>()
+            .into_anyhow_result()?
+            .url
+            .clone())
     }
 
-    fn wait<'v>(this: values::Value<'v>) -> starlark::Result<AuthCredentials> {
-        let session = this.downcast_ref_err::<AuthSession>()?;
-        let mut guard = session.inner.lock().map_err(|_| {
-            starlark::Error::new_other(anyhow::anyhow!("auth session already consumed or poisoned"))
-        })?;
+    fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<AuthCredentials> {
+        let session = this
+            .downcast_ref_err::<AuthSession>()
+            .into_anyhow_result()?;
+        let mut guard = session
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("auth session already consumed or poisoned"))?;
         let inner = guard.take().ok_or_else(|| {
-            starlark::Error::new_other(anyhow::anyhow!(
-                "auth session already consumed (wait() called twice)"
-            ))
+            anyhow::anyhow!("auth session already consumed (wait() called twice)")
         })?;
         let entry = block_on(async move {
-            let listener = inner.listener.ok_or_else(|| {
-                starlark::Error::new_other(anyhow::anyhow!("no listener in auth session"))
-            })?;
+            let listener = inner
+                .listener
+                .ok_or_else(|| anyhow::anyhow!("no listener in auth session"))?;
             let code = accept_callback(listener).await?;
             let token_resp =
                 exchange_code(&code, &inner.redirect_uri, &inner.code_verifier, inner.env).await?;
             let claims = decode_jwt_claims(&token_resp.access_token)?;
-            Ok::<CredentialsEntry, starlark::Error>(CredentialsEntry {
+            Ok::<CredentialsEntry, anyhow::Error>(CredentialsEntry {
                 access_token: token_resp.access_token,
                 refresh_token: token_resp.refresh_token,
                 email: claims.email.unwrap_or_else(|| "api-token".to_string()),
@@ -675,7 +680,7 @@ impl<'v> values::StarlarkValue<'v> for Auth {
 #[starlark_module]
 fn auth_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
-    fn api_url<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<String> {
+    fn api_url<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<String> {
         Ok(resolve_aspect_env()?.api_url.to_string())
     }
 
@@ -683,8 +688,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named)] token: Option<&str>,
         #[starlark(require = named)] api_token: Option<&str>,
-        heap: &'v values::Heap,
-    ) -> starlark::Result<values::Value<'v>> {
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
         let env = resolve_aspect_env()?;
 
         if let Some(token) = token {
@@ -703,9 +708,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
 
         if let Some(api_token) = api_token {
             let (client_id, secret) = api_token.split_once(':').ok_or_else(|| {
-                starlark::Error::new_other(anyhow::anyhow!(
-                    "invalid API token format: expected client_id:secret"
-                ))
+                anyhow::anyhow!("invalid API token format: expected client_id:secret")
             })?;
             let entry = block_on(exchange_api_token(client_id, secret, env))?;
             return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
@@ -714,11 +717,11 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         // Browser-based OAuth flow
         let port: u16 = 19556;
         let listener = block_on(TcpListener::bind(format!("127.0.0.1:{}", port))).map_err(|e| {
-            starlark::Error::new_other(anyhow::anyhow!(
+            anyhow::anyhow!(
                 "failed to bind localhost:{} — is another login in progress? ({})",
                 port,
                 e
-            ))
+            )
         })?;
         let redirect_uri = format!("http://localhost:{}/callback", port);
         let code_verifier = generate_code_verifier();
@@ -746,8 +749,10 @@ fn auth_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         creds: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
-    ) -> starlark::Result<values::Value<'v>> {
-        let creds = creds.downcast_ref_err::<AuthCredentials>()?;
+    ) -> anyhow::Result<values::Value<'v>> {
+        let creds = creds
+            .downcast_ref_err::<AuthCredentials>()
+            .into_anyhow_result()?;
         let profile_opt = profile.into_option();
         let profile = profile_opt
             .as_deref()
@@ -762,7 +767,7 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     fn logout<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
-    ) -> starlark::Result<values::Value<'v>> {
+    ) -> anyhow::Result<values::Value<'v>> {
         let profile_opt = profile.into_option();
         let profile = profile_opt
             .as_deref()
@@ -777,8 +782,8 @@ fn auth_methods(registry: &mut MethodsBuilder) {
     fn credentials<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] profile: NoneOr<String>,
-        heap: &'v values::Heap,
-    ) -> starlark::Result<values::Value<'v>> {
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
         let profile_opt = profile.into_option();
         let profile = profile_opt
             .as_deref()
@@ -808,9 +813,9 @@ fn auth_methods(registry: &mut MethodsBuilder) {
                     refreshed
                 }
                 Err(_) => {
-                    return Err(starlark::Error::new_other(anyhow::anyhow!(
+                    return Err(anyhow::anyhow!(
                         "session expired\n\nRun `aspect auth login` to re-authenticate."
-                    )));
+                    ));
                 }
             }
         } else {

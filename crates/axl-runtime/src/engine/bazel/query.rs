@@ -1,22 +1,22 @@
-use std::cell::RefCell;
 use std::env::temp_dir;
 use std::fs;
 use std::fs::File;
 
+use std::cell::RefCell;
 use std::io::Read;
 use std::process::Command;
 use std::process::Stdio;
-use std::rc::Rc;
 
 use allocative::Allocative;
 use anyhow::anyhow;
 use derive_more::Display;
-use dupe::Dupe;
+
 use prost::bytes::Bytes;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 
+use starlark::StarlarkResultExt;
 use starlark::starlark_module;
 use starlark::typing::Ty;
 use starlark::values;
@@ -86,7 +86,7 @@ impl<'v> StarlarkTypeRepr for Target {
 }
 
 impl<'v> starlark::values::AllocValue<'v> for Target {
-    fn alloc_value(self, heap: &'v starlark::values::Heap) -> starlark::values::Value<'v> {
+    fn alloc_value(self, heap: starlark::values::Heap<'v>) -> starlark::values::Value<'v> {
         match self {
             Target::SourceFile(source_file) => heap.alloc_simple(source_file),
             Target::GeneratedFile(generated_file) => heap.alloc_simple(generated_file),
@@ -104,7 +104,7 @@ pub struct TargetSet {
 }
 
 impl<'v> AllocValue<'v> for TargetSet {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_simple(self)
     }
 }
@@ -119,7 +119,7 @@ impl<'v> values::StarlarkValue<'v> for TargetSet {
         Ok(self.targets.len() as i32)
     }
 
-    fn at(&self, index: values::Value<'v>, heap: &'v Heap) -> starlark::Result<values::Value<'v>> {
+    fn at(&self, index: values::Value<'v>, heap: Heap<'v>) -> starlark::Result<values::Value<'v>> {
         let idx = index.unpack_i32().ok_or(anyhow!("pass an int"))?;
         let target = self
             .targets
@@ -129,7 +129,7 @@ impl<'v> values::StarlarkValue<'v> for TargetSet {
         Ok(target)
     }
 
-    fn iterate_collect(&self, heap: &'v Heap) -> starlark::Result<Vec<values::Value<'v>>> {
+    fn iterate_collect(&self, heap: Heap<'v>) -> starlark::Result<Vec<values::Value<'v>>> {
         Ok(self
             .targets
             .clone()
@@ -139,18 +139,17 @@ impl<'v> values::StarlarkValue<'v> for TargetSet {
     }
 }
 
-#[derive(Dupe, Clone, Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
+#[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
 #[display("<bazel.query.Query>")]
 pub struct Query {
     #[allocative(skip)]
-    // Expr here has to be mutable
-    expr: Rc<RefCell<String>>,
+    expr: RefCell<String>,
 }
 
 impl Query {
     pub fn new() -> Self {
         Self {
-            expr: Rc::new(RefCell::new(String::new())),
+            expr: RefCell::new(String::new()),
         }
     }
 
@@ -192,7 +191,7 @@ impl Query {
 }
 
 impl<'v> AllocValue<'v> for Query {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -230,10 +229,10 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] expr: values::StringValue,
     ) -> anyhow::Result<Query> {
-        use dupe::Dupe;
-        let query = this.downcast_ref_err::<Query>()?;
-        query.expr.replace(expr.as_str().to_string());
-        Ok(query.dupe())
+        let _query = this.downcast_ref_err::<Query>().into_anyhow_result()?;
+        Ok(Query {
+            expr: RefCell::new(expr.as_str().to_string()),
+        })
     }
 
     /// The query system provides a programmatic interface for analyzing build dependencies
@@ -258,8 +257,8 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     ///     .eval()
     /// ```
     fn eval<'v>(this: values::Value<'v>) -> anyhow::Result<TargetSet> {
-        let this = this.downcast_ref_err::<Query>()?;
+        let this = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         let expr = this.expr.borrow();
-        Query::query(expr.as_str())
+        Query::query(&expr)
     }
 }

@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use allocative::Allocative;
 use dupe::Dupe;
+
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::values::dict::AllocDict;
@@ -111,7 +112,7 @@ unsafe impl<'v> Trace<'v> for FieldValue<'v> {
 }
 
 impl<'v> AllocValue<'v> for FieldValue<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -176,21 +177,21 @@ impl Freeze for FieldValue<'_> {
 /// Deep-copy a default value if it's a mutable container (list or dict).
 /// This ensures each fragment instance gets its own mutable copy rather than
 /// sharing the (potentially frozen) default.
-fn copy_default_value<'v>(value: Value<'v>, heap: &'v Heap) -> starlark::Result<Value<'v>> {
+fn copy_default_value<'v>(value: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
     match value.get_type() {
         "list" => {
-            let items: Vec<Value<'v>> = value.iterate(heap)?.collect();
+            let items: Vec<Value<'v>> = value.iterate(heap).map_err(|e| e.into_anyhow())?.collect();
             Ok(heap.alloc(AllocList(items)))
         }
         "dict" => {
-            let keys: Vec<Value<'v>> = value.iterate(heap)?.collect();
+            let keys: Vec<Value<'v>> = value.iterate(heap).map_err(|e| e.into_anyhow())?.collect();
             let items: Vec<(Value<'v>, Value<'v>)> = keys
                 .into_iter()
                 .map(|k| {
-                    let v = value.at(k, heap)?;
+                    let v = value.at(k, heap).map_err(|e| e.into_anyhow())?;
                     Ok((k, v))
                 })
-                .collect::<starlark::Result<_>>()?;
+                .collect::<anyhow::Result<_>>()?;
             Ok(heap.alloc(AllocDict(items)))
         }
         _ => Ok(value),
@@ -202,7 +203,7 @@ fn copy_default_value<'v>(value: Value<'v>, heap: &'v Heap) -> starlark::Result<
 /// whose frozen TypeCompiled matchers may not function properly.
 fn build_type_checkers<'v>(
     fields: impl Iterator<Item = Value<'v>>,
-    heap: &'v Heap,
+    heap: Heap<'v>,
 ) -> starlark::Result<Vec<TypeCompiled<Value<'v>>>> {
     fields
         .map(|typ_value| TypeCompiled::new(typ_value, heap).map_err(starlark::Error::new_other))
@@ -243,7 +244,7 @@ unsafe impl<'v> Trace<'v> for FragmentType<'v> {
 }
 
 impl<'v> AllocValue<'v> for FragmentType<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -524,7 +525,7 @@ unsafe impl<'v> Trace<'v> for FragmentInstance<'v> {
 }
 
 impl<'v> AllocValue<'v> for FragmentInstance<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -547,7 +548,7 @@ impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
         write!(collector, "{}", self).unwrap();
     }
 
-    fn get_attr(&self, attribute: &str, _heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
         if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
             if let Some(idx) = frag_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].get());
@@ -599,7 +600,7 @@ impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
         Ok(())
     }
 
-    fn has_attr(&self, attribute: &str, _heap: &'v Heap) -> bool {
+    fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
         if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
             frag_type.fields.contains_key(attribute)
         } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
@@ -727,7 +728,7 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentInstance {
         write!(collector, "{}", self).unwrap();
     }
 
-    fn get_attr(&self, attribute: &str, _heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
         if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             if let Some(idx) = frozen_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].to_value());
@@ -736,7 +737,7 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentInstance {
         None
     }
 
-    fn has_attr(&self, attribute: &str, _heap: &'v Heap) -> bool {
+    fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
         if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
             frozen_type.fields.contains_key(attribute)
         } else {
@@ -861,7 +862,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn fragment<'v>(
         #[starlark(kwargs)] kwargs: SmallMap<&str, Value<'v>>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<FragmentType<'v>> {
+    ) -> anyhow::Result<FragmentType<'v>> {
         let mut fields = SmallMap::with_capacity(kwargs.len());
 
         for (name, value) in kwargs.into_iter() {
@@ -905,17 +906,17 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = pos)] typ: Value<'v>,
         #[starlark(require = pos)] default: Option<Value<'v>>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<FieldValue<'v>> {
+    ) -> anyhow::Result<FieldValue<'v>> {
         let compiled_type = TypeCompiled::new(typ, eval.heap())?;
 
         // Validate that the default matches the type if provided
         if let Some(d) = default {
             if !compiled_type.matches(d) {
-                return Err(starlark::Error::new_other(anyhow::anyhow!(
+                return Err(anyhow::anyhow!(
                     "Default value `{}` does not match field type `{}`",
                     d,
                     compiled_type
-                )));
+                ));
             }
         }
 
