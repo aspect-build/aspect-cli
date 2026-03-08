@@ -1,0 +1,408 @@
+"""Fully-featured .bazelrc parser.
+
+Primary entry-point
+-------------------
+  load("./lib/bazelrc.axl", "bazelrc")
+
+  # All configs → dict  {config_name: effective_flag_list}
+  #   Each value is the fully-merged set of flags for that config:
+  #   common/always flags + base command flags + the named config's own flags.
+  #   The base (no-config) flags are under the "" key.
+  all = bazelrc(ctx, "build")
+  # {"": ["--jobs=8"], "ci": ["--jobs=8", "--remote_cache=grpcs://..."], ...}
+
+  # One config  → flat list of effective flags
+  flags = bazelrc(ctx, "build", config = "ci")
+  # ["--jobs=8", "--remote_cache=grpcs://..."]
+
+  # Explicit path (otherwise auto-detected from BUILD_WORKSPACE_DIRECTORY)
+  flags = bazelrc(ctx, "build", config = "ci", path = "/repo/.bazelrc")
+
+Parser features
+---------------
+  - Full-line and inline # comments (respects quoted strings)
+  - Blank / whitespace-only lines
+  - Line continuation: trailing backslash joins the following line
+  - Windows CRLF line endings
+  - import <path>       — error if the file is missing
+  - try-import <path>   — silently skipped if the file is missing
+  - %workspace% expansion in import paths
+  - Relative import paths (resolved against the importing file's directory)
+  - Circular-import detection
+  - <command>[:<config>] [flags...]
+  - Double-quoted strings "..." with \\, \", \\n, \\t escape sequences
+  - Single-quoted strings '...' (no escape processing inside)
+  - Backslash-escaping of individual characters outside quotes
+  - common / always pseudo-commands (merged into every command's flags)
+
+Low-level API (escape hatch)
+----------------------------
+  parse(content, source_path, workspace_dir, std)  -> raw result dict
+  parse_file(path, workspace_dir, std)             -> raw result dict
+
+  Raw result: {"entries": [...], "errors": [...]}
+  Each entry:  {"command": str, "config": str, "flags": list,
+                "source": str, "line": int}
+"""
+
+# =============================================================================
+# Internal: comment stripping
+# =============================================================================
+
+def _strip_comment(line):
+    """Remove everything from the first unquoted '#' to end of line."""
+    result = ""
+    in_dq = False
+    in_sq = False
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if in_dq:
+            if c == "\\" and i + 1 < n:
+                result += c + line[i + 1]
+                i += 2
+            elif c == "\"":
+                in_dq = False
+                result += c
+                i += 1
+            else:
+                result += c
+                i += 1
+        elif in_sq:
+            if c == "'":
+                in_sq = False
+                result += c
+                i += 1
+            else:
+                result += c
+                i += 1
+        else:
+            if c == "#":
+                break
+            elif c == "\"":
+                in_dq = True
+                result += c
+                i += 1
+            elif c == "'":
+                in_sq = True
+                result += c
+                i += 1
+            else:
+                result += c
+                i += 1
+    return result
+
+# =============================================================================
+# Internal: line-continuation joining
+# =============================================================================
+
+def _join_continuation_lines(raw_lines):
+    """Join lines ending with \\ into logical lines.
+
+    Returns a list of (start_line_number, joined_text) tuples (1-based).
+    """
+    result = []
+    current = ""
+    start = 1
+    line_num = 0
+    for raw in raw_lines:
+        line_num += 1
+        line = raw.rstrip("\r")   # normalise CRLF
+        if current == "":
+            start = line_num
+        if line.endswith("\\"):
+            current += line[:-1] + " "
+        else:
+            current += line
+            stripped = current.strip()
+            if stripped != "":
+                result.append((start, stripped))
+            current = ""
+    if current != "":
+        stripped = current.strip()
+        if stripped != "":
+            result.append((start, stripped))
+    return result
+
+# =============================================================================
+# Internal: tokeniser
+# =============================================================================
+
+def _tokenize(s):
+    """Split *s* into tokens, handling quoted strings and backslash escapes.
+
+    - "..."  double-quoted: processes \\\\, \\", \\n, \\t; other \\x kept as-is
+    - '...'  single-quoted: literal content, no escape processing
+    - \\x    outside quotes: backslash dropped, x taken literally
+    """
+    tokens = []
+    token = ""
+    in_dq = False
+    in_sq = False
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if in_dq:
+            if c == "\\" and i + 1 < n:
+                nc = s[i + 1]
+                if nc == "\"":
+                    token += "\""
+                elif nc == "\\":
+                    token += "\\"
+                elif nc == "n":
+                    token += "\n"
+                elif nc == "t":
+                    token += "\t"
+                else:
+                    token += "\\" + nc
+                i += 2
+            elif c == "\"":
+                in_dq = False
+                i += 1
+            else:
+                token += c
+                i += 1
+        elif in_sq:
+            if c == "'":
+                in_sq = False
+                i += 1
+            else:
+                token += c
+                i += 1
+        else:
+            if c == " " or c == "\t":
+                if token != "":
+                    tokens.append(token)
+                    token = ""
+                i += 1
+            elif c == "\\" and i + 1 < n:
+                token += s[i + 1]
+                i += 2
+            elif c == "\"":
+                in_dq = True
+                i += 1
+            elif c == "'":
+                in_sq = True
+                i += 1
+            else:
+                token += c
+                i += 1
+    if token != "":
+        tokens.append(token)
+    return tokens
+
+# =============================================================================
+# Internal: path helpers
+# =============================================================================
+
+def _dir_of(path):
+    parts = path.split("/")
+    if len(parts) <= 1:
+        return ""
+    result = parts[0]
+    for part in parts[1:-1]:
+        result = result + "/" + part
+    return result
+
+def _resolve_import_path(raw_path, workspace_dir, source_path):
+    if raw_path.startswith("%workspace%"):
+        rest = raw_path[len("%workspace%"):]
+        if workspace_dir:
+            return workspace_dir.rstrip("/") + rest
+        return raw_path
+    if not raw_path.startswith("/"):
+        sd = _dir_of(source_path)
+        if sd:
+            return sd + "/" + raw_path
+        return raw_path
+    return raw_path
+
+# =============================================================================
+# Internal: recursive single-file parser
+# =============================================================================
+
+def _parse_lines(raw_lines, source_path, workspace_dir, std, visited):
+    entries = []
+    errors = []
+    for (line_num, line) in _join_continuation_lines(raw_lines):
+        line = _strip_comment(line).strip()
+        if line == "":
+            continue
+        tokens = _tokenize(line)
+        if len(tokens) == 0:
+            continue
+        directive = tokens[0]
+
+        if directive == "import" or directive == "try-import":
+            optional = directive == "try-import"
+            if len(tokens) < 2:
+                errors.append("{}:{}: '{}' requires a path argument".format(
+                    source_path, line_num, directive))
+                continue
+            import_path = _resolve_import_path(tokens[1], workspace_dir, source_path)
+            if import_path in visited:
+                errors.append("{}:{}: circular import: {}".format(
+                    source_path, line_num, import_path))
+                continue
+            if std == None:
+                errors.append("{}:{}: '{}' requires std context".format(
+                    source_path, line_num, directive))
+                continue
+            if not std.fs.exists(import_path):
+                if optional:
+                    continue
+                errors.append("{}:{}: imported file not found: {}".format(
+                    source_path, line_num, import_path))
+                continue
+            content = std.fs.read_to_string(import_path)
+            (sub_entries, sub_errors) = _parse_lines(
+                content.split("\n"), import_path, workspace_dir, std,
+                visited + [import_path])
+            entries.extend(sub_entries)
+            errors.extend(sub_errors)
+            continue
+
+        (command, _sep, config) = directive.partition(":")
+        entries.append({
+            "command": command,
+            "config":  config,
+            "flags":   tokens[1:],
+            "source":  source_path,
+            "line":    line_num,
+        })
+    return (entries, errors)
+
+# =============================================================================
+# Internal: helpers for the public API
+# =============================================================================
+
+def _effective_flags(result, command, config):
+    """Return the fully-merged flag list for (command, config).
+
+    Includes:
+      - common / always entries whose config matches (base or named)
+      - command entries whose config matches (base or named)
+    When config == "", only base (no-config) entries are included.
+    """
+    flags = []
+    for entry in result["entries"]:
+        cmd = entry["command"]
+        cfg = entry["config"]
+        if cmd not in ("common", "always", command):
+            continue
+        if cfg == "" or cfg == config:
+            flags.extend(entry["flags"])
+    return flags
+
+def _all_config_names(result, command):
+    """Return sorted list of distinct config names present for *command*."""
+    seen = {}
+    for entry in result["entries"]:
+        cmd = entry["command"]
+        if cmd in ("common", "always", command):
+            seen[entry["config"]] = True
+    names = []
+    for name in seen:
+        names.append(name)
+    return sorted(names)
+
+def _detect_workspace(std):
+    """Best-effort workspace root detection via environment variables."""
+    return (
+        std.env.var("BUILD_WORKSPACE_DIRECTORY") or
+        std.env.var("WORKSPACE") or
+        ""
+    )
+
+# =============================================================================
+# Low-level API
+# =============================================================================
+
+def parse(content, source_path = "", workspace_dir = "", std = None):
+    """Parse .bazelrc content from a string.
+
+    Args:
+        content:       Raw .bazelrc text.
+        source_path:   Path of the file (for error messages and relative
+                       import resolution).  Use "" for in-memory strings.
+        workspace_dir: Workspace root for %workspace% expansion.
+        std:           ctx.std — needed only when imports are present.
+
+    Returns:
+        {"entries": [...], "errors": [...]}
+    """
+    visited = [source_path] if source_path != "" else []
+    (entries, errors) = _parse_lines(
+        content.split("\n"), source_path, workspace_dir, std, visited)
+    return {"entries": entries, "errors": errors}
+
+def parse_file(path, workspace_dir = "", std = None):
+    """Parse a .bazelrc file from disk.
+
+    Args:
+        path:          Absolute path to the .bazelrc file.
+        workspace_dir: Workspace root for %workspace% expansion.
+        std:           ctx.std — required.
+
+    Returns:
+        {"entries": [...], "errors": [...]}
+    """
+    if std == None:
+        return {"entries": [], "errors": ["parse_file() requires std context"]}
+    if not std.fs.exists(path):
+        return {"entries": [], "errors": ["file not found: " + path]}
+    return parse(std.fs.read_to_string(path),
+                 source_path = path, workspace_dir = workspace_dir, std = std)
+
+# =============================================================================
+# Primary API
+# =============================================================================
+
+def bazelrc(ctx, command, config = None, path = None, workspace_dir = None):
+    """Parse .bazelrc and return flags for *command*.
+
+    Args:
+        ctx:           Task context (ctx.std is used for file I/O and env vars).
+        command:       Bazel command to query, e.g. "build", "test", "startup".
+        config:        Config name to resolve, e.g. "ci".
+                       Pass "" for base (no-config) flags only.
+                       Omit (None) to get all configs.
+        path:          Path to the .bazelrc file.  Supports %workspace%/...
+                       notation.  Defaults to <workspace_dir>/.bazelrc.
+        workspace_dir: Workspace root directory used for %workspace% expansion
+                       and the default path.  Auto-detected from the
+                       BUILD_WORKSPACE_DIRECTORY env var when omitted.
+
+    Returns:
+        - dict  {config_name: effective_flags}   when config is None.
+          Every value is the fully-merged flag list for that config
+          (common/always + base command flags + the config's own flags).
+          The base (no-config) flags are under the "" key.
+        - list  [flag, ...]                       when config is a string.
+          The merged effective flags for the specified config
+          (common/always + base command flags + the named config's flags).
+    """
+    std = ctx.std
+
+    if workspace_dir == None:
+        workspace_dir = _detect_workspace(std)
+
+    if path == None:
+        if workspace_dir:
+            path = workspace_dir.rstrip("/") + "/.bazelrc"
+        else:
+            fail("bazelrc(): 'path' or BUILD_WORKSPACE_DIRECTORY must be set")
+    elif path.startswith("%workspace%"):
+        path = _resolve_import_path(path, workspace_dir, "")
+
+    result = parse_file(path, workspace_dir = workspace_dir, std = std)
+
+    if config == None:
+        out = {}
+        for cfg in _all_config_names(result, command):
+            out[cfg] = _effective_flags(result, command, cfg)
+        return out
+    else:
+        return _effective_flags(result, command, config)

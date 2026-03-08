@@ -116,6 +116,46 @@ fn main() -> Result<(), std::io::Error> {
         );
     }
 
+    // Handle google.longrunning.Operation manually to avoid the prost_types::Any
+    // in the operation::Result oneof which lacks Starlark/Allocative impls.
+    config.type_attribute(
+        "google.longrunning.Operation",
+        r#"
+#[derive(
+    ::starlark::values::ProvidesStaticType,
+    ::starlark::values::Trace,
+    ::starlark::values::NoSerialize,
+    ::allocative::Allocative,
+    ::starbuf_derive::Message
+)]
+        "#,
+    );
+    config.field_attribute(
+        "google.longrunning.Operation.name",
+        r#"#[starbuf(path = "google.longrunning.Operation.name")]"#,
+    );
+    config.field_attribute(
+        "google.longrunning.Operation.done",
+        r#"#[starbuf(path = "google.longrunning.Operation.done")]"#,
+    );
+    // Skip metadata (prost_types::Any) and result (oneof containing Any)
+    config.field_attribute(
+        "google.longrunning.Operation.metadata",
+        r#"#[starbuf(path = "google.longrunning.Operation.metadata", skip)]"#,
+    );
+    config.field_attribute(
+        "google.longrunning.Operation.metadata",
+        r#"#[allocative(skip)]"#,
+    );
+    config.field_attribute(
+        "google.longrunning.Operation.result",
+        r#"#[starbuf(path = "google.longrunning.Operation.result", skip)]"#,
+    );
+    config.field_attribute(
+        "google.longrunning.Operation.result",
+        r#"#[allocative(skip)]"#,
+    );
+
     configure()
         .build_client(true)
         .build_server(false)
