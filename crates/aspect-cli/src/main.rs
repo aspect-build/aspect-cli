@@ -497,7 +497,7 @@ async fn main() -> miette::Result<ExitCode> {
                             .get_many::<String>(k.as_str())
                             .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
                     )),
-                    TaskArg::TrailingVarArgs => heap.alloc(TaskArgs::alloc_list(
+                    TaskArg::TrailingVarArgs { .. } => heap.alloc(TaskArgs::alloc_list(
                         cmdargs
                             .get_many::<String>(k.as_str())
                             .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
