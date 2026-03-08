@@ -189,6 +189,16 @@ pub struct FrozenFragmentMap {
     entries: SmallMap<u64, (FrozenValue, FrozenValue)>,
 }
 
+impl FrozenFragmentMap {
+    /// Get all entries as (type_id, type_value, instance_value) tuples.
+    pub fn entries(&self) -> Vec<(u64, Value<'_>, Value<'_>)> {
+        self.entries
+            .iter()
+            .map(|(id, (tv, iv))| (*id, tv.to_value(), iv.to_value()))
+            .collect()
+    }
+}
+
 impl Display for FrozenFragmentMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FragmentMap([")?;

@@ -299,7 +299,7 @@ version = "0.0.0-dev"
 dependencies = [
  "allocative",
  "anyhow",
- "display_container 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "display_container",
  "prost",
  "prost-build",
  "prost-types",
@@ -328,7 +328,7 @@ dependencies = [
  "clap",
  "derive_more 2.0.1",
  "dirs",
- "display_container 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "display_container",
  "dupe",
  "either",
  "fibre",
@@ -355,7 +355,6 @@ dependencies = [
  "sha2",
  "sha256",
  "ssri",
- "starbuf-types",
  "starlark",
  "starlark_derive",
  "starlark_map",
@@ -1125,16 +1124,6 @@ dependencies = [
  "libc",
  "redox_users 0.4.6",
  "winapi",
-]
-
-[[package]]
-name = "display_container"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a110a75c96bedec8e65823dea00a1d710288b7a369d95fd8a0f5127639466fa"
-dependencies = [
- "either",
- "indenter",
 ]
 
 [[package]]
@@ -4013,7 +4002,7 @@ dependencies = [
  "debugserver-types",
  "derivative",
  "derive_more 1.0.0",
- "display_container 0.9.0 (git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type)",
+ "display_container",
  "dupe",
  "either",
  "erased-serde",

@@ -16,7 +16,7 @@
 //! This design is completely safe - no `unsafe` code is needed because:
 //! - `FrozenValue` is `'static` and `Copy`
 //! - The trampoline returns ownership to Callable::invoke before calling Starlark
-//! - Memory access works because we have owned `Arc<RefCell<Store>>`
+//! - Memory access works because we have owned `Arc<Mutex<Store>>`
 
 use std::collections::HashMap;
 

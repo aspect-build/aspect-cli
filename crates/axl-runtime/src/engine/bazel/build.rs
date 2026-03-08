@@ -442,6 +442,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<BuildStatus> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
 
+        // Re-enter the span so trace coverage includes the full build lifecycle
+        let span = build.span.borrow().clone();
+        let _enter = span.enter();
+
         let result = build.child.borrow_mut().wait()?;
 
         // TODO: consider adding a wait_events() method for granular control.

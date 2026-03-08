@@ -10,12 +10,18 @@ use starlark::environment::MethodsStatic;
 
 use starlark::StarlarkResultExt;
 use starlark::starlark_module;
+use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::AllocValue;
+use starlark::values::Freeze;
+use starlark::values::FreezeError;
+use starlark::values::Freezer;
+use starlark::values::FrozenValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
+use starlark::values::Tracer;
 use starlark::values::ValueLike;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::starlark_value;
@@ -62,7 +68,7 @@ impl<'v> ConfigContext<'v> {
             fragment_map,
         )));
         Self {
-            tasks: heap.alloc_complex_no_freeze(x),
+            tasks: heap.alloc_complex(x),
             fragment_map,
             config_modules: RefCell::new(vec![]),
         }
@@ -106,15 +112,45 @@ impl<'v> values::StarlarkValue<'v> for ConfigContext<'v> {
 
 impl<'v> values::AllocValue<'v> for ConfigContext<'v> {
     fn alloc_value(self, heap: values::Heap<'v>) -> values::Value<'v> {
-        heap.alloc_complex_no_freeze(self)
+        heap.alloc_complex(self)
     }
 }
 
-impl<'v> values::Freeze for ConfigContext<'v> {
-    type Frozen = ConfigContext<'v>;
-    fn freeze(self, _freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
-        panic!("not implemented")
+impl<'v> Freeze for ConfigContext<'v> {
+    type Frozen = FrozenConfigContext;
+
+    fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
+        Ok(FrozenConfigContext {
+            tasks: self.tasks.freeze(freezer)?,
+            fragment_map: self.fragment_map.freeze(freezer)?,
+            // Keep config modules alive so frozen Def values from config files
+            // remain valid during post_freeze optimization.
+            config_modules: self.config_modules.into_inner(),
+        })
     }
+}
+
+/// Frozen version of ConfigContext. Read-only after freezing.
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
+#[display("<ConfigContext>")]
+pub struct FrozenConfigContext {
+    #[allocative(skip)]
+    tasks: FrozenValue,
+    #[allocative(skip)]
+    fragment_map: FrozenValue,
+    #[allocative(skip)]
+    config_modules: Vec<FrozenModule>,
+}
+
+unsafe impl<'v> Trace<'v> for FrozenConfigContext {
+    fn trace(&mut self, _tracer: &Tracer<'v>) {}
+}
+
+starlark_simple_value!(FrozenConfigContext);
+
+#[starlark_value(type = "ConfigContext")]
+impl<'v> values::StarlarkValue<'v> for FrozenConfigContext {
+    type Canonical = ConfigContext<'v>;
 }
 
 #[starlark_module]

@@ -31,7 +31,7 @@ use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
 
 use crate::engine::std::stream_iter;
-use crate::engine::types::bytes::Bytes;
+use starlark::values::bytes::StarlarkBytes as Bytes;
 
 #[derive(Debug, ProvidesStaticType, Dupe, Clone, NoSerialize, Allocative)]
 pub enum Readable {

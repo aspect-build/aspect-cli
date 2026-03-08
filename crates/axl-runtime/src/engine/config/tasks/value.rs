@@ -14,10 +14,15 @@ use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::Ty;
 use starlark::values::AllocValue;
+use starlark::values::Freeze;
+use starlark::values::FreezeError;
+use starlark::values::Freezer;
+use starlark::values::FrozenValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
+use starlark::values::Tracer;
 use starlark::values::Value;
 use starlark::values::ValueLike;
 use starlark::values::none::NoneType;
@@ -189,7 +194,42 @@ impl<'v> StarlarkTypeRepr for TaskList<'v> {
 
 impl<'v> AllocValue<'v> for TaskList<'v> {
     fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
-        heap.alloc_complex_no_freeze(TaskListGen(RefCell::new(self)))
+        heap.alloc_complex(TaskListGen(RefCell::new(self)))
+    }
+}
+
+/// Frozen task list data — holds frozen values after module freeze.
+#[derive(Debug, ProvidesStaticType, Allocative)]
+pub(crate) struct FrozenTaskListData {
+    content: Vec<FrozenValue>,
+    fragment_map: Option<FrozenValue>,
+}
+
+impl fmt::Display for FrozenTaskListData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "tasks")
+    }
+}
+
+unsafe impl<'v> Trace<'v> for FrozenTaskListData {
+    fn trace(&mut self, _tracer: &Tracer<'v>) {}
+}
+
+impl<'v> Freeze for TaskListGen<RefCell<TaskList<'v>>> {
+    type Frozen = TaskListGen<FrozenTaskListData>;
+
+    fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
+        let inner = self.0.into_inner();
+        let content = inner
+            .content
+            .into_iter()
+            .map(|v| v.freeze(freezer))
+            .collect::<Result<Vec<FrozenValue>, FreezeError>>()?;
+        let fragment_map = inner.fragment_map.map(|v| v.freeze(freezer)).transpose()?;
+        Ok(TaskListGen(FrozenTaskListData {
+            content,
+            fragment_map,
+        }))
     }
 }
 
@@ -205,5 +245,11 @@ impl<'v> TaskListLike<'v> for RefCell<TaskList<'v>> {
             .iter()
             .map(|f| f.to_value())
             .collect::<Vec<Value<'v>>>())
+    }
+}
+
+impl<'v> TaskListLike<'v> for FrozenTaskListData {
+    fn iterate_collect(&self, _heap: Heap<'v>) -> anyhow::Result<Vec<Value<'v>>> {
+        Ok(self.content.iter().map(|f| f.to_value()).collect())
     }
 }

@@ -193,7 +193,6 @@ struct ServiceRpc {
     method: Ident,
     request: Type,
     response: Type,
-    streaming: bool,
 }
 
 fn parse_service_attr(attr: TokenStream) -> Result<(Type, Vec<ServiceRpc>), Error> {
@@ -220,7 +219,6 @@ fn parse_service_attr(attr: TokenStream) -> Result<(Type, Vec<ServiceRpc>), Erro
                 let mut method: Option<Ident> = None;
                 let mut request: Option<Type> = None;
                 let mut response: Option<Type> = None;
-                let mut streaming: bool = false;
 
                 let nested: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
                     syn::punctuated::Punctuated::parse_terminated.parse2(list.tokens.clone())?;
@@ -263,15 +261,6 @@ fn parse_service_attr(attr: TokenStream) -> Result<(Type, Vec<ServiceRpc>), Erro
                             };
                             response = Some(parse_str(&lit.value())?);
                         }
-                        Meta::NameValue(nv) if nv.path.is_ident("streaming") => {
-                            let syn::Expr::Lit(expr_lit) = &nv.value else {
-                                bail!("streaming must be a bool literal");
-                            };
-                            let Lit::Bool(lit) = &expr_lit.lit else {
-                                bail!("streaming must be a bool literal");
-                            };
-                            streaming = lit.value;
-                        }
                         _ => {}
                     }
                 }
@@ -293,7 +282,6 @@ fn parse_service_attr(attr: TokenStream) -> Result<(Type, Vec<ServiceRpc>), Erro
                     method,
                     request,
                     response,
-                    streaming,
                 });
             }
             _ => {}
@@ -444,11 +432,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             None
         };
 
-        if sattrs.any
-            || sattrs.duration
-            || sattrs.timestamp
-            || sattrs.skip
-            || (attrs.bytes.is_some() && attrs.repeated)
+        if sattrs.any || sattrs.duration || sattrs.timestamp || sattrs.skip || attrs.bytes.is_some()
         {
             return quote! {};
         }
@@ -474,9 +458,6 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         } else if attrs.enumeration.is_some() {
             &Type::from_string(&attrs.enumeration.as_ref().unwrap())
                 .expect("failed to parse enum type")
-        } else if attrs.bytes.is_some() {
-            &parse_str::<Type>("::starlark::values::bytes::StarlarkBytes")
-                .expect("failed to parse bytes type")
         } else {
             &field.ty
         };
@@ -497,8 +478,6 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             let ty = Type::from_string(&attrs.enumeration.as_ref().unwrap())
                 .expect("failed to parse enum type");
             quote! { Ok(#ty::try_from(this.#fident)?) }
-        } else if attrs.bytes.is_some() {
-            quote! { Ok(::starlark::values::bytes::StarlarkBytes::new(this.#fident.as_ref())) }
         } else {
             quote! { Ok(this.#fident.clone()) }
         };
@@ -529,9 +508,9 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 || sattrs.any
                 || sattrs.duration
                 || sattrs.timestamp
+                || attrs.bytes.is_some()
                 || attrs.map.is_some()
                 || attrs.oneof.is_some()
-                || (attrs.bytes.is_some() && attrs.repeated)
             {
                 return None;
             }
@@ -641,12 +620,6 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                     use ::starlark::values::ValueLike;
                     result.#fident = value.downcast_ref_err::<#ty>()?.clone();
                 }
-            } else if attrs.bytes.is_some() {
-                quote! {
-                    use ::starlark::values::ValueLike;
-                    let b = value.downcast_ref_err::<::starlark::values::bytes::StarlarkBytes>()?;
-                    result.#fident = b.as_bytes().to_vec().into();
-                }
             } else {
                 return None;
             };
@@ -666,7 +639,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 || sattrs.any
                 || sattrs.duration
                 || sattrs.timestamp
-                || (attrs.bytes.is_some() && attrs.repeated)
+                || attrs.bytes.is_some()
             {
                 return None;
             }
@@ -740,8 +713,6 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 quote! { write!(f, "{}", self.#field_ident)?; }
             } else if attrs.message {
                 quote! { write!(f, "{}", self.#field_ident)?; }
-            } else if attrs.bytes.is_some() {
-                quote! { write!(f, "<{} bytes>", self.#field_ident.len())?; }
             } else {
                 return None;
             };
@@ -782,7 +753,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 || sattrs.any
                 || sattrs.duration
                 || sattrs.timestamp
-                || (attrs.bytes.is_some() && attrs.repeated)
+                || attrs.bytes.is_some()
             {
                 return None;
             }
@@ -890,8 +861,6 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 quote! { write!(__col, "{}", self.#field_ident).unwrap(); }
             } else if attrs.message {
                 quote! { self.#field_ident.__starbuf_pretty(__col, __inner); }
-            } else if attrs.bytes.is_some() {
-                quote! { write!(__col, "<{} bytes>", self.#field_ident.len()).unwrap(); }
             } else {
                 return None;
             };
@@ -1020,7 +989,7 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         } else if attrs.int32 || attrs.int64 || attrs.uint32 || attrs.uint64 {
             quote! { ::starlark::typing::Ty::int() }
         } else if attrs.bytes.is_some() {
-            quote! { <::starlark::values::bytes::StarlarkBytes as ::starlark::values::type_repr::StarlarkTypeRepr>::starlark_type_repr() }
+            quote! { ::starlark::typing::Ty::string() }
         } else {
             let ty = &field.unnamed;
             quote! {
@@ -1040,7 +1009,10 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         } else if attrs.bytes.is_some() {
             quote! {
                 Self::#variant_ident(value) => {
-                    heap.alloc(::starlark::values::bytes::StarlarkBytes::new(value.as_ref()))
+                    use starlark::values::ValueLike;
+                    heap.alloc(heap.alloc_str(
+                        unsafe { ::std::string::String::from_utf8_unchecked(value.clone()) }.as_str(),
+                    )).to_value()
                 }
             }
         } else {
@@ -1192,235 +1164,58 @@ fn try_service(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Erro
     let module_ident = Ident::new(&format!("{}_service", ident_snake), ident.span());
     let starlark_type = format!("{}_client", ident_snake);
 
-    // Generate stream handle types for streaming methods.
-    let stream_types: Vec<TokenStream> = methods.iter().filter(|rpc| rpc.streaming).map(|rpc| {
-        let rpc_name = &rpc.name;
-        let resp = &rpc.response;
-
-        let stream_ident = Ident::new(
-            &format!("{}{}Stream", handle_ident, rpc_name),
-            rpc_name.span(),
-        );
-        let stream_starlark_type = format!(
-            "{}_{}",
-            starlark_type,
-            snake(rpc_name.to_string())
-        );
-        let stream_methods_ident = Ident::new(
-            &format!("{}_{}_stream_methods", ident_snake, snake(rpc_name.to_string())),
-            rpc_name.span(),
-        );
-
-        quote! {
-            #[derive(Debug, ::allocative::Allocative, ::starlark::values::NoSerialize,
-                     ::starlark::values::ProvidesStaticType, ::starlark::values::Trace)]
-            pub struct #stream_ident {
-                #[allocative(skip)]
-                rt: ::tokio::runtime::Handle,
-                #[allocative(skip)]
-                stream: ::std::cell::RefCell<::std::option::Option<::tonic::codec::Streaming<#resp>>>,
-            }
-
-            impl ::std::fmt::Display for #stream_ident {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                    write!(f, stringify!(#stream_ident))
-                }
-            }
-
-            impl<'v> ::starlark::values::AllocValue<'v> for #stream_ident {
-                fn alloc_value(self, heap: ::starlark::values::Heap<'v>) -> ::starlark::values::Value<'v> {
-                    heap.alloc_complex_no_freeze(self)
-                }
-            }
-
-            #[::starlark::starlark_module]
-            fn #stream_methods_ident(registry: &mut ::starlark::environment::MethodsBuilder) {
-                /// Returns the next item from the stream without blocking.
-                /// Returns `None` if no data is available yet or stream is exhausted.
-                fn try_next<'v>(this: ::starlark::values::Value<'v>) -> ::anyhow::Result<::starlark::values::none::NoneOr<#resp>> {
-                    use ::starlark::values::ValueLike;
-                    use ::starlark::StarlarkResultExt;
-                    let this = this.downcast_ref_err::<#stream_ident>().into_anyhow_result()?;
-                    let mut stream_opt = this.stream.borrow_mut();
-                    let Some(stream) = stream_opt.as_mut() else {
-                        return Ok(::starlark::values::none::NoneOr::None);
-                    };
-                    match this.rt.block_on(::tokio::time::timeout(
-                        ::std::time::Duration::ZERO,
-                        stream.message(),
-                    )) {
-                        Err(_timeout) => Ok(::starlark::values::none::NoneOr::None),
-                        Ok(Ok(Some(msg))) => Ok(::starlark::values::none::NoneOr::Other(msg)),
-                        Ok(Ok(None)) => {
-                            *stream_opt = None;
-                            Ok(::starlark::values::none::NoneOr::None)
-                        }
-                        Ok(Err(_)) => {
-                            *stream_opt = None;
-                            Ok(::starlark::values::none::NoneOr::None)
-                        }
-                    }
-                }
-
-                /// Returns `True` if the stream is exhausted.
-                fn done<'v>(this: ::starlark::values::Value<'v>) -> ::anyhow::Result<bool> {
-                    use ::starlark::values::ValueLike;
-                    use ::starlark::StarlarkResultExt;
-                    let this = this.downcast_ref_err::<#stream_ident>().into_anyhow_result()?;
-                    Ok(this.stream.borrow().is_none())
-                }
-            }
-
-            #[::starlark::values::starlark_value(type = #stream_starlark_type)]
-            impl<'v> ::starlark::values::StarlarkValue<'v> for #stream_ident {
-                fn get_methods() -> ::core::option::Option<&'static ::starlark::environment::Methods> {
-                    static RES: ::starlark::environment::MethodsStatic = ::starlark::environment::MethodsStatic::new();
-                    RES.methods(#stream_methods_ident)
-                }
-
-                unsafe fn iterate(
-                    &self,
-                    me: ::starlark::values::Value<'v>,
-                    _heap: ::starlark::values::Heap<'v>,
-                ) -> ::starlark::Result<::starlark::values::Value<'v>> {
-                    Ok(me)
-                }
-
-                unsafe fn iter_next(
-                    &self,
-                    _index: usize,
-                    heap: ::starlark::values::Heap<'v>,
-                ) -> ::core::option::Option<::starlark::values::Value<'v>> {
-                    use ::starlark::values::AllocValue;
-                    let mut stream_opt = self.stream.borrow_mut();
-                    let stream = stream_opt.as_mut()?;
-                    match self.rt.block_on(stream.message()) {
-                        Ok(Some(msg)) => Some(msg.alloc_value(heap)),
-                        Ok(None) => {
-                            *stream_opt = None;
-                            None
-                        }
-                        Err(_) => {
-                            *stream_opt = None;
-                            None
-                        }
-                    }
-                }
-
-                unsafe fn iter_stop(&self) {}
-            }
-        }
-    }).collect();
-
     let rpc_methods = methods.iter().map(|rpc| {
         let rpc_name = &rpc.name;
         let rpc_method = &rpc.method;
         let req = &rpc.request;
         let resp = &rpc.response;
 
-        if rpc.streaming {
-            let stream_ident = Ident::new(
-                &format!("{}{}Stream", handle_ident, rpc_name),
-                rpc_name.span(),
-            );
-            quote! {
-                fn #rpc_name<'v>(
-                    this: ::starlark::values::Value<'v>,
-                    req: ::starlark::values::Value<'v>,
-                    heap: ::starlark::values::Heap<'v>,
-                ) -> ::starlark::Result<::starlark::values::Value<'v>> {
-                    use ::starlark::values::ValueLike;
-                    use ::starlark::values::AllocValue;
-                    let handle = this.downcast_ref_err::<#handle_ident>()?;
-                    let req = req.downcast_ref_err::<#req>()?.clone();
+        quote! {
+            fn #rpc_name<'v>(
+                this: ::starlark::values::Value<'v>,
+                req: ::starlark::values::Value<'v>,
+            ) -> ::starlark::Result<#resp> {
+                use ::starlark::values::ValueLike;
+                let handle = this.downcast_ref_err::<#handle_ident>()?;
+                let req = req.downcast_ref_err::<#req>()?.clone();
 
-                    let client = handle.client.get()
-                        .ok_or_else(|| ::starlark::Error::from(::anyhow::anyhow!(
-                            "service not connected; call .connect(ctx) first")))?
-                        .clone();
-                    let rt = handle.rt.get()
-                        .ok_or_else(|| ::starlark::Error::from(::anyhow::anyhow!(
-                            "service not connected; call .connect(ctx) first")))?
-                        .clone();
+                let client = handle.client.get()
+                    .ok_or_else(|| ::starlark::Error::from(::anyhow::anyhow!(
+                        "service not connected; call .connect(ctx) first")))?
+                    .clone();
+                let rt = handle.rt.get()
+                    .ok_or_else(|| ::starlark::Error::from(::anyhow::anyhow!(
+                        "service not connected; call .connect(ctx) first")))?
+                    .clone();
 
-                    let headers = handle.headers.clone();
+                let headers = handle.headers.clone();
 
-                    let stream = rt.block_on(async move {
-                        let mut c = client.as_ref().clone();
-                        let mut request = ::tonic::Request::new(req);
-                        for (key, value) in &headers {
-                            request.metadata_mut().insert(
-                                key.parse::<::tonic::metadata::MetadataKey<::tonic::metadata::Ascii>>()
-                                    .map_err(|e| ::anyhow::anyhow!("invalid header key '{}': {}", key, e))?,
-                                value.parse::<::tonic::metadata::MetadataValue<::tonic::metadata::Ascii>>()
-                                    .map_err(|e| ::anyhow::anyhow!("invalid header value: {}", e))?,
-                            );
-                        }
-                        Ok::<_, ::anyhow::Error>(
-                            c.#rpc_method(request)
-                                .await
-                                .map_err(::anyhow::Error::new)?
-                                .into_inner()
-                        )
-                    })
-                    .map_err(|e| ::starlark::Error::from(::anyhow::anyhow!(e)))?;
+                let resp = rt.block_on(async move {
+                    let mut c = client.as_ref().clone();
+                    let mut request = ::tonic::Request::new(req);
+                    for (key, value) in &headers {
+                        request.metadata_mut().insert(
+                            key.parse::<::tonic::metadata::MetadataKey<::tonic::metadata::Ascii>>()
+                                .map_err(|e| ::anyhow::anyhow!("invalid header key '{}': {}", key, e))?,
+                            value.parse::<::tonic::metadata::MetadataValue<::tonic::metadata::Ascii>>()
+                                .map_err(|e| ::anyhow::anyhow!("invalid header value: {}", e))?,
+                        );
+                    }
+                    let resp = c
+                        .#rpc_method(request)
+                        .await
+                        .map_err(::anyhow::Error::new)?
+                        .into_inner();
+                    Ok::<#resp, ::anyhow::Error>(resp)
+                })
+                .map_err(|e| ::starlark::Error::from(::anyhow::anyhow!(e)))?;
 
-                    Ok(#stream_ident {
-                        rt,
-                        stream: ::std::cell::RefCell::new(Some(stream)),
-                    }.alloc_value(heap))
-                }
-            }
-        } else {
-            quote! {
-                fn #rpc_name<'v>(
-                    this: ::starlark::values::Value<'v>,
-                    req: ::starlark::values::Value<'v>,
-                ) -> ::starlark::Result<#resp> {
-                    use ::starlark::values::ValueLike;
-                    let handle = this.downcast_ref_err::<#handle_ident>()?;
-                    let req = req.downcast_ref_err::<#req>()?.clone();
-
-                    let client = handle.client.get()
-                        .ok_or_else(|| ::starlark::Error::from(::anyhow::anyhow!(
-                            "service not connected; call .connect(ctx) first")))?
-                        .clone();
-                    let rt = handle.rt.get()
-                        .ok_or_else(|| ::starlark::Error::from(::anyhow::anyhow!(
-                            "service not connected; call .connect(ctx) first")))?
-                        .clone();
-
-                    let headers = handle.headers.clone();
-
-                    let resp = rt.block_on(async move {
-                        let mut c = client.as_ref().clone();
-                        let mut request = ::tonic::Request::new(req);
-                        for (key, value) in &headers {
-                            request.metadata_mut().insert(
-                                key.parse::<::tonic::metadata::MetadataKey<::tonic::metadata::Ascii>>()
-                                    .map_err(|e| ::anyhow::anyhow!("invalid header key '{}': {}", key, e))?,
-                                value.parse::<::tonic::metadata::MetadataValue<::tonic::metadata::Ascii>>()
-                                    .map_err(|e| ::anyhow::anyhow!("invalid header value: {}", e))?,
-                            );
-                        }
-                        let resp = c
-                            .#rpc_method(request)
-                            .await
-                            .map_err(::anyhow::Error::new)?
-                            .into_inner();
-                        Ok::<#resp, ::anyhow::Error>(resp)
-                    })
-                    .map_err(|e| ::starlark::Error::from(::anyhow::anyhow!(e)))?;
-
-                    Ok(resp)
-                }
+                Ok(resp)
             }
         }
     });
 
     let expanded = quote! {
-        #(#stream_types)*
-
         #[derive(Debug, ::allocative::Allocative, ::starlark::values::NoSerialize, ::starlark::values::ProvidesStaticType)]
         pub struct #handle_ident {
             uri: String,

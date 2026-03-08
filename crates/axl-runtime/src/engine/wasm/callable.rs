@@ -280,7 +280,7 @@ fn process_pending_host_call<'v>(
 
     let heap = eval.heap();
 
-    // Create Memory with owned Rc
+    // Create Memory with owned Arc
     let memory_val = match instance.get_memory(store.as_context(), "memory") {
         Some(mem) => heap.alloc(Memory {
             store: Arc::clone(store_rc),

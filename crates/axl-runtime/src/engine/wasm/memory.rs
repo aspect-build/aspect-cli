@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use super::host::WasmStoreCtx;
-use crate::engine::types::bytes::Bytes;
+use starlark::values::bytes::StarlarkBytes as Bytes;
 
 #[derive(Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<wasm.Memory>")]
@@ -58,8 +58,10 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] by: u64,
     ) -> anyhow::Result<u64> {
         let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
         let mem = wm.memory.lock().unwrap();
-        let pages = mem.grow(wm.store.lock().unwrap().as_context_mut(), by)?;
+        let pages = mem.grow(store.as_context_mut(), by)?;
         Ok(pages)
     }
 
@@ -70,7 +72,6 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         heap: values::Heap<'v>,
     ) -> anyhow::Result<NoneType> {
         let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
-        let mem = wm.memory.lock().unwrap();
         let iter = buffer.iterate(heap).map_err(|e| e.into_anyhow())?;
         let bytes: Vec<u8> = iter
             .map(|x| {
@@ -79,7 +80,10 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
                     .map(|v| v as u8)
             })
             .collect::<anyhow::Result<Vec<u8>>>()?;
-        mem.write(wm.store.lock().unwrap().as_context_mut(), offset, &bytes)?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
+        mem.write(store.as_context_mut(), offset, &bytes)?;
         Ok(NoneType)
     }
 
@@ -109,13 +113,11 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] length: usize,
     ) -> anyhow::Result<Bytes> {
         let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
-        let mem = wm.memory.lock().unwrap();
         let mut buffer = vec![0u8; length];
-        mem.read(
-            wm.store.lock().unwrap().as_context_mut(),
-            offset,
-            &mut buffer,
-        )?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
+        mem.read(store.as_context_mut(), offset, &mut buffer)?;
         Ok(Bytes::new(buffer.as_slice()))
     }
 
@@ -133,9 +135,11 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] len: usize,
     ) -> anyhow::Result<String> {
         let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
-        let mem = wm.memory.lock().unwrap();
         let mut buffer = vec![0u8; len];
-        mem.read(wm.store.lock().unwrap().as_context_mut(), ptr, &mut buffer)?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
+        mem.read(store.as_context_mut(), ptr, &mut buffer)?;
         String::from_utf8(buffer)
             .map_err(|e| anyhow::anyhow!("invalid UTF-8 at ptr {}: {}", ptr, e))
     }
@@ -154,8 +158,9 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = 4096)] max_len: usize,
     ) -> anyhow::Result<String> {
         let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
-        let mem = wm.memory.lock().unwrap();
+        // Lock store first, then memory — consistent lock ordering (store → memory)
         let store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
         let data = mem.data(store.as_context());
 
         // Find null terminator
@@ -183,9 +188,11 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] s: &str,
     ) -> anyhow::Result<usize> {
         let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
-        let mem = wm.memory.lock().unwrap();
         let bytes = s.as_bytes();
-        mem.write(wm.store.lock().unwrap().as_context_mut(), ptr, bytes)?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
+        mem.write(store.as_context_mut(), ptr, bytes)?;
         Ok(bytes.len())
     }
 }

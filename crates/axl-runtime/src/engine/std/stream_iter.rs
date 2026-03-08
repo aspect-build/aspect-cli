@@ -49,7 +49,7 @@ impl<'v> values::StarlarkValue<'v> for ReadIterator {
         if size == 0 {
             return None;
         }
-        Some(heap.alloc(super::super::types::bytes::Bytes::new(&buf[0..size])))
+        Some(heap.alloc(starlark::values::bytes::StarlarkBytes::new(&buf[0..size])))
     }
     unsafe fn iter_stop(&self) {}
 }

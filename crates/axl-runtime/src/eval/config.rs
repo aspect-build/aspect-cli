@@ -6,7 +6,7 @@ use starlark_map::small_map::SmallMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::engine::config::fragment_map::{FragmentMap, construct_fragments};
+use crate::engine::config::fragment_map::{FrozenFragmentMap, construct_fragments};
 use crate::engine::config::{ConfigContext, ConfiguredTask};
 use crate::engine::types::fragment::extract_fragment_type_id;
 use crate::eval::load::{AxlLoader, ModuleScope};
@@ -152,7 +152,7 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
                 let result_tasks: Vec<ConfiguredTask> =
                     ctx.tasks().iter().map(|t| (*t).clone()).collect();
 
-                // Store fragment map and context in the module so they survive freezing
+                // Store context and fragment map in the module so they survive freezing
                 context_module.set("__ctx__", context_value);
                 context_module.set("__fmap__", fragment_map_value);
 
@@ -169,7 +169,7 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
             .map_err(|e| EvalError::UnknownError(anyhow!("{:?}", e)))?;
         let fmap = fmap_owned
             .value()
-            .downcast_ref::<FragmentMap>()
+            .downcast_ref::<FrozenFragmentMap>()
             .expect("stored FragmentMap");
         let fragment_data: Vec<(u64, Value<'static>, Value<'static>)> = fmap
             .entries()

@@ -7,6 +7,7 @@ starlark_map = { git = "https://github.com/thesayyn/starlark-rust.git", branch =
 allocative = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
 allocative_derive = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
 dupe = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+display_container = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
 
 [workspace]
 members = ["crates/*"]

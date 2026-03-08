@@ -48,8 +48,6 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals.namespace("remote", |g| {
         g.namespace("execution", |g| {
             remote_execution::action_cache_service(g);
-            remote_execution::execution_service(g);
-            remote_execution::content_addressable_storage_service(g);
             remote_execution::v2_toplevels(g);
         });
     });
