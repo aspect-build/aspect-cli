@@ -19,9 +19,9 @@ use wasmi::AsContext;
 use wasmi::AsContextMut;
 use wasmi::ResumableCall;
 
-use std::cell::RefCell;
 use std::fmt::Debug;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use super::host::{WasmStoreCtx, starlark_to_wasm_results, wasm_vals_to_starlark};
 use super::memory::Memory;
@@ -35,9 +35,9 @@ use super::memory::Memory;
 pub struct Callable {
     pub(crate) name: String,
     #[allocative(skip)]
-    pub(crate) store: Rc<RefCell<wasmi::Store<WasmStoreCtx>>>,
+    pub(crate) store: Arc<Mutex<wasmi::Store<WasmStoreCtx>>>,
     #[allocative(skip)]
-    pub(crate) instance: Rc<RefCell<wasmi::Instance>>,
+    pub(crate) instance: Arc<Mutex<wasmi::Instance>>,
 }
 
 impl Debug for Callable {
@@ -57,8 +57,8 @@ impl<'v> values::StarlarkValue<'v> for Callable {
         args: &Arguments<'v, '_>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
-        let mut store = self.store.borrow_mut();
-        let instance = self.instance.borrow_mut();
+        let mut store = self.store.lock().unwrap();
+        let instance = self.instance.lock().unwrap();
         let func = instance
             .get_func(store.as_context_mut(), &self.name)
             .context(format!("module does not export function `{}`", &self.name))?;
@@ -207,7 +207,7 @@ impl<'v> values::StarlarkValue<'v> for Callable {
                         process_pending_host_call(&self.store, &self.instance, eval)?;
 
                     // Resume execution with the host call results
-                    let mut store = self.store.borrow_mut();
+                    let mut store = self.store.lock().unwrap();
                     resumable = trap
                         .resume(store.as_context_mut(), &host_results, &mut outputs)
                         .map_err(|e| {
@@ -246,18 +246,18 @@ impl<'v> values::StarlarkValue<'v> for Callable {
 }
 
 impl<'v> AllocValue<'v> for Callable {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
 
 fn process_pending_host_call<'v>(
-    store_rc: &Rc<RefCell<wasmi::Store<WasmStoreCtx>>>,
-    instance_rc: &Rc<RefCell<wasmi::Instance>>,
+    store_rc: &Arc<Mutex<wasmi::Store<WasmStoreCtx>>>,
+    instance_rc: &Arc<Mutex<wasmi::Instance>>,
     eval: &mut Evaluator<'v, '_, '_>,
 ) -> Result<Vec<wasmi::Val>, starlark::Error> {
-    let mut store = store_rc.borrow_mut();
-    let instance = instance_rc.borrow();
+    let mut store = store_rc.lock().unwrap();
+    let instance = instance_rc.lock().unwrap();
 
     let pending = store.data_mut().pending_call.take().ok_or_else(|| {
         starlark::Error::new_kind(starlark::ErrorKind::Function(anyhow::anyhow!(
@@ -280,11 +280,11 @@ fn process_pending_host_call<'v>(
 
     let heap = eval.heap();
 
-    // Create Memory with owned Rc
+    // Create Memory with owned Arc
     let memory_val = match instance.get_memory(store.as_context(), "memory") {
         Some(mem) => heap.alloc(Memory {
-            store: Rc::clone(store_rc),
-            memory: Rc::new(RefCell::new(mem)),
+            store: Arc::clone(store_rc),
+            memory: Arc::new(Mutex::new(mem)),
         }),
         None => Value::new_none(),
     };

@@ -320,7 +320,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     .kind("source file")
     ///     .eval()
     /// ```
-    fn query<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<query::Query> {
+    fn query<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<query::Query> {
         Ok(query::Query::new())
     }
 
@@ -409,7 +409,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)] uri: String,
         #[starlark(require = named, default = UnpackDictEntries::default())]
         metadata: UnpackDictEntries<String, String>,
-    ) -> starlark::Result<build::BuildEventSink> {
+    ) -> anyhow::Result<build::BuildEventSink> {
         // TODO: validate endpoint
         Ok(build::BuildEventSink::Grpc {
             uri: uri.replace("grpcs://", "https://"),
@@ -417,7 +417,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         })
     }
 
-    fn file(#[starlark(require = named)] path: String) -> starlark::Result<build::BuildEventSink> {
+    fn file(#[starlark(require = named)] path: String) -> anyhow::Result<build::BuildEventSink> {
         Ok(build::BuildEventSink::File { path })
     }
 }
@@ -427,13 +427,13 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     #[starlark(as_type = execlog_sink::ExecLogSink)]
     fn file(
         #[starlark(require = named)] path: String,
-    ) -> starlark::Result<execlog_sink::ExecLogSink> {
+    ) -> anyhow::Result<execlog_sink::ExecLogSink> {
         Ok(execlog_sink::ExecLogSink::File { path })
     }
 
     fn compact_file(
         #[starlark(require = named)] path: String,
-    ) -> starlark::Result<execlog_sink::ExecLogSink> {
+    ) -> anyhow::Result<execlog_sink::ExecLogSink> {
         Ok(execlog_sink::ExecLogSink::CompactFile { path })
     }
 }

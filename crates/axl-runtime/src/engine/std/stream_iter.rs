@@ -2,7 +2,6 @@ use allocative::Allocative;
 
 use derive_more::Display;
 use starlark::starlark_simple_value;
-use starlark::values::AllocValue;
 use std::fmt::Debug;
 use std::io::Read;
 
@@ -35,7 +34,7 @@ impl<'v> values::StarlarkValue<'v> for ReadIterator {
         Ty::iter(Ty::string())
     }
 
-    unsafe fn iter_next(&self, _index: usize, heap: &'v Heap) -> Option<values::Value<'v>> {
+    unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         let mut buf = vec![0; 65536];
         let r = match &self.readable {
             stream::Readable::Stdin(stdin) => stdin.lock().read(&mut buf),
@@ -50,7 +49,7 @@ impl<'v> values::StarlarkValue<'v> for ReadIterator {
         if size == 0 {
             return None;
         }
-        Some(super::super::types::bytes::Bytes::from(&buf[0..size]).alloc_value(heap))
+        Some(heap.alloc(starlark::values::bytes::StarlarkBytes::new(&buf[0..size])))
     }
     unsafe fn iter_stop(&self) {}
 }

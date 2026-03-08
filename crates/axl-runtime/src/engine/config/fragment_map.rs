@@ -52,7 +52,7 @@ unsafe impl<'v> Trace<'v> for FragmentMap<'v> {
 }
 
 impl<'v> AllocValue<'v> for FragmentMap<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -111,7 +111,7 @@ impl<'v> FragmentMap<'v> {
 
     /// Create a new FragmentMap containing only the given type IDs,
     /// copying instance references from this map.
-    pub fn scoped(&self, type_ids: &[u64], heap: &'v Heap) -> Value<'v> {
+    pub fn scoped(&self, type_ids: &[u64], heap: Heap<'v>) -> Value<'v> {
         let scoped = FragmentMap::new();
         let entries = self.entries.borrow();
         for id in type_ids {
@@ -132,7 +132,7 @@ impl<'v> StarlarkValue<'v> for FragmentMap<'v> {
         write!(collector, "{}", self).unwrap();
     }
 
-    fn at(&self, index: Value<'v>, _heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         let type_id = extract_fragment_type_id(index).ok_or_else(|| {
             starlark::Error::new_other(anyhow::anyhow!(
                 "FragmentMap key must be a fragment type, got '{}'",
@@ -189,6 +189,16 @@ pub struct FrozenFragmentMap {
     entries: SmallMap<u64, (FrozenValue, FrozenValue)>,
 }
 
+impl FrozenFragmentMap {
+    /// Get all entries as (type_id, type_value, instance_value) tuples.
+    pub fn entries(&self) -> Vec<(u64, Value<'_>, Value<'_>)> {
+        self.entries
+            .iter()
+            .map(|(id, (tv, iv))| (*id, tv.to_value(), iv.to_value()))
+            .collect()
+    }
+}
+
 impl Display for FrozenFragmentMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FragmentMap([")?;
@@ -220,7 +230,7 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentMap {
         write!(collector, "{}", self).unwrap();
     }
 
-    fn at(&self, index: Value<'v>, _heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         let type_id = extract_fragment_type_id(index).ok_or_else(|| {
             starlark::Error::new_other(anyhow::anyhow!(
                 "FragmentMap key must be a fragment type, got '{}'",
@@ -252,7 +262,7 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentMap {
 pub fn construct_fragments<'v>(
     fragment_types: &[(u64, Value<'v>)],
     eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
-    _heap: &'v Heap,
+    _heap: Heap<'v>,
 ) -> Result<FragmentMap<'v>, crate::eval::EvalError> {
     let map = FragmentMap::new();
     for (type_id, type_value) in fragment_types {

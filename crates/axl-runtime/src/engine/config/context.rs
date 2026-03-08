@@ -8,13 +8,20 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 
+use starlark::StarlarkResultExt;
 use starlark::starlark_module;
+use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::AllocValue;
+use starlark::values::Freeze;
+use starlark::values::FreezeError;
+use starlark::values::Freezer;
+use starlark::values::FrozenValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
+use starlark::values::Tracer;
 use starlark::values::ValueLike;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::starlark_value;
@@ -50,7 +57,7 @@ impl<'v> ConfigContext<'v> {
     pub fn new(
         tasks: Vec<ConfiguredTask>,
         fragment_map: values::Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> Self {
         let tasks: Vec<values::Value<'v>> = tasks
             .into_iter()
@@ -61,7 +68,7 @@ impl<'v> ConfigContext<'v> {
             fragment_map,
         )));
         Self {
-            tasks: heap.alloc_complex_no_freeze(x),
+            tasks: heap.alloc_complex(x),
             fragment_map,
             config_modules: RefCell::new(vec![]),
         }
@@ -104,23 +111,53 @@ impl<'v> values::StarlarkValue<'v> for ConfigContext<'v> {
 }
 
 impl<'v> values::AllocValue<'v> for ConfigContext<'v> {
-    fn alloc_value(self, heap: &'v values::Heap) -> values::Value<'v> {
-        heap.alloc_complex_no_freeze(self)
+    fn alloc_value(self, heap: values::Heap<'v>) -> values::Value<'v> {
+        heap.alloc_complex(self)
     }
 }
 
-impl<'v> values::Freeze for ConfigContext<'v> {
-    type Frozen = ConfigContext<'v>;
-    fn freeze(self, _freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
-        panic!("not implemented")
+impl<'v> Freeze for ConfigContext<'v> {
+    type Frozen = FrozenConfigContext;
+
+    fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
+        Ok(FrozenConfigContext {
+            tasks: self.tasks.freeze(freezer)?,
+            fragment_map: self.fragment_map.freeze(freezer)?,
+            // Keep config modules alive so frozen Def values from config files
+            // remain valid during post_freeze optimization.
+            config_modules: self.config_modules.into_inner(),
+        })
     }
+}
+
+/// Frozen version of ConfigContext. Read-only after freezing.
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
+#[display("<ConfigContext>")]
+pub struct FrozenConfigContext {
+    #[allocative(skip)]
+    tasks: FrozenValue,
+    #[allocative(skip)]
+    fragment_map: FrozenValue,
+    #[allocative(skip)]
+    config_modules: Vec<FrozenModule>,
+}
+
+unsafe impl<'v> Trace<'v> for FrozenConfigContext {
+    fn trace(&mut self, _tracer: &Tracer<'v>) {}
+}
+
+starlark_simple_value!(FrozenConfigContext);
+
+#[starlark_value(type = "ConfigContext")]
+impl<'v> values::StarlarkValue<'v> for FrozenConfigContext {
+    type Canonical = ConfigContext<'v>;
 }
 
 #[starlark_module]
 pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     /// Standard library is the foundation of powerful AXL tasks.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
+    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
         Ok(Std {})
     }
 
@@ -128,13 +165,13 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn template<'v>(
         #[allow(unused)] this: values::Value<'v>,
-    ) -> starlark::Result<template::Template> {
+    ) -> anyhow::Result<template::Template> {
         Ok(template::Template::new())
     }
 
     /// EXPERIMENTAL! Run wasm programs within tasks.
     #[starlark(attribute)]
-    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Wasm> {
+    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Wasm> {
         Ok(Wasm::new())
     }
 
@@ -148,7 +185,7 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     /// **Fetch** data from a remote server
     /// data = ctx.http().get("https://example.com/data.json").block()
     /// ```
-    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
+    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Http> {
         Ok(Http::new())
     }
 
@@ -156,7 +193,9 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     fn tasks<'v>(
         #[allow(unused)] this: values::Value<'v>,
     ) -> anyhow::Result<ValueOfUnchecked<'v, &'v TaskListRef<'v>>> {
-        let this = this.downcast_ref_err::<ConfigContext>()?;
+        let this = this
+            .downcast_ref_err::<ConfigContext>()
+            .into_anyhow_result()?;
         Ok(ValueOfUnchecked::new(this.tasks))
     }
 
@@ -167,8 +206,10 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     /// ctx.fragments[BazelFragment].extra_flags = ["--config=ci"]
     /// ```
     #[starlark(attribute)]
-    fn fragments<'v>(this: values::Value<'v>) -> starlark::Result<values::Value<'v>> {
-        let ctx = this.downcast_ref_err::<ConfigContext>()?;
+    fn fragments<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
+            .downcast_ref_err::<ConfigContext>()
+            .into_anyhow_result()?;
         Ok(ctx.fragment_map)
     }
 }

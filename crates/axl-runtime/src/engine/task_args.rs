@@ -28,7 +28,7 @@ impl<'v> TaskArgs<'v> {
     }
 
     /// Creates TaskArgs from a HashMap of string key-value pairs, allocating strings on the heap.
-    pub fn from_map(map: std::collections::HashMap<String, String>, heap: &'v Heap) -> Self {
+    pub fn from_map(map: std::collections::HashMap<String, String>, heap: Heap<'v>) -> Self {
         let mut args = SmallMap::new();
         for (key, value) in map {
             args.insert(key, heap.alloc_str(&value).to_value());
@@ -49,13 +49,13 @@ impl<'v> TaskArgs<'v> {
 
 #[starlark_value(type = "TaskArgs")]
 impl<'v> StarlarkValue<'v> for TaskArgs<'v> {
-    fn get_attr(&self, key: &str, _heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, key: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
         self.args.get(key).cloned()
     }
 }
 
 impl<'v> values::AllocValue<'v> for TaskArgs<'v> {
-    fn alloc_value(self, heap: &'v values::Heap) -> Value<'v> {
+    fn alloc_value(self, heap: values::Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -86,7 +86,7 @@ starlark_simple_value!(FrozenTaskArgs);
 impl<'v> StarlarkValue<'v> for FrozenTaskArgs {
     type Canonical = TaskArgs<'v>;
 
-    fn get_attr(&self, key: &str, _heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, key: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
         self.args.get(key).cloned().map(|x| x.to_value())
     }
 }

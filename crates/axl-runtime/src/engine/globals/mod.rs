@@ -43,11 +43,11 @@ impl<'v> values::StarlarkValue<'v> for ClockIterator {
     unsafe fn iterate(
         &self,
         me: values::Value<'v>,
-        _heap: &'v Heap,
+        _heap: Heap<'v>,
     ) -> starlark::Result<values::Value<'v>> {
         Ok(me)
     }
-    unsafe fn iter_next(&self, _index: usize, heap: &'v Heap) -> Option<values::Value<'v>> {
+    unsafe fn iter_next(&self, _index: usize, heap: Heap<'v>) -> Option<values::Value<'v>> {
         sleep(Duration::from_millis(self.rate));
         Some(heap.alloc(self.counter.fetch_add(1, Ordering::Relaxed)))
     }
@@ -57,7 +57,7 @@ impl<'v> values::StarlarkValue<'v> for ClockIterator {
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Forever clock iterator
-    fn forever<'v>(#[starlark()] rate: u32) -> starlark::Result<ClockIterator> {
+    fn forever<'v>(#[starlark()] rate: u32) -> anyhow::Result<ClockIterator> {
         Ok(ClockIterator {
             rate: rate as u64,
             counter: AtomicU64::new(0),

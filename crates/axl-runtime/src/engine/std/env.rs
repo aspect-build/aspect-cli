@@ -47,7 +47,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     fn var<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] key: values::StringValue<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
         let val = std::env::var(key.as_str())
             .map(|val| heap.alloc_str(val.as_str()))
@@ -63,7 +63,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// variables afterwards will not be reflected in the returned iterator.
     fn vars<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<
         ValueOfUnchecked<
             'v,
@@ -108,7 +108,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// [appledoc]: https://developer.apple.com/library/archive/documentation/Security/Conceptual/SecureCodingGuide/Articles/RaceConditions.html#//apple_ref/doc/uid/TP40002585-SW10
     fn temp_dir<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<values::StringValue<'v>> {
         Ok(heap.alloc_str(
             std::env::temp_dir()
@@ -146,7 +146,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// In UWP (Universal Windows Platform) targets this function is unimplemented and always returns `None`.
     fn home_dir<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
         Ok(match std::env::home_dir() {
             Some(path) => NoneOr::Other(
@@ -179,7 +179,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     ///
     fn current_dir<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<values::StringValue<'v>> {
         Ok(heap.alloc_str(
             std::env::current_dir()?
@@ -191,7 +191,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
 
     fn current_exe<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<values::StringValue<'v>> {
         Ok(heap.alloc_str(
             std::env::current_exe()?
@@ -228,7 +228,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// "linux", "macos", "windows", etc.
     fn os<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        _heap: &'v Heap,
+        _heap: Heap<'v>,
     ) -> anyhow::Result<&'v str> {
         Ok(std::env::consts::OS)
     }
@@ -239,7 +239,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
     /// "x86_64", "aarch64", etc.
     fn arch<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        _heap: &'v Heap,
+        _heap: Heap<'v>,
     ) -> anyhow::Result<&'v str> {
         Ok(std::env::consts::ARCH)
     }

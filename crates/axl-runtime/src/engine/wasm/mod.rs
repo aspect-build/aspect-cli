@@ -26,8 +26,8 @@ use starlark::values::list::UnpackList;
 use starlark::values::{self, starlark_value};
 use wasmi_wasi::ambient_authority;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use host::WasmStoreCtx;
 
@@ -217,9 +217,9 @@ fn instantiate_simple(
     let instance = linker.instantiate_and_start(&mut store, &module)?;
 
     Ok(instance::Instance {
-        module: Rc::new(RefCell::new(module)),
-        store: Rc::new(RefCell::new(store)),
-        instance: Rc::new(RefCell::new(instance)),
+        module: Arc::new(Mutex::new(module)),
+        store: Arc::new(Mutex::new(store)),
+        instance: Arc::new(Mutex::new(instance)),
     })
 }
 
@@ -305,8 +305,8 @@ fn instantiate_with_imports<'v>(
     })?;
 
     Ok(instance::Instance {
-        module: Rc::new(RefCell::new(module)),
-        store: Rc::new(RefCell::new(store)),
-        instance: Rc::new(RefCell::new(instance)),
+        module: Arc::new(Mutex::new(module)),
+        store: Arc::new(Mutex::new(store)),
+        instance: Arc::new(Mutex::new(instance)),
     })
 }

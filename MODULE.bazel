@@ -83,6 +83,22 @@ crate.annotation(
 
 inject_repo(crate, "zstd")
 
+# starlark-rust git fork: crates live in subdirectories, so rules_rs needs
+# explicit strip_prefix hints for each one.
+crate.annotation(crate = "allocative", strip_prefix = "allocative/allocative")
+crate.annotation(crate = "allocative_derive", strip_prefix = "allocative/allocative_derive")
+crate.annotation(crate = "cmp_any", strip_prefix = "gazebo/cmp_any")
+crate.annotation(crate = "display_container", strip_prefix = "gazebo/display_container")
+crate.annotation(crate = "dupe", strip_prefix = "gazebo/dupe")
+crate.annotation(crate = "dupe_derive", strip_prefix = "gazebo/dupe_derive")
+crate.annotation(crate = "starlark", strip_prefix = "starlark")
+crate.annotation(crate = "starlark_derive", strip_prefix = "starlark_derive")
+crate.annotation(crate = "starlark_lsp", strip_prefix = "starlark_lsp")
+crate.annotation(crate = "starlark_map", strip_prefix = "starlark_map")
+crate.annotation(crate = "starlark_syntax", strip_prefix = "starlark_syntax")
+crate.annotation(crate = "strong_hash", strip_prefix = "gazebo/strong_hash")
+crate.annotation(crate = "strong_hash_derive", strip_prefix = "gazebo/strong_hash_derive")
+
 use_repo(crate, "crates")
 
 bazel_dep(name = "rules_multitool", version = "1.9.0")

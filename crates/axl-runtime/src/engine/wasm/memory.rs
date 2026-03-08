@@ -1,5 +1,5 @@
 use allocative::Allocative;
-use anyhow::Context;
+
 use derive_more::Display;
 
 use starlark::StarlarkResultExt;
@@ -19,20 +19,20 @@ use starlark_derive::Trace;
 use wasmi::AsContext;
 use wasmi::AsContextMut;
 
-use std::cell::RefCell;
 use std::fmt::Debug;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use super::host::WasmStoreCtx;
-use crate::engine::types::bytes::Bytes;
+use starlark::values::bytes::StarlarkBytes as Bytes;
 
 #[derive(Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<wasm.Memory>")]
 pub struct Memory {
     #[allocative(skip)]
-    pub(crate) store: Rc<RefCell<wasmi::Store<WasmStoreCtx>>>,
+    pub(crate) store: Arc<Mutex<wasmi::Store<WasmStoreCtx>>>,
     #[allocative(skip)]
-    pub(crate) memory: Rc<RefCell<wasmi::Memory>>,
+    pub(crate) memory: Arc<Mutex<wasmi::Memory>>,
 }
 
 impl Debug for Memory {
@@ -57,9 +57,11 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] by: u64,
     ) -> anyhow::Result<u64> {
-        let wm = this.downcast_ref_err::<Memory>()?;
-        let mem = wm.memory.borrow();
-        let pages = mem.grow(wm.store.borrow_mut().as_context_mut(), by)?;
+        let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
+        let pages = mem.grow(store.as_context_mut(), by)?;
         Ok(pages)
     }
 
@@ -67,14 +69,10 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] offset: usize,
         #[starlark(require = pos)] buffer: Value<'v>,
-        heap: &'v values::Heap,
+        heap: values::Heap<'v>,
     ) -> anyhow::Result<NoneType> {
-        let wm = this.downcast_ref_err::<Memory>()?;
-        let mem = wm.memory.borrow();
-        let iter = buffer
-            .iterate(heap)
-            .into_anyhow_result()
-            .context("buffer is not iterable")?;
+        let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
+        let iter = buffer.iterate(heap).map_err(|e| e.into_anyhow())?;
         let bytes: Vec<u8> = iter
             .map(|x| {
                 x.unpack_i32()
@@ -82,7 +80,10 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
                     .map(|v| v as u8)
             })
             .collect::<anyhow::Result<Vec<u8>>>()?;
-        mem.write(wm.store.borrow_mut().as_context_mut(), offset, &bytes)?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
+        mem.write(store.as_context_mut(), offset, &bytes)?;
         Ok(NoneType)
     }
 
@@ -111,11 +112,13 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] offset: usize,
         #[starlark(require = pos)] length: usize,
     ) -> anyhow::Result<Bytes> {
-        let wm = this.downcast_ref_err::<Memory>()?;
-        let mem = wm.memory.borrow();
+        let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
         let mut buffer = vec![0u8; length];
-        mem.read(wm.store.borrow_mut().as_context_mut(), offset, &mut buffer)?;
-        Ok(Bytes::from(buffer.as_slice()))
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
+        mem.read(store.as_context_mut(), offset, &mut buffer)?;
+        Ok(Bytes::new(buffer.as_slice()))
     }
 
     /// Read a UTF-8 string from memory with explicit length.
@@ -131,10 +134,12 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] ptr: usize,
         #[starlark(require = pos)] len: usize,
     ) -> anyhow::Result<String> {
-        let wm = this.downcast_ref_err::<Memory>()?;
-        let mem = wm.memory.borrow();
+        let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
         let mut buffer = vec![0u8; len];
-        mem.read(wm.store.borrow_mut().as_context_mut(), ptr, &mut buffer)?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
+        mem.read(store.as_context_mut(), ptr, &mut buffer)?;
         String::from_utf8(buffer)
             .map_err(|e| anyhow::anyhow!("invalid UTF-8 at ptr {}: {}", ptr, e))
     }
@@ -152,9 +157,10 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] ptr: usize,
         #[starlark(require = named, default = 4096)] max_len: usize,
     ) -> anyhow::Result<String> {
-        let wm = this.downcast_ref_err::<Memory>()?;
-        let mem = wm.memory.borrow();
-        let store = wm.store.borrow();
+        let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
         let data = mem.data(store.as_context());
 
         // Find null terminator
@@ -181,16 +187,18 @@ pub(crate) fn memory_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] ptr: usize,
         #[starlark(require = pos)] s: &str,
     ) -> anyhow::Result<usize> {
-        let wm = this.downcast_ref_err::<Memory>()?;
-        let mem = wm.memory.borrow();
+        let wm = this.downcast_ref_err::<Memory>().into_anyhow_result()?;
         let bytes = s.as_bytes();
-        mem.write(wm.store.borrow_mut().as_context_mut(), ptr, bytes)?;
+        // Lock store first, then memory — consistent lock ordering (store → memory)
+        let mut store = wm.store.lock().unwrap();
+        let mem = wm.memory.lock().unwrap();
+        mem.write(store.as_context_mut(), ptr, bytes)?;
         Ok(bytes.len())
     }
 }
 
 impl<'v> AllocValue<'v> for Memory {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }

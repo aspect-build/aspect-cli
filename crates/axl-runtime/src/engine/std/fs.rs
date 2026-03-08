@@ -32,7 +32,7 @@ pub struct DirEntry<'v> {
 
 #[starlark_value(type = "fs.DirEntry")]
 impl<'v> values::StarlarkValue<'v> for DirEntry<'v> {
-    fn get_attr(&self, attr: &str, _: &Heap) -> Option<values::Value<'v>> {
+    fn get_attr(&self, attr: &str, _: Heap<'v>) -> Option<values::Value<'v>> {
         match attr {
             "path" => Some(self.path.to_value()),
             "is_file" => Some(self.is_file),
@@ -46,7 +46,7 @@ impl<'v> values::StarlarkValue<'v> for DirEntry<'v> {
 }
 
 impl<'v> values::AllocValue<'v> for DirEntry<'v> {
-    fn alloc_value(self, heap: &'v values::Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: values::Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -92,7 +92,7 @@ pub struct Metadata<'v> {
 
 #[starlark_value(type = "fs.Metadata")]
 impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
-    fn get_attr(&self, attr: &str, _: &Heap) -> Option<values::Value<'v>> {
+    fn get_attr(&self, attr: &str, _: Heap<'v>) -> Option<values::Value<'v>> {
         match attr {
             "is_dir" => Some(self.is_dir),
             "is_file" => Some(self.is_file),
@@ -120,7 +120,7 @@ impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
 }
 
 impl<'v> values::AllocValue<'v> for Metadata<'v> {
-    fn alloc_value(self, heap: &'v values::Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: values::Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -306,7 +306,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     fn metadata<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<Metadata<'v>> {
         let m = fs::metadata(path.as_str())?;
         Ok(marshal_metadata(&m, heap))
@@ -321,7 +321,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     fn read_dir<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<ValueOfUnchecked<'v, UnpackList<DirEntry<'v>>>> {
         let metadata = fs::read_dir(path.as_str())?;
         Ok(heap
@@ -347,7 +347,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     fn read_link<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<values::StringValue<'v>> {
         let r = fs::read_link(path.as_str())
             .map(|f| heap.alloc_str(&f.as_os_str().to_string_lossy().to_string()))?;
@@ -363,7 +363,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     fn read_to_string<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<values::StringValue<'v>> {
         let r = fs::read_to_string(path.as_str()).map(|f| heap.alloc_str(f.as_str()))?;
         Ok(r)
@@ -451,7 +451,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     fn symlink_metadata<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> anyhow::Result<Metadata<'v>> {
         let m = fs::symlink_metadata(path.as_str())?;
         Ok(marshal_metadata(&m, heap))
@@ -485,7 +485,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     }
 }
 
-fn marshal_metadata<'v>(m: &fs::Metadata, heap: &'v Heap) -> Metadata<'v> {
+fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
     let file_type = m.file_type();
     let modified = match m.modified() {
         Ok(t) => match t.duration_since(UNIX_EPOCH) {

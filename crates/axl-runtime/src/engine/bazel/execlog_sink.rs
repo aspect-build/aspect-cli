@@ -8,6 +8,7 @@ use derive_more::Display;
 use fibre::RecvError;
 use fibre::spmc::Receiver;
 use prost::Message;
+use starlark::StarlarkResultExt;
 use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::starlark_value;
@@ -35,7 +36,9 @@ impl<'v> UnpackValue<'v> for ExecLogSink {
     type Error = anyhow::Error;
 
     fn unpack_value_impl(value: values::Value<'v>) -> Result<Option<Self>, Self::Error> {
-        let value = value.downcast_ref_err::<ExecLogSink>()?;
+        let value = value
+            .downcast_ref_err::<ExecLogSink>()
+            .into_anyhow_result()?;
         Ok(Some(value.clone()))
     }
 }

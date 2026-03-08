@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use starlark::environment::FrozenModule;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
+use starlark::values::FrozenValue;
 use starlark::values::Heap;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::Value;
@@ -68,7 +69,7 @@ impl FrozenTaskModuleLike for FrozenModule {
 fn build_task_fragment_map<'v>(
     fragment_data: &[(u64, Value<'static>, Value<'static>)],
     task_fragment_ids: &[u64],
-    heap: &'v Heap,
+    heap: Heap<'v>,
 ) -> Value<'v> {
     let map = FragmentMap::new();
     for (id, type_val, instance_val) in fragment_data {
@@ -90,7 +91,7 @@ pub fn execute_task_with_args(
     task: &ConfiguredTask,
     store: AxlStore,
     fragment_data: &[(u64, Value<'static>, Value<'static>)],
-    args_builder: impl FnOnce(&Heap) -> TaskArgs,
+    args_builder: impl FnOnce(Heap) -> TaskArgs,
 ) -> Result<Option<u8>, EvalError> {
     // Get the task implementation function
     let task_impl = task
@@ -99,37 +100,44 @@ pub fn execute_task_with_args(
 
     // Create a module for TaskContext and freeze it immediately
     // This allows WASM to access ctx directly without runtime freezing
-    let ctx_module = Module::new();
-    let heap = ctx_module.heap();
-    let task_args = args_builder(heap);
-    let task_info = TaskInfo {
-        name: task.get_name(),
-        group: task.get_group(),
-    };
+    let frozen_ctx_module = Module::with_temp_heap(|ctx_module| {
+        let heap = ctx_module.heap();
+        let task_args = args_builder(heap);
+        let task_info = TaskInfo {
+            name: task.get_name(),
+            group: task.get_group(),
+        };
 
-    // Build a task-scoped fragment map
-    let fragment_map = build_task_fragment_map(fragment_data, &task.fragment_type_ids, heap);
+        // Build a task-scoped fragment map
+        let fragment_map = build_task_fragment_map(fragment_data, &task.fragment_type_ids, heap);
 
-    let context = heap.alloc(TaskContext::new(task_args, fragment_map, task_info));
-    ctx_module.set("__ctx__", context);
+        let context = heap.alloc(TaskContext::new(task_args, fragment_map, task_info));
+        ctx_module.set("__ctx__", context);
 
-    let frozen_ctx_module = ctx_module
-        .freeze()
-        .map_err(|e| EvalError::UnknownError(anyhow!("{:?}", e)))?;
+        ctx_module
+            .freeze()
+            .map_err(|e| EvalError::UnknownError(anyhow!("{:?}", e)))
+    })?;
     // OwnedFrozenValue keeps the frozen heap alive for the duration of this function
     let frozen_context = frozen_ctx_module
         .get("__ctx__")
         .map_err(|e| EvalError::UnknownError(anyhow!("failed to get frozen context: {:?}", e)))?;
 
+    // Extract FrozenValues (Copy, 'static-compatible) for use inside with_temp_heap closure.
+    // The OwnedFrozenValues keep the heaps alive for the duration of this function.
+    let task_impl_fv: FrozenValue = unsafe { task_impl.unchecked_frozen_value() };
+    let frozen_ctx_fv: FrozenValue = unsafe { frozen_context.unchecked_frozen_value() };
+
     // Create execution module for the evaluator
-    let exec_module = Module::new();
-    let mut eval = Evaluator::new(&exec_module);
-    eval.extra = Some(&store);
+    Module::with_temp_heap(|exec_module| {
+        let mut eval = Evaluator::new(&exec_module);
+        eval.extra = Some(&store);
 
-    // Call frozen task implementation with frozen context
-    let ret = eval.eval_function(task_impl.value(), &[frozen_context.value()], &[])?;
+        // Call frozen task implementation with frozen context
+        let ret = eval.eval_function(task_impl_fv.to_value(), &[frozen_ctx_fv.to_value()], &[])?;
 
-    Ok(ret.unpack_i32().map(|ex| ex as u8))
+        Ok(ret.unpack_i32().map(|ex| ex as u8))
+    })
 }
 
 /// The core evaluator for .axl files.
@@ -157,7 +165,7 @@ impl<'l, 'p> TaskEvaluator<'l, 'p> {
         // push the current scope to stack
         self.loader.module_stack.borrow_mut().push(scope);
 
-        let module = self.loader.eval_module(&abs_path)?;
+        let frozen = self.loader.eval_module(&abs_path)?;
 
         // pop the current scope off the stack
         let _scope = self
@@ -166,11 +174,6 @@ impl<'l, 'p> TaskEvaluator<'l, 'p> {
             .borrow_mut()
             .pop()
             .expect("just pushed a scope");
-
-        // Freeze immediately
-        let frozen = module
-            .freeze()
-            .map_err(|e| EvalError::UnknownError(anyhow!(e)))?;
 
         // Cache the frozen module so that subsequent load() calls for the same
         // path (e.g., from config files) return this module instead of

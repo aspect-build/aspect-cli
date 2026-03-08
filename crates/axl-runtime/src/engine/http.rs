@@ -8,6 +8,7 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyperlocal::{UnixClientExt, Uri as UnixUri};
 use reqwest::redirect::Policy;
 use ssri::{Integrity, IntegrityChecker};
+use starlark::StarlarkResultExt;
 use starlark::environment::{Methods, MethodsBuilder, MethodsStatic};
 use starlark::values::AllocValue;
 use starlark::values::dict::UnpackDictEntries;
@@ -135,8 +136,8 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named)] integrity: Option<String>,
         #[starlark(require = named)] sha256: Option<String>,
-    ) -> starlark::Result<StarlarkFuture<'v>> {
-        let client = &this.downcast_ref_err::<Http>()?.client;
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
+        let client = &this.downcast_ref_err::<Http>().into_anyhow_result()?.client;
         let mut req = client.get(url.as_str().to_string());
         for (key, value) in headers.entries {
             req = req.header(key.as_str(), value.as_str());
@@ -193,7 +194,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> starlark::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -249,7 +250,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                 Ok(StarlarkFuture::from_future(fut.boxed()))
             }
             None => {
-                let client = this.downcast_ref_err::<Http>()?.client.clone();
+                let client = this
+                    .downcast_ref_err::<Http>()
+                    .into_anyhow_result()?
+                    .client
+                    .clone();
                 let fut = async move {
                     let mut req = client.get(&url_str);
                     for (key, value) in &headers_vec {
@@ -270,7 +275,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackDictEntries::default())]
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> starlark::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -326,7 +331,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                 Ok(StarlarkFuture::from_future(fut.boxed()))
             }
             None => {
-                let client = this.downcast_ref_err::<Http>()?.client.clone();
+                let client = this
+                    .downcast_ref_err::<Http>()
+                    .into_anyhow_result()?
+                    .client
+                    .clone();
                 let fut = async move {
                     let mut req = client.delete(&url_str);
                     for (key, value) in &headers_vec {
@@ -348,7 +357,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> starlark::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -408,7 +417,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                 Ok(StarlarkFuture::from_future(fut))
             }
             None => {
-                let client = this.downcast_ref_err::<Http>()?.client.clone();
+                let client = this
+                    .downcast_ref_err::<Http>()
+                    .into_anyhow_result()?
+                    .client
+                    .clone();
                 let fut = async move {
                     let mut req = client.post(&url_str);
                     for (key, value) in &headers_vec {
@@ -431,7 +444,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> starlark::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -491,7 +504,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                 Ok(StarlarkFuture::from_future(fut))
             }
             None => {
-                let client = this.downcast_ref_err::<Http>()?.client.clone();
+                let client = this
+                    .downcast_ref_err::<Http>()
+                    .into_anyhow_result()?
+                    .client
+                    .clone();
                 let fut = async move {
                     let mut req = client.put(&url_str);
                     for (key, value) in &headers_vec {
@@ -514,7 +531,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
         headers: UnpackDictEntries<values::StringValue, values::StringValue>,
         #[starlark(require = named, default = NoneOr::None)] data: NoneOr<values::Value<'v>>,
         #[starlark(require = named, default = NoneOr::None)] unix_socket: NoneOr<String>,
-    ) -> starlark::Result<StarlarkFuture<'v>> {
+    ) -> anyhow::Result<StarlarkFuture<'v>> {
         let url_str = url.as_str().to_string();
         let headers_vec: Vec<(String, String)> = headers
             .entries
@@ -574,7 +591,11 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
                 Ok(StarlarkFuture::from_future(fut))
             }
             None => {
-                let client = this.downcast_ref_err::<Http>()?.client.clone();
+                let client = this
+                    .downcast_ref_err::<Http>()
+                    .into_anyhow_result()?
+                    .client
+                    .clone();
                 let fut = async move {
                     let mut req = client.patch(&url_str);
                     for (key, value) in &headers_vec {
@@ -592,7 +613,7 @@ pub(crate) fn http_methods(registry: &mut MethodsBuilder) {
 }
 
 /// Converts a Starlark `data` parameter value into a `BodyKind` synchronously.
-fn build_body_kind(data: NoneOr<values::Value<'_>>) -> starlark::Result<BodyKind> {
+fn build_body_kind(data: NoneOr<values::Value<'_>>) -> anyhow::Result<BodyKind> {
     match data.into_option() {
         None => Ok(BodyKind::Empty),
         Some(val) => {
@@ -604,10 +625,10 @@ fn build_body_kind(data: NoneOr<values::Value<'_>>) -> starlark::Result<BodyKind
                     r => Ok(BodyKind::SyncReadable(r.clone())),
                 }
             } else {
-                Err(starlark::Error::new_other(anyhow::anyhow!(
+                Err(anyhow::anyhow!(
                     "data: expected str or Readable, got {}",
                     val.get_type()
-                )))
+                ))
             }
         }
     }
@@ -730,22 +751,33 @@ starlark_simple_value!(HttpResponse);
 pub(crate) fn http_response_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn status<'v>(this: values::Value<'v>) -> anyhow::Result<u32> {
-        Ok(this.downcast_ref_err::<HttpResponse>()?.status as u32)
+        Ok(this
+            .downcast_ref_err::<HttpResponse>()
+            .into_anyhow_result()?
+            .status as u32)
     }
 
     #[starlark(attribute)]
     fn body<'v>(this: values::Value<'v>) -> anyhow::Result<&'v str> {
-        Ok(this.downcast_ref_err::<HttpResponse>()?.body.as_str())
+        Ok(this
+            .downcast_ref_err::<HttpResponse>()
+            .into_anyhow_result()?
+            .body
+            .as_str())
     }
 
     #[starlark(attribute)]
     fn headers<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<(String, String)>> {
-        Ok(this.downcast_ref_err::<HttpResponse>()?.headers.clone())
+        Ok(this
+            .downcast_ref_err::<HttpResponse>()
+            .into_anyhow_result()?
+            .headers
+            .clone())
     }
 }
 
 impl FutureAlloc for HttpResponse {
-    fn alloc_value_fut<'v>(self: Box<Self>, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value_fut<'v>(self: Box<Self>, heap: Heap<'v>) -> values::Value<'v> {
         self.alloc_value(heap)
     }
 }

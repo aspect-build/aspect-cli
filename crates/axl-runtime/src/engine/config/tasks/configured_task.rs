@@ -10,7 +10,11 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
+use starlark::starlark_simple_value;
 use starlark::values;
+use starlark::values::Freeze;
+use starlark::values::FreezeError;
+use starlark::values::Freezer;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::OwnedFrozenValue;
@@ -159,7 +163,7 @@ impl<'v> values::StarlarkValue<'v> for ConfiguredTask {
         Ok(())
     }
 
-    fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         match attribute {
             "name" => Some(heap.alloc_str(&self.name.borrow()).to_value()),
             "group" => Some(heap.alloc(AllocList(self.group.borrow().iter()))),
@@ -190,7 +194,65 @@ fn configured_task_methods(_builder: &mut MethodsBuilder) {
 }
 
 impl<'v> values::AllocValue<'v> for ConfiguredTask {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
-        heap.alloc_complex_no_freeze(self)
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc_complex(self)
+    }
+}
+
+impl Freeze for ConfiguredTask {
+    type Frozen = FrozenConfiguredTask;
+
+    fn freeze(self, _freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
+        Ok(FrozenConfiguredTask {
+            task_def: self.task_def,
+            name: self.name.into_inner(),
+            group: self.group.into_inner(),
+            fragment_type_ids: self.fragment_type_ids,
+            symbol: self.symbol,
+            path: self.path,
+        })
+    }
+}
+
+/// Frozen version of ConfiguredTask. Read-only after freezing.
+#[derive(Debug, ProvidesStaticType, Display, NoSerialize, Allocative)]
+#[display("<ConfiguredTask>")]
+pub struct FrozenConfiguredTask {
+    #[allocative(skip)]
+    pub task_def: OwnedFrozenValue,
+    pub name: String,
+    pub group: Vec<String>,
+    pub fragment_type_ids: Vec<u64>,
+    pub symbol: String,
+    pub path: PathBuf,
+}
+
+unsafe impl Trace<'_> for FrozenConfiguredTask {
+    fn trace(&mut self, _tracer: &values::Tracer<'_>) {}
+}
+
+starlark_simple_value!(FrozenConfiguredTask);
+
+#[starlark_value(type = "ConfiguredTask")]
+impl<'v> values::StarlarkValue<'v> for FrozenConfiguredTask {
+    type Canonical = ConfiguredTask;
+
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        match attribute {
+            "name" => Some(heap.alloc_str(&self.name).to_value()),
+            "group" => Some(heap.alloc(AllocList(self.group.iter()))),
+            "symbol" => Some(heap.alloc_str(&self.symbol).to_value()),
+            "path" => Some(heap.alloc_str(&self.path.to_string_lossy()).to_value()),
+            _ => None,
+        }
+    }
+
+    fn dir_attr(&self) -> Vec<String> {
+        vec![
+            "name".into(),
+            "group".into(),
+            "symbol".into(),
+            "path".into(),
+        ]
     }
 }

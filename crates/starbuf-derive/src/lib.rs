@@ -487,7 +487,8 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             #[starlark(attribute)]
             fn #fident<'v>(this: ::starlark::values::Value<'v>) -> ::anyhow::Result<#return_type> {
                 use ::starlark::values::ValueLike;
-                let this = this.downcast_ref_err::<#ident>()?;
+                use ::starlark::StarlarkResultExt;
+                let this = this.downcast_ref_err::<#ident>().into_anyhow_result()?;
                 #return_expr
             }
         }
@@ -910,7 +911,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         }
 
         impl<'v> ::starlark::values::AllocValue<'v> for #ident {
-            fn alloc_value(self, heap: &'v ::starlark::values::Heap) -> ::starlark::values::Value<'v> {
+            fn alloc_value(self, heap: ::starlark::values::Heap<'v>) -> ::starlark::values::Value<'v> {
                 heap.alloc_simple(self)
             }
         }
@@ -1031,7 +1032,7 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         }
 
         impl<'v> ::starlark::values::AllocValue<'v> for #ident {
-            fn alloc_value(self, heap: &'v starlark::values::Heap) -> ::starlark::values::Value<'v> {
+            fn alloc_value(self, heap: starlark::values::Heap<'v>) -> ::starlark::values::Value<'v> {
                 match self {
                     #(#alloc,)*
                 }
@@ -1135,7 +1136,7 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
         }
 
         impl<'v> ::starlark::values::AllocValue<'v> for #ident {
-            fn alloc_value(self, heap: &'v starlark::values::Heap) -> starlark::values::Value<'v> {
+            fn alloc_value(self, heap: starlark::values::Heap<'v>) -> starlark::values::Value<'v> {
                 match self {
                     #(#alloc,)*
                 }
@@ -1237,7 +1238,7 @@ fn try_service(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Erro
         }
 
         impl<'v> ::starlark::values::AllocValue<'v> for #handle_ident {
-            fn alloc_value(self, heap: &'v ::starlark::values::Heap) -> ::starlark::values::Value<'v> {
+            fn alloc_value(self, heap: ::starlark::values::Heap<'v>) -> ::starlark::values::Value<'v> {
                 heap.alloc_simple(self)
             }
         }

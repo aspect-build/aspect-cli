@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::process;
 use std::process::Stdio;
-use std::rc::Rc;
 
 use allocative::Allocative;
 use anyhow::anyhow;
@@ -21,6 +20,7 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::ValueLike;
 
+use starlark::StarlarkResultExt;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
@@ -68,7 +68,7 @@ pub struct Command {
 }
 
 impl<'v> AllocValue<'v> for Command {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -87,7 +87,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] arg: values::StringValue,
     ) -> anyhow::Result<values::Value<'v>> {
-        let cmd = this.downcast_ref_err::<Command>()?;
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         cmd.inner.borrow_mut().arg(arg.as_str());
         Ok(this)
     }
@@ -95,7 +95,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] args: UnpackList<values::StringValue>,
     ) -> anyhow::Result<values::Value<'v>> {
-        let cmd = this.downcast_ref_err::<Command>()?;
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         cmd.inner
             .borrow_mut()
             .args(args.items.iter().map(|f| f.as_str()));
@@ -107,7 +107,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] key: values::StringValue,
         #[starlark(require = pos)] value: NoneOr<values::StringValue>,
     ) -> anyhow::Result<values::Value<'v>> {
-        let cmd = this.downcast_ref_err::<Command>()?;
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         match value {
             NoneOr::None => cmd.inner.borrow_mut().env_remove(key.as_str()),
             NoneOr::Other(v) => cmd.inner.borrow_mut().env(key.as_str(), v.as_str()),
@@ -119,7 +119,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] dir: values::StringValue,
     ) -> anyhow::Result<values::Value<'v>> {
-        let cmd = this.downcast_ref_err::<Command>()?;
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         cmd.inner.borrow_mut().current_dir(dir.as_str());
         Ok(this)
     }
@@ -132,7 +132,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] io: values::StringValue,
     ) -> anyhow::Result<values::Value<'v>> {
-        let cmd = this.downcast_ref_err::<Command>()?;
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         match io.as_str() {
             "null" => cmd.inner.borrow_mut().stdin(Stdio::null()),
             "piped" => cmd.inner.borrow_mut().stdin(Stdio::piped()),
@@ -150,7 +150,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] io: values::StringValue,
     ) -> anyhow::Result<values::Value<'v>> {
-        let cmd = this.downcast_ref_err::<Command>()?;
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         match io.as_str() {
             "null" => cmd.inner.borrow_mut().stdout(Stdio::null()),
             "piped" => cmd.inner.borrow_mut().stdout(Stdio::piped()),
@@ -168,7 +168,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] io: values::StringValue,
     ) -> anyhow::Result<values::Value<'v>> {
-        let cmd = this.downcast_ref_err::<Command>()?;
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         match io.as_str() {
             "null" => cmd.inner.borrow_mut().stderr(Stdio::null()),
             "piped" => cmd.inner.borrow_mut().stderr(Stdio::piped()),
@@ -182,10 +182,10 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     ///
     /// By default, stdin, stdout and stderr are inherited from the parent.
     fn spawn<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Child> {
-        let cmd = this.downcast_ref_err::<Command>()?;
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         let child = cmd.inner.borrow_mut().spawn()?;
         Ok(Child {
-            inner: Rc::new(RefCell::new(Some(child))),
+            inner: RefCell::new(Some(child)),
         })
     }
 
@@ -195,7 +195,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     ///
     /// By default, stdin, stdout and stderr are inherited from the parent.
     fn status<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
-        let cmd = this.downcast_ref_err::<Command>()?;
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
         let status = cmd.inner.borrow_mut().status()?;
         Ok(ExitStatus(status))
     }
@@ -205,11 +205,11 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 #[display("<std.process.Child>")]
 pub struct Child {
     #[allocative(skip)]
-    inner: Rc<RefCell<Option<process::Child>>>,
+    inner: RefCell<Option<process::Child>>,
 }
 
 impl<'v> AllocValue<'v> for Child {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -227,7 +227,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// The handle for reading from the child’s standard output (stdout), if it has been captured.
     /// Calling this function more than once will yield error.
     fn stdout<'v>(this: values::Value<'v>) -> anyhow::Result<stream::Readable> {
-        let child = this.downcast_ref_err::<Child>()?;
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
 
         let mut inner = child.inner.borrow_mut();
 
@@ -245,7 +245,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// The handle for reading from the child’s standard error (stderr), if it has been captured.
     /// Calling this function more than once will yield error.
     fn stderr<'v>(this: values::Value<'v>) -> anyhow::Result<stream::Readable> {
-        let child = this.downcast_ref_err::<Child>()?;
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
 
         let mut inner = child.inner.borrow_mut();
 
@@ -263,7 +263,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// The handle for writing to the child’s standard input (stdin), if it has been captured.
     /// Calling this function more than once will yield error.
     fn stdin<'v>(this: values::Value<'v>) -> anyhow::Result<stream::Writable> {
-        let child = this.downcast_ref_err::<Child>()?;
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
 
         let mut inner = child.inner.borrow_mut();
 
@@ -281,7 +281,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// Returns the OS-assigned process identifier associated with this child.
     #[starlark(attribute)]
     fn id<'v>(this: values::Value<'v>) -> anyhow::Result<u32> {
-        let child = this.downcast_ref_err::<Child>()?;
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         Ok(child
             .inner
             .borrow()
@@ -294,7 +294,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     ///
     /// This is equivalent to sending a SIGKILL on Unix platforms.
     fn kill<'v>(this: values::Value<'v>) -> anyhow::Result<NoneType> {
-        let child = this.downcast_ref_err::<Child>()?;
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         child
             .inner
             .borrow_mut()
@@ -313,7 +313,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// child does not block waiting for input from the parent, while
     /// the parent waits for the child to exit.
     fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
-        let child = this.downcast_ref_err::<Child>()?;
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         let status = child
             .inner
             .borrow_mut()
@@ -340,7 +340,7 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// necessary to create new pipes between parent and child. Use
     /// `stdout('piped')` or `stderr('piped')`, respectively.
     fn wait_with_output<'v>(this: values::Value<'v>) -> anyhow::Result<Output> {
-        let child = this.downcast_ref_err::<Child>()?;
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         let output = child
             .inner
             .replace(None)
@@ -369,7 +369,7 @@ pub(crate) fn exit_status_methods(registry: &mut MethodsBuilder) {
     /// success, and success is defined as a zero exit status.
     #[starlark(attribute)]
     fn success<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
-        let out = this.downcast_ref_err::<ExitStatus>()?;
+        let out = this.downcast_ref_err::<ExitStatus>().into_anyhow_result()?;
         Ok(out.0.success())
     }
 
@@ -383,7 +383,7 @@ pub(crate) fn exit_status_methods(registry: &mut MethodsBuilder) {
     /// On Unix, this will return `None` if the process was terminated by a signal.
     #[starlark(attribute)]
     fn code<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<i32>> {
-        let out = this.downcast_ref_err::<ExitStatus>()?;
+        let out = this.downcast_ref_err::<ExitStatus>().into_anyhow_result()?;
         Ok(NoneOr::from_option(out.0.code()))
     }
 
@@ -397,7 +397,7 @@ pub(crate) fn exit_status_methods(registry: &mut MethodsBuilder) {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
-            let out = this.downcast_ref_err::<ExitStatus>()?;
+            let out = this.downcast_ref_err::<ExitStatus>().into_anyhow_result()?;
             Ok(NoneOr::from_option(out.0.signal()))
         }
         #[cfg(not(unix))]
@@ -417,7 +417,7 @@ pub(crate) fn exit_status_methods(registry: &mut MethodsBuilder) {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
-            let out = this.downcast_ref_err::<ExitStatus>()?;
+            let out = this.downcast_ref_err::<ExitStatus>().into_anyhow_result()?;
             Ok(NoneOr::from_option(out.0.stopped_signal()))
         }
         #[cfg(not(unix))]
@@ -445,21 +445,21 @@ pub(crate) fn output_methods(registry: &mut MethodsBuilder) {
     /// The status (exit code) of the process.
     #[starlark(attribute)]
     fn status<'v>(this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
-        let out = this.downcast_ref_err::<Output>()?;
+        let out = this.downcast_ref_err::<Output>().into_anyhow_result()?;
         Ok(ExitStatus(out.0.status))
     }
 
     /// The data that the process wrote to stderr.
     #[starlark(attribute)]
     fn stderr<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
-        let out = this.downcast_ref_err::<Output>()?;
+        let out = this.downcast_ref_err::<Output>().into_anyhow_result()?;
         Ok(String::from_utf8(out.0.stderr.clone())?)
     }
 
     /// The data that the process wrote to stdout.
     #[starlark(attribute)]
     fn stdout<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
-        let out = this.downcast_ref_err::<Output>()?;
+        let out = this.downcast_ref_err::<Output>().into_anyhow_result()?;
         Ok(String::from_utf8(out.0.stdout.clone())?)
     }
 }

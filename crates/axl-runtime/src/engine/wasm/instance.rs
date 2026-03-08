@@ -16,9 +16,9 @@ use starlark_derive::Trace;
 use wasmi::AsContext;
 use wasmi::AsContextMut;
 
-use std::cell::RefCell;
 use std::fmt::Debug;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use super::callable::Callable;
 use super::host::WasmStoreCtx;
@@ -29,11 +29,11 @@ use super::memory::Memory;
 pub struct Exports {
     #[allocative(skip)]
     #[allow(dead_code)]
-    pub(crate) module: Rc<RefCell<wasmi::Module>>,
+    pub(crate) module: Arc<Mutex<wasmi::Module>>,
     #[allocative(skip)]
-    pub(crate) store: Rc<RefCell<wasmi::Store<WasmStoreCtx>>>,
+    pub(crate) store: Arc<Mutex<wasmi::Store<WasmStoreCtx>>>,
     #[allocative(skip)]
-    pub(crate) instance: Rc<RefCell<wasmi::Instance>>,
+    pub(crate) instance: Arc<Mutex<wasmi::Instance>>,
 }
 
 impl Debug for Exports {
@@ -47,17 +47,17 @@ impl Debug for Exports {
 
 #[starlark_value(type = "Exports")]
 impl<'v> values::StarlarkValue<'v> for Exports {
-    fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         Some(heap.alloc(Callable {
             name: attribute.to_string(),
-            instance: Rc::clone(&self.instance),
-            store: Rc::clone(&self.store),
+            instance: Arc::clone(&self.instance),
+            store: Arc::clone(&self.store),
         }))
     }
 }
 
 impl<'v> AllocValue<'v> for Exports {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -66,11 +66,11 @@ impl<'v> AllocValue<'v> for Exports {
 #[display("<wasm.Instance>")]
 pub struct Instance {
     #[allocative(skip)]
-    pub(crate) module: Rc<RefCell<wasmi::Module>>,
+    pub(crate) module: Arc<Mutex<wasmi::Module>>,
     #[allocative(skip)]
-    pub(crate) store: Rc<RefCell<wasmi::Store<WasmStoreCtx>>>,
+    pub(crate) store: Arc<Mutex<wasmi::Store<WasmStoreCtx>>>,
     #[allocative(skip)]
-    pub(crate) instance: Rc<RefCell<wasmi::Instance>>,
+    pub(crate) instance: Arc<Mutex<wasmi::Instance>>,
 }
 
 impl Debug for Instance {
@@ -91,7 +91,7 @@ impl<'v> values::StarlarkValue<'v> for Instance {
 }
 
 impl<'v> AllocValue<'v> for Instance {
-    fn alloc_value(self, heap: &'v Heap) -> values::Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> values::Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -105,17 +105,18 @@ pub(crate) fn instance_methods(registry: &mut MethodsBuilder) {
         let wi = this
             .downcast_ref::<Instance>()
             .ok_or_else(|| anyhow::anyhow!("expected Instance"))?;
-        let mut store = wi.store.borrow_mut();
+        let mut store = wi.store.lock().unwrap();
         let memory = wi
             .instance
-            .borrow()
+            .lock()
+            .unwrap()
             .get_memory(store.as_context_mut(), name.as_str())
             .ok_or_else(|| {
                 anyhow::anyhow!("memory '{}' not found in WASM module", name.as_str())
             })?;
         Ok(Memory {
-            store: Rc::clone(&wi.store),
-            memory: Rc::new(RefCell::new(memory)),
+            store: Arc::clone(&wi.store),
+            memory: Arc::new(Mutex::new(memory)),
         })
     }
 
@@ -125,9 +126,9 @@ pub(crate) fn instance_methods(registry: &mut MethodsBuilder) {
             .downcast_ref::<Instance>()
             .ok_or_else(|| anyhow::anyhow!("expected WasmInstance"))?;
         Ok(Exports {
-            module: Rc::clone(&wi.module),
-            store: Rc::clone(&wi.store),
-            instance: Rc::clone(&wi.instance),
+            module: Arc::clone(&wi.module),
+            store: Arc::clone(&wi.store),
+            instance: Arc::clone(&wi.instance),
         })
     }
 
@@ -135,8 +136,8 @@ pub(crate) fn instance_methods(registry: &mut MethodsBuilder) {
         let wi = this
             .downcast_ref::<Instance>()
             .ok_or_else(|| anyhow::anyhow!("expected WasmInstance"))?;
-        let mut store = wi.store.borrow_mut();
-        let instance = wi.instance.borrow_mut();
+        let mut store = wi.store.lock().unwrap();
+        let instance = wi.instance.lock().unwrap();
         let func = instance
             .get_func(store.as_context(), "_start")
             .ok_or_else(|| anyhow::anyhow!("WASM module does not export '_start' function"))?;
@@ -162,10 +163,11 @@ pub(crate) fn instance_methods(registry: &mut MethodsBuilder) {
         let wi = this
             .downcast_ref::<Instance>()
             .ok_or_else(|| anyhow::anyhow!("expected WasmInstance"))?;
-        let store = wi.store.borrow();
+        let store = wi.store.lock().unwrap();
         Ok(wi
             .instance
-            .borrow()
+            .lock()
+            .unwrap()
             .exports(store.as_context())
             .map(|e| e.name().to_string())
             .collect())
