@@ -7,7 +7,7 @@ def _login_impl(ctx: TaskContext) -> int:
         if not token:
             print("Error: no token on stdin")
             return 1
-        creds = ctx.aspect.auth.login(token=token, environment=ctx.args.environment)
+        creds = ctx.aspect.auth.login(token=token)
         ctx.aspect.auth.persist(creds, profile=ctx.args.profile)
         print("Logged in as " + creds.name + " (" + creds.email + ")")
     elif ctx.args.with_api_token:
@@ -15,11 +15,11 @@ def _login_impl(ctx: TaskContext) -> int:
         if not inp:
             print("Error: no API token on stdin")
             return 1
-        creds = ctx.aspect.auth.login(api_token=inp, environment=ctx.args.environment)
+        creds = ctx.aspect.auth.login(api_token=inp)
         ctx.aspect.auth.persist(creds, profile=ctx.args.profile)
         print("Logged in as " + creds.name + " (" + creds.email + ")")
     else:
-        session = ctx.aspect.auth.login(environment=ctx.args.environment)
+        session = ctx.aspect.auth.login()
         result = ctx.std.process.command("open").arg(session.url).spawn().wait()
         if not result.success:
             print("Open this URL to log in:")
@@ -37,7 +37,6 @@ login = task(
     args = {
         "with_token":     args.boolean(default = False),
         "with_api_token": args.boolean(default = False),
-        "environment":    args.string(),
         "profile":        args.string(),
     },
 )
