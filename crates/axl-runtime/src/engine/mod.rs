@@ -52,6 +52,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             remote_execution::content_addressable_storage_service(g);
             remote_execution::v2_toplevels(g);
         });
+        g.namespace("logging", axl_proto::remote_logging_toplevels);
     });
     globals.namespace("aspect", aspect::register_globals);
     globals.namespace("std", std::register_globals);

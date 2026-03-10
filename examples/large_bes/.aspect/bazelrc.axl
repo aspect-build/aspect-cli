@@ -54,43 +54,42 @@ def _strip_comment(line):
     result = ""
     in_dq = False
     in_sq = False
-    i = 0
+    skip = 0
+    done = False
     n = len(line)
-    while i < n:
+    for i in range(n):
+        if done:
+            break
+        if skip > 0:
+            skip -= 1
+            continue
         c = line[i]
         if in_dq:
             if c == "\\" and i + 1 < n:
                 result += c + line[i + 1]
-                i += 2
+                skip = 1
             elif c == "\"":
                 in_dq = False
                 result += c
-                i += 1
             else:
                 result += c
-                i += 1
         elif in_sq:
             if c == "'":
                 in_sq = False
                 result += c
-                i += 1
             else:
                 result += c
-                i += 1
         else:
             if c == "#":
-                break
+                done = True
             elif c == "\"":
                 in_dq = True
                 result += c
-                i += 1
             elif c == "'":
                 in_sq = True
                 result += c
-                i += 1
             else:
                 result += c
-                i += 1
     return result
 
 # =============================================================================
@@ -140,9 +139,12 @@ def _tokenize(s):
     token = ""
     in_dq = False
     in_sq = False
-    i = 0
+    skip = 0
     n = len(s)
-    while i < n:
+    for i in range(n):
+        if skip > 0:
+            skip -= 1
+            continue
         c = s[i]
         if in_dq:
             if c == "\\" and i + 1 < n:
@@ -157,38 +159,30 @@ def _tokenize(s):
                     token += "\t"
                 else:
                     token += "\\" + nc
-                i += 2
+                skip = 1
             elif c == "\"":
                 in_dq = False
-                i += 1
             else:
                 token += c
-                i += 1
         elif in_sq:
             if c == "'":
                 in_sq = False
-                i += 1
             else:
                 token += c
-                i += 1
         else:
             if c == " " or c == "\t":
                 if token != "":
                     tokens.append(token)
                     token = ""
-                i += 1
             elif c == "\\" and i + 1 < n:
                 token += s[i + 1]
-                i += 2
+                skip = 1
             elif c == "\"":
                 in_dq = True
-                i += 1
             elif c == "'":
                 in_sq = True
-                i += 1
             else:
                 token += c
-                i += 1
     if token != "":
         tokens.append(token)
     return tokens

@@ -1,0 +1,74 @@
+load("./remote_config.axl", "remote_config")
+
+def _idea_impl(ctx):
+    cfg = remote_config(ctx)
+
+    remote_flags = []
+    if cfg.uri:
+        remote_flags.append("--remote_cache=" + cfg.uri)
+    for k, v in cfg.headers.items():
+        remote_flags.append("--remote_header=" + k + "=" + v)
+    if cfg.instance_name:
+        remote_flags.append("--remote_instance_name=" + cfg.instance_name)
+
+    build = ctx.bazel.build(
+        "//:target_9999",
+        flags = remote_flags + [
+            "--experimental_remote_require_cached",
+            "--nouse_action_cache",
+            "--nokeep_state_after_build",
+            "--remote_grpc_log=bazel-log.bin",
+        ],
+        inherit_stderr = False
+    )
+    r = build.wait()
+
+    log_file = ctx.std.fs.open("bazel-log.bin")
+    for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
+        if entry.method_name == "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
+            metadata = entry.metadata
+            status = entry.status
+            details = entry.details
+            get_action_result = details.details
+            req = get_action_result.request
+            output_files = ""
+
+            if get_action_result.response != None:
+                res = get_action_result.response
+                output_files = "\n".join([
+                    "{} ({})".format(
+                        file.path,
+                        file.digest.hash,
+                    )
+                    for file in res.output_files
+                ])
+                output_files += "\n"
+
+            print("""
+Target: {}
+Digest: {}/{} ({})
+Configuration: {}
+Mnemonic: {}
+Status: {} ({})
+Outputs:
+    {}
+            """.format(
+                metadata.target_id,
+                req.action_digest.hash,
+                req.action_digest.size_bytes,
+                req.digest_function,
+                metadata.configuration_id,
+                metadata.action_mnemonic,
+                getattr(status, "message", "cache hit") or "unknown",
+                getattr(status, "code", ""),
+                output_files,
+            ))
+
+ac_key = task(
+    name = "key",
+    group = ["remote"],
+    implementation = _idea_impl,
+    args = {
+        "target": args.positional()
+    }
+)

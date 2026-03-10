@@ -100,6 +100,9 @@ pub mod build {
 mod pb_impl;
 
 pub mod google {
+    pub mod bytestream {
+        include!(concat!(env!("OUT_DIR"), "/google.bytestream.rs"));
+    }
     pub mod devtools {
         pub mod build {
             pub mod v1 {
@@ -157,3 +160,4 @@ pub mod options {
 pub mod stardoc_output {
     include!(concat!(env!("OUT_DIR"), "/stardoc_output.rs"));
 }
+include!(concat!(env!("OUT_DIR"), "/remote_logging.rs"));

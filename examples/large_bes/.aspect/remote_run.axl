@@ -1,0 +1,144 @@
+load("./remote_config.axl", "remote_config")
+
+_EMPTY_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+def _sha256(ctx, data):
+    """Compute SHA-256 hex digest of bytes using system sha256sum."""
+    child = ctx.std.process.command("sha256sum").stdin("piped").stdout("piped").spawn()
+    stdin = child.stdin()
+    stdin.write(data)
+    stdin.close()
+    output = child.stdout().read_to_string()
+    return output.split(" ")[0]
+
+def _digest(ctx, proto_msg):
+    """Encode a proto message and return (bytes, Digest)."""
+    data = proto_msg.encode()
+    return data, remote.execution.Digest(hash=_sha256(ctx, data), size_bytes=len(data))
+
+def _fetch_blob(cas, instance_name, digest):
+    """Fetch a single blob from CAS by digest."""
+    resp = cas.BatchReadBlobs(
+        remote.execution.BatchReadBlobsRequest(
+            instance_name = instance_name,
+            digests = [digest],
+        ),
+    )
+    for blob in resp.responses:
+        return blob.data
+    return None
+
+def _impl(ctx):
+    cfg = remote_config(ctx)
+
+    shell_cmd = ctx.args.command if ctx.args.command else "echo it works!"
+    print("[1/4] Building action...")
+    print("       Command:", shell_cmd)
+    cmd = remote.execution.Command(
+        arguments = ["/bin/sh", "-c", shell_cmd],
+    )
+    cmd_bytes, cmd_digest = _digest(ctx, cmd)
+
+    action = remote.execution.Action(
+        command_digest    = cmd_digest,
+        input_root_digest = remote.execution.Digest(hash=_EMPTY_HASH, size_bytes=0),
+        do_not_cache      = True,
+        platform          = remote.execution.Platform(
+            properties = [
+                remote.execution.platform.Property(name="Arch", value="arm64"),
+                remote.execution.platform.Property(name="OSFamily", value="linux"),
+                remote.execution.platform.Property(name="container-image", value="docker://ubuntu:22.04"),
+            ],
+        ),
+    )
+    action_bytes, action_digest = _digest(ctx, action)
+
+    print("[2/4] Uploading inputs...")
+    cas = remote.execution.ContentAddressableStorage(uri=cfg.uri, headers=cfg.headers)
+    cas.connect(ctx)
+
+    cas.BatchUpdateBlobs(
+        remote.execution.BatchUpdateBlobsRequest(
+            instance_name = cfg.instance_name,
+            requests = [
+                remote.execution.batch_update_blobs_request.Request(
+                    digest = cmd_digest,
+                    data   = cmd_bytes,
+                ),
+                remote.execution.batch_update_blobs_request.Request(
+                    digest = action_digest,
+                    data   = action_bytes,
+                ),
+            ],
+        ),
+    )
+
+    # ── Execution: submit and stream operations ──────────────────────────
+    print("[3/4] Executing remotely...")
+    exec_svc = remote.execution.Execution(uri=cfg.uri, headers=cfg.headers)
+    exec_svc.connect(ctx)
+
+    stream = exec_svc.Execute(
+        remote.execution.ExecuteRequest(
+            instance_name     = cfg.instance_name,
+            action_digest     = action_digest,
+            skip_cache_lookup = True,
+            inline_stdout     = True,
+            inline_stderr     = True,
+        ),
+    )
+
+    last_op = None
+    for op in stream:
+        if not op.done:
+            print("       Waiting for worker...")
+        last_op = op
+
+    print("[4/4] Collecting output...")
+    if not last_op or not last_op.done or not last_op.result:
+        print("ERROR: execution did not complete")
+        return 1
+
+    resp = last_op.result.unpack()
+    if resp.status and resp.status.code != 0:
+        print("ERROR:", resp.status.message)
+        return 1
+
+    if not resp.result:
+        print("ERROR: no action result")
+        return 1
+
+    result = resp.result
+
+    # Stream stdout
+    if result.stdout_raw:
+        print(result.stdout_raw)
+    elif result.stdout_digest and result.stdout_digest.size_bytes > 0:
+        data = _fetch_blob(cas, cfg.instance_name, result.stdout_digest)
+        if data:
+            print(data)
+
+    # Stream stderr
+    if result.stderr_raw:
+        print(result.stderr_raw)
+    elif result.stderr_digest and result.stderr_digest.size_bytes > 0:
+        data = _fetch_blob(cas, cfg.instance_name, result.stderr_digest)
+        if data:
+            print(data)
+
+    print("")
+    if result.exit_code == 0:
+        print("Action completed successfully (exit code 0)")
+    else:
+        print("Action failed with exit code", result.exit_code)
+
+    return result.exit_code
+
+remote_run = task(
+    name           = "run",
+    group          = ["remote"],
+    implementation = _impl,
+    args           = {
+        "command": args.positional(),
+    },
+)

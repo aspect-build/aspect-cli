@@ -137,11 +137,23 @@ fn try_types(input: TokenStream) -> Result<TokenStream, Error> {
                 let ident_snake = snake(ident.to_string());
                 let constructor_fn =
                     Ident::new(&format!("{}_constructor", ident_snake), ident.span());
-                defs.entry(subpaths)
+                defs.entry(subpaths.clone())
                     .or_insert_with(|| (vec![], vec![]))
                     .1
                     .push(quote! {
                         #prefix::#constructor_fn(globals);
+                    });
+                defs.entry(subpaths)
+                    .or_insert_with(|| (vec![], vec![]))
+                    .1
+                    .push(quote! {
+                        ::starbuf_types::any_registry::register(
+                            <#prefix::#ident as ::prost::Name>::full_name(),
+                            Box::new(|bytes: &[u8]| -> ::anyhow::Result<Box<dyn ::starbuf_types::any_registry::AnyAllocatable>> {
+                                let msg = <#prefix::#ident as ::prost::Message>::decode(bytes)?;
+                                Ok(Box::new(msg))
+                            }),
+                        );
                     });
             }
             _ => {}
@@ -444,13 +456,49 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             None
         };
 
-        if sattrs.any
-            || sattrs.duration
+        if sattrs.duration
             || sattrs.timestamp
             || sattrs.skip
             || (attrs.bytes.is_some() && attrs.repeated)
         {
             return quote! {};
+        }
+
+        // Handle Any fields: read-only, returning SBAny or NoneOr<SBAny> or AllocList<Vec<SBAny>>
+        if sattrs.any {
+            let fident = if sattrs.rename.is_some() {
+                Ident::from_string(sattrs.rename.as_ref().unwrap()).unwrap()
+            } else {
+                field.ident.clone().unwrap()
+            };
+
+            let (return_type, return_expr) = if attrs.optional {
+                (
+                    quote! { ::starlark::values::none::NoneOr<::starbuf_types::SBAny> },
+                    quote! { Ok(::starlark::values::none::NoneOr::from_option(this.#fident.as_ref().map(::starbuf_types::SBAny::from_prost))) },
+                )
+            } else if attrs.repeated {
+                (
+                    quote! { ::starlark::values::list::AllocList<Vec<::starbuf_types::SBAny>> },
+                    quote! { Ok(::starlark::values::list::AllocList(this.#fident.iter().map(::starbuf_types::SBAny::from_prost).collect())) },
+                )
+            } else {
+                (
+                    quote! { ::starbuf_types::SBAny },
+                    quote! { Ok(::starbuf_types::SBAny::from_prost(&this.#fident)) },
+                )
+            };
+
+            return quote! {
+                #(#docs)*
+                #[starlark(attribute)]
+                fn #fident<'v>(this: ::starlark::values::Value<'v>) -> ::anyhow::Result<#return_type> {
+                    use ::starlark::values::ValueLike;
+                    use ::starlark::StarlarkResultExt;
+                    let this = this.downcast_ref_err::<#ident>().into_anyhow_result()?;
+                    #return_expr
+                }
+            };
         }
 
         let id_ty: Option<Type> = sattrs.return_type.as_ref().map(|ty| parse_str(ty).unwrap());
@@ -663,7 +711,6 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             let has_deprecated = field.attrs.iter().any(|v| v.path().is_ident("deprecated"));
             if sattrs.skip
                 || has_deprecated
-                || sattrs.any
                 || sattrs.duration
                 || sattrs.timestamp
                 || (attrs.bytes.is_some() && attrs.repeated)
@@ -678,7 +725,27 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 field_ident.to_string()
             };
 
-            let value_fmt = if attrs.oneof.is_some() {
+            let value_fmt = if sattrs.any && attrs.optional {
+                quote! {
+                    match &self.#field_ident {
+                        Some(v) => write!(f, "Any({})", v.type_url)?,
+                        None => f.write_str("None")?,
+                    }
+                }
+            } else if sattrs.any && attrs.repeated {
+                quote! {
+                    f.write_str("[")?;
+                    for (i, item) in self.#field_ident.iter().enumerate() {
+                        if i > 0 { f.write_str(", ")?; }
+                        write!(f, "Any({})", item.type_url)?;
+                    }
+                    f.write_str("]")?;
+                }
+            } else if sattrs.any {
+                quote! {
+                    write!(f, "Any({})", self.#field_ident.type_url)?;
+                }
+            } else if attrs.oneof.is_some() {
                 quote! {
                     match &self.#field_ident {
                         Some(v) => { write!(f, "{:?}", v)?; },
@@ -779,7 +846,6 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             let has_deprecated = field.attrs.iter().any(|v| v.path().is_ident("deprecated"));
             if sattrs.skip
                 || has_deprecated
-                || sattrs.any
                 || sattrs.duration
                 || sattrs.timestamp
                 || (attrs.bytes.is_some() && attrs.repeated)
@@ -794,7 +860,27 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
                 field_ident.to_string()
             };
 
-            let value_fmt = if attrs.oneof.is_some() {
+            let value_fmt = if sattrs.any && attrs.optional {
+                quote! {
+                    match &self.#field_ident {
+                        Some(v) => { write!(__col, "Any({})", v.type_url).unwrap(); },
+                        None => __col.push_str("None"),
+                    }
+                }
+            } else if sattrs.any && attrs.repeated {
+                quote! {
+                    __col.push_str("[");
+                    for (__i, __item) in self.#field_ident.iter().enumerate() {
+                        if __i > 0 { __col.push_str(", "); }
+                        write!(__col, "Any({})", __item.type_url).unwrap();
+                    }
+                    __col.push_str("]");
+                }
+            } else if sattrs.any {
+                quote! {
+                    write!(__col, "Any({})", self.#field_ident.type_url).unwrap();
+                }
+            } else if attrs.oneof.is_some() {
                 quote! {
                     match &self.#field_ident {
                         Some(v) => { write!(__col, "{:?}", v).unwrap(); },
@@ -963,6 +1049,54 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         #[::starlark::starlark_module]
         pub(crate) fn #methods_ident(registry: &mut ::starlark::environment::MethodsBuilder) {
             #(#starlark_attributes)*
+
+            fn encode<'v>(this: ::starlark::values::Value<'v>) -> ::anyhow::Result<::starlark::values::bytes::StarlarkBytes> {
+                use ::starlark::values::ValueLike;
+                use ::starlark::StarlarkResultExt;
+                use ::prost::Message;
+                let this = this.downcast_ref_err::<#ident>().into_anyhow_result()?;
+                Ok(::starlark::values::bytes::StarlarkBytes::new(&this.encode_to_vec()))
+            }
+
+            fn parse_from_delimited<'v>(
+                this: ::starlark::values::Value<'v>,
+                #[starlark(require = pos)] input: ::starlark::values::Value<'v>,
+                heap: ::starlark::values::Heap<'v>,
+            ) -> ::anyhow::Result<::starlark::values::Value<'v>> {
+                use ::starlark::values::ValueLike;
+
+                // Try StarlarkBytes
+                if let Some(bytes) = input.downcast_ref::<::starlark::values::bytes::StarlarkBytes>() {
+                    let source = ::starbuf_types::delimited::ReadSource::Bytes(
+                        ::std::io::Cursor::new(bytes.as_bytes().to_vec())
+                    );
+                    return Ok(heap.alloc_simple(
+                        ::starbuf_types::delimited::DelimitedMessageIterator::new(
+                            source,
+                            Box::new(|bytes: &[u8]| -> ::anyhow::Result<Box<dyn ::starbuf_types::any_registry::AnyAllocatable>> {
+                                let msg = <#ident as ::prost::Message>::decode(bytes)?;
+                                Ok(Box::new(msg))
+                            }),
+                        )
+                    ));
+                }
+                // Try Readable
+                if let Some(readable) = input.downcast_ref::<::axl_types::stream::Readable>() {
+                    let source = ::starbuf_types::delimited::ReadSource::Stream(
+                        readable.to_boxed_read()
+                    );
+                    return Ok(heap.alloc_simple(
+                        ::starbuf_types::delimited::DelimitedMessageIterator::new(
+                            source,
+                            Box::new(|bytes: &[u8]| -> ::anyhow::Result<Box<dyn ::starbuf_types::any_registry::AnyAllocatable>> {
+                                let msg = <#ident as ::prost::Message>::decode(bytes)?;
+                                Ok(Box::new(msg))
+                            }),
+                        )
+                    ));
+                }
+                Err(::anyhow::anyhow!("expected bytes or readable stream"))
+            }
         }
 
         #[::starlark::starlark_module]
@@ -993,6 +1127,22 @@ pub fn message(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     try_message(input.into()).unwrap().into()
 }
 
+/// Check if a type path ends with `prost_types::Any`.
+fn is_prost_any_type(ty: &Type) -> bool {
+    if let Type::Path(p) = ty {
+        let segments: Vec<String> = p
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        // Match `::prost_types::Any` or `prost_types::Any`
+        segments.ends_with(&["prost_types".to_string(), "Any".to_string()])
+    } else {
+        false
+    }
+}
+
 fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
     let input: DeriveInput = syn::parse2(input)?;
 
@@ -1015,7 +1165,12 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
     }
 
     let starlark_types = fields.iter().map(|(field, _, attrs)| {
-        if attrs.string {
+        let inner_ty = field.unnamed.first().map(|f| &f.ty);
+        let is_any = inner_ty.map_or(false, is_prost_any_type);
+
+        if is_any {
+            quote! { ::starlark::typing::Ty::starlark_value::<::starbuf_types::SBAny>() }
+        } else if attrs.string {
             quote! { ::starlark::typing::Ty::string() }
         } else if attrs.int32 || attrs.int64 || attrs.uint32 || attrs.uint64 {
             quote! { ::starlark::typing::Ty::int() }
@@ -1029,8 +1184,15 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         }
     });
 
-    let alloc = fields.iter().map(|(_, variant_ident, attrs)| {
-        if attrs.string {
+    let alloc = fields.iter().map(|(field, variant_ident, attrs)| {
+        let inner_ty = field.unnamed.first().map(|f| &f.ty);
+        let is_any = inner_ty.map_or(false, is_prost_any_type);
+
+        if is_any {
+            quote! {
+                Self::#variant_ident(value) => heap.alloc(::starbuf_types::SBAny::from_prost(&value))
+            }
+        } else if attrs.string {
             quote! {
                 Self::#variant_ident(value) =>  {
                     use starlark::values::ValueLike;
@@ -1300,9 +1462,9 @@ fn try_service(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Erro
                             *stream_opt = None;
                             None
                         }
-                        Err(_) => {
+                        Err(e) => {
                             *stream_opt = None;
-                            None
+                            panic!("stream error: {}", e);
                         }
                     }
                 }

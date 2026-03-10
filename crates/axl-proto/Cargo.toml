@@ -17,6 +17,7 @@ prost = "0.14.1"
 prost-types = "0.14.1"
 starbuf-derive = { path = "../starbuf-derive" }
 starbuf-types = { path = "../starbuf-types" }
+axl-types = { path = "../axl-types" }
 starlark = "0.13.0"
 starlark_derive = "0.13.0"
 tonic = { version = "0.14.2", features = ["transport", "tls-native-roots"] }
