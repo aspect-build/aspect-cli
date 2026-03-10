@@ -1,3 +1,6 @@
+load("./lib/github.axl", "github")
+
+
 def _token_impl(ctx: TaskContext) -> int:
     repo_args = ctx.args.repo
     if len(repo_args) == 0:
@@ -13,23 +16,20 @@ def _token_impl(ctx: TaskContext) -> int:
         print("Error: not logged in. Run `aspect auth login` to authenticate.")
         return 1
 
-    body_parts = ['{"owner":"', owner, '","repo":"', repo_name, '"']
-    if ctx.args.permissions:
-        body_parts.append(',"permissions":{')
-        first = True
-        for pair in ctx.args.permissions.split(","):
-            (k, _, v) = pair.strip().partition("=")
-            if k and v:
-                if not first:
-                    body_parts.append(",")
-                body_parts.append('"' + k + '":"' + v + '"')
-                first = False
-        body_parts.append("}")
-    body_parts.append("}")
-    body = "".join(body_parts)
+    if ctx.args.role:
+        for role in ctx.args.role:
+            if not github.validate_role(role):
+                print("Error: unknown role %r, valid roles: %s" % (role, ", ".join(github.VALID_ROLES)))
+                return 1
+
+    body = '{"owner":"' + owner + '","repo":"' + repo_name + '"}'
+
+    url = ctx.aspect.auth.api_url + "/github/token"
+    if ctx.args.role:
+        url = url + "?roles=" + ",".join(ctx.args.role)
 
     resp = ctx.http().post(
-        url = ctx.aspect.auth.api_url + "/github/token",
+        url = url,
         headers = {
             "Authorization": "Bearer " + creds.access_token,
             "Content-Type": "application/json",
@@ -58,8 +58,16 @@ token = task(
     group = ["github"],
     implementation = _token_impl,
     args = {
-        "repo":        args.positional(minimum = 1, maximum = 1),
-        "permissions": args.string(),
-        "profile":     args.string(),
+        "repo": args.positional(
+            minimum = 1,
+            maximum = 1,
+            description = "GitHub repository in OWNER/REPO format",
+        ),
+        "role": args.string_list(
+            description = "Restrict token to specific role(s). May be specified multiple times. Valid: checks.read, checks.write, statuses.read, statuses.write, prs.read, prs.write, issues.read",
+        ),
+        "profile": args.string(
+            description = "Auth profile name",
+        ),
     },
 )

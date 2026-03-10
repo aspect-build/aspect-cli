@@ -32,6 +32,22 @@ def _do_request(ctx, method, url, token, payload = None):
 # Authentication
 # =============================================================================
 
+VALID_ROLES = [
+    "checks.read",
+    "checks.write",
+    "statuses.read",
+    "statuses.write",
+    "prs.read",
+    "prs.write",
+    "issues.read",
+]
+
+
+def validate_role(role):
+    """Validate that a role is in the known set."""
+    return role in VALID_ROLES
+
+
 def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = None):
     """Resolve a GitHub token using the following priority:
 
@@ -57,9 +73,14 @@ def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = N
     if not owner or not repo:
         return None
 
+    if roles:
+        for role in roles:
+            if not validate_role(role):
+                fail("unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES)))
+
     url = ctx.aspect.auth.api_url + "/github/token"
     if roles:
-        url = url + "?roles=" + roles
+        url = url + "?roles=" + ",".join(roles)
     resp = ctx.http().post(
         url = url,
         headers = {
@@ -180,7 +201,9 @@ def _status_checks_fail(ctx, token, owner, repo, check_run_id, output = None, ap
 
 
 github = struct(
+    VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
+    validate_role = validate_role,
     status_checks = struct(
         create   = _status_checks_create,
         complete = _status_checks_complete,
