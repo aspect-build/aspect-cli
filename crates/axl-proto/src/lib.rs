@@ -42,6 +42,55 @@ pub mod build {
                     )
                 )]
                 pub struct ActionCache;
+
+                #[starbuf_derive::service(
+                    client = "crate::build::bazel::remote::execution::v2::execution_client::ExecutionClient",
+                    methods(
+                        name = "Execute",
+                        method = "execute",
+                        request = "crate::build::bazel::remote::execution::v2::ExecuteRequest",
+                        response = "crate::google::longrunning::Operation",
+                        streaming = true,
+                    ),
+                    methods(
+                        name = "WaitExecution",
+                        method = "wait_execution",
+                        request = "crate::build::bazel::remote::execution::v2::WaitExecutionRequest",
+                        response = "crate::google::longrunning::Operation",
+                        streaming = true,
+                    )
+                )]
+                pub struct Execution;
+
+                #[starbuf_derive::service(
+                    client = "crate::build::bazel::remote::execution::v2::content_addressable_storage_client::ContentAddressableStorageClient",
+                    methods(
+                        name = "FindMissingBlobs",
+                        method = "find_missing_blobs",
+                        request = "crate::build::bazel::remote::execution::v2::FindMissingBlobsRequest",
+                        response = "crate::build::bazel::remote::execution::v2::FindMissingBlobsResponse",
+                    ),
+                    methods(
+                        name = "BatchUpdateBlobs",
+                        method = "batch_update_blobs",
+                        request = "crate::build::bazel::remote::execution::v2::BatchUpdateBlobsRequest",
+                        response = "crate::build::bazel::remote::execution::v2::BatchUpdateBlobsResponse",
+                    ),
+                    methods(
+                        name = "BatchReadBlobs",
+                        method = "batch_read_blobs",
+                        request = "crate::build::bazel::remote::execution::v2::BatchReadBlobsRequest",
+                        response = "crate::build::bazel::remote::execution::v2::BatchReadBlobsResponse",
+                    ),
+                    methods(
+                        name = "GetTree",
+                        method = "get_tree",
+                        request = "crate::build::bazel::remote::execution::v2::GetTreeRequest",
+                        response = "crate::build::bazel::remote::execution::v2::GetTreeResponse",
+                        streaming = true,
+                    )
+                )]
+                pub struct ContentAddressableStorage;
             }
         }
     }
@@ -51,6 +100,9 @@ pub mod build {
 mod pb_impl;
 
 pub mod google {
+    pub mod bytestream {
+        include!(concat!(env!("OUT_DIR"), "/google.bytestream.rs"));
+    }
     pub mod devtools {
         pub mod build {
             pub mod v1 {
@@ -108,3 +160,4 @@ pub mod options {
 pub mod stardoc_output {
     include!(concat!(env!("OUT_DIR"), "/stardoc_output.rs"));
 }
+include!(concat!(env!("OUT_DIR"), "/remote_logging.rs"));

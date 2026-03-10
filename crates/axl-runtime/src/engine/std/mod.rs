@@ -21,7 +21,6 @@ mod fs;
 mod io;
 mod process;
 pub mod stream;
-mod stream_iter;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.Std>")]

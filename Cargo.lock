@@ -299,6 +299,7 @@ version = "0.0.0-dev"
 dependencies = [
  "allocative",
  "anyhow",
+ "axl-types",
  "display_container",
  "prost",
  "prost-build",
@@ -323,6 +324,7 @@ dependencies = [
  "arc-slice",
  "aspect-telemetry",
  "axl-proto",
+ "axl-types",
  "base64 0.22.1",
  "build-event-stream",
  "clap",
@@ -370,6 +372,17 @@ dependencies = [
  "wasmi",
  "wasmi_wasi",
  "zstd",
+]
+
+[[package]]
+name = "axl-types"
+version = "0.0.0-dev"
+dependencies = [
+ "allocative",
+ "anyhow",
+ "derive_more 2.0.1",
+ "dupe",
+ "starlark",
 ]
 
 [[package]]
@@ -3985,7 +3998,10 @@ name = "starbuf-types"
 version = "0.0.0-dev"
 dependencies = [
  "allocative",
+ "anyhow",
+ "axl-types",
  "derive_more 2.0.1",
+ "prost",
  "prost-types",
  "starlark",
 ]

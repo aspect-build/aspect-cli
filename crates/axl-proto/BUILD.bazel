@@ -36,11 +36,13 @@ rust_library(
         "@crates//:tonic-prost",
         "@crates//:tonic",
         "@crates//:uuid",
-        ":build_script"
+        "//crates/axl-types",
+        "//crates/starbuf-types",
+        ":build_script",
     ],
     proc_macro_deps = [
         "@crates//:starlark_derive",
-        "//crates/starbuf-derive"
+        "//crates/starbuf-derive",
     ],
     visibility = [
         "//crates/axl-runtime:__pkg__",

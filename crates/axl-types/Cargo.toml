@@ -1,5 +1,5 @@
 [package]
-name = "starbuf-types"
+name = "axl-types"
 version.workspace = true
 categories.workspace = true
 homepage.workspace = true
@@ -13,7 +13,5 @@ rust-version.workspace = true
 allocative = "0.3.4"
 anyhow = "1"
 derive_more = { version = "2.0.1", features = ["display"] }
-prost = "0.14.1"
-prost-types = "0.14.1"
+dupe = "0.9.1"
 starlark = "0.13.0"
-axl-types = { path = "../axl-types" }

@@ -54,6 +54,7 @@ liquid-core = "0.26.11"
 minijinja = "2.12.0"
 
 aspect-telemetry = { path = "../aspect-telemetry" }
+axl-types = { path = "../axl-types" }
 axl-proto = { path = "../axl-proto" }
 build-event-stream = { path = "../build-event-stream" }
 galvanize = { path = "../galvanize" }

@@ -63,4 +63,19 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             counter: AtomicU64::new(0),
         })
     }
+
+    /// Creates a `Bytes` value from a hex-encoded string.
+    fn bytes<'v>(hex: &str, heap: Heap<'v>) -> anyhow::Result<starlark::values::Value<'v>> {
+        if hex.len() % 2 != 0 {
+            return Err(anyhow::anyhow!("hex string must have even length"));
+        }
+        let data = (0..hex.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&hex[i..i + 2], 16)
+                    .map_err(|e| anyhow::anyhow!("bad hex at position {}: {}", i, e))
+            })
+            .collect::<anyhow::Result<Vec<u8>>>()?;
+        Ok(heap.alloc(starlark::values::bytes::StarlarkBytes::new(&data)))
+    }
 }

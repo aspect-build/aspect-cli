@@ -13,7 +13,7 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::starlark_value;
 
-use super::stream;
+use crate::stream;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<ReadIterator>")]

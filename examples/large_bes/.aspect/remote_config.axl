@@ -1,0 +1,33 @@
+"""Extract remote cache configuration from .bazelrc files."""
+
+load("./bazelrc.axl", "bazelrc")
+
+def remote_config(ctx, path = None):
+    """Parse .bazelrc and extract remote cache/execution configuration.
+
+    Returns:
+        struct with fields: uri, headers, instance_name
+    """
+    workspace_dir = ctx.std.env.root_dir()
+    if not path:
+        path = workspace_dir + "/.bazelrc"
+    flags = bazelrc(ctx, "build", config = "", path = path, workspace_dir = workspace_dir)
+
+    uri = ""
+    instance_name = ""
+    headers = {}
+
+    for flag in flags:
+        if flag.startswith("--remote_cache="):
+            uri = flag[len("--remote_cache="):]
+        elif flag.startswith("--remote_executor="):
+            uri = flag[len("--remote_executor="):]
+        elif flag.startswith("--remote_header="):
+            kv = flag[len("--remote_header="):]
+            k, _, v = kv.partition("=")
+            if k:
+                headers[k] = v
+        elif flag.startswith("--remote_instance_name="):
+            instance_name = flag[len("--remote_instance_name="):]
+
+    return struct(uri = uri, headers = headers, instance_name = instance_name)
