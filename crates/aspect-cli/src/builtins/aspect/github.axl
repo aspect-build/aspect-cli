@@ -13,8 +13,6 @@ def _token_impl(ctx: TaskContext) -> int:
         print("Error: not logged in. Run `aspect auth login` to authenticate.")
         return 1
 
-    api_url = ctx.args.api_url if ctx.args.api_url else "https://api.aspect.build"
-
     body_parts = ['{"owner":"', owner, '","repo":"', repo_name, '"']
     if ctx.args.permissions:
         body_parts.append(',"permissions":{')
@@ -31,7 +29,7 @@ def _token_impl(ctx: TaskContext) -> int:
     body = "".join(body_parts)
 
     resp = ctx.http().post(
-        url = api_url + "/github/token",
+        url = ctx.aspect.auth.api_url + "/github/token",
         headers = {
             "Authorization": "Bearer " + creds.access_token,
             "Content-Type": "application/json",
@@ -62,7 +60,6 @@ token = task(
     args = {
         "repo":        args.positional(minimum = 1, maximum = 1),
         "permissions": args.string(),
-        "api_url":     args.string(),
         "profile":     args.string(),
     },
 )
