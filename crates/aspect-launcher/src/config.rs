@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use aspect_telemetry::cargo_pkg_short_version;
 use miette::{Result, miette};
 use starlark_syntax::syntax::ast::{ArgumentP, AstExpr, AstLiteral, CallArgsP, Expr, Stmt};
-use starlark_syntax::syntax::module::AstModuleFields;
 use starlark_syntax::syntax::{AstModule, Dialect};
 
 const AXL_MODULE_FILE: &str = "MODULE.aspect";
