@@ -86,7 +86,9 @@ impl Display for TaskArg {
             Self::Int { .. } => write!(f, "<args.TaskArg: int>"),
             Self::UInt { .. } => write!(f, "<args.TaskArg: uint>"),
             Self::Positional { .. } => write!(f, "<args.TaskArg: positional>"),
-            Self::TrailingVarArgs { .. } => write!(f, "<args.TaskArg: trailing variable arguments>"),
+            Self::TrailingVarArgs { .. } => {
+                write!(f, "<args.TaskArg: trailing variable arguments>")
+            }
             Self::StringList { .. } => write!(f, "<args.TaskArg: string_list>"),
             Self::BooleanList { .. } => write!(f, "<args.TaskArg: boolean_list>"),
             Self::IntList { .. } => write!(f, "<args.TaskArg: int_list>"),
