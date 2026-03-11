@@ -78,7 +78,7 @@ def confirm(ctx: TaskContext, message: str) -> bool:
 
     ctx.std.io.stdout.write(message + " [y/N]: ")
     ctx.std.io.stdout.flush()
-    response = ctx.std.io.stdin.read(1).decode().lower()
+    response = str(ctx.std.io.stdin.read(1)).lower()
     return response == "y"
 
 def parse_dep_spec(spec: str) -> dict:
