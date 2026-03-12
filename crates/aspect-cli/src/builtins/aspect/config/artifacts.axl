@@ -25,6 +25,18 @@ _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 _ARTIFACTS_ROOT = "/workflows"
 
 
+_HEX = "0123456789abcdef"
+
+def _make_uuid(ctx):
+    """Generate a UUID v4 using /dev/urandom."""
+    rand_bytes = ctx.std.fs.open("/dev/urandom").read(16)
+    b = [rand_bytes[i] for i in range(16)]
+    b[6] = (b[6] & 0x0F) | 0x40  # version 4
+    b[8] = (b[8] & 0x3F) | 0x80  # variant bits
+    h = "".join([_HEX[x >> 4] + _HEX[x & 0x0F] for x in b])
+    return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+
+
 def _artifact_name_prefix(env):
     """Derive artifact name prefix from CI environment."""
     return env.var("GITHUB_JOB") or env.var("CI_JOB_NAME") or "aspect"
@@ -217,9 +229,7 @@ def configure_artifacts(ctx):
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
 
     # Generate unique profile path in /tmp
-    child = ctx.std.process.command("uuidgen").stdout("piped").stderr("piped").spawn()
-    uuid = child.stdout().read_to_string().strip()
-    child.wait()
+    uuid = _make_uuid(ctx)
 
     profile_path = "/tmp/" + uuid + ".profile.gz"
     execlog_path = "/tmp/" + uuid + ".execlog.zstd"
