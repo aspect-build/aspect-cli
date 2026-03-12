@@ -7,10 +7,12 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
         TaskArg::String {
             required,
             default,
+            short,
             description,
         } => Arg::new(name)
             .long(name)
             .value_name(name)
+            .short(short_option(short))
             .help(help_text(description))
             .required(required.to_owned())
             .default_value(default.to_string())
@@ -18,10 +20,12 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
         TaskArg::Boolean {
             required,
             default,
+            short,
             description,
         } => Arg::new(name)
             .long(name)
             .value_name(name)
+            .short(short_option(short))
             .help(help_text(description))
             .required(required.to_owned())
             .default_value(default.to_string())
@@ -32,10 +36,12 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
         TaskArg::Int {
             required,
             default,
+            short,
             description,
         } => Arg::new(name)
             .long(name)
             .value_name(name)
+            .short(short_option(short))
             .help(help_text(description))
             .required(required.to_owned())
             .default_value(default.to_string())
@@ -43,10 +49,12 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
         TaskArg::UInt {
             required,
             default,
+            short,
             description,
         } => Arg::new(name)
             .long(name)
             .value_name(name)
+            .short(short_option(short))
             .help(help_text(description))
             .required(required.to_owned())
             .default_value(default.to_string())
@@ -77,11 +85,13 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
         TaskArg::StringList {
             required,
             default,
+            short,
             description,
         } => {
             let mut it = Arg::new(name)
                 .long(name)
                 .value_name(name)
+                .short(short_option(short))
                 .help(help_text(description))
                 .action(ArgAction::Append)
                 .required(*required)
@@ -94,11 +104,13 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
         TaskArg::BooleanList {
             required,
             default,
+            short,
             description,
         } => {
             let mut it = Arg::new(name)
                 .long(name)
                 .value_name(name)
+                .short(short_option(short))
                 .help(help_text(description))
                 .action(ArgAction::Append)
                 .required(*required)
@@ -114,11 +126,13 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
         TaskArg::IntList {
             required,
             default,
+            short,
             description,
         } => {
             let mut it = Arg::new(name)
                 .long(name)
                 .value_name(name)
+                .short(short_option(short))
                 .help(help_text(description))
                 .action(ArgAction::Append)
                 .required(*required)
@@ -132,11 +146,13 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
         TaskArg::UIntList {
             required,
             default,
+            short,
             description,
         } => {
             let mut it = Arg::new(name)
                 .long(name)
                 .value_name(name)
+                .short(short_option(short))
                 .help(help_text(description))
                 .action(ArgAction::Append)
                 .required(*required)
@@ -153,6 +169,13 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
 fn help_text(description: &Option<String>) -> Resettable<StyledStr> {
     match description {
         Some(text) => Resettable::Value(text.into()),
+        None => Resettable::Reset,
+    }
+}
+
+fn short_option(short: &Option<String>) -> Resettable<char> {
+    match short {
+        Some(text) => Resettable::Value(text.chars().nth(0).unwrap().into()),
         None => Resettable::Reset,
     }
 }

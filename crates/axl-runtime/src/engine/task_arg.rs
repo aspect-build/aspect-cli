@@ -24,21 +24,25 @@ pub enum TaskArg {
     String {
         required: bool,
         default: String,
+        short: Option<String>,
         description: Option<String>,
     },
     Boolean {
         required: bool,
         default: bool,
+        short: Option<String>,
         description: Option<String>,
     },
     Int {
         required: bool,
         default: i32,
+        short: Option<String>,
         description: Option<String>,
     },
     UInt {
         required: bool,
         default: u32,
+        short: Option<String>,
         description: Option<String>,
     },
     Positional {
@@ -53,21 +57,25 @@ pub enum TaskArg {
     StringList {
         required: bool,
         default: Vec<String>,
+        short: Option<String>,
         description: Option<String>,
     },
     BooleanList {
         required: bool,
         default: Vec<bool>,
+        short: Option<String>,
         description: Option<String>,
     },
     IntList {
         required: bool,
         default: Vec<i32>,
+        short: Option<String>,
         description: Option<String>,
     },
     UIntList {
         required: bool,
         default: Vec<u32>,
+        short: Option<String>,
         description: Option<String>,
     },
 }
@@ -176,6 +184,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn string<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<String>,
+        #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<TaskArg> {
         if required && default.is_some() {
@@ -186,6 +195,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::String {
             required,
             default: default.unwrap_or_default(),
+            short: short.into_option(),
             description: description.into_option(),
         })
     }
@@ -203,6 +213,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn string_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<String>>,
+        #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<TaskArg> {
         if required && !default.is_none() {
@@ -213,6 +224,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::StringList {
             required,
             default: default.into_option().map(|it| it.items).unwrap_or_default(),
+            short: short.into_option(),
             description: description.into_option(),
         })
     }
@@ -231,6 +243,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn boolean<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named )] default: Option<bool>,
+        #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
         _eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<TaskArg> {
@@ -242,6 +255,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::Boolean {
             required,
             default: default.unwrap_or_default(),
+            short: short.into_option(),
             description: description.into_option(),
         })
     }
@@ -259,6 +273,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn boolean_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<bool>>,
+        #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<TaskArg> {
         if required && !default.is_none() {
@@ -269,6 +284,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::BooleanList {
             required,
             default: default.into_option().map(|it| it.items).unwrap_or_default(),
+            short: short.into_option(),
             description: description.into_option(),
         })
     }
@@ -287,6 +303,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn int<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<i32>,
+        #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<TaskArg> {
         if required && default.is_some() {
@@ -297,6 +314,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::Int {
             required,
             default: default.unwrap_or_default(),
+            short: short.into_option(),
             description: description.into_option(),
         })
     }
@@ -314,6 +332,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn int_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<i32>>,
+        #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<TaskArg> {
         if required && !default.is_none() {
@@ -324,6 +343,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::IntList {
             required,
             default: default.into_option().map(|it| it.items).unwrap_or_default(),
+            short: short.into_option(),
             description: description.into_option(),
         })
     }
@@ -341,6 +361,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn uint<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<u32>,
+        #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<TaskArg> {
         if required && default.is_some() {
@@ -351,6 +372,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::UInt {
             required,
             default: default.unwrap_or_default(),
+            short: short.into_option(),
             description: description.into_option(),
         })
     }
@@ -368,6 +390,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     fn uint_list<'v>(
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named, default = NoneOr::None)] default: NoneOr<UnpackList<u32>>,
+        #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<TaskArg> {
         if required && !default.is_none() {
@@ -378,6 +401,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(TaskArg::UIntList {
             required,
             default: default.into_option().map(|it| it.items).unwrap_or_default(),
+            short: short.into_option(),
             description: description.into_option(),
         })
     }
