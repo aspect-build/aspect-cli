@@ -126,6 +126,8 @@ async fn _download_into_cache(
 
 #[derive(Deserialize, Debug)]
 struct Release {
+    tag_name: String,
+    #[serde(default)]
     assets: Vec<ReleaseArtifact>,
 }
 
@@ -290,30 +292,87 @@ async fn configure_tool_task(
                     }
                     fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
 
-                    let req = gh_request(&client, url)
+                    // Try downloading directly via the predictable release
+                    // asset URL first — no API query needed.
+                    let direct_url = format!(
+                        "https://github.com/{org}/{repo}/releases/download/{tag}/{artifact}"
+                    );
+                    let req = gh_request(&client, direct_url.clone())
+                        .header(
+                            HeaderName::from_static("accept"),
+                            HeaderValue::from_static("application/octet-stream"),
+                        )
+                        .build()
+                        .into_diagnostic()?;
+                    let download_msg =
+                        format!("downloading aspect cli version {} file {}", tag, artifact);
+                    if debug_mode() {
+                        eprintln!(
+                            "{:} source {:?} downloading {:?} to {:?}",
+                            tool.name(),
+                            source,
+                            direct_url,
+                            tool_dest_file
+                        );
+                    };
+                    if _download_into_cache(&client, &tool_dest_file, req, &download_msg)
+                        .await
+                        .is_ok()
+                    {
+                        return Ok((
+                            tool_dest_file,
+                            ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
+                            extra_envs,
+                        ));
+                    }
+
+                    // Direct download failed (asset not yet published?) —
+                    // fall back to the latest release that has the artifact.
+                    if debug_mode() {
+                        eprintln!(
+                            "{:} direct download for {tag} failed, falling back to latest release with assets",
+                            tool.name(),
+                        );
+                    }
+                    let fallback_url = format!(
+                        "https://api.github.com/repos/{org}/{repo}/releases?per_page=10"
+                    );
+                    let fallback_req = gh_request(&client, fallback_url)
                         .header(
                             HeaderName::from_static("accept"),
                             HeaderValue::from_static("application/vnd.github+json"),
                         )
                         .build()
                         .into_diagnostic()?;
-
-                    let resp = client
-                        .execute(req.try_clone().unwrap())
+                    let fallback_resp = client
+                        .execute(fallback_req)
                         .await
                         .into_diagnostic()?;
-                    let release_data: Release = resp.json::<Release>().await.into_diagnostic()?;
-                    for asset in release_data.assets {
-                        if asset.name == *artifact {
-                            if debug_mode() {
-                                eprintln!(
-                                    "{:} source {:?} downloading {:?} to {:?}",
-                                    tool.name(),
-                                    source,
-                                    asset.url,
-                                    tool_dest_file
-                                );
-                            };
+                    if !fallback_resp.status().is_success() {
+                        errs.push(Err(miette!(
+                            "github releases list request for {org}/{repo} failed with status {}",
+                            fallback_resp.status()
+                        )));
+                        continue;
+                    }
+                    let releases: Vec<Release> =
+                        fallback_resp.json().await.into_diagnostic()?;
+                    let found = releases.into_iter().find_map(|r| {
+                        let rtag = r.tag_name.clone();
+                        r.assets
+                            .into_iter()
+                            .find(|a| a.name == *artifact)
+                            .map(|a| (a, rtag))
+                    });
+                    match found {
+                        Some((asset, resolved_tag)) => {
+                            eprintln!(
+                                "aspect cli release {tag} has no assets, using {resolved_tag} instead",
+                            );
+                            extra_envs.insert(
+                                "ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(),
+                                resolved_tag.clone(),
+                            );
                             let req = gh_request(&client, asset.url)
                                 .header(
                                     HeaderName::from_static("accept"),
@@ -321,14 +380,16 @@ async fn configure_tool_task(
                                 )
                                 .build()
                                 .into_diagnostic()?;
-                            let download_msg =
-                                format!("downloading aspect cli version {} file {}", tag, artifact);
+                            let download_msg = format!(
+                                "downloading aspect cli version {} file {}",
+                                resolved_tag, artifact
+                            );
                             if let err @ Err(_) =
                                 _download_into_cache(&client, &tool_dest_file, req, &download_msg)
                                     .await
                             {
                                 errs.push(err);
-                                break;
+                                continue;
                             }
                             return Ok((
                                 tool_dest_file,
@@ -336,9 +397,13 @@ async fn configure_tool_task(
                                 extra_envs,
                             ));
                         }
+                        None => {
+                            errs.push(Err(miette!(
+                                "unable to find release artifact {artifact} in any recent {org}/{repo} release"
+                            )));
+                            continue;
+                        }
                     }
-                    errs.push(Err(miette!("unable to find a release artifact in github!")));
-                    continue;
                 }
                 ToolSource::Local { path } => {
                     let tool_dest_file = cache.tool_path(&tool.name(), path);
@@ -480,5 +545,121 @@ fn main() -> Result<ExitCode> {
             })?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replace_vars_version() {
+        let result = replace_vars("tool-{version}", "1.2.3");
+        assert_eq!(result, format!("tool-1.2.3"));
+    }
+
+    #[test]
+    fn test_replace_vars_os() {
+        let result = replace_vars("{os}", "1.0.0");
+        assert_eq!(result, GOOS);
+    }
+
+    #[test]
+    fn test_replace_vars_arch() {
+        let result = replace_vars("{arch}", "1.0.0");
+        assert_eq!(result, BZLARCH);
+    }
+
+    #[test]
+    fn test_replace_vars_target() {
+        let result = replace_vars("{target}", "1.0.0");
+        assert_eq!(result, LLVM_TRIPLE);
+    }
+
+    #[test]
+    fn test_replace_vars_multiple() {
+        let result = replace_vars("tool-{version}-{os}-{arch}", "3.0.0");
+        assert_eq!(result, format!("tool-3.0.0-{}-{}", GOOS, BZLARCH));
+    }
+
+    #[test]
+    fn test_replace_vars_no_placeholders() {
+        let result = replace_vars("plain-string", "1.0.0");
+        assert_eq!(result, "plain-string");
+    }
+
+    #[test]
+    fn test_release_deserialize_with_assets() {
+        let json = r#"{
+            "tag_name": "v1.0.0",
+            "assets": [
+                {"url": "https://api.github.com/repos/o/r/releases/assets/123", "name": "tool-linux"},
+                {"url": "https://api.github.com/repos/o/r/releases/assets/456", "name": "tool-macos"}
+            ]
+        }"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v1.0.0");
+        assert_eq!(release.assets.len(), 2);
+        assert_eq!(release.assets[0].name, "tool-linux");
+        assert_eq!(release.assets[1].name, "tool-macos");
+    }
+
+    #[test]
+    fn test_release_deserialize_without_assets() {
+        let json = r#"{"tag_name": "v2.0.0"}"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v2.0.0");
+        assert!(release.assets.is_empty());
+    }
+
+    #[test]
+    fn test_release_deserialize_empty_assets() {
+        let json = r#"{"tag_name": "v3.0.0", "assets": []}"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v3.0.0");
+        assert!(release.assets.is_empty());
+    }
+
+    #[test]
+    fn test_release_deserialize_ignores_extra_fields() {
+        let json = r#"{
+            "tag_name": "v1.0.0",
+            "id": 12345,
+            "draft": false,
+            "prerelease": false,
+            "assets": []
+        }"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v1.0.0");
+    }
+
+    #[test]
+    fn test_release_list_deserialize() {
+        let json = r#"[
+            {"tag_name": "v2.0.0", "assets": []},
+            {"tag_name": "v1.0.0", "assets": [{"url": "https://example.com/asset", "name": "tool"}]}
+        ]"#;
+        let releases: Vec<Release> = serde_json::from_str(json).unwrap();
+        assert_eq!(releases.len(), 2);
+        assert!(releases[0].assets.is_empty());
+        assert_eq!(releases[1].assets[0].name, "tool");
+    }
+
+    #[test]
+    fn test_headermap_from_hashmap() {
+        let headers = vec![
+            ("Content-Type", "application/json"),
+            ("Authorization", "Bearer token"),
+        ];
+        let map = headermap_from_hashmap(headers.into_iter());
+        assert_eq!(map.get("content-type").unwrap(), "application/json");
+        assert_eq!(map.get("authorization").unwrap(), "Bearer token");
+    }
+
+    #[test]
+    fn test_headermap_from_hashmap_empty() {
+        let headers: Vec<(&str, &str)> = vec![];
+        let map = headermap_from_hashmap(headers.into_iter());
+        assert!(map.is_empty());
     }
 }
