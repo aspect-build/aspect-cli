@@ -1,7 +1,7 @@
 load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
 load("//bazel/release:release.bzl", "release")
 load("//bazel/release/homebrew:multi_platform_brew_artifacts.bzl", "multi_platform_brew_artifacts")
-load("//bazel/rust:defs.bzl", "rust_binary")
+load("//bazel/rust:defs.bzl", "rust_binary", "rust_test")
 load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
 
 rust_binary(
@@ -23,6 +23,15 @@ rust_binary(
         "//crates/aspect-telemetry",
     ],
     visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "test",
+    size = "small",
+    crate = ":aspect-launcher",
+    deps = [
+        "@crates//:serde_json",
+    ],
 )
 
 release(
