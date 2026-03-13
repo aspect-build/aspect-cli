@@ -1,0 +1,161 @@
+name: Launcher Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - crates/aspect-launcher/**
+      - crates/aspect-telemetry/**
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  integration-tests:
+    name: Integration tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    env:
+      ASPECT_CLI_DOWNLOADER_CACHE: /tmp/aspect-launcher-ci-cache
+      CARGO_TERM_COLOR: always
+      # Use the workflow's GITHUB_TOKEN to avoid rate-limiting on the releases API
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-launcher-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-launcher-
+
+      # The published aspect-cli artifacts are named after the Rust target triple
+      # (e.g. aspect-cli-x86_64-unknown-linux-musl). LLVM_TRIPLE is baked into
+      # the launcher at compile time via build.rs. In production the launcher is
+      # always cross-compiled to musl by Bazel, so LLVM_TRIPLE is correct. Here
+      # we build with plain cargo on a gnu runner, which would bake in
+      # x86_64-unknown-linux-gnu and cause the artifact lookup to fail. Building
+      # with --target x86_64-unknown-linux-musl replicates the production value.
+      - name: Install musl toolchain (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          echo "CARGO_TARGET_ARGS=--target x86_64-unknown-linux-musl" >> "$GITHUB_ENV"
+
+      - name: Build launcher
+        run: cargo build -p aspect-launcher $CARGO_TARGET_ARGS
+
+      # ── Test 1: Unpinned first run ────────────────────────────────────────────
+      # Fresh cache, no version.axl → must query the releases API and download
+      # the latest stable (non-prerelease) release.
+
+      - name: "Test 1: Unpinned first run queries releases API"
+        run: |
+          mkdir -p /tmp/axl-test
+          output=$(cd /tmp/axl-test && ASPECT_DEBUG=1 \
+            cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
+          echo "$output"
+          echo "$output" | grep -q "querying releases API (no hint cached)" \
+            || { echo "FAIL: expected 'no hint cached' API query"; exit 1; }
+          # Must resolve to a stable vYYYY.WW.P tag, not a prerelease
+          echo "$output" | grep -q 'downloading aspect cli version v[0-9]' \
+            || { echo "FAIL: expected stable version download"; exit 1; }
+
+      # ── Test 2: Warm cache ────────────────────────────────────────────────────
+      # Hint is fresh, binary is present → no network call.
+
+      - name: "Test 2: Warm cache skips API"
+        run: |
+          output=$(cd /tmp/axl-test && ASPECT_DEBUG=1 \
+            cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
+          echo "$output"
+          echo "$output" | grep -q "found in cache" \
+            || { echo "FAIL: expected cache hit"; exit 1; }
+          if echo "$output" | grep -q "querying releases"; then
+            echo "FAIL: should not query API on warm cache"; exit 1
+          fi
+
+      # ── Test 3: Stale hint ────────────────────────────────────────────────────
+      # Backdate hint mtime → must re-query API, then reuse the already-cached binary.
+
+      - name: "Test 3: Stale hint triggers API re-query"
+        run: |
+          python3 -c "
+          import os, time
+          hint_dir = '$ASPECT_CLI_DOWNLOADER_CACHE/launcher/latest'
+          for f in os.listdir(hint_dir):
+              p = os.path.join(hint_dir, f)
+              os.utime(p, (0, 0))  # epoch = definitely stale
+          "
+          output=$(cd /tmp/axl-test && ASPECT_DEBUG=1 \
+            cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
+          echo "$output"
+          echo "$output" | grep -q "querying releases API (hint is stale)" \
+            || { echo "FAIL: expected stale hint message"; exit 1; }
+          # Binary was already cached — should not re-download
+          if echo "$output" | grep -q "^downloading "; then
+            echo "FAIL: should not re-download when binary is cached"; exit 1
+          fi
+
+      # ── Test 4: API failure fallback ──────────────────────────────────────────
+      # Stale hint + bad token → must fall back to cached binary and reset expiry.
+
+      - name: "Test 4: API failure falls back to stale cached binary"
+        run: |
+          python3 -c "
+          import os
+          hint_dir = '$ASPECT_CLI_DOWNLOADER_CACHE/launcher/latest'
+          for f in os.listdir(hint_dir):
+              os.utime(os.path.join(hint_dir, f), (0, 0))
+          "
+          output=$(cd /tmp/axl-test && ASPECT_DEBUG=1 GITHUB_TOKEN=invalid \
+            cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
+          echo "$output"
+          echo "$output" | grep -q "API error, falling back to stale cached tag" \
+            || { echo "FAIL: expected stale fallback message"; exit 1; }
+
+      # ── Test 5: Pinned version (first run) ────────────────────────────────────
+      # version.axl with an explicit version → resolve tag directly, no API call.
+
+      - name: "Test 5: Pinned version downloads directly without API call"
+        run: |
+          mkdir -p /tmp/axl-test-pinned/.aspect
+          printf 'version("2026.15.2")\n' > /tmp/axl-test-pinned/.aspect/version.axl
+          touch /tmp/axl-test-pinned/MODULE.bazel
+          output=$(cd /tmp/axl-test-pinned && ASPECT_DEBUG=1 \
+            cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
+          echo "$output"
+          echo "$output" | grep -q 'pinned to tag "v2026.15.2", skipping API' \
+            || { echo "FAIL: expected pinned tag message"; exit 1; }
+          if echo "$output" | grep -q "querying releases"; then
+            echo "FAIL: pinned version should not query API"; exit 1
+          fi
+
+      # ── Test 6: Pinned version (cache hit) ────────────────────────────────────
+      # Same pinned version, second run → cache hit, no download, no API call.
+
+      - name: "Test 6: Pinned version cache hit"
+        run: |
+          output=$(cd /tmp/axl-test-pinned && ASPECT_DEBUG=1 \
+            cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p aspect-launcher $CARGO_TARGET_ARGS -- version 2>&1) || true
+          echo "$output"
+          echo "$output" | grep -q "found in cache" \
+            || { echo "FAIL: expected cache hit"; exit 1; }
+          if echo "$output" | grep -q "^downloading "; then
+            echo "FAIL: should not re-download on cache hit"; exit 1
+          fi

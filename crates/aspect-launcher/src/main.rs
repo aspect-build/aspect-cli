@@ -126,12 +126,15 @@ async fn _download_into_cache(
 
 #[derive(Deserialize, Debug)]
 struct Release {
+    tag_name: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
     assets: Vec<ReleaseArtifact>,
 }
 
 #[derive(Deserialize, Debug)]
 struct ReleaseArtifact {
-    url: String,
     name: String,
 }
 
@@ -196,7 +199,9 @@ async fn configure_tool_task(
         for source in tool.sources() {
             match source {
                 ToolSource::Http { url, headers } => {
-                    let url = replace_vars(url, tool.version());
+                    let fallback_version = cargo_pkg_short_version();
+                    let version = tool.version().unwrap_or(&fallback_version);
+                    let url = replace_vars(url, version);
                     let req_headers = headermap_from_hashmap(headers.iter());
                     let req = client
                         .request(Method::GET, &url)
@@ -250,25 +255,204 @@ async fn configure_tool_task(
                     tag,
                     artifact,
                 } => {
-                    let tag = if tag.is_empty() {
-                        format!("v{}", tool.version())
-                    } else {
-                        replace_vars(tag, tool.version())
-                    };
+                    let fallback_version = cargo_pkg_short_version();
+                    let pinned_version = tool.version();
+                    let version_for_vars = pinned_version.unwrap_or(&fallback_version);
+
                     let artifact = if artifact.is_empty() {
                         format!("{}-{}", repo, LLVM_TRIPLE)
                     } else {
-                        replace_vars(artifact, tool.version())
+                        replace_vars(artifact, version_for_vars)
                     };
 
-                    let url =
-                        format!("https://api.github.com/repos/{org}/{repo}/releases/tags/{tag}");
+                    // How long a resolved tag hint is considered fresh before we
+                    // re-query the releases API to pick up newer versions.
+                    const HINT_MAX_AGE: std::time::Duration =
+                        std::time::Duration::from_secs(24 * 60 * 60);
 
-                    let tool_dest_file = cache.tool_path(&tool.name(), &url);
+                    // Step 1: Resolve the tag.
+                    // If a version is pinned, compute the tag directly.
+                    // If unpinned, check the cached tag hint first to avoid a
+                    // network round-trip when the binary is already present and
+                    // the hint is fresh, then fall back to querying the releases API.
+                    let resolved_tag = if let Some(version) = pinned_version {
+                        let t = if tag.is_empty() {
+                            format!("v{}", version)
+                        } else {
+                            replace_vars(tag, version)
+                        };
+                        if debug_mode() {
+                            eprintln!("{:} pinned to tag {:?}, skipping API", tool.name(), t);
+                        }
+                        t
+                    } else {
+                        let hint_path = cache.latest_tag_path(&tool.name(), org, repo, &artifact);
+
+                        // Use the cached hint if it is fresh and its binary is present.
+                        if cache.latest_tag_is_fresh(&hint_path, HINT_MAX_AGE) {
+                            if let Ok(cached_tag) = fs::read_to_string(&hint_path) {
+                                let cached_tag = cached_tag.trim().to_owned();
+                                let cached_url = format!(
+                                    "https://github.com/{org}/{repo}/releases/download/{cached_tag}/{artifact}"
+                                );
+                                let cached_dest = cache.tool_path(&tool.name(), &cached_url);
+                                if cached_dest.exists() {
+                                    if debug_mode() {
+                                        eprintln!(
+                                            "{:} source {:?} found in cache {:?} (resolved tag: {})",
+                                            tool.name(),
+                                            source,
+                                            &cached_url,
+                                            cached_tag,
+                                        );
+                                    }
+                                    let mut extra_envs = HashMap::new();
+                                    extra_envs.insert(
+                                        "ASPECT_LAUNCHER_ASPECT_CLI_ORG".to_string(),
+                                        org.clone(),
+                                    );
+                                    extra_envs.insert(
+                                        "ASPECT_LAUNCHER_ASPECT_CLI_REPO".to_string(),
+                                        repo.clone(),
+                                    );
+                                    extra_envs.insert(
+                                        "ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(),
+                                        cached_tag,
+                                    );
+                                    extra_envs.insert(
+                                        "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
+                                        artifact.clone(),
+                                    );
+                                    return Ok((
+                                        cached_dest,
+                                        ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
+                                        extra_envs,
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Hint is absent, stale, or binary is missing — query the releases API.
+                        if debug_mode() {
+                            let reason = if !hint_path.exists() {
+                                "no hint cached"
+                            } else if !cache.latest_tag_is_fresh(&hint_path, HINT_MAX_AGE) {
+                                "hint is stale"
+                            } else {
+                                "binary not in cache"
+                            };
+                            eprintln!(
+                                "{:} unpinned, querying releases API ({reason})",
+                                tool.name()
+                            );
+                        }
+                        let releases_url = format!(
+                            "https://api.github.com/repos/{org}/{repo}/releases?per_page=10"
+                        );
+                        if debug_mode() {
+                            eprintln!(
+                                "{:} source {:?} querying releases from {:?}",
+                                tool.name(),
+                                source,
+                                releases_url,
+                            );
+                        }
+                        let releases_req = gh_request(&client, releases_url)
+                            .header(
+                                HeaderName::from_static("accept"),
+                                HeaderValue::from_static("application/vnd.github+json"),
+                            )
+                            .build()
+                            .into_diagnostic()?;
+                        let releases_resp = client.execute(releases_req).await.into_diagnostic()?;
+                        let releases_status = releases_resp.status();
+                        if !releases_status.is_success() {
+                            let body = releases_resp.text().await.unwrap_or_default();
+                            // If we have a stale-but-readable hint whose binary is still present,
+                            // fall back to it and touch the hint so we don't hammer a down API.
+                            if let Ok(stale_tag) = fs::read_to_string(&hint_path) {
+                                let stale_tag = stale_tag.trim().to_owned();
+                                let stale_url = format!(
+                                    "https://github.com/{org}/{repo}/releases/download/{stale_tag}/{artifact}"
+                                );
+                                let stale_dest = cache.tool_path(&tool.name(), &stale_url);
+                                if stale_dest.exists() {
+                                    if debug_mode() {
+                                        eprintln!(
+                                            "{:} API error, falling back to stale cached tag {} ({})",
+                                            tool.name(),
+                                            stale_tag,
+                                            body.trim(),
+                                        );
+                                    }
+                                    // Reset the expiry so we retry after another HINT_MAX_AGE.
+                                    cache.touch_latest_tag(&hint_path);
+                                    let mut extra_envs = HashMap::new();
+                                    extra_envs.insert(
+                                        "ASPECT_LAUNCHER_ASPECT_CLI_ORG".to_string(),
+                                        org.clone(),
+                                    );
+                                    extra_envs.insert(
+                                        "ASPECT_LAUNCHER_ASPECT_CLI_REPO".to_string(),
+                                        repo.clone(),
+                                    );
+                                    extra_envs.insert(
+                                        "ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(),
+                                        stale_tag,
+                                    );
+                                    extra_envs.insert(
+                                        "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
+                                        artifact.clone(),
+                                    );
+                                    return Ok((
+                                        stale_dest,
+                                        ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
+                                        extra_envs,
+                                    ));
+                                }
+                            }
+                            errs.push(Err(miette!(
+                                "github releases list request for {org}/{repo} failed with status {}: {}",
+                                releases_status,
+                                body
+                            )));
+                            continue;
+                        }
+                        let releases: Vec<Release> =
+                            releases_resp.json().await.into_diagnostic()?;
+                        let found = releases.into_iter().find(|r| {
+                            !r.prerelease && r.assets.iter().any(|a| a.name == *artifact)
+                        });
+                        let resolved = match found {
+                            Some(release) => release.tag_name,
+                            None => {
+                                errs.push(Err(miette!(
+                                    "unable to find release artifact {artifact} in any recent {org}/{repo} release"
+                                )));
+                                continue;
+                            }
+                        };
+                        // Persist the resolved tag so the next run can skip the API call.
+                        if let Some(parent) = hint_path.parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        let _ = fs::write(&hint_path, &resolved);
+                        resolved
+                    };
+
+                    // Step 2: Download from the direct release URL using the resolved tag.
+                    let direct_url = format!(
+                        "https://github.com/{org}/{repo}/releases/download/{resolved_tag}/{artifact}"
+                    );
+
+                    let tool_dest_file = cache.tool_path(&tool.name(), &direct_url);
                     let mut extra_envs = HashMap::new();
                     extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_ORG".to_string(), org.clone());
                     extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_REPO".to_string(), repo.clone());
-                    extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(), tag.clone());
+                    extra_envs.insert(
+                        "ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(),
+                        resolved_tag.clone(),
+                    );
                     extra_envs.insert(
                         "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
                         artifact.clone(),
@@ -279,7 +463,7 @@ async fn configure_tool_task(
                                 "{:} source {:?} found in cache {:?}",
                                 tool.name(),
                                 source,
-                                &url
+                                &direct_url
                             );
                         };
                         return Ok((
@@ -290,65 +474,37 @@ async fn configure_tool_task(
                     }
                     fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
 
-                    let req = gh_request(&client, url)
+                    if debug_mode() {
+                        eprintln!(
+                            "{:} source {:?} downloading {:?} to {:?}",
+                            tool.name(),
+                            source,
+                            direct_url,
+                            tool_dest_file
+                        );
+                    };
+                    let req = gh_request(&client, direct_url)
                         .header(
                             HeaderName::from_static("accept"),
-                            HeaderValue::from_static("application/vnd.github+json"),
+                            HeaderValue::from_static("application/octet-stream"),
                         )
                         .build()
                         .into_diagnostic()?;
-
-                    let resp = client
-                        .execute(req.try_clone().unwrap())
-                        .await
-                        .into_diagnostic()?;
-                    let status = resp.status();
-                    if !status.is_success() {
-                        let body = resp.text().await.unwrap_or_default();
-                        errs.push(Err(miette!(
-                            "GitHub API request failed with status {}: {}",
-                            status,
-                            body
-                        )));
+                    let download_msg = format!(
+                        "downloading aspect cli version {} file {}",
+                        resolved_tag, artifact
+                    );
+                    if let err @ Err(_) =
+                        _download_into_cache(&client, &tool_dest_file, req, &download_msg).await
+                    {
+                        errs.push(err);
                         continue;
                     }
-                    let release_data: Release = resp.json::<Release>().await.into_diagnostic()?;
-                    for asset in release_data.assets {
-                        if asset.name == *artifact {
-                            if debug_mode() {
-                                eprintln!(
-                                    "{:} source {:?} downloading {:?} to {:?}",
-                                    tool.name(),
-                                    source,
-                                    asset.url,
-                                    tool_dest_file
-                                );
-                            };
-                            let req = gh_request(&client, asset.url)
-                                .header(
-                                    HeaderName::from_static("accept"),
-                                    HeaderValue::from_static("application/octet-stream"),
-                                )
-                                .build()
-                                .into_diagnostic()?;
-                            let download_msg =
-                                format!("downloading aspect cli version {} file {}", tag, artifact);
-                            if let err @ Err(_) =
-                                _download_into_cache(&client, &tool_dest_file, req, &download_msg)
-                                    .await
-                            {
-                                errs.push(err);
-                                break;
-                            }
-                            return Ok((
-                                tool_dest_file,
-                                ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
-                                extra_envs,
-                            ));
-                        }
-                    }
-                    errs.push(Err(miette!("unable to find a release artifact in github!")));
-                    continue;
+                    return Ok((
+                        tool_dest_file,
+                        ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
+                        extra_envs,
+                    ));
                 }
                 ToolSource::Local { path } => {
                     let tool_dest_file = cache.tool_path(&tool.name(), path);
@@ -490,5 +646,317 @@ fn main() -> Result<ExitCode> {
             })?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replace_vars_version() {
+        let result = replace_vars("tool-{version}", "1.2.3");
+        assert_eq!(result, format!("tool-1.2.3"));
+    }
+
+    #[test]
+    fn test_replace_vars_os() {
+        let result = replace_vars("{os}", "1.0.0");
+        assert_eq!(result, GOOS);
+    }
+
+    #[test]
+    fn test_replace_vars_arch() {
+        let result = replace_vars("{arch}", "1.0.0");
+        assert_eq!(result, BZLARCH);
+    }
+
+    #[test]
+    fn test_replace_vars_target() {
+        let result = replace_vars("{target}", "1.0.0");
+        assert_eq!(result, LLVM_TRIPLE);
+    }
+
+    #[test]
+    fn test_replace_vars_multiple() {
+        let result = replace_vars("tool-{version}-{os}-{arch}", "3.0.0");
+        assert_eq!(result, format!("tool-3.0.0-{}-{}", GOOS, BZLARCH));
+    }
+
+    #[test]
+    fn test_replace_vars_no_placeholders() {
+        let result = replace_vars("plain-string", "1.0.0");
+        assert_eq!(result, "plain-string");
+    }
+
+    #[test]
+    fn test_release_deserialize_with_assets() {
+        let json = r#"{
+            "tag_name": "v1.0.0",
+            "assets": [
+                {"name": "tool-linux"},
+                {"name": "tool-macos"}
+            ]
+        }"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v1.0.0");
+        assert_eq!(release.assets.len(), 2);
+        assert_eq!(release.assets[0].name, "tool-linux");
+        assert_eq!(release.assets[1].name, "tool-macos");
+    }
+
+    #[test]
+    fn test_release_deserialize_without_assets() {
+        let json = r#"{"tag_name": "v2.0.0"}"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v2.0.0");
+        assert!(release.assets.is_empty());
+    }
+
+    #[test]
+    fn test_release_deserialize_empty_assets() {
+        let json = r#"{"tag_name": "v3.0.0", "assets": []}"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v3.0.0");
+        assert!(release.assets.is_empty());
+    }
+
+    #[test]
+    fn test_release_deserialize_ignores_extra_fields() {
+        let json = r#"{
+            "tag_name": "v1.0.0",
+            "id": 12345,
+            "draft": false,
+            "prerelease": false,
+            "assets": []
+        }"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v1.0.0");
+    }
+
+    #[test]
+    fn test_release_list_deserialize() {
+        let json = r#"[
+            {"tag_name": "v2.0.0", "assets": []},
+            {"tag_name": "v1.0.0", "assets": [{"name": "tool"}]}
+        ]"#;
+        let releases: Vec<Release> = serde_json::from_str(json).unwrap();
+        assert_eq!(releases.len(), 2);
+        assert!(releases[0].assets.is_empty());
+        assert_eq!(releases[1].assets[0].name, "tool");
+    }
+
+    #[test]
+    fn test_prerelease_releases_are_skipped() {
+        // prerelease/main should be skipped; v1.0.0 is the first stable release with the artifact.
+        let releases = vec![
+            Release {
+                tag_name: "prerelease/main".to_string(),
+                prerelease: true,
+                assets: vec![ReleaseArtifact {
+                    name: "tool".to_string(),
+                }],
+            },
+            Release {
+                tag_name: "v1.0.0".to_string(),
+                prerelease: false,
+                assets: vec![ReleaseArtifact {
+                    name: "tool".to_string(),
+                }],
+            },
+        ];
+        let found = releases
+            .into_iter()
+            .find(|r| !r.prerelease && r.assets.iter().any(|a| a.name == "tool"));
+        assert_eq!(found.unwrap().tag_name, "v1.0.0");
+    }
+
+    #[test]
+    fn test_release_deserialize_prerelease_field() {
+        let json =
+            r#"{"tag_name": "prerelease/main", "prerelease": true, "assets": [{"name": "tool"}]}"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert!(release.prerelease);
+        assert_eq!(release.tag_name, "prerelease/main");
+    }
+
+    #[test]
+    fn test_release_deserialize_prerelease_defaults_false() {
+        let json = r#"{"tag_name": "v1.0.0"}"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert!(!release.prerelease);
+    }
+
+    #[test]
+    fn test_headermap_from_hashmap() {
+        let headers = vec![
+            ("Content-Type", "application/json"),
+            ("Authorization", "Bearer token"),
+        ];
+        let map = headermap_from_hashmap(headers.into_iter());
+        assert_eq!(map.get("content-type").unwrap(), "application/json");
+        assert_eq!(map.get("authorization").unwrap(), "Bearer token");
+    }
+
+    #[test]
+    fn test_headermap_from_hashmap_empty() {
+        let headers: Vec<(&str, &str)> = vec![];
+        let map = headermap_from_hashmap(headers.into_iter());
+        assert!(map.is_empty());
+    }
+
+    // Helpers that mirror the production code's URL/path construction so the
+    // tests below exercise exactly the same logic.
+    fn make_cache(root: &std::path::Path) -> AspectCache {
+        AspectCache::from(root.to_path_buf())
+    }
+
+    fn binary_cache_path(
+        cache: &AspectCache,
+        org: &str,
+        repo: &str,
+        tag: &str,
+        artifact: &str,
+    ) -> PathBuf {
+        let url = format!("https://github.com/{org}/{repo}/releases/download/{tag}/{artifact}");
+        cache.tool_path(&"aspect-cli".to_string(), &url)
+    }
+
+    /// Create a temp dir scoped to this test process so parallel test runs don't collide.
+    fn tmp_cache_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aspect-launcher-test-{}-{}",
+            std::process::id(),
+            label
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_cache_hint_fresh_and_binary_present_skips_api() {
+        let tmp = tmp_cache_dir("hint-hit");
+        let cache = make_cache(&tmp);
+
+        let org = "aspect-build";
+        let repo = "aspect-cli";
+        let artifact = "aspect-cli-aarch64-apple-darwin";
+        let tag = "v2026.15.2";
+
+        // Write the tag hint (as the production code does after a successful API call).
+        let hint = cache.latest_tag_path("aspect-cli", org, repo, artifact);
+        std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+        std::fs::write(&hint, tag).unwrap();
+
+        // Hint must be fresh for the production code to use it.
+        assert!(cache.latest_tag_is_fresh(&hint, std::time::Duration::from_secs(86400)));
+
+        // Reconstruct the binary path from the hint — mirrors the production check.
+        let cached_tag = std::fs::read_to_string(&hint).unwrap();
+        let cached_tag = cached_tag.trim();
+        let dest = binary_cache_path(&cache, org, repo, cached_tag, artifact);
+
+        // Binary not present yet — hint alone is not enough.
+        assert!(!dest.exists());
+
+        // Simulate a previously downloaded binary.
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"fake binary").unwrap();
+
+        // Fresh hint + binary present: production code returns early, no API call.
+        assert!(dest.exists());
+        assert_eq!(cached_tag, tag);
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_stale_hint_with_binary_falls_back_on_api_failure() {
+        let tmp = tmp_cache_dir("hint-stale");
+        let cache = make_cache(&tmp);
+
+        let org = "aspect-build";
+        let repo = "aspect-cli";
+        let artifact = "aspect-cli-aarch64-apple-darwin";
+        let tag = "v2026.15.2";
+
+        // Write a hint that is immediately stale (zero max-age).
+        let hint = cache.latest_tag_path("aspect-cli", org, repo, artifact);
+        std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+        std::fs::write(&hint, tag).unwrap();
+        assert!(!cache.latest_tag_is_fresh(&hint, std::time::Duration::ZERO));
+
+        // Write a binary for the stale tag.
+        let dest = binary_cache_path(&cache, org, repo, tag, artifact);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"fake binary").unwrap();
+
+        // The stale hint + existing binary should be usable as a fallback when the
+        // API fails. After using it, touch_latest_tag resets the expiry.
+        cache.touch_latest_tag(&hint);
+        assert!(cache.latest_tag_is_fresh(&hint, std::time::Duration::from_secs(86400)));
+        assert!(dest.exists());
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_cache_hint_present_but_binary_missing_falls_through_to_api() {
+        let tmp = tmp_cache_dir("hint-miss");
+        let cache = make_cache(&tmp);
+
+        let org = "aspect-build";
+        let repo = "aspect-cli";
+        let artifact = "aspect-cli-aarch64-apple-darwin";
+        let tag = "v2026.15.2";
+
+        // Write the tag hint but do NOT create the binary.
+        let hint = cache.latest_tag_path("aspect-cli", org, repo, artifact);
+        std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+        std::fs::write(&hint, tag).unwrap();
+
+        let cached_tag = std::fs::read_to_string(&hint).unwrap();
+        let dest = binary_cache_path(&cache, org, repo, cached_tag.trim(), artifact);
+
+        // Binary missing → production code must fall through to the API.
+        assert!(!dest.exists());
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_no_cache_hint_falls_through_to_api() {
+        let tmp = tmp_cache_dir("no-hint");
+        let cache = make_cache(&tmp);
+
+        let hint = cache.latest_tag_path(
+            "aspect-cli",
+            "aspect-build",
+            "aspect-cli",
+            "aspect-cli-aarch64-apple-darwin",
+        );
+
+        // No hint written → production code must query the API.
+        assert!(!hint.exists());
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_cache_hint_is_overwritten_on_new_resolution() {
+        let tmp = tmp_cache_dir("hint-update");
+        let cache = make_cache(&tmp);
+
+        let hint = cache.latest_tag_path("aspect-cli", "aspect-build", "aspect-cli", "artifact");
+        std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+
+        std::fs::write(&hint, "v2026.14.0").unwrap();
+        assert_eq!(std::fs::read_to_string(&hint).unwrap().trim(), "v2026.14.0");
+
+        // Simulate a newer resolution overwriting the old hint.
+        std::fs::write(&hint, "v2026.15.2").unwrap();
+        assert_eq!(std::fs::read_to_string(&hint).unwrap().trim(), "v2026.15.2");
+
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }
