@@ -56,9 +56,9 @@ impl LspContext for AxlContext {
         path: &str,
         current_file: &LspUrl,
         workspace_root: Option<&std::path::Path>,
-    ) -> anyhow::Result<LspUrl> {
+    ) -> Result<LspUrl, String> {
         eprintln!("resolve_load {path} {current_file} {workspace_root:?}");
-        anyhow::bail!("not implemented yet: resolve_load")
+        Err("not implemented yet: resolve_load".to_owned())
     }
 
     fn render_as_load(
@@ -66,7 +66,7 @@ impl LspContext for AxlContext {
         target: &LspUrl,
         current_file: &LspUrl,
         workspace_root: Option<&std::path::Path>,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, String> {
         eprintln!("render_as_load {target} {current_file} {workspace_root:?}");
         Ok(String::new())
     }
@@ -76,12 +76,12 @@ impl LspContext for AxlContext {
         literal: &str,
         current_file: &LspUrl,
         workspace_root: Option<&std::path::Path>,
-    ) -> anyhow::Result<Option<StringLiteralResult>> {
+    ) -> Result<Option<StringLiteralResult>, String> {
         eprintln!("resolve_string_literal {literal} {current_file} {workspace_root:?}");
         Ok(None)
     }
 
-    fn get_load_contents(&self, uri: &LspUrl) -> anyhow::Result<Option<String>> {
+    fn get_load_contents(&self, uri: &LspUrl) -> Result<Option<String>, String> {
         eprintln!("get_load_contents {uri}");
         Ok(None)
     }
@@ -95,7 +95,7 @@ impl LspContext for AxlContext {
         &self,
         current_file: &LspUrl,
         symbol: &str,
-    ) -> anyhow::Result<Option<LspUrl>> {
+    ) -> Result<Option<LspUrl>, String> {
         eprintln!("get_url_for_global_symbol {current_file} {symbol}");
         Ok(None)
     }
