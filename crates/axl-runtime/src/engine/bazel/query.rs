@@ -7,6 +7,8 @@ use std::io::Read;
 use std::process::Command;
 use std::process::Stdio;
 
+use anyhow::Context;
+
 use allocative::Allocative;
 use anyhow::anyhow;
 use derive_more::Display;
@@ -166,7 +168,9 @@ impl Query {
         cmd.stderr(Stdio::null());
         cmd.stdout(outfile);
         cmd.stdin(Stdio::null());
-        cmd.spawn()?.wait()?;
+        cmd.spawn()
+            .with_context(|| format!("failed to spawn command {:?}", cmd))?
+            .wait()?;
 
         let mut buf = vec![];
         File::open(&out)?.read_to_end(&mut buf)?;
