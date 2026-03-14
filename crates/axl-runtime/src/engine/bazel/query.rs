@@ -169,7 +169,7 @@ impl Query {
         cmd.stdout(outfile);
         cmd.stdin(Stdio::null());
         cmd.spawn()
-            .with_context(|| format!("failed to spawn command {:?}", cmd))?
+            .with_context(|| "failed to spawn bazel")?
             .wait()?;
 
         let mut buf = vec![];

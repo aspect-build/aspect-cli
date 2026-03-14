@@ -68,14 +68,24 @@ pub struct Command {
 }
 
 impl Command {
+    /// Format as `program "arg1" "arg2"` for use in error messages.
+    /// Deliberately excludes environment variables to avoid leaking secrets.
+    fn describe(&self) -> String {
+        let inner = self.inner.borrow();
+        inner.get_args().fold(
+            inner.get_program().to_string_lossy().into_owned(),
+            |acc, a| format!("{acc} {a:?}"),
+        )
+    }
+
     fn try_spawn(&self) -> anyhow::Result<process::Child> {
         let result = self.inner.borrow_mut().spawn();
-        result.with_context(|| format!("failed to spawn command {:?}", *self.inner.borrow()))
+        result.with_context(|| format!("failed to spawn command {}", self.describe()))
     }
 
     fn try_status(&self) -> anyhow::Result<process::ExitStatus> {
         let result = self.inner.borrow_mut().status();
-        result.with_context(|| format!("failed to execute command {:?}", *self.inner.borrow()))
+        result.with_context(|| format!("failed to execute command {}", self.describe()))
     }
 }
 
@@ -502,5 +512,18 @@ mod tests {
         let err_msg = cmd.try_status().unwrap_err().to_string();
         assert!(err_msg.contains(program));
         assert!(err_msg.contains("--flag") && err_msg.contains("value"));
+    }
+
+    #[test]
+    fn describe_excludes_env_vars() {
+        let cmd = Command {
+            inner: RefCell::new(process::Command::new("program")),
+        };
+        cmd.inner
+            .borrow_mut()
+            .args(["--flag1", "--flag2", "with spaces"])
+            .env("SECRET_TOKEN", "super_secret");
+        let description = cmd.describe();
+        assert_eq!(description, r#"program "--flag1" "--flag2" "with spaces""#);
     }
 }

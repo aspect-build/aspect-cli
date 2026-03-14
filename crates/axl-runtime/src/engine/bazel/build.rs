@@ -161,7 +161,7 @@ impl Build {
         cmd.stdin(Stdio::null());
         let c = cmd
             .spawn()
-            .map_err(|e| io::Error::other(format!("failed to spawn command {:?}: {e}", cmd)))?
+            .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?
             .wait_with_output()?;
         if !c.status.success() {
             return Err(io::Error::other(anyhow!(
@@ -355,7 +355,7 @@ impl Build {
 
         let child = cmd
             .spawn()
-            .map_err(|e| io::Error::other(format!("failed to spawn command {:?}: {e}", cmd)))?;
+            .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
 
         drop(_enter);
         Ok(Self {
