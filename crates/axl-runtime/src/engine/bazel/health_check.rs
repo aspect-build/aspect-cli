@@ -118,35 +118,6 @@ fn extract_server_pid(server_pid_file: Option<&Path>) -> Option<u32> {
     text.trim().parse::<u32>().ok()
 }
 
-/// Probes whether a process with the given PID exists using signal 0.
-#[cfg(unix)]
-fn is_pid_running(pid: u32) -> bool {
-    use nix::sys::signal;
-    use nix::unistd::Pid;
-
-    signal::kill(Pid::from_raw(pid as i32), None).is_ok()
-}
-
-#[cfg(not(unix))]
-fn is_pid_running(_pid: u32) -> bool {
-    false
-}
-
-/// Sends SIGKILL to the given PID. Silently ignores failures.
-#[cfg(unix)]
-fn kill_server_pid(pid: u32) {
-    use nix::sys::signal::{self, Signal};
-    use nix::unistd::Pid;
-
-    tracing::warn!("Workflows killing bazel server with PID {}", pid);
-    let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-}
-
-#[cfg(not(unix))]
-fn kill_server_pid(_pid: u32) {
-    tracing::warn!("kill_server_pid is not supported on this platform");
-}
-
 /// Tries to determine the Bazel output base by running `bazel info output_base`.
 fn get_output_base() -> Option<PathBuf> {
     let output = Command::new("bazel")
@@ -228,8 +199,8 @@ pub fn run(output_base: Option<&str>) -> HealthCheckResult {
     };
 
     // 4b.iii / 4b.iv: Kill if running, then retry
-    if is_pid_running(pid) {
-        kill_server_pid(pid);
+    if super::process::is_pid_running(pid) {
+        super::process::sigkill(pid);
     }
 
     // Retry health check

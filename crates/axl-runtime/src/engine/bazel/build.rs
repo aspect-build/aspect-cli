@@ -8,7 +8,6 @@ use std::process::Stdio;
 use std::thread::JoinHandle;
 
 use allocative::Allocative;
-use anyhow::anyhow;
 use derive_more::Display;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
@@ -151,65 +150,6 @@ pub struct Build {
 }
 
 impl Build {
-    pub fn server_info() -> io::Result<(u32, semver::Version)> {
-        let mut cmd = Command::new("bazel");
-        cmd.arg("info");
-        cmd.arg("server_pid");
-        cmd.arg("release");
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
-        cmd.stdin(Stdio::null());
-        let c = cmd
-            .spawn()
-            .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?
-            .wait_with_output()?;
-        if !c.status.success() {
-            return Err(io::Error::other(anyhow!(
-                "failed to determine Bazel server info"
-            )));
-        }
-
-        // When bazel info is called with multiple keys it emits "key: value" lines.
-        let stdout = String::from_utf8_lossy(&c.stdout);
-        let mut pid: Option<u32> = None;
-        let mut version: Option<semver::Version> = None;
-        for line in stdout.lines() {
-            if let Some((key, value)) = line.split_once(": ") {
-                match key.trim() {
-                    "server_pid" => {
-                        pid = value.trim().parse::<u32>().ok();
-                    }
-                    "release" => {
-                        // Value is like "release 9.0.0" or "release 9.0.0-rc1"
-                        let ver_str = value.trim().trim_start_matches("release ").trim();
-                        // Strip pre-release suffix: "9.0.0-rc1" -> "9.0.0"
-                        let ver_str = ver_str.split('-').next().unwrap_or(ver_str);
-                        version = semver::Version::parse(ver_str)
-                            .map_err(|e| {
-                                io::Error::other(anyhow!(
-                                    "failed to parse Bazel version '{}': {}",
-                                    ver_str,
-                                    e
-                                ))
-                            })
-                            .ok();
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let pid =
-            pid.ok_or_else(|| io::Error::other(anyhow!("bazel info did not return server_pid")))?;
-        let version = version.ok_or_else(|| {
-            io::Error::other(anyhow!(
-                "bazel info did not return a parseable release version"
-            ))
-        })?;
-
-        Ok((pid, version))
-    }
-
     // TODO: this should return a thiserror::Error
     pub fn spawn(
         verb: &str,
@@ -224,7 +164,7 @@ impl Build {
         current_dir: Option<String>,
         rt: AsyncRuntime,
     ) -> Result<Build, std::io::Error> {
-        let (pid, _) = Self::server_info()?;
+        let (pid, _) = super::info::server_info()?;
 
         let span = tracing::info_span!(
             "ctx.bazel.build",
@@ -422,6 +362,35 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         Ok(WorkspaceEventIterator::new(event_stream.receiver()))
     }
 
+    /// Cancel this Bazel invocation by sending SIGINT to the child process.
+    ///
+    /// Signals the child process (wrapper or bazel client) that was spawned
+    /// for this build. The signal propagates to the bazel client which sends
+    /// a CancelRequest RPC to the server.
+    ///
+    /// Returns an `Cancellation` object with status and control methods.
+    /// After cancelling, you should still call `build.wait()` to properly join
+    /// stream threads and sinks.
+    fn cancel<'v>(this: values::Value<'v>) -> anyhow::Result<super::cancel::Cancellation> {
+        let build = this.downcast_ref::<Build>().unwrap();
+        let wrapper_pid = build.child.borrow().id();
+        let still_running = build.child.borrow_mut().try_wait()?.is_none();
+        if still_running {
+            // Get the real bazel client PID from the server.
+            // If we can't get it, fall back to signalling the wrapper.
+            let target_pid = super::info::client_pid(None).unwrap_or(wrapper_pid);
+            super::process::sigint(target_pid);
+        }
+        let (server_pid, _) = super::info::server_info().map_err(|e| {
+            anyhow::anyhow!("failed to get Bazel server info for cancellation: {}", e)
+        })?;
+        Ok(super::cancel::Cancellation::new(
+            server_pid,
+            Some(wrapper_pid),
+            None,
+        ))
+    }
+
     fn try_wait<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<BuildStatus>> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         let status = build.child.borrow_mut().try_wait()?;
@@ -452,8 +421,6 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let _enter = span.enter();
 
         let result = build.child.borrow_mut().wait()?;
-
-        // TODO: consider adding a wait_events() method for granular control.
 
         // Wait for BES stream to complete.
         // Note: We don't take() the stream here so that build_events() can still
