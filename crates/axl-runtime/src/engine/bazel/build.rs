@@ -159,7 +159,10 @@ impl Build {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::null());
         cmd.stdin(Stdio::null());
-        let c = cmd.spawn()?.wait_with_output()?;
+        let c = cmd
+            .spawn()
+            .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?
+            .wait_with_output()?;
         if !c.status.success() {
             return Err(io::Error::other(anyhow!(
                 "failed to determine Bazel server info"
@@ -350,7 +353,9 @@ impl Build {
         });
         cmd.stdin(Stdio::null());
 
-        let child = cmd.spawn()?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
 
         drop(_enter);
         Ok(Self {

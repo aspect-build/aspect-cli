@@ -3,7 +3,7 @@ use std::process;
 use std::process::Stdio;
 
 use allocative::Allocative;
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use derive_more::Display;
 
 use starlark::environment::Methods;
@@ -65,6 +65,28 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
 pub struct Command {
     #[allocative(skip)]
     inner: RefCell<process::Command>,
+}
+
+impl Command {
+    /// Format as `program "arg1" "arg2"` for use in error messages.
+    /// Deliberately excludes environment variables to avoid leaking secrets.
+    fn describe(&self) -> String {
+        let inner = self.inner.borrow();
+        inner.get_args().fold(
+            inner.get_program().to_string_lossy().into_owned(),
+            |acc, a| format!("{acc} {a:?}"),
+        )
+    }
+
+    fn try_spawn(&self) -> anyhow::Result<process::Child> {
+        let result = self.inner.borrow_mut().spawn();
+        result.with_context(|| format!("failed to spawn command {}", self.describe()))
+    }
+
+    fn try_status(&self) -> anyhow::Result<process::ExitStatus> {
+        let result = self.inner.borrow_mut().status();
+        result.with_context(|| format!("failed to execute command {}", self.describe()))
+    }
 }
 
 impl<'v> AllocValue<'v> for Command {
@@ -183,7 +205,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// By default, stdin, stdout and stderr are inherited from the parent.
     fn spawn<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Child> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        let child = cmd.inner.borrow_mut().spawn()?;
+        let child = cmd.try_spawn()?;
         Ok(Child {
             inner: RefCell::new(Some(child)),
         })
@@ -196,7 +218,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
     /// By default, stdin, stdout and stderr are inherited from the parent.
     fn status<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
-        let status = cmd.inner.borrow_mut().status()?;
+        let status = cmd.try_status()?;
         Ok(ExitStatus(status))
     }
 }
@@ -461,5 +483,47 @@ pub(crate) fn output_methods(registry: &mut MethodsBuilder) {
     fn stdout<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         let out = this.downcast_ref_err::<Output>().into_anyhow_result()?;
         Ok(String::from_utf8(out.0.stdout.clone())?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_error_includes_command_and_args() {
+        let program = "/nonexistent/program___axl_test";
+        let cmd = Command {
+            inner: RefCell::new(process::Command::new(program)),
+        };
+        cmd.inner.borrow_mut().args(["--flag", "value"]);
+        let err_msg = cmd.try_spawn().unwrap_err().to_string();
+        assert!(err_msg.contains(program));
+        assert!(err_msg.contains("--flag") && err_msg.contains("value"));
+    }
+
+    #[test]
+    fn status_error_includes_command_and_args() {
+        let program = "/nonexistent/program___axl_test";
+        let cmd = Command {
+            inner: RefCell::new(process::Command::new(program)),
+        };
+        cmd.inner.borrow_mut().args(["--flag", "value"]);
+        let err_msg = cmd.try_status().unwrap_err().to_string();
+        assert!(err_msg.contains(program));
+        assert!(err_msg.contains("--flag") && err_msg.contains("value"));
+    }
+
+    #[test]
+    fn describe_excludes_env_vars() {
+        let cmd = Command {
+            inner: RefCell::new(process::Command::new("program")),
+        };
+        cmd.inner
+            .borrow_mut()
+            .args(["--flag1", "--flag2", "with spaces"])
+            .env("SECRET_TOKEN", "super_secret");
+        let description = cmd.describe();
+        assert_eq!(description, r#"program "--flag1" "--flag2" "with spaces""#);
     }
 }
