@@ -57,9 +57,12 @@ fn resolve_flags<'v>(
 }
 
 mod build;
+mod cancel;
 mod execlog_sink;
 mod health_check;
+mod info;
 mod iter;
+mod process;
 mod query;
 mod stream;
 mod stream_sink;
@@ -165,7 +168,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let has_conditional = flags.items.iter().any(|f| f.is_right())
             || startup_flags.items.iter().any(|f| f.is_right());
         let bazel_version = if has_conditional {
-            let (_, version) = build::Build::server_info()
+            let (_, version) = info::server_info()
                 .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
             Some(version)
         } else {
@@ -274,7 +277,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         let has_conditional = flags.items.iter().any(|f| f.is_right())
             || startup_flags.items.iter().any(|f| f.is_right());
         let bazel_version = if has_conditional {
-            let (_, version) = build::Build::server_info()
+            let (_, version) = info::server_info()
                 .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
             Some(version)
         } else {
@@ -400,6 +403,36 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<health_check::HealthCheckResult> {
         Ok(health_check::run(output_base.into_option().as_deref()))
     }
+
+    /// Cancel whatever invocation is currently running on the Bazel server.
+    ///
+    /// Finds the bazel client process holding the server lock and sends it
+    /// SIGINT (graceful cancellation, like Ctrl+C). The client then forwards
+    /// a CancelRequest RPC to the server.
+    /// Returns an `Cancellation` with status and control methods.
+    /// # Arguments
+    /// * `output_base` - Optional Bazel output base path. When provided, it is
+    ///   passed to `bazel --output_base=` to target a specific server instance.
+    fn cancel_invocation<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] output_base: NoneOr<String>,
+    ) -> anyhow::Result<cancel::Cancellation> {
+        let output_base = output_base.into_option().filter(|s| !s.is_empty());
+        // IMPORTANT: client_pid() must be called BEFORE server_info() because
+        // server_info() runs `bazel info` without --noblock_for_lock, which
+        // blocks on the server lock. client_pid() uses --noblock_for_lock so
+        // it returns immediately even when another invocation holds the lock.
+        if let Some(pid) = info::client_pid(output_base.as_deref()) {
+            process::sigint(pid);
+        }
+        // Now that we've SIGINT'd the client, the lock will be released soon
+        // and server_info() can acquire it to read the server PID.
+        let (server_pid, _) =
+            info::server_info_with_output_base(output_base.as_deref()).map_err(|e| {
+                anyhow::anyhow!("failed to get Bazel server info for cancellation: {}", e)
+            })?;
+        Ok(cancel::Cancellation::new(server_pid, output_base))
+    }
 }
 
 #[starlark_module]
@@ -445,6 +478,7 @@ fn register_build_types(globals: &mut GlobalsBuilder) {
         StarlarkValueAsType::new();
     const BuildEventSink: StarlarkValueAsType<build::BuildEventSink> = StarlarkValueAsType::new();
     const BuildStatus: StarlarkValueAsType<build::BuildStatus> = StarlarkValueAsType::new();
+    const Cancellation: StarlarkValueAsType<cancel::Cancellation> = StarlarkValueAsType::new();
     const ExecutionLogIterator: StarlarkValueAsType<iter::ExecutionLogIterator> =
         StarlarkValueAsType::new();
     const WorkspaceEventIterator: StarlarkValueAsType<iter::WorkspaceEventIterator> =
