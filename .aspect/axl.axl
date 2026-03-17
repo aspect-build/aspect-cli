@@ -483,9 +483,10 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, result3 == True, "wait() on server-wide cancellation should return True")
 
     # Test 4: Server-wide cancel_invocation while a build is running
-    # Start a real build (full execution, not --nobuild) so the lock is held long enough
+    # Use --nobuild so it holds the lock during loading/analysis without producing outputs
     build4 = ctx.bazel.build(
         "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild"],
         build_events = True,
     )
 
@@ -512,6 +513,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     # Test 6: cancel_invocation with output_base while a build is running
     build6 = ctx.bazel.build(
         "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild"],
         build_events = True,
     )
     cancellation6 = ctx.bazel.cancel_invocation(output_base = output_base)

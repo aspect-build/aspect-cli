@@ -40,6 +40,8 @@ def impl(ctx: TaskContext) -> int:
 
     startup_flags = list(ctx.args.bazel_startup_flag)
     startup_flags.extend(fragment.extra_startup_flags)
+    if ctx.args.output_base:
+        startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
     if fragment.startup_flags:
         startup_flags = fragment.startup_flags(startup_flags)
 
