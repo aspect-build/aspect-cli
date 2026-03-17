@@ -444,36 +444,7 @@ def test_conditional_flags(ctx: TaskContext, tc: int) -> int:
     return tc
 
 def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
-    # Test 1: Per-build cancel on a build that's already finished
-    build1 = ctx.bazel.build(
-        "//crates/aspect-cli:aspect-cli",
-        flags = ["--nobuild"],
-    )
-    status1 = build1.wait()
-    tc = test_case(tc, status1.success, "build should succeed before cancel test")
-
-    cancellation1 = build1.cancel()
-    tc = test_case(tc, type(cancellation1.busy) == "bool", "cancel().busy should be a bool")
-    tc = test_case(tc, cancellation1.busy == False, "cancel() on finished build should not be busy")
-    # wait() on a non-busy cancellation should return immediately
-    result1 = cancellation1.wait()
-    tc = test_case(tc, result1 == True, "wait() on non-busy cancellation should return True")
-
-    # Test 2: Per-build cancel on a running build (use a real build to exercise SIGINT path)
-    build2 = ctx.bazel.build(
-        "//crates/aspect-cli:aspect-cli",
-        flags = ["--nobuild"],
-        build_events = True,
-    )
-    cancellation2 = build2.cancel()
-    tc = test_case(tc, type(cancellation2.busy) == "bool", "cancel().busy should be a bool on running build")
-    # wait() should return quickly for per-build (user calls build.wait())
-    cancellation2.wait()
-
-    # After cancel, still call build.wait() to join stream threads
-    build2.wait()
-
-    # Test 3: Server-wide cancel_invocation when no build is running
+    # Test 1: Server-wide cancel_invocation when no build is running
     cancellation3 = ctx.bazel.cancel_invocation()
     tc = test_case(tc, type(cancellation3.busy) == "bool", "cancel_invocation().busy should be a bool")
     # No invocation is active, so client_pid() returns None and busy should be False.
@@ -482,7 +453,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     result3 = cancellation3.wait()
     tc = test_case(tc, result3 == True, "wait() on server-wide cancellation should return True")
 
-    # Test 4: Server-wide cancel_invocation while a build is running
+    # Test 2: Server-wide cancel_invocation while a build is running
     # Use --nobuild so it holds the lock during loading/analysis without producing outputs
     build4 = ctx.bazel.build(
         "//crates/aspect-cli:aspect-cli",
@@ -501,7 +472,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     status4 = build4.wait()
     tc = test_case(tc, type(status4.code) == "int", "build.wait() after server-wide cancel should return a status")
 
-    # Test 5: cancel_invocation with output_base (no build running)
+    # Test 3: cancel_invocation with output_base (no build running)
     # output_base is passed to bazel --output_base= to target a specific server.
     info = ctx.bazel.info()
     output_base = info["output_base"]
@@ -510,7 +481,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     result5 = cancellation5.wait()
     tc = test_case(tc, result5 == True, "wait() on output_base cancel should return True")
 
-    # Test 6: cancel_invocation with output_base while a build is running
+    # Test 4: cancel_invocation with output_base while a build is running
     build6 = ctx.bazel.build(
         "//crates/aspect-cli:aspect-cli",
         flags = ["--nobuild"],
@@ -523,13 +494,13 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     status6 = build6.wait()
     tc = test_case(tc, type(status6.code) == "int", "build.wait() after output_base cancel should return a status")
 
-    # Test 7: cancel_invocation with empty output_base (should behave like no output_base)
+    # Test 5: cancel_invocation with empty output_base (should behave like no output_base)
     cancellation7 = ctx.bazel.cancel_invocation(output_base = "")
     tc = test_case(tc, cancellation7.busy == False, "cancel_invocation(output_base='') should not be busy")
     result7 = cancellation7.wait()
     tc = test_case(tc, result7 == True, "wait() on empty output_base cancel should return True")
 
-    # Test 8: force() API shape test (don't actually kill the server - just verify it returns bool)
+    # Test 6: force() API shape test (don't actually kill the server - just verify it returns bool)
     # We skip actually calling force() here because it would kill the Bazel daemon
     # and break subsequent tests. The API is exercised through the type system.
 

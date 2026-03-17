@@ -431,7 +431,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             info::server_info_with_output_base(output_base.as_deref()).map_err(|e| {
                 anyhow::anyhow!("failed to get Bazel server info for cancellation: {}", e)
             })?;
-        Ok(cancel::Cancellation::new(server_pid, None, output_base))
+        Ok(cancel::Cancellation::new(server_pid, output_base))
     }
 }
 

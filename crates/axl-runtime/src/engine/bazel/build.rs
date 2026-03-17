@@ -362,35 +362,6 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         Ok(WorkspaceEventIterator::new(event_stream.receiver()))
     }
 
-    /// Cancel this Bazel invocation by sending SIGINT to the child process.
-    ///
-    /// Signals the child process (wrapper or bazel client) that was spawned
-    /// for this build. The signal propagates to the bazel client which sends
-    /// a CancelRequest RPC to the server.
-    ///
-    /// Returns an `Cancellation` object with status and control methods.
-    /// After cancelling, you should still call `build.wait()` to properly join
-    /// stream threads and sinks.
-    fn cancel<'v>(this: values::Value<'v>) -> anyhow::Result<super::cancel::Cancellation> {
-        let build = this.downcast_ref::<Build>().unwrap();
-        let wrapper_pid = build.child.borrow().id();
-        let still_running = build.child.borrow_mut().try_wait()?.is_none();
-        if still_running {
-            // Get the real bazel client PID from the server.
-            // If we can't get it, fall back to signalling the wrapper.
-            let target_pid = super::info::client_pid(None).unwrap_or(wrapper_pid);
-            super::process::sigint(target_pid);
-        }
-        let (server_pid, _) = super::info::server_info().map_err(|e| {
-            anyhow::anyhow!("failed to get Bazel server info for cancellation: {}", e)
-        })?;
-        Ok(super::cancel::Cancellation::new(
-            server_pid,
-            Some(wrapper_pid),
-            None,
-        ))
-    }
-
     fn try_wait<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<BuildStatus>> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         let status = build.child.borrow_mut().try_wait()?;

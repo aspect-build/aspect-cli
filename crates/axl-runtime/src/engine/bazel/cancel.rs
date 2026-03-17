@@ -22,16 +22,13 @@ pub struct Cancellation {
     #[allocative(skip)]
     server_pid: u32,
     #[allocative(skip)]
-    child_pid: Option<u32>,
-    #[allocative(skip)]
     output_base: Option<String>,
 }
 
 impl Cancellation {
-    pub fn new(server_pid: u32, child_pid: Option<u32>, output_base: Option<String>) -> Self {
+    pub fn new(server_pid: u32, output_base: Option<String>) -> Self {
         Self {
             server_pid,
-            child_pid,
             output_base,
         }
     }
@@ -63,34 +60,22 @@ pub(crate) fn cancellation_methods(registry: &mut MethodsBuilder) {
 
     /// Block until the cancelled invocation finishes.
     ///
-    /// For per-build cancellations, returns immediately — call `build.wait()`
-    /// to reap the child process and join stream threads.
-    ///
-    /// For server-wide cancellations, polls until the server is no longer busy.
+    /// Polls until the server is no longer busy.
     fn wait<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = 200)] poll_ms: i32,
     ) -> anyhow::Result<bool> {
         let cancellation = this.downcast_ref::<Cancellation>().unwrap();
-        // Per-build: build.wait() handles child reap + stream joins atomically.
-        // We can't reap the child here without leaving dangling stream threads.
-        if cancellation.child_pid.is_some() {
-            return Ok(true);
-        }
-        // Server-wide: poll until the server is no longer busy.
+        let poll_ms = poll_ms.max(0) as u64;
         while info::is_server_busy(cancellation.output_base.as_deref()) {
-            std::thread::sleep(std::time::Duration::from_millis(poll_ms as u64));
+            std::thread::sleep(std::time::Duration::from_millis(poll_ms));
         }
         Ok(true)
     }
 
-    /// Force-kill the invocation: SIGTERM to the client child process (if any)
-    /// and SIGKILL to the server daemon.
+    /// Force-kill the invocation by sending SIGKILL to the server daemon.
     fn force<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
         let cancellation = this.downcast_ref::<Cancellation>().unwrap();
-        if let Some(child_pid) = cancellation.child_pid {
-            process::sigterm(child_pid);
-        }
         process::sigkill(cancellation.server_pid);
         Ok(true)
     }
