@@ -15,6 +15,7 @@ use starlark::values;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
+use starlark::values::UnpackValue;
 use starlark::values::ValueLike;
 use starlark::values::dict::UnpackDictEntries;
 use starlark::values::list::ListRef;
@@ -38,6 +39,7 @@ mod info;
 mod iter;
 mod process;
 mod query;
+mod rc;
 mod stream;
 mod stream_sink;
 mod stream_tracing;
@@ -460,6 +462,82 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// SIGINT (graceful cancellation, like Ctrl+C). The client then forwards
     /// a CancelRequest RPC to the server.
     /// Returns an `Cancellation` with status and control methods.
+    /// Parse `.bazelrc` files rooted at `root` and return a `BazelRC` object.
+    ///
+    /// # Arguments
+    /// * `root` - Workspace root directory. Defaults to the workspace root from `ctx`.
+    /// * `startup_flags` - Startup flags (e.g. `["--bazelrc=/path/to/extra.bazelrc"]`).
+    /// * `flags` - Command-line flags to inject as synthetic `always` options
+    ///   (e.g. `["--config=opt"]`).
+    ///
+    /// **Examples**
+    ///
+    /// ```python
+    /// def _impl(ctx):
+    ///     rc = ctx.bazel.parse_rc(flags = ["--config=opt"])
+    ///     build = ctx.bazel.build("//...", flags = rc.expand(command = "build"))
+    ///     build.wait()
+    /// ```
+    fn parse_rc<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] root: NoneOr<String>,
+        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
+            values::Value<'v>,
+        >,
+        #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
+            values::Value<'v>,
+        >,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<rc::StarlarkBazelRC> {
+        fn unpack_rc_option<'v>(item: values::Value<'v>) -> anyhow::Result<bazelrc::RcOption> {
+            if let Some(s) = item.unpack_str() {
+                return Ok(bazelrc::RcOption {
+                    value: s.to_owned(),
+                    ..bazelrc::RcOption::default()
+                });
+            }
+            if let Ok(Some(tup)) = UnpackTuple::<&str>::unpack_value(item) {
+                if let Some(flag) = tup.items.first() {
+                    return Ok(bazelrc::RcOption {
+                        value: flag.to_string(),
+                        version_condition: tup.items.get(1).map(|s| s.to_string()),
+                        ..bazelrc::RcOption::default()
+                    });
+                }
+            }
+            Err(anyhow::anyhow!(
+                "parse_rc: flag items must be str or (str, str), got {}",
+                item.get_type()
+            ))
+        }
+
+        let store = AxlStore::from_eval(eval)?;
+        let root = root
+            .into_option()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| store.root_dir.clone());
+        let startup_flags_vec: Vec<&str> = startup_flags
+            .items
+            .iter()
+            .map(|v| {
+                v.unpack_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "parse_rc: startup_flags items must be str, got {}",
+                        v.get_type()
+                    )
+                })
+            })
+            .collect::<anyhow::Result<_>>()?;
+        let flags_vec: Vec<bazelrc::RcOption> = flags
+            .items
+            .iter()
+            .map(|v| unpack_rc_option(*v))
+            .collect::<anyhow::Result<_>>()?;
+        let inner = bazelrc::BazelRC::new(root, &startup_flags_vec, &flags_vec)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(rc::StarlarkBazelRC { inner })
+    }
+
     fn cancel_invocation<'v>(this: values::Value<'v>) -> anyhow::Result<cancel::Cancellation> {
         let all_flags = read_startup_flags(this)?;
         // IMPORTANT: client_pid() must be called BEFORE server_info() because
@@ -542,6 +620,7 @@ fn register_query_types(globals: &mut GlobalsBuilder) {
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
     const Bazel: StarlarkValueAsType<FrozenBazel> = StarlarkValueAsType::new();
+    const BazelRC: StarlarkValueAsType<rc::StarlarkBazelRC> = StarlarkValueAsType::new();
     const HealthCheckResult: StarlarkValueAsType<health_check::HealthCheckResult> =
         StarlarkValueAsType::new();
 }

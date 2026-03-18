@@ -1,0 +1,16 @@
+[package]
+name = "bazelrc"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror = "2.0.17"
+
+[dev-dependencies]
+tempfile = "3"

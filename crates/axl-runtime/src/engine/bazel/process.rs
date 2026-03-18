@@ -42,15 +42,6 @@ pub(crate) fn sigint(_pid: u32) -> bool {
     false
 }
 
-/// Sends SIGTERM to the given PID. Returns true if the signal was sent successfully.
-#[cfg(unix)]
-pub(crate) fn sigterm(pid: u32) -> bool {
-    use nix::sys::signal::{self, Signal};
-    use nix::unistd::Pid;
-
-    signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).is_ok()
-}
-
 #[cfg(not(unix))]
 pub(crate) fn sigterm(_pid: u32) -> bool {
     tracing::warn!("sigterm is not supported on this platform");
