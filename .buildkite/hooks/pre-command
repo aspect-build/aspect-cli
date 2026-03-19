@@ -2,7 +2,7 @@
 set -eu
 
 # Bazel startup options for CI
-export BAZEL_STARTUP_OPTS="--nohome_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
+export BAZEL_STARTUP_OPTS="--nohome_rc --nosystem_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
 
 # Build bazel remote flags from environment variables set by configure_workflows_env
 BAZEL_REMOTE_FLAGS=""
