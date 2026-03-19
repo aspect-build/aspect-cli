@@ -361,9 +361,12 @@ mod tests {
         let rc_path = root.join(".bazelrc");
         fs::write(&rc_path, "build --jobs=4\n").unwrap();
 
-        // Passing the same path twice via --bazelrc should deduplicate
+        // Passing the same path twice via --bazelrc should deduplicate.
+        // Suppress system/home rcs so the test is hermetic regardless of the environment.
         let explicit = rc_path.display().to_string();
         let flags = vec![
+            "--nosystem_rc".to_string(),
+            "--nohome_rc".to_string(),
             format!("--bazelrc={explicit}"),
             format!("--bazelrc={explicit}"),
         ];
@@ -783,8 +786,18 @@ mod tests {
         fs::write(&explicit, "build --custom-flag\n").unwrap();
 
         let flag = format!("--bazelrc={}", explicit.display());
-        // Suppress workspace rc so only the explicit file is loaded
-        let rc = BazelRC::new(root, &["--noworkspace_rc", flag.as_str()], &[]).unwrap();
+        // Suppress all auto-discovered rcs so only the explicit file is loaded.
+        let rc = BazelRC::new(
+            root,
+            &[
+                "--nosystem_rc",
+                "--noworkspace_rc",
+                "--nohome_rc",
+                flag.as_str(),
+            ],
+            &[],
+        )
+        .unwrap();
         assert_eq!(rc.sources().len(), 1);
         assert_eq!(rc.options_for("build")[0].value, "--custom-flag");
     }
