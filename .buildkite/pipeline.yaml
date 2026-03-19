@@ -77,6 +77,47 @@ steps:
         $$CLI --version
         echo "--- :aspect: aspect version"
         $$LAUNCHER version
+  - key: __main__::bazelrc-e2e
+    depends_on:
+      - __main__::warm
+    label: ":bazel: BazelRC e2e (no server restart)"
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 20
+    retry:
+      automatic:
+        - exit_status: 78
+          limit: 1
+    command:
+      - |
+        echo "--- :bazel: Warm up Bazel server"
+        bazel test //crates/bazelrc:bazelrc_test
+        OUTPUT_BASE=$$(bazel info output_base)
+        SERVER_LOG=$$(bazel info server_log)
+        BEFORE_PID=$$(bazel info server_pid)
+        echo "output_base: $$OUTPUT_BASE"
+        echo "server_log:  $$SERVER_LOG"
+        echo "server_pid:  $$BEFORE_PID"
+        echo "--- :bazel: bazel info (before aspect)"
+        bazel info
+        echo "--- :aspect: aspect test //crates/bazelrc:bazelrc_test"
+        aspect test //crates/bazelrc:bazelrc_test
+        AFTER_PID=$$(bazel info server_pid)
+        echo "--- :bazel: bazel info (after aspect)"
+        bazel info
+        echo "--- :scroll: Server log"
+        cat "$$SERVER_LOG" || true
+        echo "--- :buildkite: Uploading artifacts from output_base"
+        buildkite-agent artifact upload "$$SERVER_LOG"
+        buildkite-agent artifact upload "$$OUTPUT_BASE/command.log"
+        buildkite-agent artifact upload "$$OUTPUT_BASE/server/**/*"
+        if [ "$$BEFORE_PID" != "$$AFTER_PID" ]; then
+          echo "^^^ +++"
+          echo "ERROR: Bazel server was restarted (PID $$BEFORE_PID → $$AFTER_PID)"
+          echo "This means aspect produced different startup flags than bazel."
+          exit 1
+        fi
+        echo "OK: server PID unchanged ($$BEFORE_PID)"
   - key: __main__::format
     label: ":broom: Format"
     depends_on:

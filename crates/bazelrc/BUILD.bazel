@@ -1,4 +1,4 @@
-load("//bazel/rust:defs.bzl", "rust_library")
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "bazelrc",
@@ -8,5 +8,13 @@ rust_library(
     ],
     visibility = [
         "//crates/axl-runtime:__pkg__",
+    ],
+)
+
+rust_test(
+    name = "bazelrc_test",
+    crate = ":bazelrc",
+    deps = [
+        "@crates//:tempfile",
     ],
 )
