@@ -190,7 +190,7 @@ impl BazelRC {
         let mut out = String::new();
 
         // Pass 1: direct sections (always / common / <command>) grouped by source file.
-        let direct_keys = ["always", "common", command];
+        let direct_keys = ["startup", "always", "common", command];
         for (source_idx, source_path) in self.sources.iter().enumerate() {
             let is_client = source_path == Path::new("<command line>");
 
