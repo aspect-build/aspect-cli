@@ -144,6 +144,31 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
         Ok((startup_flags, flags))
     }
 
+    /// Return a human-readable summary of all options loaded for `command`, mirroring
+    /// the output Bazel emits when `--announce_rc` is set.
+    ///
+    /// Useful for debugging which flags were picked up and from which rc file:
+    ///
+    /// ```python
+    /// print(rc.announce(command = "build"))
+    /// ```
+    ///
+    /// Example output:
+    /// ```
+    /// INFO: Options provided by the client:
+    ///   Inherited 'always' options: --config=opt
+    /// INFO: Reading rc options for 'build' from /workspace/.bazelrc:
+    ///   Inherited 'common' options: --show_timestamps --test_output=errors
+    ///   Inherited 'build' options: --jobs=8
+    /// INFO: Found applicable config definition build:opt in file /workspace/.bazelrc: --compilation_mode=opt
+    /// ```
+    fn announce(
+        this: &StarlarkBazelRC,
+        #[starlark(require = named)] command: String,
+    ) -> anyhow::Result<String> {
+        Ok(this.inner.announce(&command))
+    }
+
     /// Return the list of source file paths that were loaded.
     fn sources<'v>(
         this: &StarlarkBazelRC,

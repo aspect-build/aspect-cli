@@ -167,6 +167,115 @@ impl BazelRC {
         result
     }
 
+    /// Produce a human-readable summary of all options loaded for `command`, mirroring
+    /// the output Bazel emits when `--announce_rc` is set.
+    ///
+    /// Two kinds of lines are emitted, in this order:
+    ///
+    /// 1. **"Reading rc options"** — one block per source file for direct sections
+    ///    (`always`, `common`, `<command>`).
+    /// 2. **"Found applicable config definition"** — one line per config-keyed section
+    ///    (`build:opt`, `common:ci`, …) that is relevant to `command`.
+    ///
+    /// Version-gated flags (from `try-import-if-bazel-version`) are annotated with
+    /// `[if <cond>]` so the condition is visible.
+    pub fn announce(&self, command: &str) -> String {
+        let fmt = |opt: &RcOption| -> String {
+            match &opt.version_condition {
+                None => opt.value.clone(),
+                Some(cond) => format!("[if {}] {}", cond, opt.value),
+            }
+        };
+
+        let mut out = String::new();
+
+        // Pass 1: direct sections (always / common / <command>) grouped by source file.
+        let direct_keys = ["always", "common", command];
+        for (source_idx, source_path) in self.sources.iter().enumerate() {
+            let is_client = source_path == Path::new("<command line>");
+
+            let sections: Vec<(&str, Vec<String>)> = direct_keys
+                .iter()
+                .filter_map(|&key| {
+                    let flags: Vec<String> = self
+                        .options
+                        .get(key)
+                        .map(|v| {
+                            v.iter()
+                                .filter(|o| o.source_index == source_idx)
+                                .map(fmt)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if flags.is_empty() {
+                        None
+                    } else {
+                        Some((key, flags))
+                    }
+                })
+                .collect();
+
+            if sections.is_empty() {
+                continue;
+            }
+
+            if is_client {
+                out.push_str("INFO: Options provided by the client:\n");
+            } else {
+                out.push_str(&format!(
+                    "INFO: Reading rc options for '{}' from {}:\n",
+                    command,
+                    source_path.display()
+                ));
+            }
+
+            for (key, flags) in sections {
+                out.push_str(&format!(
+                    "  Inherited '{}' options: {}\n",
+                    key,
+                    flags.join(" ")
+                ));
+            }
+        }
+
+        // Pass 2: config-keyed sections (always:*, common:*, <command>:*), sorted for
+        // deterministic output, then ordered within each key by source file.
+        let mut config_keys: Vec<&String> = self
+            .options
+            .keys()
+            .filter(|k| {
+                if let Some(base) = k.split(':').next() {
+                    k.contains(':') && (base == "always" || base == "common" || base == command)
+                } else {
+                    false
+                }
+            })
+            .collect();
+        config_keys.sort();
+
+        for key in config_keys {
+            let opts = &self.options[key];
+            for (source_idx, source_path) in self.sources.iter().enumerate() {
+                let flags: Vec<String> = opts
+                    .iter()
+                    .filter(|o| o.source_index == source_idx)
+                    .map(fmt)
+                    .collect();
+                if flags.is_empty() {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "INFO: Found applicable config definition {} in file {}: {}\n",
+                    key,
+                    source_path.display(),
+                    flags.join(" ")
+                ));
+            }
+        }
+
+        out
+    }
+
     /// Append a synthetic `always` option, optionally version-gated.
     ///
     /// The option is attributed to the synthetic `<command line>` source (created on first use).

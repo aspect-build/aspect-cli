@@ -77,6 +77,7 @@ def _test_impl(ctx: TaskContext) -> int:
 
     rc_startup_flags, flags = rc.expand_all(command = "test")
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
+    print(rc.announce(command = "test"))
 
     for _ in range(10):
         test = ctx.bazel.test(
