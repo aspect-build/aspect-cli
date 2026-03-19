@@ -543,6 +543,422 @@ mod tests {
         assert_eq!(expanded[2].version_condition, None);
     }
 
+    // ── File content parsing ──────────────────────────────────────────────────
+
+    #[test]
+    fn empty_file() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "").unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        assert_eq!(rc.options_for("build").len(), 0);
+    }
+
+    #[test]
+    fn whitespace_only_file() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "   \n\t\n  \n").unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        assert_eq!(rc.options_for("build").len(), 0);
+    }
+
+    #[test]
+    fn commented_line() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "# startup foo\n").unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        assert_eq!(rc.options_for("startup").len(), 0);
+    }
+
+    #[test]
+    fn command_with_no_args() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build\n").unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        assert_eq!(rc.options_for("build").len(), 0);
+    }
+
+    #[test]
+    fn command_with_trailing_comment() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build --jobs=4 # a comment\n").unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let opts = rc.options_for("build");
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].value, "--jobs=4");
+    }
+
+    #[test]
+    fn multiple_args_on_one_line() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build --jobs=4 --verbose_failures\n").unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let values: Vec<&str> = rc
+            .options_for("build")
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert_eq!(values, vec!["--jobs=4", "--verbose_failures"]);
+    }
+
+    #[test]
+    fn multiple_lines_same_command_accumulates() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "build --jobs=4\nbuild --verbose_failures\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let values: Vec<&str> = rc
+            .options_for("build")
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert_eq!(values, vec!["--jobs=4", "--verbose_failures"]);
+    }
+
+    #[test]
+    fn multiple_different_commands() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "startup --max_idle_secs=60\nbuild --jobs=4\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        assert_eq!(rc.options_for("startup").len(), 1);
+        assert_eq!(rc.options_for("build").len(), 1);
+        assert_eq!(rc.options_for("startup")[0].value, "--max_idle_secs=60");
+        assert_eq!(rc.options_for("build")[0].value, "--jobs=4");
+    }
+
+    #[test]
+    fn tab_separated_command_and_args() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build\t--jobs=4\n").unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let opts = rc.options_for("build");
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].value, "--jobs=4");
+    }
+
+    #[test]
+    fn indented_command_parsed() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "  build --jobs=4\n").unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let opts = rc.options_for("build");
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].value, "--jobs=4");
+    }
+
+    #[test]
+    fn line_continuation_in_bazelrc() {
+        let dir = make_workspace();
+        let root = dir.path();
+        // Two separate build options joined by line continuation within a single directive
+        fs::write(
+            root.join(".bazelrc"),
+            "build --jobs=4 \\\n  --verbose_failures\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let values: Vec<&str> = rc
+            .options_for("build")
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert_eq!(values, vec!["--jobs=4", "--verbose_failures"]);
+    }
+
+    // ── Import ordering ───────────────────────────────────────────────────────
+
+    #[test]
+    fn import_foo_then_add_bar() {
+        // import before local flag → imported flags come before local flags
+        let dir = make_workspace();
+        let root = dir.path();
+
+        let foo = root.join("foo.bazelrc");
+        fs::write(&foo, "build --from-foo\n").unwrap();
+
+        fs::write(
+            root.join(".bazelrc"),
+            format!("import {}\nbuild --local-bar\n", foo.display()),
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let values: Vec<&str> = rc
+            .options_for("build")
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert_eq!(values, vec!["--from-foo", "--local-bar"]);
+    }
+
+    #[test]
+    fn add_bar_then_import_foo() {
+        // local flag before import → local flag comes first
+        let dir = make_workspace();
+        let root = dir.path();
+
+        let foo = root.join("foo.bazelrc");
+        fs::write(&foo, "build --from-foo\n").unwrap();
+
+        fs::write(
+            root.join(".bazelrc"),
+            format!("build --local-bar\nimport {}\n", foo.display()),
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let values: Vec<&str> = rc
+            .options_for("build")
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert_eq!(values, vec!["--local-bar", "--from-foo"]);
+    }
+
+    // ── File discovery ────────────────────────────────────────────────────────
+
+    #[test]
+    fn noworkspace_rc_skips_workspace() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build --workspace-flag\n").unwrap();
+
+        let rc = BazelRC::new(root, &["--noworkspace_rc"], &[]).unwrap();
+        // Workspace .bazelrc should not be loaded
+        assert!(rc.raw_options("build").is_empty());
+    }
+
+    #[test]
+    fn nohome_rc_skips_home() {
+        let dir = make_workspace();
+        let root = dir.path();
+        // Without a workspace .bazelrc, just verify --nohome_rc is accepted without error
+        let rc = BazelRC::new(root, &["--nohome_rc"], &[]);
+        assert!(rc.is_ok());
+    }
+
+    #[test]
+    fn ignore_all_rc_files_skips_all() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build --workspace-flag\n").unwrap();
+
+        let rc = BazelRC::new(root, &["--ignore_all_rc_files"], &[]).unwrap();
+        assert!(rc.sources().is_empty());
+        assert!(rc.options_for("build").is_empty());
+    }
+
+    #[test]
+    fn explicit_bazelrc_loads_file() {
+        let dir = make_workspace();
+        let root = dir.path();
+        let explicit = root.join("custom.bazelrc");
+        fs::write(&explicit, "build --custom-flag\n").unwrap();
+
+        let flag = format!("--bazelrc={}", explicit.display());
+        // Suppress workspace rc so only the explicit file is loaded
+        let rc = BazelRC::new(root, &["--noworkspace_rc", flag.as_str()], &[]).unwrap();
+        assert_eq!(rc.sources().len(), 1);
+        assert_eq!(rc.options_for("build")[0].value, "--custom-flag");
+    }
+
+    #[test]
+    fn explicit_bazelrc_missing_errors() {
+        let dir = make_workspace();
+        let root = dir.path();
+
+        let err = BazelRC::new(root, &["--bazelrc=/nonexistent/missing.bazelrc"], &[]).unwrap_err();
+        assert!(matches!(err, BazelRcError::BazelrcNotFound { .. }));
+    }
+
+    // ── Error cases ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn import_too_many_args_error() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "import foo bar\n").unwrap();
+
+        let err = BazelRC::new(root, &[] as &[&str], &[]).unwrap_err();
+        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+    }
+
+    #[test]
+    fn try_import_too_many_args_error() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "try-import foo bar\n").unwrap();
+
+        let err = BazelRC::new(root, &[] as &[&str], &[]).unwrap_err();
+        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+    }
+
+    // ── Config expansion ──────────────────────────────────────────────────────
+
+    #[test]
+    fn common_config_section_used_as_fallback() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "common:myconfig --common-flag\n").unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=myconfig"])).unwrap();
+        let expanded = rc.expand_configs("build").unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+        assert!(values.contains(&"--common-flag"), "got: {values:?}");
+    }
+
+    #[test]
+    fn multi_level_config_expansion() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "build:a --config=b\nbuild:b --deep-flag\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=a"])).unwrap();
+        let expanded = rc.expand_configs("build").unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+        assert_eq!(values, vec!["--deep-flag"]);
+    }
+
+    #[test]
+    fn enable_platform_specific_config() {
+        let dir = make_workspace();
+        let root = dir.path();
+        let os = std::env::consts::OS;
+        fs::write(
+            root.join(".bazelrc"),
+            format!("build:{os} --os-specific-flag\n"),
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(
+            root,
+            &[] as &[&str],
+            &flags(&["--enable_platform_specific_config"]),
+        )
+        .unwrap();
+        let expanded = rc.expand_configs("build").unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+        assert!(
+            values.contains(&"--os-specific-flag"),
+            "expected --os-specific-flag in {values:?}"
+        );
+    }
+
+    #[test]
+    fn config_in_common_section_expands() {
+        // common --config=foo with build:foo defined → build expansion includes foo's flags
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "common --config=foo\nbuild:foo --foo-flag\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let expanded = rc.expand_configs("build").unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+        assert!(values.contains(&"--foo-flag"), "got: {values:?}");
+    }
+
+    #[test]
+    fn config_in_always_section_expands() {
+        // always --config=foo with build:foo defined → build expansion includes foo's flags
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "always --config=foo\nbuild:foo --foo-flag\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let expanded = rc.expand_configs("build").unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+        assert!(values.contains(&"--foo-flag"), "got: {values:?}");
+    }
+
+    #[test]
+    fn config_defined_in_always_colon_key() {
+        // always:myconfig --flag used when build:myconfig and common:myconfig are absent
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "always:myconfig --always-only-flag\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=myconfig"])).unwrap();
+        let expanded = rc.expand_configs("build").unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+        assert!(values.contains(&"--always-only-flag"), "got: {values:?}");
+    }
+
+    #[test]
+    fn enable_platform_specific_config_no_section_is_silent() {
+        // --enable_platform_specific_config with no build:<os> section must not error
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "build --jobs=4\n").unwrap();
+
+        let rc = BazelRC::new(
+            root,
+            &[] as &[&str],
+            &flags(&["--enable_platform_specific_config"]),
+        )
+        .unwrap();
+        // Should succeed and return the regular flag, not UndefinedConfig
+        let expanded = rc.expand_configs("build").unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+        assert!(values.contains(&"--jobs=4"));
+    }
+
+    #[test]
+    fn ignore_all_rc_files_suppresses_explicit_bazelrc() {
+        // --ignore_all_rc_files must suppress --bazelrc= files too (Bazel spec)
+        let dir = make_workspace();
+        let root = dir.path();
+        let explicit = root.join("explicit.bazelrc");
+        fs::write(&explicit, "build --explicit-flag\n").unwrap();
+
+        let flag = format!("--bazelrc={}", explicit.display());
+        let rc = BazelRC::new(root, &["--ignore_all_rc_files", flag.as_str()], &[]).unwrap();
+        assert!(rc.sources().is_empty());
+        assert!(rc.options_for("build").is_empty());
+    }
+
     #[test]
     fn unconditional_config_resolving_to_versioned_section_inherits_condition() {
         let dir = make_workspace();

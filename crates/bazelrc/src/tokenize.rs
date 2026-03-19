@@ -161,4 +161,14 @@ mod tests {
     fn test_backslash_in_single_quotes() {
         assert_eq!(tokenize("build '--fl\\ag'"), vec!["build", "--flag"]);
     }
+
+    #[test]
+    fn test_tab_separated() {
+        assert_eq!(tokenize("build\tfoo\tbar"), vec!["build", "foo", "bar"]);
+    }
+
+    #[test]
+    fn test_empty_string() {
+        assert_eq!(tokenize(""), Vec::<String>::new());
+    }
 }

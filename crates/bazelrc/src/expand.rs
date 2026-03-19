@@ -29,7 +29,14 @@ pub(crate) fn expand_configs(rc: &BazelRC, command: &str) -> Result<Vec<RcOption
     }
 
     let mut result = Vec::new();
-    expand_args(rc, command, &base, &mut Vec::new(), &mut result)?;
+    expand_args(
+        rc,
+        command,
+        &base,
+        &mut Vec::new(),
+        &mut result,
+        has_platform_config,
+    )?;
 
     Ok(result)
 }
@@ -40,6 +47,9 @@ fn expand_args(
     args: &[RcOption],
     ancestor_chain: &mut Vec<String>,
     result: &mut Vec<RcOption>,
+    // When true, an undefined config is silently skipped rather than an error.
+    // Used for the synthetic --config=<os> injected by --enable_platform_specific_config.
+    implicit_platform_config: bool,
 ) -> Result<(), BazelRcError> {
     for opt in args {
         if let Some(config_name) = opt.value.strip_prefix("--config=") {
@@ -65,6 +75,15 @@ fn expand_args(
                         .cloned()
                         .collect();
                     if combined.is_empty() {
+                        // The synthetic OS config from --enable_platform_specific_config is
+                        // silently skipped when no matching section exists (Bazel spec: "if
+                        // applicable"). Explicitly-requested --config= still errors.
+                        let is_implicit_platform = implicit_platform_config
+                            && ancestor_chain.is_empty()
+                            && config_name == platform_config_name();
+                        if is_implicit_platform {
+                            continue;
+                        }
                         return Err(BazelRcError::UndefinedConfig {
                             command: command.to_owned(),
                             name: config_name.to_owned(),
@@ -88,7 +107,14 @@ fn expand_args(
                 .collect();
 
             ancestor_chain.push(config_name.to_owned());
-            expand_args(rc, command, &inherited, ancestor_chain, result)?;
+            expand_args(
+                rc,
+                command,
+                &inherited,
+                ancestor_chain,
+                result,
+                implicit_platform_config,
+            )?;
             ancestor_chain.pop();
         } else {
             result.push(opt.clone());

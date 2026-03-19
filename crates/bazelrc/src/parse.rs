@@ -149,3 +149,116 @@ fn resolve_import_path(raw: &str, workspace_root: &Path) -> PathBuf {
         PathBuf::from(raw)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn parse(path: &Path, root: &Path) -> Result<HashMap<String, Vec<RcOption>>, BazelRcError> {
+        let mut sources = Vec::new();
+        let mut options = HashMap::new();
+        let mut stack = Vec::new();
+        parse_file(path, root, None, &mut sources, &mut options, &mut stack)?;
+        Ok(options)
+    }
+
+    // ── Import argument validation ────────────────────────────────────────────
+
+    #[test]
+    fn import_too_many_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let rc = root.join("test.bazelrc");
+        fs::write(&rc, "import foo bar\n").unwrap();
+        let err = parse(&rc, root).unwrap_err();
+        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+    }
+
+    #[test]
+    fn try_import_too_many_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let rc = root.join("test.bazelrc");
+        fs::write(&rc, "try-import foo bar\n").unwrap();
+        let err = parse(&rc, root).unwrap_err();
+        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+    }
+
+    #[test]
+    fn try_import_if_bazel_version_too_few_args() {
+        // Only 2 tokens: directive + version condition, missing path
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let rc = root.join("test.bazelrc");
+        fs::write(&rc, "try-import-if-bazel-version >=8\n").unwrap();
+        let err = parse(&rc, root).unwrap_err();
+        assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
+    }
+
+    // ── %workspace% path resolution ───────────────────────────────────────────
+
+    #[test]
+    fn workspace_relative_import_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let sub = root.join("sub.bazelrc");
+        fs::write(&sub, "build --sub-flag\n").unwrap();
+
+        let main_rc = root.join("main.bazelrc");
+        fs::write(&main_rc, "import %workspace%/sub.bazelrc\n").unwrap();
+
+        let opts = parse(&main_rc, root).unwrap();
+        let build = opts.get("build").expect("build key");
+        assert_eq!(build.len(), 1);
+        assert_eq!(build[0].value, "--sub-flag");
+    }
+
+    // ── Import ordering ───────────────────────────────────────────────────────
+
+    #[test]
+    fn import_maintains_ordering() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let imported = root.join("imported.bazelrc");
+        fs::write(&imported, "build --from-import\n").unwrap();
+
+        let main_rc = root.join("main.bazelrc");
+        fs::write(
+            &main_rc,
+            format!(
+                "build --before\nimport {}\nbuild --after\n",
+                imported.display()
+            ),
+        )
+        .unwrap();
+
+        let opts = parse(&main_rc, root).unwrap();
+        let values: Vec<&str> = opts["build"].iter().map(|o| o.value.as_str()).collect();
+        assert_eq!(values, vec!["--before", "--from-import", "--after"]);
+    }
+
+    // ── Long import chain cycle detection ─────────────────────────────────────
+
+    #[test]
+    fn long_import_chain_cycle() {
+        // A → B → C → D → B  (B appears twice → cycle)
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let b = root.join("b.bazelrc");
+        let c = root.join("c.bazelrc");
+        let d = root.join("d.bazelrc");
+        let a = root.join("a.bazelrc");
+
+        fs::write(&d, format!("import {}\n", b.display())).unwrap();
+        fs::write(&c, format!("import {}\n", d.display())).unwrap();
+        fs::write(&b, format!("import {}\n", c.display())).unwrap();
+        fs::write(&a, format!("import {}\n", b.display())).unwrap();
+
+        let err = parse(&a, root).unwrap_err();
+        assert!(matches!(err, BazelRcError::ImportCycle { .. }));
+    }
+}

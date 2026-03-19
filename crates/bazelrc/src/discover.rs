@@ -71,12 +71,14 @@ pub(crate) fn discover_rc_files(
         }
     }
 
-    // Explicit --bazelrc= files always included (hard error if missing)
-    for p in explicit_bazelrcs {
-        if !p.exists() {
-            return Err(BazelRcError::BazelrcNotFound { path: p });
+    // Explicit --bazelrc= files are suppressed by --ignore_all_rc_files (Bazel spec).
+    if !ignore_all_rc {
+        for p in explicit_bazelrcs {
+            if !p.exists() {
+                return Err(BazelRcError::BazelrcNotFound { path: p });
+            }
+            candidates.push(p);
         }
-        candidates.push(p);
     }
 
     // Canonicalize and deduplicate while preserving order

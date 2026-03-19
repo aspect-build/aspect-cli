@@ -43,4 +43,19 @@ mod tests {
         let result = process(input);
         assert_eq!(result, vec!["build --jobs=4"]);
     }
+
+    #[test]
+    fn test_crlf_line_endings() {
+        // CRLF without continuation: \r should be stripped from line ending
+        let result = process("build --jobs=4\r\n");
+        assert_eq!(result, vec!["build --jobs=4"]);
+    }
+
+    #[test]
+    fn test_multiple_line_continuations() {
+        // Chained \\ across 3 lines
+        let input = "build \\\n  --jobs=4 \\\n  --verbose_failures";
+        let result = process(input);
+        assert_eq!(result, vec!["build   --jobs=4   --verbose_failures"]);
+    }
 }
