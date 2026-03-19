@@ -366,9 +366,9 @@ def test_bazel_info(ctx: TaskContext, tc: int) -> int:
     root_dir = ctx.std.env.root_dir()
     tc = test_case(tc, info["workspace"] == root_dir, "bazel.info()['workspace'] should match ctx.std.env.root_dir()")
 
-    # workdir override: pointing at the same workspace should give the same output_base
-    info2 = ctx.bazel.info(workdir = root_dir)
-    tc = test_case(tc, info2["output_base"] == info["output_base"], "bazel.info(workdir=root_dir) should return same output_base")
+    # calling info() again should return the same output_base
+    info2 = ctx.bazel.info()
+    tc = test_case(tc, info2["output_base"] == info["output_base"], "bazel.info() called twice should return same output_base")
 
     return tc
 
@@ -472,33 +472,32 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     status4 = build4.wait()
     tc = test_case(tc, type(status4.code) == "int", "build.wait() after server-wide cancel should return a status")
 
-    # Test 3: cancel_invocation with output_base (no build running)
-    # output_base is passed to bazel --output_base= to target a specific server.
+    # Test 3: cancel_invocation with startup_flags targeting a specific output_base (no build running)
     info = ctx.bazel.info()
     output_base = info["output_base"]
-    cancellation5 = ctx.bazel.cancel_invocation(output_base = output_base)
-    tc = test_case(tc, cancellation5.busy == False, "cancel_invocation(output_base=...) with no active build should not be busy")
+    cancellation5 = ctx.bazel.cancel_invocation(startup_flags = ["--output_base=" + output_base])
+    tc = test_case(tc, cancellation5.busy == False, "cancel_invocation(startup_flags=[--output_base=...]) with no active build should not be busy")
     result5 = cancellation5.wait()
-    tc = test_case(tc, result5 == True, "wait() on output_base cancel should return True")
+    tc = test_case(tc, result5 == True, "wait() on startup_flags cancel should return True")
 
-    # Test 4: cancel_invocation with output_base while a build is running
+    # Test 4: cancel_invocation with startup_flags targeting a specific output_base while a build is running
     build6 = ctx.bazel.build(
         "//crates/aspect-cli:aspect-cli",
         flags = ["--nobuild"],
         build_events = True,
     )
-    cancellation6 = ctx.bazel.cancel_invocation(output_base = output_base)
-    tc = test_case(tc, type(cancellation6.busy) == "bool", "cancel_invocation(output_base=...).busy should be a bool while build runs")
+    cancellation6 = ctx.bazel.cancel_invocation(startup_flags = ["--output_base=" + output_base])
+    tc = test_case(tc, type(cancellation6.busy) == "bool", "cancel_invocation(startup_flags=[--output_base=...]).busy should be a bool while build runs")
     result6 = cancellation6.wait()
-    tc = test_case(tc, result6 == True, "wait() on output_base cancel of running build should return True")
+    tc = test_case(tc, result6 == True, "wait() on startup_flags cancel of running build should return True")
     status6 = build6.wait()
-    tc = test_case(tc, type(status6.code) == "int", "build.wait() after output_base cancel should return a status")
+    tc = test_case(tc, type(status6.code) == "int", "build.wait() after startup_flags cancel should return a status")
 
-    # Test 5: cancel_invocation with empty output_base (should behave like no output_base)
-    cancellation7 = ctx.bazel.cancel_invocation(output_base = "")
-    tc = test_case(tc, cancellation7.busy == False, "cancel_invocation(output_base='') should not be busy")
+    # Test 5: cancel_invocation with no startup_flags
+    cancellation7 = ctx.bazel.cancel_invocation()
+    tc = test_case(tc, cancellation7.busy == False, "cancel_invocation() with no startup_flags should not be busy")
     result7 = cancellation7.wait()
-    tc = test_case(tc, result7 == True, "wait() on empty output_base cancel should return True")
+    tc = test_case(tc, result7 == True, "wait() on cancel with no startup_flags should return True")
 
     # Test 6: force() API shape test (don't actually kill the server - just verify it returns bool)
     # We skip actually calling force() here because it would kill the Bazel daemon

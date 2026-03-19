@@ -22,14 +22,14 @@ pub struct Cancellation {
     #[allocative(skip)]
     server_pid: u32,
     #[allocative(skip)]
-    output_base: Option<String>,
+    startup_flags: Vec<String>,
 }
 
 impl Cancellation {
-    pub fn new(server_pid: u32, output_base: Option<String>) -> Self {
+    pub fn new(server_pid: u32, startup_flags: Vec<String>) -> Self {
         Self {
             server_pid,
-            output_base,
+            startup_flags,
         }
     }
 }
@@ -55,7 +55,7 @@ pub(crate) fn cancellation_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn busy<'v>(this: values::Value<'v>) -> anyhow::Result<bool> {
         let cancellation = this.downcast_ref::<Cancellation>().unwrap();
-        Ok(info::is_server_busy(cancellation.output_base.as_deref()))
+        Ok(info::is_server_busy(&cancellation.startup_flags))
     }
 
     /// Block until the cancelled invocation finishes.
@@ -67,7 +67,7 @@ pub(crate) fn cancellation_methods(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<bool> {
         let cancellation = this.downcast_ref::<Cancellation>().unwrap();
         let poll_ms = poll_ms.max(0) as u64;
-        while info::is_server_busy(cancellation.output_base.as_deref()) {
+        while info::is_server_busy(&cancellation.startup_flags) {
             std::thread::sleep(std::time::Duration::from_millis(poll_ms));
         }
         Ok(true)

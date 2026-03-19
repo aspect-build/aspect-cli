@@ -76,9 +76,10 @@ struct CheckResult {
     stderr: String,
 }
 
-/// Runs `bazel --noblock_for_lock info server_pid` and returns the result.
-fn check_bazel_server() -> CheckResult {
+/// Runs `bazel [startup_flags] --noblock_for_lock info server_pid` and returns the result.
+fn check_bazel_server(startup_flags: &[String]) -> CheckResult {
     let output = Command::new("bazel")
+        .args(startup_flags)
         .arg("--noblock_for_lock")
         .arg("info")
         .arg("server_pid")
@@ -118,9 +119,10 @@ fn extract_server_pid(server_pid_file: Option<&Path>) -> Option<u32> {
     text.trim().parse::<u32>().ok()
 }
 
-/// Tries to determine the Bazel output base by running `bazel info output_base`.
-fn get_output_base() -> Option<PathBuf> {
+/// Tries to determine the Bazel output base by running `bazel [startup_flags] info output_base`.
+fn get_output_base(startup_flags: &[String]) -> Option<PathBuf> {
     let output = Command::new("bazel")
+        .args(startup_flags)
         .arg("info")
         .arg("output_base")
         .stdout(Stdio::piped())
@@ -140,19 +142,16 @@ fn get_output_base() -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
-pub fn run(output_base: Option<&str>) -> HealthCheckResult {
+pub fn run(startup_flags: &[String]) -> HealthCheckResult {
     // Step 1: Determine server directories
-    let output_base = match output_base {
-        Some(path) => Some(PathBuf::from(path)),
-        None => get_output_base(),
-    };
+    let output_base = get_output_base(startup_flags);
 
     let server_pid_file = output_base
         .as_ref()
         .map(|base| base.join("server").join("server.pid.txt"));
 
     // Step 2: Run health check
-    let result = check_bazel_server();
+    let result = check_bazel_server(startup_flags);
 
     // Step 3: Success
     if result.success {
@@ -204,7 +203,7 @@ pub fn run(output_base: Option<&str>) -> HealthCheckResult {
     }
 
     // Retry health check
-    let retry = check_bazel_server();
+    let retry = check_bazel_server(startup_flags);
 
     if retry.success {
         HealthCheckResult {
