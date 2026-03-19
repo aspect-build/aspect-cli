@@ -6,17 +6,15 @@ use anyhow::anyhow;
 
 /// Query bazel server info (server_pid, release version).
 pub fn server_info() -> io::Result<(u32, semver::Version)> {
-    server_info_with_output_base(None)
+    server_info_with_startup_flags(&[])
 }
 
-/// Query bazel server info with an optional `--output_base` flag.
-pub fn server_info_with_output_base(
-    output_base: Option<&str>,
+/// Query bazel server info with startup flags prepended before the subcommand.
+pub fn server_info_with_startup_flags(
+    startup_flags: &[String],
 ) -> io::Result<(u32, semver::Version)> {
     let mut cmd = Command::new("bazel");
-    if let Some(base) = output_base {
-        cmd.arg(format!("--output_base={}", base));
-    }
+    cmd.args(startup_flags);
     cmd.arg("info");
     cmd.arg("server_pid");
     cmd.arg("release");
@@ -79,11 +77,9 @@ pub fn server_info_with_output_base(
 /// When another invocation holds the lock, bazel exits with code 9 and prints:
 ///   "Another command (pid=12345) is running. Exiting immediately."
 /// We parse the PID from that stderr message.
-pub fn client_pid(output_base: Option<&str>) -> Option<u32> {
+pub fn client_pid(startup_flags: &[String]) -> Option<u32> {
     let mut cmd = Command::new("bazel");
-    if let Some(base) = output_base {
-        cmd.arg(format!("--output_base={}", base));
-    }
+    cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
     cmd.arg("info");
     cmd.arg("server_pid");
@@ -104,11 +100,9 @@ pub fn client_pid(output_base: Option<&str>) -> Option<u32> {
 }
 
 /// Check if the bazel server lock is currently held by a client.
-pub fn is_server_busy(output_base: Option<&str>) -> bool {
+pub fn is_server_busy(startup_flags: &[String]) -> bool {
     let mut cmd = Command::new("bazel");
-    if let Some(base) = output_base {
-        cmd.arg(format!("--output_base={}", base));
-    }
+    cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
     cmd.arg("info");
     cmd.arg("server_pid");

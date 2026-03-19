@@ -345,21 +345,23 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// ```
     fn info<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = named, default = NoneOr::None)] workdir: NoneOr<String>,
-        eval: &mut Evaluator<'v, '_, '_>,
+        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
+            values::StringValue<'v>,
+        >,
     ) -> anyhow::Result<SmallMap<String, String>> {
-        let store = AxlStore::from_eval(eval)?;
-        let workdir = workdir
-            .into_option()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| store.root_dir.clone());
+        let startup_flags: Vec<String> = startup_flags
+            .items
+            .iter()
+            .map(|s| s.as_str().to_owned())
+            .collect();
 
-        let output = std::process::Command::new("bazel")
-            .arg("info")
-            .current_dir(&workdir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .stdin(Stdio::null())
+        let mut cmd = std::process::Command::new("bazel");
+        cmd.args(&startup_flags);
+        cmd.arg("info");
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::null());
+        cmd.stdin(Stdio::null());
+        let output = cmd
             .output()
             .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?;
 
@@ -399,9 +401,16 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// ```
     fn health_check<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = named, default = NoneOr::None)] output_base: NoneOr<String>,
+        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
+            values::StringValue<'v>,
+        >,
     ) -> anyhow::Result<health_check::HealthCheckResult> {
-        Ok(health_check::run(output_base.into_option().as_deref()))
+        let startup_flags: Vec<String> = startup_flags
+            .items
+            .iter()
+            .map(|s| s.as_str().to_owned())
+            .collect();
+        Ok(health_check::run(&startup_flags))
     }
 
     /// Cancel whatever invocation is currently running on the Bazel server.
@@ -410,28 +419,31 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// SIGINT (graceful cancellation, like Ctrl+C). The client then forwards
     /// a CancelRequest RPC to the server.
     /// Returns an `Cancellation` with status and control methods.
-    /// # Arguments
-    /// * `output_base` - Optional Bazel output base path. When provided, it is
-    ///   passed to `bazel --output_base=` to target a specific server instance.
     fn cancel_invocation<'v>(
         #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = named, default = NoneOr::None)] output_base: NoneOr<String>,
+        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
+            values::StringValue<'v>,
+        >,
     ) -> anyhow::Result<cancel::Cancellation> {
-        let output_base = output_base.into_option().filter(|s| !s.is_empty());
+        let startup_flags: Vec<String> = startup_flags
+            .items
+            .iter()
+            .map(|s| s.as_str().to_owned())
+            .collect();
         // IMPORTANT: client_pid() must be called BEFORE server_info() because
         // server_info() runs `bazel info` without --noblock_for_lock, which
         // blocks on the server lock. client_pid() uses --noblock_for_lock so
         // it returns immediately even when another invocation holds the lock.
-        if let Some(pid) = info::client_pid(output_base.as_deref()) {
+        if let Some(pid) = info::client_pid(&startup_flags) {
             process::sigint(pid);
         }
         // Now that we've SIGINT'd the client, the lock will be released soon
         // and server_info() can acquire it to read the server PID.
         let (server_pid, _) =
-            info::server_info_with_output_base(output_base.as_deref()).map_err(|e| {
+            info::server_info_with_startup_flags(&startup_flags).map_err(|e| {
                 anyhow::anyhow!("failed to get Bazel server info for cancellation: {}", e)
             })?;
-        Ok(cancel::Cancellation::new(server_pid, output_base))
+        Ok(cancel::Cancellation::new(server_pid, startup_flags))
     }
 }
 
