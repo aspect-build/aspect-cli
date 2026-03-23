@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -13,7 +14,10 @@ use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
+use starlark::values::Trace;
+use starlark::values::ValueLike;
 use starlark::values::dict::UnpackDictEntries;
+use starlark::values::list::ListRef;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
@@ -25,6 +29,18 @@ use starlark::{
 
 use crate::engine::store::AxlStore;
 use axl_proto;
+
+mod build;
+mod cancel;
+mod execlog_sink;
+mod health_check;
+mod info;
+mod iter;
+mod process;
+mod query;
+mod stream;
+mod stream_sink;
+mod stream_tracing;
 
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
 /// a `Vec<String>`. Returns only the flags whose semver constraint matches `version`.
@@ -56,34 +72,87 @@ fn resolve_flags<'v>(
     Ok(result)
 }
 
-mod build;
-mod cancel;
-mod execlog_sink;
-mod health_check;
-mod info;
-mod iter;
-mod process;
-mod query;
-mod stream;
-mod stream_sink;
-mod stream_tracing;
-
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(Debug, Display, ProvidesStaticType, Trace, NoSerialize, Allocative)]
 #[display("<bazel.Bazel>")]
-pub struct Bazel {}
+pub struct Bazel<'v> {
+    pub startup_flags: values::Value<'v>,
+}
 
-starlark_simple_value!(Bazel);
+impl<'v> values::AllocValue<'v> for Bazel<'v> {
+    fn alloc_value(self, heap: values::Heap<'v>) -> values::Value<'v> {
+        heap.alloc_complex(self)
+    }
+}
+
+impl<'v> values::Freeze for Bazel<'v> {
+    type Frozen = FrozenBazel;
+    fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<FrozenBazel> {
+        Ok(FrozenBazel {
+            startup_flags: self.startup_flags.freeze(freezer)?,
+        })
+    }
+}
 
 #[starlark_value(type = "bazel.Bazel")]
-impl<'v> values::StarlarkValue<'v> for Bazel {
+impl<'v> values::StarlarkValue<'v> for Bazel<'v> {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
         RES.methods(bazel_methods)
     }
 }
 
+#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[display("<bazel.Bazel>")]
+pub struct FrozenBazel {
+    #[allocative(skip)]
+    pub startup_flags: values::FrozenValue,
+}
+
+starlark_simple_value!(FrozenBazel);
+
+#[starlark_value(type = "bazel.Bazel")]
+impl<'v> values::StarlarkValue<'v> for FrozenBazel {
+    type Canonical = Bazel<'v>;
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(bazel_methods)
+    }
+}
+
+fn read_startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<Vec<String>> {
+    let flags_val = if let Some(b) = this.downcast_ref::<Bazel>() {
+        b.startup_flags
+    } else if let Some(b) = this.downcast_ref::<FrozenBazel>() {
+        b.startup_flags.to_value()
+    } else {
+        return Ok(vec![]);
+    };
+    let list = ListRef::from_value(flags_val)
+        .ok_or_else(|| anyhow::anyhow!("startup_flags is not a list"))?;
+    list.iter()
+        .enumerate()
+        .map(|(i, v)| {
+            v.unpack_str().map(str::to_string).ok_or_else(|| {
+                anyhow::anyhow!("startup_flags[{}]: expected str, got {}", i, v.get_type())
+            })
+        })
+        .collect()
+}
+
 #[starlark_module]
 pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
+    /// Mutable list of startup flags prepended to every Bazel invocation on this context.
+    #[starlark(attribute)]
+    fn startup_flags<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        if let Some(b) = this.downcast_ref::<Bazel>() {
+            Ok(b.startup_flags)
+        } else if let Some(b) = this.downcast_ref::<FrozenBazel>() {
+            Ok(b.startup_flags.to_value())
+        } else {
+            Err(anyhow::anyhow!("expected Bazel"))
+        }
+    }
+
     /// Build one or more Bazel targets.
     ///
     /// Returns a `Build` object. The call does not block — use `.wait()` to
@@ -98,8 +167,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   [semver](https://semver.org) constraint. Pre-release versions are
     ///   normalised before matching, so `8.0.0-rc1` is matched by `>=8`. An
     ///   invalid constraint is a hard error.
-    /// * `startup_flags` - Bazel startup flags. Accepts the same plain string
-    ///   and `(flag, constraint)` tuple format as `flags`.
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace events stream.
@@ -135,7 +202,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// status = build.wait()
     /// ```
     fn build<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         #[starlark(args)] targets: UnpackTuple<values::StringValue>,
         #[starlark(require = named, default = Either::Left(false))] build_events: Either<
             bool,
@@ -147,9 +214,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             UnpackList<execlog_sink::ExecLogSink>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
-            Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
-        >,
-        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
         #[starlark(require = named, default = false)] inherit_stdout: bool,
@@ -165,8 +229,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let has_conditional = flags.items.iter().any(|f| f.is_right())
-            || startup_flags.items.iter().any(|f| f.is_right());
+        let has_conditional = flags.items.iter().any(|f| f.is_right());
         let bazel_version = if has_conditional {
             let (_, version) = info::server_info()
                 .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
@@ -175,7 +238,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             None
         };
         let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
-        let resolved_startup_flags = resolve_flags(&startup_flags.items, bazel_version.as_ref())?;
+        let resolved_startup_flags = read_startup_flags(this)?;
         let store = AxlStore::from_eval(eval)?;
         let build = build::Build::spawn(
             "build",
@@ -207,8 +270,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   [semver](https://semver.org) constraint. Pre-release versions are
     ///   normalised before matching, so `8.0.0-rc1` is matched by `>=8`. An
     ///   invalid constraint is a hard error.
-    /// * `startup_flags` - Bazel startup flags. Accepts the same plain string
-    ///   and `(flag, constraint)` tuple format as `flags`.
     /// * `build_events` - Enable the Build Event Protocol stream. Pass `True`
     ///   or a list of `BuildEventSink` values to forward events to remote sinks.
     /// * `workspace_events` - Enable the workspace events stream.
@@ -244,7 +305,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// status = test.wait()
     /// ```
     fn test<'v>(
-        #[allow(unused)] this: values::Value<'v>,
+        this: values::Value<'v>,
         #[starlark(args)] targets: UnpackTuple<values::StringValue>,
         #[starlark(require = named, default = Either::Left(false))] build_events: Either<
             bool,
@@ -256,9 +317,6 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             UnpackList<execlog_sink::ExecLogSink>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
-            Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
-        >,
-        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
         >,
         #[starlark(require = named, default = false)] inherit_stdout: bool,
@@ -274,8 +332,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             Either::Left(b) => (b, vec![]),
             Either::Right(sinks) => (true, sinks.items),
         };
-        let has_conditional = flags.items.iter().any(|f| f.is_right())
-            || startup_flags.items.iter().any(|f| f.is_right());
+        let has_conditional = flags.items.iter().any(|f| f.is_right());
         let bazel_version = if has_conditional {
             let (_, version) = info::server_info()
                 .map_err(|e| anyhow::anyhow!("failed to get Bazel server info: {}", e))?;
@@ -284,7 +341,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             None
         };
         let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
-        let resolved_startup_flags = resolve_flags(&startup_flags.items, bazel_version.as_ref())?;
+        let resolved_startup_flags = read_startup_flags(this)?;
         let store = AxlStore::from_eval(eval)?;
         let test = build::Build::spawn(
             "test",
@@ -343,17 +400,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///     print(info["output_base"])
     ///     print(info["execution_root"])
     /// ```
-    fn info<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
-            values::StringValue<'v>,
-        >,
-    ) -> anyhow::Result<SmallMap<String, String>> {
-        let startup_flags: Vec<String> = startup_flags
-            .items
-            .iter()
-            .map(|s| s.as_str().to_owned())
-            .collect();
+    fn info<'v>(this: values::Value<'v>) -> anyhow::Result<SmallMap<String, String>> {
+        let startup_flags = read_startup_flags(this)?;
 
         let mut cmd = std::process::Command::new("bazel");
         cmd.args(&startup_flags);
@@ -400,16 +448,9 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///         fail("Bazel server is unhealthy")
     /// ```
     fn health_check<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
-            values::StringValue<'v>,
-        >,
+        this: values::Value<'v>,
     ) -> anyhow::Result<health_check::HealthCheckResult> {
-        let startup_flags: Vec<String> = startup_flags
-            .items
-            .iter()
-            .map(|s| s.as_str().to_owned())
-            .collect();
+        let startup_flags = read_startup_flags(this)?;
         Ok(health_check::run(&startup_flags))
     }
 
@@ -419,31 +460,21 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     /// SIGINT (graceful cancellation, like Ctrl+C). The client then forwards
     /// a CancelRequest RPC to the server.
     /// Returns an `Cancellation` with status and control methods.
-    fn cancel_invocation<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-        #[starlark(require = named, default = UnpackList::default())] startup_flags: UnpackList<
-            values::StringValue<'v>,
-        >,
-    ) -> anyhow::Result<cancel::Cancellation> {
-        let startup_flags: Vec<String> = startup_flags
-            .items
-            .iter()
-            .map(|s| s.as_str().to_owned())
-            .collect();
+    fn cancel_invocation<'v>(this: values::Value<'v>) -> anyhow::Result<cancel::Cancellation> {
+        let all_flags = read_startup_flags(this)?;
         // IMPORTANT: client_pid() must be called BEFORE server_info() because
         // server_info() runs `bazel info` without --noblock_for_lock, which
         // blocks on the server lock. client_pid() uses --noblock_for_lock so
         // it returns immediately even when another invocation holds the lock.
-        if let Some(pid) = info::client_pid(&startup_flags) {
+        if let Some(pid) = info::client_pid(&all_flags) {
             process::sigint(pid);
         }
         // Now that we've SIGINT'd the client, the lock will be released soon
         // and server_info() can acquire it to read the server PID.
-        let (server_pid, _) =
-            info::server_info_with_startup_flags(&startup_flags).map_err(|e| {
-                anyhow::anyhow!("failed to get Bazel server info for cancellation: {}", e)
-            })?;
-        Ok(cancel::Cancellation::new(server_pid, startup_flags))
+        let (server_pid, _) = info::server_info_with_startup_flags(&all_flags).map_err(|e| {
+            anyhow::anyhow!("failed to get Bazel server info for cancellation: {}", e)
+        })?;
+        Ok(cancel::Cancellation::new(server_pid, all_flags))
     }
 }
 
@@ -510,7 +541,7 @@ fn register_query_types(globals: &mut GlobalsBuilder) {
 
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
-    const Bazel: StarlarkValueAsType<Bazel> = StarlarkValueAsType::new();
+    const Bazel: StarlarkValueAsType<FrozenBazel> = StarlarkValueAsType::new();
     const HealthCheckResult: StarlarkValueAsType<health_check::HealthCheckResult> =
         StarlarkValueAsType::new();
 }
