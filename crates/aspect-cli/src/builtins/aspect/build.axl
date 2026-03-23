@@ -44,6 +44,7 @@ def impl(ctx: TaskContext) -> int:
         startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
     if fragment.startup_flags:
         startup_flags = fragment.startup_flags(startup_flags)
+    ctx.bazel.startup_flags.extend(startup_flags)
 
     # BES: merge arg-based sinks with fragment sinks
     build_events = _collect_bes_from_args(ctx)
@@ -67,7 +68,7 @@ def impl(ctx: TaskContext) -> int:
         handler(ctx, state)
 
     if ctx.args.cancel:
-        cancellation = ctx.bazel.cancel_invocation(startup_flags = startup_flags)
+        cancellation = ctx.bazel.cancel_invocation()
         cancellation.wait()
 
     for _ in range(10):
@@ -75,7 +76,6 @@ def impl(ctx: TaskContext) -> int:
             build_events = build_events,
             execution_log = fragment.execution_log_sinks or False,
             flags = flags,
-            startup_flags = startup_flags,
             *ctx.args.target_pattern,
         )
 

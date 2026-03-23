@@ -5,7 +5,7 @@ use starlark::{
 };
 
 pub mod aspect;
-mod bazel;
+pub mod bazel;
 mod globals;
 mod http;
 mod std;

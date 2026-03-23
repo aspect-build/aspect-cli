@@ -472,32 +472,33 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     status4 = build4.wait()
     tc = test_case(tc, type(status4.code) == "int", "build.wait() after server-wide cancel should return a status")
 
-    # Test 3: cancel_invocation with startup_flags targeting a specific output_base (no build running)
+    # Test 3: cancel_invocation with instance startup_flags targeting a specific output_base (no build running)
     info = ctx.bazel.info()
     output_base = info["output_base"]
-    cancellation5 = ctx.bazel.cancel_invocation(startup_flags = ["--output_base=" + output_base])
-    tc = test_case(tc, cancellation5.busy == False, "cancel_invocation(startup_flags=[--output_base=...]) with no active build should not be busy")
+    ctx.bazel.startup_flags.append("--output_base=" + output_base)
+    cancellation5 = ctx.bazel.cancel_invocation()
+    tc = test_case(tc, cancellation5.busy == False, "cancel_invocation() with output_base startup_flag and no active build should not be busy")
     result5 = cancellation5.wait()
-    tc = test_case(tc, result5 == True, "wait() on startup_flags cancel should return True")
+    tc = test_case(tc, result5 == True, "wait() on cancel with output_base startup_flag should return True")
 
-    # Test 4: cancel_invocation with startup_flags targeting a specific output_base while a build is running
+    # Test 4: cancel_invocation with instance startup_flags targeting a specific output_base while a build is running
     build6 = ctx.bazel.build(
         "//crates/aspect-cli:aspect-cli",
         flags = ["--nobuild"],
         build_events = True,
     )
-    cancellation6 = ctx.bazel.cancel_invocation(startup_flags = ["--output_base=" + output_base])
-    tc = test_case(tc, type(cancellation6.busy) == "bool", "cancel_invocation(startup_flags=[--output_base=...]).busy should be a bool while build runs")
+    cancellation6 = ctx.bazel.cancel_invocation()
+    tc = test_case(tc, type(cancellation6.busy) == "bool", "cancel_invocation() with output_base startup_flag .busy should be a bool while build runs")
     result6 = cancellation6.wait()
-    tc = test_case(tc, result6 == True, "wait() on startup_flags cancel of running build should return True")
+    tc = test_case(tc, result6 == True, "wait() on cancel with output_base startup_flag of running build should return True")
     status6 = build6.wait()
-    tc = test_case(tc, type(status6.code) == "int", "build.wait() after startup_flags cancel should return a status")
+    tc = test_case(tc, type(status6.code) == "int", "build.wait() after cancel with output_base startup_flag should return a status")
 
-    # Test 5: cancel_invocation with no startup_flags
+    # Test 5: cancel_invocation (startup_flags already set on instance)
     cancellation7 = ctx.bazel.cancel_invocation()
-    tc = test_case(tc, cancellation7.busy == False, "cancel_invocation() with no startup_flags should not be busy")
+    tc = test_case(tc, cancellation7.busy == False, "cancel_invocation() should not be busy")
     result7 = cancellation7.wait()
-    tc = test_case(tc, result7 == True, "wait() on cancel with no startup_flags should return True")
+    tc = test_case(tc, result7 == True, "wait() on cancel should return True")
 
     # Test 6: force() API shape test (don't actually kill the server - just verify it returns bool)
     # We skip actually calling force() here because it would kill the Bazel daemon

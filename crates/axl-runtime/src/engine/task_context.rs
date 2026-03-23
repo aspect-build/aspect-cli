@@ -16,7 +16,6 @@ use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
 use super::aspect::Aspect;
-use super::bazel::Bazel;
 use super::http::Http;
 use super::std::Std;
 use super::task_args::TaskArgs;
@@ -31,14 +30,21 @@ pub struct TaskContext<'v> {
     pub fragments: values::Value<'v>,
     #[trace(unsafe_ignore)]
     pub task: TaskInfo,
+    bazel: values::Value<'v>,
 }
 
 impl<'v> TaskContext<'v> {
-    pub fn new(args: TaskArgs<'v>, fragments: values::Value<'v>, task: TaskInfo) -> Self {
+    pub fn new(
+        args: TaskArgs<'v>,
+        fragments: values::Value<'v>,
+        task: TaskInfo,
+        bazel: values::Value<'v>,
+    ) -> Self {
         Self {
             args,
             fragments,
             task,
+            bazel,
         }
     }
 }
@@ -68,6 +74,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
             args: args_value,
             fragments: self.fragments.freeze(freezer)?,
             task: self.task,
+            bazel: self.bazel.freeze(freezer)?,
         })
     }
 }
@@ -124,8 +131,17 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
 
     /// Access to Bazel functionality.
     #[starlark(attribute)]
-    fn bazel<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Bazel> {
-        Ok(Bazel {})
+    fn bazel<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
+            .downcast_ref_err::<TaskContext>()
+            .into_anyhow_result()?;
+        Ok(ctx.bazel)
+    }
+
+    /// EXPERIMENTAL! Run wasm programs within tasks.
+    #[starlark(attribute)]
+    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Wasm> {
+        Ok(Wasm::new())
     }
 
     /// The `http` attribute provides a programmatic interface for making HTTP requests.
@@ -151,6 +167,8 @@ pub struct FrozenTaskContext {
     #[allocative(skip)]
     fragments: values::FrozenValue,
     task: TaskInfo,
+    #[allocative(skip)]
+    bazel: values::FrozenValue,
 }
 
 starlark_simple_value!(FrozenTaskContext);
@@ -209,8 +227,11 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     }
 
     #[starlark(attribute)]
-    fn bazel<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Bazel> {
-        Ok(Bazel {})
+    fn bazel<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
+            .downcast_ref_err::<FrozenTaskContext>()
+            .into_anyhow_result()?;
+        Ok(ctx.bazel.to_value())
     }
 
     fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Http> {
@@ -218,14 +239,8 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     }
 
     /// EXPERIMENTAL! Run wasm programs within tasks.
-    ///
-    /// The frozen context is passed directly from `this` - no need to go through
-    /// the store since `this` IS the frozen TaskContext.
     #[starlark(attribute)]
-    fn wasm<'v>(this: values::Value<'v>) -> anyhow::Result<Wasm> {
-        let frozen_ctx = this
-            .unpack_frozen()
-            .ok_or_else(|| anyhow::anyhow!("TaskContext must be frozen for wasm access"))?;
-        Ok(Wasm::with_context(frozen_ctx))
+    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Wasm> {
+        Ok(Wasm::new())
     }
 }
