@@ -1,0 +1,20 @@
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "bazelrc",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "@crates//:thiserror",
+    ],
+    visibility = [
+        "//crates/axl-runtime:__pkg__",
+    ],
+)
+
+rust_test(
+    name = "bazelrc_test",
+    crate = ":bazelrc",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)

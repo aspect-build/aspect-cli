@@ -50,6 +50,7 @@ rust_library(
         "//crates/axl-proto",
         "//crates/axl-types",
         "//crates/build-event-stream",
+        "//crates/bazelrc",
         "//crates/galvanize",
     ],
     proc_macro_deps = [

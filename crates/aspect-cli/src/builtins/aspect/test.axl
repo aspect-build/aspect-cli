@@ -44,8 +44,6 @@ def _test_impl(ctx: TaskContext) -> int:
         startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
     if fragment.startup_flags:
         startup_flags = fragment.startup_flags(startup_flags)
-    ctx.bazel.startup_flags.extend(startup_flags)
-
     # BES: merge arg-based sinks with fragment sinks
     build_events = _collect_bes_from_args(ctx)
     if fragment.build_event_sinks:
@@ -70,6 +68,16 @@ def _test_impl(ctx: TaskContext) -> int:
     if ctx.args.cancel:
         cancellation = ctx.bazel.cancel_invocation()
         cancellation.wait()
+
+    rc = ctx.bazel.parse_rc(
+        root = ctx.std.env.root_dir(),
+        startup_flags = startup_flags,
+        flags = flags,
+    )
+
+    rc_startup_flags, flags = rc.expand_all(command = "test")
+    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
+    print(rc.announce(command = "test"))
 
     for _ in range(10):
         test = ctx.bazel.test(
