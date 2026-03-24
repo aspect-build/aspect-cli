@@ -146,17 +146,21 @@ impl<'v> values::StarlarkValue<'v> for TargetSet {
 pub struct Query {
     #[allocative(skip)]
     expr: RefCell<String>,
+    #[allocative(skip)]
+    startup_flags: Vec<String>,
 }
 
 impl Query {
-    pub fn new() -> Self {
+    pub fn new(startup_flags: Vec<String>) -> Self {
         Self {
             expr: RefCell::new(String::new()),
+            startup_flags,
         }
     }
 
-    pub fn query(expr: &str) -> anyhow::Result<TargetSet> {
+    pub fn query(expr: &str, startup_flags: &[String]) -> anyhow::Result<TargetSet> {
         let mut cmd = Command::new("bazel");
+        cmd.args(startup_flags);
         cmd.arg("query");
         cmd.arg(expr);
         cmd.arg("--output=streamed_proto");
@@ -233,9 +237,10 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         #[starlark(require = pos)] expr: values::StringValue,
     ) -> anyhow::Result<Query> {
-        let _query = this.downcast_ref_err::<Query>().into_anyhow_result()?;
+        let query = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         Ok(Query {
             expr: RefCell::new(expr.as_str().to_string()),
+            startup_flags: query.startup_flags.clone(),
         })
     }
 
@@ -263,6 +268,6 @@ pub(crate) fn query_methods(registry: &mut MethodsBuilder) {
     fn eval<'v>(this: values::Value<'v>) -> anyhow::Result<TargetSet> {
         let this = this.downcast_ref_err::<Query>().into_anyhow_result()?;
         let expr = this.expr.borrow();
-        Query::query(&expr)
+        Query::query(&expr, &this.startup_flags)
     }
 }
