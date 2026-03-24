@@ -217,6 +217,12 @@ def get_bazelrc_flags(environment: Environment, root_dir: str) -> (list, list):
 
     startup_flags = []
 
+    # If we are in runner environment ignore these two locations
+    # as they are redundant
+    if environment.runner:
+        startup_flags.append("--nohome_rc")
+        startup_flags.append("--nosystem_rc")
+
     if repo_name:
         sanitized = _sanitize_filename(repo_name)
         startup_flags.append("--output_user_root=" + storage_path + "/bazel/" + sanitized + "/" + subdir)

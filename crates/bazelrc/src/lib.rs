@@ -4,6 +4,20 @@ mod parse;
 pub(crate) mod preprocess;
 pub(crate) mod tokenize;
 
+/// Returns ancestor commands for `command` in Bazel's inheritance hierarchy,
+/// ordered from most general to most specific (excluding `common` / `always`).
+///
+/// Mirrors Bazel's own command graph:
+/// - `test`, `run`, `mobile-install`, `print_action` → `build`
+/// - `coverage` → `build`, `test`
+pub(crate) fn command_ancestors(command: &str) -> &'static [&'static str] {
+    match command {
+        "test" | "run" | "mobile-install" | "print_action" => &["build"],
+        "coverage" => &["build", "test"],
+        _ => &[],
+    }
+}
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -156,13 +170,24 @@ impl BazelRC {
             .unwrap_or(&[])
     }
 
-    /// Return all options applicable to `command`, in order: `always` + `common` + `<command>`.
+    /// Return all options applicable to `command`, respecting Bazel's command inheritance.
+    ///
+    /// Order: `always` + `common` + ancestor commands (general → specific) + `<command>`.
+    /// For example, `options_for("test")` returns `always` + `common` + `build` + `test`.
     pub fn options_for(&self, command: &str) -> Vec<&RcOption> {
         let mut result = Vec::new();
-        for key in ["always", "common", command] {
+        for key in ["always", "common"] {
             if let Some(opts) = self.options.get(key) {
                 result.extend(opts.iter());
             }
+        }
+        for ancestor in command_ancestors(command) {
+            if let Some(opts) = self.options.get(*ancestor) {
+                result.extend(opts.iter());
+            }
+        }
+        if let Some(opts) = self.options.get(command) {
+            result.extend(opts.iter());
         }
         result
     }
@@ -320,6 +345,9 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Startup flags that prevent system/home rc files from being loaded, making tests hermetic.
+    const ISOLATE: &[&str] = &["--nosystem_rc", "--nohome_rc"];
+
     fn make_workspace() -> TempDir {
         tempfile::tempdir().expect("tempdir")
     }
@@ -431,7 +459,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=opt"])).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=opt"])).unwrap();
         let expanded = rc.expand_configs("build").unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--copt=-O2", "--compilation_mode=opt"]);
@@ -444,7 +472,7 @@ mod tests {
         let rc_path = root.join(".bazelrc");
         fs::write(&rc_path, "build:a --config=b\nbuild:b --config=a\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=a"])).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=a"])).unwrap();
         let err = rc.expand_configs("build").unwrap_err();
         assert!(matches!(err, BazelRcError::ConfigCycle { .. }));
     }
@@ -456,7 +484,7 @@ mod tests {
         let rc_path = root.join(".bazelrc");
         fs::write(&rc_path, "build --jobs=4\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=nonexistent"])).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=nonexistent"])).unwrap();
         let err = rc.expand_configs("build").unwrap_err();
         assert!(matches!(err, BazelRcError::UndefinedConfig { .. }));
     }
@@ -505,13 +533,68 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let opts: Vec<&str> = rc
             .options_for("build")
             .iter()
             .map(|o| o.value.as_str())
             .collect();
         assert_eq!(opts, vec!["--always-flag", "--common-flag", "--build-flag"]);
+    }
+
+    #[test]
+    fn test_inherits_build_flags() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "build --jobs=8\nbuild --remote_cache=grpc://cache\ntest --test_output=errors\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let opts: Vec<&str> = rc
+            .options_for("test")
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        // test should include build flags before its own
+        assert_eq!(
+            opts,
+            vec![
+                "--jobs=8",
+                "--remote_cache=grpc://cache",
+                "--test_output=errors"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_config_inherits_build_config() {
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "build:opt --compilation_mode=opt\ntest:opt --test_output=errors\ntest --config=opt\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let expanded: Vec<String> = rc
+            .expand_configs("test")
+            .unwrap()
+            .into_iter()
+            .map(|o| o.value)
+            .collect();
+        // --config=opt for test should expand build:opt AND test:opt
+        assert!(
+            expanded.contains(&"--compilation_mode=opt".to_owned()),
+            "expected build:opt flags to be included; got: {expanded:?}"
+        );
+        assert!(
+            expanded.contains(&"--test_output=errors".to_owned()),
+            "expected test:opt flags to be included; got: {expanded:?}"
+        );
     }
 
     #[test]
@@ -547,7 +630,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "build:opt --copt=-O2\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=opt"])).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=opt"])).unwrap();
         // expand_configs picks up the CLI --config=opt from always options
         let expanded = rc.expand_configs("build").unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
@@ -574,7 +657,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let opts = rc.options_for("build");
 
         let unconditional: Vec<&str> = opts
@@ -611,7 +694,7 @@ mod tests {
         .unwrap();
 
         // Should not error — missing file is silently skipped like try-import
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let opts = rc.options_for("build");
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].value, "--jobs=4");
@@ -636,7 +719,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let expanded = rc.expand_configs("build").unwrap();
 
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
@@ -663,7 +746,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         assert_eq!(rc.options_for("build").len(), 0);
     }
 
@@ -673,7 +756,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "   \n\t\n  \n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         assert_eq!(rc.options_for("build").len(), 0);
     }
 
@@ -683,7 +766,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "# startup foo\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         assert_eq!(rc.options_for("startup").len(), 0);
     }
 
@@ -693,7 +776,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "build\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         assert_eq!(rc.options_for("build").len(), 0);
     }
 
@@ -703,7 +786,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "build --jobs=4 # a comment\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let opts = rc.options_for("build");
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].value, "--jobs=4");
@@ -715,7 +798,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "build --jobs=4 --verbose_failures\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let values: Vec<&str> = rc
             .options_for("build")
             .iter()
@@ -734,7 +817,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let values: Vec<&str> = rc
             .options_for("build")
             .iter()
@@ -753,7 +836,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         assert_eq!(rc.options_for("startup").len(), 1);
         assert_eq!(rc.options_for("build").len(), 1);
         assert_eq!(rc.options_for("startup")[0].value, "--max_idle_secs=60");
@@ -766,7 +849,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "build\t--jobs=4\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let opts = rc.options_for("build");
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].value, "--jobs=4");
@@ -778,7 +861,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "  build --jobs=4\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let opts = rc.options_for("build");
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].value, "--jobs=4");
@@ -795,7 +878,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let values: Vec<&str> = rc
             .options_for("build")
             .iter()
@@ -821,7 +904,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let values: Vec<&str> = rc
             .options_for("build")
             .iter()
@@ -845,7 +928,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let values: Vec<&str> = rc
             .options_for("build")
             .iter()
@@ -862,7 +945,12 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "build --workspace-flag\n").unwrap();
 
-        let rc = BazelRC::new(root, &["--noworkspace_rc"], &[]).unwrap();
+        let rc = BazelRC::new(
+            root,
+            &["--nosystem_rc", "--nohome_rc", "--noworkspace_rc"],
+            &[],
+        )
+        .unwrap();
         // Workspace .bazelrc should not be loaded
         assert!(rc.raw_options("build").is_empty());
     }
@@ -928,7 +1016,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "import foo bar\n").unwrap();
 
-        let err = BazelRC::new(root, &[] as &[&str], &[]).unwrap_err();
+        let err = BazelRC::new(root, ISOLATE, &[]).unwrap_err();
         assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
     }
 
@@ -938,7 +1026,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "try-import foo bar\n").unwrap();
 
-        let err = BazelRC::new(root, &[] as &[&str], &[]).unwrap_err();
+        let err = BazelRC::new(root, ISOLATE, &[]).unwrap_err();
         assert!(matches!(err, BazelRcError::InvalidImportArgs { .. }));
     }
 
@@ -950,7 +1038,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join(".bazelrc"), "common:myconfig --common-flag\n").unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=myconfig"])).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=myconfig"])).unwrap();
         let expanded = rc.expand_configs("build").unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(values.contains(&"--common-flag"), "got: {values:?}");
@@ -966,7 +1054,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=a"])).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=a"])).unwrap();
         let expanded = rc.expand_configs("build").unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--deep-flag"]);
@@ -1008,7 +1096,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let expanded = rc.expand_configs("build").unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(values.contains(&"--foo-flag"), "got: {values:?}");
@@ -1025,7 +1113,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &[]).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let expanded = rc.expand_configs("build").unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(values.contains(&"--foo-flag"), "got: {values:?}");
@@ -1042,7 +1130,7 @@ mod tests {
         )
         .unwrap();
 
-        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=myconfig"])).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=myconfig"])).unwrap();
         let expanded = rc.expand_configs("build").unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(values.contains(&"--always-only-flag"), "got: {values:?}");
@@ -1104,7 +1192,7 @@ mod tests {
         .unwrap();
 
         // The unconditional --config=myconfig triggers expansion of the versioned section
-        let rc = BazelRC::new(root, &[] as &[&str], &flags(&["--config=myconfig"])).unwrap();
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=myconfig"])).unwrap();
         let expanded = rc.expand_configs("build").unwrap();
 
         assert_eq!(expanded.len(), 1);
