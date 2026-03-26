@@ -10,8 +10,7 @@ use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::{env, thread};
 
-use super::util::MultiTeeReader;
-use super::util::read_varint;
+use super::util::{MultiTeeReader, read_varint};
 use thiserror::Error;
 use zstd::Decoder;
 
@@ -133,7 +132,7 @@ impl ExecLogStream {
 
             let mut read = || -> Result<(), ExecLogStreamError> {
                 // varint size can be somewhere between 1 to 10 bytes.
-                let size = read_varint(&mut out_raw)?;
+                let (size, _) = read_varint(&mut out_raw)?;
                 if size > buf.len() {
                     buf.resize(size, 0);
                 }
@@ -221,7 +220,7 @@ impl ExecLogStream {
             let mut has_readers = true;
 
             let mut read = || -> Result<(), ExecLogStreamError> {
-                let size = read_varint(&mut out_raw)?;
+                let (size, _) = read_varint(&mut out_raw)?;
                 if size > buf.len() {
                     buf.resize(size, 0);
                 }

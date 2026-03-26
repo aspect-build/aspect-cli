@@ -180,109 +180,8 @@
 //! - Dead subscribers are cleaned up lazily on the next `send()`
 //! - The `close()` method immediately frees all sender resources
 
-use std::sync::mpsc::{self, RecvError, TryRecvError};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-
-/// A handle for receiving events from a [`Broadcaster`].
-///
-/// Each subscriber has its own independent buffer and receives events
-/// independently of other subscribers. Subscribers can be moved to other
-/// threads for concurrent processing.
-///
-/// # Lifecycle
-///
-/// A subscriber remains active until either:
-/// 1. The broadcaster is dropped (all clones)
-/// 2. The broadcaster's [`close()`](Broadcaster::close) method is called
-/// 3. The subscriber is dropped (lazy cleanup on next send)
-///
-/// When the broadcaster closes or is dropped, `recv()` will return `Err(RecvError)`
-/// and `try_recv()` will return `Err(TryRecvError::Disconnected)`.
-///
-/// # Buffering
-///
-/// Events are buffered in an unbounded queue. If a subscriber doesn't consume
-/// events, they accumulate in memory. This is intentional to avoid blocking
-/// the producer.
-#[derive(Debug)]
-pub struct Subscriber<T> {
-    recv: mpsc::Receiver<T>,
-}
-
-impl<T> Subscriber<T> {
-    /// Creates a new subscriber wrapping the given receiver.
-    pub(crate) fn new(recv: mpsc::Receiver<T>) -> Self {
-        Self { recv }
-    }
-
-    /// Blocking receive - waits until an event is available or the stream closes.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(event)` - An event was received
-    /// - `Err(RecvError)` - The broadcaster was closed or dropped
-    ///
-    /// # Blocking
-    ///
-    /// This method blocks the current thread until an event is available.
-    /// Use [`try_recv()`](Self::try_recv) for non-blocking receives.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Typical consumption pattern
-    /// loop {
-    ///     match subscriber.recv() {
-    ///         Ok(event) => process(event),
-    ///         Err(_) => break, // Stream closed
-    ///     }
-    /// }
-    /// ```
-    pub fn recv(&self) -> Result<T, RecvError> {
-        self.recv.recv()
-    }
-
-    /// Non-blocking receive - returns immediately with the result.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(event)` - An event was available and returned
-    /// - `Err(TryRecvError::Empty)` - No events available, but stream is still open
-    /// - `Err(TryRecvError::Disconnected)` - The broadcaster was closed or dropped
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Poll for events without blocking
-    /// match subscriber.try_recv() {
-    ///     Ok(event) => println!("Got event: {:?}", event),
-    ///     Err(TryRecvError::Empty) => println!("No events yet"),
-    ///     Err(TryRecvError::Disconnected) => println!("Stream closed"),
-    /// }
-    /// ```
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.recv.try_recv()
-    }
-
-    /// Returns true if the stream is closed and all buffered events have been consumed.
-    ///
-    /// **Note**: This method consumes one event from the buffer to check the state.
-    /// If the stream is still open, that event is lost. Use this only when you
-    /// need to check if iteration should stop.
-    ///
-    /// # Returns
-    ///
-    /// - `true` - The broadcaster is closed/dropped AND the buffer is empty
-    /// - `false` - Either the stream is still open, or there are buffered events
-    ///
-    /// # Warning
-    ///
-    /// This is a destructive check - it may consume an event. Prefer checking
-    /// the result of `recv()` or `try_recv()` instead.
-    pub fn is_closed(&self) -> bool {
-        matches!(self.recv.try_recv(), Err(TryRecvError::Disconnected))
-    }
-}
 
 /// Internal state shared between the broadcaster and its clones.
 ///
@@ -301,6 +200,8 @@ struct BroadcasterInner<T> {
     /// - The subscribers vector is empty
     closed: bool,
 }
+
+pub type Subscriber<T> = mpsc::Receiver<T>;
 
 /// A thread-safe broadcaster that fans out events to multiple subscribers.
 ///
@@ -404,12 +305,12 @@ impl<T: Clone> Broadcaster<T> {
         if inner.closed {
             let (tx, rx) = mpsc::channel();
             drop(tx); // Drop sender immediately to disconnect the receiver
-            return Subscriber::new(rx);
+            return rx;
         }
 
         let (tx, rx) = mpsc::channel();
         inner.subscribers.push(tx);
-        Subscriber::new(rx)
+        rx
     }
 
     /// Sends an event to all current subscribers.
@@ -531,8 +432,14 @@ impl<T: Clone> Default for Broadcaster<T> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::TryRecvError;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    /// Returns true when the channel has been disconnected (all senders dropped).
+    fn is_disconnected<T>(rx: &mpsc::Receiver<T>) -> bool {
+        matches!(rx.try_recv(), Err(TryRecvError::Disconnected))
+    }
 
     #[test]
     fn test_single_subscriber_receives_events() {
@@ -664,20 +571,20 @@ mod tests {
         let sub = broadcaster.subscribe();
 
         // Not closed yet
-        assert!(!sub.is_closed());
+        assert!(!is_disconnected(&sub));
 
         // Send an event and consume it
         broadcaster.send(1);
         assert_eq!(sub.recv().unwrap(), 1);
 
         // Still not closed (broadcaster exists)
-        assert!(!sub.is_closed());
+        assert!(!is_disconnected(&sub));
 
         // Drop the broadcaster
         drop(broadcaster);
 
         // Now it should be closed
-        assert!(sub.is_closed());
+        assert!(is_disconnected(&sub));
     }
 
     #[test]
@@ -796,9 +703,9 @@ mod tests {
         assert!(sub3.recv().is_err());
 
         // is_closed should return true for all
-        assert!(sub1.is_closed());
-        assert!(sub2.is_closed());
-        assert!(sub3.is_closed());
+        assert!(is_disconnected(&sub1));
+        assert!(is_disconnected(&sub2));
+        assert!(is_disconnected(&sub3));
     }
 
     #[test]
@@ -813,7 +720,7 @@ mod tests {
 
         // Subscriber should immediately be disconnected
         assert!(sub.recv().is_err());
-        assert!(sub.is_closed());
+        assert!(is_disconnected(&sub));
     }
 
     #[test]
@@ -943,7 +850,7 @@ mod tests {
         // still holds a reference to `inner`, so senders are still alive.
         // This is a non-blocking check.
         assert!(
-            !sub.is_closed(),
+            !is_disconnected(&sub),
             "Subscriber should NOT be disconnected when only one clone is dropped"
         );
 
@@ -952,7 +859,7 @@ mod tests {
 
         // NOW the subscriber should be disconnected
         assert!(
-            sub.is_closed(),
+            is_disconnected(&sub),
             "Subscriber should be disconnected after close() is called"
         );
         assert!(sub.recv().is_err());
@@ -992,7 +899,7 @@ mod tests {
 
         // NOW disconnected (buffer empty and all senders dropped)
         assert!(sub.recv().is_err());
-        assert!(sub.is_closed());
+        assert!(is_disconnected(&sub));
     }
 
     // =========================================================================

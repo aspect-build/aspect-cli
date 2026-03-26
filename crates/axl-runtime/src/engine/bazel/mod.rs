@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::Arc;
 
 use allocative::Allocative;
 use derive_more::Display;

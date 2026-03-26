@@ -115,12 +115,7 @@ impl BuildEventSink {
             BuildEventSink::Grpc { uri, metadata } => {
                 // Use subscribe_realtime() since sinks subscribe at stream creation
                 // and don't need history replay.
-                GrpcEventStreamSink::spawn(
-                    rt,
-                    stream.subscribe_realtime(),
-                    uri.clone(),
-                    metadata.clone(),
-                )
+                GrpcEventStreamSink::spawn(rt, stream.subscribe(), uri.clone(), metadata.clone())
             }
             BuildEventSink::File { .. } => {
                 unreachable!("File sinks are handled as raw file paths, not subscriber threads")
@@ -269,7 +264,7 @@ impl Build {
             // and doesn't need history replay.
             sink_handles.push(TracingEventStreamSink::spawn(
                 rt,
-                build_event_stream.as_ref().unwrap().subscribe_realtime(),
+                build_event_stream.as_ref().unwrap().subscribe(),
             ))
         }
 
