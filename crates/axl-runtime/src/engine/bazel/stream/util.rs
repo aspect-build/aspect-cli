@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::io;
 use std::io::Read;
-use std::io::Result;
 use std::io::{BufWriter, Write};
 
 /// Wraps a `Read` source and tees every byte read to one or more `BufWriter<File>` sinks.
@@ -30,7 +29,6 @@ impl<R: Read> Write for MultiTeeReader<R> {
         }
         Ok(buf.len())
     }
-
     fn flush(&mut self) -> io::Result<()> {
         for w in &mut self.writers {
             w.flush()?;
@@ -39,38 +37,69 @@ impl<R: Read> Write for MultiTeeReader<R> {
     }
 }
 
-pub const CONTINUATION_BIT: u8 = 1 << 7;
-
-#[inline]
-pub fn low_bits_of_byte(byte: u8) -> u8 {
-    byte & !CONTINUATION_BIT
+pub(super) struct MultiWriter<R: Write> {
+    pub(super) writers: Vec<R>,
 }
 
-pub fn read_varint<T: Read>(stream: &mut T) -> Result<usize> {
-    let mut result = 0;
-    let mut shift = 0;
-
-    loop {
-        let mut buf = [0];
-        stream.read_exact(&mut buf)?;
-
-        if shift == 63 && buf[0] != 0x00 && buf[0] != 0x01 {
-            while buf[0] & CONTINUATION_BIT != 0 {
-                stream.read_exact(&mut buf)?;
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                anyhow::anyhow!("variant overflow"),
-            ));
+impl<R> io::Write for MultiWriter<R>
+where
+    R: io::Write,
+{
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        for w in &mut self.writers {
+            w.write_all(buf)?;
         }
-
-        let low_bits = low_bits_of_byte(buf[0]) as u64;
-        result |= low_bits << shift;
-
-        if buf[0] & CONTINUATION_BIT == 0 {
-            return Ok(result as usize);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        for w in &mut self.writers {
+            w.flush()?;
         }
-
-        shift += 7;
+        Ok(())
     }
 }
+
+mod varint {
+    use std::io;
+
+    pub const CONTINUATION_BIT: u8 = 1 << 7;
+
+    #[inline]
+    pub fn low_bits_of_byte(byte: u8) -> u8 {
+        byte & !CONTINUATION_BIT
+    }
+
+    pub fn read<T: io::Read>(stream: &mut T) -> io::Result<(usize, Vec<u8>)> {
+        let mut result = 0;
+        let mut shift = 0;
+        let mut raw = Vec::new();
+
+        loop {
+            let mut buf = [0];
+            stream.read_exact(&mut buf)?;
+            raw.push(buf[0]);
+
+            if shift == 63 && buf[0] != 0x00 && buf[0] != 0x01 {
+                while buf[0] & CONTINUATION_BIT != 0 {
+                    stream.read_exact(&mut buf)?;
+                    raw.push(buf[0]);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    anyhow::anyhow!("variant overflow"),
+                ));
+            }
+
+            let low_bits = low_bits_of_byte(buf[0]) as u64;
+            result |= low_bits << shift;
+
+            if buf[0] & CONTINUATION_BIT == 0 {
+                return Ok((result as usize, raw));
+            }
+
+            shift += 7;
+        }
+    }
+}
+
+pub use varint::read as read_varint;

@@ -21,17 +21,17 @@ use starlark::values::starlark_value;
 use axl_proto::build_event_stream::BuildEvent;
 use derive_more::Display;
 
-use super::super::stream::ReplaySubscriber;
+use super::super::stream::Subscriber;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<build_event_iterator>")]
 pub struct BuildEventIterator {
     #[allocative(skip)]
-    recv: RefCell<ReplaySubscriber>,
+    recv: RefCell<Subscriber<BuildEvent>>,
 }
 
 impl BuildEventIterator {
-    pub fn new(recv: ReplaySubscriber) -> Self {
+    pub fn new(recv: Subscriber<BuildEvent>) -> Self {
         Self {
             recv: RefCell::new(recv),
         }
@@ -64,7 +64,10 @@ pub(crate) fn build_event_methods(registry: &mut MethodsBuilder) {
         let this = this
             .downcast_ref_err::<BuildEventIterator>()
             .into_anyhow_result()?;
-        Ok(this.recv.borrow().is_closed())
+        Ok(matches!(
+            this.recv.borrow_mut().try_recv(),
+            Err(TryRecvError::Disconnected)
+        ))
     }
 }
 

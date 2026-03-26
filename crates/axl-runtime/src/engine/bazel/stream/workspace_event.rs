@@ -55,7 +55,7 @@ impl WorkspaceEventStream {
 
             let mut read = || -> Result<(), WorkspaceEventError> {
                 // varint size can be somewhere between 1 to 10 bytes.
-                let size = read_varint(&mut out_raw)?;
+                let (size, _) = read_varint(&mut out_raw)?;
                 if size > buf.len() {
                     buf.resize(size, 0);
                 }

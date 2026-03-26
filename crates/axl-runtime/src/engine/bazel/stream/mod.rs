@@ -5,6 +5,6 @@ mod util;
 pub mod workspace_event;
 
 pub use broadcaster::Subscriber;
-pub use build_event::{BuildEventStream, ReplaySubscriber};
+pub use build_event::BuildEventStream;
 pub use execlog::ExecLogStream;
 pub use workspace_event::WorkspaceEventStream;
