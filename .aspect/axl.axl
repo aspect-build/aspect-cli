@@ -442,9 +442,82 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     result7 = cancellation7.wait()
     tc = test_case(tc, result7 == True, "wait() on cancel should return True")
 
-    # Test 6: force() API shape test (don't actually kill the server - just verify it returns bool)
-    # We skip actually calling force() here because it would kill the Bazel daemon
-    # and break subsequent tests. The API is exercised through the type system.
+    # Test 6: cancel_invocation succeeds even when bazel commands fail (e.g. bad startup flags).
+    # With bad flags, client_pid/is_server_busy return None/False, so cancel_invocation
+    # returns a Cancellation and wait() returns True immediately.
+    ctx.bazel.startup_flags.append("--invalid_flag_that_does_not_exist")
+    cancellation8 = ctx.bazel.cancel_invocation()
+    tc = test_case(tc, type(cancellation8.busy) == "bool", "cancel_invocation() with bad flags should still return a Cancellation")
+    tc = test_case(tc, cancellation8.busy == False, "cancel_invocation() with bad flags should not be busy")
+    result8 = cancellation8.wait()
+    tc = test_case(tc, result8 == True, "wait() with bad flags should return True")
+    ctx.bazel.startup_flags.pop()
+
+    # Test 7: force() on a running build sends a second SIGINT to the client.
+    build9 = ctx.bazel.build(
+        "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild"],
+        build_events = True,
+    )
+    cancellation9 = ctx.bazel.cancel_invocation(force_kill_after_ms = 0)
+    # Manually force-kill and then wait with timeout
+    cancellation9.force()
+    result9 = cancellation9.wait(timeout_ms = 5000)
+    tc = test_case(tc, result9 == True, "force() + wait(timeout_ms) should succeed on --nobuild target")
+    status9 = build9.wait()
+    tc = test_case(tc, type(status9.code) == "int", "build.wait() after force() should return a status")
+
+    # Test 8: Auto-escalation via force_kill_after_ms on a slow build.
+    # Start a build that sleeps for 30s, cancel with a 1s grace period.
+    # The first SIGINT requests graceful cancel; after 1s wait() auto-escalates.
+    # Use --action_env with a per-process unique value to bust the action cache on warm runners.
+    build10 = ctx.bazel.build(
+        "//examples/slow_build:slow",
+        flags = ["--noremote_accept_cached", "--action_env=CACHEBUST=" + ctx.std.env.temp_dir()],
+        build_events = True,
+    )
+    cancellation10 = ctx.bazel.cancel_invocation(force_kill_after_ms = 10000)
+    result10 = cancellation10.wait()
+    tc = test_case(tc, result10 == True, "wait() with force_kill_after_ms should auto-escalate and return True")
+    status10 = build10.wait()
+    tc = test_case(tc, type(status10.code) == "int", "build.wait() after auto-escalated cancel should return a status")
+
+    # Test 9: wait(timeout_ms) on a non-busy server returns True immediately.
+    # (The False path — timeout while busy — is covered by Rust unit tests since
+    # it requires a build that ignores SIGINT, which can't be reliably arranged.)
+    cancellation11 = ctx.bazel.cancel_invocation(force_kill_after_ms = 0)
+    result11 = cancellation11.wait(timeout_ms = 500)
+    tc = test_case(tc, result11 == True, "wait(timeout_ms) on non-busy server should return True")
+
+    # Test 10: Multiple cancel_invocation() calls with discarded results, then wait.
+    build12 = ctx.bazel.build(
+        "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild"],
+        build_events = True,
+    )
+    ctx.bazel.cancel_invocation()
+    ctx.bazel.cancel_invocation()
+    ctx.bazel.cancel_invocation().wait()
+    status12 = build12.wait()
+    tc = test_case(tc, type(status12.code) == "int", "repeated cancel_invocation() calls should not break anything")
+
+    # Test 11: wait() and force() on a stale cancellation from a previous build.
+    build13 = ctx.bazel.build(
+        "//crates/aspect-cli:aspect-cli",
+        flags = ["--nobuild"],
+        build_events = True,
+    )
+    stale = ctx.bazel.cancel_invocation()
+    stale.wait()
+    status13 = build13.wait()
+    tc = test_case(tc, type(status13.code) == "int", "stale cancellation setup should complete")
+    # Now stale refers to a cancellation from a finished build.
+    # Calling wait/force/busy on it should be safe no-ops.
+    tc = test_case(tc, stale.busy == False, "stale cancellation.busy should be False")
+    result_stale = stale.wait()
+    tc = test_case(tc, result_stale == True, "stale cancellation.wait() should return True")
+    result_force = stale.force()
+    tc = test_case(tc, result_force == False, "stale cancellation.force() should return False (no client/server to signal)")
 
     return tc
 

@@ -52,8 +52,6 @@ steps:
         WORKSPACE_ROOT=$$(pwd)
         LAUNCHER=$$WORKSPACE_ROOT/$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-launcher)
         CLI=$$WORKSPACE_ROOT/$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-cli)
-        echo "--- :aspect: aspect tests axl"
-        $$LAUNCHER tests axl
         echo "--- :aspect: aspect demo template-demo"
         $$LAUNCHER demo template-demo
         echo "--- :aspect: aspect user nested user_task"
@@ -77,6 +75,10 @@ steps:
         $$CLI --version
         echo "--- :aspect: aspect version"
         $$LAUNCHER version
+        echo "--- :aspect: aspect tests axl"
+        # Run AXL tests last — cancel tests may kill the Bazel server,
+        # which invalidates bazel-out paths used by $$LAUNCHER above.
+        $$LAUNCHER tests axl
   - key: __main__::bazelrc-e2e
     depends_on:
       - __main__::warm
