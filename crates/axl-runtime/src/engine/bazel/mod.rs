@@ -537,21 +537,27 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         Ok(rc::StarlarkBazelRC { inner })
     }
 
-    fn cancel_invocation<'v>(this: values::Value<'v>) -> anyhow::Result<cancel::Cancellation> {
+    /// * `force_kill_after_ms` - If the build is still running after this many
+    ///   milliseconds, `wait()` will automatically escalate by sending the 2nd
+    ///   and 3rd SIGINT to the Bazel client (the 3rd triggers Bazel's built-in
+    ///   server kill, equivalent to Ctrl+C three times). If the client still
+    ///   doesn't exit, falls back to SIGKILL on both client and server.
+    ///   Defaults to 5000ms. Set to 0 to disable auto-escalation and manage
+    ///   cancellation manually via `wait(timeout_ms=...)` and `force()`.
+    fn cancel_invocation<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = named, default = 5000)] force_kill_after_ms: i32,
+    ) -> anyhow::Result<cancel::Cancellation> {
         let all_flags = read_startup_flags(this)?;
-        // IMPORTANT: client_pid() must be called BEFORE server_info() because
-        // server_info() runs `bazel info` without --noblock_for_lock, which
-        // blocks on the server lock. client_pid() uses --noblock_for_lock so
-        // it returns immediately even when another invocation holds the lock.
+        let force_kill_after_ms = force_kill_after_ms.max(0) as u64;
+
+        // Send SIGINT to the Bazel client holding the server lock.
+        // client_pid() uses --noblock_for_lock so it returns immediately.
         if let Some(pid) = info::client_pid(&all_flags) {
             process::sigint(pid);
         }
-        // Now that we've SIGINT'd the client, the lock will be released soon
-        // and server_info() can acquire it to read the server PID.
-        let (server_pid, _) = info::server_info_with_startup_flags(&all_flags).map_err(|e| {
-            anyhow::anyhow!("failed to get Bazel server info for cancellation: {}", e)
-        })?;
-        Ok(cancel::Cancellation::new(server_pid, all_flags))
+
+        Ok(cancel::Cancellation::new(all_flags, force_kill_after_ms))
     }
 }
 

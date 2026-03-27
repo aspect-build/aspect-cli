@@ -1,0 +1,15 @@
+"""A slow genrule target for testing cancellation with force-kill.
+
+Used by .aspect/axl.axl test_cancel_invocation to verify that
+wait()/force() auto-escalation works on builds that don't respond
+to a single SIGINT quickly enough.
+
+The test passes --action_env=CACHEBUST=<unique> to ensure the genrule
+is never served from cache on warm runners.
+"""
+
+genrule(
+    name = "slow",
+    outs = ["slow.txt"],
+    cmd = "sleep 30 && echo done > $@",
+)
