@@ -1,35 +1,82 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -eu
 
-# Bazel startup options for CI
-export BAZEL_STARTUP_OPTS="--nohome_rc --nosystem_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
+# Skip if bazel is not installed
+if ! command -v bazel >/dev/null 2>&1; then
+  echo "bazel not found, skipping"
+  exit 0
+fi
 
 # Build bazel remote flags from environment variables set by configure_workflows_env
+# These are kept as scalar strings so downstream pipeline steps can consume them with $VAR word-splitting.
 BAZEL_REMOTE_FLAGS=""
 [ -n "${ASPECT_WORKFLOWS_BES_BACKEND:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_backend=${ASPECT_WORKFLOWS_BES_BACKEND}"
 [ -n "${ASPECT_WORKFLOWS_BES_RESULTS_URL:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --bes_results_url=${ASPECT_WORKFLOWS_BES_RESULTS_URL}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_CACHE:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_cache=${ASPECT_WORKFLOWS_REMOTE_CACHE}"
 [ -n "${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX:-}" ] && BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --remote_bytestream_uri_prefix=${ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX}"
-export BAZEL_REMOTE_FLAGS
 
+# Bazel startup options and repository_cache (only on Workflows runners)
+BAZEL_STARTUP_OPTS=""
+DISABLE_PLUGINS_FLAG=""
+if [ -n "${ASPECT_WORKFLOWS_RUNNER:-}" ]; then
+  echo "Running on Aspect Workflows runner"
+  STORAGE_PATH="${ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH:-/mnt/ephemeral}"
+
+  # Derive repo name from BUILDKITE_REPO (mirrors _parse_git_url_name + _sanitize_filename in environment.axl)
+  REPO_NAME=""
+  if [ -n "${BUILDKITE_REPO:-}" ]; then
+    REPO_NAME=$(echo "${BUILDKITE_REPO}" | sed 's|/*$||' | sed 's|\.git$||' | sed 's|.*/||' | sed 's|.*:||' | sed 's|[^a-zA-Z0-9._-]|_|g')
+  fi
+
+  # Derive subdir from the workspace checkout path (mirrors _sanitize_filename(root_dir.split("/")[-1]) in environment.axl)
+  WORKSPACE_DIR="${BUILDKITE_BUILD_CHECKOUT_PATH:-$(pwd)}"
+  SUBDIR=$(basename "${WORKSPACE_DIR}" | sed 's|[^a-zA-Z0-9._-]|_|g')
+
+  if [ -n "${REPO_NAME}" ]; then
+    OUTPUT_USER_ROOT="${STORAGE_PATH}/bazel/${REPO_NAME}/${SUBDIR}"
+    OUTPUT_BASE="${STORAGE_PATH}/output/${REPO_NAME}/${SUBDIR}"
+  else
+    OUTPUT_USER_ROOT="${STORAGE_PATH}/bazel/${SUBDIR}"
+    OUTPUT_BASE="${STORAGE_PATH}/output/${SUBDIR}"
+  fi
+
+  BAZEL_STARTUP_OPTS="--nohome_rc --nosystem_rc --output_user_root=${OUTPUT_USER_ROOT} --output_base=${OUTPUT_BASE}"
+  BAZEL_REMOTE_FLAGS="${BAZEL_REMOTE_FLAGS} --repository_cache=${STORAGE_PATH}/caches/repository"
+
+  if [ -z "${ASPECT_WORKFLOWS_RUNNER_NO_LEGACY_CLI:-}" ]; then
+    DISABLE_PLUGINS_FLAG="--aspect:disable_plugins"
+  fi
+fi
+
+# Exported for use in .buildkite/pipeline.yaml steps
+export BAZEL_STARTUP_OPTS
 export BAZEL_BUILD_OPTS="--config=ci --announce_rc ${BAZEL_REMOTE_FLAGS}"
 
-# Skip if bazel is not installed
-if ! command -v bazel >/dev/null 2>&1; then
-  echo "DEBUG: bazel not found, skipping"
-  exit 0
-fi
+echo "Startup opts: ${BAZEL_STARTUP_OPTS}"
+echo "Build opts: ${BAZEL_BUILD_OPTS}"
 
 # We use a short timeout so we capture the "Another command (pid=X)" message without
 # blocking indefinitely.
-LOCK_OUTPUT=$(timeout 5 bazel $BAZEL_STARTUP_OPTS info 2>&1) || true
-BUSY_PID=$(echo "$LOCK_OUTPUT" | grep -o '(pid=[0-9]*)' | grep -o '[0-9]*') || true
-if [ -n "$BUSY_PID" ]; then
-    /etc/aspect/workflows/bin/signal_instance_unhealthy
-    exit 78
+if [ -n "${ASPECT_WORKFLOWS_RUNNER:-}" ]; then
+  echo "Checking for bazel lock..."
+  # shellcheck disable=SC2086
+  LOCK_OUTPUT=$(timeout 5 bazel $BAZEL_STARTUP_OPTS info 2>&1) || true
+  BUSY_PID=$(echo "$LOCK_OUTPUT" | grep -o '(pid=[0-9]*)' | grep -o '[0-9]*') || true
+  if [ -n "$BUSY_PID" ]; then
+      echo "Bazel is locked by pid=${BUSY_PID}, signalling unhealthy"
+      /etc/aspect/workflows/bin/signal_instance_unhealthy
+      exit 78
+  fi
+fi
+
+if [ -f /etc/bazel.bazelrc ]; then
+  echo "/etc/bazel.bazelrc exists ($(wc -l < /etc/bazel.bazelrc) lines)"
+else
+  echo "/etc/bazel.bazelrc does not exist"
 fi
 
 # Build aspect-cli so version.axl can pick it up from bazel-bin/
 echo "--- Building aspect-cli"
 # bazel in aspect workflows runners is actually old aspect-cli.
-bazel --aspect:disable_plugins $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel --show_progress_rate_limit=1 //:cli
+# shellcheck disable=SC2086
+bazel $DISABLE_PLUGINS_FLAG $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS -c dbg --remote_download_toplevel --show_progress_rate_limit=1 //:cli
