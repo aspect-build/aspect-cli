@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+env
+
 # Bazel startup options for CI
 export BAZEL_STARTUP_OPTS="--nohome_rc --nosystem_rc --output_user_root=/mnt/ephemeral/bazel/aspect-cli/__main__ --output_base=/mnt/ephemeral/output/aspect-cli/__main__"
 
