@@ -12,8 +12,6 @@ job. It does two things:
 
 load("./environment.axl", "AWS_LOG_GROUP", "get_environment", "is_warming_complete")
 
-_DEFAULT_BIN_DIR = "/etc/aspect/workflows/bin"
-
 
 def _url_encode(s):
     """Percent-encode a string for use in URLs."""
@@ -183,7 +181,7 @@ def agent_health_check(ctx, environment):
         print("--- :bazel: Running %s" % ctx.task.name)
 
     if health.outcome == "unhealthy":
-        signal_bin = _DEFAULT_BIN_DIR + "/signal_instance_unhealthy"
+        signal_bin = environment.runner.bin_dir + "/signal_instance_unhealthy"
         if ctx.std.fs.exists(signal_bin):
             ctx.std.process.command(signal_bin).spawn().wait()
         return health.message or "Bazel server is unhealthy"

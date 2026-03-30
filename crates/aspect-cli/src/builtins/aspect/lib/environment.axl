@@ -8,6 +8,9 @@ records. Also provides bazelrc flag generation and host/CI detection.
 # Default storage path on Workflows Runners
 DEFAULT_STORAGE_PATH = "/mnt/ephemeral"
 
+# Default bin directory for Workflows runner binaries
+DEFAULT_BIN_DIR = "/etc/aspect/workflows/bin"
+
 # AWS CloudWatch log group
 AWS_LOG_GROUP = "/aw/runner/cloud-init/output"
 
@@ -35,6 +38,10 @@ Runner = record(
     warming_enabled = field(bool, default = False),
     cloud_provider = field(str, default = ""),
     data_dir = field(str, default = ""),
+    bin_dir = field(str, default = DEFAULT_BIN_DIR),
+    bazel_root_dir = field(str, default = DEFAULT_STORAGE_PATH + "/bazel"),
+    output_root_dir = field(str, default = DEFAULT_STORAGE_PATH + "/output"),
+    repository_cache_dir = field(str, default = DEFAULT_STORAGE_PATH + "/caches/repository"),
     has_nvme_storage = field(bool, default = False),
     # TODO: replace with agent http api call once available
     warming_complete = field(bool, default = False),
@@ -118,6 +125,8 @@ def get_environment(std) -> Environment | None:
     if last_hc_path and std.fs.exists(last_hc_path):
         last_health_check = std.fs.read_to_string(last_hc_path)
 
+    storage_path = std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH") or DEFAULT_STORAGE_PATH
+
     return Environment(
         remote_cache = RemoteCache(
             endpoint = std.env.var("ASPECT_WORKFLOWS_REMOTE_CACHE") or "",
@@ -128,7 +137,7 @@ def get_environment(std) -> Environment | None:
             results_url = std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL") or "",
         ),
         runner = Runner(
-            storage_path = std.env.var("ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH") or DEFAULT_STORAGE_PATH,
+            storage_path = storage_path,
             product_version = std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION") or "",
             instance_id = std.env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID") or "",
             instance_name = std.env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME") or "",
@@ -140,6 +149,10 @@ def get_environment(std) -> Environment | None:
             warming_enabled = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED")),
             cloud_provider = std.env.var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER") or "",
             data_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_DATA_DIR") or "",
+            bin_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BIN_DIR") or DEFAULT_BIN_DIR,
+            bazel_root_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR") or (storage_path + "/bazel"),
+            output_root_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_OUTPUT_ROOT_DIR") or (storage_path + "/output"),
+            repository_cache_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_REPOSITORY_CACHE_DIR") or (storage_path + "/caches/repository"),
             has_nvme_storage = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE")),
             warming_complete = warming_complete,
             warming_current_cache = warming_current_cache,
@@ -188,7 +201,6 @@ def get_bazelrc_flags(environment: Environment, root_dir: str) -> (list, list):
     Returns:
         (startup_flags, build_flags): two lists of flag strings
     """
-    storage_path = environment.runner.storage_path
     repo_name = environment.ci.scm_repo_name
     subdir = _sanitize_filename(root_dir.rstrip("/").split("/")[-1]) if root_dir else "__main__"
 
@@ -213,7 +225,7 @@ def get_bazelrc_flags(environment: Environment, root_dir: str) -> (list, list):
     if environment.remote_cache.address:
         build_flags.append("--remote_bytestream_uri_prefix=" + environment.remote_cache.address)
 
-    build_flags.append("--repository_cache=" + storage_path + "/caches/repository")
+    build_flags.append("--repository_cache=" + environment.runner.repository_cache_dir)
 
     startup_flags = []
 
@@ -223,13 +235,15 @@ def get_bazelrc_flags(environment: Environment, root_dir: str) -> (list, list):
         startup_flags.append("--nohome_rc")
         startup_flags.append("--nosystem_rc")
 
+    bazel_root = environment.runner.bazel_root_dir
+    output_root = environment.runner.output_root_dir
     if repo_name:
         sanitized = _sanitize_filename(repo_name)
-        startup_flags.append("--output_user_root=" + storage_path + "/bazel/" + sanitized + "/" + subdir)
-        startup_flags.append("--output_base=" + storage_path + "/output/" + sanitized + "/" + subdir)
+        startup_flags.append("--output_user_root=" + bazel_root + "/" + sanitized + "/" + subdir)
+        startup_flags.append("--output_base=" + output_root + "/" + sanitized + "/" + subdir)
     else:
-        startup_flags.append("--output_user_root=" + storage_path + "/bazel/" + subdir)
-        startup_flags.append("--output_base=" + storage_path + "/output/" + subdir)
+        startup_flags.append("--output_user_root=" + bazel_root + "/" + subdir)
+        startup_flags.append("--output_base=" + output_root + "/" + subdir)
 
     return (startup_flags, build_flags)
 
