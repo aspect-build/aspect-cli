@@ -302,6 +302,16 @@ async fn configure_tool_task(
                         .execute(req.try_clone().unwrap())
                         .await
                         .into_diagnostic()?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        errs.push(Err(miette!(
+                            "GitHub API request failed with status {}: {}",
+                            status,
+                            body
+                        )));
+                        continue;
+                    }
                     let release_data: Release = resp.json::<Release>().await.into_diagnostic()?;
                     for asset in release_data.assets {
                         if asset.name == *artifact {
