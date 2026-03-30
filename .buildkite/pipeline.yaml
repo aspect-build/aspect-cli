@@ -7,6 +7,43 @@ env:
 secrets:
   - ASPECT_API_TOKEN
 steps:
+  - key: runner_smoke
+    label: ":aspect: Workflows Runner Smoke Test"
+    agents:
+      queue: aspect-default
+    command: |
+      aspect --version
+      aspect version
+      aspect help
+      echo "ASPECT_* env var names present:"
+      env | grep -o '^ASPECT_[^=]*' | sort | sed 's/^/  /'
+      echo "ASPECT_WORKFLOWS_* values:"
+      for var in \
+        ASPECT_WORKFLOWS_BES_BACKEND \
+        ASPECT_WORKFLOWS_BES_RESULTS_URL \
+        ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT \
+        ASPECT_WORKFLOWS_REMOTE_BYTESTREAM_URI_PREFIX \
+        ASPECT_WORKFLOWS_REMOTE_CACHE \
+        ASPECT_WORKFLOWS_RUNNER \
+        ASPECT_WORKFLOWS_RUNNER_AZ \
+        ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT \
+        ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER \
+        ASPECT_WORKFLOWS_RUNNER_DATA_DIR \
+        ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE \
+        ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID \
+        ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME \
+        ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE \
+        ASPECT_WORKFLOWS_RUNNER_JOB_HISTORY_FILE \
+        ASPECT_WORKFLOWS_RUNNER_LAST_HEALTH_CHECK_FILE \
+        ASPECT_WORKFLOWS_RUNNER_REGION \
+        ASPECT_WORKFLOWS_RUNNER_STORAGE_PATH \
+        ASPECT_WORKFLOWS_RUNNER_VERSION \
+        ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE \
+        ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE \
+        ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED \
+      ; do
+        val=$$(printenv "$$var") && echo "  $$var=$$val" || true
+      done
   - key: warm
     label: ":aspect: Building CLI"
     agents:
