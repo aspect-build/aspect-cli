@@ -3,6 +3,9 @@ version(
     sources = [
         local("target/debug/aspect-cli"),
         local("bazel-bin/crates/aspect-cli/aspect-cli"),
+        # Fallback for when bazel-bin symlink points to a different config (e.g. fastbuild)
+        # after the pre-command built with -c dbg
+        local("bazel-out/k8-dbg/bin/crates/aspect-cli/aspect-cli"),
         github(
             org = "aspect-build",
             repo = "aspect-cli",
