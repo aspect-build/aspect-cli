@@ -25,6 +25,7 @@ pub enum TaskArg {
         required: bool,
         default: String,
         short: Option<String>,
+        values: Option<Vec<String>>,
         description: Option<String>,
     },
     Boolean {
@@ -185,6 +186,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = false)] required: bool,
         #[starlark(require = named)] default: Option<String>,
         #[starlark(require = named, default = NoneOr::None)] short: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] values: NoneOr<UnpackList<String>>,
         #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
     ) -> starlark::Result<TaskArg> {
         if required && default.is_some() {
@@ -201,6 +203,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             required,
             default: default.unwrap_or_default(),
             short: short.into_option(),
+            values: values.into_option().map(|it| it.items),
             description: description.into_option(),
         })
     }
