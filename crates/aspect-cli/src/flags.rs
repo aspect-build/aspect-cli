@@ -1,5 +1,5 @@
 use axl_runtime::engine::task_arg::TaskArg;
-use clap::builder::{Resettable, StyledStr};
+use clap::builder::{PossibleValuesParser, Resettable, StyledStr};
 use clap::{Arg, ArgAction, value_parser};
 
 pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
@@ -8,15 +8,23 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
             required,
             default,
             short,
+            values,
             description,
-        } => Arg::new(name)
-            .long(name)
-            .value_name(name)
-            .short(short_option(short))
-            .help(help_text(description))
-            .required(required.to_owned())
-            .default_value(default.to_string())
-            .value_parser(value_parser!(String)),
+        } => {
+            let mut it = Arg::new(name)
+                .long(name)
+                .value_name(name)
+                .short(short_option(short))
+                .help(help_text(description))
+                .required(required.to_owned())
+                .default_value(default.to_string());
+            if let Some(values) = values {
+                it = it.value_parser(PossibleValuesParser::new(values))
+            } else {
+                it = it.value_parser(value_parser!(String));
+            }
+            it
+        }
         TaskArg::Boolean {
             required,
             default,
