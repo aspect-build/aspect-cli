@@ -196,15 +196,24 @@ def _get_pull_request(ctx, token, owner, repo, pull_number, api_base = DEFAULT_G
 
 
 def _list_pull_request_files(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
-    """List files changed in a pull request."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
-    success, status_code, body = _do_request(ctx, "GET", url, token)
-    if success:
-        return {"success": True, "files": body if type(body) == "list" else []}
-    error_msg = "request failed: " + str(status_code)
-    if body and type(body) == "dict" and body.get("message"):
-        error_msg = error_msg + " - " + body["message"]
-    return {"success": False, "error": error_msg, "status": status_code}
+    """List files changed in a pull request (paginates through all pages)."""
+    all_files = []
+    per_page = 100
+    # GitHub caps the PR files endpoint at 3 000 files (30 pages of 100).
+    for page in range(1, 31):
+        url = (api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) +
+               "/files?per_page=" + str(per_page) + "&page=" + str(page))
+        success, status_code, body = _do_request(ctx, "GET", url, token)
+        if not success:
+            error_msg = "request failed: " + str(status_code)
+            if body and type(body) == "dict" and body.get("message"):
+                error_msg = error_msg + " - " + body["message"]
+            return {"success": False, "error": error_msg, "status": status_code}
+        page_files = body if type(body) == "list" else []
+        all_files.extend(page_files)
+        if len(page_files) < per_page:
+            break
+    return {"success": True, "files": all_files}
 
 
 # Reviews
