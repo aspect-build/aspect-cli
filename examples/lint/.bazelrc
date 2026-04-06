@@ -1,23 +1,4 @@
-import %workspace%/tools/preset.bazelrc
-
 ### YOUR PROJECT SPECIFIC OPTIONS GO HERE ###
 
-# Disable skymeld; see https://github.com/bazelbuild/bazel/issues/23743
-# fixes src/main/tools/process-wrapper-legacy.cc:80: "execvp(external/++toolchains+coreutils_linux_amd64/coreutils, ...)": No such file or directory
-common --noexperimental_merged_skyframe_analysis_execution
 
-# also see: https://blog.aspect.build/configuring-bazels-downloader
-common --downloader_config=tools/downloader.cfg
-
-# rules_python is working to enable this default to avoid dependency on a system interpreter
-# See https://github.com/bazel-contrib/rules_python/issues/3187
-# NB: some tools run py_binary targets even if the user didn't select to add Python to their project
-common --@rules_python//python/config_settings:bootstrap_impl=script
-common --workspace_status_command=githooks/check-config.sh
-common:lint --aspects=//tools/lint:linters.bzl%shellcheck
-
-# Load any settings & overrides specific to the current user from `.aspect/bazelrc/user.bazelrc`.
-# This file should appear in `.gitignore` so that settings are not shared with team members. This
-# should be last statement in this config so the user configuration is able to overwrite flags from
-# this file. See https://bazel.build/configure/best-practices#bazelrc-file.
-try-import %workspace%/user.bazelrc
+common:lint --aspects=//:linters.bzl%shellcheck

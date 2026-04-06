@@ -1,7 +1,0 @@
-"""Global repository settings.
-
-See https://bazel.build/rules/lib/globals/repo
-"""
-
-ignore_directories([
-])

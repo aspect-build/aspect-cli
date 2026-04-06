@@ -9,6 +9,8 @@ module(
 )
 
 # Currently bazel-lib is only load()ed when platforms is used.
+bazel_dep(name = "bazel_env.bzl", version = "0.7.2")
+bazel_dep(name = "bazelrc-preset.bzl", version = "1.8.0")
 bazel_dep(name = "bazel_lib", version = "3.1.1")
 bazel_dep(name = "aspect_bazel_lib", version = "2.22.5", repo_name = None)  # force a recent version that works with v3
 bazel_dep(name = "platforms", version = "1.0.0")
@@ -16,12 +18,24 @@ bazel_dep(name = "apple_support", version = "2.2.0")
 bazel_dep(name = "aspect_rules_lint", version = "2.0.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.1.1")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
-bazel_dep(name = "rules_multitool", version = "1.11.1")
-bazel_dep(name = "bazelrc-preset.bzl", version = "1.8.0")
-bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "rules_shell", version = "0.7.1")
+bazel_dep(name = "rules_python", version = "1.9.0")
+bazel_dep(name = "gazelle", version = "0.49.0")
 
-multitool = use_extension("@rules_multitool//multitool:extension.bzl", "multitool")
-multitool.hub(lockfile = "//tools:tools.lock.json")
-use_repo(multitool, "multitool")
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-register_toolchains("//tools/toolchains:all")
+http_archive(
+    name = "shellcheck_linux_x86_64",
+    url = "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz",
+    sha256 = "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87",
+    build_file_content = """\
+genrule(
+    name = "shellcheck",
+    srcs = ["shellcheck-v0.10.0/shellcheck"],
+    outs = ["shellcheck_bin"],
+    cmd = "cp $(SRCS) $@ && chmod +x $@",
+    executable = True,
+    visibility = ["//visibility:public"],
+)
+""",
+)

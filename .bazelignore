@@ -2,3 +2,4 @@
 target/
 bazel/proto/
 examples/large_bes
+examples/lint
