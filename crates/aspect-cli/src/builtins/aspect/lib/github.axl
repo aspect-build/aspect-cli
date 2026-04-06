@@ -19,6 +19,10 @@ def _do_request(ctx, method, url, token, payload = None):
         response = ctx.http().post(url = url, headers = headers, data = data).block()
     elif method == "PATCH":
         response = ctx.http().patch(url = url, headers = headers, data = data).block()
+    elif method == "GET":
+        response = ctx.http().get(url = url, headers = headers).block()
+    elif method == "DELETE":
+        response = ctx.http().delete(url = url, headers = headers).block()
     else:
         return (False, 0, "unsupported method: " + method)
     success = response.status >= 200 and response.status < 300
@@ -28,10 +32,7 @@ def _do_request(ctx, method, url, token, payload = None):
     return (success, response.status, body)
 
 
-# =============================================================================
 # Authentication
-# =============================================================================
-
 VALID_ROLES = [
     "checks.read",
     "checks.write",
@@ -46,7 +47,6 @@ VALID_ROLES = [
 def validate_role(role):
     """Validate that a role is in the known set."""
     return role in VALID_ROLES
-
 
 def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = None):
     """Resolve a GitHub token using the following priority:
@@ -96,10 +96,42 @@ def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = N
     return None
 
 
-# =============================================================================
-# Check Runs
-# =============================================================================
 
+# Core
+def detect_commit_sha(env):
+    """Detect commit SHA from CI environment variables."""
+    return (
+        env.var("GITHUB_SHA") or
+        env.var("BUILDKITE_COMMIT") or
+        env.var("CIRCLE_SHA1") or
+        env.var("CI_COMMIT_SHA") or
+        ""
+    )
+
+
+def detect_github_repo(std):
+    """Detect (owner, repo) from git remote origin, or ("", "") on failure."""
+    result = std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code != 0:
+        return ("", "")
+    url = result.stdout.strip()
+
+    if url.startswith("git@github.com:"):
+        path = url[len("git@github.com:"):]
+    elif "github.com/" in url:
+        path = url[url.index("github.com/") + len("github.com/"):]
+    else:
+        return ("", "")
+
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.split("/", 1)
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return (parts[0], parts[1])
+    return ("", "")
+
+
+# Check Runs
 def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, output = None, api_base = DEFAULT_GITHUB_API):
     """Create a new check run on a commit."""
     url = api_base + "/repos/" + owner + "/" + repo + "/check-runs"
@@ -147,46 +179,84 @@ def complete_check_run(ctx, token, owner, repo, check_run_id, conclusion, output
     )
 
 
-# =============================================================================
-# CI environment detection
-# =============================================================================
-
-def detect_commit_sha(env):
-    """Detect commit SHA from CI environment variables."""
-    return (
-        env.var("GITHUB_SHA") or
-        env.var("BUILDKITE_COMMIT") or
-        env.var("CIRCLE_SHA1") or
-        env.var("CI_COMMIT_SHA") or
-        ""
-    )
 
 
-def detect_github_repo(std):
-    """Detect (owner, repo) from git remote origin, or ("", "") on failure."""
-    result = std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
-    if result.status.code != 0:
-        return ("", "")
-    url = result.stdout.strip()
 
-    if url.startswith("git@github.com:"):
-        path = url[len("git@github.com:"):]
-    elif "github.com/" in url:
-        path = url[url.index("github.com/") + len("github.com/"):]
-    else:
-        return ("", "")
-
-    if path.endswith(".git"):
-        path = path[:-4]
-    parts = path.split("/", 1)
-    if len(parts) == 2 and parts[0] and parts[1]:
-        return (parts[0], parts[1])
-    return ("", "")
+# Pull Requests
+def _get_pull_request(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
+    """Get a pull request by number."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number)
+    success, status_code, body = _do_request(ctx, "GET", url, token)
+    if success:
+        return {"success": True, "pull_request": body}
+    error_msg = "request failed: " + str(status_code)
+    if body and type(body) == "dict" and body.get("message"):
+        error_msg = error_msg + " - " + body["message"]
+    return {"success": False, "error": error_msg, "status": status_code}
 
 
-# =============================================================================
-# Struct-based API
-# =============================================================================
+def _list_pull_request_files(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
+    """List files changed in a pull request."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
+    success, status_code, body = _do_request(ctx, "GET", url, token)
+    if success:
+        return {"success": True, "files": body if type(body) == "list" else []}
+    error_msg = "request failed: " + str(status_code)
+    if body and type(body) == "dict" and body.get("message"):
+        error_msg = error_msg + " - " + body["message"]
+    return {"success": False, "error": error_msg, "status": status_code}
+
+
+# Reviews
+def _list_review_comments(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
+    """List review comments on a pull request."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
+    success, status_code, body = _do_request(ctx, "GET", url, token)
+    if success:
+        return {"success": True, "comments": body if type(body) == "list" else []}
+    error_msg = "request failed: " + str(status_code)
+    if body and type(body) == "dict" and body.get("message"):
+        error_msg = error_msg + " - " + body["message"]
+    return {"success": False, "error": error_msg, "status": status_code}
+
+
+def _create_review(ctx, token, owner, repo, pull_number, body, event, comments, commit_id, api_base = DEFAULT_GITHUB_API):
+    """Create a pull request review with inline comments."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/reviews"
+    payload = {"body": body, "event": event, "comments": comments, "commit_id": commit_id}
+    success, status_code, resp_body = _do_request(ctx, "POST", url, token, payload)
+    if success:
+        return {"success": True, "review_id": resp_body.get("id")}
+    error_msg = "request failed: " + str(status_code)
+    if resp_body and type(resp_body) == "dict" and resp_body.get("message"):
+        error_msg = error_msg + " - " + resp_body["message"]
+    return {"success": False, "error": error_msg, "status": status_code}
+
+
+def _create_review_comment(ctx, token, owner, repo, pull_number, body, path, line, commit_id,
+                            side = "RIGHT", start_line = None, start_side = None, api_base = DEFAULT_GITHUB_API):
+    """Create a single review comment on a pull request."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
+    payload = {"body": body, "path": path, "line": line, "commit_id": commit_id, "side": side}
+    if start_line:
+        payload["start_line"] = start_line
+    if start_side:
+        payload["start_side"] = start_side
+    success, status_code, resp_body = _do_request(ctx, "POST", url, token, payload)
+    if success:
+        return {"success": True, "comment_id": resp_body.get("id")}
+    error_msg = "request failed: " + str(status_code)
+    if resp_body and type(resp_body) == "dict" and resp_body.get("message"):
+        error_msg = error_msg + " - " + resp_body["message"]
+    return {"success": False, "error": error_msg, "status": status_code}
+
+
+def _delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
+    """Delete a review comment by ID."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/comments/" + str(comment_id)
+    success, status_code, _ = _do_request(ctx, "DELETE", url, token)
+    return {"success": success, "status": status_code}
+
 
 def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT_GITHUB_API):
     return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
@@ -208,5 +278,15 @@ github = struct(
         create   = _status_checks_create,
         complete = _status_checks_complete,
         fail     = _status_checks_fail,
+    ),
+    prs = struct(
+        get        = _get_pull_request,
+        list_files = _list_pull_request_files,
+    ),
+    reviews = struct(
+        create         = _create_review,
+        list_comments  = _list_review_comments,
+        create_comment = _create_review_comment,
+        delete_comment = _delete_review_comment,
     ),
 )

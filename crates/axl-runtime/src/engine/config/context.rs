@@ -29,6 +29,7 @@ use starlark::values::starlark_value;
 use crate::engine::config::tasks::value::MutableTaskList;
 use crate::engine::config::tasks::value::TaskListGen;
 
+use super::super::aspect::Aspect;
 use super::super::http::Http;
 use super::super::std::Std;
 use super::super::template;
@@ -155,6 +156,12 @@ impl<'v> values::StarlarkValue<'v> for FrozenConfigContext {
 
 #[starlark_module]
 pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
+    /// Aspect platform APIs (auth, etc.).
+    #[starlark(attribute)]
+    fn aspect<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Aspect> {
+        Ok(Aspect {})
+    }
+
     /// Standard library is the foundation of powerful AXL tasks.
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
