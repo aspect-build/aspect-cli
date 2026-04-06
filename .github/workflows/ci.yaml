@@ -27,3 +27,4 @@ jobs:
         working-directory: examples/lint
         env:
           ASPECT_DEBUG: 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
