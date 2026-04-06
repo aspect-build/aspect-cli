@@ -35,14 +35,18 @@ def _parse_github_diff_patch(patch):
     return lines
 
 
-def _make_github_diff(token, owner, repo):
+def _make_github_diff(token, owner, repo, debug):
     def get_diff(ctx, state):
         ref = ctx.std.env.var("GITHUB_REF") or ""
         if not (ref.startswith("refs/pull/") and ref.endswith("/merge")):
+            if debug:
+                print("[aspect-lint] get_diff: GITHUB_REF={!r} is not a PR merge ref, skipping".format(ref))
             return []  # not a PR build
 
         pr_number = int(ref.removeprefix("refs/pull/").removesuffix("/merge"))
         state["pr_number"] = pr_number
+        if debug:
+            print("[aspect-lint] get_diff: detected PR #{}".format(pr_number))
 
         # GITHUB_SHA is the merge-ref SHA, not the PR head commit SHA.
         # Overwrite it with the actual head SHA so staleness checks and
@@ -52,9 +56,16 @@ def _make_github_diff(token, owner, repo):
             actual_head_sha = pr_result["pull_request"].get("head", {}).get("sha", "")
             if actual_head_sha and "github" in state:
                 state["github"]["head_sha"] = actual_head_sha
+                if debug:
+                    print("[aspect-lint] get_diff: resolved head_sha={}".format(actual_head_sha))
+        else:
+            if debug:
+                print("[aspect-lint] get_diff: failed to fetch PR: {}".format(pr_result.get("error", "")))
 
         result = github.prs.list_files(ctx, token, owner, repo, pr_number)
         if not result["success"]:
+            if debug:
+                print("[aspect-lint] get_diff: failed to list PR files: {}".format(result.get("error", "")))
             return []
 
         all_files = []
@@ -65,6 +76,9 @@ def _make_github_diff(token, owner, repo):
             patch = f.get("patch", "")
             added_lines = _parse_github_diff_patch(patch)
             all_files.append({"file": filename, "lines": added_lines})
+
+        if debug:
+            print("[aspect-lint] get_diff: {} changed file(s) in PR".format(len(all_files)))
 
         state["changed_lines"] = {f["file"]: f["lines"] for f in all_files}
         return all_files
@@ -245,7 +259,7 @@ def _cleanup_comments(ctx, state, relevant_diagnostics):
                 github.reviews.delete_comment(ctx, gh["token"], gh["owner"], gh["repo"], c["id"])
 
 
-def _attach_github_reporter(fragment, token, owner, repo, mode):
+def _attach_github_reporter(fragment, token, owner, repo, mode, debug):
     def _lint_start(ctx, state):
         state["github"] = {
             "token": token,
@@ -255,10 +269,14 @@ def _attach_github_reporter(fragment, token, owner, repo, mode):
             "pending_comments": [],
             "stale": False,
         }
+        if debug:
+            print("[aspect-lint] lint_start: owner={} repo={} mode={}".format(owner, repo, mode))
 
     def _lint_report(ctx, state, filepath):
         gh = state["github"]
         if gh["stale"]:
+            if debug:
+                print("[aspect-lint] lint_report: skipping {} (PR is stale)".format(filepath))
             return
 
         content = ctx.std.fs.read_to_string(filepath)
@@ -274,6 +292,9 @@ def _attach_github_reporter(fragment, token, owner, repo, mode):
                     diag["tool"], diag["file"], diag["line"], diag["rule_id"])
                 comment["body"] = marker + "\n" + comment["body"]
 
+        if debug:
+            print("[aspect-lint] lint_report: {} comment(s) from {}".format(len(comments), filepath))
+
         gh["pending_comments"].extend(comments)
 
         if mode == "streaming":
@@ -282,6 +303,8 @@ def _attach_github_reporter(fragment, token, owner, repo, mode):
                 if "existing_markers" not in gh:
                     gh["existing_markers"] = _get_existing_markers(ctx, gh, pr_number)
                 ready = _filter_by_diff(gh["pending_comments"], state.get("changed_lines", {}))
+                if debug:
+                    print("[aspect-lint] lint_report: posting {}/{} comment(s) (streaming, filtered by diff)".format(len(ready), len(gh["pending_comments"])))
                 _post_individually(ctx, gh, pr_number, ready, gh["existing_markers"])
                 gh["pending_comments"] = []
 
@@ -290,6 +313,8 @@ def _attach_github_reporter(fragment, token, owner, repo, mode):
 
         if gh["stale"] or _check_staleness(ctx, state):
             gh["stale"] = True
+            if debug:
+                print("[aspect-lint] lint_end: PR is stale, skipping comment posting")
             return
 
         pr_number = state.get("pr_number")
@@ -297,8 +322,12 @@ def _attach_github_reporter(fragment, token, owner, repo, mode):
             if mode == "grouped":
                 existing = _get_existing_markers(ctx, gh, pr_number)
                 ready = _filter_by_diff(gh["pending_comments"], state.get("changed_lines", {}))
+                if debug:
+                    print("[aspect-lint] lint_end: posting {}/{} comment(s) (grouped, filtered by diff)".format(len(ready), len(gh["pending_comments"])))
                 _post_as_review(ctx, gh, pr_number, ready, existing)
             _cleanup_comments(ctx, state, relevant_diagnostics)
+        elif debug:
+            print("[aspect-lint] lint_end: no PR number in state, skipping comment posting")
 
     fragment.lint_start.append(_lint_start)
     fragment.lint_report.append(_lint_report)
@@ -306,18 +335,24 @@ def _attach_github_reporter(fragment, token, owner, repo, mode):
 
 
 def configure_rules_lint(ctx: ConfigContext):
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
     lint_fragment = ctx.fragments[LintFragment]
     repo_parts = (ctx.std.env.var("GITHUB_REPOSITORY") or "").split("/")
     gh_owner = repo_parts[0] if len(repo_parts) >= 2 else ""
     gh_repo  = repo_parts[1] if len(repo_parts) >= 2 else ""
     github_token = github.authenticate(ctx, ctx.std.env, owner = gh_owner, repo = gh_repo)
     if github_token:
+        if debug:
+            print("[aspect-lint] configure_rules_lint: GitHub token resolved, owner={} repo={}".format(gh_owner, gh_repo))
         lint_fragment.get_diff = _make_github_diff(
-            token = github_token, owner = gh_owner, repo = gh_repo,
+            token = github_token, owner = gh_owner, repo = gh_repo, debug = debug,
         )
         _attach_github_reporter(
             lint_fragment,
             token = github_token, owner = gh_owner, repo = gh_repo,
-            mode = "streaming",
+            mode = "streaming", debug = debug,
         )
+    else:
+        if debug:
+            print("[aspect-lint] configure_rules_lint: no GitHub token found (checked ASPECT_WORKFLOWS_PR_GITHUB_TOKEN, GITHUB_TOKEN, Aspect credentials); using local defaults")
     # else: local dev uses StrategyHoldTheLine + GitDiffSource defaults
