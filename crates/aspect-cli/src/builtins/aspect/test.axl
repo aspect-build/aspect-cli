@@ -60,7 +60,7 @@ def _test_impl(ctx: TaskContext) -> int:
             build_events = False
 
     # Shared mutable state across build_start / build_event / build_end
-    state = {"_task_name": "test"}
+    state = {}
 
     for handler in fragment.build_start:
         handler(ctx, state)

@@ -218,7 +218,7 @@ def configure_artifacts(ctx):
     - build_event: collect testlog entries + upload every BATCH_SIZE new files
     - build_end: final flush of any remaining files + upload profile
 
-    Expects state["_task_name"] to be set by the task implementation (e.g. "build", "test").
+    Uses ctx.task.name to identify the current task (e.g. "build", "test").
     """
     ci = detect_ci(ctx.std.env)
     is_local = not ci
@@ -260,7 +260,7 @@ def configure_artifacts(ctx):
             if ci == "buildkite":
                 _maybe_upload_testlogs_buildkite(ctx, upload_state["testlogs"], entries)
             else:
-                prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
+                prefix = _artifact_prefix(ci, ctx.std.env, ctx.task.name)
                 _maybe_upload_testlogs(ctx, upload_state["testlogs"], entries, prefix + "-testlogs")
 
     def _on_build_end(ctx, state, exit_code):
@@ -291,11 +291,11 @@ def configure_artifacts(ctx):
             if ci == "buildkite":
                 _upload_testlogs_buildkite(ctx, upload_state["testlogs"], entries)
             else:
-                prefix = _artifact_prefix(ci, ctx.std.env, state.get("_task_name", "unknown"))
+                prefix = _artifact_prefix(ci, ctx.std.env, ctx.task.name)
                 _upload_testlogs(ctx, upload_state["testlogs"], entries, prefix + "-testlogs")
 
             # Upload diagnostic artifacts
-            task_name = state.get("_task_name", "unknown")
+            task_name = ctx.task.name
             for src, artifact_name in [
                 (profile_path, task_name + ".profile.gz"),
                 (execlog_path, task_name + ".execlog.zstd"),
