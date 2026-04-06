@@ -163,14 +163,18 @@ def _check_staleness(ctx, state):
     if not pr_number:
         return False
 
-    result = github.prs.get(ctx, gh["token"], gh["owner"], gh["repo"], pr_number)
+    # gh["head_sha"] was set to the real PR head SHA by get_diff (via _pr_head_sha).
+    # Compare it against the current head to detect force-pushes mid-run.
+    start_sha = gh["head_sha"]
+    if not start_sha:
+        return False
 
+    result = github.prs.get(ctx, gh["token"], gh["owner"], gh["repo"], pr_number)
     if not result["success"]:
         return False
 
-    pr = result["pull_request"]
-    head_sha = pr.get("head", {}).get("sha", "")
-    return head_sha != gh["head_sha"]
+    current_sha = result["pull_request"].get("head", {}).get("sha", "")
+    return current_sha != start_sha
 
 
 def _filter_by_diff(comments, changed_lines):
@@ -309,9 +313,16 @@ def _attach_github_reporter(fragment, token, owner, repo, mode, debug):
             if pr_number:
                 if "existing_markers" not in gh:
                     gh["existing_markers"] = _get_existing_markers(ctx, gh, pr_number)
-                ready = _filter_by_diff(gh["pending_comments"], state.get("changed_lines", {}))
+                changed_lines = state.get("changed_lines", {})
+                ready = _filter_by_diff(gh["pending_comments"], changed_lines)
                 if debug:
                     print("[aspect-lint] lint_report: posting {}/{} comment(s) (streaming, filtered by diff)".format(len(ready), len(gh["pending_comments"])))
+                    for c in gh["pending_comments"]:
+                        path = c.get("path", "")
+                        line = c.get("line", 0)
+                        file_lines = changed_lines.get(path)
+                        print("[aspect-lint]   comment path={!r} line={} changed_lines_for_file={}".format(
+                            path, line, file_lines if file_lines != None else "(not in diff)"))
                 _post_individually(ctx, gh, pr_number, ready, gh["existing_markers"])
                 gh["pending_comments"] = []
 
