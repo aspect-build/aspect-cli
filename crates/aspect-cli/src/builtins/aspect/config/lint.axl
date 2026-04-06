@@ -44,6 +44,15 @@ def _make_github_diff(token, owner, repo):
         pr_number = int(ref.removeprefix("refs/pull/").removesuffix("/merge"))
         state["pr_number"] = pr_number
 
+        # GITHUB_SHA is the merge-ref SHA, not the PR head commit SHA.
+        # Overwrite it with the actual head SHA so staleness checks and
+        # review comment commit_id references are correct.
+        pr_result = github.prs.get(ctx, token, owner, repo, pr_number)
+        if pr_result["success"]:
+            actual_head_sha = pr_result["pull_request"].get("head", {}).get("sha", "")
+            if actual_head_sha and "github" in state:
+                state["github"]["head_sha"] = actual_head_sha
+
         result = github.prs.list_files(ctx, token, owner, repo, pr_number)
         if not result["success"]:
             return []

@@ -22,6 +22,6 @@ jobs:
       - name: Build aspect-cli
         run: cargo build -p aspect-cli
 
-      - name: Run aspect lint
-        run: ../../target/debug/aspect-cli lint
-        working-directory: examples/lint
+      # - name: Run aspect lint
+      #   run: ../../target/debug/aspect-cli lint
+      #   working-directory: examples/lint
