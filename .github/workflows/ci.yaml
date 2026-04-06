@@ -23,7 +23,7 @@ jobs:
         run: cargo build -p aspect-cli
 
       - name: Run aspect lint
-        run: ../../target/debug/aspect-cli lint
+        run: env && ../../target/debug/aspect-cli lint
         working-directory: examples/lint
         env:
           ASPECT_DEBUG: 1
