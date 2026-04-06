@@ -3,10 +3,13 @@
 #
 # The builtin MODULE.aspect conditionally enables configure_rules_lint when this dep is present:
 #   use_config("config/lint.axl", "configure_rules_lint", requires = ["aspect_rules_lint"])
-axl_local_dep(
+axl_archive_dep(
     name = "aspect_rules_lint",
-    path = "../../../rules_lint",
+    urls = ["https://github.com/aspect-build/rules_lint/archive/735a58b218c598077148bd374cfec5fc7d86b68a.tar.gz"],
+    integrity = "sha256-GyFMiRExAleMFytOe0DOy4yUwo66B1+nkUKAbIuz5N8=",
+    strip_prefix = "rules_lint-735a58b218c598077148bd374cfec5fc7d86b68a",
     auto_use_tasks = True,
+    dev = True
 )
 
 # To use the published archive instead of a local checkout, replace the above with:
