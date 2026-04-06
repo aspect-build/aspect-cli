@@ -25,3 +25,5 @@ jobs:
       - name: Run aspect lint
         run: ../../target/debug/aspect-cli lint
         working-directory: examples/lint
+        env:
+          ASPECT_DEBUG: 1
