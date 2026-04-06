@@ -45,10 +45,6 @@ const ASPECT: Builtin = Builtin {
         ),
         ("lib/github.axl", include_str!("./aspect/lib/github.axl")),
         ("lib/linting.axl", include_str!("./aspect/lib/linting.axl")),
-        (
-            "lib/platform.axl",
-            include_str!("./aspect/lib/platform.axl"),
-        ),
         ("lib/sarif.axl", include_str!("./aspect/lib/sarif.axl")),
         (
             "lib/health_check.axl",
