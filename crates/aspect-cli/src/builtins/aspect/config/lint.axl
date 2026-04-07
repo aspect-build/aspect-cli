@@ -81,6 +81,7 @@ def _make_github_diff(token, owner, repo, debug):
             .stdout("piped").stderr("piped").spawn().wait_with_output()
         if git_result.status.code == 0:
             ws_prefix = git_result.stdout.strip()  # e.g. "examples/lint/"
+        state["_ws_prefix"] = ws_prefix
         if debug:
             print("[aspect-lint] get_diff: workspace prefix={!r}".format(ws_prefix))
 
@@ -213,9 +214,10 @@ def _get_existing_markers(ctx, gh, pr_number):
     return markers
 
 
-def _post_as_review(ctx, gh, pr_number, comments, existing_markers):
+def _post_as_review(ctx, gh, pr_number, comments, existing_markers, ws_prefix = ""):
     to_post = [
-        c for c in comments
+        {k: (ws_prefix + v if k == "path" and ws_prefix else v) for k, v in c.items()}
+        for c in comments
         if _extract_comment_marker(c.get("body", "")) not in existing_markers
     ]
     if not to_post:
@@ -227,19 +229,21 @@ def _post_as_review(ctx, gh, pr_number, comments, existing_markers):
     )
 
 
-def _post_individually(ctx, gh, pr_number, comments, existing_markers, debug = False):
+def _post_individually(ctx, gh, pr_number, comments, existing_markers, ws_prefix = "", debug = False):
     for c in comments:
         marker = _extract_comment_marker(c.get("body", ""))
         if marker and marker in existing_markers:
             if debug:
                 print("[aspect-lint] _post_individually: skipping duplicate marker {}".format(marker))
             continue
+        # GitHub expects repo-relative paths; SARIF paths are workspace-relative.
+        path = ws_prefix + c["path"] if ws_prefix else c["path"]
         if debug:
             print("[aspect-lint] _post_individually: posting path={!r} line={} commit_id={}".format(
-                c.get("path"), c.get("line"), gh["head_sha"]))
+                path, c.get("line"), gh["head_sha"]))
         result = github.reviews.create_comment(
             ctx, gh["token"], gh["owner"], gh["repo"], pr_number,
-            body = c["body"], path = c["path"],
+            body = c["body"], path = path,
             line = c.get("line"), commit_id = gh["head_sha"],
             side = c.get("side", "RIGHT"),
             start_line = c.get("start_line"),
@@ -351,7 +355,8 @@ def _attach_github_reporter(fragment, token, owner, repo, mode, debug):
                             path, line, line - 1,
                             file_lines if file_lines != None else "(not in diff)",
                             check))
-                _post_individually(ctx, gh, pr_number, ready, gh["existing_markers"], debug = debug)
+                _post_individually(ctx, gh, pr_number, ready, gh["existing_markers"],
+                    ws_prefix = state.get("_ws_prefix", ""), debug = debug)
                 gh["pending_comments"] = []
 
     def _lint_end(ctx, state, relevant_diagnostics):
@@ -370,7 +375,7 @@ def _attach_github_reporter(fragment, token, owner, repo, mode, debug):
                 ready = _filter_by_diff(gh["pending_comments"], state.get("changed_lines", {}))
                 if debug:
                     print("[aspect-lint] lint_end: posting {}/{} comment(s) (grouped, filtered by diff)".format(len(ready), len(gh["pending_comments"])))
-                _post_as_review(ctx, gh, pr_number, ready, existing)
+                _post_as_review(ctx, gh, pr_number, ready, existing, ws_prefix = state.get("_ws_prefix", ""))
             _cleanup_comments(ctx, state, relevant_diagnostics)
         elif debug:
             print("[aspect-lint] lint_end: no PR number in state, skipping comment posting")
