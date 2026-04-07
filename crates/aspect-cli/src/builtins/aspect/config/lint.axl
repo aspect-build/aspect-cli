@@ -227,11 +227,16 @@ def _post_as_review(ctx, gh, pr_number, comments, existing_markers):
     )
 
 
-def _post_individually(ctx, gh, pr_number, comments, existing_markers):
+def _post_individually(ctx, gh, pr_number, comments, existing_markers, debug = False):
     for c in comments:
         marker = _extract_comment_marker(c.get("body", ""))
         if marker and marker in existing_markers:
+            if debug:
+                print("[aspect-lint] _post_individually: skipping duplicate marker {}".format(marker))
             continue
+        if debug:
+            print("[aspect-lint] _post_individually: posting path={!r} line={} commit_id={}".format(
+                c.get("path"), c.get("line"), gh["head_sha"]))
         result = github.reviews.create_comment(
             ctx, gh["token"], gh["owner"], gh["repo"], pr_number,
             body = c["body"], path = c["path"],
@@ -240,6 +245,8 @@ def _post_individually(ctx, gh, pr_number, comments, existing_markers):
             start_line = c.get("start_line"),
             start_side = c.get("start_side"),
         )
+        if debug:
+            print("[aspect-lint] _post_individually: result={}".format(result))
         if result["success"] and marker:
             existing_markers[marker] = True
 
@@ -344,7 +351,7 @@ def _attach_github_reporter(fragment, token, owner, repo, mode, debug):
                             path, line, line - 1,
                             file_lines if file_lines != None else "(not in diff)",
                             check))
-                _post_individually(ctx, gh, pr_number, ready, gh["existing_markers"])
+                _post_individually(ctx, gh, pr_number, ready, gh["existing_markers"], debug = debug)
                 gh["pending_comments"] = []
 
     def _lint_end(ctx, state, relevant_diagnostics):
