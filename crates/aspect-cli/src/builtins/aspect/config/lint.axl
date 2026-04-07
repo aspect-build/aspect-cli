@@ -71,17 +71,32 @@ def _make_github_diff(token, owner, repo, debug):
                 print("[aspect-lint] get_diff: failed to list PR files: {}".format(result.get("error", "")))
             return []
 
+        # Compute the workspace prefix relative to the repo root so we can strip
+        # it from GitHub's repo-relative paths and match SARIF workspace-relative paths.
+        # e.g. if the Bazel workspace is at examples/lint/, GitHub returns
+        # "examples/lint/hello.sh" but SARIF contains "hello.sh".
+        ws_prefix = ""
+        git_result = ctx.std.process.command("git") \
+            .args(["rev-parse", "--show-prefix"]) \
+            .stdout("piped").stderr("piped").spawn().wait_with_output()
+        if git_result.status.code == 0:
+            ws_prefix = git_result.stdout.strip()  # e.g. "examples/lint/"
+        if debug:
+            print("[aspect-lint] get_diff: workspace prefix={!r}".format(ws_prefix))
+
         all_files = []
         for f in result["files"]:
             if f.get("status", "") == "removed":
                 continue
             filename = f.get("filename", "")
+            if ws_prefix and filename.startswith(ws_prefix):
+                filename = filename[len(ws_prefix):]
             patch = f.get("patch", "")
             added_lines = _parse_github_diff_patch(patch)
             all_files.append({"file": filename, "lines": added_lines})
 
         if debug:
-            print("[aspect-lint] get_diff: {} changed file(s) in PR".format(len(all_files)))
+            print("[aspect-lint] get_diff: {} changed file(s) in PR (prefix stripped)".format(len(all_files)))
 
         state["changed_lines"] = {f["file"]: f["lines"] for f in all_files}
         return all_files
@@ -317,6 +332,7 @@ def _attach_github_reporter(fragment, token, owner, repo, mode, debug):
                 ready = _filter_by_diff(gh["pending_comments"], changed_lines)
                 if debug:
                     print("[aspect-lint] lint_report: posting {}/{} comment(s) (streaming, filtered by diff)".format(len(ready), len(gh["pending_comments"])))
+                    print("[aspect-lint]   diff files: {}".format(list(changed_lines.keys())))
                     for c in gh["pending_comments"]:
                         path = c.get("path", "")
                         line = c.get("line", 0)
