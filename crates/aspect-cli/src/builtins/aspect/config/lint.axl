@@ -329,6 +329,8 @@ def _attach_github_reporter(fragment, token, owner, repo, mode, debug):
                 if "existing_markers" not in gh:
                     gh["existing_markers"] = _get_existing_markers(ctx, gh, pr_number)
                 changed_lines = state.get("changed_lines", {})
+                if debug:
+                    print("[aspect-lint] lint_report: changed_lines has {} file(s) at filter time".format(len(changed_lines)))
                 ready = _filter_by_diff(gh["pending_comments"], changed_lines)
                 if debug:
                     print("[aspect-lint] lint_report: posting {}/{} comment(s) (streaming, filtered by diff)".format(len(ready), len(gh["pending_comments"])))
@@ -337,8 +339,11 @@ def _attach_github_reporter(fragment, token, owner, repo, mode, debug):
                         path = c.get("path", "")
                         line = c.get("line", 0)
                         file_lines = changed_lines.get(path)
-                        print("[aspect-lint]   comment path={!r} line={} changed_lines_for_file={}".format(
-                            path, line, file_lines if file_lines != None else "(not in diff)"))
+                        check = (line - 1) in (file_lines or [])
+                        print("[aspect-lint]   comment path={!r} line={} (checking {}) file_lines={} -> {}".format(
+                            path, line, line - 1,
+                            file_lines if file_lines != None else "(not in diff)",
+                            check))
                 _post_individually(ctx, gh, pr_number, ready, gh["existing_markers"])
                 gh["pending_comments"] = []
 
