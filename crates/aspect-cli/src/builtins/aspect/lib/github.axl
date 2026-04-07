@@ -255,8 +255,11 @@ def _create_review_comment(ctx, token, owner, repo, pull_number, body, path, lin
     if success:
         return {"success": True, "comment_id": resp_body.get("id")}
     error_msg = "request failed: " + str(status_code)
-    if resp_body and type(resp_body) == "dict" and resp_body.get("message"):
-        error_msg = error_msg + " - " + resp_body["message"]
+    if resp_body and type(resp_body) == "dict":
+        if resp_body.get("message"):
+            error_msg = error_msg + " - " + resp_body["message"]
+        if resp_body.get("errors"):
+            error_msg = error_msg + " errors=" + str(resp_body["errors"])
     return {"success": False, "error": error_msg, "status": status_code}
 
 
