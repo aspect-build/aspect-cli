@@ -239,10 +239,12 @@ def _upload_file_buildkite(ctx, path, name):
     if needs_copy:
         ctx.std.process.command("cp").args([path, dir + "/" + name]).spawn().wait()
 
-    # --literal: Do not treat paths are globs
     # --log-level=warn: Do not spam stdout with garbage. only real failures.
+    # Note: we intentionally omit --literal (added in buildkite-agent v3.47) for
+    # compatibility with older agents. Glob expansion is already scoped to `dir`
+    # via current_dir(), and `name` is a plain basename so no glob chars are present.
     child = ctx.std.process.command("buildkite-agent") \
-        .args(["artifact", "upload", name, "--literal", "--log-level=warn"]) \
+        .args(["artifact", "upload", name, "--log-level=warn"]) \
         .current_dir(dir) \
         .stdout("inherit") \
         .stderr("inherit") \

@@ -1,0 +1,33 @@
+name: CI (Github Hosted Runners)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build aspect-cli
+        run: cargo build -p aspect-cli
+
+      - name: Run aspect lint
+        run: env && ../../target/debug/aspect-cli lint
+        working-directory: examples/lint
+        env:
+          ASPECT_DEBUG: 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
