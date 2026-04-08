@@ -25,6 +25,8 @@ pub mod task_info;
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
     const ConfigContext: StarlarkValueAsType<config::ConfigContext> = StarlarkValueAsType::new();
+    const FragmentContext: StarlarkValueAsType<config::FragmentContext> =
+        StarlarkValueAsType::new();
     const Http: StarlarkValueAsType<http::Http> = StarlarkValueAsType::new();
     const HttpResponse: StarlarkValueAsType<http::HttpResponse> = StarlarkValueAsType::new();
     const Task: StarlarkValueAsType<task::Task> = StarlarkValueAsType::new();

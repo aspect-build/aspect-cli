@@ -95,8 +95,10 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
                     fragment_types.into_iter().map(|(id, v)| (id, v)).collect();
 
                 let fragment_map = {
+                    let store = self.loader.new_store(self.loader.repo_root.clone());
                     let mut eval = Evaluator::new(&context_module);
                     eval.set_loader(self.loader);
+                    eval.extra = Some(&store);
                     construct_fragments(&fragment_pairs, &mut eval, heap)?
                 };
 
