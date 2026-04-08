@@ -9,12 +9,16 @@ def _parse_endpoint(endpoint):
     """
     Parse a deliveryd endpoint string.
 
-    If the endpoint starts with "unix://", returns (base_url, socket_path).
-    Otherwise, returns (endpoint, None) to use as a direct HTTP endpoint.
+    Accepts:
+      - unix:///path/to/socket  → unix socket
+      - http://host:port        → plain HTTP
+      - https://host:port       → HTTPS
     """
     if endpoint.startswith("unix://"):
         return ("http://localhost", endpoint[len("unix://"):])
-    return (endpoint, None)
+    if endpoint.startswith("http://") or endpoint.startswith("https://"):
+        return (endpoint, None)
+    fail("Invalid deliveryd endpoint '{}': must start with unix://, http://, or https://".format(endpoint))
 
 def _post(http, endpoint, path, data):
     """Make a POST request to deliveryd, handling unix:// endpoints."""

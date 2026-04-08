@@ -192,79 +192,76 @@ impl BazelRC {
         result
     }
 
-    /// Produce a human-readable summary of all options loaded for `command`, mirroring
-    /// the output Bazel emits when `--announce_rc` is set.
+    /// Produce a human-readable summary of all options loaded for `command`.
     ///
-    /// Two kinds of lines are emitted, in this order:
-    ///
-    /// 1. **"Reading rc options"** — one block per source file for direct sections
-    ///    (`always`, `common`, `<command>`).
-    /// 2. **"Found applicable config definition"** — one line per config-keyed section
-    ///    (`build:opt`, `common:ci`, …) that is relevant to `command`.
+    /// Output is grouped by source file, with flags wrapped at `max_width` columns.
+    /// When `ansi` is true, headers and section names are styled with ANSI escape codes.
     ///
     /// Version-gated flags (from `try-import-if-bazel-version`) are annotated with
     /// `[if <cond>]` so the condition is visible.
-    pub fn announce(&self, command: &str) -> String {
-        let fmt = |opt: &RcOption| -> String {
+    pub fn announce(&self, command: &str, ansi: bool, max_width: usize) -> String {
+        let (b, d, y, r) = if ansi {
+            ("\x1b[1m", "\x1b[2m", "\x1b[33m", "\x1b[0m")
+        } else {
+            ("", "", "", "")
+        };
+
+        let fmt_flag = |opt: &RcOption| -> String {
             match &opt.version_condition {
                 None => opt.value.clone(),
-                Some(cond) => format!("[if {}] {}", cond, opt.value),
+                Some(cond) => format!("{}[if {}]{} {}", y, cond, r, opt.value),
             }
         };
 
-        let mut out = String::new();
-
-        // Pass 1: direct sections (always / common / <command>) grouped by source file.
-        let direct_keys = ["startup", "always", "common", command];
-        for (source_idx, source_path) in self.sources.iter().enumerate() {
-            let is_client = source_path == Path::new("<command line>");
-
-            let sections: Vec<(&str, Vec<String>)> = direct_keys
-                .iter()
-                .filter_map(|&key| {
-                    let flags: Vec<String> = self
-                        .options
-                        .get(key)
-                        .map(|v| {
-                            v.iter()
-                                .filter(|o| o.source_index == source_idx)
-                                .map(fmt)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if flags.is_empty() {
-                        None
-                    } else {
-                        Some((key, flags))
-                    }
-                })
-                .collect();
-
-            if sections.is_empty() {
-                continue;
+        // Shorten an absolute path to its last two components (e.g. "bazel/defaults.bazelrc").
+        let shorten = |p: &Path| -> String {
+            if p == Path::new("<command line>") {
+                return "client".to_owned();
             }
-
-            if is_client {
-                out.push_str("INFO: Options provided by the client:\n");
+            let comps: Vec<_> = p.components().collect();
+            if comps.len() <= 2 {
+                p.display().to_string()
             } else {
-                out.push_str(&format!(
-                    "INFO: Reading rc options for '{}' from {}:\n",
-                    command,
-                    source_path.display()
-                ));
+                let n = comps.len();
+                format!(
+                    "{}/{}",
+                    comps[n - 2].as_os_str().to_string_lossy(),
+                    comps[n - 1].as_os_str().to_string_lossy()
+                )
             }
+        };
 
-            for (key, flags) in sections {
-                out.push_str(&format!(
-                    "  Inherited '{}' options: {}\n",
-                    key,
-                    flags.join(" ")
-                ));
+        // Fit flags onto lines starting at `start_col`, wrapping at `max_width`.
+        // Continuation lines are padded with `cont_indent` spaces.
+        let wrap_flags = |flags: &[String], start_col: usize, cont_indent: usize| -> String {
+            if flags.is_empty() {
+                return String::new();
             }
-        }
+            let indent = " ".repeat(cont_indent);
+            let mut result = String::new();
+            let mut col = start_col;
+            let mut first = true;
+            for flag in flags {
+                let flag_len = flag.len();
+                if first {
+                    result.push_str(flag);
+                    col += flag_len;
+                    first = false;
+                } else if col + 1 + flag_len <= max_width {
+                    result.push(' ');
+                    result.push_str(flag);
+                    col += 1 + flag_len;
+                } else {
+                    result.push('\n');
+                    result.push_str(&indent);
+                    result.push_str(flag);
+                    col = cont_indent + flag_len;
+                }
+            }
+            result
+        };
 
-        // Pass 2: config-keyed sections (always:*, common:*, <command>:*), sorted for
-        // deterministic output, then ordered within each key by source file.
+        // Collect all config keys relevant to this command, sorted for deterministic output.
         let mut config_keys: Vec<&String> = self
             .options
             .keys()
@@ -278,23 +275,99 @@ impl BazelRC {
             .collect();
         config_keys.sort();
 
-        for key in config_keys {
-            let opts = &self.options[key];
-            for (source_idx, source_path) in self.sources.iter().enumerate() {
-                let flags: Vec<String> = opts
-                    .iter()
-                    .filter(|o| o.source_index == source_idx)
-                    .map(fmt)
+        let mut out = String::new();
+        let mut first_block = true;
+
+        // Single pass per source file: emit direct sections then config sections together.
+        let direct_keys = ["startup", "always", "common", command];
+        for (source_idx, source_path) in self.sources.iter().enumerate() {
+            let is_client = source_path == Path::new("<command line>");
+            let short = shorten(source_path);
+
+            // Collect direct sections for this source.
+            let direct_sections: Vec<(&str, Vec<String>)> = direct_keys
+                .iter()
+                .filter_map(|&key| {
+                    let flags: Vec<String> = self
+                        .options
+                        .get(key)
+                        .map(|v| {
+                            v.iter()
+                                .filter(|o| o.source_index == source_idx)
+                                .map(|o| fmt_flag(o))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if flags.is_empty() {
+                        None
+                    } else {
+                        Some((key, flags))
+                    }
+                })
+                .collect();
+
+            // Collect config sections for this source.
+            let config_sections: Vec<(&str, Vec<String>)> = config_keys
+                .iter()
+                .filter_map(|&key| {
+                    let flags: Vec<String> = self
+                        .options
+                        .get(key)
+                        .map(|v| {
+                            v.iter()
+                                .filter(|o| o.source_index == source_idx)
+                                .map(|o| fmt_flag(o))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if flags.is_empty() {
+                        None
+                    } else {
+                        Some((key.as_str(), flags))
+                    }
+                })
+                .collect();
+
+            if direct_sections.is_empty() && config_sections.is_empty() {
+                continue;
+            }
+
+            if !first_block {
+                out.push('\n');
+            }
+            first_block = false;
+
+            if is_client {
+                // Client flags: flatten all direct sections inline on one labelled line.
+                let all_flags: Vec<String> = direct_sections
+                    .into_iter()
+                    .flat_map(|(_, flags)| flags)
                     .collect();
-                if flags.is_empty() {
-                    continue;
+                let prefix_plain_len = short.len() + 2;
+                let wrapped = wrap_flags(&all_flags, prefix_plain_len, prefix_plain_len);
+                out.push_str(&format!("{}{}{}  {}\n", b, short, r, wrapped));
+            } else {
+                out.push_str(&format!("{}{}{}\n", b, short, r));
+
+                // Combine direct and config section names to find max label width for alignment.
+                let all_sections: Vec<(&str, Vec<String>)> = direct_sections
+                    .into_iter()
+                    .chain(config_sections.into_iter())
+                    .collect();
+                let max_key_len = all_sections.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+
+                for (key, flags) in &all_sections {
+                    let padding = " ".repeat(max_key_len - key.len());
+                    let prefix_plain_len = 2 + key.len() + padding.len() + 2;
+                    let wrapped = wrap_flags(flags, prefix_plain_len, prefix_plain_len);
+                    out.push_str(&format!("  {}{}{}{}{}\n", d, key, r, padding, {
+                        if wrapped.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  {}", wrapped)
+                        }
+                    }));
                 }
-                out.push_str(&format!(
-                    "INFO: Found applicable config definition {} in file {}: {}\n",
-                    key,
-                    source_path.display(),
-                    flags.join(" ")
-                ));
             }
         }
 

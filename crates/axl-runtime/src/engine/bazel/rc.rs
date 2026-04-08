@@ -144,29 +144,26 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
         Ok((startup_flags, flags))
     }
 
-    /// Return a human-readable summary of all options loaded for `command`, mirroring
-    /// the output Bazel emits when `--announce_rc` is set.
+    /// Return a human-readable summary of all options loaded for `command`.
+    ///
+    /// Options are grouped by source file and wrapped at `max_width` columns (default 120).
+    /// Pass `ansi = True` to enable bold/dim ANSI styling on headers and section names.
     ///
     /// Useful for debugging which flags were picked up and from which rc file:
     ///
     /// ```python
     /// print(rc.announce(command = "build"))
-    /// ```
-    ///
-    /// Example output:
-    /// ```
-    /// INFO: Options provided by the client:
-    ///   Inherited 'always' options: --config=opt
-    /// INFO: Reading rc options for 'build' from /workspace/.bazelrc:
-    ///   Inherited 'common' options: --show_timestamps --test_output=errors
-    ///   Inherited 'build' options: --jobs=8
-    /// INFO: Found applicable config definition build:opt in file /workspace/.bazelrc: --compilation_mode=opt
+    /// print(rc.announce(command = "build", ansi = True))
     /// ```
     fn announce(
         this: &StarlarkBazelRC,
         #[starlark(require = named)] command: String,
+        #[starlark(require = named, default = false)] ansi: bool,
+        #[starlark(require = named, default = 120)] max_width: i64,
     ) -> anyhow::Result<String> {
-        Ok(this.inner.announce(&command))
+        Ok(this
+            .inner
+            .announce(&command, ansi, max_width.max(0) as usize))
     }
 
     /// Return the list of source file paths that were loaded.

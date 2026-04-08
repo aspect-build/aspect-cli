@@ -16,6 +16,7 @@ rust_binary(
         "@crates//:serde",
         "@crates//:serde_json",
         "@crates//:sha2",
+        "@crates//:include_dir",
         "@crates//:sha256",
         "@crates//:starlark",
         "@crates//:tokio",

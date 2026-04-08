@@ -10,9 +10,8 @@ CircleCI is excluded — artifacts are staged at /workflows/testlogs for
 CircleCI's native store_artifacts / store_test_results steps.
 """
 
-load("../lib/artifacts.axl", "detect_ci", "upload_file", "delete_artifact")
-load("../lib/tar.axl", "tar_create")
-load("../fragments.axl", "BazelFragment")
+load("./lib/artifacts.axl", "detect_ci", "upload_file", "delete_artifact")
+load("./lib/tar.axl", "tar_create")
 
 
 # Upload every N new files per group
@@ -212,7 +211,7 @@ def _artifact_prefix(ci, env, task_name):
     return _artifact_name_prefix(env) + "-" + task_name
 
 
-def configure_artifacts(ctx):
+def configure_artifacts(ctx, attr):
     """Wire interval-based artifact upload into BazelFragment lifecycle hooks.
 
     - build_event: collect testlog entries + upload every BATCH_SIZE new files
@@ -225,7 +224,6 @@ def configure_artifacts(ctx):
     if is_local:
         ci = "local"
 
-    fragment = ctx.fragments[BazelFragment]
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
 
     # Generate unique profile path in /tmp
@@ -236,7 +234,7 @@ def configure_artifacts(ctx):
     bep_path = "/tmp/" + uuid + ".bep.bin"
 
     # Add profiling and heap dump flags
-    fragment.extra_flags.extend([
+    attr.extra_flags.extend([
         "--generate_json_trace_profile",
         "--experimental_profile_include_target_label",
         "--profile=" + profile_path,
@@ -244,10 +242,10 @@ def configure_artifacts(ctx):
     ])
 
     # Add execution log and build event file sinks
-    fragment.execution_log_sinks.append(
+    attr.execution_log_sinks.append(
         bazel.execution_log.compact_file(path = execlog_path),
     )
-    fragment.build_event_sinks.append(
+    attr.build_event_sinks.append(
         bazel.build_events.file(path = bep_path),
     )
 
@@ -305,5 +303,5 @@ def configure_artifacts(ctx):
                     upload_file(ctx, src, name = artifact_name)
                     ctx.std.fs.remove_file(src)
 
-    fragment.build_event.append(_on_build_event)
-    fragment.build_end.append(_on_build_end)
+    attr.build_event.append(_on_build_event)
+    attr.build_end.append(_on_build_end)

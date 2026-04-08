@@ -77,7 +77,7 @@ def impl(ctx: TaskContext) -> int:
 
     rc_startup_flags, flags = rc.expand_all(command = "build")
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
-    print(rc.announce(command = "build"))
+    print(rc.announce(command = "build", ansi = ctx.std.io.stdout.is_tty))
 
     for _ in range(10):
         build = ctx.bazel.build(

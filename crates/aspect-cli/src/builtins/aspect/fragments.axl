@@ -1,8 +1,76 @@
 """Fragment type definitions for builtin tasks."""
 
 load("./bazel.axl", "default_retry")
+load("./lib/environment.axl",
+    "get_environment",
+    "get_bazelrc_flags",
+    "print_environment_info",
+)
+load("./lib/health_check.axl", "agent_health_check")
+load("./lib/build_metadata.axl", "get_build_metadata_flags")
+load("./lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
+load("./artifacts.axl", "configure_artifacts")
+
+def _bazel_defaults(ctx: FragmentContext):
+    configure_artifacts(ctx, ctx.attr)
+
+    environment = get_environment(ctx.std)
+
+    if environment:
+        # Flags to optimize build & test
+        (startup_flags, build_flags) = get_bazelrc_flags(
+            environment = environment,
+            root_dir = ctx.std.env.root_dir(),
+        )
+
+        metadata_flags = get_build_metadata_flags(ctx.std)
+
+        bessie_endpoint = environment.build_events.backend
+        bessie_sinks = []
+        if bessie_endpoint:
+            bessie_sinks.append(bazel.build_events.grpc(
+                uri = bessie_endpoint,
+                metadata = {} # TODO: how does bessie authenticate?
+            ))
+
+        bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
+        if "aspect" in bazel_version_output.stdout:
+            ctx.attr.extra_startup_flags.append("--aspect:disable_plugins")
+
+        ctx.attr.extra_startup_flags.extend(startup_flags)
+        ctx.attr.extra_flags.extend(build_flags)
+        ctx.attr.extra_flags.extend(metadata_flags)
+        ctx.attr.build_event_sinks.extend(bessie_sinks)
+
+    sha = detect_commit_sha(ctx.std.env)
+    if sha:
+        (owner, repo) = detect_github_repo(ctx.std)
+        if owner and repo:
+            def _build_start(ctx, state):
+                token = github.authenticate(ctx, ctx.std.env, owner = owner, repo = repo, roles = ["checks.write", "statuses.write", "prs.write"])
+                if not token:
+                    return
+                state["_github_token"] = token
+                result = github.status_checks.create(ctx, token, owner, repo, sha, "aspect/%s" % ctx.task.name)
+                if result["success"]:
+                    state["_check_run_id"] = result["check_run_id"]
+
+            def _build_end(ctx, state, exit_code):
+                token = state.get("_github_token")
+                check_run_id = state.get("_check_run_id")
+                if not token or not check_run_id:
+                    return
+                if exit_code == 0:
+                    github.status_checks.complete(ctx, token, owner, repo, check_run_id)
+                else:
+                    github.status_checks.fail(ctx, token, owner, repo, check_run_id)
+
+            ctx.attr.build_start.append(_build_start)
+            ctx.attr.build_end.append(_build_end)
+
 
 BazelFragment = fragment(
+    _bazel_defaults,
     # Declarative data — composable, zero-cost reads
     extra_flags = attr(list[str], []),
     extra_startup_flags = attr(list[str], []),
@@ -20,12 +88,25 @@ BazelFragment = fragment(
     build_end = attr(list[typing.Callable[[TaskContext, dict, int], None]], []),
 )
 
+
+
+def _heath_check_defaults(ctx: FragmentContext):
+    environment = get_environment(ctx.std)
+    ctx.attr.pre_health_check.append(lambda ctx: print_environment_info(environment))
+    ctx.attr.pre_health_check.append(lambda ctx: agent_health_check(ctx, environment))
+
+
 HealthCheckFragment = fragment(
     pre_health_check = attr(list[typing.Callable[[TaskContext], None]], []),
     post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], []),
 )
 
+
+def _delivery_defaults(ctx: FragmentContext):
+    ctx.attr.delivery_start = lambda: print("--- :bazel: Delivery")
+
 DeliveryFragment = fragment(
+    _delivery_defaults,
     delivery_start = attr(typing.Callable[[], None], lambda: None),
     delivery_end = attr(typing.Callable[[], None], lambda: None),
     deliver_target = attr(typing.Callable[[str, bool], None], lambda label, is_forced: None),

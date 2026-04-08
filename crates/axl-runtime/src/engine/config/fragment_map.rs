@@ -11,7 +11,10 @@ use starlark::values::{
 };
 use starlark_map::small_map::SmallMap;
 
-use crate::engine::types::fragment::{FragmentType, FrozenFragmentType, extract_fragment_type_id};
+use crate::engine::config::fragment_context::FragmentContext;
+use crate::engine::types::fragment::{
+    FragmentType, FrozenFragmentType, extract_fragment_default_fn, extract_fragment_type_id,
+};
 
 /// A Starlark value that maps fragment type IDs to their instances.
 ///
@@ -258,7 +261,8 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentMap {
 }
 
 /// Auto-construct fragment instances by calling each fragment type with no arguments
-/// (using defaults from attr() definitions).
+/// (using defaults from attr() definitions), then running the fragment's default
+/// function (if any) with a FragmentContext.
 pub fn construct_fragments<'v>(
     fragment_types: &[(u64, Value<'v>)],
     eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
@@ -274,6 +278,19 @@ pub fn construct_fragments<'v>(
                     e
                 ))
             })?;
+
+            if let Some(default_fn) = extract_fragment_default_fn(*type_value) {
+                let frag_ctx = eval.heap().alloc(FragmentContext::new(instance));
+                eval.eval_function(default_fn, &[frag_ctx], &[])
+                    .map_err(|e| {
+                        crate::eval::EvalError::UnknownError(anyhow::anyhow!(
+                            "Failed to run default function for fragment {}: {:?}",
+                            type_value,
+                            e
+                        ))
+                    })?;
+            }
+
             map.insert(*type_id, *type_value, instance);
         }
     }

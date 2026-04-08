@@ -13,7 +13,7 @@ use starlark::values::typing::TypeCompiled;
 use starlark::values::{
     AllocFrozenValue, AllocValue, Freeze, FreezeError, Freezer, FrozenHeap, FrozenValue, Heap,
     NoSerialize, ProvidesStaticType, StarlarkValue, Trace, Tracer, Value, ValueLike,
-    starlark_value,
+    none::NoneType, starlark_value,
 };
 use starlark_map::small_map::SmallMap;
 
@@ -224,6 +224,10 @@ pub struct FragmentType<'v> {
     pub(crate) name: Option<String>,
     /// Fields with their types and optional defaults
     pub(crate) fields: SmallMap<String, Field<'v>>,
+    /// Optional default-value function called after attr() defaults are applied,
+    /// before config functions run. Receives a FragmentContext.
+    #[allocative(skip)]
+    pub(crate) default_fn: Option<Value<'v>>,
 }
 
 impl<'v> Display for FragmentType<'v> {
@@ -239,6 +243,9 @@ unsafe impl<'v> Trace<'v> for FragmentType<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         for (_, field) in self.fields.iter_mut() {
             field.trace(tracer);
+        }
+        if let Some(ref mut f) = self.default_fn {
+            f.trace(tracer);
         }
     }
 }
@@ -352,6 +359,7 @@ pub struct FrozenFragmentType {
     pub(crate) id: u64,
     pub(crate) name: Option<String>,
     pub(crate) fields: SmallMap<String, FrozenField>,
+    pub(crate) default_fn: Option<FrozenValue>,
 }
 
 impl Display for FrozenFragmentType {
@@ -462,6 +470,7 @@ impl Freeze for FragmentType<'_> {
             id: self.id,
             name: self.name,
             fields: frozen_fields,
+            default_fn: self.default_fn.map(|f| f.freeze(freezer)).transpose()?,
         })
     }
 }
@@ -838,6 +847,17 @@ pub fn extract_fragment_type_id(value: Value) -> Option<u64> {
     }
 }
 
+/// Extract the default function from a Value that is either a FragmentType or FrozenFragmentType.
+pub fn extract_fragment_default_fn<'v>(value: Value<'v>) -> Option<Value<'v>> {
+    if let Some(ft) = value.downcast_ref::<FragmentType>() {
+        ft.default_fn
+    } else if let Some(ft) = value.downcast_ref::<FrozenFragmentType>() {
+        ft.default_fn.map(|f| f.to_value())
+    } else {
+        None
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Global functions
 // -----------------------------------------------------------------------------
@@ -845,6 +865,10 @@ pub fn extract_fragment_type_id(value: Value) -> Option<u64> {
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Creates a fragment type with the given fields.
+    ///
+    /// An optional first positional argument may be a default-value function
+    /// `fn(ctx: FragmentContext)` that runs after `attr()` defaults are applied
+    /// and before config functions. Use it to set computed defaults.
     ///
     /// Each field can be a bare type (required, no default) or an `attr()`
     /// definition (with type and optional default).
@@ -854,15 +878,26 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///
     /// Example:
     /// ```starlark
+    /// def _defaults(ctx):
+    ///     ctx.attr.extra_flags.append("--config=default")
+    ///
     /// BazelFragment = fragment(
+    ///     _defaults,
     ///     extra_flags = attr(list[str], []),
     ///     extra_startup_flags = attr(list[str], []),
     /// )
     /// ```
     fn fragment<'v>(
+        #[starlark(require = pos, default = NoneType)] default_fn: Value<'v>,
         #[starlark(kwargs)] kwargs: SmallMap<&str, Value<'v>>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<FragmentType<'v>> {
+        let default_fn = if default_fn.is_none() {
+            None
+        } else {
+            Some(default_fn)
+        };
+
         let mut fields = SmallMap::with_capacity(kwargs.len());
 
         for (name, value) in kwargs.into_iter() {
@@ -889,6 +924,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             id: next_fragment_type_id(),
             name: None,
             fields,
+            default_fn,
         })
     }
 
