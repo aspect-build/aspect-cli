@@ -97,6 +97,7 @@ def _heath_check_defaults(ctx: FragmentContext):
 
 
 HealthCheckFragment = fragment(
+    _heath_check_defaults,
     pre_health_check = attr(list[typing.Callable[[TaskContext], None]], []),
     post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], []),
 )
