@@ -1,40 +1,28 @@
 #!/usr/bin/env python3
-import http.client
 import json
 import os
 import socket
 import sys
 import tempfile
-
-
-class UnixSocketHTTPConnection(http.client.HTTPConnection):
-    def __init__(self, socket_path):
-        super().__init__("localhost")
-        self.socket_path = socket_path
-
-    def connect(self):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(self.socket_path)
-
+import urllib.request
 
 SOCK = "/tmp/circleci-ts.sock"
 
 
-def call(method, path, body=None):
-    conn = UnixSocketHTTPConnection(SOCK)
-    headers = {"Content-Type": "application/json"} if body else {}
-    data = json.dumps(body).encode() if body else None
-    conn.request(method, path, body=data, headers=headers)
-    resp = conn.getresponse()
-    raw = resp.read()
-    print(f"{method} {path} -> {resp.status}")
-    try:
-        parsed = json.loads(raw)
-        print(json.dumps(parsed, indent=2))
-        return parsed
-    except Exception:
-        print(raw.decode()[:500])
-        return None
+def get_token():
+    """Connect to the task socket — it immediately sends token+host as JSON."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(SOCK)
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+        try:
+            return json.loads(data)  # stop once we have valid JSON
+        except json.JSONDecodeError:
+            continue
 
 
 def main():
@@ -42,29 +30,49 @@ def main():
         print(f"Socket not found: {SOCK}")
         sys.exit(1)
 
-    # Probe what's available
-    for path in ["/", "/api/v2/output/artifact", "/v2/task/config",
-                 "/task-agent-subcommands", "/api"]:
-        call("GET", path)
-        print()
+    creds = get_token()
+    token = creds["token"]
+    runner_host = creds.get("runner_host", "https://runner.circleci.com")
+    print(f"token: {token[:8]}...{token[-4:]}")
+    print(f"runner_host: {runner_host}")
 
-    # Try posting an artifact
     test_content = b"hello from socket test\n"
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as f:
         f.write(test_content)
         tmp_path = f.name
 
-    print("--- POST /api/v2/output/artifact ---")
-    result = call("POST", "/api/v2/output/artifact", {
-        "path": tmp_path,
-        "destination": "test/hello.txt",
-        "artifactType": "text/plain",
-    })
-    os.unlink(tmp_path)
+    try:
+        body = json.dumps({
+            "path": tmp_path,
+            "destination": "test/hello.txt",
+            "artifactType": "text/plain",
+        }).encode()
 
-    if result:
+        req = urllib.request.Request(
+            f"{runner_host}/api/v2/output/artifact",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read())
+            print(f"\nArtifact location response:\n{json.dumps(result, indent=2)}")
+
         upload_url = result.get("url") or result.get("location") or result.get("upload_url")
-        print(f"\nUpload URL: {upload_url}")
+        if upload_url:
+            req2 = urllib.request.Request(upload_url, data=test_content, method="PUT",
+                headers={"Content-Type": "text/plain"})
+            with urllib.request.urlopen(req2) as resp:
+                print(f"\nUpload status: {resp.status} — Success!")
+        else:
+            print(f"Unknown response shape, fields: {list(result.keys())}")
+    except urllib.error.HTTPError as e:
+        print(f"HTTP Error {e.code}: {e.read().decode()}")
+    finally:
+        os.unlink(tmp_path)
 
 
 if __name__ == "__main__":
