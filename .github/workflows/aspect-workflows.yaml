@@ -1,59 +1,53 @@
 name: Aspect Workflows
-
 on:
-    push:
-        branches: [main]
-    pull_request:
-        branches: [main]
-    workflow_dispatch:
-
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 concurrency:
-  # Cancel in-progress runs for the same PR (grouped by workflow + head branch).
-  # On push events (or any non-PR event), head_ref is empty, so each run gets a unique group
-  # and is never cancelled.
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+x-defaults: &bootstrap
+  - uses: actions/checkout@v6
+  - name: Bootstrap
+    run: . .aspect/bootstrap.sh
+
 jobs:
-    pre-build:
-        runs-on: [self-hosted, aspect-workflows, aspect-default]
-        steps:
-            - name: Clone repo
-              uses: actions/checkout@v6
-            - name: Pre-build CLI
-              run: |
-                echo "Build and upload CLI to remote cache"
-                . .aspect/bootstrap.sh
+  pre-build:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    steps:
+      - *bootstrap
+      - name: Pre-build CLI
+        run: echo "Build and upload CLI to remote cache"
 
-    build-task:
-        runs-on: [self-hosted, aspect-workflows, aspect-default]
-        needs: [pre-build]
-        steps:
-            - name: Clone repo
-              uses: actions/checkout@v6
-            - name: Build Task
-              run: |
-                ASPECT_DEBUG=1 aspect build //:cli
-                ASPECT_DEBUG=1 aspect build //...
+  build-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    steps:
+      - *bootstrap
+      - name: Build Task
+        run: |
+          ASPECT_DEBUG=1 aspect build //:cli
+          ASPECT_DEBUG=1 aspect build //...
 
-    test-task:
-        runs-on: [self-hosted, aspect-workflows, aspect-default]
-        needs: [pre-build]
-        steps:
-            - name: Clone repo
-              uses: actions/checkout@v6
-            - name: Test Task
-              run: |
-                ASPECT_DEBUG=1 aspect build //:cli
-                ASPECT_DEBUG=1 aspect test //...
+  test-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    steps:
+      - *bootstrap
+      - name: Test Task
+        run: |
+          ASPECT_DEBUG=1 aspect build //:cli
+          ASPECT_DEBUG=1 aspect test //...
 
-    delivery-task:
-        runs-on: [self-hosted, aspect-workflows, aspect-default]
-        needs: [pre-build]
-        steps:
-            - name: Clone repo
-              uses: actions/checkout@v6
-            - name: Delivery Task
-              run: |
-                ASPECT_DEBUG=1 aspect build //:cli
-                ASPECT_DEBUG=1 aspect delivery --build_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit_sha $GITHUB_SHA --force_target //:hello -- //:hello //:hello2
+  delivery-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    steps:
+      - *bootstrap
+      - name: Delivery Task
+        run: |
+          ASPECT_DEBUG=1 aspect build //:cli
+          ASPECT_DEBUG=1 aspect delivery --build_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit_sha $GITHUB_SHA --force_target //:hello -- //:hello //:hello2
