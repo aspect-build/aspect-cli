@@ -21,5 +21,5 @@ jobs:
             ssh-keyscan -t rsa gitlab.com >> ~/.ssh/known_hosts
             eval $(ssh-agent -s)
             ssh-add - <<< '${{ secrets.ASPECT_CLI_GL_DEPLOY_TOKEN }}'
-            git push git@gitlab.com:aspect-build/aspect-cli.git HEAD:main
+            git push --force git@gitlab.com:aspect-build/aspect-cli.git HEAD:main
             git push --tags --force git@gitlab.com:aspect-build/aspect-cli.git
