@@ -28,40 +28,54 @@ def api(token, runner_host, method, path, body=None):
     data = json.dumps(body).encode() if body else None
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read())
-            print(f"{method} {path} -> {resp.status}")
-            print(json.dumps(result, indent=2))
-            return result
-    except urllib.error.HTTPError as e:
-        print(f"{method} {path} -> {e.code}: {e.read().decode()[:300]}")
-        return None
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
 
 
-def main():
+def upload_artifact(file_path, destination, file_content=None):
+    import boto3
+
     creds = get_token()
     token = creds["token"]
     runner_host = creds.get("runner_host", "https://runner.circleci.com")
 
-    # Probe all known /api/v2/output/* endpoints
-    api(token, runner_host, "GET",  "/api/v2/output/config")
-    print()
-    api(token, runner_host, "GET",  "/api/v2/output/credentials")
-    print()
+    config = api(token, runner_host, "GET", "/api/v2/output/config")
+    bucket = config["bucket"]
+    region = config["region"]
 
-    # Post artifact and inspect full response
-    result = api(token, runner_host, "POST", "/api/v2/output/artifact", {
-        "path": "/tmp/test.txt",
-        "destination": "test/hello.txt",
+    aws_creds = api(token, runner_host, "GET", "/api/v2/output/credentials")["s3"]
+
+    artifact_resp = api(token, runner_host, "POST", "/api/v2/output/artifact", {
+        "path": file_path,
+        "destination": destination,
         "artifactType": "text/plain",
     })
-    print()
-    if result:
-        print(f"prefix: {result.get('prefix')}")
-        print(f"key.location: {result.get('key', {}).get('location')}")
-        print(f"key.tags: {result.get('key', {}).get('tags')}")
+    prefix = artifact_resp["prefix"]
+    tags = artifact_resp["key"].get("tags", {})
+
+    s3_key = f"{prefix}/{destination}"
+    tag_str = "&".join(f"{k}={v}" for k, v in tags.items())
+
+    print(f"Uploading to s3://{bucket}/{s3_key}")
+
+    s3 = boto3.client(
+        "s3",
+        region_name=region,
+        aws_access_key_id=aws_creds["AccessKeyID"],
+        aws_secret_access_key=aws_creds["SecretAccessKey"],
+        aws_session_token=aws_creds["SessionToken"],
+    )
+
+    content = file_content or open(file_path, "rb").read()
+    s3.put_object(
+        Bucket=bucket,
+        Key=s3_key,
+        Body=content,
+        ContentType="text/plain",
+        Tagging=tag_str,
+    )
+    print(f"Done. Artifact at: s3://{bucket}/{s3_key}")
 
 
 if __name__ == "__main__":
-    main()
+    upload_artifact("/tmp/test.txt", "test/hello.txt", b"hello from direct S3 upload!\n")
