@@ -1,0 +1,25 @@
+# We maintain a mirror of this repo on GitLab for testing at https://gitlab.com/aspect-build/aspect-cli.
+# This workflow push commits landed on main to the GitLab mirror.
+name: Sync Gitlab
+on:
+  workflow_dispatch:
+  push:
+    branches: ['main']
+    tags: ['*']
+jobs:
+  push-gl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get a full history so all commits are present
+        uses: actions/checkout@v6
+        with:
+            path: fresh-clone
+            fetch-depth: 0
+      - working-directory: fresh-clone
+        run: |
+            mkdir -p ~/.ssh
+            ssh-keyscan -t rsa gitlab.com >> ~/.ssh/known_hosts
+            eval $(ssh-agent -s)
+            ssh-add - <<< '${{ secrets.ASPECT_CLI_GL_DEPLOY_TOKEN }}'
+            git push git@gitlab.com:aspect-build/aspect-cli.git HEAD:main
+            git push --tags git@gitlab.com:aspect-build/aspect-cli.git

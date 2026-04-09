@@ -7,7 +7,7 @@ env:
 secrets:
   - ASPECT_API_TOKEN
 steps:
-  - key: runner_smoke
+  - key: runner-smoke
     label: ":aspect: Workflows Runner Smoke Test"
     agents:
       queue: aspect-default
@@ -48,45 +48,33 @@ steps:
       ; do
         val=$$(printenv "$$var") && echo "  $$var=$$val" || true
       done
-  - key: warm
-    label: ":aspect: Building CLI"
+
+  - key: pre-build
+    label: ":aspect: Pre-build CLI"
     agents:
       queue: aspect-huge
     timeout_in_minutes: 20
     retry:
       automatic:
-        - exit_status: 78
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      echo "Pre-command builds and uploads CLI to remote cache"
-  - key: test
+      echo ".buildkite/hooks/pre-command builds and uploads CLI to remote cache"
+
+  - key: axl-tests
     depends_on:
-      - warm
-    label: ":aspect: Test"
-    agents:
-      queue: aspect-default
-    timeout_in_minutes: 20
-    retry:
-      automatic:
-        - exit_status: 78
-          limit: 1
-    command: |
-      echo "--- :bazel: aspect test //..."
-      ASPECT_DEBUG=1 aspect test //... --bazel_flag=--build_tests_only
-  - key: build
-    depends_on:
-      - warm
-    label: ":aspect: Build"
+      - pre-build
+    label: ":aspect: AXL Tests"
     agents:
       queue: aspect-huge
     timeout_in_minutes: 20
     retry:
       automatic:
-        - exit_status: 78
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
       echo "--- :bazel: aspect build //:launcher //:cli"
-      aspect build //:launcher //:cli
+      ASPECT_DEBUG=1 aspect build //:launcher //:cli
       # Use cquery to get the actual output paths (handles platform transitions on Linux)
       WORKSPACE_ROOT=$$(pwd)
       LAUNCHER=$$WORKSPACE_ROOT/$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-launcher)
@@ -118,16 +106,17 @@ steps:
       # Run AXL tests last — cancel tests may kill the Bazel server,
       # which invalidates bazel-out paths used by $$LAUNCHER above.
       $$LAUNCHER tests axl
+
   - key: bazelrc-e2e
     depends_on:
-      - warm
-    label: ":bazel: BazelRC e2e (no server restart)"
+      - pre-build
+    label: ":bazel: bazelrc e2e (no server restart)"
     agents:
       queue: aspect-default
     timeout_in_minutes: 20
     retry:
       automatic:
-        - exit_status: 78
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
       echo "--- :bazel: Warm up Bazel server"
@@ -158,30 +147,63 @@ steps:
         exit 1
       fi
       echo "OK: server PID unchanged ($$BEFORE_PID)"
+
   - key: format
     label: ":broom: Format"
     depends_on:
-      - warm
+      - pre-build
     agents:
       queue: aspect-default
     timeout_in_minutes: 20
     retry:
       automatic:
-        - exit_status: 78
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
       echo "--- :bazel: bazel run //tools/format:format.check"
       bazel $$BAZEL_STARTUP_OPTS run $$BAZEL_BUILD_OPTS //tools/format:format.check
-  - key: delivery
-    label: ":package: Delivery"
+
+  - key: build-task
     depends_on:
-      - warm
+      - pre-build
+    label: ":aspect: Build Task"
     agents:
       queue: aspect-default
     timeout_in_minutes: 20
     retry:
       automatic:
-        - exit_status: 78
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
+      ASPECT_DEBUG=1 aspect build //:cli
+      ASPECT_DEBUG=1 aspect build //...
+
+  - key: test-task
+    depends_on:
+      - pre-build
+    label: ":aspect: Test Task"
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 20
+    retry:
+      automatic:
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
+          limit: 1
+    command: |
+      ASPECT_DEBUG=1 aspect build //:cli
+      ASPECT_DEBUG=1 aspect test //...
+
+  - key: delivery-task
+    label: ":package: Delivery Task"
+    depends_on:
+      - pre-build
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 20
+    retry:
+      automatic:
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
+          limit: 1
+    command: |
+      ASPECT_DEBUG=1 aspect build //:cli
+      ASPECT_DEBUG=1 aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
