@@ -8,10 +8,10 @@ use std::path::PathBuf;
 
 use crate::engine::config::feature_context::FeatureContext;
 use crate::engine::config::feature_map::{FrozenFeatureMap, construct_features};
-use crate::engine::config::fragment_map::{FrozenFragmentMap, construct_fragments};
+use crate::engine::config::trait_map::{FrozenTraitMap, construct_traits};
 use crate::engine::config::{ConfigContext, ConfiguredTask};
 use crate::engine::types::feature::{FeatureInstance, extract_feature_impl_fn};
-use crate::engine::types::fragment::extract_fragment_type_id;
+use crate::engine::types::r#trait::extract_trait_type_id;
 use crate::eval::load::{AxlLoader, ModuleScope};
 use crate::eval::load_path::join_confined;
 
@@ -21,11 +21,12 @@ use super::error::EvalError;
 pub struct ConfigResult {
     /// The configured tasks.
     pub tasks: Vec<ConfiguredTask>,
-    /// Fragment type IDs mapped to their (type_value, instance_value) pairs.
-    pub fragment_data: Vec<(u64, Value<'static>, Value<'static>)>,
+    /// Trait type IDs mapped to their (type_value, instance_value) pairs.
+    /// These are the globally-configured trait instances that tasks will use.
+    pub trait_data: Vec<(u64, Value<'static>, Value<'static>)>,
     /// Feature type IDs mapped to their (type_value, instance_value) pairs.
     pub feature_data: Vec<(u64, Value<'static>, Value<'static>)>,
-    /// Keeps the context module's frozen heap alive so fragment/feature data values remain valid.
+    /// Keeps the context module's frozen heap alive so trait_data/feature_data values remain valid.
     _context_module: FrozenModule,
 }
 
@@ -63,51 +64,53 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
     /// Evaluates all config files with the given tasks and feature types.
     ///
-    /// Execution order:
-    /// 1. Collect fragment types from all tasks
-    /// 2. Auto-construct default fragment instances
-    /// 3. Auto-construct default feature instances (enabled=True)
-    /// 4. Create ConfigContext with both maps
-    /// 5. Evaluate each config file (user mutates ctx.fragments[X] and ctx.features[Y])
-    /// 6. Run each enabled feature's implementation(FeatureContext) to inject into fragments
-    /// 7. Freeze
+    /// This method:
+    /// 1. Collects trait types from all tasks
+    /// 2. Auto-constructs default trait instances
+    /// 3. Auto-constructs default feature instances (enabled=True)
+    /// 4. Creates a TraitMap, FeatureMap, and ConfigContext
+    /// 5. Evaluates each config file, calling its `config` function
+    /// 6. Runs each enabled feature's implementation(FeatureContext) to inject into traits
+    /// 7. Returns the modified tasks, trait data, and feature data
     pub fn run_all(
         &self,
         scoped_configs: Vec<(ModuleScope, PathBuf, String)>,
         tasks: Vec<ConfiguredTask>,
         feature_types: Vec<(u64, Value<'static>)>,
     ) -> Result<ConfigResult, EvalError> {
-        let (result_tasks, fragment_map_key, feature_map_key, frozen_ctx_module) =
+        // We use with_temp_heap for context allocation, then freeze the module
+        // to keep the trait/feature values alive via FrozenModule ownership.
+        let (result_tasks, trait_map_key, feature_map_key, frozen_ctx_module) =
             Module::with_temp_heap(|context_module| {
                 let heap = context_module.heap();
 
-                // Collect fragment types from all tasks
-                let mut fragment_types: SmallMap<u64, Value> = SmallMap::new();
+                // Collect trait types from all tasks
+                let mut trait_types: SmallMap<u64, Value> = SmallMap::new();
                 for task in &tasks {
                     let frozen_task = task
                         .as_frozen_task()
                         .expect("tasks should be frozen at this point");
-                    for frag_fv in frozen_task.fragments() {
-                        let frag_value = frag_fv.to_value();
-                        if let Some(id) = extract_fragment_type_id(frag_value) {
-                            fragment_types.entry(id).or_insert(frag_value);
+                    for trait_fv in frozen_task.traits() {
+                        let trait_value = trait_fv.to_value();
+                        if let Some(id) = extract_trait_type_id(trait_value) {
+                            trait_types.entry(id).or_insert(trait_value);
                         }
                     }
                 }
 
-                // Auto-construct default fragment instances
-                let fragment_pairs: Vec<(u64, Value)> =
-                    fragment_types.into_iter().map(|(id, v)| (id, v)).collect();
+                // Auto-construct default trait instances
+                let trait_pairs: Vec<(u64, Value)> =
+                    trait_types.into_iter().map(|(id, v)| (id, v)).collect();
 
-                let fragment_map = {
+                let trait_map = {
                     let store = self.loader.new_store(self.loader.repo_root.clone());
                     let mut eval = Evaluator::new(&context_module);
                     eval.set_loader(self.loader);
                     eval.extra = Some(&store);
-                    construct_fragments(&fragment_pairs, &mut eval, heap)?
+                    construct_traits(&trait_pairs, &mut eval, heap)?
                 };
 
-                let fragment_map_value = heap.alloc(fragment_map);
+                let trait_map_value = heap.alloc(trait_map);
 
                 // Auto-construct default feature instances
                 // SAFETY: feature_types live on frozen heaps that outlive this closure
@@ -130,10 +133,10 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
                 let feature_map_value = heap.alloc(feature_map);
 
-                // Create ConfigContext with tasks, fragment map, and feature map
+                // Create ConfigContext with tasks, trait map, and feature map
                 let context_value = heap.alloc(ConfigContext::new(
                     tasks,
-                    fragment_map_value,
+                    trait_map_value,
                     feature_map_value,
                     heap,
                 ));
@@ -201,7 +204,7 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
                         if let Some(impl_fn) = extract_feature_impl_fn(type_value) {
                             let fctx =
-                                heap.alloc(FeatureContext::new(instance_value, fragment_map_value));
+                                heap.alloc(FeatureContext::new(instance_value, trait_map_value));
                             eval.eval_function(impl_fn, &[fctx], &[]).map_err(|e| {
                                 EvalError::UnknownError(anyhow!(
                                     "Feature implementation failed for {}: {:?}",
@@ -217,9 +220,9 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
                 let result_tasks: Vec<ConfiguredTask> =
                     ctx.tasks().iter().map(|t| (*t).clone()).collect();
 
-                // Store context, fragment map, and feature map so they survive freezing
+                // Store context, trait map, and feature map so they survive freezing
                 context_module.set("__ctx__", context_value);
-                context_module.set("__fmap__", fragment_map_value);
+                context_module.set("__tmap__", trait_map_value);
                 context_module.set("__featmap__", feature_map_value);
 
                 let frozen_ctx_module = context_module
@@ -228,21 +231,21 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
                 Ok::<_, EvalError>((
                     result_tasks,
-                    "__fmap__".to_string(),
+                    "__tmap__".to_string(),
                     "__featmap__".to_string(),
                     frozen_ctx_module,
                 ))
             })?;
 
-        // Extract fragment data from the frozen module's FragmentMap
-        let fmap_owned = frozen_ctx_module
-            .get(&fragment_map_key)
+        // Extract trait data from the frozen module's TraitMap
+        let tmap_owned = frozen_ctx_module
+            .get(&trait_map_key)
             .map_err(|e| EvalError::UnknownError(anyhow!("{:?}", e)))?;
-        let fmap = fmap_owned
+        let tmap = tmap_owned
             .value()
-            .downcast_ref::<FrozenFragmentMap>()
-            .expect("stored FragmentMap");
-        let fragment_data: Vec<(u64, Value<'static>, Value<'static>)> = fmap
+            .downcast_ref::<FrozenTraitMap>()
+            .expect("stored TraitMap");
+        let trait_data: Vec<(u64, Value<'static>, Value<'static>)> = tmap
             .entries()
             .into_iter()
             .map(|(id, tv, iv)| {
@@ -273,7 +276,7 @@ impl<'l, 'p> ConfigEvaluator<'l, 'p> {
 
         Ok(ConfigResult {
             tasks: result_tasks,
-            fragment_data,
+            trait_data,
             feature_data,
             _context_module: frozen_ctx_module,
         })

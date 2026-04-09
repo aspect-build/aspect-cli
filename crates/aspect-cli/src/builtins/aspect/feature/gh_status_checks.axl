@@ -1,8 +1,8 @@
-load("../fragments.axl", "BazelFragment")
+load("../traits.axl", "BazelTrait")
 load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
 
 def _github_status_checks(ctx: FeatureContext):
-    bazel = ctx.fragments[BazelFragment]
+    bazel = ctx.traits[BazelTrait]
     sha = detect_commit_sha(ctx.std.env)
     (owner, repo) = detect_github_repo(ctx.std)
     if sha and owner and repo:

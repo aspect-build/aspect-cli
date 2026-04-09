@@ -1,4 +1,4 @@
-//! FragmentMap - A Starlark value that maps fragment type IDs to instances.
+//! TraitMap - A Starlark value that maps trait type IDs to instances.
 
 use std::cell::RefCell;
 use std::fmt::{self, Display, Write};
@@ -11,26 +11,23 @@ use starlark::values::{
 };
 use starlark_map::small_map::SmallMap;
 
-use crate::engine::config::fragment_context::FragmentContext;
-use crate::engine::types::fragment::{
-    FragmentType, FrozenFragmentType, extract_fragment_default_fn, extract_fragment_type_id,
-};
+use crate::engine::types::r#trait::{FrozenTraitType, TraitType, extract_trait_type_id};
 
-/// A Starlark value that maps fragment type IDs to their instances.
+/// A Starlark value that maps trait type IDs to their instances.
 ///
-/// Used as `ctx.fragments` in both ConfigContext and TaskContext.
-/// Supports `ctx.fragments[FragType]` for reading and
-/// `ctx.fragments[FragType] = FragType(...)` for writing.
+/// Used as `ctx.traits` in both ConfigContext and TaskContext.
+/// Supports `ctx.traits[TraitType]` for reading and
+/// `ctx.traits[TraitType] = TraitType(...)` for writing.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FragmentMap<'v> {
-    /// Map from fragment type id → (type_value, instance_value)
+pub struct TraitMap<'v> {
+    /// Map from trait type id → (type_value, instance_value)
     #[allocative(skip)]
     entries: RefCell<SmallMap<u64, (Value<'v>, Value<'v>)>>,
 }
 
-impl<'v> Display for FragmentMap<'v> {
+impl<'v> Display for TraitMap<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FragmentMap([")?;
+        write!(f, "TraitMap([")?;
         let entries = self.entries.borrow();
         let mut first = true;
         for (_, (type_val, _)) in entries.iter() {
@@ -44,7 +41,7 @@ impl<'v> Display for FragmentMap<'v> {
     }
 }
 
-unsafe impl<'v> Trace<'v> for FragmentMap<'v> {
+unsafe impl<'v> Trace<'v> for TraitMap<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         let entries = self.entries.get_mut();
         for (_, (type_val, instance_val)) in entries.iter_mut() {
@@ -54,14 +51,14 @@ unsafe impl<'v> Trace<'v> for FragmentMap<'v> {
     }
 }
 
-impl<'v> AllocValue<'v> for FragmentMap<'v> {
+impl<'v> AllocValue<'v> for TraitMap<'v> {
     fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-impl<'v> Freeze for FragmentMap<'v> {
-    type Frozen = FrozenFragmentMap;
+impl<'v> Freeze for TraitMap<'v> {
+    type Frozen = FrozenTraitMap;
 
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         let entries = self.entries.into_inner();
@@ -72,28 +69,28 @@ impl<'v> Freeze for FragmentMap<'v> {
                 (type_val.freeze(freezer)?, instance_val.freeze(freezer)?),
             );
         }
-        Ok(FrozenFragmentMap {
+        Ok(FrozenTraitMap {
             entries: frozen_entries,
         })
     }
 }
 
-impl<'v> FragmentMap<'v> {
-    /// Create a new empty FragmentMap.
+impl<'v> TraitMap<'v> {
+    /// Create a new empty TraitMap.
     pub fn new() -> Self {
-        FragmentMap {
+        TraitMap {
             entries: RefCell::new(SmallMap::new()),
         }
     }
 
-    /// Insert a fragment type and its default instance.
+    /// Insert a trait type and its default instance.
     pub fn insert(&self, type_id: u64, type_value: Value<'v>, instance: Value<'v>) {
         self.entries
             .borrow_mut()
             .insert(type_id, (type_value, instance));
     }
 
-    /// Check if a fragment type is already present.
+    /// Check if a trait type is already present.
     pub fn contains(&self, type_id: u64) -> bool {
         self.entries.borrow().contains_key(&type_id)
     }
@@ -112,10 +109,10 @@ impl<'v> FragmentMap<'v> {
             .collect()
     }
 
-    /// Create a new FragmentMap containing only the given type IDs,
+    /// Create a new TraitMap containing only the given type IDs,
     /// copying instance references from this map.
     pub fn scoped(&self, type_ids: &[u64], heap: Heap<'v>) -> Value<'v> {
-        let scoped = FragmentMap::new();
+        let scoped = TraitMap::new();
         let entries = self.entries.borrow();
         for id in type_ids {
             if let Some((type_val, instance_val)) = entries.get(id) {
@@ -129,16 +126,16 @@ impl<'v> FragmentMap<'v> {
     }
 }
 
-#[starlark_value(type = "FragmentMap")]
-impl<'v> StarlarkValue<'v> for FragmentMap<'v> {
+#[starlark_value(type = "TraitMap")]
+impl<'v> StarlarkValue<'v> for TraitMap<'v> {
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 
     fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        let type_id = extract_fragment_type_id(index).ok_or_else(|| {
+        let type_id = extract_trait_type_id(index).ok_or_else(|| {
             starlark::Error::new_other(anyhow::anyhow!(
-                "FragmentMap key must be a fragment type, got '{}'",
+                "TraitMap key must be a trait type, got '{}'",
                 index.get_type()
             ))
         })?;
@@ -147,15 +144,15 @@ impl<'v> StarlarkValue<'v> for FragmentMap<'v> {
         match entries.get(&type_id) {
             Some((_, instance)) => Ok(*instance),
             None => {
-                let type_name = if let Some(ft) = index.downcast_ref::<FragmentType>() {
+                let type_name = if let Some(ft) = index.downcast_ref::<TraitType>() {
                     ft.name.as_deref().unwrap_or("anon")
-                } else if let Some(ft) = index.downcast_ref::<FrozenFragmentType>() {
+                } else if let Some(ft) = index.downcast_ref::<FrozenTraitType>() {
                     ft.name.as_deref().unwrap_or("anon")
                 } else {
                     "unknown"
                 };
                 Err(starlark::Error::new_other(anyhow::anyhow!(
-                    "Fragment type '{}' not found in FragmentMap. Is it declared in a task's fragments list?",
+                    "Trait type '{}' not found in TraitMap. Is it declared in a task's traits list?",
                     type_name
                 )))
             }
@@ -163,9 +160,9 @@ impl<'v> StarlarkValue<'v> for FragmentMap<'v> {
     }
 
     fn set_at(&self, index: Value<'v>, new_value: Value<'v>) -> starlark::Result<()> {
-        let type_id = extract_fragment_type_id(index).ok_or_else(|| {
+        let type_id = extract_trait_type_id(index).ok_or_else(|| {
             starlark::Error::new_other(anyhow::anyhow!(
-                "FragmentMap key must be a fragment type, got '{}'",
+                "TraitMap key must be a trait type, got '{}'",
                 index.get_type()
             ))
         })?;
@@ -185,14 +182,14 @@ impl<'v> StarlarkValue<'v> for FragmentMap<'v> {
     }
 }
 
-/// Frozen version of FragmentMap. Read-only after freezing.
+/// Frozen version of TraitMap. Read-only after freezing.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FrozenFragmentMap {
+pub struct FrozenTraitMap {
     #[allocative(skip)]
     entries: SmallMap<u64, (FrozenValue, FrozenValue)>,
 }
 
-impl FrozenFragmentMap {
+impl FrozenTraitMap {
     /// Get all entries as (type_id, type_value, instance_value) tuples.
     pub fn entries(&self) -> Vec<(u64, Value<'_>, Value<'_>)> {
         self.entries
@@ -202,9 +199,9 @@ impl FrozenFragmentMap {
     }
 }
 
-impl Display for FrozenFragmentMap {
+impl Display for FrozenTraitMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FragmentMap([")?;
+        write!(f, "TraitMap([")?;
         let mut first = true;
         for (_, (type_val, _)) in self.entries.iter() {
             if !first {
@@ -217,26 +214,26 @@ impl Display for FrozenFragmentMap {
     }
 }
 
-unsafe impl<'v> Trace<'v> for FrozenFragmentMap {
+unsafe impl<'v> Trace<'v> for FrozenTraitMap {
     fn trace(&mut self, _tracer: &Tracer<'v>) {
         // Frozen values don't need tracing
     }
 }
 
-starlark_simple_value!(FrozenFragmentMap);
+starlark_simple_value!(FrozenTraitMap);
 
-#[starlark_value(type = "FragmentMap")]
-impl<'v> StarlarkValue<'v> for FrozenFragmentMap {
-    type Canonical = FragmentMap<'v>;
+#[starlark_value(type = "TraitMap")]
+impl<'v> StarlarkValue<'v> for FrozenTraitMap {
+    type Canonical = TraitMap<'v>;
 
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 
     fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        let type_id = extract_fragment_type_id(index).ok_or_else(|| {
+        let type_id = extract_trait_type_id(index).ok_or_else(|| {
             starlark::Error::new_other(anyhow::anyhow!(
-                "FragmentMap key must be a fragment type, got '{}'",
+                "TraitMap key must be a trait type, got '{}'",
                 index.get_type()
             ))
         })?;
@@ -244,15 +241,15 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentMap {
         match self.entries.get(&type_id) {
             Some((_, instance)) => Ok(instance.to_value()),
             None => {
-                let type_name = if let Some(ft) = index.downcast_ref::<FragmentType>() {
+                let type_name = if let Some(ft) = index.downcast_ref::<TraitType>() {
                     ft.name.as_deref().unwrap_or("anon")
-                } else if let Some(ft) = index.downcast_ref::<FrozenFragmentType>() {
+                } else if let Some(ft) = index.downcast_ref::<FrozenTraitType>() {
                     ft.name.as_deref().unwrap_or("anon")
                 } else {
                     "unknown"
                 };
                 Err(starlark::Error::new_other(anyhow::anyhow!(
-                    "Fragment type '{}' not found in FragmentMap. Is it declared in a task's fragments list?",
+                    "Trait type '{}' not found in TraitMap. Is it declared in a task's traits list?",
                     type_name
                 )))
             }
@@ -260,36 +257,23 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentMap {
     }
 }
 
-/// Auto-construct fragment instances by calling each fragment type with no arguments
-/// (using defaults from attr() definitions), then running the fragment's default
-/// function (if any) with a FragmentContext.
-pub fn construct_fragments<'v>(
-    fragment_types: &[(u64, Value<'v>)],
+/// Auto-construct trait instances by calling each trait type with no arguments
+/// (using defaults from attr() definitions).
+pub fn construct_traits<'v>(
+    trait_types: &[(u64, Value<'v>)],
     eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     _heap: Heap<'v>,
-) -> Result<FragmentMap<'v>, crate::eval::EvalError> {
-    let map = FragmentMap::new();
-    for (type_id, type_value) in fragment_types {
+) -> Result<TraitMap<'v>, crate::eval::EvalError> {
+    let map = TraitMap::new();
+    for (type_id, type_value) in trait_types {
         if !map.contains(*type_id) {
             let instance = eval.eval_function(*type_value, &[], &[]).map_err(|e| {
                 crate::eval::EvalError::UnknownError(anyhow::anyhow!(
-                    "Failed to construct default fragment instance for {}: {:?}",
+                    "Failed to construct default trait instance for {}: {:?}",
                     type_value,
                     e
                 ))
             })?;
-
-            if let Some(default_fn) = extract_fragment_default_fn(*type_value) {
-                let frag_ctx = eval.heap().alloc(FragmentContext::new(instance));
-                eval.eval_function(default_fn, &[frag_ctx], &[])
-                    .map_err(|e| {
-                        crate::eval::EvalError::UnknownError(anyhow::anyhow!(
-                            "Failed to run default function for fragment {}: {:?}",
-                            type_value,
-                            e
-                        ))
-                    })?;
-            }
 
             map.insert(*type_id, *type_value, instance);
         }

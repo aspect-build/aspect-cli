@@ -27,7 +27,7 @@ use super::wasm::Wasm;
 #[display("<TaskContext>")]
 pub struct TaskContext<'v> {
     pub args: TaskArgs<'v>,
-    pub fragments: values::Value<'v>,
+    pub traits: values::Value<'v>,
     #[trace(unsafe_ignore)]
     pub task: TaskInfo,
     bazel: values::Value<'v>,
@@ -36,13 +36,13 @@ pub struct TaskContext<'v> {
 impl<'v> TaskContext<'v> {
     pub fn new(
         args: TaskArgs<'v>,
-        fragments: values::Value<'v>,
+        traits: values::Value<'v>,
         task: TaskInfo,
         bazel: values::Value<'v>,
     ) -> Self {
         Self {
             args,
-            fragments,
+            traits,
             task,
             bazel,
         }
@@ -71,7 +71,7 @@ impl<'v> values::Freeze for TaskContext<'v> {
 
         Ok(FrozenTaskContext {
             args: args_value,
-            fragments: self.fragments.freeze(freezer)?,
+            traits: self.traits.freeze(freezer)?,
             task: self.task,
             bazel: self.bazel.freeze(freezer)?,
         })
@@ -111,13 +111,13 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
         Ok(ctx.args.clone())
     }
 
-    /// Access to the fragment map for reading configured fragment values.
+    /// Access to the trait map for reading configured trait values.
     #[starlark(attribute)]
-    fn fragments<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+    fn traits<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
         let ctx = this
             .downcast_ref_err::<TaskContext>()
             .into_anyhow_result()?;
-        Ok(ctx.fragments)
+        Ok(ctx.traits)
     }
 
     /// Expand template files.
@@ -154,7 +154,7 @@ pub struct FrozenTaskContext {
     #[allocative(skip)]
     args: values::FrozenValue,
     #[allocative(skip)]
-    fragments: values::FrozenValue,
+    traits: values::FrozenValue,
     task: TaskInfo,
     #[allocative(skip)]
     bazel: values::FrozenValue,
@@ -201,11 +201,11 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
     }
 
     #[starlark(attribute)]
-    fn fragments<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+    fn traits<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
         let ctx = this
             .downcast_ref_err::<FrozenTaskContext>()
             .into_anyhow_result()?;
-        Ok(ctx.fragments.to_value())
+        Ok(ctx.traits.to_value())
     }
 
     #[starlark(attribute)]

@@ -1,6 +1,6 @@
 load("./lambda.axl", "lambda_with_global_bind")
 
-UserTaskConfig = fragment(
+UserTaskConfig = trait(
     message=attr(str, "hello world"),
     count=attr(int, 1),
     customize_message = attr(typing.Callable[[str], str], lambda s: s),
@@ -13,7 +13,7 @@ def _impl(ctx: TaskContext) -> int:
     lambda_with_global_bind()("assert")
 
     # do something that makes uses the task config
-    config = ctx.fragments[UserTaskConfig]
+    config = ctx.traits[UserTaskConfig]
     print(ctx)
     print(config)
     print(config.count)
@@ -27,5 +27,5 @@ user_task = task(
     group = ["user", "nested"],
     implementation = _impl,
     args = {},
-    fragments = [UserTaskConfig],
+    traits = [UserTaskConfig],
 )

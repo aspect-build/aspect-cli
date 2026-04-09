@@ -12,7 +12,7 @@ use std::path::Path;
 
 use crate::engine::bazel::Bazel;
 use crate::engine::config::ConfiguredTask;
-use crate::engine::config::fragment_map::FragmentMap;
+use crate::engine::config::trait_map::TraitMap;
 use crate::engine::store::AxlStore;
 use crate::engine::task::FrozenTask;
 use crate::engine::task_args::TaskArgs;
@@ -66,17 +66,17 @@ impl FrozenTaskModuleLike for FrozenModule {
     }
 }
 
-/// Build a task-scoped FragmentMap on the given heap, containing only the
-/// fragments the task opts into.
-fn build_task_fragment_map<'v>(
-    fragment_data: &[(u64, Value<'static>, Value<'static>)],
-    task_fragment_ids: &[u64],
+/// Build a task-scoped TraitMap on the given heap, containing only the
+/// traits the task opts into.
+fn build_task_trait_map<'v>(
+    trait_data: &[(u64, Value<'static>, Value<'static>)],
+    task_trait_ids: &[u64],
     heap: Heap<'v>,
 ) -> Value<'v> {
-    let map = FragmentMap::new();
-    for (id, type_val, instance_val) in fragment_data {
-        if task_fragment_ids.contains(id) {
-            // SAFETY: fragment_data values live on a leaked heap that outlives this call
+    let map = TraitMap::new();
+    for (id, type_val, instance_val) in trait_data {
+        if task_trait_ids.contains(id) {
+            // SAFETY: trait_data values live on a leaked heap that outlives this call
             let tv: Value<'v> = unsafe { std::mem::transmute(*type_val) };
             let iv: Value<'v> = unsafe { std::mem::transmute(*instance_val) };
             map.insert(*id, tv, iv);
@@ -92,7 +92,7 @@ fn build_task_fragment_map<'v>(
 pub fn execute_task_with_args(
     task: &ConfiguredTask,
     store: AxlStore,
-    fragment_data: &[(u64, Value<'static>, Value<'static>)],
+    trait_data: &[(u64, Value<'static>, Value<'static>)],
     args_builder: impl FnOnce(Heap) -> TaskArgs,
 ) -> Result<Option<u8>, EvalError> {
     // Get the task implementation function
@@ -113,12 +113,12 @@ pub fn execute_task_with_args(
             group: task.get_group(),
         };
 
-        // Build a task-scoped fragment map (filtered to this task's opted-in fragments)
-        let fragment_map = build_task_fragment_map(fragment_data, &task.fragment_type_ids, heap);
+        // Build a task-scoped trait map
+        let trait_map = build_task_trait_map(trait_data, &task.trait_type_ids, heap);
 
         let startup_flags = heap.alloc(AllocList([] as [String; 0]));
         let bazel = heap.alloc(Bazel { startup_flags });
-        let context = heap.alloc(TaskContext::new(task_args, fragment_map, task_info, bazel));
+        let context = heap.alloc(TaskContext::new(task_args, trait_map, task_info, bazel));
 
         let mut eval = Evaluator::new(&exec_module);
         eval.extra = Some(&store);

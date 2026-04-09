@@ -12,7 +12,7 @@ CircleCI's native store_artifacts / store_test_results steps.
 
 load("../lib/artifacts.axl", "detect_ci", "upload_file", "delete_artifact")
 load("../lib/tar.axl", "tar_create")
-load("../fragments.axl", "BazelFragment")
+load("../traits.axl", "BazelTrait")
 
 
 # Upload every N new files per group
@@ -213,14 +213,14 @@ def _artifact_prefix(ci, env, task_name):
 
 
 def _artifact_upload_impl(ctx: FeatureContext):
-    """Wire interval-based artifact upload into BazelFragment lifecycle hooks.
+    """Wire interval-based artifact upload into BazelTrait lifecycle hooks.
 
     - build_event: collect testlog entries + upload every BATCH_SIZE new files
     - build_end: final flush of any remaining files + upload profile
 
     Uses ctx.task.name to identify the current task (e.g. "build", "test").
     """
-    fragment = ctx.fragments[BazelFragment]
+    fragment = ctx.traits[BazelTrait]
 
 
     ci = detect_ci(ctx.std.env)

@@ -13,21 +13,17 @@ use starlark::values::typing::TypeCompiled;
 use starlark::values::{
     AllocFrozenValue, AllocValue, Freeze, FreezeError, Freezer, FrozenHeap, FrozenValue, Heap,
     NoSerialize, ProvidesStaticType, StarlarkValue, Trace, Tracer, Value, ValueLike,
-    none::NoneType, starlark_value,
+    starlark_value,
 };
 use starlark_map::small_map::SmallMap;
 
-static FRAGMENT_TYPE_ID: AtomicU64 = AtomicU64::new(0);
+static TRAIT_TYPE_ID: AtomicU64 = AtomicU64::new(0);
 
-fn next_fragment_type_id() -> u64 {
-    FRAGMENT_TYPE_ID.fetch_add(1, Ordering::SeqCst)
+fn next_trait_type_id() -> u64 {
+    TRAIT_TYPE_ID.fetch_add(1, Ordering::SeqCst)
 }
 
-// -----------------------------------------------------------------------------
-// Field
-// -----------------------------------------------------------------------------
-
-/// A field definition for a fragment, containing a type and optional default value.
+/// A field definition for a trait, containing a type and optional default value.
 #[derive(Debug, Clone, ProvidesStaticType, Allocative)]
 pub struct Field<'v> {
     pub(crate) typ: TypeCompiled<Value<'v>>,
@@ -80,10 +76,6 @@ impl Display for FrozenField {
         }
     }
 }
-
-// -----------------------------------------------------------------------------
-// FieldValue - a wrapper for field() function return
-// -----------------------------------------------------------------------------
 
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct FieldValue<'v> {
@@ -175,7 +167,7 @@ impl Freeze for FieldValue<'_> {
 }
 
 /// Deep-copy a default value if it's a mutable container (list or dict).
-/// This ensures each fragment instance gets its own mutable copy rather than
+/// This ensures each trait instance gets its own mutable copy rather than
 /// sharing the (potentially frozen) default.
 pub(crate) fn copy_default_value<'v>(
     value: Value<'v>,
@@ -213,54 +205,43 @@ pub(crate) fn build_type_checkers<'v>(
         .collect()
 }
 
-// -----------------------------------------------------------------------------
-// FragmentType
-// -----------------------------------------------------------------------------
-
-/// The type of a fragment, created by `fragment(field1=type1, field2=type2, ...)`.
-/// Calling this type creates a `FragmentInstance` instance.
+/// The type of a trait, created by `trait(field1=type1, field2=type2, ...)`.
+/// Calling this type creates a `TraitInstance` instance.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FragmentType<'v> {
-    /// Unique identifier for this fragment type
+pub struct TraitType<'v> {
+    /// Unique identifier for this trait type
     pub(crate) id: u64,
-    /// Name of the fragment type (set when assigned to a variable)
+    /// Name of the trait type (set when assigned to a variable)
     pub(crate) name: Option<String>,
     /// Fields with their types and optional defaults
     pub(crate) fields: SmallMap<String, Field<'v>>,
-    /// Optional default-value function called after attr() defaults are applied,
-    /// before config functions run. Receives a FragmentContext.
-    #[allocative(skip)]
-    pub(crate) default_fn: Option<Value<'v>>,
 }
 
-impl<'v> Display for FragmentType<'v> {
+impl<'v> Display for TraitType<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.name {
-            Some(name) => write!(f, "fragment[{}]", name),
-            None => write!(f, "fragment[anon]"),
+            Some(name) => write!(f, "trait[{}]", name),
+            None => write!(f, "trait[anon]"),
         }
     }
 }
 
-unsafe impl<'v> Trace<'v> for FragmentType<'v> {
+unsafe impl<'v> Trace<'v> for TraitType<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         for (_, field) in self.fields.iter_mut() {
             field.trace(tracer);
         }
-        if let Some(ref mut f) = self.default_fn {
-            f.trace(tracer);
-        }
     }
 }
 
-impl<'v> AllocValue<'v> for FragmentType<'v> {
+impl<'v> AllocValue<'v> for TraitType<'v> {
     fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-#[starlark_value(type = "fragment")]
-impl<'v> StarlarkValue<'v> for FragmentType<'v> {
+#[starlark_value(type = "trait")]
+impl<'v> StarlarkValue<'v> for TraitType<'v> {
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
@@ -270,7 +251,7 @@ impl<'v> StarlarkValue<'v> for FragmentType<'v> {
         variable_name: &str,
         _eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> starlark::Result<()> {
-        // This is called when the fragment type is assigned to a variable.
+        // This is called when the trait type is assigned to a variable.
         // We use unsafe to mutate the name, which is safe because this is only
         // called during module loading.
         let this = self as *const Self as *mut Self;
@@ -335,7 +316,7 @@ impl<'v> StarlarkValue<'v> for FragmentType<'v> {
             }
         }
 
-        let instance = FragmentInstance {
+        let instance = TraitInstance {
             typ: _me,
             values: values.into_boxed_slice(),
             type_checkers: type_checkers.into_boxed_slice(),
@@ -345,50 +326,45 @@ impl<'v> StarlarkValue<'v> for FragmentType<'v> {
 
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(fragment_type_methods)
+        RES.methods(trait_type_methods)
     }
 }
 
 #[starlark_module]
-fn fragment_type_methods(_builder: &mut MethodsBuilder) {}
+fn trait_type_methods(_builder: &mut MethodsBuilder) {}
 
-// -----------------------------------------------------------------------------
-// FrozenFragmentType
-// -----------------------------------------------------------------------------
-
-/// Frozen version of FragmentType.
+/// Frozen version of TraitType.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FrozenFragmentType {
+pub struct FrozenTraitType {
     pub(crate) id: u64,
     pub(crate) name: Option<String>,
     pub(crate) fields: SmallMap<String, FrozenField>,
-    pub(crate) default_fn: Option<FrozenValue>,
 }
 
-impl Display for FrozenFragmentType {
+impl Display for FrozenTraitType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.name {
-            Some(name) => write!(f, "fragment[{}]", name),
-            None => write!(f, "fragment[anon]"),
+            Some(name) => write!(f, "trait[{}]", name),
+            None => write!(f, "trait[anon]"),
         }
     }
 }
 
-unsafe impl<'v> Trace<'v> for FrozenFragmentType {
+unsafe impl<'v> Trace<'v> for FrozenTraitType {
     fn trace(&mut self, _tracer: &Tracer<'v>) {
         // Frozen values don't need tracing
     }
 }
 
-impl AllocFrozenValue for FrozenFragmentType {
+impl AllocFrozenValue for FrozenTraitType {
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         heap.alloc_simple(self)
     }
 }
 
-#[starlark_value(type = "fragment")]
-impl<'v> StarlarkValue<'v> for FrozenFragmentType {
-    type Canonical = FragmentType<'v>;
+#[starlark_value(type = "trait")]
+impl<'v> StarlarkValue<'v> for FrozenTraitType {
+    type Canonical = TraitType<'v>;
 
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
@@ -447,7 +423,7 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentType {
             }
         }
 
-        let instance = FragmentInstance {
+        let instance = TraitInstance {
             typ: _me,
             values: values.into_boxed_slice(),
             type_checkers: type_checkers.into_boxed_slice(),
@@ -457,35 +433,30 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentType {
 
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(fragment_type_methods)
+        RES.methods(trait_type_methods)
     }
 }
 
-impl Freeze for FragmentType<'_> {
-    type Frozen = FrozenFragmentType;
+impl Freeze for TraitType<'_> {
+    type Frozen = FrozenTraitType;
 
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         let mut frozen_fields = SmallMap::with_capacity(self.fields.len());
         for (name, field) in self.fields.into_iter() {
             frozen_fields.insert(name, field.freeze(freezer)?);
         }
-        Ok(FrozenFragmentType {
+        Ok(FrozenTraitType {
             id: self.id,
             name: self.name,
             fields: frozen_fields,
-            default_fn: self.default_fn.map(|f| f.freeze(freezer)).transpose()?,
         })
     }
 }
 
-// -----------------------------------------------------------------------------
-// FragmentInstance
-// -----------------------------------------------------------------------------
-
-/// An instance of a fragment type, containing field values.
+/// An instance of a trait type, containing field values.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FragmentInstance<'v> {
-    /// The fragment type this instance belongs to
+pub struct TraitInstance<'v> {
+    /// The trait type this instance belongs to
     pub(crate) typ: Value<'v>,
     /// Field values in the same order as the type's field definitions (mutable via Cell)
     #[allocative(skip)]
@@ -496,19 +467,19 @@ pub struct FragmentInstance<'v> {
     pub(crate) type_checkers: Box<[TypeCompiled<Value<'v>>]>,
 }
 
-impl<'v> Display for FragmentInstance<'v> {
+impl<'v> Display for TraitInstance<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(", self.typ)?;
-        if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
+        if let Some(trait_type) = self.typ.downcast_ref::<TraitType>() {
             let mut first = true;
-            for ((name, _), value) in frag_type.fields.iter().zip(self.values.iter()) {
+            for ((name, _), value) in trait_type.fields.iter().zip(self.values.iter()) {
                 if !first {
                     write!(f, ", ")?;
                 }
                 first = false;
                 write!(f, "{}={}", name, value.get())?;
             }
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenTraitType>() {
             let mut first = true;
             for ((name, _), value) in frozen_type.fields.iter().zip(self.values.iter()) {
                 if !first {
@@ -522,7 +493,7 @@ impl<'v> Display for FragmentInstance<'v> {
     }
 }
 
-unsafe impl<'v> Trace<'v> for FragmentInstance<'v> {
+unsafe impl<'v> Trace<'v> for TraitInstance<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         self.typ.trace(tracer);
         for cell in self.values.iter() {
@@ -536,17 +507,17 @@ unsafe impl<'v> Trace<'v> for FragmentInstance<'v> {
     }
 }
 
-impl<'v> AllocValue<'v> for FragmentInstance<'v> {
+impl<'v> AllocValue<'v> for TraitInstance<'v> {
     fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-impl<'v> FragmentInstance<'v> {
+impl<'v> TraitInstance<'v> {
     fn get_field_names(&self) -> Vec<&str> {
-        if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
-            frag_type.fields.keys().map(|s| s.as_str()).collect()
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
+        if let Some(trait_type) = self.typ.downcast_ref::<TraitType>() {
+            trait_type.fields.keys().map(|s| s.as_str()).collect()
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenTraitType>() {
             frozen_type.fields.keys().map(|s| s.as_str()).collect()
         } else {
             vec![]
@@ -554,18 +525,18 @@ impl<'v> FragmentInstance<'v> {
     }
 }
 
-#[starlark_value(type = "fragment")]
-impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
+#[starlark_value(type = "trait")]
+impl<'v> StarlarkValue<'v> for TraitInstance<'v> {
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 
     fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
-        if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
-            if let Some(idx) = frag_type.fields.get_index_of(attribute) {
+        if let Some(trait_type) = self.typ.downcast_ref::<TraitType>() {
+            if let Some(idx) = trait_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].get());
             }
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenTraitType>() {
             if let Some(idx) = frozen_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].get());
             }
@@ -575,13 +546,13 @@ impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
 
     fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
         // Get field index
-        let idx = if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
-            frag_type.fields.get_index_of(attribute)
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
+        let idx = if let Some(trait_type) = self.typ.downcast_ref::<TraitType>() {
+            trait_type.fields.get_index_of(attribute)
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenTraitType>() {
             frozen_type.fields.get_index_of(attribute)
         } else {
             return Err(starlark::Error::new_other(anyhow::anyhow!(
-                "Invalid fragment type"
+                "Invalid trait type"
             )));
         };
 
@@ -589,7 +560,7 @@ impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
             Some(idx) => idx,
             None => {
                 return Err(starlark::Error::new_other(anyhow::anyhow!(
-                    "Fragment {} has no field `{}`",
+                    "Trait {} has no field `{}`",
                     self.typ,
                     attribute
                 )));
@@ -613,9 +584,9 @@ impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
     }
 
     fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
-        if let Some(frag_type) = self.typ.downcast_ref::<FragmentType>() {
-            frag_type.fields.contains_key(attribute)
-        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
+        if let Some(trait_type) = self.typ.downcast_ref::<TraitType>() {
+            trait_type.fields.contains_key(attribute)
+        } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenTraitType>() {
             frozen_type.fields.contains_key(attribute)
         } else {
             false
@@ -630,21 +601,21 @@ impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
-        if let Some(other_instance) = other.downcast_ref::<FragmentInstance>() {
-            // Check that they have the same fragment type
+        if let Some(other_instance) = other.downcast_ref::<TraitInstance>() {
+            // Check that they have the same trait type
             let self_id = self
                 .typ
-                .downcast_ref::<FragmentType>()
+                .downcast_ref::<TraitType>()
                 .map(|t| t.id)
-                .or_else(|| self.typ.downcast_ref::<FrozenFragmentType>().map(|t| t.id));
+                .or_else(|| self.typ.downcast_ref::<FrozenTraitType>().map(|t| t.id));
             let other_id = other_instance
                 .typ
-                .downcast_ref::<FragmentType>()
+                .downcast_ref::<TraitType>()
                 .map(|t| t.id)
                 .or_else(|| {
                     other_instance
                         .typ
-                        .downcast_ref::<FrozenFragmentType>()
+                        .downcast_ref::<FrozenTraitType>()
                         .map(|t| t.id)
                 });
 
@@ -662,15 +633,15 @@ impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
                 }
             }
             Ok(true)
-        } else if let Some(other_frozen) = other.downcast_ref::<FrozenFragmentInstance>() {
+        } else if let Some(other_frozen) = other.downcast_ref::<FrozenTraitInstance>() {
             let self_id = self
                 .typ
-                .downcast_ref::<FragmentType>()
+                .downcast_ref::<TraitType>()
                 .map(|t| t.id)
-                .or_else(|| self.typ.downcast_ref::<FrozenFragmentType>().map(|t| t.id));
+                .or_else(|| self.typ.downcast_ref::<FrozenTraitType>().map(|t| t.id));
             let other_id = other_frozen
                 .typ
-                .downcast_ref::<FrozenFragmentType>()
+                .downcast_ref::<FrozenTraitType>()
                 .map(|t| t.id);
 
             if self_id != other_id {
@@ -693,20 +664,20 @@ impl<'v> StarlarkValue<'v> for FragmentInstance<'v> {
 }
 
 // -----------------------------------------------------------------------------
-// FrozenFragmentInstance
+// FrozenTraitInstance
 // -----------------------------------------------------------------------------
 
-/// Frozen version of FragmentInstance.
+/// Frozen version of TraitInstance.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FrozenFragmentInstance {
+pub struct FrozenTraitInstance {
     pub(crate) typ: FrozenValue,
     pub(crate) values: Box<[FrozenValue]>,
 }
 
-impl Display for FrozenFragmentInstance {
+impl Display for FrozenTraitInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(", self.typ)?;
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenTraitType>() {
             let mut first = true;
             for ((name, _), value) in frozen_type.fields.iter().zip(self.values.iter()) {
                 if !first {
@@ -720,28 +691,28 @@ impl Display for FrozenFragmentInstance {
     }
 }
 
-unsafe impl<'v> Trace<'v> for FrozenFragmentInstance {
+unsafe impl<'v> Trace<'v> for FrozenTraitInstance {
     fn trace(&mut self, _tracer: &Tracer<'v>) {
         // Frozen values don't need tracing
     }
 }
 
-impl AllocFrozenValue for FrozenFragmentInstance {
+impl AllocFrozenValue for FrozenTraitInstance {
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         heap.alloc_simple(self)
     }
 }
 
-#[starlark_value(type = "fragment")]
-impl<'v> StarlarkValue<'v> for FrozenFragmentInstance {
-    type Canonical = FragmentInstance<'v>;
+#[starlark_value(type = "trait")]
+impl<'v> StarlarkValue<'v> for FrozenTraitInstance {
+    type Canonical = TraitInstance<'v>;
 
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 
     fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenTraitType>() {
             if let Some(idx) = frozen_type.fields.get_index_of(attribute) {
                 return Some(self.values[idx].to_value());
             }
@@ -750,7 +721,7 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentInstance {
     }
 
     fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenTraitType>() {
             frozen_type.fields.contains_key(attribute)
         } else {
             false
@@ -758,7 +729,7 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentInstance {
     }
 
     fn dir_attr(&self) -> Vec<String> {
-        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFragmentType>() {
+        if let Some(frozen_type) = self.typ.downcast_ref::<FrozenTraitType>() {
             frozen_type.fields.keys().map(|s| s.to_string()).collect()
         } else {
             vec![]
@@ -766,11 +737,11 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentInstance {
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
-        if let Some(other_frozen) = other.downcast_ref::<FrozenFragmentInstance>() {
-            let self_id = self.typ.downcast_ref::<FrozenFragmentType>().map(|t| t.id);
+        if let Some(other_frozen) = other.downcast_ref::<FrozenTraitInstance>() {
+            let self_id = self.typ.downcast_ref::<FrozenTraitType>().map(|t| t.id);
             let other_id = other_frozen
                 .typ
-                .downcast_ref::<FrozenFragmentType>()
+                .downcast_ref::<FrozenTraitType>()
                 .map(|t| t.id);
 
             if self_id != other_id {
@@ -786,16 +757,16 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentInstance {
                 }
             }
             Ok(true)
-        } else if let Some(other_instance) = other.downcast_ref::<FragmentInstance>() {
-            let self_id = self.typ.downcast_ref::<FrozenFragmentType>().map(|t| t.id);
+        } else if let Some(other_instance) = other.downcast_ref::<TraitInstance>() {
+            let self_id = self.typ.downcast_ref::<FrozenTraitType>().map(|t| t.id);
             let other_id = other_instance
                 .typ
-                .downcast_ref::<FragmentType>()
+                .downcast_ref::<TraitType>()
                 .map(|t| t.id)
                 .or_else(|| {
                     other_instance
                         .typ
-                        .downcast_ref::<FrozenFragmentType>()
+                        .downcast_ref::<FrozenTraitType>()
                         .map(|t| t.id)
                 });
 
@@ -818,8 +789,8 @@ impl<'v> StarlarkValue<'v> for FrozenFragmentInstance {
     }
 }
 
-impl Freeze for FragmentInstance<'_> {
-    type Frozen = FrozenFragmentInstance;
+impl Freeze for TraitInstance<'_> {
+    type Frozen = FrozenTraitInstance;
 
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         let typ = self.typ.freeze(freezer)?;
@@ -828,7 +799,7 @@ impl Freeze for FragmentInstance<'_> {
             .iter()
             .map(|v| v.get().freeze(freezer))
             .collect();
-        Ok(FrozenFragmentInstance {
+        Ok(FrozenTraitInstance {
             typ,
             values: values?.into_boxed_slice(),
         })
@@ -836,26 +807,15 @@ impl Freeze for FragmentInstance<'_> {
 }
 
 // -----------------------------------------------------------------------------
-// Helper: extract fragment type ID from a Value
+// Helper: extract trait type ID from a Value
 // -----------------------------------------------------------------------------
 
-/// Extract the fragment type ID from a Value that is either a FragmentType or FrozenFragmentType.
-pub fn extract_fragment_type_id(value: Value) -> Option<u64> {
-    if let Some(ft) = value.downcast_ref::<FragmentType>() {
+/// Extract the trait type ID from a Value that is either a TraitType or FrozenTraitType.
+pub fn extract_trait_type_id(value: Value) -> Option<u64> {
+    if let Some(ft) = value.downcast_ref::<TraitType>() {
         Some(ft.id)
-    } else if let Some(ft) = value.downcast_ref::<FrozenFragmentType>() {
+    } else if let Some(ft) = value.downcast_ref::<FrozenTraitType>() {
         Some(ft.id)
-    } else {
-        None
-    }
-}
-
-/// Extract the default function from a Value that is either a FragmentType or FrozenFragmentType.
-pub fn extract_fragment_default_fn<'v>(value: Value<'v>) -> Option<Value<'v>> {
-    if let Some(ft) = value.downcast_ref::<FragmentType>() {
-        ft.default_fn
-    } else if let Some(ft) = value.downcast_ref::<FrozenFragmentType>() {
-        ft.default_fn.map(|f| f.to_value())
     } else {
         None
     }
@@ -867,11 +827,7 @@ pub fn extract_fragment_default_fn<'v>(value: Value<'v>) -> Option<Value<'v>> {
 
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
-    /// Creates a fragment type with the given fields.
-    ///
-    /// An optional first positional argument may be a default-value function
-    /// `fn(ctx: FragmentContext)` that runs after `attr()` defaults are applied
-    /// and before config functions. Use it to set computed defaults.
+    /// Creates a trait type with the given fields.
     ///
     /// Each field can be a bare type (required, no default) or an `attr()`
     /// definition (with type and optional default).
@@ -881,26 +837,15 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///
     /// Example:
     /// ```starlark
-    /// def _defaults(ctx):
-    ///     ctx.attr.extra_flags.append("--config=default")
-    ///
-    /// BazelFragment = fragment(
-    ///     _defaults,
+    /// BazelTrait = trait(
     ///     extra_flags = attr(list[str], []),
     ///     extra_startup_flags = attr(list[str], []),
     /// )
     /// ```
-    fn fragment<'v>(
-        #[starlark(require = pos, default = NoneType)] default_fn: Value<'v>,
+    fn r#trait<'v>(
         #[starlark(kwargs)] kwargs: SmallMap<&str, Value<'v>>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<FragmentType<'v>> {
-        let default_fn = if default_fn.is_none() {
-            None
-        } else {
-            Some(default_fn)
-        };
-
+    ) -> anyhow::Result<TraitType<'v>> {
         let mut fields = SmallMap::with_capacity(kwargs.len());
 
         for (name, value) in kwargs.into_iter() {
@@ -923,23 +868,22 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             fields.insert(name.to_string(), field);
         }
 
-        Ok(FragmentType {
-            id: next_fragment_type_id(),
+        Ok(TraitType {
+            id: next_trait_type_id(),
             name: None,
             fields,
-            default_fn,
         })
     }
 
     /// Creates a field definition with a type and optional default value.
     ///
-    /// Mutable defaults (lists, dicts) are deep-copied when a fragment instance is
+    /// Mutable defaults (lists, dicts) are deep-copied when a trait instance is
     /// created, so each instance gets its own independent copy.
     ///
     /// Example:
     /// ```starlark
-    /// BazelFragment = fragment(host=str, port=attr(int, 80))
-    /// r = BazelFragment(host="localhost")  # port defaults to 80
+    /// BazelTrait = trait(host=str, port=attr(int, 80))
+    /// r = BazelTrait(host="localhost")  # port defaults to 80
     /// ```
     fn attr<'v>(
         #[starlark(require = pos)] typ: Value<'v>,

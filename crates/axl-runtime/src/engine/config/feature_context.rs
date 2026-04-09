@@ -96,9 +96,9 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
         Ok(ctx.attr)
     }
 
-    /// The full mutable fragment map. Inject into fragments via `ctx.fragments[FragType].hook.append(...)`.
+    /// The full mutable trait map. Inject into traits via `ctx.traits[TraitType].hook.append(...)`.
     #[starlark(attribute)]
-    fn fragments<'v>(this: Value<'v>) -> anyhow::Result<Value<'v>> {
+    fn traits<'v>(this: Value<'v>) -> anyhow::Result<Value<'v>> {
         let ctx = this
             .downcast_ref_err::<FeatureContext>()
             .map_err(|e| anyhow::anyhow!("{}", e))?;

@@ -1,5 +1,5 @@
 use crate::engine::task_context::TaskContext;
-use crate::engine::types::fragment::{FragmentType, FrozenFragmentType, extract_fragment_type_id};
+use crate::engine::types::r#trait::{FrozenTraitType, TraitType, extract_trait_type_id};
 
 use super::task_arg::TaskArg;
 use allocative::Allocative;
@@ -53,7 +53,7 @@ pub struct Task<'v> {
     pub(super) description: String,
     pub(super) group: Vec<String>,
     pub(super) name: String,
-    pub(super) fragments: Vec<values::Value<'v>>,
+    pub(super) traits: Vec<values::Value<'v>>,
 }
 
 impl<'v> Task<'v> {
@@ -72,8 +72,8 @@ impl<'v> Task<'v> {
     pub fn name(&self) -> &String {
         &self.name
     }
-    pub fn fragments(&self) -> &[values::Value<'v>] {
-        &self.fragments
+    pub fn traits(&self) -> &[values::Value<'v>] {
+        &self.traits
     }
 }
 
@@ -105,15 +105,15 @@ impl<'v> values::Freeze for Task<'v> {
     type Frozen = FrozenTask;
     fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
         let frozen_impl = self.r#impl.freeze(freezer)?;
-        let frozen_fragments: Result<Vec<_>, _> =
-            self.fragments.iter().map(|f| f.freeze(freezer)).collect();
+        let frozen_traits: Result<Vec<_>, _> =
+            self.traits.iter().map(|f| f.freeze(freezer)).collect();
         Ok(FrozenTask {
             args: self.args,
             r#impl: frozen_impl,
             description: self.description,
             group: self.group,
             name: self.name,
-            fragments: frozen_fragments?,
+            traits: frozen_traits?,
         })
     }
 }
@@ -127,7 +127,7 @@ pub struct FrozenTask {
     pub(super) description: String,
     pub(super) group: Vec<String>,
     pub(super) name: String,
-    pub(super) fragments: Vec<values::FrozenValue>,
+    pub(super) traits: Vec<values::FrozenValue>,
 }
 
 starlark_simple_value!(FrozenTask);
@@ -141,14 +141,14 @@ impl FrozenTask {
     pub fn implementation(&self) -> values::FrozenValue {
         self.r#impl
     }
-    pub fn fragments(&self) -> &[values::FrozenValue] {
-        &self.fragments
+    pub fn traits(&self) -> &[values::FrozenValue] {
+        &self.traits
     }
-    /// Get fragment type IDs this task opts into.
-    pub fn fragment_type_ids(&self) -> Vec<u64> {
-        self.fragments
+    /// Get trait type IDs this task opts into.
+    pub fn trait_type_ids(&self) -> Vec<u64> {
+        self.traits
             .iter()
-            .filter_map(|f| extract_fragment_type_id(f.to_value()))
+            .filter_map(|f| extract_trait_type_id(f.to_value()))
             .collect()
     }
 }
@@ -199,7 +199,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///     task_args = {
     ///         "target": args.string(),
     ///     },
-    ///     fragments = [BazelFragment]  # Optional list of fragment types
+    ///     traits = [BazelTrait]  # Optional list of trait types
     /// )
     /// ```
     fn task<'v>(
@@ -212,9 +212,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] description: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         #[starlark(require = named, default = String::new())] name: String,
-        #[starlark(require = named, default = UnpackList::default())] fragments: UnpackList<
-            Value<'v>,
-        >,
+        #[starlark(require = named, default = UnpackList::default())] traits: UnpackList<Value<'v>>,
     ) -> anyhow::Result<Task<'v>> {
         if group.items.len() > MAX_TASK_GROUPS {
             return Err(anyhow::anyhow!(
@@ -228,15 +226,15 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             args_.insert(arg.to_owned(), def.clone());
         }
 
-        // Validate each element is a FragmentType or FrozenFragmentType
-        let all_fragments = fragments.items;
-        for frag in &all_fragments {
-            if frag.downcast_ref::<FragmentType>().is_none()
-                && frag.downcast_ref::<FrozenFragmentType>().is_none()
+        // Validate each element is a TraitType or FrozenTraitType
+        let all_traits = traits.items;
+        for t in &all_traits {
+            if t.downcast_ref::<TraitType>().is_none()
+                && t.downcast_ref::<FrozenTraitType>().is_none()
             {
                 return Err(anyhow::anyhow!(
-                    "fragments list must contain fragment types, got '{}'",
-                    frag.get_type()
+                    "traits list must contain trait types, got '{}'",
+                    t.get_type()
                 )
                 .into());
             }
@@ -248,7 +246,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             description,
             group: group.items,
             name,
-            fragments: all_fragments,
+            traits: all_traits,
         })
     }
 }

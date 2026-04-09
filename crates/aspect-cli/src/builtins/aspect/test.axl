@@ -1,7 +1,7 @@
 """
 A default 'test' task that wraps a 'bazel test' command.
 """
-load("./fragments.axl", "BazelFragment", "HealthCheckFragment")
+load("./traits.axl", "BazelTrait", "HealthCheckTrait")
 
 def _collect_bes_from_args(ctx):
     """Collect BES sinks from CLI args (--bes_backend/--bes_header)."""
@@ -20,13 +20,13 @@ def _collect_bes_from_args(ctx):
     return sinks
 
 def _test_impl(ctx: TaskContext) -> int:
-    hc_fragment = ctx.fragments[HealthCheckFragment]
-    fragment = ctx.fragments[BazelFragment]
+    hc_trait = ctx.traits[HealthCheckTrait]
+    bazel_trait = ctx.traits[BazelTrait]
 
-    for hook in hc_fragment.pre_health_check:
+    for hook in hc_trait.pre_health_check:
         hook(ctx)
 
-    for hook in hc_fragment.post_health_check:
+    for hook in hc_trait.post_health_check:
         result = hook(ctx)
         if result != None:
             fail(result)
@@ -34,27 +34,27 @@ def _test_impl(ctx: TaskContext) -> int:
     # Flags: accumulate data, then optionally transform
     flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
     flags.extend(ctx.args.bazel_flag)
-    flags.extend(fragment.extra_flags)
-    if fragment.flags:
-        flags = fragment.flags(flags)
+    flags.extend(bazel_trait.extra_flags)
+    if bazel_trait.flags:
+        flags = bazel_trait.flags(flags)
 
     startup_flags = list(ctx.args.bazel_startup_flag)
-    startup_flags.extend(fragment.extra_startup_flags)
+    startup_flags.extend(bazel_trait.extra_startup_flags)
     if ctx.args.output_base:
         startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
-    if fragment.startup_flags:
-        startup_flags = fragment.startup_flags(startup_flags)
-    # BES: merge arg-based sinks with fragment sinks
+    if bazel_trait.startup_flags:
+        startup_flags = bazel_trait.startup_flags(startup_flags)
+    # BES: merge arg-based sinks with trait sinks
     build_events = _collect_bes_from_args(ctx)
-    if fragment.build_event_sinks:
-        build_events.extend(fragment.build_event_sinks)
+    if bazel_trait.build_event_sinks:
+        build_events.extend(bazel_trait.build_event_sinks)
 
     # Coerce to bool/list for ctx.bazel.test:
     # - non-empty list → stream to those sinks + build_events() iterator.
     # - True → stream without explicit sinks (build_event handler only)
     # - False → no BEP stream at all
     if not build_events:
-        if fragment.build_event:
+        if bazel_trait.build_event:
             build_events = True
         else:
             build_events = False
@@ -62,7 +62,7 @@ def _test_impl(ctx: TaskContext) -> int:
     # Shared mutable state across build_start / build_event / build_end
     state = {}
 
-    for handler in fragment.build_start:
+    for handler in bazel_trait.build_start:
         handler(ctx, state)
 
     if ctx.args.cancel:
@@ -82,31 +82,31 @@ def _test_impl(ctx: TaskContext) -> int:
     for _ in range(10):
         test = ctx.bazel.test(
             build_events = build_events,
-            execution_log = fragment.execution_log_sinks if fragment.execution_log_sinks else False,
+            execution_log = bazel_trait.execution_log_sinks if bazel_trait.execution_log_sinks else False,
             flags = flags,
             *ctx.args.target_pattern,
         )
 
-        if fragment.build_event:
+        if bazel_trait.build_event:
             for event in test.build_events():
-                for handler in fragment.build_event:
+                for handler in bazel_trait.build_event:
                     handler(ctx, state, event)
 
         build_status = test.wait()
 
-        if build_status.code == 0 or not fragment.build_retry(build_status.code):
+        if build_status.code == 0 or not bazel_trait.build_retry(build_status.code):
             break
 
-    for handler in fragment.build_end:
+    for handler in bazel_trait.build_end:
         handler(ctx, state, build_status.code)
 
     return build_status.code
 
 test = task(
     implementation = _test_impl,
-    fragments = [
-        BazelFragment,
-        HealthCheckFragment,
+    traits = [
+        BazelTrait,
+        HealthCheckTrait,
     ],
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)

@@ -48,7 +48,7 @@ pub struct ConfigContext<'v> {
     #[allocative(skip)]
     tasks: values::Value<'v>,
     #[allocative(skip)]
-    fragment_map: values::Value<'v>,
+    trait_map: values::Value<'v>,
     #[allocative(skip)]
     feature_map: values::Value<'v>,
     #[allocative(skip)]
@@ -56,10 +56,10 @@ pub struct ConfigContext<'v> {
 }
 
 impl<'v> ConfigContext<'v> {
-    /// Create a new ConfigContext with the given tasks, fragment map, and feature map.
+    /// Create a new ConfigContext with the given tasks, trait map, and feature map.
     pub fn new(
         tasks: Vec<ConfiguredTask>,
-        fragment_map: values::Value<'v>,
+        trait_map: values::Value<'v>,
         feature_map: values::Value<'v>,
         heap: Heap<'v>,
     ) -> Self {
@@ -67,13 +67,10 @@ impl<'v> ConfigContext<'v> {
             .into_iter()
             .map(|task| task.alloc_value(heap))
             .collect();
-        let x = TaskListGen(RefCell::new(TaskList::new_with_fragment_map(
-            tasks,
-            fragment_map,
-        )));
+        let x = TaskListGen(RefCell::new(TaskList::new_with_trait_map(tasks, trait_map)));
         Self {
             tasks: heap.alloc_complex(x),
-            fragment_map,
+            trait_map,
             feature_map,
             config_modules: RefCell::new(vec![]),
         }
@@ -96,9 +93,9 @@ impl<'v> ConfigContext<'v> {
         list.0.borrow().content.clone()
     }
 
-    /// Get the fragment map value.
-    pub fn fragment_map_value(&self) -> values::Value<'v> {
-        self.fragment_map
+    /// Get the trait map value.
+    pub fn trait_map_value(&self) -> values::Value<'v> {
+        self.trait_map
     }
 
     /// Get the feature map value.
@@ -132,7 +129,7 @@ impl<'v> Freeze for ConfigContext<'v> {
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         Ok(FrozenConfigContext {
             tasks: self.tasks.freeze(freezer)?,
-            fragment_map: self.fragment_map.freeze(freezer)?,
+            trait_map: self.trait_map.freeze(freezer)?,
             feature_map: self.feature_map.freeze(freezer)?,
             // Keep config modules alive so frozen Def values from config files
             // remain valid during post_freeze optimization.
@@ -148,7 +145,7 @@ pub struct FrozenConfigContext {
     #[allocative(skip)]
     tasks: FrozenValue,
     #[allocative(skip)]
-    fragment_map: FrozenValue,
+    trait_map: FrozenValue,
     #[allocative(skip)]
     feature_map: FrozenValue,
     #[allocative(skip)]
@@ -212,18 +209,18 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
         Ok(ValueOfUnchecked::new(this.tasks))
     }
 
-    /// Access to the fragment map for configuring fragment instances.
+    /// Access to the trait map for configuring trait instances.
     ///
     /// Usage:
     /// ```starlark
-    /// ctx.fragments[BazelFragment].extra_flags = ["--config=ci"]
+    /// ctx.traits[BazelTrait].extra_flags = ["--config=ci"]
     /// ```
     #[starlark(attribute)]
-    fn fragments<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+    fn traits<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
         let ctx = this
             .downcast_ref_err::<ConfigContext>()
             .into_anyhow_result()?;
-        Ok(ctx.fragment_map)
+        Ok(ctx.trait_map)
     }
 
     /// Access to the feature map for configuring feature instances.
