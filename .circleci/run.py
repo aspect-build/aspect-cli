@@ -70,9 +70,41 @@ def upload_to_presigned_url(url: str, content: bytes, content_type: str = "text/
 
 
 def main():
+    # Dump all CCI/CIRCLE env vars and relevant files for diagnosis
+    print("=== Environment ===")
+    for k, v in sorted(os.environ.items()):
+        if any(k.startswith(p) for p in ("CCI_", "CIRCLE_", "CIRCLECI")):
+            # Redact long values that look like tokens
+            display = v if len(v) < 40 else f"{v[:8]}...{v[-4:]}"
+            print(f"  {k}={display}")
+
+    print("\n=== CIRCLE_INTERNAL_TASK_DATA ===")
+    task_data_path = os.environ.get("CIRCLE_INTERNAL_TASK_DATA")
+    if task_data_path:
+        print(f"  Path: {task_data_path}")
+        if os.path.isfile(task_data_path):
+            with open(task_data_path) as f:
+                raw = f.read()
+            print(f"  Contents: {raw[:2000]}")
+        elif os.path.isdir(task_data_path):
+            print(f"  Is a directory. Files: {os.listdir(task_data_path)}")
+            for fname in os.listdir(task_data_path):
+                fpath = os.path.join(task_data_path, fname)
+                with open(fpath) as f:
+                    print(f"  [{fname}]: {f.read()[:500]}")
+    else:
+        print("  Not set")
+
+    print("\n=== circleci-agent socket/files ===")
+    for path in ["/tmp/circle-agent-runner.pid", "/run/circleci-agent.sock",
+                 "/tmp/.circleci-agent", "/var/run/circleci-agent"]:
+        exists = os.path.exists(path)
+        print(f"  {path}: {'EXISTS' if exists else 'not found'}")
+
+    print()
+
     if not TOKEN:
-        print("ERROR: CCI_RUNNER_API_TASK_TOKEN is not set.")
-        print("This script must be run inside a CircleCI job.")
+        print("CCI_RUNNER_API_TASK_TOKEN is not set — see diagnostics above.")
         sys.exit(1)
 
     print(f"Token: {TOKEN[:8]}...{TOKEN[-4:]}")
