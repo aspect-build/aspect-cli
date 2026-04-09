@@ -113,7 +113,7 @@ pub fn execute_task_with_args(
             group: task.get_group(),
         };
 
-        // Build a task-scoped fragment map
+        // Build a task-scoped fragment map (filtered to this task's opted-in fragments)
         let fragment_map = build_task_fragment_map(fragment_data, &task.fragment_type_ids, heap);
 
         let startup_flags = heap.alloc(AllocList([] as [String; 0]));

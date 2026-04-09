@@ -21,6 +21,8 @@ pub struct ModuleStore {
     pub module_root: PathBuf,
     pub deps: Rc<RefCell<HashMap<String, Dep>>>,
     pub tasks: Rc<RefCell<HashMap<PathBuf, (String, Vec<String>)>>>,
+    /// Features declared via `use_feature(path, symbol)` in MODULE.aspect.
+    pub features: Rc<RefCell<Vec<(PathBuf, String)>>>,
 }
 
 impl ModuleStore {
@@ -31,6 +33,7 @@ impl ModuleStore {
             module_root,
             deps: Rc::new(RefCell::new(HashMap::new())),
             tasks: Rc::new(RefCell::new(HashMap::new())),
+            features: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -46,6 +49,7 @@ impl ModuleStore {
             module_root: value.module_root.clone(),
             deps: Rc::clone(&value.deps),
             tasks: Rc::clone(&value.tasks),
+            features: Rc::clone(&value.features),
         })
     }
 }

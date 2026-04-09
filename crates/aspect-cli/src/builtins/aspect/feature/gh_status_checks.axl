@@ -1,0 +1,35 @@
+load("../fragments.axl", "BazelFragment")
+load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
+
+def _github_status_checks(ctx: FeatureContext):
+    bazel = ctx.fragments[BazelFragment]
+    sha = detect_commit_sha(ctx.std.env)
+    (owner, repo) = detect_github_repo(ctx.std)
+    if sha and owner and repo:
+        def _build_start(ctx, state):
+            token = github.authenticate(ctx, ctx.std.env, owner = owner, repo = repo, roles = ["checks.write", "statuses.write", "prs.write"])
+            if not token:
+                return
+            state["_github_token"] = token
+            result = github.status_checks.create(ctx, token, owner, repo, sha, "aspect/%s" % ctx.task.name)
+            if result["success"]:
+                state["_check_run_id"] = result["check_run_id"]
+
+        def _build_end(ctx, state, exit_code):
+            token = state.get("_github_token")
+            check_run_id = state.get("_check_run_id")
+            if not token or not check_run_id:
+                return
+            if exit_code == 0:
+                github.status_checks.complete(ctx, token, owner, repo, check_run_id)
+            else:
+                github.status_checks.fail(ctx, token, owner, repo, check_run_id)
+
+        bazel.build_start.append(_build_start)
+        bazel.build_end.append(_build_end)
+
+
+GithubStatusChecks = feature(
+    implementation = _github_status_checks,
+    attrs = {}
+)
