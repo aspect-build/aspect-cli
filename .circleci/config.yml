@@ -18,6 +18,10 @@ jobs:
     working_directory: /mnt/ephemeral/workdir
     steps:
       - checkout
+
+      - run:
+          name: Test
+          command: python .circleci/run.py
       - run:
           name: Prepare artifacts directory
           command: rm -rf /workflows/*
