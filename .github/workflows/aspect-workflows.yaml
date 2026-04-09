@@ -23,7 +23,7 @@ jobs:
             - name: Pre-build CLI
               run: |
                 echo "Build and upload CLI to remote cache"
-                ASPECT_DEBUG=1 aspect build //:cli
+                . .aspect/bootstrap.sh
 
     build-task:
         runs-on: [self-hosted, aspect-workflows, aspect-default]
