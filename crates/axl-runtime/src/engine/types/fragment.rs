@@ -177,7 +177,10 @@ impl Freeze for FieldValue<'_> {
 /// Deep-copy a default value if it's a mutable container (list or dict).
 /// This ensures each fragment instance gets its own mutable copy rather than
 /// sharing the (potentially frozen) default.
-fn copy_default_value<'v>(value: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
+pub(crate) fn copy_default_value<'v>(
+    value: Value<'v>,
+    heap: Heap<'v>,
+) -> anyhow::Result<Value<'v>> {
     match value.get_type() {
         "list" => {
             let items: Vec<Value<'v>> = value.iterate(heap).map_err(|e| e.into_anyhow())?.collect();
@@ -201,7 +204,7 @@ fn copy_default_value<'v>(value: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Va
 /// Create fresh TypeCompiled values from field type values at runtime.
 /// This ensures type checking works correctly for types like starlark Records
 /// whose frozen TypeCompiled matchers may not function properly.
-fn build_type_checkers<'v>(
+pub(crate) fn build_type_checkers<'v>(
     fields: impl Iterator<Item = Value<'v>>,
     heap: Heap<'v>,
 ) -> starlark::Result<Vec<TypeCompiled<Value<'v>>>> {

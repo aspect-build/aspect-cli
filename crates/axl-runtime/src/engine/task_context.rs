@@ -66,7 +66,6 @@ impl<'v> values::AllocValue<'v> for TaskContext<'v> {
 impl<'v> values::Freeze for TaskContext<'v> {
     type Frozen = FrozenTaskContext;
     fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
-        // Freeze args by first freezing TaskArgs to FrozenTaskArgs, then allocating on frozen heap
         let frozen_args = self.args.freeze(freezer)?;
         let args_value = freezer.frozen_heap().alloc_simple(frozen_args);
 
@@ -144,16 +143,6 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
         Ok(Wasm::new())
     }
 
-    /// The `http` attribute provides a programmatic interface for making HTTP requests.
-    /// It is used to fetch data from remote servers and can be used in conjunction with
-    /// other aspects to perform complex data processing tasks.
-    ///
-    /// **Example**
-    ///
-    /// ```starlark
-    /// **Fetch** data from a remote server
-    /// data = ctx.http().get("https://example.com/data.json").block()
-    /// ```
     fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Http> {
         Ok(Http::new())
     }
@@ -238,7 +227,6 @@ fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
         Ok(Http::new())
     }
 
-    /// EXPERIMENTAL! Run wasm programs within tasks.
     #[starlark(attribute)]
     fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Wasm> {
         Ok(Wasm::new())

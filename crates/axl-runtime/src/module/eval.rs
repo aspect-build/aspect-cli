@@ -174,6 +174,26 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
         Ok(values::none::NoneType)
     }
+
+    /// Declares a feature to load and make globally available.
+    ///
+    /// The feature's `implementation` function will run after all config.axl files
+    /// have been evaluated, injecting behavior into fragment hook lists.
+    ///
+    /// Example:
+    /// ```
+    /// use_feature("//aspect/features:github_status_checks.axl", "GithubStatusChecks")
+    /// ```
+    fn use_feature<'v>(
+        #[starlark(require = pos)] label: String,
+        #[starlark(require = pos)] symbol: String,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<values::none::NoneType> {
+        let store = ModuleStore::from_eval(eval)?;
+        let absolute_path = store.module_root.join(&label);
+        store.features.borrow_mut().push((absolute_path, symbol));
+        Ok(values::none::NoneType)
+    }
 }
 
 pub const AXL_MODULE_FILE: &str = "MODULE.aspect";

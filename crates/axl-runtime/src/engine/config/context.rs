@@ -40,7 +40,8 @@ use super::tasks::value::TaskList;
 
 /// Config context for evaluating config.axl files.
 ///
-/// This context holds the list of tasks and the fragment map that config functions can modify.
+/// This context holds the list of tasks, the fragment map, and the feature map
+/// that config functions can modify.
 #[derive(Debug, Clone, ProvidesStaticType, Trace, Display, NoSerialize, Allocative)]
 #[display("<ConfigContext>")]
 pub struct ConfigContext<'v> {
@@ -49,14 +50,17 @@ pub struct ConfigContext<'v> {
     #[allocative(skip)]
     fragment_map: values::Value<'v>,
     #[allocative(skip)]
+    feature_map: values::Value<'v>,
+    #[allocative(skip)]
     config_modules: RefCell<Vec<FrozenModule>>,
 }
 
 impl<'v> ConfigContext<'v> {
-    /// Create a new ConfigContext with the given tasks and fragment map.
+    /// Create a new ConfigContext with the given tasks, fragment map, and feature map.
     pub fn new(
         tasks: Vec<ConfiguredTask>,
         fragment_map: values::Value<'v>,
+        feature_map: values::Value<'v>,
         heap: Heap<'v>,
     ) -> Self {
         let tasks: Vec<values::Value<'v>> = tasks
@@ -70,6 +74,7 @@ impl<'v> ConfigContext<'v> {
         Self {
             tasks: heap.alloc_complex(x),
             fragment_map,
+            feature_map,
             config_modules: RefCell::new(vec![]),
         }
     }
@@ -94,6 +99,11 @@ impl<'v> ConfigContext<'v> {
     /// Get the fragment map value.
     pub fn fragment_map_value(&self) -> values::Value<'v> {
         self.fragment_map
+    }
+
+    /// Get the feature map value.
+    pub fn feature_map_value(&self) -> values::Value<'v> {
+        self.feature_map
     }
 
     /// Add a config module for lifetime management.
@@ -123,6 +133,7 @@ impl<'v> Freeze for ConfigContext<'v> {
         Ok(FrozenConfigContext {
             tasks: self.tasks.freeze(freezer)?,
             fragment_map: self.fragment_map.freeze(freezer)?,
+            feature_map: self.feature_map.freeze(freezer)?,
             // Keep config modules alive so frozen Def values from config files
             // remain valid during post_freeze optimization.
             config_modules: self.config_modules.into_inner(),
@@ -138,6 +149,8 @@ pub struct FrozenConfigContext {
     tasks: FrozenValue,
     #[allocative(skip)]
     fragment_map: FrozenValue,
+    #[allocative(skip)]
+    feature_map: FrozenValue,
     #[allocative(skip)]
     config_modules: Vec<FrozenModule>,
 }
@@ -211,5 +224,20 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
             .downcast_ref_err::<ConfigContext>()
             .into_anyhow_result()?;
         Ok(ctx.fragment_map)
+    }
+
+    /// Access to the feature map for configuring feature instances.
+    ///
+    /// Usage:
+    /// ```starlark
+    /// ctx.features[GithubStatusChecks].owner = "myorg"
+    /// ctx.features[GithubStatusChecks].enabled = False
+    /// ```
+    #[starlark(attribute)]
+    fn features<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
+            .downcast_ref_err::<ConfigContext>()
+            .into_anyhow_result()?;
+        Ok(ctx.feature_map)
     }
 }

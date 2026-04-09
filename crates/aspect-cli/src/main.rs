@@ -13,6 +13,7 @@ use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
 use axl_runtime::engine::config::ConfiguredTask;
 use axl_runtime::engine::task_arg::TaskArg;
 use axl_runtime::engine::task_args::TaskArgs;
+use axl_runtime::engine::types::feature::extract_feature_type_id;
 use axl_runtime::eval::{self, FrozenTaskModuleLike, ModuleScope, execute_task_with_args};
 use axl_runtime::module::{AXL_MODULE_FILE, AXL_ROOT_MODULE_NAME};
 use axl_runtime::module::{AxlModuleEvaluator, DiskStore};
@@ -96,11 +97,12 @@ async fn main() -> miette::Result<ExitCode> {
         .await
         .into_diagnostic()?;
 
-    // Collect root and dependency modules into a vector of modules with exported tasks.
+    // Collect root and dependency modules into a vector of modules with exported tasks and features.
     let mut modules = vec![(
         root_module_store.module_name,
         root_module_store.module_root,
         root_module_store.tasks.take(),
+        root_module_store.features.take(),
     )];
 
     for (name, root) in module_roots {
@@ -115,6 +117,7 @@ async fn main() -> miette::Result<ExitCode> {
             module_store.module_name,
             module_store.module_root,
             module_store.tasks.take(),
+            module_store.features.take(),
         ))
     }
 
@@ -168,8 +171,9 @@ async fn main() -> miette::Result<ExitCode> {
             PathBuf,
             HashMap<PathBuf, (FrozenModule, String, Vec<String>)>,
         )> = vec![];
+        let mut all_features: Vec<(String, PathBuf, Vec<(PathBuf, String)>)> = vec![];
 
-        for (module_name, module_root, map) in modules.into_iter() {
+        for (module_name, module_root, map, features) in modules.into_iter() {
             let mut mmap = HashMap::new();
             for (path, (label, symbols)) in map.into_iter() {
                 let rel_path = path.strip_prefix(&module_root).unwrap().to_path_buf();
@@ -184,7 +188,54 @@ async fn main() -> miette::Result<ExitCode> {
                     .into_diagnostic()?;
                 mmap.insert(path, (frozen_module, label, symbols));
             }
-            use_task_modules.push((module_name, module_root, mmap));
+            use_task_modules.push((module_name.clone(), module_root.clone(), mmap));
+            all_features.push((module_name, module_root, features));
+        }
+
+        // Load feature files declared via use_feature() in MODULE.aspect files.
+        // Keep frozen modules alive so that Value<'static> transmutes remain valid.
+        let mut frozen_feature_modules: Vec<FrozenModule> = Vec::new();
+        let mut feature_types: Vec<(u64, starlark::values::Value<'static>)> = Vec::new();
+
+        for (module_name, module_root, features) in &all_features {
+            for (abs_path, symbol) in features {
+                let rel_path = abs_path
+                    .strip_prefix(module_root)
+                    .unwrap_or(abs_path.as_path())
+                    .to_path_buf();
+                let frozen = task_eval
+                    .eval(
+                        ModuleScope {
+                            name: module_name.clone(),
+                            path: module_root.clone(),
+                        },
+                        &rel_path,
+                    )
+                    .into_diagnostic()?;
+
+                let owned = frozen.get(symbol.as_str()).map_err(|_| {
+                    miette!(
+                        "symbol {:?} not found in feature file {:?}",
+                        symbol,
+                        abs_path
+                    )
+                })?;
+
+                let type_id = extract_feature_type_id(owned.value()).ok_or_else(|| {
+                    miette!(
+                        "symbol {:?} in {:?} is not a feature type",
+                        symbol,
+                        abs_path
+                    )
+                })?;
+
+                // SAFETY: frozen_feature_modules keeps the heap alive for the
+                // duration of this spawn_blocking closure.
+                let static_val: starlark::values::Value<'static> =
+                    unsafe { std::mem::transmute(owned.value()) };
+                feature_types.push((type_id, static_val));
+                frozen_feature_modules.push(frozen);
+            }
         }
 
         // Collect tasks from evaluated scripts.
@@ -246,10 +297,11 @@ async fn main() -> miette::Result<ExitCode> {
 
         // Run all config functions, passing in vector of tasks for configuration
         let config_result = config_eval
-            .run_all(scoped_configs, tasks)
+            .run_all(scoped_configs, tasks, feature_types)
             .into_diagnostic()?;
         let tasks = config_result.tasks;
         let fragment_data = config_result.fragment_data;
+        drop(frozen_feature_modules);
 
         // Build the command tree from the evaluated and configured tasks.
         let mut tree = CommandTree::default();

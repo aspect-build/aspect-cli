@@ -10,8 +10,9 @@ CircleCI is excluded — artifacts are staged at /workflows/testlogs for
 CircleCI's native store_artifacts / store_test_results steps.
 """
 
-load("./lib/artifacts.axl", "detect_ci", "upload_file", "delete_artifact")
-load("./lib/tar.axl", "tar_create")
+load("../lib/artifacts.axl", "detect_ci", "upload_file", "delete_artifact")
+load("../lib/tar.axl", "tar_create")
+load("../fragments.axl", "BazelFragment")
 
 
 # Upload every N new files per group
@@ -211,7 +212,7 @@ def _artifact_prefix(ci, env, task_name):
     return _artifact_name_prefix(env) + "-" + task_name
 
 
-def configure_artifacts(ctx, attr):
+def _artifact_upload_impl(ctx: FeatureContext):
     """Wire interval-based artifact upload into BazelFragment lifecycle hooks.
 
     - build_event: collect testlog entries + upload every BATCH_SIZE new files
@@ -219,6 +220,9 @@ def configure_artifacts(ctx, attr):
 
     Uses ctx.task.name to identify the current task (e.g. "build", "test").
     """
+    fragment = ctx.fragments[BazelFragment]
+
+
     ci = detect_ci(ctx.std.env)
     is_local = not ci
     if is_local:
@@ -234,7 +238,7 @@ def configure_artifacts(ctx, attr):
     bep_path = "/tmp/" + uuid + ".bep.bin"
 
     # Add profiling and heap dump flags
-    attr.extra_flags.extend([
+    fragment.extra_flags.extend([
         "--generate_json_trace_profile",
         "--experimental_profile_include_target_label",
         "--profile=" + profile_path,
@@ -242,10 +246,10 @@ def configure_artifacts(ctx, attr):
     ])
 
     # Add execution log and build event file sinks
-    attr.execution_log_sinks.append(
+    fragment.execution_log_sinks.append(
         bazel.execution_log.compact_file(path = execlog_path),
     )
-    attr.build_event_sinks.append(
+    fragment.build_event_sinks.append(
         bazel.build_events.file(path = bep_path),
     )
 
@@ -303,5 +307,12 @@ def configure_artifacts(ctx, attr):
                     upload_file(ctx, src, name = artifact_name)
                     ctx.std.fs.remove_file(src)
 
-    attr.build_event.append(_on_build_event)
-    attr.build_end.append(_on_build_end)
+    fragment.build_event.append(_on_build_event)
+    fragment.build_end.append(_on_build_end)
+
+
+
+ArtifactUpload = feature(
+    implementation = _artifact_upload_impl,
+    attrs = {}
+)
