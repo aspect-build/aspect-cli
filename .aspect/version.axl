@@ -1,5 +1,5 @@
 version(
-    "2026.13.5",
+    "2026.15.2",
     sources = [
         local("target/debug/aspect-cli"),
         local("bazel-bin/crates/aspect-cli/aspect-cli"),
