@@ -180,7 +180,7 @@ def _upload_file_github(ctx, path, name):
 
     # Step 2: Upload file to signed URL
     upload_resp = ctx.http().put(
-        signed_url,
+        url = signed_url,
         headers = {
             "x-ms-blob-type": "BlockBlob",
             "Content-Type": "application/octet-stream",
@@ -286,7 +286,7 @@ def _upload_file_gitlab(ctx, path, name):
     url = api_url + "/projects/" + project_id + "/packages/generic/" + name + "/" + pipeline_id + "/" + file_name
 
     resp = ctx.http().put(
-        url,
+        url = url,
         headers = {"JOB-TOKEN": token},
         data = ctx.std.fs.open(path),
     ).block()
