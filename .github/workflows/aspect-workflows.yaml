@@ -13,6 +13,7 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     steps:
       - uses: actions/checkout@v6
+      - run: env
       - name: Pre-build CLI
         run: |
           echo "Build and upload CLI to remote cache"

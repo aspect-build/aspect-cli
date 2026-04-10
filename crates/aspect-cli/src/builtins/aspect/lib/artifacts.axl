@@ -1,10 +1,17 @@
 """
 Artifact Upload Library
 
-Platform-agnostic artifact upload functions for CI environments.
-Supports GitHub Actions, Buildkite, and GitLab CI.
-CircleCI is excluded — artifacts are staged at /workflows/testlogs only.
+Platform-agnostic artifact upload orchestration for CI environments.
+Supports GitHub Actions, Buildkite, GitLab CI, and CircleCI.
+
+CI-specific upload primitives live in their respective lib files:
+  lib/github.axl, lib/buildkite.axl, lib/circleci.axl (gitlab inline below)
 """
+
+load("./github.axl", "github")
+load("./buildkite.axl", "buildkite")
+load("./circleci.axl", "circleci")
+load("./tar.axl", "tar_create")
 
 
 def detect_ci(env):
@@ -14,7 +21,7 @@ def detect_ci(env):
         env: Environment interface (ctx.std.env)
 
     Returns:
-        "github" | "buildkite" | "gitlab" | None
+        "github" | "buildkite" | "gitlab" | "circleci" | None
     """
     if env.var("ACTIONS_RUNTIME_TOKEN"):
         return "github"
@@ -22,258 +29,17 @@ def detect_ci(env):
         return "buildkite"
     elif env.var("CI_JOB_TOKEN"):
         return "gitlab"
-    # CircleCI (CIRCLE_PROJECT_REPONAME) intentionally excluded:
-    # artifacts are staged to disk for CircleCI's native store_artifacts step.
+    elif env.var("CIRCLE_PROJECT_REPONAME"):
+        return "circleci"
     return None
 
 
-def upload_file(ctx, path, name):
-    """Upload a single file to the current CI platform's artifact storage.
-
-    Args:
-        ctx: Context (needs ctx.http(), ctx.std.env, ctx.std.fs, ctx.std.process)
-        path: str - absolute file path to upload
-        name: str - artifact name
-
-    Returns:
-        dict with "success" (bool), "artifact_ref" (str|None), "errors" (list)
-    """
-    if not ctx.std.fs.exists(path):
-        return {"success": False, "artifact_ref": None, "errors": ["file not found: " + path]}
-
-    ci = detect_ci(ctx.std.env)
-    if ci == "github":
-        return _upload_file_github(ctx, path, name)
-    elif ci == "buildkite":
-        return _upload_file_buildkite(ctx, path, name)
-    elif ci == "gitlab":
-        return _upload_file_gitlab(ctx, path, name)
-
-    return {"success": False, "artifact_ref": None, "errors": ["not running in supported CI"]}
-
-
-def delete_artifact(ctx, name):
-    """Delete a previously uploaded artifact by name.
-
-    Args:
-        ctx: Context (needs ctx.http(), ctx.std.env, ctx.std.process)
-        name: str - artifact name to delete
-
-    Returns:
-        dict with "success" (bool)
-    """
-    ci = detect_ci(ctx.std.env)
-    if ci == "github":
-        return _delete_github(ctx, name)
-    elif ci == "buildkite":
-        return _delete_buildkite(ctx, name)
-    # GitLab and others: no easy single-artifact deletion
-    return {"success": True}
-
-
 # =============================================================================
-# GitHub Actions
-# =============================================================================
-
-def _decode_backend_ids(ctx, token):
-    """Extract workflowRunBackendId and workflowJobRunBackendId from ACTIONS_RUNTIME_TOKEN JWT.
-
-    The token's 'scp' claim contains a scope like:
-        "Actions.Results:run-backend-id:job-backend-id"
-
-    Args:
-        ctx: Context with ctx.std.process for base64 decoding
-        token: The ACTIONS_RUNTIME_TOKEN JWT string
-
-    Returns:
-        (workflow_run_backend_id, workflow_job_run_backend_id) or (None, None)
-    """
-    # JWT is three base64url-encoded segments separated by dots
-    parts = token.split(".")
-    if len(parts) < 2:
-        return (None, None)
-
-    # Decode the payload (second segment).
-    # Convert base64url encoding to standard base64 before decoding.
-    payload_b64 = parts[1].replace("-", "+").replace("_", "/")
-    child = ctx.std.process.command("base64").args(["-d"]).stdin("piped").stdout("piped").stderr("piped").spawn()
-    child.stdin().write(payload_b64)
-    child.stdin().close()
-    payload_json = child.stdout().read_to_string()
-    child.wait()
-
-    if not payload_json:
-        return (None, None)
-
-    payload = json.decode(payload_json)
-    scp = payload.get("scp", "")
-
-    # scp is space-separated scopes; find the Actions.Results one
-    scopes = scp.split(" ")
-    for scope in scopes:
-        if scope.startswith("Actions.Results:"):
-            scope_parts = scope.split(":")
-            if len(scope_parts) >= 3:
-                return (scope_parts[1], scope_parts[2])
-
-    return (None, None)
-
-
-def _github_twirp(ctx, method, payload):
-    """Make a Twirp RPC call to the GitHub Actions artifact service.
-
-    Args:
-        ctx: Context
-        method: str - Twirp method name (e.g. "CreateArtifact")
-        payload: dict - request payload
-
-    Returns:
-        (success: bool, body: dict|None)
-    """
-    token = ctx.std.env.var("ACTIONS_RUNTIME_TOKEN")
-    results_url = ctx.std.env.var("ACTIONS_RESULTS_URL")
-    if not token or not results_url:
-        return (False, None)
-
-    if results_url.endswith("/"):
-        results_url = results_url[:-1]
-
-    http = ctx.http()
-    url = results_url + "/twirp/github.actions.results.api.v1.ArtifactService/" + method
-    headers = {
-        "Authorization": "Bearer " + token,
-        "Content-Type": "application/json",
-    }
-
-    resp = http.post(url = url, headers = headers, data = json.encode(payload)).block()
-    success = resp.status >= 200 and resp.status < 300
-    body = json.decode(resp.body) if resp.body else None
-    return (success, body)
-
-
-def _upload_file_github(ctx, path, name):
-    """Upload a single file to GitHub Actions using the Twirp artifact API.
-
-    Flow: CreateArtifact -> PUT to signed Azure Blob URL -> FinalizeArtifact
-    """
-    token = ctx.std.env.var("ACTIONS_RUNTIME_TOKEN")
-    if not token:
-        return {"success": False, "artifact_ref": None, "errors": ["missing ACTIONS_RUNTIME_TOKEN"]}
-
-    run_id, job_id = _decode_backend_ids(ctx, token)
-    if not run_id or not job_id:
-        return {"success": False, "artifact_ref": None, "errors": ["failed to decode backend IDs from token"]}
-
-    # Step 1: CreateArtifact
-    ok, body = _github_twirp(ctx, "CreateArtifact", {
-        "workflowRunBackendId": run_id,
-        "workflowJobRunBackendId": job_id,
-        "name": name,
-        "version": 4,
-    })
-    if not ok or not body:
-        return {"success": False, "artifact_ref": None, "errors": ["CreateArtifact failed"]}
-
-    signed_url = body.get("signedUploadUrl", "")
-    if not signed_url:
-        return {"success": False, "artifact_ref": None, "errors": ["no signedUploadUrl returned"]}
-
-    # Step 2: Upload file to signed URL
-    upload_resp = ctx.http().put(
-        url = signed_url,
-        headers = {
-            "x-ms-blob-type": "BlockBlob",
-            "Content-Type": "application/octet-stream",
-        },
-        data = ctx.std.fs.open(path),
-    ).block()
-
-    if upload_resp.status < 200 or upload_resp.status >= 300:
-        return {"success": False, "artifact_ref": None, "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
-
-    # Step 3: FinalizeArtifact
-    ok, body = _github_twirp(ctx, "FinalizeArtifact", {
-        "workflowRunBackendId": run_id,
-        "workflowJobRunBackendId": job_id,
-        "name": name,
-        "size": str(ctx.std.fs.metadata(path).size),
-    })
-    if not ok:
-        return {"success": False, "artifact_ref": None, "errors": ["FinalizeArtifact failed"]}
-
-    return {"success": True, "artifact_ref": name, "errors": []}
-
-
-def _delete_github(ctx, name):
-    """Delete an artifact from GitHub Actions using the Twirp API."""
-    token = ctx.std.env.var("ACTIONS_RUNTIME_TOKEN")
-    if not token:
-        return {"success": False}
-
-    run_id, job_id = _decode_backend_ids(ctx, token)
-    if not run_id or not job_id:
-        return {"success": False}
-
-    ok, _ = _github_twirp(ctx, "DeleteArtifact", {
-        "workflowRunBackendId": run_id,
-        "workflowJobRunBackendId": job_id,
-        "name": name,
-    })
-    return {"success": ok}
-
-
-# =============================================================================
-# Buildkite
-# =============================================================================
-
-def _upload_file_buildkite(ctx, path, name):
-    """Upload a single file to Buildkite using the buildkite-agent CLI.
-
-    Copies the file to a temp location with the desired name so the artifact
-    appears as just `name` rather than the full absolute path.
-    """
-    dir = path.rsplit("/", 1)[0]
-    basename = path.rsplit("/", 1)[1]
-    needs_copy = basename != name
-
-    if needs_copy:
-        ctx.std.process.command("cp").args([path, dir + "/" + name]).spawn().wait()
-
-    # --literal: Do not treat paths are globs
-    # --log-level=warn: Do not spam stdout with garbage. only real failures.
-    child = ctx.std.process.command("buildkite-agent") \
-        .args(["artifact", "upload", name, "--literal", "--log-level=warn"]) \
-        .current_dir(dir) \
-        .stdout("inherit") \
-        .stderr("inherit") \
-        .spawn()
-
-    status = child.wait()
-
-    if needs_copy:
-        copied = dir + "/" + name
-        if ctx.std.fs.exists(copied):
-            ctx.std.fs.remove_file(copied)
-
-    if status.code != 0:
-        return {"success": False, "artifact_ref": None, "errors": ["exit " + str(status.code)]}
-    return {"success": True, "artifact_ref": name, "errors": []}
-
-
-def _delete_buildkite(ctx, name):
-    """Buildkite has no artifact deletion API — no-op."""
-    return {"success": True}
-
-
-# =============================================================================
-# GitLab CI
+# GitLab CI (inline — no separate lib needed)
 # =============================================================================
 
 def _upload_file_gitlab(ctx, path, name):
-    """Upload a single file to GitLab using the Generic Packages API.
-
-    PUT {CI_API_V4_URL}/projects/{CI_PROJECT_ID}/packages/generic/{name}/{version}/{filename}
-    """
+    """Upload a single file to GitLab using the Generic Packages API."""
     token = ctx.std.env.var("CI_JOB_TOKEN")
     api_url = ctx.std.env.var("CI_API_V4_URL")
     project_id = ctx.std.env.var("CI_PROJECT_ID")
@@ -294,3 +60,178 @@ def _upload_file_gitlab(ctx, path, name):
     if resp.status < 200 or resp.status >= 300:
         return {"success": False, "artifact_ref": None, "errors": ["HTTP " + str(resp.status)]}
     return {"success": True, "artifact_ref": name, "errors": []}
+
+
+_gitlab = struct(
+    upload_artifact = _upload_file_gitlab,
+    delete_artifact = lambda ctx, name: {"success": True},
+)
+
+
+# =============================================================================
+# Testlog upload strategies
+# =============================================================================
+
+_ARTIFACTS_ROOT = "/workflows"
+
+
+def _upload_testlogs_tar(ctx, provider, group, entries, name):
+    """Build tar archive and upload via provider.upload_artifact, with rolling delete.
+
+    Used for GitHub and GitLab — their artifact UIs work best with a single archive.
+    """
+    count = len(entries)
+    if count == 0 or count == group["last_count"]:
+        return False
+
+    archive_path = _ARTIFACTS_ROOT + "/" + name + ".tar.gz"
+    ctx.std.fs.create_dir_all(_ARTIFACTS_ROOT)
+
+    lines = ["#mtree"]
+    for entry in entries:
+        lines.append("./" + entry["dest"] + " type=file contents=" + entry["src"])
+    mtree = "\n".join(lines) + "\n"
+
+    if not tar_create(ctx, archive_path, mtree):
+        print("artifact upload: failed to create archive for " + name)
+        return False
+
+    group["version"] += 1
+    artifact_name = name + "-v" + str(group["version"])
+    result = provider.upload_artifact(ctx, archive_path, artifact_name)
+
+    if ctx.std.fs.exists(archive_path):
+        ctx.std.fs.remove_file(archive_path)
+
+    if result["success"]:
+        if group["prev_ref"]:
+            provider.delete_artifact(ctx, group["prev_ref"])
+        group["prev_ref"] = result["artifact_ref"]
+        group["last_count"] = count
+        return True
+    else:
+        group["version"] -= 1
+        for err in result["errors"]:
+            print("artifact upload error: " + err)
+        return False
+
+
+def _upload_testlogs_buildkite(ctx, group, entries):
+    """Upload test files individually to Buildkite via a symlink tree.
+
+    Creates a temp directory with symlinks matching the desired archive paths,
+    then uploads everything with buildkite-agent. Only uploads entries added
+    since the last successful upload.
+    """
+    count = len(entries)
+    if count == 0 or count == group["last_count"]:
+        return False
+
+    new_entries = entries[group["last_count"]:]
+
+    child = ctx.std.process.command("mktemp").args(["-d"]).stdout("piped").stderr("piped").spawn()
+    tmp_dir = child.stdout().read_to_string().strip()
+    child.wait()
+
+    for entry in new_entries:
+        dest_path = tmp_dir + "/" + entry["dest"]
+        dest_dir = dest_path.rsplit("/", 1)[0]
+        ctx.std.fs.create_dir_all(dest_dir)
+        ctx.std.process.command("ln").args(["-s", entry["src"], dest_path]).spawn().wait()
+
+    child = ctx.std.process.command("buildkite-agent") \
+        .args(["artifact", "upload", "**/*", "--log-level=warn"]) \
+        .current_dir(tmp_dir) \
+        .stdout("inherit") \
+        .stderr("inherit") \
+        .spawn()
+
+    status = child.wait()
+    ctx.std.process.command("rm").args(["-rf", tmp_dir]).spawn().wait()
+
+    if status.code == 0:
+        group["last_count"] = count
+        return True
+
+    print("artifact upload: buildkite-agent exit " + str(status.code))
+    return False
+
+
+def _upload_testlogs_per_file(ctx, provider, group, entries, name):
+    """Upload each new test file individually via provider.upload_artifact.
+
+    Used for CircleCI — its artifact UI handles individual files well.
+    """
+    count = len(entries)
+    if count == 0 or count == group["last_count"]:
+        return False
+
+    new_entries = entries[group["last_count"]:]
+    any_success = False
+    for entry in new_entries:
+        result = provider.upload_artifact(ctx, entry["src"], name + "/" + entry["dest"])
+        if result["success"]:
+            any_success = True
+        else:
+            for err in result["errors"]:
+                print("artifact upload error: " + err)
+
+    if any_success:
+        group["last_count"] = count
+    return any_success
+
+
+# =============================================================================
+# Provider factory
+# =============================================================================
+
+def create_uploader(env):
+    """Create a CI-specific uploader for the detected CI platform.
+
+    Args:
+        env: Environment interface (ctx.std.env), used only for CI detection.
+
+    Returns a struct with:
+        upload_file(ctx, path, name)          -> {success, artifact_ref, errors}
+        delete_artifact(ctx, name)            -> {success}
+        upload_testlogs(ctx, group, entries, name) -> bool
+
+    Returns None if not running in a supported CI environment.
+
+    Each method takes the full execution ctx as its first argument so that
+    file system, HTTP, and process APIs are available when called from
+    build event handlers (which receive a richer ctx than FeatureContext).
+    """
+    ci = detect_ci(env)
+    if ci == "github":
+        provider = github
+    elif ci == "buildkite":
+        provider = buildkite
+    elif ci == "gitlab":
+        provider = _gitlab
+    elif ci == "circleci":
+        provider = circleci
+    else:
+        return None
+
+    def upload_file(ctx, path, name):
+        if not ctx.std.fs.exists(path):
+            return {"success": False, "artifact_ref": None, "errors": ["file not found: " + path]}
+        return provider.upload_artifact(ctx, path, name)
+
+    def delete_artifact(ctx, name):
+        return provider.delete_artifact(ctx, name)
+
+    def upload_testlogs(ctx, group, entries, name):
+        if ci == "buildkite":
+            return _upload_testlogs_buildkite(ctx, group, entries)
+        elif ci == "circleci":
+            return _upload_testlogs_per_file(ctx, provider, group, entries, name)
+        else:
+            return _upload_testlogs_tar(ctx, provider, group, entries, name)
+
+    return struct(
+        upload_file = upload_file,
+        delete_artifact = delete_artifact,
+        upload_testlogs = upload_testlogs,
+    )
