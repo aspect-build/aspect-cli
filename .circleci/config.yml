@@ -19,15 +19,10 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Prepare artifacts directory
-          command: rm -rf /workflows/*
-      - run:
           name: Pre-build CLI
           command: |
             echo "Build and upload CLI to remote cache"
             .aspect/bootstrap.sh
-      - store_artifacts:
-          path: /workflows
 
   build-task:
     machine: true
@@ -36,17 +31,11 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Prepare artifacts directory
-          command: rm -rf /workflows/*
-      - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
       - run:
           name: Build Task
-          command: |
-            ASPECT_DEBUG=1 aspect build //...
-      - store_artifacts:
-          path: /workflows
+          command: ASPECT_DEBUG=1 aspect build //...
 
   test-task:
     machine: true
@@ -55,18 +44,11 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Prepare artifacts directory
-          command: rm -rf /workflows/*
-      - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
       - run:
           name: Test Task
-          command: |
-            ASPECT_DEBUG=1 aspect build //:cli
-            ASPECT_DEBUG=1 aspect test //...
-      - store_artifacts:
-          path: /workflows
+          command: ASPECT_DEBUG=1 aspect test //...
 
   delivery-task:
     machine: true
@@ -75,15 +57,8 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Prepare artifacts directory
-          command: rm -rf /workflows/*
-      - run:
           name: Bootstrap
           command: .aspect/bootstrap.sh
       - run:
           name: Delivery Task
-          command: |
-            ASPECT_DEBUG=1 aspect build //:cli
-            ASPECT_DEBUG=1 aspect delivery --build_url $CIRCLE_BUILD_URL --commit_sha $CIRCLE_SHA1 --force_target //:hello -- //:hello //:hello2
-      - store_artifacts:
-          path: /workflows
+          command: ASPECT_DEBUG=1 aspect delivery --build_url $CIRCLE_BUILD_URL --commit_sha $CIRCLE_SHA1 --force_target //:hello -- //:hello //:hello2

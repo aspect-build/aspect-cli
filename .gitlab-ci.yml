@@ -20,7 +20,6 @@ build-task:
   needs: [pre-build]
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect build //:cli
     - ASPECT_DEBUG=1 aspect build //...
   tags:
     - aspect-workflows
@@ -31,7 +30,6 @@ test-task:
   needs: [pre-build]
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect build //:cli
     - ASPECT_DEBUG=1 aspect test //...
   tags:
     - aspect-workflows
@@ -42,7 +40,6 @@ delivery-task:
   needs: [pre-build]
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect build //:cli
     - ASPECT_DEBUG=1 aspect delivery --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:hello -- //:hello //:hello2
   tags:
     - aspect-workflows

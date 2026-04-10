@@ -13,39 +13,37 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     steps:
       - uses: actions/checkout@v6
-      - run: .aspect/bootstrap.sh
       - name: Pre-build CLI
-        run: echo "Build and upload CLI to remote cache"
+        run: |
+          echo "Build and upload CLI to remote cache"
+          .aspect/bootstrap.sh
 
   build-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     steps:
       - uses: actions/checkout@v6
-      - run: .aspect/bootstrap.sh
+      - name: Bootstrap
+        run: .aspect/bootstrap.sh
       - name: Build Task
-        run: |
-          ASPECT_DEBUG=1 aspect build //:cli
-          ASPECT_DEBUG=1 aspect build //...
+        run: ASPECT_DEBUG=1 aspect build //...
 
   test-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     steps:
       - uses: actions/checkout@v6
-      - run: .aspect/bootstrap.sh
+      - name: Bootstrap
+        run: .aspect/bootstrap.sh
       - name: Test Task
-        run: |
-          ASPECT_DEBUG=1 aspect build //:cli
-          ASPECT_DEBUG=1 aspect test //...
+        run: ASPECT_DEBUG=1 aspect test //...
 
   delivery-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     steps:
       - uses: actions/checkout@v6
-      - run: .aspect/bootstrap.sh
+      - name: Bootstrap
+        run: .aspect/bootstrap.sh
       - name: Delivery Task
-        run: |
-          ASPECT_DEBUG=1 aspect build //:cli
-          ASPECT_DEBUG=1 aspect delivery --build_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit_sha $GITHUB_SHA --force_target //:hello -- //:hello //:hello2
+        run: ASPECT_DEBUG=1 aspect delivery --build_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit_sha $GITHUB_SHA --force_target //:hello -- //:hello //:hello2
