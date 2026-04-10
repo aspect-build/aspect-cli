@@ -4,14 +4,14 @@ load("../lib/environment.axl",
     "print_environment_info",
 )
 load("../lib/build_metadata.axl", "get_build_metadata_flags")
-load("../fragments.axl", "BazelFragment", "HealthCheckFragment")
+load("../traits.axl", "BazelTrait", "HealthCheckTrait")
 load("../lib/health_check.axl", "agent_health_check")
 
 def _default_bazel_behavior(ctx: FeatureContext):
     environment = get_environment(ctx.std)
 
-    health_check = ctx.fragments[HealthCheckFragment]
-    bazel_fragment = ctx.fragments[BazelFragment]
+    health_check = ctx.traits[HealthCheckTrait]
+    bazel_fragment = ctx.traits[BazelTrait]
 
     if environment:
         health_check.pre_health_check.append(lambda ctx: print_environment_info(environment))

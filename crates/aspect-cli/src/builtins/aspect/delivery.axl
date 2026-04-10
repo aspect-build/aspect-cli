@@ -7,7 +7,7 @@ to prevent re-delivery.
 Uses deliveryd (Unix socket HTTP server) for all delivery state operations.
 """
 
-load("./fragments.axl", "DeliveryFragment", "HealthCheckFragment")
+load("./traits.axl", "DeliveryTrait", "HealthCheckTrait")
 
 load(
     "./lib/deliveryd.axl",
@@ -89,18 +89,18 @@ def _deliver_target(ctx, endpoint, ci_host, workspace, build_url, bazel_flags, l
     return ("success", "Delivered successfully")
 
 def _delivery_impl(ctx):
-    hc_fragment = ctx.fragments[HealthCheckFragment]
+    hc_trait = ctx.traits[HealthCheckTrait]
 
-    for hook in hc_fragment.pre_health_check:
+    for hook in hc_trait.pre_health_check:
         hook(ctx)
 
-    for hook in hc_fragment.post_health_check:
+    for hook in hc_trait.post_health_check:
         result = hook(ctx)
         if result != None:
             fail(result)
 
-    fragment = ctx.fragments[DeliveryFragment]
-    fragment.delivery_start()
+    delivery_trait = ctx.traits[DeliveryTrait]
+    delivery_trait.delivery_start()
 
     # Check if terminal supports colors
     is_tty = ctx.std.io.stdout.is_tty
@@ -173,7 +173,7 @@ def _delivery_impl(ctx):
             bazel_flags, label, is_forced, target_state, is_tty
         )
 
-        fragment.deliver_target(label, is_forced)
+        delivery_trait.deliver_target(label, is_forced)
 
         forced_marker = " (FORCED)" if is_forced else ""
         if status == "success":
@@ -222,7 +222,7 @@ def _delivery_impl(ctx):
     ]
     print("{} {}".format(_style("Summary:", _BOLD, is_tty), ", ".join(summary_parts)))
 
-    fragment.delivery_end()
+    delivery_trait.delivery_end()
 
     if failed_count > 0:
         return 1
@@ -234,7 +234,7 @@ def _delivery_impl(ctx):
 delivery = task(
     name = "delivery",
     implementation = _delivery_impl,
-    fragments = [DeliveryFragment, HealthCheckFragment],
+    traits = [DeliveryTrait, HealthCheckTrait],
     args = {
         "ci_host": args.string(default = "bk"),
         "commit_sha": args.string(),

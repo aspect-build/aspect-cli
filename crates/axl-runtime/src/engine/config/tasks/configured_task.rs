@@ -1,4 +1,4 @@
-//! ConfiguredTask - A task with its fragment type IDs.
+//! ConfiguredTask - A task with its trait type IDs.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -32,12 +32,12 @@ use crate::engine::task::FrozenTask;
 use crate::engine::task::TaskLike;
 use crate::eval::EvalError;
 
-/// A task bundled with its fragment type IDs.
+/// A task bundled with its trait type IDs.
 ///
 /// This type:
 /// - Has no lifetime parameter (easy to store and pass around)
 /// - Uses `OwnedFrozenValue` for frozen values (task definition)
-/// - Stores fragment type IDs for fragment map scoping
+/// - Stores trait type IDs for fragment map scoping
 /// - Is a `StarlarkValue` that config functions can modify via `set_attr`
 #[derive(Debug, ProvidesStaticType, Display, NoSerialize, Allocative, Clone)]
 #[display("<ConfiguredTask>")]
@@ -50,7 +50,7 @@ pub struct ConfiguredTask {
     /// Task group (may be overridden by config)
     pub group: RefCell<Vec<String>>,
     /// Fragment type IDs this task opts into
-    pub fragment_type_ids: Vec<u64>,
+    pub trait_type_ids: Vec<u64>,
     /// Symbol name in the module
     pub symbol: String,
     /// Path to the .axl file
@@ -88,24 +88,24 @@ impl ConfiguredTask {
             frozen_task.name.clone()
         };
         let group = frozen_task.group.clone();
-        let fragment_type_ids = frozen_task.fragment_type_ids();
+        let trait_type_ids = frozen_task.trait_type_ids();
 
         Ok(ConfiguredTask {
             task_def,
             name: RefCell::new(name),
             group: RefCell::new(group),
-            fragment_type_ids,
+            trait_type_ids,
             symbol: symbol.to_string(),
             path,
         })
     }
 
-    /// Create a ConfiguredTask with known fragment type IDs.
-    pub fn new_with_fragments(
+    /// Create a ConfiguredTask with known trait type IDs.
+    pub fn new_with_traits(
         task_def: OwnedFrozenValue,
         name: String,
         group: Vec<String>,
-        fragment_type_ids: Vec<u64>,
+        trait_type_ids: Vec<u64>,
         symbol: String,
         path: PathBuf,
     ) -> Self {
@@ -113,7 +113,7 @@ impl ConfiguredTask {
             task_def,
             name: RefCell::new(name),
             group: RefCell::new(group),
-            fragment_type_ids,
+            trait_type_ids,
             symbol,
             path,
         }
@@ -207,7 +207,7 @@ impl Freeze for ConfiguredTask {
             task_def: self.task_def,
             name: self.name.into_inner(),
             group: self.group.into_inner(),
-            fragment_type_ids: self.fragment_type_ids,
+            trait_type_ids: self.trait_type_ids,
             symbol: self.symbol,
             path: self.path,
         })
@@ -222,7 +222,7 @@ pub struct FrozenConfiguredTask {
     pub task_def: OwnedFrozenValue,
     pub name: String,
     pub group: Vec<String>,
-    pub fragment_type_ids: Vec<u64>,
+    pub trait_type_ids: Vec<u64>,
     pub symbol: String,
     pub path: PathBuf,
 }

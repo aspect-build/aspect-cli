@@ -1,8 +1,8 @@
-"""Fragment type definitions for builtin tasks."""
+"""Trait type definitions for builtin tasks."""
 
 load("./bazel.axl", "default_retry")
 
-BazelFragment = fragment(
+BazelTrait = trait(
     # Declarative data — composable, zero-cost reads
     extra_flags = attr(list[str], []),
     extra_startup_flags = attr(list[str], []),
@@ -21,12 +21,13 @@ BazelFragment = fragment(
 )
 
 
-HealthCheckFragment = fragment(
+HealthCheckTrait = trait(
     pre_health_check = attr(list[typing.Callable[[TaskContext], None]], []),
     post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], []),
 )
 
-DeliveryFragment = fragment(
+
+DeliveryTrait = trait(
     delivery_start = attr(typing.Callable[[], None], lambda: None),
     delivery_end = attr(typing.Callable[[], None], lambda: None),
     deliver_target = attr(typing.Callable[[str, bool], None], lambda label, is_forced: None),

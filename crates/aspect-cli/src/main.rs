@@ -300,7 +300,7 @@ async fn main() -> miette::Result<ExitCode> {
             .run_all(scoped_configs, tasks, feature_types)
             .into_diagnostic()?;
         let tasks = config_result.tasks;
-        let fragment_data = config_result.fragment_data;
+        let trait_data = config_result.trait_data;
         drop(frozen_feature_modules);
 
         // Build the command tree from the evaluated and configured tasks.
@@ -451,7 +451,7 @@ async fn main() -> miette::Result<ExitCode> {
         let store = axl_loader.new_store(task.path.clone());
 
         // Execute the selected task using the new execution function
-        let exit_code = execute_task_with_args(task, store, &fragment_data, |heap| {
+        let exit_code = execute_task_with_args(task, store, &trait_data, |heap| {
             let mut args = TaskArgs::new();
             for (k, v) in definition.args().iter() {
                 let val = match v {

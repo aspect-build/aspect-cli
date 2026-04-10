@@ -8,36 +8,36 @@ AXL enforces a strict boundary between two fundamentally different modes of oper
 
 ### Evaluation
 
-Evaluation is the process of loading and interpreting `.axl` files to produce Starlark heaps containing task definitions, fragment types, and configuration functions. Evaluation has **no side effects**. It cannot make network calls, read from the filesystem, access environment variables, or perform any operation whose result could vary between runs given the same inputs.
+Evaluation is the process of loading and interpreting `.axl` files to produce Starlark heaps containing task definitions, trait types, and configuration functions. Evaluation has **no side effects**. It cannot make network calls, read from the filesystem, access environment variables, or perform any operation whose result could vary between runs given the same inputs.
 
 The only things available during evaluation are:
 
 - Standard Starlark builtins (`len`, `range`, `str`, `list`, `dict`, `True`, `False`, `None`, etc.)
 - `json.encode()` / `json.decode()` (provided by starlark-rust)
 - `load()` for importing other `.axl` files
-- AXL definition functions: `task()`, `fragment()`, `attr()`, `record()`, `config()`
+- AXL definition functions: `task()`, `trait()`, `attr()`, `record()`, `config()`
 - The `args` module for declaring task arguments
 
 Everything reachable during evaluation must be **pure and deterministic**: given identical inputs, the output must be identical every time. This property is critical because:
 
 1. **Cacheability.** Evaluated heaps can be cached by a daemon process across CLI invocations. If evaluation had side effects, cached results could silently diverge from fresh evaluation.
-2. **Predictability.** Task definitions, fragment schemas, and configuration shapes are stable artifacts. Users and tooling can reason about them without running anything.
+2. **Predictability.** Task definitions, trait schemas, and configuration shapes are stable artifacts. Users and tooling can reason about them without running anything.
 
 When new APIs are introduced to the evaluation-time global scope (e.g., `yaml.decode`), they must satisfy this purity constraint. Functions like `uuid.v4()` or `time.now()` are inherently non-deterministic and are therefore **forbidden during evaluation**. Pure utility modules (hashing, math, regex) will be available via `load('@std//hash.axl', ...)` rather than as globals, to keep the default namespace minimal.
 
 ### Config Execution
 
-After evaluation produces task definitions and fragment types, the runtime may choose to **execute** the `config()` function. This is an explicit execution step — not evaluation — even though it runs before any user-invoked task. The config function receives a `ConfigContext` with access to:
+After evaluation produces task definitions and trait types, the runtime may choose to **execute** the `config()` function. This is an explicit execution step — not evaluation — even though it runs before any user-invoked task. The config function receives a `ConfigContext` with access to:
 
 - `ctx.http()` — HTTP client
 - `ctx.std` — standard library (env, fs, process, io)
 - `ctx.template` — template rendering (handlebars, jinja2, liquid)
 - `ctx.tasks` — task registry (can add tasks dynamically)
-- `ctx.fragments[FragType]` — mutable fragment instances
+- `ctx.traits[TraitType]` — mutable trait instances
 
 Config execution can read environment variables, make HTTP requests, and perform other non-deterministic operations. The ordering of evaluation vs config execution (e.g., whether config runs before or after task files are evaluated) is an internal runtime detail that users must not depend on.
 
-When multiple config sources set the same fragment field, last-write-wins based on execution order.
+When multiple config sources set the same trait field, last-write-wins based on execution order.
 
 ### Task Execution
 
@@ -51,7 +51,7 @@ Task execution occurs when a user explicitly invokes a task (e.g., `aspect run <
 - `ctx.std.io` — stdin/stdout/stderr streams
 - `ctx.http()` — HTTP client (get, post, download with integrity checking)
 - `ctx.template` — template rendering
-- `ctx.fragments[FragType]` — frozen fragment data (read-only, as configured)
+- `ctx.traits[TraitType]` — frozen trait data (read-only, as configured)
 - `ctx.task` — task metadata (name, group)
 
 Task execution is inherently non-deterministic. It interacts with the outside world — building code, fetching URLs, writing files, running processes. The determinism guarantee applies only to evaluation; execution is where real work happens.
@@ -76,7 +76,7 @@ my_task = task(
     args = {                  # CLI argument declarations
         "name": args.string(default = "world"),
     },
-    fragments = [MyConfig],   # opt-in to fragment types
+    traits = [MyConfig],      # opt-in to trait types
 )
 ```
 
@@ -84,29 +84,29 @@ Tasks define their own CLI arguments using the `args` module. Argument types inc
 
 ### Config File
 
-`config.axl` defines a `config()` function that receives a `ConfigContext`. Config is where fragment values are set and dynamic tasks can be registered:
+`config.axl` defines a `config()` function that receives a `ConfigContext`. Config is where trait values are set and dynamic tasks can be registered:
 
 ```python
-load("./my_fragment.axl", "MyConfig")
+load("./my_trait.axl", "MyConfig")
 
 def config(ctx: ConfigContext):
-    cfg = ctx.fragments[MyConfig]
+    cfg = ctx.traits[MyConfig]
     cfg.some_field = "value"
 ```
 
-### Fragment Definitions
+### Trait Definitions
 
-Fragments are global configuration objects shared across tasks that opt in. A fragment type is defined using `fragment()` with typed attributes:
+Traits are global configuration objects shared across tasks that opt in. A trait type is defined using `trait()` with typed attributes:
 
 ```python
-MyConfig = fragment(
+MyConfig = trait(
     message = attr(str, "default value"),
     count = attr(int, 1),
     callback = attr(typing.Callable[[str], str], lambda s: s),
 )
 ```
 
-Fragment types are defined at evaluation time (pure). Fragment instances are populated during config execution (mutable) and then frozen before being passed to task execution (read-only via `ctx.fragments[MyConfig]`).
+Trait types are defined at evaluation time (pure). Trait instances are populated during config execution (mutable) and then frozen before being passed to task execution (read-only via `ctx.traits[MyConfig]`).
 
 ### Library Files
 

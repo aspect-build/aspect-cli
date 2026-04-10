@@ -32,10 +32,10 @@ use starlark::values::type_repr::StarlarkTypeRepr;
 use super::configured_task::ConfiguredTask;
 use super::r#ref::TaskListMut;
 
-use crate::engine::config::fragment_map::FragmentMap;
+use crate::engine::config::trait_map::TraitMap;
 use crate::engine::store::AxlStore;
 use crate::engine::task::{AsTaskLike, FrozenTask, Task, TaskLike};
-use crate::engine::types::fragment::extract_fragment_type_id;
+use crate::engine::types::r#trait::extract_trait_type_id;
 
 #[derive(Clone, Default, Trace, Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct TaskListGen<T>(pub(crate) T);
@@ -88,41 +88,42 @@ pub(crate) fn task_list_methods(registry: &mut MethodsBuilder) {
             Ok::<_, anyhow::Error>((frozen, task_def))
         })?;
 
-        // Get fragment type IDs from the frozen task
+        // Get trait type IDs from the frozen task
         let frozen_task = task_def
             .value()
             .downcast_ref::<FrozenTask>()
             .ok_or_else(|| anyhow::anyhow!("expected FrozenTask after freeze"))?;
-        let fragment_type_ids = frozen_task.fragment_type_ids();
+        let trait_type_ids = frozen_task.trait_type_ids();
 
-        // Auto-register any new fragment types into the FragmentMap
-        if let Some(fmap_value) = this.aref.fragment_map {
-            if let Some(fmap) = fmap_value.downcast_ref::<FragmentMap>() {
-                for frag_fv in frozen_task.fragments() {
-                    let frag_value = frag_fv.to_value();
-                    if let Some(id) = extract_fragment_type_id(frag_value) {
+        // Auto-register any new trait types into the TraitMap
+        if let Some(fmap_value) = this.aref.trait_map {
+            if let Some(fmap) = fmap_value.downcast_ref::<TraitMap>() {
+                for trait_fv in frozen_task.traits() {
+                    let trait_value = trait_fv.to_value();
+                    if let Some(id) = extract_trait_type_id(trait_value) {
                         if !fmap.contains(id) {
-                            // Auto-construct default instance by calling the fragment type with no args
-                            let instance = eval.eval_function(frag_value, &[], &[]).map_err(|e| {
-                                anyhow::anyhow!(
-                                    "Failed to construct default fragment instance for {}: {:?}",
-                                    frag_value,
-                                    e
-                                )
-                            })?;
-                            fmap.insert(id, frag_value, instance);
+                            // Auto-construct default instance by calling the trait type with no args
+                            let instance =
+                                eval.eval_function(trait_value, &[], &[]).map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to construct default trait instance for {}: {:?}",
+                                        trait_value,
+                                        e
+                                    )
+                                })?;
+                            fmap.insert(id, trait_value, instance);
                         }
                     }
                 }
             }
         }
 
-        // Create ConfiguredTask with fragment type IDs
-        let task_mut = ConfiguredTask::new_with_fragments(
+        // Create ConfiguredTask with trait type IDs
+        let task_mut = ConfiguredTask::new_with_traits(
             task_def,
             name,
             task_like.group().to_vec(),
-            fragment_type_ids,
+            trait_type_ids,
             symbol,
             PathBuf::from(store.script_path.to_string_lossy().to_string()),
         );
@@ -157,24 +158,24 @@ pub(crate) type MutableTaskList<'v> = TaskListGen<RefCell<TaskList<'v>>>;
 #[derive(Clone, Trace, Debug, ProvidesStaticType, Allocative)]
 pub struct TaskList<'v> {
     pub(crate) content: Vec<Value<'v>>,
-    /// Optional reference to the FragmentMap for auto-registering fragments
+    /// Optional reference to the TraitMap for auto-registering traits
     /// when tasks are added dynamically via ctx.tasks.add().
     #[allocative(skip)]
-    pub(crate) fragment_map: Option<Value<'v>>,
+    pub(crate) trait_map: Option<Value<'v>>,
 }
 
 impl<'v> TaskList<'v> {
     pub fn new(content: Vec<Value<'v>>) -> Self {
         TaskList {
             content,
-            fragment_map: None,
+            trait_map: None,
         }
     }
 
-    pub fn new_with_fragment_map(content: Vec<Value<'v>>, fragment_map: Value<'v>) -> Self {
+    pub fn new_with_trait_map(content: Vec<Value<'v>>, trait_map: Value<'v>) -> Self {
         TaskList {
             content,
-            fragment_map: Some(fragment_map),
+            trait_map: Some(trait_map),
         }
     }
 }
@@ -202,7 +203,7 @@ impl<'v> AllocValue<'v> for TaskList<'v> {
 #[derive(Debug, ProvidesStaticType, Allocative)]
 pub(crate) struct FrozenTaskListData {
     content: Vec<FrozenValue>,
-    fragment_map: Option<FrozenValue>,
+    trait_map: Option<FrozenValue>,
 }
 
 impl fmt::Display for FrozenTaskListData {
@@ -225,11 +226,8 @@ impl<'v> Freeze for TaskListGen<RefCell<TaskList<'v>>> {
             .into_iter()
             .map(|v| v.freeze(freezer))
             .collect::<Result<Vec<FrozenValue>, FreezeError>>()?;
-        let fragment_map = inner.fragment_map.map(|v| v.freeze(freezer)).transpose()?;
-        Ok(TaskListGen(FrozenTaskListData {
-            content,
-            fragment_map,
-        }))
+        let trait_map = inner.trait_map.map(|v| v.freeze(freezer)).transpose()?;
+        Ok(TaskListGen(FrozenTaskListData { content, trait_map }))
     }
 }
 

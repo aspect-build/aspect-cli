@@ -1,2 +1,2 @@
 pub mod feature;
-pub mod fragment;
+pub mod r#trait;

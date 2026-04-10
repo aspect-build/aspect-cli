@@ -26,8 +26,6 @@ pub mod task_info;
 fn register_types(globals: &mut GlobalsBuilder) {
     const ConfigContext: StarlarkValueAsType<config::ConfigContext> = StarlarkValueAsType::new();
     const FeatureContext: StarlarkValueAsType<config::FeatureContext> = StarlarkValueAsType::new();
-    const FragmentContext: StarlarkValueAsType<config::FragmentContext> =
-        StarlarkValueAsType::new();
     const Http: StarlarkValueAsType<http::Http> = StarlarkValueAsType::new();
     const HttpResponse: StarlarkValueAsType<http::HttpResponse> = StarlarkValueAsType::new();
     const Task: StarlarkValueAsType<task::Task> = StarlarkValueAsType::new();
@@ -45,7 +43,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     r#async::register_globals(globals);
     task::register_globals(globals);
     types::feature::register_globals(globals);
-    types::fragment::register_globals(globals);
+    types::r#trait::register_globals(globals);
 
     globals.namespace("args", task_arg::register_globals);
     globals.namespace("bazel", bazel::register_globals);

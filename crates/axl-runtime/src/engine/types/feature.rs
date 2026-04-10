@@ -27,7 +27,7 @@ use starlark::values::{
 };
 use starlark_map::small_map::SmallMap;
 
-use crate::engine::types::fragment::{
+use crate::engine::types::r#trait::{
     Field, FieldValue, FrozenField, FrozenFieldValue, build_type_checkers, copy_default_value,
 };
 
