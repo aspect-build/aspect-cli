@@ -212,8 +212,9 @@ def _decode_backend_ids(ctx, token):
 
     payload_b64 = parts[1].replace("-", "+").replace("_", "/")
     child = ctx.std.process.command("base64").args(["-d"]).stdin("piped").stdout("piped").stderr("piped").spawn()
-    child.stdin().write(payload_b64)
-    child.stdin().close()
+    stdin = child.stdin()
+    stdin.write(payload_b64)
+    stdin.close()
     payload_json = child.stdout().read_to_string()
     child.wait()
 
@@ -284,9 +285,9 @@ def _upload_artifact(ctx, path, name):
     if not ok or not body:
         return {"success": False, "artifact_ref": None, "errors": [err or "CreateArtifact failed"]}
 
-    signed_url = body.get("signedUploadUrl", "")
+    signed_url = body.get("signed_upload_url", "")
     if not signed_url:
-        return {"success": False, "artifact_ref": None, "errors": ["no signedUploadUrl returned"]}
+        return {"success": False, "artifact_ref": None, "errors": ["no signed_upload_url returned"]}
 
     upload_resp = ctx.http().put(
         url = signed_url,

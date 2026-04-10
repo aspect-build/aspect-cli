@@ -149,26 +149,6 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, prefix + "-testlogs")
 
     def _on_build_end(ctx, state, exit_code):
-        if debug:
-            entries = state.get("_test_entries", [])
-            skipped = state.get("_skipped_files", [])
-            print("")
-            print("--- artifact upload debug summary ---")
-            print("uploader: " + ("active" if not is_local else "none"))
-            print("profile: " + profile_path)
-            print("execlog: " + execlog_path)
-            print("bes/bep: " + bep_path)
-            print("testlog entries: " + str(len(entries)))
-            for f in entries:
-                print("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
-            if skipped:
-                print("skipped files: " + str(len(skipped)))
-                for f in skipped:
-                    print("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
-            if is_local:
-                print("no CI detected, uploads skipped (dry run)")
-            print("------------------------------------")
-
         if not is_local:
             _init_upload_state(state)
             entries = state.get("_test_entries", [])
@@ -182,8 +162,32 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 (bep_path, task_name + ".bep.bin"),
             ]:
                 if ctx.std.fs.exists(src):
-                    uploader.upload_file(ctx, src, artifact_name)
-                    ctx.std.fs.remove_file(src)
+                    result = uploader.upload_file(ctx, src, artifact_name)
+                    if result["success"]:
+                        ctx.std.fs.remove_file(src)
+                    else:
+                        for err in result["errors"]:
+                            print("artifact upload error (" + artifact_name + "): " + err)
+
+        if debug:
+            entries = state.get("_test_entries", [])
+            skipped = state.get("_skipped_files", [])
+            print("")
+            print("--- artifact upload debug summary ---")
+            print("uploader: " + ("active" if not is_local else "none"))
+            print("profile:  " + profile_path + " (exists=" + str(ctx.std.fs.exists(profile_path)) + ")")
+            print("execlog:  " + execlog_path + " (exists=" + str(ctx.std.fs.exists(execlog_path)) + ")")
+            print("bes/bep:  " + bep_path + " (exists=" + str(ctx.std.fs.exists(bep_path)) + ")")
+            print("testlog entries: " + str(len(entries)))
+            for f in entries:
+                print("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
+            if skipped:
+                print("skipped files: " + str(len(skipped)))
+                for f in skipped:
+                    print("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
+            if is_local:
+                print("no CI detected, uploads skipped (dry run)")
+            print("------------------------------------")
 
     fragment.build_event.append(_on_build_event)
     fragment.build_end.append(_on_build_end)

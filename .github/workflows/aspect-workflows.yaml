@@ -14,62 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-token-alias:
-    runs-on: [ubuntu-latest]
-    steps:
-      - name: Verify ACTIONS_ID_TOKEN_REQUEST_TOKEN aliases ACTIONS_RUNTIME_TOKEN
-        run: |
-          # ACTIONS_ID_TOKEN_REQUEST_TOKEN and ACTIONS_RUNTIME_TOKEN come from the same
-          # source in the runner (systemConnection.Authorization.Parameters["AccessToken"]).
-          # ScriptHandler injects ACTIONS_ID_TOKEN_REQUEST_TOKEN into shell steps when
-          # permissions: id-token: write is set; NodeScriptActionHandler injects ACTIONS_RUNTIME_TOKEN.
-          # They are identical tokens — we verify that here.
-
-          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
-            echo "FAIL: ACTIONS_ID_TOKEN_REQUEST_TOKEN is empty (requires permissions: id-token: write)"
-            exit 1
-          fi
-
-          # Decode the JWT payload (pad base64 to multiple of 4)
-          RAW=$(echo "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" | cut -d. -f2)
-          PAD=$(( (4 - ${#RAW} % 4) % 4 ))
-          PADDED="${RAW}$(printf '=%.0s' $(seq 1 $PAD))"
-          PAYLOAD=$(echo "$PADDED" | base64 -d 2>/dev/null)
-          echo "JWT scp claim: $(echo "$PAYLOAD" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("scp","(no scp)"))' 2>/dev/null)"
-          echo "JWT sub:       $(echo "$PAYLOAD" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("sub","(no sub)"))' 2>/dev/null)"
-
-          # Verify the scp contains Actions.Results scope (required for artifact upload)
-          if ! echo "$PAYLOAD" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert any(s.startswith("Actions.Results:") for s in d.get("scp","").split()), "missing Actions.Results scope"' 2>/dev/null; then
-            echo "FAIL: token does not contain Actions.Results:<runBackendId>:<jobBackendId> scope"
-            echo "Full payload: $PAYLOAD"
-            exit 1
-          fi
-
-          echo "PASS: token has Actions.Results scope — ACTIONS_ID_TOKEN_REQUEST_TOKEN == ACTIONS_RUNTIME_TOKEN"
-
-          # Hit the Twirp artifact API to confirm the token is accepted
-          RESULTS_URL="https://results-receiver.actions.githubusercontent.com"
-          RUN_ID=$(echo "$PAYLOAD" | python3 -c 'import sys,json; d=json.load(sys.stdin); scopes=[s for s in d.get("scp","").split() if s.startswith("Actions.Results:")]; print(scopes[0].split(":")[1] if scopes else "")' 2>/dev/null)
-          JOB_ID=$(echo "$PAYLOAD" | python3 -c 'import sys,json; d=json.load(sys.stdin); scopes=[s for s in d.get("scp","").split() if s.startswith("Actions.Results:")]; print(scopes[0].split(":")[2] if scopes else "")' 2>/dev/null)
-          echo "workflowRunBackendId:    $RUN_ID"
-          echo "workflowJobRunBackendId: $JOB_ID"
-
-          HTTP_CODE=$(curl -s -o /tmp/twirp_resp.json -w "%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"workflowRunBackendId\":\"$RUN_ID\",\"workflowJobRunBackendId\":\"$JOB_ID\"}" \
-            "$RESULTS_URL/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts")
-
-          echo "Twirp ListArtifacts HTTP $HTTP_CODE"
-          cat /tmp/twirp_resp.json
-
-          if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
-            echo "FAIL: artifact API rejected the token (HTTP $HTTP_CODE)"
-            exit 1
-          fi
-          echo "PASS: artifact API accepted the token (HTTP $HTTP_CODE)"
-
   pre-build:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     steps:
