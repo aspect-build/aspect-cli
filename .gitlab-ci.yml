@@ -18,29 +18,32 @@ pre-build:
 build-task:
   stage: Aspect Workflows
   needs: [pre-build]
-  script:
-    - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect build //...
   tags:
     - aspect-workflows
     - aspect-default
+  script:
+    - .aspect/bootstrap.sh
+    - ASPECT_DEBUG=1 aspect build //...
+    - aspect build //...
 
 test-task:
   stage: Aspect Workflows
   needs: [pre-build]
-  script:
-    - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect test //...
   tags:
     - aspect-workflows
     - aspect-default
+  script:
+    - .aspect/bootstrap.sh
+    - ASPECT_DEBUG=1 aspect test //...
+    - aspect test //...
 
 delivery-task:
   stage: Aspect Workflows
   needs: [pre-build]
-  script:
-    - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect delivery --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:hello -- //:hello //:hello2
   tags:
     - aspect-workflows
     - aspect-default
+  script:
+    - .aspect/bootstrap.sh
+    - ASPECT_DEBUG=1 aspect delivery --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:hello -- //:hello //:hello2
+    - aspect delivery --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:hello -- //:hello //:hello2

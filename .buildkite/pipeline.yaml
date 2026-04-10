@@ -173,7 +173,9 @@ steps:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
-    command: ASPECT_DEBUG=1 aspect build //...
+    command: |
+      ASPECT_DEBUG=1 aspect build //...
+      aspect build //...
 
   - key: test-task
     depends_on:
@@ -186,7 +188,9 @@ steps:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
-    command: ASPECT_DEBUG=1 aspect test //...
+    command: |
+      ASPECT_DEBUG=1 aspect test //...
+      aspect test //...
 
   - key: delivery-task
     label: ":package: Delivery Task"
@@ -199,4 +203,6 @@ steps:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
-    command: ASPECT_DEBUG=1 aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
+    command: |
+      ASPECT_DEBUG=1 aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
+      aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
