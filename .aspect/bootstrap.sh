@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Common CLI bootstrap for all CI platforms (Buildkite, GitHub Actions).
+# Common CLI bootstrap for all CI platforms (Buildkite, GitHub Actions, CircleCI, GitLab).
 # Source this file to configure Bazel opts, check runner health, and build //:cli.
 #
 # Exports: BAZEL_STARTUP_OPTS, BAZEL_BUILD_OPTS, DISABLE_PLUGINS_FLAG
@@ -26,10 +26,15 @@ if [ -n "${ASPECT_WORKFLOWS_RUNNER:-}" ]; then
     REPO_NAME=$(echo "${BUILDKITE_REPO}" | sed 's|/*$||' | sed 's|\.git$||' | sed 's|.*/||' | sed 's|.*:||' | sed 's|[^a-zA-Z0-9._-]|_|g')
   elif [ -n "${GITHUB_REPOSITORY:-}" ]; then
     REPO_NAME=$(echo "${GITHUB_REPOSITORY}" | sed 's|.*/||' | sed 's|[^a-zA-Z0-9._-]|_|g')
+  elif [ -n "${CIRCLE_PROJECT_REPONAME:-}" ]; then
+    REPO_NAME=$(echo "${CIRCLE_PROJECT_REPONAME}" | sed 's|[^a-zA-Z0-9._-]|_|g')
+  elif [ -n "${CI_PROJECT_NAME:-}" ]; then
+    REPO_NAME=$(echo "${CI_PROJECT_NAME}" | sed 's|[^a-zA-Z0-9._-]|_|g')
   fi
 
   # Derive workspace subdir from the checkout path.
-  WORKSPACE_DIR="${BUILDKITE_BUILD_CHECKOUT_PATH:-${GITHUB_WORKSPACE:-$(pwd)}}"
+  # Mirrors the root_dir derivation in get_bazelrc_flags in environment.axl.
+  WORKSPACE_DIR="${BUILDKITE_BUILD_CHECKOUT_PATH:-${GITHUB_WORKSPACE:-${CIRCLE_WORKING_DIRECTORY:-${CI_PROJECT_DIR:-$(pwd)}}}}"
   SUBDIR=$(basename "${WORKSPACE_DIR}" | sed 's|[^a-zA-Z0-9._-]|_|g')
 
   if [ -n "${REPO_NAME}" ]; then
