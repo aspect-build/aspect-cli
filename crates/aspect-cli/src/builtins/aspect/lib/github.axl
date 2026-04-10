@@ -200,13 +200,187 @@ def _status_checks_fail(ctx, token, owner, repo, check_run_id, output = None, ap
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "failure", output = output, api_base = api_base)
 
 
+# =============================================================================
+# Artifact upload/delete (GitHub Actions Twirp API)
+# =============================================================================
+
+def _decode_backend_ids(ctx, token):
+    """Extract workflowRunBackendId and workflowJobRunBackendId from ACTIONS_RUNTIME_TOKEN JWT."""
+    parts = token.split(".")
+    if len(parts) < 2:
+        return (None, None)
+
+    payload_b64 = parts[1].replace("-", "+").replace("_", "/")
+    child = ctx.std.process.command("base64").args(["-d"]).stdin("piped").stdout("piped").stderr("piped").spawn()
+    stdin = child.stdin()
+    stdin.write(payload_b64)
+    stdin.close()
+    payload_json = child.stdout().read_to_string()
+    child.wait()
+
+    if not payload_json:
+        return (None, None)
+
+    payload = json.decode(payload_json)
+    scp = payload.get("scp", "")
+
+    for scope in scp.split(" "):
+        if scope.startswith("Actions.Results:"):
+            scope_parts = scope.split(":")
+            if len(scope_parts) >= 3:
+                return (scope_parts[1], scope_parts[2])
+
+    return (None, None)
+
+
+_MISSING_TOKEN_MSG = """missing ACTIONS_RUNTIME_TOKEN
+
+GitHub Actions does not inject ACTIONS_RUNTIME_TOKEN into shell (run:) steps.
+To make it available, use one of the following options:
+
+  Option 1 — permissions: id-token: write  (zero config, recommended)
+    Add to your workflow job or at the top level:
+
+      permissions:
+        id-token: write
+
+    This makes ACTIONS_ID_TOKEN_REQUEST_TOKEN available in shell steps.
+    It is the same credential as ACTIONS_RUNTIME_TOKEN and is accepted
+    by the artifact API.
+
+  Option 2 — pass the token via env: on the step that calls aspect:
+
+      - run: aspect build //...
+        env:
+          ACTIONS_RUNTIME_TOKEN: ${{ secrets.ACTIONS_RUNTIME_TOKEN }}
+
+  Option 3 — set at the job level so all steps in the job receive it:
+
+      jobs:
+        build:
+          env:
+            ACTIONS_RUNTIME_TOKEN: ${{ secrets.ACTIONS_RUNTIME_TOKEN }}
+"""
+
+
+def _github_twirp(ctx, method, payload):
+    """Make a Twirp RPC call to the GitHub Actions artifact service."""
+    # ACTIONS_ID_TOKEN_REQUEST_TOKEN is the same credential as ACTIONS_RUNTIME_TOKEN —
+    # both come from systemConnection.Authorization.Parameters["AccessToken"] in the runner.
+    # ScriptHandler injects it into shell steps when permissions: id-token: write is set.
+    token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
+             ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+    # ACTIONS_RESULTS_URL is not injected by ScriptHandler; use the well-known default.
+    results_url = (ctx.std.env.var("ACTIONS_RESULTS_URL") or
+                   "https://results-receiver.actions.githubusercontent.com/")
+    if not token:
+        return (False, None, _MISSING_TOKEN_MSG)
+
+    if results_url.endswith("/"):
+        results_url = results_url[:-1]
+
+    url = results_url + "/twirp/github.actions.results.api.v1.ArtifactService/" + method
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+    }
+
+    resp = ctx.http().post(url = url, headers = headers, data = json.encode(payload)).block()
+    success = resp.status >= 200 and resp.status < 300
+    body = json.decode(resp.body) if resp.body else None
+    return (success, body, None)
+
+
+def _upload_artifact(ctx, path, name):
+    """Upload a single file to GitHub Actions using the Twirp artifact API.
+
+    Flow: CreateArtifact -> PUT to signed Azure Blob URL -> FinalizeArtifact
+    """
+    token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
+             ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+    if not token:
+        return {"success": False, "artifact_ref": None, "errors": [_MISSING_TOKEN_MSG]}
+
+    run_id, job_id = _decode_backend_ids(ctx, token)
+    if not run_id or not job_id:
+        return {"success": False, "artifact_ref": None, "errors": ["failed to decode backend IDs from token"]}
+
+    ok, body, err = _github_twirp(ctx, "CreateArtifact", {
+        "workflowRunBackendId": run_id,
+        "workflowJobRunBackendId": job_id,
+        "name": name,
+        "version": 4,
+    })
+    if not ok or not body:
+        return {"success": False, "artifact_ref": None, "errors": [err or "CreateArtifact failed"]}
+
+    signed_url = body.get("signed_upload_url", "")
+    if not signed_url:
+        return {"success": False, "artifact_ref": None, "errors": ["no signed_upload_url returned"]}
+
+    file_size = ctx.std.fs.metadata(path).size
+    upload_resp = ctx.http().put(
+        url = signed_url,
+        headers = {
+            "x-ms-blob-type": "BlockBlob",
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(file_size),
+        },
+        data = ctx.std.fs.open(path),
+    ).block()
+
+    if upload_resp.status < 200 or upload_resp.status >= 300:
+        return {"success": False, "artifact_ref": None, "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
+
+    ok, body, err = _github_twirp(ctx, "FinalizeArtifact", {
+        "workflowRunBackendId": run_id,
+        "workflowJobRunBackendId": job_id,
+        "name": name,
+        "size": str(ctx.std.fs.metadata(path).size),
+    })
+    if not ok:
+        return {"success": False, "artifact_ref": None, "errors": [err or "FinalizeArtifact failed"]}
+
+    return {"success": True, "artifact_ref": name, "errors": []}
+
+
+def _delete_artifact(ctx, name):
+    """Delete an artifact from GitHub Actions using the Twirp API."""
+    token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
+             ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+    if not token:
+        return {"success": False}
+
+    run_id, job_id = _decode_backend_ids(ctx, token)
+    if not run_id or not job_id:
+        return {"success": False}
+
+    ok, body, err = _github_twirp(ctx, "DeleteArtifact", {
+        "workflowRunBackendId": run_id,
+        "workflowJobRunBackendId": job_id,
+        "name": name,
+    })
+    return {"success": ok}
+
+
+def _check_token(env):
+    """Return a warning message if the artifact token is unavailable, else None."""
+    token = env.var("ACTIONS_RUNTIME_TOKEN") or env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    if not token:
+        return _MISSING_TOKEN_MSG
+    return None
+
+
 github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
     validate_role = validate_role,
+    check_token = _check_token,
     status_checks = struct(
         create   = _status_checks_create,
         complete = _status_checks_complete,
         fail     = _status_checks_fail,
     ),
+    upload_artifact = _upload_artifact,
+    delete_artifact = _delete_artifact,
 )

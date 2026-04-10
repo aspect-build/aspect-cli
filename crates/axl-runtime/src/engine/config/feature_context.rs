@@ -83,6 +83,11 @@ unsafe impl<'v> Trace<'v> for FrozenFeatureContext {
 #[starlark_value(type = "FeatureContext")]
 impl<'v> StarlarkValue<'v> for FrozenFeatureContext {
     type Canonical = FeatureContext<'v>;
+
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(feature_context_methods)
+    }
 }
 
 #[starlark_module]

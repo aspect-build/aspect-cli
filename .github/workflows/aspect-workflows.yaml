@@ -5,9 +5,14 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  id-token: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
+
 jobs:
   pre-build:
     runs-on: [self-hosted, aspect-workflows, aspect-default]

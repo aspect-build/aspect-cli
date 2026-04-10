@@ -1,0 +1,44 @@
+"""Buildkite artifact upload library."""
+
+
+def _upload_artifact(ctx, path, name):
+    """Upload a single file to Buildkite using the buildkite-agent CLI.
+
+    Copies the file to a temp location with the desired name so the artifact
+    appears as just `name` rather than the full absolute path.
+    """
+    dir = path.rsplit("/", 1)[0]
+    basename = path.rsplit("/", 1)[1]
+    needs_copy = basename != name
+
+    if needs_copy:
+        ctx.std.process.command("cp").args([path, dir + "/" + name]).spawn().wait()
+
+    child = ctx.std.process.command("buildkite-agent") \
+        .args(["artifact", "upload", name, "--literal", "--log-level=warn"]) \
+        .current_dir(dir) \
+        .stdout("inherit") \
+        .stderr("inherit") \
+        .spawn()
+
+    status = child.wait()
+
+    if needs_copy:
+        copied = dir + "/" + name
+        if ctx.std.fs.exists(copied):
+            ctx.std.fs.remove_file(copied)
+
+    if status.code != 0:
+        return {"success": False, "artifact_ref": None, "errors": ["exit " + str(status.code)]}
+    return {"success": True, "artifact_ref": name, "errors": []}
+
+
+def _delete_artifact(ctx, name):
+    """Buildkite has no artifact deletion API — no-op."""
+    return {"success": True}
+
+
+buildkite = struct(
+    upload_artifact = _upload_artifact,
+    delete_artifact = _delete_artifact,
+)
