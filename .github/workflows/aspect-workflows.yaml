@@ -8,17 +8,12 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
-
-x-defaults: &bootstrap
-  - uses: actions/checkout@v6
-  - name: Bootstrap
-    run: . .aspect/bootstrap.sh
-
 jobs:
   pre-build:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     steps:
-      - *bootstrap
+      - uses: actions/checkout@v6
+      - run: . .aspect/bootstrap.sh
       - name: Pre-build CLI
         run: echo "Build and upload CLI to remote cache"
 
@@ -26,7 +21,8 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     steps:
-      - *bootstrap
+      - uses: actions/checkout@v6
+      - run: . .aspect/bootstrap.sh
       - name: Build Task
         run: |
           ASPECT_DEBUG=1 aspect build //:cli
@@ -36,7 +32,8 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     steps:
-      - *bootstrap
+      - uses: actions/checkout@v6
+      - run: . .aspect/bootstrap.sh
       - name: Test Task
         run: |
           ASPECT_DEBUG=1 aspect build //:cli
@@ -46,7 +43,8 @@ jobs:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
     steps:
-      - *bootstrap
+      - uses: actions/checkout@v6
+      - run: . .aspect/bootstrap.sh
       - name: Delivery Task
         run: |
           ASPECT_DEBUG=1 aspect build //:cli
