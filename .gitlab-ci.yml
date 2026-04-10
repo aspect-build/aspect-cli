@@ -1,16 +1,16 @@
 workflow:
   rules:
     # Run for everything except tag pushes
-    - if: '$CI_COMMIT_TAG == null'
+    - if: "$CI_COMMIT_TAG == null"
 
 stages:
-    - Aspect Workflows
+  - Aspect Workflows
 
 pre-build:
   stage: Aspect Workflows
   script:
     - echo "Build and upload CLI to remote cache"
-    - ASPECT_DEBUG=1 aspect build //:cli
+    - .aspect/bootstrap.sh
   tags:
     - aspect-workflows
     - aspect-default
@@ -19,6 +19,7 @@ build-task:
   stage: Aspect Workflows
   needs: [pre-build]
   script:
+    - .aspect/bootstrap.sh
     - ASPECT_DEBUG=1 aspect build //:cli
     - ASPECT_DEBUG=1 aspect build //...
   tags:
@@ -29,6 +30,7 @@ test-task:
   stage: Aspect Workflows
   needs: [pre-build]
   script:
+    - .aspect/bootstrap.sh
     - ASPECT_DEBUG=1 aspect build //:cli
     - ASPECT_DEBUG=1 aspect test //...
   tags:
@@ -39,6 +41,7 @@ delivery-task:
   stage: Aspect Workflows
   needs: [pre-build]
   script:
+    - .aspect/bootstrap.sh
     - ASPECT_DEBUG=1 aspect build //:cli
     - ASPECT_DEBUG=1 aspect delivery --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:hello -- //:hello //:hello2
   tags:

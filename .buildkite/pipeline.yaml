@@ -120,7 +120,7 @@ steps:
           limit: 1
     command: |
       echo "--- :bazel: Warm up Bazel server"
-      bazel $$BAZEL_STARTUP_OPTS test $$BAZEL_BUILD_OPTS //crates/bazelrc:bazelrc_test
+      bazel $$BAZEL_STARTUP_OPTS test $$BAZEL_BUILD_OPTS -c dbg //crates/bazelrc:bazelrc_test
       OUTPUT_BASE=$$(bazel $$BAZEL_STARTUP_OPTS info output_base)
       SERVER_LOG=$$(bazel $$BAZEL_STARTUP_OPTS info server_log)
       BEFORE_PID=$$(bazel $$BAZEL_STARTUP_OPTS info server_pid)
