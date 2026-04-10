@@ -150,24 +150,28 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
     def _on_build_end(ctx, state, exit_code):
         if not is_local:
-            _init_upload_state(state)
-            entries = state.get("_test_entries", [])
-            prefix = _artifact_prefix(ctx.std.env, ctx.task.name)
-            uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, prefix + "-testlogs")
+            warning = uploader.check(ctx.std.env)
+            if warning:
+                print("\nwarning: artifact upload skipped — " + warning)
+            else:
+                _init_upload_state(state)
+                entries = state.get("_test_entries", [])
+                prefix = _artifact_prefix(ctx.std.env, ctx.task.name)
+                uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, prefix + "-testlogs")
 
-            task_name = ctx.task.name
-            for src, artifact_name in [
-                (profile_path, task_name + ".profile.gz"),
-                (execlog_path, task_name + ".execlog.zstd"),
-                (bep_path, task_name + ".bep.bin"),
-            ]:
-                if ctx.std.fs.exists(src):
-                    result = uploader.upload_file(ctx, src, artifact_name)
-                    if result["success"]:
-                        ctx.std.fs.remove_file(src)
-                    else:
-                        for err in result["errors"]:
-                            print("artifact upload error (" + artifact_name + "): " + err)
+                task_name = ctx.task.name
+                for src, artifact_name in [
+                    (profile_path, task_name + ".profile.gz"),
+                    (execlog_path, task_name + ".execlog.zstd"),
+                    (bep_path, task_name + ".bep.bin"),
+                ]:
+                    if ctx.std.fs.exists(src):
+                        result = uploader.upload_file(ctx, src, artifact_name)
+                        if result["success"]:
+                            ctx.std.fs.remove_file(src)
+                        else:
+                            for err in result["errors"]:
+                                print("artifact upload error (" + artifact_name + "): " + err)
 
         if debug:
             entries = state.get("_test_entries", [])

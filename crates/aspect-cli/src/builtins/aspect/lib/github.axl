@@ -233,19 +233,48 @@ def _decode_backend_ids(ctx, token):
     return (None, None)
 
 
+_MISSING_TOKEN_MSG = """missing ACTIONS_RUNTIME_TOKEN
+
+GitHub Actions does not inject ACTIONS_RUNTIME_TOKEN into shell (run:) steps.
+To make it available, use one of the following options:
+
+  Option 1 — permissions: id-token: write  (zero config, recommended)
+    Add to your workflow job or at the top level:
+
+      permissions:
+        id-token: write
+
+    This makes ACTIONS_ID_TOKEN_REQUEST_TOKEN available in shell steps.
+    It is the same credential as ACTIONS_RUNTIME_TOKEN and is accepted
+    by the artifact API.
+
+  Option 2 — pass the token via env: on the step that calls aspect:
+
+      - run: aspect build //...
+        env:
+          ACTIONS_RUNTIME_TOKEN: ${{ secrets.ACTIONS_RUNTIME_TOKEN }}
+
+  Option 3 — set at the job level so all steps in the job receive it:
+
+      jobs:
+        build:
+          env:
+            ACTIONS_RUNTIME_TOKEN: ${{ secrets.ACTIONS_RUNTIME_TOKEN }}
+"""
+
+
 def _github_twirp(ctx, method, payload):
     """Make a Twirp RPC call to the GitHub Actions artifact service."""
     # ACTIONS_ID_TOKEN_REQUEST_TOKEN is the same credential as ACTIONS_RUNTIME_TOKEN —
     # both come from systemConnection.Authorization.Parameters["AccessToken"] in the runner.
-    # ACTIONS_ID_TOKEN_REQUEST_TOKEN is injected by ScriptHandler into shell steps when
-    # permissions: id-token: write is set, so it serves as a zero-config fallback.
+    # ScriptHandler injects it into shell steps when permissions: id-token: write is set.
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
     # ACTIONS_RESULTS_URL is not injected by ScriptHandler; use the well-known default.
     results_url = (ctx.std.env.var("ACTIONS_RESULTS_URL") or
                    "https://results-receiver.actions.githubusercontent.com/")
     if not token:
-        return (False, None, "missing ACTIONS_RUNTIME_TOKEN (set permissions: id-token: write or expose ACTIONS_RUNTIME_TOKEN via a node action step)")
+        return (False, None, _MISSING_TOKEN_MSG)
 
     if results_url.endswith("/"):
         results_url = results_url[:-1]
@@ -270,7 +299,7 @@ def _upload_artifact(ctx, path, name):
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
     if not token:
-        return {"success": False, "artifact_ref": None, "errors": ["missing ACTIONS_RUNTIME_TOKEN (set permissions: id-token: write or expose via a node action step)"]}
+        return {"success": False, "artifact_ref": None, "errors": [_MISSING_TOKEN_MSG]}
 
     run_id, job_id = _decode_backend_ids(ctx, token)
     if not run_id or not job_id:
@@ -334,10 +363,19 @@ def _delete_artifact(ctx, name):
     return {"success": ok}
 
 
+def _check_token(env):
+    """Return a warning message if the artifact token is unavailable, else None."""
+    token = env.var("ACTIONS_RUNTIME_TOKEN") or env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    if not token:
+        return _MISSING_TOKEN_MSG
+    return None
+
+
 github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
     validate_role = validate_role,
+    check_token = _check_token,
     status_checks = struct(
         create   = _status_checks_create,
         complete = _status_checks_complete,

@@ -171,13 +171,13 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
     for entry in new_entries:
         result = provider.upload_artifact(ctx, entry["src"], name + "/" + entry["dest"])
         if result["success"]:
+            group["last_count"] += 1
             any_success = True
         else:
             for err in result["errors"]:
                 print("artifact upload error: " + err)
+            break
 
-    if any_success:
-        group["last_count"] = count
     return any_success
 
 
@@ -214,6 +214,12 @@ def create_uploader(env):
     else:
         return None
 
+    def check(env):
+        """Return a warning message if the uploader is misconfigured, else None."""
+        if ci == "github":
+            return github.check_token(env)
+        return None
+
     def upload_file(ctx, path, name):
         if not ctx.std.fs.exists(path):
             return {"success": False, "artifact_ref": None, "errors": ["file not found: " + path]}
@@ -231,6 +237,7 @@ def create_uploader(env):
             return _upload_testlogs_tar(ctx, provider, group, entries, name)
 
     return struct(
+        check = check,
         upload_file = upload_file,
         delete_artifact = delete_artifact,
         upload_testlogs = upload_testlogs,
