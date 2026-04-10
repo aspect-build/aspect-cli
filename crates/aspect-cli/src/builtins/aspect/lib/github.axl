@@ -289,11 +289,13 @@ def _upload_artifact(ctx, path, name):
     if not signed_url:
         return {"success": False, "artifact_ref": None, "errors": ["no signed_upload_url returned"]}
 
+    file_size = ctx.std.fs.metadata(path).size
     upload_resp = ctx.http().put(
         url = signed_url,
         headers = {
             "x-ms-blob-type": "BlockBlob",
             "Content-Type": "application/octet-stream",
+            "Content-Length": str(file_size),
         },
         data = ctx.std.fs.open(path),
     ).block()
