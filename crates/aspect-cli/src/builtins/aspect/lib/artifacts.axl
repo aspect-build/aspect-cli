@@ -34,6 +34,29 @@ def detect_ci(env):
     return None
 
 
+
+def artifact_name(ci, task_name, task_key, filename):
+    """Format an artifact name based on CI platform conventions.
+
+    Buildkite, CircleCI, and GitLab support hierarchical path-style names
+    (task_name/task_key/filename), which groups artifacts neatly in their UIs.
+    GitHub Actions requires flat names with no path separators
+    (task_name.task_key.filename) because artifacts are a flat list.
+
+    Args:
+        ci: str - CI platform ("github", "buildkite", "gitlab", "circleci", etc.)
+        task_name: str - task name (e.g. "test")
+        task_key: str - task key (e.g. "my-build")
+        filename: str - artifact filename including extension (e.g. "profile.gz")
+
+    Returns:
+        str - formatted artifact name
+    """
+    if ci == "github":
+        return task_name + "." + task_key + "." + filename
+    return task_name + "/" + task_key + "/" + filename
+
+
 # =============================================================================
 # GitLab CI (inline — no separate lib needed)
 # =============================================================================
@@ -116,7 +139,7 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name):
         return False
 
 
-def _upload_testlogs_buildkite(ctx, group, entries):
+def _upload_testlogs_buildkite(ctx, group, entries, name):
     """Upload test files individually to Buildkite via a symlink tree.
 
     Creates a temp directory with symlinks matching the desired archive paths,
@@ -134,7 +157,7 @@ def _upload_testlogs_buildkite(ctx, group, entries):
     child.wait()
 
     for entry in new_entries:
-        dest_path = tmp_dir + "/" + entry["dest"]
+        dest_path = tmp_dir + "/" + name + "/" + entry["dest"]
         dest_dir = dest_path.rsplit("/", 1)[0]
         ctx.std.fs.create_dir_all(dest_dir)
         ctx.std.process.command("ln").args(["-s", entry["src"], dest_path]).spawn().wait()
@@ -230,7 +253,7 @@ def create_uploader(env):
 
     def upload_testlogs(ctx, group, entries, name):
         if ci == "buildkite":
-            return _upload_testlogs_buildkite(ctx, group, entries)
+            return _upload_testlogs_buildkite(ctx, group, entries, name)
         elif ci == "circleci":
             return _upload_testlogs_per_file(ctx, provider, group, entries, name)
         else:

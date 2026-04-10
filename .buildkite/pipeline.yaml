@@ -170,7 +170,10 @@ steps:
           limit: 1
     command: |
       ASPECT_DEBUG=1 aspect build //...
-      aspect build //...
+      aspect build --task-key build-bk //...
+      aspect build --task-key build-bk --task-id 00000000-0000-0000-0000-000000000001 //...
+      aspect build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
+      aspect build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
 
   - key: test-task
     depends_on:
@@ -185,7 +188,7 @@ steps:
           limit: 1
     command: |
       ASPECT_DEBUG=1 aspect test //...
-      aspect test //...
+      aspect test --task-key test-bk //...
 
   - key: delivery-task
     label: ":package: Delivery Task"
@@ -200,4 +203,4 @@ steps:
           limit: 1
     command: |
       ASPECT_DEBUG=1 aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
-      aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
+      aspect delivery --task-key delivery-bk --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2

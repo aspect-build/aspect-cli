@@ -29,6 +29,13 @@ use tracing::info_span;
 use crate::cmd_tree::{CommandTree, make_command_from_task};
 use crate::helpers::{find_repo_root, get_default_axl_search_paths, search_sources};
 
+// Generate a short 8-char hex invocation ID from the current time and process ID.
+fn generate_task_key() -> String {
+    names::Generator::with_naming(names::Name::Plain)
+        .next()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()[..8].to_string())
+}
+
 // Helper function to check if debug mode is enabled based on the ASPECT_DEBUG environment variable.
 fn debug_mode() -> bool {
     match var("ASPECT_DEBUG") {
@@ -322,6 +329,32 @@ async fn main() -> miette::Result<ExitCode> {
                     .action(ArgAction::Version)
                     .help("Print version"),
             )
+            .arg(
+                Arg::new("task-key")
+                    .long("task-key")
+                    .value_name("KEY")
+                    .global(true)
+                    .value_parser(|s: &str| {
+                        if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                            Ok(s.to_string())
+                        } else {
+                            Err(format!("'{}' contains invalid characters (allowed: A-Za-z0-9, _, -)", s))
+                        }
+                    })
+                    .help("A short key identifying this task invocation. Allowed characters: A-Za-z0-9, _, -. Useful when the same task runs multiple times in one pipeline (e.g. 'backend', 'frontend'). Auto-generated if not set."),
+            )
+            .arg(
+                Arg::new("task-id")
+                    .long("task-id")
+                    .value_name("UUID")
+                    .global(true)
+                    .value_parser(|s: &str| {
+                        uuid::Uuid::parse_str(s)
+                            .map(|u| u.to_string())
+                            .map_err(|_| format!("'{}' is not a valid UUID (expected xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)", s))
+                    })
+                    .help("A UUID uniquely identifying this task invocation. Auto-generated if not set."),
+            )
             // Built-in commands (hidden from Tasks, shown in Commands via help_template)
             .subcommand(
                 Command::new("version")
@@ -443,6 +476,17 @@ async fn main() -> miette::Result<ExitCode> {
         let task = tasks.get(id).expect("task must exist at the indice");
         let definition = task.as_task().unwrap();
 
+        // Resolve task key: use --task-key if provided, else generate.
+        let provided_task_key = cmdargs
+            .get_one::<String>("task-key")
+            .filter(|s| !s.is_empty())
+            .cloned();
+        let task_key_is_generated = provided_task_key.is_none();
+        let task_key = provided_task_key.unwrap_or_else(generate_task_key);
+
+        // Resolve task ID: use --task-id if provided (already validated as UUID), else generate.
+        let task_id = cmdargs.get_one::<String>("task-id").cloned();
+
         // Enter a tracing span for task execution.
         let span = info_span!("task", name = name);
         let _enter = span.enter();
@@ -451,72 +495,80 @@ async fn main() -> miette::Result<ExitCode> {
         let store = axl_loader.new_store(task.path.clone());
 
         // Execute the selected task using the new execution function
-        let exit_code = execute_task_with_args(task, store, &trait_data, |heap| {
-            let mut args = TaskArgs::new();
-            for (k, v) in definition.args().iter() {
-                let val = match v {
-                    TaskArg::String { .. } => heap
-                        .alloc_str(
+        let exit_code = execute_task_with_args(
+            task,
+            store,
+            &trait_data,
+            task_key,
+            task_key_is_generated,
+            task_id,
+            |heap| {
+                let mut args = TaskArgs::new();
+                for (k, v) in definition.args().iter() {
+                    let val = match v {
+                        TaskArg::String { .. } => heap
+                            .alloc_str(
+                                cmdargs
+                                    .get_one::<String>(k.as_str())
+                                    .unwrap_or(&String::new()),
+                            )
+                            .to_value(),
+                        TaskArg::Int { .. } => heap
+                            .alloc(cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned())
+                            .to_value(),
+                        TaskArg::UInt { .. } => heap
+                            .alloc(cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned())
+                            .to_value(),
+                        TaskArg::Boolean { .. } => heap.alloc(
                             cmdargs
-                                .get_one::<String>(k.as_str())
-                                .unwrap_or(&String::new()),
-                        )
-                        .to_value(),
-                    TaskArg::Int { .. } => heap
-                        .alloc(cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned())
-                        .to_value(),
-                    TaskArg::UInt { .. } => heap
-                        .alloc(cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned())
-                        .to_value(),
-                    TaskArg::Boolean { .. } => heap.alloc(
-                        cmdargs
-                            .get_one::<bool>(k.as_str())
-                            .unwrap_or(&false)
-                            .to_owned(),
-                    ),
-                    TaskArg::Positional { .. } => heap.alloc(TaskArgs::alloc_list(
-                        cmdargs
-                            .get_many::<String>(k.as_str())
-                            .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
-                    )),
-                    TaskArg::TrailingVarArgs { .. } => heap.alloc(TaskArgs::alloc_list(
-                        cmdargs
-                            .get_many::<String>(k.as_str())
-                            .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
-                    )),
-                    TaskArg::StringList { .. } => heap.alloc(TaskArgs::alloc_list(
-                        cmdargs
-                            .get_many::<String>(k.as_str())
-                            .unwrap_or_default()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>(),
-                    )),
-                    TaskArg::BooleanList { .. } => heap.alloc(TaskArgs::alloc_list(
-                        cmdargs
-                            .get_many::<bool>(k.as_str())
-                            .unwrap_or_default()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                    )),
-                    TaskArg::IntList { .. } => heap.alloc(TaskArgs::alloc_list(
-                        cmdargs
-                            .get_many::<i32>(k.as_str())
-                            .unwrap_or_default()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                    )),
-                    TaskArg::UIntList { .. } => heap.alloc(TaskArgs::alloc_list(
-                        cmdargs
-                            .get_many::<u32>(k.as_str())
-                            .unwrap_or_default()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                    )),
-                };
-                args.insert(k.clone(), val);
-            }
-            args
-        })
+                                .get_one::<bool>(k.as_str())
+                                .unwrap_or(&false)
+                                .to_owned(),
+                        ),
+                        TaskArg::Positional { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(k.as_str())
+                                .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                        )),
+                        TaskArg::TrailingVarArgs { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(k.as_str())
+                                .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                        )),
+                        TaskArg::StringList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(k.as_str())
+                                .unwrap_or_default()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>(),
+                        )),
+                        TaskArg::BooleanList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<bool>(k.as_str())
+                                .unwrap_or_default()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )),
+                        TaskArg::IntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<i32>(k.as_str())
+                                .unwrap_or_default()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )),
+                        TaskArg::UIntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            cmdargs
+                                .get_many::<u32>(k.as_str())
+                                .unwrap_or_default()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )),
+                    };
+                    args.insert(k.clone(), val);
+                }
+                args
+            },
+        )
         .into_diagnostic()?;
 
         Ok(ExitCode::from(exit_code.unwrap_or(0)))

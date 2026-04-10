@@ -8,7 +8,7 @@ a successful upload (rolling replacement where applicable).
 Also configures Bazel profiling flags and uploads the profile at build_end.
 """
 
-load("../lib/artifacts.axl", "create_uploader")
+load("../lib/artifacts.axl", "create_uploader", "detect_ci", "artifact_name")
 load("../traits.axl", "BazelTrait")
 
 
@@ -29,11 +29,6 @@ def _make_uuid(ctx):
     b[8] = (b[8] & 0x3F) | 0x80  # variant bits
     h = "".join([_HEX[x >> 4] + _HEX[x & 0x0F] for x in b])
     return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
-
-
-def _artifact_name_prefix(env):
-    """Derive artifact name prefix from CI environment."""
-    return env.var("GITHUB_JOB") or env.var("CI_JOB_NAME") or "aspect"
 
 
 def _file_uri_to_path(uri):
@@ -99,22 +94,18 @@ def _init_upload_state(state):
         }
 
 
-def _artifact_prefix(env, task_name):
-    """Derive artifact name prefix from environment and task context."""
-    return _artifact_name_prefix(env) + "-" + task_name
-
-
 def _artifact_upload_impl(ctx: FeatureContext):
     """Wire interval-based artifact upload into BazelTrait lifecycle hooks.
 
     - build_event: collect testlog entries + upload every BATCH_SIZE new files
     - build_end: final flush of any remaining files + upload profile
 
-    Uses ctx.task.name to identify the current task (e.g. "build", "test").
+    Uses ctx.task.name and ctx.task.key to identify the current task invocation.
     """
     fragment = ctx.traits[BazelTrait]
 
     uploader = create_uploader(ctx.std.env)
+    ci = detect_ci(ctx.std.env)
     is_local = uploader == None
 
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
@@ -145,8 +136,8 @@ def _artifact_upload_impl(ctx: FeatureContext):
             _init_upload_state(state)
             entries = state.get("_test_entries", [])
             if len(entries) >= state["_artifact_upload"]["testlogs"]["last_count"] + _BATCH_SIZE:
-                prefix = _artifact_prefix(ctx.std.env, ctx.task.name)
-                uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, prefix + "-testlogs")
+                name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
+                uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
 
     def _on_build_end(ctx, state, exit_code):
         if not is_local:
@@ -156,28 +147,29 @@ def _artifact_upload_impl(ctx: FeatureContext):
             else:
                 _init_upload_state(state)
                 entries = state.get("_test_entries", [])
-                prefix = _artifact_prefix(ctx.std.env, ctx.task.name)
-                uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, prefix + "-testlogs")
+                name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
+                uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
 
                 task_name = ctx.task.name
-                for src, artifact_name in [
-                    (profile_path, task_name + ".profile.gz"),
-                    (execlog_path, task_name + ".execlog.zstd"),
-                    (bep_path, task_name + ".bep.bin"),
+                task_key = ctx.task.key
+                for src, name in [
+                    (profile_path, artifact_name(ci, task_name, task_key, "profile.gz")),
+                    (execlog_path, artifact_name(ci, task_name, task_key, "execlog.zstd")),
+                    (bep_path, artifact_name(ci, task_name, task_key, "bep.bin")),
                 ]:
                     if ctx.std.fs.exists(src):
-                        result = uploader.upload_file(ctx, src, artifact_name)
+                        result = uploader.upload_file(ctx, src, name)
                         if result["success"]:
                             ctx.std.fs.remove_file(src)
                         else:
                             for err in result["errors"]:
-                                print("artifact upload error (" + artifact_name + "): " + err)
+                                print("artifact upload error (" + name + "): " + err)
 
         if debug:
             entries = state.get("_test_entries", [])
             skipped = state.get("_skipped_files", [])
             print("")
-            print("--- artifact upload debug summary ---")
+            print("artifact upload debug summary:")
             print("uploader: " + ("active" if not is_local else "none"))
             print("profile:  " + profile_path + " (exists=" + str(ctx.std.fs.exists(profile_path)) + ")")
             print("execlog:  " + execlog_path + " (exists=" + str(ctx.std.fs.exists(execlog_path)) + ")")
@@ -195,7 +187,6 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
     fragment.build_event.append(_on_build_event)
     fragment.build_end.append(_on_build_end)
-
 
 
 ArtifactUpload = feature(

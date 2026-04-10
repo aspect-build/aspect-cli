@@ -33,7 +33,7 @@ jobs:
       - name: Build Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect build //...
       - name: Build Task
-        run: aspect build //...
+        run: aspect build --task-key build-gha //...
 
   test-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
@@ -45,7 +45,7 @@ jobs:
       - name: Test Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect test //...
       - name: Test Task
-        run: aspect test //...
+        run: aspect test --task-key test-gha //...
 
   delivery-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
@@ -57,4 +57,4 @@ jobs:
       - name: Delivery Task (ASPECT_DEBUG=1)
         run: ASPECT_DEBUG=1 aspect delivery --build_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit_sha $GITHUB_SHA --force_target //:hello -- //:hello //:hello2
       - name: Delivery Task
-        run: aspect delivery --build_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit_sha $GITHUB_SHA --force_target //:hello -- //:hello //:hello2
+        run: aspect delivery --task-key delivery-gha --build_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit_sha $GITHUB_SHA --force_target //:hello -- //:hello //:hello2

@@ -230,6 +230,15 @@ def test_task_info(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, len(info.group) == 1, "ctx.task.group should have one entry")
     tc = test_case(tc, info.group[0] == "tests", "ctx.task.group[0] should be 'tests'")
 
+    # key: non-empty string (auto-generated when --task-key not set)
+    tc = test_case(tc, type(info.key) == "string", "ctx.task.key should be a string")
+    tc = test_case(tc, len(info.key) > 0, "ctx.task.key should be non-empty")
+
+    # id: UUID v4 format (36 chars, dashes at positions 8/13/18/23)
+    tc = test_case(tc, type(info.id) == "string", "ctx.task.id should be a string")
+    tc = test_case(tc, len(info.id) == 36, "ctx.task.id should be 36 chars (UUID format)")
+    tc = test_case(tc, info.id[8] == "-" and info.id[13] == "-" and info.id[18] == "-" and info.id[23] == "-", "ctx.task.id should have UUID dashes at positions 8/13/18/23")
+
     return tc
 
 def test_starlark(tc: int) -> int:

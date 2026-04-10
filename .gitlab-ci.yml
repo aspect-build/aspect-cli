@@ -24,7 +24,7 @@ build-task:
   script:
     - .aspect/bootstrap.sh
     - ASPECT_DEBUG=1 aspect build //...
-    - aspect build //...
+    - aspect build --task-key build-gl //...
 
 test-task:
   stage: Aspect Workflows
@@ -35,7 +35,7 @@ test-task:
   script:
     - .aspect/bootstrap.sh
     - ASPECT_DEBUG=1 aspect test //...
-    - aspect test //...
+    - aspect test --task-key test-gl //...
 
 delivery-task:
   stage: Aspect Workflows
@@ -46,4 +46,4 @@ delivery-task:
   script:
     - .aspect/bootstrap.sh
     - ASPECT_DEBUG=1 aspect delivery --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:hello -- //:hello //:hello2
-    - aspect delivery --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:hello -- //:hello //:hello2
+    - aspect delivery --task-key delivery-gl --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:hello -- //:hello //:hello2

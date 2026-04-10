@@ -12,7 +12,10 @@ def _upload_artifact(ctx, path, name):
     needs_copy = basename != name
 
     if needs_copy:
-        ctx.std.process.command("cp").args([path, dir + "/" + name]).spawn().wait()
+        dest = dir + "/" + name
+        dest_dir = dest.rsplit("/", 1)[0]
+        ctx.std.fs.create_dir_all(dest_dir)
+        ctx.std.process.command("cp").args([path, dest]).spawn().wait()
 
     child = ctx.std.process.command("buildkite-agent") \
         .args(["artifact", "upload", name, "--literal", "--log-level=warn"]) \
@@ -24,9 +27,8 @@ def _upload_artifact(ctx, path, name):
     status = child.wait()
 
     if needs_copy:
-        copied = dir + "/" + name
-        if ctx.std.fs.exists(copied):
-            ctx.std.fs.remove_file(copied)
+        if ctx.std.fs.exists(dest):
+            ctx.std.fs.remove_file(dest)
 
     if status.code != 0:
         return {"success": False, "artifact_ref": None, "errors": ["exit " + str(status.code)]}

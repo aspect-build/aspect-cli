@@ -25,7 +25,9 @@ opentelemetry_sdk = "0.31.0"
 opentelemetry-otlp = {version = "0.31.0", features = ["grpc-tonic", "tls-roots"]}
 opentelemetry-semantic-conventions = "0.31.0"
 include_dir = { version = "0.7", features = ["glob"] }
+names = { version = "0.14", default-features = false }
 sha256 = "1.6.0"
+uuid = { version = "1", features = ["v4"] }
 starlark = "0.13.0"
 thiserror = "2.0.17"
 tokio = { version = "1.47.1", features = ["macros", "rt", "rt-multi-thread"] }

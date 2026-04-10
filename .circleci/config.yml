@@ -38,7 +38,7 @@ jobs:
           command: ASPECT_DEBUG=1 aspect build //...
       - run:
           name: Build Task
-          command: aspect build //...
+          command: aspect build --task-key build-cci //...
 
   test-task:
     machine: true
@@ -54,7 +54,7 @@ jobs:
           command: ASPECT_DEBUG=1 aspect test //...
       - run:
           name: Test Task
-          command: aspect test //...
+          command: aspect test --task-key test-cci //...
 
   delivery-task:
     machine: true
@@ -70,4 +70,4 @@ jobs:
           command: ASPECT_DEBUG=1 aspect delivery --build_url $CIRCLE_BUILD_URL --commit_sha $CIRCLE_SHA1 --force_target //:hello -- //:hello //:hello2
       - run:
           name: Delivery Task
-          command: aspect delivery --build_url $CIRCLE_BUILD_URL --commit_sha $CIRCLE_SHA1 --force_target //:hello -- //:hello //:hello2
+          command: aspect delivery --task-key delivery-cci --build_url $CIRCLE_BUILD_URL --commit_sha $CIRCLE_SHA1 --force_target //:hello -- //:hello //:hello2

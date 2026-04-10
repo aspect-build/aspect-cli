@@ -9,6 +9,7 @@ use starlark::values::Value;
 use starlark::values::ValueLike;
 use starlark::values::list::AllocList;
 use std::path::Path;
+use uuid::Uuid;
 
 use crate::engine::bazel::Bazel;
 use crate::engine::config::ConfiguredTask;
@@ -93,6 +94,9 @@ pub fn execute_task_with_args(
     task: &ConfiguredTask,
     store: AxlStore,
     trait_data: &[(u64, Value<'static>, Value<'static>)],
+    task_key: String,
+    task_key_is_generated: bool,
+    task_id: Option<String>,
     args_builder: impl FnOnce(Heap) -> TaskArgs,
 ) -> Result<Option<u8>, EvalError> {
     // Get the task implementation function
@@ -104,6 +108,19 @@ pub fn execute_task_with_args(
     // The OwnedFrozenValue keeps the heap alive for the duration of this function.
     let task_impl_fv: FrozenValue = unsafe { task_impl.unchecked_frozen_value() };
 
+    let task_id = task_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    // TODO: move all of the following output to AXL task lifecycle hooks once
+    // ctx.task.lifecycle_hooks (pre_task / post_task) is implemented.
+    // At that point, features can register hooks to:
+    //   - print a Buildkite section header ("--- :aspect: Running <name> (<key>)")
+    //     by checking ctx.std.env CI host (e.g. environment.ci.host == "buildkite")
+    //   - print the invocation line ("aspect: <name> task invocation (key: ...) (id: ...)")
+    //   - print the --task-key tip on CI when the key was auto-generated
+    //     (ctx.task.key and a flag indicating whether it was user-supplied would
+    //     need to be exposed, or the tip logic moved entirely into AXL)
+    // For now these are printed unconditionally from Rust before task execution.
+
     // Single execution heap — allocate TaskContext directly (no pre-freeze needed).
     Module::with_temp_heap(|exec_module| {
         let heap = exec_module.heap();
@@ -111,6 +128,8 @@ pub fn execute_task_with_args(
         let task_info = TaskInfo {
             name: task.get_name(),
             group: task.get_group(),
+            task_key: task_key.clone(),
+            task_id: task_id.clone(),
         };
 
         // Build a task-scoped trait map

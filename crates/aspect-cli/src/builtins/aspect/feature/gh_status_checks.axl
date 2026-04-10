@@ -1,17 +1,25 @@
-load("../traits.axl", "BazelTrait")
+load("../traits.axl", "BazelTrait", "HealthCheckTrait")
 load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
 
 def _github_status_checks(ctx: FeatureContext):
     bazel = ctx.traits[BazelTrait]
+    health_check = ctx.traits[HealthCheckTrait]
     sha = detect_commit_sha(ctx.std.env)
     (owner, repo) = detect_github_repo(ctx.std)
     if sha and owner and repo:
+        def _print_check_name(ctx):
+            print("GitHub status check: aspect/%s (%s)" % (ctx.task.name, ctx.task.key))
+
+        # TODO: move to ctx.task.lifecycle_hooks.pre_task once that is available
+        health_check.pre_health_check.append(_print_check_name)
+
         def _build_start(ctx, state):
             token = github.authenticate(ctx, ctx.std.env, owner = owner, repo = repo, roles = ["checks.write", "statuses.write", "prs.write"])
             if not token:
                 return
             state["_github_token"] = token
-            result = github.status_checks.create(ctx, token, owner, repo, sha, "aspect/%s" % ctx.task.name)
+            check_name = "aspect/%s (%s)" % (ctx.task.name, ctx.task.key)
+            result = github.status_checks.create(ctx, token, owner, repo, sha, check_name)
             if result["success"]:
                 state["_check_run_id"] = result["check_run_id"]
 
