@@ -23,7 +23,7 @@ def detect_ci(env):
     Returns:
         "github" | "buildkite" | "gitlab" | "circleci" | None
     """
-    if env.var("ACTIONS_RUNTIME_TOKEN"):
+    if env.var("GITHUB_ACTIONS"):
         return "github"
     elif env.var("BUILDKITE_AGENT_ACCESS_TOKEN"):
         return "buildkite"
