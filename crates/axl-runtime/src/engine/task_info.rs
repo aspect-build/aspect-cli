@@ -16,6 +16,8 @@ use starlark::values::starlark_value;
 pub struct TaskInfo {
     pub name: String,
     pub group: Vec<String>,
+    pub task_key: String,
+    pub task_id: String,
 }
 
 starlark_simple_value!(TaskInfo);
@@ -40,5 +42,19 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn group(this: &TaskInfo) -> anyhow::Result<Vec<String>> {
         Ok(this.group.clone())
+    }
+
+    /// A short human-readable key identifying this task invocation.
+    /// Set via --task-key on the CLI, or auto-generated as a friendly name (e.g. "fluffy-parakeet").
+    #[starlark(attribute)]
+    fn key(this: &TaskInfo) -> anyhow::Result<String> {
+        Ok(this.task_key.clone())
+    }
+
+    /// A globally unique UUID v4 for this task invocation.
+    /// Always auto-generated; use key for a short human-readable discriminator.
+    #[starlark(attribute)]
+    fn id(this: &TaskInfo) -> anyhow::Result<String> {
+        Ok(this.task_id.clone())
     }
 }

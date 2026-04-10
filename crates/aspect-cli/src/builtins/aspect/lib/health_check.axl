@@ -170,15 +170,12 @@ def agent_health_check(ctx, environment):
         None if healthy, or a str error message if the Bazel server is unhealthy.
     """
     if environment.ci.host == "buildkite":
-        print("--- :aspect: Runner Health Check")
+        print("--- :aspect: Workflows Runner Health Check")
 
     environment = _wait_for_warming(ctx.std, environment)
     _display_runner_health(environment)
     health = ctx.bazel.health_check()
     _display_bazel_health(health)
-
-    if environment.ci.host == "buildkite":
-        print("--- :bazel: Running %s" % ctx.task.name)
 
     if health.outcome == "unhealthy":
         signal_bin = environment.runner.bin_dir + "/signal_instance_unhealthy"
