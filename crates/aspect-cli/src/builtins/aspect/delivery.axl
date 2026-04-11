@@ -9,7 +9,7 @@ Requires a functioning remote cache — output_shas are extracted from the
 grpc log written during the build phase.
 """
 
-load("./traits.axl", "DeliveryTrait", "HealthCheckTrait")
+load("./traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait")
 load("./lib/runnable.axl", "runnable")
 
 load(
@@ -143,6 +143,7 @@ def _get_output_shas(ctx, targets, bazel_flags, is_tty):
 
 def _delivery_impl(ctx):
     hc_trait = ctx.traits[HealthCheckTrait]
+    bazel_trait = ctx.traits[BazelTrait]
 
     for hook in hc_trait.pre_health_check:
         hook(ctx)
@@ -163,10 +164,17 @@ def _delivery_impl(ctx):
     build_url = ctx.args.build_url
     commit_sha = ctx.args.commit_sha
 
-    # Build bazel flags for delivery
-    bazel_flags = ctx.args.bazel_flag
+    # Build bazel flags for delivery: accumulate from arg + trait, then optionally transform
+    bazel_flags = list(ctx.args.bazel_flag)
     if not bazel_flags:
         bazel_flags = ["--stamp"]
+    bazel_flags.extend(bazel_trait.extra_flags)
+    if bazel_trait.flags:
+        bazel_flags = bazel_trait.flags(bazel_flags)
+
+    startup_flags = list(bazel_trait.extra_startup_flags)
+    if bazel_trait.startup_flags:
+        startup_flags = bazel_trait.startup_flags(startup_flags)
 
     # Expand .bazelrc so remote cache config flows in automatically
     rc = ctx.bazel.parse_rc(
@@ -174,7 +182,7 @@ def _delivery_impl(ctx):
         flags = bazel_flags,
     )
     rc_startup_flags, expanded_flags = rc.expand_all(command = "build")
-    ctx.bazel.startup_flags.extend(rc_startup_flags + ["--ignore_all_rc_files"])
+    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
 
     # Delivery requires a remote cache to populate the grpc log with action digests.
     # common-section flags are re-encoded as --default_override=0:common=--remote_cache=...
@@ -375,7 +383,7 @@ delivery = task(
     name = "delivery",
     description = "Build and deliver binary targets via deliveryd. Targets are built with stamping, deduplicated by action digest, and delivered exactly once per commit unless forced.",
     implementation = _delivery_impl,
-    traits = [DeliveryTrait, HealthCheckTrait],
+    traits = [BazelTrait, DeliveryTrait, HealthCheckTrait],
     args = {
         "ci_host": args.string(
             default = "bk",
