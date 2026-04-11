@@ -55,6 +55,40 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         Ok(NoneOr::from_option(val))
     }
 
+    /// Sets an environment variable for the current process.
+    ///
+    /// This affects all subsequent `var()` calls and any child processes spawned
+    /// after this call. Use with care — environment variables are global process
+    /// state.
+    fn set_var<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] key: values::StringValue<'v>,
+        #[starlark(require = pos)] value: values::StringValue<'v>,
+    ) -> anyhow::Result<values::none::NoneType> {
+        // SAFETY: AXL evaluation is single-threaded; no concurrent env reads.
+        #[allow(deprecated)]
+        unsafe {
+            std::env::set_var(key.as_str(), value.as_str());
+        }
+        Ok(values::none::NoneType)
+    }
+
+    /// Removes an environment variable from the current process.
+    ///
+    /// Has no effect if the variable is not set. Subsequent `var()` calls will
+    /// return `None` for the removed variable.
+    fn remove_var<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] key: values::StringValue<'v>,
+    ) -> anyhow::Result<values::none::NoneType> {
+        // SAFETY: AXL evaluation is single-threaded; no concurrent env reads.
+        #[allow(deprecated)]
+        unsafe {
+            std::env::remove_var(key.as_str());
+        }
+        Ok(values::none::NoneType)
+    }
+
     /// Returns an iterator of (variable, value) pairs of strings, for all the
     /// environment variables of the current process.
     ///

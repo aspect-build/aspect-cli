@@ -52,6 +52,22 @@ def test_env(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     tc = test_case(tc, type(root_dir) == "string", "root_dir should be a string")
     tc = test_case(tc, ctx.std.fs.is_dir(root_dir), "root_dir should be a directory")
 
+    # Test set_var: set a new variable and read it back
+    ctx.std.env.set_var("AXL_TEST_SET_VAR", "hello")
+    tc = test_case(tc, ctx.std.env.var("AXL_TEST_SET_VAR") == "hello", "set_var should make var readable via var()")
+
+    # Test set_var: overwrite an existing variable
+    ctx.std.env.set_var("AXL_TEST_SET_VAR", "world")
+    tc = test_case(tc, ctx.std.env.var("AXL_TEST_SET_VAR") == "world", "set_var should overwrite an existing variable")
+
+    # Test remove_var: variable should be gone after removal
+    ctx.std.env.remove_var("AXL_TEST_SET_VAR")
+    tc = test_case(tc, ctx.std.env.var("AXL_TEST_SET_VAR") == None, "remove_var should make var() return None")
+
+    # Test remove_var on a non-existent variable: should be a no-op
+    ctx.std.env.remove_var("AXL_TEST_NONEXISTENT_VAR_99999")
+    tc = test_case(tc, ctx.std.env.var("AXL_TEST_NONEXISTENT_VAR_99999") == None, "remove_var on non-existent var should be a no-op")
+
     return tc
 
 def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
