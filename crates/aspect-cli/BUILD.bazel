@@ -10,7 +10,7 @@ rust_binary(
         "@crates//:base64",
         "@crates//:clap",
         "@crates//:dirs",
-        "@crates//:miette",
+        "@crates//:anyhow",
         "@crates//:rand",
         "@crates//:reqwest",
         "@crates//:serde",

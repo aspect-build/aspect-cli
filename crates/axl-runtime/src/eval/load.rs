@@ -23,12 +23,12 @@ pub struct ModuleScope {
 
 /// Internal loader for .axl files, handling path resolution, security checks, and recursive loading.
 #[derive(Debug)]
-pub struct AxlLoader<'p> {
-    pub(super) cli_version: &'p String,
-    pub(super) repo_root: &'p PathBuf,
+pub struct AxlLoader {
+    pub(super) cli_version: String,
+    pub(super) repo_root: PathBuf,
 
     // The deps root directory where module expander expanded all the modules.
-    pub(super) deps_root: &'p PathBuf,
+    pub(super) deps_root: PathBuf,
 
     pub(crate) dialect: Dialect,
     pub(crate) globals: Globals,
@@ -40,8 +40,8 @@ pub struct AxlLoader<'p> {
     loaded_modules: RefCell<HashMap<PathBuf, FrozenModule>>,
 }
 
-impl<'p> AxlLoader<'p> {
-    pub fn new(cli_version: &'p String, repo_root: &'p PathBuf, deps_root: &'p PathBuf) -> Self {
+impl AxlLoader {
+    pub fn new(cli_version: String, repo_root: PathBuf, deps_root: PathBuf) -> Self {
         Self {
             cli_version,
             repo_root,
@@ -122,7 +122,7 @@ impl<'p> AxlLoader<'p> {
     }
 }
 
-impl<'p> FileLoader for AxlLoader<'p> {
+impl FileLoader for AxlLoader {
     fn load(&self, raw: &str) -> starlark::Result<FrozenModule> {
         let load_path: LoadPath = raw.try_into()?;
 

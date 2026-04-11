@@ -190,11 +190,11 @@ dependencies = [
 name = "aspect-cli"
 version = "0.0.0-dev"
 dependencies = [
+ "anyhow",
  "aspect-telemetry",
  "axl-runtime",
  "clap",
  "include_dir",
- "miette 7.6.0",
  "names",
  "opentelemetry",
  "opentelemetry-otlp",
