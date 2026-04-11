@@ -1,0 +1,295 @@
+"""
+Test task to create a GitHub check run with rich Markdown output.
+Used for validating the check run UI on CI.
+
+Usage:
+  aspect test-check-run                        # create in_progress run, auto-detect repo/sha
+  aspect test-check-run --complete             # create then complete with success
+  aspect test-check-run --complete --fail      # create then complete with failure
+  aspect test-check-run --owner ORG --repo R   # explicit owner/repo
+"""
+
+load("@aspect//lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
+
+_SUMMARY_TEMPLATE = """
+{%- set status_icon -%}
+  {%- if conclusion == "success" -%}:white_check_mark:
+  {%- elif conclusion == "failure" -%}:x:
+  {%- else -%}<img src="https://raw.githubusercontent.com/buildkite/emojis/main/img-buildkite-64/aspect-build.png" height="14" />
+  {%- endif -%}
+{%- endset -%}
+{{ status_icon }} {{ status_label }} · :stopwatch: {{ duration }} · :building_construction: `{{ triggered_by }}`<br>
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/bazel/bazel-original.svg" height="14" /> `{{ targets }}` · <img src="https://cdn.simpleicons.org/cachet/888" height="14" /> {{ cache_pct }}% cache hit
+
+---
+
+:speech_balloon: **Last update:** `{{ last_update }}`
+"""
+
+_DETAILS_TEMPLATE = """
+## Build log
+<img src="{{ build_badge_url }}" alt="build" />
+
+```
+{% for line in build_log -%}
+{{ line }}
+{% endfor -%}
+```
+
+{% if tests %}
+## Test results
+<img src="{{ test_badge_url }}" alt="tests" />
+
+| Test | Duration | Status |
+|---|---|---|
+{% for test in tests -%}
+| {{ test.label }} | {{ test.duration }} | {% if test.status == "pass" %}:white_check_mark:{% else %}:x:{% endif %} |
+{% endfor %}
+{% endif %}
+
+## Cache stats
+<img src="{{ cache_badge_url }}" alt="cache" />
+
+| &nbsp; | &nbsp; |
+|---|---|
+| Local cache hits | {{ cache_local }} |
+| Remote cache hits | {{ cache_remote }} |
+| Cache misses | {{ cache_misses }} |
+| Total actions | {{ action_count }} |
+
+---
+
+[:page_facing_up: Full logs]({{ run_url }}/logs) &nbsp;·&nbsp; [:bar_chart: Cache stats]({{ run_url }}/cache)
+"""
+
+
+def _detect_github_repo(ctx):
+    """Detect (owner, repo) from git remote origin."""
+    result = ctx.std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code != 0:
+        return ("", "")
+    url = result.stdout.strip()
+    if url.startswith("git@github.com:"):
+        path = url[len("git@github.com:"):]
+    elif "github.com/" in url:
+        path = url[url.index("github.com/") + len("github.com/"):]
+    else:
+        return ("", "")
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.split("/", 1)
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return (parts[0], parts[1])
+    return ("", "")
+
+
+def _detect_sha(ctx):
+    """Detect commit SHA from CI env or git."""
+    sha = (ctx.std.env.var("GITHUB_SHA") or
+           ctx.std.env.var("BUILDKITE_COMMIT") or
+           ctx.std.env.var("CIRCLE_SHA1") or "")
+    if sha:
+        return sha
+    result = ctx.std.process.command("git").args(["rev-parse", "HEAD"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code == 0:
+        return result.stdout.strip()
+    return ""
+
+
+def _do_request(ctx, method, url, token, payload):
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    data = json.encode(payload)
+    if method == "POST":
+        response = ctx.http().post(url = url, headers = headers, data = data).block()
+    elif method == "PATCH":
+        response = ctx.http().patch(url = url, headers = headers, data = data).block()
+    else:
+        return (False, 0, "unsupported method: " + method)
+    success = response.status >= 200 and response.status < 300
+    body = json.decode(response.body) if response.body else None
+    return (success, response.status, body)
+
+
+def _impl(ctx: TaskContext) -> int:
+    env = ctx.std.env
+
+    owner = ctx.args.owner
+    repo = ctx.args.repo
+    if not owner or not repo:
+        (owner, repo) = _detect_github_repo(ctx)
+    if not owner or not repo:
+        print("Error: could not detect GitHub owner/repo. Pass --owner and --repo or run from a GitHub repo.")
+        return 1
+
+    token = github.authenticate(ctx, ctx.std.env, owner = owner, repo = repo, roles = ["checks.write", "statuses.write", "prs.write"])
+    if not token:
+        print("Error: GITHUB_TOKEN is not set")
+        return 1
+
+    sha = ctx.args.sha or _detect_sha(ctx)
+    if not sha:
+        print("Error: could not detect commit SHA. Pass --sha or set GITHUB_SHA.")
+        return 1
+
+    check_name = ctx.args.name
+    api_base = "https://api.github.com"
+    run_url = "https://app.aspect.build/runs/test"
+
+    # Shared template data
+    tests = [
+        {"label": "//app:server_test", "duration": "1.2s", "status": "pass"},
+        {"label": "//lib:core_test",   "duration": "0.4s", "status": "pass"},
+        {"label": "//lib:proto_test",  "duration": "0.8s", "status": "pass"},
+    ]
+    pass_count = len([t for t in tests if t["status"] == "pass"])
+    fail_count = len([t for t in tests if t["status"] == "fail"])
+    cache_pct = 84
+
+    if fail_count > 0:
+        test_badge_url = "https://img.shields.io/badge/tests-" + str(pass_count) + "%20passed-" + str(fail_count) + "%20failed-red"
+    else:
+        test_badge_url = "https://img.shields.io/badge/tests-" + str(pass_count) + "%20passed-brightgreen"
+
+    if cache_pct >= 80:
+        cache_color = "brightgreen"
+    elif cache_pct >= 50:
+        cache_color = "yellow"
+    else:
+        cache_color = "red"
+    cache_badge_url = "https://img.shields.io/badge/cache-" + str(cache_pct) + "%25%20hit-" + cache_color
+
+    details_data = {
+        "action_count": "112",
+        "build_badge_url": "https://img.shields.io/badge/build-112%20actions-blue",
+        "build_log": [
+            "[  1/112] Analyzing //app:server",
+            "[  2/112] Compiling src/proto/api.proto",
+            "[ 19/112] Linking //lib:core",
+            "[ 47/112] Compiling src/main.rs",
+        ],
+        "tests": tests,
+        "test_badge_url": test_badge_url,
+        "cache_badge_url": cache_badge_url,
+        "cache_pct": str(cache_pct),
+        "cache_local": "42",
+        "cache_remote": "52",
+        "cache_misses": "18",
+        "run_url": run_url,
+    }
+
+    print("Creating check run '%s' on %s/%s @ %s..." % (check_name, owner, repo, sha[:7]))
+
+    in_progress_summary = ctx.template.jinja2(_SUMMARY_TEMPLATE, data = {
+        "conclusion": "in_progress",
+        "status_label": "Running",
+        "duration": "just now",
+        "triggered_by": "aspect test-check-run",
+        "targets": "//...",
+        "cache_pct": "84",
+        "last_update": "Compiling src/main.rs (47/112)...",
+    })
+
+    details_text = ctx.template.jinja2(_DETAILS_TEMPLATE, data = details_data)
+
+    create_url = api_base + "/repos/" + owner + "/" + repo + "/check-runs"
+    ok, status_code, body = _do_request(ctx, "POST", create_url, token, {
+        "name": check_name,
+        "head_sha": sha,
+        "status": "in_progress",
+        "details_url": run_url,
+        "output": {
+            "title": "Building 47 targets...",
+            "summary": in_progress_summary,
+            "text": details_text,
+        },
+    })
+
+    if not ok:
+        msg = "HTTP " + str(status_code)
+        if body and type(body) == "dict" and body.get("message"):
+            msg = msg + ": " + body["message"]
+        print("Error: failed to create check run (" + msg + ")")
+        return 1
+
+    check_run_id = body.get("id")
+    html_url = body.get("html_url", "")
+    print("Created: " + html_url)
+
+    if not ctx.args.complete:
+        return 0
+
+    conclusion = "failure" if ctx.args.fail else "success"
+
+    if conclusion == "success":
+        status_label = "Passed"
+        last_update = "All 47 tests passed."
+        completed_title = "112 targets built, 47 tests passed"
+    else:
+        status_label = "Failed"
+        last_update = "Build failed at target 83/112."
+        completed_title = "Build failed at 83/112"
+
+    completed_summary = ctx.template.jinja2(_SUMMARY_TEMPLATE, data = {
+        "conclusion": conclusion,
+        "status_label": status_label,
+        "duration": "1m 23s",
+        "triggered_by": "aspect test-check-run",
+        "targets": "//...",
+        "cache_pct": "84",
+        "last_update": last_update,
+    })
+
+    patch_url = api_base + "/repos/" + owner + "/" + repo + "/check-runs/" + str(check_run_id)
+    ok, status_code, body = _do_request(ctx, "PATCH", patch_url, token, {
+        "status": "completed",
+        "conclusion": conclusion,
+        "output": {
+            "title": completed_title,
+            "summary": completed_summary,
+            "text": details_text,
+        },
+    })
+
+    if not ok:
+        msg = "HTTP " + str(status_code)
+        if body and type(body) == "dict" and body.get("message"):
+            msg = msg + ": " + body["message"]
+        print("Error: failed to complete check run (" + msg + ")")
+        return 1
+
+    print("Completed with conclusion: " + conclusion)
+    return 0
+
+
+test_check_run = task(
+    group = ["dev"],
+    implementation = _impl,
+    args = {
+        "owner": args.string(
+            description = "GitHub repo owner (auto-detected from git remote if not set)",
+        ),
+        "repo": args.string(
+            description = "GitHub repo name (auto-detected from git remote if not set)",
+        ),
+        "sha": args.string(
+            description = "Commit SHA (auto-detected from GITHUB_SHA or git if not set)",
+        ),
+        "name": args.string(
+            description = "Check run name",
+            default = "aspect/test-check-run",
+        ),
+        "complete": args.boolean(
+            description = "Also complete the check run after creating it",
+            default = False,
+        ),
+        "fail": args.boolean(
+            description = "Complete with failure conclusion (requires --complete)",
+            default = False,
+        ),
+    },
+)
