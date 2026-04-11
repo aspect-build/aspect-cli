@@ -31,6 +31,9 @@ Runner = record(
     instance_id = field(str, default = ""),
     instance_name = field(str, default = ""),
     instance_type = field(str, default = ""),
+    image_id = field(str, default = ""),
+    ci_agent_version = field(str, default = ""),
+    aspect_launcher_version = field(str, default = ""),
     account = field(str, default = ""),
     region = field(str, default = ""),
     az = field(str, default = ""),
@@ -39,6 +42,7 @@ Runner = record(
     cloud_provider = field(str, default = ""),
     data_dir = field(str, default = ""),
     bin_dir = field(str, default = DEFAULT_BIN_DIR),
+    job_tmpdir = field(str, default = "/workflows"),
     bazel_root_dir = field(str, default = DEFAULT_STORAGE_PATH + "/bazel"),
     output_root_dir = field(str, default = DEFAULT_STORAGE_PATH + "/output"),
     repository_cache_dir = field(str, default = DEFAULT_STORAGE_PATH + "/caches/repository"),
@@ -142,6 +146,9 @@ def get_environment(std) -> Environment | None:
             instance_id = std.env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID") or "",
             instance_name = std.env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME") or "",
             instance_type = std.env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE") or "",
+            image_id = std.env.var("ASPECT_WORKFLOWS_RUNNER_IMAGE_ID") or "",
+            ci_agent_version = std.env.var("ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION") or "",
+            aspect_launcher_version = std.env.var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION") or "",
             account = std.env.var("ASPECT_WORKFLOWS_RUNNER_CLOUD_ACCOUNT") or "",
             region = std.env.var("ASPECT_WORKFLOWS_RUNNER_REGION") or "",
             az = std.env.var("ASPECT_WORKFLOWS_RUNNER_AZ") or "",
@@ -150,6 +157,7 @@ def get_environment(std) -> Environment | None:
             cloud_provider = std.env.var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER") or "",
             data_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_DATA_DIR") or "",
             bin_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BIN_DIR") or DEFAULT_BIN_DIR,
+            job_tmpdir = std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or "/workflows",
             bazel_root_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_BAZEL_ROOT_DIR") or (storage_path + "/bazel"),
             output_root_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_OUTPUT_ROOT_DIR") or (storage_path + "/output"),
             repository_cache_dir = std.env.var("ASPECT_WORKFLOWS_RUNNER_REPOSITORY_CACHE_DIR") or (storage_path + "/caches/repository"),
@@ -276,6 +284,8 @@ def _print_workflows_info(env: Environment) -> None:
         print("--- :aspect: Workflows Runner Environment")
     print("Workflows Information")
     print("\tVersion: " + env.runner.product_version)
+    print("\tAspect Launcher Version: " + env.runner.aspect_launcher_version)
+    print("\tCI Agent Version: " + env.runner.ci_agent_version)
     print("\tWarming enabled: " + ("true" if env.runner.warming_enabled else "false"))
 
 
@@ -288,6 +298,7 @@ def _print_aws_info(env: Environment) -> None:
     print("\tInstance ID: " + env.runner.instance_id)
     print("\tInstance Name: " + env.runner.instance_name)
     print("\tInstance Type: " + env.runner.instance_type)
+    print("\tAMI ID: " + env.runner.image_id)
     print("\tSpot Instance: " + ("yes" if env.runner.preemptible else "no"))
     print("\tCLI: 'aws logs tail \"/aw/runner/cloud-init/output\" --log-stream-names \"" + env.runner.instance_id + "\" --since=30d'")
 
@@ -301,6 +312,7 @@ def _print_gcp_info(env: Environment) -> None:
     print("\tInstance ID: " + env.runner.instance_id)
     print("\tInstance Name: " + env.runner.instance_name)
     print("\tInstance Type: " + env.runner.instance_type)
+    print("\tImage ID: " + env.runner.image_id)
     print("\tPreemptible: " + ("yes" if env.runner.preemptible else "no"))
     print("\tCLI: 'gcloud logging read --project " + env.runner.account + " \"resource.type=gce_instance resource.labels.instance_id=" + env.runner.instance_id + " log_name=projects/" + env.runner.account + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
 
