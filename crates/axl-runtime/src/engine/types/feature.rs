@@ -554,16 +554,16 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// Example:
     /// ```starlark
     /// def _impl(ctx: FeatureContext):
-    ///     owner = ctx.attr.owner
-    ///     ctx.fragments[BazelFragment].build_start.append(
-    ///         lambda task_ctx, state: github.create_check(task_ctx, owner)
-    ///     )
+    ///     bazel = ctx.traits[BazelTrait]
+    ///     dry_run = ctx.attr.dry_run
+    ///     def _build_end(ctx, state, exit_code):
+    ///         print("build finished: exit_code=%d dry_run=%s" % (exit_code, dry_run))
+    ///     bazel.build_end.append(_build_end)
     ///
-    /// GithubStatusChecks = feature(
+    /// GithubStatusCheckBazelTask = feature(
     ///     implementation = _impl,
     ///     attrs = {
-    ///         "owner": attr(str | None, None),
-    ///         "repo":  attr(str | None, None),
+    ///         "dry_run": attr(bool, False),
     ///     }
     /// )
     /// ```

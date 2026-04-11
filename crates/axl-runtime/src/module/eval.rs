@@ -182,7 +182,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///
     /// Example:
     /// ```
-    /// use_feature("//aspect/features:github_status_checks.axl", "GithubStatusChecks")
+    /// use_feature("feature/gh_status_checks_bazel.axl", "GithubStatusCheckBazelTask")
     /// ```
     fn use_feature<'v>(
         #[starlark(require = pos)] label: String,

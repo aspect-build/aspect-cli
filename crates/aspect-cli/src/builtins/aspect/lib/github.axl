@@ -192,6 +192,10 @@ def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT
     return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
 
 
+def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
+    return update_check_run(ctx, token, owner, repo, check_run_id, status = "in_progress", output = output, api_base = api_base)
+
+
 def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "success", output = output, api_base = api_base)
 
@@ -378,6 +382,7 @@ github = struct(
     check_token = _check_token,
     status_checks = struct(
         create   = _status_checks_create,
+        update   = _status_checks_update,
         complete = _status_checks_complete,
         fail     = _status_checks_fail,
     ),
