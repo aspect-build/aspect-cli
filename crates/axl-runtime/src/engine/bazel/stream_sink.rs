@@ -35,41 +35,55 @@ pub enum SinkError {
 pub struct GrpcEventStreamSink {}
 
 impl GrpcEventStreamSink {
+    /// Spawn a gRPC BES forwarding thread.
+    ///
+    /// Returns `(invocation_id, handle)` where `invocation_id` is the UUID
+    /// generated for this forwarded stream — this is the ID used in the BES
+    /// backend (e.g. Aspect Web UI), which differs from Bazel's own invocation
+    /// UUID from the `build_started` event.
     pub fn spawn(
         rt: AsyncRuntime,
         recv: Subscriber<BuildEvent>,
         endpoint: String,
         headers: HashMap<String, String>,
-    ) -> JoinHandle<()> {
-        thread::spawn(move || {
+    ) -> (String, JoinHandle<()>) {
+        let invocation_id = uuid::Uuid::new_v4().to_string();
+        let invocation_id_clone = invocation_id.clone();
+        let handle = thread::spawn(move || {
             rt.block_on(async {
-                GrpcEventStreamSink::task_spawn(recv, endpoint, headers)
+                GrpcEventStreamSink::task_spawn(recv, endpoint, headers, invocation_id_clone)
                     .await
                     .await
             })
             .expect("failed to join")
             .expect("failed to wait")
-        })
+        });
+        (invocation_id, handle)
     }
 
     pub async fn task_spawn(
         recv: Subscriber<BuildEvent>,
         endpoint: String,
         headers: HashMap<String, String>,
+        invocation_id: String,
     ) -> task::JoinHandle<Result<(), SinkError>> {
-        tokio::task::spawn(GrpcEventStreamSink::work(recv, endpoint, headers))
+        tokio::task::spawn(GrpcEventStreamSink::work(
+            recv,
+            endpoint,
+            headers,
+            invocation_id,
+        ))
     }
 
     async fn work(
         recv: Subscriber<BuildEvent>,
         endpoint: String,
         headers: HashMap<String, String>,
+        invocation_id: String,
     ) -> Result<(), SinkError> {
         let mut client = Client::new(endpoint, headers).await?;
 
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let build_id = uuid.to_string();
-        let invocation_id = uuid.to_string();
+        let build_id = invocation_id.clone();
 
         client
             .publish_lifecycle_event(lifecycle::build_enqueued(

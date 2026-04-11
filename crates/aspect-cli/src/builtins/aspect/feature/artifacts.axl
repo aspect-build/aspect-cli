@@ -6,10 +6,36 @@ individual files (CircleCI/Buildkite), and the previous version is deleted after
 a successful upload (rolling replacement where applicable).
 
 Also configures Bazel profiling flags and uploads the profile at build_end.
+
+After the first successful testlogs upload, ArtifactsTrait.testlogs_artifact is
+set with the CI-specific URL where logs can be viewed/downloaded. GithubStatusChecks
+reads this to surface a "Download test logs" link in the check run output.
 """
 
 load("../lib/artifacts.axl", "create_uploader", "detect_ci", "artifact_name")
-load("../traits.axl", "BazelTrait")
+load("../traits.axl", "BazelTrait", "ArtifactsTrait")
+
+
+def _update_artifacts_trait(artifacts_trait, state, env, ci, name):
+    """Sync testlogs_artifact and testlogs_label_urls from upload state to the trait.
+
+    Prefers a direct artifact URL when the provider returned one (GitHub artifact ID
+    link, GitLab Generic Packages download URL). Falls back to the CI browse page.
+    """
+    group = state.get("_artifact_upload", {}).get("testlogs", {})
+    # Use the URL the provider embedded in artifact_ref when it's a real HTTP URL.
+    # This gives a direct download link for GitHub (/actions/runs/{id}/artifacts/{id})
+    # and GitLab (Generic Packages API download URL).
+    prev_ref = group.get("prev_ref", "")
+    if prev_ref and prev_ref.startswith("http"):
+        url = prev_ref
+    else:
+        url = _make_testlogs_url(env, ci)
+    if url:
+        artifacts_trait.testlogs_artifact = {"url": url, "name": name}
+    label_urls = group.get("label_urls", {})
+    if label_urls:
+        artifacts_trait.testlogs_label_urls = dict(label_urls)
 
 
 # Upload every N new files per group
@@ -90,8 +116,39 @@ def _init_upload_state(state):
     """Ensure the upload state is initialized in the shared state dict."""
     if "_artifact_upload" not in state:
         state["_artifact_upload"] = {
-            "testlogs": {"last_count": 0, "version": 0, "prev_ref": None},
+            # label_urls: accumulated {label -> download_url} map for per-file uploads
+            # (CircleCI/GitLab). Empty for tar-based strategies (GitHub/Buildkite).
+            "testlogs": {"last_count": 0, "version": 0, "prev_ref": None, "label_urls": {}},
         }
+
+
+def _make_testlogs_url(env, ci):
+    """Construct the URL where test logs can be viewed/downloaded on this CI.
+
+    Returns the most direct link available without extra API calls:
+      GitHub:    run artifacts page (testlogs archive is listed there)
+      Buildkite: build page (artifacts appear in sidebar)
+      CircleCI:  job page (has an Artifacts tab)
+      GitLab:    job artifacts browse page
+
+    Returns "" if the necessary env vars are missing.
+    """
+    if ci == "github":
+        server = env.var("GITHUB_SERVER_URL") or "https://github.com"
+        repo   = env.var("GITHUB_REPOSITORY") or ""
+        run_id = env.var("GITHUB_RUN_ID") or ""
+        if repo and run_id:
+            return server + "/" + repo + "/actions/runs/" + run_id
+    elif ci == "buildkite":
+        return env.var("BUILDKITE_BUILD_URL") or ""
+    elif ci == "circleci":
+        return env.var("CIRCLE_BUILD_URL") or ""
+    elif ci == "gitlab":
+        project_url = env.var("CI_PROJECT_URL") or ""
+        job_id      = env.var("CI_JOB_ID") or ""
+        if project_url and job_id:
+            return project_url + "/-/jobs/" + job_id + "/artifacts/browse"
+    return ""
 
 
 def _artifact_upload_impl(ctx: FeatureContext):
@@ -101,8 +158,11 @@ def _artifact_upload_impl(ctx: FeatureContext):
     - build_end: final flush of any remaining files + upload profile
 
     Uses ctx.task.name and ctx.task.key to identify the current task invocation.
+    After a successful testlogs upload, sets ArtifactsTrait.testlogs_artifact so
+    that GithubStatusChecks can surface a "Download test logs" link.
     """
-    bazel_trait = ctx.traits[BazelTrait]
+    bazel_trait     = ctx.traits[BazelTrait]
+    artifacts_trait = ctx.traits[ArtifactsTrait]
 
     uploader = create_uploader(ctx.std.env)
     ci = detect_ci(ctx.std.env)
@@ -139,7 +199,11 @@ def _artifact_upload_impl(ctx: FeatureContext):
             entries = state.get("_test_entries", [])
             if len(entries) >= state["_artifact_upload"]["testlogs"]["last_count"] + _BATCH_SIZE:
                 name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
-                uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
+                success = uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
+                # Surface the artifact URL and per-file label URLs as soon as the first
+                # batch is available so GithubStatusChecks can add download links quickly.
+                if success:
+                    _update_artifacts_trait(artifacts_trait, state, ctx.std.env, ci, name)
 
     def _on_build_end(ctx, exit_code):
         if not is_local:
@@ -150,7 +214,11 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 _init_upload_state(state)
                 entries = state.get("_test_entries", [])
                 name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
-                uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
+                success = uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
+                # Always update after final upload so both the archive URL and per-file
+                # label URLs reflect the complete set of uploaded files.
+                if success:
+                    _update_artifacts_trait(artifacts_trait, state, ctx.std.env, ci, name)
 
                 task_name = ctx.task.name
                 task_key = ctx.task.key
@@ -187,6 +255,14 @@ def _artifact_upload_impl(ctx: FeatureContext):
                     print("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
             if is_local:
                 print("no CI detected, uploads skipped (dry run)")
+            artifact = artifacts_trait.testlogs_artifact
+            if artifact:
+                print("testlogs_artifact: " + artifact.get("name", "") + " -> " + artifact.get("url", ""))
+            label_urls = artifacts_trait.testlogs_label_urls
+            if label_urls:
+                print("testlogs_label_urls: " + str(len(label_urls)) + " entries")
+                for lbl, lbl_url in label_urls.items():
+                    print("  " + lbl + " -> " + lbl_url)
             print("------------------------------------")
 
     bazel_trait.build_event.append(_on_build_event)

@@ -1,0 +1,1491 @@
+"""Bazel build event result accumulation and Markdown rendering.
+
+Processes the BES event stream to track failed build actions, failed build
+targets, and test outcomes (failed / flaky / passed). Produces a Markdown
+summary suitable for GitHub check run output bodies.
+
+Designed to be reusable by any feature that wants to report Bazel results
+(GitHub status checks, Buildkite annotations, etc.).
+
+Event kinds consumed:
+  "build_started"            — resets all state; captures invocation UUID, tool version, command, start time
+  "structured_command_line"  — captures bes_results_url and reconstructs full command line strings
+  "build_metadata"           — captures --build_metadata / --bes_metadata key=value pairs
+  "workspace_status"         — captures workspace_status key=value pairs (BUILD_USER, etc.)
+  "configuration"            — captures cpu arch and compilation_mode (target config only)
+  "action_completed"         — accumulates failed build actions (up to MAX_FAILED_ACTIONS)
+  "target_completed"         — accumulates failed build targets
+  "test_result"              — captures per-attempt log URI and duration (keyed by label)
+  "test_summary"             — buckets tests into failed / flaky / passed; tracks duration
+  "build_metrics"            — captures action/target/package counts and timing
+  "aborted"                  — captures build abort reason and description
+
+Payload fields used:
+  BuildStarted.uuid, .build_tool_version, .command, .start_time_millis
+  CommandLine.command_line_label, .sections[].section_type (ChunkList|OptionList oneof)
+  BuildMetadata.metadata             — dict[str,str] of --build_metadata/--bes_metadata pairs
+  WorkspaceStatus.item               — repeated list of {key, value} structs (proto field is "item")
+  Configuration.cpu, .compilation_mode, .is_tool_configuration
+  ActionExecuted.success, .type, .stderr (File)
+  TargetComplete.success
+  TestResult.test_action_output (File list), .test_attempt_duration_millis
+  TestSummary.overall_status, .total_num_cached, .total_run_duration_millis (split by cached/executed)
+  BuildMetrics.action_summary.{actions_executed, actions_created}
+  BuildMetrics.timing_metrics.{wall_time_in_ms, cpu_time_in_ms}
+  BuildMetrics.target_metrics.targets_configured
+  BuildMetrics.package_metrics.packages_loaded
+  BuildMetrics.cumulative_metrics.{num_analyses, num_builds}
+  Aborted.abort_reason, .description
+  event.id.label       — target label for all event types
+
+Post-processing (call at build_end, not during streaming):
+  resolve_stderr(ctx, results)  — reads stderr files into action entries
+  compute_repro(results)        — builds "bazel build/test ..." repro commands
+"""
+
+# Maximum number of failed build actions to display (matches Marvin's MAX_BUILD_ERRORS).
+MAX_FAILED_ACTIONS = 5
+
+# Maximum number of test targets to track (matches Marvin's MAX_TEST_TARGETS).
+MAX_TEST_TARGETS = 100
+
+# Maximum characters to read from a stderr/log file for inline display.
+# Matches Marvin's MAX_MESSAGE_RUNES.
+MAX_STDERR_CHARS = 3000
+
+# Maximum characters for a repro command string.
+# Matches Marvin's MAX_REPRO_COMMAND_RUNES.
+MAX_REPRO_CHARS = 1000
+
+# Maximum number of successfully-built target labels to track.
+MAX_BUILT_TARGETS = 250
+
+# bb_clientd FUSE mount root used to resolve bytestream:// URIs.
+# Must match the path configured in the Aspect Workflows runner environment.
+_BB_CLIENTD_ROOT = "/var/cache/bb_clientd"
+
+# TestSummary overall_status values from BlazeTestStatus proto enum.
+# starbuf_derive::Enumeration converts CamelCase variant names to lowercase snake_case:
+#   BlazeTestStatus::Failed → "failed",  BlazeTestStatus::FailedToBuild → "failed_to_build"
+_TEST_STATUS_PASSED  = "passed"
+_TEST_STATUS_FLAKY   = "flaky"
+_TEST_STATUS_FAILED  = "failed"
+_TEST_STATUS_TIMEOUT = "timeout"
+_TEST_STATUS_NO_STATUS = "no_status"
+_TEST_STATUS_FAILED_TO_BUILD = "failed_to_build"
+_TEST_STATUS_INCOMPLETE = "incomplete"
+
+_FAILED_STATUSES = [_TEST_STATUS_FAILED, _TEST_STATUS_TIMEOUT, _TEST_STATUS_FAILED_TO_BUILD]
+
+
+def _format_duration_ms(ms):
+    """Format a duration in milliseconds as a human-readable string.
+
+    Examples: 500ms → "0.5s", 1500ms → "1.5s", 65000ms → "1m 5s"
+    """
+    if ms <= 0:
+        return "0s"
+    total_s = ms // 1000
+    frac_s  = (ms % 1000) // 100  # tenths of a second
+    if total_s < 60:
+        if frac_s > 0:
+            return str(total_s) + "." + str(frac_s) + "s"
+        return str(total_s) + "s"
+    minutes = total_s // 60
+    seconds = total_s % 60
+    if seconds > 0:
+        return str(minutes) + "m " + str(seconds) + "s"
+    return str(minutes) + "m"
+
+
+def _bes_get(obj, field, default = None):
+    """Safely access a single attribute on a BES event object.
+
+    Returns default if obj is None or if the attribute is not present on the
+    object (i.e. the field name doesn't match the deserialized proto schema).
+
+    This prevents AttributeError on malformed or schema-mismatched BES events.
+    For chained access (e.g. payload.stderr.file) call it twice:
+        uri = _bes_get(_bes_get(payload, "stderr"), "file", "")
+    """
+    if obj == None:
+        return default
+    return getattr(obj, field, default)
+
+
+def _file_uri_to_path(uri):
+    """Convert a file:// or bytestream:// URI to a local filesystem path.
+
+    bytestream:// URIs are resolved via the bb_clientd FUSE mount:
+      bytestream://host:port/blobs/<hash>/<size>
+      -> {_BB_CLIENTD_ROOT}/cas/{host}/blobs/sha256/file/{hash}-{size}
+    """
+    if not uri:
+        return uri
+    if uri.startswith("file://"):
+        return uri[len("file://"):]
+    if uri.startswith("bytestream://"):
+        rest = uri[len("bytestream://"):]
+        parts = rest.split("/")
+        host_port = parts[0]
+        host = host_port.split(":")[0]
+        blob_hash = parts[2]
+        blob_size = parts[3]
+        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
+    return uri
+
+
+def _read_file_truncated(ctx, uri, max_chars):
+    """Resolve a BES file URI and read up to max_chars characters.
+
+    Args:
+        ctx:       TaskContext (for ctx.std.fs)
+        uri:       file:// or bytestream:// URI from a BES event
+        max_chars: maximum number of characters to return
+
+    Returns:
+        (content: str, truncated: int) — truncated is the number of
+        additional characters present in the file beyond max_chars (0 if
+        the file fit entirely).
+    """
+    path = _file_uri_to_path(uri)
+    if not path or not ctx.std.fs.exists(path):
+        return ("", 0)
+    # Over-read slightly so we can detect whether the file was truncated.
+    raw = ctx.std.fs.open(path).read(max_chars + 100)
+    text = raw if type(raw) == "str" else ""
+    if len(text) > max_chars:
+        return (text[:max_chars], len(text) - max_chars)
+    return (text, 0)
+
+
+def _make_repro(operation, labels, max_chars):
+    """Build a 'bazel <operation> <labels>' repro command string.
+
+    Truncates the label list so the total command length does not exceed
+    max_chars characters.
+
+    Args:
+        operation: "build" or "test"
+        labels:    list of target labels to include
+        max_chars: maximum character length of the returned command
+
+    Returns:
+        (cmd: str, n_included: int) — cmd is the repro command (empty string
+        if no labels fit), n_included is how many labels were included.
+    """
+    base = "bazel " + operation + " "
+    included = []
+    used = len(base)
+    for label in labels:
+        needed = len(label) + 1  # +1 for the separating space
+        if used + needed > max_chars:
+            break
+        included.append(label)
+        used += needed
+    if not included:
+        return ("", 0)
+    return (base + " ".join(included), len(included))
+
+
+def init_results():
+    """Create a fresh results accumulator.
+
+    Returns:
+        dict to be stored in build state and passed to process_event /
+        resolve_stderr / compute_repro / render_markdown.
+    """
+    return {
+        # Failed build targets (not test-related): [{label}]
+        "failed_targets": [],
+        # Failed build actions (detailed):
+        #   [{label, mnemonic, stderr_uri, stderr_content, stderr_truncated}]
+        # Capped at MAX_FAILED_ACTIONS. stderr_uri is the file:// or
+        # bytestream:// URI; stderr_content is empty until resolve_stderr() is
+        # called; stderr_truncated is the number of chars omitted (0 = full).
+        "failed_actions": [],
+        # Total failed action count (may exceed len(failed_actions) due to cap)
+        "failed_actions_total": 0,
+        # Test outcomes:
+        #   [{label, cached, duration_ms}]
+        # duration_ms comes from test_summary.total_run_duration_millis.
+        "failed_tests": [],
+        "flaky_tests":  [],
+        # Aggregate test counts
+        "passed_test_total": 0,
+        "failed_test_total": 0,
+        "flaky_test_total":  0,
+        "cached_test_total": 0,
+        # Tests with at least one non-cached run (used in footer)
+        "executed_test_total": 0,
+        # Wall-clock time for executed tests only (ms), from total_run_duration_millis.
+        "executed_duration_ms": 0,
+        # Wall-clock time for cached tests (ms) — represents time saved by the cache.
+        "cached_duration_ms": 0,
+        # Per-test detail from test_result events (keyed by label; last attempt wins):
+        #   {label -> {"log_path": str, "duration_ms": int}}
+        # log_path is a local filesystem path (resolved from the BES URI), or ""
+        # if the file is remote / not yet available.
+        "test_details": {},
+        # Build action metrics from the build_metrics event
+        "actions_executed": 0,
+        "actions_cached": 0,
+        "actions_total": 0,
+        # Total number of targets that completed (success + failure), from counting
+        # target_completed events. Matches the "N targets" count in BuildBuddy.
+        # distinct from targets_configured (which is 0 when analysis is fully cached).
+        "targets_total": 0,
+        # Bazel invocation UUID from build_started event
+        "invocation_id": "",
+        # Base URL of the BES results viewer (e.g. "https://app.buildbuddy.io/invocation/").
+        # Parsed from structured_command_line events. Append invocation_id to get the
+        # full invocation URL. Empty when --bes_results_url is not set.
+        "bes_results_url": "",
+        # Bazel-measured wall-clock time in ms, from build_metrics.timing_metrics.
+        # More accurate than client-side timing (excludes CLI overhead). 0 until received.
+        "wall_time_ms": 0,
+        # Key=value pairs from the BES build_metadata event.
+        # Populated by --build_metadata and --bes_metadata Bazel flags.
+        # Standard keys produced by build_metadata.axl:
+        #   BRANCH, COMMIT_SHA, COMMIT_MESSAGE, COMMIT_AUTHOR, COMMIT_TIMESTAMP,
+        #   USER, CI, VCS, REPO, REPO_OWNER, TAG
+        # Custom keys: anything the user injects via --bes_metadata=MY_KEY=value
+        "metadata": {},
+        # Key=value pairs from the BES workspace_status event.
+        # Standard keys: BUILD_USER, BUILD_HOST, BUILD_TIMESTAMP
+        # Custom keys: whatever the workspace_status script emits
+        "workspace_status": {},
+        # Abort information from the aborted event
+        "aborted": False,
+        "abort_reason": "",       # snake_case proto enum, e.g. "interrupted", "analysis_failure"
+        "abort_description": "",  # human-readable description from BES
+        # Repro commands — populated by compute_repro(), empty until called.
+        "build_repro": "",        # "bazel build //a //b ..."
+        "build_repro_total": 0,   # total unique failed build labels (some may be omitted)
+        "test_repro": "",         # "bazel test //a //b ..."
+        "test_repro_total": 0,    # total failed test labels
+        # All successfully-built target labels (test + non-test), capped at MAX_BUILT_TARGETS.
+        "built_targets": [],
+        # Passed test targets [{label, cached, duration_ms}], capped within MAX_TEST_TARGETS
+        # total across failed_tests + flaky_tests + passed_tests.
+        "passed_tests": [],
+        # Command line strings keyed by Bazel's command_line_label
+        # (e.g. "original command line", "canonical command line", "effective command line").
+        # Populated from structured_command_line BES events.
+        "command_lines": {},
+        # Invocation IDs assigned by gRPC BES sinks when forwarding to the Aspect Web UI
+        # (or other backends). Set by build.axl/test.axl after the build completes.
+        # These differ from build_started.uuid and are needed for correct Web UI links.
+        "sink_invocation_ids": [],
+        # Bazel tool version and command from build_started (e.g. "9.0.1", "test")
+        "build_tool_version": "",
+        "build_command": "",
+        # Build start time in milliseconds since epoch (from build_started.start_time_millis)
+        "start_time_ms": 0,
+        # CPU time in ms from build_metrics.timing_metrics.cpu_time_in_ms
+        "cpu_time_ms": 0,
+        # Number of targets that were configured (from build_metrics.target_metrics)
+        "targets_configured": 0,
+        # Number of packages loaded (from build_metrics.package_metrics)
+        "packages_loaded": 0,
+        # Cumulative analyses/builds from build_metrics.cumulative_metrics (analysis cache age)
+        "num_analyses": 0,
+        "num_builds": 0,
+        # CPU architecture and compilation mode from the configuration event
+        "cpu_arch": "",
+        "compilation_mode": "",
+    }
+
+
+def process_event(results, event, debug=False):
+    """Update results in-place from a single build event.
+
+    All BES field accesses go through _bes_get() to guard against AttributeError
+    on schema-mismatched or malformed events. When debug=True a warning is printed
+    to stdout whenever an expected field is absent.
+
+    Args:
+        results: dict from init_results(), mutated in place
+        event:   BuildEvent from BazelTrait.build_event hook
+        debug:   when True, print warnings for missing expected BES fields
+
+    Returns:
+        True if results changed in a way that warrants a status check update,
+        False otherwise.
+    """
+    kind = event.kind
+
+    if kind == "build_started":
+        # Retry: reset everything so we start fresh with the new event stream.
+        fresh = init_results()
+        for k in fresh:
+            results[k] = fresh[k]
+        # Capture fields from build_started for invocation details.
+        payload = event.payload
+        uuid = _bes_get(payload, "uuid", "") or ""
+        if debug and not uuid:
+            print("warning: BES build_started event missing expected field 'uuid'")
+        results["invocation_id"]      = uuid
+        results["build_tool_version"] = _bes_get(payload, "build_tool_version", "") or ""
+        results["build_command"]      = _bes_get(payload, "command", "") or ""
+        results["start_time_ms"]      = _bes_get(payload, "start_time_millis", 0) or 0
+        return False
+
+    elif kind == "structured_command_line":
+        # Parse bes_results_url and reconstruct full command line strings from BES events.
+        # Bazel emits one event per label ("original command line", "canonical command line",
+        # "effective command line", etc.) — each is stored separately in command_lines.
+        payload = event.payload
+        cmd_label = (_bes_get(payload, "command_line_label", "") or "") if payload else ""
+        if payload:
+            sections = _bes_get(payload, "sections", None) or []
+            cmd_parts = []
+            for section in sections:
+                # section_type is the starbuf-serialized oneof: NoneOr<ChunkList|OptionList>.
+                # It allocates the inner ChunkList or OptionList value directly.
+                sec_type = _bes_get(section, "section_type", None)
+                if sec_type:
+                    # Try as ChunkList: inner field is "chunk" (repeated string)
+                    chunks = _bes_get(sec_type, "chunk", None)
+                    if chunks != None:
+                        for chunk in chunks:
+                            if chunk:
+                                cmd_parts.append(chunk)
+                    else:
+                        # Try as OptionList: inner field is "option" (repeated Option)
+                        for opt in (_bes_get(sec_type, "option", None) or []):
+                            name = _bes_get(opt, "option_name", "") or ""
+                            if name == "bes_results_url":
+                                val = _bes_get(opt, "option_value", "") or ""
+                                if val:
+                                    results["bes_results_url"] = val
+                                    if debug:
+                                        print("debug: captured bes_results_url=" + val)
+                            combined = _bes_get(opt, "combined_form", "") or ""
+                            if combined:
+                                cmd_parts.append(combined)
+                            elif name:
+                                val = _bes_get(opt, "option_value", "") or ""
+                                if val:
+                                    cmd_parts.append("--" + name + "=" + val)
+                                else:
+                                    cmd_parts.append("--" + name)
+            if cmd_parts and cmd_label:
+                cmd_str = " ".join(cmd_parts)
+                results["command_lines"][cmd_label] = cmd_str
+                if debug:
+                    print("debug: command_line[" + cmd_label + "] len=" + str(len(cmd_str)))
+        return False
+
+    elif kind == "build_metadata":
+        # Merge --build_metadata and --bes_metadata key=value pairs into results.
+        # This event arrives once per invocation, early in the stream.
+        # No live update needed — metadata is context, not a status change.
+        payload = event.payload
+        if payload:
+            payload_meta = _bes_get(payload, "metadata", None)
+            if payload_meta:
+                for k, v in payload_meta.items():
+                    if k and v:
+                        results["metadata"][k] = v
+        return False
+
+    elif kind == "workspace_status":
+        # Capture workspace status variables (BUILD_USER, BUILD_HOST, etc.).
+        # The proto field is `item` — a repeated list of {key, value} structs.
+        payload = event.payload
+        if payload:
+            for ws_item in (_bes_get(payload, "item", None) or []):
+                if ws_item:
+                    key = _bes_get(ws_item, "key", "") or ""
+                    val = _bes_get(ws_item, "value", "") or ""
+                    if key and val:
+                        results["workspace_status"][key] = val
+        return False
+
+    elif kind == "action_completed":
+        payload = event.payload
+        success = _bes_get(payload, "success", None)
+        label   = _bes_get(event.id, "label", "") or ""
+        if debug and success == None:
+            print("warning: BES action_completed event missing expected field 'success' (label=" + label + ")")
+        if not success:
+            results["failed_actions_total"] += 1
+            if len(results["failed_actions"]) < MAX_FAILED_ACTIONS:
+                stderr_obj = _bes_get(payload, "stderr", None)
+                stderr_uri = _bes_get(stderr_obj, "file", "") or ""
+                mnemonic   = _bes_get(payload, "type", "") or ""
+                results["failed_actions"].append({
+                    "label":            label,
+                    "mnemonic":         mnemonic,
+                    "stderr_uri":       stderr_uri,
+                    "stderr_content":   "",   # populated by resolve_stderr()
+                    "stderr_truncated": 0,
+                })
+                return True
+        return False
+
+    elif kind == "target_completed":
+        results["targets_total"] += 1
+        payload = event.payload
+        success = _bes_get(payload, "success", None)
+        label   = _bes_get(event.id, "label", "") or ""
+        if debug and success == None:
+            print("warning: BES target_completed event missing expected field 'success' (label=" + label + ")")
+        if not success:
+            results["failed_targets"].append({"label": label})
+            return True
+        else:
+            if label and len(results["built_targets"]) < MAX_BUILT_TARGETS:
+                results["built_targets"].append({"label": label})
+        return False
+
+    elif kind == "test_result":
+        # Capture the log file URI and duration for the most recent attempt.
+        # test_result fires once per shard/run/attempt; the last write wins.
+        # test_summary (processed later) provides the authoritative final outcome.
+        label   = _bes_get(event.id, "label", "") or ""
+        payload = event.payload
+        log_uri = ""
+        if payload:
+            for output in (_bes_get(payload, "test_action_output", None) or []):
+                if output and _bes_get(output, "name", "") == "test.log":
+                    log_uri = _bes_get(output, "file", "") or ""
+                    break
+        duration_ms = (_bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
+        results["test_details"][label] = {
+            "log_path":    _file_uri_to_path(log_uri),
+            "duration_ms": duration_ms,
+        }
+        # No status update — test_summary provides the authoritative signal.
+        return False
+
+    elif kind == "test_summary":
+        payload     = event.payload
+        status      = _bes_get(payload, "overall_status", "") or ""
+        label       = _bes_get(event.id, "label", "") or ""
+        num_cached  = _bes_get(payload, "total_num_cached", 0) or 0
+        # total_run_duration_millis is deprecated in the proto but still populated by Bazel.
+        # Bucket duration by whether the test actually ran or was served from cache.
+        duration_ms = _bes_get(payload, "total_run_duration_millis", 0) or 0
+        if debug and not status:
+            print("warning: BES test_summary event missing expected field 'overall_status' (label=" + label + ")")
+        if debug and not label:
+            print("warning: BES test_summary event missing expected field 'id.label'")
+        cached = num_cached > 0
+        if cached:
+            if duration_ms:
+                results["cached_duration_ms"] += duration_ms
+        else:
+            results["executed_test_total"] += 1
+            if duration_ms:
+                results["executed_duration_ms"] += duration_ms
+
+        total_tracked = (len(results["failed_tests"]) +
+                         len(results["flaky_tests"]) +
+                         len(results["passed_tests"]))
+
+        if status in _FAILED_STATUSES:
+            results["failed_test_total"] += 1
+            if total_tracked < MAX_TEST_TARGETS:
+                results["failed_tests"].append({
+                    "label":       label,
+                    "cached":      cached,
+                    "duration_ms": duration_ms,
+                })
+            return True
+        elif status == _TEST_STATUS_FLAKY:
+            results["flaky_test_total"] += 1
+            if total_tracked < MAX_TEST_TARGETS:
+                results["flaky_tests"].append({
+                    "label":       label,
+                    "cached":      cached,
+                    "duration_ms": duration_ms,
+                })
+            return True
+        else:
+            # PASSED, NO_STATUS, INCOMPLETE — count and record label for the details list
+            results["passed_test_total"] += 1
+            if cached:
+                results["cached_test_total"] += 1
+            if label and total_tracked < MAX_TEST_TARGETS:
+                results["passed_tests"].append({
+                    "label":       label,
+                    "cached":      cached,
+                    "duration_ms": duration_ms,
+                })
+        return False
+
+    elif kind == "build_metrics":
+        payload        = event.payload
+        action_summary = _bes_get(payload, "action_summary", None)
+        if action_summary:
+            executed = _bes_get(action_summary, "actions_executed", 0) or 0
+            # Use total - executed rather than remote_cache_hits (deprecated) because
+            # this captures local cache hits too, giving a more accurate cached count.
+            total    = _bes_get(action_summary, "actions_created", 0) or 0
+            results["actions_executed"] = executed
+            results["actions_cached"]   = total - executed if total > executed else 0
+            results["actions_total"]    = total
+        elif debug:
+            print("warning: BES build_metrics event missing expected field 'action_summary'")
+        timing_metrics = _bes_get(payload, "timing_metrics", None)
+        if timing_metrics:
+            wall_time = _bes_get(timing_metrics, "wall_time_in_ms", 0) or 0
+            if wall_time > 0:
+                results["wall_time_ms"] = wall_time
+            cpu_time = _bes_get(timing_metrics, "cpu_time_in_ms", 0) or 0
+            if cpu_time > 0:
+                results["cpu_time_ms"] = cpu_time
+        target_metrics = _bes_get(payload, "target_metrics", None)
+        if target_metrics:
+            configured = _bes_get(target_metrics, "targets_configured", 0) or 0
+            if configured > 0:
+                results["targets_configured"] = configured
+        package_metrics = _bes_get(payload, "package_metrics", None)
+        if package_metrics:
+            loaded = _bes_get(package_metrics, "packages_loaded", 0) or 0
+            if loaded > 0:
+                results["packages_loaded"] = loaded
+        cumulative_metrics = _bes_get(payload, "cumulative_metrics", None)
+        if cumulative_metrics:
+            num_analyses = _bes_get(cumulative_metrics, "num_analyses", 0) or 0
+            num_builds   = _bes_get(cumulative_metrics, "num_builds", 0) or 0
+            if num_analyses > 0:
+                results["num_analyses"] = num_analyses
+            if num_builds > 0:
+                results["num_builds"] = num_builds
+        if debug:
+            print("debug: build_metrics wall_time_ms=" + str(results["wall_time_ms"]) +
+                  " cpu_time_ms=" + str(results["cpu_time_ms"]) +
+                  " targets_configured=" + str(results["targets_configured"]) +
+                  " packages_loaded=" + str(results["packages_loaded"]))
+        return True
+
+    elif kind == "configuration":
+        # Capture cpu arch and compilation_mode from the target (non-tool) configuration.
+        # Fires once per build configuration; skip exec/host tool configurations.
+        payload = event.payload
+        if payload:
+            is_tool = _bes_get(payload, "is_tool_configuration", False)
+            if not is_tool:
+                cpu  = _bes_get(payload, "cpu", "") or ""
+                mode = _bes_get(payload, "compilation_mode", "") or ""
+                if cpu:
+                    results["cpu_arch"] = cpu
+                if mode:
+                    results["compilation_mode"] = mode
+        return False
+
+    elif kind == "aborted":
+        results["aborted"] = True
+        payload = event.payload
+        if payload:
+            results["abort_reason"]      = _bes_get(payload, "abort_reason", "") or ""
+            results["abort_description"] = _bes_get(payload, "description",   "") or ""
+        return True
+
+    return False
+
+
+def resolve_stderr(ctx, results):
+    """Read stderr file content into each captured failed action entry.
+
+    Call this once at build_end (after all events have been processed) rather
+    than during streaming, so file I/O doesn't delay live status check updates.
+
+    Args:
+        ctx:     TaskContext (for ctx.std.fs)
+        results: dict from init_results(), updated in place
+    """
+    for action in results["failed_actions"]:
+        uri = action.get("stderr_uri", "")
+        if uri and not action.get("stderr_content"):
+            content, truncated = _read_file_truncated(ctx, uri, MAX_STDERR_CHARS)
+            action["stderr_content"]   = content
+            action["stderr_truncated"] = truncated
+
+
+def compute_repro(results):
+    """Compute 'bazel build/test ...' repro commands from accumulated results.
+
+    Call this once at build_end (after all events have been processed).
+    Populates results["build_repro"], results["build_repro_total"],
+    results["test_repro"], and results["test_repro_total"] in place.
+
+    The build repro deduplicates action labels to unique target labels
+    (multiple failed actions may point to the same target).
+
+    Args:
+        results: dict from init_results(), updated in place
+    """
+    # Build repro: unique labels from failed_actions, preserving insertion order.
+    seen = {}
+    build_labels = []
+    for a in results["failed_actions"]:
+        lbl = a.get("label", "")
+        if lbl and lbl not in seen:
+            seen[lbl] = True
+            build_labels.append(lbl)
+    # Fall back to failed_targets when there are no action-level labels.
+    if not build_labels:
+        build_labels = [t["label"] for t in results["failed_targets"]]
+
+    results["build_repro_total"] = len(build_labels)
+    cmd, _ = _make_repro("build", build_labels, MAX_REPRO_CHARS)
+    results["build_repro"] = cmd
+
+    # Test repro: labels of all failed tests (already capped at MAX_TEST_TARGETS).
+    test_labels = [t["label"] for t in results["failed_tests"]]
+    results["test_repro_total"] = len(test_labels)
+    cmd, _ = _make_repro("test", test_labels, MAX_REPRO_CHARS)
+    results["test_repro"] = cmd
+
+
+_SUMMARY_TEMPLATE = """
+{%- assign has_failures = false -%}
+{%- if results.failed_actions.size > 0 -%}{%- assign has_failures = true -%}{%- endif -%}
+{%- if results.failed_tests.size > 0 -%}{%- assign has_failures = true -%}{%- endif -%}
+{%- if results.flaky_tests.size > 0 -%}{%- assign has_failures = true -%}{%- endif -%}
+
+{%- if results.aborted %}
+> **Build aborted**{% if results.abort_reason != "" %} (`{{ results.abort_reason }}`){% endif %}{% if results.abort_description != "" %}: {{ results.abort_description }}{% endif %}
+
+{% endif -%}
+
+{%- if results.failed_actions.size > 0 %}
+### Build failures
+
+{% for action in results.failed_actions -%}
+- `{{ action.label }}` (`{{ action.mnemonic }}`){% if action.stderr_content != "" %}
+<details><summary>Error output</summary>
+<pre>{{ action.stderr_content }}</pre>
+{%- if action.stderr_truncated > 0 %}
+_{{ action.stderr_truncated }} chars truncated._
+{%- endif %}
+</details>
+{%- endif %}
+{% endfor -%}
+{%- if results.failed_actions_total > results.failed_actions.size %}
+_{{ results.failed_actions_total | minus: results.failed_actions.size }} more action(s) failed._
+{% endif -%}
+{%- if results.build_repro != "" %}
+```
+{{ results.build_repro }}
+```
+{%- endif %}
+{%- endif -%}
+
+{%- if results.failed_tests.size > 0 %}
+<details{% if results.failed_tests.size <= 20 %} open{% endif %}>
+<summary>Failed tests ({{ results.failed_test_total }})</summary>
+<pre>
+{%- for t in results.failed_tests %}
+{{ t.label }}{% if t.duration_ms_fmt != "" %} ({{ t.duration_ms_fmt }}){% endif %}{% if t.cached %} [cached]{% endif %}
+{%- endfor %}
+</pre>
+</details>
+{%- if results.test_repro != "" %}
+```
+{{ results.test_repro }}
+```
+{%- endif %}
+{% endif -%}
+
+{%- if results.flaky_tests.size > 0 %}
+<details>
+<summary>Flaky tests ({{ results.flaky_test_total }})</summary>
+<pre>
+{%- for t in results.flaky_tests %}
+{{ t.label }}{% if t.duration_ms_fmt != "" %} ({{ t.duration_ms_fmt }}){% endif %}{% if t.cached %} [cached]{% endif %}
+{%- endfor %}
+</pre>
+</details>
+{% endif -%}
+
+{%- if results.passed_test_total > 0 and results.failed_test_total == 0 and results.flaky_test_total == 0 %}
+{{ results.passed_test_total }} test target{% if results.passed_test_total > 1 %}s{% endif %} passed{% if results.cached_test_total > 0 %} ({{ results.cached_test_total }} cached){% endif %}.
+{%- elsif results.passed_test_total > 0 %}
+{{ results.passed_test_total }} test target{% if results.passed_test_total > 1 %}s{% endif %} passed{% if results.cached_test_total > 0 %} ({{ results.cached_test_total }} cached){% endif %}.
+{%- endif -%}
+
+{%- assign has_stats = false -%}
+{%- if results.executed_test_total > 0 or results.cached_test_total > 0 or results.actions_total > 0 -%}
+{%- assign has_stats = true -%}
+{%- endif -%}
+
+{%- if has_stats %}
+
+---
+
+{%- if results.executed_test_total > 0 %}
+_{{ results.executed_test_total }} test target{% if results.executed_test_total > 1 %}s{% endif %} executed{% if results.executed_duration != "" %} in {{ results.executed_duration }}{% endif %}._
+{%- endif %}
+{%- if results.cached_test_total > 0 %}
+_{{ results.cached_test_total }} test target{% if results.cached_test_total > 1 %}s{% endif %} cached{% if results.cached_duration != "" %} (saved {{ results.cached_duration }}){% endif %}._
+{%- endif %}
+{%- if results.actions_total > 0 %}
+{%- if results.actions_executed > 0 %}
+_{{ results.actions_executed }} build action{% if results.actions_executed > 1 %}s{% endif %} executed{% if results.actions_cached > 0 %}, {{ results.actions_cached }} cached{% endif %}._
+{%- elsif results.actions_cached > 0 %}
+_All {{ results.actions_cached }} build action{% if results.actions_cached > 1 %}s{% endif %} (100%) cached._
+{%- endif %}
+{%- endif %}
+{%- endif -%}
+
+{%- if links.ci_label != "" or links.aspect_url != "" %}
+
+---
+
+{%- if links.ci_label != "" and links.ci_url != "" %}
+[View on {{ links.ci_label }}]({{ links.ci_url }}){% if links.aspect_url != "" %} · {% endif %}
+{%- endif %}
+{%- if links.aspect_url != "" %}
+[View invocation on Aspect]({{ links.aspect_url }})
+{%- endif %}
+{%- endif -%}
+"""
+
+
+def render_markdown(ctx, results, links = None):
+    """Render a Markdown summary from accumulated results.
+
+    Args:
+        ctx:     TaskContext (for ctx.template.liquid)
+        results: dict from init_results(), updated by process_event
+        links:   optional dict with keys ci_label, ci_url, aspect_url
+                 for a footer linking to the CI job and Aspect Web UI
+
+    Returns:
+        str — Markdown suitable for a GitHub check run summary field (max 65535 chars)
+    """
+    data = dict(results)
+    # Pre-format durations so the Liquid template can render them as plain strings.
+    data["executed_duration"] = _format_duration_ms(data["executed_duration_ms"]) if data["executed_duration_ms"] > 0 else ""
+    data["cached_duration"]   = _format_duration_ms(data["cached_duration_ms"])   if data["cached_duration_ms"]   > 0 else ""
+
+    # Pre-format per-test durations (Liquid has no duration filter).
+    for t in data.get("failed_tests", []):
+        t["duration_ms_fmt"] = _format_duration_ms(t.get("duration_ms", 0)) if t.get("duration_ms", 0) > 0 else ""
+    for t in data.get("flaky_tests", []):
+        t["duration_ms_fmt"] = _format_duration_ms(t.get("duration_ms", 0)) if t.get("duration_ms", 0) > 0 else ""
+
+    links_data = links or {"ci_label": "", "ci_url": "", "aspect_url": ""}
+    return ctx.template.liquid(_SUMMARY_TEMPLATE, data = {"results": data, "links": links_data})
+
+
+def summary_title(results, status):
+    """Build a short title string for the check run output.
+
+    Args:
+        results: dict from init_results()
+        status:  "running" | "failing" | "passed" | "failed"
+
+    Returns:
+        str — max ~255 chars, suitable for check run output.title
+    """
+    parts = []
+    if results["failed_actions_total"] > 0:
+        parts.append(str(results["failed_actions_total"]) + " build failure(s)")
+    if results["failed_test_total"] > 0:
+        parts.append(str(results["failed_test_total"]) + " failed")
+    if results["flaky_test_total"] > 0:
+        parts.append(str(results["flaky_test_total"]) + " flaky")
+    if parts:
+        return ", ".join(parts)
+    if results["aborted"]:
+        reason = results["abort_reason"]
+        if reason and reason != "build_failed":
+            return "Build aborted (" + reason + ")"
+        return "Build aborted"
+    if status in ("running", "failing"):
+        return "In progress"
+    if status == "passed":
+        passed = results["passed_test_total"]
+        if passed > 0:
+            cached = results["cached_test_total"]
+            if cached > 0:
+                return str(passed) + " test(s) passed (" + str(cached) + " cached)"
+            return str(passed) + " test(s) passed"
+        return "Passed"
+    return "Failed"
+
+
+def now_ms(ctx):
+    """Return current time as milliseconds since epoch.
+
+    Used for rate-limiting status check updates.
+
+    Uses `date '+%s000'` (epoch seconds + literal "000") rather than `%3N`
+    because macOS date does not support the `%N` nanoseconds format.
+    The result is rounded to the nearest second, which is sufficient for the
+    1-second default throttle interval.
+    """
+    result = ctx.std.process.command("date").args(["+%s000"]).stdout("piped").spawn().wait_with_output()
+    if result.status.code == 0:
+        val = result.stdout.strip()
+        if val:
+            return int(val)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Check run rendering — Jinja2 templates and data builders for the
+# "bazel_results" task_update kind.
+#
+# render_check_output() is the public entry point. Callers pass:
+#   ctx       — TaskContext
+#   results   — dict from init_results(), updated by process_event
+#   status    — "running" | "failing" | "passed" | "failed"
+#   render_ctx — feature-supplied display context (see render_check_output docstring)
+#   links     — dict with keys ci_label, ci_url, aspect_url, bes_invocation_url
+#   templates — optional override dict from GitHubStatusChecksTrait.templates
+#   metadata_keys — optional list of extra BES metadata keys to surface
+# ---------------------------------------------------------------------------
+
+# Standard BES metadata keys that have dedicated template slots.
+# These are excluded from the extra_meta list even when metadata_keys=["*"].
+_RENDER_META_STANDARD_KEYS = [
+    "BRANCH", "COMMIT_SHA", "TAG", "COMMIT_MESSAGE",
+    "COMMIT_AUTHOR", "COMMIT_AUTHOR_EMAIL", "COMMIT_TIMESTAMP",
+    "USER", "CI", "VCS", "REPO", "REPO_OWNER",
+]
+
+
+def _wrap_command_line(cmd):
+    """Wrap a command line at -- flag boundaries for readability in <pre> blocks.
+
+    Splits on ' --' and re-joins with ' \\\n  --' so each flag starts on its own
+    line with a shell line-continuation backslash.
+
+    Example:
+      bazel --startup_flag build --flag1 --flag2=val
+      →
+      bazel --startup_flag build \
+        --flag1 \
+        --flag2=val
+    """
+    parts = cmd.split(" --")
+    if len(parts) <= 1:
+        return cmd
+    lines = [parts[0]]
+    for part in parts[1:]:
+        lines.append("  --" + part)
+    return " \\\n".join(lines)
+
+
+def _render_bes_url(results):
+    """Construct the full BES invocation URL from bes_results_url + invocation_id."""
+    base = results.get("bes_results_url", "")
+    inv  = results.get("invocation_id", "")
+    if not base or not inv:
+        return ""
+    return (base if base.endswith("/") else base + "/") + inv
+
+
+def _format_run_date(ctx, epoch_ms):
+    """Format an epoch timestamp (milliseconds) as a human-readable date string.
+
+    Uses the system `date` command with cross-platform flags:
+      macOS: date -r <seconds>
+      Linux: date -d @<seconds>
+
+    Returns "" if epoch_ms is 0 or the command fails.
+    """
+    if not epoch_ms or epoch_ms <= 0:
+        return ""
+    epoch_s = str(epoch_ms // 1000)
+    result = ctx.std.process.command("sh").args([
+        "-c",
+        "date -r " + epoch_s + " 2>/dev/null || date -d '@" + epoch_s + "'",
+    ]).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code == 0:
+        val = result.stdout.strip()
+        if val:
+            return val
+    return ""
+
+
+def _build_invocation_rows(ctx, results, render_ctx, status, run_date = ""):
+    """Build dynamic invocation detail rows for the SUMMARY_TEMPLATE.
+
+    Returns a list of rows, where each row is a list of {icon, value} dicts.
+    Empty values are omitted; empty rows are excluded.
+
+    Row 0: status, timing, user, host, tool
+    Row 1: targets, actions, packages, analysis cache age, cpu arch, mode,
+           test cache hit rate (only when test_summary events were received)
+    Row 2: build UUID, VCS info (branch, commit, tag)
+    Row 3: run date
+    Row 4: links (CI system, BES invocation viewer)
+    """
+    ws   = results.get("workspace_status") or {}
+    meta = results.get("metadata") or {}
+
+    def _item(icon, value):
+        return {"icon": icon, "value": value}
+
+    _status_icons = {
+        "passed":  "✅",
+        "failed":  "❌",
+        "failing": "⚠️",
+        "running": "🔄",
+    }
+    _status_labels = {
+        "passed":  "Succeeded",
+        "failed":  "Failed",
+        "failing": "Failing",
+        "running": "Running",
+    }
+
+    # --- Row 0: status, timing, user, host, tool ---
+    row0 = [_item(_status_icons.get(status, "🔄"), _status_labels.get(status, "Running"))]
+
+    wall_time_ms = results.get("wall_time_ms", 0)
+    if wall_time_ms > 0:
+        row0.append(_item("⏱", _format_duration_ms(wall_time_ms)))
+
+    cpu_time_ms = results.get("cpu_time_ms", 0)
+    if cpu_time_ms > 0:
+        row0.append(_item("⚙️", _format_duration_ms(cpu_time_ms) + " CPU"))
+
+    build_user = ws.get("BUILD_USER", "") or meta.get("USER", "")
+    if build_user:
+        row0.append(_item("👤", build_user))
+
+    build_host = ws.get("BUILD_HOST", "")
+    if build_host:
+        row0.append(_item("🖥", build_host))
+
+    tool_version = results.get("build_tool_version", "")
+    build_cmd    = results.get("build_command", "")
+    if tool_version or build_cmd:
+        tool_str = "bazel"
+        if tool_version:
+            tool_str += " v" + tool_version
+        if build_cmd:
+            tool_str += " " + build_cmd
+        row0.append(_item("🔧", tool_str))
+
+    # --- Row 1: targets, actions, packages, analysis cache age, cpu, mode,
+    #            test cache hit rate ---
+    row1 = []
+
+    targets_total      = results.get("targets_total", 0)
+    targets_configured = results.get("targets_configured", 0)
+    if targets_total > 0:
+        t_str = str(targets_total) + " target" + ("s" if targets_total != 1 else "")
+        if targets_configured > 0:
+            t_str += " (" + str(targets_configured) + " configured)"
+        row1.append(_item("📦", t_str))
+
+    actions_executed = results.get("actions_executed", 0)
+    actions_total    = results.get("actions_total", 0)
+    if actions_executed > 0 or actions_total > 0:
+        a_str = str(actions_executed) + " action" + ("s" if actions_executed != 1 else "")
+        if actions_total > 0:
+            a_str += " (" + str(actions_total) + " created)"
+        row1.append(_item("⚡", a_str))
+
+    packages = results.get("packages_loaded", 0)
+    if packages > 0:
+        row1.append(_item("📂", str(packages) + " package" + ("s" if packages != 1 else "")))
+
+    num_analyses = results.get("num_analyses", 0)
+    num_builds   = results.get("num_builds", 0)
+    if num_analyses > 0 or num_builds > 0:
+        # Analysis cache age: cumulative analyses/builds in the current Bazel server session.
+        # High values indicate a warm analysis cache.
+        row1.append(_item("🔬", str(num_analyses) + " analyses, " + str(num_builds) + " builds"))
+
+    cpu_arch = results.get("cpu_arch", "")
+    if cpu_arch:
+        row1.append(_item("💻", cpu_arch))
+
+    mode = results.get("compilation_mode", "")
+    if mode:
+        row1.append(_item("🏎", mode))
+
+    # Test cache hit rate — only shown when test_summary events were received,
+    # because for build-only invocations we don't have reliable per-test cache data.
+    pass_t  = results.get("passed_test_total", 0)
+    fail_t  = results.get("failed_test_total", 0)
+    flaky_t = results.get("flaky_test_total", 0)
+    total_tests = pass_t + fail_t + flaky_t
+    if total_tests > 0:
+        cached_t  = results.get("cached_test_total", 0)
+        cache_pct = (cached_t * 100) // total_tests
+        row1.append(_item("⊘", str(cache_pct) + "% test cache hit"))
+
+    # --- Row 2: build UUID, VCS ---
+    row2 = []
+
+    invocation_id = results.get("invocation_id", "")
+    if invocation_id:
+        row2.append(_item("🔑", invocation_id))
+
+    branch = meta.get("BRANCH", "")
+    if branch:
+        row2.append(_item("🌿", branch))
+
+    commit_sha = meta.get("COMMIT_SHA", "")
+    if commit_sha:
+        row2.append(_item("✏️", commit_sha))
+
+    tag = meta.get("TAG", "")
+    if tag:
+        row2.append(_item("🏷", tag))
+
+    # --- Row 3: run date ---
+    row3 = []
+    if run_date:
+        row3.append(_item("📅", run_date))
+
+    # --- Row 4: links (CI system + BES/Aspect Web UI invocation viewer) ---
+    row4 = []
+
+    bes_url = _render_bes_url(results)
+    if bes_url:
+        row4.append(_item("🔗", "[View invocation](" + bes_url + ")"))
+
+    env = ctx.std.env
+    if env.var("GITHUB_ACTIONS"):
+        server   = env.var("GITHUB_SERVER_URL") or "https://github.com"
+        repo     = env.var("GITHUB_REPOSITORY") or ""
+        run_id   = env.var("GITHUB_RUN_ID") or ""
+        if repo and run_id:
+            row4.append(_item("🐙", "[GitHub Actions](" + server + "/" + repo + "/actions/runs/" + run_id + ")"))
+    elif env.var("BUILDKITE"):
+        build_url = env.var("BUILDKITE_BUILD_URL") or ""
+        step_id   = env.var("BUILDKITE_STEP_ID") or ""
+        if build_url:
+            bk_url = build_url + "/steps/canvas?sid=" + step_id if step_id else build_url
+            row4.append(_item("🏗", "[Buildkite](" + bk_url + ")"))
+    elif env.var("CIRCLECI"):
+        ci_url = env.var("CIRCLE_BUILD_URL") or ""
+        if ci_url:
+            row4.append(_item("⭕", "[CircleCI](" + ci_url + ")"))
+    elif env.var("GITLAB_CI"):
+        ci_url = env.var("CI_JOB_URL") or ""
+        if ci_url:
+            row4.append(_item("🦊", "[GitLab CI](" + ci_url + ")"))
+
+    rows = []
+    for row in [row0, row1, row2, row3, row4]:
+        if row:
+            rows.append(row)
+    return rows
+
+
+SUMMARY_TEMPLATE = """
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/bazel/bazel-original.svg" height="14" /> **`{{ target_pattern }}`**{%- if commit_msg %} · {{ commit_msg }}{%- endif %}{%- if short_sha %} · :pencil2: `{{ short_sha }}`{%- endif %}{%- if branch %} · :herb: `{{ branch }}`{%- endif %}{%- if tag %} · :label: `{{ tag }}`{%- endif %}
+{%- if extra_meta %}
+{% for item in extra_meta %}`{{ item.key }}` = `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}
+{%- endif %}
+{%- if detail_rows %}
+{% for row in detail_rows %}
+{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}
+{%- endfor %}
+{%- endif %}
+
+---
+
+:speech_balloon: **Last update:** `{{ last_update }}`
+"""
+
+DETAILS_TEMPLATE = """
+{% if aborted %}
+> :warning: **Build aborted**{% if abort_reason %} (`{{ abort_reason }}`){% endif %}{% if abort_description %}: {{ abort_description }}{% endif %}
+
+{% endif %}
+{% if failed_actions %}
+## Build failures
+<img src="{{ build_badge_url }}" alt="build" />
+
+{% for action in failed_actions -%}
+- `{{ action.label }}` (`{{ action.mnemonic }}`)
+{% if action.stderr_content -%}
+<details><summary>Error output</summary>
+<pre>{{ action.stderr_content | e }}</pre>
+{% if action.stderr_truncated %}_{{ action.stderr_truncated }} chars truncated._{% endif %}
+</details>
+{% endif -%}
+{% endfor -%}
+{% if failed_actions_overflow %}
+_{{ failed_actions_overflow }} more action(s) failed._
+{% endif %}
+{% if build_repro %}
+**Reproduce:**
+```
+{{ build_repro }}
+```
+{% endif %}
+{% endif %}
+{% if failed_tests or flaky_tests %}
+## Test failures
+<img src="{{ test_badge_url }}" alt="tests" />
+{% if testlogs_artifact_url %}:paperclip: [Download test logs]({{ testlogs_artifact_url }}){% if testlogs_artifact_name %} (`{{ testlogs_artifact_name }}`){% endif %}
+
+{% endif %}
+{% if failed_tests %}
+**Failed ({{ failed_test_total }}):**
+
+{% for t in failed_tests -%}
+- {% if t.log_url %}[`{{ t.label }}`]({{ t.log_url }}){% else %}`{{ t.label }}`{% endif %}{% if t.duration %} ({{ t.duration }}){% endif %}{% if t.cached %} [cached]{% endif %}
+{% endfor %}
+{% endif %}
+{% if flaky_tests %}
+**Flaky ({{ flaky_test_total }}):**
+
+{% for t in flaky_tests -%}
+- {% if t.log_url %}[`{{ t.label }}`]({{ t.log_url }}){% else %}`{{ t.label }}`{% endif %}{% if t.duration %} ({{ t.duration }}){% endif %}{% if t.cached %} [cached]{% endif %}
+{% endfor %}
+{% endif %}
+{% if test_repro %}
+**Reproduce:**
+```
+{{ test_repro }}
+```
+{% endif %}
+{% elif passed_test_total != "0" %}
+## Tests
+<img src="{{ test_badge_url }}" alt="tests" />
+
+{{ passed_test_total }} test target{% if passed_test_total != "1" %}s{% endif %} passed{% if cached_test_total != "0" %} ({{ cached_test_total }} cached){% endif %}.
+{% if testlogs_artifact_url %}:paperclip: [Download test logs]({{ testlogs_artifact_url }}){% if testlogs_artifact_name %} (`{{ testlogs_artifact_name }}`){% endif %}
+{% endif %}
+
+{% endif %}
+{% if actions_total != "0" or targets_total != "0" %}
+## Build stats
+{% if cache_badge_url %}<img src="{{ cache_badge_url }}" alt="cache" />
+{% endif %}
+| &nbsp; | &nbsp; |
+|---|---|
+{% if targets_total != "0" %}| Targets | {{ targets_total }} |
+{% endif %}{% if actions_total != "0" %}| Actions executed | {{ actions_executed }} |
+| Actions cached | {{ actions_cached }} |
+| Total actions | {{ actions_total }} |
+{% endif %}
+{% endif %}
+{% if passed_tests %}
+<details>
+<summary>Passed: {{ passed_test_total }} test{{ "s" if passed_test_total != "1" else "" }}{% if cached_test_total != "0" %} ({{ cached_test_total }} cached){% endif %}</summary>
+<pre>
+{%- for t in passed_tests %}
+{{ t.label }}{% if t.duration %} ({{ t.duration }}){% endif %}{% if t.cached %} [cached]{% endif %}
+{%- endfor %}
+{% if passed_test_overflow %}_{{ passed_test_overflow }} more not shown._{% endif %}</pre>
+</details>
+
+{% endif %}
+{% if built_targets %}
+<details>
+<summary>{{ targets_total }} target{{ "s" if targets_total != "1" else "" }} built</summary>
+<pre>
+{%- for t in built_targets %}
+{{ t.label }}
+{%- endfor %}
+{% if built_targets_overflow %}_{{ built_targets_overflow }} more not shown._{% endif %}</pre>
+</details>
+
+{% endif %}
+{% if command_lines %}
+## Command lines
+{% for cl in command_lines %}
+<details>
+<summary>{{ cl.label if cl.label else "command line" }}</summary>
+
+<pre>{{ cl.cmd }}</pre>
+</details>
+{% endfor %}
+{% endif %}
+{% if ci_label or aspect_url or bes_invocation_url %}
+---
+
+{% if bes_invocation_url %}:mag: [View full invocation]({{ bes_invocation_url }}){% if ci_label or aspect_url %} · {% endif %}{% endif %}{% if ci_label and ci_url %}[View on {{ ci_label }}]({{ ci_url }}){% if aspect_url %} · {% endif %}{% endif %}{% if aspect_url %}[View on Aspect]({{ aspect_url }}){% endif %}
+{% endif %}
+"""
+
+
+def _build_summary_data(ctx, results, status, render_ctx, metadata_keys, run_date = ""):
+    """Build Jinja2 template data for SUMMARY_TEMPLATE.
+
+    render_ctx keys (all provided by the feature, not derived from BES):
+      triggered_by: str  — who/what started this build (e.g. "greg (workflow_dispatch)")
+      targets:      str  — target pattern string (e.g. "//...")
+      started_ms:   int  — task start time in ms since epoch
+      ended_ms:     int  — task end time (0 if still running)
+      progress:     str  — last free-text progress message from task_update.progress
+    """
+    last_update = render_ctx.get("progress") or summary_title(results, status)
+
+    meta = results.get("metadata", {})
+    sha = meta.get("COMMIT_SHA", "")
+    commit_msg = meta.get("COMMIT_MESSAGE", "")
+    if len(commit_msg) > 72:
+        commit_msg = commit_msg[:72] + "…"
+
+    extra_meta = []
+    keys = metadata_keys or []
+    show_all = keys == ["*"]
+    for k, v in meta.items():
+        if k in _RENDER_META_STANDARD_KEYS:
+            continue
+        if show_all or k in keys:
+            extra_meta.append({"key": k, "value": v})
+
+    return {
+        "last_update":    last_update,
+        "target_pattern": render_ctx.get("targets", "") if render_ctx else "",
+        "branch":         meta.get("BRANCH", ""),
+        "tag":            meta.get("TAG", ""),
+        "short_sha":      sha[:7] if sha else "",
+        "commit_msg":     commit_msg,
+        "extra_meta":     extra_meta,
+        "detail_rows":    _build_invocation_rows(ctx, results, render_ctx, status, run_date = run_date),
+    }
+
+
+def _build_details_data(results, links, render_ctx = None, status = ""):
+    """Build Jinja2 template data for DETAILS_TEMPLATE."""
+    actions_total    = results["actions_total"]
+    actions_executed = results["actions_executed"]
+    actions_cached   = results["actions_cached"]
+    cache_pct_int = (actions_cached * 100) // actions_total if actions_total > 0 else 0
+
+    if results["failed_actions_total"] > 0 or len(results["failed_targets"]) > 0:
+        build_badge_url = "https://img.shields.io/badge/build-failed-red"
+    elif actions_total > 0:
+        build_badge_url = "https://img.shields.io/badge/build-" + str(actions_total) + "%20actions-blue"
+    else:
+        build_badge_url = "https://img.shields.io/badge/build-passed-brightgreen"
+
+    fail_t  = results["failed_test_total"]
+    pass_t  = results["passed_test_total"]
+    flaky_t = results["flaky_test_total"]
+
+    if fail_t > 0:
+        test_badge_url = ("https://img.shields.io/badge/tests-" +
+                          str(pass_t) + "%20passed%2C%20" + str(fail_t) + "%20failed-red")
+    elif flaky_t > 0:
+        test_badge_url = ("https://img.shields.io/badge/tests-" +
+                          str(pass_t) + "%20passed%2C%20" + str(flaky_t) + "%20flaky-yellow")
+    elif pass_t > 0:
+        test_badge_url = "https://img.shields.io/badge/tests-" + str(pass_t) + "%20passed-brightgreen"
+    else:
+        test_badge_url = ""
+
+    if actions_total > 0:
+        cache_color = "brightgreen" if cache_pct_int >= 80 else ("yellow" if cache_pct_int >= 50 else "red")
+        cache_badge_url = "https://img.shields.io/badge/cache-" + str(cache_pct_int) + "%25%20hit-" + cache_color
+    else:
+        cache_badge_url = ""
+
+    overflow = results["failed_actions_total"] - len(results["failed_actions"])
+
+    def _prep_action(a):
+        """Pre-process a failed action entry for Jinja2 template rendering.
+
+        AXL passes integers to Jinja2 as JSON-serialized objects, which makes
+        integer 0 truthy (non-empty dict). Convert stderr_truncated to a plain
+        string — empty string when 0 so {% if %} evaluates correctly.
+        """
+        entry = dict(a)
+        truncated = a.get("stderr_truncated", 0)
+        entry["stderr_truncated"] = str(truncated) if truncated and truncated != 0 else ""
+        return entry
+
+    testlogs_label_urls = links.get("testlogs_label_urls", {})
+
+    def _with_duration(tests):
+        out = []
+        for t in tests:
+            entry = dict(t)
+            ms = t.get("duration_ms", 0)
+            entry["duration"] = _format_duration_ms(ms) if ms > 0 else ""
+            # Per-file download URL from CircleCI/GitLab artifact upload (empty on GitHub/Buildkite).
+            entry["log_url"] = testlogs_label_urls.get(t.get("label", ""), "")
+            out.append(entry)
+        return out
+
+    passed_tests      = results.get("passed_tests", [])
+    pass_t_total      = results.get("passed_test_total", 0)
+    pass_overflow     = pass_t_total - len(passed_tests)
+    built_targets     = results.get("built_targets", [])
+    targets_total_int = results.get("targets_total", 0)
+    built_overflow    = targets_total_int - len(built_targets)
+
+    return {
+        "aborted":                 results.get("aborted", False),
+        "abort_reason":            results.get("abort_reason", ""),
+        "abort_description":       results.get("abort_description", ""),
+        "failed_actions":          [_prep_action(a) for a in results["failed_actions"]],
+        "failed_actions_overflow": str(overflow) if overflow > 0 else "",
+        "build_repro":             results.get("build_repro", ""),
+        "failed_test_total":       str(fail_t),
+        "failed_tests":            _with_duration(results["failed_tests"]),
+        "flaky_test_total":        str(flaky_t),
+        "flaky_tests":             _with_duration(results["flaky_tests"]),
+        "test_repro":              results.get("test_repro", ""),
+        "passed_test_total":       str(pass_t),
+        "passed_tests":            _with_duration(sorted(passed_tests, key = lambda t: t.get("label", ""))),
+        "passed_test_overflow":    str(pass_overflow) if pass_overflow > 0 else "",
+        "cached_test_total":       str(results["cached_test_total"]),
+        "targets_total":           str(targets_total_int),
+        "built_targets":           sorted(built_targets, key = lambda t: t.get("label", "")),
+        "built_targets_overflow":  str(built_overflow) if built_overflow > 0 else "",
+        "actions_executed":        str(actions_executed),
+        "actions_cached":          str(actions_cached),
+        "actions_total":           str(actions_total),
+        "command_lines":           [{"label": k, "cmd": _wrap_command_line(v)} for k, v in (results.get("command_lines") or {}).items()],
+        "build_badge_url":         build_badge_url,
+        "test_badge_url":          test_badge_url,
+        "cache_badge_url":         cache_badge_url,
+        "bes_invocation_url":       _render_bes_url(results),
+        "ci_label":                 links.get("ci_label", ""),
+        "ci_url":                   links.get("ci_url", ""),
+        "aspect_url":               links.get("aspect_url", ""),
+        # Testlogs artifact: populated by ArtifactUpload feature after the first
+        # successful upload. Used to render a "Download test logs" link near the
+        # test results sections. Empty strings when ArtifactUpload is not enabled.
+        "testlogs_artifact_url":    links.get("testlogs_artifact_url", ""),
+        "testlogs_artifact_name":   links.get("testlogs_artifact_name", ""),
+    }
+
+
+def render_check_output(ctx, results, status, render_ctx, links, templates = None, metadata_keys = None):
+    """Render title, summary, and text for a GitHub check run output field.
+
+    This is the public entry point for the "bazel_results" task_update kind.
+    Features call this from their task_update handler when kind == "bazel_results".
+
+    Args:
+        ctx:           TaskContext
+        results:       dict from init_results(), updated by process_event
+        status:        "running" | "failing" | "passed" | "failed"
+        render_ctx:    display context from the feature (triggered_by, targets,
+                       started_ms, ended_ms, progress) — see _build_summary_data
+        links:         dict with ci_label, ci_url, aspect_url
+        templates:     optional override dict — keys "summary" and/or "details"
+                       replace the built-in Jinja2 templates
+        metadata_keys: list of extra BES metadata keys to surface in the summary;
+                       pass ["*"] to show all keys
+
+    Returns:
+        dict with keys "title", "summary", "text" — suitable for check run output
+    """
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+    if debug:
+        print("debug [render_check_output] status=" + status)
+        print("debug [render_check_output]   invocation_id=" + (results.get("invocation_id") or ""))
+        print("debug [render_check_output]   wall_time_ms=" + str(results.get("wall_time_ms", 0)))
+        print("debug [render_check_output]   targets_total=" + str(results.get("targets_total", 0)))
+        print("debug [render_check_output]   built_targets=" + str(len(results.get("built_targets", []))))
+        print("debug [render_check_output]   passed_test_total=" + str(results.get("passed_test_total", 0)))
+        print("debug [render_check_output]   passed_tests=" + str(len(results.get("passed_tests", []))))
+        print("debug [render_check_output]   failed_test_total=" + str(results.get("failed_test_total", 0)))
+        print("debug [render_check_output]   flaky_test_total=" + str(results.get("flaky_test_total", 0)))
+        print("debug [render_check_output]   actions_total=" + str(results.get("actions_total", 0)))
+        cl_keys = list((results.get("command_lines") or {}).keys())
+        print("debug [render_check_output]   command_line_labels=" + str(cl_keys))
+        for cl_label, cl_cmd in (results.get("command_lines") or {}).items():
+            print("debug [render_check_output]   command_line[" + cl_label + "]=" + cl_cmd[:120])
+        ws = results.get("workspace_status") or {}
+        if ws:
+            print("debug [render_check_output]   workspace_status=" + str(ws))
+        meta = results.get("metadata") or {}
+        if meta:
+            print("debug [render_check_output]   metadata=" + str(meta))
+        passed = results.get("passed_tests") or []
+        if passed:
+            sample = [t.get("label", "") for t in passed[:5]]
+            print("debug [render_check_output]   passed_tests sample=" + str(sample))
+        built = results.get("built_targets") or []
+        if built:
+            sample = [t.get("label", "") for t in built[:3]]
+            print("debug [render_check_output]   built_targets sample=" + str(sample))
+
+    # GitHub hard limit for check run output.text is 65535 bytes.
+    # We use 65000 as a safe ceiling to leave headroom for encoding overhead.
+    _DETAILS_LIMIT = 65000
+
+    t = templates or {}
+    run_date = _format_run_date(ctx, results.get("start_time_ms", 0))
+    summary_data = _build_summary_data(ctx, results, status, render_ctx, metadata_keys, run_date = run_date)
+    details_data = _build_details_data(results, links, render_ctx = render_ctx, status = status)
+
+    if debug:
+        print("debug [render_check_output]   summary target_pattern=" + summary_data.get("target_pattern", ""))
+        print("debug [render_check_output]   summary branch=" + summary_data.get("branch", ""))
+        print("debug [render_check_output]   summary short_sha=" + summary_data.get("short_sha", ""))
+        print("debug [render_check_output]   summary detail_rows count=" + str(len(summary_data.get("detail_rows", []))))
+        print("debug [render_check_output]   details command_lines count=" + str(len(details_data.get("command_lines", []))))
+        print("debug [render_check_output]   run_date=" + run_date)
+        print("debug [render_check_output]   cpu_arch=" + str(results.get("cpu_arch", "")))
+        print("debug [render_check_output]   compilation_mode=" + str(results.get("compilation_mode", "")))
+        print("debug [render_check_output]   build_tool_version=" + str(results.get("build_tool_version", "")))
+        print("debug [render_check_output]   targets_configured=" + str(results.get("targets_configured", 0)))
+        print("debug [render_check_output]   packages_loaded=" + str(results.get("packages_loaded", 0)))
+
+    details_tmpl = t.get("details") or DETAILS_TEMPLATE
+    summary_text = ctx.template.jinja2(t.get("summary") or SUMMARY_TEMPLATE, data = summary_data)
+    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    # --- Fit details within the GitHub limit ---
+    # Strategy (each step re-renders only if still over):
+    #   1. Drop command lines (saves ~10-20 KB typically).
+    #   2. Halve the built_targets list until it fits (removes the overflow note
+    #      and replaces it with an accurate one, so counts stay correct).
+    #   3. Halve the passed_tests list the same way.
+    if len(details_text) > _DETAILS_LIMIT:
+        if debug:
+            print("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
+                  "), dropping command lines")
+        details_data["command_lines"] = []
+        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    if len(details_text) > _DETAILS_LIMIT:
+        built = details_data.get("built_targets", [])
+        targets_total_int = results.get("targets_total", 0)
+        # Halve the list up to 10 times (handles up to 2^10 = 1024× overage).
+        for _ in range(10):
+            if len(details_text) <= _DETAILS_LIMIT or len(built) == 0:
+                break
+            built = built[:len(built) // 2]
+            overflow = targets_total_int - len(built)
+            details_data["built_targets"] = built
+            details_data["built_targets_overflow"] = str(overflow) if overflow > 0 else ""
+            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        if debug:
+            print("debug [render_check_output]   after target trim: details len=" + str(len(details_text)) +
+                  " built_targets=" + str(len(built)))
+
+    if len(details_text) > _DETAILS_LIMIT:
+        passed = details_data.get("passed_tests", [])
+        pass_t_total = results.get("passed_test_total", 0)
+        for _ in range(10):
+            if len(details_text) <= _DETAILS_LIMIT or len(passed) == 0:
+                break
+            passed = passed[:len(passed) // 2]
+            overflow = pass_t_total - len(passed)
+            details_data["passed_tests"] = passed
+            details_data["passed_test_overflow"] = str(overflow) if overflow > 0 else ""
+            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+        if debug:
+            print("debug [render_check_output]   after test trim: details len=" + str(len(details_text)) +
+                  " passed_tests=" + str(len(passed)))
+
+    if debug:
+        print("debug [render_check_output]   summary len=" + str(len(summary_text)))
+        print("debug [render_check_output]   details len=" + str(len(details_text)))
+        print("debug [render_check_output] --- summary ---")
+        print(summary_text)
+        print("debug [render_check_output] --- details (first 5000 chars) ---")
+        print(details_text[:5000])
+
+    return {
+        "title":   summary_title(results, status),
+        "summary": summary_text,
+        "text":    details_text,
+    }

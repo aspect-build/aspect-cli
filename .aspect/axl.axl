@@ -3,6 +3,7 @@ Exercise axl
 """
 load("@demo//answer.axl", "ANSWER")
 load("./lambda.axl", "lambda_with_global_bind")
+load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title")
 
 def test_case(tc, cond, msg) -> int:
     if not cond:
@@ -585,6 +586,148 @@ def test_http_get_post(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
     return tc
 
+def test_template_rendering(ctx: TaskContext, tc: int) -> int:
+    """Tests for bazel_results render_check_output across key failure modes."""
+    links = {
+        "ci_label": "GitHub Actions",
+        "ci_url": "https://github.com/example/repo/actions/runs/123",
+        "aspect_url": "",
+        "results_base_url": "",
+        "testlogs_artifact_url": "",
+        "testlogs_artifact_name": "",
+        "testlogs_label_urls": {},
+    }
+    render_ctx = {
+        "triggered_by": "tester",
+        "targets": "//...",
+        "started_ms": 1744630000000,
+        "ended_ms": 1744630002000,
+        "progress": "",
+    }
+
+    # --- Test 1: all-passed smoke test ---
+    r = init_results()
+    r["passed_test_total"] = 5
+    r["cached_test_total"] = 5
+    r["passed_tests"] = [
+        {"label": "//pkg:a_test", "cached": True, "duration_ms": 0},
+        {"label": "//pkg:b_test", "cached": True, "duration_ms": 0},
+    ]
+    r["actions_executed"] = 0
+    r["actions_cached"] = 10
+    r["actions_total"] = 10
+    r["targets_total"] = 5
+    r["wall_time_ms"] = 1200
+    r["build_command"] = "test"
+    out = render_check_output(ctx, r, "passed", render_ctx, links)
+    tc = test_case(tc, "title" in out, "render_check_output returns a dict with 'title'")
+    tc = test_case(tc, "summary" in out, "render_check_output returns a dict with 'summary'")
+    tc = test_case(tc, "text" in out, "render_check_output returns a dict with 'text'")
+    tc = test_case(tc, "passed" in out["title"] or "test" in out["title"], "passed title mentions tests: " + out["title"])
+    tc = test_case(tc, "//..." in out["summary"], "passed summary contains target pattern")
+    tc = test_case(tc, "//pkg:a_test" in out["text"], "passed details contain test label")
+
+    # --- Test 2: failed tests ---
+    r2 = init_results()
+    r2["failed_test_total"] = 2
+    r2["failed_tests"] = [
+        {"label": "//pkg:fail_test", "cached": False, "duration_ms": 3000},
+        {"label": "//pkg:slow_test", "cached": False, "duration_ms": 9000},
+    ]
+    r2["passed_test_total"] = 3
+    r2["passed_tests"] = [{"label": "//pkg:ok_test", "cached": True, "duration_ms": 0}]
+    r2["test_repro"] = "bazel test //pkg:fail_test //pkg:slow_test"
+    r2["build_command"] = "test"
+    out2 = render_check_output(ctx, r2, "failed", render_ctx, links)
+    tc = test_case(tc, "failed" in out2["title"], "failed title mentions failed: " + out2["title"])
+    tc = test_case(tc, "//pkg:fail_test" in out2["text"], "failed details contain failed test label")
+    tc = test_case(tc, "//pkg:fail_test" in out2["text"] or "Flaky" in out2["text"] or "Failed" in out2["text"], "failed details show failure section")
+
+    # --- Test 3: flaky tests ---
+    r3 = init_results()
+    r3["flaky_test_total"] = 1
+    r3["flaky_tests"] = [{"label": "//pkg:flaky_test", "cached": False, "duration_ms": 5000}]
+    r3["passed_test_total"] = 4
+    r3["build_command"] = "test"
+    out3 = render_check_output(ctx, r3, "passed", render_ctx, links)
+    tc = test_case(tc, "flaky" in out3["title"], "flaky title mentions flaky: " + out3["title"])
+    tc = test_case(tc, "//pkg:flaky_test" in out3["text"], "flaky details contain flaky label")
+    tc = test_case(tc, "Flaky" in out3["text"], "flaky details contain Flaky section header")
+
+    # --- Test 4: build action failure ---
+    r4 = init_results()
+    r4["failed_actions_total"] = 1
+    r4["failed_actions"] = [{
+        "label": "//pkg:broken",
+        "mnemonic": "CppCompile",
+        "stderr_uri": "",
+        "stderr_content": "error: use of undeclared identifier 'x'",
+        "stderr_truncated": 0,
+    }]
+    r4["targets_total"] = 5
+    r4["build_command"] = "build"
+    out4 = render_check_output(ctx, r4, "failed", render_ctx, links)
+    tc = test_case(tc, "Build failure" in out4["title"] or "build failure" in out4["title"], "build failure title: " + out4["title"])
+    tc = test_case(tc, "//pkg:broken" in out4["text"], "build failure details contain failed label")
+    tc = test_case(tc, "undeclared identifier" in out4["text"], "build failure details contain stderr content")
+
+    # --- Test 5: summary_title corner cases ---
+    r5 = init_results()
+    tc = test_case(tc, summary_title(r5, "running") == "In progress", "empty running title")
+    tc = test_case(tc, summary_title(r5, "passed") == "Passed", "empty passed title")
+    tc = test_case(tc, summary_title(r5, "failed") == "Failed", "empty failed title")
+    r5["passed_test_total"] = 3
+    r5["cached_test_total"] = 2
+    title = summary_title(r5, "passed")
+    tc = test_case(tc, "3" in title and "passed" in title, "passed with tests title: " + title)
+    tc = test_case(tc, "2" in title and "cached" in title, "passed with cached title: " + title)
+
+    # --- Test 6: artifact URL rendered in details ---
+    r6 = init_results()
+    r6["failed_test_total"] = 1
+    r6["failed_tests"] = [{"label": "//pkg:t", "cached": False, "duration_ms": 1000}]
+    links_with_artifact = {
+        "ci_label": "Buildkite",
+        "ci_url": "https://buildkite.com/org/pipeline/builds/42",
+        "aspect_url": "",
+        "results_base_url": "",
+        "testlogs_artifact_url": "https://buildkite.com/org/pipeline/builds/42",
+        "testlogs_artifact_name": "test.ci.testlogs-v1",
+        "testlogs_label_urls": {},
+    }
+    out6 = render_check_output(ctx, r6, "failed", render_ctx, links_with_artifact)
+    tc = test_case(tc, "Download test logs" in out6["text"], "artifact URL renders download link in text")
+    tc = test_case(tc, "test.ci.testlogs-v1" in out6["text"], "artifact name appears in text")
+
+    # --- Test 7: aborted build ---
+    r7 = init_results()
+    r7["aborted"] = True
+    r7["abort_reason"] = "user_interrupt"
+    r7["abort_description"] = "Build interrupted by user"
+    r7["build_command"] = "build"
+    out7 = render_check_output(ctx, r7, "failed", render_ctx, links)
+    tc = test_case(tc, "aborted" in out7["title"] or "abort" in out7["title"], "aborted title: " + out7["title"])
+    tc = test_case(tc, "user_interrupt" in out7["text"], "aborted details contain abort reason")
+
+    # --- Test 8: per-file label URLs (CircleCI/GitLab) ---
+    r8 = init_results()
+    r8["failed_test_total"] = 1
+    r8["failed_tests"] = [{"label": "//pkg:net_test", "cached": False, "duration_ms": 2000}]
+    r8["flaky_test_total"] = 1
+    r8["flaky_tests"] = [{"label": "//pkg:race_test", "cached": False, "duration_ms": 1000}]
+    links_with_label_urls = dict(links)
+    links_with_label_urls["testlogs_label_urls"] = {
+        "//pkg:net_test":  "https://output.circle-artifacts.com/output/job/job-uuid/artifacts/0/test/key/testlogs/pkg/net_test/test.log",
+        "//pkg:race_test": "https://output.circle-artifacts.com/output/job/job-uuid/artifacts/0/test/key/testlogs/pkg/race_test/test.log",
+    }
+    out8 = render_check_output(ctx, r8, "failed", render_ctx, links_with_label_urls)
+    tc = test_case(tc, "circle-artifacts.com" in out8["text"], "per-file URLs: failed test has clickable link")
+    tc = test_case(tc, "net_test" in out8["text"], "per-file URLs: failed test label present")
+    tc = test_case(tc, "race_test" in out8["text"], "per-file URLs: flaky test label present")
+
+    return tc
+
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -635,6 +778,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_http_get_post(ctx, tc, temp_dir)
     tc = test_conditional_flags(ctx, tc)
     tc = test_cancel_invocation(ctx, tc)
+    tc = test_template_rendering(ctx, tc)
 
     print(tc, "tests passed")
     return 0

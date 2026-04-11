@@ -106,6 +106,12 @@ def _upload_artifact(ctx, path, name):
     if status.code != 0:
         return {"success": False, "artifact_ref": None, "errors": ["curl s3 upload exit " + str(status.code)]}
 
+    # Return the stable public CircleCI artifact URL so callers can link to individual files.
+    # CIRCLE_WORKFLOW_JOB_ID is always set by the CircleCI runner.
+    job_id = ctx.std.env.var("CIRCLE_WORKFLOW_JOB_ID") or ""
+    if job_id:
+        public_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + name
+        return {"success": True, "artifact_ref": public_url, "errors": []}
     return {"success": True, "artifact_ref": s3_url, "errors": []}
 
 

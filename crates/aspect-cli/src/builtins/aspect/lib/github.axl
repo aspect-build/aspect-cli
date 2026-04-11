@@ -201,6 +201,10 @@ def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT
     return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
 
 
+def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
+    return update_check_run(ctx, token, owner, repo, check_run_id, status = "in_progress", output = output, api_base = api_base)
+
+
 def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "success", output = output, api_base = api_base)
 
@@ -342,6 +346,17 @@ def _upload_artifact(ctx, path, name):
     if not ok:
         return {"success": False, "artifact_ref": None, "errors": [err or "FinalizeArtifact failed"]}
 
+    # FinalizeArtifact returns an artifactId we can use to build a direct download link.
+    # URL format: https://github.com/{owner}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}
+    artifact_id = str(body.get("artifactId", "")) if body else ""
+    if artifact_id:
+        server = ctx.std.env.var("GITHUB_SERVER_URL") or "https://github.com"
+        gh_repo = ctx.std.env.var("GITHUB_REPOSITORY") or ""
+        gh_run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
+        if gh_repo and gh_run_id:
+            ref_url = server + "/" + gh_repo + "/actions/runs/" + gh_run_id + "/artifacts/" + artifact_id
+            return {"success": True, "artifact_ref": ref_url, "errors": []}
+
     return {"success": True, "artifact_ref": name, "errors": []}
 
 
@@ -452,6 +467,7 @@ github = struct(
     check_token = _check_token,
     status_checks = struct(
         create   = _status_checks_create,
+        update   = _status_checks_update,
         complete = _status_checks_complete,
         fail     = _status_checks_fail,
     ),

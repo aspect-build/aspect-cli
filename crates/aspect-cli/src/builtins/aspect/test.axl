@@ -1,7 +1,8 @@
 """
 A default 'test' task that wraps a 'bazel test' command.
 """
-load("./traits.axl", "BazelTrait", "HealthCheckTrait")
+load("./traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "GitHubStatusChecksTrait", "ArtifactsTrait", "TaskUpdate")
+load("./lib/bazel_results.axl", "init_results", "process_event", "resolve_stderr", "compute_repro")
 
 def _collect_bes_from_args(ctx):
     """Collect BES sinks from CLI args (--bes_backend/--bes_header)."""
@@ -22,6 +23,7 @@ def _collect_bes_from_args(ctx):
 def _test_impl(ctx: TaskContext) -> int:
     hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
 
     for hook in hc_trait.pre_health_check:
         hook(ctx)
@@ -44,6 +46,7 @@ def _test_impl(ctx: TaskContext) -> int:
         startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
+
     # BES: merge arg-based sinks with trait sinks
     build_events = _collect_bes_from_args(ctx)
     if bazel_trait.build_event_sinks:
@@ -51,13 +54,14 @@ def _test_impl(ctx: TaskContext) -> int:
 
     # Coerce to bool/list for ctx.bazel.test:
     # - non-empty list → stream to those sinks + build_events() iterator.
-    # - True → stream without explicit sinks (build_event handler only)
+    # - True → stream without explicit sinks (build_event handler + result tracking)
     # - False → no BEP stream at all
+    need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
     if not build_events:
-        if bazel_trait.build_event:
-            build_events = True
-        else:
-            build_events = False
+        build_events = True if need_bes else False
+
+    for handler in lifecycle.task_started:
+        handler(ctx, " ".join(ctx.args.target_pattern))
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -76,6 +80,9 @@ def _test_impl(ctx: TaskContext) -> int:
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
     print(rc.announce(command = "test"))
 
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+    results = init_results()
+
     for _ in range(10):
         test = ctx.bazel.test(
             build_events = build_events,
@@ -84,17 +91,39 @@ def _test_impl(ctx: TaskContext) -> int:
             *ctx.args.target_pattern,
         )
 
-        if bazel_trait.build_event:
+        if need_bes:
             for event in test.build_events():
                 for handler in bazel_trait.build_event:
                     handler(ctx, event)
+                if process_event(results, event, debug = debug):
+                    live_status = "failing" if (results["failed_actions_total"] > 0 or results["failed_test_total"] > 0 or results["flaky_test_total"] > 0) else "running"
+                    update = TaskUpdate(kind = "bazel_results", status = live_status, data = {"results": results})
+                    for handler in lifecycle.task_update:
+                        handler(ctx, update)
 
         build_status = test.wait()
+
+        # Capture sink invocation IDs (the UUIDs used in the Aspect/BES backend,
+        # distinct from Bazel's build_started.uuid) for Web UI link construction.
+        results["sink_invocation_ids"] = list(test.sink_invocation_ids)
 
         if build_status.code == 0 or not bazel_trait.build_retry(build_status.code):
             break
 
+    # Deferred post-processing: file I/O and repro commands after all events consumed.
+    resolve_stderr(ctx, results)
+    compute_repro(results)
+
     for handler in bazel_trait.build_end:
+        handler(ctx, build_status.code)
+
+    # Final update with fully resolved results.
+    final_status = "passed" if build_status.code == 0 else "failed"
+    update = TaskUpdate(kind = "bazel_results", status = final_status, data = {"results": results})
+    for handler in lifecycle.task_update:
+        handler(ctx, update)
+
+    for handler in lifecycle.task_complete:
         handler(ctx, build_status.code)
 
     return build_status.code
@@ -104,6 +133,9 @@ test = task(
     traits = [
         BazelTrait,
         HealthCheckTrait,
+        TaskLifecycleTrait,
+        GitHubStatusChecksTrait,
+        ArtifactsTrait,
     ],
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)
