@@ -77,16 +77,17 @@ def query(ctx, endpoint, ci_host, commit_sha, workspace):
         }
     return result
 
-def deliver(ctx, endpoint, ci_host, output_sha, workspace, signature):
+def deliver(ctx, endpoint, ci_host, output_sha, workspace, build_url):
     """
-    Mark a target as delivered by setting its delivery signature.
+    Mark a target as delivered. build_url is stored as the delivery signature
+    and identifies the CI build that performed the delivery.
     """
     http = ctx.http()
     response = _post(http, endpoint, "/deliver", {
         "ci_host": ci_host,
         "output_sha": output_sha,
         "workspace": workspace,
-        "signature": signature,
+        "signature": build_url,
     }).block()
 
     if response.status < 200 or response.status >= 300:
