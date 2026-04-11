@@ -13,11 +13,11 @@ BazelTrait = trait(
     flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
     startup_flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
 
-    # Lifecycle hooks — lists of callables, all receive (ctx, state, ...)
-    build_start = attr(list[typing.Callable[[TaskContext, dict], None]], []),
-    build_event = attr(list[typing.Callable[[TaskContext, dict, dict], None]], []),
+    # Lifecycle hooks — lists of callables; callers close over their own state
+    build_start = attr(list[typing.Callable[[TaskContext], None]], []),
+    build_event = attr(list[typing.Callable[[TaskContext, dict], None]], []),
     build_retry = attr(typing.Callable[[int], bool], default_retry),
-    build_end = attr(list[typing.Callable[[TaskContext, dict, int], None]], []),
+    build_end = attr(list[typing.Callable[[TaskContext, int], None]], []),
 )
 
 
