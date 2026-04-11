@@ -1,0 +1,350 @@
+"""Bazel build event result accumulation and Markdown rendering.
+
+Processes the BES event stream to track failed build actions, failed build
+targets, and test outcomes (failed / flaky / passed). Produces a Markdown
+summary suitable for GitHub check run output bodies.
+
+Designed to be reusable by any feature that wants to report Bazel results
+(GitHub status checks, Buildkite annotations, etc.).
+
+Event kinds consumed:
+  "build_started"      — resets all state; captures invocation UUID
+  "action_completed"   — accumulates failed build actions (up to MAX_FAILED_ACTIONS)
+  "target_completed"   — accumulates failed build targets
+  "test_summary"       — buckets tests into failed / flaky / passed; tracks duration
+  "build_metrics"      — captures final action executed/cached counts
+
+Payload fields used:
+  BuildStarted.uuid
+  ActionExecuted.success, .type, .stderr (File)
+  TargetComplete.success
+  TestSummary.overall_status, .total_num_cached, .total_run_duration_millis (split by cached/executed)
+  BuildMetrics.action_summary.{actions_executed, actions_created}
+  event.id.label       — target label for all event types
+"""
+
+# Maximum number of failed build actions to display (matches Marvin's MAX_BUILD_ERRORS).
+MAX_FAILED_ACTIONS = 5
+
+# Maximum number of test targets to track (matches Marvin's MAX_TEST_TARGETS).
+MAX_TEST_TARGETS = 100
+
+# TestSummary overall_status values from BlazeTestStatus proto enum.
+# starbuf_derive::Enumeration converts CamelCase variant names to lowercase snake_case:
+#   BlazeTestStatus::Failed → "failed",  BlazeTestStatus::FailedToBuild → "failed_to_build"
+_TEST_STATUS_PASSED  = "passed"
+_TEST_STATUS_FLAKY   = "flaky"
+_TEST_STATUS_FAILED  = "failed"
+_TEST_STATUS_TIMEOUT = "timeout"
+_TEST_STATUS_NO_STATUS = "no_status"
+_TEST_STATUS_FAILED_TO_BUILD = "failed_to_build"
+_TEST_STATUS_INCOMPLETE = "incomplete"
+
+_FAILED_STATUSES = [_TEST_STATUS_FAILED, _TEST_STATUS_TIMEOUT, _TEST_STATUS_FAILED_TO_BUILD]
+
+
+
+def _format_duration_ms(ms):
+    """Format a duration in milliseconds as a human-readable string.
+
+    Examples: 500ms → "0.5s", 1500ms → "1.5s", 65000ms → "1m 5s"
+    """
+    if ms <= 0:
+        return "0s"
+    total_s = ms // 1000
+    frac_s  = (ms % 1000) // 100  # tenths of a second
+    if total_s < 60:
+        if frac_s > 0:
+            return str(total_s) + "." + str(frac_s) + "s"
+        return str(total_s) + "s"
+    minutes = total_s // 60
+    seconds = total_s % 60
+    if seconds > 0:
+        return str(minutes) + "m " + str(seconds) + "s"
+    return str(minutes) + "m"
+
+
+def init_results():
+    """Create a fresh results accumulator.
+
+    Returns:
+        dict to be stored in build state and passed to process_event / render_markdown.
+    """
+    return {
+        # Failed build targets (not test-related): [{label}]
+        "failed_targets": [],
+        # Failed build actions (detailed): [{label, mnemonic, stderr_uri}]
+        # Capped at MAX_FAILED_ACTIONS. stderr_uri is the file:// or bytestream:// URI.
+        "failed_actions": [],
+        # Total failed action count (may exceed len(failed_actions) due to cap)
+        "failed_actions_total": 0,
+        # Test outcomes: [{label, cached}]
+        "failed_tests": [],
+        "flaky_tests":  [],
+        # Aggregate test counts
+        "passed_test_total": 0,
+        "failed_test_total": 0,
+        "flaky_test_total":  0,
+        "cached_test_total": 0,
+        # Tests with at least one non-cached run (used in footer)
+        "executed_test_total": 0,
+        # Wall-clock time for executed tests only (ms), from total_run_duration_millis.
+        "executed_duration_ms": 0,
+        # Wall-clock time for cached tests (ms) — represents time saved by the cache.
+        "cached_duration_ms": 0,
+        # Build action metrics from the build_metrics event
+        "actions_executed": 0,
+        "actions_cached": 0,
+        "actions_total": 0,
+        # Bazel invocation UUID from build_started event
+        "invocation_id": "",
+    }
+
+
+def process_event(results, event):
+    """Update results in-place from a single build event.
+
+    Args:
+        results: dict from init_results(), mutated in place
+        event:   BuildEvent from BazelTrait.build_event hook
+
+    Returns:
+        True if results changed in a way that warrants a status check update,
+        False otherwise.
+    """
+    kind = event.kind
+
+    if kind == "build_started":
+        # Retry: reset everything so we start fresh with the new event stream.
+        fresh = init_results()
+        for k in fresh:
+            results[k] = fresh[k]
+        # Capture the Bazel invocation UUID for linking to the Aspect Web UI.
+        results["invocation_id"] = event.payload.uuid or ""
+        return False
+
+    elif kind == "action_completed":
+        if not event.payload.success:
+            results["failed_actions_total"] += 1
+            if len(results["failed_actions"]) < MAX_FAILED_ACTIONS:
+                stderr_uri = ""
+                if event.payload.stderr:
+                    stderr_uri = event.payload.stderr.file or ""
+                results["failed_actions"].append({
+                    "label":     event.id.label,
+                    "mnemonic":  event.payload.type,
+                    "stderr_uri": stderr_uri,
+                })
+                return True
+        return False
+
+    elif kind == "target_completed":
+        if not event.payload.success:
+            results["failed_targets"].append({"label": event.id.label})
+            return True
+        return False
+
+    elif kind == "test_summary":
+        status = event.payload.overall_status
+        label = event.id.label
+        num_cached = event.payload.total_num_cached
+        cached = num_cached > 0
+
+        # total_run_duration_millis is deprecated in the proto but still populated by Bazel.
+        # Bucket duration by whether the test actually ran or was served from cache.
+        duration_ms = event.payload.total_run_duration_millis
+        if cached:
+            if duration_ms:
+                results["cached_duration_ms"] += duration_ms
+        else:
+            results["executed_test_total"] += 1
+            if duration_ms:
+                results["executed_duration_ms"] += duration_ms
+
+        total_tracked = (len(results["failed_tests"]) +
+                         len(results["flaky_tests"]) +
+                         results["passed_test_total"])
+
+        if status in _FAILED_STATUSES:
+            results["failed_test_total"] += 1
+            if total_tracked < MAX_TEST_TARGETS:
+                results["failed_tests"].append({"label": label, "cached": cached})
+            return True
+        elif status == _TEST_STATUS_FLAKY:
+            results["flaky_test_total"] += 1
+            if total_tracked < MAX_TEST_TARGETS:
+                results["flaky_tests"].append({"label": label, "cached": cached})
+            return True
+        else:
+            # PASSED, NO_STATUS, INCOMPLETE — count but don't enumerate
+            results["passed_test_total"] += 1
+            if cached:
+                results["cached_test_total"] += 1
+        return False
+
+    elif kind == "build_metrics":
+        action_summary = event.payload.action_summary
+        if action_summary:
+            executed = action_summary.actions_executed
+            total = action_summary.actions_created
+            results["actions_executed"] = executed
+            # Use total - executed rather than remote_cache_hits (deprecated) because
+            # this captures local cache hits too, giving a more accurate cached count.
+            results["actions_cached"] = total - executed if total > executed else 0
+            results["actions_total"] = total
+        return True
+
+    return False
+
+
+_SUMMARY_TEMPLATE = """
+{%- assign has_failures = false -%}
+{%- if results.failed_actions.size > 0 -%}{%- assign has_failures = true -%}{%- endif -%}
+{%- if results.failed_tests.size > 0 -%}{%- assign has_failures = true -%}{%- endif -%}
+{%- if results.flaky_tests.size > 0 -%}{%- assign has_failures = true -%}{%- endif -%}
+
+{%- if results.failed_actions.size > 0 %}
+### Build failures
+
+{% for action in results.failed_actions -%}
+- `{{ action.label }}` (`{{ action.mnemonic }}`)
+{% endfor -%}
+{%- if results.failed_actions_total > results.failed_actions.size %}
+_{{ results.failed_actions_total | minus: results.failed_actions.size }} more action(s) failed._
+{% endif -%}
+{%- endif -%}
+
+{%- if results.failed_tests.size > 0 %}
+<details{% if results.failed_tests.size <= 20 %} open{% endif %}>
+<summary>Failed tests ({{ results.failed_test_total }})</summary>
+<pre>
+{%- for t in results.failed_tests %}
+{{ t.label }}{% if t.cached %} (cached){% endif %}
+{%- endfor %}
+</pre>
+</details>
+{% endif -%}
+
+{%- if results.flaky_tests.size > 0 %}
+<details>
+<summary>Flaky tests ({{ results.flaky_test_total }})</summary>
+<pre>
+{%- for t in results.flaky_tests %}
+{{ t.label }}{% if t.cached %} (cached){% endif %}
+{%- endfor %}
+</pre>
+</details>
+{% endif -%}
+
+{%- if results.passed_test_total > 0 and results.failed_test_total == 0 and results.flaky_test_total == 0 %}
+{{ results.passed_test_total }} test target{% if results.passed_test_total > 1 %}s{% endif %} passed{% if results.cached_test_total > 0 %} ({{ results.cached_test_total }} cached){% endif %}.
+{%- elsif results.passed_test_total > 0 %}
+{{ results.passed_test_total }} test target{% if results.passed_test_total > 1 %}s{% endif %} passed{% if results.cached_test_total > 0 %} ({{ results.cached_test_total }} cached){% endif %}.
+{%- endif -%}
+
+{%- assign has_stats = false -%}
+{%- if results.executed_test_total > 0 or results.cached_test_total > 0 or results.actions_total > 0 -%}
+{%- assign has_stats = true -%}
+{%- endif -%}
+
+{%- if has_stats %}
+
+---
+
+{%- if results.executed_test_total > 0 %}
+_{{ results.executed_test_total }} test target{% if results.executed_test_total > 1 %}s{% endif %} executed{% if results.executed_duration != "" %} in {{ results.executed_duration }}{% endif %}._
+{%- endif %}
+{%- if results.cached_test_total > 0 %}
+_{{ results.cached_test_total }} test target{% if results.cached_test_total > 1 %}s{% endif %} cached{% if results.cached_duration != "" %} (saved {{ results.cached_duration }}){% endif %}._
+{%- endif %}
+{%- if results.actions_total > 0 %}
+{%- if results.actions_executed > 0 %}
+_{{ results.actions_executed }} build action{% if results.actions_executed > 1 %}s{% endif %} executed{% if results.actions_cached > 0 %}, {{ results.actions_cached }} cached{% endif %}._
+{%- elsif results.actions_cached > 0 %}
+_All {{ results.actions_cached }} build action{% if results.actions_cached > 1 %}s{% endif %} (100%) cached._
+{%- endif %}
+{%- endif %}
+{%- endif -%}
+
+{%- if links.ci_label != "" or links.aspect_url != "" %}
+
+---
+
+{%- if links.ci_label != "" and links.ci_url != "" %}
+[View on {{ links.ci_label }}]({{ links.ci_url }}){% if links.aspect_url != "" %} · {% endif %}
+{%- endif %}
+{%- if links.aspect_url != "" %}
+[View invocation on Aspect]({{ links.aspect_url }})
+{%- endif %}
+{%- endif -%}
+"""
+
+
+def render_markdown(ctx, results, links = None):
+    """Render a Markdown summary from accumulated results.
+
+    Args:
+        ctx:     TaskContext (for ctx.template.liquid)
+        results: dict from init_results(), updated by process_event
+        links:   optional dict with keys ci_label, ci_url, aspect_url
+                 for a footer linking to the CI job and Aspect Web UI
+
+    Returns:
+        str — Markdown suitable for a GitHub check run summary field (max 65535 chars)
+    """
+    data = dict(results)
+    # Pre-format durations so the Liquid template can render them as plain strings.
+    data["executed_duration"] = _format_duration_ms(data["executed_duration_ms"]) if data["executed_duration_ms"] > 0 else ""
+    data["cached_duration"]   = _format_duration_ms(data["cached_duration_ms"])   if data["cached_duration_ms"]   > 0 else ""
+    links_data = links or {"ci_label": "", "ci_url": "", "aspect_url": ""}
+    return ctx.template.liquid(_SUMMARY_TEMPLATE, data = {"results": data, "links": links_data})
+
+
+def summary_title(results, exit_code):
+    """Build a short title string for the check run output.
+
+    Args:
+        results:   dict from init_results()
+        exit_code: int or None (None means still in progress)
+
+    Returns:
+        str — max ~255 chars, suitable for check run output.title
+    """
+    parts = []
+    if results["failed_actions_total"] > 0:
+        parts.append(str(results["failed_actions_total"]) + " build failure(s)")
+    if results["failed_test_total"] > 0:
+        parts.append(str(results["failed_test_total"]) + " failed")
+    if results["flaky_test_total"] > 0:
+        parts.append(str(results["flaky_test_total"]) + " flaky")
+    if parts:
+        return ", ".join(parts)
+    if exit_code == None:
+        return "In progress"
+    if exit_code == 0:
+        passed = results["passed_test_total"]
+        if passed > 0:
+            cached = results["cached_test_total"]
+            if cached > 0:
+                return str(passed) + " test(s) passed (" + str(cached) + " cached)"
+            return str(passed) + " test(s) passed"
+        return "Passed"
+    return "Failed (exit code " + str(exit_code) + ")"
+
+
+def now_ms(ctx):
+    """Return current time as milliseconds since epoch.
+
+    Used for rate-limiting status check updates.
+
+    Uses `date '+%s000'` (epoch seconds + literal "000") rather than `%3N`
+    because macOS date does not support the `%N` nanoseconds format.
+    The result is rounded to the nearest second, which is sufficient for the
+    1-second default throttle interval.
+    """
+    result = ctx.std.process.command("date").args(["+%s000"]).stdout("piped").spawn().wait_with_output()
+    if result.status.code == 0:
+        val = result.stdout.strip()
+        if val:
+            return int(val)
+    return 0

@@ -1,0 +1,252 @@
+"""GitHub Status Check feature for Bazel build and test tasks.
+
+Creates and updates a GitHub check run that reflects the live state of a
+Bazel build or test invocation, including:
+
+  - Failed build actions (up to MAX_FAILED_ACTIONS)
+  - Failed build targets
+  - Failed and flaky test targets
+  - Passed test counts
+
+The check run is updated in real-time as build events arrive, throttled to
+at most once per `min_update_interval_s` seconds (default: 1.0) to avoid
+exhausting GitHub API rate limits.
+
+Usage in .aspect/config.axl:
+
+    load("@aspect_workflows//:lib.axl", "GithubStatusCheckBazelTask")
+
+    configure(build, features = [
+        GithubStatusCheckBazelTask,
+    ])
+
+    # Local dry-run (no GitHub API calls; output printed to stderr):
+    configure(build, features = [
+        GithubStatusCheckBazelTask.override(attrs = {"dry_run": True}),
+    ])
+
+    # Or enable via env var without changing config:
+    #   ASPECT_GH_STATUS_DRY_RUN=1 aspect build //...
+
+Dry-run mode also falls back to `git rev-parse HEAD` for the commit SHA when
+no CI environment variable is set, so it works in a local checkout.
+"""
+load("../traits.axl", "BazelTrait", "HealthCheckTrait")
+load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
+load("../lib/bazel_results.axl",
+    "init_results",
+    "process_event",
+    "render_markdown",
+    "summary_title",
+    "now_ms",
+)
+
+
+def _collect_ci_links(env, results_base_url):
+    """Collect CI job URL and optional Aspect Web UI URL from the environment.
+
+    Args:
+        env:              ctx.std.env (or ctx.std.env at FeatureContext time)
+        results_base_url: ASPECT_WORKFLOWS_BES_RESULTS_URL, or "" if not on Workflows
+
+    Returns:
+        dict with keys: ci_label, ci_url, aspect_url (all str, "" if unavailable)
+    """
+    ci_label = ""
+    ci_url = ""
+
+    if env.var("GITHUB_ACTIONS"):
+        ci_label = "GitHub Actions"
+        server = env.var("GITHUB_SERVER_URL") or "https://github.com"
+        repository = env.var("GITHUB_REPOSITORY") or ""
+        run_id = env.var("GITHUB_RUN_ID") or ""
+        if repository and run_id:
+            ci_url = server + "/" + repository + "/actions/runs/" + run_id
+    elif env.var("BUILDKITE"):
+        ci_label = "Buildkite"
+        build_url = env.var("BUILDKITE_BUILD_URL") or ""
+        step_id   = env.var("BUILDKITE_STEP_ID") or ""
+        if build_url and step_id:
+            ci_url = build_url + "/steps/canvas?sid=" + step_id
+        else:
+            ci_url = build_url
+    elif env.var("CIRCLECI"):
+        ci_label = "CircleCI"
+        ci_url = env.var("CIRCLE_BUILD_URL") or ""
+    elif env.var("GITLAB_CI"):
+        ci_label = "GitLab CI"
+        ci_url = env.var("CI_JOB_URL") or ""
+
+    return {"ci_label": ci_label, "ci_url": ci_url, "aspect_url": "", "results_base_url": results_base_url}
+
+
+def _resolve_aspect_url(links, invocation_id):
+    """Return the Aspect Web UI URL for an invocation, or "" if unavailable."""
+    if links["results_base_url"] and invocation_id:
+        base = links["results_base_url"]
+        if base.endswith("/"):
+            base = base[:-1]
+        return base + "/invocations/" + invocation_id
+    return ""
+
+
+def _detect_sha_with_fallback(std):
+    """Like detect_commit_sha, but falls back to git rev-parse HEAD."""
+    sha = detect_commit_sha(std.env)
+    if sha:
+        return sha
+    result = std.process.command("git").args(["rev-parse", "HEAD"]) \
+        .stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code == 0:
+        return result.stdout.strip()
+    return ""
+
+
+def _gh_status_checks_bazel(ctx: FeatureContext):
+    bazel = ctx.traits[BazelTrait]
+
+    dry_run = ctx.attr.dry_run or bool(ctx.std.env.var("ASPECT_GH_STATUS_DRY_RUN"))
+
+    # Collect CI context at feature-init time (FeatureContext has ctx.std).
+    # results_base_url is only set on Workflows runners.
+    _ci_links_base = _collect_ci_links(
+        ctx.std.env,
+        ctx.std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL") or "",
+    )
+
+    if dry_run:
+        sha = _detect_sha_with_fallback(ctx.std)
+    else:
+        sha = detect_commit_sha(ctx.std.env)
+
+    (owner, repo) = detect_github_repo(ctx.std)
+
+    if dry_run:
+        # In dry-run mode we don't make API calls, so owner/repo can be placeholders.
+        if not owner:
+            owner = "owner"
+        if not repo:
+            repo = "repo"
+        if not sha:
+            return
+    else:
+        if not sha or not owner or not repo:
+            return
+
+    min_update_interval_ms = int(ctx.attr.min_update_interval_s * 1000)
+
+    def _build_start(ctx, state):
+        state["_build_results"] = init_results()
+        state["_last_update_ms"] = 0
+        state["_ci_links"] = _ci_links_base
+
+        if dry_run:
+            print("GitHub status check [dry-run]: would create check run for %s/%s@%s" % (owner, repo, sha[:12]))
+            return
+
+        # TODO: move to ctx.task.lifecycle_hooks.pre_task once that is available
+        print("GitHub status check: aspect/%s (%s)" % (ctx.task.name, ctx.task.key))
+
+        token = github.authenticate(
+            ctx, ctx.std.env,
+            owner = owner, repo = repo,
+            roles = ["checks.write", "statuses.write", "prs.write"],
+        )
+        if not token:
+            print("GitHub status check: authentication failed for %s/%s (no token available)" % (owner, repo))
+            return
+        state["_github_token"] = token
+
+        check_name = "aspect/%s (%s)" % (ctx.task.name, ctx.task.key)
+        result = github.status_checks.create(ctx, token, owner, repo, sha, check_name)
+        if result["success"]:
+            state["_check_run_id"] = result["check_run_id"]
+        else:
+            print("GitHub status check: failed to create check run: %s" % result.get("error", "unknown error"))
+
+    def _build_event(ctx, state, event):
+        results = state.get("_build_results")
+        if not results:
+            return
+
+        changed = process_event(results, event)
+        if not changed:
+            return
+
+        links = dict(state.get("_ci_links") or _ci_links_base)
+        links["aspect_url"] = _resolve_aspect_url(links, results.get("invocation_id", ""))
+
+        if dry_run:
+            # Throttle dry-run prints the same way we throttle real updates.
+            now = now_ms(ctx)
+            last = state.get("_last_update_ms", 0)
+            if now - last < min_update_interval_ms:
+                return
+            state["_last_update_ms"] = now
+            print("\nGitHub status check [dry-run] update: %s" % summary_title(results, exit_code = None))
+            print(render_markdown(ctx, results, links = links))
+            return
+
+        token = state.get("_github_token")
+        check_run_id = state.get("_check_run_id")
+        if not token or not check_run_id:
+            return
+
+        now = now_ms(ctx)
+        last = state.get("_last_update_ms", 0)
+        if now - last < min_update_interval_ms:
+            return
+
+        state["_last_update_ms"] = now
+        output = {
+            "title":   summary_title(results, exit_code = None),
+            "summary": render_markdown(ctx, results, links = links),
+        }
+        github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output)
+
+    def _build_end(ctx, state, exit_code):
+        results = state.get("_build_results") or init_results()
+        links = dict(state.get("_ci_links") or _ci_links_base)
+        links["aspect_url"] = _resolve_aspect_url(links, results.get("invocation_id", ""))
+        output = {
+            "title":   summary_title(results, exit_code),
+            "summary": render_markdown(ctx, results, links = links),
+        }
+
+        if dry_run:
+            conclusion = "success" if exit_code == 0 else "failure"
+            print("\nGitHub status check [dry-run] final (%s): %s" % (conclusion, output["title"]))
+            print(output["summary"])
+            return
+
+        token = state.get("_github_token")
+        check_run_id = state.get("_check_run_id")
+        if not token or not check_run_id:
+            return
+
+        print("GitHub status check: completing run %s — %s" % (check_run_id, output["title"]))
+        if exit_code == 0:
+            result = github.status_checks.complete(ctx, token, owner, repo, check_run_id, output = output)
+        else:
+            result = github.status_checks.fail(ctx, token, owner, repo, check_run_id, output = output)
+        if not result["success"]:
+            print("GitHub status check: complete/fail API call failed: %s" % result.get("error", "unknown"))
+
+    bazel.build_start.append(_build_start)
+    bazel.build_event.append(_build_event)
+    bazel.build_end.append(_build_end)
+
+
+GithubStatusCheckBazelTask = feature(
+    implementation = _gh_status_checks_bazel,
+    attrs = {
+        # Set to True (or set ASPECT_GH_STATUS_DRY_RUN=1) to print rendered output
+        # to stderr instead of making GitHub API calls. Useful for local testing.
+        # In dry-run mode, the commit SHA falls back to `git rev-parse HEAD`.
+        "dry_run": attr(bool, False),
+        # Minimum seconds between live check run updates during the build.
+        # Increase this if you are using a PAT with the standard 5000 req/hr limit.
+        # GitHub App tokens have higher limits so 1.0s is a safe default.
+        "min_update_interval_s": attr(float, 1.0),
+    },
+)

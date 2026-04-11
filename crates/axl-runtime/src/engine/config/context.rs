@@ -227,8 +227,8 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     ///
     /// Usage:
     /// ```starlark
-    /// ctx.features[GithubStatusChecks].owner = "myorg"
-    /// ctx.features[GithubStatusChecks].enabled = False
+    /// ctx.features[GithubStatusCheckBazelTask].dry_run = True
+    /// ctx.features[GithubStatusCheckBazelTask].enabled = False
     /// ```
     #[starlark(attribute)]
     fn features<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
