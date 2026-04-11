@@ -1,13 +1,13 @@
 [patch.crates-io]
-starlark = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
-starlark_derive = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
-starlark_lsp = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
-starlark_syntax = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
-starlark_map = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
-allocative = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
-allocative_derive = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
-dupe = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
-display_container = { git = "https://github.com/thesayyn/starlark-rust.git", branch = "bytes_type" }
+starlark = { git = "https://github.com/aspect-build/starlark-rust", rev = "51e858ab7431782b47d08b67ec4a83151946e7b7" }
+starlark_derive = { git = "https://github.com/aspect-build/starlark-rust", rev = "51e858ab7431782b47d08b67ec4a83151946e7b7" }
+starlark_lsp = { git = "https://github.com/aspect-build/starlark-rust", rev = "51e858ab7431782b47d08b67ec4a83151946e7b7" }
+starlark_syntax = { git = "https://github.com/aspect-build/starlark-rust", rev = "51e858ab7431782b47d08b67ec4a83151946e7b7" }
+starlark_map = { git = "https://github.com/aspect-build/starlark-rust", rev = "51e858ab7431782b47d08b67ec4a83151946e7b7" }
+allocative = { git = "https://github.com/aspect-build/starlark-rust", rev = "51e858ab7431782b47d08b67ec4a83151946e7b7" }
+allocative_derive = { git = "https://github.com/aspect-build/starlark-rust", rev = "51e858ab7431782b47d08b67ec4a83151946e7b7" }
+dupe = { git = "https://github.com/aspect-build/starlark-rust", rev = "51e858ab7431782b47d08b67ec4a83151946e7b7" }
+display_container = { git = "https://github.com/aspect-build/starlark-rust", rev = "51e858ab7431782b47d08b67ec4a83151946e7b7" }
 
 [workspace]
 members = ["crates/*"]

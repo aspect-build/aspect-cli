@@ -63,10 +63,15 @@ impl<'v> Freeze for FeatureMap<'v> {
         let entries = self.entries.into_inner();
         let mut frozen_entries = SmallMap::with_capacity(entries.len());
         for (id, (type_val, instance_val)) in entries.into_iter() {
-            frozen_entries.insert(
-                id,
-                (type_val.freeze(freezer)?, instance_val.freeze(freezer)?),
-            );
+            // Freeze the type descriptor but not the instance. Keeping instances
+            // unfrozen allows mutable `state = {}` dicts captured in feature
+            // closures to remain writable during task execution.
+            //
+            // SAFETY: Instance values live on the config heap, which is kept
+            // alive for the full duration of task execution.
+            let instance_static: Value<'static> =
+                unsafe { std::mem::transmute(instance_val) };
+            frozen_entries.insert(id, (type_val.freeze(freezer)?, instance_static));
         }
         Ok(FrozenFeatureMap {
             entries: frozen_entries,
@@ -134,18 +139,28 @@ impl<'v> StarlarkValue<'v> for FeatureMap<'v> {
     }
 }
 
-/// Frozen version of FeatureMap. Read-only after freezing.
+/// Frozen version of FeatureMap. Type values are frozen; instance values retain
+/// mutability so that mutable `state = {}` dicts in feature closures remain
+/// writable during task execution.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct FrozenFeatureMap {
     #[allocative(skip)]
-    entries: SmallMap<u64, (FrozenValue, FrozenValue)>,
+    entries: SmallMap<u64, (FrozenValue, Value<'static>)>,
 }
+
+// SAFETY: AXL runtime is single-threaded; these values are never accessed concurrently.
+unsafe impl Send for FrozenFeatureMap {}
+unsafe impl Sync for FrozenFeatureMap {}
 
 impl FrozenFeatureMap {
     pub fn entries(&self) -> Vec<(u64, Value<'_>, Value<'_>)> {
         self.entries
             .iter()
-            .map(|(id, (tv, iv))| (*id, tv.to_value(), iv.to_value()))
+            .map(|(id, (tv, iv))| {
+                // SAFETY: instance values are alive for the duration of task execution.
+                let iv: Value<'_> = unsafe { std::mem::transmute(*iv) };
+                (*id, tv.to_value(), iv)
+            })
             .collect()
     }
 }
@@ -188,7 +203,8 @@ impl<'v> StarlarkValue<'v> for FrozenFeatureMap {
         })?;
 
         match self.entries.get(&type_id) {
-            Some((_, instance)) => Ok(instance.to_value()),
+            // SAFETY: instance values are alive for the duration of task execution.
+            Some((_, instance)) => Ok(unsafe { std::mem::transmute(*instance) }),
             None => {
                 let type_name = if let Some(ft) = index.downcast_ref::<FeatureType>() {
                     ft.name.as_deref().unwrap_or("anon")
