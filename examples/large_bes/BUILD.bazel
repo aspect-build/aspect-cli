@@ -10,6 +10,19 @@ To reproduce:
 Expected: Build completes and aspect exits cleanly
 Actual: aspect hangs after "Build completed successfully" due to BEP pipe deadlock
 """
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+
+[
+    sh_binary(
+        name = "bin_" + str(i),
+        srcs = ["bin.sh"],
+        data = ["target_{}".format(i)]
+    )
+
+    for i in range(100)
+]
+
 
 # Generate 1000 genrule targets to produce enough BEP events to overflow the pipe buffer
 [

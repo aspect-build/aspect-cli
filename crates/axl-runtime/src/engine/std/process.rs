@@ -345,6 +345,27 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
         Ok(ExitStatus(status))
     }
 
+    /// Non-blocking check for child exit. Returns None if the child is still running,
+    /// or ExitStatus if it has exited. Does not consume the child — stdout/stderr
+    /// stream accessors remain callable after this returns a status, allowing pipe
+    /// contents to be drained via child.stdout().read_to_string() etc.
+    fn try_wait<'v>(
+        this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
+        let status = child
+            .inner
+            .borrow_mut()
+            .as_mut()
+            .ok_or(anyhow::anyhow!("child is no longer active"))?
+            .try_wait()?;
+        Ok(match status {
+            None => values::Value::new_none(),
+            Some(s) => heap.alloc(ExitStatus(s)),
+        })
+    }
+
     /// WARNING: Calling `wait_with_output` consumes the child instance,
     /// causing errors on subsequent calls to other methods.
     ///
