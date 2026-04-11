@@ -38,6 +38,7 @@ fn register_types(globals: &mut GlobalsBuilder) {
 
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
+    std::state_dict::register_globals(globals);
 
     globals::register_globals(globals);
     r#async::register_globals(globals);

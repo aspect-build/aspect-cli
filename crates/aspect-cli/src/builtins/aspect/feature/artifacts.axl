@@ -102,7 +102,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
     Uses ctx.task.name and ctx.task.key to identify the current task invocation.
     """
-    fragment = ctx.traits[BazelTrait]
+    bazel_trait = ctx.traits[BazelTrait]
 
     uploader = create_uploader(ctx.std.env)
     ci = detect_ci(ctx.std.env)
@@ -116,21 +116,23 @@ def _artifact_upload_impl(ctx: FeatureContext):
     execlog_path = "/tmp/" + uuid + ".execlog.zstd"
     bep_path = "/tmp/" + uuid + ".bep.bin"
 
-    fragment.extra_flags.extend([
+    bazel_trait.extra_flags.extend([
         "--generate_json_trace_profile",
         "--experimental_profile_include_target_label",
         "--profile=" + profile_path,
         "--heap_dump_on_oom",
     ])
 
-    fragment.execution_log_sinks.append(
+    bazel_trait.execution_log_sinks.append(
         bazel.execution_log.compact_file(path = execlog_path),
     )
-    fragment.build_event_sinks.append(
+    bazel_trait.build_event_sinks.append(
         bazel.build_events.file(path = bep_path),
     )
 
-    def _on_build_event(ctx, state, event):
+    state = {}
+
+    def _on_build_event(ctx, event):
         _collect_test_files(ctx, state, event)
         if not is_local:
             _init_upload_state(state)
@@ -139,7 +141,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
                 uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
 
-    def _on_build_end(ctx, state, exit_code):
+    def _on_build_end(ctx, exit_code):
         if not is_local:
             warning = uploader.check(ctx.std.env)
             if warning:
@@ -185,8 +187,8 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 print("no CI detected, uploads skipped (dry run)")
             print("------------------------------------")
 
-    fragment.build_event.append(_on_build_event)
-    fragment.build_end.append(_on_build_end)
+    bazel_trait.build_event.append(_on_build_event)
+    bazel_trait.build_end.append(_on_build_end)
 
 
 ArtifactUpload = feature(

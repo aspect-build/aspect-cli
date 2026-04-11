@@ -59,11 +59,8 @@ def _test_impl(ctx: TaskContext) -> int:
         else:
             build_events = False
 
-    # Shared mutable state across build_start / build_event / build_end
-    state = {}
-
     for handler in bazel_trait.build_start:
-        handler(ctx, state)
+        handler(ctx)
 
     if ctx.args.cancel:
         cancellation = ctx.bazel.cancel_invocation()
@@ -90,7 +87,7 @@ def _test_impl(ctx: TaskContext) -> int:
         if bazel_trait.build_event:
             for event in test.build_events():
                 for handler in bazel_trait.build_event:
-                    handler(ctx, state, event)
+                    handler(ctx, event)
 
         build_status = test.wait()
 
@@ -98,7 +95,7 @@ def _test_impl(ctx: TaskContext) -> int:
             break
 
     for handler in bazel_trait.build_end:
-        handler(ctx, state, build_status.code)
+        handler(ctx, build_status.code)
 
     return build_status.code
 

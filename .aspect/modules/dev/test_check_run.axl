@@ -1,0 +1,236 @@
+"""
+Test task to create a GitHub check run with rich Markdown output.
+Used for validating the check run UI on CI.
+
+Usage:
+  aspect test-check-run                        # create in_progress run, auto-detect repo/sha
+  aspect test-check-run --complete             # create then complete with success
+  aspect test-check-run --complete --fail      # create then complete with failure
+  aspect test-check-run --owner ORG --repo R   # explicit owner/repo
+"""
+
+
+def _detect_github_repo(ctx):
+    """Detect (owner, repo) from git remote origin."""
+    result = ctx.std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code != 0:
+        return ("", "")
+    url = result.stdout.strip()
+    if url.startswith("git@github.com:"):
+        path = url[len("git@github.com:"):]
+    elif "github.com/" in url:
+        path = url[url.index("github.com/") + len("github.com/"):]
+    else:
+        return ("", "")
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.split("/", 1)
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return (parts[0], parts[1])
+    return ("", "")
+
+
+def _detect_sha(ctx):
+    """Detect commit SHA from CI env or git."""
+    sha = (ctx.std.env.var("GITHUB_SHA") or
+           ctx.std.env.var("BUILDKITE_COMMIT") or
+           ctx.std.env.var("CIRCLE_SHA1") or "")
+    if sha:
+        return sha
+    result = ctx.std.process.command("git").args(["rev-parse", "HEAD"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code == 0:
+        return result.stdout.strip()
+    return ""
+
+
+def _do_request(ctx, method, url, token, payload):
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    data = json.encode(payload)
+    if method == "POST":
+        response = ctx.http().post(url = url, headers = headers, data = data).block()
+    elif method == "PATCH":
+        response = ctx.http().patch(url = url, headers = headers, data = data).block()
+    else:
+        return (False, 0, "unsupported method: " + method)
+    success = response.status >= 200 and response.status < 300
+    body = json.decode(response.body) if response.body else None
+    return (success, response.status, body)
+
+
+def _impl(ctx: TaskContext) -> int:
+    env = ctx.std.env
+
+    token = env.var("GITHUB_TOKEN") or env.var("ASPECT_WORKFLOWS_PR_GITHUB_TOKEN")
+    if not token:
+        print("Error: GITHUB_TOKEN is not set")
+        return 1
+
+    owner = ctx.args.owner
+    repo = ctx.args.repo
+    if not owner or not repo:
+        (owner, repo) = _detect_github_repo(ctx)
+    if not owner or not repo:
+        print("Error: could not detect GitHub owner/repo. Pass --owner and --repo or run from a GitHub repo.")
+        return 1
+
+    sha = ctx.args.sha or _detect_sha(ctx)
+    if not sha:
+        print("Error: could not detect commit SHA. Pass --sha or set GITHUB_SHA.")
+        return 1
+
+    check_name = ctx.args.name
+    api_base = "https://api.github.com"
+
+    print("Creating check run '%s' on %s/%s @ %s..." % (check_name, owner, repo, sha[:7]))
+
+    in_progress_summary = "\n".join([
+        "| | |",
+        "|---|---|",
+        "| :arrows_counterclockwise: **Status** | Running |",
+        "| :stopwatch: **Started** | just now |",
+        "| :building_construction: **Triggered by** | `aspect test-check-run` |",
+        "| :dart: **Targets** | `//...` |",
+        "| :package: **Cache hit rate** | 84% |",
+        "",
+        "---",
+        "",
+        ":speech_balloon: **Last update:** `Compiling src/main.rs (47/112)...`",
+    ])
+
+    details_text = "\n".join([
+        "## Build Details",
+        "",
+        "```",
+        "[  1/112] Analyzing //app:server",
+        "[  2/112] Compiling src/proto/api.proto",
+        "[ 19/112] Linking //lib:core",
+        "[ 47/112] Compiling src/main.rs",
+        "```",
+        "",
+        "## Test Results",
+        "",
+        "> No tests have completed yet.",
+        "",
+        "---",
+        "",
+        "[:page_facing_up: Full logs](https://app.aspect.build/runs/test) &nbsp;·&nbsp; [:bar_chart: Cache stats](https://app.aspect.build/runs/test/cache)",
+    ])
+
+    create_url = api_base + "/repos/" + owner + "/" + repo + "/check-runs"
+    ok, status_code, body = _do_request(ctx, "POST", create_url, token, {
+        "name": check_name,
+        "head_sha": sha,
+        "status": "in_progress",
+        "details_url": "https://app.aspect.build/runs/test",
+        "output": {
+            "title": "Building 47 targets...",
+            "summary": in_progress_summary,
+            "text": details_text,
+        },
+        "actions": [
+            {"label": "Re-run", "description": "Trigger a new run", "identifier": "rerun"},
+            {"label": "Cancel", "description": "Cancel this run", "identifier": "cancel"},
+        ],
+    })
+
+    if not ok:
+        msg = "HTTP " + str(status_code)
+        if body and type(body) == "dict" and body.get("message"):
+            msg = msg + ": " + body["message"]
+        print("Error: failed to create check run (" + msg + ")")
+        return 1
+
+    check_run_id = body.get("id")
+    html_url = body.get("html_url", "")
+    print("Created: " + html_url)
+
+    if not ctx.args.complete:
+        return 0
+
+    conclusion = "failure" if ctx.args.fail else "success"
+
+    if conclusion == "success":
+        completed_summary = "\n".join([
+            "| | |",
+            "|---|---|",
+            "| :white_check_mark: **Status** | Passed |",
+            "| :stopwatch: **Duration** | 1m 23s |",
+            "| :building_construction: **Triggered by** | `aspect test-check-run` |",
+            "| :dart: **Targets** | `//...` |",
+            "| :package: **Cache hit rate** | 84% |",
+            "",
+            "---",
+            "",
+            ":speech_balloon: **Last update:** `All 47 tests passed.`",
+        ])
+        completed_title = "112 targets built, 47 tests passed"
+    else:
+        completed_summary = "\n".join([
+            "| | |",
+            "|---|---|",
+            "| :x: **Status** | Failed |",
+            "| :stopwatch: **Duration** | 0m 47s |",
+            "| :building_construction: **Triggered by** | `aspect test-check-run` |",
+            "| :dart: **Targets** | `//...` |",
+            "| :package: **Cache hit rate** | 84% |",
+            "",
+            "---",
+            "",
+            ":speech_balloon: **Last update:** `Build failed at target 83/112.`",
+        ])
+        completed_title = "Build failed at 83/112"
+
+    patch_url = api_base + "/repos/" + owner + "/" + repo + "/check-runs/" + str(check_run_id)
+    ok, status_code, body = _do_request(ctx, "PATCH", patch_url, token, {
+        "status": "completed",
+        "conclusion": conclusion,
+        "output": {
+            "title": completed_title,
+            "summary": completed_summary,
+            "text": details_text,
+        },
+    })
+
+    if not ok:
+        msg = "HTTP " + str(status_code)
+        if body and type(body) == "dict" and body.get("message"):
+            msg = msg + ": " + body["message"]
+        print("Error: failed to complete check run (" + msg + ")")
+        return 1
+
+    print("Completed with conclusion: " + conclusion)
+    return 0
+
+
+test_check_run = task(
+    group = ["dev"],
+    implementation = _impl,
+    args = {
+        "owner": args.string(
+            description = "GitHub repo owner (auto-detected from git remote if not set)",
+        ),
+        "repo": args.string(
+            description = "GitHub repo name (auto-detected from git remote if not set)",
+        ),
+        "sha": args.string(
+            description = "Commit SHA (auto-detected from GITHUB_SHA or git if not set)",
+        ),
+        "name": args.string(
+            description = "Check run name",
+            default = "aspect/test-check-run",
+        ),
+        "complete": args.boolean(
+            description = "Also complete the check run after creating it",
+            default = False,
+        ),
+        "fail": args.boolean(
+            description = "Complete with failure conclusion (requires --complete)",
+            default = False,
+        ),
+    },
+)

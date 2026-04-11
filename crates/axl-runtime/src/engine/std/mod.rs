@@ -20,6 +20,7 @@ mod env;
 mod fs;
 mod io;
 mod process;
+pub mod state_dict;
 pub mod stream;
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]

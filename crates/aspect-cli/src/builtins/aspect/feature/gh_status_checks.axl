@@ -2,7 +2,7 @@ load("../traits.axl", "BazelTrait", "HealthCheckTrait")
 load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
 
 def _github_status_checks(ctx: FeatureContext):
-    bazel = ctx.traits[BazelTrait]
+    bazel_trait = ctx.traits[BazelTrait]
     health_check = ctx.traits[HealthCheckTrait]
     sha = detect_commit_sha(ctx.std.env)
     (owner, repo) = detect_github_repo(ctx.std)
@@ -13,7 +13,9 @@ def _github_status_checks(ctx: FeatureContext):
         # TODO: move to ctx.task.lifecycle_hooks.pre_task once that is available
         health_check.pre_health_check.append(_print_check_name)
 
-        def _build_start(ctx, state):
+        state = {}
+
+        def _build_start(ctx):
             token = github.authenticate(ctx, ctx.std.env, owner = owner, repo = repo, roles = ["checks.write", "statuses.write", "prs.write"])
             if not token:
                 return
@@ -23,7 +25,7 @@ def _github_status_checks(ctx: FeatureContext):
             if result["success"]:
                 state["_check_run_id"] = result["check_run_id"]
 
-        def _build_end(ctx, state, exit_code):
+        def _build_end(ctx, exit_code):
             token = state.get("_github_token")
             check_run_id = state.get("_check_run_id")
             if not token or not check_run_id:
@@ -33,8 +35,8 @@ def _github_status_checks(ctx: FeatureContext):
             else:
                 github.status_checks.fail(ctx, token, owner, repo, check_run_id)
 
-        bazel.build_start.append(_build_start)
-        bazel.build_end.append(_build_end)
+        bazel_trait.build_start.append(_build_start)
+        bazel_trait.build_end.append(_build_end)
 
 
 GithubStatusChecks = feature(
