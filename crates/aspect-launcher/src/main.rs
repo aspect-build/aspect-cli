@@ -126,12 +126,13 @@ async fn _download_into_cache(
 
 #[derive(Deserialize, Debug)]
 struct Release {
+    tag_name: String,
+    #[serde(default)]
     assets: Vec<ReleaseArtifact>,
 }
 
 #[derive(Deserialize, Debug)]
 struct ReleaseArtifact {
-    url: String,
     name: String,
 }
 
@@ -196,7 +197,9 @@ async fn configure_tool_task(
         for source in tool.sources() {
             match source {
                 ToolSource::Http { url, headers } => {
-                    let url = replace_vars(url, tool.version());
+                    let fallback_version = cargo_pkg_short_version();
+                    let version = tool.version().unwrap_or(&fallback_version);
+                    let url = replace_vars(url, version);
                     let req_headers = headermap_from_hashmap(headers.iter());
                     let req = client
                         .request(Method::GET, &url)
@@ -250,25 +253,82 @@ async fn configure_tool_task(
                     tag,
                     artifact,
                 } => {
-                    let tag = if tag.is_empty() {
-                        format!("v{}", tool.version())
-                    } else {
-                        replace_vars(tag, tool.version())
-                    };
+                    let fallback_version = cargo_pkg_short_version();
+                    let pinned_version = tool.version();
+                    let version_for_vars = pinned_version.unwrap_or(&fallback_version);
+
                     let artifact = if artifact.is_empty() {
                         format!("{}-{}", repo, LLVM_TRIPLE)
                     } else {
-                        replace_vars(artifact, tool.version())
+                        replace_vars(artifact, version_for_vars)
                     };
 
-                    let url =
-                        format!("https://api.github.com/repos/{org}/{repo}/releases/tags/{tag}");
+                    // Step 1: Resolve the tag.
+                    // If a version is pinned, compute the tag directly.
+                    // If unpinned, query the releases API to find the latest
+                    // release that has the matching artifact.
+                    let resolved_tag = if let Some(version) = pinned_version {
+                        if tag.is_empty() {
+                            format!("v{}", version)
+                        } else {
+                            replace_vars(tag, version)
+                        }
+                    } else {
+                        let releases_url = format!(
+                            "https://api.github.com/repos/{org}/{repo}/releases?per_page=10"
+                        );
+                        if debug_mode() {
+                            eprintln!(
+                                "{:} source {:?} querying releases from {:?}",
+                                tool.name(),
+                                source,
+                                releases_url,
+                            );
+                        }
+                        let releases_req = gh_request(&client, releases_url)
+                            .header(
+                                HeaderName::from_static("accept"),
+                                HeaderValue::from_static("application/vnd.github+json"),
+                            )
+                            .build()
+                            .into_diagnostic()?;
+                        let releases_resp = client
+                            .execute(releases_req)
+                            .await
+                            .into_diagnostic()?;
+                        if !releases_resp.status().is_success() {
+                            errs.push(Err(miette!(
+                                "github releases list request for {org}/{repo} failed with status {}",
+                                releases_resp.status()
+                            )));
+                            continue;
+                        }
+                        let releases: Vec<Release> =
+                            releases_resp.json().await.into_diagnostic()?;
+                        let found = releases.into_iter().find(|r| {
+                            r.assets.iter().any(|a| a.name == *artifact)
+                        });
+                        match found {
+                            Some(release) => release.tag_name,
+                            None => {
+                                errs.push(Err(miette!(
+                                    "unable to find release artifact {artifact} in any recent {org}/{repo} release"
+                                )));
+                                continue;
+                            }
+                        }
+                    };
 
-                    let tool_dest_file = cache.tool_path(&tool.name(), &url);
+                    // Step 2: Download from the direct release URL using the resolved tag.
+                    let direct_url = format!(
+                        "https://github.com/{org}/{repo}/releases/download/{resolved_tag}/{artifact}"
+                    );
+
+                    let tool_dest_file = cache.tool_path(&tool.name(), &direct_url);
                     let mut extra_envs = HashMap::new();
                     extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_ORG".to_string(), org.clone());
                     extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_REPO".to_string(), repo.clone());
-                    extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(), tag.clone());
+                    extra_envs.insert("ASPECT_LAUNCHER_ASPECT_CLI_TAG".to_string(), resolved_tag.clone());
                     extra_envs.insert(
                         "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT".to_string(),
                         artifact.clone(),
@@ -279,7 +339,7 @@ async fn configure_tool_task(
                                 "{:} source {:?} found in cache {:?}",
                                 tool.name(),
                                 source,
-                                &url
+                                &direct_url
                             );
                         };
                         return Ok((
@@ -290,65 +350,36 @@ async fn configure_tool_task(
                     }
                     fs::create_dir_all(tool_dest_file.parent().unwrap()).into_diagnostic()?;
 
-                    let req = gh_request(&client, url)
+                    if debug_mode() {
+                        eprintln!(
+                            "{:} source {:?} downloading {:?} to {:?}",
+                            tool.name(),
+                            source,
+                            direct_url,
+                            tool_dest_file
+                        );
+                    };
+                    let req = gh_request(&client, direct_url)
                         .header(
                             HeaderName::from_static("accept"),
-                            HeaderValue::from_static("application/vnd.github+json"),
+                            HeaderValue::from_static("application/octet-stream"),
                         )
                         .build()
                         .into_diagnostic()?;
-
-                    let resp = client
-                        .execute(req.try_clone().unwrap())
-                        .await
-                        .into_diagnostic()?;
-                    let status = resp.status();
-                    if !status.is_success() {
-                        let body = resp.text().await.unwrap_or_default();
-                        errs.push(Err(miette!(
-                            "GitHub API request failed with status {}: {}",
-                            status,
-                            body
-                        )));
+                    let download_msg =
+                        format!("downloading aspect cli version {} file {}", resolved_tag, artifact);
+                    if let err @ Err(_) =
+                        _download_into_cache(&client, &tool_dest_file, req, &download_msg)
+                            .await
+                    {
+                        errs.push(err);
                         continue;
                     }
-                    let release_data: Release = resp.json::<Release>().await.into_diagnostic()?;
-                    for asset in release_data.assets {
-                        if asset.name == *artifact {
-                            if debug_mode() {
-                                eprintln!(
-                                    "{:} source {:?} downloading {:?} to {:?}",
-                                    tool.name(),
-                                    source,
-                                    asset.url,
-                                    tool_dest_file
-                                );
-                            };
-                            let req = gh_request(&client, asset.url)
-                                .header(
-                                    HeaderName::from_static("accept"),
-                                    HeaderValue::from_static("application/octet-stream"),
-                                )
-                                .build()
-                                .into_diagnostic()?;
-                            let download_msg =
-                                format!("downloading aspect cli version {} file {}", tag, artifact);
-                            if let err @ Err(_) =
-                                _download_into_cache(&client, &tool_dest_file, req, &download_msg)
-                                    .await
-                            {
-                                errs.push(err);
-                                break;
-                            }
-                            return Ok((
-                                tool_dest_file,
-                                ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
-                                extra_envs,
-                            ));
-                        }
-                    }
-                    errs.push(Err(miette!("unable to find a release artifact in github!")));
-                    continue;
+                    return Ok((
+                        tool_dest_file,
+                        ASPECT_LAUNCHER_METHOD_GITHUB.to_string(),
+                        extra_envs,
+                    ));
                 }
                 ToolSource::Local { path } => {
                     let tool_dest_file = cache.tool_path(&tool.name(), path);
@@ -490,5 +521,121 @@ fn main() -> Result<ExitCode> {
             })?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replace_vars_version() {
+        let result = replace_vars("tool-{version}", "1.2.3");
+        assert_eq!(result, format!("tool-1.2.3"));
+    }
+
+    #[test]
+    fn test_replace_vars_os() {
+        let result = replace_vars("{os}", "1.0.0");
+        assert_eq!(result, GOOS);
+    }
+
+    #[test]
+    fn test_replace_vars_arch() {
+        let result = replace_vars("{arch}", "1.0.0");
+        assert_eq!(result, BZLARCH);
+    }
+
+    #[test]
+    fn test_replace_vars_target() {
+        let result = replace_vars("{target}", "1.0.0");
+        assert_eq!(result, LLVM_TRIPLE);
+    }
+
+    #[test]
+    fn test_replace_vars_multiple() {
+        let result = replace_vars("tool-{version}-{os}-{arch}", "3.0.0");
+        assert_eq!(result, format!("tool-3.0.0-{}-{}", GOOS, BZLARCH));
+    }
+
+    #[test]
+    fn test_replace_vars_no_placeholders() {
+        let result = replace_vars("plain-string", "1.0.0");
+        assert_eq!(result, "plain-string");
+    }
+
+    #[test]
+    fn test_release_deserialize_with_assets() {
+        let json = r#"{
+            "tag_name": "v1.0.0",
+            "assets": [
+                {"name": "tool-linux"},
+                {"name": "tool-macos"}
+            ]
+        }"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v1.0.0");
+        assert_eq!(release.assets.len(), 2);
+        assert_eq!(release.assets[0].name, "tool-linux");
+        assert_eq!(release.assets[1].name, "tool-macos");
+    }
+
+    #[test]
+    fn test_release_deserialize_without_assets() {
+        let json = r#"{"tag_name": "v2.0.0"}"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v2.0.0");
+        assert!(release.assets.is_empty());
+    }
+
+    #[test]
+    fn test_release_deserialize_empty_assets() {
+        let json = r#"{"tag_name": "v3.0.0", "assets": []}"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v3.0.0");
+        assert!(release.assets.is_empty());
+    }
+
+    #[test]
+    fn test_release_deserialize_ignores_extra_fields() {
+        let json = r#"{
+            "tag_name": "v1.0.0",
+            "id": 12345,
+            "draft": false,
+            "prerelease": false,
+            "assets": []
+        }"#;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v1.0.0");
+    }
+
+    #[test]
+    fn test_release_list_deserialize() {
+        let json = r#"[
+            {"tag_name": "v2.0.0", "assets": []},
+            {"tag_name": "v1.0.0", "assets": [{"name": "tool"}]}
+        ]"#;
+        let releases: Vec<Release> = serde_json::from_str(json).unwrap();
+        assert_eq!(releases.len(), 2);
+        assert!(releases[0].assets.is_empty());
+        assert_eq!(releases[1].assets[0].name, "tool");
+    }
+
+    #[test]
+    fn test_headermap_from_hashmap() {
+        let headers = vec![
+            ("Content-Type", "application/json"),
+            ("Authorization", "Bearer token"),
+        ];
+        let map = headermap_from_hashmap(headers.into_iter());
+        assert_eq!(map.get("content-type").unwrap(), "application/json");
+        assert_eq!(map.get("authorization").unwrap(), "Bearer token");
+    }
+
+    #[test]
+    fn test_headermap_from_hashmap_empty() {
+        let headers: Vec<(&str, &str)> = vec![];
+        let map = headermap_from_hashmap(headers.into_iter());
+        assert!(map.is_empty());
     }
 }
