@@ -187,10 +187,12 @@ def _delivery_impl(ctx):
     # Delivery requires a remote cache to populate the grpc log with action digests.
     # common-section flags are re-encoded as --default_override=0:common=--remote_cache=...
     # so we must check for both forms.
+    # expand_all returns plain strings for unconditional flags and (value, condition)
+    # tuples for version-conditioned flags; take the first element in either case.
     remote_cache_uri = None
+    _override_prefix = "--default_override=0:common="
     for flag in expanded_flags:
-        f = flag
-        _override_prefix = "--default_override=0:common="
+        f = flag[0] if type(flag) == "tuple" else flag
         if f.startswith(_override_prefix):
             f = f[len(_override_prefix):]
         if f.startswith("--remote_cache="):
