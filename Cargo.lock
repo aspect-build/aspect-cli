@@ -51,7 +51,7 @@ dependencies = [
 [[package]]
 name = "allocative"
 version = "0.3.4"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "allocative_derive",
  "bumpalo",
@@ -63,7 +63,7 @@ dependencies = [
 [[package]]
 name = "allocative_derive"
 version = "0.3.3"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -730,7 +730,7 @@ dependencies = [
 [[package]]
 name = "cmp_any"
 version = "0.8.1"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 
 [[package]]
 name = "colorchoice"
@@ -1154,7 +1154,7 @@ dependencies = [
 [[package]]
 name = "display_container"
 version = "0.9.0"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "either",
  "indenter",
@@ -1189,7 +1189,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dupe"
 version = "0.9.1"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "dupe_derive",
 ]
@@ -1197,7 +1197,7 @@ dependencies = [
 [[package]]
 name = "dupe_derive"
 version = "0.9.1"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4056,7 +4056,7 @@ dependencies = [
 [[package]]
 name = "starlark"
 version = "0.13.0"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "allocative",
  "anyhow",
@@ -4095,7 +4095,7 @@ dependencies = [
 [[package]]
 name = "starlark_derive"
 version = "0.13.0"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "dupe",
  "proc-macro2",
@@ -4106,7 +4106,7 @@ dependencies = [
 [[package]]
 name = "starlark_lsp"
 version = "0.13.0"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "anyhow",
  "derivative",
@@ -4125,7 +4125,7 @@ dependencies = [
 [[package]]
 name = "starlark_map"
 version = "0.13.0"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "allocative",
  "dupe",
@@ -4139,7 +4139,7 @@ dependencies = [
 [[package]]
 name = "starlark_syntax"
 version = "0.13.0"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "allocative",
  "annotate-snippets",
@@ -4190,7 +4190,7 @@ dependencies = [
 [[package]]
 name = "strong_hash"
 version = "0.1.0"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "ref-cast",
  "strong_hash_derive",
@@ -4199,7 +4199,7 @@ dependencies = [
 [[package]]
 name = "strong_hash_derive"
 version = "0.1.0"
-source = "git+https://github.com/thesayyn/starlark-rust.git?branch=bytes_type#3470ef714eae7601c58de605372dba37eeec337a"
+source = "git+https://github.com/aspect-build/starlark-rust?rev=51e858ab7431782b47d08b67ec4a83151946e7b7#51e858ab7431782b47d08b67ec4a83151946e7b7"
 dependencies = [
  "quote",
  "syn 2.0.106",
