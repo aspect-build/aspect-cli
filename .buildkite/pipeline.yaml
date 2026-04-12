@@ -71,8 +71,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      echo "--- :bazel: aspect build //:launcher //:cli"
-      ASPECT_DEBUG=1 aspect build //:launcher //:cli
+      echo "--- :bazel: aspect build //crates/aspect-launcher //crates/aspect-cli"
+      ASPECT_DEBUG=1 aspect build //crates/aspect-launcher //crates/aspect-cli
       # Use cquery to get the actual output paths (handles platform transitions on Linux)
       WORKSPACE_ROOT=$$(pwd)
       LAUNCHER=$$WORKSPACE_ROOT/$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-launcher)
@@ -206,5 +206,5 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
-      aspect delivery --task-key delivery-bk --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT --force_target //:hello -- //:hello //:hello2
+      ASPECT_DEBUG=1 aspect delivery --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT //examples/deliverable
+      aspect delivery --task-key delivery-bk --build_url $BUILDKITE_BUILD_URL --commit_sha $BUILDKITE_COMMIT  //examples/deliverable
