@@ -1,3 +1,9 @@
+def _canonical(label):
+    """Normalize a Bazel label to canonical form: //foo/bar -> //foo/bar:bar."""
+    if ":" not in label:
+        return label + ":" + label.split("/")[-1]
+    return label
+
 def _process_bes(state: struct, event):
     filesets = state.filesets
     target_fileset = state.target_fileset
@@ -5,14 +11,16 @@ def _process_bes(state: struct, event):
     if event.kind == "named_set_of_files":
         filesets[event.id.id] = event.payload
     elif event.kind == "target_completed":
-        if event.id.label in targets:
+        canonical_label = _canonical(event.id.label)
+        if canonical_label in targets:
             for og in event.payload.output_group:
                 if og.name == "default":
-                    target_fileset[event.id.label] = og.file_sets
+                    target_fileset[canonical_label] = og.file_sets
 
 def _determine_entrypoint(state: struct, target: str) -> str | None:
     filesets = state.filesets
     target_fileset = state.target_fileset
+    target = _canonical(target)
     if target not in target_fileset:
         return None
 
@@ -73,7 +81,7 @@ def _spawn(ctx: TaskContext, entrypoint: str, args: list[str], capture: bool = F
 def runnable(ctx, targets: list[str]) -> struct:
     state = struct(
         ctx = ctx,
-        targets = targets,
+        targets = {_canonical(t): t for t in targets},
         filesets = {},
         target_fileset = {}
     )

@@ -64,6 +64,13 @@ def _print_captured_output(label, exit_code, stdout, stderr, is_tty):
     print(_style(sep, _BOLD, is_tty))
 
 
+def _canonical(label):
+    """Normalize a Bazel label to canonical form: //foo/bar -> //foo/bar:bar."""
+    if ":" not in label:
+        return label + ":" + label.split("/")[-1]
+    return label
+
+
 def _write_aspect_repo(ctx, repo_dir):
     ctx.std.fs.create_dir_all(repo_dir)
     ctx.std.fs.write(repo_dir + "/REPO.bazel", "")
@@ -127,7 +134,6 @@ def _get_output_shas(ctx, targets, bazel_flags, remote_executor_uri, is_tty):
     phase2_flags = bazel_flags + aspect_flags + [
         "--remote_executor=" + remote_executor_uri,
         "--experimental_remote_require_cached",
-        "--nouse_action_cache",
         "--remote_grpc_log=" + log_path,
         "--keep_going"
     ]
@@ -140,6 +146,9 @@ def _get_output_shas(ctx, targets, bazel_flags, remote_executor_uri, is_tty):
         *targets
     ).wait()
 
+    # The grpc log always records the canonical label (//foo/bar:bar), so normalize
+    # the user-supplied targets before matching.
+    canonical_targets = {_canonical(t): t for t in targets}
 
     output_shas = {}
     log_file = ctx.std.fs.open(log_path)
@@ -147,9 +156,10 @@ def _get_output_shas(ctx, targets, bazel_flags, remote_executor_uri, is_tty):
         if entry.method_name == "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             if ctx.std.env.var("ASPECT_DEBUG"):
                 print(entry)
-            label = entry.metadata.target_id
-            if label in targets and entry.metadata.action_mnemonic == "DeliveryHash":
-                output_shas[label] = entry.details.details.request.action_digest.hash
+            canonical_label = entry.metadata.target_id
+            if canonical_label in canonical_targets and entry.metadata.action_mnemonic == "DeliveryHash":
+                original_label = canonical_targets[canonical_label]
+                output_shas[original_label] = entry.details.details.request.action_digest.hash
     ctx.std.fs.remove_file(log_path)
 
     return output_shas, 0

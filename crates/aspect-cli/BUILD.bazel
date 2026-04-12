@@ -38,7 +38,10 @@ rust_binary(
         "src/builtins/**/*.axl",
         "src/builtins/**/*.aspect",
     ]),
-    visibility = ["//:__pkg__"],
+    visibility = [
+        "//:__pkg__",
+        "//examples/deliverable:__pkg__"
+    ],
 )
 
 multi_platform_rust_binaries(
