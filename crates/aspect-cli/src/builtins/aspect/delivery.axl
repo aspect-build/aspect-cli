@@ -5,8 +5,10 @@ Delivers each target via bazel run with stamping enabled, and signs artifacts
 to prevent re-delivery.
 
 Uses deliveryd (Unix socket HTTP server) for all delivery state operations.
-Requires a functioning remote cache — output_shas are extracted from the
-grpc log written during the build phase.
+Requires a functioning remote cache — output_shas are derived from the
+DeliveryHash aspect's action digest, captured via --remote_grpc_log.
+The DeliveryHash action is marked no-local so its digest is always resolved
+through the remote cache protocol, never executed locally.
 """
 
 load("./traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait")
@@ -75,6 +77,7 @@ def _write_aspect_repo(ctx, repo_dir):
         command = "echo 'Delivery by AXL' > " + hash_file.path,
         mnemonic = "DeliveryHash",
         progress_message = "Computing delivery hash for %{label}",
+        execution_requirements = {"no-local": "1"},
     )
     return [OutputGroupInfo(delivery_hash = depset([hash_file]))]
 
@@ -84,55 +87,63 @@ hashsum = aspect(implementation = _hashsum_impl)
 
 _GRPC_LOG_PATH = "/tmp/aspect-delivery-grpc-{}.bin"
 
-def _get_output_shas(ctx, targets, bazel_flags, is_tty):
+def _get_output_shas(ctx, targets, bazel_flags, remote_executor_uri, is_tty):
     """
     Build targets and extract action cache keys from the grpc log.
 
-    Phase 1: build with hashsum aspect + --nokeep_state_after_build to flush Skyframe.
-    Phase 2: rebuild with --nouse_action_cache + --remote_grpc_log to capture action digests.
+    Phase 1: build actual targets with --nokeep_state_after_build to flush Skyframe,
+             ensuring the binaries are in the remote cache.
+    Phase 2: build with the hashsum aspect + --experimental_remote_require_cached +
+             --remote_grpc_log. Bazel queries the remote cache for every action including
+             DeliveryHash; the GetActionResult request (hit or miss) is recorded in the
+             grpc log and contains the stable action_digest.hash we need. DeliveryHash is
+             marked no-local so it is never executed locally.
 
     Returns (output_shas, exit_code) where output_shas is {label: action_digest_hash}.
     """
-
     repo_dir = "/tmp/aspect_delivery_" + ctx.task.key
     _write_aspect_repo(ctx, repo_dir)
 
-    flags = bazel_flags + [
+    aspect_flags = [
         "--aspects=@aspect_delivery//:hashsum.bzl%hashsum",
         "--output_groups=+delivery_hash",
         "--inject_repository=aspect_delivery=" + repo_dir,
     ]
 
     print("  {} {} target(s)...".format(_style("Building", _BOLD, is_tty), len(targets)))
-    phase1_flags = flags + [
-        "--nokeep_state_after_build",
-    ]
+    phase1_flags = bazel_flags + ["--nokeep_state_after_build"]
     status = ctx.bazel.build(flags = phase1_flags, *targets).wait()
     if status.code != 0:
         return {}, status.code
 
-    # Phase 2: aspect build to extract output_shas for binary targets
+    # Phase 2: check every action against the remote cache without executing anything.
+    # --experimental_remote_require_cached forces GetActionResult for each action, so the
+    # DeliveryHash action digest flows into the grpc log even when it is a cache miss.
+    # We parse the log regardless of exit code; a non-zero result here simply means
+    # DeliveryHash was not yet cached remotely, which is expected on first delivery.
+    print("  {} {} target(s)...".format(_style("Checksuming", _BOLD, is_tty), len(targets)))
     log_path = _GRPC_LOG_PATH.format(ctx.task.key)
-    phase2_flags = flags + [
-        # Skip local action cache
+    phase2_flags = bazel_flags + aspect_flags + [
+        "--remote_executor=" + remote_executor_uri,
+        "--experimental_remote_require_cached",
         "--nouse_action_cache",
-        # Record remote cache interactions
-        "--remote_grpc_log=" + log_path
+        "--remote_grpc_log=" + log_path,
     ]
-    phase2_status = ctx.bazel.build(
+    ctx.bazel.build(
         flags = phase2_flags,
-        inherit_stdout = False,
-        inherit_stderr = False,
+        inherit_stdout = True,
+        inherit_stderr = True,
         *targets
     ).wait()
-    if phase2_status.code != 0:
-        return {}, phase2_status.code
 
-    print("  {} {} target(s)...".format(_style("Checksuming", _BOLD, is_tty), len(targets)))
+
     output_shas = {}
     log_file = ctx.std.fs.open(log_path)
     for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
+        print(entry)
         if entry.method_name == "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
+            if ctx.std.env.var("ASPECT_DEBUG"):
+                print(entry)
             label = entry.metadata.target_id
             if label in targets and entry.metadata.action_mnemonic == "DeliveryHash":
                 output_shas[label] = entry.details.details.request.action_digest.hash
@@ -221,7 +232,7 @@ def _delivery_impl(ctx):
     run_tracker = runnable(ctx, targets)
 
     # Build all targets and extract output_shas from grpc log
-    output_shas, build_code = _get_output_shas(ctx, targets, expanded_flags, is_tty)
+    output_shas, build_code = _get_output_shas(ctx, targets, expanded_flags, remote_cache_uri, is_tty)
 
     if build_code != 0:
         print(_style("Build failed with exit code {}".format(build_code), _BOLD + _RED, is_tty))
