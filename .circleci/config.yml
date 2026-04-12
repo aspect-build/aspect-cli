@@ -67,7 +67,7 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Delivery Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect delivery --build_url $CIRCLE_BUILD_URL --commit_sha $CIRCLE_SHA1 --force_target //:cli -- //:cli //:launcher
+          command: ASPECT_DEBUG=1 aspect delivery --build_url $CIRCLE_BUILD_URL --commit_sha $CIRCLE_SHA1 --force_target //crates/aspect-cli -- //crates/aspect-cli //crates/aspect-launcher
       - run:
           name: Delivery Task
-          command: aspect delivery --task-key delivery-cci --build_url $CIRCLE_BUILD_URL --commit_sha $CIRCLE_SHA1 --force_target //:cli -- //:cli //:launcher
+          command: aspect delivery --task-key delivery-cci --build_url $CIRCLE_BUILD_URL --commit_sha $CIRCLE_SHA1 --force_target //crates/aspect-cli -- //crates/aspect-cli //crates/aspect-launcher

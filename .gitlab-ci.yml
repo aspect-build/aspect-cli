@@ -45,5 +45,5 @@ delivery-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect delivery --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:cli -- //:cli //:launcher
-    - aspect delivery --task-key delivery-gl --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //:cli -- //:cli //:launcher
+    - ASPECT_DEBUG=1 aspect delivery --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //crates/aspect-cli -- //crates/aspect-cli //crates/aspect-launcher
+    - aspect delivery --task-key delivery-gl --build_url $CI_PIPELINE_URL --commit_sha $CI_COMMIT_SHA --force_target //crates/aspect-cli -- //crates/aspect-cli //crates/aspect-launcher

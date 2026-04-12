@@ -12,12 +12,18 @@ Actual: aspect hangs after "Build completed successfully" due to BEP pipe deadlo
 """
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
+genrule(
+    name = "test",
+    outs = ["outgtt_{}.txt".format(1)],
+    cmd = "echo 'Generated output {}' > $@".format(1),
+    local = 1
+)
 
 [
     sh_binary(
         name = "bin_" + str(i),
         srcs = ["bin.sh"],
-        data = ["target_{}".format(i)]
+        data = [":test"]
     )
 
     for i in range(100)

@@ -70,9 +70,10 @@ def _write_aspect_repo(ctx, repo_dir):
     ctx.std.fs.write(repo_dir + "/BUILD.bazel", "")
     ctx.std.fs.write(repo_dir + "/hashsum.bzl", """def _hashsum_impl(target, ctx):
     files = target[DefaultInfo].files
+    runfiles = target[DefaultInfo].default_runfiles
     hash_file = ctx.actions.declare_file(target.label.name + ".delivery_hash")
     ctx.actions.run_shell(
-        inputs = depset([], transitive = [files]),
+        inputs = depset([], transitive = [files, runfiles.files]),
         outputs = [hash_file],
         command = "echo 'Delivery by AXL' > " + hash_file.path,
         mnemonic = "DeliveryHash",
@@ -107,7 +108,7 @@ def _get_output_shas(ctx, targets, bazel_flags, remote_executor_uri, is_tty):
     aspect_flags = [
         "--aspects=@aspect_delivery//:hashsum.bzl%hashsum",
         "--output_groups=+delivery_hash",
-        "--inject_repository=aspect_delivery=" + repo_dir,
+        "--inject_repository=aspect_delivery=" + repo_dir
     ]
 
     print("  {} {} target(s)...".format(_style("Building", _BOLD, is_tty), len(targets)))
@@ -128,11 +129,14 @@ def _get_output_shas(ctx, targets, bazel_flags, remote_executor_uri, is_tty):
         "--experimental_remote_require_cached",
         "--nouse_action_cache",
         "--remote_grpc_log=" + log_path,
+        "--keep_going"
     ]
+
+    # TODO: Do not swallow errors here and surface them if we can not find the hashes for all the deliverable targets.
     ctx.bazel.build(
         flags = phase2_flags,
-        inherit_stdout = True,
-        inherit_stderr = True,
+        inherit_stdout = False,
+        inherit_stderr = False,
         *targets
     ).wait()
 
@@ -140,7 +144,6 @@ def _get_output_shas(ctx, targets, bazel_flags, remote_executor_uri, is_tty):
     output_shas = {}
     log_file = ctx.std.fs.open(log_path)
     for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
-        print(entry)
         if entry.method_name == "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
             if ctx.std.env.var("ASPECT_DEBUG"):
                 print(entry)
@@ -179,6 +182,11 @@ def _delivery_impl(ctx):
     bazel_flags = list(ctx.args.bazel_flag)
     if not bazel_flags:
         bazel_flags = ["--stamp"]
+
+
+    # Do not download any outputs
+    bazel_flags.append("--remote_download_outputs=minimal")
+
     bazel_flags.extend(bazel_trait.extra_flags)
     if bazel_trait.flags:
         bazel_flags = bazel_trait.flags(bazel_flags)
@@ -260,7 +268,10 @@ def _delivery_impl(ctx):
         phase3_flags = list(expanded_flags) + [
             "--experimental_build_event_upload_strategy=local",
             "--noremote_upload_local_results",
+            # Download the targets that needs delivery
             "--remote_download_outputs=toplevel",
+            # Build the runfiles tree before running the target
+            "--build_runfile_links",
         ]
         build = ctx.bazel.build(flags = phase3_flags, build_events = True, inherit_stderr = False, *delivery_targets)
         for event in build.build_events():
@@ -293,7 +304,7 @@ def _delivery_impl(ctx):
 
         if not output_sha:
             pending_count += 1
-            results.append((label, "WARN", "warn", "no output_sha (not in grpc log)", "-"))
+            results.append((label, "WARN", "warn", "no output_sha (not in grpc log; target may be an alias — use the actual target label)", "-"))
         elif not is_forced and target_state and target_state.get("delivered"):
             skipped_count += 1
             delivered_by = target_state.get("delivered_by") or "-"
