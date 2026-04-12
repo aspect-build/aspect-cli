@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::anyhow;
 
 /// Joins two paths ensuring that the subpath does not lead to oustide of base.
-pub(super) fn join_confined(base: &Path, subpath: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn join_confined(base: &Path, subpath: &Path) -> anyhow::Result<PathBuf> {
     let mut dest = base.to_path_buf();
     for component in subpath.components() {
         match component {

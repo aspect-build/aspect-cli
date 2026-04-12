@@ -1,9 +1,6 @@
-use std::cell::RefCell;
-
 use allocative::Allocative;
 use derive_more::Display;
 
-use starlark::environment::FrozenModule;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -23,11 +20,7 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::Tracer;
 use starlark::values::ValueLike;
-use starlark::values::ValueOfUnchecked;
 use starlark::values::starlark_value;
-
-use crate::engine::config::tasks::value::MutableTaskList;
-use crate::engine::config::tasks::value::TaskListGen;
 
 use super::super::http::Http;
 use super::super::std::Std;
@@ -35,7 +28,6 @@ use super::super::template;
 use super::super::wasm::Wasm;
 
 use super::tasks::configured_task::ConfiguredTask;
-use super::tasks::r#ref::TaskListRef;
 use super::tasks::value::TaskList;
 
 /// Config context for evaluating config.axl files.
@@ -51,8 +43,6 @@ pub struct ConfigContext<'v> {
     trait_map: values::Value<'v>,
     #[allocative(skip)]
     feature_map: values::Value<'v>,
-    #[allocative(skip)]
-    config_modules: RefCell<Vec<FrozenModule>>,
 }
 
 impl<'v> ConfigContext<'v> {
@@ -67,21 +57,37 @@ impl<'v> ConfigContext<'v> {
             .into_iter()
             .map(|task| task.alloc_value(heap))
             .collect();
-        let x = TaskListGen(RefCell::new(TaskList::new_with_trait_map(tasks, trait_map)));
         Self {
-            tasks: heap.alloc_complex(x),
+            tasks: heap.alloc(TaskList::new(tasks)),
             trait_map,
             feature_map,
-            config_modules: RefCell::new(vec![]),
+        }
+    }
+
+    /// Create a new ConfigContext from already-allocated Value<'v> task objects.
+    ///
+    /// Unlike `new`, this does not re-allocate the tasks; the same Value<'v> pointers
+    /// are reused so that mutations during config evaluation are visible to the caller.
+    pub fn new_from_values(
+        tasks: Vec<values::Value<'v>>,
+        trait_map: values::Value<'v>,
+        feature_map: values::Value<'v>,
+        heap: Heap<'v>,
+    ) -> Self {
+        Self {
+            tasks: heap.alloc(TaskList::new(tasks)),
+            trait_map,
+            feature_map,
         }
     }
 
     /// Get references to the tasks.
     pub fn tasks(&self) -> Vec<&ConfiguredTask> {
-        let list = self.tasks.downcast_ref::<MutableTaskList>().unwrap();
-        list.0
-            .borrow()
+        self.tasks
+            .downcast_ref::<TaskList>()
+            .unwrap()
             .content
+            .borrow()
             .iter()
             .map(|m| m.downcast_ref::<ConfiguredTask>().unwrap())
             .collect()
@@ -89,8 +95,7 @@ impl<'v> ConfigContext<'v> {
 
     /// Get task values for iteration (used during config evaluation).
     pub fn task_values(&self) -> Vec<values::Value<'v>> {
-        let list = self.tasks.downcast_ref::<MutableTaskList>().unwrap();
-        list.0.borrow().content.clone()
+        self.tasks.downcast_ref::<TaskList>().unwrap().values()
     }
 
     /// Get the trait map value.
@@ -101,11 +106,6 @@ impl<'v> ConfigContext<'v> {
     /// Get the feature map value.
     pub fn feature_map_value(&self) -> values::Value<'v> {
         self.feature_map
-    }
-
-    /// Add a config module for lifetime management.
-    pub fn add_config_module(&self, module: FrozenModule) {
-        self.config_modules.borrow_mut().push(module);
     }
 }
 
@@ -131,9 +131,6 @@ impl<'v> Freeze for ConfigContext<'v> {
             tasks: self.tasks.freeze(freezer)?,
             trait_map: self.trait_map.freeze(freezer)?,
             feature_map: self.feature_map.freeze(freezer)?,
-            // Keep config modules alive so frozen Def values from config files
-            // remain valid during post_freeze optimization.
-            config_modules: self.config_modules.into_inner(),
         })
     }
 }
@@ -148,8 +145,6 @@ pub struct FrozenConfigContext {
     trait_map: FrozenValue,
     #[allocative(skip)]
     feature_map: FrozenValue,
-    #[allocative(skip)]
-    config_modules: Vec<FrozenModule>,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenConfigContext {
@@ -200,13 +195,11 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
     }
 
     #[starlark(attribute)]
-    fn tasks<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-    ) -> anyhow::Result<ValueOfUnchecked<'v, &'v TaskListRef<'v>>> {
-        let this = this
+    fn tasks<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        let ctx = this
             .downcast_ref_err::<ConfigContext>()
             .into_anyhow_result()?;
-        Ok(ValueOfUnchecked::new(this.tasks))
+        Ok(ctx.tasks)
     }
 
     /// Access to the trait map for configuring trait instances.

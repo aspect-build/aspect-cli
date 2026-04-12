@@ -19,7 +19,7 @@ path = "src/main.rs"
 aspect-telemetry = { path = "../aspect-telemetry" }
 axl-runtime = { path = "../axl-runtime" }
 clap = {version= "4.5.40", features = ["string"]}
-miette = { version = "7.6.0", features = ["fancy"] }
+anyhow = "1"
 opentelemetry = "0.31.0"
 opentelemetry_sdk = "0.31.0"
 opentelemetry-otlp = {version = "0.31.0", features = ["grpc-tonic", "tls-roots"]}

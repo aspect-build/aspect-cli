@@ -15,9 +15,9 @@ use starlark::values;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::Freezer;
+use starlark::values::FrozenValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
-use starlark::values::OwnedFrozenValue;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
@@ -34,17 +34,16 @@ use crate::eval::EvalError;
 
 /// A task bundled with its trait type IDs.
 ///
-/// This type:
-/// - Has no lifetime parameter (easy to store and pass around)
-/// - Uses `OwnedFrozenValue` for frozen values (task definition)
-/// - Stores trait type IDs for fragment map scoping
-/// - Is a `StarlarkValue` that config functions can modify via `set_attr`
+/// `task_def` is a `FrozenValue` pointing to a `FrozenTask`. The frozen heap that
+/// owns it is kept alive externally — either by `AxlLoader::loaded_modules` (for
+/// tasks discovered in Phase 1) or by the live module's heap registration (for tasks
+/// added via `ctx.tasks.add`).
 #[derive(Debug, ProvidesStaticType, Display, NoSerialize, Allocative, Clone)]
 #[display("<ConfiguredTask>")]
 pub struct ConfiguredTask {
-    /// The frozen task definition (contains implementation function)
+    /// The frozen task definition (contains implementation function).
     #[allocative(skip)]
-    pub task_def: OwnedFrozenValue,
+    pub task_def: FrozenValue,
     /// Task name (may be overridden by config)
     pub name: RefCell<String>,
     /// Task group (may be overridden by config)
@@ -70,18 +69,15 @@ impl ConfiguredTask {
         symbol: &str,
         path: PathBuf,
     ) -> Result<Self, EvalError> {
-        // Get task definition - returns OwnedFrozenValue which keeps heap alive
-        let task_def = frozen
+        let owned = frozen
             .get(symbol)
             .map_err(|e| EvalError::UnknownError(anyhow!(e)))?;
 
-        // Verify it's actually a FrozenTask and extract metadata
-        let frozen_task = task_def
+        let frozen_task = owned
             .value()
             .downcast_ref::<FrozenTask>()
             .ok_or_else(|| EvalError::UnknownError(anyhow!("symbol '{}' is not a Task", symbol)))?;
 
-        // Use symbol name if task name is empty
         let name = if frozen_task.name.is_empty() {
             symbol.to_string()
         } else {
@@ -89,6 +85,11 @@ impl ConfiguredTask {
         };
         let group = frozen_task.group.clone();
         let trait_type_ids = frozen_task.trait_type_ids();
+        // Extract the bare FrozenValue; the heap stays alive via AxlLoader::loaded_modules.
+        let task_def = owned
+            .value()
+            .unpack_frozen()
+            .expect("value from FrozenModule is always frozen");
 
         Ok(ConfiguredTask {
             task_def,
@@ -100,9 +101,12 @@ impl ConfiguredTask {
         })
     }
 
-    /// Create a ConfiguredTask with known trait type IDs.
+    /// Create a ConfiguredTask from a `FrozenValue` with known metadata.
+    ///
+    /// The caller is responsible for ensuring the frozen heap that owns `task_def`
+    /// remains alive for the duration of the evaluation.
     pub fn new_with_traits(
-        task_def: OwnedFrozenValue,
+        task_def: FrozenValue,
         name: String,
         group: Vec<String>,
         trait_type_ids: Vec<u64>,
@@ -121,7 +125,7 @@ impl ConfiguredTask {
 
     /// Get a reference to the underlying FrozenTask.
     pub fn as_frozen_task(&self) -> Option<&FrozenTask> {
-        self.task_def.value().downcast_ref::<FrozenTask>()
+        self.task_def.downcast_ref::<FrozenTask>()
     }
 
     /// Get the task as a TaskLike for introspection.
@@ -129,10 +133,9 @@ impl ConfiguredTask {
         self.as_frozen_task().map(|t| t as &dyn TaskLike<'_>)
     }
 
-    /// Get the task implementation function.
-    pub fn implementation(&self) -> Option<OwnedFrozenValue> {
-        let task = self.as_frozen_task()?;
-        Some(self.task_def.map(|_| task.implementation()))
+    /// Get the task implementation as a `FrozenValue`.
+    pub fn implementation(&self) -> Option<FrozenValue> {
+        Some(self.as_frozen_task()?.implementation())
     }
 
     /// Get the current name.
@@ -219,7 +222,7 @@ impl Freeze for ConfiguredTask {
 #[display("<ConfiguredTask>")]
 pub struct FrozenConfiguredTask {
     #[allocative(skip)]
-    pub task_def: OwnedFrozenValue,
+    pub task_def: FrozenValue,
     pub name: String,
     pub group: Vec<String>,
     pub trait_type_ids: Vec<u64>,

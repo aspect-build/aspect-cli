@@ -807,8 +807,86 @@ impl Freeze for TraitInstance<'_> {
 }
 
 // -----------------------------------------------------------------------------
-// Helper: extract trait type ID from a Value
+// Helpers
 // -----------------------------------------------------------------------------
+
+/// Construct a default instance of a trait type using only the heap.
+///
+/// Equivalent to calling `TraitType()` with no arguments from Starlark, but does
+/// not require a full `Evaluator`. Every field must have a default value; if any
+/// required field has no default this returns an error.
+pub fn construct_default_instance<'v>(
+    type_val: Value<'v>,
+    heap: Heap<'v>,
+) -> starlark::Result<Value<'v>> {
+    if let Some(tt) = type_val.downcast_ref::<TraitType<'v>>() {
+        let type_checkers = build_type_checkers(tt.fields.values().map(|f| f.typ_value), heap)?;
+        let mut values = Vec::with_capacity(tt.fields.len());
+        for ((field_name, field), tc) in tt.fields.iter().zip(type_checkers.iter()) {
+            let value = match field.default {
+                Some(d) => copy_default_value(d, heap).map_err(starlark::Error::new_other)?,
+                None => {
+                    return Err(starlark::Error::new_other(anyhow::anyhow!(
+                        "Trait field `{}` has no default; cannot construct default instance of {}",
+                        field_name,
+                        type_val
+                    )));
+                }
+            };
+            if !tc.matches(value) {
+                return Err(starlark::Error::new_other(anyhow::anyhow!(
+                    "Field `{}` expected type `{}`, got `{}`",
+                    field_name,
+                    tc,
+                    value.get_type()
+                )));
+            }
+            values.push(Cell::new(value));
+        }
+        Ok(heap.alloc(TraitInstance {
+            typ: type_val,
+            values: values.into_boxed_slice(),
+            type_checkers: type_checkers.into_boxed_slice(),
+        }))
+    } else if let Some(ft) = type_val.downcast_ref::<FrozenTraitType>() {
+        let type_checkers =
+            build_type_checkers(ft.fields.values().map(|f| f.typ_value.to_value()), heap)?;
+        let mut values = Vec::with_capacity(ft.fields.len());
+        for ((field_name, field), tc) in ft.fields.iter().zip(type_checkers.iter()) {
+            let value = match field.default {
+                Some(d) => {
+                    copy_default_value(d.to_value(), heap).map_err(starlark::Error::new_other)?
+                }
+                None => {
+                    return Err(starlark::Error::new_other(anyhow::anyhow!(
+                        "Trait field `{}` has no default; cannot construct default instance of {}",
+                        field_name,
+                        type_val
+                    )));
+                }
+            };
+            if !tc.matches(value) {
+                return Err(starlark::Error::new_other(anyhow::anyhow!(
+                    "Field `{}` expected type `{}`, got `{}`",
+                    field_name,
+                    tc,
+                    value.get_type()
+                )));
+            }
+            values.push(Cell::new(value));
+        }
+        Ok(heap.alloc(TraitInstance {
+            typ: type_val,
+            values: values.into_boxed_slice(),
+            type_checkers: type_checkers.into_boxed_slice(),
+        }))
+    } else {
+        Err(starlark::Error::new_other(anyhow::anyhow!(
+            "Value is not a trait type: {}",
+            type_val
+        )))
+    }
+}
 
 /// Extract the trait type ID from a Value that is either a TraitType or FrozenTraitType.
 pub fn extract_trait_type_id(value: Value) -> Option<u64> {

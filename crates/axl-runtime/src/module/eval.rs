@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -19,7 +19,7 @@ use starlark::values::list_or_tuple::UnpackListOrTuple;
 use crate::module::AxlLocalDep;
 use crate::module::Dep;
 
-use super::super::eval::{EvalError, validate_module_name};
+use super::super::eval::{EvalError, join_confined, validate_module_name};
 
 use super::store::{AxlArchiveDep, ModuleStore};
 
@@ -166,10 +166,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ) -> anyhow::Result<values::none::NoneType> {
         let store = ModuleStore::from_eval(eval)?;
         let mut tasks = store.tasks.borrow_mut();
-        let absolute_path = store.module_root.join(&label);
+        let absolute_path = join_confined(&store.module_root, Path::new(&label))?;
 
         let entry = tasks.entry(absolute_path).or_insert((label, vec![]));
-        // TODO: validate that label does not escape.
         entry.1.extend(symbols);
 
         Ok(values::none::NoneType)
@@ -190,7 +189,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
         let store = ModuleStore::from_eval(eval)?;
-        let absolute_path = store.module_root.join(&label);
+        let absolute_path = join_confined(&store.module_root, Path::new(&label))?;
         store.features.borrow_mut().push((absolute_path, symbol));
         Ok(values::none::NoneType)
     }
@@ -233,17 +232,17 @@ pub fn get_globals() -> Globals {
 
 /// Evaluator for MODULE.aspect
 #[derive(Debug)]
-pub struct AxlModuleEvaluator {
+pub struct ModuleEvaluator {
     root_dir: PathBuf,
     dialect: Dialect,
     globals: Globals,
 }
 
-impl AxlModuleEvaluator {
+impl ModuleEvaluator {
     pub fn new(root_dir: PathBuf) -> Self {
         Self {
             root_dir,
-            dialect: AxlModuleEvaluator::dialect(),
+            dialect: ModuleEvaluator::dialect(),
             globals: get_globals(),
         }
     }
