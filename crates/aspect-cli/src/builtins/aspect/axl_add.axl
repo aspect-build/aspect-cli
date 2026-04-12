@@ -330,7 +330,7 @@ def impl(ctx: TaskContext) -> int:
 
 add = task(
     group = ["axl"],
-    description = "Add an AXL dependency to MODULE.aspect",
+    summary = "Add an AXL dependency to MODULE.aspect",
     implementation = impl,
     args = {
         "dep_spec": args.positional(),

@@ -9,6 +9,7 @@ use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStat
 use starlark::starlark_module;
 use starlark::values::dict::AllocDict;
 use starlark::values::list::AllocList;
+use starlark::values::none::NoneOr;
 use starlark::values::typing::TypeCompiled;
 use starlark::values::{
     AllocFrozenValue, AllocValue, Freeze, FreezeError, Freezer, FrozenHeap, FrozenValue, Heap,
@@ -17,30 +18,37 @@ use starlark::values::{
 };
 use starlark_map::small_map::SmallMap;
 
+use crate::engine::types::names::validate_type_name;
+
 static TRAIT_TYPE_ID: AtomicU64 = AtomicU64::new(0);
 
 fn next_trait_type_id() -> u64 {
     TRAIT_TYPE_ID.fetch_add(1, Ordering::SeqCst)
 }
 
-/// A field definition for a trait, containing a type and optional default value.
+// ---------------------------------------------------------------------------
+// Attr / FrozenAttr — stored inside trait definitions (field descriptors)
+// ---------------------------------------------------------------------------
+
+/// A field definition for a trait, containing a type, optional default value, and optional description.
 #[derive(Debug, Clone, ProvidesStaticType, Allocative)]
-pub struct Field<'v> {
+pub struct Attr<'v> {
     pub(crate) typ: TypeCompiled<Value<'v>>,
     pub(crate) typ_value: Value<'v>,
     pub(crate) default: Option<Value<'v>>,
+    pub(crate) description: Option<String>,
 }
 
-impl<'v> Display for Field<'v> {
+impl<'v> fmt::Display for Attr<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.default {
-            None => write!(f, "field({})", self.typ),
-            Some(d) => write!(f, "field({}, {})", self.typ, d),
+            None => write!(f, "attr({})", self.typ),
+            Some(d) => write!(f, "attr({}, default = {})", self.typ, d),
         }
     }
 }
 
-unsafe impl<'v> Trace<'v> for Field<'v> {
+unsafe impl<'v> Trace<'v> for Attr<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         self.typ.trace(tracer);
         self.typ_value.trace(tracer);
@@ -50,50 +58,57 @@ unsafe impl<'v> Trace<'v> for Field<'v> {
     }
 }
 
-impl<'v> Field<'v> {
-    pub fn freeze(self, freezer: &Freezer) -> Result<FrozenField, FreezeError> {
-        Ok(FrozenField {
+impl<'v> Attr<'v> {
+    pub fn freeze(self, freezer: &Freezer) -> Result<FrozenAttr, FreezeError> {
+        Ok(FrozenAttr {
             typ: self.typ.freeze(freezer)?,
             typ_value: self.typ_value.freeze(freezer)?,
             default: self.default.map(|d| d.freeze(freezer)).transpose()?,
+            description: self.description,
         })
     }
 }
 
-/// A frozen field definition.
+/// A frozen field definition for a trait.
 #[derive(Debug, Clone, ProvidesStaticType, Allocative)]
-pub struct FrozenField {
+pub struct FrozenAttr {
     pub(crate) typ: TypeCompiled<FrozenValue>,
     pub(crate) typ_value: FrozenValue,
     pub(crate) default: Option<FrozenValue>,
+    pub(crate) description: Option<String>,
 }
 
-impl Display for FrozenField {
+impl fmt::Display for FrozenAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.default {
-            None => write!(f, "field({})", self.typ),
-            Some(d) => write!(f, "field({}, {})", self.typ, d),
+            None => write!(f, "attr({})", self.typ),
+            Some(d) => write!(f, "attr({}, default = {})", self.typ, d),
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// ConfigAttrValue / FrozenConfigAttrValue — the Starlark `attr()` return value
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FieldValue<'v> {
+pub struct ConfigAttrValue<'v> {
     pub(crate) typ: TypeCompiled<Value<'v>>,
     pub(crate) typ_value: Value<'v>,
     pub(crate) default: Option<Value<'v>>,
+    pub(crate) description: Option<String>,
 }
 
-impl<'v> Display for FieldValue<'v> {
+impl<'v> fmt::Display for ConfigAttrValue<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.default {
-            None => write!(f, "field({})", self.typ),
-            Some(d) => write!(f, "field({}, {})", self.typ, d),
+            None => write!(f, "attr({})", self.typ),
+            Some(d) => write!(f, "attr({}, default = {})", self.typ, d),
         }
     }
 }
 
-unsafe impl<'v> Trace<'v> for FieldValue<'v> {
+unsafe impl<'v> Trace<'v> for ConfigAttrValue<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         self.typ.trace(tracer);
         self.typ_value.trace(tracer);
@@ -103,76 +118,75 @@ unsafe impl<'v> Trace<'v> for FieldValue<'v> {
     }
 }
 
-impl<'v> AllocValue<'v> for FieldValue<'v> {
+impl<'v> AllocValue<'v> for ConfigAttrValue<'v> {
     fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-#[starlark_value(type = "field")]
-impl<'v> StarlarkValue<'v> for FieldValue<'v> {
+#[starlark_value(type = "attr")]
+impl<'v> StarlarkValue<'v> for ConfigAttrValue<'v> {
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 }
 
-/// Frozen version of FieldValue.
+/// Frozen version of ConfigAttrValue.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct FrozenFieldValue {
+pub struct FrozenConfigAttrValue {
     pub(crate) typ: TypeCompiled<FrozenValue>,
     pub(crate) typ_value: FrozenValue,
     pub(crate) default: Option<FrozenValue>,
+    pub(crate) description: Option<String>,
 }
 
-impl Display for FrozenFieldValue {
+impl fmt::Display for FrozenConfigAttrValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.default {
-            None => write!(f, "field({})", self.typ),
-            Some(d) => write!(f, "field({}, {})", self.typ, d),
+            None => write!(f, "attr({})", self.typ),
+            Some(d) => write!(f, "attr({}, default = {})", self.typ, d),
         }
     }
 }
 
-unsafe impl<'v> Trace<'v> for FrozenFieldValue {
-    fn trace(&mut self, _tracer: &Tracer<'v>) {
-        // Frozen values don't need tracing
-    }
+unsafe impl<'v> Trace<'v> for FrozenConfigAttrValue {
+    fn trace(&mut self, _tracer: &Tracer<'v>) {}
 }
 
-impl AllocFrozenValue for FrozenFieldValue {
+impl AllocFrozenValue for FrozenConfigAttrValue {
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         heap.alloc_simple(self)
     }
 }
 
-#[starlark_value(type = "field")]
-impl<'v> StarlarkValue<'v> for FrozenFieldValue {
-    type Canonical = FieldValue<'v>;
+#[starlark_value(type = "attr")]
+impl<'v> StarlarkValue<'v> for FrozenConfigAttrValue {
+    type Canonical = ConfigAttrValue<'v>;
 
     fn collect_repr(&self, collector: &mut String) {
         write!(collector, "{}", self).unwrap();
     }
 }
 
-impl Freeze for FieldValue<'_> {
-    type Frozen = FrozenFieldValue;
+impl Freeze for ConfigAttrValue<'_> {
+    type Frozen = FrozenConfigAttrValue;
 
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
-        Ok(FrozenFieldValue {
+        Ok(FrozenConfigAttrValue {
             typ: self.typ.freeze(freezer)?,
             typ_value: self.typ_value.freeze(freezer)?,
             default: self.default.map(|d| d.freeze(freezer)).transpose()?,
+            description: self.description,
         })
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
 /// Deep-copy a default value if it's a mutable container (list or dict).
-/// This ensures each trait instance gets its own mutable copy rather than
-/// sharing the (potentially frozen) default.
-pub(crate) fn copy_default_value<'v>(
-    value: Value<'v>,
-    heap: Heap<'v>,
-) -> anyhow::Result<Value<'v>> {
+pub fn copy_default_value<'v>(value: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
     match value.get_type() {
         "list" => {
             let items: Vec<Value<'v>> = value.iterate(heap).map_err(|e| e.into_anyhow())?.collect();
@@ -194,9 +208,7 @@ pub(crate) fn copy_default_value<'v>(
 }
 
 /// Create fresh TypeCompiled values from field type values at runtime.
-/// This ensures type checking works correctly for types like starlark Records
-/// whose frozen TypeCompiled matchers may not function properly.
-pub(crate) fn build_type_checkers<'v>(
+pub fn build_type_checkers<'v>(
     fields: impl Iterator<Item = Value<'v>>,
     heap: Heap<'v>,
 ) -> starlark::Result<Vec<TypeCompiled<Value<'v>>>> {
@@ -204,6 +216,10 @@ pub(crate) fn build_type_checkers<'v>(
         .map(|typ_value| TypeCompiled::new(typ_value, heap).map_err(starlark::Error::new_other))
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// TraitType
+// ---------------------------------------------------------------------------
 
 /// The type of a trait, created by `trait(field1=type1, field2=type2, ...)`.
 /// Calling this type creates a `TraitInstance` instance.
@@ -214,7 +230,7 @@ pub struct TraitType<'v> {
     /// Name of the trait type (set when assigned to a variable)
     pub(crate) name: Option<String>,
     /// Fields with their types and optional defaults
-    pub(crate) fields: SmallMap<String, Field<'v>>,
+    pub(crate) fields: SmallMap<String, Attr<'v>>,
 }
 
 impl<'v> Display for TraitType<'v> {
@@ -251,7 +267,8 @@ impl<'v> StarlarkValue<'v> for TraitType<'v> {
         variable_name: &str,
         _eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> starlark::Result<()> {
-        // This is called when the trait type is assigned to a variable.
+        validate_type_name(variable_name, "trait")
+            .map_err(|e| starlark::Error::new_other(anyhow::anyhow!(e)))?;
         // We use unsafe to mutate the name, which is safe because this is only
         // called during module loading.
         let this = self as *const Self as *mut Self;
@@ -338,7 +355,7 @@ fn trait_type_methods(_builder: &mut MethodsBuilder) {}
 pub struct FrozenTraitType {
     pub(crate) id: u64,
     pub(crate) name: Option<String>,
-    pub(crate) fields: SmallMap<String, FrozenField>,
+    pub(crate) fields: SmallMap<String, FrozenAttr>,
 }
 
 impl Display for FrozenTraitType {
@@ -811,10 +828,6 @@ impl Freeze for TraitInstance<'_> {
 // -----------------------------------------------------------------------------
 
 /// Construct a default instance of a trait type using only the heap.
-///
-/// Equivalent to calling `TraitType()` with no arguments from Starlark, but does
-/// not require a full `Evaluator`. Every field must have a default value; if any
-/// required field has no default this returns an error.
 pub fn construct_default_instance<'v>(
     type_val: Value<'v>,
     heap: Heap<'v>,
@@ -900,24 +913,30 @@ pub fn extract_trait_type_id(value: Value) -> Option<u64> {
 }
 
 // -----------------------------------------------------------------------------
-// Global functions
+// Global functions: trait() and attr()
 // -----------------------------------------------------------------------------
 
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
-    /// Creates a trait type with the given fields.
+    /// Creates a trait type — a shared configuration object that tasks opt into.
     ///
-    /// Each field can be a bare type (required, no default) or an `attr()`
-    /// definition (with type and optional default).
+    /// ## Naming
     ///
-    /// Mutable defaults (lists, dicts) are deep-copied per instance, so each
-    /// instance gets its own independent copy. No `default_factory` needed.
+    /// Traits must be exported as **CamelCase** (`MyConfig`, `BazelTrait`). This is
+    /// enforced at definition time.
     ///
-    /// Example:
+    /// ## Fields
+    ///
+    /// Each field must be an `attr()` definition with a `default` value. The default is used
+    /// to construct the initial trait instance lazily on first access — there is no mechanism
+    /// to inject values before that construction, so all fields must have defaults.
+    ///
+    /// ## Example
+    ///
     /// ```starlark
     /// BazelTrait = trait(
-    ///     extra_flags = attr(list[str], []),
-    ///     extra_startup_flags = attr(list[str], []),
+    ///     extra_flags    = attr(list[str], default = [], description = "Extra Bazel flags for every build"),
+    ///     profile_upload = attr(bool,      default = False, description = "Upload Bazel profile after build"),
     /// )
     /// ```
     fn r#trait<'v>(
@@ -927,20 +946,22 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         let mut fields = SmallMap::with_capacity(kwargs.len());
 
         for (name, value) in kwargs.into_iter() {
-            let field = if let Some(field_value) = value.downcast_ref::<FieldValue>() {
-                // It's already a field() definition
-                Field {
-                    typ: field_value.typ.dupe(),
-                    typ_value: field_value.typ_value,
-                    default: field_value.default,
+            let field = if let Some(attr_value) = value.downcast_ref::<ConfigAttrValue>() {
+                // It's already an attr() definition
+                Attr {
+                    typ: attr_value.typ.dupe(),
+                    typ_value: attr_value.typ_value,
+                    default: attr_value.default,
+                    description: attr_value.description.clone(),
                 }
             } else {
-                // It's a type, convert to a field without default
+                // It's a type, convert to an attr without default
                 let typ = TypeCompiled::new(value, eval.heap())?;
-                Field {
+                Attr {
                     typ,
                     typ_value: value,
                     default: None,
+                    description: None,
                 }
             };
             fields.insert(name.to_string(), field);
@@ -953,38 +974,41 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         })
     }
 
-    /// Creates a field definition with a type and optional default value.
+    /// Creates a field definition for a trait, with a type, optional default value,
+    /// and optional description.
     ///
-    /// Mutable defaults (lists, dicts) are deep-copied when a trait instance is
-    /// created, so each instance gets its own independent copy.
+    /// `default` must match the declared type. Mutable defaults (lists, dicts) are deep-copied
+    /// when a trait instance is created, so each instance gets its own independent copy.
     ///
     /// Example:
     /// ```starlark
-    /// BazelTrait = trait(host=str, port=attr(int, 80))
+    /// BazelTrait = trait(host=str, port=attr(int, default = 80))
     /// r = BazelTrait(host="localhost")  # port defaults to 80
     /// ```
     fn attr<'v>(
         #[starlark(require = pos)] typ: Value<'v>,
-        #[starlark(require = pos)] default: Option<Value<'v>>,
+        #[starlark(require = named)] default: Option<Value<'v>>,
+        #[starlark(require = named, default = NoneOr::None)] description: NoneOr<String>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<FieldValue<'v>> {
+    ) -> anyhow::Result<ConfigAttrValue<'v>> {
         let compiled_type = TypeCompiled::new(typ, eval.heap())?;
+        let description = description.into_option();
 
-        // Validate that the default matches the type if provided
         if let Some(d) = default {
             if !compiled_type.matches(d) {
                 return Err(anyhow::anyhow!(
-                    "Default value `{}` does not match field type `{}`",
+                    "Default value `{}` does not match attr type `{}`",
                     d,
                     compiled_type
                 ));
             }
         }
 
-        Ok(FieldValue {
+        Ok(ConfigAttrValue {
             typ: compiled_type,
             typ_value: typ,
             default,
+            description,
         })
     }
 }

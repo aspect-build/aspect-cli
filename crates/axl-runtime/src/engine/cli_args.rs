@@ -14,20 +14,20 @@ use starlark::values::list::AllocList;
 use starlark::values::starlark_value;
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
-#[display("<TaskArgs>")]
-pub struct TaskArgs<'v> {
+#[display("<CliArgs>")]
+pub struct CliArgs<'v> {
     #[allocative(skip)]
     args: SmallMap<String, values::Value<'v>>,
 }
 
-impl<'v> TaskArgs<'v> {
+impl<'v> CliArgs<'v> {
     pub fn new() -> Self {
         Self {
             args: SmallMap::new(),
         }
     }
 
-    /// Creates TaskArgs from a HashMap of string key-value pairs, allocating strings on the heap.
+    /// Creates CliArgs from a HashMap of string key-value pairs, allocating strings on the heap.
     pub fn from_map(map: std::collections::HashMap<String, String>, heap: Heap<'v>) -> Self {
         let mut args = SmallMap::new();
         for (key, value) in map {
@@ -42,28 +42,33 @@ impl<'v> TaskArgs<'v> {
     }
 
     #[inline]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.args.contains_key(key)
+    }
+
+    #[inline]
     pub fn alloc_list<L>(items: L) -> AllocList<L> {
         AllocList(items)
     }
 }
 
-#[starlark_value(type = "TaskArgs")]
-impl<'v> StarlarkValue<'v> for TaskArgs<'v> {
+#[starlark_value(type = "CliArgs")]
+impl<'v> StarlarkValue<'v> for CliArgs<'v> {
     fn get_attr(&self, key: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
         self.args.get(key).cloned()
     }
 }
 
-impl<'v> values::AllocValue<'v> for TaskArgs<'v> {
+impl<'v> values::AllocValue<'v> for CliArgs<'v> {
     fn alloc_value(self, heap: values::Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-impl<'v> values::Freeze for TaskArgs<'v> {
-    type Frozen = FrozenTaskArgs;
+impl<'v> values::Freeze for CliArgs<'v> {
+    type Frozen = FrozenCliArgs;
     fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
-        Ok(FrozenTaskArgs {
+        Ok(FrozenCliArgs {
             args: self
                 .args
                 .iter()
@@ -74,17 +79,17 @@ impl<'v> values::Freeze for TaskArgs<'v> {
 }
 
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
-#[display("<TaskArgs {args:?}>")]
-pub struct FrozenTaskArgs {
+#[display("<CliArgs {args:?}>")]
+pub struct FrozenCliArgs {
     #[allocative(skip)]
     args: SmallMap<String, values::FrozenValue>,
 }
 
-starlark_simple_value!(FrozenTaskArgs);
+starlark_simple_value!(FrozenCliArgs);
 
-#[starlark_value(type = "TaskArgs")]
-impl<'v> StarlarkValue<'v> for FrozenTaskArgs {
-    type Canonical = TaskArgs<'v>;
+#[starlark_value(type = "CliArgs")]
+impl<'v> StarlarkValue<'v> for FrozenCliArgs {
+    type Canonical = CliArgs<'v>;
 
     fn get_attr(&self, key: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
         self.args.get(key).cloned().map(|x| x.to_value())

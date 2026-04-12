@@ -50,7 +50,7 @@ def _default_bazel_behavior(ctx: FeatureContext):
         bazel_trait.build_event_sinks.extend(bessie_sinks)
 
 
-bazel_defaults = feature(
+BazelDefaults = feature(
     implementation = _default_bazel_behavior,
-    attrs = {}
+    args = {}
 )

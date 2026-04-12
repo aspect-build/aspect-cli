@@ -119,9 +119,17 @@ impl<'v> StarlarkValue<'v> for FeatureMap<'v> {
             Some((_, instance)) => Ok(*instance),
             None => {
                 let type_name = if let Some(ft) = index.downcast_ref::<FeatureType>() {
-                    ft.name.as_deref().unwrap_or("anon")
+                    ft.export_name.as_deref().unwrap_or(if ft.name.is_empty() {
+                        "anon"
+                    } else {
+                        &ft.name
+                    })
                 } else if let Some(ft) = index.downcast_ref::<FrozenFeatureType>() {
-                    ft.name.as_deref().unwrap_or("anon")
+                    ft.export_name.as_deref().unwrap_or(if ft.name.is_empty() {
+                        "anon"
+                    } else {
+                        &ft.name
+                    })
                 } else {
                     "unknown"
                 };
@@ -191,9 +199,17 @@ impl<'v> StarlarkValue<'v> for FrozenFeatureMap {
             Some((_, instance)) => Ok(instance.to_value()),
             None => {
                 let type_name = if let Some(ft) = index.downcast_ref::<FeatureType>() {
-                    ft.name.as_deref().unwrap_or("anon")
+                    ft.export_name.as_deref().unwrap_or(if ft.name.is_empty() {
+                        "anon"
+                    } else {
+                        &ft.name
+                    })
                 } else if let Some(ft) = index.downcast_ref::<FrozenFeatureType>() {
-                    ft.name.as_deref().unwrap_or("anon")
+                    ft.export_name.as_deref().unwrap_or(if ft.name.is_empty() {
+                        "anon"
+                    } else {
+                        &ft.name
+                    })
                 } else {
                     "unknown"
                 };

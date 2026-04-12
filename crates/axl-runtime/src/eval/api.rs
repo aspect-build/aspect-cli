@@ -1,6 +1,8 @@
 use crate::engine;
+use crate::eval::multi_phase::ModuleEnv;
 use starlark::environment::{GlobalsBuilder, LibraryExtension};
-use starlark::syntax::{Dialect, DialectTypes};
+use starlark::eval::Evaluator;
+use starlark::syntax::{AstModule, Dialect, DialectTypes};
 
 /// Returns a GlobalsBuilder for AXL globals, extending various Starlark library extensions
 /// with custom top-level functions registered from the engine module.
@@ -73,6 +75,20 @@ pub fn eval_expr(src: &str) -> anyhow::Result<String> {
             .eval_module(ast, &loader.globals)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(val.to_repr())
+    })
+}
+
+/// Evaluate an AXL code snippet with the full set of AXL globals.
+///
+/// Useful in tests and tooling that need to evaluate inline Starlark without
+/// touching the filesystem. Returns `Ok(())` if evaluation succeeds, or a
+/// `starlark::Error` describing the failure.
+pub fn eval_snippet(code: &str) -> starlark::Result<()> {
+    let ast = AstModule::parse("<snippet>", code.to_owned(), &dialect())?;
+    let globals = get_globals().build();
+    ModuleEnv::with(|env| {
+        let mut eval = Evaluator::new(&env.0);
+        eval.eval_module(ast, &globals).map(|_| ())
     })
 }
 
