@@ -11,8 +11,8 @@ config_setting(
 alias(
     name = "shellcheck",
     actual = select({
-        ":macos_aarch64": "@shellcheck_darwin_aarch64//:shellcheck",
-        "//conditions:default": "@shellcheck_linux_x86_64//:shellcheck",
+        ":macos_aarch64": "@@+http_archive+shellcheck_darwin_aarch64//:shellcheck",
+        "//conditions:default": "@@+http_archive+shellcheck_linux_x86_64//:shellcheck",
     }),
     visibility = ["//visibility:public"],
 )
