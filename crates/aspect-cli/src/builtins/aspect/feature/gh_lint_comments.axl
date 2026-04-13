@@ -291,5 +291,5 @@ def _github_lint_impl(ctx: FeatureContext):
 
 GithubLintComments = feature(
     implementation = _github_lint_impl,
-    attrs = {}
+    args = {}
 )

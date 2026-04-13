@@ -152,20 +152,20 @@ StrategyHoldTheLine = Strategy(
 
 
 LintTrait = trait(
-    strategy    = attr(Strategy, StrategyHoldTheLine),
-    get_diff    = attr(typing.Callable[[TaskContext], list], _git_diff),
+    strategy    = attr(Strategy, default = StrategyHoldTheLine),
+    get_diff    = attr(typing.Callable[[TaskContext], list], default = _git_diff),
     # (ctx) -> [{"file": str, "lines": [int]}]
 
     # Lifecycle hooks — lists of callables, composable via .append()
     # Features hold their own state via closures; no shared state dict is passed.
-    lint_start  = attr(list[typing.Callable[[TaskContext], None]], []),
+    lint_start  = attr(list[typing.Callable[[TaskContext], None]], default = []),
     # Called once before the build.
 
-    lint_report = attr(list[typing.Callable[[TaskContext, str], None]], []),
+    lint_report = attr(list[typing.Callable[[TaskContext, str], None]], default = []),
     # Called per SARIF file as it arrives during the build stream.
     # Signature: (ctx, sarif_filepath)
 
-    lint_end    = attr(list[typing.Callable[[TaskContext, list], None]], []),
+    lint_end    = attr(list[typing.Callable[[TaskContext, list], None]], default = []),
     # Called once after all reports, receives strategy-filtered diagnostics.
     # Signature: (ctx, relevant_diagnostics)
 )
