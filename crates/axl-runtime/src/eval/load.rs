@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use starlark::environment::{FrozenModule, Globals, Module};
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::{AstModule, Dialect};
+use starlark::values::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -65,15 +66,38 @@ impl AxlLoader {
     }
 
     pub(super) fn eval_module(&self, path: &Path) -> Result<FrozenModule, EvalError> {
+        self.eval_module_impl(path, None, false)
+    }
+
+    pub(super) fn eval_std_module(
+        &self,
+        path: &Path,
+        content: &'static str,
+    ) -> Result<FrozenModule, EvalError> {
+        self.eval_module_impl(path, Some(content), true)
+    }
+
+    fn eval_module_impl(
+        &self,
+        path: &Path,
+        content: Option<&'static str>,
+        is_std: bool,
+    ) -> Result<FrozenModule, EvalError> {
         assert!(path.is_absolute());
 
-        // Push the script path onto the LOAD_STACK (used to detect circular loads)
         self.load_stack.borrow_mut().push(path.to_path_buf());
-        // Load and evaluate the script
-        let raw =
-            fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
+
+        let raw = match content {
+            Some(s) => s.to_owned(),
+            None => fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?,
+        };
+
         let ast = AstModule::parse(&path.to_string_lossy(), raw, &self.dialect)?;
         let frozen = Module::with_temp_heap(|module| {
+            if is_std {
+                module.set("#_is_std#", Value::new_bool(true));
+            }
             let store = self.new_store(path.to_path_buf());
             let mut eval = Evaluator::new(&module);
             eval.set_loader(self);
@@ -86,10 +110,8 @@ impl AxlLoader {
                 .map_err(|e| EvalError::UnknownError(anyhow!("{:?}", e)))
         })?;
 
-        // Pop the script path off of the LOAD_STACK
         self.load_stack.borrow_mut().pop();
 
-        // Return the evaluated script
         Ok(frozen)
     }
 
@@ -143,11 +165,22 @@ impl FileLoader for AxlLoader {
             _ => None,
         };
 
-        let resolved_script_path = match &load_path {
-            LoadPath::ModuleSpecifier { module, subpath } => {
-                self.resolve_in_deps_root(&module, &subpath)?
+        // For @std// loads, resolve from the embedded dir; for others, from deps_root on disk.
+        let (resolved_script_path, std_content) = match &load_path {
+            LoadPath::ModuleSpecifier { module, subpath } if module == "std" => {
+                let filename = subpath
+                    .to_str()
+                    .ok_or_else(|| anyhow!("invalid @std path: {:?}", subpath))?;
+                let content = crate::builtins::get(filename)
+                    .ok_or_else(|| anyhow!("'{}' does not exist in @std", filename))?;
+                // Use a synthetic absolute path as the cache/stack key.
+                let path = PathBuf::from(format!("/@std/{}", filename));
+                (path, Some(content))
             }
-            LoadPath::ModuleSubpath(subpath) => self.resolve(&module_info.path, subpath)?,
+            LoadPath::ModuleSpecifier { module, subpath } => {
+                (self.resolve_in_deps_root(&module, &subpath)?, None)
+            }
+            LoadPath::ModuleSubpath(subpath) => (self.resolve(&module_info.path, subpath)?, None),
             LoadPath::RelativePath(relpath) => {
                 let parent = parent_script_path.strip_prefix(&module_info.path).expect(
                     format!(
@@ -157,11 +190,12 @@ impl FileLoader for AxlLoader {
                     )
                     .as_str(),
                 );
-                if let Some(parent) = parent.parent() {
+                let path = if let Some(parent) = parent.parent() {
                     self.resolve(&module_info.path, &parent.join(relpath))?
                 } else {
                     self.resolve(&module_info.path, relpath)?
-                }
+                };
+                (path, None)
             }
         };
 
@@ -199,20 +233,18 @@ impl FileLoader for AxlLoader {
             drop(module_stack);
         }
 
-        // Read and parse the file content into an AST.
-        let frozen_module = self
-            .eval_module(&resolved_script_path)
-            .map_err(|e| Into::<starlark::Error>::into(e))?;
+        let frozen_module = if let Some(content) = std_content {
+            self.eval_std_module(&resolved_script_path, content)
+        } else {
+            self.eval_module(&resolved_script_path)
+        }
+        .map_err(|e| Into::<starlark::Error>::into(e))?;
 
         // Pop the dependency module scope if we pushed one.
         if new_module_scope.is_some() {
             self.module_stack.borrow_mut().pop();
         }
 
-        // Pop the load stack after successful load
-        // self.load_stack.borrow_mut().pop();
-
-        // Cache the load @module//path/to/file.axl so it can be re-used on subsequent loads
         self.loaded_modules
             .borrow_mut()
             .insert(resolved_script_path, frozen_module.clone());

@@ -1,11 +1,10 @@
 """GitHub API client library."""
+load("@std//base64.axl", "base64")
 
 DEFAULT_GITHUB_API = "https://api.github.com"
 
 
-# =============================================================================
 # Internal helpers
-# =============================================================================
 
 def _do_request(ctx, method, url, token, payload = None):
     headers = {
@@ -28,9 +27,7 @@ def _do_request(ctx, method, url, token, payload = None):
     return (success, response.status, body)
 
 
-# =============================================================================
 # Authentication
-# =============================================================================
 
 VALID_ROLES = [
     "checks.read",
@@ -96,9 +93,7 @@ def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = N
     return None
 
 
-# =============================================================================
 # Check Runs
-# =============================================================================
 
 def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, output = None, api_base = DEFAULT_GITHUB_API):
     """Create a new check run on a commit."""
@@ -147,9 +142,7 @@ def complete_check_run(ctx, token, owner, repo, check_run_id, conclusion, output
     )
 
 
-# =============================================================================
 # CI environment detection
-# =============================================================================
 
 def detect_commit_sha(env):
     """Detect commit SHA from CI environment variables."""
@@ -184,9 +177,7 @@ def detect_github_repo(std):
     return ("", "")
 
 
-# =============================================================================
 # Struct-based API
-# =============================================================================
 
 def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT_GITHUB_API):
     return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
@@ -200,9 +191,7 @@ def _status_checks_fail(ctx, token, owner, repo, check_run_id, output = None, ap
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "failure", output = output, api_base = api_base)
 
 
-# =============================================================================
 # Artifact upload/delete (GitHub Actions Twirp API)
-# =============================================================================
 
 def _decode_backend_ids(ctx, token):
     """Extract workflowRunBackendId and workflowJobRunBackendId from ACTIONS_RUNTIME_TOKEN JWT."""
@@ -210,13 +199,7 @@ def _decode_backend_ids(ctx, token):
     if len(parts) < 2:
         return (None, None)
 
-    payload_b64 = parts[1].replace("-", "+").replace("_", "/")
-    child = ctx.std.process.command("base64").args(["-d"]).stdin("piped").stdout("piped").stderr("piped").spawn()
-    stdin = child.stdin()
-    stdin.write(payload_b64)
-    stdin.close()
-    payload_json = child.stdout().read_to_string()
-    child.wait()
+    payload_json = str(base64.decode_url(parts[1]))
 
     if not payload_json:
         return (None, None)

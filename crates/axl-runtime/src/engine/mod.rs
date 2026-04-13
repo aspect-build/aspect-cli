@@ -6,7 +6,8 @@ use starlark::{
 
 pub mod aspect;
 pub mod bazel;
-mod globals;
+mod builtins;
+mod hash;
 mod http;
 mod std;
 mod template;
@@ -39,7 +40,6 @@ fn register_types(globals: &mut GlobalsBuilder) {
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
 
-    globals::register_globals(globals);
     r#async::register_globals(globals);
     task::register_globals(globals);
     types::feature::register_globals(globals);
@@ -59,4 +59,5 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     globals.namespace("aspect", aspect::register_globals);
     globals.namespace("std", std::register_globals);
     globals.namespace("wasm", wasm::register_wasm_types);
+    builtins::register_globals(globals);
 }
