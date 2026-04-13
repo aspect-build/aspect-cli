@@ -1,0 +1,92 @@
+"""Define the 'format' task
+
+Format builds a multi-formatter target and then runs it on the changed files.
+It's a simple example of interaction with version control, which Bazel only does via the workspace_status_command.
+
+Install:
+    Add rules_lint to MODULE.aspect.
+    See examples in https://github.com/bazel-starters
+
+Usage:
+    # Format changed files
+    aspect format
+    # Format all files
+    aspect format --all_files
+    # Specify the label of the format_multirun binary
+    aspect format --formatter_target=//path/to:formatter_bin
+    
+"""
+
+load("./lib/runnable.axl", "runnable")
+
+# buildifier: disable=function-docstring
+def spawn_git_with_output(out, process, args: list[str]):
+    spawn = process.command("git").args(args).stdout("piped").spawn().wait_with_output()
+    if not spawn.status.success:
+        out.write("\x1b[0;31mERROR\x1b[0m: 'git %s' failed (exit %d)\n" % (" ".join(args), spawn.status.code))
+        fail(spawn.stderr)
+
+    return spawn.stdout.strip()
+
+# buildifier: disable=function-docstring
+def find_changed_files(out, process, base_ref: str, merge_base: str | None):
+    diff_base = merge_base if merge_base else spawn_git_with_output(out, process, ["merge-base", "HEAD", base_ref])
+
+    return spawn_git_with_output(out, process, ["diff", "--diff-filter=d", "--name-only", diff_base])
+
+# buildifier: disable=function-docstring
+def impl(ctx: TaskContext) -> int:
+    out = ctx.std.io.stdout
+    out.write("Building formatter...\n")
+
+    flags = [
+        "--remote_download_outputs=toplevel",
+        "--build_runfile_links",
+        "--experimental_build_event_upload_strategy=local",
+        "--noallow_analysis_cache_discard",
+    ]
+    flags.extend(ctx.args.bazel_flag)
+
+    r = runnable(ctx, [ctx.args.formatter_target])
+
+    build = ctx.bazel.build(
+        ctx.args.formatter_target,
+        build_events = True,
+        flags = flags,
+        startup_flags = list(ctx.args.bazel_startup_flag),
+    )
+
+    for event in build.build_events():
+        r.event(event)
+
+    if not build.wait().success:
+        fail("Building the formatter has failed.")
+
+    formatter = r.determine_entrypoint(ctx.args.formatter_target)
+    if not formatter:
+        fail("Failed to determine the formatter entrypoint.")
+
+    format_args = []
+    if not ctx.args.all_files:
+        changed_files = find_changed_files(out, ctx.std.process, ctx.args.base_ref, ctx.args.merge_base)
+        out.write("Formatting changed files:\n%s\n" % changed_files)
+        format_args = changed_files.split("\n")
+
+    exit = r.spawn(formatter, format_args).wait()
+
+    if not exit.success:
+        out.write("\x1b[0;31mERROR\x1b[0m: format exited with code %d\n" % exit.code)
+
+    return exit.code
+
+format = task(
+    implementation = impl,
+    args = {
+        "all_files": args.boolean(default = False),
+        "base_ref": args.string(default = "origin/main"),
+        "merge_base": args.string(),
+        "formatter_target": args.string(default = "//tools/format"),
+        "bazel_flag": args.string_list(),
+        "bazel_startup_flag": args.string_list(),
+    },
+)

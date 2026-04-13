@@ -407,8 +407,12 @@ impl BazelRC {
     /// Each entry's `version_condition` is `Some(cond)` when the option originated from a
     /// `try-import-if-bazel-version` block; `None` otherwise. Callers can inspect this field to
     /// decide how to handle version-gated flags.
-    pub fn expand_configs(&self, command: &str) -> Result<Vec<RcOption>, BazelRcError> {
-        expand::expand_configs(self, command)
+    pub fn expand_configs(
+        &self,
+        command: &str,
+        skip_config_if_missing: &[&str],
+    ) -> Result<Vec<RcOption>, BazelRcError> {
+        expand::expand_configs(self, command, skip_config_if_missing)
     }
 }
 
@@ -533,7 +537,7 @@ mod tests {
         .unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=opt"])).unwrap();
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--copt=-O2", "--compilation_mode=opt"]);
     }
@@ -546,7 +550,7 @@ mod tests {
         fs::write(&rc_path, "build:a --config=b\nbuild:b --config=a\n").unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=a"])).unwrap();
-        let err = rc.expand_configs("build").unwrap_err();
+        let err = rc.expand_configs("build", &[]).unwrap_err();
         assert!(matches!(err, BazelRcError::ConfigCycle { .. }));
     }
 
@@ -558,7 +562,7 @@ mod tests {
         fs::write(&rc_path, "build --jobs=4\n").unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=nonexistent"])).unwrap();
-        let err = rc.expand_configs("build").unwrap_err();
+        let err = rc.expand_configs("build", &[]).unwrap_err();
         assert!(matches!(err, BazelRcError::UndefinedConfig { .. }));
     }
 
@@ -654,7 +658,7 @@ mod tests {
 
         let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
         let expanded: Vec<String> = rc
-            .expand_configs("test")
+            .expand_configs("test", &[])
             .unwrap()
             .into_iter()
             .map(|o| o.value)
@@ -705,7 +709,7 @@ mod tests {
 
         let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=opt"])).unwrap();
         // expand_configs picks up the CLI --config=opt from always options
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--copt=-O2"]);
     }
@@ -793,7 +797,7 @@ mod tests {
         .unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
 
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(
@@ -1112,7 +1116,7 @@ mod tests {
         fs::write(root.join(".bazelrc"), "common:myconfig --common-flag\n").unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=myconfig"])).unwrap();
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(values.contains(&"--common-flag"), "got: {values:?}");
     }
@@ -1128,7 +1132,7 @@ mod tests {
         .unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=a"])).unwrap();
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--deep-flag"]);
     }
@@ -1150,7 +1154,7 @@ mod tests {
             &flags(&["--enable_platform_specific_config"]),
         )
         .unwrap();
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(
             values.contains(&"--os-specific-flag"),
@@ -1170,7 +1174,7 @@ mod tests {
         .unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(values.contains(&"--foo-flag"), "got: {values:?}");
     }
@@ -1187,7 +1191,7 @@ mod tests {
         .unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(values.contains(&"--foo-flag"), "got: {values:?}");
     }
@@ -1204,7 +1208,7 @@ mod tests {
         .unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=myconfig"])).unwrap();
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(values.contains(&"--always-only-flag"), "got: {values:?}");
     }
@@ -1223,7 +1227,7 @@ mod tests {
         )
         .unwrap();
         // Should succeed and return the regular flag, not UndefinedConfig
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert!(values.contains(&"--jobs=4"));
     }
@@ -1266,7 +1270,7 @@ mod tests {
 
         // The unconditional --config=myconfig triggers expansion of the versioned section
         let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=myconfig"])).unwrap();
-        let expanded = rc.expand_configs("build").unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
 
         assert_eq!(expanded.len(), 1);
         assert_eq!(expanded[0].value, "--sandbox_default_allow_network=false");

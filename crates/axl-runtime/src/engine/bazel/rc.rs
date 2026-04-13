@@ -16,6 +16,7 @@ use starlark::values::starlark_value;
 pub struct StarlarkBazelRC {
     #[allocative(skip)]
     pub inner: bazelrc::BazelRC,
+    pub skip_config_if_missing: Vec<String>,
 }
 
 starlark_simple_value!(StarlarkBazelRC);
@@ -63,9 +64,14 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] command: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Vec<Value<'v>>> {
+        let ignore: Vec<&str> = this
+            .skip_config_if_missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         let opts = this
             .inner
-            .expand_configs(&command)
+            .expand_configs(&command, &ignore)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let mut result = Vec::with_capacity(opts.len());
         for opt in &opts {
@@ -100,9 +106,14 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named)] command: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<(Vec<Value<'v>>, Vec<Value<'v>>)> {
+        let ignore: Vec<&str> = this
+            .skip_config_if_missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         let opts = this
             .inner
-            .expand_configs(&command)
+            .expand_configs(&command, &ignore)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let mut startup_flags: Vec<Value<'v>> = Vec::new();

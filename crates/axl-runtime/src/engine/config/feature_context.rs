@@ -8,6 +8,7 @@ use starlark::values::{
     StarlarkValue, Trace, Tracer, Value, ValueLike, starlark_value,
 };
 
+use crate::engine::aspect::Aspect;
 use crate::engine::http::Http;
 use crate::engine::std::Std;
 
@@ -115,6 +116,12 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn std<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<Std> {
         Ok(Std {})
+    }
+
+    /// Aspect platform APIs (auth, etc.).
+    #[starlark(attribute)]
+    fn aspect<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<Aspect> {
+        Ok(Aspect {})
     }
 
     /// HTTP client for making requests during feature initialization.

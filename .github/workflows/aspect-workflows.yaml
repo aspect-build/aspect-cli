@@ -47,6 +47,16 @@ jobs:
       - name: Test Task
         run: aspect test --task-key test-gha //...
 
+  lint-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Bootstrap
+        run: .aspect/bootstrap.sh
+      - name: Lint Task
+        run: cd examples/lint && aspect lint //...
+
   delivery-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]

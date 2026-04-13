@@ -1,0 +1,142 @@
+"""SARIF (Static Analysis Results Interchange Format) utilities.
+
+Provides parsing of raw SARIF JSON and conversion to GitHub PR review comments.
+"""
+
+
+def parse_sarif(content):
+    """Parse a SARIF JSON string into a dict."""
+    return json.decode(content)
+
+
+def parse_sarif_diagnostics(content):
+    """Parse SARIF JSON into a flat list of diagnostic dicts.
+
+    Returns:
+        List of dicts with keys: tool, file, line, rule_id, severity
+    """
+    sarif = json.decode(content)
+    diagnostics = []
+    for run in sarif.get("runs", []):
+        tool_name = run.get("tool", {}).get("driver", {}).get("name", "unknown")
+        for result in run.get("results", []):
+            locations = result.get("locations", [])
+            if not locations:
+                continue
+            physical = locations[0].get("physicalLocation", {})
+            uri = physical.get("artifactLocation", {}).get("uri", "")
+            line = physical.get("region", {}).get("startLine", 0)
+            if not uri or not line:
+                continue
+            diagnostics.append({
+                "tool": tool_name,
+                "file": uri,
+                "line": line,
+                "rule_id": result.get("ruleId", ""),
+                "severity": result.get("level", "warning"),
+            })
+    return diagnostics
+
+
+def get_sarif_summary(sarif):
+    """Return a human-readable summary of SARIF findings."""
+    if type(sarif) == "string":
+        sarif = json.decode(sarif)
+    total = 0
+    lines = []
+    for run in sarif.get("runs", []):
+        tool_name = run.get("tool", {}).get("driver", {}).get("name", "unknown")
+        count = len(run.get("results", []))
+        total += count
+        if count > 0:
+            lines.append("%d finding(s) from %s" % (count, tool_name))
+    if not lines:
+        return "No lint findings."
+    return "\n".join(lines) + "\n%d total finding(s)" % total
+
+
+def sarif_result_to_comment(result, tool_name):
+    """Convert a single SARIF result to a GitHub review comment dict.
+
+    Returns a comment dict suitable for create_review, or None if the result
+    cannot be mapped to a file location.
+    """
+    locations = result.get("locations", [])
+    if not locations:
+        return None
+
+    location = locations[0]
+    physical = location.get("physicalLocation")
+    if not physical:
+        return None
+
+    artifact = physical.get("artifactLocation", {})
+    path = artifact.get("uri")
+    if not path:
+        return None
+
+    region = physical.get("region", {})
+    start_line = region.get("startLine")
+    end_line = region.get("endLine", start_line)
+    if not start_line:
+        return None
+
+    level = result.get("level", "warning")
+    message = result.get("message", {}).get("text", "")
+
+    body = "**{}** ({})".format(tool_name, level)
+    if message:
+        body = body + "\n\n" + message
+
+    comment = {
+        "path": path,
+        "line": end_line,
+        "side": "RIGHT",
+        "body": body,
+    }
+
+    if start_line != end_line:
+        comment["start_line"] = start_line
+        comment["start_side"] = "RIGHT"
+
+    # Extract inline fix hints from relatedLocations
+    fixes = []
+    for loc in result.get("relatedLocations", []):
+        msg = loc.get("message", {}).get("text", "")
+        if not msg.startswith("try"):
+            continue
+        loc_region = loc.get("physicalLocation", {}).get("region", {})
+        byte_offset = loc_region.get("byteOffset")
+        byte_length = loc_region.get("byteLength")
+        if byte_offset == None or byte_length == None:
+            continue
+        if msg == "try":
+            replacement = ""
+        else:
+            text = msg[4:]
+            if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+                text = text[1:-1]
+            replacement = text
+        fixes.append({
+            "byteOffset": byte_offset,
+            "byteLength": byte_length,
+            "replacement": replacement,
+        })
+    if fixes:
+        comment["_fixes"] = fixes
+
+    return comment
+
+
+def sarif_to_review_comments(sarif):
+    """Convert a parsed SARIF dict (or JSON string) to GitHub review comment dicts."""
+    if type(sarif) == "string":
+        sarif = json.decode(sarif)
+    comments = []
+    for run in sarif.get("runs", []):
+        tool_name = run.get("tool", {}).get("driver", {}).get("name", "Linter")
+        for result in run.get("results", []):
+            comment = sarif_result_to_comment(result, tool_name)
+            if comment:
+                comments.append(comment)
+    return comments

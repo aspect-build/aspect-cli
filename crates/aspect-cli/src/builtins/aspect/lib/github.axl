@@ -14,10 +14,14 @@ def _do_request(ctx, method, url, token, payload = None):
         "X-GitHub-Api-Version": "2022-11-28",
     }
     data = json.encode(payload) if payload else None
-    if method == "POST":
+    if method == "GET":
+        response = ctx.http().get(url = url, headers = headers).block()
+    elif method == "POST":
         response = ctx.http().post(url = url, headers = headers, data = data).block()
     elif method == "PATCH":
         response = ctx.http().patch(url = url, headers = headers, data = data).block()
+    elif method == "DELETE":
+        response = ctx.http().delete(url = url, headers = headers).block()
     else:
         return (False, 0, "unsupported method: " + method)
     success = response.status >= 200 and response.status < 300
@@ -354,6 +358,79 @@ def _check_token(env):
     return None
 
 
+# Pull Request Reviews
+
+def list_pull_request_files(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
+    """List files changed in a pull request."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
+    success, status_code, body = _do_request(ctx, "GET", url, token)
+    if success:
+        return {"success": True, "files": body if type(body) == "list" else []}
+    return {"success": False, "error": "request failed: " + str(status_code)}
+
+
+def get_pull_request(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
+    """Fetch a pull request object."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number)
+    success, status_code, body = _do_request(ctx, "GET", url, token)
+    if success:
+        return {"success": True, "pull_request": body}
+    return {"success": False, "error": "request failed: " + str(status_code)}
+
+
+def list_review_comments(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
+    """List all review comments on a pull request."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
+    success, status_code, body = _do_request(ctx, "GET", url, token)
+    if success:
+        return {"success": True, "comments": body if type(body) == "list" else []}
+    return {"success": False, "error": "request failed: " + str(status_code)}
+
+
+def create_review(ctx, token, owner, repo, pull_number, body, event, comments, commit_id, api_base = DEFAULT_GITHUB_API):
+    """Create a pull request review with inline comments."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/reviews"
+    payload = {
+        "commit_id": commit_id,
+        "body": body,
+        "event": event,
+        "comments": comments,
+    }
+    success, status_code, resp_body = _do_request(ctx, "POST", url, token, payload)
+    if success:
+        return {"success": True, "review_id": resp_body.get("id") if resp_body else None}
+    return {"success": False, "error": "request failed: " + str(status_code)}
+
+
+def create_review_comment(ctx, token, owner, repo, pull_number, body, path, line,
+                          commit_id, side = "RIGHT", start_line = None, start_side = None,
+                          api_base = DEFAULT_GITHUB_API):
+    """Create a single review comment on a pull request."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
+    payload = {
+        "body": body,
+        "commit_id": commit_id,
+        "path": path,
+        "line": line,
+        "side": side,
+    }
+    if start_line != None:
+        payload["start_line"] = start_line
+    if start_side != None:
+        payload["start_side"] = start_side
+    success, status_code, resp_body = _do_request(ctx, "POST", url, token, payload)
+    if success:
+        return {"success": True, "comment_id": resp_body.get("id") if resp_body else None}
+    return {"success": False, "error": "request failed: " + str(status_code)}
+
+
+def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
+    """Delete a pull request review comment."""
+    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/comments/" + str(comment_id)
+    success, status_code, _ = _do_request(ctx, "DELETE", url, token)
+    return {"success": success}
+
+
 github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
@@ -366,4 +443,12 @@ github = struct(
     ),
     upload_artifact = _upload_artifact,
     delete_artifact = _delete_artifact,
+    pulls = struct(
+        list_files           = list_pull_request_files,
+        get                  = get_pull_request,
+        list_review_comments = list_review_comments,
+        create_review        = create_review,
+        create_review_comment = create_review_comment,
+        delete_review_comment = delete_review_comment,
+    ),
 )
