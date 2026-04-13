@@ -19,7 +19,7 @@ Usage:
 """
 
 load("./lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "get_sarif_summary")
-load("./traits.axl", "BazelTrait")
+load("./traits.axl", "BazelTrait", "HealthCheckTrait")
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
@@ -174,9 +174,13 @@ LintTrait = trait(
 def impl(ctx: TaskContext) -> int:
     lint_trait = ctx.traits[LintTrait]
     bazel_trait = ctx.traits[BazelTrait]
+    hc_trait = ctx.traits[HealthCheckTrait]
     strategy = lint_trait.strategy
 
     quiet = ctx.args.quiet
+
+    for hook in hc_trait.pre_health_check:
+        hook(ctx)
 
     for hook in lint_trait.lint_start:
         hook(ctx)
@@ -193,11 +197,15 @@ def impl(ctx: TaskContext) -> int:
     if ctx.args.fix:
         flags.append("--output_groups=rules_lint_patch")
         flags.append("--@aspect_rules_lint//lint:fix")
+
     # Note: to test the non-interactive codepath, run with:
     # echo > nohup.out; nohup aspect lint ; cat nohup.out
-    flags.append("--output_groups=rules_lint_" + (
-        "human" if ctx.std.io.stdout.is_tty else "machine"))
-    flags.append("--output_groups=rules_lint_machine")
+    if ctx.std.io.stdout.is_tty:
+        flags.append("--output_groups=rules_lint_human")
+
+    if lint_trait.lint_report:
+        flags.append("--output_groups=rules_lint_machine")
+
     flags.extend(bazel_trait.extra_flags)
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
@@ -291,17 +299,24 @@ def impl(ctx: TaskContext) -> int:
 
     # 12. Determine exit code
     if build_failed:
-        return 1
-    if strategy.fail_on_severity:
-        if any([d["severity"] == strategy.fail_on_severity for d in relevant]):
-            return 1
-    if strategy.fail_on_linter_error and linter_exit_code != 0:
-        return 1
-    return 0
+        exit_code = 1
+    elif strategy.fail_on_severity and any([d["severity"] == strategy.fail_on_severity for d in relevant]):
+        exit_code = 1
+    elif strategy.fail_on_linter_error and linter_exit_code != 0:
+        exit_code = 1
+    else:
+        exit_code = 0
+
+    for hook in hc_trait.post_health_check:
+        result = hook(ctx)
+        if result != None:
+            fail(result)
+
+    return exit_code
 
 lint = task(
     implementation = impl,
-    traits = [LintTrait, BazelTrait],
+    traits = [LintTrait, BazelTrait, HealthCheckTrait],
     args = {
         "announce_rc": args.boolean(default = False),
         "quiet": args.boolean(default = False),

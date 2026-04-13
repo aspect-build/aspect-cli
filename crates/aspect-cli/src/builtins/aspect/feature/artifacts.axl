@@ -168,9 +168,11 @@ def _artifact_upload_impl(ctx: FeatureContext):
                                 print("artifact upload error (" + name + "): " + err)
 
         if debug:
+
             entries = state.get("_test_entries", [])
             skipped = state.get("_skipped_files", [])
             print("")
+            print("------------------------------------")
             print("artifact upload debug summary:")
             print("uploader: " + ("active" if not is_local else "none"))
             print("profile:  " + profile_path + " (exists=" + str(ctx.std.fs.exists(profile_path)) + ")")

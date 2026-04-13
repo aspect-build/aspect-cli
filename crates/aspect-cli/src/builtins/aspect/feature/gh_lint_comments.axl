@@ -101,6 +101,22 @@ def _filter_by_diff(comments, changed_lines):
     ]
 
 
+def _build_comments(ctx, filepath):
+    """Parse a SARIF report into review comments with markers and suggestions applied."""
+    content = ctx.std.fs.read_to_string(filepath)
+    sarif = parse_sarif(content)
+    comments = sarif_to_review_comments(sarif)
+    _enrich_with_suggestions(ctx, comments)
+    diagnostics = parse_sarif_diagnostics(content)
+    for i, comment in enumerate(comments):
+        if i < len(diagnostics):
+            diag = diagnostics[i]
+            comment["body"] = _build_comment_marker(
+                diag["tool"], diag["file"], diag["line"], diag["rule_id"],
+            ) + "\n" + comment["body"]
+    return comments
+
+
 def _get_existing_markers(ctx, gh):
     result = github.pulls.list_review_comments(
         ctx, token = gh["token"], owner = gh["owner"],
@@ -201,89 +217,74 @@ def _determine_vars(ctx):
 
 
 def _github_lint_impl(ctx: FeatureContext):
-    env_vars = _determine_vars(ctx)
-    if not env_vars:
-        return
-
-    token = github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read"])
-    if not token:
-        return
-
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
-
     lint_trait = ctx.traits[LintTrait]
-    gh = {
-        "token": token,
-        "owner": env_vars["owner"],
-        "repo": env_vars["repo"],
-        "head_sha": env_vars["sha"],
-        "pr_number": env_vars["pr_number"],
-        "changed_lines": {},
-        "pending_comments": [],
-        "stale": False,
-    }
 
-    def get_diff(ctx):
-        result = github.pulls.list_files(ctx, gh["token"], gh["owner"], gh["repo"], gh["pr_number"])
-        if not result["success"]:
-            if debug:
-                print("gh_lint_comments debug: list_files failed for PR #%d" % gh["pr_number"])
-            return []
-        all_files = []
-        for f in result["files"]:
-            if f.get("status", "") == "removed":
-                continue
-            filename = f.get("filename", "")
-            patch = f.get("patch", "")
-            added_lines = _parse_github_diff_patch(patch)
-            all_files.append({"file": filename, "lines": added_lines})
-        gh["changed_lines"] = {f["file"]: f["lines"] for f in all_files}
-        if debug:
-            print("gh_lint_comments debug: PR #%d — %d changed file(s)" % (gh["pr_number"], len(all_files)))
-            for f in all_files:
-                print("  %s — %d added line(s)" % (f["file"], len(f["lines"])))
-        return all_files
+    env_vars = _determine_vars(ctx)
+    gh = None
+
+    if env_vars:
+        token = github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read"])
+        if token:
+            gh = {
+                "token": token,
+                "owner": env_vars["owner"],
+                "repo": env_vars["repo"],
+                "head_sha": env_vars["sha"],
+                "pr_number": env_vars["pr_number"],
+                "changed_lines": {},
+                "stale": False,
+            }
+
+    if not gh and not debug:
+        return
+
+    state = {"pending": []}
+
+    if gh:
+        def get_diff(ctx):
+            result = github.pulls.list_files(ctx, gh["token"], gh["owner"], gh["repo"], gh["pr_number"])
+            if not result["success"]:
+                return []
+            all_files = []
+            for f in result["files"]:
+                if f.get("status", "") == "removed":
+                    continue
+                filename = f.get("filename", "")
+                patch = f.get("patch", "")
+                added_lines = _parse_github_diff_patch(patch)
+                all_files.append({"file": filename, "lines": added_lines})
+            gh["changed_lines"] = {f["file"]: f["lines"] for f in all_files}
+            return all_files
+
+        lint_trait.get_diff = get_diff
 
     def _lint_report(ctx, filepath):
-        if gh["stale"]:
-            if debug:
-                print("gh_lint_comments debug: skipping report (stale PR) %s" % filepath)
+        print(filepath, gh)
+        if gh and gh["stale"]:
             return
-        content = ctx.std.fs.read_to_string(filepath)
-        sarif = parse_sarif(content)
-        comments = sarif_to_review_comments(sarif)
-        _enrich_with_suggestions(ctx, comments)
-        diagnostics = parse_sarif_diagnostics(content)
-        for i, comment in enumerate(comments):
-            if i < len(diagnostics):
-                diag = diagnostics[i]
-                marker = _build_comment_marker(
-                    diag["tool"],
-                    diag["file"],
-                    diag["line"],
-                    diag["rule_id"]
-                )
-                comment["body"] = marker + "\n" + comment["body"]
-        gh["pending_comments"].extend(comments)
-        if "existing_markers" not in gh:
-            gh["existing_markers"] = _get_existing_markers(ctx, gh)
-        ready = _filter_by_diff(gh["pending_comments"], gh["changed_lines"])
-        if debug:
-            print("gh_lint_comments debug: report %s — %d comment(s), %d in diff" % (filepath, len(comments), len(ready)))
-        _post_individually(ctx, gh, ready, gh["existing_markers"])
-        gh["pending_comments"] = []
+        comments = _build_comments(ctx, filepath)
+        state["pending"].extend(comments)
+        if gh:
+            if "existing_markers" not in gh:
+                gh["existing_markers"] = _get_existing_markers(ctx, gh)
+            ready = _filter_by_diff(state["pending"], gh["changed_lines"])
+            _post_individually(ctx, gh, ready, gh["existing_markers"])
+            state["pending"] = []
 
     def _lint_end(ctx, relevant_diagnostics):
-        if gh["stale"] or _check_staleness(ctx, gh):
-            gh["stale"] = True
-            if debug:
-                print("gh_lint_comments debug: PR is stale, skipping cleanup")
-            return
-        if debug:
-            print("gh_lint_comments debug: lint_end — %d relevant diagnostic(s), running cleanup" % len(relevant_diagnostics))
-        _cleanup_comments(ctx, gh, relevant_diagnostics)
+        if gh:
+            if gh["stale"] or _check_staleness(ctx, gh):
+                gh["stale"] = True
+                return
+            _cleanup_comments(ctx, gh, relevant_diagnostics)
+        elif debug:
+            print("github lint comment debug summary:")
+            print("pending comments: %s" % len(state["pending"]))
+            for c in state["pending"]:
+                lines = c["body"].split("\n")
+                print("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
 
-    lint_trait.get_diff = get_diff
     lint_trait.lint_report.append(_lint_report)
     lint_trait.lint_end.append(_lint_end)
 
