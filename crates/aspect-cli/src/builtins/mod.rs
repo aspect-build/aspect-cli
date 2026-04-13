@@ -25,7 +25,6 @@ pub fn expand_builtins(
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
     use std::fs;
 
-    // Hash all embedded file content to detect staleness across versions
     let content_hash = {
         let mut combined = String::new();
         for entry in ASPECT_DIR.find("**/*").unwrap() {
@@ -38,17 +37,17 @@ pub fn expand_builtins(
     };
 
     let builtins_root = broot.join(content_hash);
-    let dir = builtins_root.join("aspect");
 
-    if !dir.exists() {
+    let aspect_dir = builtins_root.join("aspect");
+    if !aspect_dir.exists() {
         for entry in ASPECT_DIR.find("**/*").unwrap() {
             if let DirEntry::File(f) = entry {
-                let out_path = dir.join(f.path());
+                let out_path = aspect_dir.join(f.path());
                 fs::create_dir_all(out_path.parent().unwrap())?;
                 fs::write(&out_path, f.contents())?;
             }
         }
     }
 
-    Ok(vec![("aspect".to_string(), dir)])
+    Ok(vec![("aspect".to_string(), aspect_dir)])
 }

@@ -45,7 +45,12 @@ rust_library(
         "@crates//:wasmi",
         "@crates//:zstd",
         "@crates//:base64",
+        "@crates//:blake2",
+        "@crates//:digest",
+        "@crates//:include_dir",
+        "@crates//:md-5",
         "@crates//:semver",
+        "@crates//:sha1",
         "@crates//:sha2",
         "//crates/axl-proto",
         "//crates/axl-types",
@@ -53,6 +58,9 @@ rust_library(
         "//crates/bazelrc",
         "//crates/galvanize",
     ],
+    compile_data = glob([
+        "src/builtins/std/**/*.axl",
+    ]),
     proc_macro_deps = [
         "@crates//:starlark_derive",
     ],

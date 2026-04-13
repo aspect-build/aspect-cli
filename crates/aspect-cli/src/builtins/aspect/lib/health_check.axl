@@ -10,6 +10,7 @@ job. It does two things:
    fleet service between jobs and prints its contents.
 """
 
+load("@std//time.axl", "time")
 load("./environment.axl", "AWS_LOG_GROUP", "get_environment", "is_warming_complete")
 
 
@@ -95,7 +96,7 @@ def _wait_for_warming(std, environment):
     # it terminates the runner — so this loop will not hang indefinitely.
     if not environment.runner.warming_complete:
         print("Waiting for warming to complete...")
-        for _ in forever(1000):
+        for _ in time.sleep_iter(1000):
             if is_warming_complete(std):
                 break
 

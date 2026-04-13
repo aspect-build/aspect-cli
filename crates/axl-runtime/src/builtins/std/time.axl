@@ -1,0 +1,4 @@
+_t = __builtins__.time()
+sleep = _t.sleep
+sleep_iter = _t.sleep_iter
+time = struct(sleep=_t.sleep, sleep_iter=_t.sleep_iter)

@@ -1,0 +1,9 @@
+_h = __builtins__.hash()
+md5     = _h.md5
+sha1    = _h.sha1
+sha224  = _h.sha224
+sha256  = _h.sha256
+sha384  = _h.sha384
+sha512  = _h.sha512
+blake2b = _h.blake2b
+blake2s = _h.blake2s

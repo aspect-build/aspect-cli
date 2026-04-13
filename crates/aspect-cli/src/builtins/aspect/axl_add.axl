@@ -6,6 +6,8 @@ Usage:
   aspect axl add gh:owner/repo@latest   # same as above
   aspect axl add gh:owner/repo@v1.0.0   # adds specific version
 """
+load("@std//hash.axl", "sha512")
+load("@std//base64.axl", "base64")
 
 # ANSI escape codes for terminal UI
 ORANGE = "\033[38;5;208m"
@@ -184,24 +186,12 @@ def compute_integrity(ctx: TaskContext, url: str, temp_file: str) -> str:
     # Download the file
     ctx.http().download(url = url, output = temp_file, mode = 0o644, headers = get_github_headers()).block()
 
-    # Compute SHA512 and base64 encode using a shell command
-    # Using sh -c to pipe the commands together
-    child = ctx.std.process.command("sh").args([
-        "-c",
-        "openssl dgst -sha512 -binary '" + temp_file + "' | openssl base64 -A"
-    ]).stdout("piped").stderr("piped").spawn()
-
-    base64_hash = child.stdout().read_to_string().strip()
-    stderr_output = child.stderr().read_to_string()
-    status = child.wait()
-
-    if status.code != 0:
-        fail("Failed to compute hash: " + stderr_output)
-
-    # Clean up temp file
+    data = ctx.std.fs.open(temp_file).read()
+    h = sha512()
+    h.update(data)
     ctx.std.fs.remove_file(temp_file)
 
-    return "sha512-" + base64_hash
+    return "sha512-" + base64.encode(h.digest())
 
 def sanitize_module_name(name: str) -> str:
     """Convert a repository name to a valid module name."""

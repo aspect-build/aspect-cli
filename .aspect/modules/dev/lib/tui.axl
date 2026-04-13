@@ -1,3 +1,5 @@
+load("@std//time.axl", "sleep_iter")
+
 def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
     events = build.build_events()
     offset = 0
@@ -11,7 +13,7 @@ def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
     rate = 60
     tick_ms = 1000 // 60
 
-    for timer in forever(tick_ms):
+    for timer in sleep_iter(tick_ms):
         event = events.try_pop()
 
         if event != None:
