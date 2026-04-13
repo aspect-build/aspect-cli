@@ -16,9 +16,9 @@ use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
 use super::aspect::Aspect;
+use super::cli_args::CliArgs;
 use super::http::Http;
 use super::std::Std;
-use super::task_args::TaskArgs;
 use super::task_info::TaskInfo;
 use super::template;
 use super::wasm::Wasm;
@@ -26,7 +26,7 @@ use super::wasm::Wasm;
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<TaskContext>")]
 pub struct TaskContext<'v> {
-    pub args: TaskArgs<'v>,
+    pub args: CliArgs<'v>,
     pub traits: values::Value<'v>,
     #[trace(unsafe_ignore)]
     pub task: TaskInfo,
@@ -35,7 +35,7 @@ pub struct TaskContext<'v> {
 
 impl<'v> TaskContext<'v> {
     pub fn new(
-        args: TaskArgs<'v>,
+        args: CliArgs<'v>,
         traits: values::Value<'v>,
         task: TaskInfo,
         bazel: values::Value<'v>,
@@ -101,9 +101,9 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
         Ok(ctx.task.clone())
     }
 
-    /// Access to arguments provided by the caller.
+    /// Access to args provided by the caller (CLI flags and config.axl values).
     #[starlark(attribute)]
-    fn args<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<TaskArgs<'v>> {
+    fn args<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<CliArgs<'v>> {
         let ctx = this
             .downcast_ref_err::<TaskContext>()
             .into_anyhow_result()?;

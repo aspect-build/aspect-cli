@@ -9,15 +9,16 @@ use starlark::values::{Heap, Value, ValueLike};
 use uuid::Uuid;
 
 use crate::engine::bazel::Bazel;
+use crate::engine::cli_args::CliArgs;
 use crate::engine::config::feature_context::FeatureContext;
 use crate::engine::config::feature_map::{FeatureMap, construct_features};
 use crate::engine::config::trait_map::TraitMap;
 use crate::engine::config::{ConfigContext, ConfiguredTask};
-use crate::engine::task_args::TaskArgs;
+use crate::engine::task::FrozenTask;
 use crate::engine::task_context::TaskContext;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::types::feature::{
-    FeatureInstance, extract_feature_impl_fn, extract_feature_type_id,
+    FeatureInstance, extract_feature_impl_fn, extract_feature_type_id, populate_feature_custom_args,
 };
 use crate::engine::types::r#trait::extract_trait_type_id;
 use crate::eval::error::EvalError;
@@ -63,7 +64,8 @@ pub struct MultiPhaseEval<'v, 'loader> {
     env: &'loader ModuleEnv<'v>,
     loader: &'loader AxlLoader,
     /// Feature type values on the shared heap, collected during Phase 1.
-    feature_types: Vec<(u64, Value<'v>)>,
+    /// Tuple: (type_id, feature_type_value, source_path)
+    feature_types: Vec<(u64, Value<'v>, PathBuf)>,
     /// Global feature map allocated on the shared heap during Phase 2.
     feature_map_value: Option<Value<'v>>,
     /// Global trait map allocated on the shared heap during Phase 3.
@@ -167,11 +169,19 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
                 // access_owned_frozen_value registers the frozen heap as a dependency of the
                 // live heap (keeping it alive) and returns Value<'v>.
                 let feature_val = heap.access_owned_frozen_value(&owned);
-                self.feature_types.push((type_id, feature_val));
+                self.feature_types
+                    .push((type_id, feature_val, abs_path.clone()));
             }
         }
 
         Ok(task_values)
+    }
+
+    /// Returns feature types with their source paths, collected during Phase 1.
+    /// Each entry is `(type_id, feature_type_value, source_path)`.
+    /// Used by the CLI layer to build per-feature arg specs and help headings.
+    pub fn feature_types_with_paths(&self) -> &[(u64, Value<'v>, PathBuf)] {
+        &self.feature_types
     }
 
     /// Phase 2: construct feature instances from the feature types collected in Phase 1.
@@ -179,12 +189,18 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
     /// Allocates a `FeatureMap` on the shared heap so Phase 3 can reference and mutate it.
     pub fn eval_features(&mut self) -> Result<(), EvalError> {
         let heap = self.heap();
+        // construct_features needs (id, value) pairs; strip the PathBuf.
+        let id_val_pairs: Vec<(u64, Value<'v>)> = self
+            .feature_types
+            .iter()
+            .map(|(id, val, _)| (*id, *val))
+            .collect();
         let feature_map = {
             let store = self.loader.new_store(self.loader.repo_root.clone());
             let mut eval = Evaluator::new(&self.env.0);
             eval.set_loader(self.loader);
             eval.extra = Some(&store);
-            construct_features(&self.feature_types, &mut eval)?
+            construct_features(&id_val_pairs, &mut eval)?
         };
         self.feature_map_value = Some(heap.alloc(feature_map));
         Ok(())
@@ -276,7 +292,15 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
     /// Must be called after `eval_config` so that config files have had the opportunity
     /// to enable or disable feature instances. Each enabled feature whose type carries
     /// an `impl` function is invoked with a `FeatureContext` on the shared heap.
-    pub fn eval_feature_impls(&mut self) -> Result<(), EvalError> {
+    ///
+    /// `args_builder` is called once per enabled feature, receiving the feature's type_id
+    /// and the shared heap, and returning a `Args` containing the parsed CLI values for
+    /// that feature's declared args. Use `extract_feature_args` on the type value (available
+    /// via `feature_types_with_paths`) to know which args belong to which feature.
+    pub fn eval_feature_impls(
+        &mut self,
+        args_builder: impl Fn(u64, Heap<'v>) -> CliArgs<'v>,
+    ) -> Result<(), EvalError> {
         let heap = self.heap();
 
         let feature_map_value = self.feature_map_value.ok_or_else(|| {
@@ -306,7 +330,11 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
             }
 
             if let Some(impl_fn) = extract_feature_impl_fn(type_value) {
-                let fctx = heap.alloc(FeatureContext::new(instance_value, trait_map_value));
+                let type_id = extract_feature_type_id(type_value).unwrap_or(0);
+                let cli_args = args_builder(type_id, heap);
+                let merged = populate_feature_custom_args(type_value, instance_value, cli_args);
+                let attrs_value = heap.alloc(merged);
+                let fctx = heap.alloc(FeatureContext::new(attrs_value, trait_map_value));
                 let store = self.loader.new_store(self.loader.repo_root.clone());
                 let mut eval = Evaluator::new(&self.env.0);
                 eval.set_loader(self.loader);
@@ -324,12 +352,22 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
     ///
     /// The `TaskContext` is allocated on the shared heap. The task implementation
     /// is called via `eval_function` on a fresh evaluator over the shared module.
+    /// Phase 5: execute the selected task with pre-built args.
+    ///
+    /// `args_builder` returns a pair of `Args`:
+    /// - `all_args`: all CLI arg values, including Clap defaults.
+    /// - `explicit_args`: only values the user explicitly provided on the command line.
+    ///
+    /// Precedence (highest to lowest):
+    ///   1. Explicit CLI flag (`--count 5`)
+    ///   2. `config.axl` override (`t.args.count = 2`)
+    ///   3. Task definition default (`args.int(default = 1)`)
     pub fn execute_with_args(
         &mut self,
         task: Value<'v>,
         task_key: String,
         task_id: Option<String>,
-        args_builder: impl FnOnce(Heap<'v>) -> TaskArgs<'v>,
+        args_builder: impl FnOnce(Heap<'v>) -> (CliArgs<'v>, CliArgs<'v>),
     ) -> Result<Option<u8>, EvalError> {
         let ct = task
             .downcast_ref::<ConfiguredTask>()
@@ -346,7 +384,38 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
 
         let task_id = task_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
-        let task_args = args_builder(heap);
+        // Build args with proper precedence:
+        // 1. Start with config-only attr defaults from the task definition.
+        // 2. Apply config_overrides (from config.axl) for keys the user did NOT set on the CLI.
+        // 3. CLI args (with their own defaults) are already in all_args and win implicitly.
+        let (mut task_args, explicit_args) = args_builder(heap);
+
+        // Seed config-only arg defaults. These never go through Clap so they must be
+        // injected here. We only insert if not already present (config_overrides below
+        // may overwrite, and explicit CLI flags from args_builder already win).
+        // Custom args with no storable default (e.g. lambda defaults) are seeded as None
+        // so that `ctx.args.name` is always accessible.
+        if let Some(frozen_task) = ct.task_def.downcast_ref::<FrozenTask>() {
+            for (name, arg) in frozen_task.args().iter() {
+                if let crate::engine::arg::Arg::Custom { default, .. } = arg {
+                    if !task_args.contains_key(name.as_str()) {
+                        let value = default
+                            .map(|fv| fv.to_value())
+                            .unwrap_or_else(|| heap.alloc(starlark::values::none::NoneType));
+                        task_args.insert(name.clone(), value);
+                    }
+                }
+            }
+        }
+
+        // Apply config.axl overrides, skipping keys the user explicitly set on the CLI.
+        for (k, owned) in ct.config_overrides.borrow().iter() {
+            if !explicit_args.contains_key(k) {
+                if let Some(fv) = owned.value().unpack_frozen() {
+                    task_args.insert(k.clone(), fv.to_value());
+                }
+            }
+        }
         let task_info = TaskInfo {
             name: ct.get_name(),
             group: ct.get_group(),

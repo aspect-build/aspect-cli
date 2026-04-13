@@ -41,5 +41,10 @@ def _github_status_checks(ctx: FeatureContext):
 
 GithubStatusChecks = feature(
     implementation = _github_status_checks,
-    attrs = {}
+    args = {
+        "mode": args.string(
+            default = "ci-only",
+            description = "When to create GitHub Status Checks",
+        ),
+    },
 )

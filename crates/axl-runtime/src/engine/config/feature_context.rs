@@ -14,16 +14,16 @@ use crate::engine::std::Std;
 /// Context passed to a feature's `implementation` function.
 ///
 /// Runs after all config.axl files have been evaluated.
-/// - `ctx.attr` — the feature's own configured instance (read its user-set fields)
-/// - `ctx.fragments` — the full mutable fragment map (inject hooks into fragments)
+/// - `ctx.args` — the feature's resolved args (config values and CLI args merged)
+/// - `ctx.traits` — the full mutable fragment map (inject hooks into fragments)
 /// - `ctx.std` — standard library
 /// - `ctx.http` — HTTP client
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<FeatureContext>")]
 pub struct FeatureContext<'v> {
-    /// The feature instance (read-only at implementation time — config phase is done).
+    /// Resolved args: config-only args from the feature instance, plus CLI args.
     #[allocative(skip)]
-    pub(crate) attr: Value<'v>,
+    pub(crate) args: Value<'v>,
     /// The full mutable fragment map — inject hooks here.
     #[allocative(skip)]
     pub(crate) fragments: Value<'v>,
@@ -31,14 +31,14 @@ pub struct FeatureContext<'v> {
 
 unsafe impl<'v> Trace<'v> for FeatureContext<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
-        self.attr.trace(tracer);
+        self.args.trace(tracer);
         self.fragments.trace(tracer);
     }
 }
 
 impl<'v> FeatureContext<'v> {
-    pub fn new(attr: Value<'v>, fragments: Value<'v>) -> Self {
-        Self { attr, fragments }
+    pub fn new(args: Value<'v>, fragments: Value<'v>) -> Self {
+        Self { args, fragments }
     }
 }
 
@@ -53,7 +53,7 @@ impl<'v> Freeze for FeatureContext<'v> {
 
     fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
         Ok(FrozenFeatureContext {
-            attr: self.attr.freeze(freezer)?,
+            args: self.args.freeze(freezer)?,
             fragments: self.fragments.freeze(freezer)?,
         })
     }
@@ -71,7 +71,7 @@ impl<'v> StarlarkValue<'v> for FeatureContext<'v> {
 #[display("<FeatureContext>")]
 pub struct FrozenFeatureContext {
     #[allocative(skip)]
-    attr: FrozenValue,
+    args: FrozenValue,
     #[allocative(skip)]
     fragments: FrozenValue,
 }
@@ -92,13 +92,14 @@ impl<'v> StarlarkValue<'v> for FrozenFeatureContext {
 
 #[starlark_module]
 fn feature_context_methods(builder: &mut MethodsBuilder) {
-    /// The feature's own configured instance. Read field values via `ctx.attr.field_name`.
+    /// Resolved args for this feature: config-only values and CLI args merged.
+    /// Access via `ctx.args.arg_name`.
     #[starlark(attribute)]
-    fn attr<'v>(this: Value<'v>) -> anyhow::Result<Value<'v>> {
+    fn args<'v>(this: Value<'v>) -> anyhow::Result<Value<'v>> {
         let ctx = this
             .downcast_ref_err::<FeatureContext>()
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        Ok(ctx.attr)
+        Ok(ctx.args)
     }
 
     /// The full mutable trait map. Inject into traits via `ctx.traits[TraitType].hook.append(...)`.

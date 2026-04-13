@@ -28,7 +28,7 @@ use super::super::template;
 use super::super::wasm::Wasm;
 
 use super::tasks::configured_task::ConfiguredTask;
-use super::tasks::value::TaskList;
+use super::tasks::value::TaskMap;
 
 /// Config context for evaluating config.axl files.
 ///
@@ -58,7 +58,7 @@ impl<'v> ConfigContext<'v> {
             .map(|task| task.alloc_value(heap))
             .collect();
         Self {
-            tasks: heap.alloc(TaskList::new(tasks)),
+            tasks: heap.alloc(TaskMap::new(tasks)),
             trait_map,
             feature_map,
         }
@@ -75,7 +75,7 @@ impl<'v> ConfigContext<'v> {
         heap: Heap<'v>,
     ) -> Self {
         Self {
-            tasks: heap.alloc(TaskList::new(tasks)),
+            tasks: heap.alloc(TaskMap::new(tasks)),
             trait_map,
             feature_map,
         }
@@ -84,7 +84,7 @@ impl<'v> ConfigContext<'v> {
     /// Get references to the tasks.
     pub fn tasks(&self) -> Vec<&ConfiguredTask> {
         self.tasks
-            .downcast_ref::<TaskList>()
+            .downcast_ref::<TaskMap>()
             .unwrap()
             .content
             .borrow()
@@ -95,7 +95,7 @@ impl<'v> ConfigContext<'v> {
 
     /// Get task values for iteration (used during config evaluation).
     pub fn task_values(&self) -> Vec<values::Value<'v>> {
-        self.tasks.downcast_ref::<TaskList>().unwrap().values()
+        self.tasks.downcast_ref::<TaskMap>().unwrap().values()
     }
 
     /// Get the trait map value.

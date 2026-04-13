@@ -1,23 +1,32 @@
-use axl_runtime::engine::task_arg::TaskArg;
+use axl_runtime::engine::arg::Arg;
 use clap::builder::{PossibleValuesParser, Resettable, StyledStr};
-use clap::{Arg, ArgAction, value_parser};
+use clap::{Arg as ClapArg, ArgAction, value_parser};
 
-pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
+/// Build a Clap [`ClapArg`] from an [`Arg`] definition.
+///
+/// - `id` — the Clap internal identifier used to retrieve the value from `ArgMatches`
+///   (e.g. `"upload_bucket"` for task args, `"artifact-upload-mode"` for feature args).
+/// - `long_name` — the `--flag-name` shown on the CLI (e.g. `"upload-bucket"` or
+///   `"artifact-upload-mode"`).
+pub(crate) fn convert_arg(id: &str, long_name: &str, arg: &Arg) -> ClapArg {
     match arg {
-        TaskArg::String {
+        Arg::String {
             required,
             default,
             short,
             values,
             description,
+            ..
         } => {
-            let mut it = Arg::new(name)
-                .long(name)
-                .value_name(name)
+            // Clap requires 'static data for .long(), .value_name(), and .default_value(),
+            // so we pass owned Strings throughout.
+            let mut it = ClapArg::new(id.to_string())
+                .long(long_name.to_string())
+                .value_name(long_name.to_string())
                 .short(short_option(short))
                 .help(help_text(description))
-                .required(required.to_owned())
-                .default_value(default.to_string());
+                .required(*required)
+                .default_value(default.clone());
             if let Some(values) = values {
                 it = it.value_parser(PossibleValuesParser::new(values))
             } else {
@@ -25,99 +34,106 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
             }
             it
         }
-        TaskArg::Boolean {
+        Arg::Boolean {
             required,
             default,
             short,
             description,
-        } => Arg::new(name)
-            .long(name)
-            .value_name(name)
+            ..
+        } => ClapArg::new(id.to_string())
+            .long(long_name.to_string())
+            .value_name(long_name.to_string())
             .short(short_option(short))
             .help(help_text(description))
-            .required(required.to_owned())
-            .default_value(default.to_string())
+            .required(*required)
+            // Use static string literals — no allocation, and Clap's bool parser expects lowercase.
+            .default_value(if *default { "true" } else { "false" })
             .value_parser(value_parser!(bool))
             .num_args(0..=1)
             .require_equals(true)
             .default_missing_value("true"),
-        TaskArg::Int {
+        Arg::Int {
             required,
             default,
             short,
             description,
-        } => Arg::new(name)
-            .long(name)
-            .value_name(name)
+            ..
+        } => ClapArg::new(id.to_string())
+            .long(long_name.to_string())
+            .value_name(long_name.to_string())
             .short(short_option(short))
             .help(help_text(description))
-            .required(required.to_owned())
+            .required(*required)
             .default_value(default.to_string())
             .value_parser(value_parser!(i32)),
-        TaskArg::UInt {
+        Arg::UInt {
             required,
             default,
             short,
             description,
-        } => Arg::new(name)
-            .long(name)
-            .value_name(name)
+            ..
+        } => ClapArg::new(id.to_string())
+            .long(long_name.to_string())
+            .value_name(long_name.to_string())
             .short(short_option(short))
             .help(help_text(description))
-            .required(required.to_owned())
+            .required(*required)
             .default_value(default.to_string())
             .value_parser(value_parser!(u32)),
-        TaskArg::Positional {
+        Arg::Positional {
             minimum,
             maximum,
             default,
             description,
         } => {
-            let mut it = Arg::new(name)
+            let mut it = ClapArg::new(id.to_string())
                 .value_parser(value_parser!(String))
-                .value_name(name)
+                .value_name(id.to_string())
                 .help(help_text(description))
-                .num_args(minimum.to_owned() as usize..=maximum.to_owned() as usize);
+                .num_args(*minimum as usize..=*maximum as usize);
             if let Some(default) = default {
                 it = it.default_values(default);
             }
             it
         }
-        TaskArg::TrailingVarArgs { description } => Arg::new(name)
+        Arg::TrailingVarArgs { description } => ClapArg::new(id.to_string())
             .value_parser(value_parser!(String))
-            .value_name(name)
+            .value_name(id.to_string())
             .help(help_text(description))
             .allow_hyphen_values(true)
             .last(true)
             .num_args(0..),
-        TaskArg::StringList {
+        Arg::StringList {
             required,
             default,
             short,
             description,
+            ..
         } => {
-            let mut it = Arg::new(name)
-                .long(name)
-                .value_name(name)
+            let mut it = ClapArg::new(id.to_string())
+                .long(long_name.to_string())
+                .value_name(long_name.to_string())
                 .short(short_option(short))
                 .help(help_text(description))
                 .action(ArgAction::Append)
                 .required(*required)
                 .value_parser(value_parser!(String));
             if !default.is_empty() {
-                it = it.default_values(default.clone());
+                // Pass an iterator of cloned Strings — avoids allocating an intermediate Vec.
+                it = it.default_values(default.iter().cloned());
             }
             it
         }
-        TaskArg::BooleanList {
+        Arg::BooleanList {
             required,
             default,
             short,
             description,
+            ..
         } => {
-            let mut it = Arg::new(name)
-                .long(name)
-                .value_name(name)
+            let mut it = ClapArg::new(id.to_string())
+                .long(long_name.to_string())
+                .value_name(long_name.to_string())
                 .short(short_option(short))
                 .help(help_text(description))
                 .action(ArgAction::Append)
@@ -126,50 +142,55 @@ pub(crate) fn convert_arg(name: &String, arg: &TaskArg) -> Arg {
                 .num_args(0..=1)
                 .default_missing_value("true");
             if !default.is_empty() {
-                let default: Vec<String> = default.iter().map(|&b| b.to_string()).collect();
-                it = it.default_values(default);
+                // Static string literals — no allocation, and Clap's bool parser expects lowercase.
+                it = it.default_values(default.iter().map(|&b| if b { "true" } else { "false" }));
             }
             it
         }
-        TaskArg::IntList {
+        Arg::IntList {
             required,
             default,
             short,
             description,
+            ..
         } => {
-            let mut it = Arg::new(name)
-                .long(name)
-                .value_name(name)
+            let mut it = ClapArg::new(id.to_string())
+                .long(long_name.to_string())
+                .value_name(long_name.to_string())
                 .short(short_option(short))
                 .help(help_text(description))
                 .action(ArgAction::Append)
                 .required(*required)
                 .value_parser(value_parser!(i32));
             if !default.is_empty() {
-                let default: Vec<String> = default.iter().map(|&i| i.to_string()).collect();
-                it = it.default_values(default);
+                it = it.default_values(default.iter().map(|i| i.to_string()));
             }
             it
         }
-        TaskArg::UIntList {
+        Arg::UIntList {
             required,
             default,
             short,
             description,
+            ..
         } => {
-            let mut it = Arg::new(name)
-                .long(name)
-                .value_name(name)
+            let mut it = ClapArg::new(id.to_string())
+                .long(long_name.to_string())
+                .value_name(long_name.to_string())
                 .short(short_option(short))
                 .help(help_text(description))
                 .action(ArgAction::Append)
                 .required(*required)
                 .value_parser(value_parser!(u32));
             if !default.is_empty() {
-                let default: Vec<String> = default.iter().map(|&u| u.to_string()).collect();
-                it = it.default_values(default);
+                it = it.default_values(default.iter().map(|u| u.to_string()));
             }
             it
+        }
+        Arg::Custom { .. } => {
+            // Custom args are config.axl-only and never exposed on the CLI.
+            // convert_arg should never be called with a Custom arg.
+            unreachable!("Custom args are not CLI-exposed")
         }
     }
 }

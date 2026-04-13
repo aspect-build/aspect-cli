@@ -9,14 +9,21 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
+use axl_runtime::engine::arg::Arg;
+use axl_runtime::engine::cli_args::CliArgs;
 use axl_runtime::engine::config::ConfiguredTask;
-use axl_runtime::engine::task_arg::TaskArg;
-use axl_runtime::engine::task_args::TaskArgs;
+use axl_runtime::engine::types::feature::{
+    extract_feature_args, extract_feature_description, extract_feature_display_name,
+    extract_feature_identifier, extract_feature_name, extract_feature_summary,
+};
 use axl_runtime::eval::{self, ModuleEnv, ModuleScope, ModuleTaskSpec, MultiPhaseEval};
 use axl_runtime::module::AXL_ROOT_MODULE_NAME;
 use axl_runtime::module::{DiskStore, ModuleEvaluator};
-use clap::{Arg, ArgAction, Command};
+use clap::parser::ValueSource;
+use clap::{Arg as ClapArg, ArgAction, Command};
+use starlark::collections::SmallMap;
 use starlark::values::ValueLike;
+use starlark::values::list::ListRef;
 use tokio::task;
 use tokio::task::spawn_blocking;
 use tracing::info_span;
@@ -175,6 +182,68 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 .eval_config(&configs, &task_values, &root_scope)
                 .map_err(anyhow::Error::from)?;
 
+            // Build feature flag specs for command help.
+            // Each entry is (args_map, heading, description_line, prefix); features with no args are skipped.
+            let feature_arg_specs_for_cmd: Vec<(SmallMap<String, Arg>, String, String, String)> =
+                mpe.feature_types_with_paths()
+                    .iter()
+                    .filter_map(|(_, val, path)| {
+                        let args = extract_feature_args(*val)?;
+                        if args.is_empty() {
+                            return None;
+                        }
+                        let display_name = extract_feature_display_name(*val).unwrap_or_default();
+                        let identifier = extract_feature_identifier(*val).unwrap_or_default();
+                        let rel_path = match path.strip_prefix(&repo_root) {
+                            Ok(p) => p.to_path_buf(),
+                            Err(_) => path.clone(),
+                        };
+                        let mut label = None;
+                        for (module_name, module_root) in &module_roots_for_clap {
+                            if path.starts_with(module_root) {
+                                if module_name == AXL_ROOT_MODULE_NAME {
+                                    continue;
+                                }
+                                let module_rel = match path.strip_prefix(module_root) {
+                                    Ok(p) => p.to_path_buf(),
+                                    Err(_) => path.clone(),
+                                };
+                                label = Some(format!("@{}//{}", module_name, module_rel.display()));
+                                break;
+                            }
+                        }
+                        let defined_in = label.unwrap_or_else(|| format!("{}", rel_path.display()));
+                        let heading = format!("{} Options", display_name);
+                        let user_summary = extract_feature_summary(*val).unwrap_or_default();
+                        let user_description =
+                            extract_feature_description(*val).unwrap_or_default();
+                        let context = format!(
+                            "\x1b[3m{}\x1b[0m feature defined in \x1b[3m{}\x1b[0m",
+                            identifier, defined_in
+                        );
+                        // Build the text shown under the section heading, following the same
+                        // matrix as tasks: summary → description → context line, blank-line separated.
+                        // Clap wraps the whole heading in bold+underline including \n continuations,
+                        // so \x1b[0m right after \n resets that before our indented lines.
+                        // \x1b[8m (conceal) hides the ":" clap appends after the heading.
+                        let body = if !user_description.is_empty() {
+                            user_description
+                        } else if !user_summary.is_empty() {
+                            user_summary
+                        } else {
+                            String::new()
+                        };
+                        let desc_text = if body.is_empty() {
+                            context
+                        } else {
+                            format!("{}\n\n      {}", body, context)
+                        };
+                        let description_line = format!("\x1b[0m      {}\n\x1b[8m", desc_text);
+                        let prefix = extract_feature_name(*val).unwrap_or_default();
+                        Some((args, heading, description_line, prefix))
+                    })
+                    .collect();
+
             // Build the command tree from ALL tasks (including dynamically added ones).
             let mut tree = CommandTree::default();
 
@@ -187,14 +256,14 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 .version(cargo_pkg_short_version())
                 .disable_version_flag(true)
                 .arg(
-                    Arg::new("version")
+                    ClapArg::new("version")
                         .short('v')
                         .long("version")
                         .action(ArgAction::Version)
                         .help("Print version"),
                 )
                 .arg(
-                    Arg::new("task-key")
+                    ClapArg::new("task-key")
                         .long("task-key")
                         .value_name("KEY")
                         .global(true)
@@ -208,7 +277,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                         .help("A short key identifying this task invocation. Allowed characters: A-Za-z0-9, _, -. Useful when the same task runs multiple times in one pipeline (e.g. 'backend', 'frontend'). Auto-generated if not set."),
                 )
                 .arg(
-                    Arg::new("task-id")
+                    ClapArg::new("task-id")
                         .long("task-id")
                         .value_name("UUID")
                         .global(true)
@@ -265,7 +334,50 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     format!("{}", rel_path.display())
                 };
 
-                let cmd = make_command_from_task(&name, &defined_in, i.to_string(), def);
+                // Compute effective defaults: config_overrides as typed string slices for Clap.
+                //
+                // Scalar values (string, int, bool) become a single-element Vec<String>.
+                // List values are expanded into their individual element strings.
+                // Booleans are lowercased because Clap's `value_parser!(bool)` expects
+                // "true"/"false" while Starlark's to_string() gives "True"/"False".
+                let effective_defaults: std::collections::HashMap<String, Vec<String>> = ct
+                    .config_overrides
+                    .borrow()
+                    .iter()
+                    .map(|(k, owned)| {
+                        let v = owned.value();
+                        let elements: Vec<String> = if let Some(list) = ListRef::from_value(v) {
+                            list.iter()
+                                .map(|elem| {
+                                    let s = elem.to_string();
+                                    if elem.get_type() == "bool" {
+                                        s.to_lowercase()
+                                    } else {
+                                        s
+                                    }
+                                })
+                                .collect()
+                        } else {
+                            let s = v.to_string();
+                            let s = if v.get_type() == "bool" {
+                                s.to_lowercase()
+                            } else {
+                                s
+                            };
+                            vec![s]
+                        };
+                        (k.clone(), elements)
+                    })
+                    .collect();
+
+                let cmd = make_command_from_task(
+                    &name,
+                    &defined_in,
+                    i.to_string(),
+                    def,
+                    &feature_arg_specs_for_cmd,
+                    &effective_defaults,
+                );
                 tree.insert(&name, group, group, &defined_in, cmd)?;
             }
 
@@ -352,77 +464,172 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let span = info_span!("task", name = name);
             let _enter = span.enter();
 
-            // Phase 4: run enabled feature implementations
-            mpe.eval_feature_impls().map_err(anyhow::Error::from)?;
+            // Build per-feature arg specs (type_id, prefix, args) for the Phase 4 args builder.
+            // Cloned once here so the closure below can capture by value.
+            let feature_specs_for_args: Vec<(u64, String, SmallMap<String, Arg>)> = mpe
+                .feature_types_with_paths()
+                .iter()
+                .filter_map(|(id, val, _)| {
+                    let args = extract_feature_args(*val)?;
+                    let prefix = extract_feature_name(*val).unwrap_or_default();
+                    Some((*id, prefix, args))
+                })
+                .collect();
+
+            // Phase 4: run enabled feature implementations, supplying parsed CLI args per feature.
+            mpe.eval_feature_impls(|type_id, heap| {
+                let mut args = CliArgs::new();
+                let Some((_, prefix, spec)) = feature_specs_for_args
+                    .iter()
+                    .find(|(id, _, _)| *id == type_id)
+                else {
+                    return args;
+                };
+                for (k, v) in spec.iter() {
+                    // Look up the value by the Clap ID (respecting long override if set)
+                    // but store it under the short key (e.g. "mode") for ctx.args access.
+                    let clap_key = if let Some(lo) = v.long_override() {
+                        lo.to_string()
+                    } else if prefix.is_empty() {
+                        k.replace('_', "-")
+                    } else {
+                        format!("{}:{}", prefix, k.replace('_', "-"))
+                    };
+                    let val = match v {
+                        Arg::String { .. } => heap
+                            .alloc_str(
+                                cmdargs
+                                    .get_one::<String>(&clap_key)
+                                    .unwrap_or(&String::new()),
+                            )
+                            .to_value(),
+                        Arg::Int { .. } => heap
+                            .alloc(*cmdargs.get_one::<i32>(&clap_key).unwrap_or(&0))
+                            .to_value(),
+                        Arg::UInt { .. } => heap
+                            .alloc(*cmdargs.get_one::<u32>(&clap_key).unwrap_or(&0))
+                            .to_value(),
+                        Arg::Boolean { .. } => {
+                            heap.alloc(*cmdargs.get_one::<bool>(&clap_key).unwrap_or(&false))
+                        }
+                        Arg::Positional { .. } => heap.alloc(CliArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(&clap_key)
+                                .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                        )),
+                        Arg::TrailingVarArgs { .. } => heap.alloc(CliArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(&clap_key)
+                                .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
+                        )),
+                        Arg::StringList { .. } => heap.alloc(CliArgs::alloc_list(
+                            cmdargs
+                                .get_many::<String>(&clap_key)
+                                .unwrap_or_default()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>(),
+                        )),
+                        Arg::BooleanList { .. } => heap.alloc(CliArgs::alloc_list(
+                            cmdargs
+                                .get_many::<bool>(&clap_key)
+                                .unwrap_or_default()
+                                .copied()
+                                .collect::<Vec<_>>(),
+                        )),
+                        Arg::IntList { .. } => heap.alloc(CliArgs::alloc_list(
+                            cmdargs
+                                .get_many::<i32>(&clap_key)
+                                .unwrap_or_default()
+                                .copied()
+                                .collect::<Vec<_>>(),
+                        )),
+                        Arg::UIntList { .. } => heap.alloc(CliArgs::alloc_list(
+                            cmdargs
+                                .get_many::<u32>(&clap_key)
+                                .unwrap_or_default()
+                                .copied()
+                                .collect::<Vec<_>>(),
+                        )),
+                        Arg::Custom { .. } => {
+                            // Custom args are not CLI-exposed; extract_feature_args filters them out.
+                            continue;
+                        }
+                    };
+                    args.insert(k.clone(), val);
+                }
+                args
+            })
+            .map_err(anyhow::Error::from)?;
 
             // Phase 5: execute the selected task
 
             let exit_code = mpe
                 .execute_with_args(task_val, task_key, task_id, |heap| {
-                    let mut args = TaskArgs::new();
-                    for (k, v) in definition.args().iter() {
+                    let mut all_args = CliArgs::new();
+                    let mut explicit_args = CliArgs::new();
+                    for (k, v) in definition.cli_args() {
                         let val = match v {
-                            TaskArg::String { .. } => heap
-                                .alloc_str(
-                                    cmdargs
-                                        .get_one::<String>(k.as_str())
-                                        .unwrap_or(&String::new()),
-                                )
+                            Arg::String { .. } => heap
+                                .alloc_str(cmdargs.get_one::<String>(k).unwrap_or(&String::new()))
                                 .to_value(),
-                            TaskArg::Int { .. } => heap
-                                .alloc(cmdargs.get_one::<i32>(k.as_str()).unwrap_or(&0).to_owned())
+                            Arg::Int { .. } => heap
+                                .alloc(*cmdargs.get_one::<i32>(k).unwrap_or(&0))
                                 .to_value(),
-                            TaskArg::UInt { .. } => heap
-                                .alloc(cmdargs.get_one::<u32>(k.as_str()).unwrap_or(&0).to_owned())
+                            Arg::UInt { .. } => heap
+                                .alloc(*cmdargs.get_one::<u32>(k).unwrap_or(&0))
                                 .to_value(),
-                            TaskArg::Boolean { .. } => heap.alloc(
+                            Arg::Boolean { .. } => {
+                                heap.alloc(*cmdargs.get_one::<bool>(k).unwrap_or(&false))
+                            }
+                            Arg::Positional { .. } => heap.alloc(CliArgs::alloc_list(
                                 cmdargs
-                                    .get_one::<bool>(k.as_str())
-                                    .unwrap_or(&false)
-                                    .to_owned(),
-                            ),
-                            TaskArg::Positional { .. } => heap.alloc(TaskArgs::alloc_list(
-                                cmdargs
-                                    .get_many::<String>(k.as_str())
+                                    .get_many::<String>(k)
                                     .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
                             )),
-                            TaskArg::TrailingVarArgs { .. } => heap.alloc(TaskArgs::alloc_list(
+                            Arg::TrailingVarArgs { .. } => heap.alloc(CliArgs::alloc_list(
                                 cmdargs
-                                    .get_many::<String>(k.as_str())
+                                    .get_many::<String>(k)
                                     .map_or(vec![], |f| f.map(|s| s.as_str()).collect()),
                             )),
-                            TaskArg::StringList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            Arg::StringList { .. } => heap.alloc(CliArgs::alloc_list(
                                 cmdargs
-                                    .get_many::<String>(k.as_str())
+                                    .get_many::<String>(k)
                                     .unwrap_or_default()
                                     .map(|s| s.as_str())
                                     .collect::<Vec<_>>(),
                             )),
-                            TaskArg::BooleanList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            Arg::BooleanList { .. } => heap.alloc(CliArgs::alloc_list(
                                 cmdargs
-                                    .get_many::<bool>(k.as_str())
+                                    .get_many::<bool>(k)
                                     .unwrap_or_default()
-                                    .cloned()
+                                    .copied()
                                     .collect::<Vec<_>>(),
                             )),
-                            TaskArg::IntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            Arg::IntList { .. } => heap.alloc(CliArgs::alloc_list(
                                 cmdargs
-                                    .get_many::<i32>(k.as_str())
+                                    .get_many::<i32>(k)
                                     .unwrap_or_default()
-                                    .cloned()
+                                    .copied()
                                     .collect::<Vec<_>>(),
                             )),
-                            TaskArg::UIntList { .. } => heap.alloc(TaskArgs::alloc_list(
+                            Arg::UIntList { .. } => heap.alloc(CliArgs::alloc_list(
                                 cmdargs
-                                    .get_many::<u32>(k.as_str())
+                                    .get_many::<u32>(k)
                                     .unwrap_or_default()
-                                    .cloned()
+                                    .copied()
                                     .collect::<Vec<_>>(),
                             )),
+                            Arg::Custom { .. } => {
+                                // Custom args are not CLI-exposed; cli_args() filters them out.
+                                continue;
+                            }
                         };
-                        args.insert(k.clone(), val);
+                        all_args.insert(k.to_owned(), val);
+                        if cmdargs.value_source(k) == Some(ValueSource::CommandLine) {
+                            explicit_args.insert(k.to_owned(), val);
+                        }
                     }
-                    args
+                    (all_args, explicit_args)
                 })
                 .map_err(anyhow::Error::from)?;
 

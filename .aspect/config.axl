@@ -1,5 +1,4 @@
 load("./lambda.axl", "lambda_with_global_bind")
-load("./user-task.axl", "UserTaskConfig")
 
 def _user_task_impl(ctx: TaskContext) -> int:
     print("I am a task added by .aspect/config.axl")
@@ -19,11 +18,12 @@ def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
 
-    # Configure the UserTaskConfig trait globally
-    user_config = ctx.traits[UserTaskConfig]
-    user_config.message = "hello axl"
-    user_config.count = 2
-    user_config.customize_message = lambda s: _customize_message(s, "!")
-
     # add a new task
     ctx.tasks.add(_user_task)
+
+    # configure user_task's attrs by path (group/name).
+    t = ctx.tasks["user/nested/user-task"]
+    t.args.message = "hello axl"
+    t.args.run_count = 2
+    t.args.customize_message = lambda s: _customize_message(s, "!")
+

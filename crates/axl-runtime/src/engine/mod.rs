@@ -14,12 +14,12 @@ mod template;
 pub mod types;
 mod wasm;
 
+pub mod arg;
 pub mod r#async;
+pub mod cli_args;
 pub mod config;
 pub mod store;
 pub mod task;
-pub mod task_arg;
-pub mod task_args;
 pub mod task_context;
 pub mod task_info;
 
@@ -30,8 +30,8 @@ fn register_types(globals: &mut GlobalsBuilder) {
     const Http: StarlarkValueAsType<http::Http> = StarlarkValueAsType::new();
     const HttpResponse: StarlarkValueAsType<http::HttpResponse> = StarlarkValueAsType::new();
     const Task: StarlarkValueAsType<task::Task> = StarlarkValueAsType::new();
-    const TaskArg: StarlarkValueAsType<task_arg::TaskArg> = StarlarkValueAsType::new();
-    const TaskArgs: StarlarkValueAsType<task_args::TaskArgs> = StarlarkValueAsType::new();
+    const Arg: StarlarkValueAsType<arg::Arg> = StarlarkValueAsType::new();
+    const Args: StarlarkValueAsType<cli_args::CliArgs> = StarlarkValueAsType::new();
     const TaskContext: StarlarkValueAsType<task_context::TaskContext> = StarlarkValueAsType::new();
     const TaskInfo: StarlarkValueAsType<task_info::TaskInfo> = StarlarkValueAsType::new();
     const Template: StarlarkValueAsType<template::Template> = StarlarkValueAsType::new();
@@ -45,7 +45,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     types::feature::register_globals(globals);
     types::r#trait::register_globals(globals);
 
-    globals.namespace("args", task_arg::register_globals);
+    globals.namespace("args", arg::register_globals);
     globals.namespace("bazel", bazel::register_globals);
     globals.namespace("remote", |g| {
         g.namespace("execution", |g| {

@@ -4,31 +4,31 @@ load("./bazel.axl", "default_retry")
 
 BazelTrait = trait(
     # Declarative data — composable, zero-cost reads
-    extra_flags = attr(list[str], []),
-    extra_startup_flags = attr(list[str], []),
-    build_event_sinks = attr(list[bazel.build.BuildEventSink], []),
-    execution_log_sinks = attr(list[bazel.execution_log.ExecLogSink], []),
+    extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation"),
+    extra_startup_flags = attr(list[str], default = [], description = "Additional Bazel startup flags prepended before the command"),
+    build_event_sinks = attr(list[bazel.build.BuildEventSink], default = [], description = "Build Event Protocol sinks to stream events to during the build"),
+    execution_log_sinks = attr(list[bazel.execution_log.ExecLogSink], default = [], description = "Execution log sinks to receive the Bazel execution log after the build"),
 
     # Optional transforms — only called when set
-    flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
-    startup_flags = attr(typing.Callable[[list[str]], list[str]] | None, None),
+    flags = attr(typing.Callable[[list[str]], list[str]] | None, default = None, description = "Transform function called with the full flag list; return value replaces the list"),
+    startup_flags = attr(typing.Callable[[list[str]], list[str]] | None, default = None, description = "Transform function called with the full startup flag list; return value replaces the list"),
 
     # Lifecycle hooks — lists of callables; callers close over their own state
-    build_start = attr(list[typing.Callable[[TaskContext], None]], []),
-    build_event = attr(list[typing.Callable[[TaskContext, dict], None]], []),
-    build_retry = attr(typing.Callable[[int], bool], default_retry),
-    build_end = attr(list[typing.Callable[[TaskContext, int], None]], []),
+    build_start = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called once before the Bazel invocation starts"),
+    build_event = attr(list[typing.Callable[[TaskContext, dict], None]], default = [], description = "Hooks called for each Build Event Protocol event received during the build"),
+    build_retry = attr(typing.Callable[[int], bool], default = default_retry, description = "Predicate called with the exit code; return True to retry the build"),
+    build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes, with the exit code"),
 )
 
 
 HealthCheckTrait = trait(
-    pre_health_check = attr(list[typing.Callable[[TaskContext], None]], []),
-    post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], []),
+    pre_health_check = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called before the build to validate preconditions (e.g. auth, connectivity)"),
+    post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks called after the build; return a non-None string to report a warning"),
 )
 
 
 DeliveryTrait = trait(
-    delivery_start = attr(typing.Callable[[], None], lambda: None),
-    delivery_end = attr(typing.Callable[[], None], lambda: None),
-    deliver_target = attr(typing.Callable[[str, bool], None], lambda label, is_forced: None),
+    delivery_start = attr(typing.Callable[[], None], default = lambda: None, description = "Hook called once at the start of a delivery run, before any targets are delivered"),
+    delivery_end = attr(typing.Callable[[], None], default = lambda: None, description = "Hook called once at the end of a delivery run, after all targets are delivered"),
+    deliver_target = attr(typing.Callable[[str, bool], None], default = lambda label, is_forced: None, description = "Hook called for each target being delivered; receives the label and a forced-delivery flag"),
 )

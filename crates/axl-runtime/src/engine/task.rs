@@ -1,7 +1,8 @@
+use crate::engine::arg::Arg;
 use crate::engine::task_context::TaskContext;
+use crate::engine::types::names::{to_display_name, validate_arg_name, validate_command_name};
 use crate::engine::types::r#trait::{FrozenTraitType, TraitType, extract_trait_type_id};
 
-use super::task_arg::TaskArg;
 use allocative::Allocative;
 use derive_more::Display;
 use starlark::collections::SmallMap;
@@ -25,8 +26,13 @@ use starlark::values::typing::StarlarkCallableParamSpec;
 pub const MAX_TASK_GROUPS: usize = 5;
 
 pub trait TaskLike<'v>: 'v {
-    fn args(&self) -> &SmallMap<String, TaskArg>;
+    /// Returns only the CLI-exposed args (non-Custom Arg entries), as (name, &Arg) pairs.
+    fn cli_args(&self) -> Vec<(&str, &Arg)>;
+    /// One-line summary shown in the task list. Empty means use the "defined in" fallback.
+    fn summary(&self) -> &String;
+    /// Extended description shown only in `--help`, after the summary. Empty means omit.
     fn description(&self) -> &String;
+    fn display_name(&self) -> &String;
     fn group(&self) -> &Vec<String>;
     fn name(&self) -> &String;
 }
@@ -49,8 +55,10 @@ where
 pub struct Task<'v> {
     r#impl: values::Value<'v>,
     #[allocative(skip)]
-    pub(super) args: SmallMap<String, TaskArg>,
+    pub(super) args: SmallMap<String, Arg>,
+    pub(super) summary: String,
     pub(super) description: String,
+    pub(super) display_name: String,
     pub(super) group: Vec<String>,
     pub(super) name: String,
     pub(super) traits: Vec<values::Value<'v>>,
@@ -60,11 +68,17 @@ impl<'v> Task<'v> {
     pub fn implementation(&self) -> values::Value<'v> {
         self.r#impl
     }
-    pub fn args(&self) -> &SmallMap<String, TaskArg> {
+    pub fn args(&self) -> &SmallMap<String, Arg> {
         &self.args
+    }
+    pub fn summary(&self) -> &String {
+        &self.summary
     }
     pub fn description(&self) -> &String {
         &self.description
+    }
+    pub fn display_name(&self) -> &String {
+        &self.display_name
     }
     pub fn group(&self) -> &Vec<String> {
         &self.group
@@ -78,11 +92,21 @@ impl<'v> Task<'v> {
 }
 
 impl<'v> TaskLike<'v> for Task<'v> {
-    fn args(&self) -> &SmallMap<String, TaskArg> {
-        &self.args
+    fn cli_args(&self) -> Vec<(&str, &Arg)> {
+        self.args
+            .iter()
+            .filter(|(_, v)| v.is_cli_exposed())
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
+    fn summary(&self) -> &String {
+        &self.summary
     }
     fn description(&self) -> &String {
         &self.description
+    }
+    fn display_name(&self) -> &String {
+        &self.display_name
     }
     fn group(&self) -> &Vec<String> {
         &self.group
@@ -110,7 +134,9 @@ impl<'v> values::Freeze for Task<'v> {
         Ok(FrozenTask {
             args: self.args,
             r#impl: frozen_impl,
+            summary: self.summary,
             description: self.description,
+            display_name: self.display_name,
             group: self.group,
             name: self.name,
             traits: frozen_traits?,
@@ -123,8 +149,10 @@ impl<'v> values::Freeze for Task<'v> {
 pub struct FrozenTask {
     r#impl: values::FrozenValue,
     #[allocative(skip)]
-    pub(super) args: SmallMap<String, TaskArg>,
+    pub(super) args: SmallMap<String, Arg>,
+    pub(super) summary: String,
     pub(super) description: String,
+    pub(super) display_name: String,
     pub(super) group: Vec<String>,
     pub(super) name: String,
     pub(super) traits: Vec<values::FrozenValue>,
@@ -141,6 +169,9 @@ impl FrozenTask {
     pub fn implementation(&self) -> values::FrozenValue {
         self.r#impl
     }
+    pub fn args(&self) -> &SmallMap<String, Arg> {
+        &self.args
+    }
     pub fn traits(&self) -> &[values::FrozenValue] {
         &self.traits
     }
@@ -154,11 +185,21 @@ impl FrozenTask {
 }
 
 impl<'v> TaskLike<'v> for FrozenTask {
-    fn args(&self) -> &SmallMap<String, TaskArg> {
-        &self.args
+    fn cli_args(&self) -> Vec<(&str, &Arg)> {
+        self.args
+            .iter()
+            .filter(|(_, v)| v.is_cli_exposed())
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
+    fn summary(&self) -> &String {
+        &self.summary
     }
     fn description(&self) -> &String {
         &self.description
+    }
+    fn display_name(&self) -> &String {
+        &self.display_name
     }
     fn group(&self) -> &Vec<String> {
         &self.group
@@ -185,21 +226,49 @@ impl StarlarkCallableParamSpec for TaskImpl {
 
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
-    /// Task type representing a Task.
+    /// Declares a task — a named CLI command with an implementation function.
     ///
-    /// ```python
-    /// def _task_impl(ctx):
-    ///     pass
+    /// ## Naming
     ///
-    /// build = task(
-    ///     name = "build",
-    ///     group = [],
-    ///     impl = _task_impl,
-    ///     description = "build task",
-    ///     task_args = {
-    ///         "target": args.string(),
+    /// Assign the result to a **snake_case** variable. The CLI command name is derived
+    /// automatically by converting `_` to `-` (`axl_add` → `axl-add`).
+    /// Use `name = "explicit-name"` to override.
+    /// Command names must match `[a-z][a-z0-9-]*`.
+    ///
+    /// ## Args
+    ///
+    /// Arg keys must be `snake_case` (`[a-z][a-z0-9_]*`). There are two kinds:
+    ///
+    /// - **CLI args** (`args.string(...)`, `args.int(...)`, etc.) — exposed as `--kebab-flags` on
+    ///   the CLI and accessible as `ctx.args.arg_name` in the implementation. Can be overridden
+    ///   in `config.axl`; an explicit CLI flag always wins over a config override.
+    ///
+    /// - **Config-only args** (`args.custom(type, default = …)`) — not shown in help; set by repo
+    ///   maintainers in `config.axl` via `ctx.tasks["group/name"].args.arg_name = value`.
+    ///
+    /// All args are read as `ctx.args.arg_name` in the implementation regardless of kind.
+    ///
+    /// ## Help text
+    ///
+    /// - `summary` — one-liner shown in the task list; falls back to `"<name> task defined in <file>"`.
+    /// - `description` — extended prose shown in `--help` (replaces summary in that view).
+    /// - `display_name` — Title Case name for help section headings; auto-derived from command name.
+    ///
+    /// ## Example
+    ///
+    /// ```starlark
+    /// def _impl(ctx: TaskContext) -> int:
+    ///     ctx.std.io.stdout.write("Hello, " + ctx.args.recipient + "\n")
+    ///     return 0
+    ///
+    /// greet = task(
+    ///     group = ["utils"],
+    ///     summary = "Say hello",
+    ///     implementation = _impl,
+    ///     args = {
+    ///         "recipient": args.string(default = "world", description = "Who to greet"),
+    ///         "greeting":  args.custom(str, default = "Hello", description = "Greeting word (config.axl only)"),
     ///     },
-    ///     traits = [BazelTrait]  # Optional list of trait types
     /// )
     /// ```
     fn task<'v>(
@@ -208,11 +277,15 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             TaskImpl,
             NoneType,
         >,
-        #[starlark(require = named)] args: values::dict::UnpackDictEntries<&'v str, TaskArg>,
+        #[starlark(require = named, default = values::dict::UnpackDictEntries::default())]
+        args: values::dict::UnpackDictEntries<String, Value<'v>>,
+        #[starlark(require = named, default = String::new())] summary: String,
         #[starlark(require = named, default = String::new())] description: String,
+        #[starlark(require = named, default = String::new())] display_name: String,
         #[starlark(require = named, default = UnpackList::default())] group: UnpackList<String>,
         #[starlark(require = named, default = String::new())] name: String,
         #[starlark(require = named, default = UnpackList::default())] traits: UnpackList<Value<'v>>,
+        _eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Task<'v>> {
         if group.items.len() > MAX_TASK_GROUPS {
             return Err(anyhow::anyhow!(
@@ -221,12 +294,48 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             )
             .into());
         }
-        let mut args_ = SmallMap::new();
-        for (arg, def) in args.entries {
-            args_.insert(arg.to_owned(), def.clone());
+        // Validate name if explicitly set (empty means "derive from variable name via to_command_name").
+        if !name.is_empty() {
+            validate_command_name(&name, "task").map_err(|e| anyhow::anyhow!(e))?;
         }
 
-        // Validate each element is a TraitType or FrozenTraitType
+        // Validate group elements.
+        for g in &group.items {
+            validate_command_name(g, "group").map_err(|e| anyhow::anyhow!(e))?;
+        }
+
+        let display_name = if !display_name.is_empty() {
+            display_name
+        } else if !name.is_empty() {
+            to_display_name(&name)
+        } else {
+            String::new()
+        };
+
+        // Parse and validate args.
+        let mut args_ = SmallMap::new();
+        for (arg_name, value) in args.entries {
+            validate_arg_name(&arg_name).map_err(|e| anyhow::anyhow!("task {}", e))?;
+            let cli_arg = value.downcast_ref::<Arg>().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "task arg {:?}: expected args.string/boolean/int/uint/... or args.custom(...), got '{}'",
+                    arg_name,
+                    value.get_type()
+                )
+            })?.clone();
+            if let Some(lo) = cli_arg.long_override() {
+                if lo.contains(':') {
+                    return Err(anyhow::anyhow!(
+                        "task arg {:?}: `long` override may not contain ':'; \
+                         namespaced overrides (e.g. \"feature:flag\") are only valid for feature args",
+                        arg_name
+                    ).into());
+                }
+            }
+            args_.insert(arg_name, cli_arg);
+        }
+
+        // Validate each element is a TraitType or FrozenTraitType.
         let all_traits = traits.items;
         for t in &all_traits {
             if t.downcast_ref::<TraitType>().is_none()
@@ -243,7 +352,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         Ok(Task {
             args: args_,
             r#impl: implementation.0,
+            summary,
             description,
+            display_name,
             group: group.items,
             name,
             traits: all_traits,

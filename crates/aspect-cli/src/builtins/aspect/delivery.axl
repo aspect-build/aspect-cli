@@ -1,5 +1,5 @@
 """
-Delivery task that coordinates artifact delivery via deliveryd.
+Delivery task that coordinates artifact delivery.
 
 Delivers each target via bazel run with stamping enabled, and signs artifacts
 to prevent re-delivery.
@@ -415,13 +415,16 @@ def _delivery_impl(ctx):
 
 delivery = task(
     name = "delivery",
-    description = "Build and deliver binary targets via deliveryd. Targets are built with stamping, deduplicated by action digest, and delivered exactly once per commit unless forced.",
+    summary = "Build and deliver binary targets. Targets are built with stamping, deduplicated by action digest, and delivered exactly once per commit unless forced.",
+    description = """Build and deliver binary targets. Targets are built with stamping, deduplicated by action digest, and delivered exactly once per commit unless forced.
+    
+Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support for generic CI runners is planned. Contact Aspect support <support@aspect.build> for more info.""",
     implementation = _delivery_impl,
     traits = [BazelTrait, DeliveryTrait, HealthCheckTrait],
     args = {
         "ci_host": args.string(
             default = "bk",
-            description = "CI host identifier reported to deliveryd (e.g. bk, gh, circle).",
+            description = "CI host identifier (e.g. bk, gh, circle).",
         ),
         "commit_sha": args.string(
             required = True,
