@@ -209,6 +209,8 @@ def _github_lint_impl(ctx: FeatureContext):
     if not token:
         return
 
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+
     lint_trait = ctx.traits[LintTrait]
     gh = {
         "token": token,
@@ -224,6 +226,8 @@ def _github_lint_impl(ctx: FeatureContext):
     def get_diff(ctx):
         result = github.pulls.list_files(ctx, gh["token"], gh["owner"], gh["repo"], gh["pr_number"])
         if not result["success"]:
+            if debug:
+                print("gh_lint_comments debug: list_files failed for PR #%d" % gh["pr_number"])
             return []
         all_files = []
         for f in result["files"]:
@@ -234,10 +238,16 @@ def _github_lint_impl(ctx: FeatureContext):
             added_lines = _parse_github_diff_patch(patch)
             all_files.append({"file": filename, "lines": added_lines})
         gh["changed_lines"] = {f["file"]: f["lines"] for f in all_files}
+        if debug:
+            print("gh_lint_comments debug: PR #%d — %d changed file(s)" % (gh["pr_number"], len(all_files)))
+            for f in all_files:
+                print("  %s — %d added line(s)" % (f["file"], len(f["lines"])))
         return all_files
 
     def _lint_report(ctx, filepath):
         if gh["stale"]:
+            if debug:
+                print("gh_lint_comments debug: skipping report (stale PR) %s" % filepath)
             return
         content = ctx.std.fs.read_to_string(filepath)
         sarif = parse_sarif(content)
@@ -258,13 +268,19 @@ def _github_lint_impl(ctx: FeatureContext):
         if "existing_markers" not in gh:
             gh["existing_markers"] = _get_existing_markers(ctx, gh)
         ready = _filter_by_diff(gh["pending_comments"], gh["changed_lines"])
+        if debug:
+            print("gh_lint_comments debug: report %s — %d comment(s), %d in diff" % (filepath, len(comments), len(ready)))
         _post_individually(ctx, gh, ready, gh["existing_markers"])
         gh["pending_comments"] = []
 
     def _lint_end(ctx, relevant_diagnostics):
         if gh["stale"] or _check_staleness(ctx, gh):
             gh["stale"] = True
+            if debug:
+                print("gh_lint_comments debug: PR is stale, skipping cleanup")
             return
+        if debug:
+            print("gh_lint_comments debug: lint_end — %d relevant diagnostic(s), running cleanup" % len(relevant_diagnostics))
         _cleanup_comments(ctx, gh, relevant_diagnostics)
 
     lint_trait.get_diff = get_diff

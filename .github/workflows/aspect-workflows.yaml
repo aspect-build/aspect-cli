@@ -54,8 +54,12 @@ jobs:
       - uses: actions/checkout@v6
       - name: Bootstrap
         run: .aspect/bootstrap.sh
+      - name: Lint Task (ASPECT_DEBUG=1)
+        working-directory: examples/lint
+        run: ASPECT_DEBUG=1 aspect lint //...
       - name: Lint Task
-        run: cd examples/lint && aspect lint //...
+        working-directory: examples/lint
+        run: aspect lint //...
 
   delivery-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
