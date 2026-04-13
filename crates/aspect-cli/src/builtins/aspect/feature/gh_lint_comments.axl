@@ -280,6 +280,7 @@ def _github_lint_impl(ctx: FeatureContext):
             _cleanup_comments(ctx, gh, relevant_diagnostics)
         elif debug:
             print("github lint comment debug summary:")
+            print("uploader: %s" % ("active" if gh else "inactive"))
             print("pending comments: %s" % len(state["pending"]))
             for c in state["pending"]:
                 lines = c["body"].split("\n")
