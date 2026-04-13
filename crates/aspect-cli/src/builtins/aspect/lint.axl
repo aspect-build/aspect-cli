@@ -21,6 +21,21 @@ Usage:
 load("./lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "get_sarif_summary")
 load("./traits.axl", "BazelTrait")
 
+# bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
+_BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
+
+def _file_uri_to_path(uri):
+    if uri.startswith("file://"):
+        return uri[len("file://"):]
+    if uri.startswith("bytestream://"):
+        rest = uri[len("bytestream://"):]
+        parts = rest.split("/")
+        host = parts[0].split(":")[0]
+        blob_hash = parts[2]
+        blob_size = parts[3]
+        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
+    return uri
+
 def parse_diff_output(output):
     """
     Parse raw `git diff --unified=0` output into changed file/line information.
@@ -234,7 +249,7 @@ def impl(ctx: TaskContext) -> int:
             handler(ctx, event)
         if event.kind == "named_set_of_files":
             for file in event.payload.files:
-                filepath = file.file.removeprefix("file://")
+                filepath = _file_uri_to_path(file.file)
                 if file.name.endswith(".out"):
                     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(filepath))
                 if file.name.endswith(".report"):
@@ -248,7 +263,7 @@ def impl(ctx: TaskContext) -> int:
                     if github_output:
                         ctx.std.fs.write(github_output, "lint-report=" + filepath)
                 if file.name.endswith(".patch"):
-                    patches.append(file.file.removeprefix("file://"))
+                    patches.append(_file_uri_to_path(file.file))
                 if file.name.endswith(".exit_code"):
                     if int(ctx.std.fs.read_to_string(filepath).rstrip()) != 0:
                         linter_exit_code = 1
