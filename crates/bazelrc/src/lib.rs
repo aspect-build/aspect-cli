@@ -1137,6 +1137,106 @@ mod tests {
         assert_eq!(values, vec!["--deep-flag"]);
     }
 
+    // ── Config vs non-config ordering (Bug #1) ───────────────────────────────
+
+    #[test]
+    fn config_flags_come_after_non_config_flags() {
+        // Non-config flags that appear *after* --config= in the rc file must not
+        // override config-specific flags.  Under last-write-wins, config flags must
+        // land later in the expanded list than any plain non-config flags.
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "build:opt --config-flag\nbuild --non-config-before\nbuild --config=opt\nbuild --non-config-after\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+
+        let config_pos = values
+            .iter()
+            .position(|s| *s == "--config-flag")
+            .expect("--config-flag missing");
+        let after_pos = values
+            .iter()
+            .position(|s| *s == "--non-config-after")
+            .expect("--non-config-after missing");
+
+        assert!(
+            config_pos > after_pos,
+            "--config-flag must come after --non-config-after; got: {values:?}"
+        );
+    }
+
+    #[test]
+    fn config_flags_preserve_file_ordering() {
+        // When the same config section is defined in two files, the flag from the
+        // later file must appear last in the expansion so it wins (last-write-wins).
+        let dir = make_workspace();
+        let root = dir.path();
+
+        let second = root.join("second.bazelrc");
+        fs::write(&second, "build:opt --flag=from-second\n").unwrap();
+
+        fs::write(
+            root.join(".bazelrc"),
+            format!("build:opt --flag=from-first\nimport {}\n", second.display()),
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=opt"])).unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+
+        let first_pos = values
+            .iter()
+            .position(|s| *s == "--flag=from-first")
+            .expect("--flag=from-first missing");
+        let second_pos = values
+            .iter()
+            .position(|s| *s == "--flag=from-second")
+            .expect("--flag=from-second missing");
+
+        assert!(
+            first_pos < second_pos,
+            "flag from first file must precede flag from second file; got: {values:?}"
+        );
+    }
+
+    #[test]
+    fn multiple_configs_each_come_after_non_config_flags() {
+        // When multiple --config= flags are present, all their expansions must
+        // appear after all non-config flags, and the configs' relative order is
+        // the order the --config= flags appear in the rc file.
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "build:foo --foo-flag\nbuild:bar --bar-flag\nbuild --non-config\nbuild --config=foo\nbuild --config=bar\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+
+        let non_config_pos = values.iter().position(|s| *s == "--non-config").unwrap();
+        let foo_pos = values.iter().position(|s| *s == "--foo-flag").unwrap();
+        let bar_pos = values.iter().position(|s| *s == "--bar-flag").unwrap();
+
+        assert!(
+            non_config_pos < foo_pos,
+            "--non-config must precede --foo-flag; got: {values:?}"
+        );
+        assert!(
+            foo_pos < bar_pos,
+            "--foo-flag must precede --bar-flag (config order preserved); got: {values:?}"
+        );
+    }
+
     #[test]
     fn enable_platform_specific_config() {
         let dir = make_workspace();
