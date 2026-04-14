@@ -209,6 +209,7 @@ def _delivery_impl(ctx):
     rc = ctx.bazel.parse_rc(
         root = ctx.std.env.root_dir(),
         flags = bazel_flags,
+        startup_flags = startup_flags,
     )
     rc_startup_flags, expanded_flags = rc.expand_all(command = "build")
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
@@ -417,7 +418,7 @@ delivery = task(
     name = "delivery",
     summary = "Build and deliver binary targets. Targets are built with stamping, deduplicated by action digest, and delivered exactly once per commit unless forced.",
     description = """Build and deliver binary targets. Targets are built with stamping, deduplicated by action digest, and delivered exactly once per commit unless forced.
-    
+
 Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support for generic CI runners is planned. Contact Aspect support <support@aspect.build> for more info.""",
     implementation = _delivery_impl,
     traits = [BazelTrait, DeliveryTrait, HealthCheckTrait],
