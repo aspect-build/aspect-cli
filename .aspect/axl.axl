@@ -180,6 +180,28 @@ def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
 
     # Note: Skipping remove_dir on non-empty as we can't test the fail case in this context
     # Note: Skipping read_link as there is no symlink creation API to test with
+
+    # Test mkdtemp — default (no args)
+    tmp1 = ctx.std.fs.mkdtemp()
+    tc = test_case(tc, ctx.std.fs.exists(tmp1), "mkdtemp() should create a directory")
+    tc = test_case(tc, ctx.std.fs.metadata(tmp1).is_dir, "mkdtemp() result should be a directory")
+    ctx.std.fs.remove_dir(tmp1)
+
+    # Test mkdtemp — with prefix
+    tmp2 = ctx.std.fs.mkdtemp(prefix = "aspect-test-")
+    tc = test_case(tc, ctx.std.fs.exists(tmp2), "mkdtemp(prefix=) should create a directory")
+    tc = test_case(tc, tmp2.split("/")[-1].startswith("aspect-test-"), "mkdtemp(prefix=) dir name should start with prefix")
+    ctx.std.fs.remove_dir(tmp2)
+
+    # Test mkdtemp — with parent
+    parent_dir = temp_dir + "/mkdtemp_parent"
+    ctx.std.fs.create_dir(parent_dir)
+    tmp3 = ctx.std.fs.mkdtemp(parent = parent_dir)
+    tc = test_case(tc, ctx.std.fs.exists(tmp3), "mkdtemp(parent=) should create a directory")
+    tc = test_case(tc, tmp3.startswith(parent_dir), "mkdtemp(parent=) result should be inside parent")
+    ctx.std.fs.remove_dir(tmp3)
+    ctx.std.fs.remove_dir(parent_dir)
+
     return tc
 
 def test_stream(ctx: TaskContext, tc: int, temp_dir: str) -> int:

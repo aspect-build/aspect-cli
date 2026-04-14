@@ -232,6 +232,31 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         Ok(NoneType)
     }
 
+    /// Creates a new temporary directory with a unique name and returns its path.
+    ///
+    /// The directory is created inside `parent` (defaults to the system temp dir).
+    /// The caller is responsible for removing it when done.
+    fn mkdtemp<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = "")] prefix: &str,
+        #[starlark(require = named, default = "")] parent: &str,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<values::StringValue<'v>> {
+        let base = if parent.is_empty() {
+            std::env::temp_dir()
+        } else {
+            std::path::PathBuf::from(parent)
+        };
+        let prefix = if prefix.is_empty() { "axl-" } else { prefix };
+        // Use uuid v4 for a collision-free unique suffix.
+        let dir = base.join(format!("{}{}", prefix, uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir)?;
+        let path = dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("temp dir path is non-UTF-8"))?;
+        Ok(heap.alloc_str(path))
+    }
+
     /// Creates a new hard link on the filesystem.
     ///
     /// The link path will be a link pointing to the original path. Note that systems often require these two paths to both be located on the same filesystem.
