@@ -11,5 +11,4 @@ use_task("format.axl", "format")
 
 use_feature("feature/defaults.axl", "BazelDefaults")
 use_feature("feature/artifacts.axl", "ArtifactUpload")
-use_feature("feature/gh_status_checks.axl", "GithubStatusChecks")
 use_feature("feature/gh_lint_comments.axl", "GithubLintComments")
