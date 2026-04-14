@@ -222,8 +222,18 @@ def _github_lint_impl(ctx: FeatureContext):
 
     env_vars = _determine_vars(ctx)
     gh = None
+    gh_inactive_reason = None
 
-    if env_vars:
+    if not env_vars:
+        ref = ctx.std.env.var("GITHUB_REF") or ""
+        sha = ctx.std.env.var("GITHUB_SHA") or ""
+        repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
+        missing = [name for name, val in [("GITHUB_REF", ref), ("GITHUB_SHA", sha), ("GITHUB_REPOSITORY", repository)] if not val]
+        if missing:
+            gh_inactive_reason = "missing env var(s): %s" % ", ".join(missing)
+        else:
+            gh_inactive_reason = "GITHUB_REF is not a PR merge ref: %s" % ref
+    else:
         token = github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read"])
         if token:
             gh = {
@@ -235,6 +245,8 @@ def _github_lint_impl(ctx: FeatureContext):
                 "changed_lines": {},
                 "stale": False,
             }
+        else:
+            gh_inactive_reason = "authentication failed"
 
     if not gh and not debug:
         return
@@ -260,7 +272,6 @@ def _github_lint_impl(ctx: FeatureContext):
         lint_trait.get_diff = get_diff
 
     def _lint_report(ctx, filepath):
-        print(filepath, gh)
         if gh and gh["stale"]:
             return
         comments = _build_comments(ctx, filepath)
@@ -280,7 +291,7 @@ def _github_lint_impl(ctx: FeatureContext):
             _cleanup_comments(ctx, gh, relevant_diagnostics)
         elif debug:
             print("github lint comment debug summary:")
-            print("uploader: %s" % ("active" if gh else "inactive"))
+            print("inactive reason: %s" % gh_inactive_reason)
             print("pending comments: %s" % len(state["pending"]))
             for c in state["pending"]:
                 lines = c["body"].split("\n")
