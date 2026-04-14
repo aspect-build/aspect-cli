@@ -157,7 +157,7 @@ SlackNotify = feature(
 
 Both config-only attrs (`attr(...)`) and CLI flags (`args.boolean(...)`, `args.string(...)`, etc.) live in a single `attrs` dict — accessed uniformly as `ctx.attrs.name` in the implementation. Config-only attrs (here, a dict) are set in `config.axl` by repo maintainers and can hold complex types; CLI-typed attrs are exposed as flags on every task subcommand so developers can pass `--silent` at invocation time. Only named flags are allowed in features — positional args are not supported.
 
-**Naming:** features must be exported as **CamelCase** (`ArtifactUpload`, `GithubStatusChecks`). This is enforced at definition time. The convention mirrors Bazel providers (`CcInfo`, `DefaultInfo`) — features are referenced as type keys (`ctx.features[ArtifactUpload]`), and CamelCase signals this role. `display_name` overrides the auto-derived Title Case heading name. The `summary` and `description` fields work identically to tasks.
+**Naming:** features must be exported as **CamelCase** (`ArtifactUpload`). This is enforced at definition time. The convention mirrors Bazel providers (`CcInfo`, `DefaultInfo`) — features are referenced as type keys (`ctx.features[ArtifactUpload]`), and CamelCase signals this role. `display_name` overrides the auto-derived Title Case heading name. The `summary` and `description` fields work identically to tasks.
 
 Features are disabled per-task via `ctx.features[ArtifactUpload].enabled = False` in `config.axl`.
 

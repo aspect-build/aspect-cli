@@ -9,4 +9,3 @@ use_task("delivery.axl", "delivery")
 
 use_feature("feature/defaults.axl", "BazelDefaults")
 use_feature("feature/artifacts.axl", "ArtifactUpload")
-use_feature("feature/gh_status_checks.axl", "GithubStatusChecks")

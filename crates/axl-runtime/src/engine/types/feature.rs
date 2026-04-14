@@ -811,7 +811,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     ///
     /// ## Naming
     ///
-    /// Features must be exported as **CamelCase** (`ArtifactUpload`, `GithubStatusChecks`).
+    /// Features must be exported as **CamelCase** (`ArtifactUpload`).
     /// This is enforced at definition time. Features are referenced as type keys
     /// (`ctx.features[ArtifactUpload]`), mirroring Bazel's provider convention
     /// (`dep[CcInfo]`); CamelCase signals this type-key role.
@@ -993,10 +993,6 @@ mod tests {
     #[test]
     fn camel_display_name_basic() {
         assert_eq!(camel_to_display_name("ArtifactUpload"), "Artifact Upload");
-        assert_eq!(
-            camel_to_display_name("GithubStatusChecks"),
-            "Github Status Checks"
-        );
         assert_eq!(camel_to_display_name("BazelDefaults"), "Bazel Defaults");
     }
 
