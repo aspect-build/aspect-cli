@@ -234,7 +234,7 @@ def _github_lint_impl(ctx: FeatureContext):
         else:
             gh_inactive_reason = "GITHUB_REF is not a PR merge ref: %s" % ref
     else:
-        token = github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read"])
+        token = github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read", "prs.write"])
         if token:
             gh = {
                 "token": token,
