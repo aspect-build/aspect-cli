@@ -404,11 +404,27 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         })
         .collect();
 
+    // Compute once: do any fields have Rust's #[deprecated] attribute (prost adds this for
+    // proto fields with [deprecated = true]).  We use this to suppress the resulting
+    // compiler warnings in the generated impls that must still access those fields.
+    let struct_deprecated_allow: TokenStream = if fields
+        .iter()
+        .any(|(f, _, _, _)| f.attrs.iter().any(|a| a.path().is_ident("deprecated")))
+    {
+        quote! { #[allow(deprecated)] }
+    } else {
+        quote! {}
+    };
+
     let starlark_attributes = fields.iter().map(|(field, sattrs, attrs, docs)| {
-        let has_deprecated = field.attrs.iter().any(|v| v.path().is_ident("deprecated"));
-        if sattrs.skip || has_deprecated {
+        if sattrs.skip {
             return quote! {};
         }
+        let deprecated_allow = if field.attrs.iter().any(|v| v.path().is_ident("deprecated")) {
+            quote! { #[allow(deprecated)] }
+        } else {
+            quote! {}
+        };
         let new_return_type = if let Type::Path(p) = &field.ty {
             let tys = p
                 .path
@@ -492,9 +508,11 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             return quote! {
                 #(#docs)*
                 #[starlark(attribute)]
+                #deprecated_allow
                 fn #fident<'v>(this: ::starlark::values::Value<'v>) -> ::anyhow::Result<#return_type> {
                     use ::starlark::values::ValueLike;
                     use ::starlark::StarlarkResultExt;
+                    #deprecated_allow
                     let this = this.downcast_ref_err::<#ident>().into_anyhow_result()?;
                     #return_expr
                 }
@@ -554,9 +572,11 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         quote! {
             #(#docs)*
             #[starlark(attribute)]
+            #deprecated_allow
             fn #fident<'v>(this: ::starlark::values::Value<'v>) -> ::anyhow::Result<#return_type> {
                 use ::starlark::values::ValueLike;
                 use ::starlark::StarlarkResultExt;
+                #deprecated_allow
                 let this = this.downcast_ref_err::<#ident>().into_anyhow_result()?;
                 #return_expr
             }
@@ -571,9 +591,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     let constructor_arms: Vec<TokenStream> = fields
         .iter()
         .filter_map(|(field, sattrs, attrs, _)| {
-            let has_deprecated = field.attrs.iter().any(|v| v.path().is_ident("deprecated"));
             if sattrs.skip
-                || has_deprecated
                 || sattrs.any
                 || sattrs.duration
                 || sattrs.timestamp
@@ -708,9 +726,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     let repr_fields: Vec<TokenStream> = fields
         .iter()
         .filter_map(|(field, sattrs, attrs, _)| {
-            let has_deprecated = field.attrs.iter().any(|v| v.path().is_ident("deprecated"));
             if sattrs.skip
-                || has_deprecated
                 || sattrs.duration
                 || sattrs.timestamp
                 || (attrs.bytes.is_some() && attrs.repeated)
@@ -843,9 +859,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     let repr_fields_pretty: Vec<TokenStream> = fields
         .iter()
         .filter_map(|(field, sattrs, attrs, _)| {
-            let has_deprecated = field.attrs.iter().any(|v| v.path().is_ident("deprecated"));
             if sattrs.skip
-                || has_deprecated
                 || sattrs.duration
                 || sattrs.timestamp
                 || (attrs.bytes.is_some() && attrs.repeated)
@@ -1014,6 +1028,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     };
 
     let expanded = quote! {
+        #struct_deprecated_allow
         impl #ident {
             #[doc(hidden)]
             pub fn __starbuf_pretty(&self, __col: &mut String, __indent: usize) {
@@ -1021,6 +1036,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             }
         }
 
+        #struct_deprecated_allow
         impl ::std::fmt::Display for #ident {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 #display_body
@@ -1101,12 +1117,15 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
 
         #[::starlark::starlark_module]
         pub fn #constructor_fn_ident(globals: &mut ::starlark::environment::GlobalsBuilder) {
+            #struct_deprecated_allow
             fn #ident<'v>(
                 #[starlark(kwargs)] kwargs: ::starlark::collections::SmallMap<&str, ::starlark::values::Value<'v>>,
             ) -> ::starlark::Result<#ident> {
+                #[allow(deprecated)]
                 let mut result = #ident::default();
                 for (key, val) in kwargs.iter() {
                     let value = *val;
+                    #[allow(deprecated)]
                     match *key {
                         #(#constructor_arms)*
                         other => return Err(::anyhow::anyhow!(
