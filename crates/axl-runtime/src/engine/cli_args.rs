@@ -47,6 +47,11 @@ impl<'v> CliArgs<'v> {
     }
 
     #[inline]
+    pub fn get(&self, key: &str) -> Option<Value<'v>> {
+        self.args.get(key).cloned()
+    }
+
+    #[inline]
     pub fn alloc_list<L>(items: L) -> AllocList<L> {
         AllocList(items)
     }
