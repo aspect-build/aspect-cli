@@ -4,7 +4,6 @@ use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aspect_telemetry::cargo_pkg_short_version;
 use miette::{Result, miette};
 use starlark_syntax::syntax::ast::{ArgumentP, AstExpr, AstLiteral, CallArgsP, Expr, Stmt};
 use starlark_syntax::syntax::{AstModule, Dialect};
@@ -19,7 +18,9 @@ pub struct AspectLauncherConfig {
 #[derive(Debug, Clone)]
 pub struct AspectCliConfig {
     sources: Vec<ToolSource>,
-    version: String,
+    /// The pinned version string, or `None` if the version should be resolved
+    /// by querying the releases API for the latest available release.
+    version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +44,9 @@ pub enum ToolSource {
 
 pub trait ToolSpec: Debug {
     fn name(&self) -> String;
-    fn version(&self) -> &String;
+    /// The pinned version string, or `None` when the version should be resolved
+    /// at download time (e.g. by querying the GitHub releases API).
+    fn version(&self) -> Option<&str>;
     fn sources(&self) -> &Vec<ToolSource>;
 }
 
@@ -56,8 +59,8 @@ impl ToolSpec for AspectCliConfig {
         &self.sources
     }
 
-    fn version(&self) -> &String {
-        &self.version
+    fn version(&self) -> Option<&str> {
+        self.version.as_deref()
     }
 }
 
@@ -73,7 +76,7 @@ fn default_cli_sources() -> Vec<ToolSource> {
 fn default_aspect_cli_config() -> AspectCliConfig {
     AspectCliConfig {
         sources: default_cli_sources(),
-        version: cargo_pkg_short_version(),
+        version: None,
     }
 }
 
@@ -281,7 +284,7 @@ fn parse_version_axl(content: &str) -> Result<AspectLauncherConfig> {
 
     Ok(AspectLauncherConfig {
         aspect_cli: AspectCliConfig {
-            version: version.unwrap_or_else(cargo_pkg_short_version),
+            version,
             sources: sources.unwrap_or_else(default_cli_sources),
         },
     })
@@ -316,6 +319,263 @@ pub fn load_config(path: &PathBuf) -> Result<AspectLauncherConfig> {
 /// **Errors**
 ///
 /// Returns an error if the current working directory cannot be obtained or if loading the config fails.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_version_with_pinned_version_and_github_source() {
+        let content = r#"
+version(
+    "2026.11.6",
+    sources = [
+        github(
+            org = "aspect-build",
+            repo = "aspect-cli",
+        ),
+    ],
+)
+"#;
+        let config = parse_version_axl(content).unwrap();
+        assert_eq!(config.aspect_cli.version(), Some("2026.11.6"));
+        assert_eq!(config.aspect_cli.sources().len(), 1);
+        match &config.aspect_cli.sources()[0] {
+            ToolSource::GitHub {
+                org,
+                repo,
+                tag,
+                artifact,
+            } => {
+                assert_eq!(org, "aspect-build");
+                assert_eq!(repo, "aspect-cli");
+                assert_eq!(tag, "");
+                assert_eq!(artifact, "");
+            }
+            other => panic!("expected GitHub source, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_version_with_custom_tag_and_artifact() {
+        let content = r#"
+version(
+    "1.2.3",
+    sources = [
+        github(
+            org = "my-org",
+            repo = "my-repo",
+            tag = "release-{version}",
+            artifact = "my-tool-{target}",
+        ),
+    ],
+)
+"#;
+        let config = parse_version_axl(content).unwrap();
+        assert_eq!(config.aspect_cli.version(), Some("1.2.3"));
+        match &config.aspect_cli.sources()[0] {
+            ToolSource::GitHub { tag, artifact, .. } => {
+                assert_eq!(tag, "release-{version}");
+                assert_eq!(artifact, "my-tool-{target}");
+            }
+            other => panic!("expected GitHub source, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_version_with_no_version_uses_default() {
+        let content = r#"version()"#;
+        let config = parse_version_axl(content).unwrap();
+        assert_eq!(config.aspect_cli.version(), None);
+    }
+
+    #[test]
+    fn test_parse_version_with_custom_sources_but_no_version() {
+        let content = r#"
+version(
+    sources = [
+        local("bazel-bin/cli/aspect"),
+        github(org = "my-fork", repo = "aspect-cli"),
+    ],
+)
+"#;
+        let config = parse_version_axl(content).unwrap();
+        assert_eq!(config.aspect_cli.version(), None);
+        assert_eq!(config.aspect_cli.sources().len(), 2);
+        assert!(matches!(
+            &config.aspect_cli.sources()[0],
+            ToolSource::Local { path } if path == "bazel-bin/cli/aspect"
+        ));
+        match &config.aspect_cli.sources()[1] {
+            ToolSource::GitHub { org, repo, .. } => {
+                assert_eq!(org, "my-fork");
+                assert_eq!(repo, "aspect-cli");
+            }
+            other => panic!("expected GitHub source, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_version_with_http_source() {
+        let content = r#"
+version(
+    "1.0.0",
+    sources = [
+        http(
+            url = "https://example.com/tool-{version}-{target}",
+        ),
+    ],
+)
+"#;
+        let config = parse_version_axl(content).unwrap();
+        match &config.aspect_cli.sources()[0] {
+            ToolSource::Http { url, headers } => {
+                assert_eq!(url, "https://example.com/tool-{version}-{target}");
+                assert!(headers.is_empty());
+            }
+            other => panic!("expected Http source, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_version_with_http_source_headers_is_broken() {
+        // NOTE: extract_named_string_args fails on non-string named args
+        // like `headers = {...}`. This is a known bug.
+        let content = r#"
+version(
+    "1.0.0",
+    sources = [
+        http(
+            url = "https://example.com/tool",
+            headers = {"Authorization": "Bearer token"},
+        ),
+    ],
+)
+"#;
+        let result = parse_version_axl(content);
+        assert!(result.is_err(), "http() with headers is currently broken");
+    }
+
+    #[test]
+    fn test_parse_version_with_local_source() {
+        let content = r#"
+version(
+    "1.0.0",
+    sources = [
+        local("bazel-bin/cli/aspect"),
+    ],
+)
+"#;
+        let config = parse_version_axl(content).unwrap();
+        match &config.aspect_cli.sources()[0] {
+            ToolSource::Local { path } => {
+                assert_eq!(path, "bazel-bin/cli/aspect");
+            }
+            other => panic!("expected Local source, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_version_with_multiple_sources() {
+        let content = r#"
+version(
+    "1.0.0",
+    sources = [
+        local("bazel-bin/cli/aspect"),
+        github(org = "aspect-build", repo = "aspect-cli"),
+    ],
+)
+"#;
+        let config = parse_version_axl(content).unwrap();
+        assert_eq!(config.aspect_cli.sources().len(), 2);
+        assert!(matches!(
+            &config.aspect_cli.sources()[0],
+            ToolSource::Local { .. }
+        ));
+        assert!(matches!(
+            &config.aspect_cli.sources()[1],
+            ToolSource::GitHub { .. }
+        ));
+    }
+
+    #[test]
+    fn test_parse_version_no_sources_uses_default() {
+        let content = r#"version("1.0.0")"#;
+        let config = parse_version_axl(content).unwrap();
+        assert_eq!(config.aspect_cli.sources().len(), 1);
+        match &config.aspect_cli.sources()[0] {
+            ToolSource::GitHub { org, repo, .. } => {
+                assert_eq!(org, "aspect-build");
+                assert_eq!(repo, "aspect-cli");
+            }
+            other => panic!("expected default GitHub source, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_version_missing_version_call_errors() {
+        let content = r#"print("hello")"#;
+        let result = parse_version_axl(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_version_invalid_syntax_errors() {
+        let content = r#"version(123)"#;
+        let result = parse_version_axl(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_version_unknown_argument_errors() {
+        let content = r#"version("1.0.0", flavor = "spicy")"#;
+        let result = parse_version_axl(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_version_duplicate_positional_errors() {
+        let content = r#"version("1.0.0", "2.0.0")"#;
+        let result = parse_version_axl(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_github_missing_org_errors() {
+        let content = r#"version("1.0.0", sources = [github(repo = "aspect-cli")])"#;
+        let result = parse_version_axl(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_github_missing_repo_errors() {
+        let content = r#"version("1.0.0", sources = [github(org = "aspect-build")])"#;
+        let result = parse_version_axl(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_unknown_source_type_errors() {
+        let content = r#"version("1.0.0", sources = [ftp("foo")])"#;
+        let result = parse_version_axl(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = super::default_config();
+        assert_eq!(config.aspect_cli.version(), None);
+        assert_eq!(config.aspect_cli.sources().len(), 1);
+        assert!(matches!(
+            &config.aspect_cli.sources()[0],
+            ToolSource::GitHub {
+                org,
+                repo,
+                ..
+            } if org == "aspect-build" && repo == "aspect-cli"
+        ));
+    }
+}
+
 pub fn autoconf() -> Result<(PathBuf, AspectLauncherConfig)> {
     let current_dir =
         current_dir().map_err(|e| miette!("failed to get current directory: {}", e))?;

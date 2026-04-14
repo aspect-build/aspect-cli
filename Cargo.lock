@@ -223,6 +223,7 @@ dependencies = [
  "miette 7.6.0",
  "reqwest",
  "serde",
+ "serde_json",
  "sha2",
  "starlark_syntax",
  "tempfile",
