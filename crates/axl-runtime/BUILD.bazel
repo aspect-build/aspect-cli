@@ -1,4 +1,4 @@
-load("//bazel/rust:defs.bzl", "rust_library")
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "axl-runtime",
@@ -67,5 +67,28 @@ rust_library(
     visibility = [
         "//crates/aspect-cli:__pkg__",
         "//crates/axl-lsp:__pkg__",
+    ],
+)
+
+rust_test(
+    name = "axl-runtime-unit-tests",
+    crate = ":axl-runtime",
+)
+
+rust_test(
+    name = "naming_validation",
+    srcs = ["tests/naming_validation.rs"],
+    deps = [
+        ":axl-runtime",
+    ],
+)
+
+rust_test(
+    name = "feature_enabled",
+    srcs = ["tests/feature_enabled.rs"],
+    deps = [
+        ":axl-runtime",
+        "@crates//:anyhow",
+        "@crates//:starlark",
     ],
 )

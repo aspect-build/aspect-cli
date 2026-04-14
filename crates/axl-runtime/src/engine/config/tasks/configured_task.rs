@@ -446,6 +446,26 @@ impl<'v> values::StarlarkValue<'v> for ConfiguredTaskArgs<'v> {
                         actual
                     )));
                 }
+                if let Arg::String {
+                    values: Some(valid),
+                    ..
+                } = cli_arg
+                {
+                    if let Some(s) = value.unpack_str() {
+                        if !valid.iter().any(|v| v == s) {
+                            return Err(starlark::Error::new_other(anyhow!(
+                                "task arg {:?}: invalid value `{}`, expected one of: {}",
+                                attribute,
+                                s,
+                                valid
+                                    .iter()
+                                    .map(|v| format!("`{}`", v))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )));
+                        }
+                    }
+                }
             }
         }
 

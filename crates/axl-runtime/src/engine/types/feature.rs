@@ -9,7 +9,7 @@
 //! If the user sets `ctx.features[X].enabled = False`, the runtime skips calling
 //! `implementation` for that feature.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt::{self, Display, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,16 +18,18 @@ use allocative::Allocative;
 use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, MethodsStatic};
 use starlark::starlark_module;
 use starlark::values::dict::UnpackDictEntries;
+use starlark::values::list::AllocList;
 use starlark::values::typing::TypeCompiled;
 use starlark::values::{
     AllocFrozenValue, AllocValue, Freeze, FreezeError, Freezer, FrozenHeap, FrozenValue, Heap,
-    NoSerialize, ProvidesStaticType, StarlarkValue, Trace, Tracer, Value, ValueLike,
-    starlark_value,
+    NoSerialize, OwnedFrozenValue, ProvidesStaticType, StarlarkValue, Trace, Tracer, Value,
+    ValueError, ValueLike, starlark_value,
 };
 use starlark_map::small_map::SmallMap;
 
 use crate::engine::arg::Arg;
 use crate::engine::cli_args::CliArgs;
+use crate::engine::config::freeze_value;
 pub use crate::engine::types::names::{
     camel_to_display_name, to_command_name, to_display_name, validate_arg_name,
     validate_command_name, validate_type_name,
@@ -119,6 +121,17 @@ impl<'v> StarlarkValue<'v> for FeatureType<'v> {
             if (&(*this).name).is_empty() {
                 (*this).name = to_command_name(variable_name);
             }
+            // Bake the fully-qualified `--<feature-name>:enabled` long flag into the implicit
+            // `enabled` arg. This guarantees the correct unique Clap ID at registration time,
+            // bypassing any downstream prefix-extraction logic that might return an empty string.
+            let feature_name = (*this).name.clone();
+            if !feature_name.is_empty() {
+                if let Some(enabled_arg) = (*this).args.get_mut("enabled") {
+                    if let Arg::Boolean { long, .. } = enabled_arg {
+                        *long = Some(format!("{}:enabled", feature_name));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -185,7 +198,7 @@ impl<'v> StarlarkValue<'v> for FeatureType<'v> {
             typ: _me,
             values: values.into_boxed_slice(),
             type_checkers: type_checkers.into_boxed_slice(),
-            enabled: Cell::new(true),
+            config_overrides: RefCell::new(SmallMap::new()),
         };
         Ok(eval.heap().alloc(instance))
     }
@@ -306,7 +319,7 @@ impl<'v> StarlarkValue<'v> for FrozenFeatureType {
             typ: _me,
             values: values.into_boxed_slice(),
             type_checkers: type_checkers.into_boxed_slice(),
-            enabled: Cell::new(true),
+            config_overrides: RefCell::new(SmallMap::new()),
         };
         Ok(eval.heap().alloc(instance))
     }
@@ -360,26 +373,29 @@ fn custom_arg_index(args: &SmallMap<String, Arg>, name: &str) -> Option<usize> {
 // FeatureInstance
 // -----------------------------------------------------------------------------
 
-/// An instance of a feature type, containing field values and the built-in `enabled` flag.
+/// An instance of a feature type, containing field values.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct FeatureInstance<'v> {
     /// The feature type this instance belongs to.
     pub(crate) typ: Value<'v>,
-    /// Field values in the same order as the type's field definitions.
+    /// Field values in the same order as the type's Custom-arg definitions.
+    /// Only `Custom` args are stored here; CLI-exposed args come from the `args_builder`.
     #[allocative(skip)]
     pub(crate) values: Box<[Cell<Value<'v>>]>,
     /// Fresh type checkers created at construction time. `None` when the type annotation
     /// could not be frozen (e.g. `typing.Callable[[str], str]`) — type checking is skipped.
     #[allocative(skip)]
     pub(crate) type_checkers: Box<[Option<TypeCompiled<Value<'v>>>]>,
-    /// Built-in enabled flag. Runtime skips `implementation` if false.
+    /// Config.axl overrides for CLI-exposed args, set via `ctx.features[X].args.name = value`.
+    /// Applied at feature invocation time for keys the user did NOT explicitly pass on the CLI.
     #[allocative(skip)]
-    pub(crate) enabled: Cell<bool>,
+    pub(crate) config_overrides: RefCell<SmallMap<String, OwnedFrozenValue>>,
 }
 
 impl<'v> Display for FeatureInstance<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}(enabled={}", self.typ, self.enabled.get())?;
+        write!(f, "{}(", self.typ)?;
+        let mut first = true;
         if let Some(feat_type) = self.typ.downcast_ref::<FeatureType>() {
             let custom_names = feat_type
                 .args
@@ -387,7 +403,11 @@ impl<'v> Display for FeatureInstance<'v> {
                 .filter(|(_, v)| matches!(v, Arg::Custom { .. }))
                 .map(|(k, _)| k.as_str());
             for (name, value) in custom_names.zip(self.values.iter()) {
-                write!(f, ", {}={}", name, value.get())?;
+                if !first {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}={}", name, value.get())?;
+                first = false;
             }
         } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFeatureType>() {
             let custom_names = frozen_type
@@ -396,7 +416,11 @@ impl<'v> Display for FeatureInstance<'v> {
                 .filter(|(_, v)| matches!(v, Arg::Custom { .. }))
                 .map(|(k, _)| k.as_str());
             for (name, value) in custom_names.zip(self.values.iter()) {
-                write!(f, ", {}={}", name, value.get())?;
+                if !first {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}={}", name, value.get())?;
+                first = false;
             }
         }
         write!(f, ")")
@@ -433,7 +457,30 @@ impl<'v> StarlarkValue<'v> for FeatureInstance<'v> {
 
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         if attribute == "enabled" {
-            return Some(heap.alloc(self.enabled.get()));
+            // Return the stored override if present, otherwise the arg default.
+            if let Some(val) = self
+                .config_overrides
+                .borrow()
+                .get("enabled")
+                .and_then(|o| o.value().unpack_frozen())
+                .map(|fv| fv.to_value())
+            {
+                return Some(val);
+            }
+            let default = if let Some(ft) = self.typ.downcast_ref::<FeatureType>() {
+                matches!(
+                    ft.args.get("enabled"),
+                    Some(Arg::Boolean { default: true, .. })
+                )
+            } else if let Some(ft) = self.typ.downcast_ref::<FrozenFeatureType>() {
+                matches!(
+                    ft.args.get("enabled"),
+                    Some(Arg::Boolean { default: true, .. })
+                )
+            } else {
+                true
+            };
+            return Some(heap.alloc(default));
         }
         let idx = if let Some(feat_type) = self.typ.downcast_ref::<FeatureType>() {
             custom_arg_index(&feat_type.args, attribute)
@@ -447,16 +494,19 @@ impl<'v> StarlarkValue<'v> for FeatureInstance<'v> {
 
     fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
         if attribute == "enabled" {
-            let b = value.unpack_bool().ok_or_else(|| {
+            value.unpack_bool().ok_or_else(|| {
                 starlark::Error::new_other(anyhow::anyhow!(
                     "`enabled` must be a bool, got `{}`",
                     value.get_type()
                 ))
             })?;
-            self.enabled.set(b);
+            let frozen = freeze_value(value)
+                .map_err(|e| starlark::Error::new_other(anyhow::anyhow!("{:?}", e)))?;
+            self.config_overrides
+                .borrow_mut()
+                .insert("enabled".to_owned(), frozen);
             return Ok(());
         }
-
         let idx = if let Some(feat_type) = self.typ.downcast_ref::<FeatureType>() {
             custom_arg_index(&feat_type.args, attribute)
         } else if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFeatureType>() {
@@ -491,7 +541,7 @@ impl<'v> StarlarkValue<'v> for FeatureInstance<'v> {
     }
 
     fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
-        if attribute == "enabled" {
+        if attribute == "enabled" || attribute == "args" {
             return true;
         }
         if let Some(feat_type) = self.typ.downcast_ref::<FeatureType>() {
@@ -504,7 +554,7 @@ impl<'v> StarlarkValue<'v> for FeatureInstance<'v> {
     }
 
     fn dir_attr(&self) -> Vec<String> {
-        let mut result = vec!["enabled".to_string()];
+        let mut result = vec!["enabled".to_string(), "args".to_string()];
         if let Some(feat_type) = self.typ.downcast_ref::<FeatureType>() {
             result.extend(
                 feat_type
@@ -524,6 +574,35 @@ impl<'v> StarlarkValue<'v> for FeatureInstance<'v> {
         }
         result
     }
+
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(feature_instance_methods)
+    }
+}
+
+#[starlark_module]
+fn feature_instance_methods(builder: &mut MethodsBuilder) {
+    /// Arg accessor for overriding CLI-exposed feature args from `config.axl`.
+    ///
+    /// **Writing** stores an override that is applied at feature invocation time,
+    /// but only for args the user did NOT explicitly pass on the command line:
+    /// ```starlark
+    /// ctx.features[GithubStatusChecks].args.enabled = True
+    /// ```
+    ///
+    /// **Reading** returns the current stored override, or the arg's default if none is set:
+    /// ```starlark
+    /// enabled = ctx.features[GithubStatusChecks].args.enabled  # True or False
+    /// ```
+    ///
+    /// Precedence: explicit CLI flag > config.axl override > feature default.
+    #[starlark(attribute)]
+    fn args<'v>(this: Value<'v>) -> anyhow::Result<FeatureInstanceArgs<'v>> {
+        this.downcast_ref::<FeatureInstance>()
+            .ok_or_else(|| anyhow::anyhow!("internal: not a FeatureInstance"))?;
+        Ok(FeatureInstanceArgs { instance: this })
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -534,12 +613,14 @@ impl<'v> StarlarkValue<'v> for FeatureInstance<'v> {
 pub struct FrozenFeatureInstance {
     pub(crate) typ: FrozenValue,
     pub(crate) values: Box<[FrozenValue]>,
-    pub(crate) enabled: bool,
+    #[allocative(skip)]
+    pub(crate) config_overrides: SmallMap<String, OwnedFrozenValue>,
 }
 
 impl Display for FrozenFeatureInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}(enabled={}", self.typ, self.enabled)?;
+        write!(f, "{}(", self.typ)?;
+        let mut first = true;
         if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFeatureType>() {
             let custom_names = frozen_type
                 .args
@@ -547,7 +628,11 @@ impl Display for FrozenFeatureInstance {
                 .filter(|(_, v)| matches!(v, Arg::Custom { .. }))
                 .map(|(k, _)| k.as_str());
             for (name, value) in custom_names.zip(self.values.iter()) {
-                write!(f, ", {}={}", name, value)?;
+                if !first {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}={}", name, value)?;
+                first = false;
             }
         }
         write!(f, ")")
@@ -574,7 +659,23 @@ impl<'v> StarlarkValue<'v> for FrozenFeatureInstance {
 
     fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         if attribute == "enabled" {
-            return Some(heap.alloc(self.enabled));
+            if let Some(val) = self
+                .config_overrides
+                .get("enabled")
+                .and_then(|o| o.value().unpack_frozen())
+                .map(|fv| fv.to_value())
+            {
+                return Some(val);
+            }
+            let default = if let Some(ft) = self.typ.downcast_ref::<FrozenFeatureType>() {
+                matches!(
+                    ft.args.get("enabled"),
+                    Some(Arg::Boolean { default: true, .. })
+                )
+            } else {
+                true
+            };
+            return Some(heap.alloc(default));
         }
         if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFeatureType>() {
             if let Some(idx) = custom_arg_index(&frozen_type.args, attribute) {
@@ -585,7 +686,7 @@ impl<'v> StarlarkValue<'v> for FrozenFeatureInstance {
     }
 
     fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
-        if attribute == "enabled" {
+        if attribute == "enabled" || attribute == "args" {
             return true;
         }
         if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFeatureType>() {
@@ -596,7 +697,7 @@ impl<'v> StarlarkValue<'v> for FrozenFeatureInstance {
     }
 
     fn dir_attr(&self) -> Vec<String> {
-        let mut result = vec!["enabled".to_string()];
+        let mut result = vec!["enabled".to_string(), "args".to_string()];
         if let Some(frozen_type) = self.typ.downcast_ref::<FrozenFeatureType>() {
             result.extend(
                 frozen_type
@@ -623,8 +724,266 @@ impl Freeze for FeatureInstance<'_> {
         Ok(FrozenFeatureInstance {
             typ,
             values: values?.into_boxed_slice(),
-            enabled: self.enabled.get(),
+            config_overrides: self.config_overrides.into_inner(),
         })
+    }
+}
+
+// -----------------------------------------------------------------------------
+// FeatureInstanceArgs — accessor returned by `ctx.features[X].args`
+// -----------------------------------------------------------------------------
+
+/// Accessor returned by `.args` on a `FeatureInstance`.
+///
+/// Holds a back-reference to the instance so that writes (`f.args.enabled = True`)
+/// are stored in `FeatureInstance::config_overrides` and applied at invocation time
+/// for any arg the user did NOT explicitly provide on the command line.
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
+pub struct FeatureInstanceArgs<'v> {
+    #[allocative(skip)]
+    instance: Value<'v>,
+}
+
+impl<'v> Display for FeatureInstanceArgs<'v> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<FeatureInstanceArgs>")
+    }
+}
+
+unsafe impl<'v> Trace<'v> for FeatureInstanceArgs<'v> {
+    fn trace(&mut self, tracer: &Tracer<'v>) {
+        self.instance.trace(tracer);
+    }
+}
+
+impl<'v> AllocValue<'v> for FeatureInstanceArgs<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc_complex(self)
+    }
+}
+
+impl<'v> Freeze for FeatureInstanceArgs<'v> {
+    type Frozen = FrozenFeatureInstanceArgs;
+
+    fn freeze(self, freezer: &Freezer) -> Result<Self::Frozen, FreezeError> {
+        Ok(FrozenFeatureInstanceArgs {
+            instance: self.instance.freeze(freezer)?,
+        })
+    }
+}
+
+/// Frozen version of `FeatureInstanceArgs` — read-only after freezing.
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
+pub struct FrozenFeatureInstanceArgs {
+    #[allocative(skip)]
+    instance: FrozenValue,
+}
+
+impl Display for FrozenFeatureInstanceArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<FeatureInstanceArgs>")
+    }
+}
+
+starlark::starlark_simple_value!(FrozenFeatureInstanceArgs);
+
+#[starlark_value(type = "FeatureInstanceArgs")]
+impl<'v> StarlarkValue<'v> for FrozenFeatureInstanceArgs {
+    type Canonical = FeatureInstanceArgs<'v>;
+
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        let inst = self.instance.downcast_ref::<FrozenFeatureInstance>()?;
+        // Return stored override if present.
+        if let Some(val) = inst
+            .config_overrides
+            .get(attribute)
+            .and_then(|owned| owned.value().unpack_frozen())
+            .map(|fv| fv.to_value())
+        {
+            return Some(val);
+        }
+        // Fall back to the arg's default.
+        if let Some(ft) = inst.typ.downcast_ref::<FrozenFeatureType>() {
+            let arg = ft
+                .args
+                .get(attribute)
+                .filter(|a| !matches!(a, Arg::Custom { .. }))?;
+            return Some(feature_arg_default_value(arg, heap));
+        }
+        None
+    }
+
+    fn dir_attr(&self) -> Vec<String> {
+        if let Some(inst) = self.instance.downcast_ref::<FrozenFeatureInstance>() {
+            if let Some(ft) = inst.typ.downcast_ref::<FrozenFeatureType>() {
+                return ft
+                    .args
+                    .iter()
+                    .filter(|(_, v)| !matches!(v, Arg::Custom { .. }))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+            }
+        }
+        vec![]
+    }
+}
+
+/// Return the default value of a CLI-exposed `Arg` allocated on `heap`.
+fn feature_arg_default_value<'v>(arg: &Arg, heap: Heap<'v>) -> Value<'v> {
+    match arg {
+        Arg::Custom { default, .. } => default
+            .map(|fv| fv.to_value())
+            .unwrap_or_else(|| heap.alloc(starlark::values::none::NoneType)),
+        Arg::String { default, .. } => heap.alloc_str(default).to_value(),
+        Arg::Boolean { default, .. } => heap.alloc(*default),
+        Arg::Int { default, .. } => heap.alloc(*default),
+        Arg::UInt { default, .. } => heap.alloc(*default),
+        Arg::Positional { default, .. } => {
+            let items: Vec<&str> = default
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            heap.alloc(AllocList(items))
+        }
+        Arg::TrailingVarArgs { .. } => heap.alloc(AllocList(Vec::<&str>::new())),
+        Arg::StringList { default, .. } => heap.alloc(AllocList(
+            default.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        )),
+        Arg::BooleanList { default, .. } => heap.alloc(AllocList(default.iter().copied())),
+        Arg::IntList { default, .. } => heap.alloc(AllocList(default.iter().copied())),
+        Arg::UIntList { default, .. } => heap.alloc(AllocList(default.iter().copied())),
+    }
+}
+
+/// Look up a CLI-exposed arg by name from a FeatureType or FrozenFeatureType value.
+/// Returns `None` for Custom args and for unknown arg names.
+fn feature_cli_arg<'a>(typ: &Value, name: &str) -> Option<Arg> {
+    if let Some(ft) = typ.downcast_ref::<FeatureType>() {
+        ft.args
+            .get(name)
+            .filter(|a| !matches!(a, Arg::Custom { .. }))
+            .cloned()
+    } else if let Some(ft) = typ.downcast_ref::<FrozenFeatureType>() {
+        ft.args
+            .get(name)
+            .filter(|a| !matches!(a, Arg::Custom { .. }))
+            .cloned()
+    } else {
+        None
+    }
+}
+
+#[starlark_value(type = "FeatureInstanceArgs")]
+impl<'v> StarlarkValue<'v> for FeatureInstanceArgs<'v> {
+    fn set_attr(&self, attribute: &str, value: Value<'v>) -> starlark::Result<()> {
+        let inst = self
+            .instance
+            .downcast_ref::<FeatureInstance>()
+            .ok_or_else(|| {
+                starlark::Error::new_other(anyhow::anyhow!("internal: not a FeatureInstance"))
+            })?;
+
+        let Some(arg) = feature_cli_arg(&inst.typ, attribute) else {
+            return ValueError::unsupported(self, &format!(".{}=", attribute));
+        };
+
+        // Type-check the incoming value.
+        let expected = match &arg {
+            Arg::Custom { .. } => unreachable!("filtered above"),
+            Arg::String { .. } | Arg::Positional { .. } => "string",
+            Arg::Boolean { .. } => "bool",
+            Arg::Int { .. } | Arg::UInt { .. } => "int",
+            Arg::StringList { .. } | Arg::TrailingVarArgs { .. } => "list",
+            Arg::BooleanList { .. } | Arg::IntList { .. } | Arg::UIntList { .. } => "list",
+        };
+        let actual = value.get_type();
+        if actual != expected {
+            return Err(starlark::Error::new_other(anyhow::anyhow!(
+                "feature arg {:?}: expected type `{}`, got `{}`",
+                attribute,
+                expected,
+                actual
+            )));
+        }
+        // Validate allowed values for string args.
+        if let Arg::String {
+            values: Some(valid),
+            ..
+        } = &arg
+        {
+            if let Some(s) = value.unpack_str() {
+                if !valid.iter().any(|v| v == s) {
+                    return Err(starlark::Error::new_other(anyhow::anyhow!(
+                        "feature arg {:?}: invalid value `{}`, expected one of: {}",
+                        attribute,
+                        s,
+                        valid
+                            .iter()
+                            .map(|v| format!("`{}`", v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+            }
+        }
+
+        let frozen = freeze_value(value)
+            .map_err(|e| starlark::Error::new_other(anyhow::anyhow!("{:?}", e)))?;
+        inst.config_overrides
+            .borrow_mut()
+            .insert(attribute.to_owned(), frozen);
+        Ok(())
+    }
+
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        let inst = self.instance.downcast_ref::<FeatureInstance>()?;
+
+        // Return stored override if present.
+        if let Some(val) = inst
+            .config_overrides
+            .borrow()
+            .get(attribute)
+            .and_then(|owned| owned.value().unpack_frozen())
+            .map(|fv| fv.to_value())
+        {
+            return Some(val);
+        }
+
+        // Fall back to the arg's default.
+        let arg = feature_cli_arg(&inst.typ, attribute)?;
+        Some(feature_arg_default_value(&arg, heap))
+    }
+
+    fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
+        if let Some(inst) = self.instance.downcast_ref::<FeatureInstance>() {
+            feature_cli_arg(&inst.typ, attribute).is_some()
+        } else {
+            false
+        }
+    }
+
+    fn dir_attr(&self) -> Vec<String> {
+        if let Some(inst) = self.instance.downcast_ref::<FeatureInstance>() {
+            if let Some(ft) = inst.typ.downcast_ref::<FeatureType>() {
+                return ft
+                    .args
+                    .iter()
+                    .filter(|(_, v)| !matches!(v, Arg::Custom { .. }))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+            }
+            if let Some(ft) = inst.typ.downcast_ref::<FrozenFeatureType>() {
+                return ft
+                    .args
+                    .iter()
+                    .filter(|(_, v)| !matches!(v, Arg::Custom { .. }))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+            }
+        }
+        vec![]
     }
 }
 
@@ -729,6 +1088,77 @@ pub fn extract_feature_args(value: Value<'_>) -> Option<SmallMap<String, Arg>> {
     }
 }
 
+/// Apply config.axl overrides for CLI-exposed feature args.
+///
+/// `cli_args` is pre-populated with all CLI-parsed values (including Clap defaults).
+/// `explicit_args` contains only the keys the user explicitly passed on the command line.
+///
+/// For each override stored in the feature instance's `config_overrides`, this function
+/// inserts it into `cli_args` — but only if the key is NOT in `explicit_args`.
+/// This preserves the precedence: explicit CLI flag > config.axl override > Clap default.
+pub fn apply_feature_config_overrides<'v>(
+    instance_value: Value<'v>,
+    mut cli_args: CliArgs<'v>,
+    explicit_args: &CliArgs<'v>,
+) -> CliArgs<'v> {
+    if let Some(inst) = instance_value.downcast_ref::<FeatureInstance>() {
+        for (k, owned) in inst.config_overrides.borrow().iter() {
+            if !explicit_args.contains_key(k.as_str()) {
+                if let Some(fv) = owned.value().unpack_frozen() {
+                    cli_args.insert(k.clone(), fv.to_value());
+                }
+            }
+        }
+    }
+    cli_args
+}
+
+/// Serialize a feature instance's `config_overrides` into Clap-compatible effective defaults.
+///
+/// The returned map has the same shape as the task equivalent: arg_name -> Vec<String>.
+/// Booleans are lowercased ("true"/"false") because Clap's `value_parser!(bool)` expects
+/// lowercase while Starlark's `to_string()` produces "True"/"False".
+pub fn feature_instance_effective_defaults(
+    instance_value: Value<'_>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out = std::collections::HashMap::new();
+    let borrow;
+    let iter: Box<dyn Iterator<Item = (&String, &OwnedFrozenValue)>> =
+        if let Some(inst) = instance_value.downcast_ref::<FeatureInstance>() {
+            borrow = inst.config_overrides.borrow();
+            Box::new(borrow.iter())
+        } else if let Some(inst) = instance_value.downcast_ref::<FrozenFeatureInstance>() {
+            Box::new(inst.config_overrides.iter())
+        } else {
+            return out;
+        };
+    for (k, owned) in iter {
+        let v = owned.value();
+        use starlark::values::list::ListRef;
+        let elems: Vec<String> = if let Some(list) = ListRef::from_value(v) {
+            list.iter()
+                .map(|e| {
+                    let s = e.to_string();
+                    if e.get_type() == "bool" {
+                        s.to_lowercase()
+                    } else {
+                        s
+                    }
+                })
+                .collect()
+        } else {
+            let s = v.to_string();
+            vec![if v.get_type() == "bool" {
+                s.to_lowercase()
+            } else {
+                s
+            }]
+        };
+        out.insert(k.clone(), elems);
+    }
+    out
+}
+
 /// Populate `Custom` arg values from a feature instance into the CLI-sourced `Args` map.
 ///
 /// `cli_args` is pre-populated with CLI-parsed values for CLI-exposed args. This function
@@ -806,8 +1236,10 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     /// allowed because features apply globally and would break any task that doesn't
     /// supply the flag.
     ///
-    /// Every feature instance automatically has an `enabled` field (default `True`).
-    /// Set `ctx.features[MyFeature].enabled = False` in config.axl to disable it.
+    /// Every feature automatically gets an `enabled` CLI arg. It shows up as
+    /// `--{name}:enabled` on the command line and is accessible as `ctx.args.enabled`
+    /// in the implementation. Set `enabled = False` for opt-in features.
+    /// Override in config.axl via `ctx.features[MyFeature].enabled = True`.
     ///
     /// ## Naming
     ///
@@ -862,6 +1294,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] display_name: String,
         #[starlark(require = named, default = String::new())] summary: String,
         #[starlark(require = named, default = String::new())] description: String,
+        #[starlark(require = named, default = true)] enabled: bool,
         #[starlark(require = named, default = UnpackDictEntries::default())]
         args: UnpackDictEntries<String, Value<'v>>,
         _eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
@@ -871,9 +1304,30 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             validate_command_name(&name, "feature name").map_err(|e| anyhow::anyhow!(e))?;
         }
 
-        let mut args_ = SmallMap::with_capacity(args.entries.len());
+        // The implicit `enabled` arg is always first in the map.
+        let mut args_ = SmallMap::with_capacity(args.entries.len() + 1);
+        args_.insert(
+            "enabled".to_owned(),
+            Arg::Boolean {
+                required: false,
+                default: enabled,
+                short: None,
+                long: None,
+                description: Some(if enabled {
+                    "Set to false to disable this feature".to_owned()
+                } else {
+                    "Set to true to enable this feature".to_owned()
+                }),
+            },
+        );
 
         for (arg_name, value) in args.entries.into_iter() {
+            if arg_name == "enabled" {
+                return Err(anyhow::anyhow!(
+                    "feature arg \"enabled\" is implicit — remove it from `args` and use \
+                     `enabled = True/False` on the `feature()` call instead"
+                ));
+            }
             validate_arg_name(&arg_name).map_err(|e| anyhow::anyhow!("feature {}", e))?;
             let cli_arg = value.downcast_ref::<Arg>().ok_or_else(|| {
                 anyhow::anyhow!(

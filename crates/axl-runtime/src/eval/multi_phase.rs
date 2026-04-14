@@ -18,7 +18,8 @@ use crate::engine::task::FrozenTask;
 use crate::engine::task_context::TaskContext;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::types::feature::{
-    FeatureInstance, extract_feature_impl_fn, extract_feature_type_id, populate_feature_custom_args,
+    apply_feature_config_overrides, extract_feature_impl_fn, extract_feature_type_id,
+    populate_feature_custom_args,
 };
 use crate::engine::types::r#trait::extract_trait_type_id;
 use crate::eval::error::EvalError;
@@ -64,8 +65,11 @@ pub struct MultiPhaseEval<'v, 'loader> {
     env: &'loader ModuleEnv<'v>,
     loader: &'loader AxlLoader,
     /// Feature type values on the shared heap, collected during Phase 1.
-    /// Tuple: (type_id, feature_type_value, source_path)
-    feature_types: Vec<(u64, Value<'v>, PathBuf)>,
+    /// Tuple: (type_id, feature_type_value, source_path, symbol_name)
+    /// `symbol_name` is the Starlark variable name from the `use_feature(...)` declaration
+    /// (e.g. `"BazelDefaults"`). Used as a reliable fallback for the feature's CLI prefix
+    /// when `export_as` has not yet set the feature's internal name.
+    feature_types: Vec<(u64, Value<'v>, PathBuf, String)>,
     /// Global feature map allocated on the shared heap during Phase 2.
     feature_map_value: Option<Value<'v>>,
     /// Global trait map allocated on the shared heap during Phase 3.
@@ -170,7 +174,7 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
                 // live heap (keeping it alive) and returns Value<'v>.
                 let feature_val = heap.access_owned_frozen_value(&owned);
                 self.feature_types
-                    .push((type_id, feature_val, abs_path.clone()));
+                    .push((type_id, feature_val, abs_path.clone(), symbol.clone()));
             }
         }
 
@@ -178,10 +182,19 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
     }
 
     /// Returns feature types with their source paths, collected during Phase 1.
-    /// Each entry is `(type_id, feature_type_value, source_path)`.
+    /// Each entry is `(type_id, feature_type_value, source_path, symbol_name)`.
+    /// `symbol_name` is the raw Starlark variable name from the `use_feature` declaration
+    /// (e.g. `"BazelDefaults"`); use `to_command_name(symbol_name)` to get the kebab prefix.
     /// Used by the CLI layer to build per-feature arg specs and help headings.
-    pub fn feature_types_with_paths(&self) -> &[(u64, Value<'v>, PathBuf)] {
+    pub fn feature_types_with_paths(&self) -> &[(u64, Value<'v>, PathBuf, String)] {
         &self.feature_types
+    }
+
+    /// Returns the live feature map value, available after Phase 2 (`eval_features`).
+    /// The map is keyed by feature type ID and holds `(type_value, instance_value)` pairs.
+    /// Returns `None` if `eval_features()` has not yet been called.
+    pub fn feature_map(&self) -> Option<Value<'v>> {
+        self.feature_map_value
     }
 
     /// Phase 2: construct feature instances from the feature types collected in Phase 1.
@@ -189,11 +202,11 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
     /// Allocates a `FeatureMap` on the shared heap so Phase 3 can reference and mutate it.
     pub fn eval_features(&mut self) -> Result<(), EvalError> {
         let heap = self.heap();
-        // construct_features needs (id, value) pairs; strip the PathBuf.
+        // construct_features needs (id, value) pairs; strip the PathBuf and symbol_name.
         let id_val_pairs: Vec<(u64, Value<'v>)> = self
             .feature_types
             .iter()
-            .map(|(id, val, _)| (*id, *val))
+            .map(|(id, val, _, _)| (*id, *val))
             .collect();
         let feature_map = {
             let store = self.loader.new_store(self.loader.repo_root.clone());
@@ -294,12 +307,16 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
     /// an `impl` function is invoked with a `FeatureContext` on the shared heap.
     ///
     /// `args_builder` is called once per enabled feature, receiving the feature's type_id
-    /// and the shared heap, and returning a `Args` containing the parsed CLI values for
-    /// that feature's declared args. Use `extract_feature_args` on the type value (available
-    /// via `feature_types_with_paths`) to know which args belong to which feature.
+    /// and the shared heap, and returning a pair of `CliArgs`:
+    ///   - `all_args`: all CLI arg values, including Clap defaults.
+    ///   - `explicit_args`: only values the user explicitly provided on the command line.
+    ///
+    /// The distinction lets `config.axl` overrides (stored via `ctx.features[X].args.name`)
+    /// take effect for args the user did NOT explicitly pass on the CLI, while explicit CLI
+    /// flags always win. Precedence: explicit CLI flag > config.axl override > Clap default.
     pub fn eval_feature_impls(
         &mut self,
-        args_builder: impl Fn(u64, Heap<'v>) -> CliArgs<'v>,
+        args_builder: impl Fn(u64, Heap<'v>) -> (CliArgs<'v>, CliArgs<'v>),
     ) -> Result<(), EvalError> {
         let heap = self.heap();
 
@@ -320,19 +337,25 @@ impl<'v, 'loader> MultiPhaseEval<'v, 'loader> {
             .entries();
 
         for (_, type_value, instance_value) in feature_entries {
-            let enabled = instance_value
-                .downcast_ref::<FeatureInstance>()
-                .map(|i| i.enabled.get())
-                .unwrap_or(true);
-
-            if !enabled {
-                continue;
-            }
-
             if let Some(impl_fn) = extract_feature_impl_fn(type_value) {
                 let type_id = extract_feature_type_id(type_value).unwrap_or(0);
-                let cli_args = args_builder(type_id, heap);
+                let (cli_args, explicit_args) = args_builder(type_id, heap);
+                // Apply config.axl overrides for CLI-exposed args (lower priority than explicit CLI).
+                let cli_args =
+                    apply_feature_config_overrides(instance_value, cli_args, &explicit_args);
+                // Inject Custom arg values from the instance (set via ctx.features[X].field = v).
                 let merged = populate_feature_custom_args(type_value, instance_value, cli_args);
+
+                // Skip the feature impl if `enabled` is false. The `enabled` arg is always
+                // present (injected implicitly at feature definition time).
+                let enabled = merged
+                    .get("enabled")
+                    .and_then(|v| v.unpack_bool())
+                    .unwrap_or(true);
+                if !enabled {
+                    continue;
+                }
+
                 let attrs_value = heap.alloc(merged);
                 let fctx = heap.alloc(FeatureContext::new(attrs_value, trait_map_value));
                 let store = self.loader.new_store(self.loader.repo_root.clone());

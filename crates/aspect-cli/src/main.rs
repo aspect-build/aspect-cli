@@ -12,9 +12,11 @@ use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
 use axl_runtime::engine::arg::Arg;
 use axl_runtime::engine::cli_args::CliArgs;
 use axl_runtime::engine::config::ConfiguredTask;
+use axl_runtime::engine::config::feature_map::FeatureMap;
 use axl_runtime::engine::types::feature::{
     extract_feature_args, extract_feature_description, extract_feature_display_name,
     extract_feature_identifier, extract_feature_name, extract_feature_summary,
+    feature_instance_effective_defaults, to_command_name,
 };
 use axl_runtime::eval::{self, ModuleEnv, ModuleScope, ModuleTaskSpec, MultiPhaseEval};
 use axl_runtime::module::AXL_ROOT_MODULE_NAME;
@@ -182,13 +184,31 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 .eval_config(&configs, &task_values, &root_scope)
                 .map_err(anyhow::Error::from)?;
 
+            // Build a type_id -> instance effective_defaults map from the live feature map.
+            // Used below to show config.axl-overridden defaults in --help (e.g. enabled=false).
+            let feature_effective_defaults: std::collections::HashMap<
+                u64,
+                std::collections::HashMap<String, Vec<String>>,
+            > = mpe
+                .feature_map()
+                .and_then(|fm| fm.downcast_ref::<FeatureMap>())
+                .map(|fm| {
+                    fm.entries()
+                        .into_iter()
+                        .map(|(id, _, instance)| {
+                            (id, feature_instance_effective_defaults(instance))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
             // Build feature flag specs for command help.
             // Each entry is (args_map, heading, description_line, prefix); features with no args are skipped.
             let feature_arg_specs_for_cmd: Vec<(SmallMap<String, Arg>, String, String, String)> =
                 mpe.feature_types_with_paths()
                     .iter()
-                    .filter_map(|(_, val, path)| {
-                        let args = extract_feature_args(*val)?;
+                    .filter_map(|(type_id, val, path, symbol)| {
+                        let mut args = extract_feature_args(*val)?;
                         if args.is_empty() {
                             return None;
                         }
@@ -239,7 +259,42 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                             format!("{}\n\n      {}", body, context)
                         };
                         let description_line = format!("\x1b[0m      {}\n\x1b[8m", desc_text);
-                        let prefix = extract_feature_name(*val).unwrap_or_default();
+                        // Prefer the name the feature type set on itself (via `export_as` or
+                        // explicit `name =` kwarg). Fall back to the symbol name from the
+                        // `use_feature(...)` declaration, which is always available and correct.
+                        let prefix =
+                            extract_feature_name(*val).unwrap_or_else(|| to_command_name(symbol));
+
+                        // Apply config.axl overrides to arg defaults so --help shows the
+                        // effective default (e.g. `enabled = false` in config.axl → [default: false]).
+                        if let Some(overrides) = feature_effective_defaults.get(type_id) {
+                            for (k, vals) in overrides {
+                                if let Some(arg) = args.get_mut(k.as_str()) {
+                                    if let Some(first) = vals.first() {
+                                        match arg {
+                                            Arg::Boolean { default, .. } => {
+                                                *default = first == "true";
+                                            }
+                                            Arg::String { default, .. } => {
+                                                *default = first.clone();
+                                            }
+                                            Arg::Int { default, .. } => {
+                                                if let Ok(v) = first.parse() {
+                                                    *default = v;
+                                                }
+                                            }
+                                            Arg::UInt { default, .. } => {
+                                                if let Ok(v) = first.parse() {
+                                                    *default = v;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         Some((args, heading, description_line, prefix))
                     })
                     .collect();
@@ -469,9 +524,10 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let feature_specs_for_args: Vec<(u64, String, SmallMap<String, Arg>)> = mpe
                 .feature_types_with_paths()
                 .iter()
-                .filter_map(|(id, val, _)| {
+                .filter_map(|(id, val, _, symbol)| {
                     let args = extract_feature_args(*val)?;
-                    let prefix = extract_feature_name(*val).unwrap_or_default();
+                    let prefix =
+                        extract_feature_name(*val).unwrap_or_else(|| to_command_name(symbol));
                     Some((*id, prefix, args))
                 })
                 .collect();
@@ -479,11 +535,12 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             // Phase 4: run enabled feature implementations, supplying parsed CLI args per feature.
             mpe.eval_feature_impls(|type_id, heap| {
                 let mut args = CliArgs::new();
+                let mut explicit_args = CliArgs::new();
                 let Some((_, prefix, spec)) = feature_specs_for_args
                     .iter()
                     .find(|(id, _, _)| *id == type_id)
                 else {
-                    return args;
+                    return (args, explicit_args);
                 };
                 for (k, v) in spec.iter() {
                     // Look up the value by the Clap ID (respecting long override if set)
@@ -556,8 +613,11 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                         }
                     };
                     args.insert(k.clone(), val);
+                    if cmdargs.value_source(&clap_key) == Some(ValueSource::CommandLine) {
+                        explicit_args.insert(k.clone(), val);
+                    }
                 }
-                args
+                (args, explicit_args)
             })
             .map_err(anyhow::Error::from)?;
 

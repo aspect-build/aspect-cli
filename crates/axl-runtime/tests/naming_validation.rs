@@ -367,7 +367,7 @@ fn trait_camelcase_export_valid() {
         eval(
             r#"
 MyConfig = trait(
-    message = attr(str, "default"),
+    message = attr(str),
 )
 "#
         )
@@ -380,7 +380,7 @@ fn trait_snake_case_export_rejected() {
     let err = eval_err(
         r#"
 my_config = trait(
-    message = attr(str, "default"),
+    message = attr(str),
 )
 "#,
     );
@@ -396,7 +396,7 @@ fn trait_export_underscore_rejected() {
     let err = eval_err(
         r#"
 My_Config = trait(
-    message = attr(str, "default"),
+    message = attr(str),
 )
 "#,
     );

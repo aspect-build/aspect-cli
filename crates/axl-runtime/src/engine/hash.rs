@@ -351,7 +351,7 @@ h.hexdigest()
             r#"
 load("@std//hash.axl", "sha256")
 h = sha256()
-h.update(bytes("68656c6c6f"))
+h.update(bytes("hello"))
 h.hexdigest()
 "#,
         )
