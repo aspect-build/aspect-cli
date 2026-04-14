@@ -95,8 +95,13 @@ _gitlab = struct(
 # Testlog upload strategies
 # =============================================================================
 
-_ARTIFACTS_ROOT = "/workflows"
-
+def _print_upload_error(group, err):
+    """Print an upload error at most once per group (deduplicates noisy repeated errors)."""
+    seen = group.get("_printed_errors") or {}
+    if err not in seen:
+        print("artifact upload error: " + err)
+        seen[err] = True
+        group["_printed_errors"] = seen
 
 def _upload_testlogs_tar(ctx, provider, group, entries, name):
     """Build tar archive and upload via provider.upload_artifact, with rolling delete.
@@ -107,8 +112,10 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name):
     if count == 0 or count == group["last_count"]:
         return False
 
-    archive_path = _ARTIFACTS_ROOT + "/" + name + ".tar.gz"
-    ctx.std.fs.create_dir_all(_ARTIFACTS_ROOT)
+    _parent = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
+    artifacts_root = ctx.std.fs.mkdtemp(prefix = "aspect-artifacts-", parent = _parent)
+    archive_path = artifacts_root + "/" + name + ".tar.gz"
+    ctx.std.fs.create_dir_all(artifacts_root)
 
     lines = ["#mtree"]
     for entry in entries:
@@ -135,7 +142,7 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name):
     else:
         group["version"] -= 1
         for err in result["errors"]:
-            print("artifact upload error: " + err)
+            _print_upload_error(group, err)
         return False
 
 
@@ -198,7 +205,7 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
             any_success = True
         else:
             for err in result["errors"]:
-                print("artifact upload error: " + err)
+                _print_upload_error(group, err)
             break
 
     return any_success
