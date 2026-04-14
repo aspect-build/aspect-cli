@@ -1,11 +1,15 @@
 version(
     "2026.16.4",
     sources = [
+        # Cargo build
         local("target/debug/aspect-cli"),
+        # Root folder
         local("bazel-bin/crates/aspect-cli/aspect-cli"),
-        # Fallback for when bazel-bin symlink points to a different config (e.g. fastbuild)
-        # after the pre-command built with -c dbg
         local("bazel-out/k8-dbg/bin/crates/aspect-cli/aspect-cli"),
+        # Fallback: running somewhere inside examples/*
+        local("../../bazel-bin/crates/aspect-cli/aspect-cli"),
+        local("../../bazel-out/k8-dbg/bin/crates/aspect-cli/aspect-cli"),
+        # Download from a released version
         github(
             org = "aspect-build",
             repo = "aspect-cli",

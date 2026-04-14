@@ -1,0 +1,307 @@
+"""GitHub PR review comment reporter for the lint task."""
+
+load("../lint.axl", "LintTrait")
+load("../lib/github.axl", "github")
+load("../lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
+
+
+def _parse_github_diff_patch(patch):
+    """Parse a GitHub PR file patch string into 0-based added line numbers."""
+    if not patch:
+        return []
+    lines = []
+    current_line = 0
+    for line in patch.split("\n"):
+        if line.startswith("@@"):
+            parts = line.split(" ")
+            for part in parts:
+                if part.startswith("+") and part != "+++":
+                    plus = part.removeprefix("+")
+                    if "," in plus:
+                        current_line = int(plus.split(",")[0])
+                    else:
+                        current_line = int(plus)
+                    break
+        elif line.startswith("+"):
+            lines.append(current_line - 1)
+            current_line += 1
+        elif line.startswith("-"):
+            pass
+        else:
+            current_line += 1
+    return lines
+
+
+def _enrich_with_suggestions(ctx, comments):
+    """Append GitHub suggestion blocks to comments that carry fix hints."""
+    file_cache = {}
+    for comment in comments:
+        fixes = comment.get("_fixes")
+        if not fixes:
+            continue
+        path = comment["path"]
+        if path not in file_cache:
+            file_cache[path] = ctx.std.fs.read_to_string(path)
+        content = file_cache[path]
+        if not content:
+            continue
+        lines = content.split("\n")
+        line_num = comment["line"]
+        if line_num < 1 or line_num > len(lines):
+            continue
+        line_byte_start = 0
+        for i in range(line_num - 1):
+            line_byte_start += len(lines[i]) + 1
+        original_line = lines[line_num - 1]
+        applicable = []
+        for f in fixes:
+            rel_start = f["byteOffset"] - line_byte_start
+            rel_end = rel_start + f["byteLength"]
+            if 0 <= rel_start and rel_end <= len(original_line):
+                applicable.append({
+                    "start": rel_start,
+                    "end": rel_end,
+                    "replacement": f["replacement"],
+                })
+        if not applicable:
+            continue
+        applicable = sorted(applicable, key = lambda f: f["start"], reverse = True)
+        fixed = original_line
+        for f in applicable:
+            fixed = fixed[:f["start"]] + f["replacement"] + fixed[f["end"]:]
+        if fixed != original_line:
+            comment["body"] += "\n\n```suggestion\n" + fixed + "\n```"
+        comment.pop("_fixes", None)
+
+
+def _build_comment_marker(tool, file, line, rule_id):
+    return "<!-- aspect-lint:{}:{}:{}:{} -->".format(tool, file, line, rule_id)
+
+
+def _extract_comment_marker(body):
+    prefix = "<!-- aspect-lint:"
+    suffix = " -->"
+    if not body:
+        return None
+    idx = body.find(prefix)
+    if idx < 0:
+        return None
+    end = body.find(suffix, idx)
+    if end < 0:
+        return None
+    return body[idx:end + len(suffix)]
+
+
+def _filter_by_diff(comments, changed_lines):
+    if not changed_lines:
+        return list(comments)
+    return [
+        c for c in comments
+        if (c.get("line", 0) - 1) in (changed_lines.get(c.get("path", "")) or [])
+    ]
+
+
+def _build_comments(ctx, filepath):
+    """Parse a SARIF report into review comments with markers and suggestions applied."""
+    content = ctx.std.fs.read_to_string(filepath)
+    sarif = parse_sarif(content)
+    comments = sarif_to_review_comments(sarif)
+    _enrich_with_suggestions(ctx, comments)
+    diagnostics = parse_sarif_diagnostics(content)
+    for i, comment in enumerate(comments):
+        if i < len(diagnostics):
+            diag = diagnostics[i]
+            comment["body"] = _build_comment_marker(
+                diag["tool"], diag["file"], diag["line"], diag["rule_id"],
+            ) + "\n" + comment["body"]
+    return comments
+
+
+def _get_existing_markers(ctx, gh):
+    result = github.pulls.list_review_comments(
+        ctx, token = gh["token"], owner = gh["owner"],
+        repo = gh["repo"], pull_number = gh["pr_number"],
+    )
+    if not result["success"]:
+        return {}
+    markers = {}
+    for c in result["comments"]:
+        marker = _extract_comment_marker(c.get("body", ""))
+        if marker:
+            markers[marker] = True
+    return markers
+
+
+def _post_individually(ctx, gh, comments, existing_markers):
+    for c in comments:
+        marker = _extract_comment_marker(c.get("body", ""))
+        if marker and marker in existing_markers:
+            continue
+        result = github.pulls.create_review_comment(
+            ctx, token = gh["token"], owner = gh["owner"],
+            repo = gh["repo"], pull_number = gh["pr_number"],
+            body = c["body"], path = c["path"],
+            line = c.get("line"), commit_id = gh["head_sha"],
+            side = c.get("side", "RIGHT"),
+            start_line = c.get("start_line"),
+            start_side = c.get("start_side"),
+        )
+        if result["success"] and marker:
+            existing_markers[marker] = True
+
+
+def _check_staleness(ctx, gh):
+    result = github.pulls.get(
+        ctx, token = gh["token"], owner = gh["owner"],
+        repo = gh["repo"], pull_number = gh["pr_number"],
+    )
+    if not result["success"]:
+        return False
+    head_sha = result["pull_request"].get("head", {}).get("sha", "")
+    return head_sha != gh["head_sha"]
+
+
+def _cleanup_comments(ctx, gh, relevant_diagnostics):
+    desired = {}
+    for diag in relevant_diagnostics:
+        lines = gh["changed_lines"].get(diag["file"])
+        if lines and (diag["line"] - 1) in lines:
+            marker = _build_comment_marker(diag["tool"], diag["file"], diag["line"], diag["rule_id"])
+            desired[marker] = True
+    result = github.pulls.list_review_comments(
+        ctx, token = gh["token"], owner = gh["owner"],
+        repo = gh["repo"], pull_number = gh["pr_number"],
+    )
+    if not result["success"]:
+        return
+    by_marker = {}
+    for c in result["comments"]:
+        marker = _extract_comment_marker(c.get("body", ""))
+        if not marker:
+            continue
+        if marker not in by_marker:
+            by_marker[marker] = []
+        by_marker[marker].append(c)
+    for marker, comments in by_marker.items():
+        if marker not in desired:
+            for c in comments:
+                github.pulls.delete_review_comment(
+                    ctx, token = gh["token"], owner = gh["owner"],
+                    repo = gh["repo"], comment_id = c["id"],
+                )
+        elif len(comments) > 1:
+            by_id = sorted(comments, key = lambda c: c["id"])
+            for c in by_id[:-1]:
+                github.pulls.delete_review_comment(
+                    ctx, token = gh["token"], owner = gh["owner"],
+                    repo = gh["repo"], comment_id = c["id"],
+                )
+
+
+def _determine_vars(ctx):
+    """Read required GitHub env vars. Returns a dict or None if any is missing or not a PR ref."""
+    ref = ctx.std.env.var("GITHUB_REF") or ""
+    sha = ctx.std.env.var("GITHUB_SHA") or ""
+    repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
+    repo_parts = repository.split("/")
+    if not ref or not sha or len(repo_parts) < 2:
+        return None
+    if not (ref.startswith("refs/pull/") and ref.endswith("/merge")):
+        return None
+    return {
+        "owner": repo_parts[0],
+        "repo": repo_parts[1],
+        "sha": sha,
+        "pr_number": int(ref.removeprefix("refs/pull/").removesuffix("/merge")),
+    }
+
+
+def _github_lint_impl(ctx: FeatureContext):
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+    lint_trait = ctx.traits[LintTrait]
+
+    env_vars = _determine_vars(ctx)
+    gh = None
+    gh_inactive_reason = None
+
+    if not env_vars:
+        ref = ctx.std.env.var("GITHUB_REF") or ""
+        sha = ctx.std.env.var("GITHUB_SHA") or ""
+        repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
+        missing = [name for name, val in [("GITHUB_REF", ref), ("GITHUB_SHA", sha), ("GITHUB_REPOSITORY", repository)] if not val]
+        if missing:
+            gh_inactive_reason = "missing env var(s): %s" % ", ".join(missing)
+        else:
+            gh_inactive_reason = "GITHUB_REF is not a PR merge ref: %s" % ref
+    else:
+        token = github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read", "prs.write"])
+        if token:
+            gh = {
+                "token": token,
+                "owner": env_vars["owner"],
+                "repo": env_vars["repo"],
+                "head_sha": env_vars["sha"],
+                "pr_number": env_vars["pr_number"],
+                "changed_lines": {},
+                "stale": False,
+            }
+        else:
+            gh_inactive_reason = "authentication failed"
+
+    if not gh and not debug:
+        return
+
+    state = {"pending": []}
+
+    if gh:
+        def get_diff(ctx):
+            result = github.pulls.list_files(ctx, gh["token"], gh["owner"], gh["repo"], gh["pr_number"])
+            if not result["success"]:
+                return []
+            all_files = []
+            for f in result["files"]:
+                if f.get("status", "") == "removed":
+                    continue
+                filename = f.get("filename", "")
+                patch = f.get("patch", "")
+                added_lines = _parse_github_diff_patch(patch)
+                all_files.append({"file": filename, "lines": added_lines})
+            gh["changed_lines"] = {f["file"]: f["lines"] for f in all_files}
+            return all_files
+
+        lint_trait.get_diff = get_diff
+
+    def _lint_report(ctx, filepath):
+        if gh and gh["stale"]:
+            return
+        comments = _build_comments(ctx, filepath)
+        state["pending"].extend(comments)
+        if gh:
+            if "existing_markers" not in gh:
+                gh["existing_markers"] = _get_existing_markers(ctx, gh)
+            ready = _filter_by_diff(state["pending"], gh["changed_lines"])
+            _post_individually(ctx, gh, ready, gh["existing_markers"])
+            state["pending"] = []
+
+    def _lint_end(ctx, relevant_diagnostics):
+        if gh:
+            if gh["stale"] or _check_staleness(ctx, gh):
+                gh["stale"] = True
+                return
+            _cleanup_comments(ctx, gh, relevant_diagnostics)
+        elif debug:
+            print("github lint comment debug summary:")
+            print("inactive reason: %s" % gh_inactive_reason)
+            print("pending comments: %s" % len(state["pending"]))
+            for c in state["pending"]:
+                lines = c["body"].split("\n")
+                print("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
+
+    lint_trait.lint_report.append(_lint_report)
+    lint_trait.lint_end.append(_lint_end)
+
+
+GithubLintComments = feature(
+    implementation = _github_lint_impl,
+    args = {}
+)

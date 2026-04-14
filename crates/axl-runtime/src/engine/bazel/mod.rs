@@ -486,6 +486,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             values::Value<'v>,
         >,
+        #[starlark(require = named, default = UnpackList::default())]
+        skip_config_if_missing: UnpackList<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<rc::StarlarkBazelRC> {
         fn unpack_rc_option<'v>(item: values::Value<'v>) -> anyhow::Result<bazelrc::RcOption> {
@@ -534,7 +536,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             .collect::<anyhow::Result<_>>()?;
         let inner = bazelrc::BazelRC::new(root, &startup_flags_vec, &flags_vec)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        Ok(rc::StarlarkBazelRC { inner })
+        Ok(rc::StarlarkBazelRC {
+            inner,
+            skip_config_if_missing: skip_config_if_missing.items,
+        })
     }
 
     /// * `force_kill_after_ms` - If the build is still running after this many

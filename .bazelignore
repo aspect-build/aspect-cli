@@ -1,4 +1,6 @@
 # Cargo output directory
 target/
 bazel/proto/
+examples/lint
 examples/large_bes
+examples/slow_build

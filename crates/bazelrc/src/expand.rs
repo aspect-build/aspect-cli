@@ -8,7 +8,14 @@ use crate::{BazelRC, BazelRcError, RcOption};
 /// Each `RcOption` in the result preserves its `version_condition`. When a version-gated
 /// `--config=` flag triggers expansion, its condition is inherited by expanded entries that
 /// have no condition of their own.
-pub(crate) fn expand_configs(rc: &BazelRC, command: &str) -> Result<Vec<RcOption>, BazelRcError> {
+///
+/// `skip_config_if_missing` lists config names that should be silently dropped when no
+/// matching section exists, rather than returning an `UndefinedConfig` error.
+pub(crate) fn expand_configs(
+    rc: &BazelRC,
+    command: &str,
+    skip_config_if_missing: &[&str],
+) -> Result<Vec<RcOption>, BazelRcError> {
     let mut base: Vec<RcOption> = rc.options_for(command).into_iter().cloned().collect();
 
     // Check for --enable_platform_specific_config
@@ -36,6 +43,7 @@ pub(crate) fn expand_configs(rc: &BazelRC, command: &str) -> Result<Vec<RcOption
         &mut Vec::new(),
         &mut result,
         has_platform_config,
+        skip_config_if_missing,
     )?;
 
     Ok(result)
@@ -50,6 +58,7 @@ fn expand_args(
     // When true, an undefined config is silently skipped rather than an error.
     // Used for the synthetic --config=<os> injected by --enable_platform_specific_config.
     implicit_platform_config: bool,
+    skip_config_if_missing: &[&str],
 ) -> Result<(), BazelRcError> {
     for opt in args {
         if let Some(config_name) = opt.value.strip_prefix("--config=") {
@@ -80,7 +89,7 @@ fn expand_args(
                 let is_implicit_platform = implicit_platform_config
                     && ancestor_chain.is_empty()
                     && config_name == platform_config_name();
-                if is_implicit_platform {
+                if is_implicit_platform || skip_config_if_missing.contains(&config_name) {
                     continue;
                 }
                 return Err(BazelRcError::UndefinedConfig {
@@ -110,6 +119,7 @@ fn expand_args(
                 ancestor_chain,
                 result,
                 implicit_platform_config,
+                skip_config_if_missing,
             )?;
             ancestor_chain.pop();
         } else {
