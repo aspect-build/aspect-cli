@@ -234,7 +234,8 @@ def _github_lint_impl(ctx: FeatureContext):
         else:
             gh_inactive_reason = "GITHUB_REF is not a PR merge ref: %s" % ref
     else:
-        token = github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read", "prs.write"])
+        auth_reason = {}
+        token = ctx.args.token or github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read", "prs.write"], _reason = auth_reason)
         if token:
             gh = {
                 "token": token,
@@ -246,7 +247,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 "stale": False,
             }
         else:
-            gh_inactive_reason = "authentication failed"
+            gh_inactive_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
 
     if not gh and not debug:
         return
@@ -291,7 +292,7 @@ def _github_lint_impl(ctx: FeatureContext):
             _cleanup_comments(ctx, gh, relevant_diagnostics)
         elif debug:
             print("github lint comment debug summary:")
-            print("inactive reason: %s" % gh_inactive_reason)
+            print("inactive reason:  %s" % gh_inactive_reason)
             print("pending comments: %s" % len(state["pending"]))
             for c in state["pending"]:
                 lines = c["body"].split("\n")
@@ -303,5 +304,7 @@ def _github_lint_impl(ctx: FeatureContext):
 
 GithubLintComments = feature(
     implementation = _github_lint_impl,
-    args = {}
+    args = {
+        "token": args.string(description = "Use this specific github token for authentication")
+    }
 )

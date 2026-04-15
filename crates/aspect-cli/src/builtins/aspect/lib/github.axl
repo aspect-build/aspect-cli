@@ -49,7 +49,7 @@ def validate_role(role):
     return role in VALID_ROLES
 
 
-def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = None):
+def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = None, _reason = None):
     """Resolve a GitHub token using the following priority:
 
     1. ASPECT_WORKFLOWS_PR_GITHUB_TOKEN env var
@@ -58,6 +58,7 @@ def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = N
        (requires owner and repo to be provided)
 
     Returns the token string, or None if authentication is not possible.
+    If _reason is a dict, it will be populated with a "reason" key describing why auth failed.
     """
     token = env.var("ASPECT_WORKFLOWS_PR_GITHUB_TOKEN")
     if token:
@@ -69,9 +70,13 @@ def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = N
 
     creds = ctx.aspect.auth.credentials(profile = profile)
     if not creds:
+        if _reason != None:
+            _reason["reason"] = "not logged in (run `aspect auth login`)"
         return None
 
     if not owner or not repo:
+        if _reason != None:
+            _reason["reason"] = "owner/repo not provided"
         return None
 
     if roles:
@@ -94,6 +99,15 @@ def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = N
     if resp.status >= 200 and resp.status < 300:
         return json.decode(resp.body)["token"]
 
+    if _reason != None:
+        if resp.status == 401:
+            _reason["reason"] = "credentials expired (run `aspect auth login`)"
+        elif resp.status == 403:
+            _reason["reason"] = "access denied: %s" % resp.body
+        elif resp.status == 404:
+            _reason["reason"] = "GitHub App not installed (see https://docs.aspect.build/github-app)"
+        else:
+            _reason["reason"] = "API request failed (HTTP %d): %s" % (resp.status, resp.body)
     return None
 
 
