@@ -57,7 +57,9 @@ jobs:
         run: .aspect/bootstrap.sh
       - name: Lint Task (ASPECT_DEBUG=1)
         working-directory: examples/lint
-        run: ASPECT_DEBUG=1 aspect lint //... --github-lint-comments:token=${{ secrets.GITHUB_TOKEN }}
+        env:
+          ASPECT_DEBUG: 1
+        run: aspect lint //... --github-lint-comments:token=${{ secrets.GITHUB_TOKEN }}
       - name: Lint Task
         working-directory: examples/lint
         run: aspect lint //... --github-lint-comments:token=${{ secrets.GITHUB_TOKEN }}
