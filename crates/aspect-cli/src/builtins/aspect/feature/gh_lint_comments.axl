@@ -133,6 +133,7 @@ def _get_existing_markers(ctx, gh):
 
 
 def _post_individually(ctx, gh, comments, existing_markers):
+    errors = []
     for c in comments:
         marker = _extract_comment_marker(c.get("body", ""))
         if marker and marker in existing_markers:
@@ -146,8 +147,12 @@ def _post_individually(ctx, gh, comments, existing_markers):
             start_line = c.get("start_line"),
             start_side = c.get("start_side"),
         )
-        if result["success"] and marker:
-            existing_markers[marker] = True
+        if result["success"]:
+            if marker:
+                existing_markers[marker] = True
+        else:
+            errors.append("[%s:%s] %s" % (c.get("path", "?"), c.get("line", 0), result.get("error", "unknown error")))
+    return errors
 
 
 def _check_staleness(ctx, gh):
@@ -199,41 +204,38 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics):
 
 
 def _determine_vars(ctx):
-    """Read required GitHub env vars. Returns a dict or None if any is missing or not a PR ref."""
+    """Read required GitHub env vars.
+
+    Returns (dict, None) on success, or (None, reason_string) if any var is
+    missing or GITHUB_REF is not a PR merge ref.
+    """
     ref = ctx.std.env.var("GITHUB_REF") or ""
     sha = ctx.std.env.var("GITHUB_SHA") or ""
     repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
     repo_parts = repository.split("/")
-    if not ref or not sha or len(repo_parts) < 2:
-        return None
+    missing = [name for name, val in [("GITHUB_REF", ref), ("GITHUB_SHA", sha), ("GITHUB_REPOSITORY", repository)] if not val]
+    if missing:
+        return None, "missing env var(s): %s" % ", ".join(missing)
+    if len(repo_parts) < 2:
+        return None, "missing env var(s): GITHUB_REPOSITORY"
     if not (ref.startswith("refs/pull/") and ref.endswith("/merge")):
-        return None
+        return None, "GITHUB_REF is not a PR merge ref: %s" % ref
     return {
         "owner": repo_parts[0],
         "repo": repo_parts[1],
         "sha": sha,
         "pr_number": int(ref.removeprefix("refs/pull/").removesuffix("/merge")),
-    }
+    }, None
 
 
 def _github_lint_impl(ctx: FeatureContext):
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
     lint_trait = ctx.traits[LintTrait]
 
-    env_vars = _determine_vars(ctx)
+    env_vars, gh_inactive_reason = _determine_vars(ctx)
     gh = None
-    gh_inactive_reason = None
 
-    if not env_vars:
-        ref = ctx.std.env.var("GITHUB_REF") or ""
-        sha = ctx.std.env.var("GITHUB_SHA") or ""
-        repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
-        missing = [name for name, val in [("GITHUB_REF", ref), ("GITHUB_SHA", sha), ("GITHUB_REPOSITORY", repository)] if not val]
-        if missing:
-            gh_inactive_reason = "missing env var(s): %s" % ", ".join(missing)
-        else:
-            gh_inactive_reason = "GITHUB_REF is not a PR merge ref: %s" % ref
-    else:
+    if env_vars:
         auth_reason = {}
         token = ctx.args.token or github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read", "prs.write"], _reason = auth_reason)
         if token:
@@ -252,7 +254,7 @@ def _github_lint_impl(ctx: FeatureContext):
     if not gh and not debug:
         return
 
-    state = {"pending": [], "all_comments": []}
+    state = {"pending": [], "all_comments": [], "posted": 0, "errors": []}
 
     if gh:
         def get_diff(ctx):
@@ -282,7 +284,10 @@ def _github_lint_impl(ctx: FeatureContext):
             if "existing_markers" not in gh:
                 gh["existing_markers"] = _get_existing_markers(ctx, gh)
             ready = _filter_by_diff(state["pending"], gh["changed_lines"])
-            _post_individually(ctx, gh, ready, gh["existing_markers"])
+            before = len(gh["existing_markers"])
+            errors = _post_individually(ctx, gh, ready, gh["existing_markers"])
+            state["posted"] += len(gh["existing_markers"]) - before
+            state["errors"].extend(errors)
             state["pending"] = []
 
     def _lint_end(ctx, relevant_diagnostics):
@@ -291,6 +296,9 @@ def _github_lint_impl(ctx: FeatureContext):
             if gh_inactive_reason:
                 print("inactive reason:  %s" % gh_inactive_reason)
             print("found comments:   %s" % len(state["all_comments"]))
+            print("posted comments:  %s" % state["posted"])
+            for e in state["errors"]:
+                print("  post error: %s" % e)
             for c in state["all_comments"]:
                 lines = c["body"].split("\n")
                 print("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))

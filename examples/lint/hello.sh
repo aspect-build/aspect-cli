@@ -14,5 +14,5 @@ else
 fi
 
 # SC2164: Use 'cd ... || exit' or 'cd ... || return' in case cd fails.
-cd /tmp
+cd /tmp1
 echo "Working in $(pwd)"

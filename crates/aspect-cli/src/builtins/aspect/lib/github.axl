@@ -435,7 +435,7 @@ def create_review_comment(ctx, token, owner, repo, pull_number, body, path, line
     success, status_code, resp_body = _do_request(ctx, "POST", url, token, payload)
     if success:
         return {"success": True, "comment_id": resp_body.get("id") if resp_body else None}
-    return {"success": False, "error": "request failed: " + str(status_code)}
+    return {"success": False, "error": "HTTP %d: %s" % (status_code, resp_body)}
 
 
 def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
