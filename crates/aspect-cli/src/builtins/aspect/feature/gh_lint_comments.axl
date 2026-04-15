@@ -254,7 +254,7 @@ def _github_lint_impl(ctx: FeatureContext):
     if not gh and not debug:
         return
 
-    state = {"pending": [], "all_comments": [], "posted": 0, "errors": []}
+    state = {"pending": [], "all_comments": [], "posted": 0, "filtered": 0, "errors": []}
 
     if gh:
         def get_diff(ctx):
@@ -284,6 +284,7 @@ def _github_lint_impl(ctx: FeatureContext):
             if "existing_markers" not in gh:
                 gh["existing_markers"] = _get_existing_markers(ctx, gh)
             ready = _filter_by_diff(state["pending"], gh["changed_lines"])
+            state["filtered"] += len(state["pending"]) - len(ready)
             before = len(gh["existing_markers"])
             errors = _post_individually(ctx, gh, ready, gh["existing_markers"])
             state["posted"] += len(gh["existing_markers"]) - before
@@ -296,6 +297,10 @@ def _github_lint_impl(ctx: FeatureContext):
             if gh_inactive_reason:
                 print("inactive reason:  %s" % gh_inactive_reason)
             print("found comments:   %s" % len(state["all_comments"]))
+            if gh:
+                changed_line_count = sum([len(v) for v in gh["changed_lines"].values()])
+                print("changed lines:    %s across %s file(s)" % (changed_line_count, len(gh["changed_lines"])))
+                print("filtered by diff: %s" % state["filtered"])
             print("posted comments:  %s" % state["posted"])
             for e in state["errors"]:
                 print("  post error: %s" % e)
