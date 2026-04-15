@@ -8,12 +8,13 @@ pub(crate) mod tokenize;
 /// ordered from most general to most specific (excluding `common` / `always`).
 ///
 /// Mirrors Bazel's own command graph:
-/// - `test`, `run`, `mobile-install`, `print_action` → `build`
-/// - `coverage` → `build`, `test`
+/// - `test`, `run`, `clean`, `mobile-install`, `info`, `print_action`, `config`, `cquery`, `aquery` → `build`
+/// - `coverage`, `fetch`, `vendor` → `build`, `test`
 pub(crate) fn command_ancestors(command: &str) -> &'static [&'static str] {
     match command {
-        "test" | "run" | "mobile-install" | "print_action" => &["build"],
-        "coverage" => &["build", "test"],
+        "test" | "run" | "clean" | "mobile-install" | "info" | "print_action" | "config"
+        | "cquery" | "aquery" => &["build"],
+        "coverage" | "fetch" | "vendor" => &["build", "test"],
         _ => &[],
     }
 }
@@ -1140,10 +1141,11 @@ mod tests {
     // ── Config vs non-config ordering (Bug #1) ───────────────────────────────
 
     #[test]
-    fn config_flags_come_after_non_config_flags() {
-        // Non-config flags that appear *after* --config= in the rc file must not
-        // override config-specific flags.  Under last-write-wins, config flags must
-        // land later in the expanded list than any plain non-config flags.
+    fn config_expands_in_place() {
+        // Bazel expands --config=foo in-place at the position it appears.
+        // Flags that come *after* --config=opt in the rc file appear after the
+        // expansion, so they win under last-write-wins — matching Bazel's spec:
+        // https://bazel.build/versions/9.0.0/run/bazelrc#option-defaults
         let dir = make_workspace();
         let root = dir.path();
         fs::write(
@@ -1156,18 +1158,11 @@ mod tests {
         let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
 
-        let config_pos = values
-            .iter()
-            .position(|s| *s == "--config-flag")
-            .expect("--config-flag missing");
-        let after_pos = values
-            .iter()
-            .position(|s| *s == "--non-config-after")
-            .expect("--non-config-after missing");
-
-        assert!(
-            config_pos > after_pos,
-            "--config-flag must come after --non-config-after; got: {values:?}"
+        // Expected in-place order: before, <config expansion>, after
+        assert_eq!(
+            values,
+            vec!["--non-config-before", "--config-flag", "--non-config-after"],
+            "got: {values:?}"
         );
     }
 

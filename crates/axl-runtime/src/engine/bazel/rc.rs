@@ -130,11 +130,15 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
 
         // Split opts: common section → --default_override flags (prepended so user flags win),
         // everything else → direct flags.
-        let (override_strings, flag_strings) = partition_expand_all(&opts);
+        let (override_flags, regular_flags) = partition_expand_all(&opts);
 
         let mut flags: Vec<Value<'v>> = Vec::new();
-        for s in override_strings.iter().chain(flag_strings.iter()) {
-            flags.push(eval.heap().alloc(s.as_str()));
+        for (value, version_condition) in override_flags.iter().chain(regular_flags.iter()) {
+            let v = match version_condition {
+                None => eval.heap().alloc(value.as_str()),
+                Some(cond) => eval.heap().alloc((value.as_str(), cond.as_str())),
+            };
+            flags.push(v);
         }
         Ok((startup_flags, flags))
     }
@@ -179,15 +183,23 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
 /// `common` section options are converted to `--default_override=0:common=<value>` strings and
 /// returned first so they appear before user-specified flags in the final `flags` output.
 /// This preserves last-write-wins semantics: user flags (which come later) override the defaults.
-fn partition_expand_all(opts: &[bazelrc::RcOption]) -> (Vec<String>, Vec<String>) {
+///
+/// Each entry is `(value, version_condition)` so that version-gated options retain their
+/// semver constraint and are not silently promoted to unconditional flags.
+fn partition_expand_all(
+    opts: &[bazelrc::RcOption],
+) -> (Vec<(String, Option<String>)>, Vec<(String, Option<String>)>) {
     let mut default_override_flags = Vec::new();
     let mut flags = Vec::new();
     for opt in opts {
         let base = opt.command.split(':').next().unwrap_or(&opt.command);
         if base == "common" {
-            default_override_flags.push(format!("--default_override=0:common={}", opt.value));
+            default_override_flags.push((
+                format!("--default_override=0:common={}", opt.value),
+                opt.version_condition.clone(),
+            ));
         } else {
-            flags.push(opt.value.clone());
+            flags.push((opt.value.clone(), opt.version_condition.clone()));
         }
     }
     (default_override_flags, flags)
@@ -235,7 +247,7 @@ mod tests {
         let all: Vec<&str> = overrides
             .iter()
             .chain(regular.iter())
-            .map(String::as_str)
+            .map(|(value, _)| value.as_str())
             .collect();
 
         let first_override = all
@@ -266,8 +278,8 @@ mod tests {
         assert_eq!(
             overrides,
             vec![
-                "--default_override=0:common=--foo",
-                "--default_override=0:common=--bar",
+                ("--default_override=0:common=--foo".to_string(), None),
+                ("--default_override=0:common=--bar".to_string(), None),
             ]
         );
         assert!(regular.is_empty());

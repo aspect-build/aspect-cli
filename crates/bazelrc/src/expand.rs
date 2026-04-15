@@ -60,16 +60,9 @@ fn expand_args(
     implicit_platform_config: bool,
     skip_config_if_missing: &[&str],
 ) -> Result<(), BazelRcError> {
-    // First pass: emit all non-config flags so they appear before config expansions.
-    // This ensures config-specific flags (expanded below) come later in the list and
-    // thus override non-config-specific flags under last-write-wins semantics.
-    for opt in args {
-        if !opt.value.starts_with("--config=") {
-            result.push(opt.clone());
-        }
-    }
-
-    // Second pass: expand --config= flags, appending after all non-config flags.
+    // Single pass: emit non-config flags in-place and expand --config= flags recursively
+    // at the position where they appear, matching Bazel's in-place expansion semantics.
+    // See https://bazel.build/versions/9.0.0/run/bazelrc#option-defaults.
     for opt in args {
         if let Some(config_name) = opt.value.strip_prefix("--config=") {
             // Cycle detection
@@ -132,6 +125,8 @@ fn expand_args(
                 skip_config_if_missing,
             )?;
             ancestor_chain.pop();
+        } else {
+            result.push(opt.clone());
         }
     }
     Ok(())
