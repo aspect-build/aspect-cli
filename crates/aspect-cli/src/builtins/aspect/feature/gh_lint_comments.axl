@@ -133,6 +133,8 @@ def _get_existing_markers(ctx, gh):
 
 
 def _post_individually(ctx, gh, comments, existing_markers):
+    errors = []
+    prefix = gh.get("prefix", "")
     for c in comments:
         marker = _extract_comment_marker(c.get("body", ""))
         if marker and marker in existing_markers:
@@ -140,14 +142,18 @@ def _post_individually(ctx, gh, comments, existing_markers):
         result = github.pulls.create_review_comment(
             ctx, token = gh["token"], owner = gh["owner"],
             repo = gh["repo"], pull_number = gh["pr_number"],
-            body = c["body"], path = c["path"],
+            body = c["body"], path = prefix + c["path"],
             line = c.get("line"), commit_id = gh["head_sha"],
             side = c.get("side", "RIGHT"),
             start_line = c.get("start_line"),
             start_side = c.get("start_side"),
         )
-        if result["success"] and marker:
-            existing_markers[marker] = True
+        if result["success"]:
+            if marker:
+                existing_markers[marker] = True
+        else:
+            errors.append("[%s:%s] %s" % (c.get("path", "?"), c.get("line", 0), result.get("error", "unknown error")))
+    return errors
 
 
 def _check_staleness(ctx, gh):
@@ -199,42 +205,40 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics):
 
 
 def _determine_vars(ctx):
-    """Read required GitHub env vars. Returns a dict or None if any is missing or not a PR ref."""
+    """Read required GitHub env vars.
+
+    Returns (dict, None) on success, or (None, reason_string) if any var is
+    missing or GITHUB_REF is not a PR merge ref.
+    """
     ref = ctx.std.env.var("GITHUB_REF") or ""
     sha = ctx.std.env.var("GITHUB_SHA") or ""
     repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
     repo_parts = repository.split("/")
-    if not ref or not sha or len(repo_parts) < 2:
-        return None
+    missing = [name for name, val in [("GITHUB_REF", ref), ("GITHUB_SHA", sha), ("GITHUB_REPOSITORY", repository)] if not val]
+    if missing:
+        return None, "missing env var(s): %s" % ", ".join(missing)
+    if len(repo_parts) < 2:
+        return None, "missing env var(s): GITHUB_REPOSITORY"
     if not (ref.startswith("refs/pull/") and ref.endswith("/merge")):
-        return None
+        return None, "GITHUB_REF is not a PR merge ref: %s" % ref
     return {
         "owner": repo_parts[0],
         "repo": repo_parts[1],
         "sha": sha,
         "pr_number": int(ref.removeprefix("refs/pull/").removesuffix("/merge")),
-    }
+    }, None
 
 
 def _github_lint_impl(ctx: FeatureContext):
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
     lint_trait = ctx.traits[LintTrait]
 
-    env_vars = _determine_vars(ctx)
+    env_vars, gh_inactive_reason = _determine_vars(ctx)
     gh = None
-    gh_inactive_reason = None
 
-    if not env_vars:
-        ref = ctx.std.env.var("GITHUB_REF") or ""
-        sha = ctx.std.env.var("GITHUB_SHA") or ""
-        repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
-        missing = [name for name, val in [("GITHUB_REF", ref), ("GITHUB_SHA", sha), ("GITHUB_REPOSITORY", repository)] if not val]
-        if missing:
-            gh_inactive_reason = "missing env var(s): %s" % ", ".join(missing)
-        else:
-            gh_inactive_reason = "GITHUB_REF is not a PR merge ref: %s" % ref
-    else:
-        token = github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read", "prs.write"])
+    if env_vars:
+        auth_reason = {}
+        token = ctx.args.token or github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read", "prs.write"], _reason = auth_reason)
         if token:
             gh = {
                 "token": token,
@@ -243,26 +247,37 @@ def _github_lint_impl(ctx: FeatureContext):
                 "head_sha": env_vars["sha"],
                 "pr_number": env_vars["pr_number"],
                 "changed_lines": {},
+                "prefix": "",
                 "stale": False,
             }
         else:
-            gh_inactive_reason = "authentication failed"
+            gh_inactive_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
 
     if not gh and not debug:
         return
 
-    state = {"pending": []}
+    state = {"pending": [], "all_comments": [], "posted": 0, "filtered": 0, "errors": []}
 
     if gh:
+        # Determine the workspace prefix relative to the git root once (e.g. "examples/lint/")
+        # so that GitHub API paths ("examples/lint/hello.sh") can be stripped to match
+        # SARIF-relative paths ("hello.sh").
+        git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
+        if git_out.status.success:
+            gh["prefix"] = git_out.stdout.strip()
+
         def get_diff(ctx):
             result = github.pulls.list_files(ctx, gh["token"], gh["owner"], gh["repo"], gh["pr_number"])
             if not result["success"]:
                 return []
             all_files = []
+            prefix = gh["prefix"]
             for f in result["files"]:
                 if f.get("status", "") == "removed":
                     continue
                 filename = f.get("filename", "")
+                if prefix and filename.startswith(prefix):
+                    filename = filename[len(prefix):]
                 patch = f.get("patch", "")
                 added_lines = _parse_github_diff_patch(patch)
                 all_files.append({"file": filename, "lines": added_lines})
@@ -276,26 +291,42 @@ def _github_lint_impl(ctx: FeatureContext):
             return
         comments = _build_comments(ctx, filepath)
         state["pending"].extend(comments)
+        state["all_comments"].extend(comments)
         if gh:
             if "existing_markers" not in gh:
                 gh["existing_markers"] = _get_existing_markers(ctx, gh)
             ready = _filter_by_diff(state["pending"], gh["changed_lines"])
-            _post_individually(ctx, gh, ready, gh["existing_markers"])
+            state["filtered"] += len(state["pending"]) - len(ready)
+            before = len(gh["existing_markers"])
+            errors = _post_individually(ctx, gh, ready, gh["existing_markers"])
+            state["posted"] += len(gh["existing_markers"]) - before
+            state["errors"].extend(errors)
             state["pending"] = []
 
     def _lint_end(ctx, relevant_diagnostics):
+        if debug:
+            print("github lint comment debug summary:")
+            if gh_inactive_reason:
+                print("inactive reason:  %s" % gh_inactive_reason)
+            print("found comments:   %s" % len(state["all_comments"]))
+            if gh:
+                print("git prefix:       %r" % gh.get("prefix", ""))
+                changed_line_count = 0
+                for v in gh["changed_lines"].values():
+                    changed_line_count += len(v)
+                print("changed lines:    %s across %s file(s)" % (changed_line_count, len(gh["changed_lines"])))
+                print("filtered by diff: %s" % state["filtered"])
+            print("posted comments:  %s" % state["posted"])
+            for e in state["errors"]:
+                print("  post error: %s" % e)
+            for c in state["all_comments"]:
+                lines = c["body"].split("\n")
+                print("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
         if gh:
             if gh["stale"] or _check_staleness(ctx, gh):
                 gh["stale"] = True
                 return
             _cleanup_comments(ctx, gh, relevant_diagnostics)
-        elif debug:
-            print("github lint comment debug summary:")
-            print("inactive reason: %s" % gh_inactive_reason)
-            print("pending comments: %s" % len(state["pending"]))
-            for c in state["pending"]:
-                lines = c["body"].split("\n")
-                print("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
 
     lint_trait.lint_report.append(_lint_report)
     lint_trait.lint_end.append(_lint_end)
@@ -303,5 +334,7 @@ def _github_lint_impl(ctx: FeatureContext):
 
 GithubLintComments = feature(
     implementation = _github_lint_impl,
-    args = {}
+    args = {
+        "token": args.string(description = "Use this specific github token for authentication")
+    }
 )

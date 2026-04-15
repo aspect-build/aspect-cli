@@ -6,7 +6,7 @@
 name=$1
 
 # SC2086: Double quote to prevent globbing and word splitting.
-# shellcheck will flag the unquoted $name below.
+# The unquoted $name below will be flagged.
 if [ $name = "world" ]; then
     echo "Hello, World!"
 else
@@ -16,3 +16,4 @@ fi
 # SC2164: Use 'cd ... || exit' or 'cd ... || return' in case cd fails.
 cd /tmp
 echo "Working in $(pwd)"
+echo $name
