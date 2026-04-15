@@ -252,7 +252,7 @@ def _github_lint_impl(ctx: FeatureContext):
     if not gh and not debug:
         return
 
-    state = {"pending": []}
+    state = {"pending": [], "all_comments": []}
 
     if gh:
         def get_diff(ctx):
@@ -277,6 +277,7 @@ def _github_lint_impl(ctx: FeatureContext):
             return
         comments = _build_comments(ctx, filepath)
         state["pending"].extend(comments)
+        state["all_comments"].extend(comments)
         if gh:
             if "existing_markers" not in gh:
                 gh["existing_markers"] = _get_existing_markers(ctx, gh)
@@ -290,11 +291,12 @@ def _github_lint_impl(ctx: FeatureContext):
                 gh["stale"] = True
                 return
             _cleanup_comments(ctx, gh, relevant_diagnostics)
-        elif debug:
+        if debug:
             print("github lint comment debug summary:")
-            print("inactive reason:  %s" % gh_inactive_reason)
-            print("pending comments: %s" % len(state["pending"]))
-            for c in state["pending"]:
+            if gh_inactive_reason:
+                print("inactive reason:  %s" % gh_inactive_reason)
+            print("found comments:   %s" % len(state["all_comments"]))
+            for c in state["all_comments"]:
                 lines = c["body"].split("\n")
                 print("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
 
