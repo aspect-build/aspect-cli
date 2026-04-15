@@ -298,7 +298,9 @@ def _github_lint_impl(ctx: FeatureContext):
                 print("inactive reason:  %s" % gh_inactive_reason)
             print("found comments:   %s" % len(state["all_comments"]))
             if gh:
-                changed_line_count = sum([len(v) for v in gh["changed_lines"].values()])
+                changed_line_count = 0
+                for v in gh["changed_lines"].values():
+                    changed_line_count += len(v)
                 print("changed lines:    %s across %s file(s)" % (changed_line_count, len(gh["changed_lines"])))
                 print("filtered by diff: %s" % state["filtered"])
             print("posted comments:  %s" % state["posted"])
