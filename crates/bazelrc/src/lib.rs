@@ -8,12 +8,13 @@ pub(crate) mod tokenize;
 /// ordered from most general to most specific (excluding `common` / `always`).
 ///
 /// Mirrors Bazel's own command graph:
-/// - `test`, `run`, `mobile-install`, `print_action` → `build`
-/// - `coverage` → `build`, `test`
+/// - `test`, `run`, `clean`, `mobile-install`, `info`, `print_action`, `config`, `cquery`, `aquery` → `build`
+/// - `coverage`, `fetch`, `vendor` → `build`, `test`
 pub(crate) fn command_ancestors(command: &str) -> &'static [&'static str] {
     match command {
-        "test" | "run" | "mobile-install" | "print_action" => &["build"],
-        "coverage" => &["build", "test"],
+        "test" | "run" | "clean" | "mobile-install" | "info" | "print_action" | "config"
+        | "cquery" | "aquery" => &["build"],
+        "coverage" | "fetch" | "vendor" => &["build", "test"],
         _ => &[],
     }
 }
@@ -1135,6 +1136,100 @@ mod tests {
         let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
         assert_eq!(values, vec!["--deep-flag"]);
+    }
+
+    // ── Config vs non-config ordering (Bug #1) ───────────────────────────────
+
+    #[test]
+    fn config_expands_in_place() {
+        // Bazel expands --config=foo in-place at the position it appears.
+        // Flags that come *after* --config=opt in the rc file appear after the
+        // expansion, so they win under last-write-wins — matching Bazel's spec:
+        // https://bazel.build/versions/9.0.0/run/bazelrc#option-defaults
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "build:opt --config-flag\nbuild --non-config-before\nbuild --config=opt\nbuild --non-config-after\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+
+        // Expected in-place order: before, <config expansion>, after
+        assert_eq!(
+            values,
+            vec!["--non-config-before", "--config-flag", "--non-config-after"],
+            "got: {values:?}"
+        );
+    }
+
+    #[test]
+    fn config_flags_preserve_file_ordering() {
+        // When the same config section is defined in two files, the flag from the
+        // later file must appear last in the expansion so it wins (last-write-wins).
+        let dir = make_workspace();
+        let root = dir.path();
+
+        let second = root.join("second.bazelrc");
+        fs::write(&second, "build:opt --flag=from-second\n").unwrap();
+
+        fs::write(
+            root.join(".bazelrc"),
+            format!("build:opt --flag=from-first\nimport {}\n", second.display()),
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=opt"])).unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+
+        let first_pos = values
+            .iter()
+            .position(|s| *s == "--flag=from-first")
+            .expect("--flag=from-first missing");
+        let second_pos = values
+            .iter()
+            .position(|s| *s == "--flag=from-second")
+            .expect("--flag=from-second missing");
+
+        assert!(
+            first_pos < second_pos,
+            "flag from first file must precede flag from second file; got: {values:?}"
+        );
+    }
+
+    #[test]
+    fn multiple_configs_each_come_after_non_config_flags() {
+        // When multiple --config= flags are present, all their expansions must
+        // appear after all non-config flags, and the configs' relative order is
+        // the order the --config= flags appear in the rc file.
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "build:foo --foo-flag\nbuild:bar --bar-flag\nbuild --non-config\nbuild --config=foo\nbuild --config=bar\n",
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+
+        let non_config_pos = values.iter().position(|s| *s == "--non-config").unwrap();
+        let foo_pos = values.iter().position(|s| *s == "--foo-flag").unwrap();
+        let bar_pos = values.iter().position(|s| *s == "--bar-flag").unwrap();
+
+        assert!(
+            non_config_pos < foo_pos,
+            "--non-config must precede --foo-flag; got: {values:?}"
+        );
+        assert!(
+            foo_pos < bar_pos,
+            "--foo-flag must precede --bar-flag (config order preserved); got: {values:?}"
+        );
     }
 
     #[test]

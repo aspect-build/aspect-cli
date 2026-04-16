@@ -371,6 +371,7 @@ dependencies = [
  "starlark_derive",
  "starlark_map",
  "tar",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

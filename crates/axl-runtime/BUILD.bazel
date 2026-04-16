@@ -73,6 +73,9 @@ rust_library(
 rust_test(
     name = "axl-runtime-unit-tests",
     crate = ":axl-runtime",
+    deps = [
+        "@crates//:tempfile",
+    ],
 )
 
 rust_test(

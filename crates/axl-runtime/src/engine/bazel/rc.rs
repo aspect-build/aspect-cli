@@ -117,7 +117,6 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let mut startup_flags: Vec<Value<'v>> = Vec::new();
-        let mut flags: Vec<Value<'v>> = Vec::new();
 
         for opt in this.inner.raw_options("startup") {
             let v = match &opt.version_condition {
@@ -129,29 +128,18 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
             startup_flags.push(v);
         }
 
-        for opt in &opts {
-            let base = opt.command.split(':').next().unwrap_or(&opt.command);
+        // Split opts: common section → --default_override flags (prepended so user flags win),
+        // everything else → direct flags.
+        let (override_flags, regular_flags) = partition_expand_all(&opts);
 
-            if base == "common" {
-                let override_str = format!("--default_override=0:common={}", opt.value);
-                let v = match &opt.version_condition {
-                    None => eval.heap().alloc(override_str.as_str()),
-                    Some(cond) => eval
-                        .heap()
-                        .alloc((override_str.as_str() as &str, cond.as_str() as &str)),
-                };
-                flags.push(v);
-            } else {
-                let v = match &opt.version_condition {
-                    None => eval.heap().alloc(opt.value.as_str()),
-                    Some(cond) => eval
-                        .heap()
-                        .alloc((opt.value.as_str() as &str, cond.as_str() as &str)),
-                };
-                flags.push(v);
-            }
+        let mut flags: Vec<Value<'v>> = Vec::new();
+        for (value, version_condition) in override_flags.iter().chain(regular_flags.iter()) {
+            let v = match version_condition {
+                None => eval.heap().alloc(value.as_str()),
+                Some(cond) => eval.heap().alloc((value.as_str(), cond.as_str())),
+            };
+            flags.push(v);
         }
-
         Ok((startup_flags, flags))
     }
 
@@ -187,5 +175,113 @@ fn bazelrc_methods(registry: &mut MethodsBuilder) {
             result.push(eval.heap().alloc(p.display().to_string()));
         }
         Ok(result)
+    }
+}
+
+/// Split an expanded option list into `(default_override_flags, regular_flags)`.
+///
+/// `common` section options are converted to `--default_override=0:common=<value>` strings and
+/// returned first so they appear before user-specified flags in the final `flags` output.
+/// This preserves last-write-wins semantics: user flags (which come later) override the defaults.
+///
+/// Each entry is `(value, version_condition)` so that version-gated options retain their
+/// semver constraint and are not silently promoted to unconditional flags.
+fn partition_expand_all(
+    opts: &[bazelrc::RcOption],
+) -> (Vec<(String, Option<String>)>, Vec<(String, Option<String>)>) {
+    let mut default_override_flags = Vec::new();
+    let mut flags = Vec::new();
+    for opt in opts {
+        let base = opt.command.split(':').next().unwrap_or(&opt.command);
+        if base == "common" {
+            default_override_flags.push((
+                format!("--default_override=0:common={}", opt.value),
+                opt.version_condition.clone(),
+            ));
+        } else {
+            flags.push((opt.value.clone(), opt.version_condition.clone()));
+        }
+    }
+    (default_override_flags, flags)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use bazelrc::{BazelRC, RcOption};
+    use tempfile::tempdir;
+
+    use super::partition_expand_all;
+
+    const ISOLATE: &[&str] = &["--nosystem_rc", "--nohome_rc"];
+
+    fn cli_flag(value: &str) -> RcOption {
+        RcOption {
+            value: value.to_string(),
+            command: "always".to_string(),
+            ..RcOption::default()
+        }
+    }
+
+    // ── expand_all ordering (Bug #2) ─────────────────────────────────────────
+
+    #[test]
+    fn default_override_flags_precede_user_flags() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            "common --remote_cache=grpc://cache\nbuild --jobs=4\n",
+        )
+        .unwrap();
+
+        // Simulate a user passing a CLI flag; it is stored as `always`.
+        let rc = BazelRC::new(root, ISOLATE, &[cli_flag("--user-flag")]).unwrap();
+        let opts = rc.expand_configs("build", &[]).unwrap();
+
+        let (overrides, regular) = partition_expand_all(&opts);
+
+        // --default_override flags must all appear before any regular flag so
+        // that user-specified flags (coming later) take precedence.
+        let all: Vec<&str> = overrides
+            .iter()
+            .chain(regular.iter())
+            .map(|(value, _)| value.as_str())
+            .collect();
+
+        let first_override = all
+            .iter()
+            .position(|s| s.starts_with("--default_override"))
+            .expect("--default_override flag missing");
+        let first_user = all
+            .iter()
+            .position(|s| *s == "--user-flag")
+            .expect("--user-flag missing");
+
+        assert!(
+            first_override < first_user,
+            "--default_override must come before user-specified flags; got: {all:?}"
+        );
+    }
+
+    #[test]
+    fn common_flags_become_default_override_entries() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".bazelrc"), "common --foo\ncommon --bar\n").unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &[]).unwrap();
+        let opts = rc.expand_configs("build", &[]).unwrap();
+        let (overrides, regular) = partition_expand_all(&opts);
+
+        assert_eq!(
+            overrides,
+            vec![
+                ("--default_override=0:common=--foo".to_string(), None),
+                ("--default_override=0:common=--bar".to_string(), None),
+            ]
+        );
+        assert!(regular.is_empty());
     }
 }
