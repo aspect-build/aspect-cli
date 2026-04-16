@@ -1,8 +1,10 @@
 use std::fmt;
 use std::fmt::Debug;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 use allocative::Allocative;
 use base64::{
@@ -58,6 +60,8 @@ impl<'v> values::StarlarkValue<'v> for SleepIter {
     }
     unsafe fn iter_stop(&self) {}
 }
+
+static MONOTONIC_EPOCH: OnceLock<Instant> = OnceLock::new();
 
 const STD_MARKER: &str = "#_is_std#";
 
@@ -260,6 +264,22 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
             counter: AtomicU64::new(0),
         })
     }
+
+    fn monotonic(this: Value<'_>) -> anyhow::Result<f64> {
+        let _ = this;
+        Ok(MONOTONIC_EPOCH
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_secs_f64())
+    }
+
+    fn monotonic_ns(this: Value<'_>) -> anyhow::Result<i64> {
+        let _ = this;
+        Ok(MONOTONIC_EPOCH
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_nanos() as i64)
+    }
 }
 
 #[starlark_module]
@@ -359,5 +379,153 @@ ticks
         )
         .unwrap();
         assert_eq!(result, "[0, 1, 2]");
+    }
+
+    #[test]
+    fn monotonic_returns_float() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "monotonic")
+t = monotonic()
+type(t) == "float"
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_is_non_decreasing() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "monotonic")
+t1 = monotonic()
+t2 = monotonic()
+t2 >= t1
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_ns_returns_int() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "monotonic_ns")
+t = monotonic_ns()
+type(t) == "int"
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_ns_is_non_decreasing() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "monotonic_ns")
+t1 = monotonic_ns()
+t2 = monotonic_ns()
+t2 >= t1
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_via_time_struct() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "time")
+type(time.monotonic()) == "float"
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_ns_via_time_struct() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "time")
+type(time.monotonic_ns()) == "int"
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_is_positive() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "monotonic")
+monotonic() > 0.0
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_ns_is_positive() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "monotonic_ns")
+monotonic_ns() > 0
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_advances_after_sleep() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "monotonic", "sleep")
+t1 = monotonic()
+sleep(10)
+t2 = monotonic()
+t2 - t1 >= 0.01
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_ns_advances_after_sleep() {
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "monotonic_ns", "sleep")
+t1 = monotonic_ns()
+sleep(10)
+t2 = monotonic_ns()
+t2 - t1 >= 10000000
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
+    }
+
+    #[test]
+    fn monotonic_ns_consistent_with_monotonic() {
+        // monotonic_ns should be within 1 second of monotonic() * 1e9
+        let result = eval_expr(
+            r#"
+load("@std//time.axl", "monotonic", "monotonic_ns")
+s = monotonic()
+ns = monotonic_ns()
+diff = ns - int(s * 1000000000)
+diff > -1000000000 and diff < 1000000000
+"#,
+        )
+        .unwrap();
+        assert_eq!(result, "True");
     }
 }
