@@ -173,14 +173,35 @@ impl BazelRC {
 
     /// Return all options applicable to `command`, respecting Bazel's command inheritance.
     ///
-    /// Order: `always` + `common` + ancestor commands (general → specific) + `<command>`.
-    /// For example, `options_for("test")` returns `always` + `common` + `build` + `test`.
+    /// Order: RC-file `always` + `common` + ancestor commands (general → specific) +
+    /// `<command>` + CLI-provided flags.
+    ///
+    /// CLI-provided flags (those passed via the `flags` parameter to `BazelRC::new`, stored as
+    /// `always` with source `"<command line>"`) are placed **last** so that any `--config=`
+    /// flags they carry expand after all RC-file flags.  This matches Bazel's own semantics
+    /// where command-line flags override `.bazelrc` defaults under last-write-wins.
+    ///
+    /// For example, `options_for("test")` returns:
+    ///   `always` (rc-file) + `common` + `build` + `test` + `always` (cli)
     pub fn options_for(&self, command: &str) -> Vec<&RcOption> {
+        // CLI-provided flags live in the "always" bucket but with source "<command line>".
+        // We need to separate them so they can be appended last.
+        let cli_source_idx = self
+            .sources
+            .iter()
+            .position(|p| p.as_path() == std::path::Path::new("<command line>"));
+
         let mut result = Vec::new();
-        for key in ["always", "common"] {
-            if let Some(opts) = self.options.get(key) {
-                result.extend(opts.iter());
-            }
+        // RC-file always flags first (not from the synthetic CLI source)
+        if let Some(opts) = self.options.get("always") {
+            result.extend(
+                opts.iter()
+                    .filter(|o| cli_source_idx.map_or(true, |cli_idx| o.source_index != cli_idx)),
+            );
+        }
+        // common, then ancestor commands, then the command itself
+        if let Some(opts) = self.options.get("common") {
+            result.extend(opts.iter());
         }
         for ancestor in command_ancestors(command) {
             if let Some(opts) = self.options.get(*ancestor) {
@@ -189,6 +210,12 @@ impl BazelRC {
         }
         if let Some(opts) = self.options.get(command) {
             result.extend(opts.iter());
+        }
+        // CLI-provided flags last — they must override all RC-file flags
+        if let Some(cli_idx) = cli_source_idx {
+            if let Some(opts) = self.options.get("always") {
+                result.extend(opts.iter().filter(|o| o.source_index == cli_idx));
+            }
         }
         result
     }
@@ -511,7 +538,13 @@ mod tests {
         fs::write(&c, format!("import {}\n", d.display())).unwrap();
         fs::write(
             &a,
-            format!("import {}\nimport {}\n", b.display(), c.display()),
+            format!(
+                r#"import {}
+import {}
+"#,
+                b.display(),
+                c.display()
+            ),
         )
         .unwrap();
 
@@ -533,7 +566,10 @@ mod tests {
         let rc_path = root.join(".bazelrc");
         fs::write(
             &rc_path,
-            "build:opt --copt=-O2\nbuild:opt --compilation_mode=opt\n",
+            r#"
+build:opt --copt=-O2
+build:opt --compilation_mode=opt
+"#,
         )
         .unwrap();
 
@@ -548,7 +584,14 @@ mod tests {
         let dir = make_workspace();
         let root = dir.path();
         let rc_path = root.join(".bazelrc");
-        fs::write(&rc_path, "build:a --config=b\nbuild:b --config=a\n").unwrap();
+        fs::write(
+            &rc_path,
+            r#"
+build:a --config=b
+build:b --config=a
+"#,
+        )
+        .unwrap();
 
         let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=a"])).unwrap();
         let err = rc.expand_configs("build", &[]).unwrap_err();
@@ -607,7 +650,11 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "always --always-flag\ncommon --common-flag\nbuild --build-flag\n",
+            r#"
+always --always-flag
+common --common-flag
+build --build-flag
+"#,
         )
         .unwrap();
 
@@ -626,7 +673,11 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "build --jobs=8\nbuild --remote_cache=grpc://cache\ntest --test_output=errors\n",
+            r#"
+build --jobs=8
+build --remote_cache=grpc://cache
+test --test_output=errors
+"#,
         )
         .unwrap();
 
@@ -653,7 +704,11 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "build:opt --compilation_mode=opt\ntest:opt --test_output=errors\ntest --config=opt\n",
+            r#"
+build:opt --compilation_mode=opt
+test:opt --test_output=errors
+test --config=opt
+"#,
         )
         .unwrap();
 
@@ -688,13 +743,14 @@ mod tests {
         )
         .unwrap();
 
-        // CLI flags appear at the front of options_for (as always opts)
+        // CLI flags appear at the END of options_for so they can override RC-file flags
+        // under last-write-wins semantics (matches Bazel's CLI-overrides-RC behavior).
         let opts: Vec<&str> = rc
             .options_for("build")
             .iter()
             .map(|o| o.value.as_str())
             .collect();
-        assert_eq!(opts, vec!["--config=foo", "--verbose_failures", "--jobs=4"]);
+        assert_eq!(opts, vec!["--jobs=4", "--config=foo", "--verbose_failures"]);
 
         // Source of CLI flags is the synthetic "<command line>" entry
         let always = rc.raw_options("always");
@@ -729,7 +785,10 @@ mod tests {
         fs::write(
             &main_rc,
             format!(
-                "build --jobs=4\ntry-import-if-bazel-version >=8.0.0 {}\n",
+                r#"
+build --jobs=4
+try-import-if-bazel-version >=8.0.0 {}
+"#,
                 versioned.display()
             ),
         )
@@ -767,7 +826,10 @@ mod tests {
         let main_rc = root.join(".bazelrc");
         fs::write(
             &main_rc,
-            "build --jobs=4\ntry-import-if-bazel-version >=8.0.0 /nonexistent/path.bazelrc\n",
+            r#"
+build --jobs=4
+try-import-if-bazel-version >=8.0.0 /nonexistent/path.bazelrc
+"#,
         )
         .unwrap();
 
@@ -791,7 +853,11 @@ mod tests {
         fs::write(
             root.join(".bazelrc"),
             format!(
-                "build --jobs=4\ntry-import-if-bazel-version >=8.0.0 {}\nbuild --remote_cache=grpc://cache\n",
+                r#"
+build --jobs=4
+try-import-if-bazel-version >=8.0.0 {}
+build --remote_cache=grpc://cache
+"#,
                 versioned.display()
             ),
         )
@@ -891,7 +957,10 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "build --jobs=4\nbuild --verbose_failures\n",
+            r#"
+build --jobs=4
+build --verbose_failures
+"#,
         )
         .unwrap();
 
@@ -910,7 +979,10 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "startup --max_idle_secs=60\nbuild --jobs=4\n",
+            r#"
+startup --max_idle_secs=60
+build --jobs=4
+"#,
         )
         .unwrap();
 
@@ -952,7 +1024,9 @@ mod tests {
         // Two separate build options joined by line continuation within a single directive
         fs::write(
             root.join(".bazelrc"),
-            "build --jobs=4 \\\n  --verbose_failures\n",
+            r#"build --jobs=4 \
+  --verbose_failures
+"#,
         )
         .unwrap();
 
@@ -978,7 +1052,12 @@ mod tests {
 
         fs::write(
             root.join(".bazelrc"),
-            format!("import {}\nbuild --local-bar\n", foo.display()),
+            format!(
+                r#"import {}
+build --local-bar
+"#,
+                foo.display()
+            ),
         )
         .unwrap();
 
@@ -1002,7 +1081,12 @@ mod tests {
 
         fs::write(
             root.join(".bazelrc"),
-            format!("build --local-bar\nimport {}\n", foo.display()),
+            format!(
+                r#"build --local-bar
+import {}
+"#,
+                foo.display()
+            ),
         )
         .unwrap();
 
@@ -1128,7 +1212,10 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "build:a --config=b\nbuild:b --deep-flag\n",
+            r#"
+build:a --config=b
+build:b --deep-flag
+"#,
         )
         .unwrap();
 
@@ -1150,7 +1237,12 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "build:opt --config-flag\nbuild --non-config-before\nbuild --config=opt\nbuild --non-config-after\n",
+            r#"
+build:opt --config-flag
+build --non-config-before
+build --config=opt
+build --non-config-after
+"#,
         )
         .unwrap();
 
@@ -1178,7 +1270,12 @@ mod tests {
 
         fs::write(
             root.join(".bazelrc"),
-            format!("build:opt --flag=from-first\nimport {}\n", second.display()),
+            format!(
+                r#"build:opt --flag=from-first
+import {}
+"#,
+                second.display()
+            ),
         )
         .unwrap();
 
@@ -1186,19 +1283,7 @@ mod tests {
         let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
 
-        let first_pos = values
-            .iter()
-            .position(|s| *s == "--flag=from-first")
-            .expect("--flag=from-first missing");
-        let second_pos = values
-            .iter()
-            .position(|s| *s == "--flag=from-second")
-            .expect("--flag=from-second missing");
-
-        assert!(
-            first_pos < second_pos,
-            "flag from first file must precede flag from second file; got: {values:?}"
-        );
+        assert_eq!(values, vec!["--flag=from-first", "--flag=from-second"]);
     }
 
     #[test]
@@ -1210,7 +1295,13 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "build:foo --foo-flag\nbuild:bar --bar-flag\nbuild --non-config\nbuild --config=foo\nbuild --config=bar\n",
+            r#"
+build:foo --foo-flag
+build:bar --bar-flag
+build --non-config
+build --config=foo
+build --config=bar
+"#,
         )
         .unwrap();
 
@@ -1218,18 +1309,7 @@ mod tests {
         let expanded = rc.expand_configs("build", &[]).unwrap();
         let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
 
-        let non_config_pos = values.iter().position(|s| *s == "--non-config").unwrap();
-        let foo_pos = values.iter().position(|s| *s == "--foo-flag").unwrap();
-        let bar_pos = values.iter().position(|s| *s == "--bar-flag").unwrap();
-
-        assert!(
-            non_config_pos < foo_pos,
-            "--non-config must precede --foo-flag; got: {values:?}"
-        );
-        assert!(
-            foo_pos < bar_pos,
-            "--foo-flag must precede --bar-flag (config order preserved); got: {values:?}"
-        );
+        assert_eq!(values, vec!["--non-config", "--foo-flag", "--bar-flag"]);
     }
 
     #[test]
@@ -1264,7 +1344,10 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "common --config=foo\nbuild:foo --foo-flag\n",
+            r#"
+common --config=foo
+build:foo --foo-flag
+"#,
         )
         .unwrap();
 
@@ -1281,7 +1364,10 @@ mod tests {
         let root = dir.path();
         fs::write(
             root.join(".bazelrc"),
-            "always --config=foo\nbuild:foo --foo-flag\n",
+            r#"
+always --config=foo
+build:foo --foo-flag
+"#,
         )
         .unwrap();
 
@@ -1371,5 +1457,71 @@ mod tests {
         assert_eq!(expanded[0].value, "--sandbox_default_allow_network=false");
         // Inherited from the versioned config section
         assert_eq!(expanded[0].version_condition.as_deref(), Some(">=8.0.0"));
+    }
+
+    // ── CLI --config= overrides unconditional common flags (Bug #3) ──────────
+
+    #[test]
+    fn cli_config_overrides_common_flag() {
+        // When --config=ci is passed as a CLI flag (via the flags parameter), the ci-specific
+        // flags must appear AFTER the unconditional common flags so they win under
+        // last-write-wins — matching Bazel's CLI-overrides-RC semantics.
+        //
+        // Regression test for the monopi remote_timeout bug:
+        //   common --remote_timeout=600          ← RC default
+        //   common:ci --remote_timeout=3600      ← CI override
+        // With --config=ci, 3600 must win.
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            r#"
+common --remote_timeout=600
+common:ci --remote_timeout=3600
+"#,
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=ci"])).unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+
+        // 600 (RC default) first, 3600 (CI override) last — so 3600 wins
+        assert_eq!(
+            values,
+            vec!["--remote_timeout=600", "--remote_timeout=3600"],
+        );
+    }
+
+    #[test]
+    fn cli_config_modify_execution_info_order() {
+        // Regression test for the monopi Tar caching bug:
+        //   common --modify_execution_info=Tar=+no-remote-cache   ← local default
+        //   common:ci --modify_execution_info=Tar=-no-remote-cache ← CI override (allow hits)
+        // With --config=ci, the `-` (remove) must come AFTER the `+` (add) so
+        // Tar actions get remote-cache hits on CI.
+        let dir = make_workspace();
+        let root = dir.path();
+        fs::write(
+            root.join(".bazelrc"),
+            r#"
+common --modify_execution_info=Tar=+no-remote-cache
+common:ci --modify_execution_info=Tar=-no-remote-cache
+"#,
+        )
+        .unwrap();
+
+        let rc = BazelRC::new(root, ISOLATE, &flags(&["--config=ci"])).unwrap();
+        let expanded = rc.expand_configs("build", &[]).unwrap();
+        let values: Vec<&str> = expanded.iter().map(|o| o.value.as_str()).collect();
+
+        // `+` (local default) first, `-` (CI override, allows cache hits) last
+        assert_eq!(
+            values,
+            vec![
+                "--modify_execution_info=Tar=+no-remote-cache",
+                "--modify_execution_info=Tar=-no-remote-cache",
+            ],
+        );
     }
 }
