@@ -1,4 +1,6 @@
 load("./lambda.axl", "lambda_with_global_bind")
+load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
 
 def _user_task_impl(ctx: TaskContext) -> int:
     print("I am a task added by .aspect/config.axl")
@@ -18,8 +20,15 @@ def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
 
+    # enable Github Status Checks
+    ctx.features[GithubStatusChecks].enabled = True
+
     # add a new task
     ctx.tasks.add(_user_task)
+
+    # Template snapshot tests — renders bazel_results templates across failure modes.
+    # Run with: aspect test-template-snapshots
+    ctx.tasks.add(template_snapshot_tests)
 
     # configure user_task's attrs by path (group/name).
     t = ctx.tasks["user/nested/user-task"]
@@ -27,3 +36,41 @@ def config(ctx: ConfigContext):
     t.args.run_count = 2
     t.args.customize_message = lambda s: _customize_message(s, "!")
 
+    testing = ctx.std.env.var("ASPECT_CLI_TESTING")
+
+    # github_status_checks: Simulate a GitHub Actions CI environment so that the
+    # GithubStatusChecks feature creates real check runs during local testing.
+    # github.authenticate() uses Aspect CLI login credentials to obtain a GitHub
+    # App token — no GITHUB_TOKEN needed. GITHUB_SHA is auto-detected from git.
+    #
+    # Usage:
+    #   ASPECT_CLI_TESTING=github_status_checks aspect build //...
+    if testing == "github_status_checks":
+        ctx.std.env.set_var("CI", "true")
+        ctx.std.env.set_var("GITHUB_ACTIONS", "true")
+        if not ctx.std.env.var("GITHUB_ACTOR"):
+            ctx.std.env.set_var("GITHUB_ACTOR", ctx.std.env.var("USER") or "local-test")
+        if not ctx.std.env.var("GITHUB_EVENT_NAME"):
+            ctx.std.env.set_var("GITHUB_EVENT_NAME", "workflow_dispatch")
+        if not ctx.std.env.var("GITHUB_SHA"):
+            result = ctx.std.process.command("git").args(["rev-parse", "HEAD"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+            if result.status.code == 0:
+                ctx.std.env.set_var("GITHUB_SHA", result.stdout.strip())
+        # Fake a real GitHub Actions run URL for local testing of CI link rendering.
+        if not ctx.std.env.var("GITHUB_SERVER_URL"):
+            ctx.std.env.set_var("GITHUB_SERVER_URL", "https://github.com")
+        if not ctx.std.env.var("GITHUB_REPOSITORY"):
+            ctx.std.env.set_var("GITHUB_REPOSITORY", "aspect-build/aspect-cli")
+        if not ctx.std.env.var("GITHUB_RUN_ID"):
+            ctx.std.env.set_var("GITHUB_RUN_ID", "24410554652")
+
+        ctx.features[GithubStatusChecks].args.enabled = True
+
+        print("[ASPECT_CLI_TESTING=github_status_checks] Simulating GitHub Actions CI environment:")
+        print("  CI                = " + (ctx.std.env.var("CI") or ""))
+        print("  GITHUB_ACTIONS    = " + (ctx.std.env.var("GITHUB_ACTIONS") or ""))
+        print("  GITHUB_ACTOR      = " + (ctx.std.env.var("GITHUB_ACTOR") or ""))
+        print("  GITHUB_EVENT_NAME = " + (ctx.std.env.var("GITHUB_EVENT_NAME") or ""))
+        print("  GITHUB_SHA        = " + (ctx.std.env.var("GITHUB_SHA") or "(not set — check run will be skipped)"))
+        print("  GITHUB_REPOSITORY = " + (ctx.std.env.var("GITHUB_REPOSITORY") or ""))
+        print("  GITHUB_RUN_ID     = " + (ctx.std.env.var("GITHUB_RUN_ID") or ""))

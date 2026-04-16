@@ -2,6 +2,75 @@
 
 load("./bazel.axl", "default_retry")
 
+
+# Structured update passed to task_update hooks.
+#
+# Mandatory fields (always present):
+#   progress: str — human-readable status message; may be "" if there is nothing to say
+#   status:   str — "running" | "failing" | "passed" | "failed"
+#   kind:     str — discriminator for the data payload (see below)
+#
+# "passed" and "failed" are terminal — the task is done. Features should complete
+# their output (e.g. close a check run) on these statuses.
+# "failing" means the task is still running but has already accumulated failures.
+#
+# data payload — contents depend on kind:
+#   kind="progress"      — data is {} (progress+status are sufficient)
+#   kind="bazel_results" — data contains:
+#     "results": dict    — accumulated results from bazel_results.init_results()
+#
+TaskUpdate = record(
+    progress = field(str, default = ""),
+    status   = field(str, default = "running"),
+    kind     = field(str, default = "progress"),
+    data     = field(dict, default = {}),
+)
+
+
+# Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
+# to observe task progress without coupling to Bazel-specific hooks.
+TaskLifecycleTrait = trait(
+    # Called once at the start of the task. Features should create their status
+    # check here. Receives (ctx, subject: str) where subject is a human-readable
+    # description of what the task is operating on (e.g. "//app/..." for a build,
+    # "production" for a deploy). Pass "" if unused.
+    # Features close over their own state dict rather than receiving one.
+    task_started = attr(list[typing.Callable[[TaskContext, str], None]], default = []),
+
+    # Called to push a structured update during the task. Receives (ctx, update: TaskUpdate).
+    task_update = attr(list[typing.Callable[[TaskContext, TaskUpdate], None]], default = []),
+
+    # Called once when the task finishes. Receives (ctx, exit_code: int).
+    task_complete = attr(list[typing.Callable[[TaskContext, int], None]], default = []),
+)
+
+
+# Configures the GitHub status check output templates for a task.
+# By default the GithubStatusChecks feature uses its built-in Jinja2 templates.
+# Operators can override individual templates in their config.axl:
+#
+#   def config(ctx: ConfigContext):
+#       gh = ctx.traits[GitHubStatusChecksTrait]
+#       gh.templates["summary"] = """my custom {{ status_label }} template"""
+#
+# Available template keys: "summary", "details"
+GitHubStatusChecksTrait = trait(
+    # Map of template overrides. Empty dict → use feature defaults.
+    templates = attr(dict, default = {}),
+
+    # Additional BES build_metadata keys to surface in the check run summary,
+    # beyond the built-in set (BRANCH, COMMIT_SHA, TAG, COMMIT_MESSAGE).
+    #
+    # Use ["*"] to show ALL metadata keys from the BES stream.
+    # Users inject custom keys via --bes_metadata=MY_KEY=value or
+    # --build_metadata=MY_KEY=value on their Bazel invocation.
+    #
+    # Example — show a custom deploy environment and workspace name:
+    #   gh.metadata_keys = ["DEPLOY_ENV", "WORKSPACE"]
+    metadata_keys = attr(list[str], default = []),
+)
+
+
 BazelTrait = trait(
     # Declarative data — composable, zero-cost reads
     extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation"),
@@ -24,6 +93,22 @@ BazelTrait = trait(
 HealthCheckTrait = trait(
     pre_health_check = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called before the build to validate preconditions (e.g. auth, connectivity)"),
     post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks called after the build; return a non-None string to report a warning"),
+)
+
+
+ArtifactsTrait = trait(
+    # Set by ArtifactUpload after the first successful testlogs upload.
+    # {url: str, name: str} — url points to where test logs can be viewed/downloaded.
+    # url is CI-specific: GitHub run page, Buildkite build page, etc.
+    # Stays as {} if ArtifactUpload is disabled or no upload has completed yet.
+    testlogs_artifact = attr(dict, default = {}),
+
+    # Per-label download URLs for individual test log files.
+    # Set by ArtifactUpload on per-file upload CI platforms (CircleCI, GitLab).
+    # {} on GitHub/Buildkite where only a single archive is uploaded.
+    # Key: Bazel target label (e.g. "//foo:bar_test")
+    # Value: stable direct download URL for the test.log file
+    testlogs_label_urls = attr(dict, default = {}),
 )
 
 

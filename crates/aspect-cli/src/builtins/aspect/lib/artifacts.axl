@@ -82,7 +82,8 @@ def _upload_file_gitlab(ctx, path, name):
 
     if resp.status < 200 or resp.status >= 300:
         return {"success": False, "artifact_ref": None, "errors": ["HTTP " + str(resp.status)]}
-    return {"success": True, "artifact_ref": name, "errors": []}
+    # The upload URL is also the stable download URL — return it so callers can link to the file.
+    return {"success": True, "artifact_ref": url, "errors": []}
 
 
 _gitlab = struct(
@@ -198,9 +199,15 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
 
     new_entries = entries[group["last_count"]:]
     any_success = False
+    if "label_urls" not in group:
+        group["label_urls"] = {}
     for entry in new_entries:
         result = provider.upload_artifact(ctx, entry["src"], name + "/" + entry["dest"])
         if result["success"]:
+            # Accumulate per-label download URLs when the provider returns an http URL.
+            url = result.get("artifact_ref", "")
+            if url and url.startswith("http"):
+                group["label_urls"][entry["label"]] = url
             group["last_count"] += 1
             any_success = True
         else:

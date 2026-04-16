@@ -1,0 +1,297 @@
+"""Snapshot tests for bazel_results template rendering.
+
+Run with:
+  ASPECT_CLI_TESTING=template_snapshots aspect test-template-snapshots
+
+Each scenario prints TITLE, SUMMARY, and the first 3000 chars of DETAILS.
+Inspect the output to verify rendering is correct across failure modes.
+
+Scenarios covered:
+  1. all-passed  — fully cached test run, all green
+  2. failed      — build action failure + multiple test failures
+  3. flaky       — flaky tests with Bazel exiting 0
+  4. failing     — live "mid-build" state with some failures already seen
+  5. aborted     — build aborted mid-stream
+  6. large       — many targets/tests (exercises the trim cascade)
+"""
+load("./bazel_results.axl", "render_check_output", "init_results")
+
+
+# ---------------------------------------------------------------------------
+# Fake data builders
+# ---------------------------------------------------------------------------
+
+def _make_results_passed():
+    """All tests passed, most cached. Clean successful run."""
+    r = init_results()
+    r["invocation_id"]     = "abc12345-def4-5678-9abc-def012345678"
+    r["build_tool_version"] = "9.0.1"
+    r["build_command"]     = "test"
+    r["start_time_ms"]     = 1744630000000
+    r["wall_time_ms"]      = 2200
+    r["cpu_time_ms"]       = 8100
+    r["actions_executed"]  = 5
+    r["actions_cached"]    = 136
+    r["actions_total"]     = 141
+    r["targets_total"]     = 141
+    r["targets_configured"] = 156
+    r["packages_loaded"]   = 42
+    r["num_analyses"]      = 9
+    r["num_builds"]        = 19
+    r["cpu_arch"]          = "k8"
+    r["compilation_mode"]  = "fastbuild"
+    r["passed_test_total"] = 24
+    r["cached_test_total"] = 24
+    r["executed_test_total"] = 0
+    r["workspace_status"]  = {"BUILD_USER": "testuser", "BUILD_HOST": "ci-runner-01"}
+    r["metadata"]          = {
+        "BRANCH": "main",
+        "COMMIT_SHA": "abc123def456789abcdef",
+        "COMMIT_MESSAGE": "feat: add invocation metadata to status checks",
+    }
+    r["passed_tests"] = [
+        {"label": "//pkg/alpha:test",   "cached": True,  "duration_ms": 0},
+        {"label": "//pkg/beta:test",    "cached": True,  "duration_ms": 0},
+        {"label": "//pkg/gamma:test",   "cached": False, "duration_ms": 1200},
+        {"label": "//pkg/delta:test",   "cached": True,  "duration_ms": 0},
+        {"label": "//pkg/epsilon:test", "cached": True,  "duration_ms": 0},
+    ]
+    r["built_targets"] = [
+        {"label": "//pkg/alpha:lib"},
+        {"label": "//pkg/beta:lib"},
+        {"label": "//pkg/gamma:server"},
+    ]
+    r["sink_invocation_ids"] = ["sink-uuid-1234-5678-9abc"]
+    r["command_lines"] = {
+        "original command line": "bazel --noworkspace_rc test //...",
+        "canonical command line": "bazel --noworkspace_rc test //... --isatty=1 --keep_going --test_output=errors",
+    }
+    return r
+
+
+def _make_results_failed():
+    """Build action failure + multiple test failures. Most common failure mode."""
+    r = init_results()
+    r["invocation_id"]     = "dead1234-beef-cafe-babe-123456789abc"
+    r["build_tool_version"] = "9.0.1"
+    r["build_command"]     = "test"
+    r["wall_time_ms"]      = 45000
+    r["cpu_time_ms"]       = 120000
+    r["actions_executed"]  = 50
+    r["actions_cached"]    = 80
+    r["actions_total"]     = 130
+    r["targets_total"]     = 80
+    r["failed_actions_total"] = 1
+    r["failed_actions"] = [{
+        "label":            "//pkg/broken:lib",
+        "mnemonic":         "CppCompile",
+        "stderr_uri":       "",
+        "stderr_content":   "pkg/broken/foo.cc:10:5: error: use of undeclared identifier 'compute'\n  int x = compute(input);\n          ^\n1 error generated.",
+        "stderr_truncated": 0,
+    }]
+    r["failed_test_total"] = 3
+    r["failed_tests"] = [
+        {"label": "//pkg/a:test", "cached": False, "duration_ms": 5000},
+        {"label": "//pkg/b:test", "cached": False, "duration_ms": 12000},
+        {"label": "//pkg/c:test", "cached": False, "duration_ms": 800},
+    ]
+    r["passed_test_total"] = 21
+    r["cached_test_total"] = 18
+    r["executed_test_total"] = 3
+    r["passed_tests"] = [
+        {"label": "//pkg/d:test", "cached": True,  "duration_ms": 0},
+        {"label": "//pkg/e:test", "cached": False, "duration_ms": 3200},
+    ]
+    r["workspace_status"] = {"BUILD_USER": "ci-bot", "BUILD_HOST": "runner-2"}
+    r["metadata"] = {
+        "BRANCH": "feature/new-api",
+        "COMMIT_SHA": "deadbeef12345678abcdef",
+        "COMMIT_MESSAGE": "wip: refactor compute() — BROKEN",
+    }
+    r["build_repro"] = "bazel build //pkg/broken:lib"
+    r["test_repro"]  = "bazel test //pkg/a:test //pkg/b:test //pkg/c:test"
+    return r
+
+
+def _make_results_flaky():
+    """Flaky tests — Bazel exits 0 but test_summary reports FLAKY overall_status."""
+    r = init_results()
+    r["invocation_id"]     = "f1a4e512-3456-7890-abcd-ef0123456789"
+    r["build_tool_version"] = "9.0.1"
+    r["build_command"]     = "test"
+    r["wall_time_ms"]      = 30000
+    r["cpu_time_ms"]       = 90000
+    r["actions_executed"]  = 10
+    r["actions_cached"]    = 120
+    r["actions_total"]     = 130
+    r["targets_total"]     = 60
+    r["flaky_test_total"]  = 2
+    r["flaky_tests"] = [
+        {"label": "//flaky:timing_test",   "cached": False, "duration_ms": 8000},
+        {"label": "//flaky:network_test",  "cached": False, "duration_ms": 4000},
+    ]
+    r["passed_test_total"] = 20
+    r["cached_test_total"] = 18
+    r["executed_test_total"] = 4
+    r["passed_tests"] = [
+        {"label": "//pkg/ok:unit_test", "cached": True,  "duration_ms": 0},
+        {"label": "//pkg/ok:e2e_test",  "cached": False, "duration_ms": 6200},
+    ]
+    r["workspace_status"] = {"BUILD_USER": "developer", "BUILD_HOST": "laptop-01"}
+    r["metadata"] = {
+        "BRANCH": "main",
+        "COMMIT_SHA": "cafebabe9876543210fedcba",
+    }
+    return r
+
+
+def _make_results_failing_live():
+    """Mid-build state: some failures already recorded, build still running.
+
+    This simulates the status check update emitted when process_event returns
+    True for a failing test_summary while the build is still streaming events.
+    """
+    r = init_results()
+    r["invocation_id"]     = "11111111-2222-3333-4444-555555555555"
+    r["build_tool_version"] = "9.0.1"
+    r["build_command"]     = "test"
+    # wall_time_ms is 0 because build_metrics hasn't arrived yet
+    r["wall_time_ms"]      = 0
+    r["actions_executed"]  = 30
+    r["actions_cached"]    = 80
+    r["actions_total"]     = 110
+    r["targets_total"]     = 45
+    r["failed_test_total"] = 1
+    r["failed_tests"] = [
+        {"label": "//pkg/slow:integration_test", "cached": False, "duration_ms": 14000},
+    ]
+    r["passed_test_total"] = 5
+    r["cached_test_total"] = 5
+    r["metadata"] = {"BRANCH": "main"}
+    return r
+
+
+def _make_results_aborted():
+    """Build aborted mid-stream (e.g. Ctrl-C or OOM)."""
+    r = init_results()
+    r["invocation_id"]   = "abort123-4567-89ab-cdef-012345678901"
+    r["build_command"]   = "build"
+    r["wall_time_ms"]    = 8500
+    r["actions_executed"] = 12
+    r["actions_cached"]  = 30
+    r["actions_total"]   = 42
+    r["targets_total"]   = 20
+    r["aborted"]         = True
+    r["abort_reason"]    = "user_interrupt"
+    r["abort_description"] = "Build interrupted by user"
+    r["metadata"] = {"BRANCH": "main", "COMMIT_SHA": "aabbccdd11223344"}
+    return r
+
+
+def _make_results_large():
+    """Large build: many targets and tests (tests the trim cascade in render_check_output)."""
+    r = init_results()
+    r["build_command"]     = "test"
+    r["wall_time_ms"]      = 180000
+    r["cpu_time_ms"]       = 900000
+    r["actions_executed"]  = 500
+    r["actions_cached"]    = 2000
+    r["actions_total"]     = 2500
+    r["targets_total"]     = 600
+    r["passed_test_total"] = 200
+    r["cached_test_total"] = 180
+    for i in range(200):
+        r["passed_tests"].append({
+            "label":       "//generated/pkg_" + str(i) + ":test",
+            "cached":      i % 10 != 0,
+            "duration_ms": (i % 5 + 1) * 1000,
+        })
+    r["failed_test_total"] = 2
+    r["failed_tests"] = [
+        {"label": "//generated/pkg_42:test",  "cached": False, "duration_ms": 5000},
+        {"label": "//generated/pkg_137:test", "cached": False, "duration_ms": 3000},
+    ]
+    for i in range(600):
+        r["built_targets"].append({"label": "//generated/pkg_" + str(i // 3) + ":lib_" + str(i % 3)})
+    r["command_lines"] = {
+        "canonical command line": "bazel --noworkspace_rc test //... --isatty=1 --keep_going --test_output=errors --bes_backend=grpcs://api.aspect.build --bes_results_url=https://app.aspect.build/invocations/ --build_metadata=COMMIT_SHA=abc123 --build_metadata=BRANCH=main --build_metadata=USER=ci --build_metadata=CI=true",
+    }
+    r["metadata"] = {"BRANCH": "main"}
+    return r
+
+
+# ---------------------------------------------------------------------------
+# Shared render context and links
+# ---------------------------------------------------------------------------
+
+def _render_ctx(targets = "//..."):
+    return {
+        "triggered_by": "ci-bot (workflow_dispatch)",
+        "targets":      targets,
+        "started_ms":   1744630000000,
+        "ended_ms":     1744630002200,
+        "progress":     "",
+    }
+
+
+def _links(with_artifact = False):
+    d = {
+        "ci_label":              "GitHub Actions",
+        "ci_url":                "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652",
+        "aspect_url":            "",
+        "results_base_url":      "",
+        "testlogs_artifact_url":  "",
+        "testlogs_artifact_name": "",
+    }
+    if with_artifact:
+        d["testlogs_artifact_url"]  = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652"
+        d["testlogs_artifact_name"] = "test.local-build.testlogs-v3"
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Test task
+# ---------------------------------------------------------------------------
+
+def _test_impl(ctx):
+    """Render each scenario and print TITLE + SUMMARY + first 3000 chars of DETAILS."""
+
+    scenarios = [
+        # (label, results, status, render_targets, use_artifact_link)
+        ("1. all-passed",    _make_results_passed(),        "passed",  "//...",   True),
+        ("2. failed",        _make_results_failed(),        "failed",  "//...",   True),
+        ("3. flaky",         _make_results_flaky(),         "passed",  "//...",   True),
+        ("4. failing-live",  _make_results_failing_live(),  "failing", "//...",   False),
+        ("5. aborted",       _make_results_aborted(),       "failed",  "//...",   False),
+        ("6. large",         _make_results_large(),         "failed",  "//...",   False),
+    ]
+
+    sep = "=" * 70
+
+    for (label, results, status, targets, with_artifact) in scenarios:
+        rc = _render_ctx(targets = targets)
+        lk = _links(with_artifact = with_artifact)
+        out = render_check_output(ctx, results, status, rc, lk)
+        print(sep)
+        print("SCENARIO: " + label)
+        print(sep)
+        print("TITLE:    " + out["title"])
+        print("")
+        print("SUMMARY:")
+        print(out["summary"])
+        print("")
+        print("DETAILS (first 3000 chars):")
+        print(out["text"][:3000])
+        print("")
+
+    print(sep)
+    print("All " + str(len(scenarios)) + " scenarios rendered without error.")
+    return 0
+
+
+template_snapshot_tests = task(
+    name = "test-template-snapshots",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

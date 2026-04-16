@@ -110,7 +110,12 @@ impl<'v> UnpackValue<'v> for BuildEventSink {
 }
 
 impl BuildEventSink {
-    fn spawn(&self, rt: AsyncRuntime, stream: &BuildEventStream) -> JoinHandle<()> {
+    /// Spawn the sink and return `(invocation_id, handle)`.
+    ///
+    /// For gRPC sinks, `invocation_id` is the UUID generated for the forwarded
+    /// stream — this is the ID used in the BES backend, which differs from
+    /// Bazel's `build_started.uuid`.  For other sink types it is empty.
+    fn spawn(&self, rt: AsyncRuntime, stream: &BuildEventStream) -> (String, JoinHandle<()>) {
         match self {
             BuildEventSink::Grpc { uri, metadata } => {
                 // Use subscribe_realtime() since sinks subscribe at stream creation
@@ -136,6 +141,13 @@ pub struct Build {
 
     #[allocative(skip)]
     sink_handles: RefCell<Vec<JoinHandle<()>>>,
+
+    /// Invocation IDs assigned by each gRPC BES sink when forwarding events.
+    /// Indexed in the same order as the `build_event_sinks` passed to spawn().
+    /// These IDs are used in the BES backend (e.g. Aspect Web UI) and differ
+    /// from Bazel's own `build_started.uuid`.
+    #[allocative(skip)]
+    sink_invocation_ids: RefCell<Vec<String>>,
 
     #[allocative(skip)]
     child: RefCell<Child>,
@@ -245,8 +257,11 @@ impl Build {
 
         // Build Event sinks for forwarding the build events
         let mut sink_handles: Vec<JoinHandle<()>> = vec![];
+        let mut sink_invocation_ids: Vec<String> = vec![];
         for sink in bes_subscriber_sinks {
-            let handle = sink.spawn(rt.clone(), build_event_stream.as_ref().unwrap());
+            let (invocation_id, handle) =
+                sink.spawn(rt.clone(), build_event_stream.as_ref().unwrap());
+            sink_invocation_ids.push(invocation_id);
             sink_handles.push(handle);
         }
 
@@ -299,6 +314,7 @@ impl Build {
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
             sink_handles: RefCell::new(sink_handles),
+            sink_invocation_ids: RefCell::new(sink_invocation_ids),
             span: RefCell::new(span),
         })
     }
@@ -315,6 +331,25 @@ impl<'v> values::StarlarkValue<'v> for Build {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
         RES.methods(build_methods)
+    }
+
+    fn get_attr(&self, attribute: &str, heap: values::Heap<'v>) -> Option<values::Value<'v>> {
+        match attribute {
+            // List of invocation IDs assigned by gRPC BES sinks (one per sink, same
+            // order as build_event_sinks).  These are the IDs used in the BES backend
+            // (e.g. Aspect Web UI) — they differ from Bazel's build_started.uuid.
+            "sink_invocation_ids" => {
+                let ids = self.sink_invocation_ids.borrow();
+                Some(heap.alloc(starlark::values::list::AllocList(
+                    ids.iter().map(|s| s.as_str()),
+                )))
+            }
+            _ => None,
+        }
+    }
+
+    fn has_attr(&self, attribute: &str, _heap: values::Heap<'v>) -> bool {
+        matches!(attribute, "sink_invocation_ids")
     }
 }
 
