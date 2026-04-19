@@ -52,6 +52,9 @@ Runner = record(
     warming_current_cache = field(str, default = ""),
     runner_job_history = field(str, default = ""),
     last_health_check = field(str, default = ""),
+    runner_group_name = field(str, default = ""),
+    runner_group_queue = field(str, default = ""),
+    runner_resource_type = field(str, default = ""),
 )
 
 CI = record(
@@ -166,6 +169,9 @@ def get_environment(std) -> Environment | None:
             warming_complete = warming_complete,
             warming_current_cache = warming_current_cache,
             warming_enabled = bool(std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED")),
+            runner_group_name = std.env.var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME") or "",
+            runner_group_queue = std.env.var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE") or "",
+            runner_resource_type = std.env.var("ASPECT_WORKFLOWS_RUNNER_RESOURCE_TYPE") or "",
         ),
         ci = _read_ci(std),
     )
@@ -283,38 +289,63 @@ def _print_workflows_info(env: Environment) -> None:
     if env.ci.host == "buildkite":
         print("--- :aspect: Workflows Runner Environment")
     print("Workflows Information")
-    print("\tVersion: " + env.runner.product_version)
-    print("\tAspect Launcher Version: " + env.runner.aspect_launcher_version)
-    print("\tCI Agent Version: " + env.runner.ci_agent_version)
+    if env.runner.product_version:
+        print("\tVersion: " + env.runner.product_version)
+    if env.runner.aspect_launcher_version:
+        print("\tAspect Launcher Version: " + env.runner.aspect_launcher_version)
+    if env.runner.ci_agent_version:
+        print("\tCI Agent Version: " + env.runner.ci_agent_version)
     print("\tWarming enabled: " + ("true" if env.runner.warming_enabled else "false"))
+    if env.runner.runner_group_name:
+        print("\tRunner Group Name: " + env.runner.runner_group_name)
+    if env.runner.runner_group_queue:
+        print("\tRunner Group Queue: " + env.runner.runner_group_queue)
+    if env.runner.runner_resource_type:
+        print("\tRunner Resource Type: " + env.runner.runner_resource_type)
 
 
 def _print_aws_info(env: Environment) -> None:
     """Print AWS-specific runner information."""
     print("AWS Information")
-    print("\tRegion: " + env.runner.region)
-    print("\tAvailability Zone: " + env.runner.az)
-    print("\tAccount ID: " + env.runner.account)
-    print("\tInstance ID: " + env.runner.instance_id)
-    print("\tInstance Name: " + env.runner.instance_name)
-    print("\tInstance Type: " + env.runner.instance_type)
-    print("\tAMI ID: " + env.runner.image_id)
+    if env.runner.region:
+        print("\tRegion: " + env.runner.region)
+    if env.runner.az:
+        print("\tAvailability Zone: " + env.runner.az)
+    if env.runner.account:
+        print("\tAccount ID: " + env.runner.account)
+    if env.runner.instance_id:
+        print("\tInstance ID: " + env.runner.instance_id)
+    if env.runner.instance_name:
+        print("\tInstance Name: " + env.runner.instance_name)
+    if env.runner.instance_type:
+        print("\tInstance Type: " + env.runner.instance_type)
+    if env.runner.image_id:
+        print("\tAMI ID: " + env.runner.image_id)
     print("\tSpot Instance: " + ("yes" if env.runner.preemptible else "no"))
-    print("\tCLI: 'aws logs tail \"/aw/runner/cloud-init/output\" --log-stream-names \"" + env.runner.instance_id + "\" --since=30d'")
+    if env.runner.instance_id:
+        print("\tCLI: 'aws logs tail \"/aw/runner/cloud-init/output\" --log-stream-names \"" + env.runner.instance_id + "\" --since=30d'")
 
 
 def _print_gcp_info(env: Environment) -> None:
     """Print GCP-specific runner information."""
     print("GCP Information")
-    print("\tRegion: " + env.runner.region)
-    print("\tAvailability Zone: " + env.runner.az)
-    print("\tProject ID: " + env.runner.account)
-    print("\tInstance ID: " + env.runner.instance_id)
-    print("\tInstance Name: " + env.runner.instance_name)
-    print("\tInstance Type: " + env.runner.instance_type)
-    print("\tImage ID: " + env.runner.image_id)
+    if env.runner.region:
+        print("\tRegion: " + env.runner.region)
+    if env.runner.az:
+        print("\tAvailability Zone: " + env.runner.az)
+    if env.runner.account:
+        print("\tProject ID: " + env.runner.account)
+    if env.runner.instance_id:
+        print("\tInstance ID: " + env.runner.instance_id)
+    if env.runner.instance_name:
+        print("\tInstance Name: " + env.runner.instance_name)
+    if env.runner.instance_type:
+        print("\tInstance Type: " + env.runner.instance_type)
+    if env.runner.image_id:
+        print("\tImage ID: " + env.runner.image_id)
     print("\tPreemptible: " + ("yes" if env.runner.preemptible else "no"))
-    print("\tCLI: 'gcloud logging read --project " + env.runner.account + " \"resource.type=gce_instance resource.labels.instance_id=" + env.runner.instance_id + " log_name=projects/" + env.runner.account + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
+    if env.runner.account and env.runner.instance_id:
+        print("\tCLI: 'gcloud logging read --project " + env.runner.account + " \"resource.type=gce_instance resource.labels.instance_id=" + env.runner.instance_id + " log_name=projects/" + env.runner.account + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
 
 
 def print_environment_info(env: Environment) -> None:
