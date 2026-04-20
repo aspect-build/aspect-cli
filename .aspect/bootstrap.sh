@@ -54,7 +54,7 @@ if [ -n "${ASPECT_WORKFLOWS_RUNNER:-}" ]; then
 fi
 
 export BAZEL_STARTUP_OPTS
-export BAZEL_BUILD_OPTS="--config=ci --announce_rc ${BAZEL_REMOTE_FLAGS}"
+export BAZEL_BUILD_OPTS="--config=ci ${BAZEL_REMOTE_FLAGS}"
 export DISABLE_PLUGINS_FLAG
 
 echo "Startup opts: ${BAZEL_STARTUP_OPTS}"
