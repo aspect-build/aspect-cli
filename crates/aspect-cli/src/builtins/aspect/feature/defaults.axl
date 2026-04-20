@@ -55,6 +55,14 @@ def _default_bazel_behavior(ctx: FeatureContext):
             # Here to ensure we restart the Bazel server.
             bazel_trait.extra_startup_flags.append("--host_jvm_args=-DRUNNER_TRACKING_ID=noop")
 
+    # On GitHub Actions, Bazel runs without a TTY so --color=auto disables
+    # colored output. GHA's log viewer does render ANSI color codes though,
+    # so force --color=yes. We don't force --curses=yes because GHA's log
+    # viewer is line-oriented and doesn't handle cursor-control sequences,
+    # so curses output would appear garbled instead of updating in place.
+    if ctx.std.env.var("GITHUB_ACTIONS"):
+        bazel_trait.extra_flags.extend(["--color=yes"])
+
 
 BazelDefaults = feature(
     implementation = _default_bazel_behavior,
