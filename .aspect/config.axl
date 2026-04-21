@@ -1,4 +1,7 @@
 load("./lambda.axl", "lambda_with_global_bind")
+load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
+load("@aspect//traits.axl", "BazelTrait")
 
 def _user_task_impl(ctx: TaskContext) -> int:
     print("I am a task added by .aspect/config.axl")
@@ -18,8 +21,40 @@ def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
 
+    # enable Github Status Checks
+    ctx.features[GithubStatusChecks].enabled = True
+
     # add a new task
     ctx.tasks.add(_user_task)
+
+    # Template snapshot tests — renders bazel_results templates across failure modes.
+    # Run with: aspect test-template-snapshots
+    ctx.tasks.add(template_snapshot_tests)
+
+    # Inject a mix of secret-ish and safe Bazel flags on every task so the
+    # status-check redaction path is exercised live against a real BES stream.
+    # In the rendered "Command line options" the check run should show:
+    #   DUMMY_API_TOKEN / DUMMY_DB_PASSWORD → `<REDACTED>` (not allowlisted)
+    #   DUMMY_BUILD_MODE_ON / DUMMY_FEATURE → kept as `1` / `true` (safe values)
+    #   GIT_URL                              → URL kept, user:password stripped
+    #
+    # Also inject TAGS / TAG_* / ASPECT_WORKFLOWS_LINKS build_metadata so the
+    # summary-row renderers for tags and custom links are exercised live:
+    #   TAGS                    → "dev · local · axl-testing"     (row 6)
+    #   TAG_ENV                 → "ENV=dev"                         (row 6)
+    #   TAG_COMPONENT           → "COMPONENT=aspect-cli"            (row 6)
+    #   ASPECT_WORKFLOWS_LINKS  → "[Runbook](…) · [Dashboard](…)"  (row 7)
+    ctx.traits[BazelTrait].extra_flags.extend([
+        "--client_env=DUMMY_API_TOKEN=super-secret-token-do-not-print",
+        "--action_env=DUMMY_DB_PASSWORD=hunter2",
+        "--action_env=DUMMY_BUILD_MODE_ON=1",
+        "--repo_env=DUMMY_FEATURE_FLAG=true",
+        "--action_env=GIT_URL=https://ci:verysecret@github.com/acme/example.git",
+        "--build_metadata=TAGS=dev,local,axl-testing",
+        "--build_metadata=TAG_ENV=dev",
+        "--build_metadata=TAG_COMPONENT=aspect-cli",
+        "--build_metadata=ASPECT_WORKFLOWS_LINKS=[Docs](https://docs.aspect.build),[Website](https://aspect.build/)",
+    ])
 
     # configure user_task's attrs by path (group/name).
     t = ctx.tasks["user/nested/user-task"]
@@ -27,3 +62,93 @@ def config(ctx: ConfigContext):
     t.args.run_count = 2
     t.args.customize_message = lambda s: _customize_message(s, "!")
 
+    testing = ctx.std.env.var("ASPECT_CLI_TESTING")
+
+    def _detect_sha(env):
+        """Get HEAD sha from git; used to simulate CI env vars for local testing."""
+        if not env.var("_HEAD_SHA"):
+            r = ctx.std.process.command("git").args(["rev-parse", "HEAD"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+            if r.status.code == 0:
+                env.set_var("_HEAD_SHA", r.stdout.strip())
+        return env.var("_HEAD_SHA") or ""
+
+    # github_status_checks: Simulate a GitHub Actions CI environment so that the
+    # GithubStatusChecks feature creates real check runs during local testing.
+    # github.authenticate() uses Aspect CLI login credentials to obtain a GitHub
+    # App token — no GITHUB_TOKEN needed. GITHUB_SHA is auto-detected from git.
+    #
+    # Usage:
+    #   ASPECT_CLI_TESTING=github_status_checks aspect build //...
+    if testing == "github_status_checks":
+        ctx.std.env.set_var("CI", "true")
+        ctx.std.env.set_var("GITHUB_ACTIONS", "true")
+        if not ctx.std.env.var("GITHUB_ACTOR"):
+            ctx.std.env.set_var("GITHUB_ACTOR", ctx.std.env.var("USER") or "local-test")
+        if not ctx.std.env.var("GITHUB_EVENT_NAME"):
+            ctx.std.env.set_var("GITHUB_EVENT_NAME", "workflow_dispatch")
+        if not ctx.std.env.var("GITHUB_SHA"):
+            ctx.std.env.set_var("GITHUB_SHA", _detect_sha(ctx.std.env))
+        # Fake a real GitHub Actions run URL for local testing of CI link rendering.
+        if not ctx.std.env.var("GITHUB_SERVER_URL"):
+            ctx.std.env.set_var("GITHUB_SERVER_URL", "https://github.com")
+        if not ctx.std.env.var("GITHUB_REPOSITORY"):
+            ctx.std.env.set_var("GITHUB_REPOSITORY", "aspect-build/aspect-cli")
+        if not ctx.std.env.var("GITHUB_RUN_ID"):
+            ctx.std.env.set_var("GITHUB_RUN_ID", "24410554652")
+
+        ctx.features[GithubStatusChecks].args.enabled = True
+
+        print("[ASPECT_CLI_TESTING=github_status_checks] Simulating GitHub Actions CI environment")
+
+    # buildkite_status_checks: Simulate a Buildkite CI environment for local
+    # testing of CI link rendering, artifact upload paths, etc.
+    #
+    # Usage:
+    #   ASPECT_CLI_TESTING=buildkite_status_checks aspect build //...
+    if testing == "buildkite_status_checks":
+        ctx.std.env.set_var("CI", "true")
+        ctx.std.env.set_var("BUILDKITE", "true")
+        ctx.std.env.set_var("BUILDKITE_AGENT_ACCESS_TOKEN", "fake-token")
+        ctx.std.env.set_var("BUILDKITE_BUILD_URL", "https://buildkite.com/aspect-build/aspect-cli/builds/1354")
+        ctx.std.env.set_var("BUILDKITE_STEP_ID", "019db1eb-90d1-49ea-b00a-7ca42f3e50a8")
+        ctx.std.env.set_var("BUILDKITE_COMMIT", _detect_sha(ctx.std.env))
+        ctx.std.env.set_var("BUILDKITE_BUILD_CREATOR", ctx.std.env.var("USER") or "local-test")
+        ctx.features[GithubStatusChecks].args.enabled = True
+        print("[ASPECT_CLI_TESTING=buildkite_status_checks] Simulating Buildkite CI environment")
+
+    # circleci_status_checks: Simulate a CircleCI environment.
+    if testing == "circleci_status_checks":
+        ctx.std.env.set_var("CI", "true")
+        ctx.std.env.set_var("CIRCLECI", "true")
+        ctx.std.env.set_var("CIRCLE_PROJECT_REPONAME", "aspect-cli")
+        ctx.std.env.set_var("CIRCLE_PROJECT_USERNAME", "aspect-build")
+        ctx.std.env.set_var("CIRCLE_BUILD_NUM", "9911")
+        ctx.std.env.set_var("CIRCLE_BUILD_URL", "https://circleci.com/gh/aspect-build/aspect-cli/9911")
+        ctx.std.env.set_var("CIRCLE_PIPELINE_NUMBER", "4406")
+        ctx.std.env.set_var("CIRCLE_WORKFLOW_ID", "78c35291-a904-4987-9444-54907e75291e")
+        ctx.std.env.set_var("CIRCLE_WORKFLOW_JOB_ID", "bb66c8b1-b5d5-4aa5-87b7-d26c8a961ce8")
+        ctx.std.env.set_var("CIRCLE_REPOSITORY_URL", "git@github.com:aspect-build/aspect-cli.git")
+        ctx.std.env.set_var("CIRCLE_SHA1", _detect_sha(ctx.std.env))
+        ctx.std.env.set_var("CIRCLE_USERNAME", ctx.std.env.var("USER") or "local-test")
+        ctx.features[GithubStatusChecks].args.enabled = True
+        print("[ASPECT_CLI_TESTING=circleci_status_checks] Simulating CircleCI environment")
+
+    # gitlab_status_checks: Simulate a GitLab CI environment (typically mirrored
+    # from GitHub so we post checks back to the upstream GitHub repo).
+    if testing == "gitlab_status_checks":
+        ctx.std.env.set_var("CI", "true")
+        ctx.std.env.set_var("GITLAB_CI", "true")
+        ctx.std.env.set_var("CI_JOB_TOKEN", "fake-token")
+        ctx.std.env.set_var("CI_PROJECT_URL", "https://gitlab.com/aspect-build/aspect-cli")
+        ctx.std.env.set_var("CI_JOB_ID", "2469624812")
+        ctx.std.env.set_var("CI_JOB_URL", "https://gitlab.com/aspect-build/aspect-cli/-/jobs/2469624812")
+        ctx.std.env.set_var("CI_COMMIT_SHA", _detect_sha(ctx.std.env))
+        ctx.std.env.set_var("GITLAB_USER_LOGIN", ctx.std.env.var("USER") or "local-test")
+        # Since GitLab mirrors GitHub, point at the upstream GitHub URL. This
+        # single env var drives both status-check posting (GithubStatusChecks
+        # reads it to pick the right owner/repo) and status-check rendering
+        # (build_metadata sets REPO_URL / REPO_OWNER / REPO_NAME / VCS from it).
+        if not ctx.std.env.var("ASPECT_VCS_URL"):
+            ctx.std.env.set_var("ASPECT_VCS_URL", "https://github.com/aspect-build/aspect-cli")
+        ctx.features[GithubStatusChecks].args.enabled = True
+        print("[ASPECT_CLI_TESTING=gitlab_status_checks] Simulating GitLab CI environment")

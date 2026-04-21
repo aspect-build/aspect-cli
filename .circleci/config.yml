@@ -1,7 +1,7 @@
 version: 2.1
 
 workflows:
-  aspect-workflows:
+  ci:
     jobs:
       - pre-build
       - build-task:

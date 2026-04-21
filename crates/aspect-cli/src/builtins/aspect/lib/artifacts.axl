@@ -62,7 +62,14 @@ def artifact_name(ci, task_name, task_key, filename):
 # =============================================================================
 
 def _upload_file_gitlab(ctx, path, name):
-    """Upload a single file to GitLab using the Generic Packages API."""
+    """Upload a single file to GitLab using the Generic Packages API.
+
+    GitLab treats slashes in the package name as nested path segments, which
+    makes the browser derive an ugly URL-encoded filename on download
+    (e.g. `test%2Fgl-test%2Ftestlogs-v9%2F2469624812%2Ftestlogs.tar.gz`).
+    Flatten slashes to dashes before constructing the URL so the downloaded
+    filename is the clean `file_name` (e.g. `testlogs.tar.gz`).
+    """
     token = ctx.std.env.var("CI_JOB_TOKEN")
     api_url = ctx.std.env.var("CI_API_V4_URL")
     project_id = ctx.std.env.var("CI_PROJECT_ID")
@@ -71,8 +78,9 @@ def _upload_file_gitlab(ctx, path, name):
     if not token or not api_url or not project_id:
         return {"success": False, "artifact_ref": None, "errors": ["missing GitLab CI env vars"]}
 
+    safe_name = name.replace("/", "-")
     file_name = path.split("/")[-1]
-    url = api_url + "/projects/" + project_id + "/packages/generic/" + name + "/" + pipeline_id + "/" + file_name
+    url = api_url + "/projects/" + project_id + "/packages/generic/" + safe_name + "/" + pipeline_id + "/" + file_name
 
     resp = ctx.http().put(
         url = url,
@@ -82,7 +90,8 @@ def _upload_file_gitlab(ctx, path, name):
 
     if resp.status < 200 or resp.status >= 300:
         return {"success": False, "artifact_ref": None, "errors": ["HTTP " + str(resp.status)]}
-    return {"success": True, "artifact_ref": name, "errors": []}
+    # The upload URL is also the stable download URL — return it so callers can link to the file.
+    return {"success": True, "artifact_ref": url, "errors": []}
 
 
 _gitlab = struct(
@@ -200,9 +209,22 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
 
     new_entries = entries[group["last_count"]:]
     any_success = False
+    if "label_urls" not in group:
+        group["label_urls"] = {}
     for entry in new_entries:
         result = provider.upload_artifact(ctx, entry["src"], name + "/" + entry["dest"])
         if result["success"]:
+            # Accumulate per-label, per-filename download URLs. Bazel writes several
+            # files per test (test.log, test.xml, test.outputs.zip, ...), so key by
+            # basename so callers can surface each one separately.
+            url = result.get("artifact_ref", "")
+            if url and url.startswith("http"):
+                fname = entry["dest"].rsplit("/", 1)[-1]
+                per_file = group["label_urls"].get(entry["label"])
+                if per_file == None:
+                    per_file = {}
+                    group["label_urls"][entry["label"]] = per_file
+                per_file[fname] = url
             group["last_count"] += 1
             any_success = True
         else:

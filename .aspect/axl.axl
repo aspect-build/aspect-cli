@@ -3,6 +3,7 @@ Exercise axl
 """
 load("@demo//answer.axl", "ANSWER")
 load("./lambda.axl", "lambda_with_global_bind")
+load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title")
 
 def test_case(tc, cond, msg) -> int:
     if not cond:
@@ -585,6 +586,657 @@ def test_http_get_post(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
     return tc
 
+def test_template_rendering(ctx: TaskContext, tc: int) -> int:
+    """Tests for bazel_results render_check_output across key failure modes."""
+    links = {
+        "ci_label": "GitHub Actions",
+        "ci_url": "https://github.com/example/repo/actions/runs/123",
+        "aspect_url": "",
+        "results_base_url": "",
+        "artifacts_browse_url": "",
+        "artifact_urls": {},
+        "testlogs_label_urls": {},
+    }
+    render_ctx = {
+        "triggered_by": "tester",
+        "targets": "//...",
+        "started_ms": 1744630000000,
+        "ended_ms": 1744630002000,
+        "progress": "",
+    }
+
+    # --- Test 1: all-passed smoke test ---
+    r = init_results()
+    r["passed_test_total"] = 5
+    r["cached_test_total"] = 5
+    r["passed_tests"] = [
+        {"label": "//pkg:a_test", "cached": True, "duration_ms": 0},
+        {"label": "//pkg:b_test", "cached": True, "duration_ms": 0},
+    ]
+    r["actions_executed"] = 0
+    r["actions_cached"] = 10
+    r["actions_total"] = 10
+    r["targets_total"] = 5
+    r["wall_time_ms"] = 1200
+    r["build_command"] = "test"
+    out = render_check_output(ctx, r, "passed", render_ctx, links)
+    tc = test_case(tc, "title" in out, "render_check_output returns a dict with 'title'")
+    tc = test_case(tc, "summary" in out, "render_check_output returns a dict with 'summary'")
+    tc = test_case(tc, "text" in out, "render_check_output returns a dict with 'text'")
+    # New title format: "<Task Name> <Subject> <Invocation State>" (task name optional).
+    # In these tests no render_ctx["task_display_name"] is set, so title starts with subject.
+    tc = test_case(tc, "Tests passed" in out["title"], "passed title has Tests passed state: " + out["title"])
+    tc = test_case(tc, "//..." in out["title"], "passed title contains target pattern: " + out["title"])
+    tc = test_case(tc, "//pkg:a_test" in out["text"], "passed details contain test label")
+
+    # --- Test 2: failed tests ---
+    r2 = init_results()
+    r2["failed_test_total"] = 2
+    r2["failed_tests"] = [
+        {"label": "//pkg:fail_test", "cached": False, "duration_ms": 3000, "status": "failed"},
+        {"label": "//pkg:slow_test", "cached": False, "duration_ms": 9000, "status": "failed"},
+    ]
+    r2["passed_test_total"] = 3
+    r2["passed_tests"] = [{"label": "//pkg:ok_test", "cached": True, "duration_ms": 0}]
+    r2["test_repro"] = "bazel test //pkg:fail_test //pkg:slow_test"
+    r2["build_command"] = "test"
+    out2 = render_check_output(ctx, r2, "failed", render_ctx, links)
+    tc = test_case(tc, "Tests failed" in out2["title"], "failed title: " + out2["title"])
+    tc = test_case(tc, "//pkg:fail_test" in out2["text"], "failed details contain failed test label")
+    tc = test_case(tc, "Test Failure" in out2["text"], "failed details show Test Failure(s) bucket header")
+
+    # --- Test 3: flaky tests ---
+    r3 = init_results()
+    r3["flaky_test_total"] = 1
+    r3["flaky_tests"] = [{"label": "//pkg:flaky_test", "cached": False, "duration_ms": 5000}]
+    r3["passed_test_total"] = 4
+    r3["build_command"] = "test"
+    out3 = render_check_output(ctx, r3, "passed", render_ctx, links)
+    tc = test_case(tc, "Tests flaky" in out3["title"], "flaky title: " + out3["title"])
+    tc = test_case(tc, "//pkg:flaky_test" in out3["text"], "flaky details contain flaky label")
+    tc = test_case(tc, "Test Flake" in out3["text"], "flaky details contain Test Flakes bucket header")
+
+    # --- Test 4: build action failure ---
+    r4 = init_results()
+    r4["failed_actions_total"] = 1
+    r4["failed_actions"] = [{
+        "label":     "//pkg:broken",
+        "mnemonics": ["CppCompile"],
+    }]
+    r4["failed_action_labels"] = ["//pkg:broken"]
+    r4["failed_targets"] = [{"label": "//pkg:broken"}]
+    r4["targets_total"] = 5
+    r4["build_command"] = "build"
+    out4 = render_check_output(ctx, r4, "failed", render_ctx, links)
+    tc = test_case(tc, "Failed to build" in out4["title"], "build failure title: " + out4["title"])
+    tc = test_case(tc, "//pkg:broken" in out4["text"], "build failure details contain failed label")
+    tc = test_case(tc, "CppCompile" in out4["text"], "build failure details contain mnemonic")
+
+    # --- Test 5: summary_title corner cases ---
+    r5 = init_results()
+    # "Running..." wins while the build is streaming, regardless of counts.
+    tc = test_case(tc, "Running..." in summary_title(r5, "running"), "empty running title")
+    # No targets and no failures → empty state string (state is "", title is "").
+    tc = test_case(tc, summary_title(r5, "passed") == "", "empty passed title (no buckets)")
+    tc = test_case(tc, summary_title(r5, "failed") == "", "empty failed title (no buckets)")
+    r5["passed_test_total"] = 3
+    r5["cached_test_total"] = 2
+    title = summary_title(r5, "passed")
+    # 2 of 3 tests cached (cached != passed_total) → TEST_PASSED bucket wins → "Tests passed"
+    tc = test_case(tc, "Tests passed" in title, "passed with tests title: " + title)
+    # All cached case
+    r5["cached_test_total"] = 3
+    title_cached = summary_title(r5, "passed")
+    tc = test_case(tc, "Tests passed (cached)" in title_cached, "all-cached title: " + title_cached)
+    # With target pattern + display name
+    title_tn = summary_title(r5, "passed", target_pattern = "//foo/...", task_display_name = "Test")
+    tc = test_case(tc, title_tn.startswith("Test //foo/..."), "title begins with task and subject: " + title_tn)
+    # Long target pattern is truncated
+    long_p = "//a/very/long/pattern/that/definitely/exceeds/the/sixty/character/limit/for/titles/..."
+    title_long = summary_title(r5, "passed", target_pattern = long_p)
+    tc = test_case(tc, "…" in title_long, "long target pattern gets truncated: " + title_long)
+
+    # --- Test 6: artifact URL rendered in details ---
+    r6 = init_results()
+    r6["failed_test_total"] = 1
+    r6["failed_tests"] = [{"label": "//pkg:t", "cached": False, "duration_ms": 1000}]
+    links_with_artifact = {
+        "ci_label": "Buildkite",
+        "ci_url": "https://buildkite.com/org/pipeline/builds/42",
+        "aspect_url": "",
+        "results_base_url": "",
+        "artifacts_browse_url": "https://buildkite.com/org/pipeline/builds/42/steps/canvas?sid=s1&tab=artifacts",
+        "artifact_urls": {},
+        "testlogs_label_urls": {},
+    }
+    out6 = render_check_output(ctx, r6, "failed", render_ctx, links_with_artifact)
+    tc = test_case(tc, "[Artifacts]" in out6["text"], "artifacts page renders Artifacts link")
+    tc = test_case(tc, "tab=artifacts" in out6["text"], "Artifacts href points to artifacts tab")
+
+    # --- Test 7: aborted build ---
+    r7 = init_results()
+    r7["aborted"] = True
+    r7["abort_reason"] = "user_interrupt"
+    r7["abort_description"] = "Build interrupted by user"
+    r7["build_command"] = "build"
+    out7 = render_check_output(ctx, r7, "failed", render_ctx, links)
+    tc = test_case(tc, "Invocation disconnected" in out7["title"], "aborted title: " + out7["title"])
+    tc = test_case(tc, "user_interrupt" in out7["text"], "aborted details contain abort reason")
+    # Aborted runs should NOT show the "Build in progress" placeholder —
+    # the aborted notice at the top is authoritative.
+    tc = test_case(tc, "Build in progress" not in out7["text"], "aborted details don't show pending message")
+
+    # --- Test 7a: long labels get truncated with `...` for bounded columns ---
+    r_long = init_results()
+    long_label = "//bazel/release/homebrew/tests:myapp_artifacts_with_bottle_root_url_formula_override_formula_bottle_test_very_long"
+    r_long["failed_test_total"] = 1
+    r_long["failed_tests"] = [{"label": long_label, "cached": False, "duration_ms": 50, "status": "failed"}]
+    r_long["build_command"] = "test"
+    out_long = render_check_output(ctx, r_long, "failed", render_ctx, links)
+    tc = test_case(tc, "..." in out_long["text"], "long label truncated with ellipsis: " + out_long["text"][:300])
+    tc = test_case(tc, long_label not in out_long["text"], "full long label does NOT appear verbatim")
+
+    # --- Test 7b: fresh build with no target info yet → "Build in progress" message ---
+    r7b = init_results()
+    r7b["build_command"] = "test"
+    out7b = render_check_output(ctx, r7b, "running", render_ctx, links)
+    tc = test_case(tc, "Build in progress" in out7b["text"], "running details show waiting placeholder")
+    # Once targets start completing the placeholder should disappear.
+    r7b["passed_test_total"] = 1
+    r7b["passed_tests"]      = [{"label": "//pkg:t", "cached": False, "duration_ms": 100}]
+    out7b2 = render_check_output(ctx, r7b, "running", render_ctx, links)
+    tc = test_case(tc, "Build in progress" not in out7b2["text"], "waiting placeholder gone once targets appear")
+
+    # --- Test 8b: root vs derived failure partitioning ---
+    # A root failure (own actions failed) plus two derived failures
+    # (target_completed reported failure but no matching failed action — a dep broke).
+    r_broken = init_results()
+    r_broken["failed_actions_total"] = 2
+    r_broken["failed_actions"] = [{
+        "label":     "//pkg/root:lib",
+        "mnemonics": ["CppCompile", "CppLink"],
+    }]
+    r_broken["failed_action_labels"] = ["//pkg/root:lib"]
+    r_broken["failed_targets"] = [
+        {"label": "//pkg/root:lib"},      # root
+        {"label": "//pkg/consumer:bin"},  # derived (depends on root:lib)
+        {"label": "//pkg/other:test"},    # derived
+    ]
+    r_broken["build_command"] = "build"
+    out_broken = render_check_output(ctx, r_broken, "failed", render_ctx, links)
+    tc = test_case(tc, "3 Build Failures" in out_broken["text"], "root+derived: bucket header shows unique target count: " + out_broken["text"][:200])
+    tc = test_case(tc, "//pkg/root:lib" in out_broken["text"], "root+derived: root label is shown")
+    tc = test_case(tc, "CppCompile, CppLink" in out_broken["text"], "root+derived: mnemonics joined beside label")
+    tc = test_case(tc, "2 more targets not built" in out_broken["text"], "root+derived: collapsed derived count shown")
+    tc = test_case(tc, "//pkg/consumer:bin" in out_broken["text"], "root+derived: derived labels listed")
+    tc = test_case(tc, "//pkg/other:test" in out_broken["text"], "root+derived: derived labels listed")
+
+    # --- Test 9: per-file label URLs (CircleCI) ---
+    # Exercise both the bullet path (failed/flaky tests) and the <pre> table
+    # path (passed tests). Each test label has test.log + test.xml URLs.
+    r8 = init_results()
+    r8["failed_test_total"] = 1
+    r8["failed_tests"]      = [{"label": "//pkg:net_test", "cached": False, "duration_ms": 2000}]
+    r8["flaky_test_total"]  = 1
+    r8["flaky_tests"]       = [{"label": "//pkg:race_test", "cached": False, "duration_ms": 1000}]
+    r8["passed_test_total"] = 1
+    r8["passed_tests"]      = [{"label": "//pkg:ok_test", "cached": False, "duration_ms": 500}]
+    base_url = "https://output.circle-artifacts.com/output/job/job-uuid/artifacts/0/test/key/testlogs"
+    links_with_label_urls = dict(links)
+    links_with_label_urls["testlogs_label_urls"] = {
+        "//pkg:net_test":  {
+            "test.log": base_url + "/pkg/net_test/test.log",
+            "test.xml": base_url + "/pkg/net_test/test.xml",
+        },
+        "//pkg:race_test": {
+            "test.log": base_url + "/pkg/race_test/test.log",
+            "test.xml": base_url + "/pkg/race_test/test.xml",
+        },
+        "//pkg:ok_test": {
+            "test.log": base_url + "/pkg/ok_test/test.log",
+            "test.xml": base_url + "/pkg/ok_test/test.xml",
+        },
+    }
+    out8 = render_check_output(ctx, r8, "failed", render_ctx, links_with_label_urls)
+    tc = test_case(tc, "circle-artifacts.com" in out8["text"], "per-file URLs: failed test has clickable link")
+    tc = test_case(tc, "net_test" in out8["text"], "per-file URLs: failed test label present")
+    tc = test_case(tc, "race_test" in out8["text"], "per-file URLs: flaky test label present")
+    # Bullet-path: failed and flaky tests each get an inline [xml] link next to the label.
+    tc = test_case(tc, "[xml](" + base_url + "/pkg/net_test/test.xml)"  in out8["text"], "per-file URLs: failed test has xml link")
+    tc = test_case(tc, "[xml](" + base_url + "/pkg/race_test/test.xml)" in out8["text"], "per-file URLs: flaky test has xml link")
+    # <pre>-table path: passed tests get an Artifacts column with HTML anchors.
+    tc = test_case(tc, "Artifacts" in out8["text"],                          "per-file URLs: passed tests show Artifacts column header")
+    tc = test_case(tc, '<a href="' + base_url + '/pkg/ok_test/test.log">log</a>' in out8["text"], "per-file URLs: passed test has log <a> in <pre>")
+    tc = test_case(tc, '<a href="' + base_url + '/pkg/ok_test/test.xml">xml</a>' in out8["text"], "per-file URLs: passed test has xml <a> in <pre>")
+
+    # --- Test 10: new Invocation / Workspace Status / Build Metadata / Stats sections ---
+    # Populate the fields that drive each section and assert they render — plus
+    # that empty values are skipped (no "COMMIT_TAG" or "BUILD_EMBED_LABEL" rows).
+    r9 = init_results()
+    r9["invocation_id"]           = "1111-aaaa-2222-bbbb"
+    r9["build_command"]           = "test"
+    r9["build_tool_version"]      = "9.0.1"
+    r9["start_time_ms"]           = 1744630000000
+    r9["finish_time_ms"]          = 1744630002000
+    r9["workspace_directory"]     = "/mnt/wd"
+    r9["working_directory"]       = "/mnt/wd"
+    r9["server_pid"]              = 42
+    r9["wall_time_ms"]            = 1234
+    r9["cpu_time_ms"]             = 5000
+    r9["analysis_phase_time_ms"]  = 200
+    r9["execution_phase_time_ms"] = 1000
+    r9["cached_duration_ms"]      = 60000
+    r9["actions_total"]           = 100
+    r9["actions_cached"]          = 90
+    r9["actions_executed"]        = 10
+    r9["action_mnemonics"]        = {"CppCompile": 50, "Rustc": 40, "Symlink": 10}
+    r9["action_cache_stats"]      = {
+        "hits": 900, "misses": 100,
+        "miss_details": [{"reason": "DIGEST_MISMATCH", "count": 100}],
+    }
+    r9["workspace_status"] = {
+        "BUILD_USER":        "tester",
+        "BUILD_EMBED_LABEL": "",  # empty — must be skipped
+    }
+    r9["metadata"] = {
+        "BRANCH":     "main",
+        "COMMIT_TAG": "",  # empty — must be skipped
+    }
+    out9 = render_check_output(ctx, r9, "passed", render_ctx, links)
+    # Performance section
+    tc = test_case(tc, "## Build metrics"                                 in out9["text"], "new sections: Build metrics header renders")
+    tc = test_case(tc, "<summary>⏱ Timing</summary>"                      in out9["text"], "new sections: Timing subsection collapses")
+    tc = test_case(tc, "Cached tests time saved: `1 cpu-minute`"          in out9["text"], "new sections: cached tests time saved value in cpu-minutes")
+    tc = test_case(tc, "<summary>⚡ Actions by mnemonic</summary>"         in out9["text"], "new sections: mnemonic subsection collapses")
+    tc = test_case(tc, "CppCompile"                                       in out9["text"], "new sections: mnemonic CppCompile present")
+    tc = test_case(tc, "**Local actions cache**"                          in out9["text"], "new sections: local cache subheader")
+    tc = test_case(tc, "900 hits"                                         in out9["text"], "new sections: local hits value")
+    tc = test_case(tc, "**Local cache miss reasons**"                     in out9["text"], "new sections: miss reasons subheader")
+    tc = test_case(tc, "Digest mismatch"                                  in out9["text"], "new sections: humanized miss reason")
+    # Invocation
+    tc = test_case(tc, "## Invocation"                                    in out9["text"], "new sections: Invocation header renders")
+    tc = test_case(tc, "**Invocation ID:** `1111-aaaa-2222-bbbb`"         in out9["text"], "new sections: invocation id row")
+    tc = test_case(tc, "**Server PID:** `42`"                             in out9["text"], "new sections: server pid row")
+    tc = test_case(tc, "**User:** `tester`"                               in out9["text"], "new sections: Invocation user row (from workspace_status BUILD_USER)")
+
+    # Invocation section: CPU arch + compilation mode from the `configuration` BES event.
+    r9b = init_results()
+    r9b["build_command"]     = "test"
+    r9b["targets_total"]     = 1
+    r9b["invocation_id"]     = "id-for-cpu-mode"
+    r9b["cpu_arch"]          = "aarch64"
+    r9b["compilation_mode"]  = "opt"
+    r9b["workspace_status"]  = {"BUILD_USER": "greg", "BUILD_HOST": "MacBook-Pro-2.local"}
+    out9b = render_check_output(ctx, r9b, "passed", render_ctx, links)
+    tc = test_case(tc, "**CPU Target:** `aarch64`"              in out9b["text"], "invocation: CPU Target row (matches TARGET_CPU source)")
+    tc = test_case(tc, "**Mode:** `opt`"                        in out9b["text"], "invocation: compilation mode row")
+    tc = test_case(tc, "**Host name:** `MacBook-Pro-2.local`"   in out9b["text"], "invocation: host name row (from BUILD_HOST)")
+    tc = test_case(tc, "**User:** `greg`"                       in out9b["text"], "invocation: user row (from BUILD_USER)")
+
+    # --- Test 9c: Aspect Workflows Runner row + details section ---
+    # Set the runner env vars locally, render, assert the new summary row
+    # and the `## Aspect Workflows Runner` section both show up.
+    env = ctx.std.env
+    env.set_var("ASPECT_WORKFLOWS_RUNNER",                        "1")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_VERSION",                "5.17.21")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER",         "aws")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_AZ",                     "us-west-2b")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_REGION",                 "us-west-2")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE",          "m6id.xlarge")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID",            "i-0a2cf70da43383661")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME",          "aw-bk-runner--default")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_IMAGE_ID",               "ami-003fd591c394df929")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME",             "default")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE",            "aspect-default")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION","2026.16.4")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION",       "3.123.1")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE",       "1")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_PREEMPTIBLE",            "1")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED",        "1")
+    # Warming state files — write to tempdir, set env pointers at them.
+    tmp = ctx.std.fs.mkdtemp(prefix = "runner-warming-", parent = ctx.std.env.temp_dir())
+    marker_path  = tmp + "/warming_complete"
+    version_path = tmp + "/warming_current_cache"
+    ctx.std.fs.write(marker_path,  "")
+    ctx.std.fs.write(version_path, "42\n")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE", marker_path)
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE",   version_path)
+    r9c = init_results()
+    r9c["build_command"] = "test"
+    r9c["targets_total"] = 1
+    out9c = render_check_output(ctx, r9c, "passed", render_ctx, links)
+    # Summary row — compact line. Title now reads "Workflows runner v…".
+    tc = test_case(tc, "🚀 Workflows runner v5.17.21" in out9c["summary"], "aspect runner: summary row shows Workflows runner version")
+    tc = test_case(tc, "☁️ AWS"                      in out9c["summary"], "aspect runner: summary row cloud provider is uppercase (AWS)")
+    tc = test_case(tc, "📍 us-west-2b"               in out9c["summary"], "aspect runner: summary row shows AZ")
+    tc = test_case(tc, "💠 m6id.xlarge"              in out9c["summary"], "aspect runner: summary row shows instance type")
+    tc = test_case(tc, "🆔 i-0a2cf70da43383661"      in out9c["summary"], "aspect runner: summary row shows instance id")
+    # Details section — full set of fields, including new Group name + warming state.
+    tc = test_case(tc, "## Aspect Workflows Runner"                 in out9c["text"], "aspect runner: details section header")
+    tc = test_case(tc, "**Workflows version:** `5.17.21`"            in out9c["text"], "aspect runner: version row")
+    tc = test_case(tc, "**Cloud provider:** `AWS`"                   in out9c["text"], "aspect runner: cloud provider uppercase in details")
+    tc = test_case(tc, "**Region:** `us-west-2`"                     in out9c["text"], "aspect runner: region row")
+    tc = test_case(tc, "**Availability zone:** `us-west-2b`"         in out9c["text"], "aspect runner: AZ row")
+    tc = test_case(tc, "**Instance type:** `m6id.xlarge`"            in out9c["text"], "aspect runner: instance type row")
+    tc = test_case(tc, "**Instance name:** `aw-bk-runner--default`"  in out9c["text"], "aspect runner: instance name row")
+    tc = test_case(tc, "**Instance ID:** `i-0a2cf70da43383661`"      in out9c["text"], "aspect runner: instance id row")
+    tc = test_case(tc, "**Image ID:** `ami-003fd591c394df929`"       in out9c["text"], "aspect runner: image id row")
+    tc = test_case(tc, "**Group name:** `default`"                   in out9c["text"], "aspect runner: group name row")
+    tc = test_case(tc, "**Group queue:** `aspect-default`"           in out9c["text"], "aspect runner: group queue row")
+    tc = test_case(tc, "**Aspect launcher version:** `2026.16.4`"    in out9c["text"], "aspect runner: launcher version row")
+    tc = test_case(tc, "**CI agent version:** `3.123.1`"             in out9c["text"], "aspect runner: ci agent version row")
+    tc = test_case(tc, "**NVMe storage:** `yes`"                     in out9c["text"], "aspect runner: NVMe storage normalized to yes")
+    tc = test_case(tc, "**Preemptible:** `yes`"                      in out9c["text"], "aspect runner: preemptible normalized to yes")
+    tc = test_case(tc, "**Warming enabled:** `yes`"                  in out9c["text"], "aspect runner: warming normalized to yes")
+    tc = test_case(tc, "**Warming complete:** `yes`"                 in out9c["text"], "aspect runner: warming complete marker detected")
+    tc = test_case(tc, "**Warming cache version:** `42`"             in out9c["text"], "aspect runner: warming cache version read from file")
+    # Cleanup — leave env as we found it so later tests don't see residue.
+    env.set_var("ASPECT_WORKFLOWS_RUNNER",                        "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_VERSION",                "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER",         "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_AZ",                     "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_REGION",                 "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE",          "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID",            "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME",          "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_IMAGE_ID",               "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME",             "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE",            "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION","")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION",       "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE",       "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED",        "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE",   "")
+    # Workspace Status — BUILD_USER rendered, BUILD_EMBED_LABEL (empty) skipped
+    tc = test_case(tc, "## Workspace Status"                              in out9["text"], "new sections: Workspace Status header renders")
+    tc = test_case(tc, "**BUILD_USER:** `tester`"                         in out9["text"], "new sections: workspace BUILD_USER row")
+    tc = test_case(tc, "BUILD_EMBED_LABEL"                            not in out9["text"], "new sections: empty workspace value is skipped")
+    # Build Metadata — BRANCH rendered, COMMIT_TAG (empty) skipped
+    tc = test_case(tc, "## Build Metadata"                                in out9["text"], "new sections: Build Metadata header renders")
+    tc = test_case(tc, "**BRANCH:** `main`"                               in out9["text"], "new sections: metadata BRANCH row")
+    tc = test_case(tc, "COMMIT_TAG"                                   not in out9["text"], "new sections: empty metadata value is skipped")
+
+    # --- Test 11: flag-value quoting boundary ---
+    # For `--flag=value` tokens with spaces in the value, the quote boundary
+    # should fall after the `=` so the flag name stays readable. For space-
+    # separated "flag value" tokens (one string with an embedded space between
+    # flag and its value), the whole token needs to be quoted as a single unit.
+    r10 = init_results()
+    r10["build_command"]    = "test"
+    r10["targets_total"]    = 1
+    r10["passed_test_total"] = 0
+    r10["options_parsed"] = {
+        "explicit_cmd_line": [
+            "--config=ci",                                    # safe, unchanged
+            "--build_metadata=COMMIT_AUTHOR=Greg Magolan",    # value-only quoting
+            "--build_metadata=COMMIT_AUTHOR_EMAIL=greg@aspect.build",  # safe, unchanged
+            "--build_event_binary_file /var/folders/zm/build-event-out-fbd8f66b.bin",  # whole-token quoting
+        ],
+        "startup_options": [],
+        "cmd_line": [],
+    }
+    out10 = render_check_output(ctx, r10, "passed", render_ctx, links)
+    # Value-only quoting for --flag=value with unsafe value.
+    tc = test_case(tc, "--build_metadata=&#x27;COMMIT_AUTHOR=Greg Magolan&#x27;"                   in out10["text"], "flag quoting: --flag='value with space'")
+    tc = test_case(tc, "--build_metadata=COMMIT_AUTHOR_EMAIL=greg@aspect.build"                    in out10["text"], "flag quoting: safe --flag=value stays unquoted")
+    tc = test_case(tc, "--config=ci"                                                               in out10["text"], "flag quoting: safe --config=ci stays unquoted")
+    # Whole-token quoting for flag-with-space token (no `=`).
+    tc = test_case(tc, "&#x27;--build_event_binary_file &#x2f;var&#x2f;folders&#x2f;zm&#x2f;build-event-out-fbd8f66b.bin&#x27;" in out10["text"], "flag quoting: space-separated flag gets whole-token quoting")
+
+    # --- Test 12: Build graph one-liners + Runner table + aspects split ---
+    r11 = init_results()
+    r11["build_command"]                            = "test"
+    r11["targets_configured"]                       = 134227
+    r11["targets_configured_not_including_aspects"] = 134094
+    r11["targets_total"]                            = 141
+    r11["packages_loaded"]                          = 735
+    r11["actions_total"]                            = 33305
+    r11["actions_executed"]                         = 20233
+    r11["actions_cached"]                           = 13072
+    r11["action_mnemonics"]                         = {"CppCompile": 100, "Rustc": 41}
+    r11["runner_counts"]                            = {"remote cache hit · Remote": 130, "darwin-sandbox": 11}
+    r11["wall_time_ms"]                             = 2200
+    out11 = render_check_output(ctx, r11, "passed", render_ctx, links)
+    # Bazel-style one-liners.
+    tc = test_case(tc, "<summary>📦 Build graph</summary>"                           in out11["text"], "stats: Build graph subsection collapses")
+    tc = test_case(tc, "<summary>💾 Cache stats</summary>"                           in out11["text"], "stats: Cache stats subsection collapses")
+    tc = test_case(tc, "13,072 of 33,305 cached (39%)"                               in out11["text"], "stats: Cache stats actions line")
+    tc = test_case(tc, "**Targets**: 141 targets (134,094 configured, 133 aspect applications)" in out11["text"], "stats: targets line splits rules vs aspect applications")
+    tc = test_case(tc, "**Actions**: 20,233 actions (33,305 created)"                in out11["text"], "stats: actions line shows executed + created")
+    tc = test_case(tc, "**Packages**: 735 packages loaded"                           in out11["text"], "stats: packages line")
+    tc = test_case(tc, "<summary>🏃 Actions by runner</summary>"                     in out11["text"], "stats: runner subsection collapses")
+    tc = test_case(tc, "remote cache hit"                                            in out11["text"], "stats: runner row label")
+    tc = test_case(tc, "darwin-sandbox"                                              in out11["text"], "stats: second runner row label")
+
+    # Incremental rebuild: build_metrics reports 0 for top-level actions_total
+    # but per-mnemonic action_data carries the actions_created sums. Our
+    # handler sums those up to recover the grand total. Simulate this by
+    # setting targets_total only (to reflect target_completed events firing).
+    r12 = init_results()
+    r12["build_command"]    = "test"
+    r12["targets_total"]    = 141
+    r12["wall_time_ms"]     = 6600
+    r12["cpu_time_ms"]      = 25400
+    r12["packages_loaded"]  = 0         # incremental
+    # actions_executed = 1 (workspace status), actions_total stays 0 at
+    # this layer — our builder still emits "1 action" and omits "(N created)".
+    r12["actions_executed"] = 1
+    out12 = render_check_output(ctx, r12, "passed", render_ctx, links)
+    tc = test_case(tc, "**Targets**: 141 targets"                      in out12["text"], "stats: incremental Targets line")
+    tc = test_case(tc, "**Actions**: 1 action"                         in out12["text"], "stats: incremental Actions line shows executed only")
+    tc = test_case(tc, "**Packages**: 0 packages loaded"               in out12["text"], "stats: incremental Packages line shows 0")
+
+    # --- Test 13: VCS linking, PR, merged metadata, TAGS, ASPECT_WORKFLOWS_LINKS ---
+    r13 = init_results()
+    r13["build_command"]    = "test"
+    r13["build_tool_version"] = "9.0.1"
+    r13["invocation_id"]    = "abc-123"
+    r13["start_time_ms"]    = 1744630000000   # drives the 📅 row in the summary
+    r13["wall_time_ms"]     = 68000
+    r13["targets_total"]    = 146
+    r13["actions_executed"] = 361
+    r13["actions_total"]    = 46325
+    r13["passed_test_total"] = 25
+    r13["cached_test_total"] = 25
+    # Metadata takes precedence over workspace_status when both set a key.
+    r13["workspace_status"] = {
+        "BUILD_HOST":      "MacBook-Pro-2.local",
+        "REPO_OWNER":      "DIFFERENT_FROM_METADATA",  # should be overridden by metadata below
+    }
+    r13["metadata"] = {
+        "VCS":                   "GITHUB",
+        "REPO_OWNER":            "aspect-build",  # overrides workspace_status
+        "REPO_NAME":             "silo",
+        "BRANCH_NAME":           "bazel_status_checks",
+        "COMMIT_SHA":            "417a65c1234567890abc",
+        "COMMIT_MESSAGE":        "GitHub status checks",
+        "COMMIT_AUTHOR_NAME":    "Greg Magolan",
+        "COMMIT_AUTHOR_EMAIL":   "greg@aspect.build",
+        "RUN_TYPE":              "BRANCH_PUSH",
+        "PR_NUMBER":             "1102",
+        "PR_ID":                 "1102",
+        "TAGS":                  "nightly,canary",
+        "TAG_ENV":               "staging",
+        "ASPECT_WORKFLOWS_LINKS": "[Runbook](https://example.com/runbook),[Dashboard](https://example.com/dash)",
+    }
+    out13 = render_check_output(ctx, r13, "passed", render_ctx, links)
+    txt = out13["text"]
+    sum_txt = out13["summary"]
+    # Merged metadata: in the summary line, build_metadata (aspect-build) wins
+    # over workspace_status (DIFFERENT_FROM_METADATA). The raw workspace_status
+    # value is still shown in the dedicated Workspace Status section below —
+    # that's expected.
+    tc = test_case(tc, "DIFFERENT_FROM_METADATA"                           not in sum_txt, "merged meta: build_metadata wins over workspace_status in summary")
+    # New test cache format (mirrors actions format).
+    tc = test_case(tc, "0 of 25 tests (100% cached)"                          in sum_txt, "summary: test format matches actions format")
+    # CPU no longer in summary row 1.
+    tc = test_case(tc, "CPU"                                                 not in sum_txt, "summary: CPU removed from summary lines")
+    # Row 1 now includes the date (not row 7 anymore).
+    tc = test_case(tc, "📅"                                                   in sum_txt, "summary: date present")
+    # VCS row: repo link + PR link + branch link + commit link.
+    tc = test_case(tc, "[silo](https://github.com/aspect-build/silo)" in sum_txt, "summary: repo link text is just the repo name")
+    tc = test_case(tc, "[aspect-build/silo]"                      not in sum_txt, "summary: owner prefix not in link text")
+    tc = test_case(tc, "[#1102](https://github.com/aspect-build/silo/pull/1102)" in sum_txt, "summary: PR link")
+    tc = test_case(tc, "[bazel_status_checks](https://github.com/aspect-build/silo/tree/bazel_status_checks)" in sum_txt, "summary: branch link")
+    tc = test_case(tc, "github.com/aspect-build/silo/commit/417a65c1234567890abc" in sum_txt, "summary: commit link")
+    tc = test_case(tc, "417a65c - GitHub status checks"                       in sum_txt, "summary: commit short sha + message")
+    # Row 5: trigger
+    tc = test_case(tc, "Branch push run"                                      in sum_txt, "summary: trigger label")
+    # Tags row
+    tc = test_case(tc, "🏷 nightly"                                           in sum_txt, "summary: TAGS nightly tag")
+    tc = test_case(tc, "🏷 canary"                                            in sum_txt, "summary: TAGS canary tag")
+    tc = test_case(tc, "🏷 ENV=staging"                                       in sum_txt, "summary: TAG_ prefix tag")
+    # Custom links row
+    tc = test_case(tc, "🔗 [Runbook](https://example.com/runbook)"            in sum_txt, "summary: ASPECT_WORKFLOWS_LINKS Runbook")
+    tc = test_case(tc, "🔗 [Dashboard](https://example.com/dash)"             in sum_txt, "summary: ASPECT_WORKFLOWS_LINKS Dashboard")
+
+    # --- Test 14a: User display precedence (name only, never email) ---
+    # GitHub-flavored markdown autolinks bare emails — so we deliberately
+    # never render `@` in the summary user row. Full "Name <email>" still
+    # lives in the Build Metadata section.
+
+    # NAME wins over COMMIT_AUTHOR (email-laden) and all other sources.
+    r_ua = init_results()
+    r_ua["build_command"] = "test"
+    r_ua["targets_total"] = 1
+    r_ua["metadata"] = {
+        "COMMIT_AUTHOR_NAME":  "Greg Magolan",
+        "COMMIT_AUTHOR":       "Greg Magolan <greg@aspect.build>",
+        "COMMIT_AUTHOR_EMAIL": "ignored@example.com",
+        "USER":                "also-ignored",
+    }
+    r_ua["workspace_status"] = {"BUILD_USER": "ignored-too"}
+    out_ua = render_check_output(ctx, r_ua, "passed", render_ctx, links)
+    tc = test_case(tc, "👤 Greg Magolan"    in out_ua["summary"], "user fallback: NAME wins")
+    tc = test_case(tc, "@"              not in out_ua["summary"], "user fallback: no '@' in summary (prevents GFM autolink)")
+    tc = test_case(tc, "ignored"        not in out_ua["summary"], "user fallback: email / lower-precedence sources not rendered")
+
+    # Next: COMMIT_AUTHOR "Name <email>" form with NAME absent → strip the "<email>" tail.
+    r_ub = init_results()
+    r_ub["build_command"] = "test"
+    r_ub["targets_total"] = 1
+    r_ub["metadata"] = {
+        "COMMIT_AUTHOR":       "Jane Doe <jane@example.com>",
+        "COMMIT_AUTHOR_EMAIL": "jane@example.com",
+        "USER":                "ignored",
+    }
+    out_ub = render_check_output(ctx, r_ub, "passed", render_ctx, links)
+    tc = test_case(tc, "👤 Jane Doe" in out_ub["summary"], "user fallback: COMMIT_AUTHOR name-portion extracted")
+    tc = test_case(tc, "@"       not in out_ub["summary"], "user fallback: COMMIT_AUTHOR email suffix stripped")
+
+    # Next: USER
+    r_ud = init_results()
+    r_ud["build_command"] = "test"
+    r_ud["targets_total"] = 1
+    r_ud["metadata"] = {"USER": "ci-bot"}
+    r_ud["workspace_status"] = {"BUILD_USER": "skip-me"}
+    out_ud = render_check_output(ctx, r_ud, "passed", render_ctx, links)
+    tc = test_case(tc, "👤 ci-bot" in out_ud["summary"], "user fallback: USER")
+
+    # BUILD_USER fallback when USER is missing.
+    r_ue = init_results()
+    r_ue["build_command"] = "test"
+    r_ue["targets_total"] = 1
+    r_ue["workspace_status"] = {"BUILD_USER": "local-dev"}
+    out_ue = render_check_output(ctx, r_ue, "passed", render_ctx, links)
+    tc = test_case(tc, "👤 local-dev" in out_ue["summary"], "user fallback: BUILD_USER")
+
+    # Last resort: email-only → wrap in backticks so GFM can't autolink.
+    r_uc = init_results()
+    r_uc["build_command"] = "test"
+    r_uc["targets_total"] = 1
+    r_uc["metadata"] = {"COMMIT_AUTHOR_EMAIL": "solo@example.com"}
+    out_uc = render_check_output(ctx, r_uc, "passed", render_ctx, links)
+    tc = test_case(tc, "👤 `solo@example.com`" in out_uc["summary"], "user fallback: email-only wrapped in backticks (immune to GFM autolink)")
+
+    # --- Test 14b: REPO_URL wins over VCS+owner+name (self-hosted support) ---
+    r_rh = init_results()
+    r_rh["build_command"] = "test"
+    r_rh["targets_total"] = 1
+    r_rh["metadata"] = {
+        "VCS":        "GITHUB",
+        "REPO_URL":   "https://github.mycorp.com/myteam/myrepo",
+        "REPO_OWNER": "someone-else",
+        "REPO_NAME":  "different-repo",
+        "BRANCH_NAME": "feature/x",
+        "COMMIT_SHA":  "abc1234567",
+    }
+    out_rh = render_check_output(ctx, r_rh, "passed", render_ctx, links)
+    tc = test_case(tc, "[myrepo](https://github.mycorp.com/myteam/myrepo)" in out_rh["summary"], "self-hosted: REPO_URL used as repo link with repo name")
+    tc = test_case(tc, "https://github.mycorp.com/myteam/myrepo/tree/feature/x"            in out_rh["summary"], "self-hosted: branch URL built from REPO_URL")
+    tc = test_case(tc, "https://github.mycorp.com/myteam/myrepo/commit/abc1234567"         in out_rh["summary"], "self-hosted: commit URL built from REPO_URL")
+    tc = test_case(tc, "github.com/someone-else/different-repo"                        not in out_rh["summary"], "self-hosted: hardcoded domain not used when REPO_URL is set")
+
+    # --- Test 14c: summary row 2 on incremental + fresh ---
+    # Back-to-back invocation: wall_time > 0, actions_executed=1 (just the
+    # always-rerun BazelWorkspaceStatusAction), actions_total recovered from
+    # summing per-mnemonic action_data.actions_created — so the cached
+    # percentage is meaningful ("99% cached") even on a fully incremental run.
+    r_inc = init_results()
+    r_inc["build_command"]                = "test"
+    r_inc["wall_time_ms"]                 = 4600
+    r_inc["targets_total"]                = 146
+    r_inc["actions_executed"]             = 1     # just BazelWorkspaceStatusAction
+    r_inc["actions_total"]                = 34010 # sum of per-mnemonic actions_created
+    r_inc["packages_loaded"]              = 0
+    r_inc["passed_test_total"]            = 25
+    r_inc["cached_test_total"]            = 25
+    out_inc = render_check_output(ctx, r_inc, "passed", render_ctx, links)
+    tc = test_case(tc, "📦 146 targets"                          in out_inc["summary"], "summary: targets count (no configured parens)")
+    tc = test_case(tc, "(146 configured)"                    not in out_inc["summary"], "summary: no '(N configured)' parens")
+    tc = test_case(tc, "⚡ 1 of 34,010 actions (99% cached)"     in out_inc["summary"], "summary: actions with cached %% on incremental (per-mnemonic sum)")
+    tc = test_case(tc, "incremental rebuild"                 not in out_inc["summary"], "summary: no incremental pill")
+    tc = test_case(tc, "0 of 25 tests (100% cached)"             in out_inc["summary"], "summary: tests line still shows count + cached pct")
+    tc = test_case(tc, "packages"                            not in out_inc["summary"], "summary: packages dropped from row")
+
+    # Fresh build renders the same shape.
+    r_aspect = init_results()
+    r_aspect["build_command"]        = "test"
+    r_aspect["wall_time_ms"]         = 68000
+    r_aspect["targets_total"]        = 146
+    r_aspect["targets_configured"]   = 159453
+    r_aspect["actions_executed"]     = 361
+    r_aspect["actions_total"]        = 46325
+    r_aspect["packages_loaded"]      = 745
+    out_aspect = render_check_output(ctx, r_aspect, "passed", render_ctx, links)
+    tc = test_case(tc, "📦 146 targets"                             in out_aspect["summary"], "fresh build: targets count (no parens)")
+    tc = test_case(tc, "⚡ 361 of 46,325 actions (99% cached)"       in out_aspect["summary"], "fresh build: actions with cached pct")
+
+    # --- Test 14: Performance section Timing labels + cpu-seconds units ---
+    r14 = init_results()
+    r14["build_command"]         = "test"
+    r14["wall_time_ms"]          = 10000
+    r14["cpu_time_ms"]           = 60000   # Bazel server CPU
+    r14["executed_duration_ms"]  = 45000   # Executed Tests Time
+    r14["cached_duration_ms"]    = 150000  # Cached tests time saved (2m 30s = 150,000 ms = 2.5 cpu-minutes)
+    r14["critical_path_ms"]      = 3000    # Critical path: 3s
+    r14["passed_test_total"]     = 10
+    r14["targets_total"]         = 5
+    out14 = render_check_output(ctx, r14, "passed", render_ctx, links)
+    tc = test_case(tc, "Bazel server time: `1 cpu-minute`"          in out14["text"], "stats: Bazel server time in cpu-minutes")
+    tc = test_case(tc, "Executed Tests Time: `45 cpu-seconds`"      in out14["text"], "stats: Executed Tests Time in cpu-seconds")
+    tc = test_case(tc, "Cached tests time saved: `2.5 cpu-minutes`" in out14["text"], "stats: Cached tests time saved in cpu-minutes")
+    tc = test_case(tc, "Critical path: `3s`"                        in out14["text"], "stats: Critical path uses wall-clock format")
+
+    # _format_cpu_seconds scaling boundary tests.
+    r14b = init_results()
+    r14b["build_command"]   = "test"
+    r14b["targets_total"]   = 1
+    r14b["cpu_time_ms"]     = 2300     # 2.3 cpu-seconds
+    out14b = render_check_output(ctx, r14b, "passed", render_ctx, links)
+    tc = test_case(tc, "Bazel server time: `2.3 cpu-seconds`" in out14b["text"], "cpu-seconds formatter: <60s decimals")
+
+    r14c = init_results()
+    r14c["build_command"]   = "test"
+    r14c["targets_total"]   = 1
+    r14c["cpu_time_ms"]     = 3660000  # 61 minutes → 1 cpu-hour
+    out14c = render_check_output(ctx, r14c, "passed", render_ctx, links)
+    tc = test_case(tc, "Bazel server time: `1 cpu-hour`" in out14c["text"], "cpu-seconds formatter: 1-hour boundary")
+
+    return tc
+
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -635,6 +1287,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_http_get_post(ctx, tc, temp_dir)
     tc = test_conditional_flags(ctx, tc)
     tc = test_cancel_invocation(ctx, tc)
+    tc = test_template_rendering(ctx, tc)
 
     print(tc, "tests passed")
     return 0

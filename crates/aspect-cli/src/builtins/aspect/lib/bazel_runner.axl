@@ -1,0 +1,172 @@
+"""Shared Bazel task runner used by both the `build` and `test` builtin tasks.
+
+The two tasks are mechanically identical — they run the same health checks,
+flag pipeline, BES wiring, lifecycle hooks, and result accumulation. The only
+difference is which Bazel subcommand they invoke (`bazel build` vs
+`bazel test`). Tests happen to produce `test_summary` events on top of the
+shared event stream, which naturally flows through `process_event` into the
+test-specific buckets in `results`.
+
+Keeping a single runner here ensures the status check code path stays unified:
+any change to how build events are processed or how status updates are emitted
+applies uniformly to both tasks.
+"""
+load("../traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
+load("./bazel_results.axl", "init_results", "process_event", "compute_repro")
+
+
+def _collect_bes_from_args(ctx):
+    """Collect BES sinks from CLI args (--bes_backend/--bes_header)."""
+    sinks = []
+    for bes_backend in ctx.args.bes_backend:
+        metadata = {}
+        for bes_header in ctx.args.bes_header:
+            (k, _, v) = bes_header.partition("=")
+            metadata[k] = v
+        sinks.append(
+            bazel.build_events.grpc(
+                uri = bes_backend,
+                metadata = metadata,
+            )
+        )
+    return sinks
+
+
+def run_bazel_task(ctx: TaskContext, command: str) -> int:
+    """Shared impl for build/test tasks.
+
+    Args:
+        ctx:     TaskContext with the standard build/test args (target_pattern,
+                 bazel_flag, bazel_startup_flag, bes_backend, bes_header,
+                 cancel, output_base). Task-specific args (e.g. build's
+                 remote_executor) are not touched here — tasks can still read
+                 them from `ctx.args` before/after calling this function.
+        command: "build" or "test" — selects which Bazel subcommand to invoke
+                 and which rc section to expand. The shape of the BES event
+                 stream (including the presence of test_summary events for
+                 tests) follows naturally from this.
+    """
+    hc_trait    = ctx.traits[HealthCheckTrait]
+    bazel_trait = ctx.traits[BazelTrait]
+    lifecycle   = ctx.traits[TaskLifecycleTrait]
+
+    for hook in hc_trait.pre_health_check:
+        hook(ctx)
+
+    for hook in hc_trait.post_health_check:
+        result = hook(ctx)
+        if result != None:
+            fail(result)
+
+    # Flags: accumulate data, then optionally transform.
+    flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
+    flags.extend(ctx.args.bazel_flag)
+    flags.extend(bazel_trait.extra_flags)
+    # Task-time flag contributors — features register hooks that need
+    # ctx.task (e.g. --build_metadata=ASPECT_TASK_NAME=...) which features
+    # can't produce at activation time because FeatureContext has no task.
+    # See BazelDefaults in feature/defaults.axl for the metadata registration.
+    for hook in bazel_trait.task_flags:
+        flags.extend(hook(ctx))
+    if bazel_trait.flags:
+        flags = bazel_trait.flags(flags)
+
+    startup_flags = list(ctx.args.bazel_startup_flag)
+    startup_flags.extend(bazel_trait.extra_startup_flags)
+    if ctx.args.output_base:
+        startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
+    if bazel_trait.startup_flags:
+        startup_flags = bazel_trait.startup_flags(startup_flags)
+
+    # BES: merge arg-based sinks with trait sinks.
+    build_events = _collect_bes_from_args(ctx)
+    if bazel_trait.build_event_sinks:
+        build_events.extend(bazel_trait.build_event_sinks)
+
+    # Coerce to bool/list for ctx.bazel.build/test:
+    # - non-empty list → stream to those sinks + build_events() iterator.
+    # - True → stream without explicit sinks (build_event handler + result tracking)
+    # - False → no BEP stream at all
+    need_bes = bool(bazel_trait.build_event) or bool(lifecycle.task_update)
+    if not build_events:
+        build_events = True if need_bes else False
+
+    for handler in lifecycle.task_started:
+        handler(ctx, " ".join(ctx.args.target_pattern))
+
+    for handler in bazel_trait.build_start:
+        handler(ctx)
+
+    if ctx.args.cancel:
+        cancellation = ctx.bazel.cancel_invocation()
+        cancellation.wait()
+
+    rc = ctx.bazel.parse_rc(
+        root = ctx.std.env.root_dir(),
+        startup_flags = startup_flags,
+        flags = flags,
+    )
+
+    rc_startup_flags, flags = rc.expand_all(command = command)
+    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
+    print(rc.announce(command = command, ansi = ctx.std.io.stdout.is_tty))
+
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+    results = init_results()
+
+    for _ in range(10):
+        if command == "test":
+            invocation = ctx.bazel.test(
+                build_events = build_events,
+                execution_log = bazel_trait.execution_log_sinks or False,
+                flags = flags,
+                *ctx.args.target_pattern,
+            )
+        else:
+            invocation = ctx.bazel.build(
+                build_events = build_events,
+                execution_log = bazel_trait.execution_log_sinks or False,
+                flags = flags,
+                *ctx.args.target_pattern,
+            )
+
+        if need_bes:
+            for event in invocation.build_events():
+                for handler in bazel_trait.build_event:
+                    handler(ctx, event)
+                if process_event(results, event, debug = debug):
+                    live_status = "failing" if (
+                        results["failed_actions_total"] > 0 or
+                        results["failed_test_total"] > 0 or
+                        results["flaky_test_total"] > 0
+                    ) else "running"
+                    update = TaskUpdate(kind = "bazel_results", status = live_status, data = {"results": results})
+                    for handler in lifecycle.task_update:
+                        handler(ctx, update)
+
+        invocation_status = invocation.wait()
+
+        # Capture the sink invocation ID (the UUID used in the Aspect/BES backend,
+        # distinct from Bazel's build_started.uuid) for Web UI link construction.
+        # Empty string when no BES sinks were configured.
+        results["sink_invocation_id"] = invocation.sink_invocation_id
+
+        if invocation_status.code == 0 or not bazel_trait.build_retry(invocation_status.code):
+            break
+
+    # Deferred post-processing: repro commands after all events consumed.
+    compute_repro(results)
+
+    for handler in bazel_trait.build_end:
+        handler(ctx, invocation_status.code)
+
+    # Final update with fully resolved results.
+    final_status = "passed" if invocation_status.code == 0 else "failed"
+    update = TaskUpdate(kind = "bazel_results", status = final_status, data = {"results": results})
+    for handler in lifecycle.task_update:
+        handler(ctx, update)
+
+    for handler in lifecycle.task_complete:
+        handler(ctx, invocation_status.code)
+
+    return invocation_status.code

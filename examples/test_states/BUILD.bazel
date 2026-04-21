@@ -1,0 +1,32 @@
+"""Test targets for exercising github_status_checks states.
+
+Use with:
+  ASPECT_CLI_TESTING=github_status_checks ASPECT_DEBUG=1 \\
+    aspect dev test //examples/test_states/...
+
+Provides:
+  always_pass  — a test that always passes (sh_test exit 0)
+  always_fail  — a test that always fails (sh_test exit 1)
+  flaky_test   — a test that flips based on a counter file (simulated flaky)
+"""
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+sh_test(
+    name = "always_pass",
+    srcs = ["pass.sh"],
+    size = "small",
+)
+
+sh_test(
+    name = "always_fail",
+    srcs = ["fail.sh"],
+    size = "small",
+    tags = ["manual"],  # opt-in only; don't run with //...
+)
+
+sh_test(
+    name = "flaky_test",
+    srcs = ["flaky.sh"],
+    size = "small",
+    tags = ["manual"],  # opt-in only; don't run with //...
+)

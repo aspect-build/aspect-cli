@@ -198,6 +198,12 @@ def _delivery_impl(ctx):
     bazel_flags.append("--remote_download_outputs=minimal")
 
     bazel_flags.extend(bazel_trait.extra_flags)
+    # Task-time flag contributors — features register hooks that need ctx.task
+    # (e.g. --build_metadata=ASPECT_TASK_NAME=...) which features can't produce
+    # at activation time because FeatureContext has no task.
+    # See BazelDefaults in feature/defaults.axl.
+    for hook in bazel_trait.task_flags:
+        bazel_flags.extend(hook(ctx))
     if bazel_trait.flags:
         bazel_flags = bazel_trait.flags(bazel_flags)
 

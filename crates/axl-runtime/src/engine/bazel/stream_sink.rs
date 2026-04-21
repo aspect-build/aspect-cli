@@ -35,15 +35,25 @@ pub enum SinkError {
 pub struct GrpcEventStreamSink {}
 
 impl GrpcEventStreamSink {
+    /// Spawn a gRPC BES forwarding thread.
+    ///
+    /// The caller supplies `invocation_id` so that when multiple gRPC sinks
+    /// are configured for the same invocation (e.g. an Aspect backend plus
+    /// an internal mirror), every backend indexes this build under the same
+    /// UUID. That id is reported back to the AXL layer via
+    /// `Build.sink_invocation_id` — downstream consumers can build a single
+    /// "View invocation" URL that resolves on any backend configured for
+    /// this build.
     pub fn spawn(
         rt: AsyncRuntime,
         recv: Subscriber<BuildEvent>,
         endpoint: String,
         headers: HashMap<String, String>,
+        invocation_id: String,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             rt.block_on(async {
-                GrpcEventStreamSink::task_spawn(recv, endpoint, headers)
+                GrpcEventStreamSink::task_spawn(recv, endpoint, headers, invocation_id)
                     .await
                     .await
             })
@@ -56,20 +66,25 @@ impl GrpcEventStreamSink {
         recv: Subscriber<BuildEvent>,
         endpoint: String,
         headers: HashMap<String, String>,
+        invocation_id: String,
     ) -> task::JoinHandle<Result<(), SinkError>> {
-        tokio::task::spawn(GrpcEventStreamSink::work(recv, endpoint, headers))
+        tokio::task::spawn(GrpcEventStreamSink::work(
+            recv,
+            endpoint,
+            headers,
+            invocation_id,
+        ))
     }
 
     async fn work(
         recv: Subscriber<BuildEvent>,
         endpoint: String,
         headers: HashMap<String, String>,
+        invocation_id: String,
     ) -> Result<(), SinkError> {
         let mut client = Client::new(endpoint, headers).await?;
 
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let build_id = uuid.to_string();
-        let invocation_id = uuid.to_string();
+        let build_id = invocation_id.clone();
 
         client
             .publish_lifecycle_event(lifecycle::build_enqueued(

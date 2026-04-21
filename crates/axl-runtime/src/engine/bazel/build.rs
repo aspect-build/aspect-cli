@@ -110,12 +110,25 @@ impl<'v> UnpackValue<'v> for BuildEventSink {
 }
 
 impl BuildEventSink {
-    fn spawn(&self, rt: AsyncRuntime, stream: &BuildEventStream) -> JoinHandle<()> {
+    /// Spawn the sink. The same `invocation_id` is passed to every BES sink
+    /// so downstream backends all index this invocation under one UUID.
+    fn spawn(
+        &self,
+        rt: AsyncRuntime,
+        stream: &BuildEventStream,
+        invocation_id: String,
+    ) -> JoinHandle<()> {
         match self {
             BuildEventSink::Grpc { uri, metadata } => {
                 // Use subscribe_realtime() since sinks subscribe at stream creation
                 // and don't need history replay.
-                GrpcEventStreamSink::spawn(rt, stream.subscribe(), uri.clone(), metadata.clone())
+                GrpcEventStreamSink::spawn(
+                    rt,
+                    stream.subscribe(),
+                    uri.clone(),
+                    metadata.clone(),
+                    invocation_id,
+                )
             }
             BuildEventSink::File { .. } => {
                 unreachable!("File sinks are handled as raw file paths, not subscriber threads")
@@ -136,6 +149,16 @@ pub struct Build {
 
     #[allocative(skip)]
     sink_handles: RefCell<Vec<JoinHandle<()>>>,
+
+    /// The shared invocation_id that every gRPC BES sink uses when forwarding
+    /// this build's events. `None` when no BES sinks were configured; `Some`
+    /// otherwise — in which case all sinks indexed this invocation under this
+    /// single UUID (one call to `uuid::Uuid::new_v4()` shared across sinks).
+    /// Differs from Bazel's own `build_started.uuid`; that UUID is generated
+    /// server-side by the Bazel process, while this one is minted here before
+    /// we see `build_started`, so the forwarded stream can start immediately.
+    #[allocative(skip)]
+    sink_invocation_id: RefCell<Option<String>>,
 
     #[allocative(skip)]
     child: RefCell<Child>,
@@ -243,12 +266,28 @@ impl Build {
             None
         };
 
-        // Build Event sinks for forwarding the build events
+        // Build Event sinks for forwarding the build events.
+        //
+        // Generate ONE invocation_id and hand it to every sink so all backends
+        // key this invocation under the same UUID. This lets us build a single
+        // "View invocation" URL that works on whichever backend a user checks.
+        // Without this, each sink would mint its own UUID and we'd have no way
+        // to know which one corresponded to any particular viewer URL.
         let mut sink_handles: Vec<JoinHandle<()>> = vec![];
-        for sink in bes_subscriber_sinks {
-            let handle = sink.spawn(rt.clone(), build_event_stream.as_ref().unwrap());
-            sink_handles.push(handle);
-        }
+        let sink_invocation_id: Option<String> = if !bes_subscriber_sinks.is_empty() {
+            let invocation_id = uuid::Uuid::new_v4().to_string();
+            for sink in bes_subscriber_sinks {
+                let handle = sink.spawn(
+                    rt.clone(),
+                    build_event_stream.as_ref().unwrap(),
+                    invocation_id.clone(),
+                );
+                sink_handles.push(handle);
+            }
+            Some(invocation_id)
+        } else {
+            None
+        };
 
         // Decoded ExecLog File sinks — spawned after the execlog stream so the
         // receiver is valid. They disconnect naturally when execlog_stream is joined.
@@ -299,6 +338,7 @@ impl Build {
             workspace_event_stream: RefCell::new(workspace_event_stream),
             execlog_stream: RefCell::new(execlog_stream),
             sink_handles: RefCell::new(sink_handles),
+            sink_invocation_id: RefCell::new(sink_invocation_id),
             span: RefCell::new(span),
         })
     }
@@ -315,6 +355,23 @@ impl<'v> values::StarlarkValue<'v> for Build {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
         RES.methods(build_methods)
+    }
+
+    fn get_attr(&self, attribute: &str, heap: values::Heap<'v>) -> Option<values::Value<'v>> {
+        match attribute {
+            // The shared invocation ID that every gRPC BES sink used when
+            // forwarding this build's events. Empty string when no BES sinks
+            // were configured. Differs from Bazel's build_started.uuid.
+            "sink_invocation_id" => {
+                let id = self.sink_invocation_id.borrow();
+                Some(heap.alloc_str(id.as_deref().unwrap_or("")).to_value())
+            }
+            _ => None,
+        }
+    }
+
+    fn has_attr(&self, attribute: &str, _heap: values::Heap<'v>) -> bool {
+        matches!(attribute, "sink_invocation_id")
     }
 }
 
