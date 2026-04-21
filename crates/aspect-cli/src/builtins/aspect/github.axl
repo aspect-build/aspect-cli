@@ -13,7 +13,7 @@ def _token_impl(ctx: TaskContext) -> int:
 
     creds = ctx.aspect.auth.credentials(profile=ctx.args.profile)
     if creds == None:
-        print("Error: not logged in. Run `aspect auth login` to authenticate.")
+        print("Error: " + github.missing_credentials_reason(ctx))
         return 1
 
     if ctx.args.role:
