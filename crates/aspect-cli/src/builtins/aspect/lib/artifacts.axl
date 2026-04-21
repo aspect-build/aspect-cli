@@ -115,7 +115,9 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name):
     _parent = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
     artifacts_root = ctx.std.fs.mkdtemp(prefix = "aspect-artifacts-", parent = _parent)
     archive_path = artifacts_root + "/" + name + ".tar.gz"
-    ctx.std.fs.create_dir_all(artifacts_root)
+    # `name` may contain "/" (GitLab hierarchical artifact names), so ensure the
+    # parent directories of archive_path exist before writing into them.
+    ctx.std.fs.create_dir_all(archive_path.rsplit("/", 1)[0])
 
     lines = ["#mtree"]
     for entry in entries:
