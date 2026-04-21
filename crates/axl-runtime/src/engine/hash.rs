@@ -90,10 +90,15 @@ impl HashState {
     }
 }
 
+// NOTE: `HashState` contains `sha2::Sha512` (and others) with alignment 16,
+// but the starlark arena only guarantees 8-byte alignment for heap-allocated
+// values. Storing `HashState` inline made `HashObject` align-16 and caused
+// intermittent "misaligned pointer dereference" panics depending on bump
+// offsets. Boxing the state keeps `HashObject` at align 8.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct HashObject<'v> {
     #[allocative(skip)]
-    state: RefCell<Option<HashState>>,
+    state: RefCell<Option<Box<HashState>>>,
     algorithm: &'static str,
     _phantom: PhantomData<Value<'v>>,
 }
@@ -102,7 +107,7 @@ impl<'v> HashObject<'v> {
     pub fn new(state: HashState) -> Self {
         let algorithm = state.algorithm_name();
         Self {
-            state: RefCell::new(Some(state)),
+            state: RefCell::new(Some(Box::new(state))),
             algorithm,
             _phantom: PhantomData,
         }
@@ -133,7 +138,7 @@ impl<'v> Freeze for HashObject<'v> {
         let digest = self
             .state
             .into_inner()
-            .map(|s| s.finalize_bytes())
+            .map(|s| (*s).finalize_bytes())
             .unwrap_or_default();
         Ok(FrozenHashObject {
             digest: digest.into_boxed_slice(),
@@ -258,6 +263,17 @@ mod tests {
         let mut s = state;
         s.update(input.as_bytes());
         hex_encode(&s.finalize_bytes())
+    }
+
+    // The starlark arena only guarantees 8-byte alignment
+    // (`AValueHeader::ALIGN = 8`). `HashState` contains variants like
+    // `sha2::Sha512` with 16-byte alignment, so storing it inline made
+    // `HashObject` align-16 and crashed with "misaligned pointer dereference"
+    // whenever the bump allocator handed back a non-16 offset. Boxing the
+    // state keeps `HashObject` at 8-byte alignment.
+    #[test]
+    fn hash_object_is_8_aligned() {
+        assert_eq!(std::mem::align_of::<HashObject>(), 8);
     }
 
     #[test]

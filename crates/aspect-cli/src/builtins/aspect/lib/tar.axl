@@ -4,6 +4,8 @@ Downloads a platform-appropriate bsdtar binary from
 https://github.com/aspect-build/bsdtar-prebuilt and caches it locally.
 """
 
+load("@std//hash.axl", "sha256")
+
 _VERSION = "v3.8.1-fix.1"
 _BASE_URL = "https://github.com/aspect-build/bsdtar-prebuilt/releases/download/" + _VERSION
 
@@ -33,6 +35,13 @@ def _cache_dir(ctx):
     return home + "/.cache/aspect/bsdtar/" + _VERSION
 
 
+def _file_sha256(ctx, path):
+    h = sha256()
+    for chunk in ctx.std.fs.open(path):
+        h.update(chunk)
+    return h.hexdigest()
+
+
 def bsdtar(ctx):
     """Return the path to a cached bsdtar binary, downloading if necessary."""
     cache = _cache_dir(ctx)
@@ -41,16 +50,20 @@ def bsdtar(ctx):
 
     os, arch = _platform_key(ctx)
     bin_path = cache + "/tar"
+    expected = _SHA256.get(os + "-" + arch)
 
     if ctx.std.fs.exists(bin_path):
-        return bin_path
+        actual = _file_sha256(ctx, bin_path)
+        if actual == expected:
+            return bin_path
+        print("bsdtar cache: %s sha256 %s does not match expected %s, re-downloading" % (bin_path, actual, expected))
+        ctx.std.fs.remove_file(bin_path)
 
     asset = "tar_" + os + "_" + arch
     url = _BASE_URL + "/" + asset
-    sha256 = _SHA256.get(os + "-" + arch)
 
     ctx.std.fs.create_dir_all(cache)
-    ctx.http().download(url = url, output = bin_path, mode = 0o755, sha256 = sha256).block()
+    ctx.http().download(url = url, output = bin_path, mode = 0o755, sha256 = expected).block()
 
     return bin_path
 
