@@ -1,4 +1,4 @@
-name: Aspect Workflows
+name: GitHub Actions CI
 on:
   push:
     branches: [main]
@@ -27,30 +27,36 @@ jobs:
   build-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    env:
+      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Build Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect build //...
+        run: ASPECT_DEBUG=1 aspect build --task-key build-gha-debug //...
       - name: Build Task
         run: aspect build --task-key build-gha //...
 
   test-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    env:
+      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Test Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect test //...
+        run: ASPECT_DEBUG=1 aspect test --task-key test-gha-debug //...
       - name: Test Task
         run: aspect test --task-key test-gha //...
 
   lint-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    env:
+      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - name: Bootstrap
@@ -65,11 +71,13 @@ jobs:
   delivery-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    env:
+      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - name: Bootstrap
         run: .aspect/bootstrap.sh
       - name: Delivery Task (ASPECT_DEBUG=1)
-        run: ASPECT_DEBUG=1 aspect delivery --build-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit-sha $GITHUB_SHA //examples/deliverable
+        run: ASPECT_DEBUG=1 aspect delivery --task-key delivery-gha --build-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit-sha $GITHUB_SHA //examples/deliverable
       - name: Delivery Task
         run: aspect delivery --task-key delivery-gha --build-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --commit-sha $GITHUB_SHA //examples/deliverable
