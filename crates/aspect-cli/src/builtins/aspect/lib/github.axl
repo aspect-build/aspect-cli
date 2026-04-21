@@ -41,6 +41,7 @@ VALID_ROLES = [
     "prs.read",
     "prs.write",
     "issues.read",
+    "actions.read",
 ]
 
 
