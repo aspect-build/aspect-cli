@@ -3,7 +3,7 @@ use std::process;
 use std::process::Stdio;
 
 use allocative::Allocative;
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use derive_more::Display;
 
 use starlark::environment::Methods;
@@ -80,12 +80,12 @@ impl Command {
 
     fn try_spawn(&self) -> anyhow::Result<process::Child> {
         let result = self.inner.borrow_mut().spawn();
-        result.with_context(|| format!("failed to spawn command {}", self.describe()))
+        result.map_err(|e| anyhow!("failed to spawn command {}: {}", self.describe(), e))
     }
 
     fn try_status(&self) -> anyhow::Result<process::ExitStatus> {
         let result = self.inner.borrow_mut().status();
-        result.with_context(|| format!("failed to execute command {}", self.describe()))
+        result.map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))
     }
 }
 
