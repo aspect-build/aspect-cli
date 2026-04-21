@@ -50,34 +50,32 @@ def validate_role(role):
     return role in VALID_ROLES
 
 
-def _authenticate(ctx, env, owner = None, repo = None, profile = None, roles = None, _reason = None):
-    """Resolve a GitHub token using the following priority:
+def _missing_credentials_reason(ctx):
+    """Human-readable explanation for `ctx.aspect.auth.credentials()` returning
+    None, tailored to the environment the CLI is running in."""
+    if ctx.std.env.var("BUILDKITE_AGENT_ACCESS_TOKEN"):
+        return "no Aspect credentials — set ASPECT_API_TOKEN in the job env or provision it as a Buildkite secret (https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets)"
+    if ctx.std.env.var("CI"):
+        return "no Aspect credentials — set ASPECT_API_TOKEN (client_id:secret) in the job env"
+    return "not logged in — run `aspect auth login`"
 
-    1. ASPECT_WORKFLOWS_PR_GITHUB_TOKEN env var
-    2. GITHUB_TOKEN env var
-    3. Exchange Aspect credentials for a GitHub token via the Aspect API
-       (requires owner and repo to be provided)
+
+def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None):
+    """Resolve a GitHub token by exchanging Aspect credentials via the Aspect
+    GitHub App (requires owner and repo to be provided).
 
     Returns the token string, or None if authentication is not possible.
     If _reason is a dict, it will be populated with a "reason" key describing why auth failed.
     """
-    token = env.var("ASPECT_WORKFLOWS_PR_GITHUB_TOKEN")
-    if token:
-        return token
-
-    token = env.var("GITHUB_TOKEN")
-    if token:
-        return token
+    if not owner or not repo:
+        if _reason != None:
+            _reason["reason"] = "owner/repo not provided"
+        return None
 
     creds = ctx.aspect.auth.credentials(profile = profile)
     if not creds:
         if _reason != None:
-            _reason["reason"] = "not logged in (run `aspect auth login`)"
-        return None
-
-    if not owner or not repo:
-        if _reason != None:
-            _reason["reason"] = "owner/repo not provided"
+            _reason["reason"] = _missing_credentials_reason(ctx)
         return None
 
     if roles:
@@ -163,8 +161,23 @@ def complete_check_run(ctx, token, owner, repo, check_run_id, conclusion, output
 
 # CI environment detection
 
-def detect_commit_sha(env):
-    """Detect commit SHA from CI environment variables."""
+def detect_commit_sha(std):
+    """Detect commit SHA from CI environment variables.
+
+    On GitHub Actions `pull_request` / `pull_request_target` events, GITHUB_SHA
+    is a synthetic merge commit that isn't part of the PR's commit list —
+    check runs and review comments attached to it are silently hidden in the
+    GitHub UI. Read the PR head SHA from the event payload instead.
+    """
+    env = std.env
+    event_name = env.var("GITHUB_EVENT_NAME") or ""
+    if env.var("GITHUB_ACTIONS") and event_name in ("pull_request", "pull_request_target"):
+        event_path = env.var("GITHUB_EVENT_PATH") or ""
+        if event_path and std.fs.exists(event_path):
+            event = json.decode(std.fs.read_to_string(event_path))
+            head_sha = event.get("pull_request", {}).get("head", {}).get("sha", "")
+            if head_sha:
+                return head_sha
     return (
         env.var("GITHUB_SHA") or
         env.var("BUILDKITE_COMMIT") or
@@ -449,6 +462,7 @@ def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAUL
 github = struct(
     VALID_ROLES = VALID_ROLES,
     authenticate = _authenticate,
+    missing_credentials_reason = _missing_credentials_reason,
     validate_role = validate_role,
     check_token = _check_token,
     status_checks = struct(

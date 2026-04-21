@@ -1,7 +1,7 @@
 """GitHub PR review comment reporter for the lint task."""
 
 load("../lint.axl", "LintTrait")
-load("../lib/github.axl", "github")
+load("../lib/github.axl", "github", "detect_commit_sha")
 load("../lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
 
@@ -211,7 +211,7 @@ def _determine_vars(ctx):
     missing or GITHUB_REF is not a PR merge ref.
     """
     ref = ctx.std.env.var("GITHUB_REF") or ""
-    sha = ctx.std.env.var("GITHUB_SHA") or ""
+    sha = detect_commit_sha(ctx.std)
     repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
     repo_parts = repository.split("/")
     missing = [name for name, val in [("GITHUB_REF", ref), ("GITHUB_SHA", sha), ("GITHUB_REPOSITORY", repository)] if not val]
@@ -238,7 +238,7 @@ def _github_lint_impl(ctx: FeatureContext):
 
     if env_vars:
         auth_reason = {}
-        token = ctx.args.token or github.authenticate(ctx, ctx.std.env, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.read", "prs.write"], _reason = auth_reason)
+        token = github.authenticate(ctx, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.write"], _reason = auth_reason)
         if token:
             gh = {
                 "token": token,
@@ -334,7 +334,4 @@ def _github_lint_impl(ctx: FeatureContext):
 
 GithubLintComments = feature(
     implementation = _github_lint_impl,
-    args = {
-        "token": args.string(description = "Use this specific github token for authentication")
-    }
 )
