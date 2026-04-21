@@ -1,6 +1,3 @@
-secrets:
-  - ASPECT_API_TOKEN
-
 steps:
   - key: runner-smoke
     label: ":aspect: Workflows Runner Smoke Test"
@@ -75,7 +72,7 @@ steps:
           limit: 1
     command: |
       echo "--- :bazel: aspect build //crates/aspect-launcher //crates/aspect-cli"
-      ASPECT_DEBUG=1 aspect build //crates/aspect-launcher //crates/aspect-cli
+      ASPECT_DEBUG=1 aspect build --task-key build-bk-axl-tests-bootstrap //crates/aspect-launcher //crates/aspect-cli
       # Use cquery to get the actual output paths (handles platform transitions on Linux)
       WORKSPACE_ROOT=$$(pwd)
       LAUNCHER=$$WORKSPACE_ROOT/$$(bazel $$BAZEL_STARTUP_OPTS cquery $$BAZEL_BUILD_OPTS --output=files //crates/aspect-launcher)
@@ -103,6 +100,10 @@ steps:
       $$CLI --version
       echo "--- :aspect: aspect version"
       $$LAUNCHER version
+      echo "--- :aspect: invalid task-id"
+      $$LAUNCHER build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
+      echo "--- :aspect: invalid task-key"
+      $$LAUNCHER build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
       echo "--- :aspect: aspect tests axl"
       # Run AXL tests last — cancel tests may kill the Bazel server,
       # which invalidates bazel-out paths used by $$LAUNCHER above.
@@ -131,7 +132,7 @@ steps:
       echo "--- :bazel: bazel info (before aspect)"
       bazel $$BAZEL_STARTUP_OPTS info
       echo "--- :aspect: aspect test //crates/bazelrc:bazelrc_test"
-      aspect test //crates/bazelrc:bazelrc_test
+      aspect test --task-key build-bk-bazelrc-e2e //crates/bazelrc:bazelrc_test
       AFTER_PID=$$(bazel $$BAZEL_STARTUP_OPTS info server_pid)
       echo "--- :bazel: bazel info (after aspect)"
       bazel $$BAZEL_STARTUP_OPTS info
@@ -176,11 +177,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect build //...
+      ASPECT_DEBUG=1 aspect build --task-key build-bk-debug //...
       aspect build --task-key build-bk //...
-      aspect build --task-key build-bk --task-id 00000000-0000-0000-0000-000000000001 //...
-      aspect build --task-id not-a-uuid //... && echo "ERROR: --task-id should reject non-UUID" && exit 1 || true
-      aspect build --task-key "bad key!" //... && echo "ERROR: --task-key should reject invalid chars" && exit 1 || true
 
   - key: test-task
     depends_on:
@@ -194,7 +192,7 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect test //...
+      ASPECT_DEBUG=1 aspect test --task-key test-bk-debug //...
       aspect test --task-key test-bk //...
 
   - key: delivery-task
@@ -209,5 +207,5 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect delivery --build-url $BUILDKITE_BUILD_URL --commit-sha $BUILDKITE_COMMIT //examples/deliverable
+      ASPECT_DEBUG=1 aspect delivery --task-key delivery-bk-debug --build-url $BUILDKITE_BUILD_URL --commit-sha $BUILDKITE_COMMIT //examples/deliverable
       aspect delivery --task-key delivery-bk --build-url $BUILDKITE_BUILD_URL --commit-sha $BUILDKITE_COMMIT  //examples/deliverable

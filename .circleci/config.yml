@@ -35,7 +35,7 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Build Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect build //...
+          command: ASPECT_DEBUG=1 aspect build --task-key build-cci-debug //...
       - run:
           name: Build Task
           command: aspect build --task-key build-cci //...
@@ -51,7 +51,7 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Test Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect test //...
+          command: ASPECT_DEBUG=1 aspect test --task-key test-cci-debug //...
       - run:
           name: Test Task
           command: aspect test --task-key test-cci //...
@@ -67,7 +67,7 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Delivery Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect delivery --build-url $CIRCLE_BUILD_URL --commit-sha $CIRCLE_SHA1 //examples/deliverable
+          command: ASPECT_DEBUG=1 aspect delivery --task-key delivery-cci-debug --build-url $CIRCLE_BUILD_URL --commit-sha $CIRCLE_SHA1 //examples/deliverable
       - run:
           name: Delivery Task
           command: aspect delivery --task-key delivery-cci --build-url $CIRCLE_BUILD_URL --commit-sha $CIRCLE_SHA1 //examples/deliverable
