@@ -267,6 +267,49 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     Handle::current().block_on(fut)
 }
 
+/// Exchange an ASPECT_API_TOKEN from an explicit source — the env var or the
+/// Buildkite secret store — for a fresh credentials entry. Returns Ok(None)
+/// only when no such source is present; a malformed token or a failed
+/// exchange is surfaced as an error so CI misconfigurations fail loudly
+/// instead of falling through to whatever happens to be cached on disk
+/// (e.g. from a previous job on a persistent runner).
+fn credentials_from_api_token_env() -> anyhow::Result<Option<CredentialsEntry>> {
+    let token = std::env::var("ASPECT_API_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(buildkite_aspect_api_token);
+    let Some(token) = token else {
+        return Ok(None);
+    };
+    let (client_id, secret) = token
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("ASPECT_API_TOKEN must be in 'client_id:secret' format"))?;
+    let env = resolve_aspect_env()?;
+    let entry = block_on(exchange_api_token(client_id, secret, env))?;
+    Ok(Some(entry))
+}
+
+/// Read ASPECT_API_TOKEN from Buildkite's secret store when running on a
+/// Buildkite agent. Returns None if not on a Buildkite agent, the CLI is
+/// missing, or the secret is not defined — callers should fall through to
+/// the "not authenticated" path rather than surface the error.
+fn buildkite_aspect_api_token() -> Option<String> {
+    // BUILDKITE_AGENT_ACCESS_TOKEN is injected into every job on a Buildkite
+    // agent; checking it avoids shelling out when we're not on Buildkite.
+    if std::env::var_os("BUILDKITE_AGENT_ACCESS_TOKEN").is_none() {
+        return None;
+    }
+    let output = std::process::Command::new("buildkite-agent")
+        .args(["secret", "get", "ASPECT_API_TOKEN"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if token.is_empty() { None } else { Some(token) }
+}
+
 async fn exchange_api_token(
     client_id: &str,
     secret: &str,
@@ -789,18 +832,12 @@ fn auth_methods(registry: &mut MethodsBuilder) {
             .as_deref()
             .filter(|p| !p.is_empty())
             .unwrap_or("default");
+        // Prefer an explicit ASPECT_API_TOKEN source over cache login credentials.
+        if let Some(entry) = credentials_from_api_token_env()? {
+            return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
+        }
         let map = load_all_credentials()?;
         let Some(entry) = map.get(profile).cloned() else {
-            // Fall back to ASPECT_API_TOKEN env var
-            if let Ok(token) = std::env::var("ASPECT_API_TOKEN") {
-                if let Some((client_id, secret)) = token.split_once(':') {
-                    if let Ok(env) = resolve_aspect_env() {
-                        if let Ok(entry) = block_on(exchange_api_token(client_id, secret, env)) {
-                            return Ok(heap.alloc(AuthCredentials::from_entry(&entry)));
-                        }
-                    }
-                }
-            }
             return Ok(values::Value::new_none());
         };
         // Auto-refresh if expired and refreshable
