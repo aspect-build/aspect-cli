@@ -1117,7 +1117,30 @@ pub fn apply_feature_config_overrides<'v>(
 ///
 /// The returned map has the same shape as the task equivalent: arg_name -> Vec<String>.
 /// Booleans are lowercased ("true"/"false") because Clap's `value_parser!(bool)` expects
-/// lowercase while Starlark's `to_string()` produces "True"/"False".
+/// lowercase while Starlark's `to_string()` produces "True"/"False". Strings are
+/// unpacked via `unpack_str()` to get the raw value; `to_string()` on a Starlark
+/// string returns the repr form (quoted), which Clap rejects when a `values=[...]`
+/// constraint is in play.
+/// Convert a Starlark value to a Clap-parsable argument string.
+///
+/// - Strings are unpacked via `unpack_str()` — `Value::to_string()` on a
+///   Starlark string returns the repr form (e.g. `"failed"` with embedded
+///   quotes), which Clap rejects when a `values=[...]` constraint is in play.
+/// - Bools get lowercased because Clap's `value_parser!(bool)` expects
+///   lowercase while Starlark's `to_string()` produces `True`/`False`.
+/// - Ints, lists, and other types pass through as `Value::to_string()`.
+fn stringify_arg_value(v: Value<'_>) -> String {
+    if let Some(s) = v.unpack_str() {
+        return s.to_owned();
+    }
+    let s = v.to_string();
+    if v.get_type() == "bool" {
+        s.to_lowercase()
+    } else {
+        s
+    }
+}
+
 pub fn feature_instance_effective_defaults(
     instance_value: Value<'_>,
 ) -> std::collections::HashMap<String, Vec<String>> {
@@ -1136,23 +1159,9 @@ pub fn feature_instance_effective_defaults(
         let v = owned.value();
         use starlark::values::list::ListRef;
         let elems: Vec<String> = if let Some(list) = ListRef::from_value(v) {
-            list.iter()
-                .map(|e| {
-                    let s = e.to_string();
-                    if e.get_type() == "bool" {
-                        s.to_lowercase()
-                    } else {
-                        s
-                    }
-                })
-                .collect()
+            list.iter().map(stringify_arg_value).collect()
         } else {
-            let s = v.to_string();
-            vec![if v.get_type() == "bool" {
-                s.to_lowercase()
-            } else {
-                s
-            }]
+            vec![stringify_arg_value(v)]
         };
         out.insert(k.clone(), elems);
     }
@@ -1373,6 +1382,46 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── stringify_arg_value ──────────────────────────────────────────────────
+    //
+    // Critical correctness: Clap's `values=[...]` constraint compares the parsed
+    // input byte-for-byte against the allowed list. A Starlark string passed
+    // through `Value::to_string()` includes the surrounding quotes, which makes
+    // Clap reject even valid choices. Regression test for that bug.
+
+    #[test]
+    fn stringify_string_unquoted() {
+        use starlark::environment::Module;
+        Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let v = heap.alloc("failed");
+            assert_eq!(stringify_arg_value(v), "failed");
+        });
+    }
+
+    #[test]
+    fn stringify_bool_lowercased() {
+        use starlark::environment::Module;
+        Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let t = starlark::values::Value::new_bool(true);
+            let f = starlark::values::Value::new_bool(false);
+            let _ = heap;
+            assert_eq!(stringify_arg_value(t), "true");
+            assert_eq!(stringify_arg_value(f), "false");
+        });
+    }
+
+    #[test]
+    fn stringify_int_plain() {
+        use starlark::environment::Module;
+        Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let v = heap.alloc(42i32);
+            assert_eq!(stringify_arg_value(v), "42");
+        });
+    }
 
     // ── to_command_name ──────────────────────────────────────────────────────
 
