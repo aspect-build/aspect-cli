@@ -43,7 +43,34 @@ def _file_sha256(ctx, path):
 
 
 def bsdtar(ctx):
-    """Return the path to a cached bsdtar binary, downloading if necessary."""
+    """Return the path to a cached bsdtar binary, downloading if necessary.
+
+    Downloads to a unique staging path and atomically rename into place. Two
+    benefits fall out of this pattern:
+
+    1. Cancellation resilience: if the download is interrupted (SIGINT, crash,
+       killed process), the partial file is stranded in the staging dir rather
+       than at `bin_path`. The next run finds `bin_path` either absent or still
+       valid, and re-downloads into a fresh staging dir — we never exec a
+       half-downloaded binary.
+
+    2. Avoids `ETXTBSY` (`Text file busy`, Linux errno 26) on exec. We've
+       observed this even with a single task running, when downloading straight
+       to `bin_path` and exec'ing it shortly after. The exact mechanism is
+       unclear, but the atomic-rename pattern sidesteps the whole class: the
+       final inode at `bin_path` has never had a write fd against it, so exec
+       always sees a clean file. On Linux/macOS `execve()` resolves through
+       the inode, so renaming under an in-flight exec is also safe.
+
+    Windows note: this module only runs on darwin/linux today (see `_OS_MAP`
+    and `_SHA256`), so we rely on POSIX rename semantics. If/when Windows
+    support is added, re-evaluate: `rename` on Windows does overwrite via
+    `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` in modern Rust, but Windows
+    locks running executable images — a concurrent exec of `bin_path` could
+    block the rename. A Windows port of this function will likely need a
+    different strategy (e.g. delete-then-rename or MoveFileEx with delay-
+    until-reboot fallback).
+    """
     cache = _cache_dir(ctx)
     if not cache:
         fail("cannot determine home directory for bsdtar cache")
@@ -57,13 +84,29 @@ def bsdtar(ctx):
         if actual == expected:
             return bin_path
         print("bsdtar cache: %s sha256 %s does not match expected %s, re-downloading" % (bin_path, actual, expected))
-        ctx.std.fs.remove_file(bin_path)
+        # Intentionally no remove_file here — the atomic rename below replaces
+        # the old file in place. Removing first creates a window where exec()
+        # would hit a missing file or a partial download.
 
     asset = "tar_" + os + "_" + arch
     url = _BASE_URL + "/" + asset
 
     ctx.std.fs.create_dir_all(cache)
-    ctx.http().download(url = url, output = bin_path, mode = 0o755, sha256 = expected).block()
+
+    # Staging dir → download target → rename to final. See docstring for why.
+    # Staging lives under `cache` (not a per-job tmpdir) so the final rename
+    # stays on the same filesystem — rename(2) fails with EXDEV across
+    # filesystems, and on Aspect Workflows runners ~/.cache and the job
+    # tmpdir are typically on different mounts.
+    staging = ctx.std.fs.mkdtemp(prefix = "bsdtar-dl-", parent = cache)
+    tmp_path = staging + "/tar"
+    ctx.http().download(url = url, output = tmp_path, mode = 0o755, sha256 = expected).block()
+    ctx.std.fs.rename(tmp_path, bin_path)
+    # Intentionally no cleanup of `staging` here. After the rename it's an empty
+    # directory named `bsdtar-dl-<random>` inside the cache; leaving it behind
+    # costs nothing. AXL has no try/except, so any remove_dir_all error (permission
+    # drift, transient fs issue, networked $HOME hiccup) would turn a successful
+    # download into a user-facing failure even though `bin_path` is already valid.
 
     return bin_path
 
