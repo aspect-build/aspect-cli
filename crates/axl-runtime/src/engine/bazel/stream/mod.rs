@@ -1,6 +1,7 @@
 pub mod broadcaster;
 pub mod build_event;
 pub mod execlog;
+pub mod redaction;
 mod util;
 pub mod workspace_event;
 

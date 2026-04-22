@@ -8,6 +8,48 @@ a successful upload (rolling replacement where applicable).
 Also configures Bazel profiling flags and uploads the profile/execlog/BEP at
 build_end.
 
+What the feature does, and doesn't, control:
+
+Turning on an opt-in (upload_testlogs / upload_profile / upload_bep /
+upload_exec_log) is only *half* of what it takes for a file to exist on
+disk and get uploaded. Per kind, upload requires:
+
+  profile   — Bazel writes a JSON trace profile by default on every
+              command (`$output_base/command.profile.gz`) regardless of
+              flags. What this feature controls is *where* — our
+              `--profile=<path>` on upload_profile=True redirects Bazel
+              to our tmpdir so we know the path to upload. With
+              upload_profile=False the profile still gets written, just
+              to $output_base; we don't discover/upload it from there.
+
+  bep       — a sink-based artifact: the BES stream has to be actively
+              attached to the specific Bazel invocation via
+              `bazel_trait.build_event_sinks`. No sink on the invocation,
+              no file.
+
+  exec log  — sink-based, same story: requires the sink on
+              `bazel_trait.execution_log_sinks` to be attached to the
+              specific invocation.
+
+  testlogs  — event-derived: the task must run a Bazel command that
+              emits `test_result` BES events (`bazel test` /
+              `bazel coverage`) and route those events through
+              `bazel_trait.build_event` so this feature sees them. Build-
+              only commands never emit test_result — strategy can't
+              conjure testlogs that Bazel didn't produce.
+
+Everything above assumes the task's impl actually runs Bazel and plumbs
+those trait fields through. A task that bypasses BazelTrait, or an
+invocation that crashes before the relevant phase, leaves nothing on
+disk; the upload loop's `fs.exists(src)` guard skips missing files
+silently rather than failing the task.
+
+Secret redaction is also not this feature's job. BEP events are redacted
+at the stream source (crates/axl-runtime/src/engine/bazel/stream/redaction.rs);
+profile and testlogs are not redacted and may echo environment values; the
+compact exec log has no on-disk redaction yet, which is why upload_exec_log
+defaults to off.
+
 As uploads complete, the following ArtifactsTrait fields are populated so
 features like GithubStatusChecks can surface download links:
   - artifacts_browse_url — CI "Artifacts" page/tab for the current job
@@ -94,13 +136,56 @@ def _file_uri_to_path(uri):
     return uri
 
 
-def _collect_test_files(ctx, state, event):
+# Statuses that count as "not passed" for upload_test_logs="failed". Matches
+# the `_FAILED_STATUSES` set in lib/bazel_results.axl plus flaky — a flaky
+# test's log is exactly as interesting as a failing one.
+_NOT_PASSED_STATUSES = [
+    "failed",
+    "timeout",
+    "failed_to_build",
+    "remote_failure",
+    "blaze_halted_before_testing",
+    "flaky",
+    "incomplete",
+    "no_status",
+]
+
+
+def _should_collect_test(strategy, status, cached_locally):
+    """Return True if the test's logs should be collected for upload.
+
+    strategy:
+      "none"     — never (treated as upstream short-circuit; included here for
+                   completeness in case this helper is called directly)
+      "failed"   — any status other than "passed"
+      "executed" — any test that actually ran (not served from local cache)
+      "all"      — every test, including cached passes
+    """
+    if strategy == "none":
+        return False
+    if strategy == "all":
+        return True
+    if strategy == "executed":
+        return not cached_locally
+    if strategy == "failed":
+        return status in _NOT_PASSED_STATUSES
+    # Unknown strategy — fail closed so an operator typo doesn't leak logs.
+    return False
+
+
+def _collect_test_files(ctx, state, event, strategy):
     """Collect test output file paths from a test_result event.
 
     Records source paths and desired archive paths in state without copying.
-    The archive is built later via mtree + bsdtar.
+    The archive is built later via mtree + bsdtar. `strategy` controls which
+    test results' files get collected — see _should_collect_test.
     """
     if event.kind != "test_result":
+        return
+
+    status = event.payload.status or ""
+    cached_locally = bool(event.payload.cached_locally)
+    if not _should_collect_test(strategy, status, cached_locally):
         return
 
     label = event.id.label
@@ -230,44 +315,59 @@ def _artifact_upload_impl(ctx: FeatureContext):
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
 
     uuid = _make_uuid(ctx)
+    upload_test_logs = ctx.args.upload_test_logs
+    upload_testlogs  = upload_test_logs != "none"   # convenience for the gate below
+    upload_profile   = ctx.args.upload_profile
+    upload_bep       = ctx.args.upload_bep
+    upload_exec_log  = ctx.args.upload_exec_log
 
-    # Profile / execlog / BEP can carry sensitive data: action env vars, command
-    # lines, and full event streams. Prefer the Aspect Workflows per-job tmpdir
-    # (auto-cleaned between jobs) over shared /tmp, which is world-readable on
-    # most systems. Matches the strategy used by lib/artifacts.axl for archives.
+    # Staging paths for the four uploadable artifact kinds. Prefer the Aspect
+    # Workflows per-job tmpdir (auto-cleaned between jobs) over shared /tmp,
+    # which is world-readable on most systems. Matches lib/artifacts.axl.
     tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
     profile_path = tmpdir + "/" + uuid + ".profile.gz"
     execlog_path = tmpdir + "/" + uuid + ".execlog.zstd"
     bep_path     = tmpdir + "/" + uuid + ".bep.bin"
 
-    bazel_trait.extra_flags.extend([
-        "--generate_json_trace_profile",
-        "--experimental_profile_include_target_label",
-        "--profile=" + profile_path,
-        "--heap_dump_on_oom",
-    ])
+    # Only generate the profile when opt-in. --generate_json_trace_profile +
+    # --profile=path cost wall-clock and write a file we'd otherwise leave on
+    # disk. Skip them entirely when upload_profile is off.
+    if upload_profile:
+        bazel_trait.extra_flags.extend([
+            "--generate_json_trace_profile",
+            "--experimental_profile_include_target_label",
+            "--profile=" + profile_path,
+        ])
 
-    bazel_trait.execution_log_sinks.append(
-        bazel.execution_log.compact_file(path = execlog_path),
-    )
-    bazel_trait.build_event_sinks.append(
-        bazel.build_events.file(path = bep_path),
-    )
+    # Register sinks only when their upload is opt-in. When off, Bazel never
+    # writes the file at all — no leaked bytes on disk, no wasted I/O, and the
+    # matching upload branch below finds nothing to publish.
+    if upload_exec_log:
+        bazel_trait.execution_log_sinks.append(
+            bazel.execution_log.compact_file(path = execlog_path),
+        )
+    if upload_bep:
+        bazel_trait.build_event_sinks.append(
+            bazel.build_events.file(path = bep_path),
+        )
 
     state = {}
 
     def _on_build_event(ctx, event):
-        _collect_test_files(ctx, state, event)
-        if not is_local:
-            _init_upload_state(state)
-            entries = state.get("_test_entries", [])
-            if len(entries) >= state["_artifact_upload"]["testlogs"]["last_count"] + _BATCH_SIZE:
-                name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
-                success = uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
-                # Surface the artifact URL and per-file label URLs as soon as the first
-                # batch is available so GithubStatusChecks can add download links quickly.
-                if success:
-                    _update_testlogs_trait(artifacts_trait, state, ctx.std.env, ci)
+        # Skip collection entirely when testlog upload is opt-out — no point
+        # scanning test_result events and stashing paths we'll never read.
+        if not upload_testlogs or is_local:
+            return
+        _collect_test_files(ctx, state, event, upload_test_logs)
+        _init_upload_state(state)
+        entries = state.get("_test_entries", [])
+        if len(entries) >= state["_artifact_upload"]["testlogs"]["last_count"] + _BATCH_SIZE:
+            name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
+            success = uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
+            # Surface the artifact URL and per-file label URLs as soon as the first
+            # batch is available so GithubStatusChecks can add download links quickly.
+            if success:
+                _update_testlogs_trait(artifacts_trait, state, ctx.std.env, ci)
 
     def _on_build_end(ctx, exit_code):
         if not is_local:
@@ -275,44 +375,54 @@ def _artifact_upload_impl(ctx: FeatureContext):
             if warning:
                 print("\nwarning: artifact upload skipped — " + warning)
             else:
-                _init_upload_state(state)
-                entries = state.get("_test_entries", [])
-                name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
-                success = uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
-                # Always update after final upload so both the archive URL and per-file
-                # label URLs reflect the complete set of uploaded files.
-                if success:
-                    _update_testlogs_trait(artifacts_trait, state, ctx.std.env, ci)
+                if upload_testlogs:
+                    _init_upload_state(state)
+                    entries = state.get("_test_entries", [])
+                    name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
+                    success = uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
+                    # Always update after final upload so both the archive URL and
+                    # per-file label URLs reflect the complete set of uploaded files.
+                    if success:
+                        _update_testlogs_trait(artifacts_trait, state, ctx.std.env, ci)
 
-                # Upload profile/execlog/bep. `download_url` is an HTTP URL on
+                # Upload profile/bep/execlog. `download_url` is an HTTP URL on
                 # GitHub/GitLab/CircleCI (empty on Buildkite) — record it so
                 # status checks can link directly to the downloads. Remove the
                 # source on BOTH success and failure: a failed upload does not
                 # get a retry in this pipeline, so keeping the file just leaks
-                # a potentially-sensitive artifact (profile.gz contains Bazel
-                # action env; execlog.zstd contains command lines) into /tmp.
+                # a potentially-sensitive artifact into /tmp.
+                #
+                # Each kind is included only when its corresponding opt-in
+                # arg is set on the feature.
                 task_name = ctx.task.name
                 task_key = ctx.task.key
-                for kind, src, aname in [
-                    ("profile", profile_path, artifact_name(ci, task_name, task_key, "profile.gz")),
-                    ("execlog", execlog_path, artifact_name(ci, task_name, task_key, "execlog.zstd")),
-                    ("bep",     bep_path,     artifact_name(ci, task_name, task_key, "bep.bin")),
-                ]:
+                uploads = []
+                if upload_profile:
+                    uploads.append(("profile", profile_path, artifact_name(ci, task_name, task_key, "profile.gz")))
+                if upload_bep:
+                    uploads.append(("bep", bep_path, artifact_name(ci, task_name, task_key, "bep.bin")))
+                if upload_exec_log:
+                    uploads.append(("execlog", execlog_path, artifact_name(ci, task_name, task_key, "execlog.zstd")))
+                uploaded_any = False
+                for kind, src, aname in uploads:
                     if ctx.std.fs.exists(src):
                         result = uploader.upload_file(ctx, src, aname)
                         if result["success"]:
                             _record_artifact_url(artifacts_trait, kind, result.get("download_url", ""))
+                            uploaded_any = True
                         else:
                             for err in result["errors"]:
                                 print("artifact upload error (" + aname + "): " + err)
                         ctx.std.fs.remove_file(src)
 
-                # Build tasks (no tests) never hit _update_testlogs_trait, so
-                # artifacts_browse_url would stay empty — but profile/execlog/bep
-                # uploaded successfully and the CI artifacts tab is still the right
-                # place to point users. Set the browse URL here if any artifact
-                # made it and it hasn't been set yet.
-                if artifacts_trait.artifact_urls and not artifacts_trait.artifacts_browse_url:
+                # Set the "Artifacts" browse URL whenever ANY upload succeeded
+                # in this impl — not just when artifact_urls is populated.
+                # Buildkite returns empty download_urls (short-lived), so
+                # _record_artifact_url skips them and artifact_urls stays empty
+                # even though the upload itself landed. Keying off
+                # `uploaded_any` covers that path; testlogs still take the
+                # earlier branch via _update_testlogs_trait.
+                if uploaded_any and not artifacts_trait.artifacts_browse_url:
                     browse = _make_artifacts_browse_url(ctx.std.env, ci)
                     if browse:
                         artifacts_trait.artifacts_browse_url = browse
@@ -360,5 +470,68 @@ ArtifactUpload = feature(
     display_name = "Artifact Upload",
     summary = "Automatically upload build artifacts to CI. Supports GitHub Actions, Buildkite, CircleCI, and GitLab.",
     implementation = _artifact_upload_impl,
-    args = {}
+    args = {
+        # All uploads are opt-in. An artifact published to CI is downloadable
+        # by anyone with read access to the job, so "secrets never leave the
+        # machine" means defaulting every channel to off and letting the
+        # operator enable the ones they want for their threat model.
+        #
+        # Risk level, highest to lowest:
+        #   upload_exec_log — carries action env vars + command lines; on-disk
+        #                     redaction not yet implemented. Highest risk.
+        #   upload_testlogs — test stdout/stderr and XML output may echo env
+        #                     vars or print-debugged secrets.
+        #   upload_bep      — BES events are redacted at the stream source
+        #                     (see stream/redaction.rs), so on-disk contents
+        #                     match the redacted form downstream consumers
+        #                     see. Low risk but not zero (gaps in redaction
+        #                     coverage land here).
+        #   upload_profile  — JSON trace profile: target labels, file paths,
+        #                     timing counters. Does not include env values
+        #                     or command lines. Low risk; labels can still
+        #                     leak internal project structure.
+        # `upload_test_logs` selects which test.log / test.xml / test.outputs.zip
+        # files get collected and uploaded:
+        #   none      (default) — no test logs uploaded.
+        #   failed    — only tests that didn't pass (failed, flaky, timeout,
+        #               failed_to_build, remote_failure, incomplete, ...).
+        #               Is the usual sensible choice — passing-test logs are noise.
+        #   executed  — every test that actually ran (cached passes skipped).
+        #   all       — everything, including cached passes.
+        # Off by default — test output can echo env vars or print-debugged
+        # secrets, and on public-repo CI any uploaded file is downloadable by
+        # anyone with repo read access. When off, GithubStatusChecks will not
+        # have download links for failed test logs.
+        "upload_test_logs": args.string(
+            default = "none",
+            values = ["none", "failed", "executed", "all"],
+            description = "Which test logs to upload as artifacts. " +
+                          "'none' (default) uploads nothing. 'failed' uploads " +
+                          "only non-passing tests. 'executed' uploads every test" +
+                          "that ran (skips cached passes). 'all' uploads everything.",
+        ),
+        "upload_profile": args.boolean(
+            default = False,
+            description = "Upload Bazel's JSON trace profile as an artifact. Off by " +
+                          "default. The profile does not typically contain env values " +
+                          "or command lines, but target labels and file paths may " +
+                          "reveal internal project structure.",
+        ),
+        "upload_bep": args.boolean(
+            default = False,
+            description = "Upload the Build Event Protocol binary file as an artifact. " +
+                          "Off by default. The on-disk file is redacted at the stream " +
+                          "source (headers, URL creds, non-allowlisted env vars), so " +
+                          "risk is lower than the other channels — but gaps in redaction " +
+                          "coverage would land here.",
+        ),
+        "upload_exec_log": args.boolean(
+            default = False,
+            description = "Upload Bazel's compact execution log as an artifact. " +
+                          "Off by default — the log contains action env vars and " +
+                          "command lines that may carry secrets; on-disk redaction " +
+                          "is not yet implemented. Set to true on private-repo CI " +
+                          "where artifact access is controlled.",
+        ),
+    }
 )

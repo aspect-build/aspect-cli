@@ -1,4 +1,5 @@
 load("./lambda.axl", "lambda_with_global_bind")
+load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
 load("@aspect//traits.axl", "BazelTrait")
@@ -23,6 +24,17 @@ def config(ctx: ConfigContext):
 
     # enable Github Status Checks
     ctx.features[GithubStatusChecks].enabled = True
+
+    # Enable artifact uploads for testlogs, profile, and BEP. All four channels
+    # default to off so operators opt in per repo. The compact execution log stays
+    # off because on-disk redaction isn't implemented yet — re-enable once Bazel's
+    # zstd execlog passes through the same redactor as the BEP stream.
+    #
+    # upload_test_logs="failed" — the logs from passing tests are noise;
+    # failing/flaky tests' logs are the ones anyone would actually open.
+    ctx.features[ArtifactUpload].args.upload_test_logs = "failed"
+    ctx.features[ArtifactUpload].args.upload_profile   = True
+    ctx.features[ArtifactUpload].args.upload_bep       = True
 
     # add a new task
     ctx.tasks.add(_user_task)

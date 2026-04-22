@@ -13,6 +13,7 @@ use std::{
 use thiserror::Error;
 
 use super::broadcaster::{Broadcaster, Subscriber};
+use super::redaction::redact_event;
 use super::util::{MultiWriter, read_varint};
 
 #[derive(Error, Debug)]
@@ -21,6 +22,8 @@ pub enum BuildEventStreamError {
     IO(#[from] std::io::Error),
     #[error("prost decode error: {0}")]
     ProstDecode(#[from] prost::DecodeError),
+    #[error("prost encode error: {0}")]
+    ProstEncode(#[from] prost::EncodeError),
 }
 
 #[derive(Debug)]
@@ -60,7 +63,14 @@ impl BuildEventStream {
             // Initial size for reading a varint
             buf.resize(10, 0);
 
+            // Scratch buffer for re-encoding redacted events. Reused across
+            // iterations to avoid per-event allocation. Only populated on the
+            // rare modified-event path (the common case writes the original
+            // bytes straight through).
+            let mut reencode_buf: Vec<u8> = Vec::with_capacity(1024);
+
             let read_event = |buf: &mut Vec<u8>,
+                              reencode_buf: &mut Vec<u8>,
                               raw_out: &mut MultiWriter<BufWriter<File>>,
                               reader: &mut galvanize::Pipe|
              -> Result<BuildEvent, BuildEventStreamError> {
@@ -68,14 +78,30 @@ impl BuildEventStream {
                 if size > buf.len() {
                     buf.resize(size, 0);
                 }
-                raw_out.write(vbuf.as_slice())?;
                 reader.read_exact(&mut buf[0..size])?;
+                let mut event = BuildEvent::decode(&buf[0..size])?;
+                // Redact secrets (headers, env passthrough, URL creds) BEFORE
+                // anything downstream sees the event. Raw file sinks, gRPC
+                // forwarders, and AXL iterators all read from the post-redact
+                // stream — secrets never leave this process.
+                //
+                // `redact_event` only mutates a small set of payload kinds
+                // (StructuredCommandLine, UnstructuredCommandLine, BuildMetadata,
+                // etc.); for the common case it returns false and we write the
+                // original bytes straight through with no re-encode cost.
+                let modified = redact_event(&mut event);
                 // These can be extremely slow and expensive calls depending
                 // on the destination that we are writing to.
                 // TODO: Ensure we have a dedicated thread where the writing
                 // happens to avoid stalling.
-                raw_out.write_all(&buf[0..size])?;
-                let event = BuildEvent::decode(&buf[0..size])?;
+                if modified {
+                    reencode_buf.clear();
+                    event.encode_length_delimited(reencode_buf)?;
+                    raw_out.write_all(reencode_buf.as_slice())?;
+                } else {
+                    raw_out.write(vbuf.as_slice())?;
+                    raw_out.write_all(&buf[0..size])?;
+                }
                 Ok(event)
             };
 
@@ -87,7 +113,7 @@ impl BuildEventStream {
             let mut expecting_retry = false;
 
             loop {
-                match read_event(&mut buf, &mut raw_out, &mut reader) {
+                match read_event(&mut buf, &mut reencode_buf, &mut raw_out, &mut reader) {
                     Ok(event) => {
                         let last_message = event.last_message;
 
