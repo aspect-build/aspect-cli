@@ -1,15 +1,101 @@
 """
 Build Metadata Flag Generation
 
-Generates --build_metadata=KEY=VALUE flags for Bazel invocations.
-These feed the Build Event Stream (BES) and are queryable in Bessie.
+Generates --build_metadata=KEY=VALUE flags for Bazel invocations. The same
+metadata is used by both:
+
+  • Aspect Web UI  — consumes the `build_metadata` BES event
+  • Status checks  — consumes results["metadata"] in bazel_results.axl
+
+Key names match the Aspect Web UI's expected schema (see silo
+kilgore/app/layout/header/ExecutionContext.tsx). Canonical values are
+uppercase enum-style strings (VCS=GITHUB, CI_HOST=BUILDKITE, …).
 """
 
 
+_VCS_HOST_TO_ENUM = {
+    "github.com":    "GITHUB",
+    "gitlab.com":    "GITLAB",
+    "bitbucket.org": "BITBUCKET",
+}
+
+
+def _detect_vcs_from_host(host):
+    """Return the canonical VCS enum for a host, or "" if unrecognized.
+
+    Suffix match so Enterprise / self-hosted subdomains (`github.mycorp.com`,
+    `gitlab.mycorp.com`) are recognized as their parent VCS.
+    """
+    if not host:
+        return ""
+    h = host.lower()
+    for domain, enum in _VCS_HOST_TO_ENUM.items():
+        if h == domain or h.endswith("." + domain.split(".")[0] + "." + domain.split(".", 1)[1]):
+            return enum
+    # Simple heuristic for self-hosted: "github" or "gitlab" in the hostname.
+    if "github" in h:
+        return "GITHUB"
+    if "gitlab" in h:
+        return "GITLAB"
+    if "bitbucket" in h:
+        return "BITBUCKET"
+    return ""
+
+
+def _parse_git_remote_url(url):
+    """Parse a git remote URL (SSH or HTTPS) into {host, owner, repo, path}.
+
+    - `owner` is the top-level group (first path segment).
+    - `repo`  is the leaf project name (last path segment).
+    - `path`  is the full namespace path joining them, needed for GitLab
+      nested subgroups (e.g. `group/subgroup/project`) so callers can build
+      a canonical URL that actually resolves.
+
+    Returns {} if the URL can't be parsed. Strips credentials, trailing .git.
+    """
+    if not url:
+        return {}
+    host = ""
+    path = ""
+    if url.startswith("git@"):
+        # SSH: git@host:owner/repo.git
+        rest = url[len("git@"):]
+        colon = rest.find(":")
+        if colon < 0:
+            return {}
+        host = rest[:colon]
+        path = rest[colon + 1:]
+    else:
+        scheme_end = url.find("://")
+        if scheme_end < 0:
+            return {}
+        rest = url[scheme_end + 3:]
+        # Strip user:pass@ credentials if present.
+        at = rest.find("@")
+        slash = rest.find("/")
+        if at >= 0 and (slash < 0 or at < slash):
+            rest = rest[at + 1:]
+        slash = rest.find("/")
+        if slash < 0:
+            return {}
+        host = rest[:slash]
+        path = rest[slash + 1:]
+    if path.endswith(".git"):
+        path = path[:-len(".git")]
+    parts = path.split("/")
+    if len(parts) < 2:
+        return {"host": host}
+    return {"host": host, "owner": parts[0], "repo": parts[-1], "path": path}
+
+
 def _git_show(process):
-    """Run git show HEAD and return a dict of commit fields."""
+    """Run `git show HEAD` and return a dict of commit fields.
+
+    Produces COMMIT_SHA, COMMIT_AUTHOR_NAME, COMMIT_AUTHOR_EMAIL, COMMIT_AUTHOR
+    ("Name <email>"), COMMIT_MESSAGE, COMMIT_TIMESTAMP, TAG.
+    """
     out = process.command("git").arg("show").arg("HEAD") \
-        .arg("--format=%H\n%aN\n%aE\n%s\n%aI\n%D").arg("--no-patch") \
+        .arg("--format=%H%n%aN%n%aE%n%s%n%aI%n%D").arg("--no-patch") \
         .stdout("piped").stderr("piped").spawn().wait_with_output()
 
     if not out.stdout:
@@ -20,10 +106,21 @@ def _git_show(process):
 
     if len(lines) >= 1 and lines[0].strip():
         result["COMMIT_SHA"] = lines[0].strip()
-    if len(lines) >= 2 and lines[1].strip():
-        result["COMMIT_AUTHOR"] = lines[1].strip()
-    if len(lines) >= 3 and lines[2].strip():
-        result["COMMIT_AUTHOR_EMAIL"] = lines[2].strip()
+
+    name  = lines[1].strip() if len(lines) >= 2 else ""
+    email = lines[2].strip() if len(lines) >= 3 else ""
+    if name:
+        result["COMMIT_AUTHOR_NAME"] = name
+    if email:
+        result["COMMIT_AUTHOR_EMAIL"] = email
+    # Keep COMMIT_AUTHOR in the "Name <email>" form the Web UI docs advertise.
+    if name and email:
+        result["COMMIT_AUTHOR"] = name + " <" + email + ">"
+    elif name:
+        result["COMMIT_AUTHOR"] = name
+    elif email:
+        result["COMMIT_AUTHOR"] = email
+
     if len(lines) >= 4 and lines[3].strip():
         msg = lines[3].strip()
         if len(msg) > 80:
@@ -36,60 +133,75 @@ def _git_show(process):
         for ref in lines[5].split(","):
             ref = ref.strip()
             if ref.startswith("tag: "):
-                result["TAG"] = ref[5:]
+                result["TAG"] = ref[len("tag: "):]
                 break
 
     return result
 
 
-def _parse_git_remote_url(url):
-    """Parse git remote URL to extract REPO_OWNER, REPO, and VCS keys."""
-    if not url:
-        return {}
+def _apply_repo_url(meta, host, owner, repo, scheme = "https", url_path = None):
+    """Set REPO_URL / REPO_OWNER / REPO_NAME / VCS from a parsed triple.
 
-    result = {}
+    url_path — optional override for the path segment of REPO_URL, used when the
+    canonical URL includes more than just "owner/repo" (e.g. GitLab with nested
+    subgroups: "group/subgroup/project"). Defaults to "owner/repo".
+    """
+    if owner:
+        meta["REPO_OWNER"] = owner
+    if repo:
+        meta["REPO_NAME"] = repo
+    if host and owner and repo:
+        path = url_path if url_path else owner + "/" + repo
+        meta["REPO_URL"] = scheme + "://" + host + "/" + path
+    vcs = _detect_vcs_from_host(host)
+    if vcs and "VCS" not in meta:
+        meta["VCS"] = vcs
 
-    # Detect VCS host
-    if "github.com" in url:
-        result["VCS"] = "github"
-    elif "gitlab.com" in url:
-        result["VCS"] = "gitlab"
-    elif "bitbucket.org" in url:
-        result["VCS"] = "bitbucket"
 
-    # Parse owner/repo from URL
-    path = None
-    if url.startswith("git@"):
-        # SSH: git@github.com:owner/repo.git
-        colon_idx = url.find(":")
-        if colon_idx >= 0:
-            path = url[colon_idx + 1:]
-    else:
-        scheme_end = url.find("://")
-        if scheme_end >= 0:
-            # HTTPS (possibly with credentials): https://[token@]host/owner/repo.git
-            rest = url[scheme_end + 3:]
-            slash_idx = rest.find("/")
-            if slash_idx >= 0:
-                path = rest[slash_idx + 1:]
+def _apply_vcs_override(env, meta):
+    """Apply the ASPECT_VCS_URL override.
 
-    if path:
-        if path.endswith(".git"):
-            path = path[:-4]
-        parts = path.split("/")
-        if len(parts) >= 2:
-            result["REPO_OWNER"] = parts[0]
-            result["REPO"] = parts[1]
-        elif len(parts) == 1 and parts[0]:
-            result["REPO"] = parts[0]
+    A full repository URL that replaces any VCS / REPO_OWNER / REPO_NAME /
+    REPO_URL the CI collector may have populated. It's the cleanest way to
+    say "ignore what git remote or the CI env says the repo is — this is
+    where the code actually lives" in mirror / vendored-checkout setups.
 
-    return result
+    Accepted forms (all resolve to the same (host, owner, repo)):
+        https://github.com/aspect-build/aspect-cli
+        https://github.mycorp.com/team/repo          (GitHub Enterprise)
+        https://gitlab.com/group/subgroup/project    (GitLab with nested groups)
+        git@github.com:aspect-build/aspect-cli.git   (SSH also accepted)
+    """
+    vcs_url = env.var("ASPECT_VCS_URL") or ""
+    if not vcs_url:
+        return
 
+    parsed = _parse_git_remote_url(vcs_url)
+    host      = parsed.get("host", "")
+    owner     = parsed.get("owner", "")
+    repo      = parsed.get("repo", "")
+    url_path  = parsed.get("path") or (owner + "/" + repo if owner and repo else "")
+    if not host or not owner or not repo:
+        return
+
+    scheme = "http" if vcs_url.startswith("http://") else "https"
+    # Override — these fields win over anything the CI collector set. Use the
+    # full parsed path so nested-group GitLab repos keep their subgroups.
+    meta["REPO_URL"]   = scheme + "://" + host + "/" + url_path
+    meta["REPO_OWNER"] = owner
+    meta["REPO_NAME"]  = repo
+    vcs = _detect_vcs_from_host(host)
+    if vcs:
+        meta["VCS"] = vcs
+
+
+# ---------------------------------------------------------------------------
+# GitHub Actions
+# ---------------------------------------------------------------------------
 
 def _collect_github(env, meta):
-    """Fill meta dict from GitHub Actions environment variables."""
-    meta["CI"] = "github"
-    meta["VCS"] = "github"
+    meta["CI_HOST"] = "GITHUB_ACTIONS"
+    meta["VCS"]     = "GITHUB"
 
     sha = env.var("GITHUB_SHA")
     if sha:
@@ -99,30 +211,65 @@ def _collect_github(env, meta):
     if actor:
         meta["USER"] = actor
 
-    # Branch detection: GITHUB_HEAD_REF is set on PR events, otherwise parse GITHUB_REF
+    # Branch / tag detection.
     head_ref = env.var("GITHUB_HEAD_REF")
     if head_ref:
-        meta["BRANCH"] = head_ref
+        # PR event — head ref is the PR source branch, main ref is "refs/pull/N/merge".
+        meta["BRANCH_NAME"]           = head_ref
+        meta["PR_SOURCE_BRANCH_NAME"] = head_ref
+        base_ref = env.var("GITHUB_BASE_REF") or ""
+        if base_ref:
+            meta["PR_TARGET_BRANCH_NAME"] = base_ref
+        ref = env.var("GITHUB_REF") or ""
+        if ref.startswith("refs/pull/") and "/" in ref[len("refs/pull/"):]:
+            pr_num = ref[len("refs/pull/"):].split("/")[0]
+            if pr_num:
+                meta["PR_NUMBER"] = pr_num
+                meta["PR_ID"]     = pr_num
     else:
-        ref = env.var("GITHUB_REF")
-        if ref and ref.startswith("refs/heads/"):
-            meta["BRANCH"] = ref[11:]
-        elif ref and ref.startswith("refs/tags/"):
-            meta["TAG"] = ref[10:]
+        ref = env.var("GITHUB_REF") or ""
+        if ref.startswith("refs/heads/"):
+            meta["BRANCH_NAME"] = ref[len("refs/heads/"):]
+        elif ref.startswith("refs/tags/"):
+            meta["TAG"] = ref[len("refs/tags/"):]
 
-    repo = env.var("GITHUB_REPOSITORY")
-    if repo:
-        if "/" in repo:
-            parts = repo.split("/")
-            meta["REPO_OWNER"] = parts[0]
-            meta["REPO"] = parts[-1]
-        else:
-            meta["REPO"] = repo
+    event_name = env.var("GITHUB_EVENT_NAME") or ""
+    if event_name in ("pull_request", "pull_request_target", "pull_request_review", "pull_request_review_comment"):
+        meta["RUN_TYPE"] = "PULL_REQUEST"
+    elif event_name == "push":
+        ref = env.var("GITHUB_REF") or ""
+        meta["RUN_TYPE"] = "TAG" if ref.startswith("refs/tags/") else "BRANCH_PUSH"
+    elif event_name == "schedule":
+        meta["RUN_TYPE"] = "SCHEDULED"
+    elif event_name in ("workflow_dispatch", "repository_dispatch"):
+        meta["RUN_TYPE"] = "MANUAL"
 
+    # Repo info. GITHUB_SERVER_URL supports GitHub Enterprise; GITHUB_REPOSITORY
+    # is "{owner}/{name}". Mirror / vendored-checkout setups where the actual
+    # repo lives elsewhere use ASPECT_VCS_URL (handled by _apply_vcs_override)
+    # to override these values after the fact.
+    server = env.var("GITHUB_SERVER_URL") or "https://github.com"
+    server_host = server
+    if "://" in server_host:
+        server_host = server_host.split("://", 1)[1]
+    repo = env.var("GITHUB_REPOSITORY") or ""
+    if "/" in repo:
+        parts = repo.split("/", 1)
+        _apply_repo_url(meta, server_host, parts[0], parts[1],
+                        scheme = "https" if server.startswith("https://") else "http")
+
+    # Build URL — link to the GitHub Actions run page.
+    run_id = env.var("GITHUB_RUN_ID") or ""
+    if repo and run_id:
+        meta["BUILD_URL"] = server + "/" + repo + "/actions/runs/" + run_id
+
+
+# ---------------------------------------------------------------------------
+# Buildkite
+# ---------------------------------------------------------------------------
 
 def _collect_buildkite(env, meta):
-    """Fill meta dict from Buildkite environment variables."""
-    meta["CI"] = "buildkite"
+    meta["CI_HOST"] = "BUILDKITE"
 
     commit = env.var("BUILDKITE_COMMIT")
     if commit:
@@ -134,22 +281,59 @@ def _collect_buildkite(env, meta):
 
     branch = env.var("BUILDKITE_BRANCH")
     if branch:
-        meta["BRANCH"] = branch
+        meta["BRANCH_NAME"] = branch
 
     tag = env.var("BUILDKITE_TAG")
     if tag:
         meta["TAG"] = tag
 
+    # Repo parsing (supports both github.com and gitlab.com Buildkite setups,
+    # plus Enterprise / self-hosted via suffix detection).
     repo_url = env.var("BUILDKITE_REPO")
     if repo_url:
         parsed = _parse_git_remote_url(repo_url)
-        for k, v in parsed.items():
-            meta[k] = v
+        _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
+                        url_path = parsed.get("path"))
 
+    # RUN_TYPE. Check PR before TAG because a PR may coincidentally have a tag.
+    pr_num = env.var("BUILDKITE_PULL_REQUEST") or ""
+    source = env.var("BUILDKITE_SOURCE") or ""
+    if pr_num and pr_num != "false":
+        meta["RUN_TYPE"]   = "PULL_REQUEST"
+        meta["PR_NUMBER"]  = pr_num
+        meta["PR_ID"]      = pr_num
+        if branch:
+            meta["PR_SOURCE_BRANCH_NAME"] = branch
+        target = env.var("BUILDKITE_PULL_REQUEST_BASE_BRANCH") or ""
+        if target:
+            meta["PR_TARGET_BRANCH_NAME"] = target
+    elif tag:
+        meta["RUN_TYPE"] = "TAG"
+    elif source == "schedule":
+        meta["RUN_TYPE"] = "SCHEDULED"
+    elif source in ("ui", "api", "manual"):
+        meta["RUN_TYPE"] = "MANUAL"
+    else:
+        meta["RUN_TYPE"] = "BRANCH_PUSH"
+
+    # BUILD_URL should match exactly what the status-check CI link points at
+    # — the per-step "Buildkite" link in summary row 6. Without the step-id
+    # query suffix the link lands on the build page, not on this specific
+    # step's job page, which is often not what the user wants.
+    build_url = env.var("BUILDKITE_BUILD_URL") or ""
+    step_id   = env.var("BUILDKITE_STEP_ID") or ""
+    if build_url and step_id:
+        meta["BUILD_URL"] = build_url + "/steps/canvas?sid=" + step_id
+    elif build_url:
+        meta["BUILD_URL"] = build_url
+
+
+# ---------------------------------------------------------------------------
+# CircleCI
+# ---------------------------------------------------------------------------
 
 def _collect_circleci(env, meta):
-    """Fill meta dict from CircleCI environment variables."""
-    meta["CI"] = "circleci"
+    meta["CI_HOST"] = "CIRCLE_CI"
 
     sha = env.var("CIRCLE_SHA1")
     if sha:
@@ -161,31 +345,53 @@ def _collect_circleci(env, meta):
 
     branch = env.var("CIRCLE_BRANCH")
     if branch:
-        meta["BRANCH"] = branch
+        meta["BRANCH_NAME"] = branch
 
     tag = env.var("CIRCLE_TAG")
     if tag:
         meta["TAG"] = tag
 
-    owner = env.var("CIRCLE_PROJECT_USERNAME")
-    if owner:
-        meta["REPO_OWNER"] = owner
-
-    repo = env.var("CIRCLE_PROJECT_REPONAME")
-    if repo:
-        meta["REPO"] = repo
-
-    repo_url = env.var("CIRCLE_REPOSITORY_URL")
+    # Repo — CIRCLE_REPOSITORY_URL is the authoritative URL; CIRCLE_PROJECT_*
+    # env vars are useful fallbacks but don't carry the host.
+    repo_url = env.var("CIRCLE_REPOSITORY_URL") or ""
     if repo_url:
         parsed = _parse_git_remote_url(repo_url)
-        for k, v in parsed.items():
-            if k not in meta:
-                meta[k] = v
+        _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
+                        url_path = parsed.get("path"))
+    # Fallback to CIRCLE_PROJECT_* for owner/repo when URL parsing didn't cover them.
+    if "REPO_OWNER" not in meta:
+        owner = env.var("CIRCLE_PROJECT_USERNAME") or ""
+        if owner:
+            meta["REPO_OWNER"] = owner
+    if "REPO_NAME" not in meta:
+        repo = env.var("CIRCLE_PROJECT_REPONAME") or ""
+        if repo:
+            meta["REPO_NAME"] = repo
 
+    pr_num = env.var("CIRCLE_PR_NUMBER") or ""
+    if pr_num:
+        meta["RUN_TYPE"]  = "PULL_REQUEST"
+        meta["PR_NUMBER"] = pr_num
+        meta["PR_ID"]     = pr_num
+        if branch:
+            meta["PR_SOURCE_BRANCH_NAME"] = branch
+    elif tag:
+        meta["RUN_TYPE"] = "TAG"
+    else:
+        meta["RUN_TYPE"] = "BRANCH_PUSH"
+
+    build_url = env.var("CIRCLE_BUILD_URL")
+    if build_url:
+        meta["BUILD_URL"] = build_url
+
+
+# ---------------------------------------------------------------------------
+# GitLab CI
+# ---------------------------------------------------------------------------
 
 def _collect_gitlab(env, meta):
-    """Fill meta dict from GitLab CI environment variables."""
-    meta["CI"] = "gitlab"
+    meta["CI_HOST"] = "GITLAB"
+    meta["VCS"]     = "GITLAB"
 
     sha = env.var("CI_COMMIT_SHA")
     if sha:
@@ -197,27 +403,175 @@ def _collect_gitlab(env, meta):
 
     branch = env.var("CI_COMMIT_BRANCH")
     if branch:
-        meta["BRANCH"] = branch
+        meta["BRANCH_NAME"] = branch
 
     tag = env.var("CI_COMMIT_TAG")
     if tag:
         meta["TAG"] = tag
 
-    namespace = env.var("CI_PROJECT_NAMESPACE")
-    if namespace:
-        meta["REPO_OWNER"] = namespace
+    # Self-hosted GitLab: use CI_SERVER_URL directly to construct the repo URL
+    # so URLs still point at the right host.
+    server_url = env.var("CI_SERVER_URL") or "https://gitlab.com"
+    server_host = server_url
+    if "://" in server_host:
+        server_host = server_host.split("://", 1)[1]
 
-    project = env.var("CI_PROJECT_NAME")
-    if project:
-        meta["REPO"] = project
+    namespace = env.var("CI_PROJECT_NAMESPACE") or ""
+    project   = env.var("CI_PROJECT_NAME") or ""
+    project_path = env.var("CI_PROJECT_PATH") or ""  # full namespace/project path
+    if project_path and "/" in project_path:
+        # GitLab supports nested subgroups ("group/subgroup/project"). REPO_OWNER
+        # carries the top-level group and REPO_NAME the leaf project, but REPO_URL
+        # must retain the full path to actually resolve.
+        parts = project_path.split("/")
+        _apply_repo_url(meta, server_host, parts[0], parts[-1],
+                        scheme = "https" if server_url.startswith("https://") else "http",
+                        url_path = project_path)
+    elif namespace and project:
+        _apply_repo_url(meta, server_host, namespace, project,
+                        scheme = "https" if server_url.startswith("https://") else "http")
+    else:
+        repo_url = env.var("CI_REPOSITORY_URL") or ""
+        if repo_url:
+            parsed = _parse_git_remote_url(repo_url)
+            _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
+                            url_path = parsed.get("path"))
 
-    repo_url = env.var("CI_REPOSITORY_URL")
-    if repo_url:
-        parsed = _parse_git_remote_url(repo_url)
-        for k, v in parsed.items():
-            if k not in meta:
-                meta[k] = v
+    # PR (merge request) detection.
+    mr_iid    = env.var("CI_MERGE_REQUEST_IID") or ""
+    source    = env.var("CI_PIPELINE_SOURCE") or ""
+    mr_source = env.var("CI_MERGE_REQUEST_SOURCE_BRANCH_NAME") or ""
+    mr_target = env.var("CI_MERGE_REQUEST_TARGET_BRANCH_NAME") or ""
+    if source == "merge_request_event" or mr_iid:
+        meta["RUN_TYPE"] = "PULL_REQUEST"
+        if mr_iid:
+            meta["PR_NUMBER"] = mr_iid
+            meta["PR_ID"]     = mr_iid
+        if mr_source:
+            meta["PR_SOURCE_BRANCH_NAME"] = mr_source
+        if mr_target:
+            meta["PR_TARGET_BRANCH_NAME"] = mr_target
+    elif tag:
+        meta["RUN_TYPE"] = "TAG"
+    elif source == "schedule":
+        meta["RUN_TYPE"] = "SCHEDULED"
+    elif source in ("web", "api", "trigger"):
+        meta["RUN_TYPE"] = "MANUAL"
+    else:
+        meta["RUN_TYPE"] = "BRANCH_PUSH"
 
+    build_url = env.var("CI_JOB_URL")
+    if build_url:
+        meta["BUILD_URL"] = build_url
+
+
+# ---------------------------------------------------------------------------
+# Task-identity metadata (depends on TaskContext, not just env)
+# ---------------------------------------------------------------------------
+
+def _version_tuple(s):
+    """Parse "5.18.0" → [5, 18, 0]. Tolerant of pre-release suffixes.
+
+    Non-numeric leading parts or missing segments become 0 so bad inputs
+    sort *before* a valid "0.0.1" rather than crashing.
+    """
+    if not s:
+        return [0, 0, 0]
+    out = [0, 0, 0]
+    parts = s.split(".")
+    for i in range(3):
+        if i >= len(parts):
+            break
+        p = parts[i]
+        digits = ""
+        for j in range(len(p)):
+            c = p[j]
+            if c >= "0" and c <= "9":
+                digits += c
+            else:
+                break
+        if digits:
+            out[i] = int(digits)
+    return out
+
+
+def _version_gte(a, b):
+    """Semver-ish '>=' comparison. Handles "5.18.0" >= "5.18.0"."""
+    return _version_tuple(a) >= _version_tuple(b)
+
+
+def _task_display_name(task_name):
+    """Derive a display-name from a raw task name.
+
+    Converts "test" → "Test", "my-task" / "my_task" → "My Task". Matches
+    github_status_checks._to_display_name so the status-check title and
+    the ASPECT_TASK_* metadata agree.
+    """
+    if not task_name:
+        return task_name
+    if "/" in task_name:
+        task_name = task_name.rsplit("/", 1)[-1]
+    words = [w.capitalize() for w in task_name.replace("_", "-").split("-") if w]
+    return " ".join(words) if words else task_name
+
+
+# Workflows runner version at which the Web UI adopts the split
+# DISPLAY_NAME/NAME/KEY/ID metadata schema. Below this we emit the old
+# two-field form (ASPECT_TASK_NAME=display, ASPECT_TASK_ID=key) that the
+# older Web UI knows how to read.
+_TASK_METADATA_NEW_SCHEMA_MIN_VERSION = "5.18.0"
+
+
+def get_task_metadata_flags(ctx):
+    """Generate --build_metadata flags for the current Aspect task identity.
+
+    Two schemas depending on the detected Workflows runner version:
+
+      pre-5.18 (today, legacy Web UI):
+        ASPECT_TASK_NAME   = <display name>  — e.g. "Test"
+        ASPECT_TASK_ID     = <task key>      — e.g. "test-bk-debug"
+
+      5.18.0+ (Web UI understands the split schema):
+        ASPECT_TASK_DISPLAY_NAME = <display name>
+        ASPECT_TASK_NAME         = <raw name>      — e.g. "test"
+        ASPECT_TASK_KEY          = <task key>
+        ASPECT_TASK_ID           = <UUID>
+
+    Outside of a Workflows runner (ASPECT_WORKFLOWS_RUNNER_VERSION unset)
+    we use the legacy form so check runs rendered against non-Aspect
+    backends still show something readable.
+    """
+    task         = ctx.task
+    name         = task.name or ""
+    key          = task.key  or ""
+    uuid         = task.id   or ""
+    display_name = _task_display_name(name)
+
+    runner_version = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION") or ""
+    new_schema = bool(runner_version) and _version_gte(runner_version, _TASK_METADATA_NEW_SCHEMA_MIN_VERSION)
+
+    flags = []
+    if new_schema:
+        if display_name:
+            flags.append("--build_metadata=ASPECT_TASK_DISPLAY_NAME=" + display_name)
+        if name:
+            flags.append("--build_metadata=ASPECT_TASK_NAME=" + name)
+        if key:
+            flags.append("--build_metadata=ASPECT_TASK_KEY=" + key)
+        if uuid:
+            flags.append("--build_metadata=ASPECT_TASK_ID=" + uuid)
+    else:
+        # Legacy Web UI: NAME carries the display name; ID is the task key.
+        if display_name:
+            flags.append("--build_metadata=ASPECT_TASK_NAME=" + display_name)
+        if key:
+            flags.append("--build_metadata=ASPECT_TASK_ID=" + key)
+    return flags
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 def get_build_metadata_flags(std):
     """
@@ -231,7 +585,7 @@ def get_build_metadata_flags(std):
     """
     meta = {}
 
-    # Step 1: Collect CI host metadata (provides CI-specific fields as fallback)
+    # Step 1: Collect CI-host-specific metadata.
     if std.env.var("GITHUB_ACTIONS"):
         _collect_github(std.env, meta)
     elif std.env.var("BUILDKITE"):
@@ -241,16 +595,26 @@ def get_build_metadata_flags(std):
     elif std.env.var("GITLAB_CI"):
         _collect_gitlab(std.env, meta)
 
-    # Step 2: Run git show and overwrite commit fields (git is the primary source)
+    # Step 2: Overlay commit data from `git show`. Git is authoritative for
+    # COMMIT_* fields since it works offline and outside CI too.
     git_data = _git_show(std.process)
     for k, v in git_data.items():
         meta[k] = v
 
-    # Step 3: If no USER was set by CI, fall back to git author name
-    if not meta.get("USER") and meta.get("COMMIT_AUTHOR"):
-        meta["USER"] = meta["COMMIT_AUTHOR"]
+    # Step 3: VCS-URL override (for mirror / vendored-checkout setups).
+    # Runs AFTER the CI collector so it can overwrite anything the CI got
+    # wrong about where the code actually lives.
+    _apply_vcs_override(std.env, meta)
 
-    # Step 4: Build --build_metadata=KEY=VALUE strings, skipping empty values
+    # Step 4: USER fallback for non-CI local runs — prefer the git commit
+    # author name, then the $USER env var.
+    if not meta.get("USER"):
+        if meta.get("COMMIT_AUTHOR_NAME"):
+            meta["USER"] = meta["COMMIT_AUTHOR_NAME"]
+        elif std.env.var("USER"):
+            meta["USER"] = std.env.var("USER")
+
+    # Step 5: Emit --build_metadata=KEY=VALUE strings, skipping empty values.
     flags = []
     for key, value in meta.items():
         if value:

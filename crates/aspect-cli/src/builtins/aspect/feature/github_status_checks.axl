@@ -1,0 +1,345 @@
+"""GitHub Status Check feature for Aspect tasks.
+
+Creates and updates a GitHub check run reflecting the live state of a task.
+Only runs when the CI environment variable is set — skips silently in local
+developer workflows.
+
+Rendering is delegated to the kind-specific library:
+  kind="bazel_results" → bazel_results.render_check_output()
+
+Future kinds (e.g. "delivery_results") add a branch in _task_update and a
+corresponding render_check_output() function in their own library.
+
+Usage in .aspect/config.axl:
+
+    load("@aspect_workflows//:lib.axl", "GithubStatusChecks")
+
+    configure(build, features = [GithubStatusChecks])
+    configure(my_task, features = [GithubStatusChecks])
+
+Templates can be customized per-task via GitHubStatusChecksTrait:
+
+    def config(ctx: ConfigContext):
+        gh = ctx.traits[GitHubStatusChecksTrait]
+        gh.templates["summary"] = "my custom {{ status_label }} template"
+        # Show custom --bes_metadata keys in the summary:
+        gh.metadata_keys = ["DEPLOY_ENV", "WORKSPACE"]
+        # Or show everything:
+        gh.metadata_keys = ["*"]
+"""
+load("../traits.axl", "TaskLifecycleTrait", "GitHubStatusChecksTrait", "ArtifactsTrait", "TaskUpdate")
+load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
+load("../lib/bazel_results.axl", "init_results", "now_ms", "render_check_output")
+
+
+def _to_display_name(name):
+    """Convert a snake_case task name to a CamelCase display name.
+
+    Examples: "build" → "Build", "my_task" → "MyTask", "test_check_run" → "TestCheckRun"
+    """
+    return "".join([w[0].upper() + w[1:] for w in name.split("_") if w])
+
+
+_SUBJECT_MAX_LEN = 60
+
+
+def _truncate_subject(subject):
+    """Truncate subject at a word boundary if it exceeds _SUBJECT_MAX_LEN characters."""
+    if len(subject) <= _SUBJECT_MAX_LEN:
+        return subject
+    window = subject[:_SUBJECT_MAX_LEN - 3]
+    last_space = window.rfind(" ")
+    if last_space > 0:
+        return window[:last_space] + "..."
+    return window + "..."
+
+
+def _detect_triggered_by(env):
+    """Return a short string describing who/what triggered this build."""
+    if env.var("GITHUB_ACTIONS"):
+        actor = env.var("GITHUB_ACTOR") or ""
+        event = env.var("GITHUB_EVENT_NAME") or ""
+        if actor and event:
+            return actor + " (" + event + ")"
+        return actor or "GitHub Actions"
+    if env.var("BUILDKITE"):
+        return (env.var("BUILDKITE_BUILD_CREATOR") or
+                env.var("BUILDKITE_PIPELINE_NAME") or
+                "Buildkite")
+    if env.var("CIRCLECI"):
+        return env.var("CIRCLE_USERNAME") or "CircleCI"
+    if env.var("GITLAB_CI"):
+        return env.var("GITLAB_USER_LOGIN") or "GitLab CI"
+    return ""
+
+
+def _collect_ci_links(env, results_base_url):
+    """Collect CI job URL and optional Aspect Web UI URL from the environment."""
+    ci_label = ""
+    ci_url = ""
+
+    if env.var("GITHUB_ACTIONS"):
+        ci_label = "GitHub Actions"
+        server = env.var("GITHUB_SERVER_URL") or "https://github.com"
+        repository = env.var("GITHUB_REPOSITORY") or ""
+        run_id = env.var("GITHUB_RUN_ID") or ""
+        if repository and run_id:
+            ci_url = server + "/" + repository + "/actions/runs/" + run_id
+    elif env.var("BUILDKITE"):
+        ci_label = "Buildkite"
+        build_url = env.var("BUILDKITE_BUILD_URL") or ""
+        step_id   = env.var("BUILDKITE_STEP_ID") or ""
+        if build_url and step_id:
+            ci_url = build_url + "/steps/canvas?sid=" + step_id
+        else:
+            ci_url = build_url
+    elif env.var("CIRCLECI"):
+        ci_label = "CircleCI"
+        ci_url = env.var("CIRCLE_BUILD_URL") or ""
+    elif env.var("GITLAB_CI"):
+        ci_label = "GitLab CI"
+        ci_url = env.var("CI_JOB_URL") or ""
+
+    return {"ci_label": ci_label, "ci_url": ci_url, "aspect_url": "", "results_base_url": results_base_url}
+
+
+def _resolve_aspect_url(links, results):
+    """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
+
+    The Aspect Web UI indexes invocations by the UUID the gRPC sink
+    (stream_sink.rs) uses when it calls PublishBuildToolEventStream. Because
+    we read BES events from Bazel via a unix socket and forward the stream
+    before `build_started` arrives with Bazel's own UUID, the sink makes up
+    its own UUID up-front and uses *that* as the stream-level invocation_id
+    the backend sees. We key the URL on `sink_invocation_id`.
+
+    Falls back to Bazel's `build_started.uuid` for setups that bypass the
+    sink entirely (direct --bes_results_url to a non-Aspect backend).
+
+    Treats ASPECT_WORKFLOWS_BES_RESULTS_URL like Bazel treats its own
+    `--bes_results_url`: the full URL prefix to append the invocation ID to,
+    verbatim. Whatever path segments the deployer baked in (or didn't) are
+    respected. The Aspect Web UI uses `{base}/{id}` with no `/invocations/`
+    segment, so ASPECT_WORKFLOWS_BES_RESULTS_URL should be the bare host
+    (e.g. `https://app.oss.aspect.build/`).
+    """
+    base = links.get("results_base_url", "")
+    if not base:
+        return ""
+    inv_id = results.get("sink_invocation_id", "") or results.get("invocation_id", "")
+    if not inv_id:
+        return ""
+    return (base if base.endswith("/") else base + "/") + inv_id
+
+
+def _github_status_checks(ctx: FeatureContext):
+    lifecycle       = ctx.traits[TaskLifecycleTrait]
+    gh_trait        = ctx.traits[GitHubStatusChecksTrait]
+    artifacts_trait = ctx.traits[ArtifactsTrait]
+
+    mode = ctx.args.mode
+    is_ci = bool(ctx.std.env.var("CI"))
+
+    if mode == "ci-only" and not is_ci:
+        return
+    if mode == "local-only" and is_ci:
+        return
+    # mode == "always" falls through
+
+    # Gate on github.com. ASPECT_VCS_URL pointing at a non-github.com host
+    # (Enterprise, GitLab, Bitbucket) is rejected loudly — the Aspect GitHub
+    # App only works for github.com, so silently no-op would be confusing.
+    # Self-hosted GitHub Enterprise support is planned via a user-provided
+    # token + dynamically derived API base URL.
+    vcs_url = ctx.std.env.var("ASPECT_VCS_URL") or ""
+    if vcs_url and not github.is_public_github_url(vcs_url):
+        host = github.extract_host(vcs_url)
+        print("GitHub status checks: ASPECT_VCS_URL points at '%s', not github.com." % host)
+        print("  This feature currently only supports repositories hosted on github.com")
+        print("  via the Aspect GitHub App. Support for GitHub Enterprise (user-provided")
+        print("  token + custom API base URL) is planned. Skipping check-run creation.")
+        return
+
+    sha = detect_commit_sha(ctx.std)
+    (owner, repo) = detect_github_repo(ctx.std)
+    if not sha or not owner or not repo:
+        return
+
+    _ci_links_base = _collect_ci_links(
+        ctx.std.env,
+        ctx.std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL") or "",
+    )
+
+    min_update_interval_ms = ctx.args.min_update_interval_ms
+
+    # Feature-private state dict closed over by all hook functions.
+    _state = {}
+
+    # -------------------------------------------------------------------------
+    # Shared helpers
+    # -------------------------------------------------------------------------
+
+    def _make_render_ctx():
+        """Build the render_ctx dict passed to kind-specific render functions.
+
+        Free variable `ctx` in this closure refers to the outer FeatureContext,
+        which has no `task` attribute — so the task display name is stashed in
+        _state at task_started time (from the TaskContext) and read from there.
+        """
+        return {
+            "triggered_by":      _state.get("_triggered_by", ""),
+            "targets":           _state.get("_subject") or "//...",
+            "started_ms":        _state.get("_started_ms", 0),
+            "ended_ms":          _state.get("_ended_ms", 0),
+            "progress":          _state.get("_progress", ""),
+            # Used in the check run title: "<Task Name> <Subject> <State>"
+            "task_display_name": _state.get("_task_display_name", ""),
+        }
+
+    def _make_links(results):
+        """Build the links dict from CI env + BES invocation URL + artifact URLs."""
+        links = dict(_state.get("_ci_links") or _ci_links_base)
+        links["aspect_url"] = _resolve_aspect_url(links, results)
+        # Surface artifact URLs from ArtifactUpload feature if available.
+        links["artifacts_browse_url"] = artifacts_trait.artifacts_browse_url or ""
+        links["artifact_urls"]        = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
+        # Per-file label URLs (CircleCI/GitLab per-file uploads only). Empty on GitHub/Buildkite.
+        links["testlogs_label_urls"]  = dict(artifacts_trait.testlogs_label_urls) if artifacts_trait.testlogs_label_urls else {}
+        return links
+
+    def _create_check_run(ctx):
+        """Authenticate and create the check run with initial output.
+
+        Idempotent — if called twice for the same task, the second call is a
+        no-op. Mirrors the double-completion guard in _complete_check_run.
+        """
+        if _state.get("_check_run_id"):
+            return
+        _state["_status"] = "running"
+        _state["_started_ms"] = now_ms(ctx)
+        _state["_triggered_by"] = _detect_triggered_by(ctx.std.env)
+
+        # Authenticate first so we can reuse the Aspect App token to resolve the
+        # running job URL. actions.read is only needed for the job deep-link —
+        # the API call fails gracefully if the App isn't granted the permission.
+        token = github.authenticate(
+            ctx,
+            owner = owner,
+            repo = repo,
+            roles = ["checks.write", "actions.read"],
+        )
+        if not token:
+            print("GitHub status check: authentication failed for %s/%s (no token available)" % (owner, repo))
+            return
+        _state["_github_token"] = token
+
+        # Upgrade the GitHub Actions CI link from the run page to the specific
+        # job page (/actions/runs/{run_id}/job/{job_id}) via a single API call.
+        # Silently falls back to the run URL if the App lacks actions:read.
+        if ctx.std.env.var("GITHUB_ACTIONS"):
+            run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
+            job_url = github.resolve_current_job_url(ctx, token, owner, repo, run_id)
+            if job_url:
+                _ci_links_base["ci_url"] = job_url
+        _state["_ci_links"] = _ci_links_base
+
+        initial_output = render_check_output(
+            ctx, init_results(), "running", _make_render_ctx(),
+            dict(_ci_links_base), gh_trait.templates, gh_trait.metadata_keys,
+        )
+
+        check_name = "aspect / %s (%s)" % (_to_display_name(ctx.task.name), ctx.task.key)
+        result = github.status_checks.create(ctx, token, owner, repo, sha, check_name)
+        if not result["success"]:
+            print("GitHub status check: failed to create check run: %s" % result.get("error", "unknown error"))
+            return
+        _state["_check_run_id"] = result["check_run_id"]
+        github.status_checks.update(ctx, token, owner, repo, _state["_check_run_id"], output = initial_output)
+
+    def _complete_check_run(ctx, status, output = None):
+        """Complete the check run. Guards against double-completion — first call wins."""
+        if _state.get("_completed"):
+            return
+        token = _state.get("_github_token")
+        check_run_id = _state.get("_check_run_id")
+        if not token or not check_run_id:
+            return
+        _state["_completed"] = True
+
+        print("GitHub status check: completing run %s" % check_run_id)
+        if status == "passed":
+            result = github.status_checks.complete(ctx, token, owner, repo, check_run_id, output = output)
+        else:
+            result = github.status_checks.fail(ctx, token, owner, repo, check_run_id, output = output)
+        if not result["success"]:
+            print("GitHub status check: complete/fail API call failed: %s" % result.get("error", "unknown"))
+
+    # -------------------------------------------------------------------------
+    # TaskLifecycleTrait hooks
+    # -------------------------------------------------------------------------
+
+    def _task_started(ctx, subject):
+        subject_str = (" " + subject) if subject else ""
+        print("GitHub status check: aspect/%s (%s) — %s%s" % (ctx.task.name, ctx.task.key, _to_display_name(ctx.task.name), subject_str))
+        _state["_subject"] = _truncate_subject(subject)
+        # Stash the display name so _make_render_ctx can include it in the title
+        # without needing to reach through a FeatureContext (which has no .task).
+        _state["_task_display_name"] = _to_display_name(ctx.task.name)
+        _create_check_run(ctx)
+
+    def _task_update(ctx, update):
+        status = update.status
+        final  = status in ("passed", "failed")
+
+        _state["_progress"] = update.progress
+
+        token = _state.get("_github_token")
+        check_run_id = _state.get("_check_run_id")
+        if not token or not check_run_id:
+            return
+
+        # Dispatch to the kind-specific renderer. Unknown kinds are a no-op until
+        # a renderer is registered for them.
+        if update.kind != "bazel_results":
+            return
+        results = update.data.get("results", init_results())
+
+        # Set ended_ms before rendering so the terminal check run reflects the
+        # final duration. Non-final updates don't populate ended_ms.
+        if final:
+            _state["_ended_ms"] = now_ms(ctx)
+        else:
+            now = now_ms(ctx)
+            if now - _state.get("_last_update_ms", 0) < min_update_interval_ms:
+                return
+            _state["_last_update_ms"] = now
+
+        output = render_check_output(
+            ctx, results, status, _make_render_ctx(), _make_links(results),
+            gh_trait.templates, gh_trait.metadata_keys,
+        )
+
+        if final:
+            _complete_check_run(ctx, status, output = output)
+        else:
+            github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output)
+
+    lifecycle.task_started.append(_task_started)
+    lifecycle.task_update.append(_task_update)
+
+
+GithubStatusChecks = feature(
+    implementation = _github_status_checks,
+    enabled = False,
+    args = {
+        "mode": args.string(
+            default = "ci-only",
+            values = ["ci-only", "local-only", "always"],
+            description = "When to create GitHub Status Checks: ci-only (default), local-only, or always",
+        ),
+        # Minimum milliseconds between live check run updates during a build.
+        # Increase this if you are using a PAT with the standard 5000 req/hr limit.
+        # GitHub App tokens have higher limits so 1000ms is a safe default.
+        "min_update_interval_ms": args.int(default = 1000),
+    },
+)

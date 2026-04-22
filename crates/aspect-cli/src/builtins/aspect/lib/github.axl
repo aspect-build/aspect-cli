@@ -187,20 +187,71 @@ def detect_commit_sha(std):
     )
 
 
-def detect_github_repo(std):
-    """Detect (owner, repo) from git remote origin, or ("", "") on failure."""
-    result = std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
-    if result.status.code != 0:
-        return ("", "")
-    url = result.stdout.strip()
+def _extract_host(url):
+    """Extract host from a git remote URL (SSH or HTTPS)."""
+    if not url:
+        return ""
+    if url.startswith("git@"):
+        rest = url[len("git@"):]
+        colon = rest.find(":")
+        return rest[:colon] if colon >= 0 else ""
+    scheme_end = url.find("://")
+    if scheme_end < 0:
+        return ""
+    rest = url[scheme_end + 3:]
+    at    = rest.find("@")
+    slash = rest.find("/")
+    if at >= 0 and (slash < 0 or at < slash):
+        rest = rest[at + 1:]
+    slash = rest.find("/")
+    return rest[:slash] if slash >= 0 else rest
 
-    if url.startswith("git@github.com:"):
-        path = url[len("git@github.com:"):]
-    elif "github.com/" in url:
-        path = url[url.index("github.com/") + len("github.com/"):]
+
+def _is_public_github_url(url):
+    """True when url's host is exactly github.com (not an Enterprise instance).
+
+    Status-check posting currently requires the Aspect GitHub App, which is
+    only installed on github.com. Enterprise (github.mycorp.com) and other
+    VCS hosts need a follow-up — user-provided PAT + derived API base URL.
+    """
+    if not url:
+        # No ASPECT_VCS_URL set → defer to the env/git-remote fallback path
+        # which only matches github hosts anyway. Treated as "fine" here.
+        return True
+    h = _extract_host(url).lower()
+    return h == "github.com" or h == "www.github.com"
+
+
+def _extract_github_owner_repo_from_url(url):
+    """Return (owner, repo) if url is a GitHub (Enterprise) URL, else ("", "")."""
+    if not url:
+        return ("", "")
+    path = ""
+    # SSH form: git@host:owner/repo(.git)
+    if url.startswith("git@") and ":" in url:
+        rest = url[len("git@"):]
+        colon = rest.find(":")
+        host = rest[:colon]
+        if "github" not in host.lower():
+            return ("", "")
+        path = rest[colon + 1:]
     else:
-        return ("", "")
-
+        scheme_end = url.find("://")
+        if scheme_end < 0:
+            return ("", "")
+        rest = url[scheme_end + 3:]
+        # Strip user:pass@
+        at = rest.find("@")
+        slash = rest.find("/")
+        if at >= 0 and (slash < 0 or at < slash):
+            rest = rest[at + 1:]
+        slash = rest.find("/")
+        if slash < 0:
+            return ("", "")
+        host = rest[:slash]
+        if "github" not in host.lower():
+            return ("", "")
+        path = rest[slash + 1:]
     if path.endswith(".git"):
         path = path[:-4]
     parts = path.split("/", 1)
@@ -209,10 +260,45 @@ def detect_github_repo(std):
     return ("", "")
 
 
+def detect_github_repo(std):
+    """Detect (owner, repo), or ("", "") on failure.
+
+    Checks in order:
+      1. ASPECT_VCS_URL env var (if it's a GitHub URL) — the unified override
+         for mirror / vendored-checkout setups. Supports GitHub Enterprise
+         (github.mycorp.com) too.
+      2. GITHUB_REPOSITORY env var — set by GitHub Actions.
+      3. `git remote get-url origin` — parses any github.com / GitHub
+         Enterprise URL (https or ssh).
+    """
+    env = std.env
+
+    vcs_url = env.var("ASPECT_VCS_URL") or ""
+    if vcs_url:
+        (owner, repo) = _extract_github_owner_repo_from_url(vcs_url)
+        if owner and repo:
+            return (owner, repo)
+
+    gh_repo = env.var("GITHUB_REPOSITORY") or ""
+    if gh_repo:
+        parts = gh_repo.split("/", 1)
+        if len(parts) == 2 and parts[0] and parts[1]:
+            return (parts[0], parts[1])
+
+    result = std.process.command("git").args(["remote", "get-url", "origin"]).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if result.status.code != 0:
+        return ("", "")
+    return _extract_github_owner_repo_from_url(result.stdout.strip())
+
+
 # Struct-based API
 
 def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT_GITHUB_API):
     return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
+
+
+def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
+    return update_check_run(ctx, token, owner, repo, check_run_id, status = "in_progress", output = output, api_base = api_base)
 
 
 def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
@@ -310,15 +396,20 @@ def _upload_artifact(ctx, path, name):
     """Upload a single file to GitHub Actions using the Twirp artifact API.
 
     Flow: CreateArtifact -> PUT to signed Azure Blob URL -> FinalizeArtifact
+
+    Returns {success, artifact_ref, download_url, errors} where:
+      artifact_ref — the artifact `name`; passed back to DeleteArtifact for rolling delete.
+      download_url — direct https://…/artifacts/{id} download URL, or "" if the
+                     id / GH env vars aren't available.
     """
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
     if not token:
-        return {"success": False, "artifact_ref": None, "errors": [_MISSING_TOKEN_MSG]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": [_MISSING_TOKEN_MSG]}
 
     run_id, job_id = _decode_backend_ids(ctx, token)
     if not run_id or not job_id:
-        return {"success": False, "artifact_ref": None, "errors": ["failed to decode backend IDs from token"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to decode backend IDs from token"]}
 
     ok, body, err = _github_twirp(ctx, "CreateArtifact", {
         "workflowRunBackendId": run_id,
@@ -327,11 +418,11 @@ def _upload_artifact(ctx, path, name):
         "version": 4,
     })
     if not ok or not body:
-        return {"success": False, "artifact_ref": None, "errors": [err or "CreateArtifact failed"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": [err or "CreateArtifact failed"]}
 
     signed_url = body.get("signed_upload_url", "")
     if not signed_url:
-        return {"success": False, "artifact_ref": None, "errors": ["no signed_upload_url returned"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["no signed_upload_url returned"]}
 
     file_size = ctx.std.fs.metadata(path).size
     upload_resp = ctx.http().put(
@@ -345,7 +436,7 @@ def _upload_artifact(ctx, path, name):
     ).block()
 
     if upload_resp.status < 200 or upload_resp.status >= 300:
-        return {"success": False, "artifact_ref": None, "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
 
     ok, body, err = _github_twirp(ctx, "FinalizeArtifact", {
         "workflowRunBackendId": run_id,
@@ -354,9 +445,26 @@ def _upload_artifact(ctx, path, name):
         "size": str(ctx.std.fs.metadata(path).size),
     })
     if not ok:
-        return {"success": False, "artifact_ref": None, "errors": [err or "FinalizeArtifact failed"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": [err or "FinalizeArtifact failed"]}
 
-    return {"success": True, "artifact_ref": name, "errors": []}
+    # FinalizeArtifact returns an artifact id we use to build a direct download
+    # link. The response field is `artifact_id` (snake_case); also accept
+    # `artifactId` for future-proofing.
+    artifact_id = ""
+    if body:
+        raw = body.get("artifact_id") or body.get("artifactId") or ""
+        if raw:
+            artifact_id = str(raw)
+
+    download_url = ""
+    if artifact_id:
+        server = ctx.std.env.var("GITHUB_SERVER_URL") or "https://github.com"
+        gh_repo = ctx.std.env.var("GITHUB_REPOSITORY") or ""
+        gh_run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
+        if gh_repo and gh_run_id:
+            download_url = server + "/" + gh_repo + "/actions/runs/" + gh_run_id + "/artifacts/" + artifact_id
+
+    return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
 
 
 def _delete_artifact(ctx, name):
@@ -384,6 +492,49 @@ def _check_token(env):
     if not token:
         return _MISSING_TOKEN_MSG
     return None
+
+
+def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT_GITHUB_API):
+    """Resolve the html_url of the currently running GitHub Actions job.
+
+    Returns a URL of the form
+        https://github.com/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}
+    or "" if unable to determine.
+
+    No env var exposes the numeric job ID, so we call the jobs API and match
+    by RUNNER_NAME + status=in_progress (most reliable: one job per runner).
+    The caller must supply a token with actions:read scope (e.g. an Aspect App
+    token obtained via `github.authenticate(..., roles=["actions.read"])`).
+    """
+    if not token or not owner or not repo or not run_id:
+        return ""
+
+    runner_name = ctx.std.env.var("RUNNER_NAME") or ""
+    github_job  = ctx.std.env.var("GITHUB_JOB") or ""
+    attempt     = ctx.std.env.var("GITHUB_RUN_ATTEMPT") or ""
+
+    url = api_base + "/repos/" + owner + "/" + repo + "/actions/runs/" + run_id + "/jobs?per_page=100"
+    if attempt:
+        url = url + "&attempt_number=" + attempt
+    success, _, body = _do_request(ctx, "GET", url, token)
+    if not success or type(body) != "dict":
+        return ""
+    jobs = body.get("jobs", []) or []
+
+    # First pass: match by runner_name among in-progress jobs (exact current job).
+    if runner_name:
+        for j in jobs:
+            if j.get("runner_name", "") == runner_name and j.get("status", "") == "in_progress":
+                return j.get("html_url", "") or ""
+
+    # Second pass: fall back to GITHUB_JOB name (the YAML key). Unreliable with
+    # matrix builds or renamed jobs (`name:` overrides the key), but better than nothing.
+    if github_job:
+        for j in jobs:
+            if j.get("name", "") == github_job:
+                return j.get("html_url", "") or ""
+
+    return ""
 
 
 # Pull Request Reviews
@@ -465,13 +616,17 @@ github = struct(
     missing_credentials_reason = _missing_credentials_reason,
     validate_role = validate_role,
     check_token = _check_token,
+    is_public_github_url = _is_public_github_url,
+    extract_host = _extract_host,
     status_checks = struct(
         create   = _status_checks_create,
+        update   = _status_checks_update,
         complete = _status_checks_complete,
         fail     = _status_checks_fail,
     ),
     upload_artifact = _upload_artifact,
     delete_artifact = _delete_artifact,
+    resolve_current_job_url = _resolve_current_job_url,
     pulls = struct(
         list_files           = list_pull_request_files,
         get                  = get_pull_request,

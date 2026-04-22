@@ -22,7 +22,7 @@ def _token_impl(ctx: TaskContext) -> int:
                 print("Error: unknown role %r, valid roles: %s" % (role, ", ".join(github.VALID_ROLES)))
                 return 1
 
-    body = '{"owner":"' + owner + '","repo":"' + repo_name + '"}'
+    body = json.encode({"owner": owner, "repo": repo_name})
 
     url = ctx.aspect.auth.api_url + "/github/token"
     if ctx.args.role:

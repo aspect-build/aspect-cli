@@ -31,8 +31,9 @@ def _upload_artifact(ctx, path, name):
             ctx.std.fs.remove_file(dest)
 
     if status.code != 0:
-        return {"success": False, "artifact_ref": None, "errors": ["exit " + str(status.code)]}
-    return {"success": True, "artifact_ref": name, "errors": []}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["exit " + str(status.code)]}
+    # Buildkite artifact download URLs are short-lived — surface nothing stable.
+    return {"success": True, "artifact_ref": name, "download_url": "", "errors": []}
 
 
 def _delete_artifact(ctx, name):

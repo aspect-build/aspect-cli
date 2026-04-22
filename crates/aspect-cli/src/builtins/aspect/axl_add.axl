@@ -233,7 +233,7 @@ def check_existing_dep(content: str, name: str) -> bool:
     pattern = "name = \"" + name + "\""
     return pattern in content
 
-def impl(ctx: TaskContext) -> int:
+def _impl(ctx: TaskContext) -> int:
     if len(ctx.args.dep_spec) == 0:
         print("Error: No dependency specification provided")
         print("")
@@ -331,7 +331,7 @@ def impl(ctx: TaskContext) -> int:
 add = task(
     group = ["axl"],
     summary = "Add an AXL dependency to MODULE.aspect",
-    implementation = impl,
+    implementation = _impl,
     args = {
         "dep_spec": args.positional(),
         "name": args.string(),

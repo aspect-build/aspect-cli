@@ -62,17 +62,25 @@ def artifact_name(ci, task_name, task_key, filename):
 # =============================================================================
 
 def _upload_file_gitlab(ctx, path, name):
-    """Upload a single file to GitLab using the Generic Packages API."""
+    """Upload a single file to GitLab using the Generic Packages API.
+
+    GitLab treats slashes in the package name as nested path segments, which
+    makes the browser derive an ugly URL-encoded filename on download
+    (e.g. `test%2Fgl-test%2Ftestlogs-v9%2F2469624812%2Ftestlogs.tar.gz`).
+    Flatten slashes to dashes before constructing the URL so the downloaded
+    filename is the clean `file_name` (e.g. `testlogs.tar.gz`).
+    """
     token = ctx.std.env.var("CI_JOB_TOKEN")
     api_url = ctx.std.env.var("CI_API_V4_URL")
     project_id = ctx.std.env.var("CI_PROJECT_ID")
     pipeline_id = ctx.std.env.var("CI_PIPELINE_ID") or "0"
 
     if not token or not api_url or not project_id:
-        return {"success": False, "artifact_ref": None, "errors": ["missing GitLab CI env vars"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["missing GitLab CI env vars"]}
 
+    safe_name = name.replace("/", "-")
     file_name = path.split("/")[-1]
-    url = api_url + "/projects/" + project_id + "/packages/generic/" + name + "/" + pipeline_id + "/" + file_name
+    url = api_url + "/projects/" + project_id + "/packages/generic/" + safe_name + "/" + pipeline_id + "/" + file_name
 
     resp = ctx.http().put(
         url = url,
@@ -81,8 +89,9 @@ def _upload_file_gitlab(ctx, path, name):
     ).block()
 
     if resp.status < 200 or resp.status >= 300:
-        return {"success": False, "artifact_ref": None, "errors": ["HTTP " + str(resp.status)]}
-    return {"success": True, "artifact_ref": name, "errors": []}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["HTTP " + str(resp.status)]}
+    # The upload URL is also the stable download URL.
+    return {"success": True, "artifact_ref": name, "download_url": url, "errors": []}
 
 
 _gitlab = struct(
@@ -138,8 +147,9 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name):
     if result["success"]:
         if group["prev_ref"]:
             provider.delete_artifact(ctx, group["prev_ref"])
-        group["prev_ref"] = result["artifact_ref"]
-        group["last_count"] = count
+        group["prev_ref"]     = result["artifact_ref"]
+        group["download_url"] = result.get("download_url", "")
+        group["last_count"]   = count
         return True
     else:
         group["version"] -= 1
@@ -200,9 +210,22 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
 
     new_entries = entries[group["last_count"]:]
     any_success = False
+    if "label_urls" not in group:
+        group["label_urls"] = {}
     for entry in new_entries:
         result = provider.upload_artifact(ctx, entry["src"], name + "/" + entry["dest"])
         if result["success"]:
+            # Accumulate per-label, per-filename download URLs. Bazel writes several
+            # files per test (test.log, test.xml, test.outputs.zip, ...), so key by
+            # basename so callers can surface each one separately.
+            url = result.get("download_url", "")
+            if url and url.startswith("http"):
+                fname = entry["dest"].rsplit("/", 1)[-1]
+                per_file = group["label_urls"].get(entry["label"])
+                if per_file == None:
+                    per_file = {}
+                    group["label_urls"][entry["label"]] = per_file
+                per_file[fname] = url
             group["last_count"] += 1
             any_success = True
         else:
@@ -224,9 +247,13 @@ def create_uploader(env):
         env: Environment interface (ctx.std.env), used only for CI detection.
 
     Returns a struct with:
-        upload_file(ctx, path, name)          -> {success, artifact_ref, errors}
+        upload_file(ctx, path, name)          -> {success, artifact_ref, download_url, errors}
         delete_artifact(ctx, name)            -> {success}
         upload_testlogs(ctx, group, entries, name) -> bool
+
+    `artifact_ref` is an opaque handle the same provider's `delete_artifact`
+    can use; `download_url` is a direct HTTP URL surfacable to users ("" when
+    the provider has no stable URL, e.g. Buildkite).
 
     Returns None if not running in a supported CI environment.
 
@@ -254,7 +281,7 @@ def create_uploader(env):
 
     def upload_file(ctx, path, name):
         if not ctx.std.fs.exists(path):
-            return {"success": False, "artifact_ref": None, "errors": ["file not found: " + path]}
+            return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["file not found: " + path]}
         return provider.upload_artifact(ctx, path, name)
 
     def delete_artifact(ctx, name):

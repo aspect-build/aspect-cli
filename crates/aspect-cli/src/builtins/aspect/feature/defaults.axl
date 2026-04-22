@@ -3,7 +3,7 @@ load("../lib/environment.axl",
     "get_bazelrc_flags",
     "print_environment_info",
 )
-load("../lib/build_metadata.axl", "get_build_metadata_flags")
+load("../lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
 load("../traits.axl", "BazelTrait", "HealthCheckTrait")
 load("../lib/health_check.axl", "agent_health_check")
 
@@ -12,6 +12,14 @@ def _default_bazel_behavior(ctx: FeatureContext):
 
     health_check = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
+
+    # Register task-identity --build_metadata as a task_flags hook. Runs
+    # with TaskContext at invocation time, so it has access to ctx.task.*
+    # (name, key, id) which FeatureContext doesn't expose. Every task that
+    # uses BazelTrait (build, test, lint, delivery) picks this up by
+    # calling `bazel_trait.task_flags` hooks from its impl — one place to
+    # register, zero per-task wiring.
+    bazel_trait.task_flags.append(get_task_metadata_flags)
 
     if environment:
         def _buildkite_bazel_section(ctx):

@@ -1,109 +1,22 @@
 """
 A default 'build' task that wraps a 'bazel build' command.
 """
-load("./traits.axl", "BazelTrait", "HealthCheckTrait")
+load("./traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "GitHubStatusChecksTrait", "ArtifactsTrait")
+load("./lib/bazel_runner.axl", "run_bazel_task")
 
-def _collect_bes_from_args(ctx):
-    """Collect BES sinks from CLI args (--bes_backend/--bes_header)."""
-    sinks = []
-    for bes_backend in ctx.args.bes_backend:
-        metadata = {}
-        for bes_header in ctx.args.bes_header:
-            (k, _, v) = bes_header.partition("=")
-            metadata[k] = v
-        sinks.append(
-            bazel.build_events.grpc(
-                uri = bes_backend,
-                metadata = metadata,
-            )
-        )
-    return sinks
 
-def impl(ctx: TaskContext) -> int:
-    hc_trait = ctx.traits[HealthCheckTrait]
-    bazel_trait = ctx.traits[BazelTrait]
+def _impl(ctx: TaskContext) -> int:
+    return run_bazel_task(ctx, command = "build")
 
-    for hook in hc_trait.pre_health_check:
-        hook(ctx)
-
-    for hook in hc_trait.post_health_check:
-        result = hook(ctx)
-        if result != None:
-            fail(result)
-
-    # Flags: accumulate data, then optionally transform
-    flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
-    flags.extend(ctx.args.bazel_flag)
-    flags.extend(bazel_trait.extra_flags)
-    if bazel_trait.flags:
-        flags = bazel_trait.flags(flags)
-
-    startup_flags = list(ctx.args.bazel_startup_flag)
-    startup_flags.extend(bazel_trait.extra_startup_flags)
-    if ctx.args.output_base:
-        startup_flags.insert(0, "--output_base=" + ctx.args.output_base)
-    if bazel_trait.startup_flags:
-        startup_flags = bazel_trait.startup_flags(startup_flags)
-    # BES: merge arg-based sinks with trait sinks
-    build_events = _collect_bes_from_args(ctx)
-    if bazel_trait.build_event_sinks:
-        build_events.extend(bazel_trait.build_event_sinks)
-
-    # Coerce to bool/list for ctx.bazel.build:
-    # - non-empty list → stream to those sinks + build_events() iterator.
-    # - True → stream without explicit sinks (build_event handler only)
-    # - False → no BEP stream at all
-    if not build_events:
-        if bazel_trait.build_event:
-            build_events = True
-        else:
-            build_events = False
-
-    for handler in bazel_trait.build_start:
-        handler(ctx)
-
-    if ctx.args.cancel:
-        cancellation = ctx.bazel.cancel_invocation()
-        cancellation.wait()
-
-    rc = ctx.bazel.parse_rc(
-        root = ctx.std.env.root_dir(),
-        startup_flags = startup_flags,
-        flags = flags,
-    )
-
-    rc_startup_flags, flags = rc.expand_all(command = "build")
-    ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
-    print(rc.announce(command = "build", ansi = ctx.std.io.stdout.is_tty))
-
-    for _ in range(10):
-        build = ctx.bazel.build(
-            build_events = build_events,
-            execution_log = bazel_trait.execution_log_sinks or False,
-            flags = flags,
-            *ctx.args.target_pattern,
-        )
-
-        if bazel_trait.build_event:
-            for event in build.build_events():
-                for handler in bazel_trait.build_event:
-                    handler(ctx, event)
-
-        build_status = build.wait()
-
-        if build_status.code == 0 or not bazel_trait.build_retry(build_status.code):
-            break
-
-    for handler in bazel_trait.build_end:
-        handler(ctx, build_status.code)
-
-    return build_status.code
 
 build = task(
-    implementation = impl,
+    implementation = _impl,
     traits = [
         BazelTrait,
         HealthCheckTrait,
+        TaskLifecycleTrait,
+        GitHubStatusChecksTrait,
+        ArtifactsTrait,
     ],
     args = {
         "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
