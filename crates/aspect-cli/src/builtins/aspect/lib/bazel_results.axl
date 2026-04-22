@@ -80,8 +80,19 @@ _TEST_STATUS_TIMEOUT = "timeout"
 _TEST_STATUS_NO_STATUS = "no_status"
 _TEST_STATUS_FAILED_TO_BUILD = "failed_to_build"
 _TEST_STATUS_INCOMPLETE = "incomplete"
+_TEST_STATUS_REMOTE_FAILURE = "remote_failure"
+_TEST_STATUS_BLAZE_HALTED_BEFORE_TESTING = "blaze_halted_before_testing"
 
-_FAILED_STATUSES = [_TEST_STATUS_FAILED, _TEST_STATUS_TIMEOUT, _TEST_STATUS_FAILED_TO_BUILD]
+# Every non-pass terminal status Bazel considers a failure. REMOTE_FAILURE and
+# BLAZE_HALTED_BEFORE_TESTING are genuine failures (remote infra error / build
+# aborted before the test ran) and must not be silently counted as passes.
+_FAILED_STATUSES = [
+    _TEST_STATUS_FAILED,
+    _TEST_STATUS_TIMEOUT,
+    _TEST_STATUS_FAILED_TO_BUILD,
+    _TEST_STATUS_REMOTE_FAILURE,
+    _TEST_STATUS_BLAZE_HALTED_BEFORE_TESTING,
+]
 
 
 def _format_duration_ms(ms):
@@ -682,7 +693,11 @@ def process_event(results, event, debug=False):
                 })
             return True
         else:
-            # PASSED, NO_STATUS, INCOMPLETE — count and record label for the details list
+            # PASSED is the common case. NO_STATUS (target wasn't run / filtered)
+            # and INCOMPLETE (test was interrupted) also land here — neither is a
+            # strict "pass", but we have no dedicated bucket for them and they're
+            # rare enough that lumping them in gives a closer answer than calling
+            # them failures would.
             results["passed_test_total"] += 1
             if cached:
                 results["cached_test_total"] += 1

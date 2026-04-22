@@ -43,7 +43,13 @@ def _detect_vcs_from_host(host):
 
 
 def _parse_git_remote_url(url):
-    """Parse a git remote URL (SSH or HTTPS) into {host, owner, repo}.
+    """Parse a git remote URL (SSH or HTTPS) into {host, owner, repo, path}.
+
+    - `owner` is the top-level group (first path segment).
+    - `repo`  is the leaf project name (last path segment).
+    - `path`  is the full namespace path joining them, needed for GitLab
+      nested subgroups (e.g. `group/subgroup/project`) so callers can build
+      a canonical URL that actually resolves.
 
     Returns {} if the URL can't be parsed. Strips credentials, trailing .git.
     """
@@ -79,7 +85,7 @@ def _parse_git_remote_url(url):
     parts = path.split("/")
     if len(parts) < 2:
         return {"host": host}
-    return {"host": host, "owner": parts[0], "repo": parts[1]}
+    return {"host": host, "owner": parts[0], "repo": parts[-1], "path": path}
 
 
 def _git_show(process):
@@ -133,14 +139,20 @@ def _git_show(process):
     return result
 
 
-def _apply_repo_url(meta, host, owner, repo, scheme = "https"):
-    """Set REPO_URL / REPO_OWNER / REPO_NAME / VCS from a parsed triple."""
+def _apply_repo_url(meta, host, owner, repo, scheme = "https", url_path = None):
+    """Set REPO_URL / REPO_OWNER / REPO_NAME / VCS from a parsed triple.
+
+    url_path — optional override for the path segment of REPO_URL, used when the
+    canonical URL includes more than just "owner/repo" (e.g. GitLab with nested
+    subgroups: "group/subgroup/project"). Defaults to "owner/repo".
+    """
     if owner:
         meta["REPO_OWNER"] = owner
     if repo:
         meta["REPO_NAME"] = repo
     if host and owner and repo:
-        meta["REPO_URL"] = scheme + "://" + host + "/" + owner + "/" + repo
+        path = url_path if url_path else owner + "/" + repo
+        meta["REPO_URL"] = scheme + "://" + host + "/" + path
     vcs = _detect_vcs_from_host(host)
     if vcs and "VCS" not in meta:
         meta["VCS"] = vcs
@@ -165,15 +177,17 @@ def _apply_vcs_override(env, meta):
         return
 
     parsed = _parse_git_remote_url(vcs_url)
-    host   = parsed.get("host", "")
-    owner  = parsed.get("owner", "")
-    repo   = parsed.get("repo", "")
+    host      = parsed.get("host", "")
+    owner     = parsed.get("owner", "")
+    repo      = parsed.get("repo", "")
+    url_path  = parsed.get("path") or (owner + "/" + repo if owner and repo else "")
     if not host or not owner or not repo:
         return
 
     scheme = "http" if vcs_url.startswith("http://") else "https"
-    # Override — these fields win over anything the CI collector set.
-    meta["REPO_URL"]   = scheme + "://" + host + "/" + owner + "/" + repo
+    # Override — these fields win over anything the CI collector set. Use the
+    # full parsed path so nested-group GitLab repos keep their subgroups.
+    meta["REPO_URL"]   = scheme + "://" + host + "/" + url_path
     meta["REPO_OWNER"] = owner
     meta["REPO_NAME"]  = repo
     vcs = _detect_vcs_from_host(host)
@@ -278,7 +292,8 @@ def _collect_buildkite(env, meta):
     repo_url = env.var("BUILDKITE_REPO")
     if repo_url:
         parsed = _parse_git_remote_url(repo_url)
-        _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""))
+        _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
+                        url_path = parsed.get("path"))
 
     # RUN_TYPE. Check PR before TAG because a PR may coincidentally have a tag.
     pr_num = env.var("BUILDKITE_PULL_REQUEST") or ""
@@ -341,7 +356,8 @@ def _collect_circleci(env, meta):
     repo_url = env.var("CIRCLE_REPOSITORY_URL") or ""
     if repo_url:
         parsed = _parse_git_remote_url(repo_url)
-        _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""))
+        _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
+                        url_path = parsed.get("path"))
     # Fallback to CIRCLE_PROJECT_* for owner/repo when URL parsing didn't cover them.
     if "REPO_OWNER" not in meta:
         owner = env.var("CIRCLE_PROJECT_USERNAME") or ""
@@ -404,9 +420,13 @@ def _collect_gitlab(env, meta):
     project   = env.var("CI_PROJECT_NAME") or ""
     project_path = env.var("CI_PROJECT_PATH") or ""  # full namespace/project path
     if project_path and "/" in project_path:
+        # GitLab supports nested subgroups ("group/subgroup/project"). REPO_OWNER
+        # carries the top-level group and REPO_NAME the leaf project, but REPO_URL
+        # must retain the full path to actually resolve.
         parts = project_path.split("/")
         _apply_repo_url(meta, server_host, parts[0], parts[-1],
-                        scheme = "https" if server_url.startswith("https://") else "http")
+                        scheme = "https" if server_url.startswith("https://") else "http",
+                        url_path = project_path)
     elif namespace and project:
         _apply_repo_url(meta, server_host, namespace, project,
                         scheme = "https" if server_url.startswith("https://") else "http")
@@ -414,7 +434,8 @@ def _collect_gitlab(env, meta):
         repo_url = env.var("CI_REPOSITORY_URL") or ""
         if repo_url:
             parsed = _parse_git_remote_url(repo_url)
-            _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""))
+            _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
+                            url_path = parsed.get("path"))
 
     # PR (merge request) detection.
     mr_iid    = env.var("CI_MERGE_REQUEST_IID") or ""

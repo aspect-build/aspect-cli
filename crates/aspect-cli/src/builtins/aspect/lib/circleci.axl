@@ -50,24 +50,24 @@ def _upload_artifact(ctx, path, name):
     5. curl --aws-sigv4 PUT to https://<bucket>.s3.<region>.amazonaws.com/<prefix>/<name>
     """
     if not ctx.std.fs.exists(path):
-        return {"success": False, "artifact_ref": None, "errors": ["file not found: " + path]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["file not found: " + path]}
 
     creds = _get_token(ctx)
     if not creds:
-        return {"success": False, "artifact_ref": None, "errors": ["failed to get CircleCI token from socket"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to get CircleCI token from socket"]}
 
     token = creds["token"]
     runner_host = creds.get("runner_host", "https://runner.circleci.com")
 
     config = _runner_api(ctx, token, runner_host, "GET", "/api/v2/output/config")
     if not config:
-        return {"success": False, "artifact_ref": None, "errors": ["failed to get S3 config from runner API"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to get S3 config from runner API"]}
     bucket = config["bucket"]
     region = config["region"]
 
     aws_creds_resp = _runner_api(ctx, token, runner_host, "GET", "/api/v2/output/credentials")
     if not aws_creds_resp:
-        return {"success": False, "artifact_ref": None, "errors": ["failed to get S3 credentials from runner API"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to get S3 credentials from runner API"]}
     aws_creds = aws_creds_resp["s3"]
 
     artifact_resp = _runner_api(ctx, token, runner_host, "POST", "/api/v2/output/artifact", {
@@ -76,7 +76,7 @@ def _upload_artifact(ctx, path, name):
         "artifactType": "application/octet-stream",
     })
     if not artifact_resp:
-        return {"success": False, "artifact_ref": None, "errors": ["failed to register artifact with runner API"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to register artifact with runner API"]}
     prefix = artifact_resp["prefix"]
     tags = artifact_resp.get("key", {}).get("tags", {})
 
@@ -104,15 +104,17 @@ def _upload_artifact(ctx, path, name):
 
     status = child.wait()
     if status.code != 0:
-        return {"success": False, "artifact_ref": None, "errors": ["curl s3 upload exit " + str(status.code)]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["curl s3 upload exit " + str(status.code)]}
 
-    # Return the stable public CircleCI artifact URL so callers can link to individual files.
-    # CIRCLE_WORKFLOW_JOB_ID is always set by the CircleCI runner.
+    # Surface the stable public CircleCI artifact URL as download_url so callers
+    # can link to individual files. CIRCLE_WORKFLOW_JOB_ID is always set by the
+    # CircleCI runner; fall back to the signed S3 URL if it's ever absent.
     job_id = ctx.std.env.var("CIRCLE_WORKFLOW_JOB_ID") or ""
     if job_id:
-        public_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + name
-        return {"success": True, "artifact_ref": public_url, "errors": []}
-    return {"success": True, "artifact_ref": s3_url, "errors": []}
+        download_url = "https://output.circle-artifacts.com/output/job/" + job_id + "/artifacts/0/" + name
+    else:
+        download_url = s3_url
+    return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
 
 
 def _delete_artifact(ctx, name):

@@ -208,7 +208,13 @@ def _github_status_checks(ctx: FeatureContext):
         return links
 
     def _create_check_run(ctx):
-        """Authenticate and create the check run with initial output."""
+        """Authenticate and create the check run with initial output.
+
+        Idempotent — if called twice for the same task, the second call is a
+        no-op. Mirrors the double-completion guard in _complete_check_run.
+        """
+        if _state.get("_check_run_id"):
+            return
         _state["_status"] = "running"
         _state["_started_ms"] = now_ms(ctx)
         _state["_triggered_by"] = _detect_triggered_by(ctx.std.env)
@@ -292,29 +298,30 @@ def _github_status_checks(ctx: FeatureContext):
         if not token or not check_run_id:
             return
 
-        # Dispatch to the kind-specific renderer.
-        if update.kind == "bazel_results":
-            results = update.data.get("results", init_results())
-            output = render_check_output(
-                ctx, results, status, _make_render_ctx(), _make_links(results),
-                gh_trait.templates, gh_trait.metadata_keys,
-            )
-        else:
-            return  # unknown kind — no-op until a renderer is registered
+        # Dispatch to the kind-specific renderer. Unknown kinds are a no-op until
+        # a renderer is registered for them.
+        if update.kind != "bazel_results":
+            return
+        results = update.data.get("results", init_results())
 
+        # Set ended_ms before rendering so the terminal check run reflects the
+        # final duration. Non-final updates don't populate ended_ms.
         if final:
             _state["_ended_ms"] = now_ms(ctx)
-            # Re-render with updated ended_ms before completing.
-            output = render_check_output(
-                ctx, results, status, _make_render_ctx(), _make_links(results),
-                gh_trait.templates, gh_trait.metadata_keys,
-            )
-            _complete_check_run(ctx, status, output = output)
         else:
             now = now_ms(ctx)
             if now - _state.get("_last_update_ms", 0) < min_update_interval_ms:
                 return
             _state["_last_update_ms"] = now
+
+        output = render_check_output(
+            ctx, results, status, _make_render_ctx(), _make_links(results),
+            gh_trait.templates, gh_trait.metadata_keys,
+        )
+
+        if final:
+            _complete_check_run(ctx, status, output = output)
+        else:
             github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output)
 
     lifecycle.task_started.append(_task_started)

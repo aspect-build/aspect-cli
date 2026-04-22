@@ -379,7 +379,9 @@ def _links(with_artifact = False, ci = "github"):
     elif ci == "gitlab":
         ci_label = "GitLab CI"
         ci_url   = "https://gitlab.com/aspect-build/aspect-cli/-/jobs/2469624812"
-        browse   = "https://gitlab.com/aspect-build/aspect-cli/-/jobs/2469624812/artifacts/browse"
+        # GitLab has no usable per-job browse URL for Generic Packages uploads;
+        # _make_artifacts_browse_url returns "" for GitLab. Fixture matches.
+        browse   = ""
     else:
         ci_label = "GitHub Actions"
         ci_url   = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/job/72239404829"

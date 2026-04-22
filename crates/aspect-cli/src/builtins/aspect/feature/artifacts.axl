@@ -46,9 +46,8 @@ def _update_testlogs_trait(artifacts_trait, state, env, ci):
     if browse:
         artifacts_trait.artifacts_browse_url = browse
     # Direct testlogs download URL if the provider returned one (GitHub artifactId,
-    # GitLab Generic Packages URL).
-    prev_ref = group.get("prev_ref", "")
-    _record_artifact_url(artifacts_trait, "testlogs", prev_ref)
+    # GitLab Generic Packages URL). Empty on Buildkite (short-lived URLs).
+    _record_artifact_url(artifacts_trait, "testlogs", group.get("download_url", ""))
     label_urls = group.get("label_urls", {})
     if label_urls:
         artifacts_trait.testlogs_label_urls = dict(label_urls)
@@ -129,12 +128,20 @@ def _collect_test_files(ctx, state, event):
 
 
 def _init_upload_state(state):
-    """Ensure the upload state is initialized in the shared state dict."""
+    """Ensure the upload state is initialized in the shared state dict.
+
+    Per-group fields:
+      prev_ref     — opaque handle passed to provider.delete_artifact for
+                     rolling-delete between batches (GitHub only; providers
+                     without a delete API ignore it).
+      download_url — direct download URL surfaced to ArtifactsTrait.artifact_urls
+                     for the current (latest) version of this group's archive.
+      label_urls   — per-label {filename -> url} for per-file upload strategies
+                     (CircleCI/GitLab). Empty for tar-based strategies.
+    """
     if "_artifact_upload" not in state:
         state["_artifact_upload"] = {
-            # label_urls: accumulated {label -> download_url} map for per-file uploads
-            # (CircleCI/GitLab). Empty for tar-based strategies (GitHub/Buildkite).
-            "testlogs": {"last_count": 0, "version": 0, "prev_ref": None, "label_urls": {}},
+            "testlogs": {"last_count": 0, "version": 0, "prev_ref": None, "download_url": "", "label_urls": {}},
         }
 
 
@@ -163,9 +170,15 @@ def _make_artifacts_browse_url(env, ci):
       Buildkite: {BUILDKITE_BUILD_URL}/steps/canvas?sid={step}&tab=artifacts         (step artifacts tab)
       CircleCI:  app.circleci.com/pipelines/{vcs}/{org}/{repo}/{pipeline_num}/
                  workflows/{workflow_id}/jobs/{job_num}/artifacts                    (modern UI artifacts tab)
-      GitLab:    {CI_PROJECT_URL}/-/jobs/{CI_JOB_ID}/artifacts/browse                (generic packages browse)
+      GitLab:    "" — GitLab's {job}/artifacts/browse only works for artifacts
+                 uploaded via the standard `artifacts:` config. We upload via
+                 the Generic Packages API (see `_upload_file_gitlab` in
+                 lib/artifacts.axl), which lands files in the project's Package
+                 Registry with no clean per-job page. Users see per-file
+                 download URLs via artifact_urls/testlogs_label_urls instead.
 
-    Returns "" if the necessary env vars are missing.
+    Returns "" if the necessary env vars are missing, or if the CI host has no
+    usable browse URL for this upload strategy.
     """
     if ci == "github":
         server = env.var("GITHUB_SERVER_URL") or "https://github.com"
@@ -193,11 +206,6 @@ def _make_artifacts_browse_url(env, ci):
                     "/" + pipeline_num + "/workflows/" + workflow_id + "/jobs/" + job_num + "/artifacts")
         # Fall back to the legacy build URL if the pipeline env vars aren't set.
         return env.var("CIRCLE_BUILD_URL") or ""
-    elif ci == "gitlab":
-        project_url = env.var("CI_PROJECT_URL") or ""
-        job_id      = env.var("CI_JOB_ID") or ""
-        if project_url and job_id:
-            return project_url + "/-/jobs/" + job_id + "/artifacts/browse"
     return ""
 
 
@@ -223,9 +231,14 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
     uuid = _make_uuid(ctx)
 
-    profile_path = "/tmp/" + uuid + ".profile.gz"
-    execlog_path = "/tmp/" + uuid + ".execlog.zstd"
-    bep_path = "/tmp/" + uuid + ".bep.bin"
+    # Profile / execlog / BEP can carry sensitive data: action env vars, command
+    # lines, and full event streams. Prefer the Aspect Workflows per-job tmpdir
+    # (auto-cleaned between jobs) over shared /tmp, which is world-readable on
+    # most systems. Matches the strategy used by lib/artifacts.axl for archives.
+    tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
+    profile_path = tmpdir + "/" + uuid + ".profile.gz"
+    execlog_path = tmpdir + "/" + uuid + ".execlog.zstd"
+    bep_path     = tmpdir + "/" + uuid + ".bep.bin"
 
     bazel_trait.extra_flags.extend([
         "--generate_json_trace_profile",
@@ -271,9 +284,13 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 if success:
                     _update_testlogs_trait(artifacts_trait, state, ctx.std.env, ci)
 
-                # Upload profile/execlog/bep. Each upload returns artifact_ref which is
-                # an HTTP URL on GitHub/GitLab/CircleCI — record it on the trait so status
-                # checks can link directly to the profile/execlog/bep downloads.
+                # Upload profile/execlog/bep. `download_url` is an HTTP URL on
+                # GitHub/GitLab/CircleCI (empty on Buildkite) — record it so
+                # status checks can link directly to the downloads. Remove the
+                # source on BOTH success and failure: a failed upload does not
+                # get a retry in this pipeline, so keeping the file just leaks
+                # a potentially-sensitive artifact (profile.gz contains Bazel
+                # action env; execlog.zstd contains command lines) into /tmp.
                 task_name = ctx.task.name
                 task_key = ctx.task.key
                 for kind, src, aname in [
@@ -284,11 +301,11 @@ def _artifact_upload_impl(ctx: FeatureContext):
                     if ctx.std.fs.exists(src):
                         result = uploader.upload_file(ctx, src, aname)
                         if result["success"]:
-                            _record_artifact_url(artifacts_trait, kind, result.get("artifact_ref", ""))
-                            ctx.std.fs.remove_file(src)
+                            _record_artifact_url(artifacts_trait, kind, result.get("download_url", ""))
                         else:
                             for err in result["errors"]:
                                 print("artifact upload error (" + aname + "): " + err)
+                        ctx.std.fs.remove_file(src)
 
                 # Build tasks (no tests) never hit _update_testlogs_trait, so
                 # artifacts_browse_url would stay empty — but profile/execlog/bep

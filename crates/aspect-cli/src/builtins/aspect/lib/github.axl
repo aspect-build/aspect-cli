@@ -396,15 +396,20 @@ def _upload_artifact(ctx, path, name):
     """Upload a single file to GitHub Actions using the Twirp artifact API.
 
     Flow: CreateArtifact -> PUT to signed Azure Blob URL -> FinalizeArtifact
+
+    Returns {success, artifact_ref, download_url, errors} where:
+      artifact_ref — the artifact `name`; passed back to DeleteArtifact for rolling delete.
+      download_url — direct https://…/artifacts/{id} download URL, or "" if the
+                     id / GH env vars aren't available.
     """
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
     if not token:
-        return {"success": False, "artifact_ref": None, "errors": [_MISSING_TOKEN_MSG]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": [_MISSING_TOKEN_MSG]}
 
     run_id, job_id = _decode_backend_ids(ctx, token)
     if not run_id or not job_id:
-        return {"success": False, "artifact_ref": None, "errors": ["failed to decode backend IDs from token"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to decode backend IDs from token"]}
 
     ok, body, err = _github_twirp(ctx, "CreateArtifact", {
         "workflowRunBackendId": run_id,
@@ -413,11 +418,11 @@ def _upload_artifact(ctx, path, name):
         "version": 4,
     })
     if not ok or not body:
-        return {"success": False, "artifact_ref": None, "errors": [err or "CreateArtifact failed"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": [err or "CreateArtifact failed"]}
 
     signed_url = body.get("signed_upload_url", "")
     if not signed_url:
-        return {"success": False, "artifact_ref": None, "errors": ["no signed_upload_url returned"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["no signed_upload_url returned"]}
 
     file_size = ctx.std.fs.metadata(path).size
     upload_resp = ctx.http().put(
@@ -431,7 +436,7 @@ def _upload_artifact(ctx, path, name):
     ).block()
 
     if upload_resp.status < 200 or upload_resp.status >= 300:
-        return {"success": False, "artifact_ref": None, "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
 
     ok, body, err = _github_twirp(ctx, "FinalizeArtifact", {
         "workflowRunBackendId": run_id,
@@ -440,26 +445,26 @@ def _upload_artifact(ctx, path, name):
         "size": str(ctx.std.fs.metadata(path).size),
     })
     if not ok:
-        return {"success": False, "artifact_ref": None, "errors": [err or "FinalizeArtifact failed"]}
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": [err or "FinalizeArtifact failed"]}
 
-    # FinalizeArtifact returns an artifact id we can use to build a direct download link.
-    # URL format: https://github.com/{owner}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}
-    # The response field is `artifact_id` (snake_case); also accept `artifactId` for future-proofing.
+    # FinalizeArtifact returns an artifact id we use to build a direct download
+    # link. The response field is `artifact_id` (snake_case); also accept
+    # `artifactId` for future-proofing.
     artifact_id = ""
     if body:
         raw = body.get("artifact_id") or body.get("artifactId") or ""
         if raw:
             artifact_id = str(raw)
 
+    download_url = ""
     if artifact_id:
         server = ctx.std.env.var("GITHUB_SERVER_URL") or "https://github.com"
         gh_repo = ctx.std.env.var("GITHUB_REPOSITORY") or ""
         gh_run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
         if gh_repo and gh_run_id:
-            ref_url = server + "/" + gh_repo + "/actions/runs/" + gh_run_id + "/artifacts/" + artifact_id
-            return {"success": True, "artifact_ref": ref_url, "errors": []}
+            download_url = server + "/" + gh_repo + "/actions/runs/" + gh_run_id + "/artifacts/" + artifact_id
 
-    return {"success": True, "artifact_ref": name, "errors": []}
+    return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
 
 
 def _delete_artifact(ctx, name):
