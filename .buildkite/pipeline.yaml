@@ -136,12 +136,15 @@ steps:
       AFTER_PID=$$(bazel $$BAZEL_STARTUP_OPTS info server_pid)
       echo "--- :bazel: bazel info (after aspect)"
       bazel $$BAZEL_STARTUP_OPTS info
-      echo "--- :scroll: Server log"
-      cat "$$SERVER_LOG" || true
-      echo "--- :buildkite: Uploading artifacts from output_base"
-      buildkite-agent artifact upload "$$SERVER_LOG"
-      buildkite-agent artifact upload "$$OUTPUT_BASE/command.log"
-      buildkite-agent artifact upload "$$OUTPUT_BASE/server/**/*"
+      # Intentionally no $$SERVER_LOG cat or $$OUTPUT_BASE artifact uploads.
+      # This repo is public, so the Buildkite job log and artifact tab are
+      # world-readable. java.log / command.log / jvm.out / cmdline can capture
+      # `--announce_rc` output and error messages that quote flag values
+      # verbatim (--remote_header=, --action_env=TOKEN=, URL creds …) — none
+      # of which go through the Rust BES redactor. If this test ever flakes
+      # and needs diagnostics, SSH to the Workflows runner or re-run locally
+      # with ASPECT_DEBUG=1. Long-term fix (crash handler with redaction) is
+      # tracked in ARTIFACT_REDACTION_AND_UPLOAD_PLAN.md §2.
       if [ "$$BEFORE_PID" != "$$AFTER_PID" ]; then
         echo "^^^ +++"
         echo "ERROR: Bazel server was restarted (PID $$BEFORE_PID → $$AFTER_PID)"
