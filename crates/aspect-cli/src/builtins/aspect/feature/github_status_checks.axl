@@ -30,6 +30,45 @@ Templates can be customized per-task via GitHubStatusChecksTrait:
 load("../traits.axl", "TaskLifecycleTrait", "GitHubStatusChecksTrait", "ArtifactsTrait", "TaskUpdate")
 load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
 load("../lib/bazel_results.axl", "init_results", "now_ms", "render_check_output")
+load("../lib/lint_results.axl",
+    lint_init_results = "init_results",
+    lint_render_check_output = "render_check_output",
+)
+
+
+# Dispatch table: `task_update.kind` → (init_results_fn, render_check_output_fn).
+# Both fns share the (ctx, results, status, render_ctx, links, templates,
+# metadata_keys) shape; the "init" is called for the initial render before the
+# first real task_update has arrived.
+_RENDERERS = {
+    "bazel_results": struct(
+        init   = init_results,
+        render = render_check_output,
+    ),
+    "lint_results": struct(
+        init   = lint_init_results,
+        render = lint_render_check_output,
+    ),
+}
+
+# Map known task names to their natural task_update.kind so the initial
+# check-run render uses the right layout/title even before the first
+# task_update arrives. Unknown task names fall back to "bazel_results".
+_TASK_KIND_DEFAULTS = {
+    "build":    "bazel_results",
+    "test":     "bazel_results",
+    "lint":     "lint_results",
+}
+
+
+def _renderer_for_kind(kind):
+    """Return the Renderer struct for `kind`, or None if unknown."""
+    return _RENDERERS.get(kind, None)
+
+
+def _kind_for_task(task_name):
+    """Best-guess initial kind for a task, before any task_update has fired."""
+    return _TASK_KIND_DEFAULTS.get(task_name, "bazel_results")
 
 
 def _to_display_name(name):
@@ -247,8 +286,13 @@ def _github_status_checks(ctx: FeatureContext):
                 _ci_links_base["ci_url"] = job_url
         _state["_ci_links"] = _ci_links_base
 
-        initial_output = render_check_output(
-            ctx, init_results(), "running", _make_render_ctx(),
+        # Pick the initial renderer based on the task name — we don't have a
+        # task_update.kind yet. Falls back to bazel_results for unknown tasks,
+        # matching the pre-dispatch behavior.
+        initial_kind = _kind_for_task(ctx.task.name)
+        initial_renderer = _renderer_for_kind(initial_kind) or _renderer_for_kind("bazel_results")
+        initial_output = initial_renderer.render(
+            ctx, initial_renderer.init(), "running", _make_render_ctx(),
             dict(_ci_links_base), gh_trait.templates, gh_trait.metadata_keys,
         )
 
@@ -302,11 +346,12 @@ def _github_status_checks(ctx: FeatureContext):
         if not token or not check_run_id:
             return
 
-        # Dispatch to the kind-specific renderer. Unknown kinds are a no-op until
-        # a renderer is registered for them.
-        if update.kind != "bazel_results":
+        # Dispatch to the kind-specific renderer. Unknown kinds are a no-op
+        # until a renderer is registered for them — see _RENDERERS above.
+        renderer = _renderer_for_kind(update.kind)
+        if renderer == None:
             return
-        results = update.data.get("results", init_results())
+        results = update.data.get("results", renderer.init())
 
         # Set ended_ms before rendering so the terminal check run reflects the
         # final duration. Non-final updates don't populate ended_ms.
@@ -318,7 +363,7 @@ def _github_status_checks(ctx: FeatureContext):
                 return
             _state["_last_update_ms"] = now
 
-        output = render_check_output(
+        output = renderer.render(
             ctx, results, status, _make_render_ctx(), _make_links(results),
             gh_trait.templates, gh_trait.metadata_keys,
         )

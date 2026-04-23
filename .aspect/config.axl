@@ -2,6 +2,7 @@ load("./lambda.axl", "lambda_with_global_bind")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
+load("@aspect//lib/lint_results_test.axl", "lint_template_snapshot_tests")
 load("@aspect//traits.axl", "BazelTrait")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -42,6 +43,10 @@ def config(ctx: ConfigContext):
     # Template snapshot tests — renders bazel_results templates across failure modes.
     # Run with: aspect test-template-snapshots
     ctx.tasks.add(template_snapshot_tests)
+
+    # Lint template snapshot tests — renders lint_results templates.
+    # Run with: aspect dev test-lint-template-snapshots
+    ctx.tasks.add(lint_template_snapshot_tests)
 
     # Inject a mix of secret-ish and safe Bazel flags on every task so the
     # status-check redaction path is exercised live against a real BES stream.
