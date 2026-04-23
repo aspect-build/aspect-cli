@@ -1,0 +1,284 @@
+"""Shared test fixtures for status-surface snapshot suites.
+
+Both `buildkite_annotations_test.axl` and
+`github_status_comments_test.axl` consume these factories so the same
+data shapes drive every surface's snapshot. Keeping them here means
+fixture changes ripple to every surface without per-suite drift.
+
+Each `make_*` factory returns a fully-seeded `data` dict (the shape
+that flows through `update.data` from a producer to a renderer).
+`seed_metadata` injects the common bazel invocation / commit / CI
+metadata so the rendered output reads as a real CI build, not a
+naked-init result.
+
+These are public names (no leading underscore) because Starlark
+loads cannot import underscore-prefixed names across files.
+"""
+
+load(
+    "../lib/bazel_results.axl",
+    bazel_init_data = "init_data",
+)
+load(
+    "../lib/delivery_results.axl",
+    delivery_add_result = "add_result",
+    delivery_init_data = "init_data",
+)
+load(
+    "../lib/format_results.axl",
+    format_init_data = "init_data",
+)
+load(
+    "../lib/gazelle_results.axl",
+    gazelle_init_data = "init_data",
+)
+load(
+    "../lib/lint_results.axl",
+    lint_accumulate = "accumulate",
+    lint_init_data = "init_data",
+)
+
+# ─── Shared fake metadata ─────────────────────────────────────────────────────
+
+def seed_metadata(r):
+    """Stamp common bazel/CI/commit metadata onto a freshly-init'd
+    results dict. Same fields every renderer reads, so fixtures look
+    like real CI builds rather than blanks."""
+    r["bazel"]["invocation_id"] = "bk-abc12345-def4-5678-9abc-def012345678"
+    r["sink_invocation_id"] = "sink-uuid-1234-5678-9abc"
+    r["bazel"]["build_tool_version"] = "9.0.1"
+    r["bazel"]["build_command"] = "build"
+    r["start_time_ms"] = 1744630000000
+    r["finish_time_ms"] = 1744630004500
+    r["bazel"]["wall_time_ms"] = 4500
+    r["bazel"]["workspace_status"] = {
+        "BUILD_USER": "aspect-runner",
+        "BUILD_HOST": "ip-10-0-86-10",
+        "BUILD_TIMESTAMP": "1776727956",
+    }
+    r["bazel"]["metadata"] = {
+        "BRANCH": "main",
+        "COMMIT_SHA": "abc123def456789abcdef",
+        "COMMIT_MESSAGE": "feat: add buildkite annotations",
+        "COMMIT_AUTHOR": "Greg Magolan <greg@aspect.build>",
+        "COMMIT_AUTHOR_NAME": "Greg Magolan",
+        "USER": "Greg Magolan",
+        "CI_HOST": "BUILDKITE",
+        "VCS": "GITHUB",
+        "REPO_OWNER": "aspect-build",
+        "REPO_NAME": "silo",
+        "BUILD_NUMBER": "49508",
+        "RUN_TYPE": "BRANCH_PUSH",
+        "ASPECT_TASK_NAME": "Test",
+        "BUILD_URL": "https://buildkite.com/aspect-build/silo-aws/builds/49508",
+    }
+    return r
+
+# ─── Bazel build/test fixtures ────────────────────────────────────────────────
+
+def make_build_passed():
+    r = seed_metadata(bazel_init_data())
+    r["bazel"]["targets_total"] = 120
+    r["bazel"]["actions_executed"] = 240
+    r["bazel"]["actions_total"] = 240
+    return r
+
+def make_test_failed():
+    r = seed_metadata(bazel_init_data())
+    r["bazel"]["targets_total"] = 60
+    r["bazel"]["actions_executed"] = 120
+    r["bazel"]["actions_total"] = 120
+    r["bazel"]["passed_test_total"] = 55
+    r["bazel"]["failed_test_total"] = 3
+    r["bazel"]["flaky_test_total"] = 2
+    r["bazel"]["build_command"] = "test"
+    return r
+
+def make_build_failing_actions():
+    """Build invocation in flight, BES has already reported a failed action.
+
+    Mirrors the live `bazel_runner.axl` path that emits `status="failing"`
+    when `failed_actions_total > 0` — used to drive the early-feedback red
+    stripe before the bazel invocation completes.
+    """
+    r = seed_metadata(bazel_init_data())
+    r["bazel"]["targets_total"] = 60
+    r["bazel"]["actions_executed"] = 18
+    r["bazel"]["actions_total"] = 240
+    r["bazel"]["failed_actions_total"] = 1
+    return r
+
+def make_test_failing_test_fails():
+    """Test invocation in flight, BES has already reported a failed test."""
+    r = seed_metadata(bazel_init_data())
+    r["bazel"]["targets_total"] = 60
+    r["bazel"]["actions_executed"] = 80
+    r["bazel"]["actions_total"] = 120
+    r["bazel"]["failed_test_total"] = 1
+    r["bazel"]["passed_test_total"] = 12
+    r["bazel"]["build_command"] = "test"
+    return r
+
+def make_test_running_flaky_only():
+    """Test invocation streaming events, BES has reported flakes but no real failures.
+
+    `bazel_runner.axl` keeps the live status as "running" (not "failing")
+    when only flakes are observed, so the stripe should be yellow rather
+    than red.
+    """
+    r = seed_metadata(bazel_init_data())
+    r["bazel"]["targets_total"] = 60
+    r["bazel"]["actions_executed"] = 75
+    r["bazel"]["actions_total"] = 120
+    r["bazel"]["passed_test_total"] = 8
+    r["bazel"]["flaky_test_total"] = 2
+    r["bazel"]["build_command"] = "test"
+    return r
+
+def make_test_passed_flaky_only():
+    """Terminal `passed` with flakes — bazel exited 0 after retry."""
+    r = seed_metadata(bazel_init_data())
+    r["bazel"]["targets_total"] = 60
+    r["bazel"]["actions_executed"] = 120
+    r["bazel"]["actions_total"] = 120
+    r["bazel"]["passed_test_total"] = 58
+    r["bazel"]["flaky_test_total"] = 2
+    r["bazel"]["build_command"] = "test"
+    return r
+
+def make_test_failing_with_flaky():
+    """Failures dominate flakes — `severity_for` should still pick `error`."""
+    r = seed_metadata(bazel_init_data())
+    r["bazel"]["targets_total"] = 60
+    r["bazel"]["actions_executed"] = 90
+    r["bazel"]["actions_total"] = 120
+    r["bazel"]["passed_test_total"] = 50
+    r["bazel"]["failed_test_total"] = 1
+    r["bazel"]["flaky_test_total"] = 2
+    r["bazel"]["build_command"] = "test"
+    return r
+
+# ─── Lint fixtures ────────────────────────────────────────────────────────────
+
+def make_lint_passed_clean():
+    r = seed_metadata(lint_init_data())
+    r["target_pattern"] = "//..."
+    r["strategy"] = "hard"
+    return r
+
+def make_lint_passed_with_warnings():
+    r = seed_metadata(lint_init_data())
+    r["target_pattern"] = "//..."
+    r["strategy"] = "soft"
+    lint_accumulate(r, [
+        {"tool": "eslint", "file": "apps/web/src/a.ts", "line": 10, "rule_id": "no-console", "severity": "warning", "message": "Unexpected console statement"},
+        {"tool": "eslint", "file": "apps/web/src/b.ts", "line": 20, "rule_id": "prefer-const", "severity": "warning", "message": "Use const"},
+    ])
+    return r
+
+def make_lint_failed_errors():
+    r = seed_metadata(lint_init_data())
+    r["target_pattern"] = "//..."
+    r["strategy"] = "hard"
+    lint_accumulate(r, [
+        {"tool": "eslint", "file": "apps/web/src/a.ts", "line": 10, "rule_id": "no-undef", "severity": "error", "message": "'Foo' is not defined"},
+        {"tool": "pylint", "file": "tools/x.py", "line": 5, "rule_id": "E0401", "severity": "error", "message": "Unable to import"},
+        {"tool": "eslint", "file": "apps/web/src/b.ts", "line": 20, "rule_id": "no-console", "severity": "warning", "message": "Unexpected console"},
+    ])
+    return r
+
+# ─── Delivery fixtures ────────────────────────────────────────────────────────
+
+def make_delivery_all_ok():
+    r = seed_metadata(delivery_init_data())
+    r["target_pattern"] = "//apps/..."
+    r["build_url"] = "https://buildkite.com/aspect-build/silo-aws/builds/49508"
+    delivery_add_result(r, "//apps/web:release", "ok", message = r["build_url"], output_sha = "11112222333344445555")
+    delivery_add_result(r, "//apps/api:release", "ok", message = r["build_url"], output_sha = "22223333444455556666")
+    return r
+
+def make_delivery_all_skipped():
+    r = seed_metadata(delivery_init_data())
+    r["target_pattern"] = "//apps/..."
+    prior = "https://buildkite.com/aspect-build/silo-aws/builds/49495"
+    delivery_add_result(r, "//apps/web:release", "skip", message = prior, output_sha = "11112222333344445555")
+    delivery_add_result(r, "//apps/api:release", "skip", message = prior, output_sha = "22223333444455556666")
+    return r
+
+def make_delivery_mixed_warn():
+    r = seed_metadata(delivery_init_data())
+    r["target_pattern"] = "//apps/..."
+    r["build_url"] = "https://buildkite.com/aspect-build/silo-aws/builds/49508"
+    delivery_add_result(r, "//apps/web:release", "ok", message = r["build_url"], output_sha = "11112222333344445555")
+    delivery_add_result(r, "//apps/legacy:release", "warn", message = "no entrypoint", output_sha = "22223333444455556666")
+    return r
+
+def make_delivery_fail():
+    r = seed_metadata(delivery_init_data())
+    r["target_pattern"] = "//apps/..."
+    delivery_add_result(r, "//apps/web:release", "fail", message = "exit 1", output_sha = "11112222333344445555")
+    return r
+
+# ─── Format fixtures ──────────────────────────────────────────────────────────
+
+def make_format_clean():
+    r = seed_metadata(format_init_data())
+    r["format"]["scope"] = "changed"
+    r["format"]["formatter_target"] = "//tools/format"
+    return r
+
+def make_format_files_need_format():
+    r = seed_metadata(format_init_data())
+    r["format"]["scope"] = "changed"
+    r["format"]["formatter_target"] = "//tools/format"
+    r["format"]["affected_files"] = [
+        "apps/web/src/auth/login.ts",
+        "apps/web/src/utils/helpers.go",
+        "tools/deploy/deploy.py",
+    ]
+    return r
+
+def make_format_soft_fail():
+    """Files need formatting but --soft-fail; exits 0 → status=passed with affected_files → BK warning."""
+    r = seed_metadata(format_init_data())
+    r["format"]["scope"] = "changed"
+    r["format"]["formatter_target"] = "//tools/format"
+    r["format"]["soft_fail"] = True
+    r["format"]["affected_files"] = [
+        "apps/web/src/auth/login.ts",
+        "apps/api/handler.go",
+    ]
+    return r
+
+# ─── Gazelle fixtures ─────────────────────────────────────────────────────────
+
+def make_gazelle_clean():
+    r = seed_metadata(gazelle_init_data())
+    r["gazelle"]["gazelle_target"] = "//tools/gazelle:gazelle"
+    r["gazelle"]["gazelle_command"] = ""
+    r["gazelle"]["check_mode"] = True
+    return r
+
+def make_gazelle_out_of_date():
+    r = seed_metadata(gazelle_init_data())
+    r["gazelle"]["gazelle_target"] = "//tools/gazelle:gazelle"
+    r["gazelle"]["gazelle_command"] = ""
+    r["gazelle"]["check_mode"] = True
+    r["gazelle"]["affected_files"] = [
+        "services/api/BUILD.bazel",
+        "services/worker/BUILD.bazel",
+        "tools/go/BUILD.bazel",
+    ]
+    return r
+
+def make_gazelle_fix_applied():
+    """Fix mode applied changes; exits 0 → status=passed with affected_files → BK warning."""
+    r = seed_metadata(gazelle_init_data())
+    r["gazelle"]["gazelle_target"] = "//tools/gazelle:gazelle"
+    r["gazelle"]["gazelle_command"] = ""
+    r["gazelle"]["check_mode"] = False
+    r["gazelle"]["affected_files"] = [
+        "services/api/BUILD.bazel",
+        "services/worker/BUILD.bazel",
+    ]
+    return r

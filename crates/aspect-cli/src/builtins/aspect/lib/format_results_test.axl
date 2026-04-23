@@ -1,0 +1,258 @@
+"""Snapshot tests for `lib/format_results.axl` template rendering.
+
+Run with:
+  aspect dev test-format-template-snapshots
+
+Scenarios:
+  1. clean-passed        — no files need formatting
+  2. files-need-format   — 3 files need formatting (scope=changed)
+  3. scope-all-many      — 15 files need formatting (scope=all)
+  4. soft-fail           — files need formatting but --soft-fail; exits 0
+  5. formatter-error     — formatter binary crashed
+  6. no-git              — no initial commit / not in git repo
+  7. no-files-to-format  — scope=changed, no changed files found
+  8. with-patch-url      — patch artifact uploaded; check run shows download link
+  9. non-default-target  — custom formatter target label in repro command
+ 10. large               — 250 files to exercise the trim cascade
+"""
+
+load("./format_results.axl", "init_data", "render_check_output")
+
+# ─── Fake-data builders ───────────────────────────────────────────────────────
+
+def _make_base():
+    """Common metadata / runner info shared by all scenarios."""
+    r = init_data()
+    r["bazel"]["invocation_id"] = ""
+    r["sink_invocation_id"] = ""
+    r["start_time_ms"] = 1744630000000
+    r["finish_time_ms"] = 1744630003200
+    r["bazel"]["wall_time_ms"] = 3200
+    r["bazel"]["workspace_status"] = {
+        "BUILD_USER": "aspect-runner",
+        "BUILD_HOST": "ip-10-0-86-10",
+        "BUILD_TIMESTAMP": "1776727956",
+    }
+    r["bazel"]["metadata"] = {
+        "BRANCH": "main",
+        "BRANCH_NAME": "main",
+        "COMMIT_SHA": "abc123def456789abcdef",
+        "COMMIT_MESSAGE": "feat: add new auth flow",
+        "COMMIT_AUTHOR": "Greg Magolan <greg@aspect.build>",
+        "COMMIT_AUTHOR_NAME": "Greg Magolan",
+        "COMMIT_AUTHOR_EMAIL": "greg@aspect.build",
+        "COMMIT_TIMESTAMP": "2026-04-28 10:12:34 -0700",
+        "USER": "Greg Magolan",
+        "CI_HOST": "GITHUB",
+        "VCS": "GITHUB",
+        "REPO_OWNER": "aspect-build",
+        "REPO_NAME": "silo",
+        "BUILD_NUMBER": "12345",
+        "RUN_TYPE": "PULL_REQUEST",
+        "ASPECT_TASK_NAME": "Format",
+        "ASPECT_TASK_ID": "format",
+        "BUILD_URL": "https://github.com/aspect-build/silo/actions/runs/12345",
+    }
+    r["format"]["scope"] = "changed"
+    r["format"]["formatter_target"] = "//tools/format"
+    r["format"]["soft_fail"] = False
+    return r
+
+def _make_clean():
+    r = _make_base()
+    r["changed_files_count"] = 18
+    return r
+
+def _make_files_need_format():
+    r = _make_base()
+
+    # changed_files_count is the input set the formatter saw (post-ignore-pattern);
+    # affected_files is the post-format diff (what the formatter rewrote).
+    # Both populated to exercise the Scope-with-count Configuration row.
+    r["changed_files_count"] = 42
+    r["format"]["affected_files"] = [
+        "apps/web/src/auth/login.ts",
+        "apps/web/src/utils/helpers.go",
+        "tools/deploy/deploy.py",
+    ]
+    return r
+
+def _make_scope_all_many():
+    r = _make_base()
+    r["format"]["scope"] = "all"
+    r["format"]["affected_files"] = [
+        "apps/web/src/auth/login.ts",
+        "apps/web/src/auth/logout.ts",
+        "apps/web/src/api/client.ts",
+        "apps/web/src/api/types.ts",
+        "apps/web/src/utils/helpers.go",
+        "apps/web/src/utils/date.go",
+        "tools/deploy/deploy.py",
+        "tools/deploy/config.py",
+        "tools/ci/validate.py",
+        "tools/ci/report.py",
+        "services/api/main.go",
+        "services/api/handler.go",
+        "services/api/middleware.go",
+        "services/worker/main.go",
+        "services/worker/queue.go",
+    ]
+    return r
+
+def _make_soft_fail():
+    r = _make_base()
+    r["format"]["soft_fail"] = True
+    r["format"]["affected_files"] = [
+        "apps/web/src/auth/login.ts",
+        "apps/api/handler.go",
+    ]
+    return r
+
+def _make_applied():
+    """`--check=false` (or auto on a non-CI host) — formatter rewrote files,
+    task exited 0. Title says "Formatted N file(s)"; body has no Fix
+    section because the work has already been done locally."""
+    r = _make_base()
+    r["applied"] = True
+    r["format"]["affected_files"] = [
+        "apps/web/src/auth/login.ts",
+        "apps/api/handler.go",
+        "tools/deploy/deploy.py",
+    ]
+    return r
+
+def _make_formatter_error():
+    r = _make_base()
+    r["format"]["formatter_error"] = True
+    r["format"]["formatter_error_code"] = 2
+    return r
+
+def _make_early_fail():
+    """Status `failed` with no specific failure mode recorded — the
+    early-bail path in `_impl` when the formatter target's bootstrap
+    build failed or `runnable.determine_entrypoint` couldn't resolve
+    the entrypoint. Data dict carries no `affected_files`,
+    `formatter_error`, `no_git`, or `no_files_to_format` so the
+    renderer's fall-through branches would otherwise misleadingly
+    show "Passed" / "All files are properly formatted."
+    """
+    return _make_base()
+
+def _make_no_git():
+    r = _make_base()
+    r["format"]["no_git"] = True
+    return r
+
+def _make_no_files_to_format():
+    r = _make_base()
+    r["format"]["no_files_to_format"] = True
+    return r
+
+def _make_with_patch_url():
+    r = _make_base()
+    r["format"]["affected_files"] = [
+        "apps/web/src/auth/login.ts",
+        "tools/deploy/deploy.py",
+    ]
+    r["format"]["patch_url"] = "https://github.com/aspect-build/silo/actions/runs/12345/artifacts/999"
+    return r
+
+def _make_non_default_target():
+    r = _make_base()
+    r["format"]["formatter_target"] = "//tools/format:formatter_multirun"
+    r["format"]["affected_files"] = ["services/api/main.go"]
+    return r
+
+def _make_large():
+    """250 files to exercise the trim cascade."""
+    r = _make_base()
+    r["format"]["scope"] = "all"
+    files = []
+    for i in range(250):
+        files.append("apps/generated/module_%d/handler.go" % i)
+    r["format"]["affected_files"] = files
+    return r
+
+# ─── Test harness ─────────────────────────────────────────────────────────────
+
+def _render_ctx(task_name = "format"):
+    return {
+        "triggered_by": "Greg Magolan (pull_request)",
+        "targets": "",
+        "started_ms": 1744630000000,
+        "ended_ms": 1744630003200,
+        "progress": "",
+        "task_name": task_name,
+    }
+
+def _links(ci = "github"):
+    if ci == "buildkite":
+        ci_label = "Buildkite"
+        ci_url = "https://buildkite.com/aspect-build/silo/builds/12345/steps/canvas?sid=s1"
+    else:
+        ci_label = "GitHub Actions"
+        ci_url = "https://github.com/aspect-build/silo/actions/runs/12345/job/99"
+    return {
+        "ci_label": ci_label,
+        "ci_url": ci_url,
+        "aspect_url": "",
+        "results_base_url": "",
+        "artifacts_browse_url": "",
+        "artifact_urls": {},
+        "testlogs_label_urls": {},
+    }
+
+def _test_impl(ctx):
+    scenarios = [
+        # (label,                             data,                        status,    ci,          metadata_keys)
+        ("1. clean-passed · GH", _make_clean(), "passed", "github", None),
+        ("2. files-need-format · GH", _make_files_need_format(), "failed", "github", None),
+        ("3. scope-all-many · BK", _make_scope_all_many(), "failed", "buildkite", None),
+        ("4. soft-fail · GH", _make_soft_fail(), "passed", "github", None),
+        ("5. formatter-error · GH", _make_formatter_error(), "failed", "github", None),
+        ("6. no-git · GH", _make_no_git(), "passed", "github", None),
+        ("7. no-files-to-format · GH", _make_no_files_to_format(), "passed", "github", None),
+        ("8. with-patch-url · GH", _make_with_patch_url(), "failed", "github", None),
+        ("9. non-default-target · GH", _make_non_default_target(), "failed", "github", None),
+        ("10. large-trim · GH", _make_large(), "failed", "github", None),
+        ("11. in-progress · GH", _make_files_need_format(), "running", "github", None),
+        # Exercise GitHubStatusChecksTrait.metadata_keys through the shared summary renderer.
+        ("12. files-need-format · meta=*", _make_files_need_format(), "failed", "github", ["*"]),
+        # `--check=false` (or auto off-CI) — formatter rewrote files and the
+        # task exited 0. Title and body should reflect that the work has
+        # been applied (no "Fix" section, no failure marker).
+        ("13. applied · GH", _make_applied(), "passed", "github", None),
+        # Early-bail before the formatter ran (bootstrap-build failed or
+        # entrypoint resolution failed). Title and body must say "Failed",
+        # NOT "Passed" / "All files are properly formatted."
+        ("14. early-fail · GH", _make_early_fail(), "failed", "github", None),
+    ]
+
+    sep = "=" * 70
+
+    for (label, data, status, ci, metadata_keys) in scenarios:
+        rc = _render_ctx()
+        lk = _links(ci = ci)
+        out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
+        print(sep)
+        print("SCENARIO: " + label)
+        print(sep)
+        print("TITLE:    " + out["title"])
+        print("")
+        print("SUMMARY:")
+        print(out["summary"])
+        print("")
+        print("DETAILS (first 4000 chars):")
+        print(out["text"][:4000])
+        print("")
+
+    print(sep)
+    print("All " + str(len(scenarios)) + " format scenarios rendered without error.")
+    return 0
+
+format_template_snapshot_tests = task(
+    name = "test-format-template-snapshots",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

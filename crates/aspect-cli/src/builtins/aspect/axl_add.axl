@@ -9,6 +9,7 @@ Usage:
 
 load("@std//base64.axl", "base64")
 load("@std//hash.axl", "sha512")
+load("./lib/environment.axl", "error")
 
 # ANSI escape codes for terminal UI
 ORANGE = "\033[38;5;208m"
@@ -255,7 +256,7 @@ def check_existing_dep(content: str, name: str) -> bool:
 
 def _impl(ctx: TaskContext) -> int:
     if len(ctx.args.dep_spec) == 0:
-        print("Error: No dependency specification provided")
+        error(ctx.std, "No dependency specification provided")
         print("")
         print("Usage:")
         print("  aspect axl add gh:owner/repo          # adds latest release")
@@ -277,8 +278,8 @@ def _impl(ctx: TaskContext) -> int:
     # Check if dependency already exists
     current_content = read_module_aspect(ctx)
     if check_existing_dep(current_content, module_name):
-        print("Error: A dependency named '" + module_name + "' already exists in MODULE.aspect")
-        print("Use a different name with --name=<name> or remove the existing dependency first")
+        error(ctx.std, "A dependency named '" + module_name + "' already exists in MODULE.aspect. " +
+                       "Use a different name with --name=<name> or remove the existing dependency first.")
         return 1
 
     # Define phases for progress display

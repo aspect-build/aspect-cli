@@ -19,6 +19,7 @@ use axl_runtime::engine::arguments::Arguments;
 use axl_runtime::engine::feature::FeatureLike;
 use axl_runtime::engine::names::to_display_name;
 use axl_runtime::engine::task::{MAX_TASK_GROUPS, TaskLike};
+use axl_runtime::eval::TimingMode;
 use axl_runtime::module::Mod;
 use clap::builder::{PossibleValuesParser, Resettable, StyledStr};
 use clap::parser::ValueSource;
@@ -56,6 +57,7 @@ pub struct Dispatch {
     pub task_id: usize,
     pub task_key: String,
     pub task_uuid: Option<String>,
+    pub timing: TimingMode,
     matches: ArgMatches,
 }
 
@@ -107,6 +109,15 @@ impl<'a, 'v> Cmd<'a, 'v> {
                     .value_parser(parse_task_uuid)
                     .help("A UUID uniquely identifying this task invocation. Auto-generated if not set."),
             )
+            .arg(
+                ClapArg::new("timing")
+                    .long("timing")
+                    .value_name("LEVEL")
+                    .global(true)
+                    .value_parser(parse_timing_mode)
+                    .default_value("detailed")
+                    .help("Verbosity of the phase-timing breakdown trailing the task completion line: 'total' (no breakdown — total only), 'summary' (inline phases), or 'detailed' (multi-line with descriptions; default). Tasks that don't opt into phases see only the total regardless of this setting."),
+            )
             .subcommand(Command::new("version").about("Print version").hide(true))
             .subcommand(
                 Command::new("help")
@@ -132,10 +143,15 @@ impl<'a, 'v> Cmd<'a, 'v> {
             .cloned()
             .unwrap_or_else(generate_task_key);
         let task_uuid = leaf.get_one::<String>("task-id").cloned();
+        let timing = leaf
+            .get_one::<TimingMode>("timing")
+            .copied()
+            .unwrap_or_default();
         Ok(Dispatch {
             task_id,
             task_key,
             task_uuid,
+            timing,
             matches,
         })
     }
@@ -862,6 +878,10 @@ fn parse_task_uuid(s: &str) -> Result<String, String> {
                 s
             )
         })
+}
+
+fn parse_timing_mode(s: &str) -> Result<TimingMode, String> {
+    s.parse::<TimingMode>()
 }
 
 fn generate_task_key() -> String {

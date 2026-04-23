@@ -4,7 +4,7 @@ Processes the BES event stream to track failed build actions, failed build
 targets, and test outcomes (failed / flaky / passed). Produces a Markdown
 summary suitable for GitHub check run output bodies.
 
-Designed to be reusable by any feature that wants to report Bazel results
+Designed to be reusable by any feature that wants to report Bazel data
 (GitHub status checks, Buildkite annotations, etc.).
 
 Event kinds consumed:
@@ -38,10 +38,6 @@ Payload fields used:
   Aborted.abort_reason, .description
   event.id.label       — target label for all event types
 
-Post-processing (call at build_end, not during streaming):
-  compute_reproducer_command(results, task_name)
-                                — builds "aspect <task_name> ..." reproducer command
-
 Note: stderr output is deliberately NOT captured. Bazel's BES stream can include
 action stderr inline when upload strategies put contents in the event payload —
 we've observed 40+ MB stderr in the wild (verbose linker errors, pathological
@@ -50,8 +46,14 @@ isn't worth it for a check run display. We show the failing target label plus
 the list of failing action mnemonics; users follow the CI link for the raw log.
 """
 
-load("./environment.axl", "get_environment")
+load(
+    "./environment.axl",
+    "build_aspect_runner_rows",
+    "display_cloud_provider",
+    "is_aspect_workflows_runner",
+)
 load("./path_glob.axl", "match_path")
+load("./result_text.axl", "emoji_for_status")
 
 # Max number of unique failed build target labels to track detail for. Entries
 # are small (label + deduped mnemonic list) so this can be generous.
@@ -66,6 +68,31 @@ MAX_REPRO_CHARS = 1000
 
 # Maximum number of successfully-built target labels to track.
 MAX_BUILT_TARGETS = 250
+
+# Minimum cadence for live status surface updates during BES streaming.
+# Tasks driving bazel emit a `task_update` whenever `process_event`
+# flips something interesting; the gap between those is bursty.
+# Without a heartbeat the rendered `⏱` timer + per-phase counters
+# would visibly stall during quiet stretches.
+#
+# Each BES loop polls events.try_pop() on a `BES_DRAIN_TICK_MS`
+# cadence and force-emits a refresh if more than this many ms have
+# elapsed since the last emit. 5s aligns with how often the platforms
+# actually surface annotation refreshes — Buildkite throttles
+# annotation updates to ~4s server-side, and GitHub status checks
+# refresh on a similarly slow cadence — so a 5s heartbeat lets at
+# most one refresh per platform tick land without piling up unused
+# emits.
+MIN_HEARTBEAT_INTERVAL_MS = 5000
+
+# Sleep interval between BES event drain passes. Each tick:
+#   - drains all currently-available events via events.try_pop()
+#   - emits at most once (per interesting event batch or heartbeat)
+#   - checks events.done() for stream termination
+# 250ms gives 4 wake-ups per second — heartbeats fire within 250ms of
+# the threshold, low CPU. Short enough that long event-quiet stretches
+# (e.g. CI's 60s progress-message reduction) don't stall the loop.
+BES_DRAIN_TICK_MS = 250
 
 # bb_clientd FUSE mount root used to resolve bytestream:// URIs.
 # Must match the path configured in the Aspect Workflows runner environment.
@@ -95,13 +122,64 @@ _FAILED_STATUSES = [
     _TEST_STATUS_BLAZE_HALTED_BEFORE_TESTING,
 ]
 
-def _format_duration_ms(ms):
+def pluralize(count, singular, plural = None):
+    """Return `<count> <singular>` or `<count> <plural>` based on count.
+
+    Examples:
+        pluralize(1, "target")    → "1 target"
+        pluralize(2, "target")    → "2 targets"
+        pluralize(12500, "action") → "12,500 actions"
+        pluralize(0, "file")      → "0 files"
+        pluralize(1, "warning", plural = "warnings") → "1 warning"
+
+    Counts are formatted with thousands separators via
+    `format_int_comma` so large bazel numbers (10K+ actions, 1M+ tests
+    in big repos) read cleanly. Defaults `plural` to `singular + "s"`
+    for the common English case; pass an explicit `plural=` for
+    irregular forms or when the singular already ends in `s` /
+    past-participle (`"delivered"` should not pluralize to
+    `"delivereds"`).
+    """
+    if plural == None:
+        plural = singular + "s"
+    return format_int_comma(count) + " " + (singular if count == 1 else plural)
+
+def html_escape(s):
+    """Escape HTML special characters so user-provided text renders safely.
+
+    BES metadata flowing through the renderer (commit message, branch
+    name, tag, custom metadata keys/values, triggered-by string, …) is
+    user-controlled — a commit message that contains "<hr>" would
+    otherwise be interpreted as a literal `<hr>` element by BK
+    (concatenated into a single HTML body) and by GHSC (markdown
+    permits raw HTML), splitting the metadata row across an injected
+    horizontal rule. Apply this helper to every user-controlled string
+    on its way into the rendered markdown — including link display
+    text and code-span content; only URL components and our own
+    template literals stay unescaped.
+
+    `&` MUST be replaced first so we don't double-escape the `&` we're
+    about to introduce for `<` and `>`.
+    """
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def format_duration_ms(ms):
     """Format a duration in milliseconds as a human-readable string.
 
-    Examples: 500ms → "0.5s", 1500ms → "1.5s", 65000ms → "1m 5s"
+    Three regimes for legibility:
+      < 1s     → "5ms", "500ms"   — millisecond precision so tiny phases
+                                    don't all read as "0s"
+      < 1m     → "1.5s", "59.9s"  — tenth-of-a-second precision
+      ≥ 1m     → "1m 5s", "61m"   — whole seconds inside minutes
+
+    Mirrors the runtime's `format_duration` (multi_phase.rs) so the
+    surface header strip and the runtime's "→ Completed" line read
+    the same.
     """
     if ms <= 0:
-        return "0s"
+        return "0ms"
+    if ms < 1000:
+        return str(ms) + "ms"
     total_s = ms // 1000
     frac_s = (ms % 1000) // 100  # tenths of a second
     if total_s < 60:
@@ -117,7 +195,7 @@ def _format_duration_ms(ms):
 def _format_cpu_seconds(ms):
     """Format an aggregate CPU-time duration with an explicit unit.
 
-    Scales through seconds → minutes → hours the same way `_format_duration_ms`
+    Scales through seconds → minutes → hours the same way `format_duration_ms`
     scales wall-clock time, but preserves the "cpu-" prefix on the unit so
     the reader knows this is CPU (summed across parallel threads), not wall.
 
@@ -136,7 +214,7 @@ def _format_cpu_seconds(ms):
     # Under a minute — decimal seconds.
     if total_s < 60:
         tenths = (ms % 1000) // 100
-        base = _format_int_comma(total_s)
+        base = format_int_comma(total_s)
         if tenths > 0:
             base = base + "." + str(tenths)
         return base + " cpu-seconds"
@@ -145,23 +223,21 @@ def _format_cpu_seconds(ms):
     if total_s < 3600:
         whole = total_s // 60
         tenths = ((total_s % 60) * 10) // 60
-        base = _format_int_comma(whole)
         if tenths > 0:
-            return base + "." + str(tenths) + " cpu-minutes"
-        return base + " cpu-minute" + ("s" if whole != 1 else "")
+            return format_int_comma(whole) + "." + str(tenths) + " cpu-minutes"
+        return pluralize(whole, "cpu-minute")
 
     # Hours and up.
     whole = total_s // 3600
     tenths = ((total_s % 3600) * 10) // 3600
-    base = _format_int_comma(whole)
     if tenths > 0:
-        return base + "." + str(tenths) + " cpu-hours"
-    return base + " cpu-hour" + ("s" if whole != 1 else "")
+        return format_int_comma(whole) + "." + str(tenths) + " cpu-hours"
+    return pluralize(whole, "cpu-hour")
 
-def _format_int_comma(n):
+def format_int_comma(n):
     """Format an integer with thousands separators: 12345 → "12,345"."""
     if n < 0:
-        return "-" + _format_int_comma(-n)
+        return "-" + format_int_comma(-n)
     s = str(n)
 
     # Insert commas every 3 digits from the right.
@@ -248,191 +324,210 @@ def _repro_with_prefix(prefix, labels, max_chars):
         return ("", 0)
     return (base + " ".join(included), len(included))
 
-def init_results():
-    """Create a fresh results accumulator.
+def init_data():
+    """Create a fresh data accumulator.
 
-    Returns:
-        dict to be stored in build state and passed to process_event /
-        resolve_stderr / compute_reproducer_command.
+    Two-tier shape: task-managed scalars at the root, BES-derived
+    bazel state under `["bazel"]`. Everything under "Bazel details"
+    in the rendered body reads from `data["bazel"][...]`; task-driven
+    scalars (start/finish time, target pattern, sink invocation id,
+    repro/fix command lists) stay at the root so non-bazel tasks
+    can populate them too.
+
+    See `crates/aspect-cli/src/builtins/aspect/DEVELOPMENT.md` for
+    the full schema.
     """
     return {
-        # Failed build targets (not test-related): [{label}]
-        "failed_targets": [],
-        # Failed build actions, grouped by target label:
-        #   [{label, mnemonics}]   where mnemonics = deduped list of strings
-        # Capped at MAX_FAILED_ACTIONS unique labels. Deliberately NOT capturing
-        # stderr — BES action events can carry 40+ MB inline and we don't want
-        # that on the Starlark heap. The CI link covers the raw log.
-        "failed_actions": [],
-        # Total failed action count (may exceed len(failed_actions) due to cap)
-        "failed_actions_total": 0,
-        # Deduplicated list of target labels that had at least one failed action.
-        # Uncapped (strings only, bounded by unique target count). Used to
-        # partition failed_targets into root failures (own action failed, stderr
-        # available) vs derived failures (no own action failed — a dep broke).
-        "failed_action_labels": [],
-        # Test outcomes:
-        #   [{label, cached, duration_ms}]
-        # duration_ms comes from test_summary.total_run_duration_millis.
-        "failed_tests": [],
-        "flaky_tests": [],
-        # Aggregate test counts
-        "passed_test_total": 0,
-        "failed_test_total": 0,
-        "flaky_test_total": 0,
-        "cached_test_total": 0,
-        # label -> rule kind (e.g. "cc_library", "py_test"), populated from
-        # target_configured events. Used to:
-        #   • detect test targets (kind endswith "_test")
-        #   • display the kind beside each label in the details sections
-        # Uncapped — kinds are short strings and bounded by unique target count.
-        "target_kinds": {},
-        # Tests with at least one non-cached run (used in footer)
-        "executed_test_total": 0,
-        # Wall-clock time for executed tests only (ms), from total_run_duration_millis.
-        "executed_duration_ms": 0,
-        # Wall-clock time for cached tests (ms) — represents time saved by the cache.
-        "cached_duration_ms": 0,
-        # Per-test detail from test_result events (keyed by label; last attempt wins):
-        #   {label -> {"log_path": str, "duration_ms": int}}
-        # log_path is a local filesystem path (resolved from the BES URI), or ""
-        # if the file is remote / not yet available.
-        "test_details": {},
-        # Build action metrics from the build_metrics event
-        "actions_executed": 0,
-        "actions_cached": 0,
-        "actions_total": 0,
-        # Total number of targets that completed (success + failure), from counting
-        # target_completed events. Distinct from targets_configured (which is 0
-        # when analysis is fully cached by skyframe on an incremental rebuild).
-        "targets_total": 0,
-        # Bazel invocation UUID from build_started event
-        "invocation_id": "",
-        # Base URL of the BES results viewer. Parsed from the
-        # structured_command_line event's `--bes_results_url` option. Append
-        # invocation_id to get the full invocation URL. Empty when
-        # --bes_results_url is not set.
-        "bes_results_url": "",
-        # Bazel-measured wall-clock time in ms, from build_metrics.timing_metrics.
-        # More accurate than client-side timing (excludes CLI overhead). 0 until received.
-        "wall_time_ms": 0,
-        # Key=value pairs from the BES build_metadata event.
-        # Populated by --build_metadata and --bes_metadata Bazel flags.
-        # Standard keys produced by build_metadata.axl:
-        #   BRANCH, COMMIT_SHA, COMMIT_MESSAGE, COMMIT_AUTHOR, COMMIT_TIMESTAMP,
-        #   USER, CI, VCS, REPO, REPO_OWNER, TAG
-        # Custom keys: anything the user injects via --bes_metadata=MY_KEY=value
-        "metadata": {},
-        # Key=value pairs from the BES workspace_status event.
-        # Standard keys: BUILD_USER, BUILD_HOST, BUILD_TIMESTAMP
-        # Custom keys: whatever the workspace_status script emits
-        "workspace_status": {},
-        # Abort information from the aborted event
-        "aborted": False,
-        "abort_reason": "",  # snake_case proto enum, e.g. "interrupted", "analysis_failure"
-        "abort_description": "",  # human-readable description from BES
-        # "aspect <task> //a //b ..." reproducer command — set by callers from
-        # compute_reproducer_command()'s return value. Merges build + test
-        # failures under the user's task name so one copy-paste re-runs
-        # everything that broke. Empty until set.
-        "reproducer_command": "",
-        "reproducer_command_total": 0,
-        # All successfully-built target labels (test + non-test), capped at MAX_BUILT_TARGETS.
-        "built_targets": [],
-        # Passed test targets [{label, cached, duration_ms}], capped within MAX_TEST_TARGETS
-        # total across failed_tests + flaky_tests + passed_tests.
-        "passed_tests": [],
-        # Command-line views derived from the BES options_parsed event.
-        # Modeled after Aspect's Web UI: one assembled "explicit" command (the user-
-        # perceived command) plus browseable startup/cmd_line option lists.
-        # Intentionally does NOT reconstruct from structured_command_line — that
-        # produces full canonical output including every .bazelrc default override
-        # and wrapper-injected flag, which is noisy and unreadable.
-        "options_parsed": {
-            # User-specified flags only (pre-bazelrc, pre-config expansion).
-            # Used with build_command + target pattern to assemble the "explicit"
-            # copy-pasteable command shown in the check run output.
-            "explicit_cmd_line": [],
-            # Fully-resolved startup options (post-bazelrc).
-            "startup_options": [],
-            # Fully-resolved command options (post-bazelrc, post-config expansion).
-            "cmd_line": [],
-        },
-        # Invocation ID assigned by the gRPC BES sinks when forwarding to the Aspect
-        # Web UI (or other backends). All sinks share a single UUID so the "View
-        # invocation" link resolves on any backend. Set by bazel_runner.axl after
-        # the build completes; empty string when no BES sinks were configured.
-        # Differs from build_started.uuid (generated server-side by Bazel).
-        "sink_invocation_id": "",
-        # Bazel tool version and command from build_started (e.g. "9.0.1", "test")
-        "build_tool_version": "",
-        "build_command": "",
-        # Build start time in milliseconds since epoch (from build_started.start_time_millis)
+        # ---------- Task-managed scalars (root) ----------
+        # Build start / finish in milliseconds since epoch. For build/test
+        # these come from BES (build_started.start_time_millis,
+        # build_finished.finish_time_millis) — populated by process_event.
+        # For non-bazel tasks (lint/format/gazelle/delivery) the task code
+        # stamps them itself with `now_ms(ctx)`.
         "start_time_ms": 0,
-        # CPU time in ms from build_metrics.timing_metrics.cpu_time_in_ms
-        "cpu_time_ms": 0,
-        # Number of targets that were configured (rule targets + aspects).
-        # Populated from build_metrics.target_metrics.targets_configured —
-        # authoritative but only counts *newly* configured targets this
-        # invocation, so it's 0 on a fully-incremental rebuild. On a fresh
-        # build this is the big number (e.g. 134,227 with aspects).
-        "targets_configured": 0,
-        # Subset of the above that's just rule targets, excluding aspects.
-        # From build_metrics.target_metrics.targets_configured_not_including_aspects.
-        # Lets us split "N configured, M aspect applications" in the display
-        # (matches Bazel's CLI wording).
-        "targets_configured_not_including_aspects": 0,
-        # Number of target_configured BES events we saw ourselves. Covers
-        # the case where Bazel doesn't report targets_configured on
-        # incremental rebuilds but still emits events for cached targets.
-        "targets_configured_counted": 0,
-        # Number of packages loaded (from build_metrics.package_metrics)
-        "packages_loaded": 0,
-        # Cumulative analyses/builds from build_metrics.cumulative_metrics (analysis cache age)
-        "num_analyses": 0,
-        "num_builds": 0,
-        # CPU architecture and compilation mode from the configuration event
-        "cpu_arch": "",
-        "compilation_mode": "",
-        # Invocation physical details (from build_started event).
-        # Populated once at the start; display-only — skip rows with empty values.
-        "workspace_directory": "",
-        "working_directory": "",
-        "server_pid": 0,
-        # Build finish time in ms since epoch (from build_finished event).
-        # 0 while the build is still running; set when the BES stream closes.
         "finish_time_ms": 0,
-        # Bazel phase timing breakdown (from build_metrics.timing_metrics).
-        # 0 until build_metrics arrives.
-        "analysis_phase_time_ms": 0,
-        "execution_phase_time_ms": 0,
-        # Wall time along the longest action chain — the floor on execution
-        # parallelism. Captured from timing_metrics.critical_path_duration_millis
-        # (Bazel 7+) or critical_path_in_ms (older). 0 when unavailable.
-        "critical_path_ms": 0,
-        # Per-mnemonic action counts (e.g. CppCompile, Rustc, ...). Populated
-        # preferentially from build_metrics.action_summary.action_data (Bazel's
-        # authoritative tally that includes cached actions on incremental
-        # rebuilds); falls back to our own action_completed event counter
-        # until build_metrics arrives at the end of the stream.
-        "action_mnemonics": {},
-        # Per-runner action counts (e.g. "remote cache hit · Remote": 6934).
-        # Populated from build_metrics.action_summary.runner_count. Empty on
-        # builds that don't emit runner_count (older Bazel, partial output).
-        "runner_counts": {},
-        # Local (disk) action cache statistics from build_metrics.action_cache_statistics.
-        # Distinct from the combined hit rate in the summary line — these numbers
-        # are the LOCAL cache only (misses here may still hit remote cache).
-        "action_cache_stats": {
-            "hits": 0,
-            "misses": 0,
-            # List of {reason, count} for why local cache misses happened.
-            "miss_details": [],
+        # Space-joined target pattern from the task's args. Set by the
+        # task impl, used by the renderer for the "Targets" subject line.
+        "target_pattern": "",
+        # Invocation ID minted by the gRPC BES sinks for the Aspect Web UI
+        # / other backends. Set by bazel_runner.axl after Build::spawn
+        # returns; empty when no BES sinks were configured. Differs from
+        # build_started.uuid (which Bazel generates server-side).
+        "sink_invocation_id": "",
+        # Repro & fix commands authored by the producer at
+        # terminal-emit time. Each entry is `{"command", "description"}`.
+        # See `lib/repro_commands.axl` for helpers and shape.
+        "repro_commands": [],
+        "fix_commands": [],
+        # Per-attempt history when bazel retried. Empty on the common
+        # single-attempt path; gates the rendered "🔁 Retry attempts"
+        # body section. Each entry: `{attempt (1-indexed), exit_code,
+        # sink_invocation_id, bazel (full sub-dict snapshot)}`.
+        # Populated by `archive_bazel_attempt` from the two retry-loop
+        # callers (`bazel_runner.run_bazel_task`,
+        # `delivery._get_output_shas`).
+        "bazel_attempts": [],
+
+        # ---------- Bazel state (BES-derived) ----------
+        # Everything Bazel emits via the Build Event Protocol lands here.
+        # Populated by `process_event(data, event)` as events stream.
+        # Tasks that don't run bazel leave this dict at its zero/empty
+        # defaults; the renderer skips empty sub-blocks.
+        "bazel": {
+            # Failed build targets (not test-related): [{label}]
+            "failed_targets": [],
+            # Failed build actions, grouped by target label:
+            #   [{label, mnemonics}]   where mnemonics = deduped list of strings
+            # Capped at MAX_FAILED_ACTIONS unique labels. Deliberately NOT capturing
+            # stderr — BES action events can carry 40+ MB inline and we don't want
+            # that on the Starlark heap. The CI link covers the raw log.
+            "failed_actions": [],
+            # Total failed action count (may exceed len(failed_actions) due to cap)
+            "failed_actions_total": 0,
+            # Deduplicated list of target labels that had at least one failed action.
+            # Uncapped (strings only, bounded by unique target count). Used to
+            # partition failed_targets into root failures (own action failed, stderr
+            # available) vs derived failures (no own action failed — a dep broke).
+            "failed_action_labels": [],
+
+            # Test outcomes: [{label, cached, duration_ms}]
+            # duration_ms comes from test_summary.total_run_duration_millis.
+            "failed_tests": [],
+            "flaky_tests": [],
+            "passed_tests": [],
+            # Aggregate test counts.
+            "passed_test_total": 0,
+            "failed_test_total": 0,
+            "flaky_test_total": 0,
+            "cached_test_total": 0,
+            "executed_test_total": 0,
+            # Wall-clock time for executed tests only (ms), from total_run_duration_millis.
+            "executed_duration_ms": 0,
+            # Wall-clock time for cached tests (ms) — represents time saved by the cache.
+            "cached_duration_ms": 0,
+            # Per-test detail from test_result events (keyed by label; last attempt wins):
+            #   {label -> {"log_path": str, "duration_ms": int}}
+            # log_path is a local filesystem path (resolved from the BES URI), or ""
+            # if the file is remote / not yet available.
+            "test_details": {},
+
+            # Target inventory.
+            # label -> rule kind (e.g. "cc_library", "py_test"), populated from
+            # target_configured events. Used to detect test targets and display
+            # the kind beside each label.
+            "target_kinds": {},
+            # All successfully-built target labels (test + non-test), capped at MAX_BUILT_TARGETS.
+            "built_targets": [],
+            # Total number of targets that completed (success + failure), from
+            # counting target_completed events. Distinct from targets_configured.
+            "targets_total": 0,
+            # Counts from build_metrics.target_metrics.
+            "targets_configured": 0,
+            "targets_configured_not_including_aspects": 0,
+            "targets_configured_counted": 0,
+
+            # Build action metrics from the build_metrics event.
+            "actions_executed": 0,
+            "actions_cached": 0,
+            "actions_total": 0,
+            # Per-mnemonic action counts (e.g. CppCompile, Rustc, ...). Populated
+            # preferentially from build_metrics.action_summary.action_data (Bazel's
+            # authoritative tally that includes cached actions on incremental
+            # rebuilds); falls back to our own action_completed event counter
+            # until build_metrics arrives at the end of the stream.
+            "action_mnemonics": {},
+            # Per-runner action counts. Populated from
+            # build_metrics.action_summary.runner_count. Empty on builds that
+            # don't emit runner_count (older Bazel, partial output).
+            "runner_counts": {},
+            # Local (disk) action cache statistics from
+            # build_metrics.action_cache_statistics. Distinct from the combined
+            # hit rate in the summary — these numbers are the LOCAL cache only
+            # (misses here may still hit remote cache).
+            "action_cache_stats": {
+                "hits": 0,
+                "misses": 0,
+                # List of {reason, count} for why local cache misses happened.
+                "miss_details": [],
+            },
+
+            # Build phase timing (from build_metrics.timing_metrics).
+            # 0 until build_metrics arrives.
+            "wall_time_ms": 0,  # bazel-measured wall (excludes CLI overhead)
+            "cpu_time_ms": 0,
+            "analysis_phase_time_ms": 0,
+            "execution_phase_time_ms": 0,
+            # Wall time along the longest action chain — the floor on execution
+            # parallelism. Captured from timing_metrics.critical_path_duration_millis
+            # (Bazel 7+) or critical_path_in_ms (older). 0 when unavailable.
+            "critical_path_ms": 0,
+
+            # Number of packages loaded (from build_metrics.package_metrics).
+            "packages_loaded": 0,
+            # Cumulative analyses/builds from build_metrics.cumulative_metrics
+            # (analysis cache age).
+            "num_analyses": 0,
+            "num_builds": 0,
+
+            # Bazel invocation UUID from build_started event.
+            "invocation_id": "",
+            # Base URL of the BES data viewer. Parsed from the
+            # structured_command_line event's `--bes_results_url` option.
+            # Append invocation_id to get the full invocation URL. Empty when
+            # --bes_results_url is not set.
+            "bes_results_url": "",
+            # Bazel tool version and command from build_started (e.g. "9.0.1", "test").
+            "build_tool_version": "",
+            "build_command": "",
+
+            # CPU architecture and compilation mode from the configuration event.
+            "cpu_arch": "",
+            "compilation_mode": "",
+            # Invocation physical details (from build_started event).
+            # Populated once at the start; display-only — skip rows with empty values.
+            "workspace_directory": "",
+            "working_directory": "",
+            "server_pid": 0,
+
+            # Key=value pairs from the BES build_metadata event.
+            # Populated by --build_metadata and --bes_metadata Bazel flags.
+            # Standard keys produced by build_metadata.axl:
+            #   BRANCH, COMMIT_SHA, COMMIT_MESSAGE, COMMIT_AUTHOR, COMMIT_TIMESTAMP,
+            #   USER, CI, VCS, REPO, REPO_OWNER, TAG
+            # Custom keys: anything the user injects via --bes_metadata=MY_KEY=value
+            "metadata": {},
+            # Key=value pairs from the BES workspace_status event.
+            # Standard keys: BUILD_USER, BUILD_HOST, BUILD_TIMESTAMP
+            # Custom keys: whatever the workspace_status script emits.
+            "workspace_status": {},
+
+            # Command-line views derived from the BES options_parsed event.
+            # Modeled after Aspect's Web UI: one assembled "explicit" command
+            # (the user-perceived command) plus browseable startup/cmd_line
+            # option lists. Intentionally does NOT reconstruct from
+            # structured_command_line — that produces full canonical output
+            # including every .bazelrc default override and wrapper-injected
+            # flag, which is noisy and unreadable.
+            "options_parsed": {
+                # User-specified flags only (pre-bazelrc, pre-config expansion).
+                # Used with build_command + target pattern to assemble the
+                # "explicit" copy-pasteable command shown in the check run.
+                "explicit_cmd_line": [],
+                # Fully-resolved startup options (post-bazelrc).
+                "startup_options": [],
+                # Fully-resolved command options (post-bazelrc, post-config expansion).
+                "cmd_line": [],
+            },
+
+            # Abort information from the aborted event.
+            "aborted": False,
+            "abort_reason": "",  # snake_case proto enum, e.g. "interrupted", "analysis_failure"
+            "abort_description": "",  # human-readable description from BES
         },
     }
 
-def process_event(results, event):
-    """Update results in-place from a single build event.
+def process_event(data, event):
+    """Update data in-place from a single build event.
 
     All BES field accesses go through _bes_get() to guard against AttributeError
     on schema-mismatched or malformed events. Diagnostic warnings about missing
@@ -440,34 +535,47 @@ def process_event(results, event):
     or when an OTel endpoint is configured.
 
     Args:
-        results: dict from init_results(), mutated in place
+        data: dict from init_data(), mutated in place
         event:   BuildEvent from BazelTrait.build_event hook
 
     Returns:
-        True if results changed in a way that warrants a status check update,
+        True if data changed in a way that warrants a status check update,
         False otherwise.
     """
     kind = event.kind
 
     if kind == "build_started":
         # Retry: reset everything so we start fresh with the new event stream.
-        fresh = init_results()
+        # `sink_invocation_id` is task-managed (set by the task right after
+        # `ctx.bazel.build(...)` returns, well before this event arrives) and
+        # is intentionally preserved across the reset — wiping it would
+        # silently drop the Aspect Workflows link from every annotation /
+        # status check from the moment build_started lands.
+        preserved_sink_id = data.get("sink_invocation_id", "") or ""
+        fresh = init_data()
         for k in fresh:
-            results[k] = fresh[k]
+            data[k] = fresh[k]
+        data["sink_invocation_id"] = preserved_sink_id
 
         # Capture fields from build_started for invocation details.
         payload = event.payload
         uuid = _bes_get(payload, "uuid", "") or ""
         if not uuid:
             trace.log("warning: BES build_started event missing expected field 'uuid'")
-        results["invocation_id"] = uuid
-        results["build_tool_version"] = _bes_get(payload, "build_tool_version", "") or ""
-        results["build_command"] = _bes_get(payload, "command", "") or ""
-        results["start_time_ms"] = _bes_get(payload, "start_time_millis", 0) or 0
-        results["workspace_directory"] = _bes_get(payload, "workspace_directory", "") or ""
-        results["working_directory"] = _bes_get(payload, "working_directory", "") or ""
-        results["server_pid"] = _bes_get(payload, "server_pid", 0) or 0
-        return False
+        data["bazel"]["invocation_id"] = uuid
+        data["bazel"]["build_tool_version"] = _bes_get(payload, "build_tool_version", "") or ""
+        data["bazel"]["build_command"] = _bes_get(payload, "command", "") or ""
+        data["start_time_ms"] = _bes_get(payload, "start_time_millis", 0) or 0
+        data["bazel"]["workspace_directory"] = _bes_get(payload, "workspace_directory", "") or ""
+        data["bazel"]["working_directory"] = _bes_get(payload, "working_directory", "") or ""
+        data["bazel"]["server_pid"] = _bes_get(payload, "server_pid", 0) or 0
+
+        # Return True so live task_updates pick up the first burst of metadata
+        # (invocation_id, build_command, start_time, etc.) the moment bazel
+        # emits build_started — without this, metadata only surfaces in the
+        # annotation once the first target_completed event lands, which can
+        # be several seconds into the build.
+        return True
 
     elif kind == "structured_command_line":
         # We only need one piece of information from this event: bes_results_url
@@ -482,7 +590,7 @@ def process_event(results, event):
                         if _bes_get(opt, "option_name", "") == "bes_results_url":
                             val = _bes_get(opt, "option_value", "") or ""
                             if val:
-                                results["bes_results_url"] = val
+                                data["bazel"]["bes_results_url"] = val
                                 trace.log("debug: captured bes_results_url=" + val)
                             break
         return False
@@ -495,34 +603,41 @@ def process_event(results, event):
         # structured_command_line which dumps every .bazelrc default override.
         payload = event.payload
         if payload:
-            results["options_parsed"]["explicit_cmd_line"] = list(_bes_get(payload, "explicit_cmd_line", None) or [])
-            results["options_parsed"]["startup_options"] = list(_bes_get(payload, "startup_options", None) or [])
-            results["options_parsed"]["cmd_line"] = list(_bes_get(payload, "cmd_line", None) or [])
+            data["bazel"]["options_parsed"]["explicit_cmd_line"] = list(_bes_get(payload, "explicit_cmd_line", None) or [])
+            data["bazel"]["options_parsed"]["startup_options"] = list(_bes_get(payload, "startup_options", None) or [])
+            data["bazel"]["options_parsed"]["cmd_line"] = list(_bes_get(payload, "cmd_line", None) or [])
 
             # Fallback capture of bes_results_url in case the structured_command_line
             # event arrives after us or is absent.
-            if not results.get("bes_results_url"):
-                for arg in results["options_parsed"]["cmd_line"]:
+            if not data["bazel"].get("bes_results_url"):
+                for arg in data["bazel"]["options_parsed"]["cmd_line"]:
                     if arg.startswith("--bes_results_url="):
-                        results["bes_results_url"] = arg[len("--bes_results_url="):]
+                        data["bazel"]["bes_results_url"] = arg[len("--bes_results_url="):]
                         break
-            trace.log("debug: options_parsed explicit=" + str(len(results["options_parsed"]["explicit_cmd_line"])) +
-                      " startup=" + str(len(results["options_parsed"]["startup_options"])) +
-                      " cmd=" + str(len(results["options_parsed"]["cmd_line"])))
-        return False
+            trace.log("debug: options_parsed explicit=" + str(len(data["bazel"]["options_parsed"]["explicit_cmd_line"])) +
+                      " startup=" + str(len(data["bazel"]["options_parsed"]["startup_options"])) +
+                      " cmd=" + str(len(data["bazel"]["options_parsed"]["cmd_line"])))
+
+        # Trigger a live update — the "Explicit command line" / "Options
+        # parsed" detail blocks are populated entirely from this event and
+        # users expect them to appear in the annotation as soon as they're
+        # available, not only once a target completes.
+        return True
 
     elif kind == "build_metadata":
-        # Merge --build_metadata and --bes_metadata key=value pairs into results.
+        # Merge --build_metadata and --bes_metadata key=value pairs into data.
         # This event arrives once per invocation, early in the stream.
-        # No live update needed — metadata is context, not a status change.
         payload = event.payload
         if payload:
             payload_meta = _bes_get(payload, "metadata", None)
             if payload_meta:
                 for k, v in payload_meta.items():
                     if k and v:
-                        results["metadata"][k] = v
-        return False
+                        data["bazel"]["metadata"][k] = v
+
+        # Trigger a live update — row 2 (repo / PR / branch / commit / trigger)
+        # and the Build Metadata detail block are populated from this event.
+        return True
 
     elif kind == "workspace_status":
         # Capture workspace status variables (BUILD_USER, BUILD_HOST, etc.).
@@ -534,8 +649,11 @@ def process_event(results, event):
                     key = _bes_get(ws_item, "key", "") or ""
                     val = _bes_get(ws_item, "value", "") or ""
                     if key and val:
-                        results["workspace_status"][key] = val
-        return False
+                        data["bazel"]["workspace_status"][key] = val
+
+        # Trigger a live update — row 1's user/host segments and the
+        # Workspace Status detail block are populated from this event.
+        return True
 
     elif kind == "action_completed":
         payload = event.payload
@@ -552,27 +670,27 @@ def process_event(results, event):
         if success == None:
             trace.log("warning: BES action_completed event missing expected field 'success' (label=" + label + ")")
         if not success:
-            results["failed_actions_total"] += 1
+            data["bazel"]["failed_actions_total"] += 1
 
             # Track unique labels of targets whose own actions failed (root
             # failures). Uncapped, strings only — used to classify derived
             # failures (failed_targets without a matching failed action).
-            if label and label not in results["failed_action_labels"]:
-                results["failed_action_labels"].append(label)
+            if label and label not in data["bazel"]["failed_action_labels"]:
+                data["bazel"]["failed_action_labels"].append(label)
 
             # Group by label: one entry per unique target, deduped list of
             # mnemonics (a single target can emit multiple failed actions —
             # CppCompile + CppLink, for instance).
             entry = None
-            for a in results["failed_actions"]:
+            for a in data["bazel"]["failed_actions"]:
                 if a.get("label", "") == label:
                     entry = a
                     break
             if entry:
                 if mnemonic and mnemonic not in entry["mnemonics"]:
                     entry["mnemonics"].append(mnemonic)
-            elif len(results["failed_actions"]) < MAX_FAILED_ACTIONS:
-                results["failed_actions"].append({
+            elif len(data["bazel"]["failed_actions"]) < MAX_FAILED_ACTIONS:
+                data["bazel"]["failed_actions"].append({
                     "label": label,
                     "mnemonics": [mnemonic] if mnemonic else [],
                 })
@@ -598,25 +716,25 @@ def process_event(results, event):
         if target_kind.endswith(" rule"):
             target_kind = target_kind[:-len(" rule")]
         if label and target_kind:
-            results["target_kinds"][label] = target_kind
-        results["targets_configured_counted"] += 1
+            data["bazel"]["target_kinds"][label] = target_kind
+        data["bazel"]["targets_configured_counted"] += 1
         return False
 
     elif kind == "target_completed":
-        results["targets_total"] += 1
+        data["bazel"]["targets_total"] += 1
         payload = event.payload
         success = _bes_get(payload, "success", None)
         label = _bes_get(event.id, "label", "") or ""
 
         # Kind was captured on the prior target_configured event.
-        target_kind = results["target_kinds"].get(label, "") if label else ""
+        target_kind = data["bazel"]["target_kinds"].get(label, "") if label else ""
         if success == None:
             trace.log("warning: BES target_completed event missing expected field 'success' (label=" + label + ")")
         if not success:
-            results["failed_targets"].append({"label": label, "kind": target_kind})
+            data["bazel"]["failed_targets"].append({"label": label, "kind": target_kind})
             return True
-        elif label and len(results["built_targets"]) < MAX_BUILT_TARGETS:
-            results["built_targets"].append({"label": label, "kind": target_kind})
+        elif label and len(data["bazel"]["built_targets"]) < MAX_BUILT_TARGETS:
+            data["bazel"]["built_targets"].append({"label": label, "kind": target_kind})
         return False
 
     elif kind == "test_result":
@@ -632,7 +750,7 @@ def process_event(results, event):
                     log_uri = _bes_get(output, "file", "") or ""
                     break
         duration_ms = (_bes_get(payload, "test_attempt_duration_millis", 0) or 0) if payload else 0
-        results["test_details"][label] = {
+        data["bazel"]["test_details"][label] = {
             "log_path": _file_uri_to_path(log_uri),
             "duration_ms": duration_ms,
         }
@@ -656,38 +774,38 @@ def process_event(results, event):
         cached = num_cached > 0
         if cached:
             if duration_ms:
-                results["cached_duration_ms"] += duration_ms
+                data["bazel"]["cached_duration_ms"] += duration_ms
         else:
-            results["executed_test_total"] += 1
+            data["bazel"]["executed_test_total"] += 1
             if duration_ms:
-                results["executed_duration_ms"] += duration_ms
+                data["bazel"]["executed_duration_ms"] += duration_ms
 
-        total_tracked = (len(results["failed_tests"]) +
-                         len(results["flaky_tests"]) +
-                         len(results["passed_tests"]))
+        total_tracked = (len(data["bazel"]["failed_tests"]) +
+                         len(data["bazel"]["flaky_tests"]) +
+                         len(data["bazel"]["passed_tests"]))
 
         if status in _FAILED_STATUSES:
-            results["failed_test_total"] += 1
+            data["bazel"]["failed_test_total"] += 1
             if total_tracked < MAX_TEST_TARGETS:
-                results["failed_tests"].append({
+                data["bazel"]["failed_tests"].append({
                     "label": label,
                     "cached": cached,
                     "duration_ms": duration_ms,
-                    "kind": results["target_kinds"].get(label, ""),
+                    "kind": data["bazel"]["target_kinds"].get(label, ""),
                     # Carry the raw BES status so _compute_bucket_counts /
-                    # _build_details_data can split into TEST_FAILED vs
+                    # build_details_data can split into TEST_FAILED vs
                     # TEST_TIMEOUT vs FAILED_TO_BUILD buckets.
                     "status": status,
                 })
             return True
         elif status == _TEST_STATUS_FLAKY:
-            results["flaky_test_total"] += 1
+            data["bazel"]["flaky_test_total"] += 1
             if total_tracked < MAX_TEST_TARGETS:
-                results["flaky_tests"].append({
+                data["bazel"]["flaky_tests"].append({
                     "label": label,
                     "cached": cached,
                     "duration_ms": duration_ms,
-                    "kind": results["target_kinds"].get(label, ""),
+                    "kind": data["bazel"]["target_kinds"].get(label, ""),
                 })
             return True
         else:
@@ -696,15 +814,15 @@ def process_event(results, event):
             # strict "pass", but we have no dedicated bucket for them and they're
             # rare enough that lumping them in gives a closer answer than calling
             # them failures would.
-            results["passed_test_total"] += 1
+            data["bazel"]["passed_test_total"] += 1
             if cached:
-                results["cached_test_total"] += 1
+                data["bazel"]["cached_test_total"] += 1
             if label and total_tracked < MAX_TEST_TARGETS:
-                results["passed_tests"].append({
+                data["bazel"]["passed_tests"].append({
                     "label": label,
                     "cached": cached,
                     "duration_ms": duration_ms,
-                    "kind": results["target_kinds"].get(label, ""),
+                    "kind": data["bazel"]["target_kinds"].get(label, ""),
                 })
         return False
 
@@ -717,9 +835,9 @@ def process_event(results, event):
             # Use total - executed rather than remote_cache_hits (deprecated) because
             # this captures local cache hits too, giving a more accurate cached count.
             total = _bes_get(action_summary, "actions_created", 0) or 0
-            results["actions_executed"] = executed
-            results["actions_cached"] = total - executed if total > executed else 0
-            results["actions_total"] = total
+            data["bazel"]["actions_executed"] = executed
+            data["bazel"]["actions_cached"] = total - executed if total > executed else 0
+            data["bazel"]["actions_total"] = total
 
             # Prefer Bazel's per-mnemonic tally over our event-based counter.
             # Reason: on fully-incremental rebuilds Bazel skips action_completed
@@ -743,13 +861,13 @@ def process_event(results, event):
                     if created > 0:
                         per_mnemonic_sum_created += created
             if per_mnemonic:
-                results["action_mnemonics"] = per_mnemonic
+                data["bazel"]["action_mnemonics"] = per_mnemonic
 
             # If the top-level `actions_created` was 0 (common on incremental
             # rebuilds where Bazel only tallies new action definitions), fall
             # back to the sum of per-mnemonic created counts.
-            if results["actions_total"] == 0 and per_mnemonic_sum_created > 0:
-                results["actions_total"] = per_mnemonic_sum_created
+            if data["bazel"]["actions_total"] == 0 and per_mnemonic_sum_created > 0:
+                data["bazel"]["actions_total"] = per_mnemonic_sum_created
 
             # Per-runner action counts (local, remote cache hit, internal, etc.).
             # Skip the synthetic "total" entry Bazel emits — it sums the rest,
@@ -769,23 +887,23 @@ def process_event(results, event):
                         display = name + (" · " + exec_kind if exec_kind else "")
                         per_runner[display] = per_runner.get(display, 0) + count
             if per_runner:
-                results["runner_counts"] = per_runner
+                data["bazel"]["runner_counts"] = per_runner
         else:
             trace.log("warning: BES build_metrics event missing expected field 'action_summary'")
         timing_metrics = _bes_get(payload, "timing_metrics", None)
         if timing_metrics:
             wall_time = _bes_get(timing_metrics, "wall_time_in_ms", 0) or 0
             if wall_time > 0:
-                results["wall_time_ms"] = wall_time
+                data["bazel"]["wall_time_ms"] = wall_time
             cpu_time = _bes_get(timing_metrics, "cpu_time_in_ms", 0) or 0
             if cpu_time > 0:
-                results["cpu_time_ms"] = cpu_time
+                data["bazel"]["cpu_time_ms"] = cpu_time
             analysis_time = _bes_get(timing_metrics, "analysis_phase_time_in_ms", 0) or 0
             if analysis_time > 0:
-                results["analysis_phase_time_ms"] = analysis_time
+                data["bazel"]["analysis_phase_time_ms"] = analysis_time
             execution_time = _bes_get(timing_metrics, "execution_phase_time_in_ms", 0) or 0
             if execution_time > 0:
-                results["execution_phase_time_ms"] = execution_time
+                data["bazel"]["execution_phase_time_ms"] = execution_time
 
             # Critical path — the sum of wall time along the longest action
             # chain (the floor on parallelism). In Bazel 7+ the field is a
@@ -805,12 +923,12 @@ def process_event(results, event):
                 cp_ms = (_bes_get(timing_metrics, "critical_path_duration_millis", 0) or
                          _bes_get(timing_metrics, "critical_path_in_ms", 0) or 0)
             if cp_ms > 0:
-                results["critical_path_ms"] = cp_ms
+                data["bazel"]["critical_path_ms"] = cp_ms
         target_metrics = _bes_get(payload, "target_metrics", None)
         if target_metrics:
             configured = _bes_get(target_metrics, "targets_configured", 0) or 0
             if configured > 0:
-                results["targets_configured"] = configured
+                data["bazel"]["targets_configured"] = configured
 
             # Bazel distinguishes "targets_configured" (rule + aspect) from
             # "targets_configured_not_including_aspects" (just rule targets).
@@ -818,28 +936,28 @@ def process_event(results, event):
             #   "134,094 configured, 133 aspect applications".
             without_aspects = _bes_get(target_metrics, "targets_configured_not_including_aspects", 0) or 0
             if without_aspects > 0:
-                results["targets_configured_not_including_aspects"] = without_aspects
+                data["bazel"]["targets_configured_not_including_aspects"] = without_aspects
         package_metrics = _bes_get(payload, "package_metrics", None)
         if package_metrics:
             loaded = _bes_get(package_metrics, "packages_loaded", 0) or 0
             if loaded > 0:
-                results["packages_loaded"] = loaded
+                data["bazel"]["packages_loaded"] = loaded
         cumulative_metrics = _bes_get(payload, "cumulative_metrics", None)
         if cumulative_metrics:
             num_analyses = _bes_get(cumulative_metrics, "num_analyses", 0) or 0
             num_builds = _bes_get(cumulative_metrics, "num_builds", 0) or 0
             if num_analyses > 0:
-                results["num_analyses"] = num_analyses
+                data["bazel"]["num_analyses"] = num_analyses
             if num_builds > 0:
-                results["num_builds"] = num_builds
+                data["bazel"]["num_builds"] = num_builds
 
         # Local action cache — hits/misses and reasons for misses.
         action_cache = _bes_get(payload, "action_cache_statistics", None)
         if action_cache:
             hits = _bes_get(action_cache, "hits", 0) or 0
             misses = _bes_get(action_cache, "misses", 0) or 0
-            results["action_cache_stats"]["hits"] = hits
-            results["action_cache_stats"]["misses"] = misses
+            data["bazel"]["action_cache_stats"]["hits"] = hits
+            data["bazel"]["action_cache_stats"]["misses"] = misses
             md_list = []
             for md in (_bes_get(action_cache, "miss_details", None) or []):
                 if md:
@@ -848,11 +966,11 @@ def process_event(results, event):
                     if reason and count > 0:
                         md_list.append({"reason": reason, "count": count})
             if md_list:
-                results["action_cache_stats"]["miss_details"] = md_list
-        trace.log("debug: build_metrics wall_time_ms=" + str(results["wall_time_ms"]) +
-                  " cpu_time_ms=" + str(results["cpu_time_ms"]) +
-                  " targets_configured=" + str(results["targets_configured"]) +
-                  " packages_loaded=" + str(results["packages_loaded"]))
+                data["bazel"]["action_cache_stats"]["miss_details"] = md_list
+        trace.log("debug: build_metrics wall_time_ms=" + str(data["bazel"]["wall_time_ms"]) +
+                  " cpu_time_ms=" + str(data["bazel"]["cpu_time_ms"]) +
+                  " targets_configured=" + str(data["bazel"]["targets_configured"]) +
+                  " packages_loaded=" + str(data["bazel"]["packages_loaded"]))
         return True
 
     elif kind == "build_finished":
@@ -861,7 +979,7 @@ def process_event(results, event):
         if payload:
             finish_ms = _bes_get(payload, "finish_time_millis", 0) or 0
             if finish_ms > 0:
-                results["finish_time_ms"] = finish_ms
+                data["finish_time_ms"] = finish_ms
         return False
 
     elif kind == "configuration":
@@ -879,6 +997,7 @@ def process_event(results, event):
         if config_id == "none":
             return False
         payload = event.payload
+        cpu_or_mode_changed = False
         if payload:
             make_vars = _bes_get(payload, "make_variable", None)
             cpu = ""
@@ -894,68 +1013,112 @@ def process_event(results, event):
             if not mode:
                 mode = _bes_get(payload, "compilation_mode", "") or ""
             if cpu:
-                results["cpu_arch"] = cpu
+                data["bazel"]["cpu_arch"] = cpu
+                cpu_or_mode_changed = True
             if mode:
-                results["compilation_mode"] = mode
-        return False
+                data["bazel"]["compilation_mode"] = mode
+                cpu_or_mode_changed = True
+
+        # Trigger a live update if the row-3 cpu/mode segments changed.
+        return cpu_or_mode_changed
 
     elif kind == "aborted":
-        results["aborted"] = True
+        data["bazel"]["aborted"] = True
         payload = event.payload
         if payload:
-            results["abort_reason"] = _bes_get(payload, "abort_reason", "") or ""
-            results["abort_description"] = _bes_get(payload, "description", "") or ""
+            data["bazel"]["abort_reason"] = _bes_get(payload, "abort_reason", "") or ""
+            data["bazel"]["abort_description"] = _bes_get(payload, "description", "") or ""
         return True
 
     return False
 
-def compute_reproducer_command(results, task_name, max_chars = MAX_REPRO_CHARS):
-    """Compute an 'aspect <task_name> <labels>' reproducer command from accumulated failures.
+def resolve_aspect_url(links, data):
+    """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
 
-    Merges action-level build failures (preferred when present — finer-grained),
-    target-level build failures (fallback for derived breakage with no own action
-    failure), and failed test labels into one deduped list under the user's task
-    name. Returns a tuple `(command, total)` — the command (possibly truncated to
-    fit max_chars) and the total number of unique failed labels (not the count
-    of labels actually in the command, which may be lower after truncation).
+    The Aspect Web UI indexes invocations by the UUID the gRPC sink
+    (`stream_sink.rs`) mints when it spawns BES subscribers. We read BES
+    events from Bazel via a unix socket and forward the stream before
+    `build_started` arrives with Bazel's own UUID, so the sink makes up
+    its own UUID up-front and uses *that* as the stream-level
+    invocation_id the backend sees. The URL must be keyed on
+    `sink_invocation_id` (Bazel's own `invocation_id` is a different UUID
+    that the Aspect backend has no record of).
 
-    Pure function — does NOT mutate `results`. Earlier revisions wrote
-    `results["reproducer_command"]` in place, but `update.data["results"]` from
-    bazel_runner's TaskUpdate record is frozen on the final update, so the
-    write panics. Callers store the returned values wherever they need.
+    Tasks that build with sinks active populate `data["sink_invocation_id"]`
+    by reading `build.sink_invocation_id` immediately after
+    `ctx.bazel.build(...)` returns (the runtime mints the UUID inside
+    `Build::spawn` before returning, so the field is available before
+    the BES loop). See `bazel_runner.axl` for the canonical pattern.
+    Tasks whose builds run without sinks leave the field empty — and we
+    suppress the link rather than rendering a 404-bound URL keyed on
+    Bazel's UUID.
 
-    Args:
-        results:   dict from init_results()
-        task_name: ctx.task.name — the task being reproduced
-        max_chars: maximum character length of the repro command
+    Treats `links["results_base_url"]` (sourced from
+    `WorkflowsEnvironment.build_events.results_url` by the per-surface
+    feature impl) like Bazel treats its own `--bes_results_url`: the
+    URL prefix to append the invocation ID to. The Aspect Web UI uses
+    `{base}/{id}` with no `/invocations/` segment, so the base is just
+    the bare host. Typical value:
 
-    Returns:
-        (command: str, total: int) — empty string and 0 when there are no failures.
+        ASPECT_WORKFLOWS_BES_RESULTS_URL=https://app.oss.aspect.build
+
+    The join below is `endswith("/")`-tolerant — both the typical
+    no-trailing-slash form and the with-trailing-slash variant produce
+    the same `{base}/{id}` URL with exactly one `/` between them.
+    """
+    base = links.get("results_base_url", "") if links else ""
+    if not base:
+        return ""
+    inv_id = data.get("sink_invocation_id", "") or ""
+    if not inv_id:
+        return ""
+    return (base if base.endswith("/") else base + "/") + inv_id
+
+def failed_labels(data):
+    """Collect the deduplicated list of failed target labels from `data["bazel"]`.
+
+    Merges action-level failures (preferred when present — finer-grained, has
+    stderr), target-level failures (fallback for derived breakage with no own
+    action failure), and failed test labels into one list with insertion-order
+    dedup. Used by the repro-command builder to narrow a CI rerun to just the
+    labels that actually broke.
+
+    Pure function — does NOT mutate `data`.
     """
     seen = {}
     labels = []
 
     # Action-level failures first (most precise — these are the ones with stderr).
-    for a in results.get("failed_actions", []):
+    for a in data["bazel"].get("failed_actions", []):
         lbl = a.get("label", "")
         if lbl and lbl not in seen:
             seen[lbl] = True
             labels.append(lbl)
 
     # Target-level failures (covers derived failures with no own action failure).
-    for t in results.get("failed_targets", []):
+    for t in data["bazel"].get("failed_targets", []):
         lbl = t.get("label", "")
         if lbl and lbl not in seen:
             seen[lbl] = True
             labels.append(lbl)
 
     # Failed test targets.
-    for t in results.get("failed_tests", []):
+    for t in data["bazel"].get("failed_tests", []):
         lbl = t.get("label", "")
         if lbl and lbl not in seen:
             seen[lbl] = True
             labels.append(lbl)
 
+    return labels
+
+def compute_reproducer_command(data, task_name, max_chars = MAX_REPRO_CHARS):
+    """Legacy helper preserved for test fixtures. New code should append
+    `{"command", "description"}` entries to `data["repro_commands"]`
+    directly via `lib/repro_commands.axl::build_aspect_command`.
+
+    Returns `(command, total)` from the deduped failure-label set.
+    """
+    labels = failed_labels(data)
     cmd, _ = _repro_with_prefix("aspect " + task_name, labels, max_chars)
     return (cmd, len(labels))
 
@@ -972,37 +1135,39 @@ def _truncate_for_title(text, max_len):
         return window[:last_space] + "…"
     return window + "…"
 
-def summary_title(results, status, target_pattern = "", task_display_name = ""):
-    """Build the check run title in the form '<Task Name> <Subject> <Invocation State>'.
+def summary_title(data, status, target_pattern = "", task_name = ""):
+    """Build the check run title in the form '<status_emoji> <task_name> <subject> · <state>'.
 
     Mirrors Aspect Web UI conventions — see _BUCKET_INVOCATION_LABELS
-    for the state vocabulary and _compute_invocation_state for priority rules.
+    for the state vocabulary and compute_invocation_state for priority rules.
 
     Examples:
-        "Test //... Running..."
-        "Test //... Tests passed (cached)"
-        "Build //... Failed to build"
-        "Deploy production Invocation disconnected"
+        "🔄 test //... · Running..."
+        "✅ test //... · Tests passed (cached)"
+        "❌ build //... · Failed to build"
+        "🔥 deploy production · Invocation disconnected"
 
     Args:
-        results:           dict from init_results()
-        status:            "running" | "failing" | "passed" | "failed"
-        target_pattern:    subject (e.g. "//..." for a build/test task)
-        task_display_name: task name in display form (e.g. "Test", "Build").
-                           When empty, falls back to just "<subject> <state>".
+        data:           dict from init_data()
+        status:         "running" | "failing" | "passed" | "failed" | "warning" | "aborted"
+        target_pattern: subject (e.g. "//..." for a build/test task)
+        task_name:      raw task identifier (`ctx.task.name`) — the
+                        lowercase string declared on `task(name=...)`.
 
     Returns:
         str — max 160 chars (GitHub check title limit)
     """
     subject = _truncate_for_title(target_pattern, _TITLE_SUBJECT_MAX) if target_pattern else ""
-    state = _compute_invocation_state(results, status)
+    state = compute_invocation_state(data, status)
+    icon = emoji_for_status(status)
 
-    # Task name + subject form the "what" prefix (joined by space since they
-    # read naturally together: "Test //..."). The state is a separate clause
-    # that gets a `·` separator so it visually stands apart as the outcome.
+    # `{icon} {task} {subject}` reads naturally as the "what"; the
+    # state clause then gets a `·` separator as the outcome.
     front_parts = []
-    if task_display_name:
-        front_parts.append(task_display_name)
+    if task_name:
+        front_parts.append(icon + " " + task_name)
+    else:
+        front_parts.append(icon)
     if subject:
         front_parts.append(subject)
     front = " ".join(front_parts)
@@ -1038,7 +1203,7 @@ def now_ms(ctx):
 #
 # render_check_output() is the public entry point. Callers pass:
 #   ctx       — TaskContext
-#   results   — dict from init_results(), updated by process_event
+#   data   — dict from init_data(), updated by process_event
 #   status    — "running" | "failing" | "passed" | "failed"
 #   render_ctx — feature-supplied display context (see render_check_output docstring)
 #   links     — dict with keys ci_label, ci_url, aspect_url, bes_invocation_url
@@ -1048,7 +1213,7 @@ def now_ms(ctx):
 
 # Standard BES metadata keys that have dedicated template slots.
 # These are excluded from the extra_meta list even when metadata_keys=["*"].
-_RENDER_META_STANDARD_KEYS = [
+RENDER_META_STANDARD_KEYS = [
     "BRANCH_NAME",
     "COMMIT_SHA",
     "TAG",
@@ -1110,7 +1275,7 @@ _VCS_CONFIG = {
     },
 }
 
-def _merged_meta(results):
+def merged_meta(data):
     """Merge build_metadata and workspace_status into one dict.
 
     --build_metadata values take precedence over workspace_status when both set
@@ -1119,10 +1284,10 @@ def _merged_meta(results):
     blank workspace_status entry doesn't shadow a populated build_metadata one.
     """
     merged = {}
-    for k, v in (results.get("workspace_status", {}) or {}).items():
+    for k, v in (data["bazel"].get("workspace_status", {}) or {}).items():
         if k and v:
             merged[k] = v
-    for k, v in (results.get("metadata", {}) or {}).items():
+    for k, v in (data["bazel"].get("metadata", {}) or {}).items():
         if k and v:
             merged[k] = v
     return merged
@@ -1155,7 +1320,7 @@ def _owner_repo_from_url(url):
         return ("", "")
     return (parts[0], parts[-1])
 
-def _vcs_info(meta):
+def vcs_info(meta):
     """Return VCS link info for the status-check summary, or None when unknown.
 
     Requires VCS plus either REPO_URL (preferred — supports self-hosted hosts
@@ -1207,7 +1372,7 @@ def _trigger_label(run_type):
     """Human-readable label for a RUN_TYPE metadata value."""
     return _TRIGGER_LABELS.get(run_type or "", "")
 
-def _parse_tags(meta):
+def parse_tags(meta):
     """Collect tags from TAGS (comma-separated) and TAG_* keys.
 
     TAGS is split on commas and stripped. Each TAG_X=Y key contributes "X=Y"
@@ -1234,7 +1399,7 @@ def _parse_tags(meta):
                     out.append(display)
     return out
 
-def _parse_workflows_links(meta):
+def parse_workflows_links(meta):
     """Parse ASPECT_WORKFLOWS_LINKS as a list of {text, url}.
 
     Format:
@@ -1326,7 +1491,7 @@ _BUCKET_ICONS = {
 
 # Priority groups for picking the dominant invocation-state label. Iterated
 # top-down; first group with any non-empty bucket wins. Within an error group
-# there's an intrinsic tiebreaker ordering — see _compute_invocation_state.
+# there's an intrinsic tiebreaker ordering — see compute_invocation_state.
 _BUCKET_PRIORITY_GROUPS = [
     [
         _BUCKET_ABORTED_STATE,
@@ -1383,6 +1548,13 @@ _TABLE_HDR_LABEL = "Label"
 _TABLE_HDR_KIND = "Target Type"
 _TABLE_HDR_DURATION = "Duration"
 _TABLE_HDR_ARTIFACTS = "Artifacts"
+_TABLE_HDR_MNEMONIC = "Mnemonic"
+
+# Task-timing columns. Same `<pre>`-aligned shape as `_align_for_pre`
+# produces for target/test tables, just different header text.
+_TT_HDR_PHASE = "Phase"
+_TT_HDR_DESCRIPTION = "Description"
+_TT_HDR_DURATION = "Duration"
 
 # Maximum label length (chars) displayed in target lists. Labels longer than
 # this are truncated with a `...` suffix so the columns in <pre> tables don't
@@ -1416,13 +1588,19 @@ def _artifact_anchors(entry):
     visible = " ".join(parts_visible)
     return html, len(visible)
 
-def _align_for_pre(entries, has_duration = True):
-    """Build a column-aligned table for <pre> rendering: label | kind | duration | artifacts.
+def _align_for_pre(entries, has_duration = True, has_mnemonic = False):
+    """Build a column-aligned table for <pre> rendering.
+
+    Columns:
+      - label, kind                        (always)
+      - duration                           (when has_duration=True)
+      - artifacts                          (auto-detected from entry log_url/xml_url)
+      - mnemonic                           (when has_mnemonic=True; for build failures)
 
     Returns a dict:
         rows:      list of entries augmented with aligned_label / aligned_kind
-                   (and aligned_duration when has_duration=True, aligned_artifacts
-                   when any entry has log_url/xml_url).
+                   (and aligned_duration / aligned_artifacts / aligned_mnemonic
+                   when their column is present).
         header:    pre-formatted header line ("Label | Target Type | ...").
         separator: separator line matching the column widths.
 
@@ -1438,6 +1616,7 @@ def _align_for_pre(entries, has_duration = True):
     label_w = len(_TABLE_HDR_LABEL)
     kind_w = len(_TABLE_HDR_KIND)
     dur_w = len(_TABLE_HDR_DURATION) if has_duration else 0
+    mnemonic_w = len(_TABLE_HDR_MNEMONIC) if has_mnemonic else 0
     artifacts_w = 0
 
     # Pre-build artifact cells so we can use their visible width for alignment.
@@ -1463,11 +1642,17 @@ def _align_for_pre(entries, has_duration = True):
             dur = e.get("duration", "") or ""
             if len(dur) > dur_w:
                 dur_w = len(dur)
+        if has_mnemonic:
+            mn = e.get("mnemonic", "") or ""
+            if len(mn) > mnemonic_w:
+                mnemonic_w = len(mn)
 
-    # Header line: "Label<pad> | Target Type<pad> | Duration<pad> | Artifacts<pad>"
+    # Header line: "Label<pad> | Target Type<pad> | Duration<pad> | Mnemonic<pad> | Artifacts<pad>"
     hdr_cells = [_pad_right(_TABLE_HDR_LABEL, label_w), _pad_right(_TABLE_HDR_KIND, kind_w)]
     if has_duration:
         hdr_cells.append(_pad_right(_TABLE_HDR_DURATION, dur_w))
+    if has_mnemonic:
+        hdr_cells.append(_pad_right(_TABLE_HDR_MNEMONIC, mnemonic_w))
     if has_artifacts:
         hdr_cells.append(_pad_right(_TABLE_HDR_ARTIFACTS, artifacts_w))
     header = " | ".join(hdr_cells)
@@ -1477,6 +1662,8 @@ def _align_for_pre(entries, has_duration = True):
     sep_cells = ["-" * label_w, "-" * kind_w]
     if has_duration:
         sep_cells.append("-" * dur_w)
+    if has_mnemonic:
+        sep_cells.append("-" * mnemonic_w)
     if has_artifacts:
         sep_cells.append("-" * artifacts_w)
     separator = "-+-".join(sep_cells)
@@ -1489,6 +1676,8 @@ def _align_for_pre(entries, has_duration = True):
         row["aligned_kind"] = _pad_right(e.get("kind", "") or "", kind_w)
         if has_duration:
             row["aligned_duration"] = _pad_right(e.get("duration", "") or "", dur_w)
+        if has_mnemonic:
+            row["aligned_mnemonic"] = _pad_right(e.get("mnemonic", "") or "", mnemonic_w)
         if has_artifacts:
             html, vis_w = artifact_cells[i]
 
@@ -1498,6 +1687,114 @@ def _align_for_pre(entries, has_duration = True):
             row["aligned_artifacts"] = html + pad
         rows.append(row)
     return {"rows": rows, "header": header, "separator": separator, "has_artifacts": has_artifacts}
+
+def _align_task_timing_for_pre(entries, total_duration = ""):
+    """Build a column-aligned <pre> table for the Task timing section.
+
+    Columns: Phase | Description | Duration. Same shape as
+    `_align_for_pre` produces for target/test tables — same
+    `<header line>` + `<separator>` + data rows pattern that's
+    becoming the standard look across status-surface body sections.
+
+    The optional `total_duration` is the task's total wall time
+    (`ctx.task.elapsed_ms`, formatted). When set, an aligned `Total`
+    row is included so the table is self-contained in the body view
+    (mirrors the `⏱` total in the header strip).
+
+    Returns:
+      rows:             list of `{aligned_name, aligned_description, aligned_duration}` dicts.
+      header:           pre-formatted header line.
+      separator:        `-+-` separator line matching the column widths.
+      total_separator:  the same separator, rendered between the phase rows
+                        and the Total row so the sum stands apart. "" when
+                        no total was supplied.
+      total_line:       pre-formatted total row, or "" when no total was supplied.
+    """
+    if not entries:
+        return {
+            "rows": [],
+            "header": "",
+            "separator": "",
+            "total_separator": "",
+            "total_line": "",
+        }
+
+    # `-> ` marker prefixes the active row's Phase cell so reviewers
+    # can spot the in-flight phase at a glance. The prefix is only
+    # reserved when an `is_active` entry actually exists in this
+    # render (i.e. live emits); at terminal the table renders flush
+    # with no prefix column, so the post-run view is the cleaner of
+    # the two.
+    _ACTIVE_PREFIX = "-> "
+    _BLANK_PREFIX = " " * len(_ACTIVE_PREFIX)
+    has_active = any([e.get("is_active") for e in entries])
+    prefix_w = len(_ACTIVE_PREFIX) if has_active else 0
+    inactive_prefix = _BLANK_PREFIX if has_active else ""
+
+    name_w = prefix_w + len(_TT_HDR_PHASE)
+    desc_w = len(_TT_HDR_DESCRIPTION)
+    dur_w = len(_TT_HDR_DURATION)
+
+    # Include total in width calculations so the Total row aligns.
+    total_label = "Total"
+    if prefix_w + len(total_label) > name_w:
+        name_w = prefix_w + len(total_label)
+    if total_duration and len(total_duration) > dur_w:
+        dur_w = len(total_duration)
+
+    for e in entries:
+        n = e.get("name", "") or ""
+        d = e.get("description", "") or ""
+        dur = e.get("duration", "") or ""
+        row_prefix_len = prefix_w if (has_active and not e.get("is_active")) else (len(_ACTIVE_PREFIX) if e.get("is_active") else 0)
+        if row_prefix_len + len(n) > name_w:
+            name_w = row_prefix_len + len(n)
+        if len(d) > desc_w:
+            desc_w = len(d)
+        if len(dur) > dur_w:
+            dur_w = len(dur)
+
+    header = " | ".join([
+        _pad_right(inactive_prefix + _TT_HDR_PHASE, name_w),
+        _pad_right(_TT_HDR_DESCRIPTION, desc_w),
+        _pad_right(_TT_HDR_DURATION, dur_w),
+    ])
+    separator = "-+-".join(["-" * name_w, "-" * desc_w, "-" * dur_w])
+
+    rows = []
+    for e in entries:
+        if e.get("is_active"):
+            prefix = _ACTIVE_PREFIX
+        elif has_active:
+            prefix = _BLANK_PREFIX
+        else:
+            prefix = ""
+        rows.append({
+            "aligned_name": _pad_right(prefix + (e.get("name", "") or ""), name_w),
+            "aligned_description": _pad_right(e.get("description", "") or "", desc_w),
+            "aligned_duration": _pad_right(e.get("duration", "") or "", dur_w),
+        })
+
+    total_line = ""
+    total_separator = ""
+    if total_duration:
+        # Visual delimiter between per-phase rows and the Total row —
+        # makes the sum stand apart at the bottom rather than reading
+        # as just another phase row.
+        total_separator = separator
+        total_line = " | ".join([
+            _pad_right(inactive_prefix + total_label, name_w),
+            _pad_right("", desc_w),
+            _pad_right(total_duration, dur_w),
+        ])
+
+    return {
+        "rows": rows,
+        "header": header,
+        "separator": separator,
+        "total_separator": total_separator,
+        "total_line": total_line,
+    }
 
 def _render_counter_pre(counter, name_col, name_display = None, count_col = "Count", pct_col = "%", limit = 15):
     """Render a {name -> count} dict as a column-aligned <pre> body string.
@@ -1541,7 +1838,7 @@ def _render_counter_pre(counter, name_col, name_display = None, count_col = "Cou
         display = name_display(name) if name_display else name
         pct_tenths = (count * 1000) // total if total > 0 else 0
         pct_str = str(pct_tenths // 10) + "." + str(pct_tenths % 10) + "%"
-        c_str = _format_int_comma(count)
+        c_str = format_int_comma(count)
         formatted.append({"name": display, "count": c_str, "pct": pct_str})
         if len(display) > name_w:
             name_w = len(display)
@@ -1556,30 +1853,30 @@ def _render_counter_pre(counter, name_col, name_display = None, count_col = "Cou
     for r in formatted:
         lines.append(_pad_right(r["name"], name_w) + " | " + _pad_right(r["count"], count_w) + " | " + _pad_right(r["pct"], pct_w))
     if more_count > 0:
-        lines.append("…" + str(more_count) + " more (" + _format_int_comma(more_tally) + " actions)")
+        lines.append("…" + str(more_count) + " more (" + format_int_comma(more_tally) + " actions)")
     return "\n".join(lines)
 
-def _failed_action_labels(results):
+def _failed_action_labels(data):
     """Return the unique set of target labels whose actions failed.
 
     Normally populated by process_event (action_completed handler); falls back
     to deriving from failed_actions entries when not pre-populated (test fixtures
-    that set results fields directly without running the event pipeline).
+    that set data fields directly without running the event pipeline).
     """
-    labels = results.get("failed_action_labels", [])
+    labels = data["bazel"].get("failed_action_labels", [])
     if labels:
         return list(labels)
     seen = {}
-    for a in results.get("failed_actions", []):
+    for a in data["bazel"].get("failed_actions", []):
         lbl = a.get("label", "")
         if lbl:
             seen[lbl] = True
     return list(seen.keys())
 
-def _compute_bucket_counts(results):
+def _compute_bucket_counts(data):
     """Count targets in each bucket. Returns dict[bucket -> int].
 
-    Derives per-bucket counts from the accumulated results state:
+    Derives per-bucket counts from the accumulated data state:
       - failed_actions / failed_targets → FAILED_TO_BUILD
       - failed_tests split by .status     → TEST_FAILED / TEST_TIMEOUT / FAILED_TO_BUILD
       - flaky_tests                       → TEST_FLAKY
@@ -1588,18 +1885,19 @@ def _compute_bucket_counts(results):
       - aborted flag                      → ABORTED_STATE
     """
     counts = {b: 0 for b in _BUCKET_DISPLAY_ORDER}
-    if results.get("aborted", False):
+    if data["bazel"].get("aborted", False):
         counts[_BUCKET_ABORTED_STATE] = 1
 
-    # FAILED_TO_BUILD count = unique targets that failed to build. failed_targets
-    # is authoritative (one entry per target_completed success=false). Take the
-    # max with failed action-labels for the edge case where actions fail but
-    # their containing target_completed hasn't arrived yet (mid-stream failure).
-    counts[_BUCKET_FAILED_TO_BUILD] = max(
-        len(results.get("failed_targets", [])),
-        len(_failed_action_labels(results)),
-    )
-    for t in results.get("failed_tests", []):
+    # Count *root* failures (targets with own action failures) — not
+    # derived dep-broken ones, which would inflate the bucket header.
+    # `failed_actions` is authoritative when present; otherwise fall
+    # back to all `failed_targets` (mid-stream / older BES).
+    _root_action_labels = _failed_action_labels(data)
+    if _root_action_labels:
+        counts[_BUCKET_FAILED_TO_BUILD] = len(_root_action_labels)
+    else:
+        counts[_BUCKET_FAILED_TO_BUILD] = len(data["bazel"].get("failed_targets", []))
+    for t in data["bazel"].get("failed_tests", []):
         s = t.get("status", "failed")
         if s == "timeout":
             counts[_BUCKET_TEST_TIMEOUT] += 1
@@ -1607,25 +1905,23 @@ def _compute_bucket_counts(results):
             counts[_BUCKET_FAILED_TO_BUILD] += 1
         else:
             counts[_BUCKET_TEST_FAILED] += 1
-    counts[_BUCKET_TEST_FLAKY] = results.get("flaky_test_total", 0)
-    passed_cached = results.get("cached_test_total", 0)
-    passed_total = results.get("passed_test_total", 0)
+    counts[_BUCKET_TEST_FLAKY] = data["bazel"].get("flaky_test_total", 0)
+    passed_cached = data["bazel"].get("cached_test_total", 0)
+    passed_total = data["bazel"].get("passed_test_total", 0)
     counts[_BUCKET_TEST_PASSED_CACHED] = passed_cached
     counts[_BUCKET_TEST_PASSED] = passed_total - passed_cached if passed_total > passed_cached else 0
 
-    # Non-test built count = successful targets − tests. Derived purely from
-    # aggregate counts (which are always correct and unaffected by the capped
-    # built_targets sample). Rule-kind filtering is applied elsewhere for LIST
-    # rendering but not for counting.
-    successful_target_count = results.get("targets_total", 0) - len(results.get("failed_targets", []))
+    # successful − tests. Aggregates only, since the capped
+    # built_targets sample would under-count.
+    successful_target_count = data["bazel"].get("targets_total", 0) - len(data["bazel"].get("failed_targets", []))
     if successful_target_count < 0:
         successful_target_count = 0
-    test_target_count = passed_total + results.get("failed_test_total", 0) + results.get("flaky_test_total", 0)
+    test_target_count = passed_total + data["bazel"].get("failed_test_total", 0) + data["bazel"].get("flaky_test_total", 0)
     non_test_built = successful_target_count - test_target_count if successful_target_count > test_target_count else 0
     counts[_BUCKET_SUCCESSFUL_BUILD] = non_test_built
     return counts
 
-def _compute_invocation_state(results, status):
+def compute_invocation_state(data, status):
     """Return the invocation-state label for the title.
 
     Walks the priority groups top-down; the first group with any non-empty
@@ -1633,17 +1929,17 @@ def _compute_invocation_state(results, status):
     list acts as tiebreaker (ABORTED > FAILED_TO_BUILD > FAILED > TIMEOUT > FLAKY).
 
     Returns "Running..." while the build is in progress — that overrides
-    bucket state since partial results aren't yet authoritative.
+    bucket state since partial data aren't yet authoritative.
     """
 
     # Aborted build: label is fixed, no matter what else ran.
-    if results.get("aborted", False):
+    if data["bazel"].get("aborted", False):
         return _BUCKET_INVOCATION_LABELS[_BUCKET_ABORTED_STATE]
 
     # In-progress: always Running... regardless of mid-stream failures.
     if status in ("running", "failing"):
         return _BUCKET_INVOCATION_LABELS[_BUCKET_PENDING]
-    counts = _compute_bucket_counts(results)
+    counts = _compute_bucket_counts(data)
     for group in _BUCKET_PRIORITY_GROUPS:
         for bucket in group:
             if counts.get(bucket, 0) > 0:
@@ -2001,10 +2297,8 @@ def _quote_flag(token):
     if not token:
         return "''"
 
-    # Only flags of the form `--name=value` get value-only quoting. For this
-    # to be safe the flag-name prefix itself (everything up to and including
-    # the first `=`) must contain no shell metacharacters — otherwise the
-    # quoted value wouldn't cover the unsafe chars in the flag part.
+    # Value-only quoting requires a shell-safe `--name=` prefix; an
+    # unsafe flag name would slip past a value-quoted token.
     if token.startswith("--") and "=" in token:
         idx = token.index("=")
         flag_part = token[:idx + 1]  # includes the `=`
@@ -2064,8 +2358,7 @@ def _assemble_explicit_command(build_command, target_pattern, explicit_cmd_line,
     redacted = _redact_args(explicit_cmd_line or [], allow_env)
     flags = [_quote_flag(a) for a in redacted]
 
-    # target_pattern is a single string like "//foo:bar" or "//foo:bar //baz:...";
-    # split on whitespace so each target lands on its own line in the long form.
+    # Split the pattern so each target lands on its own line in `long`.
     target_tokens = []
     if target_pattern:
         for t in target_pattern.split(" "):
@@ -2094,22 +2387,50 @@ def _sorted_dedup(args, allow_env):
     unique = sorted(set(redacted))
     return [_quote_flag(a) for a in unique]
 
-def _render_bes_url(results):
-    """Construct the full BES invocation URL from bes_results_url + invocation_id."""
-    base = results.get("bes_results_url", "")
-    inv = results.get("invocation_id", "")
+def render_bes_url(data):
+    """Construct the full BES invocation URL from bes_results_url + invocation_id.
+
+    Uses Bazel's `invocation_id` (the UUID Bazel mints for its own
+    BEP stream — captured from the `BuildStarted` BEP event), not the
+    Aspect-side `sink_invocation_id`. The two are distinct: the
+    `--bes_results_url` consumer only sees Bazel's UUID, so the link
+    must key on that. `resolve_aspect_url` is the parallel helper for
+    the Aspect Web UI which is keyed on `sink_invocation_id`.
+
+    Returns "" when either piece is unavailable (caller suppresses
+    the link rather than rendering a broken URL).
+    """
+    base = data["bazel"].get("bes_results_url", "")
+    inv = data["bazel"].get("invocation_id", "")
     if not base or not inv:
         return ""
     return (base if base.endswith("/") else base + "/") + inv
 
-def _format_run_date(ctx, epoch_ms):
+def format_run_date(ctx, epoch_ms):
     """Format an epoch timestamp (milliseconds) as a human-readable date string.
+
+    Single source of truth for "render a Unix timestamp as the default
+    `date` form (e.g. `Sun May 10 07:16:05 UTC 2026`)" across all
+    status surfaces — bazel/format/gazelle/lint/delivery per-task check
+    bodies AND the github_status_comments PR-comment header.
 
     Uses the system `date` command with cross-platform flags:
       macOS: date -r <seconds>
       Linux: date -d @<seconds>
+    The `sh -c "A || B"` form picks whichever lands first — keeps the
+    helper working both on developer laptops (often macOS) and on CI
+    runners (Linux).
 
-    Returns "" if epoch_ms is 0 or the command fails.
+    No `-u` flag — `date` honors `$TZ` first, then `/etc/localtime`.
+    On most hosted CI runners that resolves to UTC, but workflows can
+    set `TZ=America/Los_Angeles` (or any IANA zone) at the env level
+    to render headlines in the team's local time. Locally, the
+    runner-machine TZ is just whatever the developer is set to. Either
+    way the producer-side render is honest about which clock it's on
+    (`%Z` is the TZ abbreviation in the default `date` format).
+
+    Returns "" if epoch_ms is 0/negative or the command fails — callers
+    can drop the field instead of rendering junk.
     """
     if not epoch_ms or epoch_ms <= 0:
         return ""
@@ -2124,21 +2445,21 @@ def _format_run_date(ctx, epoch_ms):
             return val
     return ""
 
-_STATUS_ICONS = {
+STATUS_ICONS = {
     "passed": "✅",
     "failed": "❌",
     "failing": "⚠️",
     "running": "🔄",
 }
 
-_STATUS_LABELS = {
+STATUS_LABELS = {
     "passed": "Succeeded",
     "failed": "Failed",
     "failing": "Failing...",
     "running": "Running...",
 }
 
-def _ci_link_item(ctx, links):
+def ci_link_item(ctx, links):
     """Build the CI-host link item for the final summary row.
 
     Prefers a pre-resolved ci_url from the feature (e.g. a job-level deep link
@@ -2176,44 +2497,182 @@ def _ci_link_item(ctx, links):
             return {"icon": "🦊", "value": "[GitLab CI](" + url + ")"}
     return None
 
-def _build_invocation_rows(ctx, results, render_ctx, status, links = None, run_date = ""):
+def _titlecase(s):
+    """Title-case the first character and convert underscores to spaces.
+
+    Phase names are lowercase identifiers (`detect`, `build`,
+    `bazel_query`); this renders them as `Detect`, `Build`,
+    `Bazel query` for display. Subsequent words stay lowercase — the
+    input is an identifier, not a sentence, so leading-cap-only
+    matches how renderers and CLIs typically format programmatic
+    names. Callers that need a non-naive display label (e.g.
+    `preflight` → `Pre-flight`) set `Phase.display_name`; the
+    renderer prefers that over this helper.
+    """
+    if not s:
+        return s
+    return s[0].upper() + s[1:].replace("_", " ")
+
+# Synthetic `init` phase entries below this duration are hidden from
+# the header phase strip (and from the runtime's breakdown line). The
+# init phase covers Aspect runtime startup + trait setup before the
+# task's first explicit `phase()` mark; on a fast path that's a few
+# ms of work and not worth a slot in the strip. Above the threshold,
+# init surfaces as a real entry the user might want to investigate.
+# Caller-named phases are never suppressed even at 0ms; intentional
+# boundaries always render. Matches the Rust-side
+# INIT_PHASE_HIDE_THRESHOLD_MS.
+_INIT_PHASE_HIDE_THRESHOLD_MS = 50
+
+def format_elapsed_with_phases(ctx, status):
+    """Render the `⏱` item content for the status surface header.
+
+    Total task time leads. Completed phases render in chronological
+    order (oldest first). The "highlight" slot — placed between total
+    and history, separated by ` | ` — carries the phase that's
+    currently demanding attention: the active phase while running /
+    failing, or the interrupted phase on terminal failure. On
+    terminal-passed (or terminal-failed without an interrupted
+    phase) there's no highlight slot and history follows total
+    after an em-dash.
+
+    Shapes:
+      No phases used:                    "12.4s"
+      Phases, running:                   "4m13s · 🔨 Build 4m11s | ⚙ Setup 1.7s · 🔍 Detect 1.2s"
+      Phases, failing:                   "4m13s · 🔨 Build (failing 4m11s) | ⚙ Setup 1.7s · 🔍 Detect 1.2s"
+      Phases, passed (terminal):         "46.8s — ⚙ Setup 1.7s · 🔍 Detect 1.2s · 🔨 Build 45.3s"
+      Phases, failed-during-phase:       "1m 15s · 🔨 Build (failed after 1m 12s) | Init 2.3s"
+      Phases, failed-after-phase-bound:  "1m 15s — Init 2.3s · 🔨 Build 1m 12s"
+
+    Each phase name leads with a small unicode icon supplied by the
+    task at phase-transition time (`Phase(name="build", emoji="🔨")`);
+    the runtime carries it on the `TaskPhase` snapshot so the renderer
+    reads `p.emoji` (closed) / `current.emoji` (live) directly. Active
+    running phase drops the `(active …)` parenthetical since position
+    alone — leading slot, before the `|` separator — makes "active"
+    implicit. Failure rider stays (`(failed after …)` / `(failing …)`)
+    since that one carries triage info.
+
+    `ctx.task.elapsed_ms` refreshes on every read; the active phase
+    auto-closes when the runtime emits the closing line, so terminal
+    snapshots already show all phases as completed.
+
+    The synthetic `init` phase is hidden when its duration is under
+    `_INIT_PHASE_HIDE_THRESHOLD_MS`.
+    """
+    elapsed_ms = ctx.task.elapsed_ms
+    if elapsed_ms <= 0:
+        return ""
+
+    text = format_duration_ms(elapsed_ms)
+    phases = ctx.task.phases()
+    current = ctx.task.current_phase()
+
+    # Filter out the synthetic init phase when negligible.
+    visible_phases = [
+        p
+        for p in phases
+        if not (p.name == "init" and p.duration_ms < _INIT_PHASE_HIDE_THRESHOLD_MS)
+    ]
+
+    if not visible_phases and not current:
+        return text
+
+    is_failed = status == "failed"
+    history = []
+    highlight = ""
+    for p in visible_phases:
+        name_t = _phase_label(p.name, p.emoji, p.display_name)
+        dur = format_duration_ms(p.duration_ms)
+        if is_failed and p.interrupted and not highlight:
+            # The phase that was active when the task hit a non-zero
+            # exit; runtime auto-closes it with `interrupted=True`.
+            highlight = "%s (failed after %s)" % (name_t, dur)
+        else:
+            history.append("%s %s" % (name_t, dur))
+    if current:
+        cur_dur = format_duration_ms(current.duration_ms)
+        name_t = _phase_label(current.name, current.emoji, current.display_name)
+        if status == "failed":
+            # `current_phase` is still set because the surface render
+            # fires from inside `_impl` before the runtime's auto-close.
+            highlight = "%s (failed after %s)" % (name_t, cur_dur)
+        elif status == "passed":
+            # Render as a completed-in-order entry — no highlight slot
+            # on terminal success.
+            history.append("%s %s" % (name_t, cur_dur))
+        elif status == "failing":
+            highlight = "%s (failing %s)" % (name_t, cur_dur)
+        else:  # running (or any unknown non-terminal)
+            # Drop the `(active …)` parenthetical — leading slot
+            # before the `|` already implies "active".
+            highlight = "%s %s" % (name_t, cur_dur)
+
+    if highlight and history:
+        return "%s · %s | %s" % (text, highlight, " · ".join(history))
+    if highlight:
+        return "%s · %s" % (text, highlight)
+    return "%s — %s" % (text, " · ".join(history))
+
+def _phase_label(phase, emoji, display_name):
+    """`<emoji> <Display name>` for the surface header phase strip.
+
+    `emoji` is the phase icon the producer supplied via
+    `Phase(name=..., emoji=...)` at transition time; the runtime
+    carries it on the phase snapshot. Empty string renders the title
+    alone.
+
+    `display_name` is the producer-supplied label override via
+    `Phase(display_name=...)`. When non-empty it's used verbatim;
+    when empty, fall back to `_titlecase(phase)` (so `bazel_query` →
+    `Bazel query` works out of the box and only the irregulars need
+    an explicit override — currently just `preflight` → `Pre-flight`).
+    """
+    name_t = display_name or _titlecase(phase)
+    if emoji:
+        return emoji + " " + name_t
+    return name_t
+
+def build_invocation_rows(ctx, data, render_ctx, status, links = None, run_date = "", extra_meta = None):
     """Build the summary rows for SUMMARY_TEMPLATE.
 
-    Returns up to 6 rows, each a list of {icon, value} dicts rendered
+    Returns up to 7 rows, each a list of {icon, value} dicts rendered
     `· ` separated by the template. Rows with no items are excluded.
+    See `DEVELOPMENT.md → Summary header rows` for the rationale
+    behind each grouping.
 
-        Row 1: status · date · elapsed · user · host
-        Row 2: repo (link) · PR (link) · branch (link) · commit (link) · trigger
-        Row 3: targets · actions · tests · tool · CPU · mode
-        Row 4: Workflows runner version · cloud · AZ · instance type ·
-               instance ID   (only on an Aspect Workflows runner)
-        Row 5: custom links · tags
-        Row 6: Aspect Workflows (link) · CI host (link)
+        Row 1 (status & timing):  status · date · elapsed
+        Row 2 (actor & toolchain): user · host · CLI version
+        Row 3 (VCS context):       repo · PR · branch · commit · trigger
+        Row 4 (build content):     targets · actions · tests · tool · CPU · mode
+        Row 5 (Workflows runner):  runner version · cloud · AZ · instance · ID
+                                   (only on an Aspect Workflows runner)
+        Row 6 (tags & custom):     custom links · tags
+        Row 7 (external links):    Aspect Workflows · CI host
     """
-    meta = _merged_meta(results)
-    vcs = _vcs_info(meta)
+    meta = merged_meta(data)
+    vcs = vcs_info(meta)
 
     def _item(icon, value):
         return {"icon": icon, "value": value}
 
-    # ------------------------------------------------------------------
-    # Row 1 — status · date · elapsed · user · host
-    # ------------------------------------------------------------------
-    row1 = [_item(_STATUS_ICONS.get(status, "🔄"), _STATUS_LABELS.get(status, "Running"))]
+    # Row 1: status · date · elapsed — outcome + when + how long.
+    row1 = [_item(STATUS_ICONS.get(status, "🔄"), STATUS_LABELS.get(status, "Running"))]
 
     if run_date:
         row1.append(_item("📅", run_date))
 
-    wall_time_ms = results.get("wall_time_ms", 0)
-    if wall_time_ms > 0:
-        row1.append(_item("⏱", _format_duration_ms(wall_time_ms)))
+    elapsed_text = format_elapsed_with_phases(ctx, status)
+    if elapsed_text:
+        row1.append(_item("⏱", elapsed_text))
 
-    # User display picks the most human-readable *name* we can find and
-    # deliberately omits any email. GitHub-flavored markdown autolinks both
-    # `<user@host>` and bare `user@host.tld` into mailto: links in check-run
-    # output; HTML-entity tricks don't work reliably because GitHub decodes
-    # entities before the autolink scan. Full "Name <email>" still lives in
-    # the Build Metadata section below.
+    # Row 2: actor & toolchain — user · host · CLI version.
+    row2 = []
+
+    # Show the most human-readable *name* and omit the email — GFM
+    # autolinks bare `user@host.tld` into mailto:, and HTML-entity
+    # tricks don't work because GitHub decodes before the autolink scan.
+    # The full "Name <email>" still appears in Build Metadata below.
     commit_author_name = meta.get("COMMIT_AUTHOR_NAME", "")
     commit_author = meta.get("COMMIT_AUTHOR", "")
     commit_author_email = meta.get("COMMIT_AUTHOR_EMAIL", "")
@@ -2233,35 +2692,40 @@ def _build_invocation_rows(ctx, results, render_ctx, status, links = None, run_d
     else:
         user_display = ""
     if user_display:
-        row1.append(_item("👤", user_display))
+        row2.append(_item("👤", html_escape(user_display)))
 
     build_host = meta.get("BUILD_HOST", "")
     if build_host:
-        row1.append(_item("🖥", build_host))
+        row2.append(_item("🖥", html_escape(build_host)))
 
-    # ------------------------------------------------------------------
-    # Row 2 — repo · PR · branch · commit · Aspect Workflows · CI · trigger
-    # ------------------------------------------------------------------
-    row2 = []
+    # `:aspect:` is a BK-only emoji shortcode; everywhere else it
+    # renders as literal text, so fall back to 💎 off-BK.
+    cli_version = ctx.std.env.aspect_cli_version() if ctx else ""
+    if cli_version:
+        on_bk = ctx and ctx.std.env.var("BUILDKITE")
+        cli_icon = ":aspect:" if on_bk else "💎"
+        row2.append(_item(cli_icon, "aspect-cli v" + cli_version))
+
+    # Row 3: VCS context — repo · PR · branch · commit · trigger.
+    row3 = []
     if vcs:
-        # Link text is just the repo name — the VCS icon already tells the
-        # reader which host it's on, and the owner is usually context-obvious.
+        # Link text is the repo name only — the icon tells the host.
         link_text = vcs["repo_name"] if vcs["repo_name"] else vcs["display_name"]
-        row2.append(_item(vcs["icon"], "[" + link_text + "](" + vcs["repo_url"] + ")"))
+        row3.append(_item(vcs["icon"], "[" + link_text + "](" + vcs["repo_url"] + ")"))
 
         pr_id = meta.get("PR_ID", "")
         pr_number = meta.get("PR_NUMBER", "")
         if pr_id and pr_number:
             pr_url = vcs["repo_url"] + vcs["pr_path"] + "/" + pr_id
-            row2.append(_item(":twisted_rightwards_arrows:", "[#" + pr_number + "](" + pr_url + ")"))
+            row3.append(_item(":twisted_rightwards_arrows:", "[#" + pr_number + "](" + pr_url + ")"))
         elif pr_number:
             # No PR_ID to build a deep link — still show the number for context.
-            row2.append(_item(":twisted_rightwards_arrows:", "#" + pr_number))
+            row3.append(_item(":twisted_rightwards_arrows:", "#" + pr_number))
 
         branch = meta.get("BRANCH_NAME", "")
         if branch:
             branch_url = vcs["repo_url"] + vcs["tree_path"] + "/" + branch
-            row2.append(_item("⎇", "[" + branch + "](" + branch_url + ")"))
+            row3.append(_item("⎇", "[" + html_escape(branch) + "](" + branch_url + ")"))
 
         sha = meta.get("COMMIT_SHA", "")
         if sha:
@@ -2269,186 +2733,249 @@ def _build_invocation_rows(ctx, results, render_ctx, status, links = None, run_d
             commit_msg = meta.get("COMMIT_MESSAGE", "")
             if len(commit_msg) > 60:
                 commit_msg = commit_msg[:60] + "…"
-            display = short_sha + (" - " + commit_msg if commit_msg else "")
+            display = short_sha + (" - " + html_escape(commit_msg) if commit_msg else "")
             commit_url = vcs["repo_url"] + vcs["commit_path"] + "/" + sha
-            row2.append(_item("✏️", "[" + display + "](" + commit_url + ")"))
+            row3.append(_item("✏️", "[" + display + "](" + commit_url + ")"))
     else:
-        # No VCS info — fall back to unlinked branch/commit so the reader
-        # still has context.
+        # No VCS info — show unlinked branch/commit for context.
         branch = meta.get("BRANCH_NAME", "")
         if branch:
-            row2.append(_item("⎇", branch))
+            row3.append(_item("⎇", html_escape(branch)))
         sha = meta.get("COMMIT_SHA", "")
         if sha:
             short_sha = sha[:7] if len(sha) > 7 else sha
             commit_msg = meta.get("COMMIT_MESSAGE", "")
             if len(commit_msg) > 60:
                 commit_msg = commit_msg[:60] + "…"
-            display = short_sha + (" - " + commit_msg if commit_msg else "")
-            row2.append(_item("✏️", display))
+            display = short_sha + (" - " + html_escape(commit_msg) if commit_msg else "")
+            row3.append(_item("✏️", display))
 
     trigger = _trigger_label(meta.get("RUN_TYPE", ""))
     if trigger:
-        row2.append(_item("🤖", trigger))
+        row3.append(_item("🏃", trigger))
 
     # ------------------------------------------------------------------
-    # Row 3 — targets · actions · tests · tool · invocation id · CPU · mode
+    # Row 4 — build content: targets · actions · tests · tool · CPU · mode
     # ------------------------------------------------------------------
-    row3 = []
+    row4 = []
 
     # Targets: just the completed count. Aspect-inclusive "configured"
     # numbers move to the Performance section where they have room and context.
-    targets_total = results.get("targets_total", 0)
+    targets_total = data["bazel"].get("targets_total", 0)
     if targets_total > 0:
-        row3.append(_item("📦", _format_int_comma(targets_total) + " target" + ("s" if targets_total != 1 else "")))
+        row4.append(_item("📦", pluralize(targets_total, "target")))
 
-    # Actions: "N of M actions (X% cached)" — M (the aspect-inclusive total)
-    # is available on every run, including incrementals, because the
-    # build_metrics handler falls back to summing per-mnemonic
-    # action_data.actions_created when the top-level total is missing.
-    actions_executed = results.get("actions_executed", 0)
-    actions_total = results.get("actions_total", 0)
+    # Actions: "N of M actions executed (X% cached)" — M (the
+    # aspect-inclusive total) is available on every run, including
+    # incrementals, because the build_metrics handler falls back to
+    # summing per-mnemonic action_data.actions_created when the
+    # top-level total is missing. Remote cache hits are reclassified
+    # as cached (they don't actually execute) — see
+    # `_effective_action_cache_counts`. When everything was cached
+    # (executed == 0), drop the "0 of" prefix and "executed" qualifier;
+    # the "100% cached" already tells the reader nothing ran.
+    actions_executed_raw = data["bazel"].get("actions_executed", 0)
+    actions_executed, cached, actions_total = _effective_action_cache_counts(data)
     if actions_total > 0:
-        cached = actions_total - actions_executed if actions_total > actions_executed else 0
         pct = (cached * 100) // actions_total
-        row3.append(_item(
-            "⚡",
-            _format_int_comma(actions_executed) + " of " + _format_int_comma(actions_total) + " actions (" + str(pct) + "% cached)",
-        ))
-    elif actions_executed > 0:
-        row3.append(_item("⚡", _format_int_comma(actions_executed) + " action" + ("s" if actions_executed != 1 else "")))
+        if actions_executed == 0:
+            row4.append(_item(
+                "⚡",
+                pluralize(actions_total, "action") + " (" + str(pct) + "% cached)",
+            ))
+        else:
+            row4.append(_item(
+                "⚡",
+                format_int_comma(actions_executed) + " of " + format_int_comma(actions_total) + " actions executed (" + str(pct) + "% cached)",
+            ))
+    elif actions_executed_raw > 0:
+        row4.append(_item("⚡", pluralize(actions_executed_raw, "action")))
 
-    # Tests: mirror the actions format.
-    pass_t = results.get("passed_test_total", 0)
-    fail_t = results.get("failed_test_total", 0)
-    flaky_t = results.get("flaky_test_total", 0)
+    # Tests: mirror the actions format. When all tests were cached
+    # (exec_t == 0), drop "0 of" + "executed" — the "100% cached"
+    # already tells the reader nothing ran.
+    pass_t = data["bazel"].get("passed_test_total", 0)
+    fail_t = data["bazel"].get("failed_test_total", 0)
+    flaky_t = data["bazel"].get("flaky_test_total", 0)
     total_tests = pass_t + fail_t + flaky_t
     if total_tests > 0:
-        cached_t = results.get("cached_test_total", 0)
+        cached_t = data["bazel"].get("cached_test_total", 0)
         exec_t = total_tests - cached_t if total_tests > cached_t else 0
         pct = (cached_t * 100) // total_tests if total_tests > 0 else 0
-        row3.append(_item(
-            ":test_tube:",
-            _format_int_comma(exec_t) + " of " + _format_int_comma(total_tests) + " tests (" + str(pct) + "% cached)",
-        ))
+        if exec_t == 0:
+            row4.append(_item(
+                ":test_tube:",
+                pluralize(total_tests, "test") + " (" + str(pct) + "% cached)",
+            ))
+        else:
+            row4.append(_item(
+                ":test_tube:",
+                format_int_comma(exec_t) + " of " + format_int_comma(total_tests) + " tests executed (" + str(pct) + "% cached)",
+            ))
 
-    tool_version = results.get("build_tool_version", "")
-    build_cmd = results.get("build_command", "")
+    tool_version = data["bazel"].get("build_tool_version", "")
+    build_cmd = data["bazel"].get("build_command", "")
     if tool_version or build_cmd:
         tool_str = "bazel"
         if tool_version:
             tool_str += " v" + tool_version
         if build_cmd:
             tool_str += " " + build_cmd
-        row3.append(_item("🔧", tool_str))
+        row4.append(_item("🔧", tool_str))
 
     # (Invocation ID intentionally omitted from the summary metadata — it's a
     # long UUID that burns a lot of horizontal space for little at-a-glance
     # value. The full ID still appears in the Invocation details section.)
 
-    cpu_arch = results.get("cpu_arch", "")
+    cpu_arch = data["bazel"].get("cpu_arch", "")
     if cpu_arch:
         # 🎯 is the closest Unicode emoji for "target CPU architecture" —
         # no dedicated chip / microprocessor emoji renders in GitHub check
         # runs, so we play on `TARGET_CPU` (the Bazel make_variable we read).
-        row3.append(_item("🎯", cpu_arch))
+        row4.append(_item("🎯", cpu_arch))
 
-    mode = results.get("compilation_mode", "")
+    mode = data["bazel"].get("compilation_mode", "")
     if mode:
-        row3.append(_item("⚙️", mode))
+        row4.append(_item("⚙️", mode))
 
     # ------------------------------------------------------------------
-    # Row 4 — Aspect Workflows runner hardware info (only when running on
-    # one). Compact view of where the build executed: Workflows version,
-    # cloud, AZ, instance type, instance id. Full field set — including
-    # group name, warming state, toolchain versions — lives in the
-    # `## Aspect Workflows Runner` details section below.
+    # Row 5 — Workflows runner hardware (only when running on one).
+    # Compact view: version, cloud, AZ, instance type, instance id. Full
+    # field set lives in the `### Runner metadata` details section below.
     # ------------------------------------------------------------------
-    row4 = []
+    row5 = []
     env = ctx.std.env
-    if _is_aspect_workflows_runner(env):
+    if is_aspect_workflows_runner(env):
         version = env.var("ASPECT_WORKFLOWS_RUNNER_VERSION") or ""
         cloud = env.var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER") or ""
         az = env.var("ASPECT_WORKFLOWS_RUNNER_AZ") or ""
         itype = env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE") or ""
         iid = env.var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID") or ""
         if version:
-            row4.append(_item("🚀", "Workflows runner v" + version))
+            row5.append(_item("🚀", "Workflows runner v" + version))
         if cloud:
-            row4.append(_item("☁️", _display_cloud_provider(cloud)))
+            row5.append(_item("☁️", display_cloud_provider(cloud)))
         if az:
-            row4.append(_item("📍", az))
+            row5.append(_item("📍", az))
         if itype:
-            row4.append(_item("💠", itype))
+            row5.append(_item("💠", itype))
         if iid:
-            row4.append(_item("🆔", iid))
+            row5.append(_item("🤖", iid))
 
     # ------------------------------------------------------------------
-    # Row 5 — custom links · tags
-    # ------------------------------------------------------------------
-    row5 = []
-    for lnk in _parse_workflows_links(meta):
-        row5.append(_item("🔗", "[" + lnk["text"] + "](" + lnk["url"] + ")"))
-    for tag in _parse_tags(meta):
-        row5.append(_item("🏷", tag))
-
-    # ------------------------------------------------------------------
-    # Row 6 — Aspect Workflows · CI host link
-    # Platform entry-points grouped together at the end; visually separates
-    # the "click here for more detail" surfaces from the intrinsic metadata.
+    # Row 6 — taxonomy: custom links · tags · operator-pinned metadata
+    # 🏷 carries repo-defined tags (TAGS + TAG_*); 📌 carries the
+    # operator-selected subset of arbitrary `--build_metadata=K=V`
+    # entries surfaced via `GitHubStatusChecksTrait.metadata_keys`.
     # ------------------------------------------------------------------
     row6 = []
+    for lnk in parse_workflows_links(meta):
+        row6.append(_item("🔗", "[" + lnk["text"] + "](" + lnk["url"] + ")"))
+    for tag in parse_tags(meta):
+        row6.append(_item("🏷", tag))
+    for entry in (extra_meta or []):
+        row6.append(_item("📌", entry["key"] + " = " + entry["value"]))
 
-    # Aspect Web UI link: prefer the feature-pre-resolved URL (uses the sink
-    # invocation UUID that the Aspect backend actually received the stream
-    # under — see _resolve_aspect_url), fall back to the BES-stream-derived
-    # URL for non-Aspect-provisioned setups.
-    aspect_url = (links or {}).get("aspect_url", "") or _render_bes_url(results)
+    # ------------------------------------------------------------------
+    # Row 7 — external links: Aspect Workflows · CI host. The "click
+    # here for more detail" surfaces, separated from the intrinsic
+    # metadata above so they're easy to find at the bottom.
+    # ------------------------------------------------------------------
+    row7 = []
+
+    # Aspect Web UI link — keyed on the sink_invocation_id the Aspect
+    # backend received the stream under (`resolve_aspect_url`).
+    aspect_url = (links or {}).get("aspect_url", "") or ""
     if aspect_url:
-        row6.append(_item("✨", "[Aspect Workflows](" + aspect_url + ")"))
-    ci_item = _ci_link_item(ctx, links)
+        row7.append(_item("✨", "[Aspect](" + aspect_url + ")"))
+
+    # Generic BES results link — keyed on Bazel's own invocation_id.
+    # Surfaces user-supplied `--bes_results_url` consumers alongside
+    # Aspect when both are configured. These point at distinct backends
+    # with distinct UUIDs; they're complementary, not redundant.
+    bes_url = (links or {}).get("bes_url", "") or render_bes_url(data)
+    if bes_url and bes_url != aspect_url:
+        row7.append(_item("🔗", "[BES](" + bes_url + ")"))
+    ci_item = ci_link_item(ctx, links)
     if ci_item:
-        row6.append(ci_item)
+        row7.append(ci_item)
 
     rows = []
-    for row in [row1, row2, row3, row4, row5, row6]:
+    for row in [row1, row2, row3, row4, row5, row6, row7]:
         if row:
             rows.append(row)
     return rows
 
 SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
-{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}
-{%- endfor %}{% endif %}{% if extra_meta %}
+{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
+{%- endfor %}{% endif %}
+{% if config_items %}
+:gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
+:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"""
 
-{% for item in extra_meta %}`{{ item.key }}` = `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
-{% if last_update %}
----
-:speech_balloon: **Last update:** `{{ last_update }}`
+# `REPRO_COMMANDS_BLOCK` and `FIX_COMMANDS_BLOCK` are reusable
+# Jinja snippets each task's details template can splice in where
+# the user expects to find the actionable command. They iterate the
+# producer-authored `repro_commands` / `fix_commands` lists and
+# render one fenced code block per entry plus an optional italic
+# description line.
+#
+# Section headings use the same emojis the PR-comment aggregator
+# uses (🔁 / 🛠️) so the per-task body and the rolled-up comment
+# stay visually consistent.
+REPRO_COMMANDS_BLOCK = """{%- if repro_commands %}
+### 🔁 Reproduce
+{% for c in repro_commands %}
+```
+{{ c.command }}
+```
+{% if c.description %}_{{ c.description }}_
+
+{% endif %}{% endfor %}
+
 {% endif %}"""
 
-DETAILS_TEMPLATE = """{% if aborted %}
-> :warning: **Build aborted**{% if abort_reason %} (`{{ abort_reason }}`){% endif %}{% if abort_description %}: {{ abort_description }}{% endif %}
+FIX_COMMANDS_BLOCK = """{%- if fix_commands %}
+### 🛠️ Fix
+{% for c in fix_commands %}
+```
+{{ c.command }}
+```
+{% if c.description %}_{{ c.description }}_
 
-{% endif %}
-## Targets ({{ total_targets }})
+{% endif %}{% endfor %}
+
+{% endif %}"""
+
+# `BAZEL_TARGETS_TEMPLATE` is the bazel-targets detail block: build
+# failures (root + dep-broken), failed/timeout/flaky tests, optional
+# repro/fix sections (only for bazel-primary tasks — gated by
+# `render_repro_in_targets`), and built-targets / cached-tests
+# tables. Pulled out of SHARED so build/test can render it as their
+# *primary* section (slot 1) while non-bazel tasks render it as
+# their bazel-context section (slot 4) — controlled by the
+# `include_bazel_targets` Jinja flag in SHARED.
+BAZEL_TARGETS_TEMPLATE = """### 🎯 Bazel targets ({{ total_targets }})
 
 {% if no_targets_info %}
 {%- if not aborted %}
-:hourglass_flowing_sand: **Build in progress** — target results will appear here as Bazel reports them.
+:hourglass_flowing_sand: **Build in progress** — target data will appear here as Bazel reports them.
 {% endif %}
 {%- else %}
 {%- if build_failures or derived_failures %}
 <details open>
 <summary>{{ build_failures_icon }} {{ build_failures_header }}</summary>
 
-{% for action in build_failures -%}
-- `{{ action.label }}`{% if action.kind %} · {{ action.kind }}{% endif %}{% if action.mnemonics_joined %} · {{ action.mnemonics_joined }}{% endif %}
-{% endfor -%}
-{% if build_failures_overflow %}
-_{{ build_failures_overflow }} more root failure(s) not shown._
+{% if build_failures %}<pre>
+{{- build_failures_table_head }}
+{{ build_failures_table_sep }}
+{%- for t in build_failures %}
+{{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_mnemonic }}
+{%- endfor %}
+{% if build_failures_overflow %}_{{ build_failures_overflow }} more root failure(s) not shown._{% endif %}</pre>
 {% endif %}
 {% if derived_failures %}
-<details><summary>{{ derived_failures_count }} more target{{ derived_failures_plural }} not built (broken by dep failure)</summary>
+<details><summary>{{ derived_failures_count }} more target{{ derived_failures_plural }} blocked by a failed dependency</summary>
 
 <pre>
 {{- derived_failures_table_head }}
@@ -2466,9 +2993,12 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 <details open>
 <summary>{{ failed_tests_icon }} {{ failed_tests_header }}</summary>
 
-{% for t in failed_tests -%}
-- {% if t.log_url %}[`{{ t.label }}`]({{ t.log_url }}){% else %}`{{ t.label }}`{% endif %}{% if t.kind %} · {{ t.kind }}{% endif %}{% if t.duration %} · {{ t.duration }}{% endif %}{% if t.xml_url %} · [xml]({{ t.xml_url }}){% endif %}
-{% endfor %}
+<pre>
+{{- failed_tests_table_head }}
+{{ failed_tests_table_sep }}
+{%- for t in failed_tests %}
+{{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}{% if failed_tests_has_artifacts %} | {{ t.aligned_artifacts }}{% endif %}
+{%- endfor %}</pre>
 </details>
 
 {% endif %}
@@ -2476,9 +3006,12 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 <details open>
 <summary>{{ timeout_tests_icon }} {{ timeout_tests_header }}</summary>
 
-{% for t in timeout_tests -%}
-- {% if t.log_url %}[`{{ t.label }}`]({{ t.log_url }}){% else %}`{{ t.label }}`{% endif %}{% if t.kind %} · {{ t.kind }}{% endif %}{% if t.duration %} · {{ t.duration }}{% endif %}{% if t.xml_url %} · [xml]({{ t.xml_url }}){% endif %}
-{% endfor %}
+<pre>
+{{- timeout_tests_table_head }}
+{{ timeout_tests_table_sep }}
+{%- for t in timeout_tests %}
+{{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}{% if timeout_tests_has_artifacts %} | {{ t.aligned_artifacts }}{% endif %}
+{%- endfor %}</pre>
 </details>
 
 {% endif %}
@@ -2486,17 +3019,13 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 <details open>
 <summary>{{ flaky_tests_icon }} {{ flaky_tests_header }}</summary>
 
-{% for t in flaky_tests -%}
-- {% if t.log_url %}[`{{ t.label }}`]({{ t.log_url }}){% else %}`{{ t.label }}`{% endif %}{% if t.kind %} · {{ t.kind }}{% endif %}{% if t.duration %} · {{ t.duration }}{% endif %}{% if t.xml_url %} · [xml]({{ t.xml_url }}){% endif %}
-{% endfor %}
+<pre>
+{{- flaky_tests_table_head }}
+{{ flaky_tests_table_sep }}
+{%- for t in flaky_tests %}
+{{ t.aligned_label }} | {{ t.aligned_kind }} | {{ t.aligned_duration }}{% if flaky_tests_has_artifacts %} | {{ t.aligned_artifacts }}{% endif %}
+{%- endfor %}</pre>
 </details>
-
-{% endif %}
-{%- if reproducer_command %}
-**Reproduce locally:**
-```
-{{ reproducer_command }}
-```
 
 {% endif %}
 {%- if passed_tests %}
@@ -2544,27 +3073,95 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 
 {% endif %}
 {% endif %}
-{% if artifacts_browse_url or artifact_links %}
-## Artifacts
+{% if render_repro_in_targets %}""" + REPRO_COMMANDS_BLOCK + FIX_COMMANDS_BLOCK + """{% endif %}
+"""
 
-:paperclip: {% if artifacts_browse_url %}[Artifacts]({{ artifacts_browse_url }}){% endif %}{% if artifact_links %}{% if artifacts_browse_url %} · {% endif %}{% for a in artifact_links %}[{{ a.label }}]({{ a.url }}){% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+# `SHARED_DETAILS_BODY_TEMPLATE` is the section block every task
+# renders below its primary data. Top-level sections, in order:
+#   1. Artifacts
+#   2. Task timing  (when phases were used)
+#   3. Bazel targets  (when caller hasn't hoisted it — i.e. non-bazel tasks)
+#   4. Bazel details  (umbrella; consolidates command line,
+#      invocation details, metrics, workspace status, build metadata,
+#      and options into one collapsible-by-sub-block section)
+#   5. Runner metadata  (only on Aspect Workflows)
+#   6. footer
+#
+# Mirrors the Aspect UI's invocation tabs (Targets / Logs / Details):
+# `Bazel targets` ↔ Targets tab, `Bazel details` ↔ Details tab.
+# (Logs aren't available on status surfaces.)
+#
+# `include_bazel_targets` is True for non-bazel tasks (Bazel targets
+# is part of the bazel-context group); False for build/test (Bazel
+# targets is hoisted into slot 1 ahead of SHARED).
+SHARED_DETAILS_BODY_TEMPLATE = """{% if artifacts_browse_url or artifact_links %}
+### 📎 Artifacts
+
+{% if artifacts_browse_url %}[Artifacts]({{ artifacts_browse_url }}){% endif %}{% if artifact_links %}{% if artifacts_browse_url %} · {% endif %}{% for a in artifact_links %}[{{ a.label }}]({{ a.url }}){% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
 
 {% endif %}
-{% if invocation_stats %}
-## Build metrics
+{% if task_timing_rows %}
+### ⏱️ Task timing
 
-{% if invocation_stats.analysis_time or invocation_stats.execution_time or invocation_stats.elapsed_time or invocation_stats.critical_path or invocation_stats.bazel_server_time or invocation_stats.executed_tests_time or invocation_stats.cached_tests_time_saved -%}
+<pre>
+{{- task_timing_table_head }}
+{{ task_timing_table_sep }}
+{%- for p in task_timing_rows %}
+{{ p.aligned_name }} | {{ p.aligned_description }} | {{ p.aligned_duration }}
+{%- endfor %}
+{%- if task_timing_total_line %}
+{{ task_timing_total_separator }}
+{{ task_timing_total_line }}
+{%- endif %}</pre>
+
+{% endif %}
+{% if include_bazel_targets %}
+""" + BAZEL_TARGETS_TEMPLATE + """
+{% endif %}
+{% if explicit_command_line or invocation_rows or invocation_stats or workspace_status_rows or build_metadata_rows or startup_options or cmd_line_options or retry_attempt_rows %}
+### 🧮 Bazel details
+
+{% if retry_attempt_rows -%}
 <details open>
+<summary>🔁 Retry attempts ({{ retry_attempt_rows|length }})</summary>
+
+{% for a in retry_attempt_rows -%}
+- Attempt {{ a.attempt }} ({{ a.outcome }}){% if a.aspect_url %} — [Aspect]({{ a.aspect_url }}){% endif %}
+{% endfor %}
+</details>
+
+{% endif -%}
+{% if explicit_command_line -%}
+<details>
+<summary>📟 Command line · <code>{{ explicit_command_line_short | e }}</code></summary>
+
+<pre>{{ explicit_command_line | e }}</pre>
+</details>
+
+{% endif -%}
+{% if invocation_rows -%}
+<details>
+<summary>ℹ️ Invocation details</summary>
+
+{% for r in invocation_rows -%}
+- **{{ r.key }}:** `{{ r.value }}`
+{% endfor %}
+</details>
+
+{% endif -%}
+{% if invocation_stats -%}
+{% if invocation_stats.analysis_time or invocation_stats.execution_time or invocation_stats.elapsed_time or invocation_stats.critical_path or invocation_stats.bazel_server_time or invocation_stats.executed_tests_time or invocation_stats.cached_tests_time_saved -%}
+<details>
 <summary>⏱ Timing</summary>
 
+{% if invocation_stats.elapsed_time -%}
+- Elapsed time: `{{ invocation_stats.elapsed_time }}`
+{% endif -%}
 {% if invocation_stats.analysis_time -%}
 - Analysis time: `{{ invocation_stats.analysis_time }}`
 {% endif -%}
 {% if invocation_stats.execution_time -%}
 - Execution time: `{{ invocation_stats.execution_time }}`
-{% endif -%}
-{% if invocation_stats.elapsed_time -%}
-- Elapsed time: `{{ invocation_stats.elapsed_time }}`
 {% endif -%}
 {% if invocation_stats.critical_path -%}
 - Critical path: `{{ invocation_stats.critical_path }}`
@@ -2582,7 +3179,7 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 
 {% endif -%}
 {% if invocation_stats.targets_line or invocation_stats.actions_line or invocation_stats.packages_line -%}
-<details open>
+<details>
 <summary>📦 Build graph</summary>
 
 {% if invocation_stats.targets_line -%}
@@ -2598,7 +3195,7 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 
 {% endif -%}
 {% if invocation_stats.cache_actions_line or invocation_stats.cache_tests_line -%}
-<details open>
+<details>
 <summary>💾 Cache stats</summary>
 
 {% if invocation_stats.cache_actions_line -%}
@@ -2606,13 +3203,24 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 {% endif -%}
 {% if invocation_stats.cache_tests_line -%}
 - **Tests**: {{ invocation_stats.cache_tests_line }}
+{% endif -%}
+{% if invocation_stats.local_cache_hits or invocation_stats.local_cache_misses %}
+- **Local cache**:{% if invocation_stats.local_cache_hits %} {{ invocation_stats.local_cache_hits }} hits{% endif %}{% if invocation_stats.local_cache_misses %}{% if invocation_stats.local_cache_hits %} ·{% endif %} {{ invocation_stats.local_cache_misses }} misses{% endif %}
+{% endif -%}
+{% if invocation_stats.miss_reasons_table %}
+<details><summary>Local cache miss reasons</summary>
+
+<pre>
+{{ invocation_stats.miss_reasons_table }}
+</pre>
+</details>
 {% endif %}
 </details>
 
 {% endif -%}
 {% if invocation_stats.mnemonic_table -%}
-<details open>
-<summary>⚡ Actions by mnemonic</summary>
+<details>
+<summary>⚡ Actions by mnemonic ({{ invocation_stats.mnemonic_count }})</summary>
 
 <pre>
 {{ invocation_stats.mnemonic_table }}
@@ -2621,8 +3229,8 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 
 {% endif -%}
 {% if invocation_stats.runner_table -%}
-<details open>
-<summary>🏃 Actions by runner</summary>
+<details>
+<summary>🏃 Actions by runner ({{ invocation_stats.runner_count }})</summary>
 
 <pre>
 {{ invocation_stats.runner_table }}
@@ -2630,52 +3238,8 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 </details>
 
 {% endif -%}
-{% if invocation_stats.local_cache_hits or invocation_stats.local_cache_misses -%}
-**Local actions cache**
-
-{% if invocation_stats.local_cache_hits -%}
-- {{ invocation_stats.local_cache_hits }} hits
 {% endif -%}
-{% if invocation_stats.local_cache_misses -%}
-- {{ invocation_stats.local_cache_misses }} misses
-{% endif %}
-{% endif -%}
-{% if invocation_stats.miss_reasons_table -%}
-**Local cache miss reasons**
-
-<pre>
-{{ invocation_stats.miss_reasons_table }}
-</pre>
-
-{% endif -%}
-{% endif %}
-{% if invocation_rows %}
-## Invocation
-
-<details>
-<summary>ℹ️ Invocation details</summary>
-
-{% for r in invocation_rows -%}
-- **{{ r.key }}:** `{{ r.value }}`
-{% endfor %}
-</details>
-
-{% endif %}
-{% if aspect_runner_rows %}
-## Aspect Workflows Runner
-
-<details>
-<summary>🚀 Aspect Workflows runner</summary>
-
-{% for r in aspect_runner_rows -%}
-- **{{ r.key }}:** `{{ r.value }}`
-{% endfor %}
-</details>
-
-{% endif %}
-{% if workspace_status_rows %}
-## Workspace Status
-
+{% if workspace_status_rows -%}
 <details>
 <summary>🏠 Workspace status ({{ workspace_status_rows|length }})</summary>
 
@@ -2684,10 +3248,8 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 {% endfor %}
 </details>
 
-{% endif %}
-{% if build_metadata_rows %}
-## Build Metadata
-
+{% endif -%}
+{% if build_metadata_rows -%}
 <details>
 <summary>🏷️ Build metadata ({{ build_metadata_rows|length }})</summary>
 
@@ -2696,19 +3258,8 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 {% endfor %}
 </details>
 
-{% endif %}
-{% if explicit_command_line %}
-## Explicit command line
-
-<details>
-<summary>📟 <code>{{ explicit_command_line_short | e }}</code></summary>
-
-<pre>{{ explicit_command_line | e }}</pre>
-</details>
-{% endif %}
-{% if startup_options or cmd_line_options %}
-## Options parsed
-
+{% endif -%}
+{% if startup_options -%}
 <details><summary>🎛️ Startup options ({{ startup_options|length }})</summary>
 
 <pre>
@@ -2718,7 +3269,9 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 </pre>
 </details>
 
-<details><summary>🎛️ Command line options ({{ cmd_line_options|length }})</summary>
+{% endif -%}
+{% if cmd_line_options -%}
+<details><summary>🎛️ Command options ({{ cmd_line_options|length }})</summary>
 
 <pre>
 {%- for opt in cmd_line_options %}
@@ -2726,13 +3279,37 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 {%- endfor %}
 </pre>
 </details>
+
+{% endif -%}
+{% endif %}
+{% if aspect_runner_rows %}
+### ⚙️ Runner metadata
+
+<details>
+<summary>🚀 Workflows runner</summary>
+
+{% for r in aspect_runner_rows -%}
+- **{{ r.key }}:** `{{ r.value }}`
+{% endfor %}
+</details>
+
 {% endif %}
 ---
 
 <sub>Powered by [Aspect Build](https://aspect.build/) · [GitHub](https://github.com/aspect-build) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
 """
 
-def _build_summary_data(ctx, results, status, render_ctx, links, metadata_keys, run_date = ""):
+# Build/test detail template: bazel-aborted prelude, the hoisted
+# Bazel targets section as the primary slot, then SHARED (which
+# skips its own Bazel targets block thanks to
+# `include_bazel_targets = False` set in details_data for these tasks).
+DETAILS_TEMPLATE = """{% if aborted %}
+> :warning: **Build aborted**{% if abort_reason %} (`{{ abort_reason }}`){% endif %}{% if abort_description %}: {{ abort_description }}{% endif %}
+
+{% endif %}
+""" + BAZEL_TARGETS_TEMPLATE + SHARED_DETAILS_BODY_TEMPLATE
+
+def build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_date = "", config_items = None, complete_suffix = ""):
     """Build Jinja2 template data for SUMMARY_TEMPLATE.
 
     render_ctx keys (all provided by the feature, not derived from BES):
@@ -2741,41 +3318,94 @@ def _build_summary_data(ctx, results, status, render_ctx, links, metadata_keys, 
       started_ms:   int  — task start time in ms since epoch
       ended_ms:     int  — task end time (0 if still running)
       progress:     str  — last free-text progress message from task_update.progress
+
+    `config_items` is a list of `{"key": str, "value": str}` dicts the
+    per-kind renderer wants to surface as a configuration row directly
+    below "Last update" — e.g. lint's Strategy, delivery's Mode. Tasks
+    with nothing notable to surface (build/test) pass `None` (or omit)
+    and the row is skipped entirely. Pulled up out of the per-kind
+    details bodies because key configuration knobs are something a
+    reviewer should see at-a-glance rather than buried in a collapsed
+    detail block.
+
+    `complete_suffix` is an optional decoration appended to the
+    terminal "<Task> complete" Last-update line on a passed status —
+    e.g. "checked 42 files" so format renders "Format complete · 42
+    files checked". Renders as " · <suffix>" when set; ignored on
+    non-passed status (the failure title already says everything).
     """
 
-    # "Last update" shows the most recent progress message (set by the feature
-    # on task_update). When no progress has been sent yet, leave it blank —
-    # the template skips the row entirely so we don't print a misleading
-    # stale title.
-    last_update = render_ctx.get("progress", "") or ""
+    # "Last update" — terminal-status handling:
+    #   passed/warning → "<task_name> complete" (the title carries the
+    #            outcome; this keeps the row's visual rhythm across
+    #            running→passed instead of disappearing it).
+    #   failed → preserve the last in-flight progress. The progress
+    #            field tells reviewers *where* the failure happened —
+    #            triage info that should stay visible.
+    if status in ("running", "failing", "failed"):
+        last_update = render_ctx.get("progress", "") or ""
+    elif status in ("passed", "warning"):
+        name = render_ctx.get("task_name", "") or "task"
 
-    meta = results.get("metadata", {})
+        # "<name> task complete" rather than "<name> complete":
+        # "test complete" reads as "the test passed" (singular) when
+        # there may have been hundreds of tests; "test task complete"
+        # reads as "the test task is finished", which is what we
+        # actually mean. Same shape across all kinds: build / test /
+        # lint / format / gazelle / delivery task complete.
+        #
+        # `warning` joins `passed` here: it's a terminal status with a
+        # non-fatal signal (e.g. a lint task with warning-only findings,
+        # a test task with flake-only failures). The verdict cell at
+        # the top of the summary already renders the warning badge —
+        # leaving Last update blank made it look like the row had been
+        # truncated mid-way. Show "<name> task complete" + an optional
+        # severity suffix.
+        last_update = name + " task complete"
+        if complete_suffix:
+            last_update = last_update + " · " + complete_suffix
+    elif status == "aborted":
+        name = render_ctx.get("task_name", "") or "task"
+        last_update = name + " task aborted"
+    else:
+        last_update = ""
+
+    meta = data["bazel"].get("metadata", {})
     sha = meta.get("COMMIT_SHA", "")
     commit_msg = meta.get("COMMIT_MESSAGE", "")
     if len(commit_msg) > 72:
         commit_msg = commit_msg[:72] + "…"
 
+    # Escape user-controlled metadata values flowing into the rendered
+    # markdown — see the comment on `html_escape`. The `key` is also
+    # user-controlled (custom `--build_metadata=KEY=value`) so escape
+    # both halves.
     extra_meta = []
     keys = metadata_keys or []
     show_all = keys == ["*"]
     for k, v in meta.items():
-        if k in _RENDER_META_STANDARD_KEYS:
+        if k in RENDER_META_STANDARD_KEYS:
+            continue
+
+        # `TAGS` and `TAG_*` already render as 🏷 chips via `parse_tags`;
+        # skip here so 📌 doesn't duplicate them.
+        if k == "TAGS" or k.startswith("TAG_"):
             continue
         if show_all or k in keys:
-            extra_meta.append({"key": k, "value": v})
+            extra_meta.append({"key": html_escape(k), "value": html_escape(v)})
 
     return {
         "last_update": last_update,
+        "config_items": config_items or [],
         "target_pattern": render_ctx.get("targets", "") if render_ctx else "",
-        "branch": meta.get("BRANCH_NAME", ""),
-        "tag": meta.get("TAG", ""),
+        "branch": html_escape(meta.get("BRANCH_NAME", "")),
+        "tag": html_escape(meta.get("TAG", "")),
         "short_sha": sha[:7] if sha else "",
-        "commit_msg": commit_msg,
-        "extra_meta": extra_meta,
-        "detail_rows": _build_invocation_rows(ctx, results, render_ctx, status, links = links, run_date = run_date),
+        "commit_msg": html_escape(commit_msg),
+        "detail_rows": build_invocation_rows(ctx, data, render_ctx, status, links = links, run_date = run_date, extra_meta = extra_meta),
     }
 
-def _build_kv_rows(kv):
+def build_kv_rows(kv):
     """Convert a key->value dict into [{key, value}] rows with empty values skipped.
 
     Keys are sorted alphabetically for stable rendering. Values are coerced to
@@ -2794,68 +3424,7 @@ def _build_kv_rows(kv):
             out.append({"key": key, "value": s})
     return out
 
-_CLOUD_PROVIDER_DISPLAY = {
-    "aws": "AWS",
-    "gcp": "GCP",
-    "azure": "Azure",
-}
-
-def _display_cloud_provider(raw):
-    """Canonical display form of a cloud provider value.
-
-    Our env vars report lowercase ("aws", "gcp") but the marketing / reader-
-    facing casing is "AWS", "GCP", "Azure". Unknown values pass through as-is.
-    """
-    return _CLOUD_PROVIDER_DISPLAY.get(raw.lower(), raw) if raw else raw
-
-def _is_aspect_workflows_runner(env):
-    """True when the current process is running on an Aspect Workflows runner."""
-    return bool(env.var("ASPECT_WORKFLOWS_RUNNER"))
-
-def _build_aspect_runner_rows(std):
-    """Build [{key, value}] rows for the Aspect Workflows Runner details section.
-
-    Uses the shared environment.axl::get_environment() parser — same record
-    that `_print_workflows_info` / `_print_aws_info` / `_print_gcp_info`
-    consume. Rows with empty values are dropped.
-    """
-    env = get_environment(std)
-    if env == None:
-        return []
-    r = env.runner
-    rows = []
-
-    def _add(key, value):
-        if value:
-            rows.append({"key": key, "value": str(value)})
-
-    _add("Workflows version", r.product_version)
-    _add("Cloud provider", _display_cloud_provider(r.cloud_provider))
-    _add("Region", r.region)
-    _add("Availability zone", r.az)
-    _add("Cloud account", r.account)  # AWS Account ID / GCP Project ID
-    _add("Instance type", r.instance_type)
-    _add("Instance name", r.instance_name)
-    _add("Instance ID", r.instance_id)
-    _add("Image ID", r.image_id)
-    _add("Group name", r.runner_group_name)
-    _add("Group queue", r.runner_group_queue)
-    _add("Resource type", r.runner_resource_type)
-    _add("Aspect launcher version", r.aspect_launcher_version)
-    _add("CI agent version", r.ci_agent_version)
-
-    # Boolean-valued flags — always rendered yes/no so the reader sees the
-    # full runner shape (preemptible yes/no matters for debugging surprise
-    # teardowns; warming_complete: no is a notable anomaly worth seeing).
-    rows.append({"key": "NVMe storage", "value": "yes" if r.has_nvme_storage else "no"})
-    rows.append({"key": "Preemptible", "value": "yes" if r.preemptible else "no"})
-    rows.append({"key": "Warming enabled", "value": "yes" if r.warming_enabled else "no"})
-    if r.warming_enabled:
-        rows.append({"key": "Warming complete", "value": "yes" if r.warming_complete else "no"})
-        _add("Warming cache version", r.warming_current_cache)
-    return rows
-
-def _build_invocation_detail_rows(results, start_date, finish_date):
+def build_invocation_detail_rows(data, start_date, finish_date):
     """Build [{key, value}] rows for the Invocation section.
 
     Skips empty values so the template never renders rows like
@@ -2867,9 +3436,9 @@ def _build_invocation_detail_rows(results, start_date, finish_date):
         if value:
             rows.append({"key": key, "value": str(value)})
 
-    _maybe_add("Invocation ID", results.get("invocation_id", ""))
-    _maybe_add("Command", results.get("build_command", ""))
-    _maybe_add("Bazel version", results.get("build_tool_version", ""))
+    _maybe_add("Invocation ID", data["bazel"].get("invocation_id", ""))
+    _maybe_add("Command", data["bazel"].get("build_command", ""))
+    _maybe_add("Bazel version", data["bazel"].get("build_tool_version", ""))
     _maybe_add("Start time", start_date)
     _maybe_add("End time", finish_date)
 
@@ -2877,59 +3446,152 @@ def _build_invocation_detail_rows(results, start_date, finish_date):
     # username + machine hostname). Separate from the "user" shown in the
     # summary row, which prefers commit author — these are about *who/where
     # the build physically ran*, not who wrote the commit.
-    ws = results.get("workspace_status", {}) or {}
+    ws = data["bazel"].get("workspace_status", {}) or {}
     _maybe_add("User", ws.get("BUILD_USER", ""))
     _maybe_add("Host name", ws.get("BUILD_HOST", ""))
-    _maybe_add("CPU Target", results.get("cpu_arch", ""))
-    _maybe_add("Mode", results.get("compilation_mode", ""))
-    _maybe_add("Working directory", results.get("working_directory", ""))
-    _maybe_add("Workspace directory", results.get("workspace_directory", ""))
-    pid = results.get("server_pid", 0)
+    _maybe_add("CPU Target", data["bazel"].get("cpu_arch", ""))
+    _maybe_add("Mode", data["bazel"].get("compilation_mode", ""))
+    _maybe_add("Working directory", data["bazel"].get("working_directory", ""))
+    _maybe_add("Workspace directory", data["bazel"].get("workspace_directory", ""))
+    pid = data["bazel"].get("server_pid", 0)
     if pid and pid > 0:
         rows.append({"key": "Server PID", "value": str(pid)})
     return rows
 
-def _cache_actions_line(results):
-    """Return 'N of M cached (P%)' for actions, or '' when no actions."""
-    actions_total = results.get("actions_total", 0) or 0
-    actions_executed = results.get("actions_executed", 0) or 0
-    if actions_total <= 0:
-        return ""
-    cached = actions_total - actions_executed if actions_total > actions_executed else 0
-    pct = (cached * 100) // actions_total
-    return _format_int_comma(cached) + " of " + _format_int_comma(actions_total) + " cached (" + str(pct) + "%)"
+def _remote_cache_hit_count(data):
+    """Count of actions Bazel reports as `remote cache hit` runner.
 
-def _cache_tests_line(results):
+    These are tallied as `actions_executed` by Bazel, but they didn't
+    actually execute — they were fetched from the remote cache. The
+    cache-rate display reclassifies them as cached so users see the
+    real cache hit rate.
+
+    `runner_counts` keys are `<runner_name> · <exec_kind>` (or
+    `<runner_name>` if exec_kind is empty); see the build_metrics
+    handler in `process_event`. Bazel's runner_name for remote cache
+    hits is `remote cache hit`.
+    """
+    rc = data["bazel"].get("runner_counts", {}) or {}
+    total = 0
+    for key, count in rc.items():
+        if key == "remote cache hit" or key.startswith("remote cache hit · "):
+            total += count
+    return total
+
+def _effective_action_cache_counts(data):
+    """Return (executed, cached, total) for the cache-rate display.
+
+    Reclassifies `remote cache hit` runner counts as cached and caps
+    cached at total in case the upstream counters are inconsistent.
+
+    When `actions_total` is 0 (incremental rebuild where build_metrics
+    reports a partial picture — e.g. one workspace-status action emits
+    `actions_executed=1` but no `actions_created`), preserve the raw
+    executed count so callers that fall back to "X action(s)" without
+    a "(N created)" parenthetical still render meaningfully.
+    """
+    total = data["bazel"].get("actions_total", 0) or 0
+    executed_raw = data["bazel"].get("actions_executed", 0) or 0
+    if total <= 0:
+        return (executed_raw, 0, 0)
+    cached_raw = total - executed_raw if total > executed_raw else 0
+    cached = cached_raw + _remote_cache_hit_count(data)
+    if cached > total:
+        cached = total
+    executed = total - cached
+    return (executed, cached, total)
+
+def _cache_actions_line(data):
+    """Return 'N of M cached (P%)' for actions, or '' when no actions."""
+    _executed, cached, total = _effective_action_cache_counts(data)
+    if total <= 0:
+        return ""
+    pct = (cached * 100) // total
+    return format_int_comma(cached) + " of " + format_int_comma(total) + " cached (" + str(pct) + "%)"
+
+def _cache_tests_line(data):
     """Return 'N of M cached (P%)' for tests, or '' when no tests ran."""
-    pass_t = results.get("passed_test_total", 0) or 0
-    fail_t = results.get("failed_test_total", 0) or 0
-    flaky_t = results.get("flaky_test_total", 0) or 0
+    pass_t = data["bazel"].get("passed_test_total", 0) or 0
+    fail_t = data["bazel"].get("failed_test_total", 0) or 0
+    flaky_t = data["bazel"].get("flaky_test_total", 0) or 0
     total = pass_t + fail_t + flaky_t
     if total <= 0:
         return ""
-    cached = results.get("cached_test_total", 0) or 0
+    cached = data["bazel"].get("cached_test_total", 0) or 0
     pct = (cached * 100) // total
-    return _format_int_comma(cached) + " of " + _format_int_comma(total) + " cached (" + str(pct) + "%)"
+    return format_int_comma(cached) + " of " + format_int_comma(total) + " cached (" + str(pct) + "%)"
 
-def _build_invocation_stats(results):
+def archive_bazel_attempt(data, human_attempt, exit_code):
+    """Append a snapshot of the current `data["bazel"]` plus
+    `data["sink_invocation_id"]` to `data["bazel_attempts"]` under the
+    given 1-indexed attempt number, and return the updated list.
+
+    Used by retry-loop callers (`bazel_runner.run_bazel_task` and
+    `delivery._get_output_shas`) to preserve per-attempt state for
+    the `🔁 Retry attempts` body section. The snapshot holds the
+    `bazel` sub-dict by reference, so the caller MUST swap
+    `data["bazel"]` for a fresh dict before the next iteration's BES
+    events mutate it.
+    """
+    attempts = list(data.get("bazel_attempts", []) or [])
+    attempts.append({
+        "attempt": human_attempt,
+        "exit_code": exit_code,
+        "sink_invocation_id": data.get("sink_invocation_id", "") or "",
+        "bazel": data["bazel"],
+    })
+    data["bazel_attempts"] = attempts
+    return attempts
+
+def _build_retry_attempt_rows(data, links):
+    """Build per-attempt rows for the `🔁 Retry attempts` body section.
+
+    Returns `[]` when no retries occurred (the common single-attempt
+    path) — the template skips the section in that case.
+
+    Each row: `{attempt, outcome, aspect_url}`. Attempt is the
+    1-indexed human number, outcome is `"passed"` or `"failed"`,
+    aspect_url resolves the per-attempt sink_invocation_id against
+    `links.results_base_url` (empty string when no sink was
+    configured, so the template suppresses the link).
+    """
+    attempts = data.get("bazel_attempts", []) or []
+    if not attempts:
+        return []
+    base = (links or {}).get("results_base_url", "") if links else ""
+    rows = []
+    for a in attempts:
+        sink_id = a.get("sink_invocation_id", "") or ""
+        if base and sink_id:
+            url = (base if base.endswith("/") else base + "/") + sink_id
+        else:
+            url = ""
+        rows.append({
+            "attempt": a.get("attempt", 0),
+            "outcome": "passed" if a.get("exit_code", 1) == 0 else "failed",
+            "aspect_url": url,
+        })
+    return rows
+
+def _build_invocation_stats(data):
     """Build the Performance section payload for the template.
 
     Returns None when there's nothing meaningful to render (pre-build_metrics
     state); the template skips the section entirely in that case.
     """
-    wall_ms = results.get("wall_time_ms", 0) or 0
-    server_cpu_ms = results.get("cpu_time_ms", 0) or 0
-    analysis_ms = results.get("analysis_phase_time_ms", 0) or 0
-    execution_ms = results.get("execution_phase_time_ms", 0) or 0
-    critical_ms = results.get("critical_path_ms", 0) or 0
-    cached_tests_ms = results.get("cached_duration_ms", 0) or 0
-    executed_tests_ms = results.get("executed_duration_ms", 0) or 0
+    wall_ms = data["bazel"].get("wall_time_ms", 0) or 0
+    server_cpu_ms = data["bazel"].get("cpu_time_ms", 0) or 0
+    analysis_ms = data["bazel"].get("analysis_phase_time_ms", 0) or 0
+    execution_ms = data["bazel"].get("execution_phase_time_ms", 0) or 0
+    critical_ms = data["bazel"].get("critical_path_ms", 0) or 0
+    cached_tests_ms = data["bazel"].get("cached_duration_ms", 0) or 0
+    executed_tests_ms = data["bazel"].get("executed_duration_ms", 0) or 0
 
-    actions_executed = results.get("actions_executed", 0) or 0
-    actions_created = results.get("actions_total", 0) or 0
+    actions_executed = data["bazel"].get("actions_executed", 0) or 0
+    actions_created = data["bazel"].get("actions_total", 0) or 0
 
-    targets_completed = results.get("targets_total", 0) or 0
-    targets_configured = results.get("targets_configured", 0) or 0
+    targets_completed = data["bazel"].get("targets_total", 0) or 0
+    targets_configured = data["bazel"].get("targets_configured", 0) or 0
 
     # Fall back to our own target_configured BES-event tally when build_metrics
     # reports zero. Bazel reports `targets_configured = 0` on cached / incremental
@@ -2937,27 +3599,27 @@ def _build_invocation_stats(results):
     # `target_configured` events for everything in scope — so the counted tally
     # stays accurate even when the metrics path is empty.
     if targets_configured == 0:
-        targets_configured = results.get("targets_configured_counted", 0) or 0
+        targets_configured = data["bazel"].get("targets_configured_counted", 0) or 0
 
     # Bazel's targets_configured includes aspect applications. The separate
     # "_not_including_aspects" variant lets us split "X configured, Y aspects".
     # Only compute the split when both fields are populated — a 0 in the
     # "_not_including_aspects" slot means Bazel didn't emit it (older version
     # or incremental run), NOT that there are 0 rule targets.
-    targets_conf_plain = results.get("targets_configured_not_including_aspects", 0) or 0
+    targets_conf_plain = data["bazel"].get("targets_configured_not_including_aspects", 0) or 0
     aspect_applications = 0
     if targets_conf_plain > 0 and targets_configured > targets_conf_plain:
         aspect_applications = targets_configured - targets_conf_plain
-    packages_loaded = results.get("packages_loaded", 0) or 0
+    packages_loaded = data["bazel"].get("packages_loaded", 0) or 0
 
-    cache_stats = results.get("action_cache_stats", {}) or {}
+    cache_stats = data["bazel"].get("action_cache_stats", {}) or {}
     local_hits = cache_stats.get("hits", 0) or 0
     local_misses = cache_stats.get("misses", 0) or 0
 
-    action_mnemonics = results.get("action_mnemonics", {}) or {}
+    action_mnemonics = data["bazel"].get("action_mnemonics", {}) or {}
     mnemonic_pre = _render_counter_pre(action_mnemonics, "Mnemonic")
 
-    runner_counts = results.get("runner_counts", {}) or {}
+    runner_counts = data["bazel"].get("runner_counts", {}) or {}
     runner_pre = _render_counter_pre(runner_counts, "Runner")
 
     # Miss reasons: convert [{reason, count}, ...] to a counter for shared renderer.
@@ -2990,21 +3652,25 @@ def _build_invocation_stats(results):
             # *this* invocation. When it's zero on an incremental rebuild the
             # "(0 configured)" is informative — matches Bazel's own output.
             count_cfg = targets_conf_plain if targets_conf_plain > 0 else targets_configured
-            parts.append(_format_int_comma(count_cfg) + " configured")
+            parts.append(format_int_comma(count_cfg) + " configured")
             if aspect_applications > 0:
-                parts.append(_format_int_comma(aspect_applications) + " aspect application" +
-                             ("s" if aspect_applications != 1 else ""))
+                parts.append(pluralize(aspect_applications, "aspect application"))
         if targets_completed > 0:
-            base = _format_int_comma(targets_completed) + " target" + ("s" if targets_completed != 1 else "")
+            base = pluralize(targets_completed, "target")
         else:
-            base = _format_int_comma(targets_configured) + " target" + ("s" if targets_configured != 1 else "")
+            base = pluralize(targets_configured, "target")
         targets_line = base + (" (" + ", ".join(parts) + ")" if parts else "")
 
+    # Reclassify remote cache hits as cached so the `actions_line` and
+    # `cache_actions_line` stay consistent with each other (otherwise
+    # "X actions" wouldn't equal "total - cached" and the reader has to
+    # do mental math to reconcile them).
     actions_line = ""
     if actions_executed > 0 or actions_created > 0:
-        base = _format_int_comma(actions_executed) + " action" + ("s" if actions_executed != 1 else "")
-        if actions_created > 0 and actions_created != actions_executed:
-            actions_line = base + " (" + _format_int_comma(actions_created) + " created)"
+        actions_executed_eff, _cached_eff, _total_eff = _effective_action_cache_counts(data)
+        base = pluralize(actions_executed_eff, "action")
+        if actions_created > 0 and actions_created != actions_executed_eff:
+            actions_line = base + " (" + format_int_comma(actions_created) + " created)"
         else:
             actions_line = base
 
@@ -3012,14 +3678,14 @@ def _build_invocation_stats(results):
     if packages_loaded >= 0 and (packages_loaded > 0 or targets_completed > 0):
         # Show even when 0 on incremental — matches Bazel's CLI and makes the
         # "fully incremental" state obvious.
-        packages_line = _format_int_comma(packages_loaded) + " package" + ("s" if packages_loaded != 1 else "") + " loaded"
+        packages_line = pluralize(packages_loaded, "package") + " loaded"
 
     return {
         # Timing subsection
-        "analysis_time": _format_duration_ms(analysis_ms) if analysis_ms > 0 else "",
-        "execution_time": _format_duration_ms(execution_ms) if execution_ms > 0 else "",
-        "elapsed_time": _format_duration_ms(wall_ms) if wall_ms > 0 else "",
-        "critical_path": _format_duration_ms(critical_ms) if critical_ms > 0 else "",
+        "analysis_time": format_duration_ms(analysis_ms) if analysis_ms > 0 else "",
+        "execution_time": format_duration_ms(execution_ms) if execution_ms > 0 else "",
+        "elapsed_time": format_duration_ms(wall_ms) if wall_ms > 0 else "",
+        "critical_path": format_duration_ms(critical_ms) if critical_ms > 0 else "",
         "bazel_server_time": _format_cpu_seconds(server_cpu_ms) if server_cpu_ms > 0 else "",
         "executed_tests_time": _format_cpu_seconds(executed_tests_ms) if executed_tests_ms > 0 else "",
         "cached_tests_time_saved": _format_cpu_seconds(cached_tests_ms) if cached_tests_ms > 0 else "",
@@ -3033,35 +3699,61 @@ def _build_invocation_stats(results):
         # Duplicates values that already appear in the metadata summary row;
         # repeated here so the Build metrics section is self-contained for
         # users drilling into it.
-        "cache_actions_line": _cache_actions_line(results),
-        "cache_tests_line": _cache_tests_line(results),
+        "cache_actions_line": _cache_actions_line(data),
+        "cache_tests_line": _cache_tests_line(data),
 
         # Local action cache.
-        "local_cache_hits": _format_int_comma(local_hits) if local_hits > 0 else "",
-        "local_cache_misses": _format_int_comma(local_misses) if local_misses > 0 else "",
+        "local_cache_hits": format_int_comma(local_hits) if local_hits > 0 else "",
+        "local_cache_misses": format_int_comma(local_misses) if local_misses > 0 else "",
 
         # Distribution tables (unchanged).
         "mnemonic_table": mnemonic_pre,
+        "mnemonic_count": len(action_mnemonics),
         "runner_table": runner_pre,
+        "runner_count": len(runner_counts),
         "miss_reasons_table": miss_reasons_pre,
     }
 
-def _build_details_data(results, links, render_ctx = None, status = "", start_date = "", finish_date = "", std = None):
+def build_details_data(data, links, render_ctx = None, status = "", start_date = "", finish_date = "", std = None, task_phases = None, task_active = None, task_elapsed_ms = 0, include_bazel_targets = True, render_repro_in_targets = False):
     """Build Jinja2 template data for DETAILS_TEMPLATE.
 
     start_date / finish_date are pre-formatted human-readable strings from the
-    caller (render_check_output formats them via _format_run_date, which shells
+    caller (render_check_output formats them via format_run_date, which shells
     out to `date` and therefore needs ctx which we don't have here).
+
+    Args:
+      task_phases:           `list[TaskPhase]` from `ctx.task.phases()`
+                             — closed phases only. Empty when the task
+                             didn't open any phase.
+      task_active:           the currently-active `TaskPhase` (or None
+                             when no phase is open). The active phase
+                             appears as the trailing row in the Task
+                             timing table with a status-aware verb in
+                             the Description column.
+      task_elapsed_ms:       int — `ctx.task.elapsed_ms` at render time.
+                             Used as the Total row of Task timing so
+                             header + body show the same number.
+      include_bazel_targets: True for non-bazel tasks (Bazel targets is
+                             part of the bazel-context group); False for
+                             build/test (Bazel targets is hoisted into
+                             the primary slot ahead of SHARED).
+      render_repro_in_targets: True for build/test (the Bazel targets
+                             section is the primary actionable slot, so
+                             the Reproduce/Fix snippets render at its
+                             top). False for non-bazel tasks — those
+                             render their own Reproduce/Fix sections
+                             higher in the body via their per-task
+                             template.
     """
 
     # Command-line views: derived from options_parsed, not structured_command_line.
     # ALLOW_ENV comes from --build_metadata=ALLOW_ENV=pattern,pattern (defaults
     # applied when not set). See _redact_arg for the redaction rules.
-    allow_env = _allow_env_patterns(results.get("metadata", {}))
-    opts_parsed = results.get("options_parsed", {}) or {}
+    allow_env = _allow_env_patterns(data["bazel"].get("metadata", {}))
+    opts_parsed = data["bazel"].get("options_parsed", {}) or {}
     target_pattern_for_cmd = (render_ctx or {}).get("targets", "") if render_ctx else ""
     _explicit_cmd = _assemble_explicit_command(
-        results.get("build_command", ""),
+        data["bazel"].get("build_command", ""),
         target_pattern_for_cmd,
         opts_parsed.get("explicit_cmd_line", []),
         allow_env,
@@ -3069,7 +3761,7 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
     _startup_opts_redacted = _sorted_dedup(opts_parsed.get("startup_options", []), allow_env)
     _cmd_line_redacted = _sorted_dedup(opts_parsed.get("cmd_line", []), allow_env)
 
-    target_kinds_map = results.get("target_kinds") or {}
+    target_kinds_map = data["bazel"].get("target_kinds") or {}
 
     def _prep_action(a):
         """Pre-process a failed build action for Jinja2 rendering.
@@ -3088,13 +3780,23 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
     testlogs_label_urls = links.get("testlogs_label_urls", {})
     artifact_urls = links.get("artifact_urls", {}) or {}
 
-    # Per-artifact-kind download links, stable ordering.
+    # Per-artifact-kind download links, stable ordering. Each link is
+    # only rendered when the URL is actually populated in
+    # `ArtifactsTrait.artifact_urls`, so kinds the current task didn't
+    # produce are silently omitted. The format/gazelle/lint patch
+    # entries here mirror the keys written by `feature/artifacts.axl`
+    # ("testlogs"/"profile"/"execlog"/"bep") and the in-task patch
+    # uploaders (`format.axl::_try_upload_format_diff` and the gazelle
+    # equivalent), which write `format_diff` / `gazelle_diff`.
     artifact_links = []
     for kind, alabel in [
         ("testlogs", "Test logs"),
         ("profile", "Profile"),
         ("execlog", "Execlog"),
         ("bep", "BEP"),
+        ("format_diff", "Format Patch"),
+        ("gazelle_diff", "Gazelle Patch"),
+        ("lint_diff", "Lint Patch"),
     ]:
         u = artifact_urls.get(kind, "")
         if u:
@@ -3115,7 +3817,7 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         for t in tests:
             entry = dict(t)
             ms = t.get("duration_ms", 0)
-            entry["duration"] = _format_duration_ms(ms) if ms > 0 else ""
+            entry["duration"] = format_duration_ms(ms) if ms > 0 else ""
             original_label = t.get("label", "")
             file_urls = testlogs_label_urls.get(original_label, {}) or {}
             entry["log_url"] = file_urls.get("test.log", "")
@@ -3130,10 +3832,10 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         return out
 
     # --- Bucketize tests by status ---
-    # failed_tests is one list in results — split by .status into TEST_FAILED,
+    # failed_tests is one list in data — split by .status into TEST_FAILED,
     # TEST_TIMEOUT, and FAILED_TO_BUILD (test-level, distinct from failed_actions
     # which are action-level build failures).
-    raw_failed = results.get("failed_tests", [])
+    raw_failed = data["bazel"].get("failed_tests", [])
     failed_by_status = {"failed": [], "timeout": [], "failed_to_build": []}
     for t in raw_failed:
         s = t.get("status", "failed")
@@ -3146,9 +3848,9 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
     # Aggregate counts (passed_test_total, cached_test_total) are authoritative,
     # so only populate a bucket list when its aggregate count is non-zero —
     # otherwise a mismatched sample entry could render a "0 Tests Passed" header.
-    raw_passed = sorted(results.get("passed_tests", []), key = lambda t: t.get("label", ""))
-    _has_executed = results.get("passed_test_total", 0) > results.get("cached_test_total", 0)
-    _has_cached = results.get("cached_test_total", 0) > 0
+    raw_passed = sorted(data["bazel"].get("passed_tests", []), key = lambda t: t.get("label", ""))
+    _has_executed = data["bazel"].get("passed_test_total", 0) > data["bazel"].get("cached_test_total", 0)
+    _has_cached = data["bazel"].get("cached_test_total", 0) > 0
     passed_executed = [t for t in raw_passed if not t.get("cached")] if _has_executed else []
     passed_cached = [t for t in raw_passed if t.get("cached")] if _has_cached else []
 
@@ -3157,7 +3859,7 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
     # Primary signal: rule kind ends in `_test` (populated by target_configured).
     # Fallback: for test fixtures without kinds, use labels from detail lists.
     test_labels_fallback = {}
-    for t in (results.get("passed_tests", []) + results.get("flaky_tests", []) + raw_failed):
+    for t in (data["bazel"].get("passed_tests", []) + data["bazel"].get("flaky_tests", []) + raw_failed):
         lbl = t.get("label", "")
         if lbl:
             test_labels_fallback[lbl] = True
@@ -3174,7 +3876,7 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
     built_non_test = [
         {"label": _truncate_label(t.get("label", "")), "kind": t.get("kind", "")}
         for t in sorted(
-            [t for t in results.get("built_targets", []) if not _is_test_entry(t)],
+            [t for t in data["bazel"].get("built_targets", []) if not _is_test_entry(t)],
             key = lambda t: t.get("label", ""),
         )
     ]
@@ -3182,7 +3884,7 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
     # --- Partition failed_targets into root (own action failed) vs derived
     # (no own action failed — some dep broke). Surfaces the same "Broken by"
     # UX as the Aspect Web UI without requiring the full rdeps graph.
-    failed_action_labels_set = {l: True for l in _failed_action_labels(results)}
+    failed_action_labels_set = {l: True for l in _failed_action_labels(data)}
 
     # Sort on the full label before truncating.
     derived_failures = [
@@ -3190,7 +3892,7 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         for t in sorted(
             [
                 {"label": t.get("label", ""), "kind": t.get("kind", "")}
-                for t in results.get("failed_targets", [])
+                for t in data["bazel"].get("failed_targets", [])
                 if t.get("label", "") and t.get("label", "") not in failed_action_labels_set
             ],
             key = lambda t: t["label"],
@@ -3204,22 +3906,22 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         derived_failures = derived_failures[:MAX_BUILT_TARGETS]
 
     # --- Bucket counts ---
-    bucket_counts = _compute_bucket_counts(results)
+    bucket_counts = _compute_bucket_counts(data)
     build_failure_count = bucket_counts.get(_BUCKET_FAILED_TO_BUILD, 0)
     failed_test_count = len(failed_by_status["failed"])
     timeout_test_count = len(failed_by_status["timeout"])
-    flaky_test_count = results.get("flaky_test_total", 0)
-    passed_test_count = results.get("passed_test_total", 0) - results.get("cached_test_total", 0)
+    flaky_test_count = data["bazel"].get("flaky_test_total", 0)
+    passed_test_count = data["bazel"].get("passed_test_total", 0) - data["bazel"].get("cached_test_total", 0)
     if passed_test_count < 0:
         passed_test_count = 0
-    cached_test_count = results.get("cached_test_total", 0)
+    cached_test_count = data["bazel"].get("cached_test_total", 0)
     built_non_test_count = bucket_counts.get(_BUCKET_SUCCESSFUL_BUILD, 0)
 
     # --- Overflow detection for trim cascade ---
     # failed_actions is now per-label (deduped); overflow = total unique failing
     # labels minus what fit in the capped list.
-    failed_actions_overflow = len(_failed_action_labels(results)) - len(results.get("failed_actions", []))
-    passed_overflow = results.get("passed_test_total", 0) - len(raw_passed)
+    failed_actions_overflow = len(_failed_action_labels(data)) - len(data["bazel"].get("failed_actions", []))
+    passed_overflow = data["bazel"].get("passed_test_total", 0) - len(raw_passed)
     built_overflow = built_non_test_count - len(built_non_test)
     derived_failures_overflow = derived_failures_count - len(derived_failures)
 
@@ -3228,6 +3930,41 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
     _cached_table = _align_for_pre(_with_duration(passed_cached), has_duration = True)
     _built_table = _align_for_pre(built_non_test, has_duration = False)
     _derived_table = _align_for_pre(derived_failures, has_duration = False)
+
+    # Failed / timeout / flaky test buckets render as aligned tables
+    # too — same `Label | Target Type | Duration` shape passed/cached
+    # tests use, plus an Artifacts column when per-file URLs exist.
+    # Consistency across every target / test bucket in the section.
+    _failed_table = _align_for_pre(_with_duration(failed_by_status["failed"]), has_duration = True)
+    _timeout_table = _align_for_pre(_with_duration(failed_by_status["timeout"]), has_duration = True)
+    _flaky_table = _align_for_pre(_with_duration(data["bazel"].get("flaky_tests", [])), has_duration = True)
+
+    # Build the failures table: Label | Target Type | Mnemonic. Each
+    # row is { label (truncated), kind (from target_kinds), mnemonic
+    # (comma-joined when an action failed multiple actions on the
+    # same target — usually a single value like "Rustc" / "CppCompile").
+    _build_failures_for_table = []
+    for a in data["bazel"].get("failed_actions", []):
+        original_label = a.get("label", "")
+        mnemonics = a.get("mnemonics", []) or []
+        _build_failures_for_table.append({
+            "label": _truncate_label(original_label),
+            "kind": target_kinds_map.get(original_label, ""),
+            "mnemonic": ", ".join(mnemonics),
+        })
+    _build_failures_table = _align_for_pre(
+        _build_failures_for_table,
+        has_duration = False,
+        has_mnemonic = True,
+    )
+
+    # --- Task timing table: aligned <pre> shape (Phase | Description | Duration). ---
+    _task_timing_rows_data = _build_task_timing_rows(task_phases, task_active, status)
+    _task_timing_total_str = format_duration_ms(task_elapsed_ms) if task_elapsed_ms > 0 else ""
+    _task_timing_table = _align_task_timing_for_pre(
+        _task_timing_rows_data,
+        total_duration = _task_timing_total_str,
+    )
 
     # --- "Nothing to show yet" signal ---
     # True when any of the target-level buckets has something to render. When
@@ -3246,7 +3983,7 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
     )
 
     # --- Badges ---
-    actions_total = results.get("actions_total", 0)
+    actions_total = data["bazel"].get("actions_total", 0)
     if build_failure_count > 0:
         build_badge_url = "https://img.shields.io/badge/build-failed-red"
     elif actions_total > 0:
@@ -3254,7 +3991,7 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
     else:
         build_badge_url = "https://img.shields.io/badge/build-passed-brightgreen"
 
-    pass_t_total = results.get("passed_test_total", 0)
+    pass_t_total = data["bazel"].get("passed_test_total", 0)
     if failed_test_count + timeout_test_count > 0:
         test_badge_url = ("https://img.shields.io/badge/tests-" +
                           str(pass_t_total) + "%20passed%2C%20" +
@@ -3269,29 +4006,34 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         test_badge_url = ""
 
     return {
-        "aborted": results.get("aborted", False),
-        "abort_reason": results.get("abort_reason", ""),
-        "abort_description": results.get("abort_description", ""),
+        "aborted": data["bazel"].get("aborted", False),
+        "abort_reason": data["bazel"].get("abort_reason", ""),
+        "abort_description": data["bazel"].get("abort_description", ""),
         # Empty string (falsy in Jinja2) when there's any target bucket to
         # render — flips to "1" when nothing has reported yet, so the template
-        # shows a "waiting for results" placeholder instead of a blank section.
+        # shows a "waiting for data" placeholder instead of a blank section.
         "no_targets_info": "" if _has_targets_info else "1",
         # Stringified target count for the "## Targets (N)" header — uses the
         # aggregate target_completed count which covers both successes and failures.
-        "total_targets": str(results.get("targets_total", 0)),
+        "total_targets": str(data["bazel"].get("targets_total", 0)),
 
         # --- Bucket sections (see _BUCKET_* constants for naming) ---
         # Each *_header is "{count} {plural header}" (e.g. "3 Test Failures").
         # Lists are empty when the bucket has no targets — template conditionals
         # skip empty sections.
-        "build_failures": [_prep_action(a) for a in results.get("failed_actions", [])],
+        "build_failures": _build_failures_table["rows"],
+        "build_failures_table_head": _build_failures_table["header"],
+        "build_failures_table_sep": _build_failures_table["separator"],
         "build_failures_count": build_failure_count,
         "build_failures_header": _bucket_header(_BUCKET_FAILED_TO_BUILD, build_failure_count),
         "build_failures_overflow": str(failed_actions_overflow) if failed_actions_overflow > 0 else "",
         "build_failures_icon": _BUCKET_ICONS[_BUCKET_FAILED_TO_BUILD],
-        # Combined "aspect <task> ..." reproducer command — populated by
-        # compute_reproducer_command in the consumer feature; empty when no failures.
-        "reproducer_command": results.get("reproducer_command", ""),
+        # Per-task repro & fix command lists, authored by each
+        # producer at terminal-emit time. See `lib/repro_commands.axl`
+        # for the shape; the template iterates each list to emit the
+        # "🔁 Reproduce" / "🛠️ Fix" sections.
+        "repro_commands": list(data.get("repro_commands", []) or []),
+        "fix_commands": list(data.get("fix_commands", []) or []),
         # Derived failures — targets that failed without emitting their own action
         # errors (a dep broke). Shown as a collapsed list under Build Failures.
         # Count is stringified (Jinja2 can't compare AXL ints directly; see
@@ -3302,13 +4044,22 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         "derived_failures_count": str(derived_failures_count),
         "derived_failures_plural": "s" if derived_failures_count != 1 else "",
         "derived_failures_overflow": str(derived_failures_overflow) if derived_failures_overflow > 0 else "",
-        "failed_tests": _with_duration(failed_by_status["failed"]),
+        "failed_tests": _failed_table["rows"],
+        "failed_tests_table_head": _failed_table["header"],
+        "failed_tests_table_sep": _failed_table["separator"],
+        "failed_tests_has_artifacts": _failed_table.get("has_artifacts", False),
         "failed_tests_header": _bucket_header(_BUCKET_TEST_FAILED, failed_test_count),
         "failed_tests_icon": _BUCKET_ICONS[_BUCKET_TEST_FAILED],
-        "timeout_tests": _with_duration(failed_by_status["timeout"]),
+        "timeout_tests": _timeout_table["rows"],
+        "timeout_tests_table_head": _timeout_table["header"],
+        "timeout_tests_table_sep": _timeout_table["separator"],
+        "timeout_tests_has_artifacts": _timeout_table.get("has_artifacts", False),
         "timeout_tests_header": _bucket_header(_BUCKET_TEST_TIMEOUT, timeout_test_count),
         "timeout_tests_icon": _BUCKET_ICONS[_BUCKET_TEST_TIMEOUT],
-        "flaky_tests": _with_duration(results.get("flaky_tests", [])),
+        "flaky_tests": _flaky_table["rows"],
+        "flaky_tests_table_head": _flaky_table["header"],
+        "flaky_tests_table_sep": _flaky_table["separator"],
+        "flaky_tests_has_artifacts": _flaky_table.get("has_artifacts", False),
         "flaky_tests_header": _bucket_header(_BUCKET_TEST_FLAKY, flaky_test_count),
         "flaky_tests_icon": _BUCKET_ICONS[_BUCKET_TEST_FLAKY],
 
@@ -3354,7 +4105,7 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         # Badges, BES links, CI links, artifacts.
         "build_badge_url": build_badge_url,
         "test_badge_url": test_badge_url,
-        "bes_invocation_url": _render_bes_url(results),
+        "bes_invocation_url": render_bes_url(data),
         "ci_label": links.get("ci_label", ""),
         "ci_url": links.get("ci_url", ""),
         "aspect_url": links.get("aspect_url", ""),
@@ -3365,14 +4116,114 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         # Build Metadata / Performance ---
         # Each is a list of {key, value} rows with empty values filtered out.
         # The template iterates and emits only the sections with at least one row.
-        "invocation_rows": _build_invocation_detail_rows(results, start_date, finish_date),
-        "aspect_runner_rows": _build_aspect_runner_rows(std) if std else [],
-        "workspace_status_rows": _build_kv_rows(results.get("workspace_status", {})),
-        "build_metadata_rows": _build_kv_rows(results.get("metadata", {})),
-        "invocation_stats": _build_invocation_stats(results),
+        "invocation_rows": build_invocation_detail_rows(data, start_date, finish_date),
+        "aspect_runner_rows": build_aspect_runner_rows(std) if std else [],
+        "workspace_status_rows": build_kv_rows(data["bazel"].get("workspace_status", {})),
+        "build_metadata_rows": build_kv_rows(data["bazel"].get("metadata", {})),
+        "invocation_stats": _build_invocation_stats(data),
+        # Per-attempt history when bazel retries occurred. Empty list
+        # for the common single-attempt path; the template hides the
+        # "🔁 Retry attempts" sub-section when empty.
+        "retry_attempt_rows": _build_retry_attempt_rows(data, links),
+
+        # Task timing — populated when the task opted into phases via
+        # `task_update(..., phase=...)` / `ctx.task.phase(...)`. Empty
+        # otherwise, in which case the template skips the section.
+        # Aligned-table shape uses the same `<pre>`-aligned style every
+        # other body section uses (Bazel targets, Workspace status,
+        # ...) — see `_align_task_timing_for_pre`.
+        "task_timing_table_head": _task_timing_table["header"],
+        "task_timing_table_sep": _task_timing_table["separator"],
+        "task_timing_rows": _task_timing_table["rows"],
+        "task_timing_total_separator": _task_timing_table["total_separator"],
+        "task_timing_total_line": _task_timing_table["total_line"],
+
+        # Whether SHARED renders the Bazel targets block. False for
+        # build/test (they hoist Bazel targets above SHARED into the
+        # primary slot via `DETAILS_TEMPLATE`); True otherwise.
+        "include_bazel_targets": include_bazel_targets,
+        # Whether the Bazel targets block renders Reproduce / Fix
+        # sections at its top. True only when Bazel targets is the
+        # primary actionable slot (build/test).
+        "render_repro_in_targets": render_repro_in_targets,
     }
 
-def render_check_output(ctx, results, status, render_ctx, links, templates = None, metadata_keys = None):
+def active_phase_data(ctx):
+    """Return the currently-active `Phase` snapshot, or `None`.
+
+    Thin pass-through to `ctx.task.current_phase()` — exists as a
+    named helper so result libraries can pass it through their public
+    `render_check_output` interface (`task_active = ...`) without
+    every caller reaching into `ctx.task` themselves. The `duration_ms`
+    on the returned Phase is the live elapsed at call time; the
+    renderer layers status-aware suffixes ("(active)" / "(failing)" /
+    "(failed during this phase)") onto the description for the body
+    table.
+    """
+    return ctx.task.current_phase()
+
+def _build_task_timing_rows(phases, active, status):
+    """Format task phase timing as table rows for the Task timing
+    body section.
+
+    Filters out the synthetic `init` phase when its duration is under
+    `_INIT_PHASE_HIDE_THRESHOLD_MS`. Caller-named phases always render
+    even at 0ms (intentional boundaries).
+
+    The Phase column renders bare names (display_name or titlecase) —
+    no emoji prefix. Emojis have variable display widths that break
+    `_pad_right`-based column alignment when some entries carry icons
+    and others don't. The header strip's `⏱ <total> · 🔨 Build 38.3s
+    | …` line keeps emoji because it's a single inline run, not a
+    fixed-width column.
+
+    The active phase, when present and the task is not yet terminal,
+    appears as the trailing row with a status-aware suffix in the
+    Description column ("(active)" / "(failing)"). On a terminal
+    `failed` status, an entry with `interrupted = True` (set by the
+    runtime's auto-close on `_impl` return) renders with a
+    "(failed during this phase)" suffix instead of a bare description
+    so the body table mirrors what the header strip shows.
+    """
+
+    def _name(name, display_name):
+        return display_name or _titlecase(name)
+
+    rows = []
+    if phases:
+        for p in phases:
+            if p.name == "init" and p.duration_ms < _INIT_PHASE_HIDE_THRESHOLD_MS:
+                continue
+            desc = p.description or "—"
+            if status == "failed" and p.interrupted:
+                desc = desc + " (failed during this phase)"
+            rows.append({
+                "name": _name(p.name, p.display_name),
+                "description": desc,
+                "duration": format_duration_ms(p.duration_ms),
+                "is_active": False,
+            })
+    if active:
+        # Status-aware verb suffix on the active row, mirroring what
+        # the header strip shows. The `is_active` flag drives a
+        # leading-arrow marker in the rendered Phase column so the
+        # in-flight row stands out on live status surfaces.
+        verb_suffix = {
+            "failed": " (failed during this phase)",
+            "passed": "",
+            "failing": " (failing)",
+        }.get(status, " (active)")
+        rows.append({
+            "name": _name(active.name, active.display_name),
+            "description": (active.description or "—") + verb_suffix,
+            "duration": format_duration_ms(active.duration_ms),
+            # Mark live-only — at terminal there's no "active" row, so
+            # the marker only ever appears on heartbeat / live emits.
+            "is_active": status not in ("passed", "failed", "aborted"),
+        })
+    return rows
+
+def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None):
     """Render title, summary, and text for a GitHub check run output field.
 
     This is the public entry point for the "bazel_results" task_update kind.
@@ -3380,10 +4231,10 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
 
     Args:
         ctx:           TaskContext
-        results:       dict from init_results(), updated by process_event
+        data:       dict from init_data(), updated by process_event
         status:        "running" | "failing" | "passed" | "failed"
         render_ctx:    display context from the feature (triggered_by, targets,
-                       started_ms, ended_ms, progress) — see _build_summary_data
+                       started_ms, ended_ms, progress) — see build_summary_data
         links:         dict with ci_label, ci_url, aspect_url
         templates:     optional override dict — keys "summary" and/or "details"
                        replace the built-in Jinja2 templates
@@ -3393,32 +4244,40 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
     Returns:
         dict with keys "title", "summary", "text" — suitable for check run output
     """
-    if trace.enabled:
+
+    # Render-debug logs are gated on `_ASPECT_DEBUG_STATUS_RENDER_CHECK`.
+    # Status surfaces re-render on every emit (one per phase, plus
+    # per-BES-event refresh), and a normal task can produce dozens of
+    # renders — way too noisy to mix into the standard debug stream.
+    # Set `_ASPECT_DEBUG_STATUS_RENDER_CHECK=1` to opt back in for
+    # render-specific diagnostics.
+    debug_render = bool(ctx.std.env.var("_ASPECT_DEBUG_STATUS_RENDER_CHECK"))
+    if debug_render:
         trace.log("debug [render_check_output] status=" + status)
-        trace.log("debug [render_check_output]   invocation_id=" + (results.get("invocation_id") or ""))
-        trace.log("debug [render_check_output]   wall_time_ms=" + str(results.get("wall_time_ms", 0)))
-        trace.log("debug [render_check_output]   targets_total=" + str(results.get("targets_total", 0)))
-        trace.log("debug [render_check_output]   built_targets=" + str(len(results.get("built_targets", []))))
-        trace.log("debug [render_check_output]   passed_test_total=" + str(results.get("passed_test_total", 0)))
-        trace.log("debug [render_check_output]   passed_tests=" + str(len(results.get("passed_tests", []))))
-        trace.log("debug [render_check_output]   failed_test_total=" + str(results.get("failed_test_total", 0)))
-        trace.log("debug [render_check_output]   flaky_test_total=" + str(results.get("flaky_test_total", 0)))
-        trace.log("debug [render_check_output]   actions_total=" + str(results.get("actions_total", 0)))
-        op = results.get("options_parsed") or {}
+        trace.log("debug [render_check_output]   invocation_id=" + (data["bazel"].get("invocation_id") or ""))
+        trace.log("debug [render_check_output]   wall_time_ms=" + str(data["bazel"].get("wall_time_ms", 0)))
+        trace.log("debug [render_check_output]   targets_total=" + str(data["bazel"].get("targets_total", 0)))
+        trace.log("debug [render_check_output]   built_targets=" + str(len(data["bazel"].get("built_targets", []))))
+        trace.log("debug [render_check_output]   passed_test_total=" + str(data["bazel"].get("passed_test_total", 0)))
+        trace.log("debug [render_check_output]   passed_tests=" + str(len(data["bazel"].get("passed_tests", []))))
+        trace.log("debug [render_check_output]   failed_test_total=" + str(data["bazel"].get("failed_test_total", 0)))
+        trace.log("debug [render_check_output]   flaky_test_total=" + str(data["bazel"].get("flaky_test_total", 0)))
+        trace.log("debug [render_check_output]   actions_total=" + str(data["bazel"].get("actions_total", 0)))
+        op = data["bazel"].get("options_parsed") or {}
         trace.log("debug [render_check_output]   options_parsed explicit=" + str(len(op.get("explicit_cmd_line", []))) +
                   " startup=" + str(len(op.get("startup_options", []))) +
                   " cmd=" + str(len(op.get("cmd_line", []))))
-        ws = results.get("workspace_status") or {}
+        ws = data["bazel"].get("workspace_status") or {}
         if ws:
             trace.log("debug [render_check_output]   workspace_status=" + str(ws))
-        meta = results.get("metadata") or {}
+        meta = data["bazel"].get("metadata") or {}
         if meta:
             trace.log("debug [render_check_output]   metadata=" + str(meta))
-        passed = results.get("passed_tests") or []
+        passed = data["bazel"].get("passed_tests") or []
         if passed:
             sample = [t.get("label", "") for t in passed[:5]]
             trace.log("debug [render_check_output]   passed_tests sample=" + str(sample))
-        built = results.get("built_targets") or []
+        built = data["bazel"].get("built_targets") or []
         if built:
             sample = [t.get("label", "") for t in built[:3]]
             trace.log("debug [render_check_output]   built_targets sample=" + str(sample))
@@ -3428,12 +4287,29 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
     _DETAILS_LIMIT = 65000
 
     t = templates or {}
-    run_date = _format_run_date(ctx, results.get("start_time_ms", 0))
-    finish_date = _format_run_date(ctx, results.get("finish_time_ms", 0))
-    summary_data = _build_summary_data(ctx, results, status, render_ctx, links, metadata_keys, run_date = run_date)
-    details_data = _build_details_data(results, links, render_ctx = render_ctx, status = status, start_date = run_date, finish_date = finish_date, std = ctx.std)
+    run_date = format_run_date(ctx, data.get("start_time_ms", 0))
+    finish_date = format_run_date(ctx, data.get("finish_time_ms", 0))
+    summary_data = build_summary_data(ctx, data, status, render_ctx, links, metadata_keys, run_date = run_date)
+    details_data = build_details_data(
+        data,
+        links,
+        render_ctx = render_ctx,
+        status = status,
+        start_date = run_date,
+        finish_date = finish_date,
+        std = ctx.std,
+        task_phases = ctx.task.phases(),
+        task_active = active_phase_data(ctx),
+        task_elapsed_ms = ctx.task.elapsed_ms,
+        # Build/test hoist the Bazel targets section into the primary
+        # slot above SHARED (see DETAILS_TEMPLATE), so SHARED skips it.
+        include_bazel_targets = False,
+        # Bazel targets is build/test's primary actionable slot, so the
+        # Reproduce/Fix sections render at its top.
+        render_repro_in_targets = True,
+    )
 
-    if trace.enabled:
+    if debug_render:
         trace.log("debug [render_check_output]   summary target_pattern=" + summary_data.get("target_pattern", ""))
         trace.log("debug [render_check_output]   summary branch=" + summary_data.get("branch", ""))
         trace.log("debug [render_check_output]   summary short_sha=" + summary_data.get("short_sha", ""))
@@ -3442,11 +4318,11 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
                   " cmd_line_options=" + str(len(details_data.get("cmd_line_options", []))) +
                   " explicit=" + str(bool(details_data.get("explicit_command_line", ""))))
         trace.log("debug [render_check_output]   run_date=" + run_date)
-        trace.log("debug [render_check_output]   cpu_arch=" + str(results.get("cpu_arch", "")))
-        trace.log("debug [render_check_output]   compilation_mode=" + str(results.get("compilation_mode", "")))
-        trace.log("debug [render_check_output]   build_tool_version=" + str(results.get("build_tool_version", "")))
-        trace.log("debug [render_check_output]   targets_configured=" + str(results.get("targets_configured", 0)))
-        trace.log("debug [render_check_output]   packages_loaded=" + str(results.get("packages_loaded", 0)))
+        trace.log("debug [render_check_output]   cpu_arch=" + str(data["bazel"].get("cpu_arch", "")))
+        trace.log("debug [render_check_output]   compilation_mode=" + str(data["bazel"].get("compilation_mode", "")))
+        trace.log("debug [render_check_output]   build_tool_version=" + str(data["bazel"].get("build_tool_version", "")))
+        trace.log("debug [render_check_output]   targets_configured=" + str(data["bazel"].get("targets_configured", 0)))
+        trace.log("debug [render_check_output]   packages_loaded=" + str(data["bazel"].get("packages_loaded", 0)))
 
     details_tmpl = t.get("details") or DETAILS_TEMPLATE
     summary_text = ctx.template.jinja2(t.get("summary") or SUMMARY_TEMPLATE, data = summary_data)
@@ -3457,48 +4333,54 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
     #   1. Drop Build Metadata (most expendable — custom key-value junk).
     #   2. Drop Workspace Status.
     #   3. Drop Invocation (reference info, covered by Aspect Web UI).
-    #   4. Drop Performance details (preserve until last of the new sections).
+    #   4. Drop Performance details.
     #   5. Drop parsed-options lists (saves ~10-20 KB typically).
     #   6. Halve the built_targets list until it fits.
     #   7. Halve the passed_tests list the same way.
     #   8. Last resort: drop cached_tests too.
-    # Priority reasoning: bucket lists (targets/tests) are the primary signal
-    # users load the check for. The new reference sections (metadata, workspace
-    # status, invocation details) are redundant with the Aspect Web UI, so drop
-    # them first.
+    # Priority reasoning: bucket lists (targets/tests) are the primary
+    # signal users load the check for; the reference sections
+    # (metadata, workspace status, invocation details) are redundant
+    # with the Aspect Web UI, so drop them first.
     if len(details_text) > _DETAILS_LIMIT:
-        trace.log("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
-                  "), dropping Build Metadata")
+        if debug_render:
+            trace.log("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
+                      "), dropping build_metadata sub-block from Bazel details")
         details_data["build_metadata_rows"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping Workspace Status")
+        if debug_render:
+            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+                      "), dropping workspace_status sub-block from Bazel details")
         details_data["workspace_status_rows"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping Invocation")
+        if debug_render:
+            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+                      "), dropping invocation sub-block from Bazel details")
         details_data["invocation_rows"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping Aspect Workflows Runner")
+        if debug_render:
+            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+                      "), dropping Runner metadata section")
         details_data["aspect_runner_rows"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping Performance")
+        if debug_render:
+            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+                      "), dropping Performance")
         details_data["invocation_stats"] = None
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping parsed-options lists")
+        if debug_render:
+            trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+                      "), dropping parsed-options lists")
         details_data["startup_options"] = []
         details_data["cmd_line_options"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
@@ -3516,8 +4398,9 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
             details_data["built_targets"] = built
             details_data["built_targets_overflow"] = str(overflow) if overflow > 0 else ""
             details_text = ctx.template.jinja2(details_tmpl, data = details_data)
-        trace.log("debug [render_check_output]   after target trim: details len=" + str(len(details_text)) +
-                  " built_targets=" + str(len(built)))
+        if debug_render:
+            trace.log("debug [render_check_output]   after target trim: details len=" + str(len(details_text)) +
+                      " built_targets=" + str(len(built)))
 
     if len(details_text) > _DETAILS_LIMIT:
         passed = details_data.get("passed_tests", [])
@@ -3530,15 +4413,16 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
             details_data["passed_tests"] = passed
             details_data["passed_tests_overflow"] = str(overflow) if overflow > 0 else ""
             details_text = ctx.template.jinja2(details_tmpl, data = details_data)
-        trace.log("debug [render_check_output]   after test trim: details len=" + str(len(details_text)) +
-                  " passed_tests=" + str(len(passed)))
+        if debug_render:
+            trace.log("debug [render_check_output]   after test trim: details len=" + str(len(details_text)) +
+                      " passed_tests=" + str(len(passed)))
 
     if len(details_text) > _DETAILS_LIMIT:
         # Last resort: drop cached_tests too.
         details_data["cached_tests"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
-    if trace.enabled:
+    if debug_render:
         trace.log("debug [render_check_output]   summary len=" + str(len(summary_text)))
         trace.log("debug [render_check_output]   details len=" + str(len(details_text)))
         trace.log("debug [render_check_output] --- summary ---")
@@ -3547,13 +4431,13 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
         trace.log(details_text[:5000])
 
     target_pattern = render_ctx.get("targets", "") if render_ctx else ""
-    task_display = render_ctx.get("task_display_name", "") if render_ctx else ""
+    task_name = render_ctx.get("task_name", "") if render_ctx else ""
     return {
         "title": summary_title(
-            results,
+            data,
             status,
             target_pattern = target_pattern,
-            task_display_name = task_display,
+            task_name = task_name,
         ),
         "summary": summary_text,
         "text": details_text,

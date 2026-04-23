@@ -1,0 +1,477 @@
+"""Delivery task status-check rendering.
+
+Parallel to `bazel_results.axl` (build/test) and `lint_results.axl`, for the
+`delivery` task. Summary metadata rows reuse bazel_results helpers; the body
+below the summary line is delivery-specific:
+
+  - Counts by outcome (delivered / skipped / warned / failed / pending)
+  - Per-outcome collapsible tables with label, hash, and context
+  - Failed deliveries surface at the top, open by default
+"""
+
+load(
+    "./bazel_results.axl",
+    "FIX_COMMANDS_BLOCK",
+    "REPRO_COMMANDS_BLOCK",
+    "SHARED_DETAILS_BODY_TEMPLATE",
+    "active_phase_data",
+    "build_details_data",
+    "build_summary_data",
+    "format_run_date",
+    "html_escape",
+    bazel_init_data = "init_data",
+)
+load("./result_text.axl", "emoji_for_status")
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+_DETAILS_LIMIT = 65000
+
+# Outcome buckets used by the delivery task. "ok" = delivered; "skip" =
+# identical hash already delivered for this commit; "warn" = informational
+# warning (no output_sha / no entrypoint); "fail" = delivery target run
+# exited non-zero; "pending" = dry-run marker or not-yet-attempted.
+_OUTCOME_ORDER = ["fail", "warn", "skip", "pending", "ok"]
+
+_OUTCOME_ICONS = {
+    "ok": "✅",
+    "skip": "⚡",
+    "warn": "⚠️",
+    "fail": "❌",
+    "pending": "⏳",
+}
+
+_OUTCOME_LABELS = {
+    "ok": "delivered",
+    "skip": "skipped",
+    "warn": "warnings",
+    "fail": "failed",
+    "pending": "pending",
+}
+
+_OUTCOME_LABELS_SINGULAR = {
+    "ok": "delivered",
+    "skip": "skipped",
+    "warn": "warning",
+    "fail": "failed",
+    "pending": "pending",
+}
+
+_OUTCOME_GROUP_HEADINGS = {
+    "ok": "Delivered",
+    "skip": "Skipped (same hash)",
+    "warn": "Warnings",
+    "fail": "Failed delivery",
+    "pending": "Pending",
+}
+
+_LABEL_MAX = 70
+_MESSAGE_MAX = 80
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
+def init_data():
+    """Return a fresh delivery-data dict.
+
+    Starts from bazel_results.init_data() so process_event can populate
+    the full bazel state the shared summary + details renderers consume,
+    plus delivery-specific fields layered on top.
+    """
+    r = bazel_init_data()
+    r["delivery"] = {
+        "ci_host": "",  # deliveryd CI label: "bk" | "gh" | "circle" | …
+        "build_url": "",  # CI job URL the delivery was performed from
+        "commit_sha": "",  # commit being delivered
+        "prefix": "",  # task.key — delivery namespace
+        "deliveries": [],  # list of {label, outcome, message, output_sha, is_forced}
+
+        # Run-shape flags surfaced in the check-run / annotation summary so a
+        # reader can tell at a glance which delivery model + safety knobs the
+        # invocation was running under. Defaults match `delivery.axl`'s args
+        # defaults so any data dict that doesn't bother to populate them
+        # (mostly test fixtures) renders the way a default invocation would.
+        "mode": "selective",
+        "dry_run": False,
+        "track_state": True,
+
+        # Aggregated counts populated by add_result().
+        "counts": {},  # {"ok": int, "skip": int, "warn": int, "fail": int, "pending": int}
+    }
+    return r
+
+def add_result(data, label, outcome, message = "", output_sha = "", is_forced = False):
+    """Record one delivery outcome and bump its count.
+
+    Args:
+        label:      Bazel target label, e.g. "//pkg/foo:release".
+        outcome:    One of "ok", "skip", "warn", "fail", "pending".
+        message:    Context for the outcome: delivered-by URL on skip, error
+                    message on fail, warn reason, dry-run marker on pending.
+        output_sha: Artifact action digest hash (delivery dedup key).
+        is_forced:  True when --force-target re-delivered despite prior delivery.
+    """
+    data["delivery"]["deliveries"].append({
+        "label": label,
+        "outcome": outcome,
+        "message": message or "",
+        "output_sha": output_sha or "",
+        "is_forced": bool(is_forced),
+    })
+    counts = data["delivery"]["counts"]
+    counts[outcome] = counts.get(outcome, 0) + 1
+
+# ─── Title ────────────────────────────────────────────────────────────────────
+
+def delivery_summary_title(data, status, target_pattern = "", task_name = ""):
+    """Compute the check-run title.
+
+    "✅ delivery //apps/... · 12 delivered" — status emoji + raw task
+    name + target pattern + verdict. Priority:
+      - build failures dominate ("Build failed" isn't produced by
+        delivery, but a non-zero exit_code without any recorded
+        outcomes still reads as "delivery · failed")
+      - any failures → "N failed"
+      - any warnings → "N delivered, N warnings"
+      - all delivered / skipped → "N delivered, M skipped"
+      - "Running..." while running
+
+    `task_name` comes from the producer's `task(name=…)`. The leading
+    emoji is the status verdict via `emoji_for_status`. Defaults to
+    "delivery" when no name is provided.
+    """
+    display = emoji_for_status(status) + " " + (task_name or "delivery")
+    target = target_pattern or data.get("target_pattern", "")
+    base = display + ((" " + target) if target else "")
+
+    counts = data["delivery"].get("counts", {})
+    ok = counts.get("ok", 0)
+    skip = counts.get("skip", 0)
+    warn = counts.get("warn", 0)
+    fail = counts.get("fail", 0)
+    pending = counts.get("pending", 0)
+    total = ok + skip + warn + fail + pending
+
+    if status == "running" and total == 0:
+        return base + " · Running..."
+
+    if status == "failing" and total == 0:
+        return base + " · Failing..."
+
+    if fail > 0:
+        parts = [_plural(fail, "failed")]
+        if ok > 0:
+            parts.append(_plural(ok, "delivered"))
+        if skip > 0:
+            parts.append(_plural(skip, "skipped"))
+        return base + " · " + ", ".join(parts)
+
+    parts = []
+    if ok > 0:
+        parts.append(_plural(ok, "delivered"))
+    if skip > 0:
+        parts.append(_plural(skip, "skipped"))
+    if warn > 0:
+        parts.append(_plural(warn, "warning"))
+    if pending > 0:
+        parts.append(_plural(pending, "pending", plural = "pending"))
+
+    if not parts:
+        if status == "passed":
+            return base + " · No targets"
+        return base
+
+    if status in ("running", "failing"):
+        return base + " · " + ", ".join(parts) + " so far"
+    return base + " · " + ", ".join(parts)
+
+def _plural(count, singular, plural = None):
+    if plural == None:
+        plural = singular + "s" if not singular.endswith("ed") else singular
+    if count == 1:
+        return str(count) + " " + singular
+    return str(count) + " " + plural
+
+# ─── Templates ────────────────────────────────────────────────────────────────
+
+_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
+{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
+{%- endfor %}{% endif %}
+{% if config_items %}
+:gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
+:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"""
+
+_DETAILS_TEMPLATE = """{% if total == 0 %}### 🚀 No deliveries
+
+_No targets selected for delivery._{% else %}### 🚀 Delivery results
+
+**Summary**
+{% for s in summary_rows %}
+- {{ s.icon }} **{{ s.count }}** {{ s.label }}{% if s.note %} ({{ s.note }}){% endif %}{% endfor %}
+
+{% for group in groups %}
+<details{% if group.open %} open{% endif %}>
+<summary>{{ group.icon }} {{ group.count }} {{ group.heading }}</summary>
+
+<pre>
+{{ group.table }}
+</pre>
+{% if group.overflow %}
+_… {{ group.overflow }} more {{ group.label_singular }} not shown._
+{% endif %}
+</details>
+{% endfor %}{% endif %}
+""" + REPRO_COMMANDS_BLOCK + FIX_COMMANDS_BLOCK + SHARED_DETAILS_BODY_TEMPLATE
+
+# ─── Details body ─────────────────────────────────────────────────────────────
+
+def _pad_right(s, width):
+    if len(s) >= width:
+        return s
+    return s + " " * (width - len(s))
+
+def _truncate(s, max_len):
+    if len(s) <= max_len:
+        return s
+    if max_len <= 3:
+        return s[:max_len]
+    return s[:max_len - 3] + "..."
+
+def _outcome_table(diags, outcome):
+    """Render a small table per outcome: label, hash, context.
+
+    Column shape depends on outcome to surface the most useful context:
+      - fail    → label, hash, error message
+      - skip    → label, hash, delivered-by URL  (rendered as <a> link)
+      - warn    → label, reason
+      - ok      → label, hash, build URL         (rendered as <a> link)
+      - pending → label, marker
+
+    Rendered inside `<pre>` so HTML anchors in the context column are
+    clickable on GitHub. Width math uses the visible URL, never the
+    anchor wrapping.
+    """
+    ctx_col = _ctx_column_for(outcome)
+    url_context = outcome in ("ok", "skip")
+
+    rows = []
+    for d in diags:
+        label = _truncate(d["label"] + (" *" if d.get("is_forced") else ""), _LABEL_MAX)
+        sha = (d["output_sha"] or "-")[:12]
+        ctx = d.get("message", "") or "-"
+
+        # Don't truncate URL context — a truncated URL is useless as a
+        # link. Non-URL context columns still truncate.
+        if not url_context:
+            ctx = _truncate(ctx, _MESSAGE_MAX)
+        rows.append((label, sha, ctx))
+
+    if not rows:
+        return ""
+
+    label_w = max([len("Target")] + [len(r[0]) for r in rows])
+    sha_w = max([len("Hash")] + [len(r[1]) for r in rows])
+    ctx_w = max([len(ctx_col)] + [len(r[2]) for r in rows])
+
+    lines = []
+    lines.append(_pad_right("Target", label_w) + "  " + _pad_right("Hash", sha_w) + "  " + ctx_col)
+    lines.append("-" * label_w + "  " + "-" * sha_w + "  " + "-" * ctx_w)
+    for label, sha, ctx in rows:
+        if url_context and ctx and ctx != "-":
+            # HTML-escape both halves — URLs can carry `&`, `"`, etc.
+            # in query strings, which would break the anchor and the
+            # link text otherwise.
+            ctx_out = '<a href="%s">%s</a>' % (html_escape(ctx), html_escape(ctx))
+        else:
+            ctx_out = ctx
+        lines.append(_pad_right(label, label_w) + "  " + _pad_right(sha, sha_w) + "  " + ctx_out)
+    return "\n".join(lines)
+
+def _ctx_column_for(outcome):
+    if outcome == "skip":
+        return "Previously delivered by"
+    if outcome == "fail":
+        return "Error"
+    if outcome == "warn":
+        return "Reason"
+    if outcome == "pending":
+        return "Note"
+    return "Build URL"
+
+def _group_deliveries(data):
+    by_outcome = {}
+    for d in data["delivery"].get("deliveries", []):
+        outcome = d.get("outcome", "pending") or "pending"
+        by_outcome.setdefault(outcome, []).append(d)
+
+    groups = []
+    for outcome in _OUTCOME_ORDER:
+        rows = by_outcome.get(outcome, [])
+        if not rows:
+            continue
+        count = len(rows)
+
+        # Cap per-group table rows to keep within the GitHub check-run limit.
+        max_rows = 50
+        shown = rows[:max_rows]
+        overflow = count - len(shown)
+        groups.append({
+            "outcome": outcome,
+            "icon": _OUTCOME_ICONS.get(outcome, "❓"),
+            "count": str(count),
+            "heading": _OUTCOME_GROUP_HEADINGS.get(outcome, outcome),
+            "label_singular": _OUTCOME_LABELS_SINGULAR.get(outcome, outcome),
+            "table": _outcome_table(shown, outcome),
+            "overflow": str(overflow) if overflow > 0 else "",
+            # Open the actionable / informative outcomes (delivered,
+            # warned, failed). Skipped / pending stay collapsed.
+            "open": outcome in ("ok", "fail", "warn"),
+        })
+    return groups
+
+def _summary_rows(counts):
+    """Render the "Summary" bullet list in the body.
+
+    Shows delivered / skipped / warnings / failed counts with brief notes
+    (e.g. "already delivered this hash"). Zero-count rows are included for
+    failed/warned (important to explicitly acknowledge they're zero) but
+    hidden for pending (noisy when unused).
+    """
+    ok = counts.get("ok", 0)
+    skip = counts.get("skip", 0)
+    warn = counts.get("warn", 0)
+    fail = counts.get("fail", 0)
+    pending = counts.get("pending", 0)
+
+    def _label(count, outcome):
+        # Use the singular label when count==1 so "1 warning" reads right.
+        if count == 1:
+            return _OUTCOME_LABELS_SINGULAR.get(outcome, _OUTCOME_LABELS.get(outcome, outcome))
+        return _OUTCOME_LABELS.get(outcome, outcome)
+
+    rows = []
+    rows.append({"outcome": "ok", "icon": _OUTCOME_ICONS["ok"], "count": str(ok), "label": _label(ok, "ok"), "note": ""})
+    if skip > 0:
+        rows.append({"outcome": "skip", "icon": _OUTCOME_ICONS["skip"], "count": str(skip), "label": _label(skip, "skip"), "note": "already delivered this hash"})
+    rows.append({"outcome": "warn", "icon": _OUTCOME_ICONS["warn"], "count": str(warn), "label": _label(warn, "warn"), "note": ""})
+    rows.append({"outcome": "fail", "icon": _OUTCOME_ICONS["fail"], "count": str(fail), "label": _label(fail, "fail"), "note": ""})
+    if pending > 0:
+        rows.append({"outcome": "pending", "icon": _OUTCOME_ICONS["pending"], "count": str(pending), "label": _label(pending, "pending"), "note": "dry run / not attempted"})
+    return rows
+
+def _build_details_data(data, render_ctx, status):
+    counts = data["delivery"].get("counts", {})
+    total = 0
+    for _k, v in counts.items():
+        total += v
+    return {
+        "total": str(total),
+        "summary_rows": _summary_rows(counts),
+        "groups": _group_deliveries(data),
+    }
+
+def _config_items(data):
+    """Build the Configuration row for the delivery summary.
+
+    Surfaces `Mode: <mode>[ (dry-run[, untracked])]` directly below
+    "Last update" — analogous to lint's Strategy line. Modifiers are
+    appended in parens, ordered dry-run (most user-visible) then
+    untracked. The `selective` + tracked + non-dry-run case is the
+    default — modifiers only appear when the invocation deviated.
+    Empty list when `mode` is unset (older fixtures pre-dating the
+    field).
+    """
+    mode = data["delivery"].get("mode", "") or ""
+    if not mode:
+        return []
+    qualifiers = []
+    if data["delivery"].get("dry_run", False):
+        qualifiers.append("dry-run")
+    if not data["delivery"].get("track_state", True):
+        qualifiers.append("untracked")
+    value = mode + " (" + ", ".join(qualifiers) + ")" if qualifiers else mode
+    return [{"key": "Mode", "value": value}]
+
+# ─── Entry point ──────────────────────────────────────────────────────────────
+
+def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None):
+    """Render title, summary, and text for a delivery check run.
+
+    Matches the bazel_results / lint_results interface so GithubStatusChecks
+    can dispatch by task_update.kind interchangeably.
+    """
+    t = templates or {}
+    run_date = format_run_date(ctx, data.get("start_time_ms", 0))
+    summary_data = build_summary_data(
+        ctx,
+        data,
+        status,
+        render_ctx,
+        links,
+        metadata_keys,
+        run_date = run_date,
+        config_items = _config_items(data),
+    )
+    finish_date = format_run_date(ctx, data.get("finish_time_ms", 0))
+    shared_data = build_details_data(
+        data,
+        links,
+        render_ctx = render_ctx,
+        status = status,
+        start_date = run_date,
+        finish_date = finish_date,
+        std = ctx.std,
+        task_phases = ctx.task.phases(),
+        task_active = active_phase_data(ctx),
+        task_elapsed_ms = ctx.task.elapsed_ms,
+        include_bazel_targets = True,
+    )
+    details_data = dict(shared_data)
+    details_data.update(_build_details_data(data, render_ctx, status))
+
+    summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
+    details_tmpl = t.get("details") or _DETAILS_TEMPLATE
+
+    summary_text = ctx.template.jinja2(summary_tmpl, data = summary_data)
+    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    # Trim cascade: halve per-group row counts until we fit.
+    if len(details_text) > _DETAILS_LIMIT:
+        for _ in range(10):
+            if len(details_text) <= _DETAILS_LIMIT:
+                break
+            trimmed = False
+            new_groups = []
+            for g in details_data["groups"]:
+                table_rows = g["table"].split("\n")
+                if len(table_rows) > 4:  # header + sep + at least 2 rows
+                    half = max(2, (len(table_rows) - 2) // 2 + 2)
+                    new_rows = table_rows[:half]
+                    missing = int(g["count"]) - (len(new_rows) - 2)
+                    g = dict(g)
+                    g["table"] = "\n".join(new_rows)
+                    g["overflow"] = str(missing) if missing > 0 else ""
+                    trimmed = True
+                new_groups.append(g)
+            if not trimmed:
+                break
+            details_data["groups"] = new_groups
+            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    if len(details_text) > _DETAILS_LIMIT:
+        details_data["groups"] = []
+        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    target_pattern = render_ctx.get("targets", "") if render_ctx else ""
+    task_name = render_ctx.get("task_name", "") if render_ctx else ""
+    if not target_pattern:
+        target_pattern = data.get("target_pattern", "")
+    return {
+        "title": delivery_summary_title(
+            data,
+            status,
+            target_pattern = target_pattern,
+            task_name = task_name,
+        ),
+        "summary": summary_text,
+        "text": details_text,
+    }

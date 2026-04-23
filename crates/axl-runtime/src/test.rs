@@ -148,9 +148,13 @@ impl EvalBuilder {
             mpe.eval(&scripts, &root_mod, &modules)
                 .map_err(anyhow::Error::from)?;
             let exit = mpe
-                .execute_tasks_with_args(task_index, "_test".to_string(), None, |_t, _h| {
-                    Arguments::new()
-                })
+                .execute_tasks_with_args(
+                    task_index,
+                    "_test".to_string(),
+                    None,
+                    crate::eval::TimingMode::default(),
+                    |_t, _h| Arguments::new(),
+                )
                 .map_err(anyhow::Error::from)?;
             Ok(exit)
         })

@@ -1,0 +1,972 @@
+"""Lint task status-check rendering.
+
+Parallel to `bazel_results.axl` for build/test, but driven by lint diagnostic
+events instead of Bazel build events. The feature-facing interface matches:
+
+  init_data()                                  → dict
+  accumulate(data, diagnostics)                → mutates data in place
+  render_check_output(ctx, data, status, …)    → {title, summary, text}
+
+The summary metadata rows (status/date, repo/branch/commit, user, runner info,
+custom links, tags, Aspect Workflows link, CI host link) are reused wholesale
+from `bazel_results.build_summary_data` — the same VCS + runner + trigger
+rendering users expect from the build/test check run. The body below the
+summary line is lint-specific: by-severity / by-tool counts plus a per-severity
+table of findings.
+"""
+
+load(
+    "./bazel_results.axl",
+    "FIX_COMMANDS_BLOCK",
+    "RENDER_META_STANDARD_KEYS",
+    "REPRO_COMMANDS_BLOCK",
+    "SHARED_DETAILS_BODY_TEMPLATE",
+    "active_phase_data",
+    "build_details_data",
+    "build_summary_data",
+    "format_int_comma",
+    "format_run_date",
+    "html_escape",
+    "merged_meta",
+    bazel_init_data = "init_data",
+)
+load("./result_text.axl", "emoji_for_status")
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+_DETAILS_LIMIT = 65000  # GitHub check-run `output.text` hard limit (~65535).
+
+# Order matters: diagnostics render in severity order, and failed-status
+# derivation walks this list top-to-bottom. "error" dominates; "info" is
+# informational only.
+#
+# SARIF's lowest-severity term is "note"; aspect-cli surfaces it as "info"
+# everywhere (translation happens in lib/sarif.axl::_translate_sarif_level).
+# Don't add "note" back to these tables — it'll never be a key in
+# practice since the SARIF parse boundary normalises away.
+_SEVERITY_ORDER = ["error", "warning", "info", "unknown"]
+
+_SEVERITY_ICONS = {
+    "error": "🚨",
+    "warning": "⚠️",
+    "info": "ℹ️",
+    "unknown": "❓",
+}
+
+_SEVERITY_LABELS = {
+    "error": "errors",
+    "warning": "warnings",
+    "info": "infos",
+    "unknown": "unclassified",
+}
+
+_SEVERITY_LABELS_SINGULAR = {
+    "error": "error",
+    "warning": "warning",
+    "info": "info",
+    "unknown": "unclassified",
+}
+
+# Per-group row cap to keep the details body under GitHub's size limit even on
+# noisy codebases. Users who want every diagnostic have the raw SARIF via the
+# `lint-report` output artifact; the check run is a summary, not a ledger.
+_MAX_ROWS_PER_GROUP = 30
+
+_LABEL_MAX = 60
+
+# GitHub check-runs API: at most 50 annotations per request. Larger sets are
+# sent across multiple PATCH calls (each batch is appended, not replaced).
+ANNOTATIONS_PER_BATCH = 50
+
+# Practical upper bound on annotations emitted by a single lint run. The cap
+# trades discoverability against API churn. We default to a single GitHub
+# batch (50) — Marvin v1 used 25, but 50 is the natural batch size for the
+# check-runs API and `aspect lint` already publishes the full SARIF as an
+# artifact for callers that need every finding. Multi-batch send is wired
+# in GithubStatusChecks for users who raise the cap.
+DEFAULT_MAX_ANNOTATIONS = 50
+
+# GitHub annotation_level vocabulary (notice/warning/failure). lint severities
+# are richer; collapse note/info to "notice". Unknown severity also maps to
+# "notice" — matches Marvin v1, and an unclassified diagnostic shouldn't
+# masquerade as a warning when it could be informational.
+_ANNOTATION_LEVEL_BY_SEVERITY = {
+    "error": "failure",
+    "warning": "warning",
+    "info": "notice",
+    "unknown": "notice",
+}
+
+# GitHub limits annotation message text to 64KB. Truncate well below that so
+# the resulting JSON payload also fits the per-request envelope.
+_ANNOTATION_MESSAGE_MAX = 4000
+
+# GitHub annotation `title` is capped at 255 chars.
+_ANNOTATION_TITLE_MAX = 255
+
+def _sum_values(d):
+    """AXL has no sum() builtin; tiny helper for integer-dict totals."""
+    total = 0
+    for _k, v in d.items():
+        total += v
+    return total
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
+def init_data():
+    """Return a fresh lint-data dict.
+
+    Starts from `bazel_results.init_data()` so that `process_event` can
+    populate the full bazel state (workspace_status, build_metadata, target /
+    action / test events, options_parsed, runner stats, etc.) the shared
+    summary + details renderers consume. Lint-specific fields are layered
+    on top.
+    """
+    r = bazel_init_data()
+    r["lint"] = {
+        "diagnostics": [],  # flat list of {tool, file, line, rule_id, severity, message?}
+        "strategy": "",  # "soft" | "hard" | "hold-the-line" | "hold-the-file" | ""
+        "build_failed": False,  # true if underlying Bazel invocation failed
+        "linter_exit_code": 0,  # 0 = all linters clean; non-zero → at least one linter errored
+        "changed_files": [],  # [{"file", "lines", "hunk_lines"}] — only populated for hold-the-line / hold-the-file
+
+        # Pre-computed aggregates populated by accumulate().
+        "counts_by_severity": {},  # {"error": 3, ...}
+        "counts_by_tool": {},  # {"eslint": 7, ...}
+
+        # Suggestion-comment records — populated by lint.axl from
+        # `lint_trait.suggestions` after `lint_end` hooks run. Each
+        # entry: {tool, file, start_line, end_line, severity,
+        # rule_id, correlated, comment_url}. See LintTrait.suggestions
+        # for the full shape and population semantics.
+        "suggestions": [],
+    }
+    return r
+
+def accumulate(data, diagnostics):
+    """Append new diagnostics and recompute aggregate counts in place."""
+    if not diagnostics:
+        return
+    existing = data["lint"]["diagnostics"]
+    existing.extend(diagnostics)
+    _recount(data)
+
+def replace_diagnostics(data, diagnostics):
+    """Replace `data["lint"]["diagnostics"]` and recompute aggregate counts.
+
+    Use after the strategy filter (`filter_hunks` for `hold-the-line`,
+    etc.) runs so the rendered summary tables, the per-tool breakdown, and
+    the `compute_annotations` consumer all see the same strategy-filtered
+    set. Without this, `data["lint"]["diagnostics"]` retains every SARIF
+    diagnostic the build streamed in — including findings from files
+    outside the strategy's scope — and the rendered report contradicts
+    the `Strategy: hold-the-line — filtered to N changed files` config
+    row above it.
+    """
+    data["lint"]["diagnostics"] = list(diagnostics)
+    _recount(data)
+
+def _recount(data):
+    by_sev = {}
+    by_tool = {}
+    for d in data["lint"]["diagnostics"]:
+        sev = d.get("severity", "unknown") or "unknown"
+        tool = d.get("tool", "unknown") or "unknown"
+        by_sev[sev] = by_sev.get(sev, 0) + 1
+        by_tool[tool] = by_tool.get(tool, 0) + 1
+    data["lint"]["counts_by_severity"] = by_sev
+    data["lint"]["counts_by_tool"] = by_tool
+
+def lint_summary_title(data, status, target_pattern = "", task_name = ""):
+    """Compute the title for the check run output.
+
+    "⚠️ lint //... · 3 errors, 8 warnings" when findings exist
+    "✅ lint //... · Passed" when status=passed and no findings
+    "❌ lint //... · Build failed" when the underlying Bazel build failed
+    "🔄 lint //... · Running..." while still running
+
+    `task_name` comes from the producer's `task(name=…)`. The leading
+    emoji is the status verdict via `emoji_for_status` so the icon
+    matches the row's outcome at a glance. Defaults to "lint" when no
+    name is provided.
+    """
+    display = emoji_for_status(status) + " " + (task_name or "lint")
+    target = target_pattern or data.get("target_pattern", "")
+    base = display + ((" " + target) if target else "")
+
+    if data["lint"].get("build_failed"):
+        return base + " · Build failed"
+
+    counts = data["lint"].get("counts_by_severity", {})
+    errs = counts.get("error", 0)
+    warns = counts.get("warning", 0)
+    infos = counts.get("info", 0)
+    total = _sum_values(counts)
+
+    if status in ("running", "failing") and total > 0:
+        return base + " · " + _findings_phrase(errs, warns, infos) + " so far..."
+    if status == "running":
+        return base + " · Running..."
+    if status == "failing":
+        return base + " · Failing..."
+    if total == 0:
+        return base + " · Passed"
+    return base + " · " + _findings_phrase(errs, warns, infos)
+
+def _findings_phrase(errs, warns, infos):
+    parts = []
+    if errs > 0:
+        parts.append(str(errs) + " error" + ("s" if errs != 1 else ""))
+    if warns > 0:
+        parts.append(str(warns) + " warning" + ("s" if warns != 1 else ""))
+    if infos > 0:
+        parts.append(str(infos) + " info" + ("s" if infos != 1 else ""))
+    if not parts:
+        return "0 findings"
+    return ", ".join(parts)
+
+# ─── Details body ─────────────────────────────────────────────────────────────
+
+# Summary template reuses bazel_results' SUMMARY_TEMPLATE-style layout: the
+# `detail_rows` key (populated by build_invocation_rows) renders the icon/line
+# grid; extra metadata rows and "last update" line follow the same conventions.
+_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
+{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
+{%- endfor %}{% endif %}
+{% if config_items %}
+:gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
+:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"""
+
+_DETAILS_TEMPLATE = """{% if lint_no_diagnostics_failure %}
+> ⚠️ Lint task was aborted: {{ lint_no_diagnostics_failure }}
+
+{% endif %}
+{% if build_failed %}
+> ⚠️ Underlying Bazel invocation failed; findings below may be incomplete.
+
+{% endif %}
+### 🔍 Lint findings ({{ total }}){% if total == 0 %}
+
+_No lint diagnostics reported._{% else %}
+
+{% for group in groups %}
+<details{% if group.open %} open{% endif %}>
+<summary>{{ group.icon }} {{ group.count }} {{ group.label }}</summary>
+
+{% for row in group.rows -%}
+- `{{ row.file }}:{{ row.line }}`{% if row.rule_display %} · {% if row.rule_is_id %}`{{ row.rule_display }}`{% else %}{{ row.rule_display }}{% endif %}{% endif %}{% if row.message %} · {{ row.message }}{% endif %}{% if row.comment_url %} · [💬 {{ row.comment_label }}]({{ row.comment_url }}){% endif %}
+{% endfor -%}
+{% if group.overflow %}
+
+_… {{ group.overflow }} more {{ group.label_singular }} not shown._
+{% endif %}
+</details>
+{% endfor %}{% endif %}
+{% if suggestions %}
+### 🪄 Auto fixes ({{ suggestions|length }})
+
+{% for s in suggestions -%}
+- {{ s.icon }} **{{ s.tool }}**{% if s.rule_id %} · `{{ s.rule_id }}`{% endif %} · `{{ s.file }}:{{ s.line_span }}`{% if s.comment_url %} · [💬 fix]({{ s.comment_url }}){% endif %}
+{% endfor %}
+{% endif %}
+{% if linters_chart %}
+### 🧹 Linters ({{ linters_count }})
+
+<pre>
+{{ linters_chart }}
+</pre>
+{% endif %}
+""" + REPRO_COMMANDS_BLOCK + FIX_COMMANDS_BLOCK + SHARED_DETAILS_BODY_TEMPLATE
+
+def _truncate(s, max_len):
+    if len(s) <= max_len:
+        return s
+    if max_len <= 3:
+        return s[:max_len]
+    return s[:max_len - 3] + "..."
+
+def _group_rows_for_template(diags, suggestion_links):
+    """Return one row dict per diagnostic for the Jinja2 template.
+
+    Rows are Markdown-friendly (rendered as a bulleted list rather
+    than a fixed-width code block) so per-row links actually
+    hyperlink — code-fenced text doesn't render markdown.
+
+    Per-row link affordance:
+
+      - `comment_url` — points at the suggested-fix PR review comment,
+        when one was posted for this finding. Sourced from
+        `suggestion_links` (built by `_build_details_data` from the
+        correlated suggestion records).
+
+    User-controlled text (file path, message, tool, rule_id) is
+    `html_escape`d before interpolation so a linter that emits a
+    message containing `<...>` doesn't accidentally render as HTML
+    or break the surrounding markdown.
+    """
+    rows = []
+    for d in diags:
+        file_ = _truncate(d.get("file", "") or "", _LABEL_MAX)
+        line = d.get("line", 0) or 0
+        rule = d.get("rule_id", "") or ""
+        tool = d.get("tool", "") or ""
+        msg = d.get("message", "") or ""
+
+        # Prefer the rule_id (e.g. `SC2164`) — it's a code-like
+        # identifier that reads well in a `<code>` span. Fall back to
+        # the tool name (`ShellCheck`) when no rule_id is available;
+        # the tool name is prose, not code, so the template renders
+        # it without backticks via `rule_is_id`.
+        rule_display = rule if rule else tool
+        rule_is_id = bool(rule)
+        link = suggestion_links.get((file_, line)) if line else None
+        comment_url = link["url"] if link else ""
+
+        # Link text:
+        #   - "fix" — URL lands on a patch-derived suggestion comment
+        #     (Apply-suggestion button). This is the only "fix"
+        #     signal we trust: the SARIF result's `has_fix` flag
+        #     would be the other obvious candidate, but rules_lint
+        #     doesn't emit the SARIF `relatedLocations` that flag
+        #     keys off (see anchor on
+        #     `lib/sarif.axl::_result_has_fix`). Today every
+        #     fix-bearing comment comes through the parallel
+        #     `.patch`-file path, which is exactly what `is_fix` on
+        #     the link tracks.
+        #   - "comment" — every other URL: plain SARIF discussion
+        #     comment, no Apply button.
+        # No URL → no link rendered.
+        is_fix = bool(link and link.get("is_fix"))
+        comment_label = "fix" if is_fix else "comment"
+        rows.append({
+            "file": html_escape(file_),
+            "line": str(line),
+            "rule_display": html_escape(rule_display),
+            "rule_is_id": rule_is_id,
+            "message": html_escape(msg),
+            "comment_url": comment_url,
+            "comment_label": comment_label,
+        })
+    return rows
+
+def _group_diagnostics(data, suggestion_links):
+    """Bucket diagnostics by severity. Returns list of group dicts ordered per
+    _SEVERITY_ORDER, with details-open set on the top non-empty group.
+
+    `suggestion_links` is threaded into `_group_rows_for_template`
+    so each diagnostic row knows whether it has a corresponding
+    suggestion comment URL.
+    """
+    by_sev = {}
+    for d in data["lint"].get("diagnostics", []):
+        sev = d.get("severity", "unknown") or "unknown"
+        by_sev.setdefault(sev, []).append(d)
+
+    groups = []
+    opened = False
+    for sev in _SEVERITY_ORDER:
+        diags = by_sev.get(sev, [])
+        if not diags:
+            continue
+        shown = diags[:_MAX_ROWS_PER_GROUP]
+        overflow = len(diags) - len(shown)
+        label = _SEVERITY_LABELS.get(sev, sev)
+        label_singular = _SEVERITY_LABELS_SINGULAR.get(sev, sev)
+        group = {
+            "icon": _SEVERITY_ICONS.get(sev, "❓"),
+            "count": len(diags),
+            "label": label,
+            "label_singular": label_singular,
+            "severity": sev,
+            "rows": _group_rows_for_template(shown, suggestion_links),
+            "overflow": overflow if overflow > 0 else 0,
+            "open": not opened,  # first (most severe) group opens by default
+        }
+        opened = True
+        groups.append(group)
+    return groups
+
+def _pad_right(s, width):
+    """Pad s with trailing spaces to at least `width` characters. No truncation."""
+    n = width - len(s)
+    if n <= 0:
+        return s
+    return s + " " * n
+
+def _pad_left(s, width):
+    """Pad s with leading spaces to at least `width` characters. No truncation.
+
+    Used for right-aligning numeric columns under left-aligned headers
+    in the <pre> linter-breakdown chart — the same column-alignment
+    convention bazel_results uses for its target tables.
+    """
+    n = width - len(s)
+    if n <= 0:
+        return s
+    return " " * n + s
+
+def _linters_chart(data):
+    """Build the per-linter breakdown as a column-aligned <pre> body.
+
+    Cross-tabulates `data["lint"]["diagnostics"]` and
+    `data["lint"]["suggestions"]` by tool, producing one row per
+    linter with error / warning / info / auto-fix counts. Sorted by
+    total finding+fix volume descending, then linter name ascending —
+    so the noisiest linter sits at the top, where it earns the eye.
+
+    Returns the chart body (no wrapping <pre> tags). Empty string
+    when no diagnostics and no suggestions were reported.
+    """
+    counts = {}
+
+    def _row(tool):
+        if tool not in counts:
+            counts[tool] = {"errors": 0, "warnings": 0, "infos": 0, "fixes": 0}
+        return counts[tool]
+
+    for d in data["lint"].get("diagnostics", []) or []:
+        tool = d.get("tool", "") or "unknown"
+        sev = d.get("severity", "") or "unknown"
+        r = _row(tool)
+        if sev == "error":
+            r["errors"] += 1
+        elif sev == "warning":
+            r["warnings"] += 1
+        elif sev == "info":
+            r["infos"] += 1
+    for s in data["lint"].get("suggestions", []) or []:
+        _row(s.get("tool", "") or "unknown")["fixes"] += 1
+
+    if not counts:
+        return ""
+
+    items = sorted(
+        [(t, counts[t]) for t in counts],
+        key = lambda kv: (
+            -(kv[1]["errors"] + kv[1]["warnings"] + kv[1]["infos"] + kv[1]["fixes"]),
+            kv[0],
+        ),
+    )
+
+    h_name = "Linter"
+    h_err = "🚨 Errors"
+    h_warn = "⚠️ Warnings"
+    h_info = "ℹ️ Infos"
+    h_fix = "🔧 Auto Fixes"
+
+    name_w = len(h_name)
+    for (t, _) in items:
+        if len(t) > name_w:
+            name_w = len(t)
+    err_w = len(h_err)
+    warn_w = len(h_warn)
+    info_w = len(h_info)
+    fix_w = len(h_fix)
+
+    lines = []
+    lines.append(
+        _pad_right(h_name, name_w) + " | " +
+        _pad_right(h_err, err_w) + " | " +
+        _pad_right(h_warn, warn_w) + " | " +
+        _pad_right(h_info, info_w) + " | " +
+        _pad_right(h_fix, fix_w),
+    )
+    lines.append(
+        "-" * name_w + "-+-" +
+        "-" * err_w + "-+-" +
+        "-" * warn_w + "-+-" +
+        "-" * info_w + "-+-" +
+        "-" * fix_w,
+    )
+    for (tool, r) in items:
+        lines.append(
+            _pad_right(tool, name_w) + " | " +
+            _pad_left(format_int_comma(r["errors"]), err_w) + " | " +
+            _pad_left(format_int_comma(r["warnings"]), warn_w) + " | " +
+            _pad_left(format_int_comma(r["infos"]), info_w) + " | " +
+            _pad_left(format_int_comma(r["fixes"]), fix_w),
+        )
+    return "\n".join(lines)
+
+def _groups_for_template(groups):
+    """Stringify integer fields the Jinja2 template interpolates."""
+    out = []
+    for g in groups:
+        out.append({
+            "icon": g["icon"],
+            "count": str(g["count"]),
+            "label": g["label"],
+            "label_singular": g["label_singular"],
+            "severity": g["severity"],
+            "rows": g["rows"],
+            "overflow": str(g["overflow"]) if g.get("overflow") else "",
+            "open": g["open"],
+        })
+    return out
+
+def _config_items(data):
+    """Build the Configuration row for the lint summary.
+
+    Surfaces `Strategy: <name>[ — filtered to N changed files]` directly
+    below "Last update" so the choice driving the pass/fail decision is
+    visible at-a-glance rather than buried in the details body.
+    """
+    strategy = data["lint"].get("strategy", "") or ""
+    if not strategy:
+        return []
+    value = strategy
+    if strategy in ("hold-the-line", "hold-the-file"):
+        changed_count = len(data["lint"].get("changed_files", []) or [])
+        if changed_count > 0:
+            value = "%s — filtered to %d changed files" % (strategy, changed_count)
+    return [{"key": "Strategy", "value": value}]
+
+def _build_details_data(data, render_ctx, status, links = None):
+    total = _sum_values(data["lint"].get("counts_by_severity", {}))
+    lint_aborted = ""
+    if status == "failed" and total == 0 and not data["lint"].get("build_failed"):
+        lint_aborted = "task exited with failure but no diagnostics were recorded"
+
+    # Distinct key from bazel's `aborted` (BES BUILD_ABORTED) so the lint-side
+    # warning and the bazel-side warning don't collide in the merged data dict
+    # when the underlying build aborts AND lint produces no diagnostics.
+    raw_suggestions = data["lint"].get("suggestions", []) or []
+
+    # Build a `(file, line) → {url, is_fix}` map driving the inline 💬
+    # link on each finding row. Two sources, merged in this order:
+    #
+    #   1. `data["lint"]["comment_urls"]` — every SARIF-derived
+    #      comment posted in this run. In "comments" mode that's
+    #      every finding (so every row gets a link); in "auto" /
+    #      "both" mode it's only the fix-bearing subset (only those
+    #      produce SARIF-derived comments). Whether a SARIF-derived
+    #      comment is "fix-bearing" depends on the diagnostic's own
+    #      `has_fix` flag — resolved at row-build time.
+    #   2. `data["lint"]["suggestions"][i].comment_url` for
+    #      correlated patch-derived suggestion records. If a finding
+    #      has both (same file+line), the patch-derived URL wins
+    #      because it lands on the suggestion-block comment with
+    #      the Apply button (always fix-bearing).
+    suggestion_links = {}
+    for k, v in (data["lint"].get("comment_urls") or {}).items():
+        if v:
+            # SARIF-derived URL — is_fix decided per-row via the
+            # diagnostic's has_fix flag, since the comment_urls map
+            # itself doesn't carry that information.
+            suggestion_links[k] = {"url": v, "is_fix": False}
+    for s in raw_suggestions:
+        if not s.get("correlated"):
+            continue
+        url = s.get("comment_url", "") or ""
+        if not url:
+            continue
+        file_ = s.get("file", "") or ""
+        line = s.get("end_line", 0) or s.get("start_line", 0) or 0
+        if file_ and line:
+            # Patch-derived suggestion comment — always fix-bearing.
+            suggestion_links[(file_, line)] = {"url": url, "is_fix": True}
+    counts_by_tool = data["lint"].get("counts_by_tool", {}) or {}
+    return {
+        # str() everywhere we interpolate an int — Jinja2 receives
+        # values as serde_json::Number for Python ints, which renders
+        # as `{"$serde_json::private::Number": "N"}`; stringify
+        # defensively at the template boundary.
+        "total": str(total),
+        "linters_chart": _linters_chart(data),
+        "linters_count": str(len(counts_by_tool)),
+        "groups": _groups_for_template(_group_diagnostics(data, suggestion_links)),
+        # All auto-fixes — correlated AND uncorrelated — land in one
+        # consolidated "Auto fixes" section. Correlated entries are
+        # also reachable via the per-finding 💬 fix link inline;
+        # listing them here too gives reviewers a single place to
+        # scan every fix the linter proposed, with severity badges
+        # and direct links to each comment thread.
+        "suggestions": _suggestions_for_template(raw_suggestions, data),
+        "build_failed": bool(data["lint"].get("build_failed")),
+        "lint_no_diagnostics_failure": lint_aborted,
+    }
+
+def _suggestions_for_template(suggestions, data):
+    """Decorate raw suggestion records with the fields the Jinja2
+    template renders directly (icon, label, line span, link text).
+
+    Severity resolution: takes the suggestion record's `severity`
+    field first (set during posting when correlation succeeded in
+    `_build_suggestion_comments`), then falls back to a late lookup
+    against `data["lint"]["diagnostics"]` at the suggestion's
+    `(file, end_line)` anchor. The late lookup catches cases where
+    the posting-time correlation didn't fire (e.g. the patch's
+    block end_line landed off the diagnostic line by one due to
+    multi-line hunks, or the diagnostic stream timing) — the
+    renderer always has the full strategy-filtered diagnostic set
+    to consult, so it's the natural place to resolve a missing
+    severity.
+
+    Sort key: severity rank first (error → warning → info), then
+    alphabetically by file. Uncorrelated suggestions (no severity
+    resolvable from either path) land at the bottom.
+    """
+
+    # (file, line, tool) → severity, drawn from the current run's
+    # strategy-filtered diagnostic set. Used to recover severity on
+    # suggestion records that came back uncorrelated. The tool is
+    # case-folded into the key so we only correlate within a single
+    # linter — a shellcheck patch's recovery lookup shouldn't pick
+    # up an eslint severity that happens to anchor the same line.
+    sev_by_anchor = {}
+    for d in data["lint"].get("diagnostics", []) or []:
+        f = d.get("file", "")
+        ln = d.get("line", 0) or 0
+        t = (d.get("tool", "") or "").lower()
+        if f and ln:
+            sev_by_anchor[(f, ln, t)] = d.get("severity", "") or ""
+
+    out = []
+    for s in suggestions:
+        sev = s.get("severity", "") or ""
+        correlated = bool(s.get("correlated"))
+
+        # Late correlation — if the suggestion didn't get a severity
+        # at posting time, look up the same-linter diagnostic at the
+        # same (file, anchor_line). Try end_line first (where the
+        # comment actually lands), then start_line for multi-line
+        # hunks.
+        if not sev:
+            f = s.get("file", "")
+            t = (s.get("tool", "") or "").lower()
+            for ln in (s.get("end_line", 0) or 0, s.get("start_line", 0) or 0):
+                if not ln:
+                    continue
+                found = sev_by_anchor.get((f, ln, t), "")
+                if found:
+                    sev = found
+                    correlated = True
+                    break
+        if sev:
+            icon = _SEVERITY_ICONS.get(sev, "❓")
+            sev_label = sev
+        else:
+            icon = "🔧"  # generic suggested-fix icon for uncorrelated
+            sev_label = "uncorrelated"
+        start = s.get("start_line", 0)
+        end = s.get("end_line", start)
+        if start and end and start != end:
+            line_span = "%d-%d" % (start, end)
+        else:
+            line_span = str(start)
+        out.append({
+            "icon": icon,
+            "tool": s.get("tool", "Linter"),
+            "rule_id": s.get("rule_id", "") or "",
+            "severity": sev_label,
+            "correlated": correlated,
+            "file": s.get("file", ""),
+            "line_span": line_span,
+            "comment_url": s.get("comment_url", "") or "",
+        })
+
+    # Sort: by severity rank, then alphabetically by file/line.
+    # Uncorrelated suggestions sink to the bottom (rank 99).
+    sev_rank = {"error": 0, "warning": 1, "info": 2}
+    return sorted(out, key = lambda r: (
+        sev_rank.get(r["severity"], 99),
+        r["file"],
+        r["line_span"],
+    ))
+
+def _annotation_message(d):
+    """Compose the annotation body GitHub renders next to the diff hunk.
+
+    Matches Marvin v1: pass the diagnostic message through verbatim. The
+    rule_id surfaces in the `title` caption above the message, so the body
+    stays focused on the diagnostic prose. When the message is empty (some
+    SARIF producers omit it), fall back to the rule_id and finally the tool
+    name so the annotation never renders blank.
+    """
+    msg = d.get("message", "") or ""
+    if msg:
+        body = msg
+    else:
+        body = d.get("rule_id", "") or d.get("tool", "") or "(no message)"
+    if len(body) > _ANNOTATION_MESSAGE_MAX:
+        body = body[:_ANNOTATION_MESSAGE_MAX - 3] + "..."
+    return body
+
+def _annotation_title(d):
+    rule = d.get("rule_id", "") or ""
+    tool = d.get("tool", "") or ""
+    title = rule if rule else tool
+    if not title:
+        return ""
+    if len(title) > _ANNOTATION_TITLE_MAX:
+        title = title[:_ANNOTATION_TITLE_MAX - 3] + "..."
+    return title
+
+def _changed_lines_index(data):
+    """Return {file: set(line_indices_0based)} for fast diff-region-membership lookup.
+
+    Uses `hunk_lines` (added + displayed-context lines) rather than
+    `lines` (added only) — the trait knob is `only_annotate_changed
+    REGIONS`, and a "region" is the displayed hunk window the
+    reviewer actually sees in the Files Changed tab, not just the
+    raw `+` lines. A finding one line below an edit (typical for
+    SC2164 flagging the `cd` on the line following an edited
+    comment) is part of the changed region from the reviewer's
+    perspective and should annotate. SARIF lines are 1-based;
+    `hunk_lines` are 0-based, so callers compare `(diag.line - 1)`.
+
+    Falls back to `lines` when `hunk_lines` is missing (older
+    fixtures, hand-built `data` dicts), so this stays compatible
+    with anything that hasn't been re-plumbed.
+    """
+    out = {}
+    for entry in data["lint"].get("changed_files", []) or []:
+        path = entry.get("file", "") or ""
+        if not path:
+            continue
+        region = entry.get("hunk_lines") or entry.get("lines", [])
+        out[path] = {ln: True for ln in region}
+    return out
+
+def compute_annotations(data, max_annotations = DEFAULT_MAX_ANNOTATIONS, only_changed_regions = False, include_fix_bearing = True, suppress_anchors = None):
+    """Build GitHub check-run annotation dicts from lint diagnostics.
+
+    Every SARIF finding gets an annotation when annotations are enabled,
+    regardless of whether the diagnostic also has an auto-fix posted
+    as a PR review comment. The two surfaces are complementary: the
+    annotation shows the diagnostic inline in the PR's Files Changed
+    tab; the auto-fix comment shows the
+    proposed replacement (with a Commit-suggestion button). For a
+    finding with both, reviewers can scan the annotation in the
+    diff and click through to the suggestion when they want to
+    apply it.
+
+    `include_fix_bearing` defaults to True for that reason. Set to
+    False at call time only when you genuinely need to suppress
+    fix-bearing diagnostics from annotations (e.g. a configuration
+    that wants comments-only output and explicitly excludes fix-
+    bearing from the annotation surface).
+
+    DORMANT-PREDICATE NOTE — `d["has_fix"]` is False for every
+    diagnostic from a rules_lint Go-errorformat linter today; see
+    the anchor on `lib/sarif.axl::_result_has_fix` (tracked:
+    https://github.com/aspect-build/rules_lint/issues/749). So `include_fix_bearing = False`
+    (used by `findings_destination = "auto"` on a PR) filters
+    nothing today and produces the same annotations as `True`. The
+    split only becomes observable once upstream rules_lint emits
+    `relatedLocations`, OR for a linter that already does (currently
+    only clippy via its separate JS formatter).
+
+    Annotations are GitHub's inline file/line markers in the Files
+    Changed tab and the check run detail panel.
+
+    Annotations are emitted in `_SEVERITY_ORDER` so the most severe findings
+    appear first if the cap kicks in. Within a severity bucket the original
+    accumulation order is preserved.
+
+    Args:
+        data: dict from init_data()
+        max_annotations: hard cap on returned annotations. Excess findings
+            are reflected in `total_eligible` so the caller can render an
+            "X not shown" notice.
+        only_changed_regions: when True, drop diagnostics whose (file,
+            line-1) isn't in the displayed hunk region — i.e. not in
+            the `hunk_lines` set populated by `detect_changed_files`.
+            Mirrors `GithubStatusChecks.args.only_annotate_changed_regions`.
+            "Region"
+            means the hunk window GitHub displays in Files Changed
+            (added lines + ~3 lines of context), so a finding adjacent
+            to an edit annotates; one ten lines away on an otherwise-
+            modified file does not. The filter is automatically
+            skipped when changed_files is empty (e.g. push to `main`,
+            manual run with no PR context).
+
+    Returns:
+        (annotations, total_eligible) — `annotations` is a list capped at
+        `max_annotations` items; `total_eligible` is the count of
+        diagnostics eligible to annotate (after the has_fix and
+        changed-region filters), used for the "X not shown" notice
+        when the cap kicks in.
+
+    Each annotation has the GitHub-compliant shape:
+        {
+            "path":              str,                    # repo-relative file
+            "start_line":        int,                    # 1-based inclusive
+            "end_line":          int,                    # 1-based inclusive
+            "annotation_level":  "notice"|"warning"|"failure",
+            "message":           str (≤ 4000 chars),
+            "title":             str (≤ 255 chars; rule_id or tool),
+        }
+    """
+    changed_lines = _changed_lines_index(data) if only_changed_regions else {}
+    apply_diff_filter = only_changed_regions and len(changed_lines) > 0
+    suppress = suppress_anchors or {}
+
+    by_sev = {}
+    total_eligible = 0
+    for d in data["lint"].get("diagnostics", []):
+        if d.get("has_fix") and not include_fix_bearing:
+            continue
+        line = d.get("line", 0) or 0
+        path = d.get("file", "") or ""
+        if not line or not path:
+            # Annotations require a file+line anchor; skip free-floating diagnostics.
+            continue
+
+        # Suppression set: anchors where a patch-derived auto-fix
+        # comment already lands. `findings_destination = "auto"`
+        # passes this set so a SARIF finding correlated to a posted
+        # auto-fix doesn't ALSO annotate at the same line — the
+        # reviewer would otherwise see the same issue twice (once as
+        # the suggestion comment, once as the inline annotation). In
+        # other modes ("both"/"comments"/"annotations") the set is
+        # empty and every finding annotates.
+        if (path, line) in suppress:
+            continue
+        if apply_diff_filter:
+            file_lines = changed_lines.get(path)
+            if not file_lines or (line - 1) not in file_lines:
+                continue
+        total_eligible += 1
+        sev = d.get("severity", "unknown") or "unknown"
+        by_sev.setdefault(sev, []).append(d)
+
+    annotations = []
+    for sev in _SEVERITY_ORDER:
+        for d in by_sev.get(sev, []):
+            if len(annotations) >= max_annotations:
+                return (annotations, total_eligible)
+            line = d.get("line", 0) or 0
+            end_line = d.get("end_line", line) or line
+            if end_line < line:
+                end_line = line
+            annotations.append({
+                "path": d.get("file", ""),
+                "start_line": line,
+                "end_line": end_line,
+                "annotation_level": _ANNOTATION_LEVEL_BY_SEVERITY.get(sev, "notice"),
+                "message": _annotation_message(d),
+                "title": _annotation_title(d),
+            })
+    return (annotations, total_eligible)
+
+def chunk_annotations(annotations, batch_size = ANNOTATIONS_PER_BATCH):
+    """Split an annotations list into batches respecting GitHub's per-call cap.
+
+    GitHub's check-runs API rejects requests with more than 50 annotations.
+    Callers PATCH the first batch with the terminal output and append the
+    rest with follow-up PATCHes (annotations on PATCH are appended, not
+    replaced).
+    """
+    if batch_size <= 0:
+        return [annotations] if annotations else []
+    out = []
+    i = 0
+    n = len(annotations)
+    for _ in range(n):
+        if i >= n:
+            break
+        out.append(annotations[i:i + batch_size])
+        i += batch_size
+    return out
+
+def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None):
+    """Render title, summary, and text for a lint check run.
+
+    Shape matches bazel_results.render_check_output so the GithubStatusChecks
+    feature dispatch can call either one interchangeably based on
+    `task_update.kind`.
+    """
+    t = templates or {}
+    run_date = format_run_date(ctx, data.get("start_time_ms", 0))
+
+    # Reuse bazel_results' summary builder — same metadata / VCS / runner /
+    # trigger / Aspect Web UI / CI host rows. Bazel-specific fields like
+    # targets_total are zero in lint data so those row items drop out
+    # naturally.
+    summary_data = build_summary_data(
+        ctx,
+        data,
+        status,
+        render_ctx,
+        links,
+        metadata_keys,
+        run_date = run_date,
+        config_items = _config_items(data),
+    )
+    finish_date = format_run_date(ctx, data.get("finish_time_ms", 0))
+
+    # Bazel context (Bazel targets · Bazel metrics · Bazel invocation ·
+    # Bazel workspace status · Bazel metadata · Bazel command line ·
+    # Bazel options parsed · Workflows runner metadata) — populated when
+    # the task drives bazel via process_event. Lint runs an internal
+    # `bazel build` for the lint aspects, so include_bazel_targets stays
+    # True here — reviewers might want to inspect the bazel-targets
+    # section for the underlying invocation.
+    shared_data = build_details_data(
+        data,
+        links,
+        render_ctx = render_ctx,
+        status = status,
+        start_date = run_date,
+        finish_date = finish_date,
+        std = ctx.std,
+        task_phases = ctx.task.phases(),
+        task_active = active_phase_data(ctx),
+        task_elapsed_ms = ctx.task.elapsed_ms,
+        include_bazel_targets = True,
+    )
+    details_data = dict(shared_data)
+    details_data.update(_build_details_data(data, render_ctx, status, links = links))
+
+    summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
+    details_tmpl = t.get("details") or _DETAILS_TEMPLATE
+
+    summary_text = ctx.template.jinja2(summary_tmpl, data = summary_data)
+    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    # Trim cascade: if we overflow GitHub's hard limit, drop detail rows
+    # progressively. Reserve the by-severity / by-tool summaries (small, high
+    # signal) and trim the per-group rows first.
+    if len(details_text) > _DETAILS_LIMIT:
+        # Halve per-group row counts until we fit (or groups are empty).
+        for _ in range(10):
+            if len(details_text) <= _DETAILS_LIMIT:
+                break
+            trimmed = False
+            new_groups = []
+            for g in details_data["groups"]:
+                rows = g["rows"]
+                if len(rows) > 2:
+                    half = max(1, len(rows) // 2)
+                    kept = rows[:half]
+                    missing = g["count"] - len(kept)
+                    g = dict(g)
+                    g["rows"] = kept
+                    g["overflow"] = missing if missing > 0 else 0
+                    trimmed = True
+                new_groups.append(g)
+            if not trimmed:
+                break
+            details_data["groups"] = new_groups
+            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    if len(details_text) > _DETAILS_LIMIT:
+        # Last resort: drop the group tables entirely; keep summary counts.
+        details_data["groups"] = []
+        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    target_pattern = render_ctx.get("targets", "") if render_ctx else ""
+    task_name = render_ctx.get("task_name", "") if render_ctx else ""
+    if not target_pattern:
+        target_pattern = data.get("target_pattern", "")
+    return {
+        "title": lint_summary_title(
+            data,
+            status,
+            target_pattern = target_pattern,
+            task_name = task_name,
+        ),
+        "summary": summary_text,
+        "text": details_text,
+    }

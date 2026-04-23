@@ -10,8 +10,36 @@ CI-specific upload primitives live in their respective lib files:
 
 load("./buildkite.axl", "buildkite")
 load("./circleci.axl", "circleci")
+load("./environment.axl", "warn")
 load("./github.axl", "github")
 load("./tar.axl", "tar_create", "zip_create")
+
+ArtifactsTrait = trait(
+    # CI-wide browse URL for all artifacts uploaded during the current job.
+    # GithubStatusChecks surfaces this as the "Artifacts" link in the check run.
+    #   GitHub:    {server}/{repo}/actions/runs/{run_id}                     (run page, artifacts section)
+    #   Buildkite: {BUILDKITE_BUILD_URL}/steps/canvas?sid={step}&tab=artifacts
+    #   CircleCI:  {CIRCLE_BUILD_URL}#artifacts                              (legacy UI; modern UI URL is harder to construct)
+    #   GitLab:    {CI_PROJECT_URL}/-/jobs/{CI_JOB_ID}/artifacts/browse
+    # Empty until the first successful upload (or when ArtifactUpload is disabled).
+    artifacts_browse_url = attr(str, default = ""),
+
+    # Per-kind direct download URLs. Keys: "testlogs", "profile", "execlog", "bep".
+    # Populated only when a stable per-file URL can be constructed:
+    #   GitHub:    {run}/artifacts/{artifactId}   (from FinalizeArtifact response)
+    #   GitLab:    Generic Packages download URL
+    #   CircleCI:  stable output.circle-artifacts.com URL
+    # Buildkite download URLs expire — not recorded here.
+    artifact_urls = attr(dict, default = {}),
+
+    # Per-label, per-file download URLs for individual test output files.
+    # Set by ArtifactUpload on per-file upload CI platforms (CircleCI currently).
+    # {} on GitHub/Buildkite/GitLab where only a single archive is uploaded.
+    # Key: Bazel target label (e.g. "//foo:bar_test")
+    # Value: dict mapping file basename ("test.log", "test.xml", ...) to its
+    #        stable direct download URL.
+    testlogs_label_urls = attr(dict, default = {}),
+)
 
 def detect_ci(env):
     """Detect CI platform from environment.
@@ -99,11 +127,11 @@ _gitlab = struct(
 # Testlog upload strategies
 # =============================================================================
 
-def _print_upload_error(group, err):
+def _print_upload_error(ctx, group, err):
     """Print an upload error at most once per group (deduplicates noisy repeated errors)."""
     seen = group.get("_printed_errors") or {}
     if err not in seen:
-        print("artifact upload error: " + err)
+        warn(ctx.std, "Artifact upload error: " + err)
         seen[err] = True
         group["_printed_errors"] = seen
 
@@ -136,7 +164,7 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name, final = False):
     mtree = "\n".join(lines) + "\n"
 
     if not tar_create(ctx, archive_path, mtree):
-        print("artifact upload: failed to create archive for " + name)
+        warn(ctx.std, "Artifact upload: failed to create archive for " + name)
         return False
 
     if final:
@@ -160,7 +188,7 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name, final = False):
         if not final:
             group["version"] -= 1
         for err in result["errors"]:
-            _print_upload_error(group, err)
+            _print_upload_error(ctx, group, err)
         return False
 
 def _upload_testlogs_zip(ctx, provider, group, entries, name, final = False):
@@ -189,7 +217,7 @@ def _upload_testlogs_zip(ctx, provider, group, entries, name, final = False):
     mtree = "\n".join(lines) + "\n"
 
     if not zip_create(ctx, archive_path, mtree):
-        print("artifact upload: failed to create zip for " + name)
+        warn(ctx.std, "Artifact upload: failed to create zip for " + name)
         return False
 
     if final:
@@ -213,7 +241,7 @@ def _upload_testlogs_zip(ctx, provider, group, entries, name, final = False):
         if not final:
             group["version"] -= 1
         for err in result["errors"]:
-            _print_upload_error(group, err)
+            _print_upload_error(ctx, group, err)
         return False
 
 def _upload_testlogs_buildkite(ctx, group, entries, name):
@@ -253,7 +281,7 @@ def _upload_testlogs_buildkite(ctx, group, entries, name):
         group["last_count"] = count
         return True
 
-    print("artifact upload: buildkite-agent exit " + str(status.code))
+    warn(ctx.std, "Artifact upload failed — buildkite-agent exited with code " + str(status.code) + ".")
     return False
 
 def _upload_testlogs_per_file(ctx, provider, group, entries, name):
@@ -287,7 +315,7 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
             any_success = True
         else:
             for err in result["errors"]:
-                _print_upload_error(group, err)
+                _print_upload_error(ctx, group, err)
             break
 
     return any_success

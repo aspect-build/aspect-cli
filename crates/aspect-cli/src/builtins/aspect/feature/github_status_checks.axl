@@ -4,11 +4,17 @@ Creates and updates a GitHub check run reflecting the live state of a task.
 Only runs when the CI environment variable is set — skips silently in local
 developer workflows.
 
-Rendering is delegated to the kind-specific library:
-  kind="bazel_results" → bazel_results.render_check_output()
+Rendering is delegated to the kind-specific library via `task_update.kind`:
 
-Future kinds (e.g. "delivery_results") add a branch in _task_update and a
-corresponding render_check_output() function in their own library.
+  bazel_results    → build, test
+  lint_results     → lint
+  format_results   → format
+  gazelle_results  → gazelle
+  delivery_results → delivery
+
+The per-kind dispatch table + helpers live in
+`lib/check_dispatch.axl` so they stay in lockstep with the parallel
+`BuildkiteAnnotations` feature. New task kinds plug in there.
 
 Templates can be customized per-task via GitHubStatusChecksTrait:
 
@@ -21,16 +27,59 @@ Templates can be customized per-task via GitHubStatusChecksTrait:
         gh.metadata_keys = ["*"]
 """
 
-load("../lib/bazel_results.axl", "compute_reproducer_command", "init_results", "now_ms", "render_check_output")
+load("../lib/artifacts.axl", "ArtifactsTrait")
+load(
+    "../lib/bazel_results.axl",
+    "now_ms",
+    "render_bes_url",
+    "resolve_aspect_url",
+)
+load(
+    "../lib/check_dispatch.axl",
+    "apply_artifact_links",
+    "kind_for_task",
+    "make_render_ctx",
+    "renderer_for_kind",
+    "should_emit_update",
+)
+load("../lib/checkrun.axl", "GitHubCheckRunTrait")
+load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
-load("../traits.axl", "ArtifactsTrait", "GitHubStatusChecksTrait", "TaskLifecycleTrait", "TaskUpdate")
+load("../lib/lifecycle.axl", "TaskLifecycleTrait", "TaskUpdate")
+load(
+    "../lib/lint_results.axl",
+    LINT_ANNOTATIONS_PER_BATCH = "ANNOTATIONS_PER_BATCH",
+    lint_chunk_annotations = "chunk_annotations",
+    lint_compute_annotations = "compute_annotations",
+)
+load("../lint.axl", "LintTrait")
 
-def _to_display_name(name):
-    """Convert a snake_case task name to a CamelCase display name.
+# Configures the GitHub status check output templates for a task.
+# By default the GithubStatusChecks feature uses its built-in Jinja2 templates.
+# Operators can override individual templates in their config.axl:
+#
+#   def config(ctx: ConfigContext):
+#       gh = ctx.traits[GitHubStatusChecksTrait]
+#       gh.templates["summary"] = """my custom {{ status_label }} template"""
+#
+# Available template keys: "summary", "details"
+GitHubStatusChecksTrait = trait(
+    # Map of template overrides. Empty dict → use feature defaults.
+    templates = attr(dict, default = {}),
 
-    Examples: "build" → "Build", "my_task" → "MyTask", "test_check_run" → "TestCheckRun"
-    """
-    return "".join([w[0].upper() + w[1:] for w in name.split("_") if w])
+    # Additional BES build_metadata keys to surface in the check run summary,
+    # beyond the built-in set (BRANCH, COMMIT_SHA, TAG, COMMIT_MESSAGE).
+    #
+    # Use ["*"] to show ALL metadata keys from the BES stream.
+    # Users inject custom keys via --bes_metadata=MY_KEY=value or
+    # --build_metadata=MY_KEY=value on their Bazel invocation.
+    #
+    # Example — show a custom deploy environment and workspace name:
+    #   gh.metadata_keys = ["DEPLOY_ENV", "WORKSPACE"]
+    metadata_keys = attr(list[str], default = []),
+)
+
+_LOG = feature_logger("GitHub status checks")
 
 _SUBJECT_MAX_LEN = 60
 
@@ -89,40 +138,26 @@ def _collect_ci_links(env, results_base_url):
         ci_label = "GitLab CI"
         ci_url = env.var("CI_JOB_URL") or ""
 
-    return {"ci_label": ci_label, "ci_url": ci_url, "aspect_url": "", "results_base_url": results_base_url}
-
-def _resolve_aspect_url(links, results):
-    """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
-
-    The Aspect Web UI indexes invocations by the UUID the gRPC sink
-    (stream_sink.rs) uses when it calls PublishBuildToolEventStream. Because
-    we read BES events from Bazel via a unix socket and forward the stream
-    before `build_started` arrives with Bazel's own UUID, the sink makes up
-    its own UUID up-front and uses *that* as the stream-level invocation_id
-    the backend sees. We key the URL on `sink_invocation_id`.
-
-    Falls back to Bazel's `build_started.uuid` for setups that bypass the
-    sink entirely (direct --bes_results_url to a non-Aspect backend).
-
-    Treats ASPECT_WORKFLOWS_BES_RESULTS_URL like Bazel treats its own
-    `--bes_results_url`: the full URL prefix to append the invocation ID to,
-    verbatim. Whatever path segments the deployer baked in (or didn't) are
-    respected. The Aspect Web UI uses `{base}/{id}` with no `/invocations/`
-    segment, so ASPECT_WORKFLOWS_BES_RESULTS_URL should be the bare host
-    (e.g. `https://app.oss.aspect.build/`).
-    """
-    base = links.get("results_base_url", "")
-    if not base:
-        return ""
-    inv_id = results.get("sink_invocation_id", "") or results.get("invocation_id", "")
-    if not inv_id:
-        return ""
-    return (base if base.endswith("/") else base + "/") + inv_id
+    return {
+        "ci_label": ci_label,
+        "ci_url": ci_url,
+        "aspect_url": "",
+        "bes_url": "",
+        "results_base_url": results_base_url,
+    }
 
 def _github_status_checks(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
     gh_trait = ctx.traits[GitHubStatusChecksTrait]
     artifacts_trait = ctx.traits[ArtifactsTrait]
+
+    # Populated below with the check-run's html_url for sibling
+    # features (e.g. GithubStatusComments) to deep-link into.
+    checkrun_trait = ctx.traits[GitHubCheckRunTrait]
+
+    # Captured at config time per feature instance. Only consulted
+    # when handling kind="lint_results" updates; harmless on others.
+    lint_trait = ctx.traits[LintTrait]
 
     mode = ctx.args.mode
     is_ci = bool(ctx.std.env.var("CI"))
@@ -134,18 +169,7 @@ def _github_status_checks(ctx: FeatureContext):
 
     # mode == "always" falls through
 
-    # Gate on github.com. ASPECT_VCS_URL pointing at a non-github.com host
-    # (Enterprise, GitLab, Bitbucket) is rejected loudly — the Aspect GitHub
-    # App only works for github.com, so silently no-op would be confusing.
-    # Self-hosted GitHub Enterprise support is planned via a user-provided
-    # token + dynamically derived API base URL.
-    vcs_url = ctx.std.env.var("ASPECT_VCS_URL") or ""
-    if vcs_url and not github.is_public_github_url(vcs_url):
-        host = github.extract_host(vcs_url)
-        print("GitHub status checks: ASPECT_VCS_URL points at '%s', not github.com." % host)
-        print("  This feature currently only supports repositories hosted on github.com")
-        print("  via the Aspect GitHub App. Support for GitHub Enterprise (user-provided")
-        print("  token + custom API base URL) is planned. Skipping check-run creation.")
+    if github.bail_if_not_public_github(ctx.std, _LOG, "Skipping check-run creation."):
         return
 
     sha = detect_commit_sha(ctx.std)
@@ -153,12 +177,11 @@ def _github_status_checks(ctx: FeatureContext):
     if not sha or not owner or not repo:
         return
 
-    _ci_links_base = _collect_ci_links(
-        ctx.std.env,
-        ctx.std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL") or "",
-    )
+    _ci_links_base = _collect_ci_links(ctx.std.env, workflows_results_url(ctx.std))
 
     min_update_interval_ms = ctx.args.min_update_interval_ms
+
+    only_annotate_changed_regions = ctx.args.only_annotate_changed_regions
 
     # Feature-private state dict closed over by all hook functions.
     _state = {}
@@ -167,34 +190,21 @@ def _github_status_checks(ctx: FeatureContext):
     # Shared helpers
     # -------------------------------------------------------------------------
 
-    def _make_render_ctx():
-        """Build the render_ctx dict passed to kind-specific render functions.
-
-        Free variable `ctx` in this closure refers to the outer FeatureContext,
-        which has no `task` attribute — so the task display name is stashed in
-        _state at task_started time (from the TaskContext) and read from there.
-        """
-        return {
-            "triggered_by": _state.get("_triggered_by", ""),
-            "targets": _state.get("_subject") or "//...",
-            "started_ms": _state.get("_started_ms", 0),
-            "ended_ms": _state.get("_ended_ms", 0),
-            "progress": _state.get("_progress", ""),
-            # Used in the check run title: "<Task Name> <Subject> <State>"
-            "task_display_name": _state.get("_task_display_name", ""),
-        }
-
-    def _make_links(results):
-        """Build the links dict from CI env + BES invocation URL + artifact URLs."""
+    def _make_links(data):
+        """Build the links dict from CI env + Aspect/BES invocation URLs + artifact URLs."""
         links = dict(_state.get("_ci_links") or _ci_links_base)
-        links["aspect_url"] = _resolve_aspect_url(links, results)
 
-        # Surface artifact URLs from ArtifactUpload feature if available.
-        links["artifacts_browse_url"] = artifacts_trait.artifacts_browse_url or ""
-        links["artifact_urls"] = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
+        # Aspect Web UI link (sink_invocation_id keyed; Aspect-specific).
+        links["aspect_url"] = resolve_aspect_url(links, data)
 
-        # Per-file label URLs (CircleCI/GitLab per-file uploads only). Empty on GitHub/Buildkite.
-        links["testlogs_label_urls"] = dict(artifacts_trait.testlogs_label_urls) if artifacts_trait.testlogs_label_urls else {}
+        # Generic BES results link from `--bes_results_url` + Bazel's
+        # invocation_id (captured from the BES stream). Independent
+        # of the Aspect link — both surface when configured.
+        links["bes_url"] = render_bes_url(data)
+
+        # Per-task check-run page URL.
+        links["check_run_url"] = checkrun_trait.html_url or ""
+        apply_artifact_links(links, artifacts_trait)
         return links
 
     def _create_check_run(ctx):
@@ -209,9 +219,8 @@ def _github_status_checks(ctx: FeatureContext):
         _state["_started_ms"] = now_ms(ctx)
         _state["_triggered_by"] = _detect_triggered_by(ctx.std.env)
 
-        # Authenticate first so we can reuse the Aspect App token to resolve the
-        # running job URL. actions.read is only needed for the job deep-link —
-        # the API call fails gracefully if the App isn't granted the permission.
+        # actions.read is for the job deep-link only — the API call
+        # fails gracefully if the App isn't granted the permission.
         auth_reason = {}
         token = github.authenticate(
             ctx,
@@ -221,7 +230,7 @@ def _github_status_checks(ctx: FeatureContext):
             _reason = auth_reason,
         )
         if not token:
-            print("GitHub status check: authentication failed for %s/%s — %s" % (
+            _LOG.warn(ctx.std, "Authentication failed for %s/%s — %s" % (
                 owner,
                 repo,
                 auth_reason.get("reason", "unknown"),
@@ -229,9 +238,8 @@ def _github_status_checks(ctx: FeatureContext):
             return
         _state["_github_token"] = token
 
-        # Upgrade the GitHub Actions CI link from the run page to the specific
-        # job page (/actions/runs/{run_id}/job/{job_id}) via a single API call.
-        # Silently falls back to the run URL if the App lacks actions:read.
+        # Upgrade the CI link from the run page to the specific job
+        # page; falls back to the run URL if the App lacks actions:read.
         if ctx.std.env.var("GITHUB_ACTIONS"):
             run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
             job_url = github.resolve_current_job_url(ctx, token, owner, repo, run_id)
@@ -239,41 +247,90 @@ def _github_status_checks(ctx: FeatureContext):
                 _ci_links_base["ci_url"] = job_url
         _state["_ci_links"] = _ci_links_base
 
-        initial_output = render_check_output(
+        # No `task_update.kind` yet — pick by task name, falling
+        # back to bazel_results for unknown tasks.
+        initial_kind = kind_for_task(ctx.task.name)
+        initial_renderer = renderer_for_kind(initial_kind) or renderer_for_kind("bazel_results")
+        initial_output = initial_renderer.render(
             ctx,
-            init_results(),
+            initial_renderer.init(),
             "running",
-            _make_render_ctx(),
+            make_render_ctx(_state, default_targets = "//..."),
             dict(_ci_links_base),
             gh_trait.templates,
             gh_trait.metadata_keys,
         )
 
-        check_name = "aspect / %s (%s)" % (_to_display_name(ctx.task.name), ctx.task.key)
+        # Match the CLI invocation name (`aspect <name>`) so the row
+        # in the PR's Checks tab reads as a command, not a heading.
+        check_name = "aspect / %s (%s)" % (ctx.task.name, ctx.task.key)
         result = github.status_checks.create(ctx, token, owner, repo, sha, check_name)
         if not result["success"]:
-            print("GitHub status check: failed to create check run: %s" % result.get("error", "unknown error"))
+            _LOG.warn(ctx.std, "Failed to create check run: %s" % result.get("error", "unknown error"))
             return
         _state["_check_run_id"] = result["check_run_id"]
+
+        # Publish on GitHubCheckRunTrait so sibling features (today:
+        # GithubStatusComments) can deep-link to this per-task check
+        # run. Consumers tolerate the empty case.
+        checkrun_trait.html_url = result.get("html_url") or ""
         github.status_checks.update(ctx, token, owner, repo, _state["_check_run_id"], output = initial_output)
 
-    def _complete_check_run(ctx, status, output = None):
-        """Complete the check run. Guards against double-completion — first call wins."""
-        if _state.get("_completed"):
-            return
+    def _push_status(ctx, status, final, output = None):
+        """Send a check-run update to GitHub for the given `(status, final)`.
+
+        Idempotent re: conclusion. Tracks `_state["_gh_conclusion"]` so:
+
+          - `status == "failing"` (live, hard fail already detected):
+            early-complete the check run with `conclusion="failure"` so
+            the PR shows the red ❌ as soon as we have signal — users
+            get feedback without waiting for `build.wait()`.
+          - Live `running` / `warning`: PATCH output only, no conclusion.
+          - Terminal `passed`: complete with `success`. (After an early
+            `failing` push, this flips conclusion back — GitHub's
+            check-runs PATCH allows this for retry recovery.)
+          - Terminal `warning`: complete with `neutral`. GitHub's native
+            verdict for "ran and finished, with non-fatal findings" —
+            used for lint warnings, format diffs, gazelle updates,
+            delivery warns, test flakes.
+          - Terminal `failed` / `aborted`: complete with `failure`.
+        """
         token = _state.get("_github_token")
         check_run_id = _state.get("_check_run_id")
         if not token or not check_run_id:
             return
-        _state["_completed"] = True
 
-        print("GitHub status check: completing run %s" % check_run_id)
-        if status == "passed":
-            result = github.status_checks.complete(ctx, token, owner, repo, check_run_id, output = output)
-        else:
-            result = github.status_checks.fail(ctx, token, owner, repo, check_run_id, output = output)
-        if not result["success"]:
-            print("GitHub status check: complete/fail API call failed: %s" % result.get("error", "unknown"))
+        # (status, final) → conclusion map. None = no conclusion change.
+        desired = None
+        if status == "failing":
+            desired = "failure"  # early-fail: don't wait for terminal
+        elif final:
+            if status == "failed" or status == "aborted":
+                desired = "failure"
+            elif status == "warning":
+                desired = "neutral"
+            elif status == "passed":
+                desired = "success"
+
+        current = _state.get("_gh_conclusion")
+        if desired and desired != current:
+            label = "early" if status == "failing" else "final"
+            _LOG.trace("setting conclusion=%s on run %s (%s)" %
+                       (desired, check_run_id, label))
+            if desired == "success":
+                result = github.status_checks.complete(ctx, token, owner, repo, check_run_id, output = output)
+            elif desired == "neutral":
+                result = github.status_checks.neutral(ctx, token, owner, repo, check_run_id, output = output)
+            else:
+                result = github.status_checks.fail(ctx, token, owner, repo, check_run_id, output = output)
+            if result["success"]:
+                _state["_gh_conclusion"] = desired
+            else:
+                _LOG.warn(ctx.std, "Complete/fail API call failed: %s" % result.get("error", "unknown"))
+            return
+
+        # PATCH on a completed run keeps the existing conclusion.
+        github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output)
 
     # -------------------------------------------------------------------------
     # TaskLifecycleTrait hooks
@@ -281,64 +338,196 @@ def _github_status_checks(ctx: FeatureContext):
 
     def _task_started(ctx, subject):
         subject_str = (" " + subject) if subject else ""
-        print("GitHub status check: aspect/%s (%s) — %s%s" % (ctx.task.name, ctx.task.key, _to_display_name(ctx.task.name), subject_str))
+        _LOG.trace("aspect/%s (%s)%s" % (ctx.task.name, ctx.task.key, subject_str))
         _state["_subject"] = _truncate_subject(subject)
 
-        # Stash the display name so _make_render_ctx can include it in the title
-        # without needing to reach through a FeatureContext (which has no .task).
-        _state["_task_display_name"] = _to_display_name(ctx.task.name)
+        # Stash for the shared `make_render_ctx` helper (FeatureContext
+        # has no .task). The title's leading emoji is derived from the
+        # status at compose time (verdict, not kind).
+        _state["_task_name"] = ctx.task.name
         _create_check_run(ctx)
+
+    def _lint_annotation_plan(ctx):
+        """Decide whether to post annotations for this lint run, and
+        whether fix-bearing diagnostics should be included.
+
+        Returns (enabled, include_fix_bearing).
+
+        Cases:
+          findings_destination == "annotations" — always enabled, all
+            diagnostics annotate (suggestions are dropped; that's the
+            tradeoff this mode accepts).
+          findings_destination == "comments"    — never enabled. Every
+            diagnostic goes to a review comment via GithubLintComments.
+          findings_destination == "auto"        — on a PR, fix-bearing
+            diagnostics are SKIPPED at the annotation surface so each
+            finding lands on exactly one surface (fix-bearing →
+            suggestion comment; non-fix → annotation). Off a PR
+            comments can't be posted, so every finding annotates —
+            otherwise fix-bearing findings would have nowhere to land.
+            DORMANT-SPLIT — `has_fix` is False for every rules_lint
+            Go-errorformat linter today (see anchor on
+            `lib/sarif.axl::_result_has_fix`; tracked in
+            https://github.com/aspect-build/rules_lint/issues/749), so on-PR "auto" currently
+            annotates the same set as "both" in practice. The split
+            becomes observable once upstream rules_lint emits SARIF
+            `relatedLocations`.
+          findings_destination == "both"        — enabled, all
+            diagnostics annotate including fix-bearing ones. Comments
+            ALSO render suggested-fix comments for fix-bearing
+            findings — both surfaces show the finding (annotation in
+            Files Changed; suggestion comment with the Apply-suggestion
+            button). Useful when surface coverage matters more than
+            de-duplication.
+        """
+        dest = lint_trait.findings_destination
+        if dest == "comments":
+            return (False, False)
+        if dest == "auto":
+            # On a PR, fix-bearing → comments only; annotate the
+            # non-fix tail. Off a PR there's no comments surface, so
+            # annotate everything to avoid losing fix-bearing findings.
+            pr, _ = github.detect_pr(ctx.std)
+            return (True, False) if pr else (True, True)
+
+        # "annotations" and "both" — every SARIF finding annotates,
+        # including ones that also have a suggested-fix comment.
+        return (True, True)
+
+    def _send_extra_annotation_batches(ctx, token, check_run_id, output, batches):
+        """Append annotation batches beyond the first via subsequent PATCHes.
+
+        GitHub limits each check-runs request to 50 annotations; additional
+        batches are appended (not replaced) when sent on follow-up PATCHes.
+        Each PATCH still carries title+summary so the rendered check run
+        stays consistent if a viewer hits one of these intermediate states.
+        """
+        if not batches:
+            return
+
+        # Strip annotations and text from the carrier output so the body only
+        # gets written once (on the terminal complete) and we don't waste API
+        # bytes re-sending the (potentially 65KB) text on every PATCH.
+        carrier = {
+            "title": output.get("title", ""),
+            "summary": output.get("summary", ""),
+        }
+        for batch in batches:
+            patch = dict(carrier)
+            patch["annotations"] = batch
+            result = github.status_checks.update(
+                ctx,
+                token,
+                owner,
+                repo,
+                check_run_id,
+                output = patch,
+            )
+            if not result["success"]:
+                _LOG.warn(ctx.std, "Annotation batch PATCH failed: %s" %
+                                   result.get("error", "unknown"))
+
+                # Stop on first failure — partial batching is fine; a later
+                # rerun will recreate the check run with full annotations.
+                return
 
     def _task_update(ctx, update):
         status = update.status
-        final = status in ("passed", "failed")
+        final = update.final
 
-        _state["_progress"] = update.progress
+        # Keep the most recent phase label when the caller didn't set
+        # one (e.g. live BES-data refreshes with empty progress styles).
+        # GHSC renders the narrative `body` form.
+        progress_text = update.progress.body
+        if progress_text:
+            _state["_progress"] = progress_text
 
         token = _state.get("_github_token")
         check_run_id = _state.get("_check_run_id")
         if not token or not check_run_id:
             return
 
-        # Dispatch to the kind-specific renderer. Unknown kinds are a no-op until
-        # a renderer is registered for them.
-        if update.kind != "bazel_results":
+        renderer = renderer_for_kind(update.kind)
+        if renderer == None:
             return
-        results = update.data.get("results", init_results())
+        data = update.data if update.data else renderer.init()
 
-        # Compute the `aspect <task> <labels>` reproducer command and stash it
-        # alongside the results dict for the renderer. The fields go into a
-        # local copy because update.data["results"] is frozen on the final
-        # update (TaskUpdate is a record), so we can't mutate `results` itself.
-        repro_cmd, repro_total = compute_reproducer_command(results, ctx.task.name)
-        results = dict(results)
-        results["reproducer_command"] = repro_cmd
-        results["reproducer_command_total"] = repro_total
-
-        # Set ended_ms before rendering so the terminal check run reflects the
-        # final duration. Non-final updates don't populate ended_ms.
-        if final:
-            _state["_ended_ms"] = now_ms(ctx)
-        else:
-            now = now_ms(ctx)
-            if now - _state.get("_last_update_ms", 0) < min_update_interval_ms:
+        # Bypass the throttle on conclusion-flipping updates (early
+        # "failing", terminal verdicts) and on caller-priority updates
+        # (status transitions the user shouldn't wait for, e.g. the
+        # first BES event flipping off "Spawning bazel build…").
+        desired_conclusion = None
+        if status == "failing":
+            desired_conclusion = "failure"
+        elif final:
+            if status == "failed" or status == "aborted":
+                desired_conclusion = "failure"
+            elif status == "warning":
+                desired_conclusion = "neutral"
+            elif status == "passed":
+                desired_conclusion = "success"
+        is_conclusion_transition = (
+            desired_conclusion != None and
+            desired_conclusion != _state.get("_gh_conclusion")
+        )
+        if not (is_conclusion_transition or update.priority):
+            if not should_emit_update(_state, now_ms(ctx), min_update_interval_ms, final):
                 return
-            _state["_last_update_ms"] = now
+        elif final:
+            # The terminal render needs _ended_ms for duration.
+            _state["_ended_ms"] = now_ms(ctx)
 
-        output = render_check_output(
+        output = renderer.render(
             ctx,
-            results,
+            data,
             status,
-            _make_render_ctx(),
-            _make_links(results),
+            make_render_ctx(_state, default_targets = "//..."),
+            _make_links(data),
             gh_trait.templates,
             gh_trait.metadata_keys,
         )
 
-        if final:
-            _complete_check_run(ctx, status, output = output)
+        # Only emit annotations on the terminal update — GitHub
+        # appends across PATCHes, so per-tick emission duplicates them.
+        extra_batches = []
+        if final and update.kind == "lint_results":
+            ann_enabled, include_fix_bearing = _lint_annotation_plan(ctx)
         else:
-            github.status_checks.update(ctx, token, owner, repo, check_run_id, output = output)
+            ann_enabled, include_fix_bearing = (False, False)
+        if ann_enabled:
+            # Suppress annotations at anchors where a patch-derived
+            # auto-fix comment already lands — but only in "auto"
+            # mode, which is explicitly the "split surfaces; avoid
+            # duplication" choice. "both" wants the duplication,
+            # "annotations" doesn't have comments to dedupe against,
+            # and "comments" has no annotations at all.
+            suppress_anchors = {}
+            if lint_trait.findings_destination == "auto":
+                for s in (data.get("lint", {}) or {}).get("suggestions", []) or []:
+                    if not s.get("correlated"):
+                        continue
+                    f = s.get("file", "") or ""
+                    ln = (s.get("end_line", 0) or 0) or (s.get("start_line", 0) or 0)
+                    if f and ln:
+                        suppress_anchors[(f, ln)] = True
+            (annotations, total_eligible) = lint_compute_annotations(
+                data,
+                only_changed_regions = only_annotate_changed_regions,
+                include_fix_bearing = include_fix_bearing,
+                suppress_anchors = suppress_anchors,
+            )
+            if annotations:
+                batches = lint_chunk_annotations(annotations, LINT_ANNOTATIONS_PER_BATCH)
+                output = dict(output)
+                output["annotations"] = batches[0]
+                extra_batches = batches[1:]
+                if total_eligible > len(annotations):
+                    _LOG.info(ctx.std, "Capping lint annotations at %d (of %d eligible)" %
+                                       (len(annotations), total_eligible))
+
+        _push_status(ctx, status, final, output = output)
+        if final and extra_batches:
+            _send_extra_annotation_batches(ctx, token, check_run_id, output, extra_batches)
 
     lifecycle.task_started.append(_task_started)
     lifecycle.task_update.append(_task_update)
@@ -352,9 +541,13 @@ GithubStatusChecks = feature(
             values = ["ci-only", "local-only", "always"],
             description = "When to create GitHub Status Checks: ci-only (default), local-only, or always",
         ),
-        # Minimum milliseconds between live check run updates during a build.
-        # Increase this if you are using a PAT with the standard 5000 req/hr limit.
-        # GitHub App tokens have higher limits so 1000ms is a safe default.
-        "min_update_interval_ms": args.int(default = 1000),
+        "min_update_interval_ms": args.int(
+            default = 1000,
+            description = "Minimum milliseconds between live check-run PATCH calls during a task. Default 1000ms suits a GitHub App token (high rate limits); increase to ~2000ms if using a PAT with the standard 5000 req/hr cap. Status-transition updates (first failing tick, terminal verdict) bypass this throttle so the red ❌ lands immediately, and the terminal update always lands.",
+        ),
+        "only_annotate_changed_regions": args.boolean(
+            default = True,
+            description = "Restrict lint check-run annotations to the displayed hunk regions of changed files (added lines + surrounding context from `detect_changed_files`). When false, off-region annotations are still posted but GitHub only renders them on the check-run detail page and commit page, not in Files Changed. Skipped silently when no changed-files context is available.",
+        ),
     },
 )

@@ -1,0 +1,280 @@
+"""Gazelle task status-check rendering.
+
+Parallel to `format_results.axl` for the `gazelle` task. Gazelle produces a
+unified diff of outdated BUILD files; the check run reports which files need
+updating and gives a copy-paste repro command.
+
+Public API:
+
+  init_data()                                  → dict
+  render_check_output(ctx, data, status, …)    → {title, summary, text}
+"""
+
+load(
+    "./bazel_results.axl",
+    "FIX_COMMANDS_BLOCK",
+    "REPRO_COMMANDS_BLOCK",
+    "SHARED_DETAILS_BODY_TEMPLATE",
+    "active_phase_data",
+    "build_details_data",
+    "build_summary_data",
+    "format_run_date",
+    bazel_init_data = "init_data",
+)
+load("./repro_commands.axl", "patch_download_cmd")
+load("./result_text.axl", "emoji_for_status")
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+_DETAILS_LIMIT = 65000
+_FILES_LIMIT = 200
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
+def init_data():
+    """Return a fresh gazelle-data dict.
+
+    Starts from bazel_results.init_data() so process_event can populate
+    the full bazel state the shared summary + details renderers consume,
+    plus gazelle-specific fields layered on top.
+    """
+    r = bazel_init_data()
+    r["gazelle"] = {
+        "affected_files": [],  # BUILD file paths extracted from gazelle's diff
+        "gazelle_target": "",  # Bazel label of the gazelle target
+        "gazelle_command": "",  # subcommand forwarded to gazelle ("fix", "update", "")
+        "check_mode": False,  # --check was set (tree not modified)
+        "dirs": [],  # positional dir args passed to gazelle
+        "gazelle_error": False,  # non-zero exit with empty diff → config error
+        "gazelle_error_code": 0,
+        "apply_error": False,  # git apply -p0 failed after getting the diff
+        "apply_error_msg": "",
+        "patch_url": "",  # download URL for gazelle.patch artifact (optional)
+    }
+    return r
+
+# ─── Title ────────────────────────────────────────────────────────────────────
+
+def gazelle_summary_title(data, status, target_pattern = "", task_name = ""):
+    """Compute the check-run title.
+
+    "❌ gazelle //tools/gazelle:gazelle · 5 BUILD files out of date"
+    "✅ gazelle //tools/gazelle:gazelle · Passed"
+    "❌ gazelle //tools/gazelle:gazelle · Configuration error (exit N)"
+    "❌ gazelle //tools/gazelle:gazelle · Apply error"
+    "🔄 gazelle //tools/gazelle:gazelle · Running..."
+
+    `task_name` comes from the producer's `task(name=…)`. The leading
+    emoji is the status verdict via `emoji_for_status`. Defaults to
+    "gazelle" when no name is provided.
+
+    `target_pattern` is the gazelle target — the bazel label of the
+    gazelle binary the task built. Mirrors how build/test/lint surface
+    their target in the title and lets multiple gazelle tasks in one
+    build (e.g. prebuilt + from-source) render distinct titles.
+    """
+    display = emoji_for_status(status) + " " + (task_name or "gazelle")
+    target = target_pattern or data["gazelle"].get("gazelle_target", "") or ""
+    base = display + ((" " + target) if target else "")
+
+    if status == "running":
+        return base + " · Running..."
+
+    if status == "failing":
+        return base + " · Failing..."
+
+    if data["gazelle"].get("gazelle_error"):
+        code = data["gazelle"].get("gazelle_error_code", 0)
+        return base + " · Configuration error (exit %s)" % str(code)
+
+    if data["gazelle"].get("apply_error"):
+        return base + " · Apply error"
+
+    if status == "aborted":
+        return base + " · Aborted"
+
+    affected = data["gazelle"].get("affected_files", [])
+    if not affected:
+        # `failed` with no specific failure recorded means an early-bail
+        # path before gazelle ran (bootstrap-build failed, entrypoint
+        # resolution failed). Don't claim "Passed".
+        if status == "failed":
+            return base + " · Failed"
+        return base + " · Passed"
+
+    count = len(affected)
+    noun = "BUILD file" if count == 1 else "BUILD files"
+    return base + " · %s %s out of date" % (str(count), noun)
+
+# ─── Templates ────────────────────────────────────────────────────────────────
+
+_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
+{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}{% if not loop.last %}  {% endif %}
+{%- endfor %}{% endif %}
+{% if config_items %}
+:gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
+:speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"""
+
+_DETAILS_TEMPLATE = """{% if gazelle_error %}
+> ❌ Gazelle exited with code {{ gazelle_error_code }} without producing a diff. This usually indicates a configuration error — check the task log.
+
+{% elif apply_error %}
+> ❌ `git apply -p0` failed after generating the diff. This usually means the working tree changed during the run.
+{% if apply_error_msg %}
+> Error: {{ apply_error_msg }}
+{% endif %}
+
+{% elif is_failed %}
+> ❌ Gazelle task failed before gazelle could run. Check the task log for details.
+
+{% elif is_clean %}
+### ✅ All BUILD files are up to date.
+
+{% else %}
+### ❌ {{ total }} BUILD {{ noun }} {{ verb }} out of date
+
+### 📝 Files
+```
+{{ file_list }}
+```
+{% if has_overflow %}
+_… {{ overflow }} more file(s) not shown._
+{% endif %}
+
+""" + FIX_COMMANDS_BLOCK + """{% if check_mode %}
+> ℹ️ This check ran with `--check` (tree not modified). Re-run with `--check=false` (the fix command above) to apply the changes.
+{% endif %}
+{% if patch_url %}
+### 📥 Patch
+[Download the patch]({{ patch_url }}), then run `git apply -p0 <file>` in your workspace.
+{% if patch_download_cmd %}
+<details>
+<summary>One-line download + apply</summary>
+
+```shell
+{{ patch_download_cmd }}
+```
+</details>
+{% endif %}
+{% endif %}
+{% endif %}
+""" + REPRO_COMMANDS_BLOCK + SHARED_DETAILS_BODY_TEMPLATE
+
+# ─── Details body ─────────────────────────────────────────────────────────────
+
+def _build_details_data(data, status):
+    affected = data["gazelle"].get("affected_files", []) or []
+    total = len(affected)
+    shown = affected[:_FILES_LIMIT]
+    overflow = total - len(shown)
+
+    return {
+        # Display strings — use boolean flags for all {% if %} conditions
+        # (Jinja2 treats string "0" as truthy).
+        "total": str(total),
+        "noun": "file" if total == 1 else "files",
+        "verb": "is" if total == 1 else "are",
+        "file_list": "\n".join(shown),
+        "overflow": str(overflow) if overflow > 0 else "",
+        # Boolean flags for Jinja2 conditions.
+        # `is_clean` is only true on a real passing run — `failed` with
+        # no recorded affected_files happens on early-bail paths and
+        # would otherwise misleadingly claim "All BUILD files are up to
+        # date."
+        "is_clean": status == "passed" and total == 0,
+        # Reserved for early-bail terminal failures — `status="failed"`
+        # with no affected files and no specific failure mode flag.
+        # When `affected_files` IS populated gazelle ran and the
+        # template's "N BUILD files out of date" branch should win.
+        "is_failed": status == "failed" and
+                     total == 0 and
+                     not data["gazelle"].get("gazelle_error") and
+                     not data["gazelle"].get("apply_error"),
+        "has_overflow": overflow > 0,
+        "check_mode": bool(data["gazelle"].get("check_mode")),
+        "gazelle_error": bool(data["gazelle"].get("gazelle_error")),
+        "gazelle_error_code": str(data["gazelle"].get("gazelle_error_code", 0) or 0),
+        "apply_error": bool(data["gazelle"].get("apply_error")),
+        "apply_error_msg": data["gazelle"].get("apply_error_msg", "") or "",
+        "patch_url": data["gazelle"].get("patch_url", "") or "",
+        "patch_download_cmd": patch_download_cmd(
+            data["gazelle"].get("patch_url", "") or "",
+            strip = 0,
+        ),
+    }
+
+# ─── Entry point ──────────────────────────────────────────────────────────────
+
+def render_check_output(ctx, data, status, render_ctx, links, templates = None, metadata_keys = None):
+    """Render title, summary, and text for a gazelle check run.
+
+    Matches the bazel_results / lint_results interface so GithubStatusChecks
+    and BuildkiteAnnotations can dispatch by task_update.kind interchangeably.
+    """
+    t = templates or {}
+    run_date = format_run_date(ctx, data.get("start_time_ms", 0))
+
+    # No `config_items` for gazelle — the only variable knob is
+    # `--check` (no-op apply mode otherwise), and `--check` is the
+    # canonical CI mode anyway. Always-True doesn't tell a reviewer
+    # anything they don't already assume; rendering it would just
+    # add a noise row to every gazelle annotation on CI.
+    summary_data = build_summary_data(
+        ctx,
+        data,
+        status,
+        render_ctx,
+        links,
+        metadata_keys,
+        run_date = run_date,
+    )
+    finish_date = format_run_date(ctx, data.get("finish_time_ms", 0))
+    shared_data = build_details_data(
+        data,
+        links,
+        render_ctx = render_ctx,
+        status = status,
+        start_date = run_date,
+        finish_date = finish_date,
+        std = ctx.std,
+        task_phases = ctx.task.phases(),
+        task_active = active_phase_data(ctx),
+        task_elapsed_ms = ctx.task.elapsed_ms,
+        include_bazel_targets = True,
+    )
+    details_data = dict(shared_data)
+    details_data.update(_build_details_data(data, status))
+
+    summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
+    details_tmpl = t.get("details") or _DETAILS_TEMPLATE
+
+    summary_text = ctx.template.jinja2(summary_tmpl, data = summary_data)
+    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    # Trim cascade: if file list overflows the limit, trim progressively.
+    if len(details_text) > _DETAILS_LIMIT:
+        files = list(details_data.get("file_list", "").split("\n"))
+        for _ in range(10):
+            if len(details_text) <= _DETAILS_LIMIT:
+                break
+            if len(files) <= 1:
+                break
+            files = files[:max(1, len(files) // 2)]
+            missing = int(details_data["total"]) - len(files)
+            details_data["file_list"] = "\n".join(files)
+            details_data["overflow"] = str(missing) if missing > 0 else ""
+            details_data["has_overflow"] = missing > 0
+            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    task_name = render_ctx.get("task_name", "") if render_ctx else ""
+    target_pattern = render_ctx.get("targets", "") if render_ctx else ""
+    return {
+        "title": gazelle_summary_title(
+            data,
+            status,
+            target_pattern = target_pattern,
+            task_name = task_name,
+        ),
+        "summary": summary_text,
+        "text": details_text,
+    }

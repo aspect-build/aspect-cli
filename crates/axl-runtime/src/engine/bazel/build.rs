@@ -324,6 +324,16 @@ impl Build {
         let mut sink_handles: Vec<JoinHandle<SinkOutcome>> = vec![];
         let sink_invocation_id: Option<String> = if !bes_subscriber_sinks.is_empty() {
             let invocation_id = uuid::Uuid::new_v4().to_string();
+            let debug = std::env::var_os("ASPECT_DEBUG")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if debug {
+                eprintln!(
+                    "BES sinks: spawning {} subscriber sink(s) sink_invocation_id={}",
+                    bes_subscriber_sinks.len(),
+                    invocation_id
+                );
+            }
             for sink in bes_subscriber_sinks {
                 let handle = sink.spawn(
                     rt.clone(),

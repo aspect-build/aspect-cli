@@ -1,11 +1,13 @@
+load("./lib/environment.axl", "error", "info")
+
 def _login_impl(ctx: TaskContext) -> int:
     if ctx.args.with_token and ctx.args.with_api_token:
-        print("Error: --with-token and --with-api-token are mutually exclusive")
+        error(ctx.std, "--with-token and --with-api-token are mutually exclusive.")
         return 1
     elif ctx.args.with_token:
         token = ctx.std.io.stdin.read_to_string().strip()
         if not token:
-            print("Error: no token on stdin")
+            error(ctx.std, "No token on stdin")
             return 1
         creds = ctx.aspect.auth.login(token = token)
         ctx.aspect.auth.persist(creds, profile = ctx.args.profile)
@@ -13,7 +15,7 @@ def _login_impl(ctx: TaskContext) -> int:
     elif ctx.args.with_api_token:
         inp = ctx.std.io.stdin.read_to_string().strip()
         if not inp:
-            print("Error: no API token on stdin")
+            error(ctx.std, "No API token on stdin")
             return 1
         creds = ctx.aspect.auth.login(api_token = inp)
         ctx.aspect.auth.persist(creds, profile = ctx.args.profile)

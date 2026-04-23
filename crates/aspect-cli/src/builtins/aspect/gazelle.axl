@@ -92,9 +92,20 @@ Usage:
         --bazel-flag=--config=pure_go
 """
 
-load("./lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
+load("@std//time.axl", "sleep_iter")
+load("./bazel.axl", "BazelTrait")
+load("./lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader", "detect_ci")
+load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "pluralize", "process_event")
+load("./lib/checkrun.axl", "GitHubCheckRunTrait")
+load("./lib/environment.axl", "color_enabled", "error", "info", "warn")
+load(
+    "./lib/gazelle_results.axl",
+    gaz_init_data = "init_data",
+)
+load("./lib/health_check.axl", "HealthCheckTrait")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
+load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
-load("./traits.axl", "ArtifactsTrait", "BazelTrait")
 
 def _parse_diff_paths(diff_text):
     """Extract the set of affected paths from a unified diff.
@@ -138,11 +149,10 @@ def _try_upload_gazelle_diff(ctx, diff_text):
     status-check features can surface a "View patch" link, mirroring
     the format task's `format_diff` artifact.
     """
-    out = ctx.std.io.stdout
     ci = detect_ci(ctx.std.env)
     uploader = create_uploader(ctx.std.env)
     if not uploader:
-        out.write("--upload-gazelle-diff: not running on a recognized CI host; skipping.\n")
+        info(ctx.std, "Skipping gazelle diff upload — not running on a recognized CI host.")
         return
 
     # Write the patch to a job-scoped tmpdir so concurrent gazelle
@@ -154,7 +164,7 @@ def _try_upload_gazelle_diff(ctx, diff_text):
     name = artifact_name(ci, ctx.task.name, ctx.task.key, "gazelle.patch")
     result = uploader.upload_file(ctx, patch_path, name)
     if not result["success"]:
-        out.write("--upload-gazelle-diff: upload failed: %s\n" % "; ".join(result.get("errors") or ["unknown error"]))
+        warn(ctx.std, "Gazelle diff upload failed: %s" % "; ".join(result.get("errors") or ["unknown error"]))
         return
 
     download_url = result.get("download_url") or ""
@@ -163,15 +173,130 @@ def _try_upload_gazelle_diff(ctx, diff_text):
         urls = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
         urls["gazelle_diff"] = download_url
         artifacts_trait.artifact_urls = urls
-        out.write("--upload-gazelle-diff: uploaded patch — %s\n" % download_url)
+        info(ctx.std, "Uploaded gazelle diff patch — %s" % download_url)
     else:
-        out.write("--upload-gazelle-diff: uploaded patch (no stable URL on this CI host).\n")
+        info(ctx.std, "Uploaded gazelle diff patch (no stable URL on this CI host).")
+
+def _pick_status(data, had_failure, terminal):
+    """Decide a gazelle task's lifecycle status from accumulated data.
+
+    Aborted (bazel terminated mid-build) → "aborted".
+    Hard failure → "failing"/"failed".
+    `affected_files` non-empty (gazelle wants to update BUILD files) →
+    "warning" (soft-fail or fix-applied — same signal either way).
+    Else → "running"/"passed"."""
+    if data.get("bazel", {}).get("aborted"):
+        return "aborted"
+    if had_failure:
+        return "failed" if terminal else "failing"
+    if (data.get("gazelle", {}) or {}).get("affected_files"):
+        return "warning"
+    return "passed" if terminal else "running"
+
+def _compact_text(status, data):
+    """Compact Result-cell text for the PR-comment surface."""
+    n = len((data.get("gazelle", {}) or {}).get("affected_files", []) or [])
+    if status == "failed" or status == "failing":
+        return ("%d out of date" % n) if n > 0 else ""
+    if status == "passed":
+        return "clean"
+    if status == "warning":
+        if n > 0:
+            return "%d update%s" % (n, "s" if n != 1 else "")
+        return ""
+    if status == "running":
+        if n > 0:
+            return "%d update%s pending" % (n, "s" if n != 1 else "")
+        return ""
+    return ""
+
+def _body_text(status, data):
+    """Narrative-form `progress.body` for the PR-comment 💬 line."""
+    compact = _compact_text(status, data)
+    if status == "passed" or status == "warning":
+        return "Gazelle complete" + ((" (" + compact + ")") if compact else "")
+    if status == "failed":
+        return "Gazelle failed" + ((" (" + compact + ")") if compact else "")
+    if status == "aborted":
+        return "Gazelle aborted"
+    return ""
+
+def _emit_final(ctx, lifecycle, data, exit_code):
+    """Emit the terminal task_update and task_complete for status-check consumers,
+    then print the closing CLI marker so the local terminal has a symmetric
+    end-of-task line matching the opening `→` phase announcements."""
+    status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
+    if not data.get("finish_time_ms"):
+        data["finish_time_ms"] = now_ms(ctx)
+    if data.get("start_time_ms") and not data["bazel"].get("wall_time_ms"):
+        data["bazel"]["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
+
+    task_path = task_cli_path(ctx.task)
+
+    # Always-rendered Reproduce — re-runs the same `aspect gazelle
+    # --check=true …` invocation CI ran, leaving the working tree
+    # untouched. The fix command (below) only emits when there's
+    # something to apply.
+    repro_flags = [("--check", "true"), ("--gazelle-target", ctx.args.gazelle_target)]
+    if ctx.args.gazelle_command:
+        repro_flags.append(("--gazelle-command", ctx.args.gazelle_command))
+    if ctx.args.gazelle_flags:
+        repro_flags.append(("--gazelle-flag", list(ctx.args.gazelle_flags)))
+    data["repro_commands"].append({
+        "command": build_aspect_command(task_path, repro_flags, list(ctx.args.dirs) if ctx.args.dirs else []),
+        "description": "",
+    })
+
+    # Fix command — emitted only when gazelle actually found changes.
+    affected = (data.get("gazelle", {}) or {}).get("affected_files", []) or []
+    if affected:
+        fix_flags = [("--check", "false"), ("--gazelle-target", ctx.args.gazelle_target)]
+        if ctx.args.gazelle_command:
+            fix_flags.append(("--gazelle-command", ctx.args.gazelle_command))
+        if ctx.args.gazelle_flags:
+            fix_flags.append(("--gazelle-flag", list(ctx.args.gazelle_flags)))
+        data["fix_commands"].append({
+            "command": build_aspect_command(task_path, fix_flags, list(ctx.args.dirs) if ctx.args.dirs else []),
+            "description": "",
+        })
+
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind = "gazelle_results",
+            status = status,
+            final = True,
+            data = data,
+            progress = ProgressStyles(
+                body = _body_text(status, data),
+            ),
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
 
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
-    out = ctx.std.io.stdout
     bazel_trait = ctx.traits[BazelTrait]
-    out.write("Building gazelle...\n")
+    hc_trait = ctx.traits[HealthCheckTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+    ansi = color_enabled(ctx.std)
+
+    # Initialize data and fire task_started FIRST so any subsequent failure
+    # still creates a visible status check.
+    data = gaz_init_data()
+    data["start_time_ms"] = now_ms(ctx)
+    data["gazelle"]["gazelle_target"] = ctx.args.gazelle_target
+    data["gazelle"]["gazelle_command"] = ctx.args.gazelle_command or ""
+    data["gazelle"]["check_mode"] = bool(ctx.args.check)
+    data["gazelle"]["dirs"] = list(ctx.args.dirs) if ctx.args.dirs else []
+    setup_phase(ctx, lifecycle)
+    for handler in lifecycle.task_started:
+        handler(ctx, ctx.args.gazelle_target)
+
+    # Pre-flight: Workflows' `print_environment_info` +
+    # `agent_health_check` hooks fire here, printing the
+    # `--- :computer: Workflows runner environment` and health check
+    # BK section markers.
+    preflight_phase(ctx, lifecycle, hc_trait)
 
     flags = [
         "--remote_download_outputs=toplevel",
@@ -196,20 +321,117 @@ def _impl(ctx: TaskContext) -> int:
 
     r = runnable(ctx, [ctx.args.gazelle_target])
 
+    # Pass `bazel_trait.build_event_sinks` (which includes the Aspect
+    # backend gRPC sink in CI deployments) so this build's BES events
+    # actually reach the backend and the "✨ Aspect Workflows" link in
+    # the gazelle check-run / annotation header resolves to a real
+    # invocation. See the matching comment in format.axl for why bare
+    # `build_events = True` isn't sufficient.
+    build_events = list(bazel_trait.build_event_sinks) if bazel_trait.build_event_sinks else True
+
+    # Fire `bazel_trait.build_start` hooks before spawning bazel — features
+    # like Workflows register the BK `--- :bazel: Running bazel …`
+    # section marker here.
+    for hook in bazel_trait.build_start:
+        hook(ctx)
+
+    status = _pick_status(data, had_failure = False, terminal = False)
+    task_update(
+        ctx,
+        lifecycle,
+        status,
+        ProgressStyles(
+            body = "Building gazelle... (%s)" % ctx.args.gazelle_target,
+            stream = "Building gazelle (%s)" % ctx.args.gazelle_target,
+        ),
+        kind = "gazelle_results",
+        data = data,
+        phase = Phase(name = "build", description = "Build gazelle", emoji = "🔨"),
+    )
+
     build = ctx.bazel.build(
         ctx.args.gazelle_target,
-        build_events = True,
+        build_events = build_events,
         flags = flags,
     )
 
-    for event in build.build_events():
-        r.event(event)
+    # Subscribe to the BES stream BEFORE doing any potentially-slow work
+    # (e.g. emitting task_updates that spawn `buildkite-agent annotate`).
+    # The broadcaster only delivers events to subscribers that joined
+    # before the event was sent — on a warm bazel daemon (second
+    # `aspect gazelle` invocation in a step) BES events stream within
+    # milliseconds, so any delay between `ctx.bazel.build` returning and
+    # this `build_events()` call risks missing the early burst
+    # (`build_started`, `target_completed`, `named_set_of_files`) that
+    # `runnable` needs to determine the gazelle target's entrypoint.
+    events = build.build_events()
 
-    if not build.wait().success:
+    # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
+    # before it returns. Populate `data["sink_invocation_id"]` here and
+    # emit a running task_update so the BK annotation / status check picks up
+    # the Aspect Workflows link as soon as the build is spawned, rather than
+    # waiting for `build.wait()` to surface it.
+    data["sink_invocation_id"] = build.sink_invocation_id
+
+    # Re-emit (now that the sink_invocation_id is known so we can show the Web UI link)
+    # but target only the status surfaces — empty `stream` suppresses the
+    # duplicate CLI line.
+    status = _pick_status(data, had_failure = False, terminal = False)
+    task_update(
+        ctx,
+        lifecycle,
+        status,
+        ProgressStyles(
+            body = "Building gazelle... (%s)" % ctx.args.gazelle_target,
+        ),
+        kind = "gazelle_results",
+        data = data,
+    )
+
+    # Tick-driven drain: fires a heartbeat refresh every
+    # MIN_HEARTBEAT_INTERVAL_MS even when bazel is silent. Per-event
+    # work: r.event() (entrypoint discovery), bazel_trait.build_event
+    # hooks (ArtifactUpload records testlog paths), process_event
+    # populates the shared bazel state for the rendered body.
+    last_emit_ms = now_ms(ctx)
+    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        interesting = False
+        for _ in range(10000):
+            event = events.try_pop()
+            if event == None:
+                break
+            r.event(event)
+            for handler in bazel_trait.build_event:
+                handler(ctx, event)
+            if process_event(data, event):
+                interesting = True
+        if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
+            heartbeat_status = _pick_status(data, had_failure = False, terminal = False)
+            for handler in lifecycle.task_update:
+                handler(ctx, TaskUpdate(
+                    kind = "gazelle_results",
+                    status = heartbeat_status,
+                    data = data,
+                    progress = ProgressStyles(),
+                ))
+            last_emit_ms = now_ms(ctx)
+        if events.done():
+            break
+
+    build_status = build.wait()
+
+    # Fire `bazel_trait.build_end` hooks. The ArtifactUpload feature's
+    # `_on_build_end` runs the actual artifact upload step here.
+    for hook in bazel_trait.build_end:
+        hook(ctx, build_status.code)
+
+    if not build_status.success:
+        _emit_final(ctx, lifecycle, data, build_status.code or 1)
         fail("Building the gazelle target has failed.")
 
     gazelle = r.determine_entrypoint(ctx.args.gazelle_target)
     if not gazelle:
+        _emit_final(ctx, lifecycle, data, 1)
         fail("Failed to determine the gazelle target's entrypoint.")
 
     # Upstream `gazelle()` (bazel-gazelle, used by `gazelle_from_source`-
@@ -262,9 +484,22 @@ def _impl(ctx: TaskContext) -> int:
         if not f.startswith("-mode") and not f.startswith("--mode"):
             diff_args.append(f)
         else:
-            out.write("WARNING: --gazelle-flag=%s ignored in diff phase (task controls -mode internally).\n" % f)
+            info(ctx.std, "--gazelle-flag=%s ignored in diff phase (task controls -mode internally)." % f)
     diff_args.append("-mode=diff")
     diff_args.extend(ctx.args.dirs)
+    status = _pick_status(data, had_failure = False, terminal = False)
+    task_update(
+        ctx,
+        lifecycle,
+        status,
+        ProgressStyles(
+            body = "Running gazelle... (-mode=diff)",
+            stream = "Running gazelle (-mode=diff)",
+        ),
+        kind = "gazelle_results",
+        data = data,
+        phase = Phase(name = "diff", description = "Compute BUILD-file diff", emoji = "📋"),
+    )
     diff_proc = r.spawn(gazelle, diff_args, capture = True)
     diff_stdout = diff_proc.stdout().read_to_string()
     diff_stderr = diff_proc.stderr().read_to_string()
@@ -273,20 +508,25 @@ def _impl(ctx: TaskContext) -> int:
     # Surface gazelle's stderr unconditionally so warnings, "encountered
     # changes" notes, language-plugin diagnostics, etc. aren't swallowed.
     if diff_stderr.strip():
-        out.write(diff_stderr)
+        print(diff_stderr)
         if not diff_stderr.endswith("\n"):
-            out.write("\n")
+            print("")
 
     # Real gazelle errors (config issues, missing language plugin, etc.)
     # surface as non-zero exit + empty stdout. We've already printed
     # stderr above; just turn that into a hard failure.
     if not diff_status.success and not diff_stdout.strip():
-        out.write("\x1b[0;31mERROR\x1b[0m: gazelle (-mode=diff) exited %d with no diff output (likely a configuration error).\n" % diff_status.code)
+        error(ctx.std, "Gazelle (-mode=diff) exited %d with no diff output (likely a configuration error)." % diff_status.code)
+        data["gazelle"]["gazelle_error"] = True
+        data["gazelle"]["gazelle_error_code"] = diff_status.code
+        _emit_final(ctx, lifecycle, data, diff_status.code)
         return diff_status.code
 
     if not diff_stdout.strip():
-        # Clean — gazelle reports no changes needed. We're done
-        # regardless of --check / fix mode.
+        # Clean — gazelle reports no changes needed regardless of
+        # --check / fix mode.
+        print("✅ All BUILD files are up to date.")
+        _emit_final(ctx, lifecycle, data, 0)
         return 0
 
     affected = _parse_diff_paths(diff_stdout)
@@ -306,6 +546,20 @@ def _impl(ctx: TaskContext) -> int:
     # `--check` skips this entirely — CI mode doesn't want a dirtied
     # tree.
     if not ctx.args.check:
+        files_label = pluralize(len(affected), "file")
+        status = _pick_status(data, had_failure = False, terminal = False)
+        task_update(
+            ctx,
+            lifecycle,
+            status,
+            ProgressStyles(
+                body = "Applying gazelle patch... (%s)" % files_label,
+                stream = "Applying gazelle patch (%s)" % files_label,
+            ),
+            kind = "gazelle_results",
+            data = data,
+            phase = Phase(name = "apply", description = "Apply gazelle patch", emoji = "📦"),
+        )
         tmp = ctx.std.env.temp_dir()
         patch_path = tmp + "/gazelle-" + ctx.task.key + ".patch"
         ctx.std.fs.write(patch_path, diff_stdout)
@@ -314,38 +568,51 @@ def _impl(ctx: TaskContext) -> int:
             .stdout("piped").stderr("piped").spawn().wait_with_output()
         ctx.std.fs.remove_file(patch_path)
         if not apply_result.status.success:
-            out.write("\x1b[0;31mERROR\x1b[0m: failed to apply gazelle's patch via `git apply` (exit %d).\nstderr: %s\nThe diff was generated but couldn't be applied — possibly the working tree changed during the run, or gazelle produced a diff format git doesn't accept. Run `bazel run %s` directly to apply.\n" % (apply_result.status.code, apply_result.stderr.strip(), ctx.args.gazelle_target))
+            error(ctx.std, "Failed to apply gazelle's patch via `git apply` (exit %d).\nstderr: %s\nThe diff was generated but couldn't be applied — possibly the working tree changed during the run, or gazelle produced a diff format git doesn't accept. Run `bazel run %s` directly to apply." % (apply_result.status.code, apply_result.stderr.strip(), ctx.args.gazelle_target))
+            data["gazelle"]["affected_files"] = affected
+            data["gazelle"]["apply_error"] = True
+            data["gazelle"]["apply_error_msg"] = apply_result.stderr.strip()
+            _emit_final(ctx, lifecycle, data, apply_result.status.code)
             return apply_result.status.code
 
     verb = "would update" if ctx.args.check else "updated"
     if affected:
-        out.write("\nGazelle %s %d file(s):\n" % (verb, len(affected)))
+        print("\nGazelle %s %d file(s):" % (verb, len(affected)))
         for f in affected:
-            out.write("  - %s\n" % f)
+            print("  - %s" % f)
     else:
         # Diff was non-empty but `+++` lines didn't yield paths —
         # fall back to printing the raw diff so the user has
         # something to act on.
-        out.write("\nGazelle %s BUILD files (raw diff follows):\n" % verb)
-        out.write(diff_stdout)
+        print("\nGazelle %s BUILD files (raw diff follows):" % verb)
+        print(diff_stdout)
+
+    # Populate data for status-check consumers.
+    data["gazelle"]["affected_files"] = affected
 
     if ctx.args.upload_gazelle_diff:
         _try_upload_gazelle_diff(ctx, diff_stdout)
 
-    out.write("\x1b[0;31mERROR\x1b[0m: BUILD files are out of date. Run `aspect gazelle` locally and commit the result.\n")
+        # Surface the patch URL in data.
+        artifacts_trait = ctx.traits[ArtifactsTrait]
+        if artifacts_trait.artifact_urls:
+            data["gazelle"]["patch_url"] = artifacts_trait.artifact_urls.get("gazelle_diff", "") or ""
+
+    error(ctx.std, "BUILD files are out of date. Run `aspect gazelle` locally and commit the result.")
+    _emit_final(ctx, lifecycle, data, 1)
     return 1
 
 gazelle = task(
     implementation = _impl,
-    traits = [ArtifactsTrait, BazelTrait],
+    traits = [ArtifactsTrait, BazelTrait, HealthCheckTrait, TaskLifecycleTrait, GitHubCheckRunTrait],
     args = {
         "check": args.boolean(
             default = False,
             description = "When true, only report the diff — don't apply it. Recommended in CI: faster (skips the apply step), leaves the tree clean (no risk of a half-formatted state on mid-run interrupt), and the verdict comes from gazelle directly without depending on the workspace being a git working tree. Local devs typically leave this off so `aspect gazelle` updates BUILD files in place.",
         ),
         "upload_gazelle_diff": args.boolean(
-            default = False,
-            description = "Upload gazelle's diff as a CI artifact (named `gazelle.patch`) so reviewers can apply it locally without re-running gazelle. No-op when the working tree is clean (no diff to upload), or when not running on a recognized CI host (GitHub Actions, Buildkite, CircleCI, GitLab). The download URL (where the CI provider returns one) is surfaced via ArtifactsTrait.artifact_urls['gazelle_diff']. Off by default.",
+            default = True,
+            description = "Upload gazelle's diff as a CI artifact (named `gazelle.patch`) so reviewers can apply it locally without re-running gazelle. No-op when the working tree is clean (no diff to upload), or when not running on a recognized CI host (GitHub Actions, Buildkite, CircleCI, GitLab). The download URL (where the CI provider returns one) is surfaced via ArtifactsTrait.artifact_urls['gazelle_diff']. Pass `--upload-gazelle-diff=false` to disable.",
         ),
         "gazelle_target": args.string(
             default = "//tools/gazelle:gazelle",

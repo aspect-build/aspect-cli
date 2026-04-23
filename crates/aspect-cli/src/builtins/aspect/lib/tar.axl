@@ -5,6 +5,7 @@ https://github.com/aspect-build/bsdtar-prebuilt and caches it locally.
 """
 
 load("@std//hash.axl", "sha256")
+load("./environment.axl", "info", "warn")
 
 _VERSION = "v3.8.1-fix.1"
 _BASE_URL = "https://github.com/aspect-build/bsdtar-prebuilt/releases/download/" + _VERSION
@@ -80,7 +81,7 @@ def bsdtar(ctx):
         actual = _file_sha256(ctx, bin_path)
         if actual == expected:
             return bin_path
-        print("bsdtar cache: %s sha256 %s does not match expected %s, re-downloading" % (bin_path, actual, expected))
+        info(ctx.std, "bsdtar %s sha256 %s does not match expected %s, re-downloading" % (bin_path, actual, expected))
         # Intentionally no remove_file here — the atomic rename below replaces
         # the old file in place. Removing first creates a window where exec()
         # would hit a missing file or a partial download.

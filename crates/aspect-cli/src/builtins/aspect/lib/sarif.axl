@@ -7,11 +7,91 @@ def parse_sarif(content):
     """Parse a SARIF JSON string into a dict."""
     return json.decode(content)
 
+# SARIF `level` values per spec: "none" | "note" | "warning" | "error".
+# Translate to aspect-cli's user-facing severity vocabulary at the SARIF
+# parse boundary so every internal consumer sees a consistent set:
+# "error" | "warning" | "info". "note" is SARIF's wire term for the
+# lowest-severity bucket; we surface it as "info" everywhere a user
+# reads lint output (matches what shellcheck's tty output and
+# LSP DiagnosticSeverity 3=Information call it). "none" is SARIF's
+# "severity not applicable" — collapse it to "info" too.
+_SARIF_LEVEL_TO_SEVERITY = {
+    "error": "error",
+    "warning": "warning",
+    "note": "info",
+    "none": "info",
+}
+
+def _translate_sarif_level(level):
+    """Translate a SARIF `level` to aspect-cli's internal severity."""
+    return _SARIF_LEVEL_TO_SEVERITY.get(level, level)
+
+def _result_has_fix(result):
+    """Return True if the SARIF result carries an inline fix hint.
+
+    Mirrors the extraction logic in `sarif_result_to_comment` — relatedLocations
+    with message exactly `try` or starting with `try ` describe a replacement
+    that GithubLintComments turns into a GitHub suggestion block. Findings with
+    fixes can ONLY be rendered as PR comments (the check-run annotations API
+    has no equivalent for suggested patches), so this flag drives the
+    fix-aware splitting in lint_results.compute_annotations and
+    github_lint_comments.
+
+    DORMANT CODE — anchor docstring. Returns False for ~every diagnostic
+    in practice because `aspect-build/rules_lint`'s SARIF generator
+    (`tools/sarif/sarif.go`, current at v2.5.2 / Jan 2026) does NOT
+    emit `relatedLocations` for ANY of its Go-errorformat-based
+    linters: shellcheck, yamllint, clang-tidy, qmllint, keep-sorted,
+    ty, buf, vale, cppcheck, pydoclint. Only clippy — which has a
+    separate JS pipeline at `lint/rust/rust.diagnostic-formatter.js`
+    — emits the shape this predicate keys on. Tracked upstream in
+    aspect-build/rules_lint#749 ("[FR]: Include suggested fixes in
+    SARIF reports") — https://github.com/aspect-build/rules_lint/issues/749.
+
+    Net effect downstream: `parse_sarif_diagnostics[i].has_fix` is
+    False, `sarif_result_to_comment(...)["_fixes"]` is absent, and
+    every fix-bearing routing path keyed off either flag is
+    unreachable for the common (Go-errorformat) linter set. Today
+    fix-bearing routing flows entirely through the parallel
+    `.patch`-file path: rules_lint emits `--format=diff` patches that
+    `_build_suggestion_comments` parses into suggestion-block
+    comments. The SARIF inline-fix path stays wired in case (a) a
+    fix-emitting linter routes through aspect-cli (e.g. clippy on
+    rules_lint via the Rust pipeline), or (b) we land the
+    `tools/sarif` upgrade that emits `relatedLocations` with
+    `try "<replacement>"` for the errorformat linters too — the
+    `-f json1` + structural-SARIF proposal in
+    `shellcheck-sarif-investigation.md` is the intended shape. Since
+    we own rules_lint, the fix is on our court — no upstream blocker.
+
+    See `shellcheck-sarif-investigation.md` ("Issue 2 NOT fixed") in
+    the repo root for the full trace, the rules_lint code locations
+    that would need to change, and the workarounds available today
+    (annotations-only routing for affected linters; the
+    `.patch`-file path already handles auto-fixes for the
+    rules_lint Go-errorformat linters since rules_lint emits patches
+    independently of the SARIF stream).
+    """
+    for loc in result.get("relatedLocations", []):
+        msg = loc.get("message", {}).get("text", "")
+        if msg != "try" and not msg.startswith("try "):
+            continue
+        loc_region = loc.get("physicalLocation", {}).get("region", {})
+        if loc_region.get("byteOffset") == None or loc_region.get("byteLength") == None:
+            continue
+        return True
+    return False
+
 def parse_sarif_diagnostics(content):
     """Parse SARIF JSON into a flat list of diagnostic dicts.
 
     Returns:
-        List of dicts with keys: tool, file, line, rule_id, severity
+        List of dicts with keys: tool, file, line, end_line, rule_id, severity,
+        message, has_fix.
+
+    `end_line` falls back to `line` when SARIF only specifies startLine. `has_fix`
+    is True when the result carries an inline-fix relatedLocation (see
+    `_result_has_fix`).
     """
     sarif = json.decode(content)
     diagnostics = []
@@ -23,15 +103,20 @@ def parse_sarif_diagnostics(content):
                 continue
             physical = locations[0].get("physicalLocation", {})
             uri = physical.get("artifactLocation", {}).get("uri", "")
-            line = physical.get("region", {}).get("startLine", 0)
+            region = physical.get("region", {})
+            line = region.get("startLine", 0)
+            end_line = region.get("endLine", line) or line
             if not uri or not line:
                 continue
             diagnostics.append({
                 "tool": tool_name,
                 "file": uri,
                 "line": line,
+                "end_line": end_line,
                 "rule_id": result.get("ruleId", ""),
-                "severity": result.get("level", "warning"),
+                "severity": _translate_sarif_level(result.get("level", "warning")),
+                "message": result.get("message", {}).get("text", ""),
+                "has_fix": _result_has_fix(result),
             })
     return diagnostics
 
@@ -77,7 +162,7 @@ def sarif_result_to_comment(result, tool_name):
     if not start_line:
         return None
 
-    level = result.get("level", "warning")
+    level = _translate_sarif_level(result.get("level", "warning"))
     message = result.get("message", {}).get("text", "")
 
     body = "**{}** ({})".format(tool_name, level)
@@ -103,6 +188,15 @@ def sarif_result_to_comment(result, tool_name):
     # (replace with the quoted text). A startswith("try") check would also
     # match real words like "trying ..." so require the literal `try` token
     # followed by either end-of-string or a space.
+    #
+    # Keep the predicate aligned with `_result_has_fix` so the diagnostic-level
+    # `has_fix` flag never disagrees with the comment-level `_fixes` list.
+    #
+    # DORMANT in practice — see the anchor docstring on `_result_has_fix`
+    # above for why no current rules_lint Go-errorformat linter emits
+    # the matching SARIF shape (tracked: https://github.com/aspect-build/rules_lint/issues/749).
+    # `_fixes` ends up absent on every comment from those linters; the
+    # loop below appends nothing.
     fixes = []
     for loc in result.get("relatedLocations", []):
         msg = loc.get("message", {}).get("text", "")

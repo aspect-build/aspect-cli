@@ -1,16 +1,16 @@
+load("../bazel.axl", "BazelTrait")
 load("../lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
 load(
     "../lib/environment.axl",
     "color_enabled",
     "get_bazelrc_flags",
-    "get_environment",
+    "get_workflows_environment",
     "print_environment_info",
 )
-load("../lib/health_check.axl", "agent_health_check")
-load("../traits.axl", "BazelTrait", "HealthCheckTrait")
+load("../lib/health_check.axl", "HealthCheckTrait", "agent_health_check")
 
 def _workflows_impl(ctx: FeatureContext):
-    environment = get_environment(ctx.std)
+    environment = get_workflows_environment(ctx.std)
 
     health_check = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
@@ -23,30 +23,52 @@ def _workflows_impl(ctx: FeatureContext):
     # register, zero per-task wiring.
     bazel_trait.task_flags.append(get_task_metadata_flags)
 
-    if environment:
-        def _buildkite_bazel_section(ctx):
-            if environment.ci.host == "buildkite":
-                targets = getattr(ctx.args, "targets", [])
-                print("--- :bazel: Running bazel %s %s" % (ctx.task.name, " ".join(targets)))
+    # `--color=yes` is wanted in every environment where aspect-cli will
+    # render ANSI elsewhere — not just on Workflows runners. Bazel's
+    # default `--color=auto` keys off stderr's isatty (since `ctx.bazel.
+    # build` inherits stderr by default that's normally a TTY locally),
+    # but several conditions still trip it to "no color" — `TERM=dumb`,
+    # being launched from a parent that's not on a tty (e.g. `cargo run
+    # -- format` from certain shells / editors), or CI log viewers that
+    # capture stderr to a pipe even though they render ANSI fine. Force
+    # it whenever `color_enabled` agrees output should be colored. On a
+    # plain TTY this matches what `auto` would have done. Deliberately
+    # not forcing `--curses=yes`: line-oriented log viewers garble
+    # cursor-control sequences.
+    if color_enabled(ctx.std):
+        bazel_trait.extra_flags.append("--color=yes")
 
-        bazel_trait.build_start.append(_buildkite_bazel_section)
+    if environment.runner != None:
+        # BK section markers per-phase are emitted by lifecycle.task_update
+        # when `phase=` is set (see `_emit_bk_phase_section`). The
+        # pre_health_check hooks below print their own intra-phase BK
+        # section markers (Workflows runner environment, health check),
+        # so the preflight phase mark itself skips the auto-emit.
         health_check.pre_health_check.append(lambda ctx: print_environment_info(ctx.std, environment))
         health_check.pre_health_check.append(lambda ctx: agent_health_check(ctx, environment))
 
-    if environment:
         # Flags to optimize build & test
         (startup_flags, build_flags) = get_bazelrc_flags(
             environment = environment,
             root_dir = ctx.std.env.root_dir(),
         )
 
+        bazel_trait.extra_startup_flags.extend(startup_flags)
+        bazel_trait.extra_flags.extend(build_flags)
+
+        # On older runners, `bazel` on the PATH is the legacy CLI so we disable
+        # the plugin feature on all calls
+        bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
+        if "aspect" in bazel_version_output.stdout:
+            bazel_trait.extra_startup_flags.append("--aspect:disable_plugins")
+
+    if environment.build_events != None:
         metadata_flags = get_build_metadata_flags(ctx.std)
 
-        bessie_endpoint = environment.build_events.backend
         bessie_sinks = []
-        if bessie_endpoint:
+        if environment.build_events and environment.build_events.backend:
             bessie_sinks.append(bazel.build_events.grpc(
-                uri = bessie_endpoint,
+                uri = environment.build_events.backend,
                 metadata = {},
                 max_retries = ctx.args.bes_max_retries,
                 retry_min_delay = ctx.args.bes_retry_min_delay,
@@ -55,30 +77,12 @@ def _workflows_impl(ctx: FeatureContext):
                 error_strategy = ctx.args.bes_error_strategy,
             ))
 
-        bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
-        if "aspect" in bazel_version_output.stdout:
-            bazel_trait.extra_startup_flags.append("--aspect:disable_plugins")
-
-        bazel_trait.extra_startup_flags.extend(startup_flags)
-        bazel_trait.extra_flags.extend(build_flags)
         bazel_trait.extra_flags.extend(metadata_flags)
         bazel_trait.build_event_sinks.extend(bessie_sinks)
 
-        if environment.ci.host == "github":
-            # Prevent github actions from reaping the JVM server at the end of a job.
-            ctx.std.env.set_var("RUNNER_TRACKING_ID", "")
-
-            # Here to ensure we restart the Bazel server.
-            bazel_trait.extra_startup_flags.append("--host_jvm_args=-DRUNNER_TRACKING_ID=noop")
-
-        # Bazel's --color=auto only emits color on a TTY, but most CI log
-        # viewers (GHA, CircleCI, GitLab, …) render ANSI fine even though
-        # stdout is captured to a non-TTY pipe. Force --color=yes whenever
-        # color_enabled() agrees output should be colored. On a real TTY
-        # this is a no-op vs auto. We deliberately don't force --curses=yes:
-        # line-oriented log viewers garble cursor-control sequences.
-        if color_enabled(ctx.std):
-            bazel_trait.extra_flags.append("--color=yes")
+    if environment.ci and environment.ci.host == "github":
+        # Prevent github actions from reaping the JVM server at the end of a job.
+        ctx.std.env.set_var("RUNNER_TRACKING_ID", "")
 
 Workflows = feature(
     display_name = "Aspect Workflows",

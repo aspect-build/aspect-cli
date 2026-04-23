@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
@@ -15,6 +16,7 @@ use crate::engine::feature_context::FeatureContext;
 use crate::engine::feature_map::FeatureMap;
 use crate::engine::task::{FrozenTask, Task, TaskLike};
 use crate::engine::task_context::TaskContext;
+use crate::engine::task_info::PhaseRecord;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::task_map::TaskMap;
 use crate::engine::telemetry::{self, ExporterSpec, Telemetry};
@@ -374,6 +376,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         task_index: usize,
         task_key: String,
         task_id: Option<String>,
+        timing: TimingMode,
         args_builder: impl FnOnce(&dyn TaskLike<'v>, Heap<'v>) -> Arguments<'v>,
     ) -> Result<Option<u8>, EvalError> {
         let task = *self.tasks().get(task_index).ok_or_else(|| {
@@ -388,12 +391,92 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         span.record("task", task.name());
         span.record("task_id", task_id.as_str());
 
-        let task_info = TaskInfo {
-            name: task.name(),
-            group: task.group().clone(),
-            task_key,
-            task_id,
+        // Capture name early — `task_info` is moved into TaskContext below
+        // and is no longer accessible from the closing announcement after
+        // the eval returns.
+        let task_name = task.name();
+        let task_info = TaskInfo::new(task.name(), task.group().clone(), task_key, task_id);
+
+        // Universal "task starting" announcement. Fires for every task —
+        // built-in or custom — so users can see in CI logs which task is
+        // running and what key/id it was invoked under, without each
+        // task's AXL impl having to remember to print this itself. Phase
+        // boundaries inside the task body are still announced from AXL
+        // via `lib/lifecycle.axl::announce`; this line just frames each
+        // task invocation.
+        //
+        // Diagnostic output → stderr. stdout is reserved for the primary
+        // task output (anything a downstream consumer might want to
+        // capture or pipe).
+        //
+        // On Buildkite, a `--- :aspect: Running …` section header
+        // opens a collapsible section that groups the task's output
+        // under one header — this REPLACES the `→ Running …` line on
+        // BK (avoids printing the same text twice on the BK log
+        // viewer). Off BK, the `→ Running …` line is the only marker.
+        // Bracket form `[key]` matches BazelDefaults' "Running bazel
+        // <cmd> [<key>] <targets>" so the two adjacent log lines read
+        // as a pair.
+        //
+        // The `[<key>]` bracket is only included on CI. Locally most
+        // invocations don't pass `--task-key`, so the auto-generated
+        // name (e.g. `taboo-rub`) just clutters every task line. CI
+        // shows it because that's where users correlate task-key with
+        // the GHSC check-run / BK annotation context. Detected via
+        // any of the major CI env markers.
+        let on_buildkite = std::env::var_os("BUILDKITE").is_some();
+        let on_ci = on_buildkite
+            || std::env::var_os("CI").is_some()
+            || std::env::var_os("GITHUB_ACTIONS").is_some()
+            || std::env::var_os("CIRCLECI").is_some()
+            || std::env::var_os("GITLAB_CI").is_some();
+        let key_suffix = if on_ci {
+            format!(" [{}]", task_info.task_key)
+        } else {
+            String::new()
         };
+        // ANSI styling — verb color for the leading verb on success
+        // ("Running" / "Completed"), bold+red on failure ("Failed").
+        // Color emitted when stderr is a TTY OR a known CI host is
+        // detected (CI log viewers render ANSI even when stderr is
+        // piped). Skipped on the BK section marker so it stays clean
+        // structural text.
+        //
+        // Success color reads from `ASPECT_CLI_HIGHLIGHT_COLOR` (matches
+        // the same env var the AXL `highlight_style` helper uses for
+        // mid-task phase task_updates) so the runtime-emitted bookend
+        // lines stay in sync with the in-task ones. Default `1;36`
+        // (bold cyan) reads cleanly on dark terminals; common
+        // overrides include `94` (bright blue), `38;5;75` (256-color
+        // sky blue), or empty to disable.
+        let color = std::io::stderr().is_terminal() || on_ci;
+        let highlight_color = std::env::var("ASPECT_CLI_HIGHLIGHT_COLOR")
+            .ok()
+            .unwrap_or_else(|| "1;36".to_string());
+        let verb_seq = if color && !highlight_color.is_empty() {
+            format!("\x1b[{}m", highlight_color)
+        } else {
+            String::new()
+        };
+        let bold_red = if color { "\x1b[1;31m" } else { "" };
+        let reset = if color { "\x1b[0m" } else { "" };
+        if on_buildkite {
+            // The `--- :aspect: Running …` section header carries the
+            // same text the `→` line would, so emit only the section
+            // header on BK — printing both is duplicate output.
+            eprintln!(
+                "--- :aspect: {}Running{} `{}` task{}",
+                verb_seq, reset, task_info.name, key_suffix
+            );
+        } else {
+            // 🎬 reads as "Action!" — the universal signal for a
+            // scene beginning. Pairs with the closing 🏁 (finish
+            // flag) as the bookend pair for the task.
+            eprintln!(
+                "→ 🎬 {}Running{} `{}` task{}",
+                verb_seq, reset, task_info.name, key_suffix
+            );
+        }
 
         let task_trait_map = match self.trait_map_value {
             Some(tmap_val) => {
@@ -408,10 +491,15 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
         let startup_flags = heap.alloc(AllocList([] as [String; 0]));
         let bazel = heap.alloc(Bazel { startup_flags });
+        // Allocate `task_info` on the heap and keep the resulting Value
+        // so we can read back timing + phases after `_impl` returns.
+        // `TaskInfo::started_at` is the authoritative task start (stamped
+        // in `TaskInfo::new`), so we don't need a stack-local `task_start`.
+        let task_info_val = heap.alloc(task_info);
         let context = heap.alloc(TaskContext::new(
             heap.alloc(task_args),
             task_trait_map,
-            heap.alloc(task_info),
+            task_info_val,
             bazel,
         ));
 
@@ -422,6 +510,17 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let ret = eval.eval_function(task.implementation(), &[context], &[])?;
         let exit_code = ret.unpack_i32().map(|ex| ex as u8);
 
+        // Read elapsed + phases off the heap-allocated TaskInfo. Closes
+        // any phase still active when `_impl` returned so the breakdown
+        // is whole.
+        let (elapsed, phases) = {
+            let info = task_info_val
+                .downcast_ref::<TaskInfo>()
+                .expect("task_info_val downcasts to TaskInfo");
+            info.close_active_phase();
+            (info.started_at.elapsed(), info.phases.borrow().clone())
+        };
+
         tracing::Span::current().record("exit_code", exit_code.unwrap_or(0) as i64);
         if let Some(code) = exit_code
             && code != 0
@@ -429,11 +528,280 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             tracing::error!(exit_code = code as i64, "task exited with non-zero status");
         }
 
+        // Universal "task complete" announcement — symmetric with the
+        // opening "Running" announcement above. Every task gets a
+        // closing CLI marker for free without each AXL impl having to
+        // emit its own. Status surfaces (BK / GHSC) get terminal
+        // status via the per-task `lifecycle.task_update(..., status="passed"|"failed", ...)`
+        // emit, so this is CLI-only. Verb mirrors the opener: bold+blue
+        // "Completed" on success, bold+red "Failed" on non-zero exit.
+        //
+        // The phase breakdown trailing the line follows `--timing`:
+        //   total    → ""
+        //   summary  → " — Init 0.2s · Detect 1.2s · …"
+        //   detailed → "\n    Init    0.2s  —\n    Detect  1.2s  Detecting…\n…"
+        // Empty when no phases were marked.
+        let duration = format_duration(elapsed);
+        let failed = matches!(exit_code, Some(code) if code != 0);
+        let breakdown = render_phase_breakdown(&phases, timing, failed);
+        // Emit a closing Buildkite section marker so the task's
+        // completion lands in its own collapsible group, symmetric
+        // with the per-phase `--- :emoji: <Phase> · …` headers AXL
+        // emits during the run. CI-only: gated on `BUILDKITE` env var
+        // so local terminals don't see literal `--- :checkered_flag:`
+        // text.
+        let on_bk = std::env::var_os("BUILDKITE")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        // On Buildkite, only emit the `---` section header — the
+        // breakdown trails it on the same line for Summary mode, or
+        // on the next lines for Detailed. Skip the duplicate
+        // `→ Completed/Failed` line entirely. Off BK, keep the
+        // leading blank + `→` line as before.
+        match exit_code {
+            Some(0) | None => {
+                if on_bk {
+                    eprintln!(
+                        "--- :checkered_flag: {}Completed{} · `{}` task in {}{}",
+                        verb_seq, reset, task_name, duration, breakdown
+                    );
+                } else {
+                    // 🏁 (checkered flag) matches the BK section
+                    // header's `:checkered_flag:` shortcode and pairs
+                    // with the opening 🏎️ on the Running line.
+                    eprintln!();
+                    eprintln!(
+                        "→ 🏁 {}Completed{} `{}` task in {}{}",
+                        verb_seq, reset, task_name, duration, breakdown
+                    );
+                }
+            }
+            Some(code) => {
+                if on_bk {
+                    eprintln!(
+                        "--- :x: {}Failed{} · `{}` task (exit code {}) in {}{}",
+                        bold_red, reset, task_name, code, duration, breakdown
+                    );
+                } else {
+                    eprintln!();
+                    eprintln!(
+                        "→ ❌ {}Failed{} `{}` task (exit code {}) in {}{}",
+                        bold_red, reset, task_name, code, duration, breakdown
+                    );
+                }
+            }
+        }
+
         Ok(exit_code)
     }
 
     pub fn finish(self) -> FinishedEval {
         FinishedEval
+    }
+}
+
+/// Format an elapsed `Duration` as a short human-readable string.
+///
+/// Three regimes for legibility:
+///   < 1s     → `"500ms"`, `"5ms"`     — millisecond precision so tiny
+///                                       phases don't all read as "0.0s"
+///   < 1m     → `"4.2s"`, `"59.9s"`    — tenth-of-a-second precision
+///   ≥ 1m     → `"1m 5s"`, `"61m 1s"`  — whole seconds inside minutes
+///
+/// Mirrors AXL's `bazel_results.format_duration_ms` so the closing
+/// CLI marker reads the same as durations rendered inside per-task
+/// summaries.
+fn format_duration(d: std::time::Duration) -> String {
+    let total_ms = d.as_millis();
+    if total_ms < 1_000 {
+        format!("{}ms", total_ms)
+    } else if total_ms < 60_000 {
+        let secs = total_ms / 1000;
+        let tenths = (total_ms % 1000) / 100;
+        format!("{}.{}s", secs, tenths)
+    } else {
+        let total_s = (total_ms / 1000) as u64;
+        format!("{}m {}s", total_s / 60, total_s % 60)
+    }
+}
+
+/// Threshold below which the synthetic `init` phase is hidden from
+/// the breakdown. The init phase covers Aspect runtime startup +
+/// trait setup before the task's first explicit `phase()` mark; on
+/// a fast path that's a few ms of work and not worth a row in the
+/// breakdown. Above this threshold, init surfaces as a real entry
+/// the user might want to investigate (cold-start anomalies, slow
+/// trait construction, etc.). Caller-named phases always render
+/// even at 0ms — those are intentional boundaries.
+const INIT_PHASE_HIDE_THRESHOLD_MS: u128 = 50;
+
+/// Verbosity for the phase breakdown trailing the runtime's
+/// "→ Completed" / "→ Failed" line. Driven by the top-level
+/// `--timing` CLI flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingMode {
+    /// Total only. Same as the pre-phase output.
+    /// `→ Completed `lint` task in 46.8s`
+    Total,
+    /// Total + inline phase breakdown.
+    /// `→ Completed `lint` task in 46.8s — Init 0.2s · Detect 1.2s · ...`
+    Summary,
+    /// Total + multi-line breakdown with descriptions. Default.
+    Detailed,
+}
+
+impl Default for TimingMode {
+    fn default() -> Self {
+        TimingMode::Detailed
+    }
+}
+
+impl std::str::FromStr for TimingMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "total" => Ok(TimingMode::Total),
+            "summary" => Ok(TimingMode::Summary),
+            "detailed" => Ok(TimingMode::Detailed),
+            other => Err(format!(
+                "invalid timing mode {:?}; expected one of: total, summary, detailed",
+                other
+            )),
+        }
+    }
+}
+
+/// Render the phase breakdown that trails the runtime's "→ Completed"
+/// / "→ Failed" line.
+///
+/// Returns `""` for `Total` mode, or for any mode when `phases` is
+/// empty (task didn't opt into phases).
+///
+/// `Summary` returns a leading-space-and-em-dash inline form so it
+/// concatenates cleanly after the duration. `Detailed` returns a
+/// leading newline plus indented per-phase lines.
+///
+/// When `failed` is true, an `interrupted` phase entry (recorded by
+/// `close_active_phase()` on `_impl` return) renders with a
+/// `(failed after <duration>)` suffix instead of a bare duration —
+/// it's the phase that was active when the task hit a non-zero exit.
+/// On success or a non-failed exit, `interrupted` is treated as a
+/// normal completed entry.
+fn render_phase_breakdown(phases: &[PhaseRecord], mode: TimingMode, failed: bool) -> String {
+    if phases.is_empty() || mode == TimingMode::Total {
+        return String::new();
+    }
+    // Suppress the synthetic `init` phase when it's negligible. The
+    // synthetic init covers the setup time before the task's first
+    // explicit `phase()` call; a few ms of that is just statement
+    // overhead, not signal. Caller-named phases (everything else)
+    // always render, even at 0ms — those are intentional boundaries.
+    let visible: Vec<&PhaseRecord> = phases
+        .iter()
+        .filter(|p| !(p.name == "init" && p.duration.as_millis() < INIT_PHASE_HIDE_THRESHOLD_MS))
+        .collect();
+    if visible.is_empty() {
+        return String::new();
+    }
+    // CLI surfaces only render the emoji the caller supplied via
+    // `Phase(emoji=...)`; empty stays bare. Emoji rendering on plain
+    // terminals varies (some terminfos double-width them and break
+    // column alignment, some render `?`), so we render bare rather
+    // than inconsistently. Users who want emoji on CLI supply it
+    // explicitly per phase.
+    let phase_label = |p: &PhaseRecord| -> String {
+        let name = if p.display_name.is_empty() {
+            titlecase(&p.name)
+        } else {
+            p.display_name.clone()
+        };
+        if p.emoji.is_empty() {
+            name
+        } else {
+            format!("{} {}", p.emoji, name)
+        }
+    };
+    let format_phase = |p: &PhaseRecord| -> String {
+        let label = phase_label(p);
+        let dur = format_duration(p.duration);
+        if failed && p.interrupted {
+            format!("{} (failed after {})", label, dur)
+        } else {
+            format!("{} {}", label, dur)
+        }
+    };
+    match mode {
+        TimingMode::Total => unreachable!(),
+        TimingMode::Summary => {
+            let parts: Vec<String> = visible.iter().map(|p| format_phase(p)).collect();
+            format!(" — {}", parts.join(" · "))
+        }
+        TimingMode::Detailed => {
+            // Compute column widths so durations align. Emoji gets
+            // prefixed inside the name column — names with emoji
+            // render slightly wider, but the dur+desc columns still
+            // line up.
+            let labels: Vec<String> = visible.iter().map(|p| phase_label(p)).collect();
+            let name_w = labels.iter().map(|s| s.chars().count()).max().unwrap_or(0);
+            let dur_strs: Vec<String> = visible
+                .iter()
+                .map(|p| format_duration(p.duration))
+                .collect();
+            let dur_w = dur_strs.iter().map(|s| s.len()).max().unwrap_or(0);
+            let mut out = String::new();
+            for ((p, dur), label) in visible.iter().zip(dur_strs.iter()).zip(labels.iter()) {
+                let desc_base = if p.description.is_empty() {
+                    "—"
+                } else {
+                    p.description.as_str()
+                };
+                let failure_marker = if failed && p.interrupted {
+                    " (failed)"
+                } else {
+                    ""
+                };
+                // Pad the label to `name_w` *characters* (not bytes) —
+                // emoji sequences confuse byte-width Rust formatters.
+                let pad = name_w.saturating_sub(label.chars().count());
+                out.push_str(&format!(
+                    "\n    {}{}  {:>dw$}  {}{}",
+                    label,
+                    " ".repeat(pad),
+                    dur,
+                    desc_base,
+                    failure_marker,
+                    dw = dur_w,
+                ));
+            }
+            out
+        }
+    }
+}
+
+/// Title-case the first ASCII letter, convert underscores to spaces.
+///
+/// Phase names are lowercase identifiers (`detect`, `build`,
+/// `bazel_query`, `init`); this renders them as `Detect`, `Build`,
+/// `Bazel query`, `Init` for display. Callers that need a non-naive
+/// display label (e.g. `preflight` → `Pre-flight`) pass an explicit
+/// `display_name` to `ctx.task.phase(...)`; renderers prefer that
+/// over this helper.
+fn titlecase(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => {
+            let mut out = String::with_capacity(s.len());
+            out.extend(c.to_uppercase());
+            for ch in chars {
+                if ch == '_' {
+                    out.push(' ');
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        }
+        None => String::new(),
     }
 }
 

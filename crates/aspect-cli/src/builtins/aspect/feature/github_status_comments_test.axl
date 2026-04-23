@@ -1,0 +1,950 @@
+"""Snapshot tests for `feature/github_status_comments.axl`.
+
+Run with:
+  aspect dev test-pr-comment-snapshots
+
+Dry-run style — we don't actually invoke the GitHub Issues API. We
+construct artifact-payload-shaped entry dicts (matching what
+`_publish_self` writes to the per-task task.json), pass them through
+`_prepare_for_render` + `_bucket_entries` + `_render_body`, and print
+the resulting Markdown body for each scenario.
+
+Coverage:
+  - All-running, mixed running + failed, all-passed clean,
+    flake-only-warning, lint-warnings, format-diffs,
+    delivery mixed-warn, aborted, all-failed, empty
+  - Link availability variants (CI Run only, no Aspect, no Check, all)
+  - Live phase + ProgressStyles round-trip via the artifact-shape dict
+  - Failed-in-phase prefix
+"""
+
+load(
+    "./github_status_comments.axl",
+    "DEFAULT_BODY_TEMPLATE",
+    "DEFAULT_STATUS_BADGES",
+    "MARKER_FMT",
+    "bucket_entries",
+    "prepare_for_render",
+    "render_body",
+    "results_subset",
+)
+load(
+    "./test_fixtures.axl",
+    "make_build_failing_actions",
+    "make_build_passed",
+    "make_delivery_all_ok",
+    "make_delivery_fail",
+    "make_delivery_mixed_warn",
+    "make_format_clean",
+    "make_format_files_need_format",
+    "make_gazelle_clean",
+    "make_gazelle_fix_applied",
+    "make_gazelle_out_of_date",
+    "make_lint_failed_errors",
+    "make_lint_passed_clean",
+    "make_lint_passed_with_warnings",
+    "make_test_failed",
+    "make_test_failing_test_fails",
+    "make_test_failing_with_flaky",
+    "make_test_passed_flaky_only",
+    "make_test_running_flaky_only",
+)
+load("../lib/bazel_results.axl", "compute_reproducer_command")
+
+_DEFAULT_RUN_URL = "https://github.com/aspect-build/aspect-cli/actions/runs/25615893249"
+_DEFAULT_ASPECT_URL = "https://app.aspect.build/build/sink-uuid-1234-5678-9abc"
+_DEFAULT_CHECK_URL = "https://github.com/aspect-build/aspect-cli/runs/47921003"
+
+# Pinned-in-time fixture timestamp so snapshot output is stable.
+# Corresponds to `date -u -d "@1715326565"` → `Fri May 10 07:16:05 UTC 2024`.
+_DEFAULT_START_MS = 1715326565000
+
+# Mirror of each producer's `_body_text` so the fixture builds the
+# same `progress.body` strings the live producers ship. Internal
+# `_compact_for` / `_*_compact` helpers compute count strings; the
+# narrative `_body_for` wraps them in a verb-prefixed phrase.
+
+def _with_commands(data, repro = [], fix = []):
+    """Decorate a fixture's `data` dict with explicit
+    `repro_commands` + `fix_commands` lists. Each input is a list of
+    `(command, description)` tuples (description usually `""`). Use
+    in scenarios that need to assert the aggregator's repro / fix
+    rendering — the producers normally append these at terminal-emit
+    time, but the snapshot tests fabricate the artifact-payload
+    shape directly so the inputs are spelled out here."""
+    out = dict(data)
+    out["repro_commands"] = [{"command": c, "description": d} for (c, d) in repro]
+    out["fix_commands"] = [{"command": c, "description": d} for (c, d) in fix]
+    return out
+
+def _body_for(kind, status, data):
+    """Mirror the producer's `progress.body` narrative form.
+
+    Running emits ship the live phase narrative (`Bazel test running
+    (12 tests run)` / `Linting`); terminal emits ship a verb-prefixed
+    summary (`Bazel test complete (58/58 passed)` /
+    `Lint failed (3 errors)`)."""
+    compact = _compact_for(kind, status, data)
+
+    # Live forms.
+    if status == "running":
+        if kind == "build" or kind == "test":
+            base = "Bazel " + kind + " running..."
+            return base + (" (" + compact + ")") if compact else base
+        if kind == "lint":
+            return ("Linting... (" + compact + ")") if compact else "Linting..."
+        if kind == "format":
+            return ("Formatting... (" + compact + ")") if compact else "Formatting..."
+        if kind == "gazelle":
+            return ("Running gazelle... (" + compact + ")") if compact else "Running gazelle..."
+        if kind == "delivery":
+            return ("Delivering... (" + compact + ")") if compact else "Delivering..."
+        return ""
+
+    # Terminal / live-non-running forms — verb-prefixed summary.
+    verb_map = {
+        "passed": "complete",
+        "warning": "complete",
+        "failing": "failing",
+        "failed": "failed",
+        "aborted": "aborted",
+    }
+    verb = verb_map.get(status, status)
+    if kind == "build" or kind == "test":
+        return "Bazel " + kind + " " + verb + ((" (" + compact + ")") if compact else "")
+    title = {
+        "lint": "Lint",
+        "format": "Format",
+        "gazelle": "Gazelle",
+        "delivery": "Delivery",
+    }.get(kind, kind)
+    return title + " " + verb + ((" (" + compact + ")") if compact else "")
+
+def _compact_for(kind, status, data):
+    if kind == "build" or kind == "test":
+        return _bazel_compact(kind, status, data)
+    if kind == "lint":
+        return _lint_compact(status, data)
+    if kind == "format":
+        return _format_compact(status, data)
+    if kind == "gazelle":
+        return _gazelle_compact(status, data)
+    if kind == "delivery":
+        return _delivery_compact(status, data)
+    return ""
+
+def _bazel_compact(command, status, data):
+    bz = data.get("bazel", {}) or {}
+    if status == "running":
+        if command == "test":
+            ran = bz.get("passed_test_total", 0) + bz.get("failed_test_total", 0)
+            total = bz.get("targets_total", 0)
+            if total > 0 and ran > 0:
+                return "%d/%d tests run" % (ran, total)
+        elif command == "build":
+            n = bz.get("targets_total", 0)
+            if n > 0:
+                return "%d targets" % n
+        return ""
+    if status == "warning" or status == "passed":
+        if command == "test":
+            passed = bz.get("passed_test_total", 0)
+            failed = bz.get("failed_test_total", 0)
+            flaky = bz.get("flaky_test_total", 0)
+            cached = bz.get("cached_test_total", 0)
+            total = passed + failed
+            if total == 0:
+                return "no tests"
+            text = "%d/%d passed" % (passed, total)
+            extras = []
+            if flaky > 0:
+                extras.append("%d flaky" % flaky)
+            if cached > 0:
+                extras.append("%d cached" % cached)
+            if extras:
+                text = text + " · " + " · ".join(extras)
+            return text
+        n = bz.get("targets_total", 0)
+        return ("%d built" % n) if n > 0 else "ok"
+    if status == "failing" or status == "failed":
+        if command == "test":
+            f = bz.get("failed_test_total", 0)
+            if f > 0:
+                return "%d test%s failed" % (f, "s" if f != 1 else "")
+            return ""
+
+        # build/failed: detailed reads "Bazel build failed"; compact = ""
+        # so the headline doesn't render the redundant "· build failed"
+        # tail (mirrors bazel_runner.axl::_compact_text).
+        return ""
+    return ""
+
+def _lint_compact(status, data):
+    counts = (data.get("lint", {}) or {}).get("counts_by_severity", {}) or {}
+    e = counts.get("error", 0)
+    w = counts.get("warning", 0)
+    if status == "failed" or status == "failing":
+        return ("%d error%s" % (e, "s" if e != 1 else "")) if e > 0 else ""
+    if status == "passed":
+        return "clean"
+    if status == "warning":
+        return ("%d warning%s" % (w, "s" if w != 1 else "")) if w > 0 else ""
+    if e > 0 or w > 0:
+        bits = []
+        if e > 0:
+            bits.append("%d error%s" % (e, "s" if e != 1 else ""))
+        if w > 0:
+            bits.append("%d warning%s" % (w, "s" if w != 1 else ""))
+        return " · ".join(bits)
+    return ""
+
+def _format_compact(status, data):
+    n = len((data.get("format", {}) or {}).get("affected_files", []) or [])
+    if status == "failed" or status == "failing":
+        if n > 0:
+            return "%d file%s need%s format" % (n, "s" if n != 1 else "", "" if n != 1 else "s")
+        return ""
+    if status == "passed":
+        return "clean"
+    if status == "warning" or status == "running":
+        if n > 0:
+            return "%d file%s differ%s" % (n, "s" if n != 1 else "", "" if n != 1 else "s")
+        return ""
+    return ""
+
+def _gazelle_compact(status, data):
+    n = len((data.get("gazelle", {}) or {}).get("affected_files", []) or [])
+    if status == "failed" or status == "failing":
+        return ("%d out of date" % n) if n > 0 else ""
+    if status == "passed":
+        return "clean"
+    if status == "warning":
+        if n > 0:
+            return "%d update%s" % (n, "s" if n != 1 else "")
+        return ""
+    if status == "running":
+        if n > 0:
+            return "%d update%s pending" % (n, "s" if n != 1 else "")
+        return ""
+    return ""
+
+def _delivery_compact(status, dr):
+    counts = (dr.get("delivery", {}) or {}).get("counts", {}) or {}
+    ok = counts.get("ok", 0)
+    skip = counts.get("skip", 0)
+    warn = counts.get("warn", 0)
+    fail = counts.get("fail", 0)
+    if status == "failed" or status == "failing":
+        if fail > 0:
+            return "%d delivery fail%s" % (fail, "s" if fail != 1 else "")
+        return ""
+    if status == "passed" or status == "warning":
+        bits = []
+        if ok:
+            bits.append("%d delivered" % ok)
+        if warn:
+            bits.append("%d warn" % warn)
+        if skip:
+            bits.append("%d skipped" % skip)
+        if bits:
+            return " · ".join(bits)
+        return "no deliveries" if status == "passed" else ""
+    if status == "running":
+        done = ok + skip + warn + fail
+        total = (dr.get("delivery", {}) or {}).get("targets_total", 0) or 0
+        if done > 0:
+            if total > 0:
+                return "%d/%d delivered" % (done, total)
+            return "%d delivered" % done
+    return ""
+
+def _entry(
+        name,
+        key,
+        job,
+        kind,
+        status,
+        data,
+        elapsed_ms,
+        aspect_url = _DEFAULT_ASPECT_URL,
+        bes_url = "",
+        check_run_url = _DEFAULT_CHECK_URL,
+        ci_run_url = _DEFAULT_RUN_URL,
+        current_phase = "",
+        current_phase_elapsed_ms = 0,
+        progress = None,
+        failed_in_phase = "",
+        start_time_ms = _DEFAULT_START_MS):
+    """Build an artifact-payload-shaped entry. Mirrors what
+    `_publish_self` writes to task.json so the test exercises the same
+    on-wire shape sibling jobs would read.
+
+    Emulates the producer-side composition: `body` is filled from
+    `_body_for(kind, status, data)` matching what each real producer
+    ships at task_update time. Pass an explicit `progress` dict to
+    override (e.g. to test a specific shape)."""
+
+    # Mirror the producer side: if the fixture's `data` doesn't carry
+    # repro_commands, synthesize one the way bazel_runner does. Lets
+    # existing fixtures exercise the "🔁 Reproduce" section without
+    # spelling out the list shape.
+    if not data.get("repro_commands"):
+        repro, _ = compute_reproducer_command(data, name)
+        if repro:
+            data = dict(data)
+            data["repro_commands"] = [{"command": repro, "description": ""}]
+    payload = results_subset(
+        data,
+        elapsed_ms,
+        aspect_url = aspect_url,
+        bes_url = bes_url,
+        check_run_url = check_run_url,
+        current_phase = current_phase,
+        current_phase_elapsed_ms = current_phase_elapsed_ms,
+        progress_styles = None,
+        failed_in_phase = failed_in_phase,
+        start_time_ms = start_time_ms,
+    )
+    if progress != None:
+        # Explicit override — scenario tests a specific progress shape.
+        payload["progress"] = progress
+    else:
+        # Default: mirror what each producer ships — narrative `body`
+        # text + empty `stream`.
+        payload["progress"] = {
+            "body": _body_for(kind, status, data),
+            "stream": "",
+        }
+    payload["name"] = name
+    payload["key"] = key
+    payload["job"] = job
+    payload["run_attempt"] = "1"
+    payload["status"] = status
+    payload["ci_run_url"] = ci_run_url
+    return payload
+
+def _test_impl(ctx):
+    sep = "=" * 70
+
+    scenarios = [
+        (
+            "1. all-running (initial)",
+            [
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "running",
+                    make_build_passed(),
+                    8000,
+                ),
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "running",
+                    make_test_failing_test_fails(),
+                    12000,
+                ),
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "running",
+                    make_lint_passed_clean(),
+                    4000,
+                ),
+            ],
+        ),
+        (
+            "2. mixed running + one failed",
+            [
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "failed",
+                    make_build_failing_actions(),
+                    42000,
+                ),
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "running",
+                    make_test_failing_test_fails(),
+                    78000,
+                ),
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "passed",
+                    make_lint_passed_clean(),
+                    24000,
+                ),
+            ],
+        ),
+        (
+            "3. all-passed clean",
+            [
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "passed",
+                    make_build_passed(),
+                    60000,
+                ),
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "passed",
+                    make_test_passed_flaky_only(),
+                    180000,
+                ),
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "passed",
+                    make_lint_passed_clean(),
+                    24000,
+                ),
+                _entry(
+                    "format",
+                    "format-task",
+                    "format-task",
+                    "format",
+                    "passed",
+                    make_format_clean(),
+                    14000,
+                ),
+                _entry(
+                    "gazelle",
+                    "gazelle-task",
+                    "gazelle-task",
+                    "gazelle",
+                    "passed",
+                    make_gazelle_clean(),
+                    22000,
+                ),
+                _entry(
+                    "delivery",
+                    "delivery-task",
+                    "delivery-task",
+                    "delivery",
+                    "passed",
+                    make_delivery_all_ok(),
+                    28000,
+                ),
+            ],
+        ),
+        (
+            "4. warned with flake-only (warning sort)",
+            [
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "warning",
+                    make_test_passed_flaky_only(),
+                    180000,
+                ),
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "passed",
+                    make_build_passed(),
+                    60000,
+                ),
+            ],
+        ),
+        (
+            "5. lint warnings → warned (soft)",
+            [
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "warning",
+                    make_lint_passed_with_warnings(),
+                    30000,
+                ),
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "passed",
+                    make_build_passed(),
+                    60000,
+                ),
+            ],
+        ),
+        (
+            "6. format diffs → warned (soft-fail clean exit)",
+            [
+                _entry(
+                    "format",
+                    "format-task",
+                    "format-task",
+                    "format",
+                    "warning",
+                    make_format_files_need_format(),
+                    14000,
+                ),
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "passed",
+                    make_build_passed(),
+                    60000,
+                ),
+            ],
+        ),
+        (
+            "7. delivery mixed → warned",
+            [
+                _entry(
+                    "delivery",
+                    "delivery-task",
+                    "delivery-task",
+                    "delivery",
+                    "warning",
+                    make_delivery_mixed_warn(),
+                    28000,
+                ),
+            ],
+        ),
+        (
+            "8. one aborted",
+            [
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "aborted",
+                    _aborted(make_build_passed(), "timeout"),
+                    30000,
+                ),
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "running",
+                    make_test_failing_test_fails(),
+                    14000,
+                ),
+            ],
+        ),
+        (
+            "9. all-failed",
+            [
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "failed",
+                    make_build_failing_actions(),
+                    42000,
+                ),
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "failed",
+                    make_test_failed(),
+                    90000,
+                ),
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "failed",
+                    make_lint_failed_errors(),
+                    30000,
+                ),
+                _entry(
+                    "format",
+                    "format-task",
+                    "format-task",
+                    "format",
+                    "failed",
+                    make_format_files_need_format(),
+                    14000,
+                ),
+                _entry(
+                    "gazelle",
+                    "gazelle-task",
+                    "gazelle-task",
+                    "gazelle",
+                    "failed",
+                    make_gazelle_out_of_date(),
+                    22000,
+                ),
+                _entry(
+                    "delivery",
+                    "delivery-task",
+                    "delivery-task",
+                    "delivery",
+                    "failed",
+                    make_delivery_fail(),
+                    28000,
+                ),
+            ],
+        ),
+        (
+            "10. empty (no entries)",
+            [],
+        ),
+
+        # Each row in this scenario carries a different subset of
+        # (CI Run, Aspect, Check) so the snapshot freezes the
+        # graceful-degradation behaviour.
+        (
+            "11. mixed link availability",
+            [
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "passed",
+                    make_build_passed(),
+                    60000,
+                ),  # all three links
+                _entry(
+                    "delivery",
+                    "delivery-task",
+                    "delivery-task",
+                    "delivery",
+                    "passed",
+                    make_delivery_all_ok(),
+                    28000,
+                    aspect_url = "",
+                ),  # no Aspect
+                _entry(
+                    "format",
+                    "format-task",
+                    "format-task",
+                    "format",
+                    "passed",
+                    make_format_clean(),
+                    14000,
+                    check_run_url = "",
+                ),  # no Check
+                _entry(
+                    "gazelle",
+                    "gazelle-task",
+                    "gazelle-task",
+                    "gazelle",
+                    "passed",
+                    make_gazelle_fix_applied(),
+                    22000,
+                    aspect_url = "",
+                    check_run_url = "",
+                ),  # CI Run only
+            ],
+        ),
+
+        # Phase + progress text round-trip — running rows compose
+        # phase, kind detail, and producer-supplied progress.
+        (
+            "12. running with phase + progress",
+            [
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "running",
+                    make_test_running_flaky_only(),
+                    78000,
+                    current_phase = "test",
+                    current_phase_elapsed_ms = 65000,
+                    progress = {
+                        "body": "Bazel test running... (12 tests run)",
+                        "stream": "",
+                    },
+                ),
+                _entry(
+                    "delivery",
+                    "delivery-task",
+                    "delivery-task",
+                    "delivery",
+                    "running",
+                    make_delivery_all_ok(),
+                    3000,
+                    current_phase = "resolve",
+                    current_phase_elapsed_ms = 3000,
+                    progress = {"body": "", "stream": ""},
+                ),
+                # `body` populated by an arbitrary producer string —
+                # snapshot exercises the renderer's body-text path.
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "running",
+                    make_lint_passed_clean(),
+                    4000,
+                    progress = {
+                        "body": "Linting 482 files...",
+                        "stream": "",
+                    },
+                ),
+            ],
+        ),
+
+        # Failed-in-phase — the failed row carries the phase the task
+        # was in when it died.
+        (
+            "13. failed in phase",
+            [
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "failed",
+                    make_build_failing_actions(),
+                    42000,
+                    failed_in_phase = "build",
+                    progress = {
+                        "body": "Bazel build failed (3 actions failed)",
+                        "stream": "",
+                    },
+                ),
+            ],
+        ),
+
+        # Test-failing-with-flaky — failures dominate flakes; should
+        # render as failed (red) not warning (yellow).
+        (
+            "14. failing test with flakes (failures dominate)",
+            [
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "failing",
+                    make_test_failing_with_flaky(),
+                    60000,
+                ),
+            ],
+        ),
+
+        # Live `warning` — non-fatal signal detected mid-flight. The
+        # producer flips status to `warning` so BK / GHSC PR-comment all
+        # paint yellow before the task terminates.
+        (
+            "15. live warning (lint warnings detected mid-build)",
+            [
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "warning",
+                    make_lint_passed_with_warnings(),
+                    18000,
+                    current_phase = "build",
+                    current_phase_elapsed_ms = 12000,
+                ),
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "warning",
+                    make_test_running_flaky_only(),
+                    45000,
+                    current_phase = "test",
+                    current_phase_elapsed_ms = 30000,
+                ),
+            ],
+        ),
+
+        # Per-kind running compacts — exercises the mid-flight text
+        # for lint/format/gazelle/delivery.
+        (
+            "16. per-kind running compacts",
+            [
+                # No fixture for "format running with diffs" — reuse files-need
+                # but keep status=running so it's a live `warning` row with
+                # the "N files differ" compact.
+                _entry(
+                    "format",
+                    "format-task",
+                    "format-task",
+                    "format",
+                    "warning",
+                    make_format_files_need_format(),
+                    8000,
+                    current_phase = "diff",
+                ),
+                _entry(
+                    "gazelle",
+                    "gazelle-task",
+                    "gazelle-task",
+                    "gazelle",
+                    "warning",
+                    make_gazelle_fix_applied(),
+                    12000,
+                    current_phase = "diff",
+                ),
+                _entry(
+                    "delivery",
+                    "delivery-task",
+                    "delivery-task",
+                    "delivery",
+                    "running",
+                    _delivery_partial(make_delivery_all_ok(), 12),
+                    25000,
+                    current_phase = "deliver",
+                ),
+            ],
+        ),
+
+        # Validates the aggregator's "🔁 Reproduce" (non-passing
+        # entries only) and "🛠️ Fix" (every contributing entry,
+        # including passing ones) sections plus the kind-aware
+        # dedup-and-attribute join across tasks contributing identical
+        # commands.
+        (
+            "17. repro & fix sections",
+            [
+                # Failed build — contributes a repro narrowed to the
+                # failed labels.
+                _entry(
+                    "build",
+                    "build-task",
+                    "build-task",
+                    "build",
+                    "failed",
+                    _with_commands(
+                        make_build_failing_actions(),
+                        repro = [("aspect build -- //pkg:lib //pkg:bin", "")],
+                    ),
+                    42000,
+                ),
+                # Sibling task contributing the SAME repro command —
+                # exercises dedup-and-attribute (one row, both task
+                # keys listed).
+                _entry(
+                    "test",
+                    "test-task",
+                    "test-task",
+                    "test",
+                    "failed",
+                    _with_commands(
+                        make_test_failed(),
+                        repro = [("aspect build -- //pkg:lib //pkg:bin", "")],
+                    ),
+                    78000,
+                ),
+                # Passing format task that contributes a fix command
+                # only — verifies the fix section includes passing
+                # tasks while the repro section does not.
+                _entry(
+                    "format",
+                    "format-task",
+                    "format-task",
+                    "format",
+                    "passed",
+                    _with_commands(
+                        make_format_clean(),
+                        fix = [("aspect format --check=false", "")],
+                    ),
+                    24000,
+                ),
+                # Warned lint task contributing both — appears in
+                # repro (non-passing) and fix sections.
+                _entry(
+                    "lint",
+                    "lint-task",
+                    "lint-task",
+                    "lint",
+                    "warned",
+                    _with_commands(
+                        make_lint_passed_with_warnings(),
+                        repro = [("aspect lint --strategy=hold-the-line -- //...", "")],
+                        fix = [("aspect lint --fix --strategy=hold-the-line -- //...", "")],
+                    ),
+                    16000,
+                ),
+            ],
+        ),
+    ]
+
+    for (label, raw_entries) in scenarios:
+        prepared = prepare_for_render(raw_entries)
+        sections = bucket_entries(prepared)
+        marker = MARKER_FMT % 1234
+
+        # Pinned-in-time formatted timestamp so snapshot output is
+        # stable (matches `date -u -d "@_DEFAULT_START_MS / 1000"`).
+        body = render_body(
+            ctx,
+            marker,
+            prepared,
+            "Fri May 10 07:16:05 UTC 2024",
+            DEFAULT_BODY_TEMPLATE,
+            DEFAULT_STATUS_BADGES,
+            sections,
+        )
+
+        print(sep)
+        print("SCENARIO: " + label)
+        print(sep)
+        print(body)
+        print("")
+
+    print(sep)
+    print("All %d PR-comment scenarios rendered without error." % len(scenarios))
+    return 0
+
+def _aborted(data, reason):
+    """Mark a fixture as aborted so it routes through the aborted badge."""
+    data["bazel"]["aborted"] = True
+    data["bazel"]["abort_reason"] = reason
+    return data
+
+def _delivery_partial(data, total):
+    """Stash a `targets_total` denominator on a delivery fixture so the
+    running compact renders `N/M delivered` rather than `N delivered`."""
+    if "delivery" not in data:
+        data["delivery"] = {}
+    data["delivery"]["targets_total"] = total
+    return data
+
+pr_comment_snapshot_tests = task(
+    name = "test-pr-comment-snapshots",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

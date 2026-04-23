@@ -1,0 +1,225 @@
+"""Snapshot tests for `lib/gazelle_results.axl` template rendering.
+
+Run with:
+  aspect dev test-gazelle-template-snapshots
+
+Scenarios:
+  1. clean-passed        — all BUILD files are up to date
+  2. files-out-of-date   — 4 BUILD files need updating (--check mode)
+  3. fix-mode            — same 4 files, fix mode (patch applied)
+  4. gazelle-error       — non-zero exit with no diff (config error)
+  5. apply-error         — git apply -p0 failed
+  6. with-patch-url      — patch artifact uploaded
+  7. non-default-target  — custom gazelle target + subcommand
+  8. dirs-scoped         — positional dirs in repro command
+  9. large               — 300 files to exercise the trim cascade
+ 10. in-progress         — task still running (initial state)
+"""
+
+load("./gazelle_results.axl", "init_data", "render_check_output")
+
+# ─── Fake-data builders ───────────────────────────────────────────────────────
+
+def _make_base():
+    """Common metadata / runner info shared by all scenarios."""
+    r = init_data()
+    r["bazel"]["invocation_id"] = ""
+    r["sink_invocation_id"] = ""
+    r["start_time_ms"] = 1744630000000
+    r["finish_time_ms"] = 1744630005800
+    r["bazel"]["wall_time_ms"] = 5800
+    r["bazel"]["workspace_status"] = {
+        "BUILD_USER": "aspect-runner",
+        "BUILD_HOST": "ip-10-0-86-10",
+        "BUILD_TIMESTAMP": "1776727956",
+    }
+    r["bazel"]["metadata"] = {
+        "BRANCH": "main",
+        "BRANCH_NAME": "main",
+        "COMMIT_SHA": "abc123def456789abcdef",
+        "COMMIT_MESSAGE": "feat: add new Go service",
+        "COMMIT_AUTHOR": "Greg Magolan <greg@aspect.build>",
+        "COMMIT_AUTHOR_NAME": "Greg Magolan",
+        "COMMIT_AUTHOR_EMAIL": "greg@aspect.build",
+        "COMMIT_TIMESTAMP": "2026-04-28 10:12:34 -0700",
+        "USER": "Greg Magolan",
+        "CI_HOST": "GITHUB",
+        "VCS": "GITHUB",
+        "REPO_OWNER": "aspect-build",
+        "REPO_NAME": "silo",
+        "BUILD_NUMBER": "12346",
+        "RUN_TYPE": "PULL_REQUEST",
+        "ASPECT_TASK_NAME": "Gazelle",
+        "ASPECT_TASK_ID": "gazelle",
+        "BUILD_URL": "https://github.com/aspect-build/silo/actions/runs/12346",
+    }
+    r["gazelle"]["gazelle_target"] = "//tools/gazelle:gazelle"
+    r["gazelle"]["gazelle_command"] = ""
+    r["gazelle"]["check_mode"] = True
+    r["gazelle"]["dirs"] = []
+    return r
+
+def _make_clean():
+    return _make_base()
+
+def _make_files_out_of_date():
+    r = _make_base()
+    r["gazelle"]["check_mode"] = True
+    r["gazelle"]["affected_files"] = [
+        "services/api/BUILD.bazel",
+        "services/worker/BUILD.bazel",
+        "tools/go/BUILD.bazel",
+        "apps/web/proto/BUILD.bazel",
+    ]
+    return r
+
+def _make_fix_mode():
+    r = _make_base()
+    r["gazelle"]["check_mode"] = False
+    r["gazelle"]["affected_files"] = [
+        "services/api/BUILD.bazel",
+        "services/worker/BUILD.bazel",
+        "tools/go/BUILD.bazel",
+        "apps/web/proto/BUILD.bazel",
+    ]
+    return r
+
+def _make_gazelle_error():
+    r = _make_base()
+    r["gazelle"]["gazelle_error"] = True
+    r["gazelle"]["gazelle_error_code"] = 1
+    return r
+
+def _make_early_fail():
+    """Status `failed` with no specific failure mode recorded — the
+    early-bail path when the gazelle target's bootstrap build failed
+    or `runnable.determine_entrypoint` couldn't resolve the
+    entrypoint. Title and body must say "Failed", NOT "Passed" /
+    "All BUILD files are up to date."
+    """
+    return _make_base()
+
+def _make_apply_error():
+    r = _make_base()
+    r["gazelle"]["check_mode"] = False
+    r["gazelle"]["affected_files"] = ["services/api/BUILD.bazel", "tools/go/BUILD.bazel"]
+    r["gazelle"]["apply_error"] = True
+    r["gazelle"]["apply_error_msg"] = "error: patch failed: services/api/BUILD.bazel:3"
+    return r
+
+def _make_with_patch_url():
+    r = _make_base()
+    r["gazelle"]["check_mode"] = True
+    r["gazelle"]["affected_files"] = [
+        "services/api/BUILD.bazel",
+        "tools/go/BUILD.bazel",
+    ]
+    r["gazelle"]["patch_url"] = "https://github.com/aspect-build/silo/actions/runs/12346/artifacts/888"
+    return r
+
+def _make_non_default_target():
+    r = _make_base()
+    r["gazelle"]["check_mode"] = True
+    r["gazelle"]["gazelle_target"] = "//tools/gazelle:gazelle_from_source"
+    r["gazelle"]["gazelle_command"] = "fix"
+    r["gazelle"]["affected_files"] = ["services/api/BUILD.bazel"]
+    return r
+
+def _make_dirs_scoped():
+    r = _make_base()
+    r["gazelle"]["check_mode"] = True
+    r["gazelle"]["dirs"] = ["services/api", "tools/go"]
+    r["gazelle"]["affected_files"] = [
+        "services/api/BUILD.bazel",
+        "tools/go/BUILD.bazel",
+    ]
+    return r
+
+def _make_large():
+    """300 files to exercise the trim cascade."""
+    r = _make_base()
+    r["gazelle"]["check_mode"] = True
+    files = []
+    for i in range(300):
+        files.append("services/svc_%d/BUILD.bazel" % i)
+    r["gazelle"]["affected_files"] = files
+    return r
+
+# ─── Test harness ─────────────────────────────────────────────────────────────
+
+def _render_ctx(task_name = "gazelle"):
+    return {
+        "triggered_by": "Greg Magolan (pull_request)",
+        "targets": "",
+        "started_ms": 1744630000000,
+        "ended_ms": 1744630005800,
+        "progress": "",
+        "task_name": task_name,
+    }
+
+def _links(ci = "github"):
+    if ci == "buildkite":
+        ci_label = "Buildkite"
+        ci_url = "https://buildkite.com/aspect-build/silo/builds/12346/steps/canvas?sid=s1"
+    else:
+        ci_label = "GitHub Actions"
+        ci_url = "https://github.com/aspect-build/silo/actions/runs/12346/job/100"
+    return {
+        "ci_label": ci_label,
+        "ci_url": ci_url,
+        "aspect_url": "",
+        "results_base_url": "",
+        "artifacts_browse_url": "",
+        "artifact_urls": {},
+        "testlogs_label_urls": {},
+    }
+
+def _test_impl(ctx):
+    scenarios = [
+        # (label,                               data,                       status,    ci,          metadata_keys)
+        ("1. clean-passed · GH", _make_clean(), "passed", "github", None),
+        ("2. files-out-of-date check · GH", _make_files_out_of_date(), "failed", "github", None),
+        ("3. files-out-of-date fix · GH", _make_fix_mode(), "failed", "github", None),
+        ("4. gazelle-error · GH", _make_gazelle_error(), "failed", "github", None),
+        ("5. apply-error · GH", _make_apply_error(), "failed", "github", None),
+        ("6. with-patch-url · GH", _make_with_patch_url(), "failed", "github", None),
+        ("7. non-default-target · BK", _make_non_default_target(), "failed", "buildkite", None),
+        ("8. dirs-scoped · GH", _make_dirs_scoped(), "failed", "github", None),
+        ("9. large-trim · GH", _make_large(), "failed", "github", None),
+        ("10. in-progress · GH", _make_files_out_of_date(), "running", "github", None),
+        # Exercise GitHubStatusChecksTrait.metadata_keys through the shared summary renderer.
+        ("11. files-out-of-date · meta=*", _make_files_out_of_date(), "failed", "github", ["*"]),
+        # Early-bail before gazelle ran (bootstrap-build failed or
+        # entrypoint resolution failed). Title and body must say "Failed",
+        # NOT "Passed" / "All BUILD files are up to date."
+        ("12. early-fail · GH", _make_early_fail(), "failed", "github", None),
+    ]
+
+    sep = "=" * 70
+
+    for (label, data, status, ci, metadata_keys) in scenarios:
+        rc = _render_ctx()
+        lk = _links(ci = ci)
+        out = render_check_output(ctx, data, status, rc, lk, metadata_keys = metadata_keys)
+        print(sep)
+        print("SCENARIO: " + label)
+        print(sep)
+        print("TITLE:    " + out["title"])
+        print("")
+        print("SUMMARY:")
+        print(out["summary"])
+        print("")
+        print("DETAILS (first 4000 chars):")
+        print(out["text"][:4000])
+        print("")
+
+    print(sep)
+    print("All " + str(len(scenarios)) + " gazelle scenarios rendered without error.")
+    return 0
+
+gazelle_template_snapshot_tests = task(
+    name = "test-gazelle-template-snapshots",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

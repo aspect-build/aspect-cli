@@ -1,132 +1,39 @@
-"""Trait type definitions for builtin tasks."""
+"""Public facade re-exporting framework traits.
 
-load("./bazel.axl", "default_retry")
+Each trait's definition lives in its owning module (see those files for
+docstrings and field semantics). This file exists so user `config.axl`
+files can load the full trait set with a single import:
 
-# Structured update passed to task_update hooks.
-#
-# Mandatory fields (always present):
-#   progress: str — human-readable status message; may be "" if there is nothing to say
-#   status:   str — "running" | "failing" | "passed" | "failed"
-#   kind:     str — discriminator for the data payload (see below)
-#
-# "passed" and "failed" are terminal — the task is done. Features should complete
-# their output (e.g. close a check run) on these statuses.
-# "failing" means the task is still running but has already accumulated failures.
-#
-# data payload — contents depend on kind:
-#   kind="progress"      — data is {} (progress+status are sufficient)
-#   kind="bazel_results" — data contains:
-#     "results": dict    — accumulated results from bazel_results.init_results()
-#
-TaskUpdate = record(
-    progress = field(str, default = ""),
-    status = field(str, default = "running"),
-    kind = field(str, default = "progress"),
-    data = field(dict, default = {}),
+    load("@aspect//:traits.axl",
+         "BazelTrait",
+         "TaskLifecycleTrait",
+         "GitHubStatusChecksTrait",
+         "ArtifactsTrait",
+         "DeliveryTrait",
+         "HealthCheckTrait",
+         "TaskUpdate")
+
+Internal modules should load directly from the owning module — this
+facade is purely a user-facing convenience.
+"""
+
+load("./bazel.axl", _BazelTrait = "BazelTrait")
+load("./delivery.axl", _DeliveryTrait = "DeliveryTrait")
+load("./feature/github_status_checks.axl", _GitHubStatusChecksTrait = "GitHubStatusChecksTrait")
+load("./lib/artifacts.axl", _ArtifactsTrait = "ArtifactsTrait")
+load("./lib/checkrun.axl", _GitHubCheckRunTrait = "GitHubCheckRunTrait")
+load("./lib/health_check.axl", _HealthCheckTrait = "HealthCheckTrait")
+load(
+    "./lib/lifecycle.axl",
+    _TaskLifecycleTrait = "TaskLifecycleTrait",
+    _TaskUpdate = "TaskUpdate",
 )
 
-# Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
-# to observe task progress without coupling to Bazel-specific hooks.
-TaskLifecycleTrait = trait(
-    # Called once at the start of the task. Features should create their status
-    # check here. Receives (ctx, subject: str) where subject is a human-readable
-    # description of what the task is operating on (e.g. "//app/..." for a build,
-    # "production" for a deploy). Pass "" if unused.
-    # Features close over their own state dict rather than receiving one.
-    task_started = attr(list[typing.Callable[[TaskContext, str], None]], default = []),
-
-    # Called to push a structured update during the task. Receives (ctx, update: TaskUpdate).
-    task_update = attr(list[typing.Callable[[TaskContext, TaskUpdate], None]], default = []),
-
-    # Called once when the task finishes. Receives (ctx, exit_code: int).
-    task_complete = attr(list[typing.Callable[[TaskContext, int], None]], default = []),
-)
-
-# Configures the GitHub status check output templates for a task.
-# By default the GithubStatusChecks feature uses its built-in Jinja2 templates.
-# Operators can override individual templates in their config.axl:
-#
-#   def config(ctx: ConfigContext):
-#       gh = ctx.traits[GitHubStatusChecksTrait]
-#       gh.templates["summary"] = """my custom {{ status_label }} template"""
-#
-# Available template keys: "summary", "details"
-GitHubStatusChecksTrait = trait(
-    # Map of template overrides. Empty dict → use feature defaults.
-    templates = attr(dict, default = {}),
-
-    # Additional BES build_metadata keys to surface in the check run summary,
-    # beyond the built-in set (BRANCH, COMMIT_SHA, TAG, COMMIT_MESSAGE).
-    #
-    # Use ["*"] to show ALL metadata keys from the BES stream.
-    # Users inject custom keys via --bes_metadata=MY_KEY=value or
-    # --build_metadata=MY_KEY=value on their Bazel invocation.
-    #
-    # Example — show a custom deploy environment and workspace name:
-    #   gh.metadata_keys = ["DEPLOY_ENV", "WORKSPACE"]
-    metadata_keys = attr(list[str], default = []),
-)
-
-BazelTrait = trait(
-    # Declarative data — composable, zero-cost reads
-    extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation"),
-    extra_startup_flags = attr(list[str], default = [], description = "Additional Bazel startup flags prepended before the command"),
-    build_event_sinks = attr(list[bazel.build.BuildEventSink], default = [], description = "Build Event Protocol sinks to stream events to during the build"),
-    execution_log_sinks = attr(list[bazel.execution_log.ExecLogSink], default = [], description = "Execution log sinks to receive the Bazel execution log after the build"),
-
-    # Optional transforms — only called when set
-    flags = attr(typing.Callable[[list[str]], list[str]] | None, default = None, description = "Transform function called with the full flag list; return value replaces the list"),
-    startup_flags = attr(typing.Callable[[list[str]], list[str]] | None, default = None, description = "Transform function called with the full startup flag list; return value replaces the list"),
-
-    # Task-time flag contributors — hooks that receive TaskContext and return
-    # additional flags to append to the invocation. Fires late enough in the
-    # task lifecycle (after the task is known but before Bazel is spawned) that
-    # features can inject ctx.task-dependent flags (e.g. --build_metadata=
-    # ASPECT_TASK_NAME=...). Invoked by bazel_runner.axl for build/test and by
-    # each task's impl for lint/delivery.
-    task_flags = attr(list[typing.Callable[[TaskContext], list[str]]], default = [], description = "Hooks returning additional flags; called with TaskContext at invocation time"),
-
-    # Lifecycle hooks — lists of callables; callers close over their own state
-    build_start = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called once before the Bazel invocation starts"),
-    build_event = attr(list[typing.Callable[[TaskContext, dict], None]], default = [], description = "Hooks called for each Build Event Protocol event received during the build"),
-    build_retry = attr(typing.Callable[[int], bool], default = default_retry, description = "Predicate called with the exit code; return True to retry the build"),
-    build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes, with the exit code"),
-)
-
-HealthCheckTrait = trait(
-    pre_health_check = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called before the build to validate preconditions (e.g. auth, connectivity)"),
-    post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks called after the build; return a non-None string to report a warning"),
-)
-
-ArtifactsTrait = trait(
-    # CI-wide browse URL for all artifacts uploaded during the current job.
-    # GithubStatusChecks surfaces this as the "Artifacts" link in the check run.
-    #   GitHub:    {server}/{repo}/actions/runs/{run_id}                     (run page, artifacts section)
-    #   Buildkite: {BUILDKITE_BUILD_URL}/steps/canvas?sid={step}&tab=artifacts
-    #   CircleCI:  {CIRCLE_BUILD_URL}#artifacts                              (legacy UI; modern UI URL is harder to construct)
-    #   GitLab:    {CI_PROJECT_URL}/-/jobs/{CI_JOB_ID}/artifacts/browse
-    # Empty until the first successful upload (or when ArtifactUpload is disabled).
-    artifacts_browse_url = attr(str, default = ""),
-
-    # Per-kind direct download URLs. Keys: "testlogs", "profile", "execlog", "bep".
-    # Populated only when a stable per-file URL can be constructed:
-    #   GitHub:    {run}/artifacts/{artifactId}   (from FinalizeArtifact response)
-    #   GitLab:    Generic Packages download URL
-    #   CircleCI:  stable output.circle-artifacts.com URL
-    # Buildkite download URLs expire — not recorded here.
-    artifact_urls = attr(dict, default = {}),
-
-    # Per-label, per-file download URLs for individual test output files.
-    # Set by ArtifactUpload on per-file upload CI platforms (CircleCI currently).
-    # {} on GitHub/Buildkite/GitLab where only a single archive is uploaded.
-    # Key: Bazel target label (e.g. "//foo:bar_test")
-    # Value: dict mapping file basename ("test.log", "test.xml", ...) to its
-    #        stable direct download URL.
-    testlogs_label_urls = attr(dict, default = {}),
-)
-
-DeliveryTrait = trait(
-    delivery_start = attr(typing.Callable[[], None], default = lambda: None, description = "Hook called once at the start of a delivery run, before any targets are delivered"),
-    delivery_end = attr(typing.Callable[[], None], default = lambda: None, description = "Hook called once at the end of a delivery run, after all targets are delivered"),
-    deliver_target = attr(typing.Callable[[str, bool], None], default = lambda label, is_forced: None, description = "Hook called for each target being delivered; receives the label and a forced-delivery flag"),
-)
+TaskUpdate = _TaskUpdate
+TaskLifecycleTrait = _TaskLifecycleTrait
+BazelTrait = _BazelTrait
+HealthCheckTrait = _HealthCheckTrait
+ArtifactsTrait = _ArtifactsTrait
+GitHubCheckRunTrait = _GitHubCheckRunTrait
+DeliveryTrait = _DeliveryTrait
+GitHubStatusChecksTrait = _GitHubStatusChecksTrait
