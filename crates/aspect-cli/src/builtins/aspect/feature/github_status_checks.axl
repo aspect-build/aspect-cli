@@ -4,11 +4,16 @@ Creates and updates a GitHub check run reflecting the live state of a task.
 Only runs when the CI environment variable is set — skips silently in local
 developer workflows.
 
-Rendering is delegated to the kind-specific library:
-  kind="bazel_results" → bazel_results.render_check_output()
+Rendering is delegated to the kind-specific library via `task_update.kind`:
 
-Future kinds (e.g. "delivery_results") add a branch in _task_update and a
-corresponding render_check_output() function in their own library.
+  kind="bazel_results"    → bazel_results.render_check_output()    (build, test)
+  kind="lint_results"     → lint_results.render_check_output()     (lint)
+  kind="delivery_results" → delivery_results.render_check_output() (delivery)
+
+Each library owns its own `init_results()` + `render_check_output()` pair and
+is registered in `_RENDERERS` below. New task kinds can plug in by defining
+a matching pair and adding one entry to the dispatch table — the feature
+stays agnostic of the per-kind payload.
 
 Usage in .aspect/config.axl:
 
@@ -34,6 +39,10 @@ load("../lib/lint_results.axl",
     lint_init_results = "init_results",
     lint_render_check_output = "render_check_output",
 )
+load("../lib/delivery_results.axl",
+    delivery_init_results = "init_results",
+    delivery_render_check_output = "render_check_output",
+)
 
 
 # Dispatch table: `task_update.kind` → (init_results_fn, render_check_output_fn).
@@ -49,6 +58,10 @@ _RENDERERS = {
         init   = lint_init_results,
         render = lint_render_check_output,
     ),
+    "delivery_results": struct(
+        init   = delivery_init_results,
+        render = delivery_render_check_output,
+    ),
 }
 
 # Map known task names to their natural task_update.kind so the initial
@@ -58,6 +71,7 @@ _TASK_KIND_DEFAULTS = {
     "build":    "bazel_results",
     "test":     "bazel_results",
     "lint":     "lint_results",
+    "delivery": "delivery_results",
 }
 
 

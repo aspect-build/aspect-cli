@@ -1,0 +1,321 @@
+"""Buildkite Annotations feature for Aspect tasks.
+
+Creates and updates a Buildkite annotation reflecting the live state of a task.
+Parallel to `GithubStatusChecks` — subscribes to the same `TaskLifecycleTrait`
+hooks and reuses the same per-kind renderers so the rendered body stays in
+sync with the GitHub check-run body.
+
+The annotation style (success / info / warning / error) is mapped from the
+task's terminal status + accumulated counts, so a passing-with-warnings lint
+run shows up yellow rather than green.
+
+Only runs when `BUILDKITE` env is set — skips silently in local dev.
+
+Usage in `.aspect/config.axl`:
+
+    load("@aspect_workflows//:lib.axl", "BuildkiteAnnotations")
+
+    def config(ctx):
+        ctx.features[BuildkiteAnnotations].enabled = True
+"""
+
+load("../traits.axl", "TaskLifecycleTrait", "TaskUpdate")
+load("../lib/bazel_results.axl", "init_results", "now_ms", "render_check_output")
+load("../lib/lint_results.axl",
+    lint_init_results = "init_results",
+    lint_render_check_output = "render_check_output",
+)
+load("../lib/delivery_results.axl",
+    delivery_init_results = "init_results",
+    delivery_render_check_output = "render_check_output",
+)
+
+
+# Same dispatch table as github_status_checks — one renderer per task kind.
+# Kept independent so the two features can diverge on rendering if needed
+# (e.g. BK-specific formatting tweaks in a subsequent phase).
+_RENDERERS = {
+    "bazel_results": struct(
+        init   = init_results,
+        render = render_check_output,
+    ),
+    "lint_results": struct(
+        init   = lint_init_results,
+        render = lint_render_check_output,
+    ),
+    "delivery_results": struct(
+        init   = delivery_init_results,
+        render = delivery_render_check_output,
+    ),
+}
+
+
+_TASK_KIND_DEFAULTS = {
+    "build":    "bazel_results",
+    "test":     "bazel_results",
+    "lint":     "lint_results",
+    "delivery": "delivery_results",
+}
+
+
+def _renderer_for_kind(kind):
+    return _RENDERERS.get(kind, None)
+
+
+def _kind_for_task(task_name):
+    return _TASK_KIND_DEFAULTS.get(task_name, "bazel_results")
+
+
+def _to_display_name(name):
+    return "".join([w[0].upper() + w[1:] for w in name.split("_") if w])
+
+
+# ─── Style selection ──────────────────────────────────────────────────────────
+
+def severity_for(kind, results, status):
+    """Public test hook; see `_severity_for` for behavior."""
+    return _severity_for(kind, results, status)
+
+
+def format_body(out, kind, status):
+    """Public test hook; see `_format_body` for behavior."""
+    return _format_body(out, kind, status)
+
+
+def _severity_for(kind, results, status):
+    """Map (kind, results, status) → buildkite-agent annotate --style value.
+
+    Values recognised by buildkite-agent:
+      success — green
+      info    — blue
+      warning — yellow
+      error   — red
+
+    Rules:
+      - `status == "failed"` always maps to `error` regardless of kind.
+      - For lint: passed-with-findings still shows up yellow so warnings
+        aren't silently green.
+      - For delivery: any `fail` count → error; any `warn` count → warning;
+        all-ok → success.
+      - Running updates get `info` so they're visually distinct from the
+        terminal annotation.
+    """
+    if status == "running" or status == "failing":
+        return "info"
+    if status == "failed":
+        return "error"
+
+    # status == "passed" from here
+    if kind == "lint_results":
+        counts = results.get("counts_by_severity", {}) or {}
+        if counts.get("error", 0) > 0:
+            # Shouldn't happen with status == passed, but guard anyway —
+            # StrategySoft keeps exit_code == 0 even when errors are present.
+            return "error"
+        if counts.get("warning", 0) > 0:
+            return "warning"
+    elif kind == "delivery_results":
+        counts = results.get("counts", {}) or {}
+        if counts.get("fail", 0) > 0:
+            return "error"
+        if counts.get("warn", 0) > 0:
+            return "warning"
+    # bazel_results and fallthrough
+    return "success"
+
+
+# ─── Body formatting ──────────────────────────────────────────────────────────
+
+_ANNOTATION_SIZE_LIMIT = 1024 * 1024  # 1 MiB, Buildkite's hard limit per annotation
+
+
+def _format_body(out, kind, status):
+    """Concatenate renderer output into a single Markdown annotation body.
+
+    The renderers return {title, summary, text}. Buildkite annotations render
+    Markdown including fenced code blocks and `<details>` blocks, so the GH
+    output is mostly usable as-is. We:
+      - Prepend an `### <title>` heading (annotations start with an h3 block).
+      - Join the summary (metadata rows) and text (body) with blank lines.
+      - Hard-cap at 1 MiB; BK rejects larger annotations.
+    """
+    title = out.get("title", "") or ""
+    summary = out.get("summary", "") or ""
+    text = out.get("text", "") or ""
+
+    parts = []
+    if title:
+        parts.append("### " + title)
+    if summary:
+        parts.append(summary.strip())
+    if text:
+        parts.append(text.strip())
+    body = "\n\n".join(parts)
+
+    if len(body) > _ANNOTATION_SIZE_LIMIT:
+        # Trim from the tail — the body (`text`) is where trim cascades live,
+        # and the summary/title are the most useful parts to preserve.
+        body = body[:_ANNOTATION_SIZE_LIMIT - 64] + "\n\n_… annotation truncated (1 MiB limit)._"
+    return body
+
+
+# ─── Annotation I/O ───────────────────────────────────────────────────────────
+
+def _write_annotation(ctx, style, body, context_id):
+    """Invoke `buildkite-agent annotate` to create or replace the annotation.
+
+    `--context <id>` makes the call idempotent — re-running with the same
+    context replaces the previous annotation rather than creating a new one.
+    Body is passed on stdin to sidestep argv length limits.
+    """
+    child = ctx.std.process.command("buildkite-agent") \
+        .args(["annotate", "--style", style, "--context", context_id]) \
+        .stdin("piped") \
+        .stdout("piped") \
+        .stderr("piped") \
+        .spawn()
+
+    # Buildkite accepts the body on stdin.
+    stdin = child.stdin()
+    # .write returns bytes written; loop until the whole body is flushed.
+    remaining = body
+    for _ in range(256):
+        if not remaining:
+            break
+        n = stdin.write(remaining)
+        if n <= 0:
+            break
+        remaining = remaining[n:]
+    stdin.close()
+
+    out = child.wait_with_output()
+    if out.status.code != 0:
+        stderr = (out.stderr or "").strip()
+        print("buildkite-agent annotate (ctx=%s style=%s) failed: exit %s %s" %
+              (context_id, style, out.status.code, stderr))
+
+
+# ─── Feature implementation ───────────────────────────────────────────────────
+
+def _buildkite_annotations(ctx: FeatureContext):
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    mode = ctx.args.mode
+    is_bk = bool(ctx.std.env.var("BUILDKITE"))
+
+    if mode == "ci-only" and not is_bk:
+        return
+    if mode == "local-only" and is_bk:
+        return
+    # mode == "always" falls through
+
+    # Require buildkite-agent on PATH — fail loudly early if it's not.
+    probe = ctx.std.process.command("buildkite-agent") \
+        .args(["--version"]) \
+        .stdout("piped").stderr("piped").spawn().wait()
+    if probe.code != 0:
+        print("BuildkiteAnnotations: buildkite-agent not found on PATH; skipping.")
+        return
+
+    min_update_interval_ms = ctx.args.min_update_interval_ms
+    _state = {}
+
+    def _make_render_ctx():
+        return {
+            "triggered_by":      _state.get("_triggered_by", ""),
+            "targets":           _state.get("_subject") or "",
+            "started_ms":        _state.get("_started_ms", 0),
+            "ended_ms":          _state.get("_ended_ms", 0),
+            "progress":          _state.get("_progress", ""),
+            "task_display_name": _state.get("_task_display_name", ""),
+        }
+
+    def _make_links():
+        # Populate from the BK env so the rendered summary still shows CI links.
+        # GithubStatusChecks uses a much richer collector — BK only needs the
+        # bare minimum since the annotation IS on the BK job page already.
+        build_url = ctx.std.env.var("BUILDKITE_BUILD_URL") or ""
+        step_id   = ctx.std.env.var("BUILDKITE_STEP_ID") or ""
+        ci_url    = build_url
+        if build_url and step_id:
+            ci_url = build_url + "/steps/canvas?sid=" + step_id
+        return {
+            "ci_label":             "Buildkite",
+            "ci_url":               ci_url,
+            "aspect_url":           "",
+            "results_base_url":     ctx.std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL") or "",
+            "artifacts_browse_url": "",
+            "artifact_urls":        {},
+            "testlogs_label_urls":  {},
+        }
+
+    def _task_started(ctx, subject):
+        _state["_subject"]            = subject
+        _state["_started_ms"]         = now_ms(ctx)
+        _state["_task_display_name"]  = _to_display_name(ctx.task.name)
+        _state["_triggered_by"]       = (ctx.std.env.var("BUILDKITE_BUILD_CREATOR") or
+                                         ctx.std.env.var("BUILDKITE_PIPELINE_NAME") or "")
+        _state["_context_id"]         = "aspect-%s-%s" % (ctx.task.name, ctx.task.key)
+
+        # Emit an initial "in progress" annotation so it appears on the BK
+        # build page as soon as the task starts. Uses the kind default for the
+        # task since no task_update has fired yet.
+        initial_kind = _kind_for_task(ctx.task.name)
+        renderer = _renderer_for_kind(initial_kind) or _renderer_for_kind("bazel_results")
+        out = renderer.render(
+            ctx, renderer.init(), "running", _make_render_ctx(),
+            _make_links(), None, None,
+        )
+        body = _format_body(out, initial_kind, "running")
+        _write_annotation(ctx, "info", body, _state["_context_id"])
+
+    def _task_update(ctx, update):
+        status = update.status
+        final  = status in ("passed", "failed")
+
+        _state["_progress"] = update.progress
+
+        context_id = _state.get("_context_id", "")
+        if not context_id:
+            return
+
+        renderer = _renderer_for_kind(update.kind)
+        if renderer == None:
+            return
+        results = update.data.get("results", renderer.init())
+
+        if final:
+            _state["_ended_ms"] = now_ms(ctx)
+        else:
+            now = now_ms(ctx)
+            # Throttle running updates to avoid hammering buildkite-agent —
+            # terminal updates always go through.
+            if now - _state.get("_last_update_ms", 0) < min_update_interval_ms:
+                return
+            _state["_last_update_ms"] = now
+
+        out = renderer.render(
+            ctx, results, status, _make_render_ctx(), _make_links(), None, None,
+        )
+        body = _format_body(out, update.kind, status)
+        style = _severity_for(update.kind, results, status)
+        _write_annotation(ctx, style, body, context_id)
+
+    lifecycle.task_started.append(_task_started)
+    lifecycle.task_update.append(_task_update)
+
+
+BuildkiteAnnotations = feature(
+    implementation = _buildkite_annotations,
+    enabled = False,
+    args = {
+        "mode": args.string(
+            default = "ci-only",
+            values = ["ci-only", "local-only", "always"],
+            description = "When to create Buildkite annotations: ci-only (default), local-only, or always.",
+        ),
+        # buildkite-agent annotate is cheap but can flood the BK API on
+        # very-chatty tasks; throttle running updates.
+        "min_update_interval_ms": args.int(default = 2000),
+    },
+)

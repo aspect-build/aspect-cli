@@ -1,0 +1,235 @@
+"""Snapshot tests for `feature/buildkite_annotations.axl`.
+
+Run with:
+  aspect dev test-bk-annotation-snapshots
+
+Dry-run style — we don't actually invoke `buildkite-agent annotate`. Instead,
+we call the per-kind renderers + the feature's `format_body` / `severity_for`
+helpers directly and print what *would* be sent to BK for each scenario.
+
+Coverage:
+  - Each task kind (bazel_results, lint_results, delivery_results)
+  - Each terminal status (passed, failed)
+  - Style selection edge cases: soft-lint passing with warnings, delivery
+    all-skipped, delivery all-failed.
+"""
+
+load("../lib/bazel_results.axl",
+    bazel_init_results = "init_results",
+    bazel_render_check_output = "render_check_output",
+)
+load("../lib/lint_results.axl",
+    lint_init_results = "init_results",
+    lint_accumulate = "accumulate",
+    lint_render_check_output = "render_check_output",
+)
+load("../lib/delivery_results.axl",
+    delivery_init_results = "init_results",
+    delivery_add_result = "add_result",
+    delivery_render_check_output = "render_check_output",
+)
+load("./buildkite_annotations.axl", "format_body", "severity_for")
+
+
+# ─── Shared fake metadata ─────────────────────────────────────────────────────
+
+def _seed_metadata(r):
+    r["invocation_id"]       = "bk-abc12345-def4-5678-9abc-def012345678"
+    r["sink_invocation_id"]  = "sink-uuid-1234-5678-9abc"
+    r["build_tool_version"]  = "9.0.1"
+    r["build_command"]       = "build"
+    r["start_time_ms"]       = 1744630000000
+    r["finish_time_ms"]      = 1744630004500
+    r["wall_time_ms"]        = 4500
+    r["workspace_status"]    = {
+        "BUILD_USER":      "aspect-runner",
+        "BUILD_HOST":      "ip-10-0-86-10",
+        "BUILD_TIMESTAMP": "1776727956",
+    }
+    r["metadata"] = {
+        "BRANCH":             "main",
+        "COMMIT_SHA":         "abc123def456789abcdef",
+        "COMMIT_MESSAGE":     "feat: add buildkite annotations",
+        "COMMIT_AUTHOR":      "Greg Magolan <greg@aspect.build>",
+        "COMMIT_AUTHOR_NAME": "Greg Magolan",
+        "USER":               "Greg Magolan",
+        "CI_HOST":            "BUILDKITE",
+        "VCS":                "GITHUB",
+        "REPO_OWNER":         "aspect-build",
+        "REPO_NAME":          "silo",
+        "BUILD_NUMBER":       "49508",
+        "RUN_TYPE":           "BRANCH_PUSH",
+        "ASPECT_TASK_NAME":   "Test",
+        "BUILD_URL":          "https://buildkite.com/aspect-build/silo-aws/builds/49508",
+    }
+    return r
+
+
+# ─── Fixtures ─────────────────────────────────────────────────────────────────
+
+def _make_build_passed():
+    r = _seed_metadata(bazel_init_results())
+    r["targets_total"]    = 120
+    r["actions_executed"] = 240
+    r["actions_total"]    = 240
+    return r
+
+
+def _make_test_failed():
+    r = _seed_metadata(bazel_init_results())
+    r["targets_total"]        = 60
+    r["actions_executed"]     = 120
+    r["actions_total"]        = 120
+    r["passed_test_total"]    = 55
+    r["failed_test_total"]    = 3
+    r["flaky_test_total"]     = 2
+    r["build_command"]        = "test"
+    return r
+
+
+def _make_lint_passed_clean():
+    r = _seed_metadata(lint_init_results())
+    r["target_pattern"] = "//..."
+    r["strategy"]       = "hard"
+    return r
+
+
+def _make_lint_passed_with_warnings():
+    r = _seed_metadata(lint_init_results())
+    r["target_pattern"] = "//..."
+    r["strategy"]       = "soft"
+    lint_accumulate(r, [
+        {"tool": "eslint", "file": "apps/web/src/a.ts", "line": 10, "rule_id": "no-console",   "severity": "warning", "message": "Unexpected console statement"},
+        {"tool": "eslint", "file": "apps/web/src/b.ts", "line": 20, "rule_id": "prefer-const", "severity": "warning", "message": "Use const"},
+    ])
+    return r
+
+
+def _make_lint_failed_errors():
+    r = _seed_metadata(lint_init_results())
+    r["target_pattern"] = "//..."
+    r["strategy"]       = "hard"
+    lint_accumulate(r, [
+        {"tool": "eslint", "file": "apps/web/src/a.ts", "line": 10, "rule_id": "no-undef", "severity": "error",   "message": "'Foo' is not defined"},
+        {"tool": "pylint", "file": "tools/x.py",        "line": 5,  "rule_id": "E0401",   "severity": "error",   "message": "Unable to import"},
+        {"tool": "eslint", "file": "apps/web/src/b.ts", "line": 20, "rule_id": "no-console", "severity": "warning", "message": "Unexpected console"},
+    ])
+    return r
+
+
+def _make_delivery_all_ok():
+    r = _seed_metadata(delivery_init_results())
+    r["target_pattern"] = "//apps/..."
+    r["build_url"]      = "https://buildkite.com/aspect-build/silo-aws/builds/49508"
+    delivery_add_result(r, "//apps/web:release", "ok", message = r["build_url"], output_sha = "11112222333344445555")
+    delivery_add_result(r, "//apps/api:release", "ok", message = r["build_url"], output_sha = "22223333444455556666")
+    return r
+
+
+def _make_delivery_all_skipped():
+    r = _seed_metadata(delivery_init_results())
+    r["target_pattern"] = "//apps/..."
+    prior = "https://buildkite.com/aspect-build/silo-aws/builds/49495"
+    delivery_add_result(r, "//apps/web:release", "skip", message = prior, output_sha = "11112222333344445555")
+    delivery_add_result(r, "//apps/api:release", "skip", message = prior, output_sha = "22223333444455556666")
+    return r
+
+
+def _make_delivery_mixed_warn():
+    r = _seed_metadata(delivery_init_results())
+    r["target_pattern"] = "//apps/..."
+    r["build_url"]      = "https://buildkite.com/aspect-build/silo-aws/builds/49508"
+    delivery_add_result(r, "//apps/web:release",    "ok",   message = r["build_url"], output_sha = "11112222333344445555")
+    delivery_add_result(r, "//apps/legacy:release", "warn", message = "no entrypoint", output_sha = "22223333444455556666")
+    return r
+
+
+def _make_delivery_fail():
+    r = _seed_metadata(delivery_init_results())
+    r["target_pattern"] = "//apps/..."
+    delivery_add_result(r, "//apps/web:release", "fail", message = "exit 1", output_sha = "11112222333344445555")
+    return r
+
+
+# ─── Test harness ─────────────────────────────────────────────────────────────
+
+def _bk_links():
+    return {
+        "ci_label":             "Buildkite",
+        "ci_url":               "https://buildkite.com/aspect-build/silo-aws/builds/49508/steps/canvas?sid=s1",
+        "aspect_url":           "https://app.aspect.build/invocations/sink-uuid-1234-5678-9abc",
+        "results_base_url":     "https://app.aspect.build/",
+        "artifacts_browse_url": "",
+        "artifact_urls":        {},
+        "testlogs_label_urls":  {},
+    }
+
+
+def _render_ctx(targets, task_display_name):
+    return {
+        "triggered_by":      "Greg Magolan (BUILDKITE_BUILD_CREATOR)",
+        "targets":           targets,
+        "started_ms":        1744630000000,
+        "ended_ms":          1744630004500,
+        "progress":          "",
+        "task_display_name": task_display_name,
+    }
+
+
+_RENDERERS = {
+    "bazel_results":    bazel_render_check_output,
+    "lint_results":     lint_render_check_output,
+    "delivery_results": delivery_render_check_output,
+}
+
+
+def _test_impl(ctx):
+    scenarios = [
+        # (label,                                      kind,                results,                            status,  targets,        display)
+        ("1. build-passed · bazel_results",            "bazel_results",     _make_build_passed(),               "passed", "//...",       "Build"),
+        ("2. test-failed · bazel_results",             "bazel_results",     _make_test_failed(),                "failed", "//...",       "Test"),
+        ("3. lint-passed-clean · lint_results",        "lint_results",      _make_lint_passed_clean(),          "passed", "//...",       "Lint"),
+        ("4. lint-passed-with-warnings (soft)",        "lint_results",      _make_lint_passed_with_warnings(),  "passed", "//...",       "Lint"),
+        ("5. lint-failed-errors · lint_results",       "lint_results",      _make_lint_failed_errors(),         "failed", "//...",       "Lint"),
+        ("6. delivery-all-ok · delivery_results",      "delivery_results",  _make_delivery_all_ok(),            "passed", "//apps/...",  "Delivery"),
+        ("7. delivery-all-skipped · delivery_results", "delivery_results",  _make_delivery_all_skipped(),       "passed", "//apps/...",  "Delivery"),
+        ("8. delivery-mixed-warn · delivery_results",  "delivery_results",  _make_delivery_mixed_warn(),        "passed", "//apps/...",  "Delivery"),
+        ("9. delivery-fail · delivery_results",        "delivery_results",  _make_delivery_fail(),              "failed", "//apps/...",  "Delivery"),
+        # Running updates should pick the info style.
+        ("10. lint-running · lint_results",             "lint_results",      _make_lint_passed_with_warnings(),  "running", "//...",      "Lint"),
+    ]
+
+    sep = "=" * 70
+
+    for (label, kind, results, status, targets, display) in scenarios:
+        renderer = _RENDERERS[kind]
+        rc = _render_ctx(targets, display)
+        out = renderer(ctx, results, status, rc, _bk_links(), None, None)
+        body = format_body(out, kind, status)
+        style = severity_for(kind, results, status)
+
+        context_id = "aspect-%s-%s" % (display.lower(), "local-test")
+
+        print(sep)
+        print("SCENARIO: " + label)
+        print(sep)
+        print("buildkite-agent annotate --style %s --context %s" % (style, context_id))
+        print("─" * 70)
+        # Show first 2500 chars of the formatted body — enough to see the
+        # title/summary and the first chunk of the body without flooding.
+        print(body[:2500])
+        if len(body) > 2500:
+            print("... [truncated, full length: %d chars]" % len(body))
+        print("")
+
+    print(sep)
+    print("All " + str(len(scenarios)) + " BK annotation scenarios rendered without error.")
+    return 0
+
+
+bk_annotation_snapshot_tests = task(
+    name = "test-bk-annotation-snapshots",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
