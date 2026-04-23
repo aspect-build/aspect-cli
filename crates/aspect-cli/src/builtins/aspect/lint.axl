@@ -150,9 +150,14 @@ StrategyHoldTheLine = Strategy(
     fail_on_linter_error = False,
 )
 
+_STRATEGIES = {
+    "soft": StrategySoft,
+    "hard": StrategyHard,
+    "hold-the-line": StrategyHoldTheLine,
+}
+
 
 LintTrait = trait(
-    strategy    = attr(Strategy, default = StrategyHoldTheLine),
     get_diff    = attr(typing.Callable[[TaskContext], list], default = _git_diff),
     # (ctx) -> [{"file": str, "lines": [int]}]
 
@@ -175,7 +180,7 @@ def _impl(ctx: TaskContext) -> int:
     lint_trait = ctx.traits[LintTrait]
     bazel_trait = ctx.traits[BazelTrait]
     hc_trait = ctx.traits[HealthCheckTrait]
-    strategy = lint_trait.strategy
+    strategy = _STRATEGIES[ctx.args.strategy]
 
     quiet = ctx.args.quiet
 
@@ -327,6 +332,10 @@ lint = task(
         "announce_rc": args.boolean(default = False),
         "quiet": args.boolean(default = False),
         "fix": args.boolean(),
+        "strategy": args.string(
+            default = "hold-the-line",
+            values = ["soft", "hard", "hold-the-line"],
+        ),
         "targets": args.positional(minimum = 0, default = ["..."]),
     },
 )
