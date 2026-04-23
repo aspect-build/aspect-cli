@@ -1,0 +1,431 @@
+"""Buildkite Annotations feature for Aspect tasks.
+
+Creates and updates a Buildkite annotation reflecting the live state of a task.
+Parallel to `GithubStatusChecks` — subscribes to the same `TaskLifecycleTrait`
+hooks and reuses the same per-kind renderers so the rendered body stays in
+sync with the GitHub check-run body.
+
+The annotation style (success / info / warning / error) is mapped from the
+task's terminal status + accumulated counts, so a passing-with-warnings lint
+run shows up yellow rather than green.
+
+Only runs when `BUILDKITE` env is set — skips silently in local dev.
+
+Usage in `.aspect/config.axl`:
+
+    load("@aspect_workflows//:lib.axl", "BuildkiteAnnotations")
+
+    def config(ctx):
+        ctx.features[BuildkiteAnnotations].enabled = True
+"""
+
+load("../traits.axl", "ArtifactsTrait", "TaskLifecycleTrait", "TaskUpdate")
+load("../lib/bazel_results.axl", "now_ms", "resolve_aspect_url")
+load("../lib/check_dispatch.axl",
+    "apply_artifact_links",
+    "kind_for_task",
+    "make_render_ctx",
+    "renderer_for_kind",
+    "should_emit_update",
+    "to_display_name",
+)
+
+
+# ─── Style selection ──────────────────────────────────────────────────────────
+
+def severity_for(kind, results, status):
+    """Public test hook; see `_severity_for` for behavior."""
+    return _severity_for(kind, results, status)
+
+
+def format_body(out, kind, status, task_label = ""):
+    """Public test hook; see `_format_body` for behavior."""
+    return _format_body(out, kind, status, task_label = task_label)
+
+
+def _severity_for(kind, results, status):
+    """Map (kind, results, status) → buildkite-agent annotate --style value.
+
+    Values recognised by buildkite-agent:
+      success — green
+      info    — blue
+      warning — yellow
+      error   — red
+
+    Rules:
+      - `status == "failing"` (live, hard failure already detected) and
+        `status == "failed"` (terminal) both map to `error`. We surface
+        the red stripe early so users get feedback as soon as the build
+        knows it's going to fail, without waiting for `build.wait()`.
+      - For lint: passed-with-findings still shows up yellow so warnings
+        aren't silently green.
+      - For delivery: any `fail` count → error; any `warn` count → warning;
+        all-ok → success.
+      - For build/test: flaky-only outcomes (no real failures, but
+        `flaky_test_total > 0`) map to `warning` at both running and
+        passed phases — the title says "Tests flaky" so the stripe
+        should match.
+      - "Pure" running updates (no failures, no flakes) get `info` so
+        they're visually distinct from the terminal annotation.
+    """
+    # Hard failure — early or terminal. Stripe red.
+    if status == "failed" or status == "failing":
+        return "error"
+
+    # Flaky-only on bazel_results — yellow at any non-failed phase.
+    # A test-with-flake-and-real-failure is already covered above by the
+    # "failing" / "failed" branch.
+    if kind == "bazel_results":
+        flaky = results.get("flaky_test_total", 0) or 0
+        failed_t = results.get("failed_test_total", 0) or 0
+        failed_a = results.get("failed_actions_total", 0) or 0
+        if flaky > 0 and failed_t == 0 and failed_a == 0:
+            return "warning"
+
+    if status == "running":
+        return "info"
+
+    # status == "passed" from here
+    if kind == "lint_results":
+        counts = results.get("counts_by_severity", {}) or {}
+        if counts.get("error", 0) > 0:
+            # Shouldn't happen with status == passed, but guard anyway —
+            # StrategySoft keeps exit_code == 0 even when errors are present.
+            return "error"
+        if counts.get("warning", 0) > 0:
+            return "warning"
+    elif kind == "delivery_results":
+        counts = results.get("counts", {}) or {}
+        if counts.get("fail", 0) > 0:
+            return "error"
+        if counts.get("warn", 0) > 0:
+            return "warning"
+    elif kind in ("format_results", "gazelle_results"):
+        # Any affected files → warning (not error) so warnings-only runs
+        # are visually distinct from hard failures caused by other errors.
+        # A non-zero exit still maps to "error" via the `status == "failed"` guard above.
+        affected = results.get("affected_files", []) or []
+        if affected:
+            return "warning"
+    # bazel_results and fallthrough
+    return "success"
+
+
+# ─── Body formatting ──────────────────────────────────────────────────────────
+
+_ANNOTATION_SIZE_LIMIT = 1024 * 1024  # 1 MiB, Buildkite's hard limit per annotation
+
+
+def _format_body(out, kind, status, task_label = ""):
+    """Concatenate renderer output into a single Markdown annotation body.
+
+    The renderers return {title, summary, text}. Buildkite annotations render
+    Markdown plus inline HTML, so the GH output is mostly usable as-is.
+
+    When `task_label` is set, render it as a leading pill in front of the
+    title — the same flex row, but with the task identifier styled as a
+    contrasting badge so a reader scanning a vertical stack of annotations
+    on a busy step page sees "task: <key>" before they see the title.
+    Critically, this also signals at a glance that the annotation reflects
+    a single Aspect task, not the BK step as a whole — the step's terminal
+    status can still flip from the task's (post-task hooks, artifact
+    upload, teardown), so we never want the annotation's success/error
+    stripe to read as a step verdict.
+
+    Hard-cap at 1 MiB; BK rejects larger annotations.
+    """
+    title = out.get("title", "") or ""
+    summary = out.get("summary", "") or ""
+    text = out.get("text", "") or ""
+
+    parts = []
+    if title:
+        if task_label:
+            # Flex row: leading pill + h3-styled title.
+            #
+            # Pill styling uses the Basscss classes BK puts on the
+            # annotation user-input allowlist:
+            #
+            #   https://buildkite.com/docs/pipelines/annotations#supported-css-classes
+            #
+            # `bg-blue-light` gives the pill a contrasting fill,
+            # `rounded` softens the corners, and `px1 mr2` give it
+            # breathing room from the title text. Sibling `h3 mt0`
+            # gives the title the same visual weight as a `### ` header
+            # without `<h3>`'s default top margin (which BK's CSS
+            # otherwise reasserts even with `m0`).
+            parts.append(
+                '<div class="flex items-baseline mb2"><span class="bg-blue-light rounded px1 mr2">%s</span><span class="h3 m0">%s</span></div>' %
+                (task_label, title)
+            )
+        else:
+            parts.append("### " + title)
+    if summary:
+        parts.append(summary.strip())
+    # On GHSC the summary and text are separate API fields rendered in
+    # separate UI sections, so the natural division reads cleanly. On BK
+    # they're concatenated into one body, so we drop a horizontal rule
+    # between them to mirror the GHSC split — header + Last update +
+    # Configuration above; per-task details below. (No "Details"
+    # heading: the rule alone is enough.)
+    #
+    # BK's HTML sanitizer strips `style` attributes and the allowed
+    # Basscss subset has no border-color / border-width / height
+    # classes, so we can't make a styled fat rule. `border-top` on an
+    # empty div renders as a thin 1px line in BK's default border color
+    # — same visual weight as a markdown `---`, but rendered through a
+    # `<div>` that BK's CSS gives slightly higher contrast than a bare
+    # `<hr>`.
+    if summary and text:
+        parts.append('<div class="border-top my3"></div>')
+    if text:
+        parts.append(text.strip())
+    body = "\n\n".join(parts)
+
+    if len(body) > _ANNOTATION_SIZE_LIMIT:
+        # Trim from the tail — the body (`text`) is where trim cascades live,
+        # and the summary/title are the most useful parts to preserve.
+        body = body[:_ANNOTATION_SIZE_LIMIT - 64] + "\n\n_… annotation truncated (1 MiB limit)._"
+    return body
+
+
+def _task_label(task_name, task_key, display_name):
+    """Compose the leading pill text that prefixes the title.
+
+    Format: `:aspect: task <code>task-key</code>` — the `:aspect:` emoji
+    makes it visually obvious the annotation came from Aspect Workflows
+    (vs other tools that drop annotations on the same job), the literal
+    word "task" makes it explicit that the report is scoped to one task,
+    and the key (in `<code>`) disambiguates when multiple tasks run in
+    the same step (e.g. `format-bk` + `format-bk-debug`). The display
+    name is intentionally NOT in the pill — it's already in the title
+    that sits beside the pill, so duplicating it would add noise.
+    """
+    return ":aspect: task <code>%s</code>" % task_key
+
+
+# ─── Annotation I/O ───────────────────────────────────────────────────────────
+
+def _write_annotation(ctx, style, body, context_id, debug = False):
+    """Invoke `buildkite-agent annotate` to create or replace the annotation.
+
+    `--scope=job` pins the annotation to the running step's Annotations tab —
+    without it, buildkite-agent posts to the build-level Annotations page,
+    which mixes per-job task annotations together and isn't where reviewers
+    look for "what did this step say?".
+    `--context <id>` makes the call idempotent — re-running with the same
+    context replaces the previous annotation rather than creating a new one.
+    Body is passed on stdin to sidestep argv length limits.
+    """
+    if debug:
+        print("Buildkite annotation: invoking buildkite-agent annotate --style %s --context %s --scope=job (body=%d bytes)" %
+              (style, context_id, len(body)))
+
+    child = ctx.std.process.command("buildkite-agent") \
+        .args(["annotate", "--style", style, "--context", context_id, "--scope=job"]) \
+        .stdin("piped") \
+        .stdout("piped") \
+        .stderr("piped") \
+        .spawn()
+
+    # Buildkite accepts the body on stdin.
+    stdin = child.stdin()
+    # .write returns bytes written; loop until the whole body is flushed.
+    remaining = body
+    written = 0
+    for _ in range(256):
+        if not remaining:
+            break
+        n = stdin.write(remaining)
+        if n == None or n <= 0:
+            break
+        written += n
+        remaining = remaining[n:]
+    stdin.close()
+
+    out = child.wait_with_output()
+    if not out.status.success:
+        stderr = (out.stderr or "").strip()
+        stdout = (out.stdout or "").strip()
+        print("buildkite-agent annotate (ctx=%s style=%s) failed: code=%s stderr=%r stdout=%r body_written=%d/%d" %
+              (context_id, style, str(out.status.code), stderr, stdout, written, len(body)))
+        return
+    if debug:
+        print("Buildkite annotation: ok (ctx=%s wrote=%d/%d bytes)" %
+              (context_id, written, len(body)))
+
+
+# ─── Feature implementation ───────────────────────────────────────────────────
+
+def _buildkite_annotations(ctx: FeatureContext):
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+    # `ArtifactsTrait` is populated by the ArtifactUpload feature whenever
+    # the running task uploads testlogs / profile / BEP / execlog (controlled
+    # per-task via `ctx.features[ArtifactUpload].args.upload_*`). Reading it
+    # here picks up artifacts from every task that uploads, without each
+    # task needing to thread the URLs through itself.
+    artifacts_trait = ctx.traits[ArtifactsTrait]
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+
+    mode = ctx.args.mode
+    is_bk = bool(ctx.std.env.var("BUILDKITE"))
+
+    if debug:
+        print("BuildkiteAnnotations: starting (mode=%s BUILDKITE=%r is_bk=%s)" %
+              (mode, ctx.std.env.var("BUILDKITE") or "", is_bk))
+
+    if mode == "ci-only" and not is_bk:
+        if debug:
+            print("BuildkiteAnnotations: skipping — mode=ci-only and BUILDKITE not set")
+        return
+    if mode == "local-only" and is_bk:
+        if debug:
+            print("BuildkiteAnnotations: skipping — mode=local-only and BUILDKITE is set")
+        return
+    # mode == "always" falls through
+
+    # Require buildkite-agent on PATH — `.spawn()` raises when the binary is
+    # missing, so on an Aspect Workflows runner (where the agent always exists)
+    # this is a clean rc check; in environments where it's missing this print
+    # never fires because the impl errors out before it. Acceptable trade-off
+    # for getting a typed exit code on the happy path.
+    probe = ctx.std.process.command("buildkite-agent") \
+        .args(["--version"]) \
+        .stdout("piped").stderr("piped").spawn().wait()
+    if not probe.success:
+        print("BuildkiteAnnotations: `buildkite-agent --version` returned code=%s; skipping." %
+              str(probe.code))
+        return
+    if debug:
+        print("BuildkiteAnnotations: buildkite-agent probe ok")
+
+    min_update_interval_ms = ctx.args.min_update_interval_ms
+    _state = {}
+
+    def _make_links(results):
+        # Populate from the BK env so the rendered summary still shows CI links.
+        # GithubStatusChecks uses a much richer collector — BK only needs the
+        # bare minimum since the annotation IS on the BK job page already.
+        build_url = ctx.std.env.var("BUILDKITE_BUILD_URL") or ""
+        step_id   = ctx.std.env.var("BUILDKITE_STEP_ID") or ""
+        ci_url    = build_url
+        if build_url and step_id:
+            ci_url = build_url + "/steps/canvas?sid=" + step_id
+        links = {
+            "ci_label":             "Buildkite",
+            "ci_url":               ci_url,
+            "aspect_url":           "",
+            "results_base_url":     ctx.std.env.var("ASPECT_WORKFLOWS_BES_RESULTS_URL") or "",
+        }
+        apply_artifact_links(links, artifacts_trait)
+        # Compute the Aspect Web UI link from results.sink_invocation_id +
+        # results_base_url, mirroring GithubStatusChecks. When the build ran
+        # without sinks (sink_invocation_id empty), resolve_aspect_url
+        # returns "" and the renderer suppresses the row.
+        links["aspect_url"] = resolve_aspect_url(links, results)
+        return links
+
+    def _task_started(ctx, subject):
+        _state["_subject"]            = subject
+        _state["_started_ms"]         = now_ms(ctx)
+        _state["_task_display_name"]  = to_display_name(ctx.task.name)
+        _state["_triggered_by"]       = (ctx.std.env.var("BUILDKITE_BUILD_CREATOR") or
+                                         ctx.std.env.var("BUILDKITE_PIPELINE_NAME") or "")
+        _state["_context_id"]         = "aspect-%s-%s" % (ctx.task.name, ctx.task.key)
+        _state["_task_label"]         = _task_label(ctx.task.name, ctx.task.key, _state["_task_display_name"])
+
+        subject_str = (" " + subject) if subject else ""
+        print("Buildkite annotation: aspect/%s (%s) — %s%s (ctx=%s)" %
+              (ctx.task.name, ctx.task.key, _state["_task_display_name"], subject_str, _state["_context_id"]))
+
+        # Emit an initial "in progress" annotation so it appears on the BK
+        # build page as soon as the task starts. Uses the kind default for the
+        # task since no task_update has fired yet. The initial results dict
+        # has no sink_invocation_id yet, so the Aspect Web UI link will be
+        # empty here — the terminal task_update fills it in once the build
+        # has run.
+        initial_kind = kind_for_task(ctx.task.name)
+        renderer = renderer_for_kind(initial_kind) or renderer_for_kind("bazel_results")
+        initial_results = renderer.init()
+        out = renderer.render(
+            ctx, initial_results, "running", make_render_ctx(_state),
+            _make_links(initial_results), None, None,
+        )
+        body = _format_body(out, initial_kind, "running", task_label = _state["_task_label"])
+        _write_annotation(ctx, "info", body, _state["_context_id"], debug = debug)
+
+    def _task_update(ctx, update):
+        status = update.status
+        final  = status in ("passed", "failed")
+
+        # Only overwrite the displayed phase label when the caller actually
+        # set one. Bare TaskUpdate emits (e.g. live-data refreshes during a
+        # long BES stream) come through with progress="" and should keep
+        # the most recent phase label visible.
+        if update.progress:
+            _state["_progress"] = update.progress
+
+        context_id = _state.get("_context_id", "")
+        if not context_id:
+            if debug:
+                print("Buildkite annotation: task_update fired but no context_id; ignoring (kind=%s status=%s)" %
+                      (update.kind, status))
+            return
+
+        renderer = renderer_for_kind(update.kind)
+        if renderer == None:
+            if debug:
+                print("Buildkite annotation: no renderer for kind=%r; ignoring" % update.kind)
+            return
+        results = update.data.get("results", renderer.init())
+
+        # First transition into "failing" bypasses the throttle so the
+        # red stripe lands on the BK annotation immediately rather than
+        # waiting up to `min_update_interval_ms`. Tracked via
+        # `_state["_seen_failing"]` so subsequent failing-while-failing
+        # ticks still throttle normally.
+        first_failing = status == "failing" and not _state.get("_seen_failing")
+        if first_failing:
+            _state["_seen_failing"] = True
+            _state["_last_update_ms"] = now_ms(ctx)
+        elif not should_emit_update(_state, now_ms(ctx), min_update_interval_ms, final):
+            return
+
+        out = renderer.render(
+            ctx, results, status, make_render_ctx(_state), _make_links(results), None, None,
+        )
+        body = _format_body(out, update.kind, status, task_label = _state.get("_task_label", ""))
+        style = _severity_for(update.kind, results, status)
+        if final:
+            print("Buildkite annotation: completing %s (style=%s len=%d)" %
+                  (context_id, style, len(body)))
+        elif first_failing:
+            print("Buildkite annotation: early-failing %s (style=%s len=%d)" %
+                  (context_id, style, len(body)))
+        _write_annotation(ctx, style, body, context_id, debug = debug)
+
+    lifecycle.task_started.append(_task_started)
+    lifecycle.task_update.append(_task_update)
+
+
+BuildkiteAnnotations = feature(
+    implementation = _buildkite_annotations,
+    # Enabled by default to match GithubStatusChecks. The implementation
+    # gates on `BUILDKITE` env at runtime, so this is a no-op in non-BK
+    # environments (GHA, CircleCI, GitLab, local dev). Defaulting to False
+    # would make the feature unreachable from tasks invoked in directories
+    # without an enclosing `.aspect/config.axl`.
+    enabled = True,
+    args = {
+        "mode": args.string(
+            default = "ci-only",
+            values = ["ci-only", "local-only", "always"],
+            description = "When to create Buildkite annotations: ci-only (default), local-only, or always.",
+        ),
+        # buildkite-agent annotate has no documented rate limit and is a
+        # thin wrapper around the BK Agent API. 500ms keeps non-final
+        # updates feeling live without flooding very-chatty tasks; final
+        # task_update always passes through unconditionally.
+        "min_update_interval_ms": args.int(default = 500),
+    },
+)

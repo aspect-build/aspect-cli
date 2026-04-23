@@ -17,6 +17,10 @@ workflows:
           requires: [pre-build]
       - test-task:
           requires: [pre-build]
+      - lint-task:
+          requires: [pre-build]
+      - buildifier-task:
+          requires: [pre-build]
       - format-task:
           requires: [pre-build]
       - gazelle-task:
@@ -71,7 +75,10 @@ jobs:
           name: Test Task
           command: aspect test --task-key test-cci -- //... -//exclude/...
 
-  format-task:
+  # Lint runs from the repo root using the shellcheck demo aspect under
+  # `//examples/lint:linters.bzl`. The `-//examples/lint/exclude/...` pattern
+  # exercises the multi-positional + hyphen-led parsing regression.
+  lint-task:
     machine: true
     resource_class: aspect-build/aspect-default
     working_directory: /mnt/ephemeral/workdir
@@ -81,11 +88,62 @@ jobs:
           name: Bootstrap
           command: .aspect/bootstrap.sh
       - run:
+          name: Lint Task (ASPECT_DEBUG=1)
+          command: ASPECT_DEBUG=1 aspect lint --task-key lint-cci-debug --aspect=//examples/lint:linters.bzl%shellcheck -- //examples/lint/... -//examples/lint/exclude/...
+      - run:
+          name: Lint Task
+          command: aspect lint --task-key lint-cci --aspect=//examples/lint:linters.bzl%shellcheck -- //examples/lint/... -//examples/lint/exclude/...
+
+  # Dedicated buildifier-only step that runs in parallel with format-task.
+  # Models the legacy Rosetta `buildifier` task using a Starlark-only
+  # `format_multirun` target — see docs/cli/migration/buildifier.mdx.
+  buildifier-task:
+    machine: true
+    resource_class: aspect-build/aspect-default
+    working_directory: /mnt/ephemeral/workdir
+    steps:
+      - checkout
+      - run:
+          name: Bootstrap
+          command: .aspect/bootstrap.sh
+      - run:
+          name: Buildifier Task (ASPECT_DEBUG=1)
+          command: ASPECT_DEBUG=1 aspect format --task-key buildifier-cci-debug --formatter-target=//tools/format:format-starlark
+      - run:
+          name: Buildifier Task
+          command: aspect format --task-key buildifier-cci --formatter-target=//tools/format:format-starlark
+
+  format-task:
+    machine: true
+    resource_class: aspect-build/aspect-default
+    working_directory: /mnt/ephemeral/workdir
+    steps:
+      - checkout
+      - run:
+          name: Bootstrap
+          command: .aspect/bootstrap.sh
+      # Starlark patterns are handled by buildifier-task; ignore them here so
+      # the two steps don't do duplicate work.
+      - run:
           name: Format Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect format --task-key format-cci-debug
+          command: |
+            ASPECT_DEBUG=1 aspect format --task-key format-cci-debug \
+              --ignore-pattern='**/*.bzl' \
+              --ignore-pattern='**/BUILD' \
+              --ignore-pattern='**/BUILD.bazel' \
+              --ignore-pattern='**/MODULE.bazel' \
+              --ignore-pattern='**/WORKSPACE' \
+              --ignore-pattern='**/WORKSPACE.bazel'
       - run:
           name: Format Task
-          command: aspect format --task-key format-cci
+          command: |
+            aspect format --task-key format-cci \
+              --ignore-pattern='**/*.bzl' \
+              --ignore-pattern='**/BUILD' \
+              --ignore-pattern='**/BUILD.bazel' \
+              --ignore-pattern='**/MODULE.bazel' \
+              --ignore-pattern='**/WORKSPACE' \
+              --ignore-pattern='**/WORKSPACE.bazel'
 
   gazelle-task:
     machine: true

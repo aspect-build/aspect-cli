@@ -1,0 +1,195 @@
+"""Shared per-kind dispatch for check-run / annotation features.
+
+`GithubStatusChecks` (`feature/github_status_checks.axl`) and
+`BuildkiteAnnotations` (`feature/buildkite_annotations.axl`) both
+subscribe to the same `TaskLifecycleTrait` slots, dispatch on
+`task_update.kind`, and share the same throttle / link-augmentation
+logic. This module hosts the parts that should stay in lockstep when a
+new task kind is added or a renderer's signature evolves.
+
+Split here, not in the features:
+
+  RENDERERS                  Per-kind init + render dispatch table.
+  renderer_for_kind(kind)
+  kind_for_task(task_name)   Initial kind to use before the first
+                             task_update has fired.
+  to_display_name(name)      snake_case → CamelCase task display name.
+  make_render_ctx(state, default_targets="")
+                             Build the render_ctx dict the per-kind
+                             renderers consume from a feature's
+                             closure-state dict.
+  apply_artifact_links(links, artifacts_trait)
+                             Copy ArtifactsTrait fields onto a links
+                             dict in place.
+  should_emit_update(state, now_ms, min_interval_ms, final)
+                             Throttle non-final updates by elapsed
+                             ms-since-last; terminal updates always
+                             pass. Mutates `state` in place.
+
+Kept in `lib/` rather than `feature/` so per-task result libraries can
+load it without creating a feature-↔-feature edge.
+"""
+
+load("./bazel_results.axl",
+    bazel_init_results = "init_results",
+    bazel_render_check_output = "render_check_output",
+)
+load("./lint_results.axl",
+    lint_init_results = "init_results",
+    lint_render_check_output = "render_check_output",
+)
+load("./delivery_results.axl",
+    delivery_init_results = "init_results",
+    delivery_render_check_output = "render_check_output",
+)
+load("./format_results.axl",
+    format_init_results = "init_results",
+    format_render_check_output = "render_check_output",
+)
+load("./gazelle_results.axl",
+    gazelle_init_results = "init_results",
+    gazelle_render_check_output = "render_check_output",
+)
+
+
+# Dispatch table: `task_update.kind` → struct(init, render).
+#
+#   init(...)    Returns a fresh kind-specific results dict. Used by
+#                callers that want to render *before* the first real
+#                `task_update` arrives (initial / "running" emit).
+#   render(...)  Signature shared across kinds:
+#                  ctx, results, status, render_ctx, links,
+#                  templates = None, metadata_keys = None
+#                Returns {title, summary, text} for the check-run /
+#                annotation body.
+#
+# Adding a new task kind: define `init_results()` + `render_check_output()`
+# in a sibling `lib/<kind>_results.axl`, register one entry here, and add
+# the task name → kind mapping below.
+RENDERERS = {
+    "bazel_results": struct(
+        init = bazel_init_results,
+        render = bazel_render_check_output,
+    ),
+    "lint_results": struct(
+        init = lint_init_results,
+        render = lint_render_check_output,
+    ),
+    "delivery_results": struct(
+        init = delivery_init_results,
+        render = delivery_render_check_output,
+    ),
+    "format_results": struct(
+        init = format_init_results,
+        render = format_render_check_output,
+    ),
+    "gazelle_results": struct(
+        init = gazelle_init_results,
+        render = gazelle_render_check_output,
+    ),
+}
+
+# Initial kind to use before the first `task_update` has fired. Drives
+# the "running" emit's title / metadata layout for known task names.
+# Unknown task names fall back to "bazel_results" — most custom tasks
+# either drive bazel directly or want the bazel summary shape.
+_TASK_KIND_DEFAULTS = {
+    "build": "bazel_results",
+    "test": "bazel_results",
+    "lint": "lint_results",
+    "delivery": "delivery_results",
+    "format": "format_results",
+    "gazelle": "gazelle_results",
+}
+
+
+def renderer_for_kind(kind):
+    """Return the Renderer struct for `kind`, or None if unknown."""
+    return RENDERERS.get(kind, None)
+
+
+def kind_for_task(task_name):
+    """Best-guess initial kind for a task before any task_update has fired.
+
+    Falls back to "bazel_results" for unknown task names.
+    """
+    return _TASK_KIND_DEFAULTS.get(task_name, "bazel_results")
+
+
+def to_display_name(name):
+    """Convert a snake_case task name to a CamelCase display name.
+
+    Examples: "build" → "Build", "my_task" → "MyTask",
+    "test_check_run" → "TestCheckRun".
+    """
+    return "".join([w[0].upper() + w[1:] for w in name.split("_") if w])
+
+
+def make_render_ctx(state, default_targets = ""):
+    """Build the render_ctx dict the per-kind renderers consume.
+
+    Reads from `state` — the feature-private dict the caller maintains
+    across hook calls. Expected slots: `_triggered_by`, `_subject`,
+    `_started_ms`, `_ended_ms`, `_progress`, `_task_display_name`.
+
+    `default_targets` is the placeholder for the `targets` field when
+    `_subject` hasn't been set yet (an early render before
+    task_started). GitHubStatusChecks uses `"//..."` so the initial
+    "running" check-run has *something* readable in the title;
+    BuildkiteAnnotations leaves it empty.
+    """
+    return {
+        "triggered_by": state.get("_triggered_by", ""),
+        "targets": state.get("_subject") or default_targets,
+        "started_ms": state.get("_started_ms", 0),
+        "ended_ms": state.get("_ended_ms", 0),
+        "progress": state.get("_progress", ""),
+        "task_display_name": state.get("_task_display_name", ""),
+    }
+
+
+def apply_artifact_links(links, artifacts_trait):
+    """Copy ArtifactsTrait fields onto a links dict in place.
+
+    The ArtifactUpload feature populates these on every task that
+    uploads (build / test / lint / format / gazelle / delivery); the
+    per-kind renderers consume them as `artifacts_browse_url`,
+    `artifact_urls`, and `testlogs_label_urls` to render the Artifacts
+    row + per-kind download links. Both check-run / annotation
+    features need to thread these through their `links` dicts the same
+    way, so the duplication lives here.
+    """
+    links["artifacts_browse_url"] = artifacts_trait.artifacts_browse_url or ""
+    links["artifact_urls"] = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
+    links["testlogs_label_urls"] = dict(artifacts_trait.testlogs_label_urls) if artifacts_trait.testlogs_label_urls else {}
+
+
+def should_emit_update(state, now_ms_val, min_interval_ms, final):
+    """Decide whether a `task_update` should produce an outbound emit.
+
+    Mutates `state` in place:
+
+      - `final=True`: records `state["_ended_ms"] = now_ms_val` and
+        returns True. Terminal updates never throttle — they're the
+        last chance to surface the final result.
+
+      - `final=False`: throttles by `min_interval_ms`. Returns True
+        when at least that long has elapsed since the previous
+        non-throttled update; in that case records
+        `state["_last_update_ms"] = now_ms_val`. Returns False
+        otherwise (caller should skip the emit).
+
+    Caller pattern:
+
+        if not should_emit_update(_state, now_ms(ctx),
+                                  min_update_interval_ms, final):
+            return
+        ... build + send the update ...
+    """
+    if final:
+        state["_ended_ms"] = now_ms_val
+        return True
+    if now_ms_val - state.get("_last_update_ms", 0) < min_interval_ms:
+        return False
+    state["_last_update_ms"] = now_ms_val
+    return True

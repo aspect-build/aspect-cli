@@ -1,7 +1,13 @@
 load("./lambda.axl", "lambda_with_global_bind")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
+load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
+load("@aspect//lib/lint_results_test.axl", "lint_template_snapshot_tests")
+load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
+load("@aspect//lib/format_results_test.axl", "format_template_snapshot_tests")
+load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
+load("@aspect//feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests")
 load("@aspect//traits.axl", "BazelTrait")
 
 def _user_task_impl(ctx: TaskContext) -> int:
@@ -42,8 +48,9 @@ def config(ctx: ConfigContext):
             },
         )
 
-    # enable Github Status Checks
-    ctx.features[GithubStatusChecks].enabled = True
+    # GithubStatusChecks and BuildkiteAnnotations default to enabled = True
+    # in their feature definitions and gate on the relevant CI env vars at
+    # runtime, so they no-op outside CI without any per-config opt-in here.
 
     # Enable artifact uploads for testlogs, profile, and BEP. All four channels
     # default to off so operators opt in per repo. The compact execution log stays
@@ -62,6 +69,27 @@ def config(ctx: ConfigContext):
     # Template snapshot tests — renders bazel_results templates across failure modes.
     # Run with: aspect test-template-snapshots
     ctx.tasks.add(template_snapshot_tests)
+
+    # Lint template snapshot tests — renders lint_results templates.
+    # Run with: aspect dev test-lint-template-snapshots
+    ctx.tasks.add(lint_template_snapshot_tests)
+
+    # Delivery template snapshot tests — renders delivery_results templates.
+    # Run with: aspect dev test-delivery-template-snapshots
+    ctx.tasks.add(delivery_template_snapshot_tests)
+
+    # Format template snapshot tests — renders format_results templates.
+    # Run with: aspect dev test-format-template-snapshots
+    ctx.tasks.add(format_template_snapshot_tests)
+
+    # Gazelle template snapshot tests — renders gazelle_results templates.
+    # Run with: aspect dev test-gazelle-template-snapshots
+    ctx.tasks.add(gazelle_template_snapshot_tests)
+
+    # Buildkite annotations — snapshots the body that would be passed to
+    # `buildkite-agent annotate` for each task kind and status combo.
+    # Run with: aspect dev test-bk-annotation-snapshots
+    ctx.tasks.add(bk_annotation_snapshot_tests)
 
     # Inject a mix of secret-ish and safe Bazel flags on every task so the
     # status-check redaction path is exercised live against a real BES stream.
@@ -147,6 +175,26 @@ def config(ctx: ConfigContext):
         ctx.std.env.set_var("BUILDKITE_BUILD_CREATOR", ctx.std.env.var("USER") or "local-test")
         ctx.features[GithubStatusChecks].args.enabled = True
         print("[ASPECT_CLI_TESTING=buildkite_status_checks] Simulating Buildkite CI environment")
+
+    # buildkite_annotations: Simulate a Buildkite CI environment AND enable
+    # the BuildkiteAnnotations feature so `buildkite-agent annotate` is
+    # actually invoked during the task. Requires buildkite-agent on PATH —
+    # the feature probes for it at startup and no-ops if missing.
+    #
+    # Usage:
+    #   ASPECT_CLI_TESTING=buildkite_annotations aspect build //...
+    #   ASPECT_CLI_TESTING=buildkite_annotations aspect lint //...
+    #   ASPECT_CLI_TESTING=buildkite_annotations aspect delivery --commit-sha=$(git rev-parse HEAD) //...
+    if testing == "buildkite_annotations":
+        ctx.std.env.set_var("CI", "true")
+        ctx.std.env.set_var("BUILDKITE", "true")
+        ctx.std.env.set_var("BUILDKITE_AGENT_ACCESS_TOKEN", "fake-token")
+        ctx.std.env.set_var("BUILDKITE_BUILD_URL", "https://buildkite.com/aspect-build/aspect-cli/builds/1354")
+        ctx.std.env.set_var("BUILDKITE_STEP_ID", "019db1eb-90d1-49ea-b00a-7ca42f3e50a8")
+        ctx.std.env.set_var("BUILDKITE_COMMIT", _detect_sha(ctx.std.env))
+        ctx.std.env.set_var("BUILDKITE_BUILD_CREATOR", ctx.std.env.var("USER") or "local-test")
+        ctx.features[BuildkiteAnnotations].args.enabled = True
+        print("[ASPECT_CLI_TESTING=buildkite_annotations] Simulating Buildkite CI + BuildkiteAnnotations feature")
 
     # circleci_status_checks: Simulate a CircleCI environment.
     if testing == "circleci_status_checks":

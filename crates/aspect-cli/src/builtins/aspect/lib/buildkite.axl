@@ -6,6 +6,14 @@ def _upload_artifact(ctx, path, name):
 
     Copies the file to a temp location with the desired name so the artifact
     appears as just `name` rather than the full absolute path.
+
+    After a successful upload, runs `buildkite-agent artifact search` with
+    `--format '%u'` to capture the stable BK artifact URL so check-run /
+    annotation renderers can show direct download links per artifact kind
+    (Profile / BEP / Execlog / Test logs). Earlier revisions hardcoded an
+    empty URL on the assumption that BK's URLs were short-lived; that was
+    wrong — BK's `/.../artifacts/{id}` URLs are stable for the build's
+    retention window.
     """
     dir = path.rsplit("/", 1)[0]
     basename = path.rsplit("/", 1)[1]
@@ -32,8 +40,100 @@ def _upload_artifact(ctx, path, name):
 
     if status.code != 0:
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["exit " + str(status.code)]}
-    # Buildkite artifact download URLs are short-lived — surface nothing stable.
-    return {"success": True, "artifact_ref": name, "download_url": "", "errors": []}
+
+    # Resolve the stable artifact URL via `artifact search`. Best-effort —
+    # any failure (older agent without `%u` support, no matching artifact,
+    # network hiccup) just leaves `download_url` empty and the renderer
+    # falls back to the "Artifacts" browse link only.
+    download_url = _resolve_artifact_url(ctx, name)
+    return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
+
+
+def _resolve_artifact_url(ctx, name):
+    """Return the stable BK artifact URL for `name`, or "" on any failure.
+
+    `buildkite-agent artifact search`'s default `--print-format` on BK
+    Agent v3.126 is `%j %p %T\\n` — i.e. *job-id* / path / timestamp.
+    The first whitespace-separated token is therefore the JobID, not
+    the artifact ID; constructing
+    `…/jobs/{BUILDKITE_JOB_ID}/artifacts/{first_token}/download` ends
+    up using BUILDKITE_JOB_ID for both segments, which BK silently
+    redirects to the build canvas.
+
+    Pass `--print-format '%i\\n'` so the agent emits *only* the
+    artifact ID. Then build the public URL from `BUILDKITE_BUILD_URL`
+    + `BUILDKITE_JOB_ID` + that ID.
+
+    Best-effort — any failure (no match, agent CLI error, missing env
+    vars) returns "" and the caller falls back to showing only the
+    "Artifacts" browse link.
+    """
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+    # The flag is `--format`, NOT `--print-format` (despite urfave/cli
+    # struct field being named `PrintFormat`, the cli tag is "format").
+    # See `clicommand/artifact_search.go` in BK Agent v3.126.0:
+    #
+    #   PrintFormat string `cli:"format"`
+    #
+    # Earlier revisions of this helper used `--print-format`, which
+    # urfave/cli silently ignored as an unknown flag. Output then
+    # used the agent's built-in default `%j %p %u\n`, which my parser
+    # took as `<artifact_id> …` and produced the malformed-looking
+    # URLs we kept rendering in BK annotations.
+    #
+    # `%i` is the artifact UUID (per BK Agent help text). The escape
+    # `\n` must be the literal 2 characters (backslash + n) — BK Agent
+    # internally runs `strings.Replace(format, "\\n", "\n", -1)`. In
+    # Starlark, `"%i\\n"` is the 4-char string `%i\n`.
+    out = ctx.std.process.command("buildkite-agent") \
+        .args(["artifact", "search", name, "--format", "%i\\n", "--log-level=error"]) \
+        .stdout("piped") \
+        .stderr("piped") \
+        .spawn() \
+        .wait_with_output()
+    if debug:
+        print("artifact search debug: query=%s exit=%d" % (name, out.status.code))
+        print("artifact search debug: stdout=%s" % out.stdout)
+        print("artifact search debug: stderr=%s" % out.stderr)
+    trace.log("artifact search: query=" + name +
+              " exit=" + str(out.status.code) +
+              " stdout=" + repr(out.stdout or "") +
+              " stderr=" + repr(out.stderr or ""))
+
+    if out.status.code != 0:
+        return ""
+
+    # `--print-format '%i\n'` prints just the artifact ID, one per line.
+    # `--build` defaults to BUILDKITE_BUILD_ID so the search is already
+    # scoped to this build, and our artifact paths embed
+    # `task_name/task_key/<filename>` so the query is unique per upload.
+    artifact_id = ""
+    for line in out.stdout.split("\n"):
+        line = line.strip()
+        if line:
+            artifact_id = line
+            break
+    if not artifact_id:
+        return ""
+
+    # Build the canonical artifact URL — same pattern BK's UI links to
+    # on the per-job Artifacts tab:
+    #
+    #   https://buildkite.com/organizations/{org}/pipelines/{pipe}/
+    #     builds/{N}/jobs/{job_id}/artifacts/{artifact_id}
+    #
+    # We use the env-var inputs directly rather than parsing
+    # `BUILDKITE_BUILD_URL` (which is the shorter `/{org}/{pipe}/...`
+    # form and would 302 to the canonical one anyway).
+    org      = ctx.std.env.var("BUILDKITE_ORGANIZATION_SLUG") or ""
+    pipeline = ctx.std.env.var("BUILDKITE_PIPELINE_SLUG") or ""
+    build_no = ctx.std.env.var("BUILDKITE_BUILD_NUMBER") or ""
+    job_id   = ctx.std.env.var("BUILDKITE_JOB_ID") or ""
+    if not org or not pipeline or not build_no or not job_id:
+        return ""
+    return "https://buildkite.com/organizations/%s/pipelines/%s/builds/%s/jobs/%s/artifacts/%s" % (
+        org, pipeline, build_no, job_id, artifact_id,
+    )
 
 
 def _delete_artifact(ctx, name):

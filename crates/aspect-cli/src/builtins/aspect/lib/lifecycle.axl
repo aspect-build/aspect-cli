@@ -1,0 +1,54 @@
+"""Task-side helpers for lifecycle event emission.
+
+`announce(ctx, lifecycle, kind, results, label, status="running")`
+prints the phase label to stdout and emits a TaskUpdate carrying it.
+The two side effects are paired so a single call surfaces the new
+phase in CI logs *and* in the BK annotation / GHSC summary's "Last
+update" line — keeping the two sources of truth in sync.
+
+Bare `lifecycle.task_update` emits (without a phase label) are still
+the right shape for live data refreshes within a phase: features now
+preserve the most recent phase label when `update.progress` is empty,
+so callers can stream BES/event-driven updates without erasing the
+displayed phase.
+"""
+load("../traits.axl", "TaskUpdate")
+
+
+def announce(ctx, lifecycle, kind, results, label, status = "running"):
+    """Print a phase label to stdout and emit a TaskUpdate carrying it.
+
+    The stdout line is prefixed with `→ ` so phase boundaries stand out
+    in CI logs amid the surrounding bazel / formatter / linter output.
+    A trailing `…` is appended to indicate the work is currently in
+    flight — the `Last update` line in the rendered annotation /
+    check-run picks up the same decorated string so the visual signal
+    matches across surfaces. The TaskUpdate has progress=<decorated>
+    and the supplied status, so the GHSC + BK features pick the label
+    up via `_state["_progress"]`.
+
+    Args:
+        ctx:       The TaskContext.
+        lifecycle: The TaskLifecycleTrait with task_update handlers.
+        kind:      The task_update kind ("bazel_results", "lint_results",
+                   "format_results", "gazelle_results", "delivery_results").
+        results:   The kind-specific results dict to ship in the update's
+                   data payload.
+        label:     The phase label to print and surface (e.g. "Building 8
+                   target(s)"). Empty string is rejected — use a bare
+                   `lifecycle.task_update` emission for label-less updates.
+        status:    Lifecycle status, default "running". Pass "failing"
+                   when announcing a phase from inside an already-failing
+                   stream so the BK stripe / GHSC conclusion stay red.
+                   Terminal statuses ("passed" / "failed") are not the
+                   right shape for this helper — use the per-task final
+                   emit path instead.
+    """
+    if label:
+        decorated = label + "…"
+        print("→ " + decorated)
+    else:
+        decorated = ""
+    update = TaskUpdate(kind = kind, status = status, progress = decorated, data = {"results": results})
+    for handler in lifecycle.task_update:
+        handler(ctx, update)

@@ -311,6 +311,17 @@ impl Build {
         let mut sink_handles: Vec<JoinHandle<()>> = vec![];
         let sink_invocation_id: Option<String> = if !bes_subscriber_sinks.is_empty() {
             let invocation_id = uuid::Uuid::new_v4().to_string();
+            // `target: "axl.log"` + TRACE level so the line surfaces through
+            // the FileSinksLayer (which filters on those targets) — matches
+            // the pattern axl's `trace.log()` uses, so these lines land on
+            // stderr under `ASPECT_DEBUG=1` alongside the existing
+            // `debug: ...` lines.
+            tracing::trace!(
+                target: "axl.log",
+                "debug: BES sinks: spawning {} subscriber sink(s) sink_invocation_id={}",
+                bes_subscriber_sinks.len(),
+                invocation_id
+            );
             for sink in bes_subscriber_sinks {
                 let handle = sink.spawn(
                     rt.clone(),
@@ -483,12 +494,51 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             }
         };
 
+        // Drain BES subscriber sink threads. Each thread's spawn body runs the
+        // full gRPC sink lifecycle (build_enqueued → invocation_started →
+        // event stream → invocation_finished → build_finished) inside its
+        // own `rt.block_on`, so a successful join here means the backend
+        // received every lifecycle event for that sink. A panic in the
+        // spawn body (failed gRPC connect, send error, etc.) surfaces here
+        // as `Err(JoinError)` and propagates out as a build failure.
         let handles = build.sink_handles.take();
+        let sink_count = handles.len();
+        let invocation_id_for_log = build.sink_invocation_id.borrow().clone();
+        let inv_log = invocation_id_for_log.as_deref().unwrap_or("");
+        if sink_count > 0 {
+            tracing::trace!(
+                target: "axl.log",
+                "debug: BES sinks: joining {} subscriber sink thread(s) sink_invocation_id={}",
+                sink_count, inv_log
+            );
+        }
         for handle in handles {
             match handle.join() {
                 Ok(_) => continue,
-                Err(err) => anyhow::bail!("one of the sinks failed: {:#?}", err),
+                Err(err) => {
+                    // The sink spawn body catches its own SinkError + JoinError
+                    // and logs them as warnings, returning cleanly — so a
+                    // genuine `Err` here means a Rust-level panic inside the
+                    // closure, not a network/gRPC failure. Box<dyn Any>'s
+                    // default Debug renders just "Any { .. }"; downcast to
+                    // &str/String to surface the actual panic message.
+                    let msg = if let Some(s) = err.downcast_ref::<&'static str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = err.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        format!("{:?}", err)
+                    };
+                    anyhow::bail!("one of the sinks failed: {}", msg);
+                }
             }
+        }
+        if sink_count > 0 {
+            tracing::trace!(
+                target: "axl.log",
+                "debug: BES sinks: joined {} subscriber sink thread(s) sink_invocation_id={}",
+                sink_count, inv_log
+            );
         }
 
         // Drop the span to end the trace

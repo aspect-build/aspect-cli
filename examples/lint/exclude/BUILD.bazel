@@ -1,9 +1,8 @@
 # Live-CI regression test for `aspect lint` multi-positional + hyphen-led
-# pattern parsing. CI invokes:
+# pattern parsing. CI invokes (from the repo root):
 #
-#     aspect lint --aspect=//:linters.bzl%shellcheck -- //... -//exclude/...
-#
-# from the `examples/lint` working directory.
+#     aspect lint --aspect=//examples/lint:linters.bzl%shellcheck -- \
+#       //examples/lint/... -//examples/lint/exclude/...
 #
 # This file is parse-level coverage only — the default lint strategy
 # `hold-the-line` only flags errors in changed files, so a deliberately

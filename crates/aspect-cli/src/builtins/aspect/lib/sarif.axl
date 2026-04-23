@@ -9,11 +9,38 @@ def parse_sarif(content):
     return json.decode(content)
 
 
+def _result_has_fix(result):
+    """Return True if the SARIF result carries an inline fix hint.
+
+    Mirrors the extraction logic in `sarif_result_to_comment` — relatedLocations
+    with message exactly `try` or starting with `try ` describe a replacement
+    that GithubLintComments turns into a GitHub suggestion block. Findings with
+    fixes can ONLY be rendered as PR comments (the check-run annotations API
+    has no equivalent for suggested patches), so this flag drives the
+    fix-aware splitting in lint_results.compute_annotations and
+    github_lint_comments.
+    """
+    for loc in result.get("relatedLocations", []):
+        msg = loc.get("message", {}).get("text", "")
+        if msg != "try" and not msg.startswith("try "):
+            continue
+        loc_region = loc.get("physicalLocation", {}).get("region", {})
+        if loc_region.get("byteOffset") == None or loc_region.get("byteLength") == None:
+            continue
+        return True
+    return False
+
+
 def parse_sarif_diagnostics(content):
     """Parse SARIF JSON into a flat list of diagnostic dicts.
 
     Returns:
-        List of dicts with keys: tool, file, line, rule_id, severity
+        List of dicts with keys: tool, file, line, end_line, rule_id, severity,
+        message, has_fix.
+
+    `end_line` falls back to `line` when SARIF only specifies startLine. `has_fix`
+    is True when the result carries an inline-fix relatedLocation (see
+    `_result_has_fix`).
     """
     sarif = json.decode(content)
     diagnostics = []
@@ -25,15 +52,20 @@ def parse_sarif_diagnostics(content):
                 continue
             physical = locations[0].get("physicalLocation", {})
             uri = physical.get("artifactLocation", {}).get("uri", "")
-            line = physical.get("region", {}).get("startLine", 0)
+            region = physical.get("region", {})
+            line = region.get("startLine", 0)
+            end_line = region.get("endLine", line) or line
             if not uri or not line:
                 continue
             diagnostics.append({
-                "tool": tool_name,
-                "file": uri,
-                "line": line,
-                "rule_id": result.get("ruleId", ""),
+                "tool":     tool_name,
+                "file":     uri,
+                "line":     line,
+                "end_line": end_line,
+                "rule_id":  result.get("ruleId", ""),
                 "severity": result.get("level", "warning"),
+                "message":  result.get("message", {}).get("text", ""),
+                "has_fix":  _result_has_fix(result),
             })
     return diagnostics
 
@@ -107,6 +139,9 @@ def sarif_result_to_comment(result, tool_name):
     # (replace with the quoted text). A startswith("try") check would also
     # match real words like "trying ..." so require the literal `try` token
     # followed by either end-of-string or a space.
+    #
+    # Keep the predicate aligned with `_result_has_fix` so the diagnostic-level
+    # `has_fix` flag never disagrees with the comment-level `_fixes` list.
     fixes = []
     for loc in result.get("relatedLocations", []):
         msg = loc.get("message", {}).get("text", "")

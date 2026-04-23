@@ -322,6 +322,41 @@ def _make_results_fully_cached():
     return r
 
 
+def _make_results_html_chars():
+    """Branch / commit message containing HTML special characters.
+
+    Exercises `html_escape` so the metadata row doesn't break when a
+    user's commit message includes literal `<...>` tokens (e.g. a
+    commit titled "use inline-styled <hr>") or when a branch name
+    contains `&` / `<` / `>`. Without escaping the BK / GHSC renderer
+    interprets `<hr>` as an actual horizontal rule and splits the
+    metadata line.
+    """
+    r = init_results()
+    r["invocation_id"]   = "html123x-4567-89ab-cdef-012345678901"
+    r["build_command"]   = "build"
+    r["wall_time_ms"]    = 4500
+    r["actions_executed"] = 240
+    r["actions_total"]   = 240
+    r["targets_total"]   = 120
+    r["metadata"] = {
+        "BRANCH_NAME":    "feature/<sandbox>",
+        "COMMIT_SHA":     "abcdef1234567890",
+        "COMMIT_MESSAGE": "fix(bk): use inline-styled <hr> for header/details divider",
+        "TAG":            "v1.0.0-beta<rc1>",
+        "BUILD_USER":     "<anonymous>",
+        "BUILD_HOST":     "<auto-runner>",
+        "RUN_TYPE":       "PULL_REQUEST",
+        "USER":           "<unknown>",
+        "REPO_OWNER":     "aspect-build",
+        "REPO_NAME":      "silo",
+        "VCS":            "GITHUB",
+        "CI_HOST":        "BUILDKITE",
+        "EXTRA_HTML":     "value with <tag> & ampersand",
+    }
+    return r
+
+
 def _make_results_aborted():
     """Build aborted mid-stream (e.g. Ctrl-C or OOM)."""
     r = init_results()
@@ -381,13 +416,13 @@ def _make_results_large():
 # Shared render context and links
 # ---------------------------------------------------------------------------
 
-def _render_ctx(targets = "//...", task_display_name = "Test"):
+def _render_ctx(targets = "//...", task_display_name = "Test", progress = ""):
     return {
         "triggered_by":      "ci-bot (workflow_dispatch)",
         "targets":           targets,
         "started_ms":        1744630000000,
         "ended_ms":          1744630002200,
-        "progress":          "",
+        "progress":          progress,
         "task_display_name": task_display_name,
     }
 
@@ -477,38 +512,52 @@ def _test_impl(ctx):
     """Render each scenario and print TITLE + SUMMARY + first 3000 chars of DETAILS."""
 
     scenarios = [
-        # (label, results, status, render_targets, use_artifact_link, ci, metadata_keys)
+        # (label, results, status, render_targets, use_artifact_link, ci, metadata_keys, progress)
         # metadata_keys exercises GitHubStatusChecksTrait.metadata_keys:
         #   None            → default (no extra_meta surfaced)
         #   ["*"]           → surface every non-standard metadata key
         #   ["K1", "K2"]    → surface only the named keys
-        ("1. all-passed · GitHub",            _make_results_passed(),       "passed",  "//...",   True,  "github",    None),
-        ("2. failed · Buildkite",             _make_results_failed(),       "failed",  "//...",   True,  "buildkite", None),
-        ("3. flaky · CircleCI",               _make_results_flaky(),        "passed",  "//...",   True,  "circleci",  None),
-        ("4. failing-live · GitLab",          _make_results_failing_live(), "failing", "//...",   False, "gitlab",    None),
-        ("5. aborted · GitHub",               _make_results_aborted(),      "failed",  "//...",   False, "github",    None),
-        ("6. large · Buildkite",              _make_results_large(),        "failed",  "//...",   False, "buildkite", None),
-        ("7. all-passed · GitLab",            _make_results_passed(),       "passed",  "//...",   True,  "gitlab",    None),
-        ("8. all-passed · CircleCI",          _make_results_passed(),       "passed",  "//...",   True,  "circleci",  None),
-        ("9. all-passed · Buildkite",         _make_results_passed(),       "passed",  "//...",   True,  "buildkite", None),
+        ("1. all-passed · GitHub",            _make_results_passed(),       "passed",  "//...",   True,  "github",    None,                       ""),
+        ("2. failed · Buildkite",             _make_results_failed(),       "failed",  "//...",   True,  "buildkite", None,                       ""),
+        ("3. flaky · CircleCI",               _make_results_flaky(),        "passed",  "//...",   True,  "circleci",  None,                       ""),
+        ("4. failing-live · GitLab",          _make_results_failing_live(), "failing", "//...",   False, "gitlab",    None,                       ""),
+        ("5. aborted · GitHub",               _make_results_aborted(),      "failed",  "//...",   False, "github",    None,                       ""),
+        ("6. large · Buildkite",              _make_results_large(),        "failed",  "//...",   False, "buildkite", None,                       ""),
+        ("7. all-passed · GitLab",            _make_results_passed(),       "passed",  "//...",   True,  "gitlab",    None,                       ""),
+        ("8. all-passed · CircleCI",          _make_results_passed(),       "passed",  "//...",   True,  "circleci",  None,                       ""),
+        ("9. all-passed · Buildkite",         _make_results_passed(),       "passed",  "//...",   True,  "buildkite", None,                       ""),
         # metadata_keys=["*"] — operator opts in to showing every non-standard BES
         # metadata key. TAG_ENV, TAG_REGION (from _make_results_passed.metadata)
         # should appear as extra_meta rows; standard keys stay in their slots.
-        ("10. all-passed · GitHub · meta=*",  _make_results_passed(),       "passed",  "//...",   True,  "github",    ["*"]),
+        ("10. all-passed · GitHub · meta=*",  _make_results_passed(),       "passed",  "//...",   True,  "github",    ["*"],                      ""),
         # metadata_keys=["TAG_ENV", "TAG_REGION"] — operator allowlists specific
         # keys; TAG_ENV/TAG_REGION appear, WORKSPACE does not (not in list, not standard).
-        ("11. all-passed · GitHub · meta=2",  _make_results_passed(),       "passed",  "//...",   True,  "github",    ["TAG_ENV", "TAG_REGION"]),
+        ("11. all-passed · GitHub · meta=2",  _make_results_passed(),       "passed",  "//...",   True,  "github",    ["TAG_ENV", "TAG_REGION"],  ""),
         # Incremental / fully-cached rebuild: build_metrics reports 0 newly
         # configured targets, but BES still sent 146 target_configured events.
         # The Build graph row should show "146 configured" via the counted
         # fallback, not "0 configured".
-        ("12. fully-cached · GitHub",          _make_results_fully_cached(), "passed",  "//...",   True,  "github",    None),
+        ("12. fully-cached · GitHub",          _make_results_fully_cached(), "passed",  "//...",   True,  "github",    None,                      ""),
+        # Progress / "Last update" rendering. Running scenarios surface the
+        # phase label below the metadata rows; terminal status suppresses it
+        # so the title carries the outcome on its own.
+        ("13. running · spawning · GitHub",    _make_results_passed(),       "running", "//...",   False, "github",    None,                      "Spawning bazel build…"),
+        ("14. failing-live · GitLab · running",_make_results_failing_live(), "failing", "//...",   False, "gitlab",    None,                      "Spawning bazel build…"),
+        # Terminal status with a stale progress field — the renderer
+        # replaces it with "<Task> complete" on passed (so the row keeps
+        # its visual rhythm across the running→passed transition) and
+        # blanks it on failed (the failure title already says everything).
+        ("15. passed · stale-progress · GH",   _make_results_passed(),       "passed",  "//...",   False, "github",    None,                      "Spawning bazel build…"),
+        # HTML escape — branch/commit_msg/tag/extra_meta with `<...>` tokens
+        # render as escaped entities (`&lt;hr&gt;`) so BK/GHSC don't
+        # interpret them as real HTML and break the metadata layout.
+        ("16. html-chars-in-metadata · GH",    _make_results_html_chars(),   "passed",  "//...",   False, "github",    ["*"],                     ""),
     ]
 
     sep = "=" * 70
 
-    for (label, results, status, targets, with_artifact, ci, metadata_keys) in scenarios:
-        rc = _render_ctx(targets = targets)
+    for (label, results, status, targets, with_artifact, ci, metadata_keys, progress) in scenarios:
+        rc = _render_ctx(targets = targets, progress = progress)
         lk = _links(with_artifact = with_artifact, ci = ci)
         out = render_check_output(ctx, results, status, rc, lk, metadata_keys = metadata_keys)
         print(sep)

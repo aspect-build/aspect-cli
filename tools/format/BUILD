@@ -3,4 +3,14 @@ load("@aspect_rules_lint//format:defs.bzl", "format_multirun")
 format_multirun(
     name = "format",
     rust = "@rules_rust//tools/upstream_wrapper:rustfmt",
+    starlark = "@buildifier_prebuilt//:buildifier",
+)
+
+# Starlark-only formatter for the dedicated buildifier CI step. Lets us run
+# buildifier in parallel with the multi-language `format` target while
+# `aspect format --task-key=format` ignores Starlark patterns to avoid
+# duplicate work. See docs/cli/migration/buildifier.mdx.
+format_multirun(
+    name = "format-starlark",
+    starlark = "@buildifier_prebuilt//:buildifier",
 )

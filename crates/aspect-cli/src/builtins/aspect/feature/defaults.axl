@@ -26,7 +26,13 @@ def _default_bazel_behavior(ctx: FeatureContext):
         def _buildkite_bazel_section(ctx):
             if environment.ci.host == "buildkite":
                 targets = getattr(ctx.args, "targets", [])
-                print("--- :bazel: Running bazel %s %s" % (ctx.task.name, " ".join(targets)))
+                # Include the task key — a single BK step can run several
+                # tasks (e.g. `format-bk-debug` then `format-bk`); without
+                # the key, the BK section header looks identical across
+                # runs and the reader has to count occurrences to find
+                # the one they want.
+                print("--- :bazel: Running bazel %s [%s] %s" %
+                      (ctx.task.name, ctx.task.key, " ".join(targets)))
 
         bazel_trait.build_start.append(_buildkite_bazel_section)
         health_check.pre_health_check.append(lambda ctx: print_environment_info(ctx.std, environment))

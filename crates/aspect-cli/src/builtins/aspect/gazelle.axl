@@ -94,7 +94,12 @@ Usage:
 
 load("./lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
 load("./lib/runnable.axl", "runnable")
-load("./traits.axl", "ArtifactsTrait", "BazelTrait")
+load("./lib/bazel_results.axl", "now_ms", "pluralize", "process_event")
+load("./lib/lifecycle.axl", "announce")
+load("./lib/gazelle_results.axl",
+    gaz_init_results = "init_results",
+)
+load("./traits.axl", "ArtifactsTrait", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
 
 
 def _parse_diff_paths(diff_text):
@@ -169,11 +174,48 @@ def _try_upload_gazelle_diff(ctx, diff_text):
         out.write("--upload-gazelle-diff: uploaded patch (no stable URL on this CI host).\n")
 
 
+def _emit_final(ctx, lifecycle, results, exit_code):
+    """Emit the terminal task_update and task_complete for status-check consumers."""
+    status = "passed" if exit_code == 0 else "failed"
+    if not results.get("finish_time_ms"):
+        results["finish_time_ms"] = now_ms(ctx)
+    if results.get("start_time_ms") and not results.get("wall_time_ms"):
+        results["wall_time_ms"] = results["finish_time_ms"] - results["start_time_ms"]
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind   = "gazelle_results",
+            status = status,
+            data   = {"results": results},
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
+
+
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
     out = ctx.std.io.stdout
     bazel_trait = ctx.traits[BazelTrait]
-    out.write("Building gazelle...\n")
+    hc_trait    = ctx.traits[HealthCheckTrait]
+    lifecycle   = ctx.traits[TaskLifecycleTrait]
+
+    # Initialize results and fire task_started FIRST so any subsequent failure
+    # still creates a visible status check.
+    results = gaz_init_results()
+    results["start_time_ms"]  = now_ms(ctx)
+    results["gazelle_target"] = ctx.args.gazelle_target
+    results["gazelle_command"] = ctx.args.gazelle_command or ""
+    results["check_mode"]     = bool(ctx.args.check)
+    results["dirs"]           = list(ctx.args.dirs) if ctx.args.dirs else []
+    for handler in lifecycle.task_started:
+        handler(ctx, ctx.args.gazelle_target)
+
+    # Run pre-health-checks. BazelDefaults registers `print_environment_info`
+    # and `agent_health_check` here, which print the
+    # `--- :aspect: Workflows Runner Environment` and
+    # `--- :aspect: Workflows Runner Health Check` BK section markers.
+    announce(ctx, lifecycle, "gazelle_results", results, "Running pre-gazelle checks")
+    for hook in hc_trait.pre_health_check:
+        hook(ctx)
 
     flags = [
         "--remote_download_outputs=toplevel",
@@ -197,16 +239,76 @@ def _impl(ctx: TaskContext) -> int:
 
     r = runnable(ctx, [ctx.args.gazelle_target])
 
+    # Pass `bazel_trait.build_event_sinks` (which includes the Aspect
+    # backend gRPC sink in CI deployments) so this build's BES events
+    # actually reach the backend and the "✨ Aspect Workflows" link in
+    # the gazelle check-run / annotation header resolves to a real
+    # invocation. See the matching comment in format.axl for why bare
+    # `build_events = True` isn't sufficient.
+    build_events = list(bazel_trait.build_event_sinks) if bazel_trait.build_event_sinks else True
+
+    # Fire `bazel_trait.build_start` hooks before spawning bazel — features
+    # like BazelDefaults register the BK `--- :bazel: Running bazel …`
+    # section marker here.
+    for hook in bazel_trait.build_start:
+        hook(ctx)
+
     build = ctx.bazel.build(
         ctx.args.gazelle_target,
-        build_events = True,
+        build_events = build_events,
         flags = flags,
     )
 
-    for event in build.build_events():
-        r.event(event)
+    # Subscribe to the BES stream BEFORE doing any potentially-slow work
+    # (e.g. emitting task_updates that spawn `buildkite-agent annotate`).
+    # The broadcaster only delivers events to subscribers that joined
+    # before the event was sent — on a warm bazel daemon (second
+    # `aspect gazelle` invocation in a step) BES events stream within
+    # milliseconds, so any delay between `ctx.bazel.build` returning and
+    # this `build_events()` call risks missing the early burst
+    # (`build_started`, `target_completed`, `named_set_of_files`) that
+    # `runnable` needs to determine the gazelle target's entrypoint.
+    events = build.build_events()
 
-    if not build.wait().success:
+    # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
+    # before it returns. Populate `results["sink_invocation_id"]` here and
+    # emit a running task_update so the BK annotation / status check picks up
+    # the Aspect Workflows link as soon as the build is spawned, rather than
+    # waiting for `build.wait()` to surface it.
+    results["sink_invocation_id"] = build.sink_invocation_id
+    announce(ctx, lifecycle, "gazelle_results", results,
+             "Building gazelle (%s)" % ctx.args.gazelle_target)
+
+    for event in events:
+        r.event(event)
+        # Fire `bazel_trait.build_event` hooks per BES event — the
+        # ArtifactUpload feature's `_on_build_event` records testlog paths
+        # here so it can upload them in `_on_build_end`. Without this,
+        # gazelle never uploads artifacts.
+        for handler in bazel_trait.build_event:
+            handler(ctx, event)
+        # Pull full bazel state off the BES stream so the gazelle check-run /
+        # annotation summary gets the same row layout AND shared detail body
+        # (Targets · Build metrics · Invocation · Workflows Runner · Workspace
+        # Status · Build Metadata · Options parsed) as build/test. When
+        # `process_event` flags the event as status-relevant, emit a running
+        # task_update so the metadata streams into the annotation in real
+        # time rather than only appearing on terminal task_complete.
+        if process_event(results, event):
+            for handler in lifecycle.task_update:
+                handler(ctx, TaskUpdate(
+                    kind   = "gazelle_results",
+                    status = "running",
+                    data   = {"results": results},
+                ))
+
+    build_status = build.wait()
+    # Fire `bazel_trait.build_end` hooks. The ArtifactUpload feature's
+    # `_on_build_end` runs the actual artifact upload step here.
+    for hook in bazel_trait.build_end:
+        hook(ctx, build_status.code)
+
+    if not build_status.success:
         fail("Building the gazelle target has failed.")
 
     gazelle = r.determine_entrypoint(ctx.args.gazelle_target)
@@ -266,6 +368,7 @@ def _impl(ctx: TaskContext) -> int:
             out.write("WARNING: --gazelle-flag=%s ignored in diff phase (task controls -mode internally).\n" % f)
     diff_args.append("-mode=diff")
     diff_args.extend(ctx.args.dirs)
+    announce(ctx, lifecycle, "gazelle_results", results, "Running gazelle (-mode=diff)")
     diff_proc = r.spawn(gazelle, diff_args, capture = True)
     diff_stdout = diff_proc.stdout().read_to_string()
     diff_stderr = diff_proc.stderr().read_to_string()
@@ -283,11 +386,15 @@ def _impl(ctx: TaskContext) -> int:
     # stderr above; just turn that into a hard failure.
     if not diff_status.success and not diff_stdout.strip():
         out.write("\x1b[0;31mERROR\x1b[0m: gazelle (-mode=diff) exited %d with no diff output (likely a configuration error).\n" % diff_status.code)
+        results["gazelle_error"]      = True
+        results["gazelle_error_code"] = diff_status.code
+        _emit_final(ctx, lifecycle, results, diff_status.code)
         return diff_status.code
 
     if not diff_stdout.strip():
         # Clean — gazelle reports no changes needed. We're done
         # regardless of --check / fix mode.
+        _emit_final(ctx, lifecycle, results, 0)
         return 0
 
     affected = _parse_diff_paths(diff_stdout)
@@ -307,6 +414,8 @@ def _impl(ctx: TaskContext) -> int:
     # `--check` skips this entirely — CI mode doesn't want a dirtied
     # tree.
     if not ctx.args.check:
+        announce(ctx, lifecycle, "gazelle_results", results,
+                 "Applying gazelle patch (%s)" % pluralize(len(affected), "file"))
         tmp = ctx.std.env.temp_dir()
         patch_path = tmp + "/gazelle-" + ctx.task.key + ".patch"
         ctx.std.fs.write(patch_path, diff_stdout)
@@ -316,6 +425,10 @@ def _impl(ctx: TaskContext) -> int:
         ctx.std.fs.remove_file(patch_path)
         if not apply_result.status.success:
             out.write("\x1b[0;31mERROR\x1b[0m: failed to apply gazelle's patch via `git apply` (exit %d).\nstderr: %s\nThe diff was generated but couldn't be applied — possibly the working tree changed during the run, or gazelle produced a diff format git doesn't accept. Run `bazel run %s` directly to apply.\n" % (apply_result.status.code, apply_result.stderr.strip(), ctx.args.gazelle_target))
+            results["affected_files"]  = affected
+            results["apply_error"]     = True
+            results["apply_error_msg"] = apply_result.stderr.strip()
+            _emit_final(ctx, lifecycle, results, apply_result.status.code)
             return apply_result.status.code
 
     verb = "would update" if ctx.args.check else "updated"
@@ -330,16 +443,24 @@ def _impl(ctx: TaskContext) -> int:
         out.write("\nGazelle %s BUILD files (raw diff follows):\n" % verb)
         out.write(diff_stdout)
 
+    # Populate results for status-check consumers.
+    results["affected_files"] = affected
+
     if ctx.args.upload_gazelle_diff:
         _try_upload_gazelle_diff(ctx, diff_stdout)
+        # Surface the patch URL in results.
+        artifacts_trait = ctx.traits[ArtifactsTrait]
+        if artifacts_trait.artifact_urls:
+            results["patch_url"] = artifacts_trait.artifact_urls.get("gazelle_diff", "") or ""
 
     out.write("\x1b[0;31mERROR\x1b[0m: BUILD files are out of date. Run `aspect gazelle` locally and commit the result.\n")
+    _emit_final(ctx, lifecycle, results, 1)
     return 1
 
 
 gazelle = task(
     implementation = _impl,
-    traits = [ArtifactsTrait, BazelTrait],
+    traits = [ArtifactsTrait, BazelTrait, HealthCheckTrait, TaskLifecycleTrait],
     args = {
         "check": args.boolean(
             default = False,

@@ -50,7 +50,10 @@ test-task:
     - ASPECT_DEBUG=1 aspect test --task-key test-gl-debug -- //... -//exclude/...
     - aspect test --task-key test-gl -- //... -//exclude/...
 
-format-task:
+# Lint runs from the repo root using the shellcheck demo aspect under
+# `//examples/lint:linters.bzl`. The `-//examples/lint/exclude/...` pattern
+# exercises the multi-positional + hyphen-led parsing regression.
+lint-task:
   stage: CI
   needs: [pre-build]
   tags:
@@ -58,8 +61,49 @@ format-task:
     - aspect-default
   script:
     - .aspect/bootstrap.sh
-    - ASPECT_DEBUG=1 aspect format --task-key format-gl-debug
-    - aspect format --task-key format-gl
+    - ASPECT_DEBUG=1 aspect lint --task-key lint-gl-debug --aspect=//examples/lint:linters.bzl%shellcheck -- //examples/lint/... -//examples/lint/exclude/...
+    - aspect lint --task-key lint-gl --aspect=//examples/lint:linters.bzl%shellcheck -- //examples/lint/... -//examples/lint/exclude/...
+
+# Dedicated buildifier-only step that runs in parallel with format-task.
+# Models the legacy Rosetta `buildifier` task using a Starlark-only
+# `format_multirun` target — see docs/cli/migration/buildifier.mdx.
+buildifier-task:
+  stage: CI
+  needs: [pre-build]
+  tags:
+    - aspect-workflows
+    - aspect-default
+  script:
+    - .aspect/bootstrap.sh
+    - ASPECT_DEBUG=1 aspect format --task-key buildifier-gl-debug --formatter-target=//tools/format:format-starlark
+    - aspect format --task-key buildifier-gl --formatter-target=//tools/format:format-starlark
+
+format-task:
+  stage: CI
+  needs: [pre-build]
+  tags:
+    - aspect-workflows
+    - aspect-default
+  # Starlark patterns are handled by buildifier-task; ignore them here so the
+  # two steps don't do duplicate work.
+  script:
+    - .aspect/bootstrap.sh
+    - |
+      ASPECT_DEBUG=1 aspect format --task-key format-gl-debug \
+        --ignore-pattern='**/*.bzl' \
+        --ignore-pattern='**/BUILD' \
+        --ignore-pattern='**/BUILD.bazel' \
+        --ignore-pattern='**/MODULE.bazel' \
+        --ignore-pattern='**/WORKSPACE' \
+        --ignore-pattern='**/WORKSPACE.bazel'
+    - |
+      aspect format --task-key format-gl \
+        --ignore-pattern='**/*.bzl' \
+        --ignore-pattern='**/BUILD' \
+        --ignore-pattern='**/BUILD.bazel' \
+        --ignore-pattern='**/MODULE.bazel' \
+        --ignore-pattern='**/WORKSPACE' \
+        --ignore-pattern='**/WORKSPACE.bazel'
 
 gazelle-task:
   stage: CI

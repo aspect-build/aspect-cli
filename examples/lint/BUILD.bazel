@@ -1,0 +1,33 @@
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+# Demo target for `aspect lint --aspect=//examples/lint:linters.bzl%shellcheck`.
+# This package is a regular subpackage of the root workspace — the previous
+# nested MODULE.bazel was removed when the lint task was hoisted to root.
+# Shellcheck binaries are declared in the root MODULE.bazel.
+
+config_setting(
+    name = "macos_aarch64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+alias(
+    name = "shellcheck",
+    actual = select({
+        ":macos_aarch64": "@shellcheck_darwin_aarch64//:shellcheck",
+        "//conditions:default": "@shellcheck_linux_x86_64//:shellcheck",
+    }),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(
+    [".shellcheckrc"],
+    visibility = ["//visibility:public"],
+)
+
+sh_library(
+    name = "hello",
+    srcs = ["hello.sh"],
+)

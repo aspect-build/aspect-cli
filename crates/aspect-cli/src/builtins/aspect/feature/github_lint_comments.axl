@@ -95,19 +95,69 @@ def _filter_by_diff(comments, changed_lines):
     ]
 
 
-def _build_comments(ctx, filepath):
-    """Parse a SARIF report into review comments with markers and suggestions applied."""
+def _filter_for_destination(comments, destination):
+    """Drop non-fix comments when annotations carry the load.
+
+    `LintTrait.findings_destination` lets users choose where lint findings
+    surface:
+
+      "comments"    — every finding is a PR review comment (default).
+      "annotations" — only fix-bearing findings get a comment (the
+                      suggestion block is the value-add); non-fix findings
+                      are emitted as check-run annotations by
+                      GithubStatusChecks instead, so we skip them here to
+                      avoid double-reporting.
+      "both"        — keep all comments AND emit annotations on the check
+                      run; this branch returns the input unchanged because
+                      the additive annotations path lives in
+                      GithubStatusChecks.
+
+    Comments carry the `_fixes` key (set by `sarif_result_to_comment`) only
+    while a suggested patch is attached; we filter on its presence rather
+    than the diagnostic-level `has_fix` flag to keep the two paths in
+    lockstep.
+    """
+    if destination != "annotations":
+        return comments
+    return [c for c in comments if c.get("_fixes")]
+
+
+def _build_comments(ctx, filepath, destination = "comments"):
+    """Parse a SARIF report into review comments with markers and suggestions applied.
+
+    `destination` matches `LintTrait.findings_destination` and gates the
+    fix-only filter for "annotations" mode (see _filter_for_destination).
+    """
     content = ctx.std.fs.read_to_string(filepath)
     sarif = parse_sarif(content)
     comments = sarif_to_review_comments(sarif)
+    # Filter BEFORE enrichment because _enrich_with_suggestions pops `_fixes`
+    # after applying its suggestion block — once that runs, we can't tell
+    # which comments were fix-bearing anymore.
+    comments = _filter_for_destination(comments, destination)
     _enrich_with_suggestions(ctx, comments)
+    # Re-parse diagnostics for marker construction. The list is positionally
+    # aligned with the unfiltered SARIF results, so when destination filters
+    # comments out, we look up the matching diagnostic by its anchor instead
+    # of trusting the index.
     diagnostics = parse_sarif_diagnostics(content)
-    for i, comment in enumerate(comments):
-        if i < len(diagnostics):
-            diag = diagnostics[i]
-            comment["body"] = _build_comment_marker(
-                diag["tool"], diag["file"], diag["line"], diag["rule_id"],
-            ) + "\n" + comment["body"]
+    if destination == "annotations":
+        diags_by_anchor = {}
+        for d in diagnostics:
+            diags_by_anchor[(d["file"], d["line"])] = d
+        for comment in comments:
+            d = diags_by_anchor.get((comment.get("path", ""), comment.get("line", 0)))
+            if d:
+                comment["body"] = _build_comment_marker(
+                    d["tool"], d["file"], d["line"], d["rule_id"],
+                ) + "\n" + comment["body"]
+    else:
+        for i, comment in enumerate(comments):
+            if i < len(diagnostics):
+                diag = diagnostics[i]
+                comment["body"] = _build_comment_marker(
+                    diag["tool"], diag["file"], diag["line"], diag["rule_id"],
+                ) + "\n" + comment["body"]
     return comments
 
 
@@ -163,9 +213,18 @@ def _check_staleness(ctx, gh):
     return head_sha != gh["head_sha"]
 
 
-def _cleanup_comments(ctx, gh, relevant_diagnostics):
+def _cleanup_comments(ctx, gh, relevant_diagnostics, destination = "comments"):
+    """Delete stale lint markers — diagnostics this run no longer reports as comments.
+
+    When `destination == "annotations"`, non-fix diagnostics are no longer
+    desired as comments (they're posted as check-run annotations). Existing
+    review comments for those findings get cleaned up here so switching
+    modes naturally reaps the previous run's leftovers.
+    """
     desired = {}
     for diag in relevant_diagnostics:
+        if destination == "annotations" and not diag.get("has_fix"):
+            continue
         lines = gh["changed_lines"].get(diag["file"])
         if lines and (diag["line"] - 1) in lines:
             marker = _build_comment_marker(diag["tool"], diag["file"], diag["line"], diag["rule_id"])
@@ -203,6 +262,9 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics):
 def _github_lint_impl(ctx: FeatureContext):
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
     lint_trait = ctx.traits[LintTrait]
+    # Read at config time and capture in the closure so subsequent reassignment
+    # of LintTrait fields can't desync the various hooks below.
+    destination = lint_trait.findings_destination
 
     pr, gh_inactive_reason = github.detect_pr(ctx.std)
     gh = None
@@ -268,7 +330,7 @@ def _github_lint_impl(ctx: FeatureContext):
                 state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
     if gh:
-        # Workspace prefix relative to the git root (e.g. "examples/lint/") —
+        # Workspace prefix relative to the git root (e.g. "subdir/") —
         # _post_individually prepends it when posting because SARIF paths are
         # workspace-relative but GitHub expects repo-relative paths.
         git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
@@ -295,7 +357,7 @@ def _github_lint_impl(ctx: FeatureContext):
         # Errors are always top priority; FIFO among them is fine.
         if gh and gh["stale"]:
             return
-        comments = _build_comments(ctx, filepath)
+        comments = _build_comments(ctx, filepath, destination = destination)
         state["all_comments_count"] += len(comments)
 
         cap_exhausted = bool(gh) and state["posted"] >= max_pr_comments
@@ -371,6 +433,93 @@ def _github_lint_impl(ctx: FeatureContext):
             state["all_comments"] = []
 
     def _lint_end(ctx, relevant_diagnostics):
+        # Post-phase status — populated by the actual posting work below so
+        # the debug summary at the end of the function reflects the FINAL
+        # state, not the entry-time snapshot. Every code path that either
+        # exits early or completes posting writes something here so the
+        # summary always tells the user *why* `posted comments: N` was
+        # what it was.
+        outcome = ""
+
+        if gh:
+            if gh["stale"] or _check_staleness(ctx, gh):
+                gh["stale"] = True
+                outcome = "PR head moved during the run (stale); skipped posting"
+            else:
+                # Errors were streamed in _lint_report; here we post the remaining
+                # warnings/notes (sorted by severity, capped to whatever budget
+                # is left after streaming).
+                non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"]
+
+                # 1. Diff filter (line-level).
+                diff_filtered = _filter_by_diff(non_errors, gh["changed_lines"])
+                state["filtered"] += len(non_errors) - len(diff_filtered)
+
+                # 2. Dedup against existing markers (which now include the
+                #    just-streamed errors thanks to _post_individually's mutation).
+                deduped_skipped = 0
+                new_only = []
+                for c in diff_filtered:
+                    marker = _extract_comment_marker(c.get("body", ""))
+                    if marker and marker in gh["existing_markers"]:
+                        deduped_skipped += 1
+                        continue
+                    new_only.append(c)
+
+                # 3. Sort warnings before notes (stable by path/line).
+                new_only = sorted(new_only, key = _comment_sort_key)
+
+                # 4. Cap remainder.
+                remaining_budget = max_pr_comments - state["posted"]
+                if remaining_budget <= 0:
+                    _increment_dropped(new_only)
+                    new_only = []
+                elif len(new_only) > remaining_budget:
+                    _increment_dropped(new_only[remaining_budget:])
+                    new_only = new_only[:remaining_budget]
+
+                # 5. Post.
+                if new_only:
+                    before = len(gh["existing_markers"])
+                    errors = _post_individually(ctx, gh, new_only, gh["existing_markers"])
+                    state["posted"] += len(gh["existing_markers"]) - before
+                    state["errors"].extend(errors)
+                    outcome = "posted %d new comment(s)" % (len(gh["existing_markers"]) - before)
+                elif deduped_skipped > 0:
+                    outcome = "%d comment(s) already posted on this PR (deduped via marker), nothing new to post" % deduped_skipped
+                elif len(non_errors) == 0:
+                    outcome = "nothing to post — only errors were found, all already streamed during build"
+                elif len(diff_filtered) == 0:
+                    outcome = "%d non-error comment(s) found but all fell outside the PR diff; nothing to post" % len(non_errors)
+                else:
+                    outcome = "no comments survived dedup/cap filters"
+
+                _cleanup_comments(ctx, gh, relevant_diagnostics, destination = destination)
+
+                if state["dropped_due_to_cap"] > 0:
+                    ansi = color_enabled(ctx.std)
+                    prefix = (_BOLD + _YELLOW + "WARNING:" + _RESET) if ansi else "WARNING:"
+                    # Build a per-severity breakdown — well-known levels in
+                    # priority order, then anything else as "other".
+                    by_sev = state["dropped_per_severity"]
+                    parts = []
+                    for sev in ["error", "warning", "note"]:
+                        n = by_sev.get(sev, 0)
+                        if n > 0:
+                            parts.append("%d %s" % (n, sev))
+                    other = 0
+                    for k, v in by_sev.items():
+                        if k not in ("error", "warning", "note"):
+                            other += v
+                    if other > 0:
+                        parts.append("%d other" % other)
+                    breakdown = " (" + ", ".join(parts) + ")" if parts else ""
+                    print("%s capped at %d PR review comment(s); %d additional diagnostic(s)%s not posted to GitHub. The lint task's exit code is unaffected by this cap. Run `aspect lint` locally to see the full list, or raise --github-lint-comments:max-pr-comments=<n> to widen the cap." % (
+                        prefix, max_pr_comments, state["dropped_due_to_cap"], breakdown,
+                    ))
+        else:
+            outcome = "skipped — no GitHub PR context (see `inactive reason` above)"
+
         if trace.enabled:
             trace.log("github lint comment debug summary:")
             if gh_inactive_reason:
@@ -383,77 +532,15 @@ def _github_lint_impl(ctx: FeatureContext):
                     changed_line_count += len(v)
                 trace.log("changed lines:    %s across %s file(s)" % (changed_line_count, len(gh["changed_lines"])))
                 trace.log("filtered by diff: %s" % state["filtered"])
+                trace.log("destination:      %s" % destination)
             trace.log("posted comments:  %s" % state["posted"])
+            if outcome:
+                trace.log("outcome:          %s" % outcome)
             for e in state["errors"]:
                 trace.log("  post error: %s" % e)
             for c in state["all_comments"]:
                 lines = c["body"].split("\n")
                 trace.log("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
-        if gh:
-            if gh["stale"] or _check_staleness(ctx, gh):
-                gh["stale"] = True
-                return
-
-            # Errors were streamed in _lint_report; here we post the remaining
-            # warnings/notes (sorted by severity, capped to whatever budget
-            # is left after streaming).
-            non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"]
-
-            # 1. Diff filter (line-level).
-            diff_filtered = _filter_by_diff(non_errors, gh["changed_lines"])
-            state["filtered"] += len(non_errors) - len(diff_filtered)
-
-            # 2. Dedup against existing markers (which now include the
-            #    just-streamed errors thanks to _post_individually's mutation).
-            new_only = []
-            for c in diff_filtered:
-                marker = _extract_comment_marker(c.get("body", ""))
-                if marker and marker in gh["existing_markers"]:
-                    continue
-                new_only.append(c)
-
-            # 3. Sort warnings before notes (stable by path/line).
-            new_only = sorted(new_only, key = _comment_sort_key)
-
-            # 4. Cap remainder.
-            remaining_budget = max_pr_comments - state["posted"]
-            if remaining_budget <= 0:
-                _increment_dropped(new_only)
-                new_only = []
-            elif len(new_only) > remaining_budget:
-                _increment_dropped(new_only[remaining_budget:])
-                new_only = new_only[:remaining_budget]
-
-            # 5. Post.
-            if new_only:
-                before = len(gh["existing_markers"])
-                errors = _post_individually(ctx, gh, new_only, gh["existing_markers"])
-                state["posted"] += len(gh["existing_markers"]) - before
-                state["errors"].extend(errors)
-
-            _cleanup_comments(ctx, gh, relevant_diagnostics)
-
-            if state["dropped_due_to_cap"] > 0:
-                ansi = color_enabled(ctx.std)
-                prefix = (_BOLD + _YELLOW + "WARNING:" + _RESET) if ansi else "WARNING:"
-                # Build a per-severity breakdown — well-known levels in
-                # priority order, then anything else as "other".
-                by_sev = state["dropped_per_severity"]
-                parts = []
-                for sev in ["error", "warning", "note"]:
-                    n = by_sev.get(sev, 0)
-                    if n > 0:
-                        parts.append("%d %s" % (n, sev))
-                other = 0
-                for k, v in by_sev.items():
-                    if k not in ("error", "warning", "note"):
-                        other += v
-                if other > 0:
-                    parts.append("%d other" % other)
-                breakdown = " (" + ", ".join(parts) + ")" if parts else ""
-                print("%s capped at %d PR review comment(s); %d additional diagnostic(s)%s not posted to GitHub. The lint task's exit code is unaffected by this cap. Run `aspect lint` locally to see the full list, or raise --github-lint-comments:max-pr-comments=<n> to widen the cap." % (
-                    prefix, max_pr_comments, state["dropped_due_to_cap"], breakdown,
-                ))
 
     lint_trait.lint_start.append(_lint_start)
     lint_trait.lint_report.append(_lint_report)

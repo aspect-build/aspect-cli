@@ -20,6 +20,7 @@ load("@aspect//lib/build_metadata.axl",
     "version_gte",
     "task_display_name",
 )
+load("@aspect//feature/buildkite_annotations.axl", bk_severity_for = "severity_for")
 
 def test_case(tc, cond, msg) -> int:
     if not cond:
@@ -1017,9 +1018,11 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     # Bazel-style one-liners.
     tc = test_case(tc, "<summary>📦 Build graph</summary>"                           in out11["text"], "stats: Build graph subsection collapses")
     tc = test_case(tc, "<summary>💾 Cache stats</summary>"                           in out11["text"], "stats: Cache stats subsection collapses")
-    tc = test_case(tc, "13,072 of 33,305 cached (39%)"                               in out11["text"], "stats: Cache stats actions line")
+    # Remote cache hits are reclassified as cached: cached = (33,305-20,233) + 130 = 13,202;
+    # executed = 33,305 - 13,202 = 20,103. See `_effective_action_cache_counts` in bazel_results.axl.
+    tc = test_case(tc, "13,202 of 33,305 cached (39%)"                               in out11["text"], "stats: Cache stats actions line")
     tc = test_case(tc, "**Targets**: 141 targets (134,094 configured, 133 aspect applications)" in out11["text"], "stats: targets line splits rules vs aspect applications")
-    tc = test_case(tc, "**Actions**: 20,233 actions (33,305 created)"                in out11["text"], "stats: actions line shows executed + created")
+    tc = test_case(tc, "**Actions**: 20,103 actions (33,305 created)"                in out11["text"], "stats: actions line shows executed + created")
     tc = test_case(tc, "**Packages**: 735 packages loaded"                           in out11["text"], "stats: packages line")
     tc = test_case(tc, "<summary>🏃 Actions by runner</summary>"                     in out11["text"], "stats: runner subsection collapses")
     tc = test_case(tc, "remote cache hit"                                            in out11["text"], "stats: runner row label")
@@ -1084,8 +1087,8 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     # value is still shown in the dedicated Workspace Status section below —
     # that's expected.
     tc = test_case(tc, "DIFFERENT_FROM_METADATA"                           not in sum_txt, "merged meta: build_metadata wins over workspace_status in summary")
-    # New test cache format (mirrors actions format).
-    tc = test_case(tc, "0 of 25 tests (100% cached)"                          in sum_txt, "summary: test format matches actions format")
+    # All tests cached → "0 of" prefix is dropped.
+    tc = test_case(tc, "25 tests (100% cached)"                               in sum_txt, "summary: test format matches actions format")
     # CPU no longer in summary row 1.
     tc = test_case(tc, "CPU"                                                 not in sum_txt, "summary: CPU removed from summary lines")
     # Row 1 now includes the date (not row 7 anymore).
@@ -1201,9 +1204,9 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     out_inc = render_check_output(ctx, r_inc, "passed", render_ctx, links)
     tc = test_case(tc, "📦 146 targets"                          in out_inc["summary"], "summary: targets count (no configured parens)")
     tc = test_case(tc, "(146 configured)"                    not in out_inc["summary"], "summary: no '(N configured)' parens")
-    tc = test_case(tc, "⚡ 1 of 34,010 actions (99% cached)"     in out_inc["summary"], "summary: actions with cached %% on incremental (per-mnemonic sum)")
+    tc = test_case(tc, "⚡ 1 of 34,010 actions executed (99% cached)" in out_inc["summary"], "summary: actions with cached %% on incremental (per-mnemonic sum)")
     tc = test_case(tc, "incremental rebuild"                 not in out_inc["summary"], "summary: no incremental pill")
-    tc = test_case(tc, "0 of 25 tests (100% cached)"             in out_inc["summary"], "summary: tests line still shows count + cached pct")
+    tc = test_case(tc, "25 tests (100% cached)"                  in out_inc["summary"], "summary: tests line — all cached drops '0 of executed'")
     tc = test_case(tc, "packages"                            not in out_inc["summary"], "summary: packages dropped from row")
 
     # Fresh build renders the same shape.
@@ -1217,7 +1220,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     r_aspect["packages_loaded"]      = 745
     out_aspect = render_check_output(ctx, r_aspect, "passed", render_ctx, links)
     tc = test_case(tc, "📦 146 targets"                             in out_aspect["summary"], "fresh build: targets count (no parens)")
-    tc = test_case(tc, "⚡ 361 of 46,325 actions (99% cached)"       in out_aspect["summary"], "fresh build: actions with cached pct")
+    tc = test_case(tc, "⚡ 361 of 46,325 actions executed (99% cached)" in out_aspect["summary"], "fresh build: actions with cached pct")
 
     # --- Test 14: Performance section Timing labels + cpu-seconds units ---
     r14 = init_results()
@@ -1776,6 +1779,59 @@ def test_build_metadata_lib(tc: int) -> int:
         got = task_display_name(input)
         tc = test_case(tc, got == expected, "task_display_name: %s → %r (got %r)" % (desc, expected, got))
 
+    return tc
+
+
+def test_bk_severity_for(tc: int) -> int:
+    """Coverage for feature/buildkite_annotations.axl::severity_for.
+
+    Walks the (kind, results, status) → BK style mapping that drives the
+    annotation stripe color. Pinned cases:
+      - status == "failing" or "failed" → "error" regardless of kind.
+      - bazel_results with flaky_test_total > 0 and no real failures
+        → "warning" at running and passed (flaky-only is yellow).
+      - bazel_results "failing" with both flaky + real failure → "error"
+        (failures dominate flakes).
+      - lint_results passed with warnings → "warning"; with errors → "error".
+      - delivery_results with fail count → "error"; with warn count → "warning".
+      - format/gazelle_results with affected_files → "warning"; clean → "success".
+      - status == "running" with no flakes → "info".
+    """
+    cases = [
+        # (kind, results, status, expected, desc)
+        # ── Hard-failure short-circuit ───────────────────────────────────
+        ("bazel_results",    {"failed_actions_total": 1},                     "failing", "error",   "bazel: failing + failed action → error"),
+        ("bazel_results",    {"failed_test_total": 1},                        "failing", "error",   "bazel: failing + failed test → error"),
+        ("bazel_results",    {"failed_test_total": 1, "flaky_test_total": 2}, "failing", "error",   "bazel: failing with both real fail + flake → error (fail dominates)"),
+        ("bazel_results",    {"failed_test_total": 3, "flaky_test_total": 2}, "failed",  "error",   "bazel: terminal failed → error"),
+        ("lint_results",     {},                                              "failing", "error",   "lint: failing → error regardless of counts"),
+        ("delivery_results", {},                                              "failed",  "error",   "delivery: failed → error"),
+        ("format_results",   {},                                              "failed",  "error",   "format: failed → error"),
+        ("gazelle_results",  {},                                              "failed",  "error",   "gazelle: failed → error"),
+        # ── Flaky-only on bazel_results (no real failures) ───────────────
+        ("bazel_results",    {"flaky_test_total": 2},                         "running", "warning", "bazel: running + flake-only → warning"),
+        ("bazel_results",    {"flaky_test_total": 2},                         "passed",  "warning", "bazel: passed + flake-only → warning"),
+        ("bazel_results",    {"flaky_test_total": 0},                         "running", "info",    "bazel: running + no flakes → info"),
+        ("bazel_results",    {},                                              "running", "info",    "bazel: running + bare results → info"),
+        ("bazel_results",    {},                                              "passed",  "success", "bazel: passed clean → success"),
+        # ── Lint passed-with-findings ────────────────────────────────────
+        ("lint_results",     {"counts_by_severity": {"error":   1}},          "passed",  "error",   "lint: passed + errors (soft) → error"),
+        ("lint_results",     {"counts_by_severity": {"warning": 1}},          "passed",  "warning", "lint: passed + warnings → warning"),
+        ("lint_results",     {"counts_by_severity": {}},                      "passed",  "success", "lint: passed clean → success"),
+        ("lint_results",     {"counts_by_severity": {"warning": 1}},          "running", "info",    "lint: running → info (running short-circuits)"),
+        # ── Delivery counts ──────────────────────────────────────────────
+        ("delivery_results", {"counts": {"fail": 1}},                         "passed",  "error",   "delivery: passed + fail count → error"),
+        ("delivery_results", {"counts": {"warn": 1}},                         "passed",  "warning", "delivery: passed + warn count → warning"),
+        ("delivery_results", {"counts": {"ok": 2}},                           "passed",  "success", "delivery: passed + ok only → success"),
+        # ── Format / Gazelle affected_files ──────────────────────────────
+        ("format_results",   {"affected_files": ["a.ts"]},                    "passed",  "warning", "format: passed + affected → warning (soft-fail)"),
+        ("format_results",   {"affected_files": []},                          "passed",  "success", "format: passed clean → success"),
+        ("gazelle_results",  {"affected_files": ["BUILD.bazel"]},             "passed",  "warning", "gazelle: passed + affected → warning (fix-applied)"),
+        ("gazelle_results",  {"affected_files": []},                          "passed",  "success", "gazelle: passed clean → success"),
+    ]
+    for (kind, results, status, expected, desc) in cases:
+        got = bk_severity_for(kind, results, status)
+        tc = test_case(tc, got == expected, "severity_for: %s (got %r, want %r)" % (desc, got, expected))
     return tc
 
 
@@ -2513,6 +2569,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_sanitize_filename(tc)
     tc = test_deliveryd_parse_endpoint(tc)
     tc = test_build_metadata_lib(tc)
+    tc = test_bk_severity_for(tc)
 
     print(tc, "tests passed")
     return 0

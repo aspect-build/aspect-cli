@@ -1,0 +1,586 @@
+"""Snapshot tests for `lib/lint_results.axl` template rendering.
+
+Run with:
+  aspect dev test-lint-template-snapshots
+
+Mirrors the shape of `bazel_results_test.axl` — hand-crafted results dicts
+covering the main scenarios (no findings / mixed severity / errors only /
+build failure), rendered through the lint renderer, printed for visual
+inspection of TITLE, SUMMARY, and DETAILS output.
+
+Scenarios:
+  1. clean-passed    — no diagnostics, build succeeded
+  2. mixed-findings  — errors + warnings + info across multiple tools
+  3. errors-only     — only errors, terminal status "failed"
+  4. warnings-only   — only warnings, terminal status "passed" (soft strategy)
+  5. build-failed    — underlying Bazel build crashed before all linters ran
+  6. large           — 200+ findings (exercises the trim cascade)
+  7. hold-the-line   — hold_the_line strategy, changed_files present
+
+Annotation scenarios:
+  A. annotations-mixed   — non-fix findings → annotations, fix-bearing skipped
+  B. annotations-cap     — 250 findings hit the DEFAULT_MAX_ANNOTATIONS cap
+  C. annotations-chunk   — 50-per-batch chunking from `chunk_annotations`
+  D. annotations-shape   — exercises severity → annotation_level mapping
+"""
+load("./lint_results.axl",
+    "render_check_output",
+    "init_results",
+    "accumulate",
+    "compute_annotations",
+    "chunk_annotations",
+    "ANNOTATIONS_PER_BATCH",
+    "DEFAULT_MAX_ANNOTATIONS",
+)
+
+
+# ─── Fake-data builders ───────────────────────────────────────────────────────
+
+def _make_base():
+    """Common metadata / runner info shared by all scenarios.
+
+    Matches the shape lint_init_results() produces — populates the fields
+    build_summary_data reads when rendering the summary metadata rows
+    (status/date, repo/branch/commit, user, CI/Aspect links).
+    """
+    r = init_results()
+    r["invocation_id"]       = "lint-abc12345-def4-5678-9abc-def012345678"
+    r["sink_invocation_id"]  = "sink-uuid-1234-5678-9abc"
+    r["build_tool_version"]  = "9.0.1"
+    r["build_command"]       = "build"
+    r["start_time_ms"]       = 1744630000000
+    r["finish_time_ms"]      = 1744630004500
+    r["wall_time_ms"]        = 4500
+    r["workspace_status"]    = {
+        "BUILD_USER":      "aspect-runner",
+        "BUILD_HOST":      "ip-10-0-86-10",
+        "BUILD_TIMESTAMP": "1776727956",
+    }
+    r["metadata"] = {
+        "BRANCH":             "main",
+        "BRANCH_NAME":        "main",
+        "COMMIT_SHA":         "abc123def456789abcdef",
+        "COMMIT_MESSAGE":     "refactor: extract lint renderer",
+        "COMMIT_AUTHOR":      "Greg Magolan <greg@aspect.build>",
+        "COMMIT_AUTHOR_NAME": "Greg Magolan",
+        "COMMIT_AUTHOR_EMAIL": "greg@aspect.build",
+        "COMMIT_TIMESTAMP":   "2026-04-14 16:32:09 -0700",
+        "USER":               "Greg Magolan",
+        "CI_HOST":             "BUILDKITE",
+        "VCS":                 "GITHUB",
+        "REPO_OWNER":          "aspect-build",
+        "REPO_NAME":           "silo",
+        "BUILD_NUMBER":        "49508",
+        "RUN_TYPE":            "BRANCH_PUSH",
+        "ASPECT_TASK_NAME":    "Lint",
+        "ASPECT_TASK_ID":      "lint",
+        "BUILD_URL":           "https://buildkite.com/aspect-build/silo-aws/builds/49508",
+    }
+    r["target_pattern"] = "//..."
+    r["strategy"]       = "hard"
+    return r
+
+
+def _make_results_clean():
+    r = _make_base()
+    # No diagnostics — lint passed.
+    return r
+
+
+def _make_results_mixed():
+    """Mixed severities across tools — the common "most builds look like this" case."""
+    r = _make_base()
+    diags = [
+        {"tool": "eslint",       "file": "apps/web/src/auth/login.ts",      "line": 42,  "rule_id": "no-unused-vars",   "severity": "error",   "message": "'foo' is defined but never used"},
+        {"tool": "eslint",       "file": "apps/web/src/auth/login.ts",      "line": 58,  "rule_id": "no-console",       "severity": "warning", "message": "Unexpected console statement"},
+        {"tool": "eslint",       "file": "apps/web/src/utils/helpers.ts",   "line": 15,  "rule_id": "prefer-const",     "severity": "warning", "message": "'x' is never reassigned. Use 'const' instead."},
+        {"tool": "eslint",       "file": "apps/web/src/api/client.ts",      "line": 103, "rule_id": "no-floating-promises", "severity": "error", "message": "Promises must be awaited, end with a call to .catch, end with a call to .then with a rejection handler or be explicitly marked as ignored with the `void` operator"},
+        {"tool": "eslint",       "file": "apps/web/src/api/client.ts",      "line": 204, "rule_id": "no-explicit-any",  "severity": "warning", "message": "Unexpected any. Specify a different type."},
+        {"tool": "pylint",       "file": "tools/deploy/deploy.py",         "line": 88,  "rule_id": "C0116",            "severity": "warning", "message": "Missing function or method docstring"},
+        {"tool": "pylint",       "file": "tools/deploy/deploy.py",         "line": 120, "rule_id": "W0611",            "severity": "warning", "message": "Unused import os"},
+        {"tool": "pylint",       "file": "tools/deploy/config.py",         "line": 5,   "rule_id": "E0401",            "severity": "error",   "message": "Unable to import 'missing_module'"},
+        {"tool": "pylint",       "file": "tools/ci/validate.py",           "line": 14,  "rule_id": "C0411",            "severity": "warning", "message": "standard import 'os' should be placed before third-party imports"},
+        {"tool": "pylint",       "file": "tools/ci/validate.py",           "line": 42,  "rule_id": "R0913",            "severity": "info",    "message": "Too many arguments (6/5)"},
+        {"tool": "markdownlint", "file": "docs/README.md",                 "line": 23,  "rule_id": "MD041",            "severity": "warning", "message": "First line in file should be a top-level heading"},
+        {"tool": "markdownlint", "file": "docs/CONTRIBUTING.md",           "line": 12,  "rule_id": "MD022",            "severity": "warning", "message": "Headings should be surrounded by blank lines"},
+    ]
+    accumulate(r, diags)
+    return r
+
+
+def _make_results_errors_only():
+    r = _make_base()
+    diags = [
+        {"tool": "eslint", "file": "apps/web/src/index.ts",       "line": 10, "rule_id": "no-undef",   "severity": "error", "message": "'Foo' is not defined"},
+        {"tool": "eslint", "file": "apps/web/src/bootstrap.ts",   "line": 25, "rule_id": "no-undef",   "severity": "error", "message": "'Bar' is not defined"},
+        {"tool": "pylint", "file": "tools/build/generator.py",    "line": 103,"rule_id": "E1101",      "severity": "error", "message": "Instance of 'Generator' has no 'write' member"},
+    ]
+    accumulate(r, diags)
+    return r
+
+
+def _make_results_warnings_only():
+    r = _make_base()
+    r["strategy"] = "soft"
+    diags = [
+        {"tool": "eslint", "file": "apps/web/src/auth/utils.ts", "line": 15, "rule_id": "prefer-const",  "severity": "warning", "message": "'y' is never reassigned. Use 'const' instead."},
+        {"tool": "eslint", "file": "apps/web/src/api/client.ts", "line": 204, "rule_id": "no-explicit-any", "severity": "warning", "message": "Unexpected any. Specify a different type."},
+        {"tool": "pylint", "file": "tools/deploy/deploy.py",    "line": 88, "rule_id": "C0116",          "severity": "warning", "message": "Missing function or method docstring"},
+    ]
+    accumulate(r, diags)
+    return r
+
+
+def _make_results_build_failed():
+    r = _make_base()
+    r["build_failed"] = True
+    # Partial diagnostics captured before the build aborted.
+    diags = [
+        {"tool": "eslint", "file": "apps/web/src/auth/login.ts", "line": 42, "rule_id": "no-unused-vars", "severity": "error", "message": "'foo' is defined but never used"},
+    ]
+    accumulate(r, diags)
+    return r
+
+
+def _make_results_large():
+    """200+ findings to exercise the group-table trim cascade."""
+    r = _make_base()
+    diags = []
+    for i in range(60):
+        diags.append({
+            "tool": "eslint",
+            "file": "apps/web/src/gen/module_" + str(i) + ".ts",
+            "line": (i % 100) + 1,
+            "rule_id": "no-unused-vars",
+            "severity": "error",
+            "message": "Variable 'foo_" + str(i) + "' is defined but never used",
+        })
+    for i in range(150):
+        diags.append({
+            "tool": "eslint",
+            "file": "apps/web/src/gen/module_" + str(i) + ".ts",
+            "line": (i % 100) + 2,
+            "rule_id": "no-console",
+            "severity": "warning",
+            "message": "Unexpected console statement on this line",
+        })
+    for i in range(30):
+        diags.append({
+            "tool": "pylint",
+            "file": "tools/gen/module_" + str(i) + ".py",
+            "line": (i % 50) + 1,
+            "rule_id": "C0116",
+            "severity": "info",
+            "message": "Missing function or method docstring for gen_" + str(i),
+        })
+    accumulate(r, diags)
+    return r
+
+
+def _make_results_hold_the_line():
+    r = _make_base()
+    r["strategy"] = "hold_the_line"
+    r["changed_files"] = [
+        {"file": "apps/web/src/auth/login.ts",   "lines": [42, 58]},
+        {"file": "apps/web/src/api/client.ts",   "lines": [103, 204]},
+    ]
+    diags = [
+        {"tool": "eslint", "file": "apps/web/src/auth/login.ts",  "line": 42,  "rule_id": "no-unused-vars",      "severity": "error",   "message": "'foo' is defined but never used"},
+        {"tool": "eslint", "file": "apps/web/src/api/client.ts",  "line": 103, "rule_id": "no-floating-promises", "severity": "error",  "message": "Promises must be awaited"},
+        {"tool": "eslint", "file": "apps/web/src/api/client.ts",  "line": 204, "rule_id": "no-explicit-any",      "severity": "warning", "message": "Unexpected any"},
+    ]
+    accumulate(r, diags)
+    return r
+
+
+# ─── Annotation scenarios ────────────────────────────────────────────────────
+
+
+def _make_results_annotations_mixed():
+    """Mix of fix-bearing and non-fix diagnostics — exercises the fix-skip filter."""
+    r = _make_base()
+    diags = [
+        # has_fix=True → suppressed from annotations (must surface as a comment).
+        {"tool": "eslint", "file": "apps/web/src/auth/login.ts", "line": 42, "end_line": 42,
+         "rule_id": "prefer-const", "severity": "warning",
+         "message": "'x' is never reassigned. Use 'const' instead.", "has_fix": True},
+        # has_fix=False → annotated (severity=error → annotation_level="failure").
+        {"tool": "eslint", "file": "apps/web/src/auth/login.ts", "line": 58, "end_line": 60,
+         "rule_id": "no-unused-vars", "severity": "error",
+         "message": "'foo' is defined but never used", "has_fix": False},
+        # Multi-line range — annotation should keep end_line distinct.
+        {"tool": "eslint", "file": "apps/web/src/api/client.ts", "line": 100, "end_line": 110,
+         "rule_id": "no-floating-promises", "severity": "error",
+         "message": "Promises must be awaited or explicitly ignored.", "has_fix": False},
+        # Note severity → annotation_level="notice".
+        {"tool": "pylint", "file": "tools/deploy/deploy.py", "line": 5, "end_line": 5,
+         "rule_id": "C0114", "severity": "note",
+         "message": "Missing module docstring", "has_fix": False},
+        # Diagnostic missing line anchor — must be skipped (annotations need file+line).
+        {"tool": "shellcheck", "file": "scripts/setup.sh", "line": 0, "end_line": 0,
+         "rule_id": "SC2086", "severity": "warning",
+         "message": "Double quote to prevent globbing", "has_fix": False},
+        # Another fix-bearing — confirms multiple fixes are filtered consistently.
+        {"tool": "eslint", "file": "apps/web/src/api/client.ts", "line": 12, "end_line": 12,
+         "rule_id": "prefer-template", "severity": "warning",
+         "message": "Use template literals.", "has_fix": True},
+    ]
+    accumulate(r, diags)
+    return r
+
+
+def _make_results_annotations_cap():
+    """Generate enough non-fix diagnostics to trip DEFAULT_MAX_ANNOTATIONS."""
+    r = _make_base()
+    diags = []
+    overflow = DEFAULT_MAX_ANNOTATIONS + 50  # 50 over the cap
+    for i in range(overflow):
+        diags.append({
+            "tool":     "eslint",
+            "file":     "apps/web/src/gen/module_" + str(i) + ".ts",
+            "line":     (i % 100) + 1,
+            "end_line": (i % 100) + 1,
+            "rule_id":  "no-unused-vars",
+            "severity": "warning",
+            "message":  "Unused variable in generated module " + str(i),
+            "has_fix":  False,
+        })
+    accumulate(r, diags)
+    return r
+
+
+def _make_results_annotations_changed_regions():
+    """Mix findings on changed lines vs untouched lines for the diff filter test."""
+    r = _make_base()
+    # Diff context: two changed files, with specific 0-based line indices added.
+    # SARIF lines below are 1-based, so the diff filter checks (line - 1) ∈ lines.
+    r["changed_files"] = [
+        {"file": "apps/web/src/auth/login.ts", "lines": [41, 57]},   # 1-based 42 and 58
+        {"file": "apps/web/src/api/client.ts", "lines": [99, 100]},  # 1-based 100 and 101
+        # apps/web/src/api/types.ts deliberately omitted — findings there
+        # should be filtered out.
+    ]
+    diags = [
+        # In-diff: login.ts lines 42 and 58 (0-based 41 and 57).
+        {"tool": "eslint", "file": "apps/web/src/auth/login.ts", "line": 42, "end_line": 42,
+         "rule_id": "no-unused-vars", "severity": "error",
+         "message": "in-diff: changed line 42", "has_fix": False},
+        {"tool": "eslint", "file": "apps/web/src/auth/login.ts", "line": 58, "end_line": 58,
+         "rule_id": "no-console", "severity": "warning",
+         "message": "in-diff: changed line 58", "has_fix": False},
+        # Out-of-diff: login.ts line 100 (0-based 99) — not in changed_lines.
+        {"tool": "eslint", "file": "apps/web/src/auth/login.ts", "line": 100, "end_line": 100,
+         "rule_id": "prefer-const", "severity": "warning",
+         "message": "off-diff: untouched line 100", "has_fix": False},
+        # In-diff: client.ts line 100.
+        {"tool": "eslint", "file": "apps/web/src/api/client.ts", "line": 100, "end_line": 100,
+         "rule_id": "no-floating-promises", "severity": "error",
+         "message": "in-diff: changed line 100", "has_fix": False},
+        # Out-of-file: types.ts is not in the changed set at all.
+        {"tool": "eslint", "file": "apps/web/src/api/types.ts", "line": 1, "end_line": 1,
+         "rule_id": "no-explicit-any", "severity": "warning",
+         "message": "off-diff: file not in changed set", "has_fix": False},
+    ]
+    accumulate(r, diags)
+    return r
+
+
+# ─── Test harness ─────────────────────────────────────────────────────────────
+
+def _render_ctx(targets = "//...", task_display_name = "Lint"):
+    return {
+        "triggered_by":      "Greg Magolan (workflow_dispatch)",
+        "targets":           targets,
+        "started_ms":        1744630000000,
+        "ended_ms":          1744630004500,
+        "progress":          "",
+        "task_display_name": task_display_name,
+    }
+
+
+def _links(with_artifact = False, ci = "github"):
+    if ci == "buildkite":
+        ci_label = "Buildkite"
+        ci_url   = "https://buildkite.com/aspect-build/aspect-cli/builds/1354/steps/canvas?sid=s1"
+    elif ci == "circleci":
+        ci_label = "CircleCI"
+        ci_url   = "https://circleci.com/gh/aspect-build/aspect-cli/9911"
+    elif ci == "gitlab":
+        ci_label = "GitLab CI"
+        ci_url   = "https://gitlab.com/aspect-build/aspect-cli/-/jobs/2469624812"
+    else:
+        ci_label = "GitHub Actions"
+        ci_url   = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/job/72239404829"
+
+    d = {
+        "ci_label":             ci_label,
+        "ci_url":               ci_url,
+        "aspect_url":           "https://app.aspect.build/invocations/sink-uuid-1234-5678-9abc",
+        "results_base_url":     "https://app.aspect.build/",
+        "artifacts_browse_url": "",
+        "artifact_urls":        {},
+        "testlogs_label_urls":  {},
+    }
+    if with_artifact and ci == "github":
+        d["artifacts_browse_url"] = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652"
+    return d
+
+
+def _print_annotation(a, idx = None):
+    """Compact one-liner per annotation — all the fields we care about."""
+    prefix = ("[%s] " % str(idx)) if idx != None else "    "
+    print("%s%s @ %s:%s-%s  %s | %s" % (
+        prefix,
+        a.get("annotation_level", ""),
+        a.get("path", ""),
+        str(a.get("start_line", 0)),
+        str(a.get("end_line", 0)),
+        a.get("title", ""),
+        a.get("message", ""),
+    ))
+
+
+def _annotation_scenarios(ctx):
+    """Print compute_annotations / chunk_annotations output for hand-built results."""
+    sep = "-" * 70
+
+    # A. Mixed fix / non-fix / missing-anchor — verify filtering and severity map.
+    print(sep)
+    print("ANNOTATION SCENARIO A: mixed fix/non-fix/missing-anchor diagnostics")
+    print(sep)
+    r = _make_results_annotations_mixed()
+    (anns, total) = compute_annotations(r)
+    print("Diagnostics in results:    %d" % len(r["diagnostics"]))
+    print("Eligible (non-fix + line): %d" % total)
+    print("Annotations emitted:       %d" % len(anns))
+    print("")
+    for i, a in enumerate(anns):
+        _print_annotation(a, idx = i)
+    print("")
+
+    # B. Cap enforcement — generate > DEFAULT_MAX_ANNOTATIONS, expect truncation.
+    print(sep)
+    print("ANNOTATION SCENARIO B: cap at DEFAULT_MAX_ANNOTATIONS (=%d)" % DEFAULT_MAX_ANNOTATIONS)
+    print(sep)
+    r = _make_results_annotations_cap()
+    (anns, total) = compute_annotations(r)
+    print("Diagnostics in results:    %d" % len(r["diagnostics"]))
+    print("Eligible (non-fix + line): %d" % total)
+    print("Annotations emitted:       %d" % len(anns))
+    if len(anns) != DEFAULT_MAX_ANNOTATIONS:
+        fail("expected exactly %d annotations after cap, got %d" %
+             (DEFAULT_MAX_ANNOTATIONS, len(anns)))
+    if total != len(r["diagnostics"]):
+        fail("expected total_eligible to equal diagnostics count when none are filtered, got %d vs %d" %
+             (total, len(r["diagnostics"])))
+    # Spot-check: first and last items should still be valid annotations.
+    print("First annotation:")
+    _print_annotation(anns[0])
+    print("Last annotation:")
+    _print_annotation(anns[-1])
+    print("")
+
+    # C. chunk_annotations should split into 50-per-batch groups. Force a
+    # higher cap here so we exercise multi-batch chunking even though the
+    # default is one batch.
+    print(sep)
+    print("ANNOTATION SCENARIO C: chunk_annotations(batches of %d) — multi-batch path" % ANNOTATIONS_PER_BATCH)
+    print(sep)
+    (anns_big, _t) = compute_annotations(r, max_annotations = len(r["diagnostics"]))
+    batches = chunk_annotations(anns_big, ANNOTATIONS_PER_BATCH)
+    expected = (len(anns_big) + ANNOTATIONS_PER_BATCH - 1) // ANNOTATIONS_PER_BATCH
+    print("Total annotations: %d → %d batch(es) (expected %d)" %
+          (len(anns_big), len(batches), expected))
+    if len(batches) != expected:
+        fail("expected %d batches, got %d" % (expected, len(batches)))
+    if expected < 2:
+        fail("scenario C should exercise multi-batch path; expected ≥ 2 batches but got %d" % expected)
+    for i, b in enumerate(batches):
+        print("  batch %d: %d annotations" % (i + 1, len(b)))
+    # No batch may exceed the per-batch cap.
+    for b in batches:
+        if len(b) > ANNOTATIONS_PER_BATCH:
+            fail("batch exceeded per-batch cap: %d > %d" % (len(b), ANNOTATIONS_PER_BATCH))
+    print("")
+
+    # D. Severity → annotation_level mapping. Verify every defined level is reachable.
+    print(sep)
+    print("ANNOTATION SCENARIO D: severity → annotation_level mapping")
+    print(sep)
+    r = _make_base()
+    accumulate(r, [
+        {"tool": "x", "file": "a.go", "line": 1, "end_line": 1, "rule_id": "ER",  "severity": "error",   "message": "an error",   "has_fix": False},
+        {"tool": "x", "file": "a.go", "line": 2, "end_line": 2, "rule_id": "WA",  "severity": "warning", "message": "a warning",  "has_fix": False},
+        {"tool": "x", "file": "a.go", "line": 3, "end_line": 3, "rule_id": "IN",  "severity": "info",    "message": "an info",    "has_fix": False},
+        {"tool": "x", "file": "a.go", "line": 4, "end_line": 4, "rule_id": "NO",  "severity": "note",    "message": "a note",     "has_fix": False},
+        {"tool": "x", "file": "a.go", "line": 5, "end_line": 5, "rule_id": "UN",  "severity": "unknown", "message": "an unknown", "has_fix": False},
+    ])
+    (anns, _t) = compute_annotations(r)
+    by_severity = {}
+    for a in anns:
+        by_severity[a["title"]] = a["annotation_level"]
+    expected_levels = {
+        "ER": "failure",
+        "WA": "warning",
+        "IN": "notice",
+        "NO": "notice",
+        # Unknown maps to "notice" — Marvin v1 parity. An unclassified
+        # diagnostic shouldn't masquerade as a warning when it could be info.
+        "UN": "notice",
+    }
+    for rule, level in expected_levels.items():
+        got = by_severity.get(rule, "")
+        ok = "OK" if got == level else "FAIL"
+        print("  %s  %s -> %s (expected %s)" % (ok, rule, got, level))
+        if got != level:
+            fail("severity mapping mismatch for %s: got %r, expected %r" % (rule, got, level))
+    # Severity ordering: errors should come before warnings, etc.
+    titles_in_order = [a["title"] for a in anns]
+    print("Order:", titles_in_order)
+    if titles_in_order[0] != "ER":
+        fail("expected error annotation first, got %r" % titles_in_order[0])
+
+    # E. compute_annotations must be a pure read — never mutate `results`.
+    print(sep)
+    print("ANNOTATION SCENARIO E: compute_annotations is read-only")
+    print(sep)
+    r = _make_results_annotations_mixed()
+    snapshot = len(r["diagnostics"])
+    compute_annotations(r)
+    compute_annotations(r)
+    if len(r["diagnostics"]) != snapshot:
+        fail("compute_annotations mutated diagnostics list (was %d, now %d)" %
+             (snapshot, len(r["diagnostics"])))
+    print("OK — diagnostics list unchanged after multiple invocations.")
+    print("")
+
+    # F. only_changed_regions filter — keep findings that match changed_files
+    # entries, drop findings outside the diff. Unlike GithubLintComments which
+    # rejects out-of-diff comments because the GitHub API does, the annotations
+    # API accepts off-diff anchors but hides them from the Files Changed tab.
+    # Marvin v1's `only_annotate_changed_regions` (default true) drops them so
+    # users see annotations exactly where they made changes.
+    print(sep)
+    print("ANNOTATION SCENARIO F: only_changed_regions diff filter")
+    print(sep)
+    r = _make_results_annotations_changed_regions()
+    (off, off_total) = compute_annotations(r, only_changed_regions = False)
+    (on, on_total)   = compute_annotations(r, only_changed_regions = True)
+    print("Without filter: %d eligible, %d emitted" % (off_total, len(off)))
+    print("With filter:    %d eligible, %d emitted" % (on_total, len(on)))
+    print("")
+    print("Annotations emitted with filter:")
+    for i, a in enumerate(on):
+        _print_annotation(a, idx = i)
+    if len(off) != 5:
+        fail("expected 5 annotations without filter, got %d" % len(off))
+    if len(on) != 3:
+        fail("expected 3 annotations with filter (the in-diff ones), got %d" % len(on))
+    for a in on:
+        msg = a.get("message", "")
+        if "off-diff" in msg:
+            fail("filter let an off-diff finding through: %r" % msg)
+    print("")
+
+    # F2. Filter is a no-op when changed_files is empty — sensible behaviour
+    # for non-PR runs (push to main, manual invocations).
+    print(sep)
+    print("ANNOTATION SCENARIO F2: filter no-ops when changed_files is empty")
+    print(sep)
+    r = _make_results_annotations_mixed()  # has no changed_files
+    (no_filter, _t1) = compute_annotations(r, only_changed_regions = False)
+    (with_flag, _t2) = compute_annotations(r, only_changed_regions = True)
+    print("Without filter flag: %d annotations" % len(no_filter))
+    print("With filter flag (no changed_files): %d annotations" % len(with_flag))
+    if len(with_flag) != len(no_filter):
+        fail("filter should be no-op when changed_files is empty (%d vs %d)" %
+             (len(with_flag), len(no_filter)))
+    print("OK — empty changed_files leaves output unchanged.")
+    print("")
+
+    # G. Message construction — verify v1 parity (no `tool: ` prefix; rule_id
+    # surfaces in the title only). Also verify the title fallback to tool name
+    # when rule_id is empty.
+    print(sep)
+    print("ANNOTATION SCENARIO G: message and title construction")
+    print(sep)
+    r = _make_base()
+    accumulate(r, [
+        # Standard finding — message verbatim, title = rule_id.
+        {"tool": "eslint", "file": "a.ts", "line": 1, "end_line": 1,
+         "rule_id": "no-unused-vars", "severity": "warning",
+         "message": "'foo' is defined but never used", "has_fix": False},
+        # rule_id missing — title falls back to tool name.
+        {"tool": "shellcheck", "file": "a.sh", "line": 2, "end_line": 2,
+         "rule_id": "", "severity": "warning",
+         "message": "Double quote to prevent globbing", "has_fix": False},
+        # message missing — body falls back to rule_id, then tool.
+        {"tool": "pylint", "file": "a.py", "line": 3, "end_line": 3,
+         "rule_id": "C0114", "severity": "note",
+         "message": "", "has_fix": False},
+    ])
+    (anns, _t) = compute_annotations(r)
+    for a in anns:
+        _print_annotation(a)
+    if anns[0]["title"] != "no-unused-vars":
+        fail("expected title=rule_id, got %r" % anns[0]["title"])
+    if anns[0]["message"] != "'foo' is defined but never used":
+        fail("expected verbatim message, got %r" % anns[0]["message"])
+    if "tool:" in anns[0]["message"] or "eslint:" in anns[0]["message"]:
+        fail("message must not be prefixed with tool name (v1 parity)")
+    if anns[1]["title"] != "shellcheck":
+        fail("expected title fallback to tool name when rule_id empty, got %r" % anns[1]["title"])
+    if anns[2]["message"] != "C0114":
+        fail("expected message fallback to rule_id when message empty, got %r" % anns[2]["message"])
+    print("")
+
+
+def _test_impl(ctx):
+    """Render each scenario and print TITLE + SUMMARY + first 4000 chars of DETAILS."""
+
+    scenarios = [
+        # (label, results, status, targets, with_artifact, ci, metadata_keys)
+        ("1. clean-passed · GitHub",      _make_results_clean(),         "passed",  "//...",   True,  "github",    None),
+        ("2. mixed-findings · GitHub",    _make_results_mixed(),         "failed",  "//...",   True,  "github",    None),
+        ("3. errors-only · Buildkite",    _make_results_errors_only(),   "failed",  "//...",   True,  "buildkite", None),
+        ("4. warnings-only · GitHub",     _make_results_warnings_only(), "passed",  "//...",   True,  "github",    None),
+        ("5. build-failed · GitHub",      _make_results_build_failed(),  "failed",  "//...",   False, "github",    None),
+        ("6. large-trim · GitHub",        _make_results_large(),         "failed",  "//...",   True,  "github",    None),
+        ("7. hold-the-line · GitHub",     _make_results_hold_the_line(), "failed",  "//...",   True,  "github",    None),
+        # Exercise GitHubStatusChecksTrait.metadata_keys through the shared summary renderer.
+        ("8. mixed · meta=*",             _make_results_mixed(),         "failed",  "//...",   True,  "github",    ["*"]),
+    ]
+
+    sep = "=" * 70
+
+    for (label, results, status, targets, with_artifact, ci, metadata_keys) in scenarios:
+        rc = _render_ctx(targets = targets)
+        lk = _links(with_artifact = with_artifact, ci = ci)
+        out = render_check_output(ctx, results, status, rc, lk, metadata_keys = metadata_keys)
+        print(sep)
+        print("SCENARIO: " + label)
+        print(sep)
+        print("TITLE:    " + out["title"])
+        print("")
+        print("SUMMARY:")
+        print(out["summary"])
+        print("")
+        print("DETAILS (first 4000 chars):")
+        print(out["text"][:4000])
+        print("")
+
+    # Annotation-pipeline tests run after the templated render scenarios so
+    # any failure surfaces with the renderer scenarios already validated.
+    _annotation_scenarios(ctx)
+
+    print(sep)
+    print("All " + str(len(scenarios)) + " lint scenarios + annotation pipeline rendered without error.")
+    return 0
+
+
+lint_template_snapshot_tests = task(
+    name = "test-lint-template-snapshots",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

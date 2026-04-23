@@ -395,6 +395,36 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             task_id,
         };
 
+        // Universal "task starting" announcement. Fires for every task —
+        // built-in or custom — so users can see in CI logs which task is
+        // running and what key/id it was invoked under, without each
+        // task's AXL impl having to remember to print this itself. Phase
+        // boundaries inside the task body are still announced from AXL
+        // via `lib/lifecycle.axl::announce`; this line just frames each
+        // task invocation.
+        //
+        // On Buildkite the line is wrapped in a `--- :aspect:` section
+        // marker so it groups its task's output under a collapsible
+        // header rather than floating above the existing "Workflows
+        // Runner Environment" / "Health Check" / "Running bazel …"
+        // sections that BazelDefaults emits. Off Buildkite the marker
+        // adds nothing (BK groups on `---`; other terminals just show a
+        // plain line) so we keep the simpler `→` form.
+        let on_buildkite = std::env::var_os("BUILDKITE").is_some();
+        let prefix = if on_buildkite {
+            "--- :aspect: "
+        } else {
+            "→ "
+        };
+        if task_info.task_key != task_info.name {
+            println!(
+                "{prefix}Running task `{}` (key: {})",
+                task_info.name, task_info.task_key
+            );
+        } else {
+            println!("{prefix}Running task `{}`", task_info.name);
+        }
+
         let task_trait_map = match self.trait_map_value {
             Some(tmap_val) => {
                 if let Some(tmap) = tmap_val.downcast_ref::<TraitMap>() {

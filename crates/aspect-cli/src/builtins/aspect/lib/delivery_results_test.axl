@@ -1,0 +1,290 @@
+"""Snapshot tests for `lib/delivery_results.axl` template rendering.
+
+Run with:
+  aspect dev test-delivery-template-snapshots
+
+Mirrors `lint_results_test.axl` and `bazel_results_test.axl`. Hand-crafted
+results dicts exercise every outcome bucket (ok / skip / warn / fail / pending)
+and the trim cascade.
+
+Scenarios:
+  1. all-delivered    — every target freshly delivered
+  2. mixed-outcomes   — delivered + skipped + warned + failed
+  3. all-skipped      — same hash already delivered this commit
+  4. all-failed       — every delivery target exited non-zero
+  5. dry-run          — --dry-run marks everything pending
+  6. forced           — --force-target re-delivers a previously delivered target
+  7. large            — 200 results to exercise the trim cascade
+  8. no-targets       — empty target list → "No targets" title
+  9. build-failed     — delivery aborted before any targets ran (synthetic warns)
+"""
+load("./delivery_results.axl", "render_check_output", "init_results", "add_result")
+
+
+# ─── Fake-data builders ───────────────────────────────────────────────────────
+
+def _make_base():
+    """Common metadata / runner info shared by all scenarios.
+
+    Matches the shape init_results() produces — populates the fields
+    build_summary_data reads when rendering the summary metadata rows
+    (status/date, repo/branch/commit, user, CI/Aspect links).
+    """
+    r = init_results()
+    r["invocation_id"]       = "dlv-abc12345-def4-5678-9abc-def012345678"
+    r["sink_invocation_id"]  = "sink-uuid-1234-5678-9abc"
+    r["build_tool_version"]  = "9.0.1"
+    r["build_command"]       = "build"
+    r["start_time_ms"]       = 1744630000000
+    r["finish_time_ms"]      = 1744630012500
+    r["wall_time_ms"]        = 12500
+    r["workspace_status"]    = {
+        "BUILD_USER":      "aspect-runner",
+        "BUILD_HOST":      "ip-10-0-86-10",
+        "BUILD_TIMESTAMP": "1776727956",
+    }
+    r["metadata"] = {
+        "BRANCH":              "main",
+        "BRANCH_NAME":         "main",
+        "COMMIT_SHA":          "abc123def456789abcdef",
+        "COMMIT_MESSAGE":      "deploy: cut release v1.42.0",
+        "COMMIT_AUTHOR":       "Greg Magolan <greg@aspect.build>",
+        "COMMIT_AUTHOR_NAME":  "Greg Magolan",
+        "COMMIT_AUTHOR_EMAIL": "greg@aspect.build",
+        "COMMIT_TIMESTAMP":    "2026-04-14 16:32:09 -0700",
+        "USER":                "Greg Magolan",
+        "CI_HOST":             "BUILDKITE",
+        "VCS":                 "GITHUB",
+        "REPO_OWNER":          "aspect-build",
+        "REPO_NAME":           "silo",
+        "BUILD_NUMBER":        "49508",
+        "RUN_TYPE":            "BRANCH_PUSH",
+        "ASPECT_TASK_NAME":    "Delivery",
+        "ASPECT_TASK_ID":      "delivery",
+        "BUILD_URL":           "https://buildkite.com/aspect-build/silo-aws/builds/49508",
+    }
+    r["target_pattern"] = "//apps/..."
+    r["prefix"]         = "delivery"
+    r["ci_host"]        = "bk"
+    r["commit_sha"]     = "abc123def456789abcdef"
+    r["build_url"]      = "https://buildkite.com/aspect-build/silo-aws/builds/49508"
+    # Default run-shape — the snapshot scenarios that exercise non-default
+    # values flip these explicitly after calling _make_base().
+    r["mode"]           = "selective"
+    r["dry_run"]        = False
+    r["track_state"]    = True
+    return r
+
+
+_SHA_1 = "11112222333344445555666677778888aaaabbbbccccddddeeeeffff00001111"
+_SHA_2 = "22223333444455556666777788889999bbbbccccddddeeeeffff000011112222"
+_SHA_3 = "33334444555566667777888899990000ccccddddeeeeffff0000111122223333"
+_SHA_4 = "44445555666677778888999900001111ddddeeeeffff0000111122223333444"
+_SHA_5 = "55556666777788889999000011112222eeeeffff000011112222333344445555"
+
+
+def _make_all_delivered():
+    r = _make_base()
+    add_result(r, "//apps/web:release",     "ok", message = r["build_url"], output_sha = _SHA_1)
+    add_result(r, "//apps/api:release",     "ok", message = r["build_url"], output_sha = _SHA_2)
+    add_result(r, "//apps/worker:release",  "ok", message = r["build_url"], output_sha = _SHA_3)
+    add_result(r, "//apps/cli:release",     "ok", message = r["build_url"], output_sha = _SHA_4)
+    return r
+
+
+def _make_mixed():
+    r = _make_base()
+    add_result(r, "//apps/web:release", "ok",
+               message = r["build_url"], output_sha = _SHA_1)
+    add_result(r, "//apps/api:release", "ok",
+               message = r["build_url"], output_sha = _SHA_2)
+    add_result(r, "//apps/cli:release", "skip",
+               message = "https://buildkite.com/aspect-build/silo-aws/builds/49495",
+               output_sha = _SHA_3)
+    add_result(r, "//apps/legacy:release", "warn",
+               message = "no entrypoint (not in BES)",
+               output_sha = _SHA_4)
+    add_result(r, "//apps/experimental:release", "fail",
+               message = "exit 1",
+               output_sha = _SHA_5)
+    return r
+
+
+def _make_all_skipped():
+    r = _make_base()
+    prior = "https://buildkite.com/aspect-build/silo-aws/builds/49495"
+    add_result(r, "//apps/web:release",     "skip", message = prior, output_sha = _SHA_1)
+    add_result(r, "//apps/api:release",     "skip", message = prior, output_sha = _SHA_2)
+    add_result(r, "//apps/worker:release",  "skip", message = prior, output_sha = _SHA_3)
+    return r
+
+
+def _make_all_failed():
+    r = _make_base()
+    add_result(r, "//apps/web:release",    "fail", message = "exit 1",   output_sha = _SHA_1)
+    add_result(r, "//apps/api:release",    "fail", message = "exit 137", output_sha = _SHA_2)
+    add_result(r, "//apps/worker:release", "fail", message = "exit 2",   output_sha = _SHA_3)
+    return r
+
+
+def _make_dry_run():
+    r = _make_base()
+    r["dry_run"] = True
+    add_result(r, "//apps/web:release",    "pending", message = "dry-run", output_sha = _SHA_1)
+    add_result(r, "//apps/api:release",    "pending", message = "dry-run", output_sha = _SHA_2)
+    add_result(r, "//apps/cli:release",    "pending", message = "dry-run (forced)",
+               output_sha = _SHA_3, is_forced = True)
+    return r
+
+
+def _make_always_dry_run_untracked():
+    """`--mode=always --dry-run --track-state=false` — the most-permissive
+    combination, exercises all three modifiers in the rendered Mode line."""
+    r = _make_base()
+    r["mode"]        = "always"
+    r["dry_run"]     = True
+    r["track_state"] = False
+    add_result(r, "//apps/web:release",    "pending", message = "dry-run", output_sha = _SHA_1)
+    add_result(r, "//apps/api:release",    "pending", message = "dry-run", output_sha = _SHA_2)
+    return r
+
+
+def _make_forced():
+    r = _make_base()
+    add_result(r, "//apps/web:release", "ok",
+               message = r["build_url"], output_sha = _SHA_1, is_forced = True)
+    add_result(r, "//apps/api:release", "ok",
+               message = r["build_url"], output_sha = _SHA_2)
+    return r
+
+
+def _make_large():
+    """200 deliveries to exercise the per-group trim cascade."""
+    r = _make_base()
+    r["target_pattern"] = "//apps/..."
+    for i in range(120):
+        add_result(r, "//apps/svc_" + str(i) + ":release", "ok",
+                   message = r["build_url"], output_sha = _SHA_1)
+    for i in range(50):
+        add_result(r, "//apps/svc_legacy_" + str(i) + ":release", "skip",
+                   message = "https://buildkite.com/aspect-build/silo-aws/builds/49495",
+                   output_sha = _SHA_2)
+    for i in range(20):
+        add_result(r, "//apps/svc_broken_" + str(i) + ":release", "fail",
+                   message = "exit 1", output_sha = _SHA_3)
+    for i in range(10):
+        add_result(r, "//apps/svc_warn_" + str(i) + ":release", "warn",
+                   message = "no entrypoint (not in BES)",
+                   output_sha = _SHA_4)
+    return r
+
+
+def _make_no_targets():
+    r = _make_base()
+    r["target_pattern"] = ""
+    return r
+
+
+def _make_build_failed():
+    """Build-phase failure before any target delivery: synthetic warns per target."""
+    r = _make_base()
+    for label in [
+        "//apps/web:release",
+        "//apps/api:release",
+        "//apps/worker:release",
+    ]:
+        add_result(r, label, "warn", message = "build failed (exit 1)")
+    return r
+
+
+# ─── Test harness ─────────────────────────────────────────────────────────────
+
+def _render_ctx(targets = "//apps/...", task_display_name = "Delivery", progress = ""):
+    return {
+        "triggered_by":      "Greg Magolan (workflow_dispatch)",
+        "targets":           targets,
+        "started_ms":        1744630000000,
+        "ended_ms":          1744630012500,
+        "progress":          progress,
+        "task_display_name": task_display_name,
+    }
+
+
+def _links(ci = "buildkite"):
+    if ci == "github":
+        ci_label = "GitHub Actions"
+        ci_url   = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/job/72239404829"
+    elif ci == "circleci":
+        ci_label = "CircleCI"
+        ci_url   = "https://circleci.com/gh/aspect-build/aspect-cli/9911"
+    elif ci == "gitlab":
+        ci_label = "GitLab CI"
+        ci_url   = "https://gitlab.com/aspect-build/aspect-cli/-/jobs/2469624812"
+    else:
+        ci_label = "Buildkite"
+        ci_url   = "https://buildkite.com/aspect-build/silo-aws/builds/49508/steps/canvas?sid=s1"
+    return {
+        "ci_label":             ci_label,
+        "ci_url":               ci_url,
+        "aspect_url":           "https://app.aspect.build/invocations/sink-uuid-1234-5678-9abc",
+        "results_base_url":     "https://app.aspect.build/",
+        "artifacts_browse_url": "",
+        "artifact_urls":        {},
+        "testlogs_label_urls":  {},
+    }
+
+
+def _test_impl(ctx):
+    scenarios = [
+        # (label,                            results,                     status,     targets,        ci,          metadata_keys, progress)
+        ("1. all-delivered · BK",            _make_all_delivered(),       "passed",   "//apps/...",   "buildkite", None,          ""),
+        ("2. mixed-outcomes · BK",           _make_mixed(),               "failed",   "//apps/...",   "buildkite", None,          ""),
+        ("3. all-skipped · GH",              _make_all_skipped(),         "passed",   "//apps/...",   "github",    None,          ""),
+        ("4. all-failed · BK",               _make_all_failed(),          "failed",   "//apps/...",   "buildkite", None,          ""),
+        ("5. dry-run · BK",                  _make_dry_run(),             "passed",   "//apps/...",   "buildkite", None,          ""),
+        ("6. forced · GH",                   _make_forced(),              "passed",   "//apps/...",   "github",    None,          ""),
+        ("7. large · BK",                    _make_large(),               "failed",   "//apps/...",   "buildkite", None,          ""),
+        ("8. no-targets · BK",               _make_no_targets(),          "passed",   "",             "buildkite", None,          ""),
+        ("9. build-failed · BK",             _make_build_failed(),        "failed",   "//apps/...",   "buildkite", None,          ""),
+        # Exercise GitHubStatusChecksTrait.metadata_keys through the shared summary renderer.
+        ("10. mixed · meta=*",                _make_mixed(),               "failed",   "//apps/...",   "buildkite", ["*"],         ""),
+        # Progress scenarios — confirm the "Last update" line surfaces the
+        # phase label that delivery.axl threads into TaskUpdate.progress.
+        ("11. progress=building · running · BK",   _make_mixed(),               "running",  "//apps/...",   "buildkite", None,          "Building 8 targets for delivery…"),
+        ("12. progress=delivering · running · BK", _make_mixed(),               "running",  "//apps/...",   "buildkite", None,          "Delivering 3 of 8 targets…"),
+        # Mode line — exercises both the default-suppressed path (no
+        # qualifiers when `selective` + tracked + non-dry-run) and the
+        # all-modifiers path. The dry-run scenario above covers the
+        # single-modifier case.
+        ("13. mode=always · dry-run · untracked",  _make_always_dry_run_untracked(), "passed", "//apps/...", "buildkite", None,          ""),
+    ]
+
+    sep = "=" * 70
+
+    for (label, results, status, targets, ci, metadata_keys, progress) in scenarios:
+        rc = _render_ctx(targets = targets, progress = progress)
+        lk = _links(ci = ci)
+        out = render_check_output(ctx, results, status, rc, lk, metadata_keys = metadata_keys)
+        print(sep)
+        print("SCENARIO: " + label)
+        print(sep)
+        print("TITLE:    " + out["title"])
+        print("")
+        print("SUMMARY:")
+        print(out["summary"])
+        print("")
+        print("DETAILS (first 4000 chars):")
+        print(out["text"][:4000])
+        print("")
+
+    print(sep)
+    print("All " + str(len(scenarios)) + " delivery scenarios rendered without error.")
+    return 0
+
+
+delivery_template_snapshot_tests = task(
+    name = "test-delivery-template-snapshots",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

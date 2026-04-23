@@ -19,7 +19,10 @@ Usage:
 """
 
 load("./lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "get_sarif_summary")
-load("./traits.axl", "BazelTrait", "HealthCheckTrait")
+load("./lib/lint_results.axl", lint_init_results = "init_results", lint_accumulate = "accumulate")
+load("./lib/bazel_results.axl", "now_ms", "pluralize", "process_event")
+load("./lib/lifecycle.axl", "announce")
+load("./traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
 load("./lib/environment.axl", "color_enabled")
 load("./lib/github.axl", "detect_changed_files")
 
@@ -120,6 +123,26 @@ LintTrait = trait(
     # [{"file": str, "lines": [int (0-based added line indices)]}].
     changed_files = attr(list, default = []),
 
+    # Where to surface lint findings *that don't carry a suggested fix*. One of:
+    #   "comments"    — post inline PR review comments (default; preserves
+    #                   the existing GithubLintComments behaviour).
+    #   "annotations" — emit GitHub check-run annotations on the lint check
+    #                   run; comments are reserved for fix-bearing findings.
+    #   "both"        — emit annotations AND post comments.
+    #
+    # Findings *with* suggested fixes are always posted as comments because
+    # the check-runs API has no patch primitive. Suggestions only render in
+    # PR review comments (`<details><summary>Suggested fix</summary>` blocks).
+    findings_destination = attr(str, default = "comments"),
+
+    # When True (the v1 Marvin default), annotations are filtered to lines in
+    # `changed_files` so they appear inline in the PR's Files Changed tab —
+    # GitHub hides annotations on lines outside the diff in that view, and
+    # noise on unrelated regions confuses reviewers. The filter is skipped
+    # silently when `changed_files` is empty (e.g. a manual run on `main`),
+    # so the same task config behaves sensibly outside PR context.
+    only_annotate_changed_regions = attr(bool, default = True),
+
     # Lifecycle hooks. Each is a list of callables; features compose by
     # appending their hook to the list.
 
@@ -137,14 +160,55 @@ LintTrait = trait(
     lint_end = attr(list[typing.Callable[[TaskContext, list], None]], default = []),
 )
 
+
+# Allowed values for LintTrait.findings_destination — keep this and the trait
+# docstring in sync.
+FINDINGS_DESTINATIONS = ["comments", "annotations", "both"]
+
+
+def validate_findings_destination(value):
+    """Return value if it's a recognised findings_destination, else fail."""
+    if value not in FINDINGS_DESTINATIONS:
+        fail(
+            "lint: invalid LintTrait.findings_destination=%r — expected one of %s" %
+            (value, ", ".join(FINDINGS_DESTINATIONS))
+        )
+    return value
+
+def _strategy_name(strategy):
+    """Best-effort label for a Strategy record — matches the three built-ins."""
+    if strategy == StrategyHoldTheLine:
+        return "hold_the_line"
+    if strategy == StrategyHard:
+        return "hard"
+    if strategy == StrategySoft:
+        return "soft"
+    return "custom"
+
+
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
     lint_trait = ctx.traits[LintTrait]
     bazel_trait = ctx.traits[BazelTrait]
     hc_trait = ctx.traits[HealthCheckTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
     strategy = _STRATEGIES[ctx.args.strategy]
 
+    # Validate findings_destination up front so a typo doesn't fail late
+    # (after the build has already run).
+    validate_findings_destination(lint_trait.findings_destination)
+
+    # Initialize lint results for status-check emission. Fire task_started
+    # FIRST so any subsequent hook failure still produces a visible check run.
+    results = lint_init_results()
+    results["start_time_ms"]  = now_ms(ctx)
+    results["strategy"]       = _strategy_name(strategy)
+    results["target_pattern"] = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
+    for handler in lifecycle.task_started:
+        handler(ctx, results["target_pattern"])
+
     # 1. Health checks
+    announce(ctx, lifecycle, "lint_results", results, "Running pre-lint checks")
     for hook in hc_trait.pre_health_check:
         hook(ctx)
 
@@ -154,6 +218,7 @@ def _impl(ctx: TaskContext) -> int:
     # CI host), falling back to local `git diff <base> --unified=0`.
     # Lives in lib/github.axl because format also wants the same
     # precedence.
+    announce(ctx, lifecycle, "lint_results", results, "Detecting changed files")
     changed_files = detect_changed_files(
         ctx,
         line_level = True,
@@ -161,6 +226,7 @@ def _impl(ctx: TaskContext) -> int:
         merge_base = ctx.args.merge_base or None,
     )
     lint_trait.changed_files = changed_files
+    results["changed_files"] = changed_files
 
     for hook in lint_trait.lint_start:
         hook(ctx)
@@ -234,15 +300,43 @@ def _impl(ctx: TaskContext) -> int:
         inherit_stdout = True,
         *ctx.args.targets,
     )
+
+    # Subscribe BEFORE emitting (broadcaster only delivers to pre-existing
+    # subscribers); a warm daemon can stream BES events within milliseconds,
+    # so any delay between `ctx.bazel.build` returning and the subscribe
+    # risks missing the early burst (build_started, build_metadata, …).
+    events = build.build_events()
+
+    # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
+    # before it returns, so we can populate `results["sink_invocation_id"]`
+    # here — well before `build.wait()`. Emitting a running task_update at
+    # this point lets the BK annotation / status check pick up the Aspect
+    # Workflows link as soon as the build is spawned, instead of waiting for
+    # the first SARIF report (or task_complete) to surface it.
+    results["sink_invocation_id"] = build.sink_invocation_id
+    announce(ctx, lifecycle, "lint_results", results,
+             "Running %s" % pluralize(len(ctx.args.aspects), "lint aspect"))
+
     all_diagnostics = []
     linter_exit_code = 0
     patches = []
     github_output = ctx.std.env.var("GITHUB_OUTPUT")
 
 
-    for event in build.build_events():
+    for event in events:
         for handler in bazel_trait.build_event:
             handler(ctx, event)
+        # Stream metadata / target-completed updates into the BK annotation
+        # as they arrive — without this, header rows (workspace status,
+        # build metadata, options parsed, etc.) would only appear once a
+        # SARIF report fires the existing emit below or on task_complete.
+        if process_event(results, event):
+            for handler in lifecycle.task_update:
+                handler(ctx, TaskUpdate(
+                    kind   = "lint_results",
+                    status = "running",
+                    data   = {"results": results},
+                ))
         if event.kind == "named_set_of_files":
             for file in event.payload.files:
                 filepath = file_uri_to_path(file.file)
@@ -251,7 +345,17 @@ def _impl(ctx: TaskContext) -> int:
                 if file.name.endswith(".report"):
                     report = ctx.std.fs.read_to_string(filepath)
                     if "sarif-" in report:
-                        all_diagnostics.extend(parse_sarif_diagnostics(report))
+                        diags = parse_sarif_diagnostics(report)
+                        all_diagnostics.extend(diags)
+                        lint_accumulate(results, diags)
+                        # Emit a live task_update so status-check consumers
+                        # see the finding counts ratchet up during the build.
+                        for handler in lifecycle.task_update:
+                            handler(ctx, TaskUpdate(
+                                kind   = "lint_results",
+                                status = "running",
+                                data   = {"results": results},
+                            ))
                         for hook in lint_trait.lint_report:
                             hook(ctx, filepath)
                         continue
@@ -267,18 +371,27 @@ def _impl(ctx: TaskContext) -> int:
     # 7. Wait for build
     build_status = build.wait()
     build_failed = not build_status.success
+    results["build_failed"]       = build_failed
+    results["linter_exit_code"]   = linter_exit_code
+    if not results.get("finish_time_ms"):
+        results["finish_time_ms"] = now_ms(ctx)
+    if not results.get("wall_time_ms") and results.get("start_time_ms"):
+        results["wall_time_ms"] = results["finish_time_ms"] - results["start_time_ms"]
 
     # 8. BazelTrait.build_end hooks
     for hook in bazel_trait.build_end:
         hook(ctx, build_status.code)
 
     # 9. Apply patches
-    if ctx.args.fix:
+    if ctx.args.fix and patches:
+        announce(ctx, lifecycle, "lint_results", results,
+                 "Applying %s" % pluralize(len(patches), "auto-fix patch", plural = "auto-fix patches"))
         for patch in patches:
             ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
                 .current_dir(ctx.std.env.current_dir()).spawn().wait()
 
     # 10. Apply strategy filter → relevant diagnostics for reporting and exit code
+    announce(ctx, lifecycle, "lint_results", results, "Filtering diagnostics")
     relevant = strategy.filter(all_diagnostics, changed_files)
 
     # 11. lint_end hooks receive filtered diagnostics
@@ -295,6 +408,18 @@ def _impl(ctx: TaskContext) -> int:
     else:
         exit_code = 0
 
+    # Final task_update — for GithubStatusChecks this drives the terminal
+    # render. Status "passed" | "failed" signals it's the last update.
+    final_status = "passed" if exit_code == 0 else "failed"
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind   = "lint_results",
+            status = final_status,
+            data   = {"results": results},
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
+
     for hook in hc_trait.post_health_check:
         result = hook(ctx)
         if result != None:
@@ -304,7 +429,7 @@ def _impl(ctx: TaskContext) -> int:
 
 lint = task(
     implementation = _impl,
-    traits = [LintTrait, BazelTrait, HealthCheckTrait],
+    traits = [LintTrait, BazelTrait, HealthCheckTrait, TaskLifecycleTrait],
     args = {
         "aspects": args.string_list(
             long = "aspect",

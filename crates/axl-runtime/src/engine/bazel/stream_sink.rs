@@ -52,13 +52,45 @@ impl GrpcEventStreamSink {
         invocation_id: String,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
-            rt.block_on(async {
+            // BES forwarding is a side-channel — its failure shouldn't take
+            // the build down. The build's own success is determined by Bazel's
+            // exit code; if a sink panics, the user has likely already seen
+            // the work they care about complete (test output, lint findings,
+            // delivery results) and dropping the rest of the BES forward is
+            // recoverable. Log via stderr (also captured by axl.log under
+            // ASPECT_DEBUG=1) and return cleanly so `Build::wait()` can join
+            // the thread without surfacing it as a build failure.
+            let inv_id = invocation_id.clone();
+            let result = rt.block_on(async {
                 GrpcEventStreamSink::task_spawn(recv, endpoint, headers, invocation_id)
                     .await
                     .await
-            })
-            .expect("failed to join")
-            .expect("failed to wait")
+            });
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(sink_err)) => {
+                    eprintln!(
+                        "warning: BES sink failed (non-fatal) sink_invocation_id={}: {}",
+                        inv_id, sink_err
+                    );
+                    tracing::trace!(
+                        target: "axl.log",
+                        "debug: BES sink failed (non-fatal) sink_invocation_id={}: {}",
+                        inv_id, sink_err
+                    );
+                }
+                Err(join_err) => {
+                    eprintln!(
+                        "warning: BES sink task did not complete cleanly (non-fatal) sink_invocation_id={}: {}",
+                        inv_id, join_err
+                    );
+                    tracing::trace!(
+                        target: "axl.log",
+                        "debug: BES sink task did not complete cleanly (non-fatal) sink_invocation_id={}: {}",
+                        inv_id, join_err
+                    );
+                }
+            }
         })
     }
 
@@ -82,10 +114,23 @@ impl GrpcEventStreamSink {
         headers: HashMap<String, String>,
         invocation_id: String,
     ) -> Result<(), SinkError> {
+        // All `tracing::trace!(target: "axl.log", ...)` lines below surface on
+        // stderr under `ASPECT_DEBUG=1` via the same FileSinksLayer that
+        // catches axl's `trace.log(...)` calls. They give a phase-by-phase
+        // trail of the gRPC sink's lifecycle so when `sink_invocation_id` is
+        // captured but the backend later returns 404, the log shows exactly
+        // which lifecycle event was the last one published before the
+        // process exited.
+        tracing::trace!(
+            target: "axl.log",
+            "debug: GrpcEventStreamSink: connecting to backend endpoint={} sink_invocation_id={}",
+            endpoint, invocation_id
+        );
         let mut client = Client::new(endpoint, headers).await?;
 
         let build_id = invocation_id.clone();
 
+        tracing::trace!(target: "axl.log", "debug: GrpcEventStreamSink: publishing build_enqueued sink_invocation_id={}", invocation_id);
         client
             .publish_lifecycle_event(lifecycle::build_enqueued(
                 build_id.to_string(),
@@ -93,6 +138,7 @@ impl GrpcEventStreamSink {
             ))
             .await?;
 
+        tracing::trace!(target: "axl.log", "debug: GrpcEventStreamSink: publishing invocation_started sink_invocation_id={}", invocation_id);
         client
             .publish_lifecycle_event(lifecycle::invocation_started(
                 build_id.to_string(),
@@ -156,7 +202,9 @@ impl GrpcEventStreamSink {
 
         a?;
         b?;
+        tracing::trace!(target: "axl.log", "debug: GrpcEventStreamSink: event stream drained sink_invocation_id={}", invocation_id);
 
+        tracing::trace!(target: "axl.log", "debug: GrpcEventStreamSink: publishing invocation_finished sink_invocation_id={}", invocation_id);
         client
             .publish_lifecycle_event(lifecycle::invocation_finished(
                 build_id.to_string(),
@@ -171,6 +219,7 @@ impl GrpcEventStreamSink {
             ))
             .await?;
 
+        tracing::trace!(target: "axl.log", "debug: GrpcEventStreamSink: publishing build_finished sink_invocation_id={}", invocation_id);
         client
             .publish_lifecycle_event(lifecycle::build_finished(
                 build_id.to_string(),
@@ -178,6 +227,7 @@ impl GrpcEventStreamSink {
             ))
             .await?;
 
+        tracing::trace!(target: "axl.log", "debug: GrpcEventStreamSink: all lifecycle events published; closing sink_invocation_id={}", invocation_id);
         Ok(())
     }
 }
