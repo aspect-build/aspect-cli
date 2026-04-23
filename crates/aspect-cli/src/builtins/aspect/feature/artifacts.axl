@@ -327,7 +327,11 @@ def _artifact_upload_impl(ctx: FeatureContext):
     tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
     profile_path = tmpdir + "/" + uuid + ".profile.gz"
     execlog_path = tmpdir + "/" + uuid + ".execlog.zstd"
-    bep_path     = tmpdir + "/" + uuid + ".bep.bin"
+    # `.binpb` is Google's canonical extension for binary-encoded protobuf
+    # (docs use it alongside `.textpb` / `.jsonpb`). We avoid `.bep.bin`
+    # because macOS Finder's Archive Utility heuristic treats `.bin` as
+    # potentially-compressed and auto-expands on double-click.
+    bep_path     = tmpdir + "/" + uuid + ".bep.binpb"
 
     # Only generate the profile when opt-in. --generate_json_trace_profile +
     # --profile=path cost wall-clock and write a file we'd otherwise leave on
@@ -379,7 +383,13 @@ def _artifact_upload_impl(ctx: FeatureContext):
                     _init_upload_state(state)
                     entries = state.get("_test_entries", [])
                     name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
-                    success = uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
+                    # final = True: publish under the plain `{name}` (no
+                    # `.partial.N` suffix) so the user-facing artifact has a
+                    # clean filename. Rolling-delete still removes the last
+                    # partial via provider.delete_artifact(prev_ref).
+                    success = uploader.upload_testlogs(
+                        ctx, state["_artifact_upload"]["testlogs"], entries, name, final = True,
+                    )
                     # Always update after final upload so both the archive URL and
                     # per-file label URLs reflect the complete set of uploaded files.
                     if success:
@@ -400,7 +410,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
                 if upload_profile:
                     uploads.append(("profile", profile_path, artifact_name(ci, task_name, task_key, "profile.gz")))
                 if upload_bep:
-                    uploads.append(("bep", bep_path, artifact_name(ci, task_name, task_key, "bep.bin")))
+                    uploads.append(("bep", bep_path, artifact_name(ci, task_name, task_key, "bep.binpb")))
                 if upload_exec_log:
                     uploads.append(("execlog", execlog_path, artifact_name(ci, task_name, task_key, "execlog.zstd")))
                 uploaded_any = False

@@ -1,5 +1,6 @@
 """GitHub API client library."""
 load("@std//base64.axl", "base64")
+load("./tar.axl", "zip_create")
 
 DEFAULT_GITHUB_API = "https://api.github.com"
 
@@ -424,16 +425,42 @@ def _upload_artifact(ctx, path, name):
     if not signed_url:
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["no signed_upload_url returned"]}
 
-    file_size = ctx.std.fs.metadata(path).size
+    # GitHub's v2 artifact API requires a ZIP-formatted blob on the client
+    # side. v1 (where GitHub wrapped server-side) was turned off April 2024.
+    # Uploading raw bytes results in a "download" that fails to unzip — the
+    # file gets served with a .zip suffix but the content isn't a valid
+    # archive. actions/upload-artifact@v4 does the same thing.
+    #
+    # If `path` is already a .zip (e.g. lib/artifacts.axl::_upload_testlogs_zip
+    # built a multi-entry testlogs archive), upload it verbatim. Otherwise
+    # wrap the single file in a .zip with its basename as the entry name so
+    # `unzip` produces a predictable filename instead of the /tmp/<uuid> path.
+    if path.endswith(".zip"):
+        zip_path = path
+        owns_zip = False
+    else:
+        basename = path.rsplit("/", 1)[-1]
+        zip_path = path + ".upload.zip"
+        mtree = "#mtree\n./" + basename + " type=file contents=" + path + "\n"
+        if not zip_create(ctx, zip_path, mtree):
+            return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to create zip"]}
+        owns_zip = True
+
+    zip_size = ctx.std.fs.metadata(zip_path).size
     upload_resp = ctx.http().put(
         url = signed_url,
         headers = {
             "x-ms-blob-type": "BlockBlob",
-            "Content-Type": "application/octet-stream",
-            "Content-Length": str(file_size),
+            "Content-Type": "application/zip",
+            "Content-Length": str(zip_size),
         },
-        data = ctx.std.fs.open(path),
+        data = ctx.std.fs.open(zip_path),
     ).block()
+
+    # Only remove the zip if we owned it — if the caller passed a pre-zipped
+    # path, they're responsible for its cleanup (see _upload_testlogs_zip).
+    if owns_zip and ctx.std.fs.exists(zip_path):
+        ctx.std.fs.remove_file(zip_path)
 
     if upload_resp.status < 200 or upload_resp.status >= 300:
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
@@ -442,7 +469,9 @@ def _upload_artifact(ctx, path, name):
         "workflowRunBackendId": run_id,
         "workflowJobRunBackendId": job_id,
         "name": name,
-        "size": str(ctx.std.fs.metadata(path).size),
+        # `size` is the uploaded blob size, which is now the ZIP size, not the
+        # raw file size. @actions/artifact reports this same value.
+        "size": str(zip_size),
     })
     if not ok:
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": [err or "FinalizeArtifact failed"]}

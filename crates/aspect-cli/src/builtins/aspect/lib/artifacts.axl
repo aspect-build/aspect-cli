@@ -11,7 +11,7 @@ CI-specific upload primitives live in their respective lib files:
 load("./github.axl", "github")
 load("./buildkite.axl", "buildkite")
 load("./circleci.axl", "circleci")
-load("./tar.axl", "tar_create")
+load("./tar.axl", "tar_create", "zip_create")
 
 
 def detect_ci(env):
@@ -112,13 +112,19 @@ def _print_upload_error(group, err):
         seen[err] = True
         group["_printed_errors"] = seen
 
-def _upload_testlogs_tar(ctx, provider, group, entries, name):
+def _upload_testlogs_tar(ctx, provider, group, entries, name, final = False):
     """Build tar archive and upload via provider.upload_artifact, with rolling delete.
 
-    Used for GitHub and GitLab — their artifact UIs work best with a single archive.
+    Used for GitHub and GitLab — their artifact UIs work best with a single
+    archive. When `final = False` (mid-build batch), uploads under a versioned
+    `.partial.N` name so incremental snapshots don't collide. When `final =
+    True` (build_end), uploads under the plain unversioned name so the
+    artifact a user downloads is `{name}.tar.gz`, not `{name}.partial.9.tar.gz`.
     """
     count = len(entries)
-    if count == 0 or count == group["last_count"]:
+    if count == 0:
+        return False
+    if not final and count == group["last_count"]:
         return False
 
     _parent = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
@@ -137,8 +143,11 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name):
         print("artifact upload: failed to create archive for " + name)
         return False
 
-    group["version"] += 1
-    artifact_name = name + "-v" + str(group["version"])
+    if final:
+        artifact_name = name
+    else:
+        group["version"] += 1
+        artifact_name = name + ".partial." + str(group["version"])
     result = provider.upload_artifact(ctx, archive_path, artifact_name)
 
     if ctx.std.fs.exists(archive_path):
@@ -152,7 +161,62 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name):
         group["last_count"]   = count
         return True
     else:
-        group["version"] -= 1
+        if not final:
+            group["version"] -= 1
+        for err in result["errors"]:
+            _print_upload_error(group, err)
+        return False
+
+
+def _upload_testlogs_zip(ctx, provider, group, entries, name, final = False):
+    """Build a ZIP archive and upload via provider.upload_artifact.
+
+    Used for GitHub: the v2 artifact API requires ZIP-formatted uploads, so
+    packaging test logs as a tarball first and letting the provider rewrap
+    produces a nested `.zip` containing a `.tar.gz` — double unpack on
+    download. Building the ZIP directly here keeps the user-facing unzip to
+    one step. `final` has the same meaning as in _upload_testlogs_tar.
+    """
+    count = len(entries)
+    if count == 0:
+        return False
+    if not final and count == group["last_count"]:
+        return False
+
+    _parent = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
+    artifacts_root = ctx.std.fs.mkdtemp(prefix = "aspect-artifacts-", parent = _parent)
+    archive_path = artifacts_root + "/" + name + ".zip"
+    ctx.std.fs.create_dir_all(archive_path.rsplit("/", 1)[0])
+
+    lines = ["#mtree"]
+    for entry in entries:
+        lines.append("./" + entry["dest"] + " type=file contents=" + entry["src"])
+    mtree = "\n".join(lines) + "\n"
+
+    if not zip_create(ctx, archive_path, mtree):
+        print("artifact upload: failed to create zip for " + name)
+        return False
+
+    if final:
+        artifact_name = name
+    else:
+        group["version"] += 1
+        artifact_name = name + ".partial." + str(group["version"])
+    result = provider.upload_artifact(ctx, archive_path, artifact_name)
+
+    if ctx.std.fs.exists(archive_path):
+        ctx.std.fs.remove_file(archive_path)
+
+    if result["success"]:
+        if group["prev_ref"]:
+            provider.delete_artifact(ctx, group["prev_ref"])
+        group["prev_ref"]     = result["artifact_ref"]
+        group["download_url"] = result.get("download_url", "")
+        group["last_count"]   = count
+        return True
+    else:
+        if not final:
+            group["version"] -= 1
         for err in result["errors"]:
             _print_upload_error(group, err)
         return False
@@ -287,13 +351,24 @@ def create_uploader(env):
     def delete_artifact(ctx, name):
         return provider.delete_artifact(ctx, name)
 
-    def upload_testlogs(ctx, group, entries, name):
+    def upload_testlogs(ctx, group, entries, name, final = False):
+        # `final = True` on the build_end call so the published artifact lands
+        # under `{name}` (no version suffix); mid-build batches during
+        # build_event use `{name}.partial.{N}` to avoid name collisions with
+        # each rolling replacement. Only GitHub / GitLab (archive-based)
+        # actually version — buildkite / circleci upload per-file and ignore
+        # the flag.
         if ci == "buildkite":
             return _upload_testlogs_buildkite(ctx, group, entries, name)
         elif ci == "circleci":
             return _upload_testlogs_per_file(ctx, provider, group, entries, name)
+        elif ci == "github":
+            # GitHub's v2 artifact API requires ZIP-format uploads; go
+            # straight to .zip to avoid nested .zip(.tar.gz) on download.
+            return _upload_testlogs_zip(ctx, provider, group, entries, name, final = final)
         else:
-            return _upload_testlogs_tar(ctx, provider, group, entries, name)
+            # GitLab accepts any bytes; .tar.gz is compact and extracts in one step.
+            return _upload_testlogs_tar(ctx, provider, group, entries, name, final = final)
 
     return struct(
         check = check,
