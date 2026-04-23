@@ -24,7 +24,8 @@ def _default_bazel_behavior(ctx: FeatureContext):
     if environment:
         def _buildkite_bazel_section(ctx):
             if environment.ci.host == "buildkite":
-                print("--- :bazel: Running bazel %s %s" % (ctx.task.name, " ".join(ctx.args.target_pattern)))
+                targets = getattr(ctx.args, "target_pattern", None) or getattr(ctx.args, "targets", [])
+                print("--- :bazel: Running bazel %s %s" % (ctx.task.name, " ".join(targets)))
 
         bazel_trait.build_start.append(_buildkite_bazel_section)
         health_check.pre_health_check.append(lambda ctx: print_environment_info(environment))
