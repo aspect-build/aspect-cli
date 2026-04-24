@@ -1,34 +1,33 @@
+_DEFAULT_WORKSPACE_NAME = "_main"
+
 def _canonical(label):
-    """Normalize a Bazel label to canonical form: //foo/bar -> //foo/bar:bar."""
     if ":" not in label:
         return label + ":" + label.split("/")[-1]
     return label
 
 def _process_bes(state: struct, event):
-    filesets = state.filesets
-    target_fileset = state.target_fileset
-    targets = state.targets
     if event.kind == "named_set_of_files":
-        filesets[event.id.id] = event.payload
+        state.filesets[event.id.id] = event.payload
     elif event.kind == "target_completed":
         canonical_label = _canonical(event.id.label)
-        if canonical_label in targets:
+        if canonical_label in state.targets:
             for og in event.payload.output_group:
                 if og.name == "default":
-                    target_fileset[canonical_label] = og.file_sets
+                    state.target_fileset[canonical_label] = og.file_sets
+    elif event.kind == "workspace_config":
+        # WorkspaceConfig.local_exec_root is "<output_base>/execroot/<workspace_name>".
+        # Its basename is the canonical repo name Bazel uses inside runfiles trees.
+        local_exec_root = getattr(event.payload, "local_exec_root", None)
+        if local_exec_root:
+            state.workspace_name[0] = local_exec_root.rstrip("/").split("/")[-1]
 
 def _determine_entrypoint(state: struct, target: str) -> str | None:
-    filesets = state.filesets
-    target_fileset = state.target_fileset
     target = _canonical(target)
-    if target not in target_fileset:
+    if target not in state.target_fileset:
         return None
 
-    # BFS over the named-set graph. Each output_group root and each named set's
-    # file_sets field may reference further named sets; we must traverse all of
-    # them to find the executable, not just the first root's direct files.
     visited = {}
-    frontier = [fs_ref.id for fs_ref in target_fileset[target]]
+    frontier = [fs_ref.id for fs_ref in state.target_fileset[target]]
 
     for _depth in range(32):
         if not frontier:
@@ -38,7 +37,7 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
             if set_id in visited:
                 continue
             visited[set_id] = True
-            payload = filesets.get(set_id)
+            payload = state.filesets.get(set_id)
             if not payload:
                 continue
             for file in payload.files:
@@ -51,23 +50,11 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
 
     return None
 
-def _spawn(ctx: TaskContext, entrypoint: str, args: list[str], capture: bool = False) -> std.process.Child:
-    """Execute a program that was built by Bazel.
-
-    - Set the environment required for commonly understood language-specific Runfiles libraries
-    - Set BUILD_WORKING_DIRECTORY and BUILD_WORKSPACE_DIRECTORY like Bazel does
-
-    TODO: set the env and args that the *_binary target specifies
-
-    Args:
-      ctx: AXL task context
-      entrypoint: relative path to the executable, typically under bazel-bin
-      args: list of arguments to pass to the executable
-      capture: if True, pipe stdout and stderr instead of inheriting the parent's streams
-    """
+def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], capture: bool = False) -> std.process.Child:
     runfiles = entrypoint + ".runfiles"
+    workspace_name = state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME
     cmd = ctx.std.process.command(entrypoint)\
-        .current_dir(runfiles) \
+        .current_dir(runfiles + "/" + workspace_name) \
         .env("RUNFILES_DIR", runfiles) \
         .env("JAVA_RUNFILES", runfiles) \
         .env("RUNFILES_MANIFEST_FILE", runfiles + "_manifest") \
@@ -83,11 +70,14 @@ def runnable(ctx, targets: list[str]) -> struct:
         ctx = ctx,
         targets = {_canonical(t): t for t in targets},
         filesets = {},
-        target_fileset = {}
+        target_fileset = {},
+        # Single-element list so `_process_bes` can mutate it (struct fields are
+        # otherwise read-only after construction).
+        workspace_name = [""],
     )
 
     return struct(
         event = lambda event: _process_bes(state, event),
         determine_entrypoint = lambda event: _determine_entrypoint(state, event),
-        spawn = lambda entrypoint, args, capture=False: _spawn(ctx, entrypoint, args, capture),
+        spawn = lambda entrypoint, args, capture=False: _spawn(ctx, state, entrypoint, args, capture),
     )
