@@ -687,7 +687,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         ),
         "bazel_flag": args.string_list(
             default = [],
-            description = "Additional Bazel flags passed to every build phase. --stamp is included by default if no flags are provided.",
+            description = "Additional Bazel flags passed to every build phase. When unset, --stamp is added automatically; passing any --bazel-flag replaces this default, so include --bazel-flag=--stamp explicitly if you still want stamping alongside your custom flags.",
         ),
         "bazel_startup_flag": args.string_list(
             default = [],
