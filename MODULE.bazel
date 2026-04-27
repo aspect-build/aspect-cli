@@ -5,29 +5,21 @@ http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "ht
 bazel_dep(name = "aspect_bazel_lib", version = "2.21.1")
 bazel_dep(name = "aspect_rules_lint", version = "1.9.1")
 bazel_dep(name = "rules_nodejs", version = "6.7.3")  # Transitive dep; bump for bazel9
-bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "bazelrc-preset.bzl", version = "1.4.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2")
 bazel_dep(name = "gazelle", version = "0.45.0")
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "rules_cc", version = "0.2.16")
+bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "rules_go", version = "0.59.0")
 bazel_dep(name = "rules_pkg", version = "1.1.0")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "with_cfg.bzl", version = "0.12.0")
-bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.5.2")
+bazel_dep(name = "llvm", version = "0.7.1")
 
-register_toolchains("@toolchains_llvm_bootstrapped//toolchain:all")
+register_toolchains("@llvm//toolchain:all")
 
-bazel_dep(name = "rules_rs", version = "0.0.27")
-
-# Special toolchains branch
-archive_override(
-    module_name = "rules_rs",
-    integrity = "sha256-YbDRjZos4UmfIPY98znK1BgBWRQ1/ui3CtL6RqxE30I=",
-    strip_prefix = "rules_rs-6cf3d940fdc48baf3ebd6c37daf8e0be8fc73ecb",
-    url = "https://github.com/dzbarsky/rules_rs/archive/6cf3d940fdc48baf3ebd6c37daf8e0be8fc73ecb.tar.gz",
-)
+bazel_dep(name = "rules_rs", version = "0.0.58")
 
 rules_rust = use_extension("@rules_rs//rs/experimental:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, "rules_rust")
@@ -39,11 +31,10 @@ toolchains.toolchain(
 )
 use_repo(
     toolchains,
-    "experimental_rust_toolchains_1_92_0",
-    "rust_toolchain_artifacts_macos_aarch64_1_92_0",
+    "default_rust_toolchains",
 )
 
-register_toolchains("@experimental_rust_toolchains_1_92_0//:all")
+register_toolchains("@default_rust_toolchains//:all")
 
 crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
 crate.from_cargo(
@@ -58,6 +49,7 @@ crate.from_cargo(
         "aarch64-unknown-linux-musl",
         "x86_64-unknown-linux-musl",
     ],
+    use_experimental_platforms = True,
 )
 
 bazel_dep(name = "openssl", version = "3.3.1.bcr.6")
@@ -69,6 +61,7 @@ crate.annotation(
         "OPENSSL_DIR": "$(location @openssl//:gen_dir)",
     },
     crate = "openssl-sys",
+    gen_build_script = "on",
 )
 
 inject_repo(crate, "openssl")
@@ -85,20 +78,58 @@ inject_repo(crate, "zstd")
 
 # starlark-rust git fork: crates live in subdirectories, so rules_rs needs
 # explicit strip_prefix hints for each one.
-crate.annotation(crate = "allocative", strip_prefix = "allocative/allocative")
-crate.annotation(crate = "allocative_derive", strip_prefix = "allocative/allocative_derive")
-crate.annotation(crate = "cmp_any", strip_prefix = "gazebo/cmp_any")
-crate.annotation(crate = "display_container", strip_prefix = "gazebo/display_container")
-crate.annotation(crate = "dupe", strip_prefix = "gazebo/dupe")
-crate.annotation(crate = "dupe_derive", strip_prefix = "gazebo/dupe_derive")
-crate.annotation(crate = "starlark", strip_prefix = "starlark")
-crate.annotation(crate = "starlark_derive", strip_prefix = "starlark_derive")
-crate.annotation(crate = "starlark_lsp", strip_prefix = "starlark_lsp")
-crate.annotation(crate = "starlark_map", strip_prefix = "starlark_map")
-crate.annotation(crate = "starlark_syntax", strip_prefix = "starlark_syntax")
-crate.annotation(crate = "strong_hash", strip_prefix = "gazebo/strong_hash")
-crate.annotation(crate = "strong_hash_derive", strip_prefix = "gazebo/strong_hash_derive")
-
+crate.annotation(
+    crate = "allocative",
+    strip_prefix = "allocative/allocative",
+)
+crate.annotation(
+    crate = "allocative_derive",
+    strip_prefix = "allocative/allocative_derive",
+)
+crate.annotation(
+    crate = "cmp_any",
+    strip_prefix = "gazebo/cmp_any",
+)
+crate.annotation(
+    crate = "display_container",
+    strip_prefix = "gazebo/display_container",
+)
+crate.annotation(
+    crate = "dupe",
+    strip_prefix = "gazebo/dupe",
+)
+crate.annotation(
+    crate = "dupe_derive",
+    strip_prefix = "gazebo/dupe_derive",
+)
+crate.annotation(
+    crate = "starlark",
+    strip_prefix = "starlark",
+)
+crate.annotation(
+    crate = "starlark_derive",
+    strip_prefix = "starlark_derive",
+)
+crate.annotation(
+    crate = "starlark_lsp",
+    strip_prefix = "starlark_lsp",
+)
+crate.annotation(
+    crate = "starlark_map",
+    strip_prefix = "starlark_map",
+)
+crate.annotation(
+    crate = "starlark_syntax",
+    strip_prefix = "starlark_syntax",
+)
+crate.annotation(
+    crate = "strong_hash",
+    strip_prefix = "gazebo/strong_hash",
+)
+crate.annotation(
+    crate = "strong_hash_derive",
+    strip_prefix = "gazebo/strong_hash_derive",
+)
 use_repo(crate, "crates")
 
 bazel_dep(name = "rules_multitool", version = "1.9.0")
