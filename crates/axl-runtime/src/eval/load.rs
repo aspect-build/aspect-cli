@@ -69,7 +69,7 @@ impl AxlLoader {
         self.eval_module_impl(path, None, false)
     }
 
-    pub(super) fn eval_std_module(
+    pub(crate) fn eval_std_module(
         &self,
         path: &Path,
         content: &'static str,

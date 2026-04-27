@@ -1,0 +1,38 @@
+load("//bazel/release:release.bzl", "release")
+load("//bazel/rust:defs.bzl", "rust_binary", "rust_test")
+load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
+
+rust_binary(
+    name = "axl-docgen",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:clap",
+        "@crates//:markdown",
+        "@crates//:mdast_util_to_markdown",
+        "@crates//:regex",
+        "@crates//:starlark",
+        "@crates//:syntect",
+        "@crates//:tokio",
+        "//crates/axl-runtime",
+    ],
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "test",
+    size = "small",
+    crate = ":axl-docgen",
+)
+
+multi_platform_rust_binaries(
+    name = "bins",
+    target = ":axl-docgen",
+    tags = ["no-macos"],
+)
+
+release(
+    name = "release",
+    targets = [":bins"],
+    tags = ["no-macos"],
+)

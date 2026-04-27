@@ -26,9 +26,19 @@ bazel-bin/crates/aspect-cli/aspect-cli <command>
 
 ## Update docs
 
+Generate API reference markdown into `docs/lib/`:
+
 ```
-(cd crates/axl-docgen && cargo run)
+bazel run //:docgen -- --output docs
 ```
+
+Or via cargo from the repo root:
+
+```
+cargo run -p axl-docgen -- --output docs
+```
+
+Flags: `--output <DIR>` (default `docs`), `--base-path <PREFIX>` (default `lib`).
 
 ## Managing Dependencies
 

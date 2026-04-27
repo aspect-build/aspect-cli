@@ -97,36 +97,129 @@ impl<'v> StarlarkValue<'v> for BuiltinsHash {
 
 #[starlark_module]
 fn builtins_hash_methods(registry: &mut MethodsBuilder) {
+    /// Creates a new MD5 hash object.
+    ///
+    /// Call `update(data)` to feed bytes or strings into the hash, then
+    /// `digest()` for raw bytes or `hexdigest()` for the hex-encoded string.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//hash.axl", "md5")
+    /// h = md5()
+    /// h.update("hello world")
+    /// h.hexdigest()  # "5eb63bbbe01eeed093cb22bb8f5acdc3"
+    /// ```
     fn md5<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         Ok(heap.alloc(HashObject::new(HashState::Md5(md5::Md5::new()))))
     }
 
+    /// Creates a new SHA-1 hash object.
+    ///
+    /// Call `update(data)` to feed bytes or strings into the hash, then
+    /// `digest()` for raw bytes or `hexdigest()` for the hex-encoded string.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//hash.axl", "sha1")
+    /// h = sha1()
+    /// h.update("hello world")
+    /// h.hexdigest()  # "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed"
+    /// ```
     fn sha1<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         Ok(heap.alloc(HashObject::new(HashState::Sha1(sha1::Sha1::new()))))
     }
 
+    /// Creates a new SHA-224 hash object.
+    ///
+    /// Call `update(data)` to feed bytes or strings into the hash, then
+    /// `digest()` for raw bytes or `hexdigest()` for the hex-encoded string.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//hash.axl", "sha224")
+    /// h = sha224()
+    /// h.update("hello world")
+    /// h.hexdigest()  # "2f05477fc24bb4faefd86517156dafdecec45b8a..."
+    /// ```
     fn sha224<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         Ok(heap.alloc(HashObject::new(HashState::Sha224(sha2::Sha224::new()))))
     }
 
+    /// Creates a new SHA-256 hash object.
+    ///
+    /// Call `update(data)` to feed bytes or strings into the hash, then
+    /// `digest()` for raw bytes or `hexdigest()` for the hex-encoded string.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//hash.axl", "sha256")
+    /// h = sha256()
+    /// h.update("hello world")
+    /// h.hexdigest()
+    /// # "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    /// ```
     fn sha256<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         Ok(heap.alloc(HashObject::new(HashState::Sha256(sha2::Sha256::new()))))
     }
 
+    /// Creates a new SHA-384 hash object.
+    ///
+    /// Call `update(data)` to feed bytes or strings into the hash, then
+    /// `digest()` for raw bytes or `hexdigest()` for the hex-encoded string.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//hash.axl", "sha384")
+    /// h = sha384()
+    /// h.update("hello world")
+    /// h.hexdigest()  # 96-char hex string
+    /// ```
     fn sha384<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         Ok(heap.alloc(HashObject::new(HashState::Sha384(sha2::Sha384::new()))))
     }
 
+    /// Creates a new SHA-512 hash object.
+    ///
+    /// Call `update(data)` to feed bytes or strings into the hash, then
+    /// `digest()` for raw bytes or `hexdigest()` for the hex-encoded string.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//hash.axl", "sha512")
+    /// h = sha512()
+    /// h.update("hello ")
+    /// h.update("world")
+    /// h.hexdigest()  # 128-char hex string
+    /// ```
     fn sha512<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         Ok(heap.alloc(HashObject::new(HashState::Sha512(sha2::Sha512::new()))))
     }
 
+    /// Creates a new BLAKE2b-512 hash object.
+    ///
+    /// Call `update(data)` to feed bytes or strings into the hash, then
+    /// `digest()` for raw bytes or `hexdigest()` for the hex-encoded string.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//hash.axl", "blake2b")
+    /// h = blake2b()
+    /// h.update("hello world")
+    /// h.digest()  # raw 64-byte digest as bytes
+    /// ```
     fn blake2b<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         Ok(heap.alloc(HashObject::new(HashState::Blake2b(
@@ -134,6 +227,19 @@ fn builtins_hash_methods(registry: &mut MethodsBuilder) {
         ))))
     }
 
+    /// Creates a new BLAKE2s-256 hash object.
+    ///
+    /// Call `update(data)` to feed bytes or strings into the hash, then
+    /// `digest()` for raw bytes or `hexdigest()` for the hex-encoded string.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//hash.axl", "blake2s")
+    /// h = blake2s()
+    /// h.update("hello world")
+    /// h.digest()  # raw 32-byte digest as bytes
+    /// ```
     fn blake2s<'v>(this: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         Ok(heap.alloc(HashObject::new(HashState::Blake2s(
@@ -164,6 +270,18 @@ impl<'v> StarlarkValue<'v> for BuiltinsBase64 {
 
 #[starlark_module]
 fn builtins_base64_methods(registry: &mut MethodsBuilder) {
+    /// Encodes a string or bytes value as a standard Base64 string (RFC 4648).
+    ///
+    /// Accepts either `str` (encoded as UTF-8) or `bytes`. Output uses the
+    /// standard alphabet with `=` padding.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//base64.axl", "base64")
+    /// base64.encode("hello")     # "aGVsbG8="
+    /// base64.encode(b"\x00\xff")  # "AP8="
+    /// ```
     fn encode<'v>(this: Value<'v>, value: Value<'v>) -> anyhow::Result<String> {
         let _ = this;
         if let Some(s) = value.unpack_str() {
@@ -178,6 +296,17 @@ fn builtins_base64_methods(registry: &mut MethodsBuilder) {
         }
     }
 
+    /// Decodes a standard Base64-encoded string into `bytes` (RFC 4648).
+    ///
+    /// Expects the standard alphabet with `=` padding. Raises if the input
+    /// is not valid Base64.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//base64.axl", "base64")
+    /// base64.decode("aGVsbG8=")  # b"hello"
+    /// ```
     fn decode<'v>(this: Value<'v>, value: &str, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         let data = STANDARD
@@ -186,6 +315,18 @@ fn builtins_base64_methods(registry: &mut MethodsBuilder) {
         Ok(heap.alloc(starlark::values::bytes::StarlarkBytes::new(&data)))
     }
 
+    /// Encodes a string or bytes value as a URL-safe Base64 string without padding.
+    ///
+    /// Uses the URL-safe alphabet (`-` and `_` instead of `+` and `/`) and
+    /// omits trailing `=` padding. Accepts either `str` (encoded as UTF-8)
+    /// or `bytes`.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//base64.axl", "base64")
+    /// base64.encode_url("hello?")  # "aGVsbG8_"  (no '=' padding)
+    /// ```
     fn encode_url<'v>(this: Value<'v>, value: Value<'v>) -> anyhow::Result<String> {
         let _ = this;
         if let Some(s) = value.unpack_str() {
@@ -200,6 +341,17 @@ fn builtins_base64_methods(registry: &mut MethodsBuilder) {
         }
     }
 
+    /// Decodes a URL-safe Base64 string (no padding) into `bytes`.
+    ///
+    /// Expects the URL-safe alphabet (`-` and `_`) with no trailing `=`
+    /// padding. Raises if the input is not valid Base64.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//base64.axl", "base64")
+    /// base64.decode_url("aGVsbG8_")  # b"hello?"
+    /// ```
     fn decode_url<'v>(this: Value<'v>, value: &str, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
         let _ = this;
         let data = URL_SAFE_NO_PAD
@@ -251,12 +403,37 @@ impl<'v> StarlarkValue<'v> for BuiltinsTime {
 
 #[starlark_module]
 fn builtins_time_methods(registry: &mut MethodsBuilder) {
+    /// Blocks the current thread for `ms` milliseconds.
+    ///
+    /// Returns `None`. The sleep is synchronous; the calling task's thread
+    /// is parked for the full duration.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//time.axl", "sleep")
+    /// sleep(250)  # pause for 250 ms
+    /// ```
     fn sleep(this: Value<'_>, ms: u32) -> anyhow::Result<starlark::values::none::NoneType> {
         let _ = this;
         std::thread::sleep(Duration::from_millis(ms as u64));
         Ok(starlark::values::none::NoneType)
     }
 
+    /// Returns an infinite iterator that yields a monotonically increasing
+    /// integer every `ms` milliseconds.
+    ///
+    /// Each call to `next` sleeps for `ms` milliseconds, then returns the
+    /// next tick (starting at `0`). Use `break` to stop iteration.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//time.axl", "sleep_iter")
+    /// for tick in sleep_iter(1000):  # poll once per second
+    ///     if check_done():
+    ///         break
+    /// ```
     fn sleep_iter(this: Value<'_>, ms: u32) -> anyhow::Result<SleepIter> {
         let _ = this;
         Ok(SleepIter {
@@ -265,6 +442,20 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
         })
     }
 
+    /// Returns a monotonically non-decreasing time in seconds as a float.
+    ///
+    /// The reference epoch is fixed at process start, so values are only
+    /// meaningful relative to other `monotonic()` readings within the same
+    /// process. Suitable for measuring elapsed time.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//time.axl", "monotonic")
+    /// start = monotonic()
+    /// do_work()
+    /// elapsed = monotonic() - start  # seconds, as float
+    /// ```
     fn monotonic(this: Value<'_>) -> anyhow::Result<f64> {
         let _ = this;
         Ok(MONOTONIC_EPOCH
@@ -273,6 +464,20 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
             .as_secs_f64())
     }
 
+    /// Returns a monotonically non-decreasing time in nanoseconds as an int.
+    ///
+    /// The reference epoch is fixed at process start, so values are only
+    /// meaningful relative to other `monotonic_ns()` readings within the
+    /// same process. Higher precision than `monotonic()`.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// load("@std//time.axl", "monotonic_ns")
+    /// start = monotonic_ns()
+    /// do_work()
+    /// elapsed_ns = monotonic_ns() - start  # nanoseconds, as int
+    /// ```
     fn monotonic_ns(this: Value<'_>) -> anyhow::Result<i64> {
         let _ = this;
         Ok(MONOTONIC_EPOCH
@@ -284,12 +489,23 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
 
 #[starlark_module]
 fn builtins_methods(registry: &mut MethodsBuilder) {
+    /// Returns the hash namespace, exposing constructors for supported
+    /// digest algorithms (`md5`, `sha1`, `sha224`, `sha256`, `sha384`,
+    /// `sha512`, `blake2b`, `blake2s`).
+    ///
+    /// Only callable from within `@std` modules; other modules should
+    /// `load("@std//hash.axl", ...)` to access hashing.
     fn hash<'v>(this: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<BuiltinsHash> {
         let _ = this;
         check_std_context(eval)?;
         Ok(BuiltinsHash)
     }
 
+    /// Returns the Base64 namespace, exposing `encode`, `decode`,
+    /// `encode_url`, and `decode_url`.
+    ///
+    /// Only callable from within `@std` modules; other modules should
+    /// `load("@std//base64.axl", ...)` to access Base64.
     fn base64<'v>(
         this: Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -299,6 +515,11 @@ fn builtins_methods(registry: &mut MethodsBuilder) {
         Ok(BuiltinsBase64)
     }
 
+    /// Returns the time namespace, exposing `sleep`, `sleep_iter`,
+    /// `monotonic`, and `monotonic_ns`.
+    ///
+    /// Only callable from within `@std` modules; other modules should
+    /// `load("@std//time.axl", ...)` to access time utilities.
     fn time<'v>(this: Value<'v>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<BuiltinsTime> {
         let _ = this;
         check_std_context(eval)?;
@@ -311,6 +532,21 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     const __builtins__: Builtins = Builtins;
     const Hash: StarlarkValueAsType<HashObject> = StarlarkValueAsType::new();
 
+    /// Returns an infinite iterator that yields a monotonically increasing
+    /// integer every `rate` milliseconds.
+    ///
+    /// Useful for driving polling loops. Each iteration sleeps for `rate`
+    /// milliseconds before yielding the next tick (starting at `0`); use
+    /// `break` to terminate the loop.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// for tick in forever(500):  # poll every 500 ms
+    ///     status = check()
+    ///     if status == "done":
+    ///         break
+    /// ```
     fn forever(#[starlark()] rate: u32) -> anyhow::Result<SleepIter> {
         Ok(SleepIter {
             rate: rate as u64,

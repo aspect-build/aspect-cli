@@ -19,10 +19,8 @@ impl<'a> Renderer<'a> {
     pub fn render_page(&self, page: &DocPage) -> String {
         let mut output = String::new();
 
-        // Add a placeholder heading that will be removed by main.rs
-        output.push_str("# Placeholder\n\n");
-
         // Separate items by category for ordered rendering
+        let mut load_statements = Vec::new();
         let mut types = Vec::new();
         let mut modules = Vec::new();
         let mut functions = Vec::new();
@@ -30,6 +28,7 @@ impl<'a> Renderer<'a> {
 
         for item in page.items.iter() {
             match item {
+                DocPageItem::LoadStatement { .. } => load_statements.push(item),
                 DocPageItem::Type { .. } => types.push(item),
                 DocPageItem::Module { .. } => modules.push(item),
                 DocPageItem::Function { .. } => functions.push(item),
@@ -37,7 +36,14 @@ impl<'a> Renderer<'a> {
             }
         }
 
-        // Render types first (no separators)
+        // Render load statements first (top of the page)
+        for item in &load_statements {
+            if let DocPageItem::LoadStatement { module, symbols } = item {
+                output.push_str(&self.render_load_statement(module, symbols));
+            }
+        }
+
+        // Render types (no separators)
         for item in &types {
             if let DocPageItem::Type { name, docs } = item {
                 output.push_str(&self.render_type(name, docs.as_ref()));
@@ -75,6 +81,35 @@ impl<'a> Renderer<'a> {
             }
         }
 
+        output
+    }
+
+    fn render_load_statement(&self, module: &str, symbols: &[String]) -> String {
+        let mut output = String::new();
+        output.push_str(PRELUDE);
+        if symbols.is_empty() {
+            output.push_str(&format!("load(\"{module}\")"));
+        } else {
+            let quoted: Vec<String> = symbols.iter().map(|s| format!("\"{s}\"")).collect();
+            // Single-line if it fits comfortably; otherwise split per symbol.
+            let single = format!("load(\"{module}\", {})", quoted.join(", "));
+            if single.len() <= 100 {
+                output.push_str(&single);
+            } else {
+                output.push_str(&format!("load(\n    \"{module}\",\n"));
+                for (i, s) in quoted.iter().enumerate() {
+                    output.push_str("    ");
+                    output.push_str(s);
+                    if i < quoted.len() - 1 {
+                        output.push(',');
+                    }
+                    output.push('\n');
+                }
+                output.push(')');
+            }
+        }
+        output.push_str(POSTLUDE);
+        output.push_str("\n\n");
         output
     }
 

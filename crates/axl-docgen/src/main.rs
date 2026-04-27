@@ -4,46 +4,65 @@ mod traversal;
 mod type_linker;
 mod type_registry;
 
-use anyhow::{Ok, Result};
-use axl_runtime::eval;
+use anyhow::Result;
+use axl_runtime::docs;
+use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Parser, Debug)]
+#[command(name = "axl-docgen", about = "Generate AXL API documentation")]
+struct Args {
+    /// Output directory. Pages are written under <output>/types/... and
+    /// <output>/builtins/... .
+    #[arg(long, default_value = "docs")]
+    output: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("generating docs");
+    let args = Args::parse();
 
-    let doc_module = eval::get_globals().build().documentation();
+    let documentation = docs::documentation()?;
+    let result = traversal::traverse_all(&documentation.types, &documentation.builtins);
 
-    // Phase 1: Traverse and build registry (handles path normalization and deduplication)
-    let result = traversal::traverse(&doc_module, "lib");
-
-    // Phase 2: Create linker and renderer
     let linker = type_linker::TypeLinker::new(&result.registry);
     let renderer = renderer::Renderer::new(&linker);
 
-    // Phase 3: Render all pages and sort by path
-    let mut pages: Vec<(String, String)> = result
+    let pages: Vec<(String, String)> = result
         .pages
         .iter()
         .map(|(path, page)| (path.clone(), renderer.render_page(page)))
         .collect();
-    pages.sort_by(|(ka, _), (kb, _)| ka.cmp(kb));
 
-    // Phase 4: Write files with highlighting
-    let _ = fs::remove_dir_all("../../docs/lib"); // Ignore error if directory doesn't exist
+    for sub in ["types", "builtins"] {
+        let _ = fs::remove_dir_all(args.output.join(sub));
+    }
 
-    for (path, content) in pages {
-        let p = PathBuf::from(format!("../../docs/{path}.md"));
-        if !p.parent().unwrap().exists() {
-            fs::create_dir_all(p.parent().unwrap())?;
+    // Pre-create parent directories sequentially so the parallel write phase is race-free.
+    for (path, _) in &pages {
+        let p = args.output.join(format!("{path}.md"));
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent)?;
         }
-        // Remove the first # in the markdown.
-        let mut value = highlight::highlight(&content)?;
+    }
 
-        let value = value.split_off(value.find('\n').unwrap());
-        eprintln!("docs/{path}.md");
-        std::fs::write(format!("../../docs/{path}.md"), value).unwrap()
+    // Highlight + write each page on the blocking thread pool. `highlight` is pure
+    // CPU work (markdown parse + syntect tokenization + regex passes) and dominates
+    // total runtime for large doc trees.
+    let mut set = tokio::task::JoinSet::new();
+    for (path, content) in pages {
+        let output = args.output.clone();
+        set.spawn_blocking(move || -> Result<()> {
+            let p = output.join(format!("{path}.md"));
+            let value = highlight::highlight(&content)?;
+            eprintln!("{}", p.display());
+            fs::write(p, value)?;
+            Ok(())
+        });
+    }
+    while let Some(res) = set.join_next().await {
+        res.map_err(|e| anyhow::anyhow!("join error: {e}"))??;
     }
     Ok(())
 }
