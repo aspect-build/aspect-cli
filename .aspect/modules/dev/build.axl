@@ -9,7 +9,7 @@ def _build_impl(ctx: TaskContext) -> int:
         build_events = True,
         flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))],
         inherit_stderr = False,
-        *ctx.args.target_pattern
+        *ctx.args.targets
     )
     return tui(ctx, build)
 
@@ -17,6 +17,6 @@ build = task(
     implementation = _build_impl,
     group = ["dev"],
     args = {
-        "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
+        "targets": args.positional(minimum = 1, maximum = 512, default = ["..."]),
     }
 )
