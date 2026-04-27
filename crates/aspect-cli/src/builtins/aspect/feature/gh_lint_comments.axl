@@ -252,6 +252,14 @@ def _github_lint_impl(ctx: FeatureContext):
             }
         else:
             gh_inactive_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
+            # We are demonstrably in a GitHub Actions PR context (env_vars
+            # validated) but auth failed — surface that to the build log so the
+            # user knows why no comments are appearing. Other inactive paths
+            # ("missing env var(s)", "not a PR merge ref") stay silent because
+            # they mean the feature doesn't apply, not that it failed.
+            print("GitHub lint comments: authentication failed for %s/%s — %s" % (
+                env_vars["owner"], env_vars["repo"], auth_reason.get("reason", "unknown"),
+            ))
 
     if not gh and not debug:
         return
