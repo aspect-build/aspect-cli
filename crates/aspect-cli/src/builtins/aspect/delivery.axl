@@ -73,6 +73,9 @@ Failure modes
   --mode=selective --track-state=false            hard fail() at startup
   --track-state=true and the state backend
     endpoint env var is not set                   hard fail() at startup
+  --commit-sha unset and no CI env var
+    exposes one (GITHUB_SHA, BUILDKITE_COMMIT,
+    CIRCLE_SHA1, CI_COMMIT_SHA)                   hard fail() at startup
   No --remote_cache configured (most modes)       graceful return 1 with error
   No --remote_cache configured for the
     --mode=always --dry-run --track-state=false   prints NOTE; continues
@@ -117,6 +120,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait")
+load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha")
 load("@aspect//lib/runnable.axl", "runnable")
 load("@std//time.axl", "time")
 
@@ -337,10 +341,14 @@ def _delivery_impl(ctx):
     if not endpoint and track_state:
         fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)")
 
-    # Delivery context
+    # Delivery context. --commit-sha and --build-url are auto-detected from
+    # common CI env vars (GITHUB_*, BUILDKITE_*, CIRCLE_*, CI_* for GitLab)
+    # when the user doesn't pass them explicitly.
     ci_host = ctx.args.ci_host
-    build_url = ctx.args.build_url
-    commit_sha = ctx.args.commit_sha
+    commit_sha = ctx.args.commit_sha or detect_commit_sha(ctx.std)
+    if not commit_sha:
+        fail("Could not determine commit SHA. Pass --commit-sha=<sha>, or run on a CI host that exposes GITHUB_SHA, BUILDKITE_COMMIT, CIRCLE_SHA1, or CI_COMMIT_SHA.")
+    build_url = ctx.args.build_url or detect_build_url(ctx) or "-"
 
     # Change-detection prefix: always anchored to --task-key, optionally extended by --salt
     if ctx.args.salt:
@@ -670,12 +678,12 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             description = "CI host identifier (e.g. bk, gh, circle).",
         ),
         "commit_sha": args.string(
-            required = True,
-            description = "Git commit SHA being delivered. Used as the change-detection key.",
+            default = "",
+            description = "Git commit SHA being delivered. Used as the change-detection key. Auto-detected from CI env vars (GITHUB_SHA / BUILDKITE_COMMIT / CIRCLE_SHA1 / CI_COMMIT_SHA, with PR-head resolution for GitHub Actions pull_request events) when unset or empty; pass a non-empty value to override.",
         ),
         "build_url": args.string(
-            default = "-",
-            description = "URL of the CI build that produced the artifacts.",
+            default = "",
+            description = "URL of the CI build that produced the artifacts. Auto-detected from CI env vars when unset or empty; pass a non-empty value to override.",
         ),
         "query": args.string(
             default = "",
