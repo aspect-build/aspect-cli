@@ -21,7 +21,7 @@ test = task(
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
-        "target_pattern": args.positional(minimum = 1, maximum = 512, default = ["..."]),
+        "targets": args.positional(minimum = 1, maximum = 512, default = ["..."]),
         "bazel_flag": args.string_list(),
         "bazel_startup_flag": args.string_list(),
         "bes_backend": args.string_list(),

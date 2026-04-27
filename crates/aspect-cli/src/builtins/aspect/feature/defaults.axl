@@ -24,7 +24,7 @@ def _default_bazel_behavior(ctx: FeatureContext):
     if environment:
         def _buildkite_bazel_section(ctx):
             if environment.ci.host == "buildkite":
-                targets = getattr(ctx.args, "target_pattern", None) or getattr(ctx.args, "targets", [])
+                targets = getattr(ctx.args, "targets", [])
                 print("--- :bazel: Running bazel %s %s" % (ctx.task.name, " ".join(targets)))
 
         bazel_trait.build_start.append(_buildkite_bazel_section)

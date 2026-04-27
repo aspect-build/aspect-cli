@@ -36,7 +36,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
     """Shared impl for build/test tasks.
 
     Args:
-        ctx:     TaskContext with the standard build/test args (target_pattern,
+        ctx:     TaskContext with the standard build/test args (targets,
                  bazel_flag, bazel_startup_flag, bes_backend, bes_header,
                  cancel, output_base). Task-specific args (e.g. build's
                  remote_executor) are not touched here — tasks can still read
@@ -92,7 +92,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
         build_events = True if need_bes else False
 
     for handler in lifecycle.task_started:
-        handler(ctx, " ".join(ctx.args.target_pattern))
+        handler(ctx, " ".join(ctx.args.targets))
 
     for handler in bazel_trait.build_start:
         handler(ctx)
@@ -120,14 +120,14 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
-                *ctx.args.target_pattern,
+                *ctx.args.targets,
             )
         else:
             invocation = ctx.bazel.build(
                 build_events = build_events,
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
-                *ctx.args.target_pattern,
+                *ctx.args.targets,
             )
 
         if need_bes:
