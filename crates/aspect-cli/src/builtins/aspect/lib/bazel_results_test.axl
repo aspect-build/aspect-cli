@@ -293,6 +293,36 @@ def _make_results_failing_live():
     return r
 
 
+def _make_results_fully_cached():
+    """Incremental rebuild where build_metrics reports targets_configured = 0.
+
+    Reproduces a real-world scenario seen in the field:
+    https://github.com/aspect-build/aspect-cli/pull/1021/checks?check_run_id=73244967419
+
+    Bazel reports `targets_configured = 0` in build_metrics when no targets
+    needed re-analysis (everything resolved from skyframe / fully cached),
+    but it still emits per-target `target_configured` BES events for every
+    target in the request scope. The renderer must fall back to our own
+    `targets_configured_counted` tally so the "Build graph" row shows the
+    real target count instead of "0 configured".
+    """
+    r = init_results()
+    r["invocation_id"]    = "cache-1234-5678-9abc-def012345678"
+    r["build_tool_version"] = "9.0.1"
+    r["build_command"]    = "build"
+    r["wall_time_ms"]     = 4200
+    r["actions_executed"] = 1
+    r["actions_total"]    = 64604
+    r["targets_total"]    = 146
+    # build_metrics reported 0 targets_configured (incremental rebuild) —
+    # but BES streamed 146 target_configured events.
+    r["targets_configured"]         = 0
+    r["targets_configured_counted"] = 146
+    r["packages_loaded"]   = 0
+    r["metadata"] = {"BRANCH": "main"}
+    return r
+
+
 def _make_results_aborted():
     """Build aborted mid-stream (e.g. Ctrl-C or OOM)."""
     r = init_results()
@@ -469,6 +499,11 @@ def _test_impl(ctx):
         # metadata_keys=["TAG_ENV", "TAG_REGION"] — operator allowlists specific
         # keys; TAG_ENV/TAG_REGION appear, WORKSPACE does not (not in list, not standard).
         ("11. all-passed · GitHub · meta=2",  _make_results_passed(),       "passed",  "//...",   True,  "github",    ["TAG_ENV", "TAG_REGION"]),
+        # Incremental / fully-cached rebuild: build_metrics reports 0 newly
+        # configured targets, but BES still sent 146 target_configured events.
+        # The Build graph row should show "146 configured" via the counted
+        # fallback, not "0 configured".
+        ("12. fully-cached · GitHub",          _make_results_fully_cached(), "passed",  "//...",   True,  "github",    None),
     ]
 
     sep = "=" * 70
