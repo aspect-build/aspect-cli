@@ -222,14 +222,18 @@ def _github_status_checks(ctx: FeatureContext):
         # Authenticate first so we can reuse the Aspect App token to resolve the
         # running job URL. actions.read is only needed for the job deep-link —
         # the API call fails gracefully if the App isn't granted the permission.
+        auth_reason = {}
         token = github.authenticate(
             ctx,
             owner = owner,
             repo = repo,
             roles = ["checks.write", "actions.read"],
+            _reason = auth_reason,
         )
         if not token:
-            print("GitHub status check: authentication failed for %s/%s (no token available)" % (owner, repo))
+            print("GitHub status check: authentication failed for %s/%s — %s" % (
+                owner, repo, auth_reason.get("reason", "unknown"),
+            ))
             return
         _state["_github_token"] = token
 
@@ -330,7 +334,7 @@ def _github_status_checks(ctx: FeatureContext):
 
 GithubStatusChecks = feature(
     implementation = _github_status_checks,
-    enabled = False,
+    enabled = True,
     args = {
         "mode": args.string(
             default = "ci-only",
