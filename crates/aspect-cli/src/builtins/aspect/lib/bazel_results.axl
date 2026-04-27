@@ -3085,6 +3085,13 @@ def _build_invocation_stats(results):
 
     targets_completed    = results.get("targets_total", 0) or 0
     targets_configured   = results.get("targets_configured", 0) or 0
+    # Fall back to our own target_configured BES-event tally when build_metrics
+    # reports zero. Bazel reports `targets_configured = 0` on cached / incremental
+    # builds where no targets needed re-analysis, but it still emits per-target
+    # `target_configured` events for everything in scope — so the counted tally
+    # stays accurate even when the metrics path is empty.
+    if targets_configured == 0:
+        targets_configured = results.get("targets_configured_counted", 0) or 0
     # Bazel's targets_configured includes aspect applications. The separate
     # "_not_including_aspects" variant lets us split "X configured, Y aspects".
     # Only compute the split when both fields are populated — a 0 in the
