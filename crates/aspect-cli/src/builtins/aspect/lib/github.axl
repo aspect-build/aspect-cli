@@ -206,6 +206,44 @@ def detect_commit_sha(std):
     )
 
 
+def detect_build_url(ctx):
+    """Detect the CI build URL from common environment variables.
+
+    Returns the URL of the running CI build (the page a developer would visit
+    to see logs/status), or "" if no recognized CI host is detected.
+
+    On GitHub Actions, transparently upgrades the run URL
+    (`/actions/runs/<run_id>`) to the specific job URL
+    (`/actions/runs/<run_id>/job/<job_id>`) when the Aspect Workflows GitHub
+    App is installed and the active ASPECT_API_TOKEN has the `actions:read`
+    scope. Silently falls back to the run URL on any failure (no app,
+    missing scope, API error).
+    """
+    env = ctx.std.env
+    if env.var("GITHUB_ACTIONS"):
+        server = env.var("GITHUB_SERVER_URL") or "https://github.com"
+        repository = env.var("GITHUB_REPOSITORY") or ""
+        run_id = env.var("GITHUB_RUN_ID") or ""
+        if not (repository and run_id):
+            return ""
+        run_url = server + "/" + repository + "/actions/runs/" + run_id
+        owner, repo = detect_github_repo(ctx.std)
+        if owner and repo:
+            token = _authenticate(ctx, owner = owner, repo = repo, roles = ["actions.read"])
+            if token:
+                job_url = _resolve_current_job_url(ctx, token, owner, repo, run_id)
+                if job_url:
+                    return job_url
+        return run_url
+    if env.var("BUILDKITE"):
+        return env.var("BUILDKITE_BUILD_URL") or ""
+    if env.var("CIRCLECI"):
+        return env.var("CIRCLE_BUILD_URL") or ""
+    if env.var("GITLAB_CI"):
+        return env.var("CI_JOB_URL") or ""
+    return ""
+
+
 def _extract_host(url):
     """Extract host from a git remote URL (SSH or HTTPS)."""
     if not url:

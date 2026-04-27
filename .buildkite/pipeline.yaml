@@ -207,5 +207,5 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect delivery --task-key delivery-bk-debug --build-url $BUILDKITE_BUILD_URL --commit-sha $BUILDKITE_COMMIT //examples/deliverable
-      aspect delivery --task-key delivery-bk --build-url $BUILDKITE_BUILD_URL --commit-sha $BUILDKITE_COMMIT  //examples/deliverable
+      ASPECT_DEBUG=1 aspect delivery --task-key delivery-bk-debug //examples/deliverable
+      aspect delivery --task-key delivery-bk //examples/deliverable
