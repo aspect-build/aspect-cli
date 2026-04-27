@@ -1,14 +1,119 @@
 """
-Delivery task that coordinates artifact delivery.
+`aspect delivery` — deliver Bazel-built artifacts with change detection.
 
-Delivers each target via bazel run with stamping enabled, and signs artifacts
-to prevent re-delivery.
+Replaces the legacy two-task `delivery_manifest` + `delivery` pipeline that
+ran on Redis-backed state. Each invocation goes through up to three Bazel
+build phases plus a dispatch loop:
 
-Uses deliveryd (Unix socket HTTP server) for all delivery state operations.
-Requires a functioning remote cache — output_shas are derived from the
-DeliveryHash aspect's action digest, captured via --remote_grpc_log.
-The DeliveryHash action is marked no-local so its digest is always resolved
-through the remote cache protocol, never executed locally.
+  1. Phase 1 — build the resolved targets with the `hashsum` aspect injected.
+     The aspect produces a `DeliveryHash` action per target, marked `no-local`
+     so the action always resolves through the remote cache.
+  2. Phase 2 — re-run with `--experimental_remote_require_cached` and
+     `--remote_grpc_log`. Bazel emits a gRPC log entry for every action
+     including `DeliveryHash`, and the impl extracts `action_digest.hash` per
+     target. (Phases 1 and 2 share a single function.)
+  3. deliveryd record/query — record (label, digest) pairs and query the
+     per-prefix delivery state.
+  4. Phase 3 — download runfiles for the targets that survived change
+     detection, streaming BES into a run tracker to discover entrypoints.
+  5. Dispatch — `bazel run` each pending target, then `deliveryd_deliver` (or
+     `deliveryd_delete_artifact` on failure).
+
+
+Flags
+-----
+
+Three orthogonal flags shape every invocation:
+
+  --mode={selective,always}    default `selective` — the delivery model
+  --dry-run                       default off — preview, do not run targets
+  --track-state={true,false}      default true — record/query delivery state
+
+`--mode=selective` uses change detection: only runs candidates that haven't
+already been delivered for the `--task-key[:--salt]` prefix. `--mode=always`
+skips change detection and treats every resolved target as a candidate
+(closest analogue to the legacy `only_on_change: false` rule attribute;
+`--force-target` is redundant in this mode).
+
+`--track-state=true` (the default) records the digests and deliveries this
+run produces, and queries the state backend for prior deliveries. Change
+detection is built on this state, so `--mode=selective --track-state=false`
+is rejected at startup with a pointer to `--mode=always`.
+
+Today the state backend is `deliveryd` (a Unix-socket HTTP server that
+Aspect Workflows runners start automatically and expose via
+`ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT`). Other backends may be supported
+in the future.
+
+
+Combination matrix
+------------------
+
+Each cell says whether each pipeline stage runs:
+
+  Combination                                       phase 1/2  phase 3  record  query  run  deliver
+  --mode=selective (default)                            ✓         ✓       ✓      ✓     ✓     ✓
+  --mode=selective --dry-run                            ✓         ✓       ✓      ✓     —     —
+  --mode=selective --track-state=false                  rejected at startup
+  --mode=always                                      ✓         ✓       ✓      —     ✓     ✓
+  --mode=always --dry-run                            ✓         ✓       ✓      —     —     —
+  --mode=always --track-state=false                  —         ✓       —      —     ✓     —
+  --mode=always --dry-run --track-state=false      optional¹   —       —      —     —     —
+
+¹ Best-effort preview — this is the only combination tolerant of a missing
+  remote cache. If a remote cache is configured, action digests are computed
+  and shown in the dry-run output. If not, a `NOTE:` is printed and the
+  preview falls back to listing candidates without digests; everything else
+  still works.
+
+
+Failure modes
+-------------
+
+  --mode=selective --track-state=false            hard fail() at startup
+  --track-state=true and the state backend
+    endpoint env var is not set                   hard fail() at startup
+  No --remote_cache configured (most modes)       graceful return 1 with error
+  No --remote_cache configured for the
+    --mode=always --dry-run --track-state=false   prints NOTE; continues
+    best-effort preview                                without digests
+  Bazel build failure in phase 1, 2, or 3         propagates Bazel exit code
+  --max-parallelization < 1                       graceful return 1
+  Per-target runtime failure (bazel run != 0)     recorded as FAIL; loop
+                                                    continues; on
+                                                    --track-state=true also
+                                                    rolls back the recorded
+                                                    artifact
+  --query resolves to no targets                  prints "No targets to
+                                                    deliver" and returns 0
+
+
+Why selective requires state tracking
+-------------------------------------
+
+Change detection compares each target's action digest against the state
+backend's record of "what's already been delivered for this
+`--task-key[:--salt]` prefix". Without that state, every target looks fresh
+— selective is functionally identical to `always`. Rather than have two
+flag combinations produce the same behavior under different names, the impl
+rejects `--mode=selective --track-state=false` outright. Users who want a
+digest preview outside Aspect Workflows runners can use
+`--mode=always --dry-run --track-state=false`.
+
+
+Why `--mode=always` records by default
+--------------------------------------
+
+When state tracking is enabled, `--mode=always` records the digests and
+deliveries it produces. This ensures a subsequent `--mode=selective` run
+sees those digests in its change-detection check — usually what you want
+from a backfill or cache-invalidation event. Pass `--track-state=false` if
+you specifically want `--mode=always` to skip recording (e.g., local
+development or one-off delivery flows that should not influence future
+selective runs).
+
+
+User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait")
@@ -45,9 +150,14 @@ def _fmt_elapsed(secs):
         return "{}.{}s".format(int(secs), int(secs * 10) % 10)
     return "{}m{}s".format(int(secs) // 60, int(secs) % 60)
 
-def _print_header(is_tty, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets):
+def _print_header(is_tty, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state):
     print(_style("Delivery:", _BOLD, is_tty))
-    print("  {}: {}".format(_style("deliveryd", _BOLD, is_tty), endpoint))
+    mode_str = mode + (" (dry-run)" if dry_run else "")
+    print("  {}: {}".format(_style("Mode", _BOLD, is_tty), mode_str))
+    if track_state:
+        print("  {}: {}".format(_style("State", _BOLD, is_tty), endpoint))
+    else:
+        print("  {}: (untracked — --track-state=false)".format(_style("State", _BOLD, is_tty)))
     print("  {}: {}".format(_style("Host", _BOLD, is_tty), ci_host))
     print("  {}: {}".format(_style("Commit", _BOLD, is_tty), commit_sha))
     print("  {}: {} (set by {})".format(_style("Prefix", _BOLD, is_tty), prefix, prefix_source))
@@ -201,17 +311,38 @@ def _delivery_impl(ctx):
 
     is_tty = ctx.std.io.stdout.is_tty
 
-    # deliveryd socket path (runners start deliveryd automatically and expose the socket via env)
+    # Three orthogonal flags shape this invocation. See the module docstring
+    # at the top of this file for the full reference and combination matrix.
+    mode = ctx.args.mode
+    dry_run = ctx.args.dry_run
+    track_state = ctx.args.track_state
+
+    if mode == "selective" and not track_state:
+        fail("--mode=selective requires --track-state=true. Change detection cannot decide what to deliver without persisted state. Either use --track-state=true (the default), or switch to --mode=always to deliver without change detection (combine with --dry-run for a preview).")
+
+    # Derived: phase 1/2 (action-digest computation) runs whenever digests are
+    # useful — i.e. anywhere they'll be recorded (--track-state=true) or
+    # surfaced in dry-run output. The only case it can be skipped is
+    # --mode=always without state tracking and without dry-run (a pure run,
+    # no preview).
+    phase_1_2_runs = track_state or dry_run
+    # Derived: a "preview-only" run — phase 3 download is unnecessary because
+    # we won't actually `bazel run` and we don't need entrypoint info to build
+    # the result table (every candidate is reported as DRY-RUN).
+    preview_only = dry_run and not track_state
+
+    # deliveryd is the current state backend. Aspect Workflows runners start it
+    # automatically and expose its Unix socket via the env var below.
     endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
-    if not endpoint:
-        fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. deliveryd must be running.")
+    if not endpoint and track_state:
+        fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)")
 
     # Delivery context
     ci_host = ctx.args.ci_host
     build_url = ctx.args.build_url
     commit_sha = ctx.args.commit_sha
 
-    # Deduplication prefix: always anchored to --task-key, optionally extended by --salt
+    # Change-detection prefix: always anchored to --task-key, optionally extended by --salt
     if ctx.args.salt:
         prefix = ctx.task.key + ":" + ctx.args.salt
         prefix_source = "--task-key + --salt"
@@ -267,11 +398,24 @@ def _delivery_impl(ctx):
             remote_cache_uri = f[len("--remote_cache="):]
         elif f.startswith("--remote_executor="):
             remote_cache_uri = f[len("--remote_executor="):]
-    if not remote_cache_uri:
-        print(rc.announce(command = "build", ansi = is_tty))
-        print(_style("ERROR:", _BOLD + _RED, is_tty) +
-              " Delivery requires a remote cache but no --remote_cache or --remote_executor was found.")
-        return 1
+    if not remote_cache_uri and phase_1_2_runs:
+        # Graceful degradation: --mode=always --dry-run --track-state=false
+        # is a "best-effort preview" that's tolerant of missing prerequisites
+        # — skip phase 1/2 (no digests in output) and tell the user how to
+        # enable digest visibility. Other combinations need digests for
+        # correctness (recording, change-detection decisions) and still hard-error.
+        # The rc announce was already printed above; we just emit the
+        # mode-specific NOTE/ERROR here.
+        if mode == "always" and dry_run and not track_state:
+            print(_style("NOTE:", _BOLD + _YELLOW, is_tty) +
+                  " No remote cache configured; the preview will list candidates without action digests." +
+                  " Configure --bazel-flag=--remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
+            phase_1_2_runs = False
+        else:
+            print(_style("ERROR:", _BOLD + _RED, is_tty) +
+                  " Delivery requires a remote cache but no --remote_cache or --remote_executor was found." +
+                  " (Use --mode=always --track-state=false to deliver every target without change detection.)")
+            return 1
 
     query_expr = ctx.args.query
     if query_expr:
@@ -287,42 +431,64 @@ def _delivery_impl(ctx):
         print(_style("No targets to deliver", _BOLD + _YELLOW, is_tty))
         return 0
 
-    _print_header(is_tty, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, flags, targets, forced_targets)
+    _print_header(is_tty, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, flags, targets, forced_targets, mode, dry_run, track_state)
 
     run_tracker = runnable(ctx, targets)
 
     _t_total = time.monotonic()
 
-    # Build all targets and extract output_shas from grpc log
-    _t_build = time.monotonic()
-    output_shas, build_code = _get_output_shas(ctx, bazel_trait, build_events, targets, expanded_flags, remote_cache_uri, is_tty)
-    print("  Build+checksum total: {}.".format(_fmt_elapsed(time.monotonic() - _t_build)))
+    # Phase 1/2: build all targets and extract output_shas from the grpc log.
+    # Skipped only in --mode=always + --track-state=false: digests are neither
+    # recorded nor used for change detection, so there's nothing to compute.
+    if phase_1_2_runs:
+        _t_build = time.monotonic()
+        output_shas, build_code = _get_output_shas(ctx, bazel_trait, build_events, targets, expanded_flags, remote_cache_uri, is_tty)
+        print("  Build+checksum total: {}.".format(_fmt_elapsed(time.monotonic() - _t_build)))
 
-    for handler in bazel_trait.build_end:
-        handler(ctx, build_code)
+        for handler in bazel_trait.build_end:
+            handler(ctx, build_code)
 
-    if build_code != 0:
-        print(_style("Build failed with exit code {}".format(build_code), _BOLD + _RED, is_tty))
-        return build_code
+        if build_code != 0:
+            print(_style("Build failed with exit code {}".format(build_code), _BOLD + _RED, is_tty))
+            return build_code
+    else:
+        output_shas = {}
 
-    # Record each target with deliveryd (only those with a known output_sha)
-    for label in targets:
-        if label in output_shas:
-            deliveryd_record(ctx, endpoint, ci_host, commit_sha, prefix, label, output_shas[label])
+    # Record each target's digest with deliveryd. Skipped when --track-state=false.
+    if track_state:
+        for label in targets:
+            if label in output_shas:
+                deliveryd_record(ctx, endpoint, ci_host, commit_sha, prefix, label, output_shas[label])
 
-    # Query deliveryd for delivery state of all targets
-    delivery_state = deliveryd_query(ctx, endpoint, ci_host, commit_sha, prefix)
+    # Query deliveryd for delivery state. Skipped when --track-state=false (no
+    # endpoint to query) or in --mode=always (every target is a candidate
+    # regardless of state, so we don't need it).
+    if track_state and mode != "always":
+        delivery_state = deliveryd_query(ctx, endpoint, ci_host, commit_sha, prefix)
+    else:
+        delivery_state = {}
 
-    # Phase 3: download + BES for targets that actually need delivery
-    delivery_targets = [
-        label for label in targets
-        if output_shas.get(label) and (
-            label in forced_targets or
-            not (delivery_state.get(label) and delivery_state.get(label).get("delivered"))
-        )
-    ]
+    # Phase 3: download + BES for targets that actually need delivery.
+    # In --mode=always every resolved target is a delivery candidate (no change detection).
+    if mode == "always":
+        delivery_targets = list(targets)
+    else:
+        delivery_targets = [
+            label for label in targets
+            if output_shas.get(label) and (
+                label in forced_targets or
+                not (delivery_state.get(label) and delivery_state.get(label).get("delivered"))
+            )
+        ]
 
-    if delivery_targets:
+    # Phase 3 builds + materializes runfiles for `bazel run`. The remote-cache
+    # flags below are no-ops when no remote cache is configured, so the same
+    # build covers --mode=always with --track-state=false (builds everything from source or
+    # local cache) as well as the modes that still talk to the remote cache
+    # populated by phase 1/2.
+    # Skipped only for the dry-run + --track-state=false preview: targets are
+    # never run, and we don't need entrypoint info for the preview output.
+    if delivery_targets and not preview_only:
         print("  {} {} target(s)...".format(_style("Downloading", _BOLD, is_tty), len(delivery_targets)))
         phase3_flags = list(expanded_flags) + [
             "--experimental_build_event_upload_strategy=local",
@@ -337,6 +503,14 @@ def _delivery_impl(ctx):
         for event in build.build_events():
             run_tracker.event(event)
         status = build.wait()
+        # When phase 1/2 was skipped (--mode=always + --track-state=false), phase 3
+        # is the only Bazel build that ran. Run build_end hooks here with its
+        # status so features like ArtifactUpload can finalize uploads.
+        # Phase-1/2-having-run cases already dispatched build_end above with
+        # their own build_code.
+        if not phase_1_2_runs:
+            for handler in bazel_trait.build_end:
+                handler(ctx, status.code)
         if status.code != 0:
             print(_style("Build failed with exit code {}".format(status.code), _BOLD + _RED, is_tty))
             return status.code
@@ -348,7 +522,6 @@ def _delivery_impl(ctx):
               " --max-parallelization must be >= 1, got {}.".format(max_par))
         return 1
     capture = max_par > 1
-    dry_run = ctx.args.dry_run
 
     # Step 1: collect targets needing delivery; record WARN/SKIP immediately
     results = []
@@ -359,24 +532,34 @@ def _delivery_impl(ctx):
     pending = []  # [(label, entrypoint, is_forced, output_sha)]
 
     for label in targets:
-        is_forced = label in forced_targets
+        # --mode=always behaves as if every target was passed via --force-target.
+        is_forced = label in forced_targets or mode == "always"
         target_state = delivery_state.get(label)
         output_sha = output_shas.get(label)
 
-        if not output_sha:
+        if not output_sha and phase_1_2_runs:
+            # Expected a digest from phase 1/2 but none was recorded — usually
+            # an alias or a target that doesn't go through DeliveryHash.
             pending_count += 1
             results.append((label, "WARN", "warn", "no output_sha (not in grpc log; target may be an alias — use the actual target label)", "-", "-"))
         elif not is_forced and target_state and target_state.get("delivered"):
             skipped_count += 1
             delivered_by = target_state.get("delivered_by") or "-"
             results.append((label, "SKIP", "skip", delivered_by, output_sha, "-"))
+        elif preview_only:
+            # dry-run + --track-state=false: phase 3 was skipped, so run_tracker
+            # has no entrypoints. dry_run is True so the bazel run path below
+            # is never reached; entrypoint=None is safe.
+            pending.append((label, None, is_forced, output_sha or "-"))
         else:
+            # Phase 3 ran (any mode/flag combination except the dry-run +
+            # --track-state=false preview) — run_tracker has entrypoints.
             entrypoint = run_tracker.determine_entrypoint(label)
             if not entrypoint:
                 pending_count += 1
-                results.append((label, "WARN", "warn", "no entrypoint (not in BES)", output_sha, "-"))
+                results.append((label, "WARN", "warn", "no entrypoint (not in BES)", output_sha or "-", "-"))
             else:
-                pending.append((label, entrypoint, is_forced, output_sha))
+                pending.append((label, entrypoint, is_forced, output_sha or "-"))
 
         delivery_trait.deliver_target(label, is_forced)
 
@@ -408,11 +591,13 @@ def _delivery_impl(ctx):
 
             duration = _fmt_elapsed(time.monotonic() - t_start)
             if exit_code == 0:
-                deliveryd_deliver(ctx, endpoint, ci_host, output_sha, prefix, build_url)
+                if track_state:
+                    deliveryd_deliver(ctx, endpoint, ci_host, output_sha, prefix, build_url)
                 success_count += 1
                 results.append((label, "OK" + forced_marker, "ok", build_url, output_sha, duration))
             else:
-                deliveryd_delete_artifact(ctx, endpoint, ci_host, output_sha, prefix)
+                if track_state:
+                    deliveryd_delete_artifact(ctx, endpoint, ci_host, output_sha, prefix)
                 failed_count += 1
                 results.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
 
@@ -473,8 +658,8 @@ def _delivery_impl(ctx):
 
 delivery = task(
     name = "delivery",
-    summary = "Build and deliver binary targets. Targets are built with stamping, deduplicated by action digest, and delivered exactly once per commit unless forced.",
-    description = """Build and deliver binary targets. Targets are built with stamping, deduplicated by action digest, and delivered exactly once per commit unless forced.
+    summary = "Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.",
+    description = """Build and deliver binary targets. Targets are built with stamping and delivered exactly once per commit unless forced; change detection skips targets whose outputs haven't changed since the last delivery.
 
 Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support for generic CI runners is planned. Contact Aspect support <support@aspect.build> for more info.""",
     implementation = _delivery_impl,
@@ -486,7 +671,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         ),
         "commit_sha": args.string(
             required = True,
-            description = "Git commit SHA being delivered. Used as the deduplication key.",
+            description = "Git commit SHA being delivered. Used as the change-detection key.",
         ),
         "build_url": args.string(
             default = "-",
@@ -494,7 +679,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         ),
         "query": args.string(
             default = "",
-            description = "Bazel query expression to select candidate delivery targets (takes precedence over positional targets). Candidates are only delivered when their action digest + deduplication prefix (--task-key[:--salt]) has not been seen before — this does not force re-delivery.",
+            description = "Bazel query expression to select candidate delivery targets (takes precedence over positional targets). Candidates are only delivered when change detection finds them new for the --task-key[:--salt] prefix — this does not force re-delivery.",
         ),
         "limit": args.int(
             default = 0,
@@ -510,15 +695,24 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         ),
         "salt": args.string(
             default = "",
-            description = "Additional string appended to --task-key to form the deduplication prefix (task-key:salt). Useful for scoping delivery to a specific environment or pipeline variant without changing --task-key.",
+            description = "Additional string appended to --task-key to scope change detection (task-key:salt). Useful for scoping delivery to a specific environment or pipeline variant without changing --task-key.",
         ),
         "force_target": args.string_list(
             default = [],
             description = "Re-deliver these targets even if they have already been delivered for this commit. Use as a break-glass override when a previous delivery needs to be repeated.",
         ),
+        "mode": args.string(
+            default = "selective",
+            values = ["selective", "always"],
+            description = "Delivery model. 'selective' (default): only run candidates that haven't already been delivered for this --task-key[:--salt] prefix (uses change detection). 'always': skip change detection entirely and run every resolved target — closest analogue to legacy always-deliver behavior. Combine with --dry-run for a preview and/or --track-state=false for environments without a state backend.",
+        ),
         "dry_run": args.boolean(
             default = False,
-            description = "Resolve delivery state and show which targets would be delivered, without executing them.",
+            description = "Resolve delivery state and print what would be delivered without running any targets. Combines with both modes: --mode=selective --dry-run previews change-detection results; --mode=always --dry-run lists every resolved target as a delivery candidate.",
+        ),
+        "track_state": args.boolean(
+            default = True,
+            description = "Whether to track delivery state across runs (record what's been delivered, query before re-delivering). Default true. Set to false (--track-state=false) for environments where the state backend isn't available, like local development or non-Aspect-Workflows CI. Change detection cannot decide what to deliver without state, so --mode=selective --track-state=false is rejected; use --mode=always (optionally with --dry-run for a preview) when running without state tracking.",
         ),
         "max_parallelization": args.int(
             default = 1,
