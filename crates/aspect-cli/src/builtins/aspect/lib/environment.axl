@@ -106,7 +106,7 @@ def _read_ci(std) -> CI:
     ci_supports_curses = std.io.stdout.is_tty
     if std.env.var("BUILDKITE_REPO"):
         ci_host = "buildkite"
-        ci_scm_repo_name = _parse_git_url_name(std.env.var("BUILDKITE_REPO"))
+        ci_scm_repo_name = parse_git_url_name(std.env.var("BUILDKITE_REPO"))
         ci_supports_curses = True
     elif std.env.var("GITHUB_REPOSITORY"):
         ci_host = "github"
@@ -211,16 +211,19 @@ def is_warming_complete(std) -> bool:
     return bool(path) and std.fs.exists(path)
 
 
-def _parse_git_url_name(url: str) -> str:
+def parse_git_url_name(url: str) -> str:
+    """Extract the repo name from a git URL. Returns "" on empty input
+    so the return type stays str (the only caller already guards against
+    an empty url, but the function is now safe to call defensively)."""
     if not url:
-        return None
+        return ""
     name = url.rstrip("/")
     if name.endswith(".git"):
         name = name[:-4]
     return name.split("/")[-1].split(":")[-1]
 
 
-def _sanitize_filename(name: str) -> str:
+def sanitize_filename(name: str) -> str:
     if not name:
         return ""
     result = ""
@@ -244,7 +247,7 @@ def get_bazelrc_flags(environment: Environment, root_dir: str) -> (list, list):
         (startup_flags, build_flags): two lists of flag strings
     """
     repo_name = environment.ci.scm_repo_name
-    subdir = _sanitize_filename(root_dir.rstrip("/").split("/")[-1]) if root_dir else "__main__"
+    subdir = sanitize_filename(root_dir.rstrip("/").split("/")[-1]) if root_dir else "__main__"
 
     build_flags = []
 
@@ -280,7 +283,7 @@ def get_bazelrc_flags(environment: Environment, root_dir: str) -> (list, list):
     bazel_root = environment.runner.bazel_root_dir
     output_root = environment.runner.output_root_dir
     if repo_name:
-        sanitized = _sanitize_filename(repo_name)
+        sanitized = sanitize_filename(repo_name)
         startup_flags.append("--output_user_root=" + bazel_root + "/" + sanitized + "/" + subdir)
         startup_flags.append("--output_base=" + output_root + "/" + sanitized + "/" + subdir)
     else:

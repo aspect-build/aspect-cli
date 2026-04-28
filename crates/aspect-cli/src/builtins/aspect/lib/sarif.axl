@@ -102,11 +102,15 @@ def sarif_result_to_comment(result, tool_name):
         comment["start_line"] = start_line
         comment["start_side"] = "RIGHT"
 
-    # Extract inline fix hints from relatedLocations
+    # Extract inline fix hints from relatedLocations. The expected message
+    # format is exactly `try` (replace with empty) or `try "<replacement>"`
+    # (replace with the quoted text). A startswith("try") check would also
+    # match real words like "trying ..." so require the literal `try` token
+    # followed by either end-of-string or a space.
     fixes = []
     for loc in result.get("relatedLocations", []):
         msg = loc.get("message", {}).get("text", "")
-        if not msg.startswith("try"):
+        if msg != "try" and not msg.startswith("try "):
             continue
         loc_region = loc.get("physicalLocation", {}).get("region", {})
         byte_offset = loc_region.get("byteOffset")

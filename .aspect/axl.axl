@@ -3,8 +3,23 @@ Exercise axl
 """
 load("@demo//answer.axl", "ANSWER")
 load("./lambda.axl", "lambda_with_global_bind")
-load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title")
+load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title", "compute_repro")
+load("@aspect//delivery.axl", delivery_fmt_elapsed = "fmt_elapsed")
 load("@aspect//lib/path_glob.axl", "match_path", "match_any")
+load("@aspect//lib/github.axl", "github", "detect_commit_sha", "detect_build_url")
+load("@aspect//lib/environment.axl", "color_enabled", "parse_git_url_name", "sanitize_filename")
+load("@aspect//lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments", "get_sarif_summary", "parse_sarif")
+load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset")
+load("@aspect//lib/runnable.axl", "canonical_label", "runnable")
+load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
+load("@aspect//lib/artifacts.axl", "detect_ci", "artifact_name")
+load("@aspect//lib/build_metadata.axl",
+    "detect_vcs_from_host",
+    "parse_git_remote_url",
+    "version_tuple",
+    "version_gte",
+    "task_display_name",
+)
 
 def test_case(tc, cond, msg) -> int:
     if not cond:
@@ -1238,6 +1253,10 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     return tc
 
 
+# =============================================================================
+# lib/path_glob.axl
+# =============================================================================
+
 def test_path_glob(tc: int) -> int:
     """Coverage for lib/path_glob.axl (match_path / match_any)."""
     cases = [
@@ -1306,6 +1325,1059 @@ def test_path_glob(tc: int) -> int:
     return tc
 
 
+# =============================================================================
+# lib/github.axl
+# =============================================================================
+
+# Helper — clear out any host-specific env vars that detect_github_pr looks
+# at, so each scenario starts from a clean slate. Tests assume the real
+# environment doesn't have these set; safe in `aspect tests axl` since the
+# task runs in a sandboxed env.
+_GH_PR_ENVS = [
+    "ASPECT_GITHUB_PR_NUMBER",
+    "GITHUB_ACTIONS",
+    "GITHUB_REF",
+    "GITHUB_REPOSITORY",
+    "GITHUB_SHA",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_EVENT_PATH",
+    "GITHUB_SERVER_URL",
+    "GITHUB_RUN_ID",
+    "BUILDKITE",
+    "BUILDKITE_PULL_REQUEST",
+    "BUILDKITE_COMMIT",
+    "BUILDKITE_REPO",
+    "BUILDKITE_BUILD_URL",
+    "CIRCLECI",
+    "CIRCLE_PULL_REQUEST",
+    "CIRCLE_SHA1",
+    "CIRCLE_PROJECT_REPONAME",
+    "CIRCLE_BUILD_URL",
+    "GITLAB_CI",
+    "CI_COMMIT_SHA",
+    "CI_PROJECT_NAME",
+    "CI_JOB_URL",
+    "ASPECT_VCS_URL",
+]
+
+
+def _clear_pr_env(env):
+    for k in _GH_PR_ENVS:
+        env.remove_var(k)
+
+
+def test_github_lib(ctx: TaskContext, tc: int) -> int:
+    """Coverage for lib/github.axl helpers — env-var-driven detection,
+    URL parsing, patch parsing, diff parsing."""
+    env = ctx.std.env
+    _clear_pr_env(env)
+
+    # ----- detect_github_pr -----
+
+    # No env vars at all → no PR detected.
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr == None, "detect_pr: no env → None")
+    tc = test_case(tc, "no GitHub PR context" in reason, "detect_pr: no env → reason mentions no PR context")
+
+    # GitHub Actions PR merge ref.
+    env.set_var("GITHUB_ACTIONS", "true")
+    env.set_var("GITHUB_REF", "refs/pull/42/merge")
+    env.set_var("GITHUB_REPOSITORY", "acme/widgets")
+    env.set_var("GITHUB_SHA", "abc123")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr != None, "detect_pr: GHA PR ref → detected")
+    tc = test_case(tc, pr["owner"] == "acme", "detect_pr: GHA owner = acme")
+    tc = test_case(tc, pr["repo"] == "widgets", "detect_pr: GHA repo = widgets")
+    tc = test_case(tc, pr["pr_number"] == 42, "detect_pr: GHA pr_number = 42")
+    tc = test_case(tc, pr["sha"] == "abc123", "detect_pr: GHA sha = abc123")
+
+    # GitHub Actions branch push (not a PR ref).
+    _clear_pr_env(env)
+    env.set_var("GITHUB_ACTIONS", "true")
+    env.set_var("GITHUB_REF", "refs/heads/main")
+    env.set_var("GITHUB_REPOSITORY", "acme/widgets")
+    env.set_var("GITHUB_SHA", "abc123")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr == None, "detect_pr: GHA non-PR ref → None")
+    tc = test_case(tc, "not a PR merge ref" in reason, "detect_pr: GHA non-PR reason mentions PR merge ref")
+
+    # Buildkite PR.
+    _clear_pr_env(env)
+    env.set_var("BUILDKITE", "true")
+    env.set_var("BUILDKITE_PULL_REQUEST", "99")
+    env.set_var("BUILDKITE_COMMIT", "deadbeef")
+    env.set_var("ASPECT_VCS_URL", "https://github.com/acme/widgets")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr != None, "detect_pr: Buildkite PR → detected")
+    tc = test_case(tc, pr["owner"] == "acme" and pr["repo"] == "widgets", "detect_pr: Buildkite owner/repo from ASPECT_VCS_URL")
+    tc = test_case(tc, pr["pr_number"] == 99, "detect_pr: Buildkite pr_number = 99")
+    tc = test_case(tc, pr["sha"] == "deadbeef", "detect_pr: Buildkite sha")
+
+    # Buildkite non-PR build (BUILDKITE_PULL_REQUEST=false).
+    env.set_var("BUILDKITE_PULL_REQUEST", "false")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr == None, "detect_pr: Buildkite false → None")
+    tc = test_case(tc, "false" in reason, "detect_pr: Buildkite false reason mentions \"false\"")
+
+    # Buildkite non-numeric PR.
+    env.set_var("BUILDKITE_PULL_REQUEST", "not-a-number")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr == None, "detect_pr: Buildkite non-numeric → None")
+
+    # CircleCI PR with GitHub URL.
+    _clear_pr_env(env)
+    env.set_var("CIRCLECI", "true")
+    env.set_var("CIRCLE_PULL_REQUEST", "https://github.com/acme/widgets/pull/77")
+    env.set_var("CIRCLE_SHA1", "cafebabe")
+    env.set_var("ASPECT_VCS_URL", "https://github.com/acme/widgets")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr != None, "detect_pr: CircleCI PR URL → detected")
+    tc = test_case(tc, pr["pr_number"] == 77, "detect_pr: CircleCI pr_number = 77")
+    tc = test_case(tc, pr["sha"] == "cafebabe", "detect_pr: CircleCI sha = cafebabe")
+
+    # CircleCI URL with trailing slash.
+    env.set_var("CIRCLE_PULL_REQUEST", "https://github.com/acme/widgets/pull/77/")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr != None and pr["pr_number"] == 77, "detect_pr: CircleCI URL trailing slash")
+
+    # CircleCI URL with query string.
+    env.set_var("CIRCLE_PULL_REQUEST", "https://github.com/acme/widgets/pull/77?utm=ci")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr != None and pr["pr_number"] == 77, "detect_pr: CircleCI URL with query string")
+
+    # CircleCI non-GitHub URL (Bitbucket).
+    env.set_var("CIRCLE_PULL_REQUEST", "https://bitbucket.org/acme/widgets/pull-requests/77")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr == None, "detect_pr: CircleCI Bitbucket URL → None (no /pull/ segment)")
+
+    # Explicit override via ASPECT_GITHUB_PR_NUMBER.
+    _clear_pr_env(env)
+    env.set_var("ASPECT_GITHUB_PR_NUMBER", "123")
+    env.set_var("ASPECT_VCS_URL", "https://github.com/acme/widgets")
+    env.set_var("GITHUB_SHA", "feedface")  # detect_commit_sha picks this up
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr != None and pr["pr_number"] == 123, "detect_pr: explicit override")
+    tc = test_case(tc, pr["owner"] == "acme" and pr["repo"] == "widgets", "detect_pr: override + ASPECT_VCS_URL")
+
+    # ASPECT_GITHUB_PR_NUMBER non-numeric.
+    env.set_var("ASPECT_GITHUB_PR_NUMBER", "fortytwo")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr == None, "detect_pr: override non-numeric → None")
+    tc = test_case(tc, "must be numeric" in reason, "detect_pr: override non-numeric reason")
+
+    # ASPECT_GITHUB_PR_NUMBER overrides GHA — even when GITHUB_REF is set,
+    # the explicit override wins.
+    _clear_pr_env(env)
+    env.set_var("ASPECT_GITHUB_PR_NUMBER", "999")
+    env.set_var("GITHUB_ACTIONS", "true")
+    env.set_var("GITHUB_REF", "refs/pull/42/merge")
+    env.set_var("GITHUB_REPOSITORY", "acme/widgets")
+    env.set_var("GITHUB_SHA", "abc123")
+    pr, reason = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr != None and pr["pr_number"] == 999, "detect_pr: explicit override beats GHA")
+
+    # ----- detect_commit_sha -----
+
+    _clear_pr_env(env)
+    tc = test_case(tc, detect_commit_sha(ctx.std) == "", "detect_commit_sha: no env → empty")
+
+    env.set_var("GITHUB_SHA", "gh-sha")
+    tc = test_case(tc, detect_commit_sha(ctx.std) == "gh-sha", "detect_commit_sha: GITHUB_SHA")
+
+    _clear_pr_env(env)
+    env.set_var("BUILDKITE_COMMIT", "bk-sha")
+    tc = test_case(tc, detect_commit_sha(ctx.std) == "bk-sha", "detect_commit_sha: BUILDKITE_COMMIT")
+
+    _clear_pr_env(env)
+    env.set_var("CIRCLE_SHA1", "cci-sha")
+    tc = test_case(tc, detect_commit_sha(ctx.std) == "cci-sha", "detect_commit_sha: CIRCLE_SHA1")
+
+    _clear_pr_env(env)
+    env.set_var("CI_COMMIT_SHA", "gl-sha")
+    tc = test_case(tc, detect_commit_sha(ctx.std) == "gl-sha", "detect_commit_sha: CI_COMMIT_SHA")
+
+    # GITHUB_SHA wins over others when GITHUB_ACTIONS is set.
+    _clear_pr_env(env)
+    env.set_var("GITHUB_SHA", "gh-sha")
+    env.set_var("BUILDKITE_COMMIT", "bk-sha")
+    tc = test_case(tc, detect_commit_sha(ctx.std) == "gh-sha", "detect_commit_sha: GITHUB_SHA precedence")
+
+    # ----- extract_owner_repo (URL parsing) -----
+
+    cases = [
+        ("https://github.com/acme/widgets",            ("acme", "widgets"),  "https url"),
+        ("https://github.com/acme/widgets.git",        ("acme", "widgets"),  ".git suffix stripped"),
+        ("git@github.com:acme/widgets.git",            ("acme", "widgets"),  "ssh url"),
+        ("git@github.com:acme/widgets",                ("acme", "widgets"),  "ssh url no .git"),
+        ("https://github.mycorp.com/acme/widgets",     ("acme", "widgets"),  "GitHub Enterprise"),
+        ("https://user:pass@github.com/acme/widgets",  ("acme", "widgets"),  "userinfo stripped"),
+        ("https://gitlab.com/acme/widgets",            ("", ""),             "non-github → empty"),
+        ("https://bitbucket.org/acme/widgets",         ("", ""),             "bitbucket → empty"),
+        ("",                                            ("", ""),            "empty url"),
+        ("not-a-url",                                   ("", ""),            "garbage url"),
+        ("https://github.com/onlyowner",                ("", ""),            "missing repo segment"),
+    ]
+    for (url, expected, desc) in cases:
+        got = github.extract_owner_repo(url)
+        tc = test_case(tc, got == expected, "extract_owner_repo: %s → %s" % (desc, str(expected)))
+
+    # ----- extract_host -----
+
+    cases = [
+        ("https://github.com/foo/bar",        "github.com",        "https"),
+        ("git@github.com:foo/bar.git",        "github.com",        "ssh"),
+        ("https://user:pass@gh.example.com/foo/bar", "gh.example.com", "userinfo stripped"),
+        ("",                                  "",                  "empty"),
+        ("not-a-url",                         "",                  "no scheme"),
+    ]
+    for (url, expected, desc) in cases:
+        tc = test_case(tc, github.extract_host(url) == expected, "extract_host: %s → %r" % (desc, expected))
+
+    # ----- is_public_github_url -----
+
+    tc = test_case(tc, github.is_public_github_url("https://github.com/foo/bar"),       "is_public_github_url: github.com → True")
+    tc = test_case(tc, github.is_public_github_url("git@github.com:foo/bar"),           "is_public_github_url: ssh github.com → True")
+    tc = test_case(tc, not github.is_public_github_url("https://github.mycorp.com/foo"), "is_public_github_url: GHE → False")
+    tc = test_case(tc, not github.is_public_github_url("https://gitlab.com/foo"),       "is_public_github_url: gitlab → False")
+    # Empty URL is intentionally True (defers to other fallback paths) — see docstring.
+    tc = test_case(tc, github.is_public_github_url(""),                                  "is_public_github_url: empty → True (deferral)")
+
+    # ----- parse_pr_patch (GitHub PR Files API patch format) -----
+    # Returns 0-based added-line indices.
+
+    # Single hunk, --unified=0 style (no context), 2 added lines at 1-based 5,6.
+    patch1 = "@@ -4,0 +5,2 @@\n+new line A\n+new line B"
+    tc = test_case(tc, github.parse_pr_patch(patch1) == [4, 5], "parse_pr_patch: 2-line addition at line 5 → [4, 5]")
+
+    # No additions, only deletions and context — empty result.
+    patch2 = "@@ -1,3 +1,1 @@\n keep\n-removed\n-also removed"
+    tc = test_case(tc, github.parse_pr_patch(patch2) == [], "parse_pr_patch: only deletions → []")
+
+    # Multi-hunk patch.
+    patch3 = "@@ -1,0 +1,1 @@\n+line1\n@@ -10,0 +10,1 @@\n+line10"
+    tc = test_case(tc, github.parse_pr_patch(patch3) == [0, 9], "parse_pr_patch: multi-hunk")
+
+    # Empty patch.
+    tc = test_case(tc, github.parse_pr_patch("") == [], "parse_pr_patch: empty → []")
+
+    # Single-line +N (no count) form.
+    patch4 = "@@ -1 +1 @@\n+only line"
+    tc = test_case(tc, github.parse_pr_patch(patch4) == [0], "parse_pr_patch: +N (no count) → [0]")
+
+    # With context lines (default unified diff): context advances current_line.
+    # @@ -4,1 +5,3 @@: hunk has 1 context line and 2 added lines.
+    patch5 = "@@ -4,1 +5,3 @@\n existing\n+new A\n+new B"
+    # After header current_line=5. " existing" → +1 → 6. "+new A" → append 5; cur=7. "+new B" → append 6; cur=8.
+    tc = test_case(tc, github.parse_pr_patch(patch5) == [5, 6], "parse_pr_patch: context lines advance current_line")
+
+    # "\ No newline at end of file" metadata marker — diff-internal, not real content.
+    # Should NOT count toward current_line. Fixed in this commit.
+    patch6 = "@@ -1,1 +1,2 @@\n existing\n+added\n\\ No newline at end of file"
+    # current_line=1. " existing" → +1 → 2. "+added" → append 1; cur=3.
+    # "\ No newline ..." → backslash branch, no advance.
+    tc = test_case(tc, github.parse_pr_patch(patch6) == [1], "parse_pr_patch: no-newline marker doesn't advance current_line")
+
+    # Marker between context line and another addition — confirms no off-by-one.
+    patch7 = "@@ -1,1 +1,3 @@\n existing\n\\ No newline at end of file\n+a\n+b"
+    # current_line=1. " existing" → +1 → 2. "\ No..." → no advance.
+    # "+a" → append 1; cur=3. "+b" → append 2; cur=4.
+    tc = test_case(tc, github.parse_pr_patch(patch7) == [1, 2], "parse_pr_patch: marker before additions doesn't shift them")
+
+    # ----- parse_local_diff (git diff --unified=0 format) -----
+
+    # New file with one added line.
+    diff1 = "diff --git a/foo.txt b/foo.txt\nnew file mode 100644\n--- /dev/null\n+++ b/foo.txt\n@@ -0,0 +1,1 @@\n+hello"
+    files1 = github.parse_local_diff(diff1)
+    tc = test_case(tc, len(files1) == 1, "parse_local_diff: new file → 1 entry")
+    tc = test_case(tc, files1[0]["file"] == "foo.txt", "parse_local_diff: filename")
+    tc = test_case(tc, files1[0]["lines"] == [0], "parse_local_diff: 0-based line index")
+
+    # Modified file with 2 added lines starting at 5.
+    diff2 = "diff --git a/bar.go b/bar.go\n--- a/bar.go\n+++ b/bar.go\n@@ -4,0 +5,2 @@\n+line5\n+line6"
+    files2 = github.parse_local_diff(diff2)
+    tc = test_case(tc, len(files2) == 1 and files2[0]["file"] == "bar.go", "parse_local_diff: modified file")
+    tc = test_case(tc, files2[0]["lines"] == [4, 5], "parse_local_diff: lines 5,6 → 0-based [4,5]")
+
+    # Deleted file → entry should NOT appear.
+    diff3 = "diff --git a/baz.txt b/baz.txt\ndeleted file mode 100644\n--- a/baz.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-gone"
+    files3 = github.parse_local_diff(diff3)
+    tc = test_case(tc, len(files3) == 0, "parse_local_diff: deleted file dropped")
+
+    # Multiple files in one diff.
+    diff4 = "--- a/one.txt\n+++ b/one.txt\n@@ -0,0 +1,1 @@\n+a\n--- a/two.txt\n+++ b/two.txt\n@@ -0,0 +1,2 @@\n+b\n+c"
+    files4 = github.parse_local_diff(diff4)
+    tc = test_case(tc, len(files4) == 2, "parse_local_diff: 2 files")
+    tc = test_case(tc, files4[0]["file"] == "one.txt" and files4[1]["file"] == "two.txt", "parse_local_diff: file names")
+    tc = test_case(tc, files4[0]["lines"] == [0] and files4[1]["lines"] == [0, 1], "parse_local_diff: per-file lines")
+
+    # Empty diff (no changes).
+    tc = test_case(tc, github.parse_local_diff("") == [], "parse_local_diff: empty → []")
+
+    # Renamed file with no content changes — still appears via +++ b/<new>
+    # but with no @@ hunks. Lines list is empty. (Prior to the rename detection
+    # in github.detect_changed_files, format/lint would treat an empty-lines
+    # entry as a file in the changed set with no specific changed lines.)
+    diff_rename = "diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt"
+    files_rename = github.parse_local_diff(diff_rename)
+    tc = test_case(tc, files_rename == [], "parse_local_diff: pure rename (no content delta, no +++ b/) → []")
+
+    # Mode-only change: no content delta, parses to no entries (no `+++ b/`).
+    diff_mode = "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755"
+    tc = test_case(tc, github.parse_local_diff(diff_mode) == [], "parse_local_diff: mode-only change → []")
+
+    # Rename WITH content changes — has +++ b/<new> and @@ hunks.
+    diff_rename_mod = """diff --git a/old.txt b/new.txt
+similarity index 80%
+rename from old.txt
+rename to new.txt
+--- a/old.txt
++++ b/new.txt
+@@ -0,0 +5,1 @@
++added"""
+    files_rm = github.parse_local_diff(diff_rename_mod)
+    tc = test_case(tc, len(files_rm) == 1 and files_rm[0]["file"] == "new.txt", "parse_local_diff: rename+modify → entry under new path")
+    tc = test_case(tc, files_rm[0]["lines"] == [4], "parse_local_diff: rename+modify added line index")
+
+    _clear_pr_env(env)
+    return tc
+
+
+# =============================================================================
+# lib/environment.axl (color_enabled)
+# =============================================================================
+
+def test_parse_git_url_name(tc: int) -> int:
+    """Coverage for environment.parse_git_url_name."""
+    cases = [
+        ("https://github.com/acme/widgets",       "widgets",          "https"),
+        ("https://github.com/acme/widgets.git",   "widgets",          ".git suffix stripped"),
+        ("https://github.com/acme/widgets/",      "widgets",          "trailing slash stripped"),
+        ("https://github.com/acme/widgets.git/",  "widgets",          "trailing slash + .git"),
+        ("git@github.com:acme/widgets.git",       "widgets",          "ssh"),
+        ("git@github.com:widgets",                "widgets",          "ssh no owner"),
+        ("https://gitlab.com/foo/bar/baz",        "baz",              "deep path"),
+    ]
+    for (url, expected, desc) in cases:
+        got = parse_git_url_name(url)
+        tc = test_case(tc, got == expected, "parse_git_url_name: %s → %r (got %r)" % (desc, expected, got))
+
+    tc = test_case(tc, parse_git_url_name("") == "", "parse_git_url_name: empty → \"\"")
+    return tc
+
+
+def test_sanitize_filename(tc: int) -> int:
+    """Coverage for environment.sanitize_filename."""
+    cases = [
+        ("foo",          "foo",          "alphanumeric passes through"),
+        ("foo-bar.txt",  "foo-bar.txt",  "dash and dot allowed"),
+        ("foo_bar",      "foo_bar",      "underscore allowed"),
+        ("foo bar",      "foo_bar",      "space → underscore"),
+        ("foo/bar",      "foo_bar",      "slash → underscore"),
+        ("foo:bar",      "foo_bar",      "colon → underscore"),
+        ("a/b/c",        "a_b_c",        "multiple slashes"),
+        ("Mixed Case 123", "Mixed_Case_123", "mixed allowed + underscores"),
+        ("",             "",             "empty"),
+    ]
+    for (input, expected, desc) in cases:
+        got = sanitize_filename(input)
+        tc = test_case(tc, got == expected, "sanitize_filename: %s → %r (got %r)" % (desc, expected, got))
+    return tc
+
+
+def test_deliveryd_parse_endpoint(tc: int) -> int:
+    """Coverage for deliveryd.parse_endpoint."""
+    base, sock = deliveryd_parse_endpoint("unix:///run/deliveryd.sock")
+    tc = test_case(tc, base == "http://localhost", "parse_endpoint: unix → base = http://localhost")
+    tc = test_case(tc, sock == "/run/deliveryd.sock", "parse_endpoint: unix → socket path")
+
+    base, sock = deliveryd_parse_endpoint("http://deliveryd.local:8080")
+    tc = test_case(tc, base == "http://deliveryd.local:8080", "parse_endpoint: http → base passthrough")
+    tc = test_case(tc, sock == None, "parse_endpoint: http → no socket")
+
+    base, sock = deliveryd_parse_endpoint("https://deliveryd.example.com")
+    tc = test_case(tc, base == "https://deliveryd.example.com", "parse_endpoint: https → base passthrough")
+    tc = test_case(tc, sock == None, "parse_endpoint: https → no socket")
+
+    # Invalid scheme should fail() — we can't catch it easily, so just don't test
+    # the failure path here.
+
+    return tc
+
+
+def test_build_metadata_lib(tc: int) -> int:
+    """Coverage for the pure helpers in lib/build_metadata.axl."""
+
+    # detect_vcs_from_host
+    cases = [
+        ("github.com",            "GITHUB",    "github.com → GITHUB"),
+        ("gitlab.com",            "GITLAB",    "gitlab.com → GITLAB"),
+        ("bitbucket.org",         "BITBUCKET", "bitbucket.org → BITBUCKET"),
+        ("github.mycorp.com",     "GITHUB",    "GitHub Enterprise"),
+        ("gitlab.example.com",    "GITLAB",    "GitLab self-hosted"),
+        ("bitbucket.local",       "BITBUCKET", "Bitbucket self-hosted"),
+        ("git.example.com",       "",          "unrecognized → empty"),
+        ("",                      "",          "empty → empty"),
+        ("GitHub.com",            "GITHUB",    "case-insensitive match"),
+    ]
+    for (host, expected, desc) in cases:
+        got = detect_vcs_from_host(host)
+        tc = test_case(tc, got == expected, "detect_vcs_from_host: %s → %r (got %r)" % (desc, expected, got))
+
+    # parse_git_remote_url
+    cases = [
+        ("https://github.com/acme/widgets",       {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"},                    "https"),
+        ("https://github.com/acme/widgets.git",   {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"},                    ".git stripped"),
+        ("git@github.com:acme/widgets.git",       {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"},                    "ssh"),
+        ("https://user:pass@github.com/acme/widgets", {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"},                "userinfo stripped"),
+        ("https://gitlab.com/group/sub/proj",     {"host": "gitlab.com", "owner": "group", "repo": "proj", "path": "group/sub/proj"},                    "GitLab nested subgroup"),
+        ("",                                       {},                                                                                                    "empty"),
+        ("not-a-url",                              {},                                                                                                    "garbage"),
+        ("git@host",                               {},                                                                                                    "ssh no colon → {}"),
+        ("https://github.com/onlyowner",           {"host": "github.com"},                                                                                "missing repo segment"),
+    ]
+    for (url, expected, desc) in cases:
+        got = parse_git_remote_url(url)
+        tc = test_case(tc, got == expected, "parse_git_remote_url: %s → match (got %s)" % (desc, str(got)))
+
+    # version_tuple
+    cases = [
+        ("1.2.3",          [1, 2, 3],   "simple semver"),
+        ("5.18.0",         [5, 18, 0],  "two-digit minor"),
+        ("0.0.1",          [0, 0, 1],   "leading zeros"),
+        ("",               [0, 0, 0],   "empty → [0,0,0]"),
+        ("5",              [5, 0, 0],   "major-only → patch zero"),
+        ("5.18",           [5, 18, 0],  "major.minor → patch zero"),
+        ("5.18.0-rc1",     [5, 18, 0],  "pre-release suffix tolerated"),
+        ("5.18.0-rc1+meta", [5, 18, 0], "build metadata tolerated"),
+        ("garbage",        [0, 0, 0],   "non-numeric → [0,0,0]"),
+        ("1.2.3.4.5",      [1, 2, 3],   "extra segments ignored"),
+    ]
+    for (s, expected, desc) in cases:
+        got = version_tuple(s)
+        tc = test_case(tc, got == expected, "version_tuple: %s → %s (got %s)" % (desc, str(expected), str(got)))
+
+    # version_gte
+    tc = test_case(tc, version_gte("5.18.0", "5.18.0"), "version_gte: equal")
+    tc = test_case(tc, version_gte("5.18.1", "5.18.0"), "version_gte: patch greater")
+    tc = test_case(tc, version_gte("6.0.0",  "5.99.99"), "version_gte: major greater")
+    tc = test_case(tc, not version_gte("5.17.99", "5.18.0"), "version_gte: less")
+    tc = test_case(tc, version_gte("5.18.0-rc1", "5.18.0"), "version_gte: pre-release tolerant (treated equal)")
+
+    # task_display_name
+    cases = [
+        ("test",          "Test",          "single-word"),
+        ("build",         "Build",         "single-word"),
+        ("my-task",       "My Task",       "kebab → Title Case"),
+        ("my_task",       "My Task",       "snake → Title Case"),
+        ("github-status", "Github Status", "kebab title-case"),
+        ("",              "",              "empty"),
+    ]
+    for (input, expected, desc) in cases:
+        got = task_display_name(input)
+        tc = test_case(tc, got == expected, "task_display_name: %s → %r (got %r)" % (desc, expected, got))
+
+    return tc
+
+
+def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
+    """Coverage for lib/artifacts.axl: detect_ci + artifact_name."""
+    env = ctx.std.env
+    # Clear all CI markers up front.
+    for k in ["GITHUB_ACTIONS", "BUILDKITE_AGENT_ACCESS_TOKEN", "CI_JOB_TOKEN", "CIRCLE_PROJECT_REPONAME"]:
+        env.remove_var(k)
+
+    tc = test_case(tc, detect_ci(env) == None, "detect_ci: no markers → None")
+
+    env.set_var("GITHUB_ACTIONS", "true")
+    tc = test_case(tc, detect_ci(env) == "github", "detect_ci: GITHUB_ACTIONS")
+
+    env.remove_var("GITHUB_ACTIONS")
+    env.set_var("BUILDKITE_AGENT_ACCESS_TOKEN", "x")
+    tc = test_case(tc, detect_ci(env) == "buildkite", "detect_ci: Buildkite")
+
+    env.remove_var("BUILDKITE_AGENT_ACCESS_TOKEN")
+    env.set_var("CI_JOB_TOKEN", "x")
+    tc = test_case(tc, detect_ci(env) == "gitlab", "detect_ci: GitLab")
+
+    env.remove_var("CI_JOB_TOKEN")
+    env.set_var("CIRCLE_PROJECT_REPONAME", "foo")
+    tc = test_case(tc, detect_ci(env) == "circleci", "detect_ci: CircleCI")
+
+    # GitHub takes precedence when multiple markers set (e.g. mirrored setup).
+    env.set_var("GITHUB_ACTIONS", "true")
+    tc = test_case(tc, detect_ci(env) == "github", "detect_ci: GitHub precedence over CircleCI")
+
+    # Clean up.
+    for k in ["GITHUB_ACTIONS", "BUILDKITE_AGENT_ACCESS_TOKEN", "CI_JOB_TOKEN", "CIRCLE_PROJECT_REPONAME"]:
+        env.remove_var(k)
+
+    # artifact_name
+    cases = [
+        # (ci, task_name, task_key, filename, expected, desc)
+        ("github",   "test",   "my-build", "profile.gz",   "test.my-build.profile.gz",   "github → flat dotted"),
+        ("buildkite", "test",  "my-build", "profile.gz",   "test/my-build/profile.gz",   "buildkite → path"),
+        ("gitlab",   "test",   "my-build", "profile.gz",   "test/my-build/profile.gz",   "gitlab → path"),
+        ("circleci", "test",   "my-build", "profile.gz",   "test/my-build/profile.gz",   "circleci → path"),
+        ("github",   "lint",   "lint-gha", "format.patch", "lint.lint-gha.format.patch", "github format.patch"),
+    ]
+    for (ci, task_name, task_key, filename, expected, desc) in cases:
+        got = artifact_name(ci, task_name, task_key, filename)
+        tc = test_case(tc, got == expected, "artifact_name: %s → %r (got %r)" % (desc, expected, got))
+
+    return tc
+
+
+def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
+    """detect_build_url for the env-var-only paths (Buildkite/CircleCI/GitLab).
+
+    GitHub Actions has an auth-based deep-link upgrade we don't exercise here
+    (would require the Aspect App auth path to succeed); we just check that
+    it gracefully falls through to the run URL when auth isn't available.
+    """
+    env = ctx.std.env
+    _clear_pr_env(env)
+
+    # No CI env → empty.
+    tc = test_case(tc, detect_build_url(ctx) == "", "detect_build_url: no env → \"\"")
+
+    # Buildkite
+    _clear_pr_env(env)
+    env.set_var("BUILDKITE", "true")
+    env.set_var("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
+    tc = test_case(tc, detect_build_url(ctx) == "https://buildkite.com/acme/widgets/builds/42", "detect_build_url: Buildkite")
+
+    # Buildkite without BUILDKITE_BUILD_URL set.
+    env.remove_var("BUILDKITE_BUILD_URL")
+    tc = test_case(tc, detect_build_url(ctx) == "", "detect_build_url: Buildkite without URL → \"\"")
+
+    # CircleCI
+    _clear_pr_env(env)
+    env.set_var("CIRCLECI", "true")
+    env.set_var("CIRCLE_BUILD_URL", "https://circleci.com/gh/acme/widgets/9911")
+    tc = test_case(tc, detect_build_url(ctx) == "https://circleci.com/gh/acme/widgets/9911", "detect_build_url: CircleCI")
+
+    # GitLab
+    _clear_pr_env(env)
+    env.set_var("GITLAB_CI", "true")
+    env.set_var("CI_JOB_URL", "https://gitlab.com/acme/widgets/-/jobs/12345")
+    tc = test_case(tc, detect_build_url(ctx) == "https://gitlab.com/acme/widgets/-/jobs/12345", "detect_build_url: GitLab")
+
+    # GitHub Actions: when auth fails / not available, fall back to run URL.
+    # This test relies on no ASPECT_API_TOKEN being set (or auth failing).
+    # If the test environment has creds for github.com/acme/widgets, this
+    # would attempt a real call and succeed with a job-URL upgrade — guard
+    # that by using a clearly-fake repo name nobody would have creds for.
+    _clear_pr_env(env)
+    env.set_var("GITHUB_ACTIONS", "true")
+    env.set_var("GITHUB_SERVER_URL", "https://github.com")
+    env.set_var("GITHUB_REPOSITORY", "fake-owner-axl-test/fake-repo-axl-test")
+    env.set_var("GITHUB_RUN_ID", "12345")
+    expected = "https://github.com/fake-owner-axl-test/fake-repo-axl-test/actions/runs/12345"
+    got = detect_build_url(ctx)
+    tc = test_case(tc, got == expected, "detect_build_url: GHA falls back to run URL when auth unavailable (got %r)" % got)
+
+    # GHA without GITHUB_REPOSITORY → empty.
+    env.remove_var("GITHUB_REPOSITORY")
+    tc = test_case(tc, detect_build_url(ctx) == "", "detect_build_url: GHA without GITHUB_REPOSITORY → \"\"")
+
+    _clear_pr_env(env)
+    return tc
+
+
+def test_file_uri_to_path(tc: int) -> int:
+    """Coverage for lint.file_uri_to_path BES URI → bb_clientd path."""
+    BB = "/mnt/ephemeral/buildbarn/bb_clientd"
+
+    # file:// passthrough (scheme stripped).
+    tc = test_case(tc, file_uri_to_path("file:///abs/path/to/foo.txt") == "/abs/path/to/foo.txt", "file_uri_to_path: file:// scheme stripped")
+
+    # Non-scheme: returned as-is.
+    tc = test_case(tc, file_uri_to_path("relative/path.txt") == "relative/path.txt", "file_uri_to_path: no scheme passthrough")
+
+    # bytestream:// 5-part with explicit sha256 digest function (modern Bazel).
+    uri5 = "bytestream://localhost:8443/blobs/sha256/abc123def/4567"
+    expected5 = BB + "/cas/localhost/blobs/sha256/file/abc123def-4567"
+    tc = test_case(tc, file_uri_to_path(uri5) == expected5, "file_uri_to_path: bytestream 5-part (sha256/HASH/SIZE)")
+
+    # bytestream:// 4-part without digest function (legacy form).
+    uri4 = "bytestream://localhost:8443/blobs/abc123def/4567"
+    expected4 = BB + "/cas/localhost/blobs/sha256/file/abc123def-4567"
+    tc = test_case(tc, file_uri_to_path(uri4) == expected4, "file_uri_to_path: bytestream 4-part (HASH/SIZE)")
+
+    # bytestream:// with sha512 digest function.
+    uri_sha512 = "bytestream://cache.example.com:443/blobs/sha512/HASHHASH/9999"
+    expected_sha512 = BB + "/cas/cache.example.com/blobs/sha512/file/HASHHASH-9999"
+    tc = test_case(tc, file_uri_to_path(uri_sha512) == expected_sha512, "file_uri_to_path: bytestream sha512")
+
+    return tc
+
+
+def test_validate_role(tc: int) -> int:
+    """Coverage for github.validate_role + VALID_ROLES."""
+    valid = ["checks.read", "checks.write", "statuses.read", "statuses.write",
+             "prs.read", "prs.write", "issues.read", "actions.read"]
+    for r in valid:
+        tc = test_case(tc, github.validate_role(r), "validate_role: %s ok" % r)
+
+    invalid = ["", "checks", "checks.write.something", "prs", "Checks.Write", "actions.write"]
+    for r in invalid:
+        tc = test_case(tc, not github.validate_role(r), "validate_role: %r rejected" % r)
+
+    # VALID_ROLES is the authoritative list — all entries should self-validate.
+    for r in github.VALID_ROLES:
+        tc = test_case(tc, github.validate_role(r), "validate_role: %s self-consistent" % r)
+    return tc
+
+
+def test_lint_filters(tc: int) -> int:
+    """Coverage for lint.filter_all and lint.filter_changeset."""
+    diags = [
+        {"file": "a.go", "line": 1, "severity": "error"},
+        {"file": "a.go", "line": 5, "severity": "warning"},
+        {"file": "b.go", "line": 2, "severity": "error"},
+        {"file": "c.go", "line": 7, "severity": "note"},
+    ]
+    changed = [
+        {"file": "a.go", "lines": [0, 4]},
+        {"file": "c.go", "lines": [6]},
+    ]
+
+    # filter_all returns the input as-is.
+    tc = test_case(tc, filter_all(diags, changed) == diags, "filter_all: returns input unchanged")
+    tc = test_case(tc, filter_all([], []) == [], "filter_all: empty → empty")
+    tc = test_case(tc, filter_all(diags, []) == diags, "filter_all: ignores changed_files")
+
+    # filter_changeset keeps only diagnostics whose file is in the changed set.
+    relevant = filter_changeset(diags, changed)
+    tc = test_case(tc, len(relevant) == 3, "filter_changeset: keeps a.go (2) + c.go (1)")
+    tc = test_case(tc, all([d["file"] in ("a.go", "c.go") for d in relevant]), "filter_changeset: drops b.go")
+
+    # No changed files context → nothing relevant (intentional, see docstring).
+    tc = test_case(tc, filter_changeset(diags, []) == [], "filter_changeset: no changed_files → []")
+    tc = test_case(tc, filter_changeset([], changed) == [], "filter_changeset: no diagnostics → []")
+
+    # Only diagnostics in changed files (line numbers don't gate this — that's
+    # the line-level filter applied by gh_lint_comments / annotation features).
+    only_a = [{"file": "a.go", "line": 999, "severity": "error"}]  # line not in changed[0]["lines"]
+    tc = test_case(tc, filter_changeset(only_a, changed) == only_a, "filter_changeset: file-level only, line numbers not gated here")
+
+    return tc
+
+
+def test_fmt_elapsed(tc: int) -> int:
+    """Coverage for delivery.fmt_elapsed — duration formatting."""
+    cases = [
+        # (secs, expected, description)
+        (0,        "0.0s",  "zero"),
+        (0.0,      "0.0s",  "zero float"),
+        (0.5,      "0.5s",  "half-second"),
+        (0.55,     "0.5s",  "tenths truncate (no rounding)"),
+        (1,        "1.0s",  "one whole second"),
+        (1.4,      "1.4s",  "below 60 seconds"),
+        (9.99,     "9.9s",  "9.99 → 9.9 (truncated, not rounded)"),
+        (59,       "59.0s", "just under a minute"),
+        (59.9,     "59.9s", "59.9 still sub-minute"),
+        (60,       "1m0s",  "exactly one minute"),
+        (61,       "1m1s",  "minute + 1"),
+        (61.5,     "1m1s",  "minute + 1 (fractional dropped)"),
+        (90,       "1m30s", "90 sec → 1m30s"),
+        (3600,     "60m0s", "one hour → 60m0s (no hour unit)"),
+        (3661,     "61m1s", "hour + minute + sec → 61m1s"),
+    ]
+    for (secs, expected, desc) in cases:
+        got = delivery_fmt_elapsed(secs)
+        tc = test_case(tc, got == expected, "fmt_elapsed: %s → %r (got %r)" % (desc, expected, got))
+    return tc
+
+
+def test_summary_title(tc: int) -> int:
+    """Coverage for bazel_results.summary_title — GitHub check title."""
+    # status="passed" + no buckets → state empty → just task+subject
+    r = init_results()
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Build")
+    tc = test_case(tc, title == "Build //...", "summary_title: empty results, passed → task+subject only (got %r)" % title)
+
+    # status="running" → "Running..." (mid-build state, regardless of buckets)
+    r = init_results()
+    title = summary_title(r, "running", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Running...", "summary_title: running → Running... (got %r)" % title)
+
+    # status="failing" also counts as in-progress.
+    title = summary_title(r, "failing", target_pattern = "//foo", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //foo · Running...", "summary_title: failing → Running... (got %r)" % title)
+
+    # passed_test_total > 0, all cached → "Tests passed (cached)"
+    r = init_results()
+    r["passed_test_total"] = 5
+    r["cached_test_total"] = 5
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests passed (cached)", "summary_title: all cached → Tests passed (cached) (got %r)" % title)
+
+    # Not all cached → "Tests passed" (TEST_PASSED takes precedence over PASSED_CACHED).
+    r = init_results()
+    r["passed_test_total"] = 5
+    r["cached_test_total"] = 2
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests passed", "summary_title: partial cached → Tests passed (got %r)" % title)
+
+    # failed_tests with status=failed → "Tests failed"
+    r = init_results()
+    r["failed_tests"] = [{"label": "//a:t", "status": "failed"}]
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests failed", "summary_title: failed test → Tests failed (got %r)" % title)
+
+    # failed_tests with status=timeout → "Tests timeout"
+    r = init_results()
+    r["failed_tests"] = [{"label": "//a:t", "status": "timeout"}]
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests timeout", "summary_title: timeout → Tests timeout (got %r)" % title)
+
+    # flaky_test_total → "Tests flaky"
+    r = init_results()
+    r["flaky_test_total"] = 1
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests flaky", "summary_title: flaky → Tests flaky (got %r)" % title)
+
+    # failed_targets (build failure) → "Failed to build"
+    r = init_results()
+    r["failed_targets"] = [{"label": "//a:b"}]
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Build")
+    tc = test_case(tc, title == "Build //... · Failed to build", "summary_title: failed target → Failed to build (got %r)" % title)
+
+    # aborted=True dominates everything (even with passed tests in the mix).
+    r = init_results()
+    r["aborted"] = True
+    r["passed_test_total"] = 99
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Invocation disconnected", "summary_title: aborted → Invocation disconnected (got %r)" % title)
+
+    # Empty task_display_name → no leading "Test "; subject + state only.
+    r = init_results()
+    r["passed_test_total"] = 1
+    title = summary_title(r, "passed", target_pattern = "//foo")
+    tc = test_case(tc, title == "//foo · Tests passed", "summary_title: empty task name → subject + state (got %r)" % title)
+
+    # Empty target_pattern → no subject; task + state.
+    title = summary_title(r, "passed", task_display_name = "Test")
+    tc = test_case(tc, title == "Test · Tests passed", "summary_title: empty subject → task + state (got %r)" % title)
+
+    # Both empty → state only.
+    title = summary_title(r, "passed")
+    tc = test_case(tc, title == "Tests passed", "summary_title: state-only fallback (got %r)" % title)
+
+    # Long subject is truncated at 60 chars (with ellipsis).
+    long_target = "//" + "x" * 200
+    title = summary_title(r, "passed", target_pattern = long_target, task_display_name = "Build")
+    tc = test_case(tc, "…" in title, "summary_title: long subject gets ellipsis truncation (got %r)" % title)
+    tc = test_case(tc, title.startswith("Build //"), "summary_title: still starts with task+subject prefix")
+    tc = test_case(tc, len(title) <= 160, "summary_title: respects 160 char hard limit (len=%d)" % len(title))
+
+    return tc
+
+
+def test_compute_repro(tc: int) -> int:
+    """Coverage for bazel_results.compute_repro — repro-command derivation."""
+    # No failures → empty repros, totals 0.
+    r = init_results()
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro"] == "", "compute_repro: no failures → empty build_repro")
+    tc = test_case(tc, r["build_repro_total"] == 0, "compute_repro: no failures → build_repro_total=0")
+    tc = test_case(tc, r["test_repro"] == "", "compute_repro: no failures → empty test_repro")
+    tc = test_case(tc, r["test_repro_total"] == 0, "compute_repro: no failures → test_repro_total=0")
+
+    # failed_actions: dedupe + ordering.
+    r = init_results()
+    r["failed_actions"] = [
+        {"label": "//a:lib", "mnemonics": ["CppCompile"]},
+        {"label": "//b:lib", "mnemonics": ["CppCompile"]},
+        {"label": "//a:lib", "mnemonics": ["CppLink"]},  # dup label
+    ]
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro"] == "bazel build //a:lib //b:lib", "compute_repro: dedupes labels and preserves insertion order (got %r)" % r["build_repro"])
+    tc = test_case(tc, r["build_repro_total"] == 2, "compute_repro: build_repro_total = unique labels")
+
+    # Falls back to failed_targets when failed_actions is empty.
+    r = init_results()
+    r["failed_targets"] = [{"label": "//x:y"}, {"label": "//z:w"}]
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro"] == "bazel build //x:y //z:w", "compute_repro: falls back to failed_targets (got %r)" % r["build_repro"])
+    tc = test_case(tc, r["build_repro_total"] == 2, "compute_repro: build_repro_total from failed_targets")
+
+    # Action-level labels take precedence over target-level fallback when both present.
+    r = init_results()
+    r["failed_actions"] = [{"label": "//action:fail"}]
+    r["failed_targets"] = [{"label": "//target:fail"}]
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro"] == "bazel build //action:fail", "compute_repro: prefers action labels over target labels (got %r)" % r["build_repro"])
+
+    # failed_tests → test_repro.
+    r = init_results()
+    r["failed_tests"] = [
+        {"label": "//a:t1", "status": "failed"},
+        {"label": "//b:t2", "status": "timeout"},
+    ]
+    compute_repro(r)
+    tc = test_case(tc, r["test_repro"] == "bazel test //a:t1 //b:t2", "compute_repro: test_repro joins failed test labels (got %r)" % r["test_repro"])
+    tc = test_case(tc, r["test_repro_total"] == 2, "compute_repro: test_repro_total = failed test count")
+
+    # Long label list is truncated at MAX_REPRO_CHARS but total still reflects all.
+    r = init_results()
+    long_labels = []
+    for i in range(200):
+        long_labels.append({"label": "//pkg/some/longer/path:target_" + str(i)})
+    r["failed_targets"] = long_labels
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro_total"] == 200, "compute_repro: total reflects all labels even when repro truncates (got %d)" % r["build_repro_total"])
+    tc = test_case(tc, len(r["build_repro"]) <= 1000, "compute_repro: build_repro respects MAX_REPRO_CHARS (len=%d)" % len(r["build_repro"]))
+    tc = test_case(tc, r["build_repro"].startswith("bazel build //pkg/some/longer/path:target_0"), "compute_repro: truncated repro starts with first labels")
+
+    return tc
+
+
+def test_process_bes_target_completed(ctx: TaskContext, tc: int) -> int:
+    """Regression test for the canonical_label-shadow bug in _process_bes.
+
+    When `_canonical` was renamed to `canonical_label` (matching the function
+    in lib/runnable.axl), the local `canonical_label = canonical_label(...)`
+    inside `_process_bes` started shadowing the module-level function for the
+    whole function scope, breaking the call with "referenced before assignment".
+
+    This test wires up `runnable()` and feeds a fake `target_completed` event
+    through `r.event(...)` — the same call path delivery and format use. Before
+    the fix this raised; after the fix it succeeds and populates target_fileset.
+    """
+    r = runnable(ctx, ["//foo:bar"])
+    fake_event = struct(
+        kind = "target_completed",
+        id = struct(id = "evt1", label = "//foo:bar"),
+        payload = struct(output_group = [
+            struct(name = "default", file_sets = [struct(id = "fs1")]),
+        ]),
+    )
+    # Pre-fix this call raised; post-fix it returns None and updates state.
+    r.event(fake_event)
+    tc = test_case(tc, True, "_process_bes: target_completed does not raise (canonical_label shadow regression)")
+
+    # named_set_of_files event also goes through _process_bes — sanity check.
+    fake_nsf = struct(
+        kind = "named_set_of_files",
+        id = struct(id = "fs1"),
+        payload = struct(files = [], file_sets = []),
+    )
+    r.event(fake_nsf)
+    tc = test_case(tc, True, "_process_bes: named_set_of_files does not raise")
+
+    # Untracked targets are silently ignored — verify by feeding an event for
+    # a label that wasn't in the constructor list.
+    fake_untracked = struct(
+        kind = "target_completed",
+        id = struct(id = "evt2", label = "//other:thing"),
+        payload = struct(output_group = []),
+    )
+    r.event(fake_untracked)
+    tc = test_case(tc, True, "_process_bes: target_completed for untracked label is a no-op")
+
+    return tc
+
+
+def test_canonical_label(tc: int) -> int:
+    """Coverage for runnable.canonical_label — Bazel label normalization."""
+    cases = [
+        ("//foo",                      "//foo:foo",         "//foo → //foo:foo"),
+        ("//foo:bar",                  "//foo:bar",         "explicit target unchanged"),
+        ("//foo/bar",                  "//foo/bar:bar",     "deep path → leaf as target"),
+        ("//foo/bar/baz",              "//foo/bar/baz:baz", "deeper path"),
+        ("//foo/bar:baz",              "//foo/bar:baz",     "explicit target with deep path"),
+        ("//",                         "//:",               "root-only edge case"),
+        ("@repo//foo",                 "@repo//foo:foo",    "repo-prefixed label"),
+        ("@repo//foo:bar",             "@repo//foo:bar",    "repo-prefixed with target"),
+        ("//foo:",                     "//foo:",            "empty target name kept (caller error, not normalized)"),
+    ]
+    for (input, expected, desc) in cases:
+        got = canonical_label(input)
+        tc = test_case(tc, got == expected, "canonical_label: %s → %r (got %r)" % (desc, expected, got))
+    return tc
+
+
+def test_color_enabled(ctx: TaskContext, tc: int) -> int:
+    """color_enabled: should return True on a TTY OR a recognized CI host."""
+    env = ctx.std.env
+    # Clear all CI vars first so we're testing the predicate cleanly.
+    for k in ["GITHUB_ACTIONS", "BUILDKITE", "CIRCLECI", "GITLAB_CI"]:
+        env.remove_var(k)
+
+    # Without any CI env, the result depends on whether stdout is a TTY,
+    # which we can't reliably control in the test harness — skip the
+    # "no env" case and only test that each CI env flips it on.
+
+    for ci_env in ["GITHUB_ACTIONS", "BUILDKITE", "CIRCLECI", "GITLAB_CI"]:
+        env.set_var(ci_env, "true")
+        tc = test_case(tc, color_enabled(ctx.std), "color_enabled: %s=true → True" % ci_env)
+        env.remove_var(ci_env)
+
+    return tc
+
+
+# =============================================================================
+# lib/sarif.axl
+# =============================================================================
+
+def test_detect_github_repo(ctx: TaskContext, tc: int) -> int:
+    """detect_github_repo: ASPECT_VCS_URL > GITHUB_REPOSITORY > git remote.
+    The git remote fallback isn't tested here (would need a fixture repo)."""
+    env = ctx.std.env
+    _clear_pr_env(env)
+
+    # Note: detect_github_repo isn't directly exposed; it's called
+    # internally by detect_pr and detect_changed_files. We test via
+    # detect_pr scenarios that exercise it.
+
+    # ASPECT_VCS_URL precedence on Buildkite/CircleCI paths.
+    env.set_var("BUILDKITE", "true")
+    env.set_var("BUILDKITE_PULL_REQUEST", "1")
+    env.set_var("BUILDKITE_COMMIT", "sha1")
+    env.set_var("ASPECT_VCS_URL", "https://github.com/foo/bar")
+    pr, _ = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr != None and pr["owner"] == "foo" and pr["repo"] == "bar", "ASPECT_VCS_URL drives owner/repo")
+
+    # GITHUB_REPOSITORY-only path on GHA.
+    _clear_pr_env(env)
+    env.set_var("GITHUB_ACTIONS", "true")
+    env.set_var("GITHUB_REF", "refs/pull/1/merge")
+    env.set_var("GITHUB_REPOSITORY", "foo/bar")
+    env.set_var("GITHUB_SHA", "x")
+    pr, _ = github.detect_pr(ctx.std)
+    tc = test_case(tc, pr != None and pr["owner"] == "foo" and pr["repo"] == "bar", "GITHUB_REPOSITORY drives owner/repo on GHA")
+
+    _clear_pr_env(env)
+    return tc
+
+
+def test_sarif_lib(tc: int) -> int:
+    """Coverage for parse_sarif_diagnostics + sarif_to_review_comments."""
+    sarif_text = """
+    {
+      "runs": [{
+        "tool": {"driver": {"name": "shellcheck"}},
+        "results": [
+          {
+            "level": "error",
+            "ruleId": "SC1090",
+            "message": {"text": "Can't follow non-constant source."},
+            "locations": [{"physicalLocation": {
+              "artifactLocation": {"uri": "scripts/build.sh"},
+              "region": {"startLine": 12, "endLine": 12}
+            }}]
+          },
+          {
+            "level": "warning",
+            "ruleId": "SC2086",
+            "message": {"text": "Double quote to prevent globbing."},
+            "locations": [{"physicalLocation": {
+              "artifactLocation": {"uri": "scripts/test.sh"},
+              "region": {"startLine": 5, "endLine": 7}
+            }}]
+          }
+        ]
+      }]
+    }
+    """
+
+    diags = parse_sarif_diagnostics(sarif_text)
+    tc = test_case(tc, len(diags) == 2, "parse_sarif_diagnostics: 2 results")
+    tc = test_case(tc, diags[0]["tool"] == "shellcheck", "parse_sarif_diagnostics: tool name")
+    tc = test_case(tc, diags[0]["file"] == "scripts/build.sh", "parse_sarif_diagnostics: file path")
+    tc = test_case(tc, diags[0]["line"] == 12, "parse_sarif_diagnostics: line")
+    tc = test_case(tc, diags[0]["rule_id"] == "SC1090", "parse_sarif_diagnostics: rule_id")
+    tc = test_case(tc, diags[0]["severity"] == "error", "parse_sarif_diagnostics: severity error")
+    tc = test_case(tc, diags[1]["severity"] == "warning", "parse_sarif_diagnostics: severity warning")
+
+    comments = sarif_to_review_comments(sarif_text)
+    tc = test_case(tc, len(comments) == 2, "sarif_to_review_comments: 2 comments")
+    tc = test_case(tc, comments[0]["path"] == "scripts/build.sh", "sarif_to_review_comments: path")
+    tc = test_case(tc, comments[0]["line"] == 12, "sarif_to_review_comments: end_line")
+    tc = test_case(tc, comments[0].get("_severity") == "error", "sarif_to_review_comments: _severity present")
+    tc = test_case(tc, "shellcheck" in comments[0]["body"], "sarif_to_review_comments: body has tool name")
+    tc = test_case(tc, "Can't follow" in comments[0]["body"], "sarif_to_review_comments: body has message")
+    # Multi-line region: comment carries start_line + start_side.
+    tc = test_case(tc, comments[1].get("start_line") == 5 and comments[1].get("line") == 7, "sarif_to_review_comments: multi-line region")
+    tc = test_case(tc, comments[1].get("start_side") == "RIGHT", "sarif_to_review_comments: start_side RIGHT")
+
+    # Empty SARIF.
+    empty = """{"runs": []}"""
+    tc = test_case(tc, parse_sarif_diagnostics(empty) == [], "parse_sarif_diagnostics: no runs → []")
+    tc = test_case(tc, sarif_to_review_comments(empty) == [], "sarif_to_review_comments: no runs → []")
+
+    # Result without locations should be skipped.
+    no_loc = """{"runs":[{"tool":{"driver":{"name":"x"}},"results":[{"level":"error","message":{"text":"oops"}}]}]}"""
+    tc = test_case(tc, sarif_to_review_comments(no_loc) == [], "sarif_to_review_comments: result without location dropped")
+
+    # get_sarif_summary
+    sarif_text = """{"runs":[
+        {"tool":{"driver":{"name":"shellcheck"}},"results":[
+            {"level":"error","message":{"text":"a"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"x"},"region":{"startLine":1}}}]},
+            {"level":"warning","message":{"text":"b"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"x"},"region":{"startLine":2}}}]}
+        ]},
+        {"tool":{"driver":{"name":"eslint"}},"results":[
+            {"level":"error","message":{"text":"c"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"y"},"region":{"startLine":3}}}]}
+        ]}
+    ]}"""
+    summary = get_sarif_summary(sarif_text)
+    tc = test_case(tc, "2 finding(s) from shellcheck" in summary, "get_sarif_summary: shellcheck count")
+    tc = test_case(tc, "1 finding(s) from eslint" in summary, "get_sarif_summary: eslint count")
+    tc = test_case(tc, "3 total finding(s)" in summary, "get_sarif_summary: total count")
+
+    # Empty/no-runs SARIF.
+    tc = test_case(tc, get_sarif_summary("""{"runs":[]}""") == "No lint findings.", "get_sarif_summary: empty runs")
+    # Run with zero results: no individual line, but "No lint findings." returned.
+    no_results = """{"runs":[{"tool":{"driver":{"name":"shellcheck"}},"results":[]}]}"""
+    tc = test_case(tc, get_sarif_summary(no_results) == "No lint findings.", "get_sarif_summary: zero results")
+
+    # Accepts pre-parsed dict too.
+    tc = test_case(tc, get_sarif_summary(parse_sarif("""{"runs":[]}""")) == "No lint findings.", "get_sarif_summary: accepts dict")
+
+    # Fix-hint extraction (sarif_result_to_comment via sarif_to_review_comments).
+    # Realistic shape: relatedLocations carries `try "<replacement>"` messages
+    # paired with a byteOffset/byteLength region pointing at the bytes to splice.
+    fix_sarif = """{"runs":[{"tool":{"driver":{"name":"shellcheck"}},"results":[
+        {"level":"warning","ruleId":"SC2086","message":{"text":"add quotes"},
+         "locations":[{"physicalLocation":{"artifactLocation":{"uri":"a.sh"},"region":{"startLine":3,"endLine":3}}}],
+         "relatedLocations":[
+            {"message":{"text":"try \\"$VAR\\""},"physicalLocation":{"region":{"byteOffset":42,"byteLength":4}}}
+         ]
+        },
+        {"level":"warning","ruleId":"SC2034","message":{"text":"unused"},
+         "locations":[{"physicalLocation":{"artifactLocation":{"uri":"b.sh"},"region":{"startLine":1,"endLine":1}}}],
+         "relatedLocations":[
+            {"message":{"text":"trying to be helpful"},"physicalLocation":{"region":{"byteOffset":1,"byteLength":1}}}
+         ]
+        },
+        {"level":"warning","ruleId":"SC9999","message":{"text":"empty fix"},
+         "locations":[{"physicalLocation":{"artifactLocation":{"uri":"c.sh"},"region":{"startLine":2,"endLine":2}}}],
+         "relatedLocations":[
+            {"message":{"text":"try"},"physicalLocation":{"region":{"byteOffset":5,"byteLength":3}}}
+         ]
+        }
+    ]}]}"""
+    fix_comments = sarif_to_review_comments(fix_sarif)
+    tc = test_case(tc, len(fix_comments) == 3, "fix hint sarif: 3 comments")
+    # 1st comment has a real fix hint → _fixes populated.
+    fixes_a = fix_comments[0].get("_fixes")
+    tc = test_case(tc, fixes_a != None and len(fixes_a) == 1, "fix hint: comment 0 has 1 fix")
+    if fixes_a and len(fixes_a) == 1:
+        f = fixes_a[0]
+        tc = test_case(tc, f["replacement"] == "$VAR", "fix hint: quoted text unquoted")
+        tc = test_case(tc, f["byteOffset"] == 42 and f["byteLength"] == 4, "fix hint: byte offset/length")
+    # 2nd comment: "trying to be helpful" should NOT match fix-hint format ("try " prefix only).
+    fixes_b = fix_comments[1].get("_fixes")
+    tc = test_case(tc, fixes_b == None, "fix hint: \"trying ...\" not mistaken for fix")
+    # 3rd comment: bare "try" → empty replacement.
+    fixes_c = fix_comments[2].get("_fixes")
+    tc = test_case(tc, fixes_c != None and fixes_c[0]["replacement"] == "", "fix hint: bare \"try\" → empty replacement")
+
+    return tc
+
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -1358,6 +2430,24 @@ def impl(ctx: TaskContext) -> int:
     tc = test_cancel_invocation(ctx, tc)
     tc = test_template_rendering(ctx, tc)
     tc = test_path_glob(tc)
+    tc = test_github_lib(ctx, tc)
+    tc = test_color_enabled(ctx, tc)
+    tc = test_detect_github_repo(ctx, tc)
+    tc = test_detect_build_url(ctx, tc)
+    tc = test_artifacts_lib(ctx, tc)
+    tc = test_sarif_lib(tc)
+    tc = test_file_uri_to_path(tc)
+    tc = test_canonical_label(tc)
+    tc = test_process_bes_target_completed(ctx, tc)
+    tc = test_validate_role(tc)
+    tc = test_lint_filters(tc)
+    tc = test_fmt_elapsed(tc)
+    tc = test_summary_title(tc)
+    tc = test_compute_repro(tc)
+    tc = test_parse_git_url_name(tc)
+    tc = test_sanitize_filename(tc)
+    tc = test_deliveryd_parse_endpoint(tc)
+    tc = test_build_metadata_lib(tc)
 
     print(tc, "tests passed")
     return 0

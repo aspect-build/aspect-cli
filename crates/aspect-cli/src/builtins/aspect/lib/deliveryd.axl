@@ -5,7 +5,7 @@ deliveryd is a Unix socket HTTP server that manages delivery state,
 tracking which artifacts have been delivered and preventing re-delivery.
 """
 
-def _parse_endpoint(endpoint):
+def parse_endpoint(endpoint):
     """
     Parse a deliveryd endpoint string.
 
@@ -23,7 +23,7 @@ def _parse_endpoint(endpoint):
 
 def _post(http, endpoint, path, data):
     """Make a POST request to deliveryd, handling unix:// endpoints."""
-    base_url, socket_path = _parse_endpoint(endpoint)
+    base_url, socket_path = parse_endpoint(endpoint)
     encoded = json.encode(data)
     if socket_path:
         return http.post(url = base_url + path, headers={"Content-Type": "application/json"}, data=encoded, unix_socket=socket_path)
@@ -31,7 +31,7 @@ def _post(http, endpoint, path, data):
 
 def _get(http, endpoint, path):
     """Make a GET request to deliveryd, handling unix:// endpoints."""
-    base_url, socket_path = _parse_endpoint(endpoint)
+    base_url, socket_path = parse_endpoint(endpoint)
     if socket_path:
         return http.get(url=base_url + path, unix_socket=socket_path)
     return http.get(url=base_url + path)
