@@ -271,13 +271,20 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 /// task can call `ctx.aspect.auth.credentials()` multiple times (once per
 /// `github.authenticate` call); without caching each call hits Frontegg's
 /// `/api-token` endpoint. The cache stores the most recently successful
-/// exchange keyed on the source token; entries are invalidated automatically
-/// once the JWT's `exp` claim falls inside the 60-second skew buffer
-/// (`is_expired_jwt`), so we don't hand out tokens that are about to be rejected.
+/// exchange keyed on the source token AND the resolved auth-environment
+/// domain; entries are invalidated automatically once the JWT's `exp` claim
+/// falls inside the 60-second skew buffer (`is_expired_jwt`), so we don't
+/// hand out tokens that are about to be rejected.
 struct ApiTokenCacheEntry {
     /// Source token (the raw `client_id:secret` value) the cached entry was
     /// minted from. If the env var changes mid-run we mint a fresh one.
     source_token: String,
+    /// Auth-environment domain the cached entry was exchanged against
+    /// (`https://auth.aspect.build`, `…staging…`, `…dev…`). Reusing a
+    /// staging-issued token after `__ASPECT_ENVIRONMENT__` flips to
+    /// production would hand back credentials minted by the wrong issuer,
+    /// so the env domain is part of the cache key.
+    auth_domain: &'static str,
     entry: CredentialsEntry,
 }
 
@@ -305,11 +312,19 @@ fn credentials_from_api_token_env() -> anyhow::Result<Option<CredentialsEntry>> 
         return Ok(None);
     };
 
-    // Fast path: a cached exchange for the same source token whose JWT
-    // hasn't entered the 60-second pre-expiry buffer.
+    // Resolve the env every call so __ASPECT_ENVIRONMENT__ changes within
+    // a single process (test harnesses, multi-step tooling) re-exchange
+    // against the new issuer instead of returning a stale token.
+    let env = resolve_aspect_env()?;
+
+    // Fast path: a cached exchange for the same source token AND auth env
+    // whose JWT hasn't entered the 60-second pre-expiry buffer.
     if let Ok(guard) = api_token_cache().lock() {
         if let Some(cached) = guard.as_ref() {
-            if cached.source_token == token && !is_expired_jwt(&cached.entry) {
+            if cached.source_token == token
+                && cached.auth_domain == env.domain
+                && !is_expired_jwt(&cached.entry)
+            {
                 return Ok(Some(cached.entry.clone()));
             }
         }
@@ -318,7 +333,6 @@ fn credentials_from_api_token_env() -> anyhow::Result<Option<CredentialsEntry>> 
     let (client_id, secret) = token
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("ASPECT_API_TOKEN must be in 'client_id:secret' format"))?;
-    let env = resolve_aspect_env()?;
     let entry = block_on(exchange_api_token(client_id, secret, env))?;
 
     // Store for subsequent calls. Clearing on lock-poison is fine — the
@@ -326,6 +340,7 @@ fn credentials_from_api_token_env() -> anyhow::Result<Option<CredentialsEntry>> 
     if let Ok(mut guard) = api_token_cache().lock() {
         *guard = Some(ApiTokenCacheEntry {
             source_token: token,
+            auth_domain: env.domain,
             entry: entry.clone(),
         });
     }
