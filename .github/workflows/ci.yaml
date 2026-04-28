@@ -86,6 +86,39 @@ jobs:
       - name: Format Task
         run: aspect format --task-key format-gha
 
+  gazelle-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    env:
+      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Bootstrap
+        run: .aspect/bootstrap.sh
+      - name: Gazelle Task (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect gazelle --check --task-key gazelle-gha-debug
+      - name: Gazelle Task
+        run: aspect gazelle --check --task-key gazelle-gha
+
+  gazelle-from-source-task:
+    runs-on: [self-hosted, aspect-workflows, aspect-default]
+    needs: [pre-build]
+    env:
+      ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Bootstrap
+        run: .aspect/bootstrap.sh
+      # Regression test for the build-from-source gazelle path —
+      # upstream `gazelle()` macro + rules_go toolchain compiling a
+      # bespoke gazelle binary, instead of the prebuilt artifact.
+      # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
+      # lld can't accept Go's non-PIC relocations on x86_64.
+      - name: Gazelle Task — from-source (ASPECT_DEBUG=1)
+        run: ASPECT_DEBUG=1 aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gha-debug
+      - name: Gazelle Task — from-source
+        run: aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gha
+
   delivery-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]

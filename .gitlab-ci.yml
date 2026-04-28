@@ -61,6 +61,33 @@ format-task:
     - ASPECT_DEBUG=1 aspect format --task-key format-gl-debug
     - aspect format --task-key format-gl
 
+gazelle-task:
+  stage: CI
+  needs: [pre-build]
+  tags:
+    - aspect-workflows
+    - aspect-default
+  script:
+    - .aspect/bootstrap.sh
+    - ASPECT_DEBUG=1 aspect gazelle --check --task-key gazelle-gl-debug
+    - aspect gazelle --check --task-key gazelle-gl
+
+# Regression test for the build-from-source gazelle path — upstream
+# `gazelle()` macro + rules_go toolchain. Most users will adopt the
+# prebuilt binary; this job catches breakage on the alternate path.
+# `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
+# lld can't accept Go's non-PIC relocations on x86_64.
+gazelle-from-source-task:
+  stage: CI
+  needs: [pre-build]
+  tags:
+    - aspect-workflows
+    - aspect-default
+  script:
+    - .aspect/bootstrap.sh
+    - ASPECT_DEBUG=1 aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gl-debug
+    - aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-gl
+
 delivery-task:
   stage: CI
   needs: [pre-build]
