@@ -18,6 +18,7 @@ Usage:
 """
 
 load("./lib/github.axl", "detect_changed_files")
+load("./lib/path_glob.axl", "match_any")
 load("./lib/runnable.axl", "runnable")
 load("./traits.axl", "BazelTrait")
 
@@ -140,6 +141,8 @@ def _impl(ctx: TaskContext) -> int:
     if not formatter:
         fail("Failed to determine the formatter entrypoint.")
 
+    ignore_patterns = list(ctx.args.ignore_pattern)
+
     format_args = []
     if not ctx.args.all_files:
         # Prefers the GitHub PR Files API when authenticated and in a PR
@@ -152,6 +155,15 @@ def _impl(ctx: TaskContext) -> int:
             base_ref = ctx.args.base_ref,
             merge_base = ctx.args.merge_base or None,
         )
+        if ignore_patterns:
+            kept = [f for f in changed_files if not match_any(ignore_patterns, f)]
+            ignored_count = len(changed_files) - len(kept)
+            if ignored_count > 0:
+                out.write("Filtered %d file(s) via --ignore-pattern.\n" % ignored_count)
+            changed_files = kept
+        if not changed_files:
+            out.write("No files to format.\n")
+            return 0
         out.write("Formatting changed files:\n%s\n" % "\n".join(changed_files))
         format_args = changed_files
 
@@ -189,12 +201,34 @@ def _impl(ctx: TaskContext) -> int:
     if not formatter_diff:
         return 0
 
-    # Format changes detected. List the affected file set for the user.
+    # List the affected file set, then filter through --ignore-pattern.
+    # Ignore patterns hide files from BOTH the user-facing affected list
+    # and the failure decision below. They don't undo the formatter's
+    # changes — those still sit in the working tree — but they prevent
+    # files in (e.g.) nested Bazel workspaces or vendored directories
+    # from failing this task.
     name_out, _, _ = _git_capture(ctx, "diff", "--name-only", pre_snap if pre_snap else "HEAD")
-    affected = [f for f in name_out.strip().split("\n") if f]
+    affected_all = [f for f in name_out.strip().split("\n") if f]
+    if ignore_patterns:
+        affected = [f for f in affected_all if not match_any(ignore_patterns, f)]
+        ignored_count = len(affected_all) - len(affected)
+    else:
+        affected = affected_all
+        ignored_count = 0
+
+    if not affected:
+        # All formatter changes are in ignored paths — task is OK from the
+        # user's perspective. Note any working-tree changes the formatter
+        # made so they aren't surprising downstream.
+        if ignored_count > 0:
+            out.write("Formatter modified %d file(s), all matching --ignore-pattern; treating as OK.\n" % ignored_count)
+        return 0
+
     out.write("\nFormatting changes were applied to %d file(s):\n" % len(affected))
     for f in affected:
         out.write("  - %s\n" % f)
+    if ignored_count > 0:
+        out.write("(also modified %d file(s) matching --ignore-pattern; not counted toward failure)\n" % ignored_count)
 
     if ctx.args.soft_fail:
         out.write("\x1b[0;33mWARNING\x1b[0m: formatting required, but --soft-fail is set; task exits 0.\n")
@@ -215,6 +249,9 @@ format = task(
         "soft_fail": args.boolean(
             default = False,
             description = "When true, the task returns 0 even if the formatter modified files, printing a WARNING with the affected file list instead. Useful for teams introducing automated formatting incrementally so the CI step doesn't block merges. The formatter binary's own non-zero exits are still surfaced as task failures regardless of this flag.",
+        ),
+        "ignore_pattern": args.string_list(
+            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--ignore-pattern='vendor/**' --ignore-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In the default (changed-files) mode, filtered files are dropped from the file list passed to the formatter. In --all-files mode the formatter discovers files itself, so ignored files may still be rewritten on disk; in either mode, ignored files are excluded from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "base_ref": args.string(
             default = "origin/main",
