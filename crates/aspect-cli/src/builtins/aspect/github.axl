@@ -50,7 +50,10 @@ def _token_impl(ctx: TaskContext) -> int:
         print("Error: API request failed (HTTP " + str(resp.status) + "): " + resp.body)
         return 1
 
-    parsed = json.decode(resp.body)
+    parsed = json.try_decode(resp.body, None)
+    if parsed == None or "token" not in parsed:
+        print("Error: API returned 2xx but the body was not a valid token response.")
+        return 1
     print(parsed["token"])
     return 0
 

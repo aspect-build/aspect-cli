@@ -147,7 +147,10 @@ def fetch_latest_release(ctx: TaskContext, owner: str, repo: str) -> dict:
     if not response.body:
         fail("Empty response body from GitHub API")
 
-    return json.decode(response.body)
+    parsed = json.try_decode(response.body, None)
+    if parsed == None:
+        fail("GitHub API returned 200 but body was not valid JSON: " + response.body[:200].replace("\n", " "))
+    return parsed
 
 def fetch_release_by_tag(ctx: TaskContext, owner: str, repo: str, tag: str) -> dict:
     """Fetch a specific release by tag from GitHub API."""
@@ -162,7 +165,10 @@ def fetch_release_by_tag(ctx: TaskContext, owner: str, repo: str, tag: str) -> d
         msg = "Failed to fetch release info: HTTP " + str(response.status)
         fail(msg)
 
-    return json.decode(response.body)
+    parsed = json.try_decode(response.body, None)
+    if parsed == None:
+        fail("GitHub API returned 200 but body was not valid JSON: " + (response.body or "")[:200].replace("\n", " "))
+    return parsed
 
 def fetch_tag_as_release(ctx: TaskContext, owner: str, repo: str, tag: str) -> dict:
     """Fetch tag info and create a synthetic release object for tags without releases."""

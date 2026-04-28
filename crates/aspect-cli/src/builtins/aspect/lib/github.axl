@@ -35,23 +35,32 @@ def _do_request(ctx, method, url, token, payload = None):
         return (False, 0, "transport error: " + response)
     success = response.status >= 200 and response.status < 300
     body = response.body
-    if body:
-        # Sniff the body before json.decode. GitHub normally returns JSON
-        # for both successful and documented-error responses, but transient
-        # gateway flakes (502/503/504) can come back as HTML or plain text
-        # from edge proxies. `json.decode` is unrecoverable in Starlark
-        # (no try/except), so a non-JSON body here would crash the whole
-        # task — including any task that just calls into a github lifecycle
-        # hook (e.g. status checks via the github_status_checks feature).
-        # Treat any non-JSON body as a soft failure: return success=False
-        # with the raw snippet, letting callers fall back to status-driven
-        # error paths instead of bringing down the parent task.
-        stripped = body.lstrip()
-        if not stripped or stripped[0] not in ("{", "["):
-            snippet = body[:200].replace("\n", " ")
-            return (False, response.status, "non-JSON response (status %d): %s" % (response.status, snippet))
-        body = json.decode(body)
-    return (success, response.status, body)
+    if not body:
+        return (success, response.status, body)
+
+    # 5xx responses (and any other server-side error) often come back as
+    # HTML or plain text from edge proxies / rate limiters between us
+    # and GitHub. Don't attempt to decode them — surface a transport-
+    # style error snippet so callers fall back to status-driven error
+    # paths.
+    if response.status >= 500:
+        snippet = body[:200].replace("\n", " ")
+        return (False, response.status, "upstream error (status %d): %s" % (response.status, snippet))
+
+    # 2xx success and documented 4xx error envelopes use JSON.
+    # `json.try_decode` returns a sentinel on parse failure (truncated
+    # bodies, empty strings, or anything else malformed) — without it,
+    # a malformed body would crash the parent task (no try/except in
+    # Starlark), including unrelated tasks that only touch GitHub via
+    # a lifecycle hook (e.g. `aspect test` updating a status check).
+    # The sentinel has to be distinguishable from a valid `null` parse,
+    # which would also produce None.
+    _PARSE_FAILED = struct(_parse_failed = True)
+    parsed = json.try_decode(body, _PARSE_FAILED)
+    if parsed == _PARSE_FAILED:
+        snippet = body[:200].replace("\n", " ")
+        return (False, response.status, "non-JSON response (status %d): %s" % (response.status, snippet))
+    return (success, response.status, parsed)
 
 
 # Authentication
@@ -131,7 +140,17 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
         return None
 
     if resp.status >= 200 and resp.status < 300:
-        return json.decode(resp.body)["token"]
+        # Aspect's auth endpoint returns JSON on success. Use try_decode
+        # so a malformed/empty 2xx body (rare, but possible during partial
+        # outages) doesn't crash the parent task — falls through to the
+        # _reason error path instead.
+        parsed = json.try_decode(resp.body, None)
+        if parsed != None and "token" in parsed:
+            return parsed["token"]
+        if _reason != None:
+            snippet = (resp.body or "")[:200].replace("\n", " ")
+            _reason["reason"] = "Aspect API returned 2xx but body was unusable: %s" % snippet
+        return None
 
     if _reason != None:
         if resp.status == 401:

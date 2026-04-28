@@ -18,7 +18,11 @@ def _get_token(ctx):
     child.wait()
     if not output:
         return None
-    return json.decode(output)
+    # Use try_decode rather than json.decode — the runner socket is shared
+    # infrastructure and a stray non-JSON response (early-EOF, daemon
+    # restart, partial read) shouldn't take down the parent task. Return
+    # None to mean "couldn't auth", same as the no-output case above.
+    return json.try_decode(output, None)
 
 
 def _runner_api(ctx, token, runner_host, method, path, body = None):
@@ -36,7 +40,10 @@ def _runner_api(ctx, token, runner_host, method, path, body = None):
         return None
     if resp.status < 200 or resp.status >= 300:
         return None
-    return json.decode(resp.body) if resp.body else None
+    # try_decode → None on parse failure mirrors the "no body" branch
+    # below; both surface as a soft auth failure rather than crashing
+    # the parent task on a malformed runner-API response.
+    return json.try_decode(resp.body, None) if resp.body else None
 
 
 def _upload_artifact(ctx, path, name):

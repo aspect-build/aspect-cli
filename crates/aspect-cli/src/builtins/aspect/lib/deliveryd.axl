@@ -66,7 +66,13 @@ def query(ctx, endpoint, ci_host, commit_sha, workspace):
         msg = "deliveryd query failed: " + response.body
         fail(msg)
 
-    data = json.decode(response.body)
+    # try_decode + fail with a clean message — protects `aspect delivery`
+    # from a corrupted/early-truncated 2xx response from deliveryd
+    # (rare, but the daemon shares state between many concurrent
+    # deliveries, so a defensive decode here costs nothing).
+    data = json.try_decode(response.body, None)
+    if data == None:
+        fail("deliveryd /query returned 2xx but body was not valid JSON: " + (response.body or "")[:200].replace("\n", " "))
 
     targets = data.get("targets", []) or []
     # Build lookup dict by label
