@@ -15,8 +15,13 @@ permissions:
   id-token: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  # PRs share a group keyed by the head ref so a new push to the PR
+  # cancels the in-flight run. On push (main) and workflow_dispatch each
+  # run gets a unique group via run_id, so concurrent runs never cancel
+  # each other; cancel-in-progress is also gated to PRs as a safety
+  # double-check.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pre-build:
