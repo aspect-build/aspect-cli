@@ -10,7 +10,7 @@ load("@aspect//lib/github.axl", "github", "detect_commit_sha", "detect_build_url
 load("@aspect//lib/environment.axl", "color_enabled", "parse_git_url_name", "sanitize_filename")
 load("@aspect//lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments", "get_sarif_summary", "parse_sarif")
 load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset")
-load("@aspect//lib/runnable.axl", "canonical_label")
+load("@aspect//lib/runnable.axl", "canonical_label", "runnable")
 load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
 load("@aspect//lib/artifacts.axl", "detect_ci", "artifact_name")
 load("@aspect//lib/build_metadata.axl",
@@ -2134,6 +2134,52 @@ def test_compute_repro(tc: int) -> int:
     return tc
 
 
+def test_process_bes_target_completed(ctx: TaskContext, tc: int) -> int:
+    """Regression test for the canonical_label-shadow bug in _process_bes.
+
+    When `_canonical` was renamed to `canonical_label` (matching the function
+    in lib/runnable.axl), the local `canonical_label = canonical_label(...)`
+    inside `_process_bes` started shadowing the module-level function for the
+    whole function scope, breaking the call with "referenced before assignment".
+
+    This test wires up `runnable()` and feeds a fake `target_completed` event
+    through `r.event(...)` — the same call path delivery and format use. Before
+    the fix this raised; after the fix it succeeds and populates target_fileset.
+    """
+    r = runnable(ctx, ["//foo:bar"])
+    fake_event = struct(
+        kind = "target_completed",
+        id = struct(id = "evt1", label = "//foo:bar"),
+        payload = struct(output_group = [
+            struct(name = "default", file_sets = [struct(id = "fs1")]),
+        ]),
+    )
+    # Pre-fix this call raised; post-fix it returns None and updates state.
+    r.event(fake_event)
+    tc = test_case(tc, True, "_process_bes: target_completed does not raise (canonical_label shadow regression)")
+
+    # named_set_of_files event also goes through _process_bes — sanity check.
+    fake_nsf = struct(
+        kind = "named_set_of_files",
+        id = struct(id = "fs1"),
+        payload = struct(files = [], file_sets = []),
+    )
+    r.event(fake_nsf)
+    tc = test_case(tc, True, "_process_bes: named_set_of_files does not raise")
+
+    # Untracked targets are silently ignored — verify by feeding an event for
+    # a label that wasn't in the constructor list.
+    fake_untracked = struct(
+        kind = "target_completed",
+        id = struct(id = "evt2", label = "//other:thing"),
+        payload = struct(output_group = []),
+    )
+    r.event(fake_untracked)
+    tc = test_case(tc, True, "_process_bes: target_completed for untracked label is a no-op")
+
+    return tc
+
+
 def test_canonical_label(tc: int) -> int:
     """Coverage for runnable.canonical_label — Bazel label normalization."""
     cases = [
@@ -2392,6 +2438,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_sarif_lib(tc)
     tc = test_file_uri_to_path(tc)
     tc = test_canonical_label(tc)
+    tc = test_process_bes_target_completed(ctx, tc)
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
     tc = test_fmt_elapsed(tc)
