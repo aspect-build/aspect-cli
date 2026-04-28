@@ -3,7 +3,8 @@ Exercise axl
 """
 load("@demo//answer.axl", "ANSWER")
 load("./lambda.axl", "lambda_with_global_bind")
-load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title")
+load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title", "compute_repro")
+load("@aspect//delivery.axl", delivery_fmt_elapsed = "fmt_elapsed")
 load("@aspect//lib/path_glob.axl", "match_path", "match_any")
 load("@aspect//lib/github.axl", "github", "detect_commit_sha", "detect_build_url")
 load("@aspect//lib/environment.axl", "color_enabled", "parse_git_url_name", "sanitize_filename")
@@ -1963,6 +1964,176 @@ def test_lint_filters(tc: int) -> int:
     return tc
 
 
+def test_fmt_elapsed(tc: int) -> int:
+    """Coverage for delivery.fmt_elapsed — duration formatting."""
+    cases = [
+        # (secs, expected, description)
+        (0,        "0.0s",  "zero"),
+        (0.0,      "0.0s",  "zero float"),
+        (0.5,      "0.5s",  "half-second"),
+        (0.55,     "0.5s",  "tenths truncate (no rounding)"),
+        (1,        "1.0s",  "one whole second"),
+        (1.4,      "1.4s",  "below 60 seconds"),
+        (9.99,     "9.9s",  "9.99 → 9.9 (truncated, not rounded)"),
+        (59,       "59.0s", "just under a minute"),
+        (59.9,     "59.9s", "59.9 still sub-minute"),
+        (60,       "1m0s",  "exactly one minute"),
+        (61,       "1m1s",  "minute + 1"),
+        (61.5,     "1m1s",  "minute + 1 (fractional dropped)"),
+        (90,       "1m30s", "90 sec → 1m30s"),
+        (3600,     "60m0s", "one hour → 60m0s (no hour unit)"),
+        (3661,     "61m1s", "hour + minute + sec → 61m1s"),
+    ]
+    for (secs, expected, desc) in cases:
+        got = delivery_fmt_elapsed(secs)
+        tc = test_case(tc, got == expected, "fmt_elapsed: %s → %r (got %r)" % (desc, expected, got))
+    return tc
+
+
+def test_summary_title(tc: int) -> int:
+    """Coverage for bazel_results.summary_title — GitHub check title."""
+    # status="passed" + no buckets → state empty → just task+subject
+    r = init_results()
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Build")
+    tc = test_case(tc, title == "Build //...", "summary_title: empty results, passed → task+subject only (got %r)" % title)
+
+    # status="running" → "Running..." (mid-build state, regardless of buckets)
+    r = init_results()
+    title = summary_title(r, "running", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Running...", "summary_title: running → Running... (got %r)" % title)
+
+    # status="failing" also counts as in-progress.
+    title = summary_title(r, "failing", target_pattern = "//foo", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //foo · Running...", "summary_title: failing → Running... (got %r)" % title)
+
+    # passed_test_total > 0, all cached → "Tests passed (cached)"
+    r = init_results()
+    r["passed_test_total"] = 5
+    r["cached_test_total"] = 5
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests passed (cached)", "summary_title: all cached → Tests passed (cached) (got %r)" % title)
+
+    # Not all cached → "Tests passed" (TEST_PASSED takes precedence over PASSED_CACHED).
+    r = init_results()
+    r["passed_test_total"] = 5
+    r["cached_test_total"] = 2
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests passed", "summary_title: partial cached → Tests passed (got %r)" % title)
+
+    # failed_tests with status=failed → "Tests failed"
+    r = init_results()
+    r["failed_tests"] = [{"label": "//a:t", "status": "failed"}]
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests failed", "summary_title: failed test → Tests failed (got %r)" % title)
+
+    # failed_tests with status=timeout → "Tests timeout"
+    r = init_results()
+    r["failed_tests"] = [{"label": "//a:t", "status": "timeout"}]
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests timeout", "summary_title: timeout → Tests timeout (got %r)" % title)
+
+    # flaky_test_total → "Tests flaky"
+    r = init_results()
+    r["flaky_test_total"] = 1
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Tests flaky", "summary_title: flaky → Tests flaky (got %r)" % title)
+
+    # failed_targets (build failure) → "Failed to build"
+    r = init_results()
+    r["failed_targets"] = [{"label": "//a:b"}]
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Build")
+    tc = test_case(tc, title == "Build //... · Failed to build", "summary_title: failed target → Failed to build (got %r)" % title)
+
+    # aborted=True dominates everything (even with passed tests in the mix).
+    r = init_results()
+    r["aborted"] = True
+    r["passed_test_total"] = 99
+    title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Test")
+    tc = test_case(tc, title == "Test //... · Invocation disconnected", "summary_title: aborted → Invocation disconnected (got %r)" % title)
+
+    # Empty task_display_name → no leading "Test "; subject + state only.
+    r = init_results()
+    r["passed_test_total"] = 1
+    title = summary_title(r, "passed", target_pattern = "//foo")
+    tc = test_case(tc, title == "//foo · Tests passed", "summary_title: empty task name → subject + state (got %r)" % title)
+
+    # Empty target_pattern → no subject; task + state.
+    title = summary_title(r, "passed", task_display_name = "Test")
+    tc = test_case(tc, title == "Test · Tests passed", "summary_title: empty subject → task + state (got %r)" % title)
+
+    # Both empty → state only.
+    title = summary_title(r, "passed")
+    tc = test_case(tc, title == "Tests passed", "summary_title: state-only fallback (got %r)" % title)
+
+    # Long subject is truncated at 60 chars (with ellipsis).
+    long_target = "//" + "x" * 200
+    title = summary_title(r, "passed", target_pattern = long_target, task_display_name = "Build")
+    tc = test_case(tc, "…" in title, "summary_title: long subject gets ellipsis truncation (got %r)" % title)
+    tc = test_case(tc, title.startswith("Build //"), "summary_title: still starts with task+subject prefix")
+    tc = test_case(tc, len(title) <= 160, "summary_title: respects 160 char hard limit (len=%d)" % len(title))
+
+    return tc
+
+
+def test_compute_repro(tc: int) -> int:
+    """Coverage for bazel_results.compute_repro — repro-command derivation."""
+    # No failures → empty repros, totals 0.
+    r = init_results()
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro"] == "", "compute_repro: no failures → empty build_repro")
+    tc = test_case(tc, r["build_repro_total"] == 0, "compute_repro: no failures → build_repro_total=0")
+    tc = test_case(tc, r["test_repro"] == "", "compute_repro: no failures → empty test_repro")
+    tc = test_case(tc, r["test_repro_total"] == 0, "compute_repro: no failures → test_repro_total=0")
+
+    # failed_actions: dedupe + ordering.
+    r = init_results()
+    r["failed_actions"] = [
+        {"label": "//a:lib", "mnemonics": ["CppCompile"]},
+        {"label": "//b:lib", "mnemonics": ["CppCompile"]},
+        {"label": "//a:lib", "mnemonics": ["CppLink"]},  # dup label
+    ]
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro"] == "bazel build //a:lib //b:lib", "compute_repro: dedupes labels and preserves insertion order (got %r)" % r["build_repro"])
+    tc = test_case(tc, r["build_repro_total"] == 2, "compute_repro: build_repro_total = unique labels")
+
+    # Falls back to failed_targets when failed_actions is empty.
+    r = init_results()
+    r["failed_targets"] = [{"label": "//x:y"}, {"label": "//z:w"}]
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro"] == "bazel build //x:y //z:w", "compute_repro: falls back to failed_targets (got %r)" % r["build_repro"])
+    tc = test_case(tc, r["build_repro_total"] == 2, "compute_repro: build_repro_total from failed_targets")
+
+    # Action-level labels take precedence over target-level fallback when both present.
+    r = init_results()
+    r["failed_actions"] = [{"label": "//action:fail"}]
+    r["failed_targets"] = [{"label": "//target:fail"}]
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro"] == "bazel build //action:fail", "compute_repro: prefers action labels over target labels (got %r)" % r["build_repro"])
+
+    # failed_tests → test_repro.
+    r = init_results()
+    r["failed_tests"] = [
+        {"label": "//a:t1", "status": "failed"},
+        {"label": "//b:t2", "status": "timeout"},
+    ]
+    compute_repro(r)
+    tc = test_case(tc, r["test_repro"] == "bazel test //a:t1 //b:t2", "compute_repro: test_repro joins failed test labels (got %r)" % r["test_repro"])
+    tc = test_case(tc, r["test_repro_total"] == 2, "compute_repro: test_repro_total = failed test count")
+
+    # Long label list is truncated at MAX_REPRO_CHARS but total still reflects all.
+    r = init_results()
+    long_labels = []
+    for i in range(200):
+        long_labels.append({"label": "//pkg/some/longer/path:target_" + str(i)})
+    r["failed_targets"] = long_labels
+    compute_repro(r)
+    tc = test_case(tc, r["build_repro_total"] == 200, "compute_repro: total reflects all labels even when repro truncates (got %d)" % r["build_repro_total"])
+    tc = test_case(tc, len(r["build_repro"]) <= 1000, "compute_repro: build_repro respects MAX_REPRO_CHARS (len=%d)" % len(r["build_repro"]))
+    tc = test_case(tc, r["build_repro"].startswith("bazel build //pkg/some/longer/path:target_0"), "compute_repro: truncated repro starts with first labels")
+
+    return tc
+
+
 def test_canonical_label(tc: int) -> int:
     """Coverage for runnable.canonical_label — Bazel label normalization."""
     cases = [
@@ -2223,6 +2394,9 @@ def impl(ctx: TaskContext) -> int:
     tc = test_canonical_label(tc)
     tc = test_validate_role(tc)
     tc = test_lint_filters(tc)
+    tc = test_fmt_elapsed(tc)
+    tc = test_summary_title(tc)
+    tc = test_compute_repro(tc)
     tc = test_parse_git_url_name(tc)
     tc = test_sanitize_filename(tc)
     tc = test_deliveryd_parse_endpoint(tc)

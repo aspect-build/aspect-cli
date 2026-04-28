@@ -153,7 +153,12 @@ def _style(text, codes, ansi):
 def pad(s, width):
     return s + " " * (width - len(s))
 
-def _fmt_elapsed(secs):
+def fmt_elapsed(secs):
+    """Format an elapsed-seconds duration as `S.Ts` (sub-minute) or `MmSs` (≥1 min).
+
+    Sub-minute output truncates to the tenths place (no rounding) — e.g. 9.99 → "9.9s".
+    Minute output is whole-second; a minute is the largest unit (3661 → "61m1s").
+    """
     if secs < 60:
         return "{}.{}s".format(int(secs), int(secs * 10) % 10)
     return "{}m{}s".format(int(secs) // 60, int(secs) % 60)
@@ -262,7 +267,7 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
             break
     if status.code != 0:
         return {}, status.code
-    print("  Build took {}.".format(_fmt_elapsed(time.monotonic() - _t_phase1)))
+    print("  Build took {}.".format(fmt_elapsed(time.monotonic() - _t_phase1)))
 
     # Phase 2: check every action against the remote cache without executing anything.
     # --experimental_remote_require_cached forces GetActionResult for each action, so the
@@ -302,7 +307,7 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
                 original_label = canonical_targets[canonical_label]
                 output_shas[original_label] = entry.details.details.request.action_digest.hash
     ctx.std.fs.remove_file(log_path)
-    print("  Checksum took {}.".format(_fmt_elapsed(time.monotonic() - _t_phase2)))
+    print("  Checksum took {}.".format(fmt_elapsed(time.monotonic() - _t_phase2)))
 
     return output_shas, 0
 
@@ -476,7 +481,7 @@ def _delivery_impl(ctx):
     if phase_1_2_runs:
         _t_build = time.monotonic()
         output_shas, build_code = _get_output_shas(ctx, bazel_trait, build_events, targets, expanded_flags, remote_cache_uri, ansi)
-        print("  Build+checksum total: {}.".format(_fmt_elapsed(time.monotonic() - _t_build)))
+        print("  Build+checksum total: {}.".format(fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
             handler(ctx, build_code)
@@ -547,7 +552,7 @@ def _delivery_impl(ctx):
         if status.code != 0:
             print(_style("Build failed with exit code {}".format(status.code), _BOLD + _RED, ansi))
             return status.code
-        print("  Download took {}.".format(_fmt_elapsed(time.monotonic() - _t_download)))
+        print("  Download took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
 
     max_par = ctx.args.max_parallelization
     if max_par < 1:
@@ -622,7 +627,7 @@ def _delivery_impl(ctx):
             else:
                 exit_code = child.wait().code
 
-            duration = _fmt_elapsed(time.monotonic() - t_start)
+            duration = fmt_elapsed(time.monotonic() - t_start)
             if exit_code == 0:
                 if track_state:
                     deliveryd_deliver(ctx, endpoint, ci_host, output_sha, prefix, build_url)
@@ -669,7 +674,7 @@ def _delivery_impl(ctx):
         print("  {}  {}{}  {}  {}  {}".format(
             pad(label, max_label_width), styled_status, padding, pad(duration, max_duration_width), pad(short_hash, 32), delivered_by))
 
-    total_elapsed = _fmt_elapsed(time.monotonic() - _t_total)
+    total_elapsed = fmt_elapsed(time.monotonic() - _t_total)
     print("")
     summary_parts = [
         _style("{} delivered".format(success_count), _BOLD + _GREEN, ansi),
