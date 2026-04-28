@@ -19,14 +19,31 @@ build = task(
         ArtifactsTrait,
     ],
     args = {
-        "targets": args.positional(minimum = 1, maximum = 512, default = ["..."]),
-        "bazel_flag": args.string_list(),
-        "bazel_startup_flag": args.string_list(),
-        "remote_executor": args.string(),
-        "remote_cache": args.string(),
-        "bes_backend": args.string_list(),
-        "bes_header": args.string_list(),
-        "cancel": args.boolean(default = False, description = "Cancel any running Bazel invocation before starting the build"),
-        "output_base": args.string(default = "", description = "Bazel output base path to target a specific server instance"),
+        "targets": args.positional(
+            minimum = 1,
+            maximum = 512,
+            default = ["..."],
+            description = "Bazel target patterns to build. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory.",
+        ),
+        "bazel_flag": args.string_list(
+            description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
+        ),
+        "bazel_startup_flag": args.string_list(
+            description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+        ),
+        "bes_backend": args.string_list(
+            description = "Build Event Service backend(s) to stream BEP events to. Repeat the flag to pass multiple. Translated to --bes_backend=<value> on the Bazel command.",
+        ),
+        "bes_header": args.string_list(
+            description = "HTTP header(s) attached to BES streams (e.g. --bes-header=x-token=abc). Repeat the flag to pass multiple. Translated to --bes_header=<value> on the Bazel command.",
+        ),
+        "cancel": args.boolean(
+            default = False,
+            description = "Cancel any running Bazel invocation before starting the build.",
+        ),
+        "output_base": args.string(
+            default = "",
+            description = "Bazel output base path. Use to target a specific Bazel server instance — distinct paths run independent JVMs and cache contents.",
+        ),
     },
 )
