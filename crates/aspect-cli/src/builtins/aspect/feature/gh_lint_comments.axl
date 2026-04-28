@@ -290,15 +290,35 @@ def _github_lint_impl(ctx: FeatureContext):
     max_pr_comments = ctx.args.max_pr_comments
     state = {
         "all_comments": [],
+        # all_comments_count tracks the total number of diagnostics seen
+        # across the run regardless of whether the objects are still buffered.
+        # Once the cap is exhausted, all_comments is cleared and stops growing
+        # (debug mode keeps it populated for the verbose summary).
+        "all_comments_count": 0,
         "posted": 0,
         "filtered": 0,
         "errors": [],
-        # Cap accounting — set in _lint_end once we know the global comment
-        # set, so it reflects priority-aware drops rather than per-batch
-        # arrival order. Surfaced as a WARNING so users know the displayed
-        # annotations are a subset.
         "dropped_due_to_cap": 0,
+        # Per-severity breakdown of cap-dropped diagnostics. Surfaced in the
+        # WARNING line so the user knows what the cap suppressed.
+        "dropped_per_severity": {},
     }
+
+    def _increment_dropped(comments_or_severity, count = 1):
+        """Bump dropped_due_to_cap and per-severity counters.
+
+        Pass either an iterable of comment dicts (severity inferred from
+        each `_severity` key) or a string severity + count.
+        """
+        if type(comments_or_severity) == "string":
+            sev = comments_or_severity
+            state["dropped_due_to_cap"] += count
+            state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + count
+        else:
+            for c in comments_or_severity:
+                sev = c.get("_severity") or "other"
+                state["dropped_due_to_cap"] += 1
+                state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
     if gh:
         # Determine the workspace prefix relative to the git root once (e.g. "examples/lint/")
@@ -340,6 +360,21 @@ def _github_lint_impl(ctx: FeatureContext):
         if gh and gh["stale"]:
             return
         comments = _build_comments(ctx, filepath)
+        state["all_comments_count"] += len(comments)
+
+        cap_exhausted = bool(gh) and state["posted"] >= max_pr_comments
+
+        # If the cap is already exhausted, just count by severity and return.
+        # Skip buffering entirely (unless debug mode wants the full set).
+        if cap_exhausted and not debug:
+            _increment_dropped(comments)
+            return
+
+        if cap_exhausted and debug:
+            state["all_comments"].extend(comments)
+            _increment_dropped(comments)
+            return
+
         state["all_comments"].extend(comments)
         if not gh:
             return
@@ -377,10 +412,10 @@ def _github_lint_impl(ctx: FeatureContext):
 
         remaining_budget = max_pr_comments - state["posted"]
         if remaining_budget <= 0:
-            state["dropped_due_to_cap"] += len(new_only)
+            _increment_dropped("error", len(new_only))
             return
         if len(new_only) > remaining_budget:
-            state["dropped_due_to_cap"] += len(new_only) - remaining_budget
+            _increment_dropped("error", len(new_only) - remaining_budget)
             new_only = new_only[:remaining_budget]
 
         before = len(gh["existing_markers"])
@@ -388,12 +423,23 @@ def _github_lint_impl(ctx: FeatureContext):
         state["posted"] += len(gh["existing_markers"]) - before
         state["errors"].extend(errors)
 
+        # Streaming just exhausted the cap — drop any warnings/notes already
+        # buffered from earlier reports; they can't be posted now. (Debug
+        # mode keeps the full buffer for the verbose summary.)
+        if not debug and state["posted"] >= max_pr_comments and state["all_comments"]:
+            for c in state["all_comments"]:
+                if c.get("_severity") != "error":
+                    sev = c.get("_severity") or "other"
+                    state["dropped_due_to_cap"] += 1
+                    state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
+            state["all_comments"] = []
+
     def _lint_end(ctx, relevant_diagnostics):
         if debug:
             print("github lint comment debug summary:")
             if gh_inactive_reason:
                 print("inactive reason:  %s" % gh_inactive_reason)
-            print("found comments:   %s" % len(state["all_comments"]))
+            print("found comments:   %s" % state["all_comments_count"])
             if gh:
                 print("git prefix:       %r" % gh.get("prefix", ""))
                 changed_line_count = 0
@@ -436,10 +482,10 @@ def _github_lint_impl(ctx: FeatureContext):
             # 4. Cap remainder.
             remaining_budget = max_pr_comments - state["posted"]
             if remaining_budget <= 0:
-                state["dropped_due_to_cap"] += len(new_only)
+                _increment_dropped(new_only)
                 new_only = []
             elif len(new_only) > remaining_budget:
-                state["dropped_due_to_cap"] += len(new_only) - remaining_budget
+                _increment_dropped(new_only[remaining_budget:])
                 new_only = new_only[:remaining_budget]
 
             # 5. Post.
@@ -454,8 +500,20 @@ def _github_lint_impl(ctx: FeatureContext):
             if state["dropped_due_to_cap"] > 0:
                 ansi = color_enabled(ctx.std)
                 prefix = (_BOLD + _YELLOW + "WARNING:" + _RESET) if ansi else "WARNING:"
-                print("%s capped at %d PR review comment(s); %d additional diagnostic(s) not posted to GitHub. The lint task's exit code is unaffected by this cap. Run `aspect lint` locally to see the full list, or raise --github-lint-comments:max-pr-comments=<n> to widen the cap." % (
-                    prefix, max_pr_comments, state["dropped_due_to_cap"],
+                # Build a per-severity breakdown — well-known levels in
+                # priority order, then anything else as "other".
+                by_sev = state["dropped_per_severity"]
+                parts = []
+                for sev in ["error", "warning", "note"]:
+                    n = by_sev.get(sev, 0)
+                    if n > 0:
+                        parts.append("%d %s" % (n, sev))
+                other = sum([v for k, v in by_sev.items() if k not in ("error", "warning", "note")])
+                if other > 0:
+                    parts.append("%d other" % other)
+                breakdown = " (" + ", ".join(parts) + ")" if parts else ""
+                print("%s capped at %d PR review comment(s); %d additional diagnostic(s)%s not posted to GitHub. The lint task's exit code is unaffected by this cap. Run `aspect lint` locally to see the full list, or raise --github-lint-comments:max-pr-comments=<n> to widen the cap." % (
+                    prefix, max_pr_comments, state["dropped_due_to_cap"], breakdown,
                 ))
 
     lint_trait.lint_report.append(_lint_report)
