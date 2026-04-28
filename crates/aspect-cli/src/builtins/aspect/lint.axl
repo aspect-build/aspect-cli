@@ -99,18 +99,21 @@ LintTrait = trait(
     # [{"file": str, "lines": [int (0-based added line indices)]}].
     changed_files = attr(list, default = []),
 
-    # Lifecycle hooks — lists of callables, composable via .append()
-    # Features hold their own state via closures; no shared state dict is passed.
-    lint_start  = attr(list[typing.Callable[[TaskContext], None]], default = []),
-    # Called once before the build.
+    # Lifecycle hooks. Each is a list of callables; features compose by
+    # appending their hook to the list.
 
-    lint_report = attr(list[typing.Callable[[TaskContext, str], None]], default = []),
+    # Called once before the build, after lint_trait.changed_files is set.
+    # Signature: (ctx) -> None.
+    lint_start = attr(list[typing.Callable[[TaskContext], None]], default = []),
+
     # Called per SARIF file as it arrives during the build stream.
-    # Signature: (ctx, sarif_filepath)
+    # Signature: (ctx, sarif_filepath) -> None.
+    lint_report = attr(list[typing.Callable[[TaskContext, str], None]], default = []),
 
-    lint_end    = attr(list[typing.Callable[[TaskContext, list], None]], default = []),
-    # Called once after all reports, receives strategy-filtered diagnostics.
-    # Signature: (ctx, relevant_diagnostics)
+    # Called once after all SARIF reports are collected, receives the
+    # strategy-filtered diagnostics for this run.
+    # Signature: (ctx, relevant_diagnostics) -> None.
+    lint_end = attr(list[typing.Callable[[TaskContext, list], None]], default = []),
 )
 
 # buildifier: disable=function-docstring
