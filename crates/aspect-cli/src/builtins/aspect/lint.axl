@@ -92,6 +92,13 @@ _STRATEGIES = {
 
 
 LintTrait = trait(
+    # Canonical changed-file set for this lint run. Populated by the task
+    # impl via detect_changed_files (GitHub PR Files API → local-git
+    # fallback) BEFORE any lifecycle hook fires, so features read it as a
+    # data field rather than each computing their own. Shape:
+    # [{"file": str, "lines": [int (0-based added line indices)]}].
+    changed_files = attr(list, default = []),
+
     # Lifecycle hooks — lists of callables, composable via .append()
     # Features hold their own state via closures; no shared state dict is passed.
     lint_start  = attr(list[typing.Callable[[TaskContext], None]], default = []),
@@ -118,20 +125,22 @@ def _impl(ctx: TaskContext) -> int:
     for hook in hc_trait.pre_health_check:
         hook(ctx)
 
-    for hook in lint_trait.lint_start:
-        hook(ctx)
-
-    # 1. Fetch changed files (needed by strategy filter)
-    # Detect changed files: prefer the GitHub PR Files API when authenticated
-    # and in a PR context (works on any CI host), falling back to local
-    # `git diff <base> --unified=0`. Lives in lib/github.axl as a shared
-    # helper because format also wants the same precedence.
+    # Detect changed files BEFORE lint_start hooks so features can read
+    # lint_trait.changed_files as the canonical set. Prefers the GitHub
+    # PR Files API when authenticated and in a PR context (works on any
+    # CI host), falling back to local `git diff <base> --unified=0`.
+    # Lives in lib/github.axl because format also wants the same
+    # precedence.
     changed_files = detect_changed_files(
         ctx,
         line_level = True,
         base_ref = ctx.args.base_ref,
         merge_base = ctx.args.merge_base or None,
     )
+    lint_trait.changed_files = changed_files
+
+    for hook in lint_trait.lint_start:
+        hook(ctx)
 
 
     # 3. Build flags — lint-specific first, then BazelTrait additions.

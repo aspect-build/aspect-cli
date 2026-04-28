@@ -2,7 +2,7 @@
 
 load("../lint.axl", "LintTrait")
 load("../lib/environment.axl", "color_enabled")
-load("../lib/github.axl", "detect_changed_files", "github")
+load("../lib/github.axl", "github")
 load("../lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
 
@@ -275,14 +275,14 @@ def _github_lint_impl(ctx: FeatureContext):
         if git_out.status.success:
             gh["prefix"] = git_out.stdout.strip()
 
-        # Populate gh["changed_lines"] for _filter_by_diff and _cleanup_comments.
-        # The lint task impl computes its own changed_files via the shared
-        # detect_changed_files helper for the strategy filter. Both call paths
-        # hit the same GitHub PR Files API (one extra HTTP call per lint run);
-        # there's no shared cache because the two consumers run in different
-        # phases (feature activation vs. task execution).
-        changed = detect_changed_files(ctx, line_level = True)
-        gh["changed_lines"] = {f["file"]: f["lines"] for f in changed}
+    def _lint_start(ctx):
+        # Read changed_files from the lint trait, populated by the lint
+        # task impl via detect_changed_files. Avoids a duplicate GitHub
+        # PR Files API call (or a duplicate `git diff`) — the task impl
+        # has already done the work.
+        if not gh:
+            return
+        gh["changed_lines"] = {f["file"]: f["lines"] for f in lint_trait.changed_files}
 
     def _lint_report(ctx, filepath):
         # Per-SARIF-file callback. Hybrid posting strategy:
@@ -455,6 +455,7 @@ def _github_lint_impl(ctx: FeatureContext):
                     prefix, max_pr_comments, state["dropped_due_to_cap"], breakdown,
                 ))
 
+    lint_trait.lint_start.append(_lint_start)
     lint_trait.lint_report.append(_lint_report)
     lint_trait.lint_end.append(_lint_end)
 
