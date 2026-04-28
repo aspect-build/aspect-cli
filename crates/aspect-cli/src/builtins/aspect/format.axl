@@ -274,8 +274,23 @@ def _impl(ctx: TaskContext) -> int:
 
     # Optional: archive the diff as a CI artifact so reviewers can apply
     # it locally without re-running the formatter. Off by default.
+    #
+    # Scope the uploaded patch to `affected` (the post-ignore file set)
+    # so it matches the failure-decision basis. In changed-files mode
+    # this is redundant — the formatter never saw ignored files, so
+    # `formatter_diff` is already scoped to un-ignored paths. In
+    # --all-files mode the formatter discovers files itself via
+    # `git ls-files` and rewrites ignored ones; without re-scoping, the
+    # uploaded patch would carry those changes even though they don't
+    # contribute to failure or appear in the user-facing affected list.
     if ctx.args.upload_format_diff:
-        _try_upload_format_diff(ctx, formatter_diff)
+        if ignored_count > 0:
+            upload_diff, _, _ = _git_capture(
+                ctx, "diff", pre_snap if pre_snap else "HEAD", "--", *affected,
+            )
+        else:
+            upload_diff = formatter_diff
+        _try_upload_format_diff(ctx, upload_diff)
 
     if ctx.args.soft_fail:
         out.write("\x1b[0;33mWARNING\x1b[0m: formatting required, but --soft-fail is set; task exits 0.\n")
