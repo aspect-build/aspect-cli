@@ -219,8 +219,10 @@ steps:
     label: ":package: Delivery Task"
     depends_on:
       - pre-build
-      - force-targets-input
-    allow_dependency_failure: true # input step is skipped on non-UI builds
+      # Per-dep allow_failure so a skipped input on non-UI builds doesn't
+      # bypass pre-build failures.
+      - step: force-targets-input
+        allow_failure: true
     agents:
       queue: aspect-default
     timeout_in_minutes: 20
