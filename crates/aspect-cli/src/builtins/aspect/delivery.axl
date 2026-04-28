@@ -123,7 +123,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait")
-load("@aspect//lib/environment.axl", _is_tty = "is_tty")
+load("@aspect//lib/environment.axl", "color_enabled")
 load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha")
 load("@aspect//lib/runnable.axl", "runnable")
 load("@std//time.axl", "time")
@@ -144,9 +144,9 @@ _YELLOW = "\033[33m"
 _RED = "\033[31m"
 _RESET = "\033[0m"
 
-def _style(text, codes, is_tty):
+def _style(text, codes, ansi):
     """Wrap text in ANSI codes if terminal is TTY."""
-    if is_tty:
+    if ansi:
         return codes + text + _RESET
     return text
 
@@ -158,34 +158,34 @@ def _fmt_elapsed(secs):
         return "{}.{}s".format(int(secs), int(secs * 10) % 10)
     return "{}m{}s".format(int(secs) // 60, int(secs) % 60)
 
-def _print_header(is_tty, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state):
-    print(_style("Delivery:", _BOLD, is_tty))
+def _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, expanded_flags, targets, forced_targets, mode, dry_run, track_state):
+    print(_style("Delivery:", _BOLD, ansi))
     mode_str = mode + (" (dry-run)" if dry_run else "")
-    print("  {}: {}".format(_style("Mode", _BOLD, is_tty), mode_str))
+    print("  {}: {}".format(_style("Mode", _BOLD, ansi), mode_str))
     if track_state:
-        print("  {}: {}".format(_style("State", _BOLD, is_tty), endpoint))
+        print("  {}: {}".format(_style("State", _BOLD, ansi), endpoint))
     else:
-        print("  {}: (untracked — --track-state=false)".format(_style("State", _BOLD, is_tty)))
-    print("  {}: {}".format(_style("Host", _BOLD, is_tty), ci_host))
-    print("  {}: {}".format(_style("Commit", _BOLD, is_tty), commit_sha))
-    print("  {}: {} (set by {})".format(_style("Prefix", _BOLD, is_tty), prefix, prefix_source))
-    print("  {}: {}".format(_style("URL", _BOLD, is_tty), build_url))
-    print("  {}: {}".format(_style("Flags", _BOLD, is_tty), expanded_flags))
+        print("  {}: (untracked — --track-state=false)".format(_style("State", _BOLD, ansi)))
+    print("  {}: {}".format(_style("Host", _BOLD, ansi), ci_host))
+    print("  {}: {}".format(_style("Commit", _BOLD, ansi), commit_sha))
+    print("  {}: {} (set by {})".format(_style("Prefix", _BOLD, ansi), prefix, prefix_source))
+    print("  {}: {}".format(_style("URL", _BOLD, ansi), build_url))
+    print("  {}: {}".format(_style("Flags", _BOLD, ansi), expanded_flags))
     print()
-    print(_style("Found {} target(s) to deliver:".format(len(targets)), _BOLD, is_tty))
+    print(_style("Found {} target(s) to deliver:".format(len(targets)), _BOLD, ansi))
     for t in targets:
-        forced_marker = _style(" (forced)", _YELLOW, is_tty) if t in forced_targets else ""
+        forced_marker = _style(" (forced)", _YELLOW, ansi) if t in forced_targets else ""
         print("  - {}{}".format(t, forced_marker))
     print("")
 
-def _print_captured_output(label, exit_code, stdout, stderr, is_tty):
+def _print_captured_output(label, exit_code, stdout, stderr, ansi):
     sep = "─" * 36
     header = "── {} (exit {}) ".format(label, exit_code)
-    print(_style(header + sep[:max(0, len(sep) - len(header))], _BOLD, is_tty))
+    print(_style(header + sep[:max(0, len(sep) - len(header))], _BOLD, ansi))
     combined = (stdout or "") + (stderr or "")
     if combined.strip():
         print(combined)
-    print(_style(sep, _BOLD, is_tty))
+    print(_style(sep, _BOLD, ansi))
 
 
 def _canonical(label):
@@ -219,7 +219,7 @@ hashsum = aspect(implementation = _hashsum_impl)
 
 _GRPC_LOG_PATH = "/tmp/aspect-delivery-grpc-{}.bin"
 
-def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remote_executor_uri, is_tty):
+def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remote_executor_uri, ansi):
     """
     Build targets and extract action cache keys from the grpc log.
 
@@ -244,7 +244,7 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
         "--inject_repository=aspect_delivery=" + repo_dir
     ]
 
-    print("  {} {} target(s)...".format(_style("Building", _BOLD, is_tty), len(targets)))
+    print("  {} {} target(s)...".format(_style("Building", _BOLD, ansi), len(targets)))
     phase1_flags = bazel_flags + ["--nokeep_state_after_build"]
     _t_phase1 = time.monotonic()
     for _ in range(10):
@@ -269,7 +269,7 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
     # DeliveryHash action digest flows into the grpc log even when it is a cache miss.
     # We parse the log regardless of exit code; a non-zero result here simply means
     # DeliveryHash was not yet cached remotely, which is expected on first delivery.
-    print("  {} {} target(s)...".format(_style("Checksuming", _BOLD, is_tty), len(targets)))
+    print("  {} {} target(s)...".format(_style("Checksuming", _BOLD, ansi), len(targets)))
     _t_phase2 = time.monotonic()
     log_path = _GRPC_LOG_PATH.format(ctx.task.key)
     phase2_flags = bazel_flags + aspect_flags + [
@@ -317,7 +317,7 @@ def _delivery_impl(ctx):
     delivery_trait = ctx.traits[DeliveryTrait]
     delivery_trait.delivery_start()
 
-    is_tty = _is_tty(ctx.std)
+    ansi = color_enabled(ctx.std)
 
     # Three orthogonal flags shape this invocation. See the module docstring
     # at the top of this file for the full reference and combination matrix.
@@ -393,7 +393,7 @@ def _delivery_impl(ctx):
     )
     rc_startup_flags, expanded_flags = rc.expand_all(command = "build")
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
-    print(rc.announce(command = "build", ansi = is_tty))
+    print(rc.announce(command = "build", ansi = ansi))
 
     # Delivery requires a remote cache to populate the grpc log with action digests.
     # common-section flags are re-encoded as --default_override=0:common=--remote_cache=...
@@ -419,12 +419,12 @@ def _delivery_impl(ctx):
         # The rc announce was already printed above; we just emit the
         # mode-specific NOTE/ERROR here.
         if mode == "always" and dry_run and not track_state:
-            print(_style("NOTE:", _BOLD + _YELLOW, is_tty) +
+            print(_style("NOTE:", _BOLD + _YELLOW, ansi) +
                   " No remote cache configured; the preview will list candidates without action digests." +
                   " Configure --bazel-flag=--remote_cache=<uri> (or set it in .bazelrc) to surface digests in the preview output.")
             phase_1_2_runs = False
         else:
-            print(_style("ERROR:", _BOLD + _RED, is_tty) +
+            print(_style("ERROR:", _BOLD + _RED, ansi) +
                   " Delivery requires a remote cache but no --remote_cache or --remote_executor was found." +
                   " (Use --mode=always --track-state=false to deliver every target without change detection.)")
             return 1
@@ -449,7 +449,7 @@ def _delivery_impl(ctx):
             forced_targets.append(tok)
 
     if not targets:
-        print(_style("No targets to deliver", _BOLD + _YELLOW, is_tty))
+        print(_style("No targets to deliver", _BOLD + _YELLOW, ansi))
         return 0
 
     # --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS only flip
@@ -463,7 +463,7 @@ def _delivery_impl(ctx):
              ", ".join(unmatched_forced) +
              ". Force-target re-delivers labels already selected by --query or positional args; it does not add new labels. Either fix the typo or update --query / positional targets to include them.")
 
-    _print_header(is_tty, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, flags, targets, forced_targets, mode, dry_run, track_state)
+    _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, flags, targets, forced_targets, mode, dry_run, track_state)
 
     run_tracker = runnable(ctx, targets)
 
@@ -474,14 +474,14 @@ def _delivery_impl(ctx):
     # recorded nor used for change detection, so there's nothing to compute.
     if phase_1_2_runs:
         _t_build = time.monotonic()
-        output_shas, build_code = _get_output_shas(ctx, bazel_trait, build_events, targets, expanded_flags, remote_cache_uri, is_tty)
+        output_shas, build_code = _get_output_shas(ctx, bazel_trait, build_events, targets, expanded_flags, remote_cache_uri, ansi)
         print("  Build+checksum total: {}.".format(_fmt_elapsed(time.monotonic() - _t_build)))
 
         for handler in bazel_trait.build_end:
             handler(ctx, build_code)
 
         if build_code != 0:
-            print(_style("Build failed with exit code {}".format(build_code), _BOLD + _RED, is_tty))
+            print(_style("Build failed with exit code {}".format(build_code), _BOLD + _RED, ansi))
             return build_code
     else:
         output_shas = {}
@@ -521,7 +521,7 @@ def _delivery_impl(ctx):
     # Skipped only for the dry-run + --track-state=false preview: targets are
     # never run, and we don't need entrypoint info for the preview output.
     if delivery_targets and not preview_only:
-        print("  {} {} target(s)...".format(_style("Downloading", _BOLD, is_tty), len(delivery_targets)))
+        print("  {} {} target(s)...".format(_style("Downloading", _BOLD, ansi), len(delivery_targets)))
         phase3_flags = list(expanded_flags) + [
             "--experimental_build_event_upload_strategy=local",
             "--noremote_upload_local_results",
@@ -544,13 +544,13 @@ def _delivery_impl(ctx):
             for handler in bazel_trait.build_end:
                 handler(ctx, status.code)
         if status.code != 0:
-            print(_style("Build failed with exit code {}".format(status.code), _BOLD + _RED, is_tty))
+            print(_style("Build failed with exit code {}".format(status.code), _BOLD + _RED, ansi))
             return status.code
         print("  Download took {}.".format(_fmt_elapsed(time.monotonic() - _t_download)))
 
     max_par = ctx.args.max_parallelization
     if max_par < 1:
-        print(_style("ERROR:", _BOLD + _RED, is_tty) +
+        print(_style("ERROR:", _BOLD + _RED, ansi) +
               " --max-parallelization must be >= 1, got {}.".format(max_par))
         return 1
     capture = max_par > 1
@@ -609,7 +609,7 @@ def _delivery_impl(ctx):
         children = []
         for label, entrypoint, is_forced, output_sha in chunk:
             forced_marker = " (FORCED)" if is_forced else ""
-            print("  {} {}{}...".format(_style("Delivering", _BOLD, is_tty), label, forced_marker))
+            print("  {} {}{}...".format(_style("Delivering", _BOLD, ansi), label, forced_marker))
             children.append((label, is_forced, output_sha, time.monotonic(), run_tracker.spawn(entrypoint, [], capture)))
 
         for label, is_forced, output_sha, t_start, child in children:
@@ -617,7 +617,7 @@ def _delivery_impl(ctx):
             if capture:
                 out = child.wait_with_output()
                 exit_code = out.status.code
-                _print_captured_output(label, exit_code, out.stdout, out.stderr, is_tty)
+                _print_captured_output(label, exit_code, out.stdout, out.stderr, ansi)
             else:
                 exit_code = child.wait().code
 
@@ -660,9 +660,9 @@ def _delivery_impl(ctx):
     print("")
     header = "  {}  {}  {}  {}  {}".format(
         pad("TARGET", max_label_width), pad("STATUS", max_status_width), pad("DURATION", max_duration_width), pad("HASH", 32), "BUILD URL")
-    print(_style(header, _BOLD, is_tty))
+    print(_style(header, _BOLD, ansi))
     for label, status_text, status_type, delivered_by, output_sha, duration in results:
-        styled_status = _style(status_text, status_styles[status_type], is_tty)
+        styled_status = _style(status_text, status_styles[status_type], ansi)
         padding = " " * (max_status_width - len(status_text))
         short_hash = output_sha[:32] if output_sha != "-" else "-"
         print("  {}  {}{}  {}  {}  {}".format(
@@ -671,12 +671,12 @@ def _delivery_impl(ctx):
     total_elapsed = _fmt_elapsed(time.monotonic() - _t_total)
     print("")
     summary_parts = [
-        _style("{} delivered".format(success_count), _BOLD + _GREEN, is_tty),
-        _style("{} skipped".format(skipped_count), _BOLD + _YELLOW, is_tty),
-        _style("{} pending".format(pending_count), _BOLD + _YELLOW, is_tty),
-        _style("{} failed".format(failed_count), _BOLD + _RED, is_tty),
+        _style("{} delivered".format(success_count), _BOLD + _GREEN, ansi),
+        _style("{} skipped".format(skipped_count), _BOLD + _YELLOW, ansi),
+        _style("{} pending".format(pending_count), _BOLD + _YELLOW, ansi),
+        _style("{} failed".format(failed_count), _BOLD + _RED, ansi),
     ]
-    print("{} {}  ({} total)".format(_style("Summary:", _BOLD, is_tty), ", ".join(summary_parts), total_elapsed))
+    print("{} {}  ({} total)".format(_style("Summary:", _BOLD, ansi), ", ".join(summary_parts), total_elapsed))
 
     delivery_trait.delivery_end()
 

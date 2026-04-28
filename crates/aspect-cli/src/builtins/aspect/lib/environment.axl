@@ -72,7 +72,7 @@ Environment = record(
 
 # --- Terminal / ANSI detection ---
 
-def is_tty(std):
+def color_enabled(std):
     """Should ANSI color codes be emitted to stdout?
 
     True when stdout is a real TTY, or when a recognized CI host is
