@@ -124,9 +124,14 @@ def _impl(ctx: TaskContext) -> int:
     # 1. Fetch changed files (needed by strategy filter)
     # Detect changed files: prefer the GitHub PR Files API when authenticated
     # and in a PR context (works on any CI host), falling back to local
-    # `git diff HEAD~1 --unified=0`. Lives in lib/github.axl as a shared
+    # `git diff <base> --unified=0`. Lives in lib/github.axl as a shared
     # helper because format also wants the same precedence.
-    changed_files = detect_changed_files(ctx, line_level = True)
+    changed_files = detect_changed_files(
+        ctx,
+        line_level = True,
+        base_ref = ctx.args.base_ref,
+        merge_base = ctx.args.merge_base or None,
+    )
 
 
     # 3. Build flags — lint-specific first, then BazelTrait additions.
@@ -269,13 +274,33 @@ lint = task(
             required = True,
             description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. At least one aspect is required.",
         ),
-        "announce_rc": args.boolean(default = False),
-        "quiet": args.boolean(default = False),
-        "fix": args.boolean(),
+        "announce_rc": args.boolean(
+            default = False,
+            description = "Print the resolved Bazel `.bazelrc` flags before running the lint build. Useful when debugging which config sections fired or what the final flag set looks like.",
+        ),
+        "quiet": args.boolean(
+            default = False,
+            description = "Suppress Bazel's stdout/stderr from the underlying build. Lint diagnostics are still surfaced via SARIF reports and any registered lint_end hooks (e.g. PR review comments).",
+        ),
+        "fix": args.boolean(
+            description = "Apply auto-fixes from rules_lint where the linter provides them. Runs the build with --output_groups=rules_lint_patch and applies the resulting patches to the working tree.",
+        ),
         "strategy": args.string(
             default = "hold-the-line",
             values = ["soft", "hard", "hold-the-line"],
+            description = "How lint diagnostics drive the exit code: 'hold-the-line' (default) fails only on error-severity diagnostics in changed files; 'hard' fails on any error and on linter-process failure; 'soft' surfaces diagnostics without ever failing.",
         ),
-        "targets": args.positional(minimum = 0, default = ["..."]),
+        "base_ref": args.string(
+            default = "origin/main",
+            description = "Base ref for the changed-file set when the local-git fallback runs (no PR context detected, or PR-API auth unavailable). Resolved to a merge-base via `git merge-base HEAD <base-ref>`. Ignored on the GitHub PR Files API path. Override --merge-base to skip the merge-base resolution and use a specific SHA directly.",
+        ),
+        "merge_base": args.string(
+            description = "Explicit merge-base SHA for the local-git fallback's diff base. When set, skips the `git merge-base HEAD <base-ref>` resolution and uses this SHA directly. Ignored on the GitHub PR Files API path.",
+        ),
+        "targets": args.positional(
+            minimum = 0,
+            default = ["..."],
+            description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory.",
+        ),
     },
 )

@@ -434,9 +434,12 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
       - parses each file's `patch` to extract added-line indices
       - returns the same shape regardless of CI host
 
-    Local-git fallback (always available):
-      - line_level=True:  `git diff HEAD~1 --unified=0`
-      - line_level=False: `git diff --diff-filter=d --name-only <merge-base>`
+    Local-git fallback (always available). The diff base is resolved as:
+      - explicit `merge_base` SHA if provided, else
+      - `git merge-base HEAD <base_ref>` (default base_ref `origin/main`).
+    Then:
+      - line_level=True:  `git diff <base> --unified=0`
+      - line_level=False: `git diff --diff-filter=d --name-only <base>`
 
     If a GitHub PR context is detected but the PR-API path is unavailable
     (auth failure, transient API error), a yellow WARNING is printed
@@ -481,16 +484,9 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
             prefix, pr["owner"], pr["repo"], pr["pr_number"], fallback_reason,
         ))
 
-    # Local-git fallback.
+    # Local-git fallback. Resolve the diff base once for both shapes.
     process = ctx.std.process
     cwd = ctx.std.env.current_dir()
-    if line_level:
-        result = process.command("git").args(["diff", "HEAD~1", "--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
-        if not result.status.success:
-            return []
-        return _parse_local_diff_output(result.stdout)
-
-    # File-level: resolve merge base, then list changed files.
     if merge_base:
         diff_base = merge_base
     else:
@@ -498,6 +494,13 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
         if not mb.status.success:
             return []
         diff_base = mb.stdout.strip()
+
+    if line_level:
+        result = process.command("git").args(["diff", diff_base, "--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+        if not result.status.success:
+            return []
+        return _parse_local_diff_output(result.stdout)
+
     out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", diff_base]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
     if not out.status.success:
         return []
