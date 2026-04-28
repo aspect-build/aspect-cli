@@ -26,16 +26,37 @@ load("./lib/github.axl", "detect_changed_files")
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
 
-def _file_uri_to_path(uri):
+def file_uri_to_path(uri):
+    """Resolve a BES file URI to a local path via the bb_clientd FUSE mount.
+
+    Handles both bytestream forms Bazel emits:
+      - bytestream://HOST:PORT/blobs/HASH/SIZE                      (4 parts)
+      - bytestream://HOST:PORT/blobs/<digest>/HASH/SIZE             (5 parts)
+
+    The 5-part form is what modern Bazel (with sha256) emits — `parts[2]`
+    holds the digest function name ("sha256"), and HASH/SIZE move to
+    parts[3] / parts[4]. Treating the digest-function segment as the hash
+    (the previous behavior) produced bb_clientd paths like
+    `.../sha256/file/sha256-HASH`, which don't resolve.
+    """
     if uri.startswith("file://"):
         return uri[len("file://"):]
     if uri.startswith("bytestream://"):
         rest = uri[len("bytestream://"):]
         parts = rest.split("/")
         host = parts[0].split(":")[0]
-        blob_hash = parts[2]
-        blob_size = parts[3]
-        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
+        # Detect the digest-function segment by checking if parts[2] is
+        # one of the known function names. If it is, the hash/size shift
+        # right by one. Default sha256 if unspecified.
+        if len(parts) >= 5 and parts[2] in ("sha256", "sha512", "blake3"):
+            digest_fn = parts[2]
+            blob_hash = parts[3]
+            blob_size = parts[4]
+        else:
+            digest_fn = "sha256"
+            blob_hash = parts[2] if len(parts) > 2 else ""
+            blob_size = parts[3] if len(parts) > 3 else ""
+        return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/" + digest_fn + "/file/" + blob_hash + "-" + blob_size
     return uri
 
 # Filter functions — (all_diagnostics, changed_files) -> relevant_diagnostics
@@ -223,7 +244,7 @@ def _impl(ctx: TaskContext) -> int:
             handler(ctx, event)
         if event.kind == "named_set_of_files":
             for file in event.payload.files:
-                filepath = _file_uri_to_path(file.file)
+                filepath = file_uri_to_path(file.file)
                 if file.name.endswith(".out"):
                     ctx.std.io.stderr.write(ctx.std.fs.read_to_string(filepath))
                 if file.name.endswith(".report"):
@@ -237,7 +258,7 @@ def _impl(ctx: TaskContext) -> int:
                     if github_output:
                         ctx.std.fs.write(github_output, "lint-report=" + filepath)
                 if file.name.endswith(".patch"):
-                    patches.append(_file_uri_to_path(file.file))
+                    patches.append(file_uri_to_path(file.file))
                 if file.name.endswith(".exit_code"):
                     if int(ctx.std.fs.read_to_string(filepath).rstrip()) != 0:
                         linter_exit_code = 1
