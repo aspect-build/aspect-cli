@@ -409,6 +409,10 @@ def _parse_github_pr_patch(patch):
             current_line += 1
         elif line.startswith("-"):
             pass
+        elif line.startswith("\\"):
+            # `\ No newline at end of file` (and similar diff metadata
+            # lines) — not real content. Don't advance current_line.
+            pass
         else:
             current_line += 1
     return lines
