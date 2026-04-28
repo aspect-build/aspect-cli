@@ -84,7 +84,7 @@ def color_enabled(std):
     styled output / `rc.announce(ansi=...)` decisions are made.
 
     Note: broader than `CI.supports_curses` — curses cursor control
-    breaks line-oriented log viewers (e.g. GHA), but plain ANSI color
+    breaks line-oriented log viewers, but plain ANSI color
     codes render fine. Don't conflate the two.
     """
     if std.io.stdout.is_tty:
