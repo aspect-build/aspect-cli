@@ -1,8 +1,29 @@
 """GitHub PR review comment reporter for the lint task."""
 
 load("../lint.axl", "LintTrait")
+load("../lib/environment.axl", "color_enabled")
 load("../lib/github.axl", "github", "detect_commit_sha")
 load("../lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
+
+
+# ANSI codes (matching delivery.axl/lint.axl)
+_BOLD = "\033[1m"
+_YELLOW = "\033[33m"
+_RESET = "\033[0m"
+
+
+# SARIF level priority for cap ordering — errors come first, then warnings,
+# then notes. Unknown levels sort last.
+_SEVERITY_RANK = {"error": 0, "warning": 1, "note": 2, "none": 3}
+
+
+def _comment_sort_key(comment):
+    """Sort key prioritizing higher severity, then stable by path+line."""
+    return (
+        _SEVERITY_RANK.get(comment.get("_severity", ""), 99),
+        comment.get("path", ""),
+        comment.get("line", 0),
+    )
 
 
 def _parse_github_diff_patch(patch):
@@ -136,6 +157,8 @@ def _post_individually(ctx, gh, comments, existing_markers):
     errors = []
     prefix = gh.get("prefix", "")
     for c in comments:
+        # _severity is internal — drop it before sending to GitHub.
+        c.pop("_severity", None)
         marker = _extract_comment_marker(c.get("body", ""))
         if marker and marker in existing_markers:
             continue
@@ -264,7 +287,38 @@ def _github_lint_impl(ctx: FeatureContext):
     if not gh and not debug:
         return
 
-    state = {"pending": [], "all_comments": [], "posted": 0, "filtered": 0, "errors": []}
+    max_pr_comments = ctx.args.max_pr_comments
+    state = {
+        "all_comments": [],
+        # all_comments_count tracks the total number of diagnostics seen
+        # across the run regardless of whether the objects are still buffered.
+        # Once the cap is exhausted, all_comments is cleared and stops growing
+        # (debug mode keeps it populated for the verbose summary).
+        "all_comments_count": 0,
+        "posted": 0,
+        "filtered": 0,
+        "errors": [],
+        "dropped_due_to_cap": 0,
+        # Per-severity breakdown of cap-dropped diagnostics. Surfaced in the
+        # WARNING line so the user knows what the cap suppressed.
+        "dropped_per_severity": {},
+    }
+
+    def _increment_dropped(comments_or_severity, count = 1):
+        """Bump dropped_due_to_cap and per-severity counters.
+
+        Pass either an iterable of comment dicts (severity inferred from
+        each `_severity` key) or a string severity + count.
+        """
+        if type(comments_or_severity) == "string":
+            sev = comments_or_severity
+            state["dropped_due_to_cap"] += count
+            state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + count
+        else:
+            for c in comments_or_severity:
+                sev = c.get("_severity") or "other"
+                state["dropped_due_to_cap"] += 1
+                state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
     if gh:
         # Determine the workspace prefix relative to the git root once (e.g. "examples/lint/")
@@ -295,28 +349,97 @@ def _github_lint_impl(ctx: FeatureContext):
         lint_trait.get_diff = get_diff
 
     def _lint_report(ctx, filepath):
+        # Per-SARIF-file callback. Hybrid posting strategy:
+        #   - Errors are streamed immediately (subject to cap, dedup, and
+        #     line-level diff filter) so reviewers get fast feedback on the
+        #     most important diagnostics during long lint runs.
+        #   - Warnings/notes are buffered and posted in _lint_end so the cap
+        #     remainder is filled in priority + stable order across the full
+        #     build, not per-SARIF-file arrival order.
+        # Errors are always top priority; FIFO among them is fine.
         if gh and gh["stale"]:
             return
         comments = _build_comments(ctx, filepath)
-        state["pending"].extend(comments)
+        state["all_comments_count"] += len(comments)
+
+        cap_exhausted = bool(gh) and state["posted"] >= max_pr_comments
+
+        # If the cap is already exhausted, just count by severity and return.
+        # Skip buffering entirely (unless debug mode wants the full set).
+        if cap_exhausted and not debug:
+            _increment_dropped(comments)
+            return
+
+        if cap_exhausted and debug:
+            state["all_comments"].extend(comments)
+            _increment_dropped(comments)
+            return
+
         state["all_comments"].extend(comments)
-        if gh:
-            if "existing_markers" not in gh:
-                gh["existing_markers"] = _get_existing_markers(ctx, gh)
-            ready = _filter_by_diff(state["pending"], gh["changed_lines"])
-            state["filtered"] += len(state["pending"]) - len(ready)
-            before = len(gh["existing_markers"])
-            errors = _post_individually(ctx, gh, ready, gh["existing_markers"])
-            state["posted"] += len(gh["existing_markers"]) - before
-            state["errors"].extend(errors)
-            state["pending"] = []
+        if not gh:
+            return
+
+        # Lazy-init existing markers on first stream so we can dedup against
+        # comments posted in prior runs of this task.
+        if "existing_markers" not in gh:
+            gh["existing_markers"] = _get_existing_markers(ctx, gh)
+
+        # Pull just the errors from this batch; everything else goes into the
+        # buffered set processed in _lint_end.
+        errors_in_batch = [c for c in comments if c.get("_severity") == "error"]
+        if not errors_in_batch:
+            return
+
+        # Diff filter: GitHub's review-comment API rejects (422) any comment
+        # not on a changed line, so this guards both correctness and API
+        # validity.
+        ready = _filter_by_diff(errors_in_batch, gh["changed_lines"])
+        state["filtered"] += len(errors_in_batch) - len(ready)
+        if not ready:
+            return
+
+        # Cap accounting. _post_individually internally skips entries whose
+        # marker is already in existing_markers, so duplicates won't consume
+        # cap budget — slice only counts new postable comments.
+        new_only = []
+        for c in ready:
+            marker = _extract_comment_marker(c.get("body", ""))
+            if marker and marker in gh["existing_markers"]:
+                continue
+            new_only.append(c)
+        if not new_only:
+            return
+
+        remaining_budget = max_pr_comments - state["posted"]
+        if remaining_budget <= 0:
+            _increment_dropped("error", len(new_only))
+            return
+        if len(new_only) > remaining_budget:
+            _increment_dropped("error", len(new_only) - remaining_budget)
+            new_only = new_only[:remaining_budget]
+
+        before = len(gh["existing_markers"])
+        errors = _post_individually(ctx, gh, new_only, gh["existing_markers"])
+        state["posted"] += len(gh["existing_markers"]) - before
+        state["errors"].extend(errors)
+
+        # Streaming just exhausted the cap — drop any warnings/notes already
+        # buffered from earlier reports; they can't be posted now. (Debug
+        # mode keeps the full buffer for the verbose summary.)
+        if not debug and state["posted"] >= max_pr_comments and state["all_comments"]:
+            for c in state["all_comments"]:
+                if c.get("_severity") != "error":
+                    sev = c.get("_severity") or "other"
+                    state["dropped_due_to_cap"] += 1
+                    state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
+            state["all_comments"] = []
 
     def _lint_end(ctx, relevant_diagnostics):
         if debug:
             print("github lint comment debug summary:")
             if gh_inactive_reason:
                 print("inactive reason:  %s" % gh_inactive_reason)
-            print("found comments:   %s" % len(state["all_comments"]))
+            print("found comments:   %s" % state["all_comments_count"])
             if gh:
                 print("git prefix:       %r" % gh.get("prefix", ""))
                 changed_line_count = 0
@@ -334,7 +457,67 @@ def _github_lint_impl(ctx: FeatureContext):
             if gh["stale"] or _check_staleness(ctx, gh):
                 gh["stale"] = True
                 return
+
+            # Errors were streamed in _lint_report; here we post the remaining
+            # warnings/notes (sorted by severity, capped to whatever budget
+            # is left after streaming).
+            non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"]
+
+            # 1. Diff filter (line-level).
+            diff_filtered = _filter_by_diff(non_errors, gh["changed_lines"])
+            state["filtered"] += len(non_errors) - len(diff_filtered)
+
+            # 2. Dedup against existing markers (which now include the
+            #    just-streamed errors thanks to _post_individually's mutation).
+            new_only = []
+            for c in diff_filtered:
+                marker = _extract_comment_marker(c.get("body", ""))
+                if marker and marker in gh["existing_markers"]:
+                    continue
+                new_only.append(c)
+
+            # 3. Sort warnings before notes (stable by path/line).
+            new_only = sorted(new_only, key = _comment_sort_key)
+
+            # 4. Cap remainder.
+            remaining_budget = max_pr_comments - state["posted"]
+            if remaining_budget <= 0:
+                _increment_dropped(new_only)
+                new_only = []
+            elif len(new_only) > remaining_budget:
+                _increment_dropped(new_only[remaining_budget:])
+                new_only = new_only[:remaining_budget]
+
+            # 5. Post.
+            if new_only:
+                before = len(gh["existing_markers"])
+                errors = _post_individually(ctx, gh, new_only, gh["existing_markers"])
+                state["posted"] += len(gh["existing_markers"]) - before
+                state["errors"].extend(errors)
+
             _cleanup_comments(ctx, gh, relevant_diagnostics)
+
+            if state["dropped_due_to_cap"] > 0:
+                ansi = color_enabled(ctx.std)
+                prefix = (_BOLD + _YELLOW + "WARNING:" + _RESET) if ansi else "WARNING:"
+                # Build a per-severity breakdown — well-known levels in
+                # priority order, then anything else as "other".
+                by_sev = state["dropped_per_severity"]
+                parts = []
+                for sev in ["error", "warning", "note"]:
+                    n = by_sev.get(sev, 0)
+                    if n > 0:
+                        parts.append("%d %s" % (n, sev))
+                other = 0
+                for k, v in by_sev.items():
+                    if k not in ("error", "warning", "note"):
+                        other += v
+                if other > 0:
+                    parts.append("%d other" % other)
+                breakdown = " (" + ", ".join(parts) + ")" if parts else ""
+                print("%s capped at %d PR review comment(s); %d additional diagnostic(s)%s not posted to GitHub. The lint task's exit code is unaffected by this cap. Run `aspect lint` locally to see the full list, or raise --github-lint-comments:max-pr-comments=<n> to widen the cap." % (
+                    prefix, max_pr_comments, state["dropped_due_to_cap"], breakdown,
+                ))
 
     lint_trait.lint_report.append(_lint_report)
     lint_trait.lint_end.append(_lint_end)
@@ -342,4 +525,10 @@ def _github_lint_impl(ctx: FeatureContext):
 
 GithubLintComments = feature(
     implementation = _github_lint_impl,
+    args = {
+        "max_pr_comments": args.int(
+            default = 25,
+            description = "Maximum number of PR review comments to post in a single lint run. Errors are prioritized over warnings, then notes; remaining diagnostics are dropped from the PR (with a WARNING in the build log) but still drive the lint task's exit code. Set to 0 to disable PR comment posting entirely while keeping exit-code behavior intact.",
+        ),
+    },
 )

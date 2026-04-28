@@ -93,6 +93,9 @@ def sarif_result_to_comment(result, tool_name):
         "line": end_line,
         "side": "RIGHT",
         "body": body,
+        # Underscore-prefixed key — used for cap prioritization in
+        # GithubLintComments, stripped before posting to GitHub.
+        "_severity": level,
     }
 
     if start_line != end_line:
