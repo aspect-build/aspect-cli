@@ -390,9 +390,8 @@ def _delivery_impl(ctx):
     # Expand .bazelrc so remote cache config flows in automatically
     rc = ctx.bazel.parse_rc(
         root = ctx.std.env.root_dir(),
-        flags = flags + ["--config=delivery"],
+        flags = flags,
         startup_flags = startup_flags,
-        skip_config_if_missing = ["delivery"]
     )
     rc_startup_flags, expanded_flags = rc.expand_all(command = "build")
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
