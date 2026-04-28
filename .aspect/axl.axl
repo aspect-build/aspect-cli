@@ -2180,6 +2180,56 @@ def test_process_bes_target_completed(ctx: TaskContext, tc: int) -> int:
     return tc
 
 
+def test_json_try_decode(tc: int) -> int:
+    """Coverage for the AXL runtime's `json.try_decode` — fallible JSON decode.
+
+    Replaces the body-prefix sniff in lib/github.axl with a real fallible
+    decoder so callers can recover from malformed JSON (HTML/text gateway
+    errors, truncated bodies, partial responses) without crashing the
+    parent task.
+    """
+    # Valid JSON inputs decode normally.
+    tc = test_case(tc, json.try_decode("{}") == {}, "try_decode: empty object")
+    tc = test_case(tc, json.try_decode("[]") == [], "try_decode: empty array")
+    tc = test_case(tc, json.try_decode('{"a": 1}') == {"a": 1}, "try_decode: simple object")
+    tc = test_case(tc, json.try_decode('{"k": "v"}') == {"k": "v"}, "try_decode: string value")
+    tc = test_case(tc, json.try_decode("[1, 2, 3]") == [1, 2, 3], "try_decode: array of ints")
+    tc = test_case(tc, json.try_decode("true") == True, "try_decode: literal true")
+    tc = test_case(tc, json.try_decode("false") == False, "try_decode: literal false")
+    tc = test_case(tc, json.try_decode("42") == 42, "try_decode: bare number")
+    tc = test_case(tc, json.try_decode('"hello"') == "hello", "try_decode: bare string")
+
+    # `null` decodes to Starlark None — same value as the default-on-failure,
+    # so callers wanting to disambiguate "valid null" from "parse failed"
+    # must pass an explicit sentinel default.
+    tc = test_case(tc, json.try_decode("null") == None, "try_decode: literal null → None")
+
+    # Parse-failure inputs return None by default.
+    tc = test_case(tc, json.try_decode("") == None, "try_decode: empty string → None")
+    tc = test_case(tc, json.try_decode("not json") == None, "try_decode: plain text → None")
+    tc = test_case(tc, json.try_decode("<html>oops</html>") == None, "try_decode: HTML body → None")
+    tc = test_case(tc, json.try_decode("<!DOCTYPE html>") == None, "try_decode: HTML doctype → None")
+    tc = test_case(tc, json.try_decode("{") == None, "try_decode: truncated object → None (the case the body sniff missed)")
+    tc = test_case(tc, json.try_decode('{"a": 1') == None, "try_decode: truncated mid-object → None")
+    tc = test_case(tc, json.try_decode("[1, 2, ") == None, "try_decode: truncated mid-array → None")
+    tc = test_case(tc, json.try_decode("rate limited") == None, "try_decode: rate-limit text → None")
+
+    # Custom default returned on failure.
+    tc = test_case(tc, json.try_decode("not json", {}) == {}, "try_decode: empty-dict default on failure")
+    tc = test_case(tc, json.try_decode("not json", []) == [], "try_decode: empty-list default on failure")
+    tc = test_case(tc, json.try_decode("not json", "FAIL") == "FAIL", "try_decode: sentinel string default on failure")
+    tc = test_case(tc, json.try_decode("not json", 0) == 0, "try_decode: zero default on failure")
+
+    # Custom default ignored when input is valid (even when the parsed value
+    # equals the default). Important: try_decode does NOT replace valid
+    # parses with the default.
+    tc = test_case(tc, json.try_decode("null", "MISS") == None, "try_decode: valid null parse not replaced by default")
+    tc = test_case(tc, json.try_decode("{}", {"x": 1}) == {}, "try_decode: valid empty-object parse beats default")
+    tc = test_case(tc, json.try_decode('{"a": 1}', None) == {"a": 1}, "try_decode: valid parse with explicit None default")
+
+    return tc
+
+
 def test_canonical_label(tc: int) -> int:
     """Coverage for runnable.canonical_label — Bazel label normalization."""
     cases = [
@@ -2437,6 +2487,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_artifacts_lib(ctx, tc)
     tc = test_sarif_lib(tc)
     tc = test_file_uri_to_path(tc)
+    tc = test_json_try_decode(tc)
     tc = test_canonical_label(tc)
     tc = test_process_bes_target_completed(ctx, tc)
     tc = test_validate_role(tc)

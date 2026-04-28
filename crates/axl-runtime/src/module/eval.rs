@@ -214,7 +214,9 @@ pub fn get_globals() -> Globals {
         LibraryExtension::Debug,
         LibraryExtension::EnumType,
         LibraryExtension::Filter,
-        LibraryExtension::Json,
+        // NB: `LibraryExtension::Json` is intentionally skipped — we
+        // register a custom `json` namespace below that adds `try_decode`
+        // alongside `encode`/`decode`. See engine::builtins::register_json.
         LibraryExtension::Map,
         LibraryExtension::NamespaceType,
         LibraryExtension::Partial,
@@ -227,7 +229,10 @@ pub fn get_globals() -> Globals {
         LibraryExtension::StructType,
         LibraryExtension::Typing,
     ]);
-    globals.with(register_globals).build()
+    globals
+        .with(crate::engine::builtins::register_json)
+        .with(register_globals)
+        .build()
 }
 
 /// Evaluator for MODULE.aspect

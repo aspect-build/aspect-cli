@@ -13,7 +13,11 @@ pub fn get_globals() -> GlobalsBuilder {
         LibraryExtension::Debug,
         LibraryExtension::EnumType,
         LibraryExtension::Filter,
-        LibraryExtension::Json,
+        // NB: `LibraryExtension::Json` is intentionally skipped — we
+        // register a custom `json` namespace below that adds `try_decode`
+        // alongside `encode`/`decode`. Calling `globals.namespace("json",
+        // ...)` after the stdlib extension would *replace* the namespace
+        // rather than merge, so we own it here in full.
         LibraryExtension::Map,
         LibraryExtension::NamespaceType,
         LibraryExtension::Partial,
@@ -26,6 +30,7 @@ pub fn get_globals() -> GlobalsBuilder {
         LibraryExtension::StructType,
         LibraryExtension::Typing,
     ]);
+    engine::builtins::register_json(&mut globals);
     engine::register_globals(&mut globals);
     globals
 }

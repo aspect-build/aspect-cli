@@ -521,6 +521,65 @@ fn builtins_methods(registry: &mut MethodsBuilder) {
     }
 }
 
+/// Registers the `json` namespace with `encode`, `decode`, and the
+/// fallible `try_decode`. Replaces `LibraryExtension::Json` from the
+/// Starlark stdlib (whose namespace is otherwise replaced — not merged
+/// — when a second `globals.namespace("json", ...)` call lands).
+///
+/// `try_decode` is the reason this exists: Starlark has no try/except,
+/// so a normal `json.decode` failure crashes the entire task. Any I/O
+/// boundary that decodes an untrusted body (HTTP response, subprocess
+/// output, file content from a flaky source) should use `try_decode`
+/// and check the result rather than letting a malformed input bring
+/// down the whole evaluation.
+pub fn register_json(globals: &mut GlobalsBuilder) {
+    #[starlark_module]
+    fn json_members(globals: &mut GlobalsBuilder) {
+        /// Encode a value to a JSON string. Mirrors the Starlark stdlib's
+        /// `json.encode`.
+        fn encode(#[starlark(require = pos)] x: Value) -> anyhow::Result<String> {
+            x.to_json()
+        }
+
+        /// Decode a JSON string. Raises on parse failure. Mirrors the
+        /// Starlark stdlib's `json.decode`. Use `try_decode` instead at
+        /// I/O boundaries where a malformed input would otherwise crash
+        /// the caller.
+        fn decode<'v>(
+            #[starlark(require = pos)] x: &str,
+            heap: Heap<'v>,
+        ) -> anyhow::Result<Value<'v>> {
+            Ok(heap.alloc(serde_json::from_str::<serde_json::Value>(x)?))
+        }
+
+        /// Decode a JSON string. Returns `default` (None by default) on
+        /// parse failure instead of raising. Distinguishing "parse
+        /// failed" from "valid `null` parse": both produce None unless
+        /// the caller passes a sentinel `default`.
+        ///
+        /// # Examples
+        ///
+        /// ```python
+        /// json.try_decode('{"a": 1}')        # {"a": 1}
+        /// json.try_decode("not json")        # None
+        /// json.try_decode("not json", {})    # {}
+        /// json.try_decode("null")            # None  (valid parse)
+        /// json.try_decode("null", "MISS")    # None  (still valid; not the sentinel)
+        /// ```
+        fn try_decode<'v>(
+            #[starlark(require = pos)] x: &str,
+            #[starlark(require = pos)] default: Option<Value<'v>>,
+            heap: Heap<'v>,
+        ) -> anyhow::Result<Value<'v>> {
+            match serde_json::from_str::<serde_json::Value>(x) {
+                Ok(v) => Ok(heap.alloc(v)),
+                Err(_) => Ok(default.unwrap_or_else(Value::new_none)),
+            }
+        }
+    }
+    globals.namespace("json", json_members);
+}
+
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     const __builtins__: Builtins = Builtins;

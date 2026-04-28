@@ -6,7 +6,7 @@ use starlark::{
 
 pub mod aspect;
 pub mod bazel;
-mod builtins;
+pub mod builtins;
 mod hash;
 mod http;
 mod std;
