@@ -17,17 +17,24 @@ struct Args {
     /// <output>/builtins/... .
     #[arg(long, default_value = "docs")]
     output: PathBuf,
+
+    /// URL prefix prepended to every generated link (e.g. `/docs` for a site
+    /// hosted at https://example.com/docs/). Trailing slashes are stripped.
+    /// Defaults to empty, producing absolute paths like `/types/str`.
+    #[arg(long, default_value = "")]
+    base_url: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let base_url = args.base_url.trim_end_matches('/').to_string();
 
     let documentation = docs::documentation()?;
     let result = traversal::traverse_all(&documentation.types, &documentation.builtins);
 
-    let linker = type_linker::TypeLinker::new(&result.registry);
-    let renderer = renderer::Renderer::new(&linker);
+    let linker = type_linker::TypeLinker::new(&result.registry, &base_url);
+    let renderer = renderer::Renderer::new(&linker, &base_url);
 
     let pages: Vec<(String, String)> = result
         .pages

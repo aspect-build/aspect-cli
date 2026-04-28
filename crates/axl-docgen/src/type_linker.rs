@@ -7,6 +7,8 @@ use std::sync::LazyLock;
 /// that highlight.rs expects.
 pub struct TypeLinker<'a> {
     registry: &'a TypeRegistry,
+    /// URL prefix (e.g. `/docs`, or `""` for absolute paths). No trailing slash.
+    base_url: &'a str,
 }
 
 // Match qualified names like "module.Type" or simple identifiers
@@ -15,8 +17,8 @@ static QUALIFIED_TYPE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 impl<'a> TypeLinker<'a> {
-    pub fn new(registry: &'a TypeRegistry) -> Self {
-        Self { registry }
+    pub fn new(registry: &'a TypeRegistry, base_url: &'a str) -> Self {
+        Self { registry, base_url }
     }
 
     /// Get the path for a type name from the registry.
@@ -45,7 +47,7 @@ impl<'a> TypeLinker<'a> {
 
                 // First try the full qualified name (for types registered with their full path)
                 if let Some(path) = self.registry.get_path(full_name) {
-                    return format!("'@link@ /{path} @@ {full_name} @link@'");
+                    return self.link_marker(path, full_name);
                 }
 
                 // For qualified names like "module.Type", link each component separately
@@ -55,7 +57,7 @@ impl<'a> TypeLinker<'a> {
 
                 // Try simple name (no dots)
                 if let Some(path) = self.registry.get_path(full_name) {
-                    format!("'@link@ /{path} @@ {full_name} @link@'")
+                    self.link_marker(path, full_name)
                 } else {
                     full_name.to_string()
                 }
@@ -63,10 +65,15 @@ impl<'a> TypeLinker<'a> {
             .into_owned()
     }
 
+    /// Build a single `@link@` marker honoring the configured `base_url`.
+    fn link_marker(&self, path: &str, label: &str) -> String {
+        format!("'@link@ {}/{path} @@ {label} @link@'", self.base_url)
+    }
+
     /// Handle namespaced types with separate links for each component.
     ///
     /// Input:  "std.Env"
-    /// Output: "'@link@ /lib/std @@ std @link@'.'@link@ /lib/std/env @@ Env @link@'"
+    /// Output: "'@link@ /types/std @@ std @link@'.'@link@ /types/std/env @@ Env @link@'"
     fn linkify_namespaced(&self, type_name: &str) -> String {
         let parts: Vec<&str> = type_name.split('.').collect();
         let mut result = Vec::new();
@@ -80,23 +87,21 @@ impl<'a> TypeLinker<'a> {
                 // First part - look up in registry to get the base path
                 if let Some(base_path) = self.registry.get_path(part) {
                     path_so_far = base_path.to_string();
-                    result.push(format!("'@link@ /{} @@ {} @link@'", path_so_far, part));
                 } else {
-                    // If first part not in registry, try with lib/ prefix
-                    path_so_far = format!("lib/{}", snake_part);
-                    result.push(format!("'@link@ /{} @@ {} @link@'", path_so_far, part));
+                    // If first part not in registry, try with types/ prefix
+                    path_so_far = format!("types/{}", snake_part);
                 }
+                result.push(self.link_marker(&path_so_far, part));
             } else {
                 // For subsequent parts, first check if registered in registry
                 // (handles properties/functions that are documented on parent module's page)
                 if let Some(registered_path) = self.registry.get_path(part) {
-                    result.push(format!("'@link@ /{} @@ {} @link@'", registered_path, part));
                     path_so_far = registered_path.to_string();
                 } else {
                     // Otherwise extend the path progressively
                     path_so_far = format!("{}/{}", path_so_far, snake_part);
-                    result.push(format!("'@link@ /{} @@ {} @link@'", path_so_far, part));
                 }
+                result.push(self.link_marker(&path_so_far, part));
             }
         }
 
@@ -128,55 +133,73 @@ mod tests {
     #[test]
     fn test_linkify_simple_type() {
         let mut registry = TypeRegistry::new();
-        registry.register("str", "lib/str");
-        registry.register("int", "lib/int");
+        registry.register("str", "types/str");
+        registry.register("int", "types/int");
 
-        let linker = TypeLinker::new(&registry);
+        let linker = TypeLinker::new(&registry, "");
 
-        assert_eq!(linker.linkify_str("str"), "'@link@ /lib/str @@ str @link@'");
-        assert_eq!(linker.linkify_str("int"), "'@link@ /lib/int @@ int @link@'");
+        assert_eq!(
+            linker.linkify_str("str"),
+            "'@link@ /types/str @@ str @link@'"
+        );
+        assert_eq!(
+            linker.linkify_str("int"),
+            "'@link@ /types/int @@ int @link@'"
+        );
+    }
+
+    #[test]
+    fn test_linkify_with_base_url() {
+        let mut registry = TypeRegistry::new();
+        registry.register("str", "types/str");
+
+        let linker = TypeLinker::new(&registry, "/docs");
+        assert_eq!(
+            linker.linkify_str("str"),
+            "'@link@ /docs/types/str @@ str @link@'"
+        );
     }
 
     #[test]
     fn test_linkify_generic_type() {
         let mut registry = TypeRegistry::new();
-        registry.register("str", "lib/str");
-        registry.register("TaskContext", "lib/task_context");
+        registry.register("str", "types/str");
+        registry.register("TaskContext", "types/task_context");
 
-        let linker = TypeLinker::new(&registry);
+        let linker = TypeLinker::new(&registry, "");
 
         let result = linker.linkify_str("dict[str, TaskContext]");
-        assert!(result.contains("'@link@ /lib/str @@ str @link@'"));
-        assert!(result.contains("'@link@ /lib/task_context @@ TaskContext @link@'"));
+        assert!(result.contains("'@link@ /types/str @@ str @link@'"));
+        assert!(result.contains("'@link@ /types/task_context @@ TaskContext @link@'"));
     }
 
     #[test]
     fn test_linkify_namespaced_type() {
         let mut registry = TypeRegistry::new();
-        registry.register("args", "lib/args");
-        registry.register("std", "lib/std");
+        registry.register("args", "types/args");
+        registry.register("std", "types/std");
 
-        let linker = TypeLinker::new(&registry);
+        let linker = TypeLinker::new(&registry, "");
 
         // For "args.TaskArg", each component gets its own link
         let result = linker.linkify_str("args.TaskArg");
         assert_eq!(
             result,
-            "'@link@ /lib/args @@ args @link@'.'@link@ /lib/args/task_arg @@ TaskArg @link@'"
+            "'@link@ /types/args @@ args @link@'.'@link@ /types/args/task_arg @@ TaskArg @link@'"
         );
 
         // For "std.Env", each component gets its own link
         let result = linker.linkify_str("std.Env");
         assert_eq!(
             result,
-            "'@link@ /lib/std @@ std @link@'.'@link@ /lib/std/env @@ Env @link@'"
+            "'@link@ /types/std @@ std @link@'.'@link@ /types/std/env @@ Env @link@'"
         );
     }
 
     #[test]
     fn test_linkify_unknown_type() {
         let registry = TypeRegistry::new();
-        let linker = TypeLinker::new(&registry);
+        let linker = TypeLinker::new(&registry, "");
 
         // Unknown types should pass through unchanged
         assert_eq!(linker.linkify_str("UnknownType"), "UnknownType");

@@ -14,8 +14,10 @@ const POSTDULE: &'static str = r#"</code></pre>"#;
 // The markers are wrapped in quotes in the source so Python syntax highlighting
 // treats them as string literals. The regex matches just the marker content,
 // since the quotes get separated by HTML span tags during highlighting.
+// The path group accepts URL-safe characters (alphanumerics, `/`, `.`, `-`, `_`)
+// so `--base-url` values like `/v2.1` or `/my-docs` survive.
 static LINK_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"@link@ ([\w/]+) @@ ([\w\.]+) @link@").unwrap());
+    LazyLock::new(|| Regex::new(r"@link@ ([\w/.\-]+) @@ ([\w\.]+) @link@").unwrap());
 
 // After replacing link markers, we need to remove the quote spans that surround
 // the anchor tags. The pattern is:
