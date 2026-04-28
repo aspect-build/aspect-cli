@@ -50,6 +50,7 @@ the list of failing action mnemonics; users follow the CI link for the raw log.
 """
 
 load("./environment.axl", "get_environment")
+load("./path_glob.axl", "match_path")
 
 
 # Max number of unique failed build target labels to track detail for. Entries
@@ -1854,43 +1855,6 @@ _SAFE_ENV_VALUES_LITERAL = ["", "0", "1"]
 _SAFE_ENV_VALUES_BOOL    = ["true", "false"]
 
 
-def _glob_match(pattern, name):
-    """Glob-match NAME against PATTERN (case-insensitive). Supports `*`.
-
-    Iterative with backtracking — AXL has no regex or `while`.
-    A trailing `*` matches zero-or-more trailing chars; a leading `*` is also
-    supported. The common case is prefix+`*` (e.g. `GITHUB_*`).
-    """
-    pat = pattern.lower()
-    nm  = name.lower()
-    pi = 0
-    ni = 0
-    star_pi = -1
-    star_ni = 0
-    for _ in range(len(nm) + len(pat) + 8):
-        if ni < len(nm) and pi < len(pat) and (pat[pi] == "?" or pat[pi] == nm[ni]):
-            pi += 1
-            ni += 1
-        elif pi < len(pat) and pat[pi] == "*":
-            star_pi = pi
-            star_ni = ni
-            pi += 1
-        elif star_pi >= 0:
-            pi = star_pi + 1
-            star_ni += 1
-            ni = star_ni
-        else:
-            return False
-        if ni >= len(nm):
-            for _ in range(len(pat) - pi + 1):
-                if pi < len(pat) and pat[pi] == "*":
-                    pi += 1
-                else:
-                    break
-            return pi == len(pat)
-    return False
-
-
 def _allow_env_patterns(metadata):
     """Resolve the ALLOW_ENV glob patterns from --build_metadata=ALLOW_ENV=...
 
@@ -1904,9 +1868,16 @@ def _allow_env_patterns(metadata):
 
 
 def _is_allowed_env(key, allow_env):
-    """True when KEY is on the allowlist (case-insensitive, globs supported)."""
+    """True when KEY is on the allowlist (case-insensitive, globs supported).
+
+    Case-insensitive matching: lowercase both sides and delegate to
+    path_glob.match_path. ALLOW_ENV patterns are simple shell-style globs
+    over single env-var names (no `/`), so the path-segment-aware
+    matcher behaves identically here.
+    """
+    key_lc = key.lower()
     for pat in allow_env:
-        if pat == "*" or _glob_match(pat, key):
+        if pat == "*" or match_path(pat.lower(), key_lc):
             return True
     return False
 

@@ -4,6 +4,7 @@ Exercise axl
 load("@demo//answer.axl", "ANSWER")
 load("./lambda.axl", "lambda_with_global_bind")
 load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title")
+load("@aspect//lib/path_glob.axl", "match_path", "match_any")
 
 def test_case(tc, cond, msg) -> int:
     if not cond:
@@ -1237,6 +1238,74 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     return tc
 
 
+def test_path_glob(tc: int) -> int:
+    """Coverage for lib/path_glob.axl (match_path / match_any)."""
+    cases = [
+        # (pattern, path, expected, description)
+        ("*.lock",                "Cargo.lock",                True,  "match_path: *.lock vs Cargo.lock"),
+        ("*.lock",                "subdir/Cargo.lock",         False, "match_path: *.lock vs subdir/Cargo.lock (no recursion)"),
+        ("*.lock",                "Cargo.lockfile",            False, "match_path: *.lock vs Cargo.lockfile (suffix only)"),
+
+        ("vendor/*",              "vendor/foo",                True,  "match_path: vendor/* vs vendor/foo"),
+        ("vendor/*",              "vendor/foo/bar",            False, "match_path: vendor/* vs vendor/foo/bar (single segment)"),
+
+        ("vendor/**",             "vendor/foo",                True,  "match_path: vendor/** vs vendor/foo"),
+        ("vendor/**",             "vendor/foo/bar/baz",        True,  "match_path: vendor/** vs vendor/foo/bar/baz"),
+        ("vendor/**",             "vendor",                    False, "match_path: vendor/** vs vendor (must have child)"),
+
+        ("**/foo",                "foo",                       True,  "match_path: **/foo vs foo (zero leading)"),
+        ("**/foo",                "a/foo",                     True,  "match_path: **/foo vs a/foo"),
+        ("**/foo",                "a/b/c/foo",                 True,  "match_path: **/foo vs a/b/c/foo"),
+        ("**/foo",                "foo/bar",                   False, "match_path: **/foo vs foo/bar (suffix mismatch)"),
+
+        ("a/**/b",                "a/b",                       True,  "match_path: a/**/b vs a/b (zero middle)"),
+        ("a/**/b",                "a/x/b",                     True,  "match_path: a/**/b vs a/x/b (one middle)"),
+        ("a/**/b",                "a/x/y/b",                   True,  "match_path: a/**/b vs a/x/y/b (multi middle)"),
+        ("a/**/b",                "a/x",                       False, "match_path: a/**/b vs a/x (no trailing b)"),
+
+        ("**",                    "foo",                       True,  "match_path: ** vs foo"),
+        ("**",                    "a/b/c",                     True,  "match_path: ** vs a/b/c"),
+
+        ("*.generated.go",        "foo.generated.go",          True,  "match_path: *.generated.go vs foo.generated.go"),
+        ("*.generated.go",        "Foo.Generated.Go",          False, "match_path: case-sensitive"),
+        ("**/*.generated.go",     "a/b/foo.generated.go",      True,  "match_path: **/*.generated.go vs a/b/foo.generated.go"),
+
+        ("?ar",                   "bar",                       True,  "match_path: ?ar vs bar"),
+        ("?ar",                   "ar",                        False, "match_path: ?ar vs ar (? requires one char)"),
+        ("?ar",                   "bar/baz",                   False, "match_path: ?ar vs bar/baz (? doesn't cross /)"),
+
+        ("*",                     "foo",                       True,  "match_path: * vs foo"),
+        ("*",                     "a/foo",                     False, "match_path: * vs a/foo (single segment)"),
+
+        ("foo",                   "foo",                       True,  "match_path: literal exact match"),
+        ("foo",                   "Foo",                       False, "match_path: literal case-sensitive"),
+        ("foo",                   "foobar",                    False, "match_path: literal not prefix"),
+
+        ("foo/",                  "foo",                       True,  "match_path: trailing slash trimmed (foo/ ≡ foo)"),
+        ("vendor/**/",            "vendor/foo",                True,  "match_path: trailing slash trimmed (vendor/**/ ≡ vendor/**)"),
+
+        ("",                      "foo",                       False, "match_path: empty pattern matches nothing"),
+        ("",                      "",                          False, "match_path: empty pattern vs empty path"),
+
+        ("*?",                    "a" * 11,                    True,  "match_path: *? vs 11-char name"),
+        ("*?",                    "a" * 32,                    True,  "match_path: *? vs 32-char name"),
+        ("*b",                    "b" * 11,                    True,  "match_path: *b vs 11 b's"),
+        ("*b",                    "b" * 64,                    True,  "match_path: *b vs 64 b's"),
+        ("*?b",                   "a" * 32 + "b",              True,  "match_path: *?b deep backtracking"),
+    ]
+    for (pattern, path, expected, desc) in cases:
+        got = match_path(pattern, path)
+        tc = test_case(tc, got == expected, "%s → %s" % (desc, "match" if expected else "no match"))
+
+    # match_any: True if any pattern in the list matches.
+    tc = test_case(tc, match_any(["*.lock", "vendor/**"], "Cargo.lock"),         "match_any: first pattern matches")
+    tc = test_case(tc, match_any(["*.lock", "vendor/**"], "vendor/foo/bar"),     "match_any: second pattern matches")
+    tc = test_case(tc, not match_any(["*.lock", "vendor/**"], "src/main.rs"),    "match_any: no pattern matches")
+    tc = test_case(tc, not match_any([], "anything"),                            "match_any: empty pattern list never matches")
+
+    return tc
+
+
 def impl(ctx: TaskContext) -> int:
     tc = 0
 
@@ -1288,6 +1357,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_conditional_flags(ctx, tc)
     tc = test_cancel_invocation(ctx, tc)
     tc = test_template_rendering(ctx, tc)
+    tc = test_path_glob(tc)
 
     print(tc, "tests passed")
     return 0
