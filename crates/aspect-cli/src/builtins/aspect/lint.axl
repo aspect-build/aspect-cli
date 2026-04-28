@@ -195,11 +195,14 @@ def _impl(ctx: TaskContext) -> int:
     changed_files = lint_trait.get_diff(ctx)
 
 
-    # 3. Build flags — lint-specific first, then BazelTrait additions
+    # 3. Build flags — lint-specific first, then BazelTrait additions.
+    # Each --aspect=<label> from the user becomes a Bazel --aspects=<label>.
+    # At least one aspect is required (enforced by args.string_list(required=True)).
     flags = [
-        "--config=lint",
         "--remote_download_regex='.*AspectRulesLint.*'",
     ]
+    for aspect in ctx.args.aspect:
+        flags.append("--aspects=" + aspect)
     if ctx.args.fix:
         flags.append("--output_groups=rules_lint_patch")
         flags.append("--@aspect_rules_lint//lint:fix")
@@ -241,8 +244,6 @@ def _impl(ctx: TaskContext) -> int:
         root = ctx.std.env.root_dir(),
         startup_flags = startup_flags,
         flags = flags,
-        # ignore specific errors
-        skip_config_if_missing = ["lint"],
     )
     rc_startup_flags, flags = rc.expand_all(command = "build")
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
@@ -330,6 +331,10 @@ lint = task(
     implementation = _impl,
     traits = [LintTrait, BazelTrait, HealthCheckTrait],
     args = {
+        "aspect": args.string_list(
+            required = True,
+            description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. At least one aspect is required.",
+        ),
         "announce_rc": args.boolean(default = False),
         "quiet": args.boolean(default = False),
         "fix": args.boolean(),

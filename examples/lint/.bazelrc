@@ -1,4 +1,0 @@
-### YOUR PROJECT SPECIFIC OPTIONS GO HERE ###
-
-
-common:lint --aspects=//:linters.bzl%shellcheck
