@@ -120,6 +120,7 @@ def _impl(ctx: TaskContext) -> int:
     startup_flags.extend(bazel_trait.extra_startup_flags)
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
+    ctx.bazel.startup_flags.extend(startup_flags)
 
     r = runnable(ctx, [ctx.args.formatter_target])
 
@@ -127,7 +128,6 @@ def _impl(ctx: TaskContext) -> int:
         ctx.args.formatter_target,
         build_events = True,
         flags = flags,
-        startup_flags = startup_flags,
     )
 
     for event in build.build_events():
