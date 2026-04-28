@@ -48,8 +48,23 @@ jobs:
           repository-cache: true
 
       - name: Build release artifacts
+        # `release.sh` (genrule output of //bazel/release:release.bzl) cps
+        # bazel-out paths directly without declaring the binaries / .sha256
+        # files as runfiles. The :ci default `--remote_download_outputs=minimal`
+        # leaves cache-hit outputs (notably the unstamped axl-docgen `hashes`
+        # actions) remote-only, so the cp step then fails with "cannot stat".
+        #
+        # Pre-build `:bins` (the filegroup whose DefaultInfo lists exactly
+        # the binaries + sha256 files) with `toplevel` so those land on
+        # local disk first; the subsequent `bazel run :release` cps from
+        # those already-materialized paths and doesn't need a broader
+        # download policy.
         run: |
           mkdir -p upload_root/assets
+          bazel build --config=release --config=ci --remote_download_outputs=toplevel \
+            //crates/aspect-launcher:bins \
+            //crates/aspect-cli:bins \
+            //crates/axl-docgen:bins
           bazel run --config=release --config=ci //crates/aspect-launcher:release -- "${PWD}/upload_root/assets"
           bazel run --config=release --config=ci //crates/aspect-cli:release -- "${PWD}/upload_root/assets"
           bazel run --config=release --config=ci //crates/axl-docgen:release -- "${PWD}/upload_root/assets"
