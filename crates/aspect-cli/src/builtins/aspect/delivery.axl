@@ -76,6 +76,9 @@ Failure modes
   --commit-sha unset and no CI env var
     exposes one (GITHUB_SHA, BUILDKITE_COMMIT,
     CIRCLE_SHA1, CI_COMMIT_SHA)                   hard fail() at startup
+  --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS
+    contains a label not in the resolved
+    delivery set (from --query / positional)      hard fail() at startup
   No --remote_cache configured (most modes)       graceful return 1 with error
   No --remote_cache configured for the
     --mode=always --dry-run --track-state=false   prints NOTE; continues
@@ -448,6 +451,17 @@ def _delivery_impl(ctx):
         print(_style("No targets to deliver", _BOLD + _YELLOW, is_tty))
         return 0
 
+    # --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS only flip
+    # change detection for labels already in the resolved target set —
+    # they don't add labels. Hard-fail on any unmatched forced label so
+    # typos and stale labels are caught at startup rather than silently
+    # ignored.
+    unmatched_forced = [t for t in forced_targets if t not in targets]
+    if unmatched_forced:
+        fail("--force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS labels not in the resolved delivery set: " +
+             ", ".join(unmatched_forced) +
+             ". Force-target re-delivers labels already selected by --query or positional args; it does not add new labels. Either fix the typo or update --query / positional targets to include them.")
+
     _print_header(is_tty, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, flags, targets, forced_targets, mode, dry_run, track_state)
 
     run_tracker = runnable(ctx, targets)
@@ -716,7 +730,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         ),
         "force_target": args.string_list(
             default = [],
-            description = "Re-deliver these targets even if they have already been delivered for this commit. Use as a break-glass override when a previous delivery needs to be repeated. The ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS env var (whitespace-separated labels) is merged in addition to this flag — convenient for CI parameter fields that don't easily template into a flag.",
+            description = "Re-deliver these targets even if they have already been delivered for this commit. Use as a break-glass override when a previous delivery needs to be repeated. Each label must already be in the resolved delivery set (from --query or positional args) — force-target only flips the change-detection skip, it does not add labels; an unmatched label hard-fails at startup so typos are caught early. The ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS env var (whitespace-separated labels) is merged in addition to this flag — convenient for CI parameter fields that don't easily template into a flag.",
         ),
         "mode": args.string(
             default = "selective",
