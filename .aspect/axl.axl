@@ -1886,6 +1886,23 @@ def test_file_uri_to_path(tc: int) -> int:
     return tc
 
 
+def test_validate_role(tc: int) -> int:
+    """Coverage for github.validate_role + VALID_ROLES."""
+    valid = ["checks.read", "checks.write", "statuses.read", "statuses.write",
+             "prs.read", "prs.write", "issues.read", "actions.read"]
+    for r in valid:
+        tc = test_case(tc, github.validate_role(r), "validate_role: %s ok" % r)
+
+    invalid = ["", "checks", "checks.write.something", "prs", "Checks.Write", "actions.write"]
+    for r in invalid:
+        tc = test_case(tc, not github.validate_role(r), "validate_role: %r rejected" % r)
+
+    # VALID_ROLES is the authoritative list — all entries should self-validate.
+    for r in github.VALID_ROLES:
+        tc = test_case(tc, github.validate_role(r), "validate_role: %s self-consistent" % r)
+    return tc
+
+
 def test_canonical_label(tc: int) -> int:
     """Coverage for runnable.canonical_label — Bazel label normalization."""
     cases = [
@@ -2042,6 +2059,45 @@ def test_sarif_lib(tc: int) -> int:
     # Accepts pre-parsed dict too.
     tc = test_case(tc, get_sarif_summary(parse_sarif("""{"runs":[]}""")) == "No lint findings.", "get_sarif_summary: accepts dict")
 
+    # Fix-hint extraction (sarif_result_to_comment via sarif_to_review_comments).
+    # Realistic shape: relatedLocations carries `try "<replacement>"` messages
+    # paired with a byteOffset/byteLength region pointing at the bytes to splice.
+    fix_sarif = """{"runs":[{"tool":{"driver":{"name":"shellcheck"}},"results":[
+        {"level":"warning","ruleId":"SC2086","message":{"text":"add quotes"},
+         "locations":[{"physicalLocation":{"artifactLocation":{"uri":"a.sh"},"region":{"startLine":3,"endLine":3}}}],
+         "relatedLocations":[
+            {"message":{"text":"try \\"$VAR\\""},"physicalLocation":{"region":{"byteOffset":42,"byteLength":4}}}
+         ]
+        },
+        {"level":"warning","ruleId":"SC2034","message":{"text":"unused"},
+         "locations":[{"physicalLocation":{"artifactLocation":{"uri":"b.sh"},"region":{"startLine":1,"endLine":1}}}],
+         "relatedLocations":[
+            {"message":{"text":"trying to be helpful"},"physicalLocation":{"region":{"byteOffset":1,"byteLength":1}}}
+         ]
+        },
+        {"level":"warning","ruleId":"SC9999","message":{"text":"empty fix"},
+         "locations":[{"physicalLocation":{"artifactLocation":{"uri":"c.sh"},"region":{"startLine":2,"endLine":2}}}],
+         "relatedLocations":[
+            {"message":{"text":"try"},"physicalLocation":{"region":{"byteOffset":5,"byteLength":3}}}
+         ]
+        }
+    ]}]}"""
+    fix_comments = sarif_to_review_comments(fix_sarif)
+    tc = test_case(tc, len(fix_comments) == 3, "fix hint sarif: 3 comments")
+    # 1st comment has a real fix hint → _fixes populated.
+    fixes_a = fix_comments[0].get("_fixes")
+    tc = test_case(tc, fixes_a != None and len(fixes_a) == 1, "fix hint: comment 0 has 1 fix")
+    if fixes_a and len(fixes_a) == 1:
+        f = fixes_a[0]
+        tc = test_case(tc, f["replacement"] == "$VAR", "fix hint: quoted text unquoted")
+        tc = test_case(tc, f["byteOffset"] == 42 and f["byteLength"] == 4, "fix hint: byte offset/length")
+    # 2nd comment: "trying to be helpful" should NOT match fix-hint format ("try " prefix only).
+    fixes_b = fix_comments[1].get("_fixes")
+    tc = test_case(tc, fixes_b == None, "fix hint: \"trying ...\" not mistaken for fix")
+    # 3rd comment: bare "try" → empty replacement.
+    fixes_c = fix_comments[2].get("_fixes")
+    tc = test_case(tc, fixes_c != None and fixes_c[0]["replacement"] == "", "fix hint: bare \"try\" → empty replacement")
+
     return tc
 
 
@@ -2105,6 +2161,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_sarif_lib(tc)
     tc = test_file_uri_to_path(tc)
     tc = test_canonical_label(tc)
+    tc = test_validate_role(tc)
     tc = test_parse_git_url_name(tc)
     tc = test_sanitize_filename(tc)
     tc = test_deliveryd_parse_endpoint(tc)
