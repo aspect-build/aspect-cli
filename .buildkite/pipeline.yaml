@@ -195,10 +195,34 @@ steps:
       ASPECT_DEBUG=1 aspect test --task-key test-bk-debug //...
       aspect test --task-key test-bk //...
 
+  # Manual break-glass input — only shown on UI-triggered builds. Users
+  # can fill this to force-deliver specific targets without editing the
+  # pipeline. The delivery step reads it via meta-data and pipes the value
+  # into ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS. Non-UI builds skip the
+  # input entirely so webhook/PR builds aren't blocked.
+  - key: force-targets-input
+    if: build.source == "ui"
+    input: ":package: Delivery: force-target overrides (optional)"
+    fields:
+      - text: FORCE_TARGETS
+        hint: "Space-separated Bazel labels to force-deliver. Example: //examples/deliverable. Leave empty for normal selective delivery."
+        required: false
+        default: ""
+        key: force_targets
+        # Validate the input against Bazel's label grammar so a typo
+        # is caught at job-trigger time rather than during the build.
+        # Allows whitespace (including empty), one or more labels, and
+        # the full label syntax — repository, package path, and target name.
+        format: ^\s*$|^\s*(?:([@]{1,2}[\w.~-]*|[@]{0})\/\/(?:[\w.@-]+\/)*[\w.@-]*(?::(?:[\w\[\]!%@^"#\$&'()*+,;<=>?{|}~.-]+\/)*[\w\[\]!%@^"#\$&'()*+,;<=>?{|}~.-]*)?(?!\/)(?:\s+)?)+\s*$
+
   - key: delivery-task
     label: ":package: Delivery Task"
     depends_on:
       - pre-build
+      # Per-dep allow_failure so a skipped input on non-UI builds doesn't
+      # bypass pre-build failures.
+      - step: force-targets-input
+        allow_failure: true
     agents:
       queue: aspect-default
     timeout_in_minutes: 20
@@ -207,5 +231,6 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
+      export ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS=$$(buildkite-agent meta-data get force_targets --default '')
       ASPECT_DEBUG=1 aspect delivery --task-key delivery-bk-debug //examples/deliverable
       aspect delivery --task-key delivery-bk //examples/deliverable

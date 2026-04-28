@@ -9,6 +9,12 @@ variables:
   # right owner/repo from it) and status-check rendering (build_metadata
   # derives REPO_URL / REPO_OWNER / REPO_NAME / VCS from it).
   ASPECT_VCS_URL: "https://github.com/aspect-build/aspect-cli"
+  # Manual break-glass override for `aspect delivery`. Default empty —
+  # appears as an editable field on the "Run pipeline" page so users can
+  # force-deliver specific targets without editing the pipeline.
+  FORCE_TARGETS:
+    value: ""
+    description: "Bazel targets to force-deliver (space-separated). Example: //examples/deliverable. Leave empty for normal selective delivery."
 
 stages:
   - CI
@@ -50,6 +56,8 @@ delivery-task:
   tags:
     - aspect-workflows
     - aspect-default
+  variables:
+    ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: $FORCE_TARGETS
   script:
     - .aspect/bootstrap.sh
     - ASPECT_DEBUG=1 aspect delivery --task-key delivery-gl-debug //examples/deliverable

@@ -433,7 +433,16 @@ def _delivery_impl(ctx):
             targets = targets[:limit]
     else:
         targets = ctx.args.targets
-    forced_targets = ctx.args.force_target
+    # Accept --force-target plus ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS
+    # (whitespace-separated) so CI systems can wire a parameter field to
+    # the env var without templating the flag itself. Whitespace is the
+    # only safe separator: Bazel's label grammar allows commas in target
+    # names, so a comma-split would collide with valid labels.
+    forced_targets = list(ctx.args.force_target)
+    env_forced = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS") or ""
+    for tok in env_forced.split():
+        if tok and tok not in forced_targets:
+            forced_targets.append(tok)
 
     if not targets:
         print(_style("No targets to deliver", _BOLD + _YELLOW, is_tty))
@@ -707,7 +716,7 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
         ),
         "force_target": args.string_list(
             default = [],
-            description = "Re-deliver these targets even if they have already been delivered for this commit. Use as a break-glass override when a previous delivery needs to be repeated.",
+            description = "Re-deliver these targets even if they have already been delivered for this commit. Use as a break-glass override when a previous delivery needs to be repeated. The ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS env var (whitespace-separated labels) is merged in addition to this flag — convenient for CI parameter fields that don't easily template into a flag.",
         ),
         "mode": args.string(
             default = "selective",
