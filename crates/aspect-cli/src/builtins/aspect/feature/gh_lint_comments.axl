@@ -508,7 +508,10 @@ def _github_lint_impl(ctx: FeatureContext):
                     n = by_sev.get(sev, 0)
                     if n > 0:
                         parts.append("%d %s" % (n, sev))
-                other = sum([v for k, v in by_sev.items() if k not in ("error", "warning", "note")])
+                other = 0
+                for k, v in by_sev.items():
+                    if k not in ("error", "warning", "note"):
+                        other += v
                 if other > 0:
                     parts.append("%d other" % other)
                 breakdown = " (" + ", ".join(parts) + ")" if parts else ""
