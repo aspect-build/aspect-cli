@@ -37,14 +37,8 @@ starlark_simple_value!(SleepIter);
 
 #[starlark_value(type = "sleep_iter")]
 impl<'v> values::StarlarkValue<'v> for SleepIter {
-    fn eval_type(&self) -> Option<Ty> {
-        Some(Ty::iter(
-            axl_proto::tools::protos::ExecLogEntry::get_type_starlark_repr(),
-        ))
-    }
-
     fn get_type_starlark_repr() -> Ty {
-        Ty::iter(axl_proto::tools::protos::ExecLogEntry::get_type_starlark_repr())
+        Ty::iter(Ty::int())
     }
 
     unsafe fn iterate(
@@ -531,28 +525,6 @@ fn builtins_methods(registry: &mut MethodsBuilder) {
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     const __builtins__: Builtins = Builtins;
     const Hash: StarlarkValueAsType<HashObject> = StarlarkValueAsType::new();
-
-    /// Returns an infinite iterator that yields a monotonically increasing
-    /// integer every `rate` milliseconds.
-    ///
-    /// Useful for driving polling loops. Each iteration sleeps for `rate`
-    /// milliseconds before yielding the next tick (starting at `0`); use
-    /// `break` to terminate the loop.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// for tick in forever(500):  # poll every 500 ms
-    ///     status = check()
-    ///     if status == "done":
-    ///         break
-    /// ```
-    fn forever(#[starlark()] rate: u32) -> anyhow::Result<SleepIter> {
-        Ok(SleepIter {
-            rate: rate as u64,
-            counter: AtomicU64::new(0),
-        })
-    }
 }
 
 #[cfg(test)]
