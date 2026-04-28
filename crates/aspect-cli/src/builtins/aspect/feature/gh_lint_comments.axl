@@ -329,16 +329,64 @@ def _github_lint_impl(ctx: FeatureContext):
         lint_trait.get_diff = get_diff
 
     def _lint_report(ctx, filepath):
-        # Per-SARIF-file callback. We *only* accumulate here — posting is
-        # deferred to _lint_end so the cap can apply to the global set with
-        # priority ordering (errors first), and so the dedup-against-
-        # existing-PR-comments step happens before the cap rather than after
-        # (otherwise duplicates would consume cap budget and starve real
-        # diagnostics on re-runs of the same task).
+        # Per-SARIF-file callback. Hybrid posting strategy:
+        #   - Errors are streamed immediately (subject to cap, dedup, and
+        #     line-level diff filter) so reviewers get fast feedback on the
+        #     most important diagnostics during long lint runs.
+        #   - Warnings/notes are buffered and posted in _lint_end so the cap
+        #     remainder is filled in priority + stable order across the full
+        #     build, not per-SARIF-file arrival order.
+        # Errors are always top priority; FIFO among them is fine.
         if gh and gh["stale"]:
             return
         comments = _build_comments(ctx, filepath)
         state["all_comments"].extend(comments)
+        if not gh:
+            return
+
+        # Lazy-init existing markers on first stream so we can dedup against
+        # comments posted in prior runs of this task.
+        if "existing_markers" not in gh:
+            gh["existing_markers"] = _get_existing_markers(ctx, gh)
+
+        # Pull just the errors from this batch; everything else goes into the
+        # buffered set processed in _lint_end.
+        errors_in_batch = [c for c in comments if c.get("_severity") == "error"]
+        if not errors_in_batch:
+            return
+
+        # Diff filter: GitHub's review-comment API rejects (422) any comment
+        # not on a changed line, so this guards both correctness and API
+        # validity.
+        ready = _filter_by_diff(errors_in_batch, gh["changed_lines"])
+        state["filtered"] += len(errors_in_batch) - len(ready)
+        if not ready:
+            return
+
+        # Cap accounting. _post_individually internally skips entries whose
+        # marker is already in existing_markers, so duplicates won't consume
+        # cap budget — slice only counts new postable comments.
+        new_only = []
+        for c in ready:
+            marker = _extract_comment_marker(c.get("body", ""))
+            if marker and marker in gh["existing_markers"]:
+                continue
+            new_only.append(c)
+        if not new_only:
+            return
+
+        remaining_budget = max_pr_comments - state["posted"]
+        if remaining_budget <= 0:
+            state["dropped_due_to_cap"] += len(new_only)
+            return
+        if len(new_only) > remaining_budget:
+            state["dropped_due_to_cap"] += len(new_only) - remaining_budget
+            new_only = new_only[:remaining_budget]
+
+        before = len(gh["existing_markers"])
+        errors = _post_individually(ctx, gh, new_only, gh["existing_markers"])
+        state["posted"] += len(gh["existing_markers"]) - before
+        state["errors"].extend(errors)
 
     def _lint_end(ctx, relevant_diagnostics):
         if debug:
@@ -364,17 +412,17 @@ def _github_lint_impl(ctx: FeatureContext):
                 gh["stale"] = True
                 return
 
-            # Lazy-init existing markers — done once now that we have the
-            # full set of comments to evaluate.
-            gh["existing_markers"] = _get_existing_markers(ctx, gh)
+            # Errors were streamed in _lint_report; here we post the remaining
+            # warnings/notes (sorted by severity, capped to whatever budget
+            # is left after streaming).
+            non_errors = [c for c in state["all_comments"] if c.get("_severity") != "error"]
 
-            # 1. Diff filter (line-level): drop comments not on changed lines.
-            diff_filtered = _filter_by_diff(state["all_comments"], gh["changed_lines"])
-            state["filtered"] = len(state["all_comments"]) - len(diff_filtered)
+            # 1. Diff filter (line-level).
+            diff_filtered = _filter_by_diff(non_errors, gh["changed_lines"])
+            state["filtered"] += len(non_errors) - len(diff_filtered)
 
-            # 2. Dedup against PR comments already posted in prior runs of this
-            #    task. Doing this *before* the cap means duplicates don't eat
-            #    cap budget and starve genuinely-new diagnostics.
+            # 2. Dedup against existing markers (which now include the
+            #    just-streamed errors thanks to _post_individually's mutation).
             new_only = []
             for c in diff_filtered:
                 marker = _extract_comment_marker(c.get("body", ""))
@@ -382,23 +430,24 @@ def _github_lint_impl(ctx: FeatureContext):
                     continue
                 new_only.append(c)
 
-            # 3. Global priority sort: errors > warnings > notes, then stable
-            #    by path/line. Applied to the full set so the highest-severity
-            #    items always make the cap, regardless of SARIF arrival order.
+            # 3. Sort warnings before notes (stable by path/line).
             new_only = sorted(new_only, key = _comment_sort_key)
 
-            # 4. Cap.
-            if len(new_only) > max_pr_comments:
-                state["dropped_due_to_cap"] = len(new_only) - max_pr_comments
-                new_only = new_only[:max_pr_comments]
+            # 4. Cap remainder.
+            remaining_budget = max_pr_comments - state["posted"]
+            if remaining_budget <= 0:
+                state["dropped_due_to_cap"] += len(new_only)
+                new_only = []
+            elif len(new_only) > remaining_budget:
+                state["dropped_due_to_cap"] += len(new_only) - remaining_budget
+                new_only = new_only[:remaining_budget]
 
-            # 5. Post (no-ops if max_pr_comments=0; _post_individually still
-            #    short-circuits anything that snuck through with a known
-            #    marker, defense-in-depth).
-            before = len(gh["existing_markers"])
-            errors = _post_individually(ctx, gh, new_only, gh["existing_markers"])
-            state["posted"] = len(gh["existing_markers"]) - before
-            state["errors"].extend(errors)
+            # 5. Post.
+            if new_only:
+                before = len(gh["existing_markers"])
+                errors = _post_individually(ctx, gh, new_only, gh["existing_markers"])
+                state["posted"] += len(gh["existing_markers"]) - before
+                state["errors"].extend(errors)
 
             _cleanup_comments(ctx, gh, relevant_diagnostics)
 
