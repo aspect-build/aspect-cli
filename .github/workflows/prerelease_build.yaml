@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: prerelease-build-${{ inputs.branch || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
