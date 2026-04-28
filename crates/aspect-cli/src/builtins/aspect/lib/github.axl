@@ -36,6 +36,20 @@ def _do_request(ctx, method, url, token, payload = None):
     success = response.status >= 200 and response.status < 300
     body = response.body
     if body:
+        # Sniff the body before json.decode. GitHub normally returns JSON
+        # for both successful and documented-error responses, but transient
+        # gateway flakes (502/503/504) can come back as HTML or plain text
+        # from edge proxies. `json.decode` is unrecoverable in Starlark
+        # (no try/except), so a non-JSON body here would crash the whole
+        # task — including any task that just calls into a github lifecycle
+        # hook (e.g. status checks via the github_status_checks feature).
+        # Treat any non-JSON body as a soft failure: return success=False
+        # with the raw snippet, letting callers fall back to status-driven
+        # error paths instead of bringing down the parent task.
+        stripped = body.lstrip()
+        if not stripped or stripped[0] not in ("{", "["):
+            snippet = body[:200].replace("\n", " ")
+            return (False, response.status, "non-JSON response (status %d): %s" % (response.status, snippet))
         body = json.decode(body)
     return (success, response.status, body)
 
