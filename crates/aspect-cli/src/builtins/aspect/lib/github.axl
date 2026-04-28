@@ -92,7 +92,8 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     if roles:
         for role in roles:
             if not validate_role(role):
-                fail("unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES)))
+                msg = "unknown role %r, valid roles: %s" % (role, ", ".join(VALID_ROLES))
+                fail(msg)
 
     url = ctx.aspect.auth.api_url + "/github/token"
     if roles:

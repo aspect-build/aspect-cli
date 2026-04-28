@@ -137,10 +137,12 @@ def fetch_latest_release(ctx: TaskContext, owner: str, repo: str) -> dict:
     response = ctx.http().get(url = url, headers = get_github_headers()).block()
 
     if response.status == 404:
-        fail("Repository " + owner + "/" + repo + " not found or has no releases")
+        msg = "Repository " + owner + "/" + repo + " not found or has no releases"
+        fail(msg)
 
     if response.status != 200:
-        fail("Failed to fetch release info: HTTP " + str(response.status))
+        msg = "Failed to fetch release info: HTTP " + str(response.status)
+        fail(msg)
 
     if not response.body:
         fail("Empty response body from GitHub API")
@@ -157,7 +159,8 @@ def fetch_release_by_tag(ctx: TaskContext, owner: str, repo: str, tag: str) -> d
         return fetch_tag_as_release(ctx, owner, repo, tag)
 
     if response.status != 200:
-        fail("Failed to fetch release info: HTTP " + str(response.status))
+        msg = "Failed to fetch release info: HTTP " + str(response.status)
+        fail(msg)
 
     return json.decode(response.body)
 
@@ -168,10 +171,12 @@ def fetch_tag_as_release(ctx: TaskContext, owner: str, repo: str, tag: str) -> d
     response = ctx.http().get(url = url, headers = get_github_headers()).block()
 
     if response.status == 404:
-        fail("Tag " + tag + " not found in " + owner + "/" + repo)
+        msg = "Tag " + tag + " not found in " + owner + "/" + repo
+        fail(msg)
 
     if response.status != 200:
-        fail("Failed to fetch tag info: HTTP " + str(response.status))
+        msg = "Failed to fetch tag info: HTTP " + str(response.status)
+        fail(msg)
 
     # Create a synthetic release object with the tag name
     return {

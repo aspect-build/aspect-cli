@@ -326,7 +326,8 @@ def _delivery_impl(ctx):
     track_state = ctx.args.track_state
 
     if mode == "selective" and not track_state:
-        fail("--mode=selective requires --track-state=true. Change detection cannot decide what to deliver without persisted state. Either use --track-state=true (the default), or switch to --mode=always to deliver without change detection (combine with --dry-run for a preview).")
+        msg = "--mode=selective requires --track-state=true. Change detection cannot decide what to deliver without persisted state. Either use --track-state=true (the default), or switch to --mode=always to deliver without change detection (combine with --dry-run for a preview)."
+        fail(msg)
 
     # Derived: phase 1/2 (action-digest computation) runs whenever digests are
     # useful — i.e. anywhere they'll be recorded (--track-state=true) or
@@ -343,7 +344,8 @@ def _delivery_impl(ctx):
     # automatically and expose its Unix socket via the env var below.
     endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
     if not endpoint and track_state:
-        fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)")
+        msg = "ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)"
+        fail(msg)
 
     # Delivery context. --commit-sha and --build-url are auto-detected from
     # common CI env vars (GITHUB_*, BUILDKITE_*, CIRCLE_*, CI_* for GitLab)
@@ -351,7 +353,8 @@ def _delivery_impl(ctx):
     ci_host = ctx.args.ci_host
     commit_sha = ctx.args.commit_sha or detect_commit_sha(ctx.std)
     if not commit_sha:
-        fail("Could not determine commit SHA. Pass --commit-sha=<sha>, or run on a CI host that exposes GITHUB_SHA, BUILDKITE_COMMIT, CIRCLE_SHA1, or CI_COMMIT_SHA.")
+        msg = "Could not determine commit SHA. Pass --commit-sha=<sha>, or run on a CI host that exposes GITHUB_SHA, BUILDKITE_COMMIT, CIRCLE_SHA1, or CI_COMMIT_SHA."
+        fail(msg)
     build_url = ctx.args.build_url or detect_build_url(ctx) or "-"
 
     # Change-detection prefix: always anchored to --task-key, optionally extended by --salt
@@ -459,9 +462,8 @@ def _delivery_impl(ctx):
     # ignored.
     unmatched_forced = [t for t in forced_targets if t not in targets]
     if unmatched_forced:
-        fail("--force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS labels not in the resolved delivery set: " +
-             ", ".join(unmatched_forced) +
-             ". Force-target re-delivers labels already selected by --query or positional args; it does not add new labels. Either fix the typo or update --query / positional targets to include them.")
+        msg = "--force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS labels not in the resolved delivery set: " + ", ".join(unmatched_forced) + ". Force-target re-delivers labels already selected by --query or positional args; it does not add new labels. Either fix the typo or update --query / positional targets to include them."
+        fail(msg)
 
     _print_header(ansi, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, flags, targets, forced_targets, mode, dry_run, track_state)
 
