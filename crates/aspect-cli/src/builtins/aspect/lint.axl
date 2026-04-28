@@ -123,8 +123,6 @@ def _impl(ctx: TaskContext) -> int:
     hc_trait = ctx.traits[HealthCheckTrait]
     strategy = _STRATEGIES[ctx.args.strategy]
 
-    quiet = ctx.args.quiet
-
     for hook in hc_trait.pre_health_check:
         hook(ctx)
 
@@ -203,11 +201,15 @@ def _impl(ctx: TaskContext) -> int:
         print(rc.announce(command = "build", ansi = color_enabled(ctx.std)))
 
     # 6. Build + stream events
+    # TODO: re-introduce a --quiet arg once we can capture (rather than
+    # only inherit-or-not) Bazel's stdout/stderr. Today suppressing both
+    # streams hides build failures from the user, which is the opposite
+    # of what most --quiet expectations imply.
     build = ctx.bazel.build(
         flags = flags,
         build_events = build_events,
-        inherit_stderr = not ctx.args.quiet,
-        inherit_stdout = not ctx.args.quiet,
+        inherit_stderr = True,
+        inherit_stdout = True,
         *ctx.args.targets,
     )
     all_diagnostics = []
@@ -289,10 +291,6 @@ lint = task(
         "announce_rc": args.boolean(
             default = False,
             description = "Print the resolved Bazel `.bazelrc` flags before running the lint build. Useful when debugging which config sections fired or what the final flag set looks like.",
-        ),
-        "quiet": args.boolean(
-            default = False,
-            description = "Suppress Bazel's stdout/stderr from the underlying build. Lint diagnostics are still surfaced via SARIF reports and any registered lint_end hooks (e.g. PR review comments).",
         ),
         "fix": args.boolean(
             description = "Apply auto-fixes from rules_lint where the linter provides them. Runs the build with --output_groups=rules_lint_patch and applies the resulting patches to the working tree.",
