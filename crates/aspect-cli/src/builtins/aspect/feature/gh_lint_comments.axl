@@ -289,14 +289,14 @@ def _github_lint_impl(ctx: FeatureContext):
 
     max_pr_comments = ctx.args.max_pr_comments
     state = {
-        "pending": [],
         "all_comments": [],
         "posted": 0,
         "filtered": 0,
         "errors": [],
-        # Cap accounting — increments every time we drop a comment because the
-        # max-pr-comments budget is exhausted. Surfaced as a WARNING in
-        # _lint_end so users know the displayed annotations are a subset.
+        # Cap accounting — set in _lint_end once we know the global comment
+        # set, so it reflects priority-aware drops rather than per-batch
+        # arrival order. Surfaced as a WARNING so users know the displayed
+        # annotations are a subset.
         "dropped_due_to_cap": 0,
     }
 
@@ -329,37 +329,16 @@ def _github_lint_impl(ctx: FeatureContext):
         lint_trait.get_diff = get_diff
 
     def _lint_report(ctx, filepath):
+        # Per-SARIF-file callback. We *only* accumulate here — posting is
+        # deferred to _lint_end so the cap can apply to the global set with
+        # priority ordering (errors first), and so the dedup-against-
+        # existing-PR-comments step happens before the cap rather than after
+        # (otherwise duplicates would consume cap budget and starve real
+        # diagnostics on re-runs of the same task).
         if gh and gh["stale"]:
             return
         comments = _build_comments(ctx, filepath)
-        state["pending"].extend(comments)
         state["all_comments"].extend(comments)
-        if gh:
-            if "existing_markers" not in gh:
-                gh["existing_markers"] = _get_existing_markers(ctx, gh)
-            ready = _filter_by_diff(state["pending"], gh["changed_lines"])
-            state["filtered"] += len(state["pending"]) - len(ready)
-
-            # Cap enforcement: prioritize errors > warnings > notes within
-            # this batch, then slice to remaining budget. Comments dropped
-            # here are only suppressed from PR review comments; they still
-            # flow through the lint task's strategy filter and exit-code
-            # logic upstream.
-            ready = sorted(ready, key = _comment_sort_key)
-            remaining_budget = max_pr_comments - state["posted"]
-            if remaining_budget <= 0:
-                state["dropped_due_to_cap"] += len(ready)
-                state["pending"] = []
-                return
-            if len(ready) > remaining_budget:
-                state["dropped_due_to_cap"] += len(ready) - remaining_budget
-                ready = ready[:remaining_budget]
-
-            before = len(gh["existing_markers"])
-            errors = _post_individually(ctx, gh, ready, gh["existing_markers"])
-            state["posted"] += len(gh["existing_markers"]) - before
-            state["errors"].extend(errors)
-            state["pending"] = []
 
     def _lint_end(ctx, relevant_diagnostics):
         if debug:
@@ -384,7 +363,45 @@ def _github_lint_impl(ctx: FeatureContext):
             if gh["stale"] or _check_staleness(ctx, gh):
                 gh["stale"] = True
                 return
+
+            # Lazy-init existing markers — done once now that we have the
+            # full set of comments to evaluate.
+            gh["existing_markers"] = _get_existing_markers(ctx, gh)
+
+            # 1. Diff filter (line-level): drop comments not on changed lines.
+            diff_filtered = _filter_by_diff(state["all_comments"], gh["changed_lines"])
+            state["filtered"] = len(state["all_comments"]) - len(diff_filtered)
+
+            # 2. Dedup against PR comments already posted in prior runs of this
+            #    task. Doing this *before* the cap means duplicates don't eat
+            #    cap budget and starve genuinely-new diagnostics.
+            new_only = []
+            for c in diff_filtered:
+                marker = _extract_comment_marker(c.get("body", ""))
+                if marker and marker in gh["existing_markers"]:
+                    continue
+                new_only.append(c)
+
+            # 3. Global priority sort: errors > warnings > notes, then stable
+            #    by path/line. Applied to the full set so the highest-severity
+            #    items always make the cap, regardless of SARIF arrival order.
+            new_only = sorted(new_only, key = _comment_sort_key)
+
+            # 4. Cap.
+            if len(new_only) > max_pr_comments:
+                state["dropped_due_to_cap"] = len(new_only) - max_pr_comments
+                new_only = new_only[:max_pr_comments]
+
+            # 5. Post (no-ops if max_pr_comments=0; _post_individually still
+            #    short-circuits anything that snuck through with a known
+            #    marker, defense-in-depth).
+            before = len(gh["existing_markers"])
+            errors = _post_individually(ctx, gh, new_only, gh["existing_markers"])
+            state["posted"] = len(gh["existing_markers"]) - before
+            state["errors"].extend(errors)
+
             _cleanup_comments(ctx, gh, relevant_diagnostics)
+
             if state["dropped_due_to_cap"] > 0:
                 ansi = color_enabled(ctx.std)
                 prefix = (_BOLD + _YELLOW + "WARNING:" + _RESET) if ansi else "WARNING:"
