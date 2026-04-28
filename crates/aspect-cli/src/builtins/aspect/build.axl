@@ -19,6 +19,8 @@ build = task(
         ArtifactsTrait,
     ],
     args = {
+        # TODO: Support a long --pattern_file like bazel does (@./targets)
+        # TODO: Support - (list from stdin)
         "targets": args.positional(
             minimum = 1,
             maximum = 512,
