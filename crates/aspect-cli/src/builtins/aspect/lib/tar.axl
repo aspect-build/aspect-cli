@@ -24,7 +24,8 @@ def _platform_key(ctx):
     os = _OS_MAP.get(ctx.std.env.os())
     arch = _ARCH_MAP.get(ctx.std.env.arch())
     if not os or not arch:
-        fail("unsupported platform: " + ctx.std.env.os() + "/" + ctx.std.env.arch())
+        msg = "unsupported platform: " + ctx.std.env.os() + "/" + ctx.std.env.arch()
+        fail(msg)
     return os, arch
 
 
