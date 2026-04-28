@@ -17,23 +17,9 @@ Usage:
     
 """
 
+load("./lib/github.axl", "detect_changed_files")
 load("./lib/runnable.axl", "runnable")
 load("./traits.axl", "BazelTrait")
-
-# buildifier: disable=function-docstring
-def spawn_git_with_output(out, process, args: list[str]):
-    spawn = process.command("git").args(args).stdout("piped").spawn().wait_with_output()
-    if not spawn.status.success:
-        out.write("\x1b[0;31mERROR\x1b[0m: 'git %s' failed (exit %d)\n" % (" ".join(args), spawn.status.code))
-        fail(spawn.stderr)
-
-    return spawn.stdout.strip()
-
-# buildifier: disable=function-docstring
-def find_changed_files(out, process, base_ref: str, merge_base: str | None):
-    diff_base = merge_base if merge_base else spawn_git_with_output(out, process, ["merge-base", "HEAD", base_ref])
-
-    return spawn_git_with_output(out, process, ["diff", "--diff-filter=d", "--name-only", diff_base])
 
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
@@ -84,9 +70,18 @@ def _impl(ctx: TaskContext) -> int:
 
     format_args = []
     if not ctx.args.all_files:
-        changed_files = find_changed_files(out, ctx.std.process, ctx.args.base_ref, ctx.args.merge_base)
-        out.write("Formatting changed files:\n%s\n" % changed_files)
-        format_args = changed_files.split("\n")
+        # Prefers the GitHub PR Files API when authenticated and in a PR
+        # context (works on any CI host), falling back to a local
+        # `git diff <merge-base> --diff-filter=d --name-only`. The
+        # --base-ref / --merge-base flags below only apply to that fallback.
+        changed_files = detect_changed_files(
+            ctx,
+            line_level = False,
+            base_ref = ctx.args.base_ref,
+            merge_base = ctx.args.merge_base or None,
+        )
+        out.write("Formatting changed files:\n%s\n" % "\n".join(changed_files))
+        format_args = changed_files
 
     exit = r.spawn(formatter, format_args).wait()
 
@@ -99,11 +94,26 @@ format = task(
     implementation = _impl,
     traits = [BazelTrait],
     args = {
-        "all_files": args.boolean(default = False),
-        "base_ref": args.string(default = "origin/main"),
-        "merge_base": args.string(),
-        "formatter_target": args.string(default = "//tools/format"),
-        "bazel_flag": args.string_list(),
-        "bazel_startup_flag": args.string_list(),
+        "all_files": args.boolean(
+            default = False,
+            description = "Format every file in the working tree instead of just the changed-file set. Useful for nightly maintenance jobs or when introducing a new formatter to a repo for the first time.",
+        ),
+        "base_ref": args.string(
+            default = "origin/main",
+            description = "Base ref for the changed-file set when the local-git fallback runs (no PR context detected, or PR-API auth unavailable). Resolved to a merge-base via `git merge-base HEAD <base-ref>`. Ignored on the GitHub PR Files API path. Override --merge-base to skip the merge-base resolution and use a specific SHA directly.",
+        ),
+        "merge_base": args.string(
+            description = "Explicit merge-base SHA for the local-git fallback's diff base. When set, skips the `git merge-base HEAD <base-ref>` resolution and uses this SHA directly. Ignored on the GitHub PR Files API path.",
+        ),
+        "formatter_target": args.string(
+            default = "//tools/format",
+            description = "Bazel label of the format_multirun target (or any runnable target) to invoke as the formatter. The target is built first, then run with the changed-file list passed as positional arguments.",
+        ),
+        "bazel_flag": args.string_list(
+            description = "Additional Bazel flags forwarded to the formatter build. Repeat the flag to pass multiple — e.g. `--bazel-flag=--config=ci --bazel-flag=--keep_going`.",
+        ),
+        "bazel_startup_flag": args.string_list(
+            description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+        ),
     },
 )

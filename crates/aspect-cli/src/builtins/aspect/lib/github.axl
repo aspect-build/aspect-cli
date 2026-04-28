@@ -1,5 +1,6 @@
 """GitHub API client library."""
 load("@std//base64.axl", "base64")
+load("./environment.axl", "color_enabled")
 load("./tar.axl", "zip_create")
 
 DEFAULT_GITHUB_API = "https://api.github.com"
@@ -243,6 +244,274 @@ def detect_build_url(ctx):
     if env.var("GITLAB_CI"):
         return env.var("CI_JOB_URL") or ""
     return ""
+
+
+def detect_github_pr(std):
+    """Detect GitHub pull-request context from common CI environment variables.
+
+    Returns ({"owner": str, "repo": str, "pr_number": int, "sha": str}, "")
+    on success, or (None, reason) when no PR context can be determined.
+
+    Detection order — first match wins:
+      1. ASPECT_GITHUB_PR_NUMBER env var (explicit override) — paired with
+         detect_github_repo + detect_commit_sha. Escape hatch for setups
+         where no native CI var maps cleanly (GitLab CI mirroring a GitHub
+         repo, custom triggers, etc).
+      2. GitHub Actions: GITHUB_REF of the form refs/pull/<n>/merge.
+      3. Buildkite: BUILDKITE_PULL_REQUEST when set and not "false".
+      4. CircleCI: CIRCLE_PULL_REQUEST URL parse for /pull/<n>.
+
+    GitLab is intentionally absent: GitLab CI uses GitLab merge requests,
+    not GitHub PRs. Use the ASPECT_GITHUB_PR_NUMBER override when running
+    on GitLab CI against a GitHub-hosted repo.
+    """
+    env = std.env
+
+    explicit = env.var("ASPECT_GITHUB_PR_NUMBER") or ""
+    if explicit:
+        owner, repo = detect_github_repo(std)
+        if not owner or not repo:
+            return None, "ASPECT_GITHUB_PR_NUMBER set but no GitHub repo could be detected"
+        sha = detect_commit_sha(std)
+        if not sha:
+            return None, "ASPECT_GITHUB_PR_NUMBER set but no commit SHA could be detected"
+        if not explicit.isdigit():
+            return None, "ASPECT_GITHUB_PR_NUMBER must be numeric, got %r" % explicit
+        return {
+            "owner": owner,
+            "repo": repo,
+            "pr_number": int(explicit),
+            "sha": sha,
+        }, ""
+
+    if env.var("GITHUB_ACTIONS"):
+        ref = env.var("GITHUB_REF") or ""
+        if not (ref.startswith("refs/pull/") and ref.endswith("/merge")):
+            return None, "GITHUB_REF is not a PR merge ref: %r" % ref
+        repository = env.var("GITHUB_REPOSITORY") or ""
+        repo_parts = repository.split("/")
+        if len(repo_parts) < 2 or not repo_parts[0] or not repo_parts[1]:
+            return None, "GITHUB_REPOSITORY missing or malformed"
+        sha = detect_commit_sha(std)
+        if not sha:
+            return None, "no commit SHA available (GITHUB_SHA / pull_request head)"
+        return {
+            "owner": repo_parts[0],
+            "repo": repo_parts[1],
+            "pr_number": int(ref.removeprefix("refs/pull/").removesuffix("/merge")),
+            "sha": sha,
+        }, ""
+
+    if env.var("BUILDKITE"):
+        bk_pr = env.var("BUILDKITE_PULL_REQUEST") or ""
+        if not bk_pr or bk_pr == "false":
+            return None, "BUILDKITE_PULL_REQUEST is not set or is \"false\" (not a PR build)"
+        if not bk_pr.isdigit():
+            return None, "BUILDKITE_PULL_REQUEST is not numeric: %r" % bk_pr
+        owner, repo = detect_github_repo(std)
+        if not owner or not repo:
+            return None, "Buildkite PR detected but no GitHub repo could be derived"
+        sha = detect_commit_sha(std)
+        if not sha:
+            return None, "Buildkite PR detected but no commit SHA available"
+        return {
+            "owner": owner,
+            "repo": repo,
+            "pr_number": int(bk_pr),
+            "sha": sha,
+        }, ""
+
+    if env.var("CIRCLECI"):
+        cci_pr = env.var("CIRCLE_PULL_REQUEST") or ""
+        if not cci_pr:
+            return None, "CIRCLE_PULL_REQUEST is not set (not a PR build)"
+        # URL shape: https://github.com/<owner>/<repo>/pull/<n>
+        idx = cci_pr.find("/pull/")
+        if idx < 0:
+            return None, "CIRCLE_PULL_REQUEST does not look like a GitHub PR URL: %r" % cci_pr
+        tail = cci_pr[idx + len("/pull/"):]
+        # Strip trailing slash or query string if present.
+        for stop in ["/", "?", "#"]:
+            cut = tail.find(stop)
+            if cut >= 0:
+                tail = tail[:cut]
+        if not tail.isdigit():
+            return None, "could not parse PR number from CIRCLE_PULL_REQUEST: %r" % cci_pr
+        owner, repo = detect_github_repo(std)
+        if not owner or not repo:
+            return None, "CircleCI PR detected but no GitHub repo could be derived"
+        sha = detect_commit_sha(std)
+        if not sha:
+            return None, "CircleCI PR detected but no commit SHA available"
+        return {
+            "owner": owner,
+            "repo": repo,
+            "pr_number": int(tail),
+            "sha": sha,
+        }, ""
+
+    return None, "no GitHub PR context detected on this CI host"
+
+
+def _parse_local_diff_output(output):
+    """Parse `git diff --unified=0` output into [{file, lines}] (0-based added lines)."""
+    files = []
+    current_file = None
+    for line in output.split("\n"):
+        if line.startswith("+++ b/"):
+            path = line.removeprefix("+++ b/")
+            current_file = {"file": path, "lines": []}
+            files.append(current_file)
+        elif line.startswith("--- /dev/null"):
+            pass
+        elif line.startswith("+++ /dev/null"):
+            if current_file:
+                files.pop()
+                current_file = None
+        elif line.startswith("@@ ") and current_file != None:
+            parts = line.split(" ")
+            for part in parts:
+                if part.startswith("+") and part != "+++":
+                    plus = part.removeprefix("+")
+                    if "," in plus:
+                        chunks = plus.split(",")
+                        start = int(chunks[0])
+                        count = int(chunks[1])
+                    else:
+                        start = int(plus)
+                        count = 1
+                    if count > 0:
+                        for i in range(count):
+                            current_file["lines"].append(start - 1 + i)
+                    break
+    return files
+
+
+def _parse_github_pr_patch(patch):
+    """Parse a GitHub PR file `patch` string into 0-based added line numbers."""
+    if not patch:
+        return []
+    lines = []
+    current_line = 0
+    for line in patch.split("\n"):
+        if line.startswith("@@"):
+            parts = line.split(" ")
+            for part in parts:
+                if part.startswith("+") and part != "+++":
+                    plus = part.removeprefix("+")
+                    if "," in plus:
+                        current_line = int(plus.split(",")[0])
+                    else:
+                        current_line = int(plus)
+                    break
+        elif line.startswith("+"):
+            lines.append(current_line - 1)
+            current_line += 1
+        elif line.startswith("-"):
+            pass
+        else:
+            current_line += 1
+    return lines
+
+
+def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge_base = None):
+    """Detect changed files for a build, preferring the GitHub PR Files API
+    when available and falling back to local `git diff` otherwise.
+
+    Args:
+      ctx:        TaskContext.
+      line_level: if True (default), return [{file, lines: [int]}] with
+                  0-based added-line indices (lint usage). If False, return
+                  a flat list of file paths (format usage).
+      base_ref:   merge-base argument for the local-git fallback when
+                  line_level=False (e.g. "origin/main"). Ignored on the PR
+                  API path and when line_level=True.
+      merge_base: explicit merge-base SHA for the local-git fallback when
+                  line_level=False. Overrides `base_ref` if set.
+
+    PR-API path (when in a GitHub PR + auth succeeds):
+      - calls github.pulls.list_files via authenticate(roles=["prs.read"])
+      - parses each file's `patch` to extract added-line indices
+      - returns the same shape regardless of CI host
+
+    Local-git fallback (always available). The diff base is resolved as:
+      - explicit `merge_base` SHA if provided, else
+      - `git merge-base HEAD <base_ref>` (default base_ref `origin/main`).
+    Then:
+      - line_level=True:  `git diff <base> --unified=0`
+      - line_level=False: `git diff --diff-filter=d --name-only <base>`
+
+    If a GitHub PR context is detected but the PR-API path is unavailable
+    (auth failure, transient API error), a yellow WARNING is printed
+    explaining the reason before falling through. Outside PR contexts the
+    fallback is silent — local-git is the expected source.
+
+    Returns an empty list if neither source produces results.
+    """
+    pr, _ = detect_github_pr(ctx.std)
+    fallback_reason = ""
+    if pr:
+        auth_reason = {}
+        token = _authenticate(ctx, owner = pr["owner"], repo = pr["repo"], roles = ["prs.read"], _reason = auth_reason)
+        if not token:
+            fallback_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
+        else:
+            result = list_pull_request_files(ctx, token, pr["owner"], pr["repo"], pr["pr_number"])
+            if result["success"]:
+                # `git rev-parse --show-prefix` strips the workspace prefix so
+                # GitHub-API paths line up with local relative paths.
+                git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
+                prefix = git_out.stdout.strip() if git_out.status.success else ""
+                files = []
+                for f in result["files"]:
+                    if f.get("status", "") == "removed":
+                        continue
+                    filename = f.get("filename", "")
+                    if prefix and filename.startswith(prefix):
+                        filename = filename[len(prefix):]
+                    if line_level:
+                        added_lines = _parse_github_pr_patch(f.get("patch", ""))
+                        files.append({"file": filename, "lines": added_lines})
+                    else:
+                        files.append(filename)
+                return files
+            fallback_reason = "GitHub PR Files API call failed: %s" % result.get("error", "unknown")
+
+    if fallback_reason:
+        ansi = color_enabled(ctx.std)
+        prefix = ("\033[1m\033[33mWARNING:\033[0m") if ansi else "WARNING:"
+        print("%s detected a GitHub PR build (%s/%s#%d) but %s. Falling back to local `git diff` for changed-file detection." % (
+            prefix, pr["owner"], pr["repo"], pr["pr_number"], fallback_reason,
+        ))
+
+    # Local-git fallback. Resolve the diff base once for both shapes.
+    # Errors fail loudly: a silent empty result would be interpreted as
+    # "no changed files" by callers (lint hold-the-line surfaces nothing,
+    # format formats nothing) and pass CI even though the diff base was
+    # invalid (shallow clone, missing remote ref, …).
+    process = ctx.std.process
+    cwd = ctx.std.env.current_dir()
+    if merge_base:
+        diff_base = merge_base
+    else:
+        mb = process.command("git").args(["merge-base", "HEAD", base_ref]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+        if not mb.status.success:
+            msg = "Could not resolve merge-base for changed-file detection: `git merge-base HEAD %s` failed (exit %d).\nstderr: %s\nThe ref may not exist locally (shallow clone? missing `git fetch`?). Override with --merge-base=<sha>, or set --base-ref to a ref that's available in the local repo." % (base_ref, mb.status.code, mb.stderr.strip())
+            fail(msg)
+        diff_base = mb.stdout.strip()
+
+    if line_level:
+        result = process.command("git").args(["diff", diff_base, "--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+        if not result.status.success:
+            msg = "`git diff %s --unified=0` failed (exit %d).\nstderr: %s" % (diff_base, result.status.code, result.stderr.strip())
+            fail(msg)
+        return _parse_local_diff_output(result.stdout)
+
+    out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", diff_base]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not out.status.success:
+        msg = "`git diff --diff-filter=d --name-only %s` failed (exit %d).\nstderr: %s" % (diff_base, out.status.code, out.stderr.strip())
+        fail(msg)
+    return [f for f in out.stdout.strip().split("\n") if f]
 
 
 def _extract_host(url):
@@ -626,12 +895,28 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT
 # Pull Request Reviews
 
 def list_pull_request_files(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
-    """List files changed in a pull request."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
-    success, status_code, body = _do_request(ctx, "GET", url, token)
-    if success:
-        return {"success": True, "files": body if type(body) == "list" else []}
-    return {"success": False, "error": "request failed: " + str(status_code)}
+    """List all files changed in a pull request, paginated.
+
+    GitHub returns up to 100 files per page; PRs can carry up to 3000
+    (the API caps there). We page through with `?per_page=100&page=N`
+    and stop when a page returns fewer than 100 entries — no Link-header
+    parsing needed. The 30-page safety cap matches GitHub's hard limit.
+    """
+    base_url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
+    per_page = 100
+    max_pages = 30
+    all_files = []
+    for page in range(1, max_pages + 1):
+        url = base_url + "?per_page=" + str(per_page) + "&page=" + str(page)
+        success, status_code, body = _do_request(ctx, "GET", url, token)
+        if not success:
+            return {"success": False, "error": "request failed (page %d): %s" % (page, str(status_code))}
+        if type(body) != "list":
+            break
+        all_files.extend(body)
+        if len(body) < per_page:
+            break
+    return {"success": True, "files": all_files}
 
 
 def get_pull_request(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
@@ -721,4 +1006,6 @@ github = struct(
         create_review_comment = create_review_comment,
         delete_review_comment = delete_review_comment,
     ),
+    detect_pr             = detect_github_pr,
+    detect_changed_files  = detect_changed_files,
 )
