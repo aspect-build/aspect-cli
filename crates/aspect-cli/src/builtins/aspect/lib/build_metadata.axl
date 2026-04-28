@@ -20,7 +20,7 @@ _VCS_HOST_TO_ENUM = {
 }
 
 
-def _detect_vcs_from_host(host):
+def detect_vcs_from_host(host):
     """Return the canonical VCS enum for a host, or "" if unrecognized.
 
     Suffix match so Enterprise / self-hosted subdomains (`github.mycorp.com`,
@@ -42,7 +42,7 @@ def _detect_vcs_from_host(host):
     return ""
 
 
-def _parse_git_remote_url(url):
+def parse_git_remote_url(url):
     """Parse a git remote URL (SSH or HTTPS) into {host, owner, repo, path}.
 
     - `owner` is the top-level group (first path segment).
@@ -153,7 +153,7 @@ def _apply_repo_url(meta, host, owner, repo, scheme = "https", url_path = None):
     if host and owner and repo:
         path = url_path if url_path else owner + "/" + repo
         meta["REPO_URL"] = scheme + "://" + host + "/" + path
-    vcs = _detect_vcs_from_host(host)
+    vcs = detect_vcs_from_host(host)
     if vcs and "VCS" not in meta:
         meta["VCS"] = vcs
 
@@ -176,7 +176,7 @@ def _apply_vcs_override(env, meta):
     if not vcs_url:
         return
 
-    parsed = _parse_git_remote_url(vcs_url)
+    parsed = parse_git_remote_url(vcs_url)
     host      = parsed.get("host", "")
     owner     = parsed.get("owner", "")
     repo      = parsed.get("repo", "")
@@ -190,7 +190,7 @@ def _apply_vcs_override(env, meta):
     meta["REPO_URL"]   = scheme + "://" + host + "/" + url_path
     meta["REPO_OWNER"] = owner
     meta["REPO_NAME"]  = repo
-    vcs = _detect_vcs_from_host(host)
+    vcs = detect_vcs_from_host(host)
     if vcs:
         meta["VCS"] = vcs
 
@@ -291,7 +291,7 @@ def _collect_buildkite(env, meta):
     # plus Enterprise / self-hosted via suffix detection).
     repo_url = env.var("BUILDKITE_REPO")
     if repo_url:
-        parsed = _parse_git_remote_url(repo_url)
+        parsed = parse_git_remote_url(repo_url)
         _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
                         url_path = parsed.get("path"))
 
@@ -355,7 +355,7 @@ def _collect_circleci(env, meta):
     # env vars are useful fallbacks but don't carry the host.
     repo_url = env.var("CIRCLE_REPOSITORY_URL") or ""
     if repo_url:
-        parsed = _parse_git_remote_url(repo_url)
+        parsed = parse_git_remote_url(repo_url)
         _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
                         url_path = parsed.get("path"))
     # Fallback to CIRCLE_PROJECT_* for owner/repo when URL parsing didn't cover them.
@@ -433,7 +433,7 @@ def _collect_gitlab(env, meta):
     else:
         repo_url = env.var("CI_REPOSITORY_URL") or ""
         if repo_url:
-            parsed = _parse_git_remote_url(repo_url)
+            parsed = parse_git_remote_url(repo_url)
             _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
                             url_path = parsed.get("path"))
 
@@ -469,7 +469,7 @@ def _collect_gitlab(env, meta):
 # Task-identity metadata (depends on TaskContext, not just env)
 # ---------------------------------------------------------------------------
 
-def _version_tuple(s):
+def version_tuple(s):
     """Parse "5.18.0" → [5, 18, 0]. Tolerant of pre-release suffixes.
 
     Non-numeric leading parts or missing segments become 0 so bad inputs
@@ -495,12 +495,12 @@ def _version_tuple(s):
     return out
 
 
-def _version_gte(a, b):
+def version_gte(a, b):
     """Semver-ish '>=' comparison. Handles "5.18.0" >= "5.18.0"."""
-    return _version_tuple(a) >= _version_tuple(b)
+    return version_tuple(a) >= version_tuple(b)
 
 
-def _task_display_name(task_name):
+def task_display_name(task_name):
     """Derive a display-name from a raw task name.
 
     Converts "test" → "Test", "my-task" / "my_task" → "My Task". Matches
@@ -545,10 +545,10 @@ def get_task_metadata_flags(ctx):
     name         = task.name or ""
     key          = task.key  or ""
     uuid         = task.id   or ""
-    display_name = _task_display_name(name)
+    display_name = task_display_name(name)
 
     runner_version = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION") or ""
-    new_schema = bool(runner_version) and _version_gte(runner_version, _TASK_METADATA_NEW_SCHEMA_MIN_VERSION)
+    new_schema = bool(runner_version) and version_gte(runner_version, _TASK_METADATA_NEW_SCHEMA_MIN_VERSION)
 
     flags = []
     if new_schema:
