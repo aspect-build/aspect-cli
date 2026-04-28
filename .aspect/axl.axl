@@ -9,6 +9,7 @@ load("@aspect//lib/github.axl", "github", "detect_commit_sha", "detect_build_url
 load("@aspect//lib/environment.axl", "color_enabled", "parse_git_url_name", "sanitize_filename")
 load("@aspect//lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments", "get_sarif_summary", "parse_sarif")
 load("@aspect//lint.axl", "file_uri_to_path")
+load("@aspect//lib/runnable.axl", "canonical_label")
 load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
 load("@aspect//lib/artifacts.axl", "detect_ci", "artifact_name")
 load("@aspect//lib/build_metadata.axl",
@@ -1885,6 +1886,25 @@ def test_file_uri_to_path(tc: int) -> int:
     return tc
 
 
+def test_canonical_label(tc: int) -> int:
+    """Coverage for runnable.canonical_label — Bazel label normalization."""
+    cases = [
+        ("//foo",                      "//foo:foo",         "//foo → //foo:foo"),
+        ("//foo:bar",                  "//foo:bar",         "explicit target unchanged"),
+        ("//foo/bar",                  "//foo/bar:bar",     "deep path → leaf as target"),
+        ("//foo/bar/baz",              "//foo/bar/baz:baz", "deeper path"),
+        ("//foo/bar:baz",              "//foo/bar:baz",     "explicit target with deep path"),
+        ("//",                         "//:",               "root-only edge case"),
+        ("@repo//foo",                 "@repo//foo:foo",    "repo-prefixed label"),
+        ("@repo//foo:bar",             "@repo//foo:bar",    "repo-prefixed with target"),
+        ("//foo:",                     "//foo:",            "empty target name kept (caller error, not normalized)"),
+    ]
+    for (input, expected, desc) in cases:
+        got = canonical_label(input)
+        tc = test_case(tc, got == expected, "canonical_label: %s → %r (got %r)" % (desc, expected, got))
+    return tc
+
+
 def test_color_enabled(ctx: TaskContext, tc: int) -> int:
     """color_enabled: should return True on a TTY OR a recognized CI host."""
     env = ctx.std.env
@@ -2084,6 +2104,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_artifacts_lib(ctx, tc)
     tc = test_sarif_lib(tc)
     tc = test_file_uri_to_path(tc)
+    tc = test_canonical_label(tc)
     tc = test_parse_git_url_name(tc)
     tc = test_sanitize_filename(tc)
     tc = test_deliveryd_parse_endpoint(tc)

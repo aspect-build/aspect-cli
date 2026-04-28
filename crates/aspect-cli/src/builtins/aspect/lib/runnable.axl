@@ -1,6 +1,6 @@
 _DEFAULT_WORKSPACE_NAME = "_main"
 
-def _canonical(label):
+def canonical_label(label):
     if ":" not in label:
         return label + ":" + label.split("/")[-1]
     return label
@@ -9,7 +9,7 @@ def _process_bes(state: struct, event):
     if event.kind == "named_set_of_files":
         state.filesets[event.id.id] = event.payload
     elif event.kind == "target_completed":
-        canonical_label = _canonical(event.id.label)
+        canonical_label = canonical_label(event.id.label)
         if canonical_label in state.targets:
             for og in event.payload.output_group:
                 if og.name == "default":
@@ -22,7 +22,7 @@ def _process_bes(state: struct, event):
             state.workspace_name[0] = local_exec_root.rstrip("/").split("/")[-1]
 
 def _determine_entrypoint(state: struct, target: str) -> str | None:
-    target = _canonical(target)
+    target = canonical_label(target)
     if target not in state.target_fileset:
         return None
 
@@ -68,7 +68,7 @@ def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], ca
 def runnable(ctx, targets: list[str]) -> struct:
     state = struct(
         ctx = ctx,
-        targets = {_canonical(t): t for t in targets},
+        targets = {canonical_label(t): t for t in targets},
         filesets = {},
         target_fileset = {},
         # Single-element list so `_process_bes` can mutate it (struct fields are
