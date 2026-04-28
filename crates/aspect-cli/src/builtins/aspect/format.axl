@@ -37,8 +37,22 @@ def _git_capture(ctx, *args):
 def _snapshot_tracked_state(ctx):
     """Snapshot the current tracked-tree state via `git stash create`.
 
-    Returns the commit SHA, or "" if the working tree is clean (in which
-    case `git stash create` produces empty output and no commit object).
+    Returns:
+        - commit SHA (str) on success — pass to `_diff_against` to compute
+          the formatter-induced diff.
+        - "" when the working tree is clean (`git stash create` produces
+          empty output and no commit object). `_diff_against("")` then
+          falls back to `git diff HEAD` which gives the same answer.
+        - None when the workspace has no initial commit yet. `git stash
+          create` requires HEAD, so on a freshly-initialized repo it
+          fails with "You do not have the initial commit yet". We can't
+          snapshot in that case, but we don't want to break `aspect
+          format` either — callers should skip the diff phase and run
+          the formatter as-is. Diffing against the empty tree object
+          (4b825d…) was considered as a fallback but rejected: it would
+          report every tracked file as "changed" regardless of whether
+          the formatter actually touched it, which defeats the purpose
+          of the detection.
 
     This is non-destructive: stash create writes a commit object to the
     object store without modifying the working tree, index, or stash list.
@@ -49,6 +63,14 @@ def _snapshot_tracked_state(ctx):
     default ~2-week grace period for unreachable objects). Don't add a
     "leak" cleanup pass — there is no leak.
     """
+    # Probe for HEAD before attempting `git stash create`. Fresh repos
+    # with no commits fail the stash with a confusing "do not have the
+    # initial commit yet" message; check explicitly so the caller can
+    # decide what to do.
+    _, head_code, _ = _git_capture(ctx, "rev-parse", "--verify", "HEAD")
+    if head_code != 0:
+        return None
+
     out, code, err = _git_capture(ctx, "stash", "create")
     if code != 0:
         msg = "`git stash create` failed (exit %d).\nstderr: %s\nThe formatter task uses this to snapshot pre-format state for diff detection. Ensure the workspace is a git repo." % (code, err.strip())
@@ -148,6 +170,16 @@ def _impl(ctx: TaskContext) -> int:
         # is left in place for the user to inspect.
         out.write("\x1b[0;31mERROR\x1b[0m: formatter exited with code %d\n" % exit.code)
         return exit.code
+
+    # No HEAD means snapshot wasn't possible — either we're not in a git
+    # repository or the repo has no initial commit yet. The formatter still
+    # ran and wrote whatever it wanted to disk; we just can't compute a
+    # diff, so degrade the detection feature with a warning rather than
+    # failing the task.
+    if pre_snap == None:
+        out.write("\x1b[0;33mWARNING\x1b[0m: cannot resolve HEAD (no initial git commit, or not in a git repository); formatting-required detection is skipped. The formatter ran, but we cannot tell whether it changed anything.\n")
+        out.write("Make at least one commit (or run inside a git repo) and re-run if you want `aspect format` to surface formatter-induced changes.\n")
+        return 0
 
     # Diff the post-format tree against the pre-format snapshot. Any
     # non-empty diff means the formatter modified files = "formatting
