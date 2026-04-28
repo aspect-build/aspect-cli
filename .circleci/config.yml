@@ -1,5 +1,14 @@
 version: 2.1
 
+# Manual break-glass override for `aspect delivery`. Settable via the
+# CircleCI "Trigger Pipeline" UI or API; default empty means normal
+# selective delivery on every other build.
+parameters:
+  force_targets:
+    type: string
+    default: ""
+    description: "Bazel targets to force-deliver (space-separated). Example: //examples/deliverable. Leave empty for normal selective delivery."
+
 workflows:
   ci:
     jobs:
@@ -60,6 +69,8 @@ jobs:
     machine: true
     resource_class: aspect-build/aspect-default
     working_directory: /mnt/ephemeral/workdir
+    environment:
+      ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: << pipeline.parameters.force_targets >>
     steps:
       - checkout
       - run:
