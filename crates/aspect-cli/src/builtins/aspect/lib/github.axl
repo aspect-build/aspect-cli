@@ -1,5 +1,6 @@
 """GitHub API client library."""
 load("@std//base64.axl", "base64")
+load("./environment.axl", "color_enabled")
 load("./tar.axl", "zip_create")
 
 DEFAULT_GITHUB_API = "https://api.github.com"
@@ -437,12 +438,21 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
       - line_level=True:  `git diff HEAD~1 --unified=0`
       - line_level=False: `git diff --diff-filter=d --name-only <merge-base>`
 
+    If a GitHub PR context is detected but the PR-API path is unavailable
+    (auth failure, transient API error), a yellow WARNING is printed
+    explaining the reason before falling through. Outside PR contexts the
+    fallback is silent — local-git is the expected source.
+
     Returns an empty list if neither source produces results.
     """
-    pr, _reason = detect_github_pr(ctx.std)
+    pr, _ = detect_github_pr(ctx.std)
+    fallback_reason = ""
     if pr:
-        token = _authenticate(ctx, owner = pr["owner"], repo = pr["repo"], roles = ["prs.read"])
-        if token:
+        auth_reason = {}
+        token = _authenticate(ctx, owner = pr["owner"], repo = pr["repo"], roles = ["prs.read"], _reason = auth_reason)
+        if not token:
+            fallback_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
+        else:
             result = list_pull_request_files(ctx, token, pr["owner"], pr["repo"], pr["pr_number"])
             if result["success"]:
                 # `git rev-parse --show-prefix` strips the workspace prefix so
@@ -462,6 +472,14 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
                     else:
                         files.append(filename)
                 return files
+            fallback_reason = "GitHub PR Files API call failed: %s" % result.get("error", "unknown")
+
+    if fallback_reason:
+        ansi = color_enabled(ctx.std)
+        prefix = ("\033[1m\033[33mWARNING:\033[0m") if ansi else "WARNING:"
+        print("%s detected a GitHub PR build (%s/%s#%d) but %s. Falling back to local `git diff` for changed-file detection." % (
+            prefix, pr["owner"], pr["repo"], pr["pr_number"], fallback_reason,
+        ))
 
     # Local-git fallback.
     process = ctx.std.process
