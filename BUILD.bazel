@@ -8,6 +8,11 @@ alias(
     actual = "//crates/aspect-cli",
 )
 
+alias(
+    name = "docgen",
+    actual = "//crates/axl-docgen",
+)
+
 exports_files([
     "LICENSE",
     "README.md",

@@ -8,21 +8,21 @@ const POSTLUDE: &str = r#"</code></pre>"#;
 /// Renders documentation pages to markdown format.
 pub struct Renderer<'a> {
     linker: &'a TypeLinker<'a>,
+    /// URL prefix prepended to direct markdown links (e.g. `[name](<base_url>/types/foo)`).
+    base_url: &'a str,
 }
 
 impl<'a> Renderer<'a> {
-    pub fn new(linker: &'a TypeLinker<'a>) -> Self {
-        Self { linker }
+    pub fn new(linker: &'a TypeLinker<'a>, base_url: &'a str) -> Self {
+        Self { linker, base_url }
     }
 
     /// Render a complete documentation page to markdown.
     pub fn render_page(&self, page: &DocPage) -> String {
         let mut output = String::new();
 
-        // Add a placeholder heading that will be removed by main.rs
-        output.push_str("# Placeholder\n\n");
-
         // Separate items by category for ordered rendering
+        let mut load_statements = Vec::new();
         let mut types = Vec::new();
         let mut modules = Vec::new();
         let mut functions = Vec::new();
@@ -30,6 +30,7 @@ impl<'a> Renderer<'a> {
 
         for item in page.items.iter() {
             match item {
+                DocPageItem::LoadStatement { .. } => load_statements.push(item),
                 DocPageItem::Type { .. } => types.push(item),
                 DocPageItem::Module { .. } => modules.push(item),
                 DocPageItem::Function { .. } => functions.push(item),
@@ -37,7 +38,14 @@ impl<'a> Renderer<'a> {
             }
         }
 
-        // Render types first (no separators)
+        // Render load statements first (top of the page)
+        for item in &load_statements {
+            if let DocPageItem::LoadStatement { module, symbols } = item {
+                output.push_str(&self.render_load_statement(module, symbols));
+            }
+        }
+
+        // Render types (no separators)
         for item in &types {
             if let DocPageItem::Type { name, docs } = item {
                 output.push_str(&self.render_type(name, docs.as_ref()));
@@ -75,6 +83,35 @@ impl<'a> Renderer<'a> {
             }
         }
 
+        output
+    }
+
+    fn render_load_statement(&self, module: &str, symbols: &[String]) -> String {
+        let mut output = String::new();
+        output.push_str(PRELUDE);
+        if symbols.is_empty() {
+            output.push_str(&format!("load(\"{module}\")"));
+        } else {
+            let quoted: Vec<String> = symbols.iter().map(|s| format!("\"{s}\"")).collect();
+            // Single-line if it fits comfortably; otherwise split per symbol.
+            let single = format!("load(\"{module}\", {})", quoted.join(", "));
+            if single.len() <= 100 {
+                output.push_str(&single);
+            } else {
+                output.push_str(&format!("load(\n    \"{module}\",\n"));
+                for (i, s) in quoted.iter().enumerate() {
+                    output.push_str("    ");
+                    output.push_str(s);
+                    if i < quoted.len() - 1 {
+                        output.push(',');
+                    }
+                    output.push('\n');
+                }
+                output.push(')');
+            }
+        }
+        output.push_str(POSTLUDE);
+        output.push_str("\n\n");
         output
     }
 
@@ -265,18 +302,18 @@ impl<'a> Renderer<'a> {
     }
 
     fn render_type(&self, name: &str, _docs: Option<&starlark::docs::DocString>) -> String {
-        // Render as simple line: `type` [TypeName](path)
+        // Render as simple line: `type` [TypeName](<base_url>/<path>)
         if let Some(path) = self.linker.get_path(name) {
-            format!("`type` [{}](/{})\n\n", name, path)
+            format!("`type` [{}]({}/{})\n\n", name, self.base_url, path)
         } else {
             format!("`type` {}\n\n", name)
         }
     }
 
     fn render_module(&self, name: &str, _docs: Option<&starlark::docs::DocString>) -> String {
-        // Render as simple line: `module` [name](path)
+        // Render as simple line: `module` [name](<base_url>/<path>)
         if let Some(path) = self.linker.get_path(name) {
-            format!("`module` [{}](/{})\n\n", name, path)
+            format!("`module` [{}]({}/{})\n\n", name, self.base_url, path)
         } else {
             format!("`module` {}\n\n", name)
         }

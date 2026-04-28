@@ -31,6 +31,13 @@ pub enum DocPageItem {
         name: String,
         docs: Option<DocString>,
     },
+    /// A `load(...)` import hint shown at the top of a builtin page.
+    LoadStatement {
+        /// The module specifier, e.g. `@std//time.axl`.
+        module: String,
+        /// The symbols a user can import from the module.
+        symbols: Vec<String>,
+    },
 }
 
 /// The result of traversing a DocModule tree.
@@ -39,30 +46,78 @@ pub struct TraversalResult {
     pub registry: TypeRegistry,
 }
 
-/// Traverse a DocModule tree and collect documentation items with their paths.
-pub fn traverse(module: &DocModule, base_path: &str) -> TraversalResult {
+/// Top-level output paths.
+const TYPES_ROOT: &str = "types";
+const BUILTINS_ROOT: &str = "builtins";
+
+/// Traverse both the Rust-defined globals tree and the per-`@std//` builtin DocModules,
+/// merging them into a single page set.
+///
+/// - Rust-defined types/globals → `types/...`
+/// - `.axl` builtin modules     → `builtins/<name>` (each page begins with a
+///   synthesized `load("@std//<name>.axl", ...)` snippet derived from the
+///   module's public top-level symbols)
+pub fn traverse_all(globals: &DocModule, builtins: &[(String, DocModule)]) -> TraversalResult {
     let mut registry = TypeRegistry::new();
     let mut pages: HashMap<String, DocPage> = HashMap::new();
-
-    // Register builtin types
     register_builtin_types(&mut registry);
 
-    traverse_module(module, base_path, &mut pages, &mut registry);
+    traverse_module(globals, TYPES_ROOT, &mut pages, &mut registry);
+
+    for (name, dm) in builtins {
+        let page_path = normalize_path(&format!("{BUILTINS_ROOT}/{name}"));
+        registry.register(name, &page_path);
+
+        // Add a Module entry on the builtins index page so it links from there.
+        add_page(
+            &mut pages,
+            BUILTINS_ROOT.to_string(),
+            vec![DocPageItem::Module {
+                name: name.clone(),
+                docs: dm.docs.clone(),
+            }],
+        );
+
+        // Public top-level symbols (not internal markers like `#_is_std#`,
+        // not private names starting with `_`).
+        let symbols: Vec<String> = dm
+            .members
+            .iter()
+            .filter(|(n, _)| is_public_member(n))
+            .map(|(n, _)| n.clone())
+            .collect();
+
+        // Prepend the load hint, then walk the rest of the module's contents.
+        add_page(
+            &mut pages,
+            page_path.clone(),
+            vec![DocPageItem::LoadStatement {
+                module: format!("@std//{name}.axl"),
+                symbols,
+            }],
+        );
+        traverse_module(dm, &page_path, &mut pages, &mut registry);
+    }
 
     TraversalResult { pages, registry }
 }
 
+/// Returns true if `name` should appear in generated documentation.
+/// Filters internal markers (e.g. `#_is_std#`) and private (`_`-prefixed) symbols.
+fn is_public_member(name: &str) -> bool {
+    !name.starts_with('#') && !name.starts_with('_')
+}
+
 fn register_builtin_types(registry: &mut TypeRegistry) {
-    // Register common builtin types
-    registry.register("str", "lib/str");
-    registry.register("int", "lib/int");
-    registry.register("bool", "lib/bool");
-    registry.register("float", "lib/float");
-    registry.register("list", "lib/list");
-    registry.register("dict", "lib/dict");
-    registry.register("tuple", "lib/tuple");
-    registry.register("None", "lib/none");
-    registry.register("NoneType", "lib/none");
+    registry.register("str", "types/str");
+    registry.register("int", "types/int");
+    registry.register("bool", "types/bool");
+    registry.register("float", "types/float");
+    registry.register("list", "types/list");
+    registry.register("dict", "types/dict");
+    registry.register("tuple", "types/tuple");
+    registry.register("None", "types/none");
+    registry.register("NoneType", "types/none");
 }
 
 fn traverse_module(
@@ -75,6 +130,9 @@ fn traverse_module(
     let mut module_items = Vec::new();
 
     for (name, doc_item) in module.members.iter() {
+        if !is_public_member(name) {
+            continue;
+        }
         match doc_item {
             DocItem::Module(submodule) => {
                 // Calculate the submodule path and normalize it

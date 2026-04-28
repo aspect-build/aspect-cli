@@ -2,6 +2,7 @@ use anyhow::Result;
 use markdown::mdast;
 use mdast_util_to_markdown::to_markdown;
 use regex::Regex;
+use std::sync::LazyLock;
 use syntect::html::{ClassStyle, ClassedHTMLGenerator};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
@@ -9,27 +10,36 @@ use syntect::util::LinesWithEndings;
 const PREDULE: &'static str = r#"<pre class="language-python"><code>"#;
 const POSTDULE: &'static str = r#"</code></pre>"#;
 
+// Match link markers: @link@ /path @@ Name @link@
+// The markers are wrapped in quotes in the source so Python syntax highlighting
+// treats them as string literals. The regex matches just the marker content,
+// since the quotes get separated by HTML span tags during highlighting.
+// The path group accepts URL-safe characters (alphanumerics, `/`, `.`, `-`, `_`)
+// so `--base-url` values like `/v2.1` or `/my-docs` survive.
+static LINK_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@link@ ([\w/.\-]+) @@ ([\w\.]+) @link@").unwrap());
+
+// After replacing link markers, we need to remove the quote spans that surround
+// the anchor tags. The pattern is:
+// <span class="...string..."><span class="...string..."><span class="...begin...">&#39;</span></span></span>
+// ...content (now an <a> tag)...
+// <span class="...end...">&#39;</span></span></span>
+static OPENING_QUOTE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"<span class="[^"]*string[^"]*"><span class="[^"]*string[^"]*"><span class="[^"]*begin[^"]*">&#39;</span></span></span><span class="[^"]*string[^"]*"><span class="[^"]*string[^"]*">"#,
+    )
+    .unwrap()
+});
+static CLOSING_QUOTE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<span class="[^"]*end[^"]*">&#39;</span></span></span>"#).unwrap()
+});
+
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+
 pub fn highlight(md: &String) -> Result<String> {
     let mut md = markdown::to_mdast(md.as_str(), &markdown::ParseOptions::default()).unwrap();
 
     fn traverse(nodes: &mut Vec<mdast::Node>) {
-        // Match link markers: @link@ /path @@ Name @link@
-        // The markers are wrapped in quotes in the source so Python syntax highlighting
-        // treats them as string literals. The regex matches just the marker content,
-        // since the quotes get separated by HTML span tags during highlighting.
-        let link_regex = Regex::new(r"@link@ ([\w/]+) @@ ([\w\.]+) @link@").unwrap();
-
-        // After replacing link markers, we need to remove the quote spans that surround
-        // the anchor tags. The pattern is:
-        // <span class="...string..."><span class="...string..."><span class="...begin...">&#39;</span></span></span>
-        // ...content (now an <a> tag)...
-        // <span class="...end...">&#39;</span></span></span>
-        let opening_quote_regex = Regex::new(
-            r#"<span class="[^"]*string[^"]*"><span class="[^"]*string[^"]*"><span class="[^"]*begin[^"]*">&#39;</span></span></span><span class="[^"]*string[^"]*"><span class="[^"]*string[^"]*">"#
-        ).unwrap();
-        let closing_quote_regex =
-            Regex::new(r#"<span class="[^"]*end[^"]*">&#39;</span></span></span>"#).unwrap();
-
         nodes.iter_mut().for_each(|node| match node {
             mdast::Node::Html(html) => {
                 let html_raw = html.value.clone();
@@ -40,11 +50,10 @@ pub fn highlight(md: &String) -> Result<String> {
                         .strip_suffix(POSTDULE)
                         .unwrap();
 
-                    let syntax_set = SyntaxSet::load_defaults_newlines();
-                    let syntax_starlark = syntax_set.find_syntax_by_extension("py").unwrap();
+                    let syntax_starlark = SYNTAX_SET.find_syntax_by_extension("py").unwrap();
                     let mut html_generator = ClassedHTMLGenerator::new_with_class_style(
                         syntax_starlark,
-                        &syntax_set,
+                        &SYNTAX_SET,
                         ClassStyle::Spaced,
                     );
                     for line in LinesWithEndings::from(strip_down) {
@@ -54,12 +63,9 @@ pub fn highlight(md: &String) -> Result<String> {
                     }
                     let out = html_generator.finalize();
 
-                    // Replace link markers with anchor tags
-                    let out = link_regex.replace_all(out.as_str(), r#"<a href="$1">$2</a>"#);
-
-                    // Remove surrounding quote spans from anchor tags
-                    let out = opening_quote_regex.replace_all(&out, "");
-                    let out = closing_quote_regex.replace_all(&out, "");
+                    let out = LINK_REGEX.replace_all(out.as_str(), r#"<a href="$1">$2</a>"#);
+                    let out = OPENING_QUOTE_REGEX.replace_all(&out, "");
+                    let out = CLOSING_QUOTE_REGEX.replace_all(&out, "");
 
                     html.value = format!("{}{}{}", PREDULE, out, POSTDULE);
                 }

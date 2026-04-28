@@ -66,6 +66,7 @@ rust_library(
     ],
     visibility = [
         "//crates/aspect-cli:__pkg__",
+        "//crates/axl-docgen:__pkg__",
         "//crates/axl-lsp:__pkg__",
     ],
 )
