@@ -34,13 +34,24 @@ def _match_chars(pat, name):
 
     Supports `*` (any chars except none) and `?` (exactly one char).
     Iterative with backtracking — Starlark has no `while`, so we cap the
-    iteration count at len(pat) + len(name) + 8 (a tight bound).
+    iteration count.
+
+    Bound rationale: this is the standard one-star-at-a-time backtracking
+    algorithm. Each backtrack increments `star_ni` (monotone, capped at
+    len(name)), and between backtracks we do at most len(pat) char
+    advances before either matching or failing. Worst case is therefore
+    O(len(pat) * len(name)) — e.g. pattern `*?` against an N-character
+    string takes ~2N iterations because each `?` advance is followed by
+    a backtrack to `star_ni + 1`. The previous bound of
+    `len(pat) + len(name) + 8` was undersized: `*?` and `*b` against
+    11-character names both ran out of iterations and silently
+    false-negative'd before reaching the match.
     """
     pi = 0
     ni = 0
     star_pi = -1
     star_ni = 0
-    for _ in range(len(pat) + len(name) + 8):
+    for _ in range(len(pat) * len(name) + len(pat) + len(name) + 8):
         if ni < len(name) and pi < len(pat) and (pat[pi] == "?" or pat[pi] == name[ni]):
             pi += 1
             ni += 1

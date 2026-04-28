@@ -1286,6 +1286,12 @@ def test_path_glob(tc: int) -> int:
 
         ("",                      "foo",                       False, "match_path: empty pattern matches nothing"),
         ("",                      "",                          False, "match_path: empty pattern vs empty path"),
+
+        ("*?",                    "a" * 11,                    True,  "match_path: *? vs 11-char name"),
+        ("*?",                    "a" * 32,                    True,  "match_path: *? vs 32-char name"),
+        ("*b",                    "b" * 11,                    True,  "match_path: *b vs 11 b's"),
+        ("*b",                    "b" * 64,                    True,  "match_path: *b vs 64 b's"),
+        ("*?b",                   "a" * 32 + "b",              True,  "match_path: *?b deep backtracking"),
     ]
     for (pattern, path, expected, desc) in cases:
         got = match_path(pattern, path)
