@@ -485,6 +485,10 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
         ))
 
     # Local-git fallback. Resolve the diff base once for both shapes.
+    # Errors fail loudly: a silent empty result would be interpreted as
+    # "no changed files" by callers (lint hold-the-line surfaces nothing,
+    # format formats nothing) and pass CI even though the diff base was
+    # invalid (shallow clone, missing remote ref, …).
     process = ctx.std.process
     cwd = ctx.std.env.current_dir()
     if merge_base:
@@ -492,18 +496,21 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
     else:
         mb = process.command("git").args(["merge-base", "HEAD", base_ref]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
         if not mb.status.success:
-            return []
+            msg = "Could not resolve merge-base for changed-file detection: `git merge-base HEAD %s` failed (exit %d).\nstderr: %s\nThe ref may not exist locally (shallow clone? missing `git fetch`?). Override with --merge-base=<sha>, or set --base-ref to a ref that's available in the local repo." % (base_ref, mb.status.code, mb.stderr.strip())
+            fail(msg)
         diff_base = mb.stdout.strip()
 
     if line_level:
         result = process.command("git").args(["diff", diff_base, "--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
         if not result.status.success:
-            return []
+            msg = "`git diff %s --unified=0` failed (exit %d).\nstderr: %s" % (diff_base, result.status.code, result.stderr.strip())
+            fail(msg)
         return _parse_local_diff_output(result.stdout)
 
     out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", diff_base]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
     if not out.status.success:
-        return []
+        msg = "`git diff --diff-filter=d --name-only %s` failed (exit %d).\nstderr: %s" % (diff_base, out.status.code, out.stderr.strip())
+        fail(msg)
     return [f for f in out.stdout.strip().split("\n") if f]
 
 
@@ -888,12 +895,28 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT
 # Pull Request Reviews
 
 def list_pull_request_files(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
-    """List files changed in a pull request."""
-    url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
-    success, status_code, body = _do_request(ctx, "GET", url, token)
-    if success:
-        return {"success": True, "files": body if type(body) == "list" else []}
-    return {"success": False, "error": "request failed: " + str(status_code)}
+    """List all files changed in a pull request, paginated.
+
+    GitHub returns up to 100 files per page; PRs can carry up to 3000
+    (the API caps there). We page through with `?per_page=100&page=N`
+    and stop when a page returns fewer than 100 entries — no Link-header
+    parsing needed. The 30-page safety cap matches GitHub's hard limit.
+    """
+    base_url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/files"
+    per_page = 100
+    max_pages = 30
+    all_files = []
+    for page in range(1, max_pages + 1):
+        url = base_url + "?per_page=" + str(per_page) + "&page=" + str(page)
+        success, status_code, body = _do_request(ctx, "GET", url, token)
+        if not success:
+            return {"success": False, "error": "request failed (page %d): %s" % (page, str(status_code))}
+        if type(body) != "list":
+            break
+        all_files.extend(body)
+        if len(body) < per_page:
+            break
+    return {"success": True, "files": all_files}
 
 
 def get_pull_request(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
