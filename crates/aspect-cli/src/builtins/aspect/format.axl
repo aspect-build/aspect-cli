@@ -17,9 +17,11 @@ Usage:
 
 """
 
+load("./lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
 load("./lib/github.axl", "detect_changed_files")
+load("./lib/path_glob.axl", "match_any")
 load("./lib/runnable.axl", "runnable")
-load("./traits.axl", "BazelTrait")
+load("./traits.axl", "ArtifactsTrait", "BazelTrait")
 
 
 def _git_capture(ctx, *args):
@@ -93,6 +95,47 @@ def _diff_against(ctx, base):
     return out
 
 
+def _try_upload_format_diff(ctx, diff_text):
+    """Write the formatter's diff to a temp file and upload it via the
+    CI-specific artifact uploader. Failures are logged but don't fail the
+    task — the diff is informational, not load-bearing for the verdict.
+
+    The download URL (when the CI provider returns one) lands in
+    ArtifactsTrait.artifact_urls["format_diff"] so future status-check
+    features can surface a "View patch" link.
+    """
+    out = ctx.std.io.stdout
+    ci = detect_ci(ctx.std.env)
+    uploader = create_uploader(ctx.std.env)
+    if not uploader:
+        out.write("--upload-format-diff: not running on a recognized CI host; skipping.\n")
+        return
+
+    # Write the patch to a job-scoped tmpdir so concurrent format runs in
+    # the same process don't collide.
+    tmp = ctx.std.env.temp_dir()
+    patch_path = tmp + "/format-" + ctx.task.key + ".patch"
+    ctx.std.fs.write(patch_path, diff_text)
+
+    name = artifact_name(ci, ctx.task.name, ctx.task.key, "format.patch")
+    result = uploader.upload_file(ctx, patch_path, name)
+    if not result["success"]:
+        out.write("--upload-format-diff: upload failed: %s\n" % "; ".join(result.get("errors") or ["unknown error"]))
+        return
+
+    # Surface the download URL via ArtifactsTrait so status-check or
+    # other downstream features can link to it.
+    download_url = result.get("download_url") or ""
+    if download_url:
+        artifacts_trait = ctx.traits[ArtifactsTrait]
+        urls = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
+        urls["format_diff"] = download_url
+        artifacts_trait.artifact_urls = urls
+        out.write("--upload-format-diff: uploaded patch — %s\n" % download_url)
+    else:
+        out.write("--upload-format-diff: uploaded patch (no stable URL on this CI host).\n")
+
+
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
     out = ctx.std.io.stdout
@@ -140,6 +183,8 @@ def _impl(ctx: TaskContext) -> int:
     if not formatter:
         fail("Failed to determine the formatter entrypoint.")
 
+    ignore_patterns = list(ctx.args.ignore_pattern)
+
     format_args = []
     if not ctx.args.all_files:
         # Prefers the GitHub PR Files API when authenticated and in a PR
@@ -152,6 +197,15 @@ def _impl(ctx: TaskContext) -> int:
             base_ref = ctx.args.base_ref,
             merge_base = ctx.args.merge_base or None,
         )
+        if ignore_patterns:
+            kept = [f for f in changed_files if not match_any(ignore_patterns, f)]
+            ignored_count = len(changed_files) - len(kept)
+            if ignored_count > 0:
+                out.write("Filtered %d file(s) via --ignore-pattern.\n" % ignored_count)
+            changed_files = kept
+        if not changed_files:
+            out.write("No files to format.\n")
+            return 0
         out.write("Formatting changed files:\n%s\n" % "\n".join(changed_files))
         format_args = changed_files
 
@@ -189,12 +243,54 @@ def _impl(ctx: TaskContext) -> int:
     if not formatter_diff:
         return 0
 
-    # Format changes detected. List the affected file set for the user.
+    # List the affected file set, then filter through --ignore-pattern.
+    # Ignore patterns hide files from BOTH the user-facing affected list
+    # and the failure decision below. They don't undo the formatter's
+    # changes — those still sit in the working tree — but they prevent
+    # files in (e.g.) nested Bazel workspaces or vendored directories
+    # from failing this task.
     name_out, _, _ = _git_capture(ctx, "diff", "--name-only", pre_snap if pre_snap else "HEAD")
-    affected = [f for f in name_out.strip().split("\n") if f]
+    affected_all = [f for f in name_out.strip().split("\n") if f]
+    if ignore_patterns:
+        affected = [f for f in affected_all if not match_any(ignore_patterns, f)]
+        ignored_count = len(affected_all) - len(affected)
+    else:
+        affected = affected_all
+        ignored_count = 0
+
+    if not affected:
+        # All formatter changes are in ignored paths — task is OK from the
+        # user's perspective. Note any working-tree changes the formatter
+        # made so they aren't surprising downstream.
+        if ignored_count > 0:
+            out.write("Formatter modified %d file(s), all matching --ignore-pattern; treating as OK.\n" % ignored_count)
+        return 0
+
     out.write("\nFormatting changes were applied to %d file(s):\n" % len(affected))
     for f in affected:
         out.write("  - %s\n" % f)
+    if ignored_count > 0:
+        out.write("(also modified %d file(s) matching --ignore-pattern; not counted toward failure)\n" % ignored_count)
+
+    # Optional: archive the diff as a CI artifact so reviewers can apply
+    # it locally without re-running the formatter. Off by default.
+    #
+    # Scope the uploaded patch to `affected` (the post-ignore file set)
+    # so it matches the failure-decision basis. In changed-files mode
+    # this is redundant — the formatter never saw ignored files, so
+    # `formatter_diff` is already scoped to un-ignored paths. In
+    # --all-files mode the formatter discovers files itself via
+    # `git ls-files` and rewrites ignored ones; without re-scoping, the
+    # uploaded patch would carry those changes even though they don't
+    # contribute to failure or appear in the user-facing affected list.
+    if ctx.args.upload_format_diff:
+        if ignored_count > 0:
+            upload_diff, _, _ = _git_capture(
+                ctx, "diff", pre_snap if pre_snap else "HEAD", "--", *affected,
+            )
+        else:
+            upload_diff = formatter_diff
+        _try_upload_format_diff(ctx, upload_diff)
 
     if ctx.args.soft_fail:
         out.write("\x1b[0;33mWARNING\x1b[0m: formatting required, but --soft-fail is set; task exits 0.\n")
@@ -206,7 +302,7 @@ def _impl(ctx: TaskContext) -> int:
 
 format = task(
     implementation = _impl,
-    traits = [BazelTrait],
+    traits = [BazelTrait, ArtifactsTrait],
     args = {
         "all_files": args.boolean(
             default = False,
@@ -215,6 +311,13 @@ format = task(
         "soft_fail": args.boolean(
             default = False,
             description = "When true, the task returns 0 even if the formatter modified files, printing a WARNING with the affected file list instead. Useful for teams introducing automated formatting incrementally so the CI step doesn't block merges. The formatter binary's own non-zero exits are still surfaced as task failures regardless of this flag.",
+        ),
+        "ignore_pattern": args.string_list(
+            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--ignore-pattern='vendor/**' --ignore-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In the default (changed-files) mode, filtered files are dropped from the file list passed to the formatter. In --all-files mode the formatter discovers files itself, so ignored files may still be rewritten on disk; in either mode, ignored files are excluded from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
+        ),
+        "upload_format_diff": args.boolean(
+            default = False,
+            description = "Upload the formatter's diff as a CI artifact (named `format.patch`) so reviewers can apply it locally without re-running the formatter. No-op when the working tree is clean post-format, or when not running on a recognized CI host (GitHub Actions, Buildkite, CircleCI, GitLab). The download URL (where the CI provider returns one) is surfaced via ArtifactsTrait.artifact_urls['format_diff']. Off by default.",
         ),
         "base_ref": args.string(
             default = "origin/main",
