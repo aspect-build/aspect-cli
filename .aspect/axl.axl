@@ -1612,6 +1612,31 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     # Empty diff (no changes).
     tc = test_case(tc, github.parse_local_diff("") == [], "parse_local_diff: empty → []")
 
+    # Renamed file with no content changes — still appears via +++ b/<new>
+    # but with no @@ hunks. Lines list is empty. (Prior to the rename detection
+    # in github.detect_changed_files, format/lint would treat an empty-lines
+    # entry as a file in the changed set with no specific changed lines.)
+    diff_rename = "diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt"
+    files_rename = github.parse_local_diff(diff_rename)
+    tc = test_case(tc, files_rename == [], "parse_local_diff: pure rename (no content delta, no +++ b/) → []")
+
+    # Mode-only change: no content delta, parses to no entries (no `+++ b/`).
+    diff_mode = "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755"
+    tc = test_case(tc, github.parse_local_diff(diff_mode) == [], "parse_local_diff: mode-only change → []")
+
+    # Rename WITH content changes — has +++ b/<new> and @@ hunks.
+    diff_rename_mod = """diff --git a/old.txt b/new.txt
+similarity index 80%
+rename from old.txt
+rename to new.txt
+--- a/old.txt
++++ b/new.txt
+@@ -0,0 +5,1 @@
++added"""
+    files_rm = github.parse_local_diff(diff_rename_mod)
+    tc = test_case(tc, len(files_rm) == 1 and files_rm[0]["file"] == "new.txt", "parse_local_diff: rename+modify → entry under new path")
+    tc = test_case(tc, files_rm[0]["lines"] == [4], "parse_local_diff: rename+modify added line index")
+
     _clear_pr_env(env)
     return tc
 
