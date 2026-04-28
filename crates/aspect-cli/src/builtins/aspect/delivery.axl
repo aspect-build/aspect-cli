@@ -123,6 +123,7 @@ User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
 load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait")
+load("@aspect//lib/environment.axl", _is_tty = "is_tty")
 load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha")
 load("@aspect//lib/runnable.axl", "runnable")
 load("@std//time.axl", "time")
@@ -316,7 +317,7 @@ def _delivery_impl(ctx):
     delivery_trait = ctx.traits[DeliveryTrait]
     delivery_trait.delivery_start()
 
-    is_tty = ctx.std.io.stdout.is_tty
+    is_tty = _is_tty(ctx.std)
 
     # Three orthogonal flags shape this invocation. See the module docstring
     # at the top of this file for the full reference and combination matrix.

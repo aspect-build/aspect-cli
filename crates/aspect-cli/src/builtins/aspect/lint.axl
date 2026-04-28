@@ -20,6 +20,7 @@ Usage:
 
 load("./lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "get_sarif_summary")
 load("./traits.axl", "BazelTrait", "HealthCheckTrait")
+load("./lib/environment.axl", "is_tty")
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
@@ -247,7 +248,7 @@ def _impl(ctx: TaskContext) -> int:
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
 
     if ctx.args.announce_rc:
-        print(rc.announce(command = "build", ansi = ctx.std.io.stdout.is_tty))
+        print(rc.announce(command = "build", ansi = is_tty(ctx.std)))
 
     # 6. Build + stream events
     build = ctx.bazel.build(

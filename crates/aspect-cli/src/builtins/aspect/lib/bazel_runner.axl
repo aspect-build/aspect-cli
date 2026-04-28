@@ -13,6 +13,7 @@ applies uniformly to both tasks.
 """
 load("../traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
 load("./bazel_results.axl", "init_results", "process_event", "compute_repro")
+load("./environment.axl", "is_tty")
 
 
 def _collect_bes_from_args(ctx):
@@ -109,7 +110,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
 
     rc_startup_flags, flags = rc.expand_all(command = command)
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
-    print(rc.announce(command = command, ansi = ctx.std.io.stdout.is_tty))
+    print(rc.announce(command = command, ansi = is_tty(ctx.std)))
 
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
     results = init_results()
