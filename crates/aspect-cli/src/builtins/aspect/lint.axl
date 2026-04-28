@@ -21,6 +21,7 @@ Usage:
 load("./lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "get_sarif_summary")
 load("./traits.axl", "BazelTrait", "HealthCheckTrait")
 load("./lib/environment.axl", "color_enabled")
+load("./lib/github.axl", "detect_changed_files")
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
@@ -36,74 +37,6 @@ def _file_uri_to_path(uri):
         blob_size = parts[3]
         return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
     return uri
-
-def parse_diff_output(output):
-    """
-    Parse raw `git diff --unified=0` output into changed file/line information.
-
-    Args:
-        output: Raw output string from `git diff --unified=0`
-
-    Returns:
-        List of dicts: [{"file": str, "lines": [int]}]
-        lines are 0-based line numbers of added lines only.
-        Deleted files are excluded.
-    """
-    files = []
-    current_file = None
-
-    for line in output.split("\n"):
-        if line.startswith("+++ b/"):
-            path = line.removeprefix("+++ b/")
-            current_file = {"file": path, "lines": []}
-            files.append(current_file)
-        elif line.startswith("--- /dev/null"):
-            # Next +++ line is a new file (not a deletion); handled naturally
-            pass
-        elif line.startswith("+++ /dev/null"):
-            # File was deleted — remove the entry we just added
-            if current_file:
-                files.pop()
-                current_file = None
-        elif line.startswith("@@ ") and current_file != None:
-            # Parse hunk header: @@ -old,count +new,count @@
-            # We only care about the +new,count part
-            parts = line.split(" ")
-            for part in parts:
-                if part.startswith("+") and part != "+++":
-                    # +start or +start,count
-                    plus = part.removeprefix("+")
-                    if "," in plus:
-                        chunks = plus.split(",")
-                        start = int(chunks[0])
-                        count = int(chunks[1])
-                    else:
-                        start = int(plus)
-                        count = 1
-                    if count > 0:
-                        # Convert to 0-based line numbers
-                        for i in range(count):
-                            current_file["lines"].append(start - 1 + i)
-                    break
-
-    return files
-
-
-def _git_diff(ctx):
-    """Default get_diff implementation using `git diff HEAD~1`.
-
-    Returns: [{"file": "path/to/file.py", "lines": [0, 4, 9]}, ...]
-    lines = 0-based line numbers of added lines only.
-    Empty list = no change context available.
-    """
-    result = ctx.std.process.command("git") \
-        .args(["diff", "HEAD~1", "--unified=0"]) \
-        .current_dir(ctx.std.env.current_dir()) \
-        .stdout("piped").stderr("piped").spawn().wait_with_output()
-    if not result.status.success:
-        return []  # no previous commit or not a git repo
-    return parse_diff_output(result.stdout)
-
 
 # Filter functions — (all_diagnostics, changed_files) -> relevant_diagnostics
 def _filter_all(diagnostics, changed_files):
@@ -159,9 +92,6 @@ _STRATEGIES = {
 
 
 LintTrait = trait(
-    get_diff    = attr(typing.Callable[[TaskContext], list], default = _git_diff),
-    # (ctx) -> [{"file": str, "lines": [int]}]
-
     # Lifecycle hooks — lists of callables, composable via .append()
     # Features hold their own state via closures; no shared state dict is passed.
     lint_start  = attr(list[typing.Callable[[TaskContext], None]], default = []),
@@ -192,7 +122,11 @@ def _impl(ctx: TaskContext) -> int:
         hook(ctx)
 
     # 1. Fetch changed files (needed by strategy filter)
-    changed_files = lint_trait.get_diff(ctx)
+    # Detect changed files: prefer the GitHub PR Files API when authenticated
+    # and in a PR context (works on any CI host), falling back to local
+    # `git diff HEAD~1 --unified=0`. Lives in lib/github.axl as a shared
+    # helper because format also wants the same precedence.
+    changed_files = detect_changed_files(ctx, line_level = True)
 
 
     # 3. Build flags — lint-specific first, then BazelTrait additions.

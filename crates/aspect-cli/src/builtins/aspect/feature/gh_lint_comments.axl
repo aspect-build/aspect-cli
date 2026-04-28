@@ -2,7 +2,7 @@
 
 load("../lint.axl", "LintTrait")
 load("../lib/environment.axl", "color_enabled")
-load("../lib/github.axl", "github", "detect_commit_sha")
+load("../lib/github.axl", "detect_changed_files", "github")
 load("../lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
 
@@ -24,33 +24,6 @@ def _comment_sort_key(comment):
         comment.get("path", ""),
         comment.get("line", 0),
     )
-
-
-def _parse_github_diff_patch(patch):
-    """Parse a GitHub PR file patch string into 0-based added line numbers."""
-    if not patch:
-        return []
-    lines = []
-    current_line = 0
-    for line in patch.split("\n"):
-        if line.startswith("@@"):
-            parts = line.split(" ")
-            for part in parts:
-                if part.startswith("+") and part != "+++":
-                    plus = part.removeprefix("+")
-                    if "," in plus:
-                        current_line = int(plus.split(",")[0])
-                    else:
-                        current_line = int(plus)
-                    break
-        elif line.startswith("+"):
-            lines.append(current_line - 1)
-            current_line += 1
-        elif line.startswith("-"):
-            pass
-        else:
-            current_line += 1
-    return lines
 
 
 def _enrich_with_suggestions(ctx, comments):
@@ -227,61 +200,35 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics):
                 )
 
 
-def _determine_vars(ctx):
-    """Read required GitHub env vars.
-
-    Returns (dict, None) on success, or (None, reason_string) if any var is
-    missing or GITHUB_REF is not a PR merge ref.
-    """
-    ref = ctx.std.env.var("GITHUB_REF") or ""
-    sha = detect_commit_sha(ctx.std)
-    repository = ctx.std.env.var("GITHUB_REPOSITORY") or ""
-    repo_parts = repository.split("/")
-    missing = [name for name, val in [("GITHUB_REF", ref), ("GITHUB_SHA", sha), ("GITHUB_REPOSITORY", repository)] if not val]
-    if missing:
-        return None, "missing env var(s): %s" % ", ".join(missing)
-    if len(repo_parts) < 2:
-        return None, "missing env var(s): GITHUB_REPOSITORY"
-    if not (ref.startswith("refs/pull/") and ref.endswith("/merge")):
-        return None, "GITHUB_REF is not a PR merge ref: %s" % ref
-    return {
-        "owner": repo_parts[0],
-        "repo": repo_parts[1],
-        "sha": sha,
-        "pr_number": int(ref.removeprefix("refs/pull/").removesuffix("/merge")),
-    }, None
-
-
 def _github_lint_impl(ctx: FeatureContext):
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
     lint_trait = ctx.traits[LintTrait]
 
-    env_vars, gh_inactive_reason = _determine_vars(ctx)
+    pr, gh_inactive_reason = github.detect_pr(ctx.std)
     gh = None
 
-    if env_vars:
+    if pr:
         auth_reason = {}
-        token = github.authenticate(ctx, owner = env_vars["owner"], repo = env_vars["repo"], roles = ["prs.write"], _reason = auth_reason)
+        token = github.authenticate(ctx, owner = pr["owner"], repo = pr["repo"], roles = ["prs.write"], _reason = auth_reason)
         if token:
             gh = {
                 "token": token,
-                "owner": env_vars["owner"],
-                "repo": env_vars["repo"],
-                "head_sha": env_vars["sha"],
-                "pr_number": env_vars["pr_number"],
+                "owner": pr["owner"],
+                "repo": pr["repo"],
+                "head_sha": pr["sha"],
+                "pr_number": pr["pr_number"],
                 "changed_lines": {},
                 "prefix": "",
                 "stale": False,
             }
         else:
             gh_inactive_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
-            # We are demonstrably in a GitHub Actions PR context (env_vars
-            # validated) but auth failed — surface that to the build log so the
-            # user knows why no comments are appearing. Other inactive paths
-            # ("missing env var(s)", "not a PR merge ref") stay silent because
-            # they mean the feature doesn't apply, not that it failed.
+            # We are demonstrably in a GitHub PR context (detect_pr succeeded)
+            # but auth failed — surface that to the build log so the user
+            # knows why no comments are appearing. Non-PR contexts stay silent
+            # because they mean the feature doesn't apply, not that it failed.
             print("GitHub lint comments: authentication failed for %s/%s — %s" % (
-                env_vars["owner"], env_vars["repo"], auth_reason.get("reason", "unknown"),
+                pr["owner"], pr["repo"], auth_reason.get("reason", "unknown"),
             ))
 
     if not gh and not debug:
@@ -321,32 +268,21 @@ def _github_lint_impl(ctx: FeatureContext):
                 state["dropped_per_severity"][sev] = state["dropped_per_severity"].get(sev, 0) + 1
 
     if gh:
-        # Determine the workspace prefix relative to the git root once (e.g. "examples/lint/")
-        # so that GitHub API paths ("examples/lint/hello.sh") can be stripped to match
-        # SARIF-relative paths ("hello.sh").
+        # Workspace prefix relative to the git root (e.g. "examples/lint/") —
+        # _post_individually prepends it when posting because SARIF paths are
+        # workspace-relative but GitHub expects repo-relative paths.
         git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
         if git_out.status.success:
             gh["prefix"] = git_out.stdout.strip()
 
-        def get_diff(ctx):
-            result = github.pulls.list_files(ctx, gh["token"], gh["owner"], gh["repo"], gh["pr_number"])
-            if not result["success"]:
-                return []
-            all_files = []
-            prefix = gh["prefix"]
-            for f in result["files"]:
-                if f.get("status", "") == "removed":
-                    continue
-                filename = f.get("filename", "")
-                if prefix and filename.startswith(prefix):
-                    filename = filename[len(prefix):]
-                patch = f.get("patch", "")
-                added_lines = _parse_github_diff_patch(patch)
-                all_files.append({"file": filename, "lines": added_lines})
-            gh["changed_lines"] = {f["file"]: f["lines"] for f in all_files}
-            return all_files
-
-        lint_trait.get_diff = get_diff
+        # Populate gh["changed_lines"] for _filter_by_diff and _cleanup_comments.
+        # The lint task impl computes its own changed_files via the shared
+        # detect_changed_files helper for the strategy filter. Both call paths
+        # hit the same GitHub PR Files API (one extra HTTP call per lint run);
+        # there's no shared cache because the two consumers run in different
+        # phases (feature activation vs. task execution).
+        changed = detect_changed_files(ctx, line_level = True)
+        gh["changed_lines"] = {f["file"]: f["lines"] for f in changed}
 
     def _lint_report(ctx, filepath):
         # Per-SARIF-file callback. Hybrid posting strategy:

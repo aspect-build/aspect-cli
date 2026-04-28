@@ -17,23 +17,9 @@ Usage:
     
 """
 
+load("./lib/github.axl", "detect_changed_files")
 load("./lib/runnable.axl", "runnable")
 load("./traits.axl", "BazelTrait")
-
-# buildifier: disable=function-docstring
-def spawn_git_with_output(out, process, args: list[str]):
-    spawn = process.command("git").args(args).stdout("piped").spawn().wait_with_output()
-    if not spawn.status.success:
-        out.write("\x1b[0;31mERROR\x1b[0m: 'git %s' failed (exit %d)\n" % (" ".join(args), spawn.status.code))
-        fail(spawn.stderr)
-
-    return spawn.stdout.strip()
-
-# buildifier: disable=function-docstring
-def find_changed_files(out, process, base_ref: str, merge_base: str | None):
-    diff_base = merge_base if merge_base else spawn_git_with_output(out, process, ["merge-base", "HEAD", base_ref])
-
-    return spawn_git_with_output(out, process, ["diff", "--diff-filter=d", "--name-only", diff_base])
 
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
@@ -84,9 +70,18 @@ def _impl(ctx: TaskContext) -> int:
 
     format_args = []
     if not ctx.args.all_files:
-        changed_files = find_changed_files(out, ctx.std.process, ctx.args.base_ref, ctx.args.merge_base)
-        out.write("Formatting changed files:\n%s\n" % changed_files)
-        format_args = changed_files.split("\n")
+        # Prefers the GitHub PR Files API when authenticated and in a PR
+        # context (works on any CI host), falling back to a local
+        # `git diff <merge-base> --diff-filter=d --name-only`. The
+        # --base-ref / --merge-base flags below only apply to that fallback.
+        changed_files = detect_changed_files(
+            ctx,
+            line_level = False,
+            base_ref = ctx.args.base_ref,
+            merge_base = ctx.args.merge_base or None,
+        )
+        out.write("Formatting changed files:\n%s\n" % "\n".join(changed_files))
+        format_args = changed_files
 
     exit = r.spawn(formatter, format_args).wait()
 
