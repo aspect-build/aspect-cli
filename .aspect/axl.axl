@@ -8,7 +8,7 @@ load("@aspect//lib/path_glob.axl", "match_path", "match_any")
 load("@aspect//lib/github.axl", "github", "detect_commit_sha", "detect_build_url")
 load("@aspect//lib/environment.axl", "color_enabled", "parse_git_url_name", "sanitize_filename")
 load("@aspect//lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments", "get_sarif_summary", "parse_sarif")
-load("@aspect//lint.axl", "file_uri_to_path")
+load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset")
 load("@aspect//lib/runnable.axl", "canonical_label")
 load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
 load("@aspect//lib/artifacts.axl", "detect_ci", "artifact_name")
@@ -1928,6 +1928,41 @@ def test_validate_role(tc: int) -> int:
     return tc
 
 
+def test_lint_filters(tc: int) -> int:
+    """Coverage for lint.filter_all and lint.filter_changeset."""
+    diags = [
+        {"file": "a.go", "line": 1, "severity": "error"},
+        {"file": "a.go", "line": 5, "severity": "warning"},
+        {"file": "b.go", "line": 2, "severity": "error"},
+        {"file": "c.go", "line": 7, "severity": "note"},
+    ]
+    changed = [
+        {"file": "a.go", "lines": [0, 4]},
+        {"file": "c.go", "lines": [6]},
+    ]
+
+    # filter_all returns the input as-is.
+    tc = test_case(tc, filter_all(diags, changed) == diags, "filter_all: returns input unchanged")
+    tc = test_case(tc, filter_all([], []) == [], "filter_all: empty → empty")
+    tc = test_case(tc, filter_all(diags, []) == diags, "filter_all: ignores changed_files")
+
+    # filter_changeset keeps only diagnostics whose file is in the changed set.
+    relevant = filter_changeset(diags, changed)
+    tc = test_case(tc, len(relevant) == 3, "filter_changeset: keeps a.go (2) + c.go (1)")
+    tc = test_case(tc, all([d["file"] in ("a.go", "c.go") for d in relevant]), "filter_changeset: drops b.go")
+
+    # No changed files context → nothing relevant (intentional, see docstring).
+    tc = test_case(tc, filter_changeset(diags, []) == [], "filter_changeset: no changed_files → []")
+    tc = test_case(tc, filter_changeset([], changed) == [], "filter_changeset: no diagnostics → []")
+
+    # Only diagnostics in changed files (line numbers don't gate this — that's
+    # the line-level filter applied by gh_lint_comments / annotation features).
+    only_a = [{"file": "a.go", "line": 999, "severity": "error"}]  # line not in changed[0]["lines"]
+    tc = test_case(tc, filter_changeset(only_a, changed) == only_a, "filter_changeset: file-level only, line numbers not gated here")
+
+    return tc
+
+
 def test_canonical_label(tc: int) -> int:
     """Coverage for runnable.canonical_label — Bazel label normalization."""
     cases = [
@@ -2187,6 +2222,7 @@ def impl(ctx: TaskContext) -> int:
     tc = test_file_uri_to_path(tc)
     tc = test_canonical_label(tc)
     tc = test_validate_role(tc)
+    tc = test_lint_filters(tc)
     tc = test_parse_git_url_name(tc)
     tc = test_sanitize_filename(tc)
     tc = test_deliveryd_parse_endpoint(tc)

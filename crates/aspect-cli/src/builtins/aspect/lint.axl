@@ -60,10 +60,10 @@ def file_uri_to_path(uri):
     return uri
 
 # Filter functions — (all_diagnostics, changed_files) -> relevant_diagnostics
-def _filter_all(diagnostics, changed_files):
+def filter_all(diagnostics, changed_files):
     return diagnostics
 
-def _filter_changeset(diagnostics, changed_files):
+def filter_changeset(diagnostics, changed_files):
     """Filter to ONLY diagnostics from changed files.
 
     This means lint results from unchanged files are completely excluded —
@@ -88,19 +88,19 @@ Strategy = record(
 
 # Built-in strategies
 StrategySoft = Strategy(
-    filter              = _filter_all,
+    filter              = filter_all,
     fail_on_severity    = None,    # never fails
     fail_on_linter_error = False,
 )
 
 StrategyHard = Strategy(
-    filter              = _filter_all,
+    filter              = filter_all,
     fail_on_severity    = "error",
     fail_on_linter_error = True,   # also fail if linter exits non-zero
 )
 
 StrategyHoldTheLine = Strategy(
-    filter              = _filter_changeset,
+    filter              = filter_changeset,
     fail_on_severity    = "error",
     fail_on_linter_error = False,
 )
