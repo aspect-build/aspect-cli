@@ -14,12 +14,62 @@ Usage:
     aspect format --all_files
     # Specify the label of the format_multirun binary
     aspect format --formatter_target=//path/to:formatter_bin
-    
+
 """
 
 load("./lib/github.axl", "detect_changed_files")
 load("./lib/runnable.axl", "runnable")
 load("./traits.axl", "BazelTrait")
+
+
+def _git_capture(ctx, *args):
+    """Run `git <args>` and return (stdout, exit_code, stderr).
+
+    All stderr goes to a string so caller can include it in a fail()
+    message. Stdout is captured as-is (no trim).
+    """
+    result = ctx.std.process.command("git").args(list(args)) \
+        .current_dir(ctx.std.env.current_dir()) \
+        .stdout("piped").stderr("piped").spawn().wait_with_output()
+    return result.stdout, result.status.code, result.stderr
+
+
+def _snapshot_tracked_state(ctx):
+    """Snapshot the current tracked-tree state via `git stash create`.
+
+    Returns the commit SHA, or "" if the working tree is clean (in which
+    case `git stash create` produces empty output and no commit object).
+
+    This is non-destructive: stash create writes a commit object to the
+    object store without modifying the working tree, index, or stash list.
+
+    No cleanup needed. `stash create` does NOT add a stash entry — there's
+    nothing in `git stash list` to drop. The commit object it writes is
+    unreachable from any ref, so `git gc` reaps it automatically (after the
+    default ~2-week grace period for unreachable objects). Don't add a
+    "leak" cleanup pass — there is no leak.
+    """
+    out, code, err = _git_capture(ctx, "stash", "create")
+    if code != 0:
+        msg = "`git stash create` failed (exit %d).\nstderr: %s\nThe formatter task uses this to snapshot pre-format state for diff detection. Ensure the workspace is a git repo." % (code, err.strip())
+        fail(msg)
+    return out.strip()
+
+
+def _diff_against(ctx, base):
+    """Return the diff between `base` (a commit SHA) and the working tree
+    as a string. `base=""` means diff against HEAD.
+
+    No --color flag — output is consumed by string equality and patch
+    archival; both want plain text.
+    """
+    target = base if base else "HEAD"
+    out, code, err = _git_capture(ctx, "diff", target)
+    if code != 0:
+        msg = "`git diff %s` failed (exit %d).\nstderr: %s" % (target, code, err.strip())
+        fail(msg)
+    return out
+
 
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
@@ -83,12 +133,44 @@ def _impl(ctx: TaskContext) -> int:
         out.write("Formatting changed files:\n%s\n" % "\n".join(changed_files))
         format_args = changed_files
 
+    # Snapshot pre-format tracked state so we can detect what the formatter
+    # changed independently of any pre-existing dirty files. `git stash
+    # create` is non-destructive: writes a commit object representing the
+    # working-tree+index state and returns its SHA without touching the
+    # working tree, index, or stash list. Empty output = clean tree.
+    pre_snap = _snapshot_tracked_state(ctx)
+
     exit = r.spawn(formatter, format_args).wait()
 
     if not exit.success:
-        out.write("\x1b[0;31mERROR\x1b[0m: format exited with code %d\n" % exit.code)
+        # Formatter binary itself errored — surface that and skip the
+        # formatting-required check. Whatever the formatter wrote to disk
+        # is left in place for the user to inspect.
+        out.write("\x1b[0;31mERROR\x1b[0m: formatter exited with code %d\n" % exit.code)
+        return exit.code
 
-    return exit.code
+    # Diff the post-format tree against the pre-format snapshot. Any
+    # non-empty diff means the formatter modified files = "formatting
+    # required". When `pre_snap` is empty (working tree was clean before),
+    # `git diff HEAD` gives the same answer.
+    formatter_diff = _diff_against(ctx, pre_snap)
+    if not formatter_diff:
+        return 0
+
+    # Format changes detected. List the affected file set for the user.
+    name_out, _, _ = _git_capture(ctx, "diff", "--name-only", pre_snap if pre_snap else "HEAD")
+    affected = [f for f in name_out.strip().split("\n") if f]
+    out.write("\nFormatting changes were applied to %d file(s):\n" % len(affected))
+    for f in affected:
+        out.write("  - %s\n" % f)
+
+    if ctx.args.soft_fail:
+        out.write("\x1b[0;33mWARNING\x1b[0m: formatting required, but --soft-fail is set; task exits 0.\n")
+        out.write("Run `aspect format` locally and commit the result, or amend with --soft-fail=false to enforce.\n")
+        return 0
+
+    out.write("\x1b[0;31mERROR\x1b[0m: formatting required. Run `aspect format` locally and commit the result.\n")
+    return 1
 
 format = task(
     implementation = _impl,
@@ -97,6 +179,10 @@ format = task(
         "all_files": args.boolean(
             default = False,
             description = "Format every file in the working tree instead of just the changed-file set. Useful for nightly maintenance jobs or when introducing a new formatter to a repo for the first time.",
+        ),
+        "soft_fail": args.boolean(
+            default = False,
+            description = "When true, the task returns 0 even if the formatter modified files, printing a WARNING with the affected file list instead. Useful for teams introducing automated formatting incrementally so the CI step doesn't block merges. The formatter binary's own non-zero exits are still surfaced as task failures regardless of this flag.",
         ),
         "base_ref": args.string(
             default = "origin/main",
