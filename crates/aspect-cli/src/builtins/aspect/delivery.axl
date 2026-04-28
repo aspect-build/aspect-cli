@@ -448,6 +448,17 @@ def _delivery_impl(ctx):
         print(_style("No targets to deliver", _BOLD + _YELLOW, is_tty))
         return 0
 
+    # --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS only flip
+    # change detection for labels already in the resolved target set —
+    # they don't add labels. Warn if any forced labels are unmatched so
+    # the user isn't silently surprised when their override is a no-op.
+    unmatched_forced = [t for t in forced_targets if t not in targets]
+    if unmatched_forced:
+        print(_style("WARNING:", _BOLD + _YELLOW, is_tty) +
+              " --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS labels not in the resolved delivery set (will be ignored): " +
+              ", ".join(unmatched_forced))
+        print("  Force-target re-delivers labels already selected by --query or positional args; it does not add new labels. Update --query / positional targets to include them.")
+
     _print_header(is_tty, endpoint, ci_host, commit_sha, prefix, prefix_source, build_url, flags, targets, forced_targets, mode, dry_run, track_state)
 
     run_tracker = runnable(ctx, targets)
