@@ -1,4 +1,5 @@
 load("../lib/environment.axl",
+    "color_enabled",
     "get_environment",
     "get_bazelrc_flags",
     "print_environment_info",
@@ -63,12 +64,15 @@ def _default_bazel_behavior(ctx: FeatureContext):
             ctx.std.env.set_var("RUNNER_TRACKING_ID", "")
             # Here to ensure we restart the Bazel server.
             bazel_trait.extra_startup_flags.append("--host_jvm_args=-DRUNNER_TRACKING_ID=noop")
-            # On GitHub Actions, Bazel runs without a TTY so --color=auto disables
-            # colored output. GHA's log viewer does render ANSI color codes though,
-            # so force --color=yes. We don't force --curses=yes because GHA's log
-            # viewer is line-oriented and doesn't handle cursor-control sequences,
-            # so curses output would appear garbled instead of updating in place.
-            bazel_trait.extra_flags.extend(["--color=yes"])
+
+        # Bazel's --color=auto only emits color on a TTY, but most CI log
+        # viewers (GHA, CircleCI, GitLab, …) render ANSI fine even though
+        # stdout is captured to a non-TTY pipe. Force --color=yes whenever
+        # color_enabled() agrees output should be colored. On a real TTY
+        # this is a no-op vs auto. We deliberately don't force --curses=yes:
+        # line-oriented log viewers garble cursor-control sequences.
+        if color_enabled(ctx.std):
+            bazel_trait.extra_flags.append("--color=yes")
 
 
 BazelDefaults = feature(

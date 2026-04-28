@@ -70,6 +70,34 @@ Environment = record(
     ci = CI,
 )
 
+# --- Terminal / ANSI detection ---
+
+def color_enabled(std):
+    """Should ANSI color codes be emitted to stdout?
+
+    True when stdout is a real TTY, or when a recognized CI host is
+    detected (GitHub Actions, Buildkite, CircleCI, GitLab) — those CIs
+    render ANSI in their log viewers even though stdout is captured into
+    a non-TTY pipe.
+
+    This is the "should I emit color?" predicate. Use it everywhere
+    styled output / `rc.announce(ansi=...)` decisions are made.
+
+    Note: broader than `CI.supports_curses` — curses cursor control
+    breaks line-oriented log viewers, but plain ANSI color
+    codes render fine. Don't conflate the two.
+    """
+    if std.io.stdout.is_tty:
+        return True
+    env = std.env
+    return bool(
+        env.var("GITHUB_ACTIONS") or
+        env.var("BUILDKITE") or
+        env.var("CIRCLECI") or
+        env.var("GITLAB_CI")
+    )
+
+
 # --- Reading environment ---
 
 def _read_ci(std) -> CI:
