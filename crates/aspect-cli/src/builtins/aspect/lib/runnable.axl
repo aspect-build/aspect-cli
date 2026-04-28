@@ -9,11 +9,15 @@ def _process_bes(state: struct, event):
     if event.kind == "named_set_of_files":
         state.filesets[event.id.id] = event.payload
     elif event.kind == "target_completed":
-        canonical_label = canonical_label(event.id.label)
-        if canonical_label in state.targets:
+        # Bind to a fresh name; assigning to `canonical_label` here would shadow
+        # the module-level function (which gets called on the right-hand side)
+        # for the entire function body, breaking the call with
+        # "referenced before assignment".
+        canonical = canonical_label(event.id.label)
+        if canonical in state.targets:
             for og in event.payload.output_group:
                 if og.name == "default":
-                    state.target_fileset[canonical_label] = og.file_sets
+                    state.target_fileset[canonical] = og.file_sets
     elif event.kind == "workspace_config":
         # WorkspaceConfig.local_exec_root is "<output_base>/execroot/<workspace_name>".
         # Its basename is the canonical repo name Bazel uses inside runfiles trees.
