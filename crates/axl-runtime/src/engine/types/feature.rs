@@ -1129,7 +1129,7 @@ pub fn apply_feature_config_overrides<'v>(
 /// - Bools get lowercased because Clap's `value_parser!(bool)` expects
 ///   lowercase while Starlark's `to_string()` produces `True`/`False`.
 /// - Ints, lists, and other types pass through as `Value::to_string()`.
-fn stringify_arg_value(v: Value<'_>) -> String {
+pub fn stringify_arg_value(v: Value<'_>) -> String {
     if let Some(s) = v.unpack_str() {
         return s.to_owned();
     }

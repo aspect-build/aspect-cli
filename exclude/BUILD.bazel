@@ -1,0 +1,52 @@
+# Live-CI regression test for `aspect <task>` multi-positional + hyphen-led
+# pattern parsing.
+#
+# CI invokes `aspect build` and `aspect test` with the form:
+#
+#     aspect <task> -- //... -//exclude/...
+#
+# The targets below are deliberately broken: a build-failing genrule and a
+# failing sh_test. If the CLI's positional handling silently regresses
+# (clap drops the second positional, hyphen-led patterns stop parsing through
+# `--`, etc.), the broken targets get included in the build/test set and CI
+# fails loudly with a clear message.
+#
+# This catches both PARSE-level breaks (clap errors before invoking Bazel)
+# AND SEMANTIC-level breaks (clap parses but the second positional doesn't
+# reach Bazel, so exclusion silently no-ops). The no-op design we had
+# initially only caught the former.
+#
+# Local impact: `bazel build //...` from a dev machine WILL hit the failing
+# genrule. That's expected — running with the exclude pattern is the
+# canonical workflow on this repo. Dev ergonomics:
+#
+#   aspect build -- //... -//exclude/...
+#   bazel build  -- //... -//exclude/...
+#
+# Both work. The error message from the genrule below explains the fix.
+
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+genrule(
+    name = "always_fails_build",
+    outs = ["fail.out"],
+    cmd = "echo 'CI exclusion regression: //exclude was not excluded from `aspect build //...`. Either: (1) you ran `bazel build //...` directly — use `bazel build -- //... -//exclude/...` instead; or (2) the CLI multi-positional / hyphen-led pattern parsing has regressed.' >&2; exit 1",
+    visibility = ["//visibility:private"],
+)
+
+write_file(
+    name = "always_fails_test_sh",
+    out = "always_fails_test.sh",
+    content = [
+        "#!/usr/bin/env bash",
+        "echo 'CI exclusion regression: //exclude was not excluded from `aspect test //...`. The CLI multi-positional / hyphen-led pattern parsing has regressed.' >&2",
+        "exit 1",
+    ],
+    is_executable = True,
+)
+
+sh_test(
+    name = "always_fails_test",
+    srcs = [":always_fails_test_sh"],
+)

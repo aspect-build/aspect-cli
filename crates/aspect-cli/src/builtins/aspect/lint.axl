@@ -332,8 +332,9 @@ lint = task(
         ),
         "targets": args.positional(
             minimum = 0,
+            maximum = 512,
             default = ["..."],
-            description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory.",
+            description = "Bazel target patterns to lint. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. Pass multiple patterns to combine includes and excludes; when any pattern is hyphen-led, separate them from flags with `--` (e.g. `aspect lint -- //... -//experimental/...`).",
         ),
     },
 )

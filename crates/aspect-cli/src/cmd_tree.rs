@@ -267,6 +267,11 @@ pub fn make_command_from_task(
                     }
                 }
             };
+            // A config.axl override satisfies a `required = true` declaration —
+            // the user has provided the value, just not on the CLI. Without this
+            // relaxation, Clap rejects the run with `--<flag> required` even
+            // though the default was set above.
+            clap_arg = clap_arg.required(false);
         }
         cmd = cmd.arg(clap_arg);
     }

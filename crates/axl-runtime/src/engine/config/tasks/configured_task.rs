@@ -431,10 +431,15 @@ impl<'v> values::StarlarkValue<'v> for ConfiguredTaskArgs<'v> {
             cli_arg => {
                 let expected = match cli_arg {
                     Arg::Custom { .. } => unreachable!(),
-                    Arg::String { .. } | Arg::Positional { .. } => "string",
+                    Arg::String { .. } => "string",
                     Arg::Boolean { .. } => "bool",
                     Arg::Int { .. } | Arg::UInt { .. } => "int",
-                    Arg::StringList { .. } | Arg::TrailingVarArgs { .. } => "list",
+                    // Positional and TrailingVarArgs are list-shaped at runtime
+                    // (the impl reads them via list/star-unpack), so config.axl
+                    // overrides must also be lists.
+                    Arg::Positional { .. }
+                    | Arg::StringList { .. }
+                    | Arg::TrailingVarArgs { .. } => "list",
                     Arg::BooleanList { .. } | Arg::IntList { .. } | Arg::UIntList { .. } => "list",
                 };
                 let actual = value.get_type();
