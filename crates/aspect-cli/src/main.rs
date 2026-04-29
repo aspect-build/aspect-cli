@@ -16,7 +16,7 @@ use axl_runtime::engine::config::feature_map::FeatureMap;
 use axl_runtime::engine::types::feature::{
     extract_feature_args, extract_feature_description, extract_feature_display_name,
     extract_feature_identifier, extract_feature_name, extract_feature_summary,
-    feature_instance_effective_defaults, to_command_name,
+    feature_instance_effective_defaults, stringify_arg_value, to_command_name,
 };
 use axl_runtime::eval::{self, ModuleEnv, ModuleScope, ModuleTaskSpec, MultiPhaseEval};
 use axl_runtime::module::AXL_ROOT_MODULE_NAME;
@@ -393,8 +393,12 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 //
                 // Scalar values (string, int, bool) become a single-element Vec<String>.
                 // List values are expanded into their individual element strings.
+                // String values must be unpacked with `unpack_str()` rather than
+                // `to_string()` — the latter returns the Starlark repr (with quotes)
+                // which Clap then rejects against `values=[...]` constraints.
                 // Booleans are lowercased because Clap's `value_parser!(bool)` expects
-                // "true"/"false" while Starlark's to_string() gives "True"/"False".
+                // "true"/"false" while Starlark's `to_string()` gives "True"/"False".
+                // See `stringify_arg_value` for the per-element conversion rules.
                 let effective_defaults: std::collections::HashMap<String, Vec<String>> = ct
                     .config_overrides
                     .borrow()
@@ -402,24 +406,9 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     .map(|(k, owned)| {
                         let v = owned.value();
                         let elements: Vec<String> = if let Some(list) = ListRef::from_value(v) {
-                            list.iter()
-                                .map(|elem| {
-                                    let s = elem.to_string();
-                                    if elem.get_type() == "bool" {
-                                        s.to_lowercase()
-                                    } else {
-                                        s
-                                    }
-                                })
-                                .collect()
+                            list.iter().map(stringify_arg_value).collect()
                         } else {
-                            let s = v.to_string();
-                            let s = if v.get_type() == "bool" {
-                                s.to_lowercase()
-                            } else {
-                                s
-                            };
-                            vec![s]
+                            vec![stringify_arg_value(v)]
                         };
                         (k.clone(), elements)
                     })
