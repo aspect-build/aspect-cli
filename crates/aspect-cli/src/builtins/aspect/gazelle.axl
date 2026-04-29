@@ -94,7 +94,11 @@ Usage:
 
 load("./lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
 load("./lib/runnable.axl", "runnable")
-load("./traits.axl", "ArtifactsTrait", "BazelTrait")
+load("./lib/bazel_results.axl", "now_ms")
+load("./lib/gazelle_results.axl",
+    gaz_init_results = "init_results",
+)
+load("./traits.axl", "ArtifactsTrait", "BazelTrait", "TaskLifecycleTrait", "TaskUpdate")
 
 
 def _parse_diff_paths(diff_text):
@@ -169,10 +173,40 @@ def _try_upload_gazelle_diff(ctx, diff_text):
         out.write("--upload-gazelle-diff: uploaded patch (no stable URL on this CI host).\n")
 
 
+def _emit_final(ctx, lifecycle, results, exit_code):
+    """Emit the terminal task_update and task_complete for status-check consumers."""
+    status = "passed" if exit_code == 0 else "failed"
+    if not results.get("finish_time_ms"):
+        results["finish_time_ms"] = now_ms(ctx)
+    if results.get("start_time_ms") and not results.get("wall_time_ms"):
+        results["wall_time_ms"] = results["finish_time_ms"] - results["start_time_ms"]
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind   = "gazelle_results",
+            status = status,
+            data   = {"results": results},
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
+
+
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
     out = ctx.std.io.stdout
     bazel_trait = ctx.traits[BazelTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    # Initialize results and fire task_started FIRST so any subsequent failure
+    # still creates a visible status check.
+    results = gaz_init_results()
+    results["start_time_ms"]  = now_ms(ctx)
+    results["gazelle_target"] = ctx.args.gazelle_target
+    results["gazelle_command"] = ctx.args.gazelle_command or ""
+    results["check_mode"]     = bool(ctx.args.check)
+    results["dirs"]           = list(ctx.args.dirs) if ctx.args.dirs else []
+    for handler in lifecycle.task_started:
+        handler(ctx, ctx.args.gazelle_target)
+
     out.write("Building gazelle...\n")
 
     flags = [
@@ -283,11 +317,15 @@ def _impl(ctx: TaskContext) -> int:
     # stderr above; just turn that into a hard failure.
     if not diff_status.success and not diff_stdout.strip():
         out.write("\x1b[0;31mERROR\x1b[0m: gazelle (-mode=diff) exited %d with no diff output (likely a configuration error).\n" % diff_status.code)
+        results["gazelle_error"]      = True
+        results["gazelle_error_code"] = diff_status.code
+        _emit_final(ctx, lifecycle, results, diff_status.code)
         return diff_status.code
 
     if not diff_stdout.strip():
         # Clean — gazelle reports no changes needed. We're done
         # regardless of --check / fix mode.
+        _emit_final(ctx, lifecycle, results, 0)
         return 0
 
     affected = _parse_diff_paths(diff_stdout)
@@ -316,6 +354,10 @@ def _impl(ctx: TaskContext) -> int:
         ctx.std.fs.remove_file(patch_path)
         if not apply_result.status.success:
             out.write("\x1b[0;31mERROR\x1b[0m: failed to apply gazelle's patch via `git apply` (exit %d).\nstderr: %s\nThe diff was generated but couldn't be applied — possibly the working tree changed during the run, or gazelle produced a diff format git doesn't accept. Run `bazel run %s` directly to apply.\n" % (apply_result.status.code, apply_result.stderr.strip(), ctx.args.gazelle_target))
+            results["affected_files"]  = affected
+            results["apply_error"]     = True
+            results["apply_error_msg"] = apply_result.stderr.strip()
+            _emit_final(ctx, lifecycle, results, apply_result.status.code)
             return apply_result.status.code
 
     verb = "would update" if ctx.args.check else "updated"
@@ -330,16 +372,24 @@ def _impl(ctx: TaskContext) -> int:
         out.write("\nGazelle %s BUILD files (raw diff follows):\n" % verb)
         out.write(diff_stdout)
 
+    # Populate results for status-check consumers.
+    results["affected_files"] = affected
+
     if ctx.args.upload_gazelle_diff:
         _try_upload_gazelle_diff(ctx, diff_stdout)
+        # Surface the patch URL in results.
+        artifacts_trait = ctx.traits[ArtifactsTrait]
+        if artifacts_trait.artifact_urls:
+            results["patch_url"] = artifacts_trait.artifact_urls.get("gazelle_diff", "") or ""
 
     out.write("\x1b[0;31mERROR\x1b[0m: BUILD files are out of date. Run `aspect gazelle` locally and commit the result.\n")
+    _emit_final(ctx, lifecycle, results, 1)
     return 1
 
 
 gazelle = task(
     implementation = _impl,
-    traits = [ArtifactsTrait, BazelTrait],
+    traits = [ArtifactsTrait, BazelTrait, TaskLifecycleTrait],
     args = {
         "check": args.boolean(
             default = False,

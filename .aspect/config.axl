@@ -5,6 +5,8 @@ load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
 load("@aspect//lib/lint_results_test.axl", "lint_template_snapshot_tests")
 load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
+load("@aspect//lib/format_results_test.axl", "format_template_snapshot_tests")
+load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
 load("@aspect//feature/buildkite_annotations_test.axl", "bk_annotation_snapshot_tests")
 load("@aspect//traits.axl", "BazelTrait")
 
@@ -58,6 +60,14 @@ def config(ctx: ConfigContext):
     # Delivery template snapshot tests — renders delivery_results templates.
     # Run with: aspect dev test-delivery-template-snapshots
     ctx.tasks.add(delivery_template_snapshot_tests)
+
+    # Format template snapshot tests — renders format_results templates.
+    # Run with: aspect dev test-format-template-snapshots
+    ctx.tasks.add(format_template_snapshot_tests)
+
+    # Gazelle template snapshot tests — renders gazelle_results templates.
+    # Run with: aspect dev test-gazelle-template-snapshots
+    ctx.tasks.add(gazelle_template_snapshot_tests)
 
     # Buildkite annotations — snapshots the body that would be passed to
     # `buildkite-agent annotate` for each task kind and status combo.

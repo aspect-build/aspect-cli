@@ -8,10 +8,11 @@ we call the per-kind renderers + the feature's `format_body` / `severity_for`
 helpers directly and print what *would* be sent to BK for each scenario.
 
 Coverage:
-  - Each task kind (bazel_results, lint_results, delivery_results)
+  - Each task kind (bazel_results, lint_results, delivery_results,
+    format_results, gazelle_results)
   - Each terminal status (passed, failed)
   - Style selection edge cases: soft-lint passing with warnings, delivery
-    all-skipped, delivery all-failed.
+    all-skipped, delivery all-failed, soft-format passing with files.
 """
 
 load("../lib/bazel_results.axl",
@@ -27,6 +28,14 @@ load("../lib/delivery_results.axl",
     delivery_init_results = "init_results",
     delivery_add_result = "add_result",
     delivery_render_check_output = "render_check_output",
+)
+load("../lib/format_results.axl",
+    format_init_results = "init_results",
+    format_render_check_output = "render_check_output",
+)
+load("../lib/gazelle_results.axl",
+    gazelle_init_results = "init_results",
+    gazelle_render_check_output = "render_check_output",
 )
 load("./buildkite_annotations.axl", "format_body", "severity_for")
 
@@ -151,6 +160,72 @@ def _make_delivery_fail():
     return r
 
 
+def _make_format_clean():
+    r = _seed_metadata(format_init_results())
+    r["scope"]            = "changed"
+    r["formatter_target"] = "//tools/format"
+    return r
+
+
+def _make_format_files_need_format():
+    r = _seed_metadata(format_init_results())
+    r["scope"]            = "changed"
+    r["formatter_target"] = "//tools/format"
+    r["affected_files"]   = [
+        "apps/web/src/auth/login.ts",
+        "apps/web/src/utils/helpers.go",
+        "tools/deploy/deploy.py",
+    ]
+    return r
+
+
+def _make_format_soft_fail():
+    """Files need formatting but --soft-fail; exits 0 → status=passed with affected_files → BK warning."""
+    r = _seed_metadata(format_init_results())
+    r["scope"]            = "changed"
+    r["formatter_target"] = "//tools/format"
+    r["soft_fail"]        = True
+    r["affected_files"]   = [
+        "apps/web/src/auth/login.ts",
+        "apps/api/handler.go",
+    ]
+    return r
+
+
+def _make_gazelle_clean():
+    r = _seed_metadata(gazelle_init_results())
+    r["gazelle_target"]  = "//tools/gazelle:gazelle"
+    r["gazelle_command"] = ""
+    r["check_mode"]      = True
+    return r
+
+
+def _make_gazelle_out_of_date():
+    r = _seed_metadata(gazelle_init_results())
+    r["gazelle_target"]  = "//tools/gazelle:gazelle"
+    r["gazelle_command"] = ""
+    r["check_mode"]      = True
+    r["affected_files"]  = [
+        "services/api/BUILD.bazel",
+        "services/worker/BUILD.bazel",
+        "tools/go/BUILD.bazel",
+    ]
+    return r
+
+
+def _make_gazelle_fix_applied():
+    """Fix mode applied changes; exits 0 → status=passed with affected_files → BK warning."""
+    r = _seed_metadata(gazelle_init_results())
+    r["gazelle_target"]  = "//tools/gazelle:gazelle"
+    r["gazelle_command"] = ""
+    r["check_mode"]      = False
+    r["affected_files"]  = [
+        "services/api/BUILD.bazel",
+        "services/worker/BUILD.bazel",
+    ]
+    return r
+
+
 # ─── Test harness ─────────────────────────────────────────────────────────────
 
 def _bk_links():
@@ -180,6 +255,8 @@ _RENDERERS = {
     "bazel_results":    bazel_render_check_output,
     "lint_results":     lint_render_check_output,
     "delivery_results": delivery_render_check_output,
+    "format_results":   format_render_check_output,
+    "gazelle_results":  gazelle_render_check_output,
 }
 
 
@@ -197,6 +274,14 @@ def _test_impl(ctx):
         ("9. delivery-fail · delivery_results",        "delivery_results",  _make_delivery_fail(),              "failed", "//apps/...",  "Delivery"),
         # Running updates should pick the info style.
         ("10. lint-running · lint_results",             "lint_results",      _make_lint_passed_with_warnings(),  "running", "//...",      "Lint"),
+        # Format scenarios — clean=success, files-failed=error, soft-fail=warning.
+        ("11. format-clean · format_results",           "format_results",    _make_format_clean(),               "passed",  "",           "Format"),
+        ("12. format-files-failed · format_results",    "format_results",    _make_format_files_need_format(),   "failed",  "",           "Format"),
+        ("13. format-soft-fail · format_results",       "format_results",    _make_format_soft_fail(),           "passed",  "",           "Format"),
+        # Gazelle scenarios — clean=success, out-of-date=error, fix-applied=warning.
+        ("14. gazelle-clean · gazelle_results",         "gazelle_results",   _make_gazelle_clean(),              "passed",  "",           "Gazelle"),
+        ("15. gazelle-out-of-date · gazelle_results",   "gazelle_results",   _make_gazelle_out_of_date(),        "failed",  "",           "Gazelle"),
+        ("16. gazelle-fix-applied · gazelle_results",   "gazelle_results",   _make_gazelle_fix_applied(),        "passed",  "",           "Gazelle"),
     ]
 
     sep = "=" * 70
@@ -223,7 +308,7 @@ def _test_impl(ctx):
         print("")
 
     print(sep)
-    print("All " + str(len(scenarios)) + " BK annotation scenarios rendered without error.")
+    print("All " + str(len(scenarios)) + " BK annotation scenarios rendered without error (including format + gazelle).")
     return 0
 
 

@@ -43,6 +43,14 @@ load("../lib/delivery_results.axl",
     delivery_init_results = "init_results",
     delivery_render_check_output = "render_check_output",
 )
+load("../lib/format_results.axl",
+    format_init_results = "init_results",
+    format_render_check_output = "render_check_output",
+)
+load("../lib/gazelle_results.axl",
+    gazelle_init_results = "init_results",
+    gazelle_render_check_output = "render_check_output",
+)
 
 
 # Dispatch table: `task_update.kind` → (init_results_fn, render_check_output_fn).
@@ -62,6 +70,14 @@ _RENDERERS = {
         init   = delivery_init_results,
         render = delivery_render_check_output,
     ),
+    "format_results": struct(
+        init   = format_init_results,
+        render = format_render_check_output,
+    ),
+    "gazelle_results": struct(
+        init   = gazelle_init_results,
+        render = gazelle_render_check_output,
+    ),
 }
 
 # Map known task names to their natural task_update.kind so the initial
@@ -72,6 +88,8 @@ _TASK_KIND_DEFAULTS = {
     "test":     "bazel_results",
     "lint":     "lint_results",
     "delivery": "delivery_results",
+    "format":   "format_results",
+    "gazelle":  "gazelle_results",
 }
 
 

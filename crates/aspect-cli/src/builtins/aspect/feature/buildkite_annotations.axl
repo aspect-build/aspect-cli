@@ -29,6 +29,14 @@ load("../lib/delivery_results.axl",
     delivery_init_results = "init_results",
     delivery_render_check_output = "render_check_output",
 )
+load("../lib/format_results.axl",
+    format_init_results = "init_results",
+    format_render_check_output = "render_check_output",
+)
+load("../lib/gazelle_results.axl",
+    gazelle_init_results = "init_results",
+    gazelle_render_check_output = "render_check_output",
+)
 
 
 # Same dispatch table as github_status_checks — one renderer per task kind.
@@ -47,6 +55,14 @@ _RENDERERS = {
         init   = delivery_init_results,
         render = delivery_render_check_output,
     ),
+    "format_results": struct(
+        init   = format_init_results,
+        render = format_render_check_output,
+    ),
+    "gazelle_results": struct(
+        init   = gazelle_init_results,
+        render = gazelle_render_check_output,
+    ),
 }
 
 
@@ -55,6 +71,8 @@ _TASK_KIND_DEFAULTS = {
     "test":     "bazel_results",
     "lint":     "lint_results",
     "delivery": "delivery_results",
+    "format":   "format_results",
+    "gazelle":  "gazelle_results",
 }
 
 
@@ -119,6 +137,13 @@ def _severity_for(kind, results, status):
         if counts.get("fail", 0) > 0:
             return "error"
         if counts.get("warn", 0) > 0:
+            return "warning"
+    elif kind in ("format_results", "gazelle_results"):
+        # Any affected files → warning (not error) so warnings-only runs
+        # are visually distinct from hard failures caused by other errors.
+        # A non-zero exit still maps to "error" via the `status == "failed"` guard above.
+        affected = results.get("affected_files", []) or []
+        if affected:
             return "warning"
     # bazel_results and fallthrough
     return "success"

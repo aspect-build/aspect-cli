@@ -21,7 +21,11 @@ load("./lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
 load("./lib/github.axl", "detect_changed_files")
 load("./lib/path_glob.axl", "match_any")
 load("./lib/runnable.axl", "runnable")
-load("./traits.axl", "ArtifactsTrait", "BazelTrait")
+load("./lib/bazel_results.axl", "now_ms")
+load("./lib/format_results.axl",
+    fmt_init_results = "init_results",
+)
+load("./traits.axl", "ArtifactsTrait", "BazelTrait", "TaskLifecycleTrait", "TaskUpdate")
 
 
 def _git_capture(ctx, *args):
@@ -136,10 +140,39 @@ def _try_upload_format_diff(ctx, diff_text):
         out.write("--upload-format-diff: uploaded patch (no stable URL on this CI host).\n")
 
 
+def _emit_final(ctx, lifecycle, results, exit_code):
+    """Emit the terminal task_update and task_complete for status-check consumers."""
+    status = "passed" if exit_code == 0 else "failed"
+    if not results.get("finish_time_ms"):
+        results["finish_time_ms"] = now_ms(ctx)
+    if results.get("start_time_ms") and not results.get("wall_time_ms"):
+        results["wall_time_ms"] = results["finish_time_ms"] - results["start_time_ms"]
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind   = "format_results",
+            status = status,
+            data   = {"results": results},
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
+
+
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
     out = ctx.std.io.stdout
     bazel_trait = ctx.traits[BazelTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    # Initialize results and fire task_started FIRST so any subsequent failure
+    # still creates a visible status check.
+    results = fmt_init_results()
+    results["start_time_ms"]   = now_ms(ctx)
+    results["scope"]           = ctx.args.scope
+    results["formatter_target"] = ctx.args.formatter_target
+    results["soft_fail"]       = bool(ctx.args.soft_fail)
+    for handler in lifecycle.task_started:
+        handler(ctx, ctx.args.formatter_target)
+
     out.write("Building formatter...\n")
 
     flags = [
@@ -204,6 +237,8 @@ def _impl(ctx: TaskContext) -> int:
             changed_files = kept
         if not changed_files:
             out.write("No files to format.\n")
+            results["no_files_to_format"] = True
+            _emit_final(ctx, lifecycle, results, 0)
             return 0
         out.write("Formatting changed files:\n%s\n" % "\n".join(changed_files))
         format_args = changed_files
@@ -222,6 +257,9 @@ def _impl(ctx: TaskContext) -> int:
         # formatting-required check. Whatever the formatter wrote to disk
         # is left in place for the user to inspect.
         out.write("\x1b[0;31mERROR\x1b[0m: formatter exited with code %d\n" % exit.code)
+        results["formatter_error"]      = True
+        results["formatter_error_code"] = exit.code
+        _emit_final(ctx, lifecycle, results, exit.code)
         return exit.code
 
     # No HEAD means snapshot wasn't possible — either we're not in a git
@@ -232,6 +270,8 @@ def _impl(ctx: TaskContext) -> int:
     if pre_snap == None:
         out.write("\x1b[0;33mWARNING\x1b[0m: cannot resolve HEAD (no initial git commit, or not in a git repository); formatting-required detection is skipped. The formatter ran, but we cannot tell whether it changed anything.\n")
         out.write("Make at least one commit (or run inside a git repo) and re-run if you want `aspect format` to surface formatter-induced changes.\n")
+        results["no_git"] = True
+        _emit_final(ctx, lifecycle, results, 0)
         return 0
 
     # Diff the post-format tree against the pre-format snapshot. Any
@@ -240,6 +280,7 @@ def _impl(ctx: TaskContext) -> int:
     # `git diff HEAD` gives the same answer.
     formatter_diff = _diff_against(ctx, pre_snap)
     if not formatter_diff:
+        _emit_final(ctx, lifecycle, results, 0)
         return 0
 
     # List the affected file set, then filter through --ignore-pattern.
@@ -263,6 +304,7 @@ def _impl(ctx: TaskContext) -> int:
         # made so they aren't surprising downstream.
         if ignored_count > 0:
             out.write("Formatter modified %d file(s), all matching --ignore-pattern; treating as OK.\n" % ignored_count)
+        _emit_final(ctx, lifecycle, results, 0)
         return 0
 
     out.write("\nFormatting changes were applied to %d file(s):\n" % len(affected))
@@ -270,6 +312,10 @@ def _impl(ctx: TaskContext) -> int:
         out.write("  - %s\n" % f)
     if ignored_count > 0:
         out.write("(also modified %d file(s) matching --ignore-pattern; not counted toward failure)\n" % ignored_count)
+
+    # Populate results with the affected file set and ignore count for status checks.
+    results["affected_files"] = affected
+    results["ignored_count"]  = ignored_count
 
     # Optional: archive the diff as a CI artifact so reviewers can apply
     # it locally without re-running the formatter. Off by default.
@@ -290,18 +336,24 @@ def _impl(ctx: TaskContext) -> int:
         else:
             upload_diff = formatter_diff
         _try_upload_format_diff(ctx, upload_diff)
+        # Surface the patch URL in results so the status-check renderer can link to it.
+        artifacts_trait = ctx.traits[ArtifactsTrait]
+        if artifacts_trait.artifact_urls:
+            results["patch_url"] = artifacts_trait.artifact_urls.get("format_diff", "") or ""
 
     if ctx.args.soft_fail:
         out.write("\x1b[0;33mWARNING\x1b[0m: formatting required, but --soft-fail is set; task exits 0.\n")
         out.write("Run `aspect format` locally and commit the result, or amend with --soft-fail=false to enforce.\n")
+        _emit_final(ctx, lifecycle, results, 0)
         return 0
 
     out.write("\x1b[0;31mERROR\x1b[0m: formatting required. Run `aspect format` locally and commit the result.\n")
+    _emit_final(ctx, lifecycle, results, 1)
     return 1
 
 format = task(
     implementation = _impl,
-    traits = [BazelTrait, ArtifactsTrait],
+    traits = [BazelTrait, ArtifactsTrait, TaskLifecycleTrait],
     args = {
         "scope": args.string(
             default = "changed",
