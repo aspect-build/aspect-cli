@@ -17,4 +17,13 @@ common:release --workspace_status_command "${PWD}/bazel/workspace_status.sh"
 common:release --compilation_mode=opt
 common:release --@rules_rust//rust/settings:lto=fat
 
+# Use Go's internal linker rather than the cc_toolchain — required when
+# building gazelle from source on Linux because toolchains_llvm_bootstrapped's
+# lld can't accept Go's non-PIC relocations (relocation R_X86_64_64 ...
+# recompile with -fPIC). Pure Go binaries skip cgo and the cc link step
+# entirely. Used by the //tools/gazelle:gazelle_from_source regression target;
+# the prebuilt aspect_gazelle binary we use elsewhere isn't built here so
+# this config doesn't affect it.
+common:pure_go --@rules_go//go/config:pure
+
 common --test_output=errors

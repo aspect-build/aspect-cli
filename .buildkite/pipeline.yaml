@@ -165,6 +165,45 @@ steps:
       ASPECT_DEBUG=1 aspect format --task-key format-bk-debug
       aspect format --task-key format-bk
 
+  - key: gazelle-task
+    label: ":aspect: Gazelle Task"
+    depends_on:
+      - pre-build
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 20
+    retry:
+      automatic:
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
+          limit: 1
+    command: |
+      ASPECT_DEBUG=1 aspect gazelle --check --task-key gazelle-bk-debug
+      aspect gazelle --check --task-key gazelle-bk
+
+  - key: gazelle-from-source-task
+    label: ":aspect: Gazelle Task (from-source)"
+    depends_on:
+      - pre-build
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
+          limit: 1
+    command: |
+      # Regression test for the build-from-source gazelle path
+      # (upstream `gazelle()` macro + rules_go toolchain) — same task
+      # logic, alternate target. Most users will adopt the prebuilt
+      # binary; this job exists so we catch breakage in the
+      # build-from-source path.
+      #
+      # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
+      # lld can't accept Go's non-PIC relocations on x86_64. Pure Go skips the
+      # cc-toolchain link step entirely. See .bazelrc for the config definition.
+      ASPECT_DEBUG=1 aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-bk-debug
+      aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-bk
+
   - key: build-task
     depends_on:
       - pre-build

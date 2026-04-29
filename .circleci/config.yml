@@ -19,6 +19,10 @@ workflows:
           requires: [pre-build]
       - format-task:
           requires: [pre-build]
+      - gazelle-task:
+          requires: [pre-build]
+      - gazelle-from-source-task:
+          requires: [pre-build]
       - delivery-task:
           requires: [pre-build]
 
@@ -82,6 +86,43 @@ jobs:
       - run:
           name: Format Task
           command: aspect format --task-key format-cci
+
+  gazelle-task:
+    machine: true
+    resource_class: aspect-build/aspect-default
+    working_directory: /mnt/ephemeral/workdir
+    steps:
+      - checkout
+      - run:
+          name: Bootstrap
+          command: .aspect/bootstrap.sh
+      - run:
+          name: Gazelle Task (ASPECT_DEBUG=1)
+          command: ASPECT_DEBUG=1 aspect gazelle --check --task-key gazelle-cci-debug
+      - run:
+          name: Gazelle Task
+          command: aspect gazelle --check --task-key gazelle-cci
+
+  # Regression test for the build-from-source gazelle path — upstream
+  # `gazelle()` macro + rules_go toolchain. Most users will adopt the
+  # prebuilt binary; this job catches breakage on the alternate path.
+  gazelle-from-source-task:
+    machine: true
+    resource_class: aspect-build/aspect-default
+    working_directory: /mnt/ephemeral/workdir
+    steps:
+      - checkout
+      - run:
+          name: Bootstrap
+          command: .aspect/bootstrap.sh
+      # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
+      # lld can't accept Go's non-PIC relocations on x86_64. See .bazelrc.
+      - run:
+          name: Gazelle Task — from-source (ASPECT_DEBUG=1)
+          command: ASPECT_DEBUG=1 aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-cci-debug
+      - run:
+          name: Gazelle Task — from-source
+          command: aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-cci
 
   delivery-task:
     machine: true

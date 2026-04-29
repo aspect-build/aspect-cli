@@ -1,0 +1,375 @@
+"""Define the 'gazelle' task
+
+`aspect gazelle` runs a single gazelle target with `-mode=diff` to
+get the verdict (was anything out of date) and the patch (unified
+diff on stdout) without modifying the tree. In fix mode (default)
+the captured patch is then applied via `git apply -p0` — there's no
+second gazelle invocation, which matters on large monorepos where
+gazelle's whole-repo scan is the slow part.
+
+Flow:
+    1. Build the gazelle target.
+    2. Run it with `-mode=diff`, capture stdout. The wrapper
+       hardcodes `-mode fix`; Gazelle's Go flag parser treats the
+       second `-mode` as a last-wins override (BEHAVIOR switches
+       to diff-mode — no tree modification, unified diff on
+       stdout). Exit code is unreliable in this duplicate-flag
+       config (it's 0 even on diff), so the verdict comes from
+       stdout content, not exit code.
+    3. If stdout is empty → exit 0 (clean).
+    4. If stdout has a diff:
+         - In `--check` mode: report the affected files and exit 1.
+         - In fix mode (default): `git apply -p0 <diff>` to write
+           the changes, report the affected files, exit 1. The
+           non-zero exit signals "BUILDs were out of date — please
+           commit the working-tree changes" (matches format's
+           contract).
+    5. With `--upload-gazelle-diff` set on a recognized CI host,
+       the captured patch is also uploaded as `gazelle.patch` so
+       reviewers can apply it locally.
+
+Why a single target (rather than a `with_check = True` sibling
+`.check` target):
+  - `with_check` is specific to `aspect_gazelle()` from
+    `aspect_gazelle_prebuilt`. Upstream `gazelle()` from
+    `bazel-contrib/bazel-gazelle` (used when building gazelle from
+    source via `bazel_dep(name = "gazelle")` + rules_go) has no
+    equivalent — it only emits `<name>` and `<name>-runner.bash`.
+    The `-mode=diff` runtime override works against both, so the
+    same task implementation drives prebuilt and from-source
+    targets. We exercise the from-source path via the
+    `:gazelle_from_source` regression target in CI.
+
+Why not git stash + git diff (the format task):
+  - We can rely on gazelle's own `-mode=diff` to produce a clean
+    unified diff. Formatters mostly can't — see format.axl's
+    docstring for that story.
+  - Detecting newly-created BUILD files (a common gazelle output)
+    via `git diff` is awkward — that's tracked-file-only, so we'd
+    need a separate `git ls-files --others` snapshot. The diff
+    from `-mode=diff` includes new files natively
+    (`--- /dev/null +++ <new path>`).
+
+Install:
+    Add `aspect_gazelle_prebuilt` to MODULE.bazel:
+
+        bazel_dep(name = "aspect_gazelle_prebuilt", version = "0.0.8")
+
+    Define a gazelle target. `with_check` is NOT required:
+
+        load("@aspect_gazelle_prebuilt//:def.bzl", "aspect_gazelle")
+
+        aspect_gazelle(
+            name = "gazelle",
+            languages = ["go", "proto", "python"],  # whatever fits
+        )
+
+Usage:
+    # Run gazelle, apply changes via `git apply -p0`,
+    # exit 1 if anything changed.
+    aspect gazelle
+
+    # CI mode: don't modify the tree, just report and exit 1 on diff.
+    aspect gazelle --check
+
+    # Limit to specific directories (gazelle only walks those subtrees).
+    aspect gazelle --check tools/go services/api
+
+    # Pass arbitrary gazelle flags (e.g. aspect-gazelle's --progress).
+    aspect gazelle --gazelle-flag=-progress --gazelle-flag=-r tools/go
+
+    # Use the 'fix' subcommand (removes obsolete rules too).
+    aspect gazelle --gazelle-command=fix
+
+    # CI patch upload: archives the diff as a `gazelle.patch` artifact.
+    aspect gazelle --check --upload-gazelle-diff
+
+    # Override the gazelle target (e.g. build-from-source variant).
+    # Combine with `--bazel-flag=--config=pure_go` if linking against
+    # toolchains_llvm_bootstrapped on Linux.
+    aspect gazelle --check \\
+        --gazelle-target=//tools/gazelle:gazelle_from_source \\
+        --bazel-flag=--config=pure_go
+"""
+
+load("./lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
+load("./lib/runnable.axl", "runnable")
+load("./traits.axl", "ArtifactsTrait", "BazelTrait")
+
+
+def _parse_diff_paths(diff_text):
+    """Extract the set of affected paths from a unified diff.
+
+    Looks at `+++` lines (the "after" file in each hunk header).
+    Format:
+
+        +++ path/to/file.bazel\\t<timestamp>
+
+    For new files the corresponding `---` line is `--- /dev/null`,
+    which we don't need — the `+++` side is always the path that
+    would exist post-fix.
+
+    Returns a sorted list of unique paths. Empty list if the diff
+    is unparseable; callers fall back to printing the raw diff in
+    that case so the user still has something to act on.
+    """
+    paths = {}
+    for line in diff_text.split("\n"):
+        if not line.startswith("+++ "):
+            continue
+        rest = line[len("+++ "):]
+        # Strip the trailing tab + timestamp if present.
+        tab_idx = rest.find("\t")
+        path = rest[:tab_idx] if tab_idx >= 0 else rest
+        path = path.strip()
+        if not path or path == "/dev/null":
+            continue
+        paths[path] = True
+    return sorted(paths.keys())
+
+
+def _try_upload_gazelle_diff(ctx, diff_text):
+    """Write gazelle's diff to a temp file and upload it via the
+    CI-specific artifact uploader. Failures are logged but don't fail
+    the task — the diff is informational, not load-bearing for the
+    verdict.
+
+    The download URL (when the CI provider returns one) lands in
+    `ArtifactsTrait.artifact_urls["gazelle_diff"]` so future
+    status-check features can surface a "View patch" link, mirroring
+    the format task's `format_diff` artifact.
+    """
+    out = ctx.std.io.stdout
+    ci = detect_ci(ctx.std.env)
+    uploader = create_uploader(ctx.std.env)
+    if not uploader:
+        out.write("--upload-gazelle-diff: not running on a recognized CI host; skipping.\n")
+        return
+
+    # Write the patch to a job-scoped tmpdir so concurrent gazelle
+    # runs in the same process don't collide.
+    tmp = ctx.std.env.temp_dir()
+    patch_path = tmp + "/gazelle-" + ctx.task.key + ".patch"
+    ctx.std.fs.write(patch_path, diff_text)
+
+    name = artifact_name(ci, ctx.task.name, ctx.task.key, "gazelle.patch")
+    result = uploader.upload_file(ctx, patch_path, name)
+    if not result["success"]:
+        out.write("--upload-gazelle-diff: upload failed: %s\n" % "; ".join(result.get("errors") or ["unknown error"]))
+        return
+
+    download_url = result.get("download_url") or ""
+    if download_url:
+        artifacts_trait = ctx.traits[ArtifactsTrait]
+        urls = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
+        urls["gazelle_diff"] = download_url
+        artifacts_trait.artifact_urls = urls
+        out.write("--upload-gazelle-diff: uploaded patch — %s\n" % download_url)
+    else:
+        out.write("--upload-gazelle-diff: uploaded patch (no stable URL on this CI host).\n")
+
+
+# buildifier: disable=function-docstring
+def _impl(ctx: TaskContext) -> int:
+    out = ctx.std.io.stdout
+    bazel_trait = ctx.traits[BazelTrait]
+    out.write("Building gazelle...\n")
+
+    flags = [
+        "--remote_download_outputs=toplevel",
+        "--build_runfile_links",
+        "--experimental_build_event_upload_strategy=local",
+    ]
+    flags.extend(ctx.args.bazel_flag)
+    flags.extend(bazel_trait.extra_flags)
+    # Task-time flag contributors — features register hooks that need
+    # ctx.task (e.g. --build_metadata=ASPECT_TASK_NAME=...).
+    for hook in bazel_trait.task_flags:
+        flags.extend(hook(ctx))
+    if bazel_trait.flags:
+        flags = bazel_trait.flags(flags)
+
+    startup_flags = list(ctx.args.bazel_startup_flag)
+    startup_flags.extend(bazel_trait.extra_startup_flags)
+    if bazel_trait.startup_flags:
+        startup_flags = bazel_trait.startup_flags(startup_flags)
+    ctx.bazel.startup_flags.extend(startup_flags)
+
+    r = runnable(ctx, [ctx.args.gazelle_target])
+
+    build = ctx.bazel.build(
+        ctx.args.gazelle_target,
+        build_events = True,
+        flags = flags,
+    )
+
+    for event in build.build_events():
+        r.event(event)
+
+    if not build.wait().success:
+        fail("Building the gazelle target has failed.")
+
+    gazelle = r.determine_entrypoint(ctx.args.gazelle_target)
+    if not gazelle:
+        fail("Failed to determine the gazelle target's entrypoint.")
+
+    # Upstream `gazelle()` (bazel-gazelle, used by `gazelle_from_source`-
+    # style targets) produces both a `<name>` sh_binary and an inner
+    # `<name>-runner.bash` script — and `determine_entrypoint` may
+    # surface either depending on BES ordering. The inner runner
+    # script's `$0`-relative runfiles lookup expects to find a sibling
+    # `<name>-runner.bash.runfiles` dir, but bazel actually creates
+    # the runfiles tree as `<name>.runfiles` (matching the sh_binary).
+    # Stripping the suffix points us at the sh_binary symlink instead,
+    # whose runfiles dir resolves correctly.
+    if gazelle.endswith("-runner.bash"):
+        gazelle = gazelle[:-len("-runner.bash")]
+
+    # Diff phase: run with -mode=diff to get the verdict and the patch
+    # without modifying the tree. The aspect_gazelle wrapper hardcodes
+    # `-mode fix`; we append `-mode=diff` to flip the inner gazelle's
+    # flag parser to diff mode (last-wins, via Go's stdlib flag pkg)
+    # so it prints a unified diff to stdout instead of writing files.
+    #
+    # Exit code can't be trusted as the verdict — it differs by gazelle
+    # provenance:
+    #
+    #   * aspect_gazelle_prebuilt: exits 0 even on a non-empty diff.
+    #     The aspect-gazelle binary's own arg extraction is first-wins,
+    #     so its outer `mode` stays at the wrapper's hardcoded "fix"
+    #     and never trips its `mode != Fix` exit-1 branch. (Its
+    #     vendored gazelle copy also swallows the upstream ErrDiff for
+    #     this same reason.)
+    #   * upstream gazelle (from-source path): exits 1 on a non-empty
+    #     diff — standard upstream behavior.
+    #
+    # So we drive the verdict off stdout content, not the exit code.
+    # Empty stdout + non-zero exit = real gazelle error; otherwise the
+    # stdout content speaks for itself regardless of exit code.
+    #
+    # capture=True pipes both stdout and stderr. We drain both so
+    # nothing is silently dropped — order matters (read stdout to EOF
+    # before stderr; gazelle has typically flushed stderr by the time
+    # stdout closes).
+    #
+    # User flags from --gazelle-flag are passed through, but any -mode
+    # flag is stripped — our appended -mode=diff must be the last mode
+    # flag so that Go's last-wins flag parsing keeps us in diff mode
+    # regardless of gazelle provenance.
+    diff_args = []
+    if ctx.args.gazelle_command:
+        diff_args.append(ctx.args.gazelle_command)
+    for f in ctx.args.gazelle_flags:
+        if not f.startswith("-mode") and not f.startswith("--mode"):
+            diff_args.append(f)
+        else:
+            out.write("WARNING: --gazelle-flag=%s ignored in diff phase (task controls -mode internally).\n" % f)
+    diff_args.append("-mode=diff")
+    diff_args.extend(ctx.args.dirs)
+    diff_proc = r.spawn(gazelle, diff_args, capture = True)
+    diff_stdout = diff_proc.stdout().read_to_string()
+    diff_stderr = diff_proc.stderr().read_to_string()
+    diff_status = diff_proc.wait()
+
+    # Surface gazelle's stderr unconditionally so warnings, "encountered
+    # changes" notes, language-plugin diagnostics, etc. aren't swallowed.
+    if diff_stderr.strip():
+        out.write(diff_stderr)
+        if not diff_stderr.endswith("\n"):
+            out.write("\n")
+
+    # Real gazelle errors (config issues, missing language plugin, etc.)
+    # surface as non-zero exit + empty stdout. We've already printed
+    # stderr above; just turn that into a hard failure.
+    if not diff_status.success and not diff_stdout.strip():
+        out.write("\x1b[0;31mERROR\x1b[0m: gazelle (-mode=diff) exited %d with no diff output (likely a configuration error).\n" % diff_status.code)
+        return diff_status.code
+
+    if not diff_stdout.strip():
+        # Clean — gazelle reports no changes needed. We're done
+        # regardless of --check / fix mode.
+        return 0
+
+    affected = _parse_diff_paths(diff_stdout)
+
+    # Apply phase (default mode): apply the captured diff via
+    # `git apply -p0` rather than re-running gazelle. Skipping the
+    # second gazelle invocation is a meaningful win — gazelle scans
+    # the whole repo and on large workspaces that's slow even when
+    # cached. The diff we already have is exactly what fix-mode
+    # would produce, so `git apply` is equivalent.
+    #
+    # `-p0` is required: gazelle emits paths relative to the
+    # workspace root (e.g. `tools/gazelle/testdata/BUILD.bazel`) and
+    # the default `-p1` would strip the leading directory and look
+    # for `gazelle/testdata/BUILD.bazel`, which doesn't exist.
+    #
+    # `--check` skips this entirely — CI mode doesn't want a dirtied
+    # tree.
+    if not ctx.args.check:
+        tmp = ctx.std.env.temp_dir()
+        patch_path = tmp + "/gazelle-" + ctx.task.key + ".patch"
+        ctx.std.fs.write(patch_path, diff_stdout)
+        apply_result = ctx.std.process.command("git").args(["apply", "-p0", patch_path]) \
+            .current_dir(ctx.std.env.root_dir()) \
+            .stdout("piped").stderr("piped").spawn().wait_with_output()
+        ctx.std.fs.remove_file(patch_path)
+        if not apply_result.status.success:
+            out.write("\x1b[0;31mERROR\x1b[0m: failed to apply gazelle's patch via `git apply` (exit %d).\nstderr: %s\nThe diff was generated but couldn't be applied — possibly the working tree changed during the run, or gazelle produced a diff format git doesn't accept. Run `bazel run %s` directly to apply.\n" % (apply_result.status.code, apply_result.stderr.strip(), ctx.args.gazelle_target))
+            return apply_result.status.code
+
+    verb = "would update" if ctx.args.check else "updated"
+    if affected:
+        out.write("\nGazelle %s %d file(s):\n" % (verb, len(affected)))
+        for f in affected:
+            out.write("  - %s\n" % f)
+    else:
+        # Diff was non-empty but `+++` lines didn't yield paths —
+        # fall back to printing the raw diff so the user has
+        # something to act on.
+        out.write("\nGazelle %s BUILD files (raw diff follows):\n" % verb)
+        out.write(diff_stdout)
+
+    if ctx.args.upload_gazelle_diff:
+        _try_upload_gazelle_diff(ctx, diff_stdout)
+
+    out.write("\x1b[0;31mERROR\x1b[0m: BUILD files are out of date. Run `aspect gazelle` locally and commit the result.\n")
+    return 1
+
+
+gazelle = task(
+    implementation = _impl,
+    traits = [ArtifactsTrait, BazelTrait],
+    args = {
+        "check": args.boolean(
+            default = False,
+            description = "When true, only report the diff — don't apply it. Recommended in CI: faster (skips the apply step), leaves the tree clean (no risk of a half-formatted state on mid-run interrupt), and the verdict comes from gazelle directly without depending on the workspace being a git working tree. Local devs typically leave this off so `aspect gazelle` updates BUILD files in place.",
+        ),
+        "upload_gazelle_diff": args.boolean(
+            default = False,
+            description = "Upload gazelle's diff as a CI artifact (named `gazelle.patch`) so reviewers can apply it locally without re-running gazelle. No-op when the working tree is clean (no diff to upload), or when not running on a recognized CI host (GitHub Actions, Buildkite, CircleCI, GitLab). The download URL (where the CI provider returns one) is surfaced via ArtifactsTrait.artifact_urls['gazelle_diff']. Off by default.",
+        ),
+        "gazelle_target": args.string(
+            default = "//tools/gazelle:gazelle",
+            description = "Bazel label of the gazelle target. Generated by `aspect_gazelle()` from `@aspect_gazelle_prebuilt//:def.bzl`. The task runs the target once with `-mode=diff` to derive the verdict + patch without modifying the tree, then (in fix mode, when `--check=false`) applies the captured patch via `git apply -p0` rather than re-running gazelle.",
+        ),
+        "gazelle_command": args.string(
+            default = "",
+            description = "Gazelle subcommand to pass before flags: 'fix' or 'update'. When empty (default), no subcommand is passed and gazelle uses its built-in default. 'update' adds and updates rules for new and changed source files. 'fix' does everything 'update' does and additionally removes rules for deleted files and performs language-specific cleanups. Note: 'update-repos' is not supported here because its interaction with `-mode=diff` is untested — use `bazel run <target> -- update-repos` directly for dependency updates.",
+        ),
+        "gazelle_flags": args.string_list(
+            long = "gazelle-flag",
+            description = "Additional flags forwarded to the gazelle binary. Repeat to pass multiple — e.g. `--gazelle-flag=-progress --gazelle-flag=-r`. Any `-mode`/`--mode` flag is ignored — the task controls mode internally and applies changes via `git apply` rather than a second gazelle invocation. Flags specific to `aspect_gazelle_prebuilt` (e.g. `-progress`, `-cache`) are accepted here but will cause errors against from-source gazelle targets that don't know those flags.",
+        ),
+        "dirs": args.positional(
+            minimum = 0,
+            description = "Directories to pass to gazelle as positional arguments. Gazelle limits its walk to these subtrees. When empty (default), gazelle walks the entire repo from the workspace root. Useful for limiting scope on large repos or when only certain packages need updating.",
+        ),
+        "bazel_flag": args.string_list(
+            description = "Additional Bazel flags forwarded to the gazelle build. Repeat the flag to pass multiple — e.g. `--bazel-flag=--config=ci --bazel-flag=--keep_going`.",
+        ),
+        "bazel_startup_flag": args.string_list(
+            description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+        ),
+    },
+)
