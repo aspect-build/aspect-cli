@@ -317,6 +317,12 @@ bazel $DISABLE_PLUGINS_FLAG $BAZEL_STARTUP_OPTS build $BAZEL_BUILD_OPTS \
   ${METADATA_ARGS[@]+"${METADATA_ARGS[@]}"} \
   -c dbg --remote_download_toplevel --show_progress_rate_limit=1 //:cli
 
+# Copy the built binary to a stable path outside bazel-out/ so that subsequent
+# aspect invocations in this job find the branch's binary regardless of whether
+# later bazel builds redirect the bazel-bin symlink to a different configuration
+mkdir -p target/ci
+cp -f bazel-out/k8-dbg/bin/crates/aspect-cli/aspect-cli target/ci/aspect-cli
+
 # In GitHub Actions, env vars do not persist across steps unless written here.
 if [ -n "${GITHUB_ENV:-}" ]; then
   {

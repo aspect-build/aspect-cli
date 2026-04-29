@@ -3,12 +3,13 @@ version(
     sources = [
         # Cargo build
         local("target/debug/aspect-cli"),
+        # Stable CI bootstrap copy — written by bootstrap.sh after each bazel build,
+        # outside bazel-out/ so it survives bazel-bin symlink redirects.
+        local("target/ci/aspect-cli"),
         # Root folder
         local("bazel-bin/crates/aspect-cli/aspect-cli"),
-        local("bazel-out/k8-dbg/bin/crates/aspect-cli/aspect-cli"),
         # Fallback: running somewhere inside examples/*
         local("../../bazel-bin/crates/aspect-cli/aspect-cli"),
-        local("../../bazel-out/k8-dbg/bin/crates/aspect-cli/aspect-cli"),
         # Download from a released version
         github(
             org = "aspect-build",

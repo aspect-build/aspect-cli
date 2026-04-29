@@ -2444,7 +2444,7 @@ def impl(ctx: TaskContext) -> int:
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER") == "true", "ASPECT_LAUNCHER should be true")
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_VERSION") == "0.0.0-dev", "ASPECT_LAUNCHER_VERSION should be 0.0.0-dev")
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_METHOD") == "local", "ASPECT_LAUNCHER_ASPECT_CLI_METHOD should be local")
-        tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_PATH") == "bazel-bin/crates/aspect-cli/aspect-cli", "ASPECT_LAUNCHER_ASPECT_CLI_PATH should be bazel-bin/crates/aspect-cli/aspect-cli")
+        tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_PATH") == "target/ci/aspect-cli", "ASPECT_LAUNCHER_ASPECT_CLI_PATH should be target/ci/aspect-cli")
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_URL") == None, "ASPECT_LAUNCHER_ASPECT_CLI_URL should be None")
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_ORG") == None, "ASPECT_LAUNCHER_ASPECT_CLI_ORG should be None")
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_REPO") == None, "ASPECT_LAUNCHER_ASPECT_CLI_REPO should be None")
