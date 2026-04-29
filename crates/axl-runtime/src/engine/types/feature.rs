@@ -1429,7 +1429,10 @@ mod tests {
     fn command_name_snake_case() {
         assert_eq!(to_command_name("axl_add"), "axl-add");
         assert_eq!(to_command_name("remote_cache"), "remote-cache");
-        assert_eq!(to_command_name("bazel_startup_flag"), "bazel-startup-flag");
+        assert_eq!(
+            to_command_name("bazel_startup_flags"),
+            "bazel-startup-flags"
+        );
     }
 
     #[test]
@@ -1520,7 +1523,7 @@ mod tests {
             "foo",
             "foo_bar",
             "foo123",
-            "bazel_flag",
+            "bazel_flags",
             "remote_cache",
         ] {
             assert!(

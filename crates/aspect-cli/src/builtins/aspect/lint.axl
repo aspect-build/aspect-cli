@@ -171,7 +171,7 @@ def _impl(ctx: TaskContext) -> int:
     flags = [
         "--remote_download_regex='.*AspectRulesLint.*'",
     ]
-    for aspect in ctx.args.aspect:
+    for aspect in ctx.args.aspects:
         flags.append("--aspects=" + aspect)
     if ctx.args.fix:
         flags.append("--output_groups=rules_lint_patch")
@@ -305,7 +305,8 @@ lint = task(
     implementation = _impl,
     traits = [LintTrait, BazelTrait, HealthCheckTrait],
     args = {
-        "aspect": args.string_list(
+        "aspects": args.string_list(
+            long = "aspect",
             required = True,
             description = "Bazel aspect label(s) to apply for linting (e.g. //tools/lint:linters.bzl%eslint). Repeat the flag to run multiple aspects in a single invocation. At least one aspect is required.",
         ),

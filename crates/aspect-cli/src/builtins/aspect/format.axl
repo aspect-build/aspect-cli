@@ -148,7 +148,7 @@ def _impl(ctx: TaskContext) -> int:
         "--experimental_build_event_upload_strategy=local",
         "--noallow_analysis_cache_discard",
     ]
-    flags.extend(ctx.args.bazel_flag)
+    flags.extend(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
     # Task-time flag contributors — features register hooks that need ctx.task
     # (e.g. --build_metadata=ASPECT_TASK_NAME=...) which features can't produce
@@ -159,7 +159,7 @@ def _impl(ctx: TaskContext) -> int:
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
 
-    startup_flags = list(ctx.args.bazel_startup_flag)
+    startup_flags = list(ctx.args.bazel_startup_flags)
     startup_flags.extend(bazel_trait.extra_startup_flags)
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
@@ -183,7 +183,7 @@ def _impl(ctx: TaskContext) -> int:
     if not formatter:
         fail("Failed to determine the formatter entrypoint.")
 
-    ignore_patterns = list(ctx.args.ignore_pattern)
+    ignore_patterns = list(ctx.args.ignore_patterns)
 
     format_args = []
     if not ctx.args.all_files:
@@ -312,7 +312,8 @@ format = task(
             default = False,
             description = "When true, the task returns 0 even if the formatter modified files, printing a WARNING with the affected file list instead. Useful for teams introducing automated formatting incrementally so the CI step doesn't block merges. The formatter binary's own non-zero exits are still surfaced as task failures regardless of this flag.",
         ),
-        "ignore_pattern": args.string_list(
+        "ignore_patterns": args.string_list(
+            long = "ignore-pattern",
             description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--ignore-pattern='vendor/**' --ignore-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In the default (changed-files) mode, filtered files are dropped from the file list passed to the formatter. In --all-files mode the formatter discovers files itself, so ignored files may still be rewritten on disk; in either mode, ignored files are excluded from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "upload_format_diff": args.boolean(
@@ -330,10 +331,12 @@ format = task(
             default = "//tools/format",
             description = "Bazel label of the format_multirun target (or any runnable target) to invoke as the formatter. The target is built first, then run with the changed-file list passed as positional arguments.",
         ),
-        "bazel_flag": args.string_list(
+        "bazel_flags": args.string_list(
+            long = "bazel-flag",
             description = "Additional Bazel flags forwarded to the formatter build. Repeat the flag to pass multiple — e.g. `--bazel-flag=--config=ci --bazel-flag=--keep_going`.",
         ),
-        "bazel_startup_flag": args.string_list(
+        "bazel_startup_flags": args.string_list(
+            long = "bazel-startup-flag",
             description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
     },

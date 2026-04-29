@@ -16,8 +16,8 @@ def _token_impl(ctx: TaskContext) -> int:
         print("Error: " + github.missing_credentials_reason(ctx))
         return 1
 
-    if ctx.args.role:
-        for role in ctx.args.role:
+    if ctx.args.roles:
+        for role in ctx.args.roles:
             if not github.validate_role(role):
                 print("Error: unknown role %r, valid roles: %s" % (role, ", ".join(github.VALID_ROLES)))
                 return 1
@@ -25,8 +25,8 @@ def _token_impl(ctx: TaskContext) -> int:
     body = json.encode({"owner": owner, "repo": repo_name})
 
     url = ctx.aspect.auth.api_url + "/github/token"
-    if ctx.args.role:
-        url = url + "?roles=" + ",".join(ctx.args.role)
+    if ctx.args.roles:
+        url = url + "?roles=" + ",".join(ctx.args.roles)
 
     resp = ctx.http().post(
         url = url,
@@ -66,7 +66,8 @@ token = task(
             maximum = 1,
             description = "GitHub repository in OWNER/REPO format",
         ),
-        "role": args.string_list(
+        "roles": args.string_list(
+            long = "role",
             description = "Restrict token to specific role(s). May be specified multiple times. Valid: checks.read, checks.write, statuses.read, statuses.write, prs.read, prs.write, issues.read",
         ),
         "profile": args.string(
