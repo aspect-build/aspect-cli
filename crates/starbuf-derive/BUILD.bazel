@@ -5,15 +5,15 @@ rust_proc_macro(
     srcs = [
         "src/lib.rs",
     ],
+    edition = "2021",
+    visibility = [
+        "//crates/axl-proto:__pkg__",
+    ],
     deps = [
         "@crates//:anyhow",
         "@crates//:darling",
         "@crates//:proc-macro2",
         "@crates//:quote",
-        "@crates//:syn"
-    ],
-    edition = "2021",
-    visibility = [
-        "//crates/axl-proto:__pkg__",
+        "@crates//:syn",
     ],
 )

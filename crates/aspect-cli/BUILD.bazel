@@ -1,57 +1,57 @@
+load("//bazel/release:release.bzl", "release")
 load("//bazel/rust:defs.bzl", "rust_binary")
 load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binaries")
-load("//bazel/release:release.bzl", "release")
 
 rust_binary(
     name = "aspect-cli",
-    version_key = "STABLE_MONOREPO_VERSION",
     srcs = glob(["src/**/*.rs"]),
+    compile_data = glob([
+        "src/builtins/**/*.axl",
+        "src/builtins/**/*.aspect",
+    ]),
+    version_key = "STABLE_MONOREPO_VERSION",
+    visibility = [
+        "//:__pkg__",
+        "//examples/deliverable:__pkg__",
+    ],
     deps = [
+        "//crates/aspect-telemetry",
+        "//crates/axl-runtime",
+        "@crates//:anyhow",
         "@crates//:base64",
         "@crates//:clap",
         "@crates//:dirs",
-        "@crates//:anyhow",
+        "@crates//:include_dir",
+        "@crates//:names",
+        "@crates//:opentelemetry",
+        "@crates//:opentelemetry-otlp",
+        "@crates//:opentelemetry-semantic-conventions",
+        "@crates//:opentelemetry_sdk",
         "@crates//:rand",
         "@crates//:reqwest",
         "@crates//:serde",
         "@crates//:serde_json",
         "@crates//:sha2",
-        "@crates//:include_dir",
-        "@crates//:names",
         "@crates//:sha256",
-        "@crates//:uuid",
         "@crates//:starlark",
-        "@crates//:tokio",
         "@crates//:thiserror",
+        "@crates//:tokio",
         "@crates//:tracing",
         "@crates//:tracing-core",
         "@crates//:tracing-opentelemetry",
         "@crates//:tracing-subscriber",
-        "@crates//:opentelemetry-semantic-conventions",
-        "@crates//:opentelemetry",
-        "@crates//:opentelemetry_sdk",
-        "@crates//:opentelemetry-otlp",
-        "//crates/aspect-telemetry",
-        "//crates/axl-runtime",
-    ],
-    compile_data = glob([
-        "src/builtins/**/*.axl",
-        "src/builtins/**/*.aspect",
-    ]),
-    visibility = [
-        "//:__pkg__",
-        "//examples/deliverable:__pkg__"
+        "@crates//:uuid",
     ],
 )
 
 multi_platform_rust_binaries(
     name = "bins",
-    target = ":aspect-cli",
     tags = ["no-macos"],
+    target = ":aspect-cli",
 )
 
 release(
     name = "release",
-    targets = [":bins"],
     tags = ["no-macos"],
+    targets = [":bins"],
 )

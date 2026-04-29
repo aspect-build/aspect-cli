@@ -22,8 +22,8 @@ alias(
 
 platform(
     name = "linux_host_platform",
-    parents = ["@platforms//host"],
     constraint_values = [
         "@toolchains_llvm_bootstrapped//constraints/libc:gnu.2.28",
     ],
+    parents = ["@platforms//host"],
 )

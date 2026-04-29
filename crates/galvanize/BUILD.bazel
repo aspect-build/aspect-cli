@@ -2,25 +2,25 @@ load("//bazel/rust:defs.bzl", "rust_library")
 
 config_setting(
     name = "macos",
-    constraint_values = ["@platforms//os:macos"]
+    constraint_values = ["@platforms//os:macos"],
 )
 
 config_setting(
     name = "linux",
-    constraint_values = ["@platforms//os:linux"]
+    constraint_values = ["@platforms//os:linux"],
 )
 
 rust_library(
     name = "galvanize",
     srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/axl-runtime:__pkg__",
+    ],
     deps = [
+        "@crates//:libc",
         "@crates//:nix",
-        "@crates//:libc"
     ] + select({
         ":macos": ["@crates//:proc_pidinfo"],
         ":linux": ["@crates//:procfs"],
     }),
-    visibility = [
-        "//crates/axl-runtime:__pkg__",
-    ],
 )

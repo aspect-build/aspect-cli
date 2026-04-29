@@ -5,7 +5,9 @@ load("//bazel/rust:multi_platform_rust_binaries.bzl", "multi_platform_rust_binar
 rust_binary(
     name = "axl-docgen",
     srcs = glob(["src/**/*.rs"]),
+    visibility = ["//:__pkg__"],
     deps = [
+        "//crates/axl-runtime",
         "@crates//:anyhow",
         "@crates//:clap",
         "@crates//:markdown",
@@ -14,9 +16,7 @@ rust_binary(
         "@crates//:starlark",
         "@crates//:syntect",
         "@crates//:tokio",
-        "//crates/axl-runtime",
     ],
-    visibility = ["//:__pkg__"],
 )
 
 rust_test(
@@ -27,12 +27,12 @@ rust_test(
 
 multi_platform_rust_binaries(
     name = "bins",
-    target = ":axl-docgen",
     tags = ["no-macos"],
+    target = ":axl-docgen",
 )
 
 release(
     name = "release",
-    targets = [":bins"],
     tags = ["no-macos"],
+    targets = [":bins"],
 )

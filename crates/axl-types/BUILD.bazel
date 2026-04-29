@@ -3,16 +3,16 @@ load("//bazel/rust:defs.bzl", "rust_library")
 rust_library(
     name = "axl-types",
     srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/axl-proto:__pkg__",
+        "//crates/axl-runtime:__pkg__",
+        "//crates/starbuf-types:__pkg__",
+    ],
     deps = [
         "@crates//:allocative",
         "@crates//:anyhow",
         "@crates//:derive_more",
         "@crates//:dupe",
         "@crates//:starlark",
-    ],
-    visibility = [
-        "//crates/axl-proto:__pkg__",
-        "//crates/axl-runtime:__pkg__",
-        "//crates/starbuf-types:__pkg__",
     ],
 )

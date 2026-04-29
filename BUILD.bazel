@@ -1,3 +1,8 @@
+# Gazelle directives — applied repo-wide. The `examples/` tree is
+# user-facing fixture content (not part of the bazel build) so we
+# exclude it from gazelle's BUILD-file generation.
+# gazelle:exclude examples
+
 alias(
     name = "launcher",
     actual = "//crates/aspect-launcher",

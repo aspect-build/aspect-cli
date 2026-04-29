@@ -1,5 +1,5 @@
-load("//bazel/rust:defs.bzl", "rust_library")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("//bazel/rust:defs.bzl", "rust_library")
 
 cargo_build_script(
     name = "build_rs",
@@ -10,13 +10,13 @@ rust_library(
     name = "aspect-telemetry",
     srcs = glob(["src/**/*.rs"]),
     version_key = "STABLE_MONOREPO_VERSION",
-    deps = [
-        "@crates//:reqwest",
-        ":build_rs"
-    ],
     visibility = [
         "//crates/aspect-cli:__pkg__",
-        "//crates/axl-runtime:__pkg__",
         "//crates/aspect-launcher:__pkg__",
+        "//crates/axl-runtime:__pkg__",
+    ],
+    deps = [
+        ":build_rs",
+        "@crates//:reqwest",
     ],
 )
