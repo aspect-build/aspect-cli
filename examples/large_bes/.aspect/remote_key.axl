@@ -68,7 +68,5 @@ ac_key = task(
     name = "key",
     group = ["remote"],
     implementation = _idea_impl,
-    args = {
-        "target": args.positional()
-    }
+    args = {},
 )

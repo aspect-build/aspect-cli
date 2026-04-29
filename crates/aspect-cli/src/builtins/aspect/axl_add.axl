@@ -307,9 +307,11 @@ def _impl(ctx: TaskContext) -> int:
     # Clear progress display for confirmation
     clear_progress(ctx, len(phases) + 1)
 
-    # Get author info from release
-    author_login = release["author"]["login"] if "author" in release else "unknown"
-    author_url = release["author"]["html_url"] if "author" in release else ""
+    # Get author info from release. fetch_tag_as_release() returns a synthetic
+    # release with only `login`, so html_url may be absent — use .get() defaults.
+    author = release.get("author") or {}
+    author_login = author.get("login", "unknown")
+    author_url = author.get("html_url", "")
 
     # Confirmation (only for latest version, unless --yes flag is set)
     if version == "latest" and not ctx.args.yes:

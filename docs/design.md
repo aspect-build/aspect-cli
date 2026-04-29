@@ -43,7 +43,7 @@ When multiple config sources set the same trait field, last-write-wins based on 
 
 Task execution occurs when a user explicitly invokes a task (e.g., `aspect run <task>`). The runtime calls the task's `implementation` function with a `TaskContext` providing the full set of capabilities:
 
-- `ctx.attrs` — parsed CLI arguments as declared by the task
+- `ctx.args` — parsed CLI arguments as declared by the task
 - `ctx.bazel` — Bazel build, test, query, and info
 - `ctx.std.fs` — filesystem operations (read, write, copy, rename, mkdir, etc.)
 - `ctx.std.process` — subprocess execution
@@ -66,7 +66,7 @@ Any `.axl` file in `.aspect/` can define tasks. A task is declared at the top le
 
 ```python
 def _impl(ctx: TaskContext) -> int:
-    name = ctx.attrs.recipient
+    name = ctx.args.recipient
     ctx.std.io.stdout.write("Hello, " + name + "\n")
     return 0
 
@@ -77,7 +77,7 @@ greet = task(
 Say hello to someone. Defaults to the world.
 """,                               # extended text shown in --help
     implementation = _impl,
-    attrs = {
+    args = {
         "recipient": args.string(default = "world", description = "Who to greet"),
     },
     traits = [MyConfig],           # opt-in to trait types
@@ -101,7 +101,7 @@ Use `name = "explicit-name"` to override the derived command name. Command names
 
 **Group names** follow the same `[a-z][a-z0-9-]*` constraint: `group = ["axl"]`, `group = ["ci", "build"]`.
 
-**Attr names** use `snake_case` (`[a-z][a-z0-9_]*`) because they are accessed directly in Starlark as `ctx.attrs.attr_name`. CLI-typed attrs (`args.string(...)`, etc.) are automatically converted to `--kebab-flags` on the CLI: `"remote_cache"` → `--remote-cache`.
+**Arg names** use `snake_case` (`[a-z][a-z0-9_]*`) because they are accessed directly in Starlark as `ctx.args.arg_name`. CLI-typed args (`args.string(...)`, etc.) are automatically converted to `--kebab-flags` on the CLI: `"remote_cache"` → `--remote-cache`. Use `long = "explicit-name"` on the arg constructor to override the derived flag name.
 
 #### Help text fields
 
@@ -113,7 +113,7 @@ Use `name = "explicit-name"` to override the derived command name. Command names
 
 #### CLI arguments
 
-Argument types: `args.string()`, `args.int()`, `args.uint()`, `args.boolean()`, their `_list` variants, `args.positional()`, and `args.trailing_var_args()`. All support `required`, `default`, `description`, and (for scalar types) `short` for a single-character alias.
+Argument types: `args.string()`, `args.int()`, `args.uint()`, `args.boolean()`, their `_list` variants, `args.positional()`, `args.trailing_var_args()`, and `args.custom(type, default = ...)` for non-CLI/config-only values (lambdas, dicts of complex shape, etc.). Scalar/list types support `required`, `default`, `description`, `long` (kebab-flag override), and (for scalar types) `short` for a single-character alias.
 
 ### Config File
 
@@ -134,10 +134,10 @@ Features are composable behavior injectors. They run after all config files have
 ```python
 def _impl(ctx: FeatureContext):
     bazel_trait = ctx.traits[BazelTrait]
-    channels = ctx.attrs.channels   # dict set in config.axl: {"failure": "#alerts", "success": "#releases"}
+    channels = ctx.args.channels   # dict set in config.axl: {"failure": "#alerts", "success": "#releases"}
 
     def _on_build_end(task_ctx, exit_code):
-        if ctx.attrs.silent or not channels:
+        if ctx.args.silent or not channels:
             return
         event = "success" if exit_code == 0 else "failure"
         channel = channels.get(event)
@@ -148,14 +148,14 @@ def _impl(ctx: FeatureContext):
 
 SlackNotify = feature(
     implementation = _impl,
-    attrs = {
-        "channels": attr(dict[str, str], {}),  # config.axl: route outcomes to channels
+    args = {
+        "channels": args.custom(dict[str, str], default = {}),  # config.axl: route outcomes to channels
         "silent":   args.boolean(default = False, description = "Suppress notifications for this run"),
     },
 )
 ```
 
-Both config-only attrs (`attr(...)`) and CLI flags (`args.boolean(...)`, `args.string(...)`, etc.) live in a single `attrs` dict — accessed uniformly as `ctx.attrs.name` in the implementation. Config-only attrs (here, a dict) are set in `config.axl` by repo maintainers and can hold complex types; CLI-typed attrs are exposed as flags on every task subcommand so developers can pass `--silent` at invocation time. Only named flags are allowed in features — positional args are not supported.
+Both config-only args (`args.custom(...)`) and CLI flags (`args.boolean(...)`, `args.string(...)`, etc.) live in a single `args` dict — accessed uniformly as `ctx.args.name` in the implementation. Config-only args (here, a dict) are set in `config.axl` by repo maintainers and can hold complex types; CLI-typed args are exposed as flags on every task subcommand so developers can pass `--silent` at invocation time. Only named flags are allowed in features — positional args are not supported, and feature CLI args must always have a default (`required = True` is rejected).
 
 **Naming:** features must be exported as **CamelCase** (`ArtifactUpload`). This is enforced at definition time. The convention mirrors Bazel providers (`CcInfo`, `DefaultInfo`) — features are referenced as type keys (`ctx.features[ArtifactUpload]`), and CamelCase signals this role. `display_name` overrides the auto-derived Title Case heading name. The `summary` and `description` fields work identically to tasks.
 
@@ -167,9 +167,9 @@ Traits are global configuration objects shared across tasks that opt in. A trait
 
 ```python
 MyConfig = trait(
-    message = attr(str, "default value"),
-    count = attr(int, 1),
-    callback = attr(typing.Callable[[str], str], lambda s: s),
+    message = attr(str, default = "default value"),
+    count = attr(int, default = 1),
+    callback = attr(typing.Callable[[str], str], default = lambda s: s),
 )
 ```
 

@@ -48,7 +48,7 @@ def test_env(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
     # Test var for existing and non-existing variables
     path_var = ctx.std.env.var("PATH")
-    tc = test_case(tc, path_var != None and path_var != "", "PATH environment variable should exist and by non-empty")
+    tc = test_case(tc, path_var != None and path_var != "", "PATH environment variable should exist and be non-empty")
     tc = test_case(tc, type(path_var) == "string", "PATH should be a string")
     no_var = ctx.std.env.var("NO_SUCH_VAR_12345")
     tc = test_case(tc, no_var == None, "Non-existent variable should return None")
@@ -2439,7 +2439,7 @@ def impl(ctx: TaskContext) -> int:
 
     # Test aspect_cli_version (on CI only)
     if ctx.std.env.var("CI"):
-        print("CI enviroment detected")
+        print("CI environment detected")
         tc = test_case(tc, ctx.std.env.aspect_cli_version() == "0.0.0-dev", "aspect-cli version should be 0.0.0-dev")
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER") == "true", "ASPECT_LAUNCHER should be true")
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_VERSION") == "0.0.0-dev", "ASPECT_LAUNCHER_VERSION should be 0.0.0-dev")
@@ -2451,7 +2451,7 @@ def impl(ctx: TaskContext) -> int:
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_RELEASE") == None, "ASPECT_LAUNCHER_ASPECT_CLI_RELEASE should be None")
         tc = test_case(tc, ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT") == None, "ASPECT_LAUNCHER_ASPECT_CLI_ARTIFACT should be None")
     else:
-        print("local enviroment detected")
+        print("local environment detected")
         print("ASPECT_LAUNCHER_VERSION", ctx.std.env.var("ASPECT_LAUNCHER_VERSION"))
         print("ASPECT_LAUNCHER_ASPECT_CLI_METHOD", ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_METHOD"))
         print("ASPECT_LAUNCHER_ASPECT_CLI_PATH", ctx.std.env.var("ASPECT_LAUNCHER_ASPECT_CLI_PATH"))

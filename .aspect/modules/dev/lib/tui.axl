@@ -11,7 +11,7 @@ def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
             print("\033[1A" * (last_drawn_lines) + "\033[J\033[1A")
 
     rate = 60
-    tick_ms = 1000 // 60
+    tick_ms = 1000 // rate
 
     for timer in sleep_iter(tick_ms):
         event = events.try_pop()
@@ -22,7 +22,8 @@ def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
 
             elif event.kind == "target_completed":
                 start = in_flight.pop(event.id.label, None)
-                print("Built {} in {} ticks".format(event.id.label, (timer - start)))
+                if start != None:
+                    print("Built {} in {} ticks".format(event.id.label, timer - start))
 
             elif event.kind == "progress":
                 clear()
@@ -38,11 +39,11 @@ def _fancy_tui(ctx: TaskContext, build: bazel.build.Build) -> int:
                 exit = build.wait()
                 return exit.code
 
-        elif timer % 60 == 0 and in_flight:
+        elif timer % rate == 0 and in_flight:
             clear()
 
             for k, t in in_flight.items():
-                print("-", k, ((timer - t) // 60))
+                print("-", k, ((timer - t) // rate))
 
             last_drawn_lines = len(in_flight)
             offset = (offset + 1) % len(in_flight)

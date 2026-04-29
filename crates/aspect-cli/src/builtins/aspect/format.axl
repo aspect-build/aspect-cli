@@ -306,7 +306,7 @@ format = task(
         "scope": args.string(
             default = "changed",
             values = ["changed", "all"],
-            description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage). Useful nightly-job mode and when introducing a new formatter to a repo for the first time.",
+            description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage). Useful as a nightly-job mode and when introducing a new formatter to a repo for the first time.",
         ),
         "soft_fail": args.boolean(
             default = False,

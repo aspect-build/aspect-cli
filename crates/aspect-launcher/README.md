@@ -105,8 +105,13 @@ github(
 ```starlark
 http(
     url = "https://example.com/aspect-cli-{version}-{target}",  # required
+    headers = {                                                 # optional
+        "Authorization": "Bearer <token>",
+    },
 )
 ```
+
+`headers` is forwarded on the download request — useful for authenticated mirrors or private CDNs.
 
 #### local()
 
