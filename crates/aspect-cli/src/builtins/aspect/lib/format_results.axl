@@ -1,0 +1,254 @@
+"""Format task status-check rendering.
+
+Parallel to `lint_results.axl` and `delivery_results.axl` for the `format`
+task. The format task doesn't stream BES events — it runs a formatter binary
+and diffs the result — so there are no intermediate partial states. There is
+one terminal state: clean (passed) or files-need-formatting (failed).
+
+Public API:
+
+  init_results()                                  → dict
+  render_check_output(ctx, results, status, …)    → {title, summary, text}
+
+The summary metadata rows reuse `bazel_results.build_summary_data`, giving the
+same VCS / runner / trigger rows users see on build and lint check runs.
+"""
+load("./bazel_results.axl",
+    "build_summary_data",
+    "format_run_date",
+)
+
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+_DETAILS_LIMIT = 65000  # GitHub check-run `output.text` hard limit
+_FILES_LIMIT   = 200    # max files listed in the details body before truncating
+
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
+def init_results():
+    """Return a fresh format-results dict.
+
+    Overlaps with bazel_results.init_results() in the metadata / timing /
+    sink_invocation_id fields that build_summary_data reads, plus
+    format-specific fields below.
+    """
+    return {
+        # Shared metadata / timing — consumed by build_summary_data.
+        "metadata":             {},
+        "workspace_status":     {},
+        "invocation_id":        "",
+        "sink_invocation_id":   "",
+        "start_time_ms":        0,
+        "finish_time_ms":       0,
+        "wall_time_ms":         0,
+        "build_tool_version":   "",
+        "build_command":        "",
+        # Bazel-specific fields stay zero so build_invocation_rows drops row 3.
+        "targets_total":        0,
+        "actions_executed":     0,
+        "actions_total":        0,
+        "passed_test_total":    0,
+        "failed_test_total":    0,
+        "flaky_test_total":     0,
+        "cached_test_total":    0,
+        "cpu_arch":             "",
+        "compilation_mode":     "",
+
+        # Format-specific.
+        "affected_files":       [],    # file paths that need formatting
+        "ignored_count":        0,     # files filtered by --ignore-pattern
+        "scope":                "",    # "changed" | "all"
+        "formatter_target":     "",    # Bazel label of the formatter binary
+        "soft_fail":            False, # --soft-fail was set
+        "formatter_error":      False, # formatter binary itself crashed
+        "formatter_error_code": 0,     # exit code when formatter_error is True
+        "no_git":               False, # no initial git commit / not in a git repo
+        "no_files_to_format":   False, # scope=changed but no changed files found
+        "patch_url":            "",    # download URL for the format.patch artifact (optional)
+    }
+
+
+# ─── Title ────────────────────────────────────────────────────────────────────
+
+def format_summary_title(results, status, task_display_name = ""):
+    """Compute the check-run title.
+
+    "Format · 3 files need formatting"    when files need formatting
+    "Format · Passed"                     when everything is formatted
+    "Format · Formatter error (exit N)"   when the formatter binary crashed
+    "Format · No files to format"         when scope=changed yields nothing
+    "Format · In progress"                while running
+    """
+    display = task_display_name or "Format"
+    base = display
+
+    if status in ("running", "failing"):
+        return base + " · In progress"
+
+    if results.get("formatter_error"):
+        code = results.get("formatter_error_code", 0)
+        return base + " · Formatter error (exit %s)" % str(code)
+
+    if results.get("no_git"):
+        return base + " · Passed (no git context)"
+
+    if results.get("no_files_to_format"):
+        return base + " · No files to format"
+
+    affected = results.get("affected_files", [])
+    if not affected:
+        return base + " · Passed"
+
+    count = len(affected)
+    noun = "file" if count == 1 else "files"
+    verb = "needs" if count == 1 else "need"
+    return base + " · %s %s %s formatting" % (str(count), noun, verb)
+
+
+# ─── Templates ────────────────────────────────────────────────────────────────
+
+_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
+{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}
+{%- endfor %}{% endif %}{% if extra_meta %}
+
+{% for item in extra_meta %}`{{ item.key }}` = `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+{% if last_update %}
+---
+:speech_balloon: **Last update:** `{{ last_update }}`
+{% endif %}"""
+
+_DETAILS_TEMPLATE = """{% if formatter_error %}
+> ❌ The formatter binary exited with code {{ formatter_error_code }}. Check the task log for details.
+
+{% elif no_git %}
+> ⚠️ No initial git commit (or not in a git repository). The formatter ran but change detection was skipped.
+
+{% elif no_files_to_format %}
+> ℹ️ No changed files found for `--scope=changed`. Nothing to format.
+
+{% elif is_clean %}
+## ✅ All files are properly formatted.
+
+{% else %}
+## ❌ {{ total }} {{ noun }} need{{ verb_suffix }} formatting
+
+### Files
+```
+{{ file_list }}
+```
+{% if has_overflow %}
+_… {{ overflow }} more file(s) not shown._
+{% endif %}
+{% if has_ignored %}
+_({{ ignored_count }} file(s) matching `--ignore-pattern` were excluded from this check.)_
+{% endif %}
+{% if soft_fail %}
+> ⚠️ `--soft-fail` is set — this task returned 0 despite formatting being required.
+{% endif %}
+
+### Fix
+Run locally to apply formatting:
+
+```shell
+{{ repro_command }}
+```
+{% if patch_url %}
+Or [download the patch]({{ patch_url }}) and apply it:
+
+```shell
+curl -fsSL '{{ patch_url }}' | git apply -p0
+```
+{% endif %}
+{% endif %}"""
+
+
+# ─── Details body ─────────────────────────────────────────────────────────────
+
+def _repro_command(results):
+    """Build a minimal `aspect format` command the user can run to fix things."""
+    parts = ["aspect format"]
+    scope = results.get("scope", "") or ""
+    if scope == "all":
+        parts.append("--scope=all")
+    target = results.get("formatter_target", "") or ""
+    default_target = "//tools/format"
+    if target and target != default_target:
+        parts.append("--formatter-target=" + target)
+    return " ".join(parts)
+
+
+def _build_details_data(results, status):
+    affected  = results.get("affected_files", []) or []
+    total     = len(affected)
+    shown     = affected[:_FILES_LIMIT]
+    overflow  = total - len(shown)
+    ignored   = results.get("ignored_count", 0) or 0
+
+    return {
+        # Display strings (Jinja2 treats these as truthy even when "0" — use
+        # boolean flags for all {% if %} / {% elif %} conditions below).
+        "total":                str(total),
+        "noun":                 "file" if total == 1 else "files",
+        # "1 file needs" vs "2 files need" — add "s" only for singular.
+        "verb_suffix":          "s" if total == 1 else "",
+        "file_list":            "\n".join(shown),
+        "overflow":             str(overflow) if overflow > 0 else "",
+        "ignored_count":        str(ignored),
+        # Boolean flags used in Jinja2 conditions.
+        "is_clean":             total == 0,
+        "has_overflow":         overflow > 0,
+        "has_ignored":          ignored > 0,
+        "soft_fail":            bool(results.get("soft_fail")),
+        "formatter_error":      bool(results.get("formatter_error")),
+        "formatter_error_code": str(results.get("formatter_error_code", 0) or 0),
+        "no_git":               bool(results.get("no_git")),
+        "no_files_to_format":   bool(results.get("no_files_to_format")),
+        "repro_command":        _repro_command(results),
+        "patch_url":            results.get("patch_url", "") or "",
+    }
+
+
+# ─── Entry point ──────────────────────────────────────────────────────────────
+
+def render_check_output(ctx, results, status, render_ctx, links, templates = None, metadata_keys = None):
+    """Render title, summary, and text for a format check run.
+
+    Matches the bazel_results / lint_results interface so GithubStatusChecks
+    and BuildkiteAnnotations can dispatch by task_update.kind interchangeably.
+    """
+    t = templates or {}
+    run_date = format_run_date(ctx, results.get("start_time_ms", 0))
+    summary_data = build_summary_data(
+        ctx, results, status, render_ctx, links, metadata_keys, run_date = run_date,
+    )
+    details_data = _build_details_data(results, status)
+
+    summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
+    details_tmpl = t.get("details") or _DETAILS_TEMPLATE
+
+    summary_text = ctx.template.jinja2(summary_tmpl, data = summary_data)
+    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    # Trim cascade: if file list overflows the limit, drop files progressively.
+    if len(details_text) > _DETAILS_LIMIT:
+        files = list(details_data.get("file_list", "").split("\n"))
+        for _ in range(10):
+            if len(details_text) <= _DETAILS_LIMIT:
+                break
+            if len(files) <= 1:
+                break
+            files = files[:max(1, len(files) // 2)]
+            missing = int(details_data["total"]) - len(files)
+            details_data["file_list"] = "\n".join(files)
+            details_data["overflow"] = str(missing) if missing > 0 else ""
+            details_data["has_overflow"] = missing > 0
+            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    task_display = render_ctx.get("task_display_name", "") if render_ctx else ""
+    return {
+        "title":   format_summary_title(results, status, task_display_name = task_display),
+        "summary": summary_text,
+        "text":    details_text,
+    }

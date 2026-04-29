@@ -1,0 +1,456 @@
+"""Lint task status-check rendering.
+
+Parallel to `bazel_results.axl` for build/test, but driven by lint diagnostic
+events instead of Bazel build events. The feature-facing interface matches:
+
+  init_results()                                  → dict
+  accumulate(results, diagnostics)                → mutates results in place
+  render_check_output(ctx, results, status, …)    → {title, summary, text}
+
+The summary metadata rows (status/date, repo/branch/commit, user, runner info,
+custom links, tags, Aspect Workflows link, CI host link) are reused wholesale
+from `bazel_results.build_summary_data` — the same VCS + runner + trigger
+rendering users expect from the build/test check run. The body below the
+summary line is lint-specific: by-severity / by-tool counts plus a per-severity
+table of findings.
+"""
+load("./bazel_results.axl",
+    "RENDER_META_STANDARD_KEYS",
+    "build_summary_data",
+    "format_int_comma",
+    "format_run_date",
+    "merged_meta",
+)
+
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+_DETAILS_LIMIT = 65000  # GitHub check-run `output.text` hard limit (~65535).
+
+# Order matters: diagnostics render in severity order, and failed-status
+# derivation walks this list top-to-bottom. "error" dominates; "note"/"info"
+# are informational only.
+_SEVERITY_ORDER = ["error", "warning", "info", "note", "unknown"]
+
+_SEVERITY_ICONS = {
+    "error":   "🚨",
+    "warning": "⚠️",
+    "info":    "ℹ️",
+    "note":    "ℹ️",
+    "unknown": "❓",
+}
+
+_SEVERITY_LABELS = {
+    "error":   "errors",
+    "warning": "warnings",
+    "info":    "infos",
+    "note":    "notes",
+    "unknown": "unclassified",
+}
+
+_SEVERITY_LABELS_SINGULAR = {
+    "error":   "error",
+    "warning": "warning",
+    "info":    "info",
+    "note":    "note",
+    "unknown": "unclassified",
+}
+
+# Per-group row cap to keep the details body under GitHub's size limit even on
+# noisy codebases. Users who want every diagnostic have the raw SARIF via the
+# `lint-report` output artifact; the check run is a summary, not a ledger.
+_MAX_ROWS_PER_GROUP = 30
+
+_LABEL_MAX = 60
+
+
+def _sum_values(d):
+    """AXL has no sum() builtin; tiny helper for integer-dict totals."""
+    total = 0
+    for _k, v in d.items():
+        total += v
+    return total
+
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
+def init_results():
+    """Return a fresh lint-results dict.
+
+    Shape overlaps with `bazel_results.init_results()` for the metadata /
+    runner-info / sink_invocation_id fields that `build_summary_data` reads,
+    and adds lint-specific fields on top.
+    """
+    return {
+        # Shared metadata the summary-row renderer consumes.
+        "metadata":             {},    # BES build_metadata dict
+        "workspace_status":     {},    # BES workspace_status dict
+        "invocation_id":        "",    # Bazel build_started.uuid (if any)
+        "sink_invocation_id":   "",    # stream-level sink UUID (for Aspect Web UI link)
+        "start_time_ms":        0,
+        "finish_time_ms":       0,
+        "wall_time_ms":         0,
+        "build_tool_version":   "",
+        "build_command":        "",
+        # Per build_invocation_rows: bazel-specific fields left zero — the
+        # template skips rows with empty values so that row 3 is dropped
+        # entirely (we render lint-specific counts in the body).
+        "targets_total":        0,
+        "actions_executed":     0,
+        "actions_total":        0,
+        "passed_test_total":    0,
+        "failed_test_total":    0,
+        "flaky_test_total":     0,
+        "cached_test_total":    0,
+        "cpu_arch":             "",
+        "compilation_mode":     "",
+
+        # Lint-specific.
+        "diagnostics":          [],    # flat list of {tool, file, line, rule_id, severity, message?}
+        "strategy":             "",    # "soft" | "hard" | "hold_the_line" | ""
+        "build_failed":         False, # true if underlying Bazel invocation failed
+        "linter_exit_code":     0,     # 0 = all linters clean; non-zero → at least one linter errored
+        "target_pattern":       "",    # e.g. "//..." — what the lint ran against
+        "changed_files":        [],    # [{"file", "lines"}] — only populated for hold-the-line
+
+        # Pre-computed aggregates populated by accumulate().
+        "counts_by_severity":   {},    # {"error": 3, ...}
+        "counts_by_tool":       {},    # {"eslint": 7, ...}
+    }
+
+
+def accumulate(results, diagnostics):
+    """Append new diagnostics and recompute aggregate counts in place."""
+    if not diagnostics:
+        return
+    existing = results["diagnostics"]
+    existing.extend(diagnostics)
+    _recount(results)
+
+
+def _recount(results):
+    by_sev = {}
+    by_tool = {}
+    for d in results["diagnostics"]:
+        sev = d.get("severity", "unknown") or "unknown"
+        tool = d.get("tool", "unknown") or "unknown"
+        by_sev[sev] = by_sev.get(sev, 0) + 1
+        by_tool[tool] = by_tool.get(tool, 0) + 1
+    results["counts_by_severity"] = by_sev
+    results["counts_by_tool"] = by_tool
+
+
+def lint_summary_title(results, status, target_pattern = "", task_display_name = ""):
+    """Compute the title for the check run output.
+
+    "Lint //... · 3 errors, 8 warnings" when findings exist
+    "Lint //... · Passed"                when status=passed and no findings
+    "Lint //... · Build failed"          when the underlying Bazel build failed
+    "Lint //... · In progress"           while still running
+    """
+    display = task_display_name or "Lint"
+    target = target_pattern or results.get("target_pattern", "")
+    base = display + ((" " + target) if target else "")
+
+    if results.get("build_failed"):
+        return base + " · Build failed"
+
+    counts = results.get("counts_by_severity", {})
+    errs  = counts.get("error", 0)
+    warns = counts.get("warning", 0)
+    infos = counts.get("info", 0) + counts.get("note", 0)
+    total = _sum_values(counts)
+
+    if status == "running" or status == "failing":
+        if total > 0:
+            return base + " · " + _findings_phrase(errs, warns, infos) + " so far"
+        return base + " · In progress"
+
+    if total == 0:
+        return base + " · Passed"
+    return base + " · " + _findings_phrase(errs, warns, infos)
+
+
+def _findings_phrase(errs, warns, infos):
+    parts = []
+    if errs > 0:
+        parts.append(str(errs) + " error" + ("s" if errs != 1 else ""))
+    if warns > 0:
+        parts.append(str(warns) + " warning" + ("s" if warns != 1 else ""))
+    if infos > 0:
+        parts.append(str(infos) + " info" + ("s" if infos != 1 else ""))
+    if not parts:
+        return "0 findings"
+    return ", ".join(parts)
+
+
+# ─── Details body ─────────────────────────────────────────────────────────────
+
+# Summary template reuses bazel_results' SUMMARY_TEMPLATE-style layout: the
+# `detail_rows` key (populated by build_invocation_rows) renders the icon/line
+# grid; extra metadata rows and "last update" line follow the same conventions.
+_SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
+{% for item in row %}{{ item.icon }} {{ item.value }}{% if not loop.last %} · {% endif %}{% endfor %}
+{%- endfor %}{% endif %}{% if extra_meta %}
+
+{% for item in extra_meta %}`{{ item.key }}` = `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+{% if last_update %}
+---
+:speech_balloon: **Last update:** `{{ last_update }}`
+{% endif %}"""
+
+_DETAILS_TEMPLATE = """{% if aborted %}
+> ⚠️ Lint task was aborted: {{ aborted }}
+
+{% endif %}
+{% if build_failed %}
+> ⚠️ Underlying Bazel invocation failed; findings below may be incomplete.
+
+{% endif %}
+{% if strategy %}
+**Strategy:** `{{ strategy }}`{% if changed_files_count %} — filtered to {{ changed_files_count }} changed files{% endif %}
+
+{% endif %}
+## Findings ({{ total }}){% if total == 0 %}
+
+_No lint diagnostics reported._{% else %}
+
+**By severity**
+{% for s in severities %}
+- {{ s.icon }} **{{ s.count }}** {{ s.label }}{% endfor %}
+
+**By tool**
+{% for t in tools %}
+- `{{ t.name }}`: {{ t.count }}{% endfor %}
+
+{% for group in groups %}
+<details{% if group.open %} open{% endif %}>
+<summary>{{ group.icon }} {{ group.count }} {{ group.label }}</summary>
+
+```
+{{ group.table }}
+```
+{% if group.overflow %}
+_… {{ group.overflow }} more {{ group.label_singular }} not shown._
+{% endif %}
+</details>
+{% endfor %}{% endif %}
+"""
+
+
+def _pad_right(s, width):
+    if len(s) >= width:
+        return s
+    return s + " " * (width - len(s))
+
+
+def _truncate(s, max_len):
+    if len(s) <= max_len:
+        return s
+    if max_len <= 3:
+        return s[:max_len]
+    return s[:max_len - 3] + "..."
+
+
+def _align_group_rows(diags):
+    """Render a fixed-width table of (file, line, rule, message) for one severity group."""
+    cols = []
+    for d in diags:
+        file_ = _truncate(d.get("file", "") or "", _LABEL_MAX)
+        line = str(d.get("line", "") or "")
+        rule = d.get("rule_id", "") or ""
+        tool = d.get("tool", "") or ""
+        msg  = d.get("message", "") or ""
+        rule_display = rule if rule else tool
+        cols.append((file_, line, rule_display, msg))
+
+    file_w = max([len("File")] + [len(c[0]) for c in cols])
+    line_w = max([len("Line")] + [len(c[1]) for c in cols])
+    rule_w = max([len("Rule")] + [len(c[2]) for c in cols])
+    # Cap total width so wrap-prone message column gets truncated, not the rule.
+    max_rule = 30
+    if rule_w > max_rule:
+        rule_w = max_rule
+
+    rows = []
+    header = _pad_right("File", file_w) + "  " + _pad_right("Line", line_w) + "  " + _pad_right("Rule", rule_w) + "  Message"
+    sep    = "-" * file_w + "  " + "-" * line_w + "  " + "-" * rule_w + "  " + "-------"
+    rows.append(header)
+    rows.append(sep)
+    for file_, line, rule_display, msg in cols:
+        rule_display = _truncate(rule_display, rule_w)
+        msg_display = msg if msg else ""
+        rows.append(
+            _pad_right(file_, file_w) + "  " +
+            _pad_right(line, line_w) + "  " +
+            _pad_right(rule_display, rule_w) + "  " +
+            msg_display
+        )
+    return "\n".join(rows)
+
+
+def _group_diagnostics(results):
+    """Bucket diagnostics by severity. Returns list of group dicts ordered per
+    _SEVERITY_ORDER, with details-open set on the top non-empty group.
+    """
+    by_sev = {}
+    for d in results.get("diagnostics", []):
+        sev = d.get("severity", "unknown") or "unknown"
+        by_sev.setdefault(sev, []).append(d)
+
+    groups = []
+    opened = False
+    for sev in _SEVERITY_ORDER:
+        diags = by_sev.get(sev, [])
+        if not diags:
+            continue
+        shown = diags[:_MAX_ROWS_PER_GROUP]
+        overflow = len(diags) - len(shown)
+        label = _SEVERITY_LABELS.get(sev, sev)
+        label_singular = _SEVERITY_LABELS_SINGULAR.get(sev, sev)
+        group = {
+            "icon":           _SEVERITY_ICONS.get(sev, "❓"),
+            "count":          len(diags),
+            "label":          label,
+            "label_singular": label_singular,
+            "severity":       sev,
+            "table":          _align_group_rows(shown),
+            "overflow":       overflow if overflow > 0 else 0,
+            "open":           not opened,  # first (most severe) group opens by default
+        }
+        opened = True
+        groups.append(group)
+    return groups
+
+
+def _severities_summary(counts):
+    out = []
+    for sev in _SEVERITY_ORDER:
+        count = counts.get(sev, 0)
+        if count == 0:
+            continue
+        out.append({
+            "severity": sev,
+            "icon":     _SEVERITY_ICONS.get(sev, "❓"),
+            # Jinja2 side receives values as serde_json::Number for Python
+            # ints, which renders as `{"$serde_json::private::Number": "N"}`
+            # — stringify defensively at the template boundary.
+            "count":    str(count),
+            "label":    _SEVERITY_LABELS.get(sev, sev) if count != 1 else _SEVERITY_LABELS_SINGULAR.get(sev, sev),
+        })
+    return out
+
+
+def _tools_summary(counts):
+    # Sort by count descending, then name ascending for a stable readable order.
+    items = [(tool, count) for tool, count in counts.items()]
+    items = sorted(items, key = lambda p: (-p[1], p[0]))
+    return [{"name": t, "count": str(c)} for t, c in items]
+
+
+def _groups_for_template(groups):
+    """Stringify integer fields the Jinja2 template interpolates."""
+    out = []
+    for g in groups:
+        out.append({
+            "icon":           g["icon"],
+            "count":          str(g["count"]),
+            "label":          g["label"],
+            "label_singular": g["label_singular"],
+            "severity":       g["severity"],
+            "table":          g["table"],
+            "overflow":       str(g["overflow"]) if g.get("overflow") else "",
+            "open":           g["open"],
+        })
+    return out
+
+
+def _build_details_data(results, render_ctx, status):
+    total = _sum_values(results.get("counts_by_severity", {}))
+    aborted = ""
+    if status == "failed" and total == 0 and not results.get("build_failed"):
+        aborted = "task exited with failure but no diagnostics were recorded"
+
+    changed_files_count = len(results.get("changed_files", []))
+    return {
+        # str() everywhere we interpolate an int — see _severities_summary comment.
+        "total":                str(total),
+        "severities":           _severities_summary(results.get("counts_by_severity", {})),
+        "tools":                _tools_summary(results.get("counts_by_tool", {})),
+        "groups":               _groups_for_template(_group_diagnostics(results)),
+        "strategy":             results.get("strategy", ""),
+        "changed_files_count":  str(changed_files_count) if results.get("strategy") == "hold_the_line" and changed_files_count > 0 else "",
+        "build_failed":         bool(results.get("build_failed")),
+        "aborted":              aborted,
+    }
+
+
+def render_check_output(ctx, results, status, render_ctx, links, templates = None, metadata_keys = None):
+    """Render title, summary, and text for a lint check run.
+
+    Shape matches bazel_results.render_check_output so the GithubStatusChecks
+    feature dispatch can call either one interchangeably based on
+    `task_update.kind`.
+    """
+    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
+
+    t = templates or {}
+    run_date = format_run_date(ctx, results.get("start_time_ms", 0))
+    # Reuse bazel_results' summary builder — same metadata / VCS / runner /
+    # trigger / Aspect Web UI / CI host rows. Bazel-specific fields like
+    # targets_total are zero in lint results so those row items drop out
+    # naturally.
+    summary_data = build_summary_data(
+        ctx, results, status, render_ctx, links, metadata_keys, run_date = run_date,
+    )
+    details_data = _build_details_data(results, render_ctx, status)
+
+    summary_tmpl = t.get("summary") or _SUMMARY_TEMPLATE
+    details_tmpl = t.get("details") or _DETAILS_TEMPLATE
+
+    summary_text = ctx.template.jinja2(summary_tmpl, data = summary_data)
+    details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    # Trim cascade: if we overflow GitHub's hard limit, drop detail rows
+    # progressively. Reserve the by-severity / by-tool summaries (small, high
+    # signal) and trim the per-group tables first.
+    if len(details_text) > _DETAILS_LIMIT:
+        # Halve per-group row counts until we fit (or groups are empty).
+        for _ in range(10):
+            if len(details_text) <= _DETAILS_LIMIT:
+                break
+            trimmed = False
+            new_groups = []
+            for g in details_data["groups"]:
+                new_rows = g["table"].split("\n")
+                # Keep header + separator + half of body.
+                if len(new_rows) > 4:
+                    half = max(2, (len(new_rows) - 2) // 2 + 2)
+                    new_rows = new_rows[:half]
+                    missing = g["count"] - (len(new_rows) - 2)
+                    g = dict(g)
+                    g["table"] = "\n".join(new_rows)
+                    g["overflow"] = missing if missing > 0 else 0
+                    trimmed = True
+                new_groups.append(g)
+            if not trimmed:
+                break
+            details_data["groups"] = new_groups
+            details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    if len(details_text) > _DETAILS_LIMIT:
+        # Last resort: drop the group tables entirely; keep summary counts.
+        details_data["groups"] = []
+        details_text = ctx.template.jinja2(details_tmpl, data = details_data)
+
+    target_pattern  = render_ctx.get("targets", "") if render_ctx else ""
+    task_display    = render_ctx.get("task_display_name", "") if render_ctx else ""
+    if not target_pattern:
+        target_pattern = results.get("target_pattern", "")
+    return {
+        "title":   lint_summary_title(results, status,
+                                      target_pattern = target_pattern,
+                                      task_display_name = task_display),
+        "summary": summary_text,
+        "text":    details_text,
+    }

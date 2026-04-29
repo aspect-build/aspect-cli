@@ -122,10 +122,15 @@ selective runs).
 User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
-load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait")
+load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
 load("@aspect//lib/environment.axl", "color_enabled")
 load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha")
 load("@aspect//lib/runnable.axl", "runnable")
+load("@aspect//lib/bazel_results.axl", "now_ms")
+load("@aspect//lib/delivery_results.axl",
+    delivery_init_results = "init_results",
+    delivery_add_result = "add_result",
+)
 load("@std//time.axl", "time")
 
 load(
@@ -312,9 +317,55 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
     return output_shas, 0
 
 
+def _emit_update(ctx, lifecycle, dr, status = "running"):
+    """Emit a running task_update carrying the accumulating delivery results."""
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind   = "delivery_results",
+            status = status,
+            data   = {"results": dr},
+        ))
+
+
+def _emit_final(ctx, lifecycle, dr, exit_code):
+    """Emit the terminal task_update + task_complete hooks for delivery.
+
+    Called at every return path out of _delivery_impl so a check run is always
+    completed — even on early error exits before any per-target results exist.
+    """
+    if not dr.get("finish_time_ms"):
+        dr["finish_time_ms"] = now_ms(ctx)
+    if not dr.get("wall_time_ms") and dr.get("start_time_ms"):
+        dr["wall_time_ms"] = dr["finish_time_ms"] - dr["start_time_ms"]
+    final_status = "passed" if exit_code == 0 else "failed"
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind   = "delivery_results",
+            status = final_status,
+            data   = {"results": dr},
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
+
+
 def _delivery_impl(ctx):
     hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    # Build the delivery-results shell first, then fire task_started ASAP —
+    # so that any later failure (pre_health_check throwing, deliveryd endpoint
+    # missing, remote_cache missing) still shows up as a failed check run
+    # rather than a silent no-op.
+    dr = delivery_init_results()
+    dr["start_time_ms"]  = now_ms(ctx)
+    dr["prefix"]         = ctx.task.key
+    dr["commit_sha"]     = ctx.args.commit_sha
+    dr["build_url"]      = ctx.args.build_url
+    dr["ci_host"]        = ctx.args.ci_host
+
+    for handler in lifecycle.task_started:
+        handler(ctx, "")
 
     for hook in hc_trait.pre_health_check:
         hook(ctx)
@@ -349,8 +400,8 @@ def _delivery_impl(ctx):
     # automatically and expose its Unix socket via the env var below.
     endpoint = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT")
     if not endpoint and track_state:
-        msg = "ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)"
-        fail(msg)
+        _emit_final(ctx, lifecycle, dr, exit_code = 1)
+        fail("ASPECT_WORKFLOWS_DELIVERY_API_ENDPOINT is not set. The delivery state backend must be running. (Pass --track-state=false to run without state tracking; allowed in combination with --dry-run or --mode=always.)")
 
     # Delivery context. --commit-sha and --build-url are auto-detected from
     # common CI env vars (GITHUB_*, BUILDKITE_*, CIRCLE_*, CI_* for GitLab)
@@ -434,6 +485,7 @@ def _delivery_impl(ctx):
             print(_style("ERROR:", _BOLD + _RED, ansi) +
                   " Delivery requires a remote cache but no --remote_cache or --remote_executor was found." +
                   " (Use --mode=always --track-state=false to deliver every target without change detection.)")
+            _emit_final(ctx, lifecycle, dr, exit_code = 1)
             return 1
 
     query_expr = ctx.args.query
@@ -455,8 +507,16 @@ def _delivery_impl(ctx):
         if tok and tok not in forced_targets:
             forced_targets.append(tok)
 
+    # Now that we know the target set, push an update so the check run's
+    # subject line reflects the actual targets (task_started fired earlier
+    # with an empty subject to guarantee the check is created before any
+    # failure point).
+    dr["target_pattern"] = " ".join(list(targets)) if targets else ""
+    _emit_update(ctx, lifecycle, dr, status = "running")
+
     if not targets:
         print(_style("No targets to deliver", _BOLD + _YELLOW, ansi))
+        _emit_final(ctx, lifecycle, dr, exit_code = 0)
         return 0
 
     # --force-target / ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS only flip
@@ -488,6 +548,13 @@ def _delivery_impl(ctx):
 
         if build_code != 0:
             print(_style("Build failed with exit code {}".format(build_code), _BOLD + _RED, ansi))
+            # Record a synthetic warn entry so the status check conveys *why* the
+            # task failed, not just that it did. One row per target keeps the body
+            # readable without blowing up for large target sets.
+            for label in targets:
+                delivery_add_result(dr, label, "warn",
+                                    message = "build failed (exit {})".format(build_code))
+            _emit_final(ctx, lifecycle, dr, exit_code = build_code)
             return build_code
     else:
         output_shas = {}
@@ -551,6 +618,11 @@ def _delivery_impl(ctx):
                 handler(ctx, status.code)
         if status.code != 0:
             print(_style("Build failed with exit code {}".format(status.code), _BOLD + _RED, ansi))
+            for label in delivery_targets:
+                delivery_add_result(dr, label, "warn",
+                                    message = "download failed (exit {})".format(status.code),
+                                    output_sha = output_shas.get(label, ""))
+            _emit_final(ctx, lifecycle, dr, exit_code = status.code)
             return status.code
         print("  Download took {}.".format(fmt_elapsed(time.monotonic() - _t_download)))
 
@@ -558,6 +630,7 @@ def _delivery_impl(ctx):
     if max_par < 1:
         print(_style("ERROR:", _BOLD + _RED, ansi) +
               " --max-parallelization must be >= 1, got {}.".format(max_par))
+        _emit_final(ctx, lifecycle, dr, exit_code = 1)
         return 1
     capture = max_par > 1
 
@@ -579,11 +652,17 @@ def _delivery_impl(ctx):
             # Expected a digest from phase 1/2 but none was recorded — usually
             # an alias or a target that doesn't go through DeliveryHash.
             pending_count += 1
-            results.append((label, "WARN", "warn", "no output_sha (not in grpc log; target may be an alias — use the actual target label)", "-", "-"))
+            msg = "no output_sha (not in grpc log; target may be an alias — use the actual target label)"
+            results.append((label, "WARN", "warn", msg, "-", "-"))
+            delivery_add_result(dr, label, "warn", message = msg,
+                                is_forced = is_forced)
         elif not is_forced and target_state and target_state.get("delivered"):
             skipped_count += 1
             delivered_by = target_state.get("delivered_by") or "-"
             results.append((label, "SKIP", "skip", delivered_by, output_sha, "-"))
+            delivery_add_result(dr, label, "skip", message = delivered_by,
+                                output_sha = output_sha,
+                                is_forced = is_forced)
         elif preview_only:
             # dry-run + --track-state=false: phase 3 was skipped, so run_tracker
             # has no entrypoints. dry_run is True so the bazel run path below
@@ -596,10 +675,17 @@ def _delivery_impl(ctx):
             if not entrypoint:
                 pending_count += 1
                 results.append((label, "WARN", "warn", "no entrypoint (not in BES)", output_sha or "-", "-"))
+                delivery_add_result(dr, label, "warn",
+                                    message = "no entrypoint (not in BES)",
+                                    output_sha = output_sha or "",
+                                    is_forced = is_forced)
             else:
                 pending.append((label, entrypoint, is_forced, output_sha or "-"))
 
         delivery_trait.deliver_target(label, is_forced)
+    # Emit an intermediate update so that skip/warn state is visible in the
+    # check run before the (potentially long) per-target delivery loop starts.
+    _emit_update(ctx, lifecycle, dr, status = "running")
 
     # Step 2: dispatch in chunks of max_par — spawn all in chunk, poll for completions
     for chunk_start in range(0, len(pending), max_par):
@@ -610,6 +696,10 @@ def _delivery_impl(ctx):
                 forced_marker = " (FORCED)" if is_forced else ""
                 pending_count += 1
                 results.append((label, "DRY-RUN" + forced_marker, "pending", "-", output_sha, "-"))
+                delivery_add_result(dr, label, "pending",
+                                    message = "dry-run" + (" (forced)" if is_forced else ""),
+                                    output_sha = output_sha,
+                                    is_forced = is_forced)
             continue
 
         children = []
@@ -633,11 +723,21 @@ def _delivery_impl(ctx):
                     deliveryd_deliver(ctx, endpoint, ci_host, output_sha, prefix, build_url)
                 success_count += 1
                 results.append((label, "OK" + forced_marker, "ok", build_url, output_sha, duration))
+                delivery_add_result(dr, label, "ok", message = build_url,
+                                    output_sha = output_sha,
+                                    is_forced = is_forced)
             else:
                 if track_state:
                     deliveryd_delete_artifact(ctx, endpoint, ci_host, output_sha, prefix)
                 failed_count += 1
                 results.append((label, "FAIL" + forced_marker, "fail", "-", output_sha, duration))
+                delivery_add_result(dr, label, "fail",
+                                    message = "exit {}".format(exit_code),
+                                    output_sha = output_sha,
+                                    is_forced = is_forced)
+            # Emit a running update after each chunk item so long-running
+            # deliveries show steady progress in the status check.
+            _emit_update(ctx, lifecycle, dr, status = "failing" if failed_count > 0 else "running")
 
     # Calculate column widths for alignment
     max_label_width = len("TARGET")
@@ -691,7 +791,9 @@ def _delivery_impl(ctx):
         if result != None:
             fail(result)
 
-    return 1 if failed_count > 0 else 0
+    exit_code = 1 if failed_count > 0 else 0
+    _emit_final(ctx, lifecycle, dr, exit_code = exit_code)
+    return exit_code
 
 
 delivery = task(
@@ -701,7 +803,7 @@ delivery = task(
 
 Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support for generic CI runners is planned. Contact Aspect support <support@aspect.build> for more info.""",
     implementation = _delivery_impl,
-    traits = [BazelTrait, DeliveryTrait, HealthCheckTrait],
+    traits = [BazelTrait, DeliveryTrait, HealthCheckTrait, TaskLifecycleTrait],
     args = {
         "ci_host": args.string(
             default = "bk",

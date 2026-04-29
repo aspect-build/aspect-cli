@@ -19,7 +19,9 @@ Usage:
 """
 
 load("./lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "get_sarif_summary")
-load("./traits.axl", "BazelTrait", "HealthCheckTrait")
+load("./lib/lint_results.axl", lint_init_results = "init_results", lint_accumulate = "accumulate")
+load("./lib/bazel_results.axl", "now_ms")
+load("./traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
 load("./lib/environment.axl", "color_enabled")
 load("./lib/github.axl", "detect_changed_files")
 
@@ -137,12 +139,75 @@ LintTrait = trait(
     lint_end = attr(list[typing.Callable[[TaskContext, list], None]], default = []),
 )
 
+def _capture_bes_fields(results, event):
+    """Minimal BES handler for fields lint_results needs in its summary.
+
+    Parallels bazel_results.process_event but:
+      - doesn't reset on build_started (lint accumulates SARIF diagnostics
+        across retries),
+      - only captures metadata / workspace_status / timing / invocation_id —
+        the fields the shared summary-row renderer reads.
+    """
+    kind = event.kind
+    if kind == "build_started":
+        payload = event.payload
+        if payload:
+            results["invocation_id"]       = getattr(payload, "uuid", "") or ""
+            results["build_tool_version"]  = getattr(payload, "build_tool_version", "") or ""
+            results["build_command"]       = getattr(payload, "command", "") or ""
+            results["start_time_ms"]       = getattr(payload, "start_time_millis", 0) or 0
+    elif kind == "build_finished":
+        payload = event.payload
+        if payload:
+            finish_ms = getattr(payload, "finish_time_millis", 0) or 0
+            results["finish_time_ms"] = finish_ms
+            start = results.get("start_time_ms", 0)
+            if start and finish_ms:
+                results["wall_time_ms"] = finish_ms - start
+    elif kind == "build_metadata":
+        payload = event.payload
+        if payload:
+            meta = getattr(payload, "metadata", None) or {}
+            for k, v in meta.items():
+                results["metadata"][k] = v
+    elif kind == "workspace_status":
+        payload = event.payload
+        if payload:
+            items = getattr(payload, "item", None) or []
+            for it in items:
+                key = getattr(it, "key", "") or ""
+                val = getattr(it, "value", "") or ""
+                if key:
+                    results["workspace_status"][key] = val
+
+
+def _strategy_name(strategy):
+    """Best-effort label for a Strategy record — matches the three built-ins."""
+    if strategy == StrategyHoldTheLine:
+        return "hold_the_line"
+    if strategy == StrategyHard:
+        return "hard"
+    if strategy == StrategySoft:
+        return "soft"
+    return "custom"
+
+
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
     lint_trait = ctx.traits[LintTrait]
     bazel_trait = ctx.traits[BazelTrait]
     hc_trait = ctx.traits[HealthCheckTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
     strategy = _STRATEGIES[ctx.args.strategy]
+
+    # Initialize lint results for status-check emission. Fire task_started
+    # FIRST so any subsequent hook failure still produces a visible check run.
+    results = lint_init_results()
+    results["start_time_ms"]  = now_ms(ctx)
+    results["strategy"]       = _strategy_name(strategy)
+    results["target_pattern"] = " ".join(list(ctx.args.targets)) if ctx.args.targets else ""
+    for handler in lifecycle.task_started:
+        handler(ctx, results["target_pattern"])
 
     for hook in hc_trait.pre_health_check:
         hook(ctx)
@@ -160,6 +225,7 @@ def _impl(ctx: TaskContext) -> int:
         merge_base = ctx.args.merge_base or None,
     )
     lint_trait.changed_files = changed_files
+    results["changed_files"] = changed_files
 
     for hook in lint_trait.lint_start:
         hook(ctx)
@@ -242,6 +308,7 @@ def _impl(ctx: TaskContext) -> int:
     for event in build.build_events():
         for handler in bazel_trait.build_event:
             handler(ctx, event)
+        _capture_bes_fields(results, event)
         if event.kind == "named_set_of_files":
             for file in event.payload.files:
                 filepath = file_uri_to_path(file.file)
@@ -250,7 +317,17 @@ def _impl(ctx: TaskContext) -> int:
                 if file.name.endswith(".report"):
                     report = ctx.std.fs.read_to_string(filepath)
                     if "sarif-" in report:
-                        all_diagnostics.extend(parse_sarif_diagnostics(report))
+                        diags = parse_sarif_diagnostics(report)
+                        all_diagnostics.extend(diags)
+                        lint_accumulate(results, diags)
+                        # Emit a live task_update so status-check consumers
+                        # see the finding counts ratchet up during the build.
+                        for handler in lifecycle.task_update:
+                            handler(ctx, TaskUpdate(
+                                kind   = "lint_results",
+                                status = "running",
+                                data   = {"results": results},
+                            ))
                         for hook in lint_trait.lint_report:
                             hook(ctx, filepath)
                         continue
@@ -266,6 +343,13 @@ def _impl(ctx: TaskContext) -> int:
     # 7. Wait for build
     build_status = build.wait()
     build_failed = not build_status.success
+    results["sink_invocation_id"] = build.sink_invocation_id
+    results["build_failed"]       = build_failed
+    results["linter_exit_code"]   = linter_exit_code
+    if not results.get("finish_time_ms"):
+        results["finish_time_ms"] = now_ms(ctx)
+    if not results.get("wall_time_ms") and results.get("start_time_ms"):
+        results["wall_time_ms"] = results["finish_time_ms"] - results["start_time_ms"]
 
     # 8. BazelTrait.build_end hooks
     for hook in bazel_trait.build_end:
@@ -294,6 +378,18 @@ def _impl(ctx: TaskContext) -> int:
     else:
         exit_code = 0
 
+    # Final task_update — for GithubStatusChecks this drives the terminal
+    # render. Status "passed" | "failed" signals it's the last update.
+    final_status = "passed" if exit_code == 0 else "failed"
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind   = "lint_results",
+            status = final_status,
+            data   = {"results": results},
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
+
     for hook in hc_trait.post_health_check:
         result = hook(ctx)
         if result != None:
@@ -303,7 +399,7 @@ def _impl(ctx: TaskContext) -> int:
 
 lint = task(
     implementation = _impl,
-    traits = [LintTrait, BazelTrait, HealthCheckTrait],
+    traits = [LintTrait, BazelTrait, HealthCheckTrait, TaskLifecycleTrait],
     args = {
         "aspects": args.string_list(
             long = "aspect",
