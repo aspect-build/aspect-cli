@@ -8,12 +8,12 @@ Install:
     See examples in https://github.com/bazel-starters
 
 Usage:
-    # Format changed files
+    # Format changed files (default)
     aspect format
-    # Format all files
-    aspect format --all_files
+    # Format every file the formatter knows how to handle
+    aspect format --scope=all
     # Specify the label of the format_multirun binary
-    aspect format --formatter_target=//path/to:formatter_bin
+    aspect format --formatter-target=//path/to:formatter_bin
 
 """
 
@@ -186,7 +186,7 @@ def _impl(ctx: TaskContext) -> int:
     ignore_patterns = list(ctx.args.ignore_patterns)
 
     format_args = []
-    if not ctx.args.all_files:
+    if ctx.args.scope == "changed":
         # Prefers the GitHub PR Files API when authenticated and in a PR
         # context (works on any CI host), falling back to a local
         # `git diff <merge-base> --diff-filter=d --name-only`. The
@@ -276,10 +276,10 @@ def _impl(ctx: TaskContext) -> int:
     # it locally without re-running the formatter. Off by default.
     #
     # Scope the uploaded patch to `affected` (the post-ignore file set)
-    # so it matches the failure-decision basis. In changed-files mode
+    # so it matches the failure-decision basis. In --scope=changed mode
     # this is redundant — the formatter never saw ignored files, so
     # `formatter_diff` is already scoped to un-ignored paths. In
-    # --all-files mode the formatter discovers files itself via
+    # --scope=all mode the formatter discovers files itself via
     # `git ls-files` and rewrites ignored ones; without re-scoping, the
     # uploaded patch would carry those changes even though they don't
     # contribute to failure or appear in the user-facing affected list.
@@ -304,9 +304,10 @@ format = task(
     implementation = _impl,
     traits = [BazelTrait, ArtifactsTrait],
     args = {
-        "all_files": args.boolean(
-            default = False,
-            description = "Format every file in the working tree instead of just the changed-file set. Useful for nightly maintenance jobs or when introducing a new formatter to a repo for the first time.",
+        "scope": args.string(
+            default = "changed",
+            values = ["changed", "all"],
+            description = "Which files to format. 'changed' (default) formats only files that differ from the merge base — the GitHub PR Files API in PR contexts, otherwise `git diff <merge-base>`. 'all' lets the formatter discover files itself across the working tree (subject to its own extension coverage). Useful nightly-job mode and when introducing a new formatter to a repo for the first time.",
         ),
         "soft_fail": args.boolean(
             default = False,
@@ -314,7 +315,7 @@ format = task(
         ),
         "ignore_patterns": args.string_list(
             long = "ignore-pattern",
-            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--ignore-pattern='vendor/**' --ignore-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In the default (changed-files) mode, filtered files are dropped from the file list passed to the formatter. In --all-files mode the formatter discovers files itself, so ignored files may still be rewritten on disk; in either mode, ignored files are excluded from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
+            description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--ignore-pattern='vendor/**' --ignore-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In `--scope=changed` (default), filtered files are dropped from the file list passed to the formatter. In `--scope=all`, the formatter discovers files itself, so ignored files may still be rewritten on disk; in either scope, ignored files are excluded from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "upload_format_diff": args.boolean(
             default = False,
