@@ -146,7 +146,6 @@ def _impl(ctx: TaskContext) -> int:
         "--remote_download_outputs=toplevel",
         "--build_runfile_links",
         "--experimental_build_event_upload_strategy=local",
-        "--noallow_analysis_cache_discard",
     ]
     flags.extend(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
