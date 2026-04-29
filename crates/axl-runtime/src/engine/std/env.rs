@@ -9,7 +9,7 @@ use starlark::values::{Heap, NoSerialize, ProvidesStaticType, ValueOfUnchecked};
 use starlark::values::{StarlarkValue, starlark_value};
 use starlark::{starlark_module, starlark_simple_value, values};
 
-use crate::engine::store::AxlStore;
+use crate::engine::store::Env as RuntimeEnv;
 
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize, Allocative, Display)]
 #[display("<std.Env>")]
@@ -39,8 +39,8 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::StringValue<'v>> {
-        let store = AxlStore::from_eval(eval)?;
-        Ok(eval.heap().alloc_str(&store.cli_version))
+        let env = RuntimeEnv::from_eval(eval)?;
+        Ok(eval.heap().alloc_str(&env.cli_version))
     }
 
     /// Fetches the environment variable key from the current process.
@@ -246,10 +246,9 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::StringValue<'v>> {
-        let store = AxlStore::from_eval(eval)?;
+        let env = RuntimeEnv::from_eval(eval)?;
         Ok(eval.heap().alloc_str(
-            &store
-                .root_dir
+            &env.root_dir
                 .to_str()
                 // to_str() returns None() if string is not UTF-8 (https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
                 .ok_or(anyhow::anyhow!("root dir is non utf-8"))?,

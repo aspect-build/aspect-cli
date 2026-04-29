@@ -8,9 +8,9 @@ use starlark::values::{
     StarlarkValue, Trace, Tracer, Value, ValueLike, starlark_value,
 };
 
-use crate::engine::aspect::Aspect;
-use crate::engine::http::Http;
-use crate::engine::std::Std;
+use super::aspect::Aspect;
+use super::http::Http;
+use super::std::Std;
 
 /// Context passed to a feature's `implementation` function.
 ///
@@ -23,10 +23,8 @@ use crate::engine::std::Std;
 #[display("<FeatureContext>")]
 pub struct FeatureContext<'v> {
     /// Resolved args: config-only args from the feature instance, plus CLI args.
-    #[allocative(skip)]
     pub(crate) args: Value<'v>,
     /// The full mutable fragment map — inject hooks here.
-    #[allocative(skip)]
     pub(crate) fragments: Value<'v>,
 }
 

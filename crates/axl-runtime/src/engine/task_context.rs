@@ -5,39 +5,42 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 
-use starlark::StarlarkResultExt;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
+use starlark::values::FrozenValueTyped;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
 use starlark::values::ValueLike;
+use starlark::values::ValueTyped;
 use starlark::values::starlark_value;
 
+use super::arguments::{Arguments, FrozenArguments};
 use super::aspect::Aspect;
-use super::cli_args::CliArgs;
+use super::bazel::{Bazel, FrozenBazel};
 use super::http::Http;
 use super::std::Std;
 use super::task_info::TaskInfo;
-use super::template;
+use super::template::Template;
+use super::trait_map::{FrozenTraitMap, TraitMap};
+
 use super::wasm::Wasm;
 
 #[derive(Debug, Clone, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<TaskContext>")]
 pub struct TaskContext<'v> {
-    pub args: CliArgs<'v>,
+    pub args: values::Value<'v>,
     pub traits: values::Value<'v>,
-    #[trace(unsafe_ignore)]
-    pub task: TaskInfo,
+    pub task: values::Value<'v>,
     bazel: values::Value<'v>,
 }
 
 impl<'v> TaskContext<'v> {
     pub fn new(
-        args: CliArgs<'v>,
+        args: values::Value<'v>,
         traits: values::Value<'v>,
-        task: TaskInfo,
+        task: values::Value<'v>,
         bazel: values::Value<'v>,
     ) -> Self {
         Self {
@@ -66,13 +69,10 @@ impl<'v> values::AllocValue<'v> for TaskContext<'v> {
 impl<'v> values::Freeze for TaskContext<'v> {
     type Frozen = FrozenTaskContext;
     fn freeze(self, freezer: &values::Freezer) -> values::FreezeResult<Self::Frozen> {
-        let frozen_args = self.args.freeze(freezer)?;
-        let args_value = freezer.frozen_heap().alloc_simple(frozen_args);
-
         Ok(FrozenTaskContext {
-            args: args_value,
+            args: self.args.freeze(freezer)?,
             traits: self.traits.freeze(freezer)?,
-            task: self.task,
+            task: self.task.freeze(freezer)?,
             bazel: self.bazel.freeze(freezer)?,
         })
     }
@@ -80,70 +80,72 @@ impl<'v> values::Freeze for TaskContext<'v> {
 
 #[starlark_module]
 pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
-    /// Aspect platform APIs (auth, etc.).
+    /// Aspect platform integrations — authentication and other hosted services
+    /// provided by the Aspect Workflows backend.
     #[starlark(attribute)]
-    fn aspect<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Aspect> {
+    fn aspect<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Aspect> {
         Ok(Aspect {})
     }
 
-    /// Standard library is the foundation of powerful AXL tasks.
+    /// The standard library. Gives access to common utilities such as
+    /// filesystem, process execution, environment variables, and IO streams.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
+    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
         Ok(Std {})
     }
 
-    /// Identity information for this task (name and group).
+    /// Identity of the currently running task — its name, group(s),
+    /// short human-readable key, and globally unique id.
     #[starlark(attribute)]
-    fn task<'v>(this: values::Value<'v>) -> anyhow::Result<TaskInfo> {
-        let ctx = this
-            .downcast_ref_err::<TaskContext>()
-            .into_anyhow_result()?;
-        Ok(ctx.task.clone())
+    fn task<'v>(this: values::Value<'v>) -> starlark::Result<ValueTyped<'v, TaskInfo>> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(ValueTyped::new_err(ctx.task)?)
     }
 
-    /// Access to args provided by the caller (CLI flags and config.axl values).
+    /// Resolved arguments for this task invocation. Read individual values
+    /// as `ctx.args.<arg_name>`. Values are produced by merging, in order
+    /// of decreasing precedence: explicit CLI flags, `config.axl` overrides,
+    /// and the task's declared arg defaults.
     #[starlark(attribute)]
-    fn args<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<CliArgs<'v>> {
-        let ctx = this
-            .downcast_ref_err::<TaskContext>()
-            .into_anyhow_result()?;
-        // TODO: don't do this.
-        Ok(ctx.args.clone())
+    fn args<'v>(this: values::Value<'v>) -> starlark::Result<ValueTyped<'v, Arguments<'v>>> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(ValueTyped::new_err(ctx.args)?)
     }
 
-    /// Access to the trait map for reading configured trait values.
+    /// Configured trait instances visible to this task. Index by a trait
+    /// type to read its fields, e.g. `ctx.traits[GitHub].token`. Only
+    /// trait types this task opted into via `task(traits = [...])`
+    /// are present.
     #[starlark(attribute)]
-    fn traits<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
-        let ctx = this
-            .downcast_ref_err::<TaskContext>()
-            .into_anyhow_result()?;
-        Ok(ctx.traits)
+    fn traits<'v>(this: values::Value<'v>) -> starlark::Result<ValueTyped<'v, TraitMap<'v>>> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(ValueTyped::new_err(ctx.traits)?)
     }
 
-    /// Expand template files.
+    /// Render template files by substituting placeholders with values.
     #[starlark(attribute)]
-    fn template<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-    ) -> anyhow::Result<template::Template> {
-        Ok(template::Template::new())
+    fn template<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Template> {
+        Ok(Template::new())
     }
 
-    /// Access to Bazel functionality.
+    /// Drive Bazel from a task: run `build`, `test`, `query`, `info`,
+    /// parse `.bazelrc`, and consume Build Event Stream output.
     #[starlark(attribute)]
-    fn bazel<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
-        let ctx = this
-            .downcast_ref_err::<TaskContext>()
-            .into_anyhow_result()?;
-        Ok(ctx.bazel)
+    fn bazel<'v>(this: values::Value<'v>) -> starlark::Result<ValueTyped<'v, Bazel<'v>>> {
+        let ctx = this.downcast_ref_err::<TaskContext>()?;
+        Ok(ValueTyped::new_err(ctx.bazel)?)
     }
 
-    /// EXPERIMENTAL! Run wasm programs within tasks.
+    /// Execute WebAssembly modules within a task.
+    ///
+    /// EXPERIMENTAL: this surface may change or be removed without notice.
     #[starlark(attribute)]
-    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Wasm> {
+    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Wasm> {
         Ok(Wasm::new())
     }
 
-    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Http> {
+    /// HTTP client for issuing requests to remote services.
+    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
         Ok(Http::new())
     }
 }
@@ -151,12 +153,9 @@ pub(crate) fn task_context_methods(registry: &mut MethodsBuilder) {
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<TaskContext>")]
 pub struct FrozenTaskContext {
-    #[allocative(skip)]
     args: values::FrozenValue,
-    #[allocative(skip)]
     traits: values::FrozenValue,
-    task: TaskInfo,
-    #[allocative(skip)]
+    task: values::FrozenValue,
     bazel: values::FrozenValue,
 }
 
@@ -174,61 +173,76 @@ impl<'v> values::StarlarkValue<'v> for FrozenTaskContext {
 
 #[starlark_module]
 fn frozen_task_context_methods(registry: &mut MethodsBuilder) {
+    /// Aspect platform integrations — authentication and other hosted services
+    /// provided by the Aspect Workflows backend.
     #[starlark(attribute)]
-    fn aspect<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Aspect> {
+    fn aspect<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Aspect> {
         Ok(Aspect {})
     }
 
+    /// The standard library. Gives access to common utilities such as
+    /// filesystem, process execution, environment variables, and IO streams.
     #[starlark(attribute)]
-    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Std> {
+    fn std<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Std> {
         Ok(Std {})
     }
 
+    /// Identity of the currently running task — its name, group(s),
+    /// short human-readable key, and globally unique id.
     #[starlark(attribute)]
-    fn task<'v>(this: values::Value<'v>) -> anyhow::Result<TaskInfo> {
-        let ctx = this
-            .downcast_ref_err::<FrozenTaskContext>()
-            .into_anyhow_result()?;
-        Ok(ctx.task.clone())
+    fn task<'v>(this: values::Value<'v>) -> starlark::Result<FrozenValueTyped<'v, TaskInfo>> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(FrozenValueTyped::new_err(ctx.task)?)
     }
 
+    /// Resolved arguments for this task invocation. Read individual values
+    /// as `ctx.args.<arg_name>`. Values are produced by merging, in order
+    /// of decreasing precedence: explicit CLI flags, `config.axl` overrides,
+    /// and the task's declared arg defaults.
     #[starlark(attribute)]
-    fn args<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
-        let ctx = this
-            .downcast_ref_err::<FrozenTaskContext>()
-            .into_anyhow_result()?;
-        Ok(ctx.args.to_value())
+    fn args<'v>(
+        this: values::Value<'v>,
+    ) -> starlark::Result<FrozenValueTyped<'v, FrozenArguments>> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(FrozenValueTyped::new_err(ctx.args)?)
     }
 
+    /// Configured trait instances visible to this task. Index by a trait
+    /// type to read its fields, e.g. `ctx.traits[GitHub].token`. Only
+    /// trait types this task opted into via `task(traits = [...])`
+    /// are present.
     #[starlark(attribute)]
-    fn traits<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
-        let ctx = this
-            .downcast_ref_err::<FrozenTaskContext>()
-            .into_anyhow_result()?;
-        Ok(ctx.traits.to_value())
+    fn traits<'v>(
+        this: values::Value<'v>,
+    ) -> starlark::Result<FrozenValueTyped<'v, FrozenTraitMap>> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(FrozenValueTyped::new_err(ctx.traits)?)
     }
 
+    /// Render template files by substituting placeholders with values.
     #[starlark(attribute)]
-    fn template<'v>(
-        #[allow(unused)] this: values::Value<'v>,
-    ) -> anyhow::Result<template::Template> {
-        Ok(template::Template::new())
+    fn template<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Template> {
+        Ok(Template::new())
     }
 
+    /// Drive Bazel from a task: run `build`, `test`, `query`, `info`,
+    /// parse `.bazelrc`, and consume Build Event Stream output.
     #[starlark(attribute)]
-    fn bazel<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
-        let ctx = this
-            .downcast_ref_err::<FrozenTaskContext>()
-            .into_anyhow_result()?;
-        Ok(ctx.bazel.to_value())
+    fn bazel<'v>(this: values::Value<'v>) -> starlark::Result<FrozenValueTyped<'v, FrozenBazel>> {
+        let ctx = this.downcast_ref_err::<FrozenTaskContext>()?;
+        Ok(FrozenValueTyped::new_err(ctx.bazel)?)
     }
 
-    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Http> {
+    /// HTTP client for issuing requests to remote services.
+    fn http<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Http> {
         Ok(Http::new())
     }
 
+    /// Execute WebAssembly modules within a task.
+    ///
+    /// EXPERIMENTAL: this surface may change or be removed without notice.
     #[starlark(attribute)]
-    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<Wasm> {
+    fn wasm<'v>(#[allow(unused)] this: values::Value<'v>) -> starlark::Result<Wasm> {
         Ok(Wasm::new())
     }
 }

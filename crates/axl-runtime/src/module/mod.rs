@@ -1,10 +1,10 @@
 mod disk_store;
 mod eval;
-mod store;
+mod module;
 
 pub use disk_store::{DiskStore, StoreError};
 pub use eval::{
     AXL_CONFIG_EXTENSION, AXL_MODULE_FILE, AXL_ROOT_MODULE_NAME, AXL_SCRIPT_EXTENSION,
-    AXL_VERSION_EXTENSION, ModuleEvaluator, register_globals,
+    AXL_VERSION_EXTENSION, ModEvaluator, register_globals,
 };
-pub use store::{AxlArchiveDep, AxlLocalDep, Dep, ModuleStore};
+pub use module::{AxlArchiveDep, AxlLocalDep, Dep, Mod};

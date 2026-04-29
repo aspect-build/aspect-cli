@@ -1,9 +1,9 @@
 use anyhow::Result;
 use ssri::Integrity;
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -14,43 +14,42 @@ use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkValue;
 use starlark::values::starlark_value;
 
+use crate::module::AXL_ROOT_MODULE_NAME;
+
 #[derive(Debug, ProvidesStaticType, Default)]
-pub struct ModuleStore {
+pub struct Mod {
     pub root_dir: PathBuf,
-    pub module_name: String,
-    pub module_root: PathBuf,
-    pub deps: Rc<RefCell<HashMap<String, Dep>>>,
-    pub tasks: Rc<RefCell<HashMap<PathBuf, (String, Vec<String>)>>>,
-    /// Features declared via `use_feature(path, symbol)` in MODULE.aspect.
-    pub features: Rc<RefCell<Vec<(PathBuf, String)>>>,
+    pub name: String,
+    pub root: PathBuf,
+    pub deps: HashSet<Dep>,
+    pub tasks: HashMap<PathBuf, (String, Vec<String>)>,
+    pub features: Vec<(PathBuf, String)>,
 }
 
-impl ModuleStore {
-    pub fn new(root_dir: PathBuf, module_name: String, module_root: PathBuf) -> Self {
+impl Mod {
+    pub fn new(root_dir: PathBuf, name: String, root: PathBuf) -> Self {
         Self {
             root_dir,
-            module_name,
-            module_root,
-            deps: Rc::new(RefCell::new(HashMap::new())),
-            tasks: Rc::new(RefCell::new(HashMap::new())),
-            features: Rc::new(RefCell::new(Vec::new())),
+            name,
+            root,
+            deps: HashSet::new(),
+            tasks: HashMap::new(),
+            features: Vec::new(),
         }
     }
 
-    pub fn from_eval<'v>(eval: &mut Evaluator<'v, '_, '_>) -> Result<ModuleStore> {
-        let value = eval
-            .extra
-            .ok_or(anyhow::anyhow!("failed to get module store"))?
-            .downcast_ref::<ModuleStore>()
-            .ok_or(anyhow::anyhow!("failed to cast module store"))?;
-        Ok(ModuleStore {
-            root_dir: value.root_dir.clone(),
-            module_name: value.module_name.clone(),
-            module_root: value.module_root.clone(),
-            deps: Rc::clone(&value.deps),
-            tasks: Rc::clone(&value.tasks),
-            features: Rc::clone(&value.features),
-        })
+    pub fn is_root(&self) -> bool {
+        self.name == AXL_ROOT_MODULE_NAME
+    }
+
+    pub fn from_eval<'v, 'a, 'e>(eval: &'e mut Evaluator<'v, 'a, '_>) -> Result<&'e mut Mod> {
+        let extra = eval
+            .extra_mut
+            .as_deref_mut()
+            .ok_or_else(|| anyhow::anyhow!("failed to get module store"))?;
+        extra
+            .downcast_mut::<Mod>()
+            .ok_or_else(|| anyhow::anyhow!("failed to cast module store"))
     }
 }
 
@@ -66,6 +65,20 @@ impl Dep {
             Dep::Local(local) => &local.name,
             Dep::Remote(remote) => &remote.name,
         }
+    }
+}
+
+impl Eq for Dep {}
+
+impl PartialEq for Dep {
+    fn eq(&self, other: &Self) -> bool {
+        self.name() == other.name()
+    }
+}
+
+impl Hash for Dep {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name().hash(state);
     }
 }
 

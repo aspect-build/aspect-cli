@@ -94,5 +94,6 @@ rust_test(
         ":axl-runtime",
         "@crates//:anyhow",
         "@crates//:starlark",
+        "@crates//:tokio",
     ],
 )

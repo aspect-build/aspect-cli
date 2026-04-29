@@ -9,12 +9,10 @@ use starlark::StarlarkResultExt;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values;
-use starlark::values::AllocValue;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::Freezer;
 use starlark::values::FrozenValue;
-use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
 use starlark::values::Trace;
@@ -22,75 +20,38 @@ use starlark::values::Tracer;
 use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 
-use super::super::http::Http;
-use super::super::std::Std;
-use super::super::template;
-use super::super::wasm::Wasm;
+use super::http::Http;
+use super::std::Std;
+use super::template;
+use super::wasm::Wasm;
 
-use super::tasks::configured_task::ConfiguredTask;
-use super::tasks::value::TaskMap;
+use super::task_map::TaskMap;
 
 /// Config context for evaluating config.axl files.
 ///
-/// This context holds the list of tasks, the fragment map, and the feature map
-/// that config functions can modify.
+/// This context holds the task map, the trait map, and the feature map that
+/// config functions can modify.
 #[derive(Debug, Clone, ProvidesStaticType, Trace, Display, NoSerialize, Allocative)]
 #[display("<ConfigContext>")]
 pub struct ConfigContext<'v> {
-    #[allocative(skip)]
     tasks: values::Value<'v>,
-    #[allocative(skip)]
     trait_map: values::Value<'v>,
-    #[allocative(skip)]
     feature_map: values::Value<'v>,
 }
 
 impl<'v> ConfigContext<'v> {
-    /// Create a new ConfigContext with the given tasks, trait map, and feature map.
+    /// Create a new ConfigContext from a pre-allocated `TaskMap` value plus the
+    /// trait and feature map values.
     pub fn new(
-        tasks: Vec<ConfiguredTask>,
+        tasks: values::Value<'v>,
         trait_map: values::Value<'v>,
         feature_map: values::Value<'v>,
-        heap: Heap<'v>,
     ) -> Self {
-        let tasks: Vec<values::Value<'v>> = tasks
-            .into_iter()
-            .map(|task| task.alloc_value(heap))
-            .collect();
         Self {
-            tasks: heap.alloc(TaskMap::new(tasks)),
+            tasks,
             trait_map,
             feature_map,
         }
-    }
-
-    /// Create a new ConfigContext from already-allocated Value<'v> task objects.
-    ///
-    /// Unlike `new`, this does not re-allocate the tasks; the same Value<'v> pointers
-    /// are reused so that mutations during config evaluation are visible to the caller.
-    pub fn new_from_values(
-        tasks: Vec<values::Value<'v>>,
-        trait_map: values::Value<'v>,
-        feature_map: values::Value<'v>,
-        heap: Heap<'v>,
-    ) -> Self {
-        Self {
-            tasks: heap.alloc(TaskMap::new(tasks)),
-            trait_map,
-            feature_map,
-        }
-    }
-
-    /// Get references to the tasks.
-    pub fn tasks(&self) -> Vec<&ConfiguredTask> {
-        self.tasks
-            .downcast_ref::<TaskMap>()
-            .unwrap()
-            .content
-            .borrow()
-            .iter()
-            .map(|m| m.downcast_ref::<ConfiguredTask>().unwrap())
-            .collect()
     }
 
     /// Get task values for iteration (used during config evaluation).

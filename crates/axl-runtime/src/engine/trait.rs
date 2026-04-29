@@ -18,17 +18,13 @@ use starlark::values::{
 };
 use starlark_map::small_map::SmallMap;
 
-use crate::engine::types::names::validate_type_name;
+use super::names::validate_type_name;
 
 static TRAIT_TYPE_ID: AtomicU64 = AtomicU64::new(0);
 
 fn next_trait_type_id() -> u64 {
     TRAIT_TYPE_ID.fetch_add(1, Ordering::SeqCst)
 }
-
-// ---------------------------------------------------------------------------
-// Attr / FrozenAttr — stored inside trait definitions (field descriptors)
-// ---------------------------------------------------------------------------
 
 /// A field definition for a trait, containing a type, optional default value, and optional description.
 #[derive(Debug, Clone, ProvidesStaticType, Allocative)]
@@ -86,10 +82,6 @@ impl fmt::Display for FrozenAttr {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// ConfigAttrValue / FrozenConfigAttrValue — the Starlark `attr()` return value
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct ConfigAttrValue<'v> {
@@ -181,10 +173,6 @@ impl Freeze for ConfigAttrValue<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
 /// Deep-copy a default value if it's a mutable container (list or dict).
 pub fn copy_default_value<'v>(value: Value<'v>, heap: Heap<'v>) -> anyhow::Result<Value<'v>> {
     match value.get_type() {
@@ -216,10 +204,6 @@ pub fn build_type_checkers<'v>(
         .map(|typ_value| TypeCompiled::new(typ_value, heap).map_err(starlark::Error::new_other))
         .collect()
 }
-
-// ---------------------------------------------------------------------------
-// TraitType
-// ---------------------------------------------------------------------------
 
 /// The type of a trait, created by `trait(field1=type1, field2=type2, ...)`.
 /// Calling this type creates a `TraitInstance` instance.

@@ -4,34 +4,44 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
-pub mod aspect;
-pub mod bazel;
-pub mod builtins;
+mod aspect;
+mod r#async;
 mod hash;
 mod http;
 mod std;
 mod template;
-pub mod types;
 mod wasm;
 
+pub mod feature;
+pub mod names;
+pub mod r#trait;
+
 pub mod arg;
-pub mod r#async;
-pub mod cli_args;
-pub mod config;
+pub mod arguments;
+pub(crate) mod bazel;
+pub(crate) mod builtins;
+pub mod config_context;
+pub mod feature_context;
+pub mod feature_map;
 pub mod store;
 pub mod task;
 pub mod task_context;
 pub mod task_info;
+pub mod task_map;
+pub mod trait_map;
+pub mod util;
 
 #[starlark_module]
 fn register_types(globals: &mut GlobalsBuilder) {
-    const ConfigContext: StarlarkValueAsType<config::ConfigContext> = StarlarkValueAsType::new();
-    const FeatureContext: StarlarkValueAsType<config::FeatureContext> = StarlarkValueAsType::new();
+    const ConfigContext: StarlarkValueAsType<config_context::ConfigContext> =
+        StarlarkValueAsType::new();
+    const FeatureContext: StarlarkValueAsType<feature_context::FeatureContext> =
+        StarlarkValueAsType::new();
     const Http: StarlarkValueAsType<http::Http> = StarlarkValueAsType::new();
     const HttpResponse: StarlarkValueAsType<http::HttpResponse> = StarlarkValueAsType::new();
     const Task: StarlarkValueAsType<task::Task> = StarlarkValueAsType::new();
     const Arg: StarlarkValueAsType<arg::Arg> = StarlarkValueAsType::new();
-    const Args: StarlarkValueAsType<cli_args::CliArgs> = StarlarkValueAsType::new();
+    const Arguments: StarlarkValueAsType<arguments::Arguments> = StarlarkValueAsType::new();
     const TaskContext: StarlarkValueAsType<task_context::TaskContext> = StarlarkValueAsType::new();
     const TaskInfo: StarlarkValueAsType<task_info::TaskInfo> = StarlarkValueAsType::new();
     const Template: StarlarkValueAsType<template::Template> = StarlarkValueAsType::new();
@@ -41,9 +51,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
 
     r#async::register_globals(globals);
+    r#trait::register_globals(globals);
     task::register_globals(globals);
-    types::feature::register_globals(globals);
-    types::r#trait::register_globals(globals);
+    feature::register_globals(globals);
 
     globals.namespace("args", arg::register_globals);
     globals.namespace("bazel", bazel::register_globals);

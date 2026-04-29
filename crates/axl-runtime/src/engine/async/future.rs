@@ -14,7 +14,7 @@ use starlark::values::{NoSerialize, ProvidesStaticType, starlark_value};
 use std::cell::RefCell;
 use std::fmt::Debug;
 
-use crate::engine::store::AxlStore;
+use crate::engine::store::Env;
 
 pub trait FutureAlloc: Send {
     fn alloc_value_fut<'v>(self: Box<Self>, heap: Heap<'v>) -> values::Value<'v>;
@@ -192,7 +192,7 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
         this: values::Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::Value<'v>> {
-        let store = AxlStore::from_eval(eval)?;
+        let env = Env::from_eval(eval)?;
         let this = this
             .downcast_ref_err::<StarlarkFuture>()
             .into_anyhow_result()?;
@@ -204,7 +204,7 @@ pub(crate) fn future_methods(registry: &mut MethodsBuilder) {
             .ok_or(anyhow::anyhow!("future has already been awaited"))?;
         let transforms = this.transforms.borrow().clone();
 
-        let result = store.rt.block_on(fut);
+        let result = env.rt.block_on(fut);
         apply_transforms(result, &transforms, eval)
     }
 
