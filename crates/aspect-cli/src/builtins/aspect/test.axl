@@ -27,16 +27,20 @@ test = task(
             default = ["..."],
             description = "Bazel target patterns to test. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory.",
         ),
-        "bazel_flag": args.string_list(
+        "bazel_flags": args.string_list(
+            long = "bazel-flag",
             description = "Additional Bazel flags forwarded to the test invocation (e.g. --bazel-flag=--config=ci --bazel-flag=--test_filter=foo). Repeat the flag to pass multiple.",
         ),
-        "bazel_startup_flag": args.string_list(
+        "bazel_startup_flags": args.string_list(
+            long = "bazel-startup-flag",
             description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
         ),
-        "bes_backend": args.string_list(
+        "bes_backends": args.string_list(
+            long = "bes-backend",
             description = "Build Event Service backend(s) to stream BEP events to. Repeat the flag to pass multiple. Translated to --bes_backend=<value> on the Bazel command.",
         ),
-        "bes_header": args.string_list(
+        "bes_headers": args.string_list(
+            long = "bes-header",
             description = "HTTP header(s) attached to BES streams (e.g. --bes-header=x-token=abc). Repeat the flag to pass multiple. Translated to --bes_header=<value> on the Bazel command.",
         ),
         "cancel": args.boolean(

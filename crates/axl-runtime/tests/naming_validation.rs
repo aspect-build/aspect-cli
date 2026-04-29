@@ -145,7 +145,7 @@ fn task_valid_args() {
 def _impl(ctx): pass
 T = task(implementation = _impl, args = {
     "target_pattern": args.string(),
-    "bazel_flag": args.string_list(),
+    "bazel_flags": args.string_list(),
     "dry_run": args.boolean(default = False),
 })
 "#

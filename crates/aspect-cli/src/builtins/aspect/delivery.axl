@@ -373,14 +373,14 @@ def _delivery_impl(ctx):
     # Flags: accumulate data, then optionally transform. --remote_download_outputs=minimal
     # is mandatory for phase 1/2 (we never want to download outputs while computing shas).
     flags = ["--remote_download_outputs=minimal"]
-    flags.extend(ctx.args.bazel_flag)
+    flags.extend(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
-    if not ctx.args.bazel_flag:
+    if not ctx.args.bazel_flags:
         flags.append("--stamp")
     if bazel_trait.flags:
         flags = bazel_trait.flags(flags)
 
-    startup_flags = list(ctx.args.bazel_startup_flag)
+    startup_flags = list(ctx.args.bazel_startup_flags)
     startup_flags.extend(bazel_trait.extra_startup_flags)
     if bazel_trait.startup_flags:
         startup_flags = bazel_trait.startup_flags(startup_flags)
@@ -449,7 +449,7 @@ def _delivery_impl(ctx):
     # the env var without templating the flag itself. Whitespace is the
     # only safe separator: Bazel's label grammar allows commas in target
     # names, so a comma-split would collide with valid labels.
-    forced_targets = list(ctx.args.force_target)
+    forced_targets = list(ctx.args.force_targets)
     env_forced = ctx.std.env.var("ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS") or ""
     for tok in env_forced.split():
         if tok and tok not in forced_targets:
@@ -723,11 +723,13 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             default = 0,
             description = "Maximum number of targets to deliver when using --query. 0 means no limit.",
         ),
-        "bazel_flag": args.string_list(
+        "bazel_flags": args.string_list(
+            long = "bazel-flag",
             default = [],
             description = "Additional Bazel flags passed to every build phase. When unset, --stamp is added automatically; passing any --bazel-flag replaces this default, so include --bazel-flag=--stamp explicitly if you still want stamping alongside your custom flags.",
         ),
-        "bazel_startup_flag": args.string_list(
+        "bazel_startup_flags": args.string_list(
+            long = "bazel-startup-flag",
             default = [],
             description = "Additional Bazel startup flags.",
         ),
@@ -735,7 +737,8 @@ Currently \x1b[3monly\x1b[23m supported on Aspect Workflows CI runners. Support 
             default = "",
             description = "Additional string appended to --task-key to scope change detection (task-key:salt). Useful for scoping delivery to a specific environment or pipeline variant without changing --task-key.",
         ),
-        "force_target": args.string_list(
+        "force_targets": args.string_list(
+            long = "force-target",
             default = [],
             description = "Re-deliver these targets even if they have already been delivered for this commit. Use as a break-glass override when a previous delivery needs to be repeated. Each label must already be in the resolved delivery set (from --query or positional args) — force-target only flips the change-detection skip, it does not add labels; an unmatched label hard-fails at startup so typos are caught early. The ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS env var (whitespace-separated labels) is merged in addition to this flag — convenient for CI parameter fields that don't easily template into a flag.",
         ),
