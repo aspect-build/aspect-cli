@@ -31,7 +31,7 @@ def _fetch_blob(cas, instance_name, digest):
 def _impl(ctx):
     cfg = remote_config(ctx)
 
-    shell_cmd = ctx.args.command if ctx.args.command else "echo it works!"
+    shell_cmd = ctx.args.command[0] if ctx.args.command else "echo it works!"
     print("[1/4] Building action...")
     print("       Command:", shell_cmd)
     cmd = remote.execution.Command(

@@ -144,10 +144,11 @@ def _impl(ctx: TaskContext) -> int:
     hc_trait = ctx.traits[HealthCheckTrait]
     strategy = _STRATEGIES[ctx.args.strategy]
 
+    # 1. Health checks
     for hook in hc_trait.pre_health_check:
         hook(ctx)
 
-    # Detect changed files BEFORE lint_start hooks so features can read
+    # 2. Detect changed files BEFORE lint_start hooks so features can read
     # lint_trait.changed_files as the canonical set. Prefers the GitHub
     # PR Files API when authenticated and in a PR context (works on any
     # CI host), falling back to local `git diff <base> --unified=0`.

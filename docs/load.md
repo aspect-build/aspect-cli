@@ -7,7 +7,7 @@ AXL scripts use the `load` statement to import symbols from other `.axl` files, 
 - **Relative Paths**: Start with `./` or `../` (e.g., `load("./utils.axl")`).
   - Resolved relative to the directory of the current script.
   - Supports relative loads within the repository, but prevents escaping the repository root.
-  - Supports relative relative within a module, but prevents escaping the module root.
+  - Supports relative loads within a module, but prevents escaping the module root.
 
 - **Repository/Module-Root Relative Paths**: No leading `./` or `/` (e.g., `load("path/to/script.axl")`).
   - Treated as paths starting from the repository root or module root.

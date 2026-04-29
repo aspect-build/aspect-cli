@@ -6,7 +6,7 @@ This example uses [ShellCheck](https://www.shellcheck.net/) to lint `hello.sh`.
 
 ```sh
 cd examples/lint
-cli2 lint
+aspect lint
 ```
 
 ## Producing new violations

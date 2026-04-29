@@ -60,7 +60,7 @@ def _default_bazel_behavior(ctx: FeatureContext):
         bazel_trait.build_event_sinks.extend(bessie_sinks)
 
         if environment.ci.host == "github":
-            # Prevent github actions from reaping the JVM server at the of a job.
+            # Prevent github actions from reaping the JVM server at the end of a job.
             ctx.std.env.set_var("RUNNER_TRACKING_ID", "")
             # Here to ensure we restart the Bazel server.
             bazel_trait.extra_startup_flags.append("--host_jvm_args=-DRUNNER_TRACKING_ID=noop")

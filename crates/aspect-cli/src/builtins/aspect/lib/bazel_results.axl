@@ -260,7 +260,7 @@ def init_results():
 
     Returns:
         dict to be stored in build state and passed to process_event /
-        resolve_stderr / compute_repro / render_markdown.
+        resolve_stderr / compute_repro.
     """
     return {
         # Failed build targets (not test-related): [{label}]
@@ -940,138 +940,6 @@ def compute_repro(results):
     results["test_repro_total"] = len(test_labels)
     cmd, _ = _make_repro("test", test_labels, MAX_REPRO_CHARS)
     results["test_repro"] = cmd
-
-
-_SUMMARY_TEMPLATE = """
-{%- assign has_failures = false -%}
-{%- if results.failed_actions.size > 0 -%}{%- assign has_failures = true -%}{%- endif -%}
-{%- if results.failed_tests.size > 0 -%}{%- assign has_failures = true -%}{%- endif -%}
-{%- if results.flaky_tests.size > 0 -%}{%- assign has_failures = true -%}{%- endif -%}
-
-{%- if results.aborted %}
-> **Build aborted**{% if results.abort_reason != "" %} (`{{ results.abort_reason }}`){% endif %}{% if results.abort_description != "" %}: {{ results.abort_description }}{% endif %}
-
-{% endif -%}
-
-{%- if results.failed_actions.size > 0 %}
-### Build failures
-
-{% for action in results.failed_actions -%}
-- `{{ action.label }}` (`{{ action.mnemonic }}`){% if action.stderr_content != "" %}
-<details><summary>Error output</summary>
-<pre>{{ action.stderr_content }}</pre>
-{%- if action.stderr_truncated > 0 %}
-_{{ action.stderr_truncated }} chars truncated._
-{%- endif %}
-</details>
-{%- endif %}
-{% endfor -%}
-{%- if results.failed_actions_total > results.failed_actions.size %}
-_{{ results.failed_actions_total | minus: results.failed_actions.size }} more action(s) failed._
-{% endif -%}
-{%- if results.build_repro != "" %}
-```
-{{ results.build_repro }}
-```
-{%- endif %}
-{%- endif -%}
-
-{%- if results.failed_tests.size > 0 %}
-<details{% if results.failed_tests.size <= 20 %} open{% endif %}>
-<summary>Failed tests ({{ results.failed_test_total }})</summary>
-<pre>
-{%- for t in results.failed_tests %}
-{{ t.label }}{% if t.duration_ms_fmt != "" %} ({{ t.duration_ms_fmt }}){% endif %}{% if t.cached %} [cached]{% endif %}
-{%- endfor %}
-</pre>
-</details>
-{%- if results.test_repro != "" %}
-```
-{{ results.test_repro }}
-```
-{%- endif %}
-{% endif -%}
-
-{%- if results.flaky_tests.size > 0 %}
-<details>
-<summary>Flaky tests ({{ results.flaky_test_total }})</summary>
-<pre>
-{%- for t in results.flaky_tests %}
-{{ t.label }}{% if t.duration_ms_fmt != "" %} ({{ t.duration_ms_fmt }}){% endif %}{% if t.cached %} [cached]{% endif %}
-{%- endfor %}
-</pre>
-</details>
-{% endif -%}
-
-{%- if results.passed_test_total > 0 and results.failed_test_total == 0 and results.flaky_test_total == 0 %}
-{{ results.passed_test_total }} test target{% if results.passed_test_total > 1 %}s{% endif %} passed{% if results.cached_test_total > 0 %} ({{ results.cached_test_total }} cached){% endif %}.
-{%- elsif results.passed_test_total > 0 %}
-{{ results.passed_test_total }} test target{% if results.passed_test_total > 1 %}s{% endif %} passed{% if results.cached_test_total > 0 %} ({{ results.cached_test_total }} cached){% endif %}.
-{%- endif -%}
-
-{%- assign has_stats = false -%}
-{%- if results.executed_test_total > 0 or results.cached_test_total > 0 or results.actions_total > 0 -%}
-{%- assign has_stats = true -%}
-{%- endif -%}
-
-{%- if has_stats %}
-
----
-
-{%- if results.executed_test_total > 0 %}
-_{{ results.executed_test_total }} test target{% if results.executed_test_total > 1 %}s{% endif %} executed{% if results.executed_duration != "" %} in {{ results.executed_duration }}{% endif %}._
-{%- endif %}
-{%- if results.cached_test_total > 0 %}
-_{{ results.cached_test_total }} test target{% if results.cached_test_total > 1 %}s{% endif %} cached{% if results.cached_duration != "" %} (saved {{ results.cached_duration }}){% endif %}._
-{%- endif %}
-{%- if results.actions_total > 0 %}
-{%- if results.actions_executed > 0 %}
-_{{ results.actions_executed }} build action{% if results.actions_executed > 1 %}s{% endif %} executed{% if results.actions_cached > 0 %}, {{ results.actions_cached }} cached{% endif %}._
-{%- elsif results.actions_cached > 0 %}
-_All {{ results.actions_cached }} build action{% if results.actions_cached > 1 %}s{% endif %} (100%) cached._
-{%- endif %}
-{%- endif %}
-{%- endif -%}
-
-{%- if links.ci_label != "" or links.aspect_url != "" %}
-
----
-
-{%- if links.ci_label != "" and links.ci_url != "" %}
-[View on {{ links.ci_label }}]({{ links.ci_url }}){% if links.aspect_url != "" %} · {% endif %}
-{%- endif %}
-{%- if links.aspect_url != "" %}
-[View invocation on Aspect]({{ links.aspect_url }})
-{%- endif %}
-{%- endif -%}
-"""
-
-
-def render_markdown(ctx, results, links = None):
-    """Render a Markdown summary from accumulated results.
-
-    Args:
-        ctx:     TaskContext (for ctx.template.liquid)
-        results: dict from init_results(), updated by process_event
-        links:   optional dict with keys ci_label, ci_url, aspect_url
-                 for a footer linking to the CI job and Aspect Web UI
-
-    Returns:
-        str — Markdown suitable for a GitHub check run summary field (max 65535 chars)
-    """
-    data = dict(results)
-    # Pre-format durations so the Liquid template can render them as plain strings.
-    data["executed_duration"] = _format_duration_ms(data["executed_duration_ms"]) if data["executed_duration_ms"] > 0 else ""
-    data["cached_duration"]   = _format_duration_ms(data["cached_duration_ms"])   if data["cached_duration_ms"]   > 0 else ""
-
-    # Pre-format per-test durations (Liquid has no duration filter).
-    for t in data.get("failed_tests", []):
-        t["duration_ms_fmt"] = _format_duration_ms(t.get("duration_ms", 0)) if t.get("duration_ms", 0) > 0 else ""
-    for t in data.get("flaky_tests", []):
-        t["duration_ms_fmt"] = _format_duration_ms(t.get("duration_ms", 0)) if t.get("duration_ms", 0) > 0 else ""
-
-    links_data = links or {"ci_label": "", "ci_url": "", "aspect_url": ""}
-    return ctx.template.liquid(_SUMMARY_TEMPLATE, data = {"results": data, "links": links_data})
 
 
 _TITLE_MAX_LEN     = 160

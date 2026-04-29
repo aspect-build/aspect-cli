@@ -82,6 +82,6 @@ def runnable(ctx, targets: list[str]) -> struct:
 
     return struct(
         event = lambda event: _process_bes(state, event),
-        determine_entrypoint = lambda event: _determine_entrypoint(state, event),
+        determine_entrypoint = lambda target: _determine_entrypoint(state, target),
         spawn = lambda entrypoint, args, capture=False: _spawn(ctx, state, entrypoint, args, capture),
     )

@@ -517,7 +517,7 @@ ArtifactUpload = feature(
             values = ["none", "failed", "executed", "all"],
             description = "Which test logs to upload as artifacts. " +
                           "'none' (default) uploads nothing. 'failed' uploads " +
-                          "only non-passing tests. 'executed' uploads every test" +
+                          "only non-passing tests. 'executed' uploads every test " +
                           "that ran (skips cached passes). 'all' uploads everything.",
         ),
         "upload_profile": args.boolean(
