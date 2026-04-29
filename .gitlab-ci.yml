@@ -50,6 +50,17 @@ test-task:
     - ASPECT_DEBUG=1 aspect test --task-key test-gl-debug //...
     - aspect test --task-key test-gl //...
 
+format-task:
+  stage: CI
+  needs: [pre-build]
+  tags:
+    - aspect-workflows
+    - aspect-default
+  script:
+    - .aspect/bootstrap.sh
+    - ASPECT_DEBUG=1 aspect format --task-key format-gl-debug
+    - aspect format --task-key format-gl
+
 delivery-task:
   stage: CI
   needs: [pre-build]

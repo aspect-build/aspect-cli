@@ -150,8 +150,8 @@ steps:
       fi
       echo "OK: server PID unchanged ($$BEFORE_PID)"
 
-  - key: format
-    label: ":broom: Format"
+  - key: format-task
+    label: ":aspect: Format Task"
     depends_on:
       - pre-build
     agents:
@@ -162,8 +162,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      echo "--- :bazel: bazel run //tools/format:format.check"
-      bazel $$BAZEL_STARTUP_OPTS run $$BAZEL_BUILD_OPTS //tools/format:format.check
+      ASPECT_DEBUG=1 aspect format --task-key format-bk-debug
+      aspect format --task-key format-bk
 
   - key: build-task
     depends_on:
