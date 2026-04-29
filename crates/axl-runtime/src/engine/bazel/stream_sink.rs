@@ -52,13 +52,15 @@ impl GrpcEventStreamSink {
         invocation_id: String,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
-            rt.block_on(async {
+            match rt.block_on(async {
                 GrpcEventStreamSink::task_spawn(recv, endpoint, headers, invocation_id)
                     .await
                     .await
-            })
-            .expect("failed to join")
-            .expect("failed to wait")
+            }) {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => tracing::warn!("gRPC BES sink failed: {}", err),
+                Err(err) => tracing::warn!("gRPC BES sink task failed to join: {}", err),
+            }
         })
     }
 
@@ -121,7 +123,10 @@ impl GrpcEventStreamSink {
                         // TODO: Use this information to control how many inflight BES events we should be
                         // sending.
                         Ok(_ev) => {}
-                        Err(err) => eprintln!("{}", err),
+                        Err(err) => {
+                            eprintln!("{}", err);
+                            return Err(ClientError::from(err).into());
+                        }
                     }
                 }
                 Ok(())
@@ -179,5 +184,43 @@ impl GrpcEventStreamSink {
             .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+
+    use crate::engine::r#async::rt::AsyncRuntime;
+
+    use super::*;
+
+    fn closed_endpoint() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("https://{}", listener.local_addr().unwrap());
+        drop(listener);
+        endpoint
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grpc_sink_transport_errors_do_not_panic_sink_thread() {
+        let (_sender, recv) = std::sync::mpsc::channel::<BuildEvent>();
+
+        let handle = GrpcEventStreamSink::spawn(
+            AsyncRuntime::new(),
+            recv,
+            closed_endpoint(),
+            HashMap::new(),
+            "test-invocation-id".to_string(),
+        );
+
+        let join_result = tokio::task::spawn_blocking(move || handle.join())
+            .await
+            .unwrap();
+
+        assert!(
+            join_result.is_ok(),
+            "gRPC sink transport errors should not panic the sink thread"
+        );
     }
 }
