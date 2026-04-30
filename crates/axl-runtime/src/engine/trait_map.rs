@@ -11,7 +11,7 @@ use starlark::values::{
 };
 use starlark_map::small_map::SmallMap;
 
-use crate::engine::types::r#trait::{
+use super::r#trait::{
     FrozenTraitType, TraitType, construct_default_instance, extract_trait_type_id,
 };
 

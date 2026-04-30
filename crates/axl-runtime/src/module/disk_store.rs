@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::{io, os::unix::ffi::OsStrExt, path::PathBuf, str::FromStr};
 
 use anyhow::anyhow;
@@ -12,7 +11,7 @@ use thiserror::Error;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 
-use super::store::ModuleStore;
+use super::module::Mod;
 use super::{AxlArchiveDep, AxlLocalDep, Dep};
 
 pub struct DiskStore {
@@ -228,7 +227,7 @@ impl DiskStore {
 
     pub async fn expand_store(
         &self,
-        store: &ModuleStore,
+        store: &Mod,
         builtins: Vec<(String, PathBuf)>,
     ) -> Result<Vec<(String, PathBuf)>, StoreError> {
         let root = self.root();
@@ -239,26 +238,21 @@ impl DiskStore {
 
         let client = reqwest::Client::new();
 
-        let mut all: HashMap<String, Dep> = builtins
+        let builtin_deps: Vec<Dep> = builtins
             .into_iter()
             .map(|(name, path)| {
-                (
-                    name.clone(),
-                    Dep::Local(AxlLocalDep {
-                        name: name,
-                        path: path,
-                        // Builtins tasks are always auto used
-                        auto_use_tasks: true,
-                    }),
-                )
+                Dep::Local(AxlLocalDep {
+                    name,
+                    path,
+                    // Builtins tasks are always auto used
+                    auto_use_tasks: true,
+                })
             })
             .collect();
 
-        all.extend(store.deps.take());
-
         let mut module_roots = vec![];
 
-        for dep in all.values() {
+        for dep in builtin_deps.iter().chain(store.deps.iter()) {
             let dep_marker_path = self.dep_marker_path(&dep);
             let dep_path = self.dep_path(dep.name());
 

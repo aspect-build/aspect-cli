@@ -24,7 +24,7 @@ pub struct Documentation {
 /// Collect documentation for the entire AXL runtime — both Rust-defined types
 /// and the embedded `@std//*.axl` builtin modules.
 ///
-/// Must be called within an active Tokio runtime (the loader's `AxlStore`
+/// Must be called within an active Tokio runtime (the loader's `Env`
 /// requires `tokio::runtime::Handle::current()`).
 pub fn documentation() -> anyhow::Result<Documentation> {
     let types = get_globals().build().documentation();
@@ -34,7 +34,7 @@ pub fn documentation() -> anyhow::Result<Documentation> {
     // short-circuit before any caller-context lookups in `FileLoader::load`),
     // so no seeding is required.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    let loader = Loader::new("docgen".to_string(), cwd.clone(), cwd);
+    let loader = Loader::new("docgen".to_string(), cwd, &[]);
 
     let mut builtins = Vec::new();
     for filename in list_std_files() {

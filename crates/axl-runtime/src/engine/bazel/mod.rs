@@ -27,7 +27,7 @@ use starlark::{
     values::starlark_value_as_type::StarlarkValueAsType,
 };
 
-use crate::engine::store::AxlStore;
+use crate::engine::store::Env;
 use axl_proto;
 
 mod build;
@@ -240,7 +240,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         };
         let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
         let resolved_startup_flags = read_startup_flags(this)?;
-        let store = AxlStore::from_eval(eval)?;
+        let env = Env::from_eval(eval)?;
         let build = build::Build::spawn(
             "build",
             targets.items.iter().map(|f| f.as_str().to_string()),
@@ -252,7 +252,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             inherit_stdout,
             inherit_stderr,
             current_dir.into_option(),
-            store.rt,
+            env.rt.clone(),
         )?;
         Ok(build)
     }
@@ -343,7 +343,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         };
         let resolved_flags = resolve_flags(&flags.items, bazel_version.as_ref())?;
         let resolved_startup_flags = read_startup_flags(this)?;
-        let store = AxlStore::from_eval(eval)?;
+        let env = Env::from_eval(eval)?;
         let test = build::Build::spawn(
             "test",
             targets.items.iter().map(|f| f.as_str().to_string()),
@@ -355,7 +355,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             inherit_stdout,
             inherit_stderr,
             current_dir.into_option(),
-            store.rt,
+            env.rt.clone(),
         )?;
         Ok(test)
     }
@@ -512,11 +512,11 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
             ))
         }
 
-        let store = AxlStore::from_eval(eval)?;
+        let env = Env::from_eval(eval)?;
         let root = root
             .into_option()
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| store.root_dir.clone());
+            .unwrap_or_else(|| env.root_dir.clone());
         let startup_flags_vec: Vec<&str> = startup_flags
             .items
             .iter()

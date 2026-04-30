@@ -21,7 +21,7 @@ use crate::module::Dep;
 
 use super::super::eval::{EvalError, join_confined, validate_module_name};
 
-use super::store::{AxlArchiveDep, ModuleStore};
+use super::module::{AxlArchiveDep, Mod};
 
 #[starlark_module]
 pub fn register_globals(globals: &mut GlobalsBuilder) {
@@ -90,7 +90,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             }
         }
 
-        let store = ModuleStore::from_eval(eval)?;
+        let store = Mod::from_eval(eval)?;
 
         let integrity = if integrity.is_empty() {
             None
@@ -98,19 +98,16 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             Some(integrity.parse()?)
         };
 
-        let prev_dep = store.deps.borrow_mut().insert(
-            name.clone(),
-            Dep::Remote(AxlArchiveDep {
-                name: name.clone(),
-                strip_prefix,
-                urls: urls.items,
-                integrity,
-                dev: true,
-                auto_use_tasks,
-            }),
-        );
+        let success = store.deps.insert(Dep::Remote(AxlArchiveDep {
+            name: name.to_owned(),
+            strip_prefix,
+            integrity,
+            auto_use_tasks,
+            urls: urls.items,
+            dev: true,
+        }));
 
-        if prev_dep.is_some() {
+        if !success {
             anyhow::bail!("duplicate axl dep `{}` was declared previously.", name)
         }
 
@@ -128,7 +125,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         }
         validate_module_name(&name)?;
 
-        let store = ModuleStore::from_eval(eval)?;
+        let store = Mod::from_eval(eval)?;
 
         let mut abs_path = PathBuf::from(path);
         if !abs_path.is_absolute() {
@@ -143,16 +140,13 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
             anyhow::bail!("path `{:?}` is not a directory", abs_path);
         }
 
-        let prev_dep = store.deps.borrow_mut().insert(
-            name.clone(),
-            Dep::Local(AxlLocalDep {
-                name: name.clone(),
-                path: abs_path,
-                auto_use_tasks,
-            }),
-        );
+        let success = store.deps.insert(Dep::Local(AxlLocalDep {
+            name: name.to_owned(),
+            path: abs_path,
+            auto_use_tasks,
+        }));
 
-        if prev_dep.is_some() {
+        if !success {
             anyhow::bail!("duplicate axl dep `{}` was declared previously.", name)
         }
 
@@ -164,11 +158,10 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(args)] symbols: UnpackListOrTuple<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
-        let store = ModuleStore::from_eval(eval)?;
-        let mut tasks = store.tasks.borrow_mut();
-        let absolute_path = join_confined(&store.module_root, Path::new(&label))?;
+        let store = Mod::from_eval(eval)?;
+        let absolute_path = join_confined(&store.root, Path::new(&label))?;
 
-        let entry = tasks.entry(absolute_path).or_insert((label, vec![]));
+        let entry = store.tasks.entry(absolute_path).or_insert((label, vec![]));
         entry.1.extend(symbols);
 
         Ok(values::none::NoneType)
@@ -188,9 +181,9 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = pos)] symbol: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
-        let store = ModuleStore::from_eval(eval)?;
-        let absolute_path = join_confined(&store.module_root, Path::new(&label))?;
-        store.features.borrow_mut().push((absolute_path, symbol));
+        let r#mod = Mod::from_eval(eval)?;
+        let absolute_path = join_confined(&r#mod.root, Path::new(&label))?;
+        r#mod.features.push((absolute_path, symbol));
         Ok(values::none::NoneType)
     }
 }
@@ -237,17 +230,17 @@ pub fn get_globals() -> Globals {
 
 /// Evaluator for MODULE.aspect
 #[derive(Debug)]
-pub struct ModuleEvaluator {
+pub struct ModEvaluator {
     root_dir: PathBuf,
     dialect: Dialect,
     globals: Globals,
 }
 
-impl ModuleEvaluator {
+impl ModEvaluator {
     pub fn new(root_dir: PathBuf) -> Self {
         Self {
             root_dir,
-            dialect: ModuleEvaluator::dialect(),
+            dialect: ModEvaluator::dialect(),
             globals: get_globals(),
         }
     }
@@ -268,36 +261,29 @@ impl ModuleEvaluator {
         }
     }
 
-    pub fn evaluate(
-        &self,
-        module_name: String,
-        module_root: PathBuf,
-    ) -> Result<ModuleStore, EvalError> {
-        let is_root_module = module_name == AXL_ROOT_MODULE_NAME;
+    pub fn evaluate(&self, name: String, root: PathBuf) -> Result<Mod, EvalError> {
+        let is_root_module = name == AXL_ROOT_MODULE_NAME;
         let axl_filename = if is_root_module {
             AXL_MODULE_FILE.to_string()
         } else {
-            module_root
-                .join(AXL_MODULE_FILE)
-                .to_string_lossy()
-                .to_string()
+            format!("{}/{}", root.to_str().unwrap(), AXL_MODULE_FILE)
         };
 
-        let module_boundary_path = &module_root.join(AXL_MODULE_FILE);
+        let module_boundary_path = &root.join(AXL_MODULE_FILE);
 
-        let store = ModuleStore::new(self.root_dir.to_path_buf(), module_name, module_root);
+        let mut r#mod = Mod::new(self.root_dir.to_path_buf(), name, root);
 
         if module_boundary_path.exists() {
             let contents = fs::read_to_string(module_boundary_path)?;
             let ast = AstModule::parse(&axl_filename, contents, &self.dialect)?;
             Module::with_temp_heap(|module| {
                 let mut eval = Evaluator::new(&module);
-                eval.extra = Some(&store);
+                eval.extra_mut = Some(&mut r#mod);
                 eval.eval_module(ast, &self.globals)?;
                 Ok::<_, starlark::Error>(())
             })?;
         }
 
-        Ok(store)
+        Ok(r#mod)
     }
 }

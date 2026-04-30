@@ -4,55 +4,49 @@ use starlark::{eval::Evaluator, values::ProvidesStaticType};
 
 use super::r#async::rt::AsyncRuntime;
 
-/// A store object which we pass to the Starlark interpreter which allows us
-/// to store shared data (runtime, tools, cache, ...) around the Starlark evaluation.
+/// Process-wide environment passed to every Starlark evaluator via `eval.extra`.
+///
+/// `script_path` is intentionally absent — the file currently being evaluated
+/// is recovered from the evaluator's call stack by [`Env::current_script_path`].
 #[derive(Debug, ProvidesStaticType, Clone)]
-pub struct AxlStore {
-    pub(crate) cli_version: String,
-    pub(crate) root_dir: PathBuf,
-    pub(crate) script_path: PathBuf,
-    pub(crate) rt: AsyncRuntime,
+pub struct Env {
+    pub cli_version: String,
+    pub root_dir: PathBuf,
+    pub rt: AsyncRuntime,
 }
 
-impl AxlStore {
-    pub fn new(cli_version: String, root_dir: PathBuf, script_path: PathBuf) -> Self {
+impl Env {
+    pub fn new(cli_version: String, root_dir: PathBuf) -> Self {
         Self {
             cli_version,
             root_dir,
-            script_path,
             rt: AsyncRuntime::new(),
         }
     }
 
-    pub fn from_eval<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<AxlStore> {
+    pub fn from_eval<'v, 'a>(eval: &'a Evaluator<'v, '_, '_>) -> anyhow::Result<&'a Env> {
         let value = eval
             .extra
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("failed to get axl store (extra is None)"))?;
+            .ok_or_else(|| anyhow::anyhow!("failed to get env (extra is None)"))?;
+        value.downcast_ref::<Env>().ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to cast env: unexpected type. Actual type: {}",
+                std::any::type_name_of_val(value)
+            )
+        })
+    }
 
-        // Try both &AxlStore and AxlStore casts as you may get one or the other depending on how
-        // Rust decides to compile a `eval.extra = Some(&store)`
-        if let Some(store_ref) = value.downcast_ref::<&AxlStore>() {
-            return Ok(AxlStore {
-                cli_version: store_ref.cli_version.clone(),
-                root_dir: store_ref.root_dir.clone(),
-                script_path: store_ref.script_path.clone(),
-                rt: store_ref.rt.clone(),
-            });
-        }
-
-        if let Some(store_owned) = value.downcast_ref::<AxlStore>() {
-            return Ok(AxlStore {
-                cli_version: store_owned.cli_version.clone(),
-                root_dir: store_owned.root_dir.clone(),
-                script_path: store_owned.script_path.clone(),
-                rt: store_owned.rt.clone(),
-            });
-        }
-
-        Err(anyhow::anyhow!(
-            "failed to cast axl store: unexpected type (not AxlStore nor &AxlStore). Actual type: {}",
-            std::any::type_name_of_val(value)
-        ))
+    /// Absolute path of the `.axl` file currently being evaluated.
+    ///
+    /// Reads the topmost call-stack frame, whose filename is whatever was
+    /// passed to `AstModule::parse` — `AxlLoader` always passes the absolute
+    /// path. Returns an error if there is no Starlark frame on the stack
+    /// (i.e. called from native-only context).
+    pub fn current_script_path(eval: &Evaluator) -> anyhow::Result<PathBuf> {
+        let span = eval.call_stack_top_location().ok_or_else(|| {
+            anyhow::anyhow!("no Starlark frame on the call stack — cannot resolve script path")
+        })?;
+        Ok(PathBuf::from(span.filename()))
     }
 }

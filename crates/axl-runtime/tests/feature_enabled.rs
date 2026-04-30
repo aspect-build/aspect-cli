@@ -10,8 +10,21 @@
 /// - `feature_instance_effective_defaults` serializes bool overrides as lowercase strings
 // ── helpers ──────────────────────────────────────────────────────────────────
 use axl_runtime::engine::arg::Arg;
-use axl_runtime::engine::types::feature::{extract_feature_args, to_command_name};
+use axl_runtime::engine::feature::{Feature, FeatureLike, FrozenFeature};
+use axl_runtime::engine::names::to_command_name;
 use axl_runtime::eval::eval_snippet;
+use starlark::values::{Value, ValueLike};
+
+/// Run a closure with `&dyn FeatureLike` for whichever feature variant a value holds.
+fn with_feature<R>(value: Value<'_>, f: impl FnOnce(&dyn FeatureLike<'_>) -> R) -> R {
+    if let Some(live) = value.downcast_ref::<Feature>() {
+        return f(live);
+    }
+    if let Some(frozen) = value.downcast_ref::<FrozenFeature>() {
+        return f(frozen);
+    }
+    panic!("value is not a feature: {}", value.get_type());
+}
 
 fn ok(code: &str) {
     eval_snippet(code).unwrap_or_else(|e| panic!("expected ok, got: {e}"));
@@ -28,16 +41,26 @@ fn with_module_value<T>(
     symbol: &str,
     f: impl for<'v> FnOnce(starlark::values::Value<'v>) -> T,
 ) -> T {
+    use axl_runtime::engine::store::Env;
     use axl_runtime::eval::api::{dialect, get_globals};
     use starlark::environment::Module;
     use starlark::eval::Evaluator;
     use starlark::syntax::AstModule;
+    use std::path::PathBuf;
+    use tokio::runtime::Runtime;
 
     let ast = AstModule::parse("<test>", code.to_owned(), &dialect())
         .unwrap_or_else(|e| panic!("parse error: {e}"));
     let globals = get_globals().build();
+    // `feature()` and `task()` read Env from `eval.extra`; the script path
+    // is recovered from the evaluator's call stack. Env::new requires a
+    // tokio runtime (it captures the current Handle).
+    let rt = Runtime::new().expect("failed to create runtime");
+    let _guard = rt.enter();
+    let env = Env::new("test".to_string(), PathBuf::from("/"));
     Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
+        eval.extra = Some(&env);
         eval.eval_module(ast, &globals)
             .unwrap_or_else(|e| panic!("eval error: {e}"));
         let value = module
@@ -105,23 +128,24 @@ fn feature_name_camelcase_to_kebab() {
 /// Every feature has an implicit Boolean `enabled` arg regardless of user-supplied args.
 #[test]
 fn feature_enabled_arg_always_present() {
-    let args = with_module_value(
+    let (has_enabled, has_mode) = with_module_value(
         r#"
 def _impl(ctx): pass
 ArtifactUpload = feature(implementation = _impl, args = {"mode": args.string(default = "upload")})
 "#,
         "ArtifactUpload",
-        |v| extract_feature_args(v).expect("failed to extract feature args"),
+        |v| {
+            with_feature(v, |f| {
+                (
+                    f.args().contains_key("enabled"),
+                    f.args().contains_key("mode"),
+                )
+            })
+        },
     );
 
-    assert!(
-        args.contains_key("enabled"),
-        "implicit `enabled` arg must always be present"
-    );
-    assert!(
-        args.contains_key("mode"),
-        "user-defined arg `mode` must be present"
-    );
+    assert!(has_enabled, "implicit `enabled` arg must always be present");
+    assert!(has_mode, "user-defined arg `mode` must be present");
 }
 
 // ── `enabled` default value ───────────────────────────────────────────────────
@@ -136,11 +160,12 @@ MyFeature = feature(implementation = _impl)
 "#,
         "MyFeature",
         |v| {
-            let args = extract_feature_args(v).unwrap();
-            match args.get("enabled").expect("enabled arg not found") {
-                Arg::Boolean { default, .. } => *default,
-                other => panic!("expected Boolean arg, got: {other:?}"),
-            }
+            with_feature(v, |f| {
+                match f.args().get("enabled").expect("enabled arg not found") {
+                    Arg::Boolean { default, .. } => *default,
+                    other => panic!("expected Boolean arg, got: {other:?}"),
+                }
+            })
         },
     );
     assert!(default_val, "default should be true when enabled = True");
@@ -156,11 +181,12 @@ MyFeature = feature(implementation = _impl, enabled = False)
 "#,
         "MyFeature",
         |v| {
-            let args = extract_feature_args(v).unwrap();
-            match args.get("enabled").expect("enabled arg not found") {
-                Arg::Boolean { default, .. } => *default,
-                other => panic!("expected Boolean arg, got: {other:?}"),
-            }
+            with_feature(v, |f| {
+                match f.args().get("enabled").expect("enabled arg not found") {
+                    Arg::Boolean { default, .. } => *default,
+                    other => panic!("expected Boolean arg, got: {other:?}"),
+                }
+            })
         },
     );
     assert!(!default_val, "default should be false when enabled = False");

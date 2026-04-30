@@ -48,27 +48,19 @@ pub fn eval_expr(src: &str) -> anyhow::Result<String> {
     use starlark::syntax::AstModule;
     use tokio::runtime::Runtime;
 
-    use crate::eval::load::{AxlLoader, ModuleScope};
+    use crate::eval::load::AxlLoader;
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let deps_root = manifest_dir.join("../aspect-cli/src/builtins");
     let repo_root = manifest_dir.clone();
 
-    // AxlStore::new calls Handle::current(), which requires a Tokio runtime.
+    // Env::new calls Handle::current(), which requires a Tokio runtime.
     let rt = Runtime::new()?;
     let _guard = rt.enter();
 
-    let loader = AxlLoader::new("test".to_string(), repo_root.clone(), deps_root);
-
-    // Seed the stacks so that load() can resolve the parent path and module scope.
-    loader.module_stack.borrow_mut().push(ModuleScope {
-        name: "test".to_string(),
-        path: repo_root.clone(),
-    });
-    loader
-        .load_stack
-        .borrow_mut()
-        .push(repo_root.join("test.axl"));
+    // Tests don't exercise dep modules. `@std//` loads work without any
+    // caller scope; relative or subpath loads from snippets are unsupported
+    // (no `Mod` scope to resolve against).
+    let loader = AxlLoader::new("test".to_string(), repo_root.clone(), &[]);
 
     let ast = AstModule::parse("test", src.to_owned(), &dialect())
         .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -89,10 +81,20 @@ pub fn eval_expr(src: &str) -> anyhow::Result<String> {
 /// touching the filesystem. Returns `Ok(())` if evaluation succeeds, or a
 /// `starlark::Error` describing the failure.
 pub fn eval_snippet(code: &str) -> starlark::Result<()> {
+    use crate::engine::store::Env;
+    use std::path::PathBuf;
+    use tokio::runtime::Runtime;
+
     let ast = AstModule::parse("<snippet>", code.to_owned(), &dialect())?;
     let globals = get_globals().build();
+    // `feature()` and `task()` read Env from `eval.extra`. Env::new requires
+    // a tokio runtime (it captures the current Handle).
+    let rt = Runtime::new().map_err(|e| anyhow::anyhow!("failed to create runtime: {}", e))?;
+    let _guard = rt.enter();
+    let env_store = Env::new("test".to_string(), PathBuf::from("/"));
     ModuleEnv::with(|env| {
         let mut eval = Evaluator::new(&env.0);
+        eval.extra = Some(&env_store);
         eval.eval_module(ast, &globals).map(|_| ())
     })
 }
