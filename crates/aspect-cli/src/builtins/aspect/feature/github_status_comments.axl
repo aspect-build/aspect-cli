@@ -1,0 +1,214 @@
+"""GitHub Status Comments feature — aggregates task names from sibling CI jobs into one PR comment.
+
+Every job is both a producer (uploads its task name as an artifact) and a writer
+(polls all sibling-job artifacts in the current run and PATCHes one PR comment).
+Polling is event-paced — the loop ticks when Bazel emits BES events, throttled
+by min_poll_interval_seconds.
+
+Prototype: payload is just the task name as plain text, comment body is a
+deduped bullet list. Status/progress rendering comes later.
+
+GitHub Actions only.
+
+Requires permissions: pull-requests: write, actions: read.
+"""
+load("../traits.axl", "TaskLifecycleTrait")
+load("../lib/github.axl", "github")
+load("../lib/bazel_results.axl", "now_ms")
+load("../lib/tar.axl", "bsdtar")
+
+
+_ARTIFACT_PREFIX = "aspect-ci-status-"
+_MARKER_FMT      = "<!-- aspect-ci-status:pr-%d -->"
+
+
+def _extract_zip(ctx, zip_path, dest_dir):
+    """Extract a zip into dest_dir using bsdtar (already cached for zip_create)."""
+    bin_path = bsdtar(ctx)
+    child = ctx.std.process.command(bin_path).args(["xf", zip_path, "-C", dest_dir]).stdout("piped").stderr("piped").spawn()
+    return child.wait().code == 0
+
+
+def _render_body(marker, task_names):
+    lines = [marker, "", "## Aspect CI Status", ""]
+    for name in task_names:
+        lines.append("- " + name)
+    return "\n".join(lines) + "\n"
+
+
+def _github_status_comments(ctx: FeatureContext):
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    mode = ctx.args.mode
+    is_ci = bool(ctx.std.env.var("CI"))
+    if mode == "ci-only" and not is_ci:
+        return
+    if mode == "local-only" and is_ci:
+        return
+
+    # Hard gate: artifact upload uses the GitHub Actions Twirp API.
+    if not ctx.std.env.var("GITHUB_ACTIONS"):
+        return
+
+    pr, reason = github.detect_pr(ctx.std)
+    if pr == None:
+        return
+
+    owner        = pr["owner"]
+    repo         = pr["repo"]
+    pr_number    = pr["pr_number"]
+    marker       = _MARKER_FMT % pr_number
+    job_name     = ctx.std.env.var("GITHUB_JOB") or "unknown-job"
+    run_id       = ctx.std.env.var("GITHUB_RUN_ID") or ""
+    run_attempt  = ctx.std.env.var("GITHUB_RUN_ATTEMPT") or "1"
+    if not run_id:
+        print("GitHub status comments: missing GITHUB_RUN_ID; skipping.")
+        return
+
+    min_poll_interval_ms = ctx.args.min_poll_interval_seconds * 1000
+
+    _state = {}
+
+    def _publish(ctx):
+        token = _state.get("_github_token")
+        if not token:
+            return
+
+        # 1) Write our payload (just the task name) and replace our artifact.
+        if "_workdir" not in _state:
+            _state["_workdir"] = ctx.std.fs.mkdtemp(prefix = "aspect-ci-status-")
+        workdir = _state["_workdir"]
+        artifact_name = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_key"] + "-" + run_attempt
+
+        payload_path = workdir + "/task.txt"
+        ctx.std.fs.write(payload_path, _state["_task_name"])
+
+        github.delete_artifact(ctx, artifact_name)
+        up = github.upload_artifact(ctx, payload_path, artifact_name)
+        if not up.get("success"):
+            print("GitHub status comments: upload failed: %s" % up.get("errors", []))
+            return
+
+        # 2) List sibling artifacts in this run, download each, read the task name.
+        listed = github.actions.list_run_artifacts(ctx, token, owner, repo, run_id, name_prefix = _ARTIFACT_PREFIX)
+        if not listed.get("success"):
+            print("GitHub status comments: list artifacts failed: %s" % listed.get("error", "unknown"))
+            return
+
+        seen = {}  # artifact_name -> highest run_attempt -> task_name
+        for a in listed["artifacts"]:
+            aname = a.get("name", "")
+            zip_path = workdir + "/" + str(a["id"]) + ".zip"
+            dl = github.actions.download_artifact_zip(ctx, token, owner, repo, a["id"], zip_path)
+            if not dl.get("success"):
+                continue
+            extract_dir = workdir + "/x-" + str(a["id"])
+            ctx.std.fs.create_dir_all(extract_dir)
+            if not _extract_zip(ctx, zip_path, extract_dir):
+                continue
+            task_path = extract_dir + "/task.txt"
+            if not ctx.std.fs.exists(task_path):
+                continue
+            task_name = ctx.std.fs.read_to_string(task_path).strip()
+            if not task_name:
+                continue
+            # aname already encodes (job, task_key, run_attempt) — dedupe on that.
+            if aname not in seen:
+                seen[aname] = task_name
+
+        body = _render_body(marker, sorted(seen.values()))
+
+        # 3) Find or create the comment, then PATCH.
+        if "_comment_id" in _state:
+            res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
+            if not res.get("success"):
+                print("GitHub status comments: update failed: %s" % res.get("error", "unknown"))
+            return
+
+        listed_c = github.issues.list_comments(ctx, token, owner, repo, pr_number)
+        if not listed_c.get("success"):
+            print("GitHub status comments: list comments failed: %s" % listed_c.get("error", "unknown"))
+            return
+        for c in listed_c["comments"]:
+            if marker in (c.get("body") or ""):
+                _state["_comment_id"] = c["id"]
+                break
+
+        if "_comment_id" in _state:
+            res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
+            if not res.get("success"):
+                print("GitHub status comments: update failed: %s" % res.get("error", "unknown"))
+            return
+
+        res = github.issues.create_comment(ctx, token, owner, repo, pr_number, body)
+        if not res.get("success"):
+            print("GitHub status comments: create failed: %s" % res.get("error", "unknown"))
+            return
+        _state["_comment_id"] = res["comment_id"]
+
+        # Race mitigation: if two jobs both POSTed, keep the lowest comment id and delete the rest.
+        listed_c2 = github.issues.list_comments(ctx, token, owner, repo, pr_number)
+        if listed_c2.get("success"):
+            dupes = [c for c in listed_c2["comments"] if marker in (c.get("body") or "")]
+            if len(dupes) > 1:
+                dupes_sorted = sorted(dupes, key = lambda c: c["id"])
+                _state["_comment_id"] = dupes_sorted[0]["id"]
+                for d in dupes_sorted[1:]:
+                    github.issues.delete_comment(ctx, token, owner, repo, d["id"])
+
+    def _task_started(ctx, subject):
+        # Cache task identity from TaskContext so the FeatureContext-level
+        # closure can build the artifact name without reaching for ctx.task
+        # (which doesn't exist on FeatureContext).
+        _state["_task_name"] = ctx.task.name
+        _state["_task_key"]  = ctx.task.key
+
+        # Authenticate via the Aspect GitHub App. prs.write covers issue-comment
+        # POST/PATCH/DELETE on PRs; actions.read covers run-artifact list/download.
+        auth_reason = {}
+        token = github.authenticate(
+            ctx,
+            owner = owner,
+            repo = repo,
+            roles = ["prs.write", "actions.read"],
+            _reason = auth_reason,
+        )
+        if not token:
+            print("GitHub status comments: authentication failed for %s/%s — %s" % (
+                owner, repo, auth_reason.get("reason", "unknown"),
+            ))
+            return
+        _state["_github_token"] = token
+
+        _publish(ctx)
+
+    def _task_update(ctx, update):
+        final = update.status in ("passed", "failed")
+        if not final:
+            now = now_ms(ctx)
+            if now - _state.get("_last_publish_ms", 0) < min_poll_interval_ms:
+                return
+            _state["_last_publish_ms"] = now
+        _publish(ctx)
+
+    lifecycle.task_started.append(_task_started)
+    lifecycle.task_update.append(_task_update)
+
+
+GithubStatusComments = feature(
+    implementation = _github_status_comments,
+    enabled = True,
+    args = {
+        "mode": args.string(
+            default = "ci-only",
+            values = ["ci-only", "local-only", "always"],
+            description = "When to post PR comments: ci-only (default), local-only, or always.",
+        ),
+        "min_poll_interval_seconds": args.int(
+            default = 10,
+            description = "Lower bound on the gap between poll-render-PATCH cycles. " +
+                          "Acts as a throttle on event-paced ticks (each BES update is a candidate poll). " +
+                          "Different jobs land on different cadences naturally; tune higher to reduce API calls.",
+        ),
+    },
+)
