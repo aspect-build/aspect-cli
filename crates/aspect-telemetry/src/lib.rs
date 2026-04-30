@@ -83,9 +83,17 @@ fn is_ci() -> bool {
 }
 
 /// Identify the CI/CD runner, mirroring `tools_telemetry`'s `_build_runner`.
+///
+/// Probe order matters: Forgejo and Gitea Actions both set `GITHUB_RUN_NUMBER`
+/// for compatibility, so they must be detected before `github-actions` or
+/// they'd be misclassified — and the aggregator-side `runner` grouping would
+/// disagree with what `tools_telemetry` reports for the same users.
 fn runner() -> Option<String> {
     let probes: &[(&str, &str)] = &[
         ("BUILDKITE_BUILD_NUMBER", "buildkite"),
+        // We only test presence; the value is never read or transmitted.
+        ("FORGEJO_TOKEN", "forgejo"),
+        ("GITEA_ACTIONS", "gitea"),
         ("GITHUB_RUN_NUMBER", "github-actions"),
         ("GITLAB_CI", "gitlab"),
         ("CIRCLE_BUILD_NUM", "circleci"),
