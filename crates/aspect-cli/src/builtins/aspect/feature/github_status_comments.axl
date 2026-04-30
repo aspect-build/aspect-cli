@@ -29,8 +29,20 @@ def _extract_zip(ctx, zip_path, dest_dir):
     return child.wait().code == 0
 
 
-def _render_body(marker, task_names):
+def _now_iso(ctx):
+    """UTC ISO-8601 timestamp via `date -u`. Used so each PATCH visibly differs
+    even when the task list hasn't changed — confirms the loop is alive."""
+    result = ctx.std.process.command("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"]).stdout("piped").spawn().wait_with_output()
+    if result.status.code == 0:
+        return result.stdout.strip()
+    return ""
+
+
+def _render_body(marker, task_names, updated_at):
     lines = [marker, "", "## Aspect CI Status", ""]
+    if updated_at:
+        lines.append("_Last updated: " + updated_at + "_")
+        lines.append("")
     for name in task_names:
         lines.append("- " + name)
     return "\n".join(lines) + "\n"
@@ -116,7 +128,7 @@ def _github_status_comments(ctx: FeatureContext):
             if aname not in seen:
                 seen[aname] = task_name
 
-        body = _render_body(marker, sorted(seen.values()))
+        body = _render_body(marker, sorted(seen.values()), _now_iso(ctx))
 
         # 3) Find or create the comment, then PATCH.
         if "_comment_id" in _state:
