@@ -12,9 +12,9 @@ GitHub Actions only.
 
 Requires permissions: pull-requests: write, actions: read.
 """
+load("@std//time.axl", "monotonic")
 load("../traits.axl", "TaskLifecycleTrait")
 load("../lib/github.axl", "github")
-load("../lib/bazel_results.axl", "now_ms")
 load("../lib/tar.axl", "bsdtar")
 
 
@@ -38,13 +38,32 @@ def _now_iso(ctx):
     return ""
 
 
-def _render_body(marker, task_names, updated_at):
+_STATUS_BADGE = {
+    "running": "🟡 running",
+    "passed":  "✅ passed",
+    "failed":  "❌ failed",
+}
+
+
+def _render_body(marker, entries, updated_at):
+    """Render the comment body. `entries` is a list of dicts with keys:
+    name, key, job, run_attempt, status."""
     lines = [marker, "", "## Aspect CI Status", ""]
     if updated_at:
         lines.append("_Last updated: " + updated_at + "_")
         lines.append("")
-    for name in task_names:
-        lines.append("- " + name)
+    if entries:
+        lines.append("| Job | Task | Key | Attempt | Status |")
+        lines.append("|-----|------|-----|---------|--------|")
+        for e in entries:
+            status = e.get("status", "running")
+            lines.append("| %s | %s | `%s` | %s | %s |" % (
+                e.get("job", "?"),
+                e.get("name", "?"),
+                e.get("key", "?"),
+                e.get("run_attempt", "?"),
+                _STATUS_BADGE.get(status, status),
+            ))
     return "\n".join(lines) + "\n"
 
 
@@ -77,7 +96,7 @@ def _github_status_comments(ctx: FeatureContext):
         print("GitHub status comments: missing GITHUB_RUN_ID; skipping.")
         return
 
-    min_poll_interval_ms = ctx.args.min_poll_interval_seconds * 1000
+    min_poll_interval_seconds = ctx.args.min_poll_interval_seconds
 
     _state = {}
 
@@ -92,8 +111,14 @@ def _github_status_comments(ctx: FeatureContext):
         workdir = _state["_workdir"]
         artifact_name = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_key"] + "-" + run_attempt
 
-        payload_path = workdir + "/task.txt"
-        ctx.std.fs.write(payload_path, _state["_task_name"])
+        payload_path = workdir + "/task.json"
+        ctx.std.fs.write(payload_path, json.encode({
+            "name":        _state["_task_name"],
+            "key":         _state["_task_key"],
+            "job":         job_name,
+            "run_attempt": run_attempt,
+            "status":      _state.get("_status", "running"),
+        }))
 
         github.delete_artifact(ctx, artifact_name)
         up = github.upload_artifact(ctx, payload_path, artifact_name)
@@ -107,7 +132,7 @@ def _github_status_comments(ctx: FeatureContext):
             print("GitHub status comments: list artifacts failed: %s" % listed.get("error", "unknown"))
             return
 
-        seen = {}  # artifact_name -> highest run_attempt -> task_name
+        seen = {}  # artifact_name (encodes job/task_key/run_attempt) -> entry dict
         for a in listed["artifacts"]:
             aname = a.get("name", "")
             zip_path = workdir + "/" + str(a["id"]) + ".zip"
@@ -118,17 +143,20 @@ def _github_status_comments(ctx: FeatureContext):
             ctx.std.fs.create_dir_all(extract_dir)
             if not _extract_zip(ctx, zip_path, extract_dir):
                 continue
-            task_path = extract_dir + "/task.txt"
-            if not ctx.std.fs.exists(task_path):
+            json_path = extract_dir + "/task.json"
+            if not ctx.std.fs.exists(json_path):
                 continue
-            task_name = ctx.std.fs.read_to_string(task_path).strip()
-            if not task_name:
+            entry = json.try_decode(ctx.std.fs.read_to_string(json_path), None)
+            if not entry:
                 continue
-            # aname already encodes (job, task_key, run_attempt) — dedupe on that.
             if aname not in seen:
-                seen[aname] = task_name
+                seen[aname] = entry
 
-        body = _render_body(marker, sorted(seen.values()), _now_iso(ctx))
+        entries = sorted(
+            seen.values(),
+            key = lambda e: (e.get("job", ""), e.get("name", ""), e.get("key", "")),
+        )
+        body = _render_body(marker, entries, _now_iso(ctx))
 
         # 3) Find or create the comment, then PATCH.
         if "_comment_id" in _state:
@@ -174,6 +202,7 @@ def _github_status_comments(ctx: FeatureContext):
         # (which doesn't exist on FeatureContext).
         _state["_task_name"] = ctx.task.name
         _state["_task_key"]  = ctx.task.key
+        _state["_status"]    = "running"
 
         # Authenticate via the Aspect GitHub App. prs.write covers issue-comment
         # POST/PATCH/DELETE on PRs; actions.read covers run-artifact list/download.
@@ -195,12 +224,13 @@ def _github_status_comments(ctx: FeatureContext):
         _publish(ctx)
 
     def _task_update(ctx, update):
+        _state["_status"] = update.status
         final = update.status in ("passed", "failed")
         if not final:
-            now = now_ms(ctx)
-            if now - _state.get("_last_publish_ms", 0) < min_poll_interval_ms:
+            now = monotonic()
+            if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds:
                 return
-            _state["_last_publish_ms"] = now
+            _state["_last_publish_s"] = now
         _publish(ctx)
 
     lifecycle.task_started.append(_task_started)
