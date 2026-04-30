@@ -235,6 +235,8 @@ name = "aspect-telemetry"
 version = "0.0.0-dev"
 dependencies = [
  "reqwest",
+ "serde_json",
+ "sha1",
 ]
 
 [[package]]
