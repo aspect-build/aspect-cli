@@ -13,7 +13,7 @@ pub static GOOS: &str = env!("BUILD_GOOS");
 pub static GOARCH: &str = env!("BUILD_GOARCH");
 pub static LLVM_TRIPLE: &str = env!("LLVM_TRIPLE");
 
-static TELURL: &str = "https://telemetry2.aspect.build/ingest";
+static TELURL: &str = "https://telemetry.aspect.build/ingest";
 
 /// Pull the version of the currently running rust binary from CARGO_PKG_VERSION env.  This env
 /// is injected into the rust build artifacts with the version_key attribute on rust_library & rust_binary
@@ -51,10 +51,15 @@ pub async fn send_telemetry() -> std::result::Result<(), ()> {
         return Ok(());
     }
 
-    // Report telemetry
+    // Report telemetry.
+    //
+    // Breadcrumb: the payload is wrapped under the `aspect-cli` key, mirroring
+    // the `tools_telemetry` envelope used by https://github.com/aspect-build/tools_telemetry.
+    // When adding new fields, prefer reusing key names from that ruleset
+    // (e.g. `os`, `arch`, `ci`) so the aggregator stays consistent.
     let v = cargo_pkg_version();
     let body = format!(
-        "{{\"cli\": {{\"version\": \"{v}\", \"os\": \"{BZLOS}\", \"arch\": \"{BZLARCH}\"}}}}"
+        "{{\"aspect-cli\": {{\"version\": \"{v}\", \"os\": \"{BZLOS}\", \"arch\": \"{BZLARCH}\"}}}}"
     );
 
     let mut url = TELURL.to_string();
