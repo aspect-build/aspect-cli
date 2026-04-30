@@ -1,0 +1,262 @@
+"""Default telemetry feature.
+
+Registers exporters from three sources:
+
+  1. ASPECT_DEBUG=1 — always (regardless of `discover_endpoints`) wires up
+     a compact stderr exporter for local debugging. Independent of the
+     OTLP paths below.
+
+  2. Environment variables — when `discover_endpoints = True` (default), reads the
+     standard `OTEL_EXPORTER_OTLP_*` vars and registers matching endpoints.
+     Preserves the familiar behavior where setting those vars in CI is
+     enough to ship traces, without baking the env-var sniff into the
+     runtime; the path is fully Starlark-driven.
+
+  3. The `endpoint` arg — a CLI-friendly string list. Each entry encodes
+     a URL with optional headers using a semicolon-separated form:
+
+         "URL[;header_key=header_value[;header_key=header_value...]]"
+
+     Examples:
+         --telemetry:endpoint=https://collector.example.com:4317
+         --telemetry:endpoint='https://otel.internal:4317;authorization=Bearer xyz;x-tenant=acme'
+
+     Endpoints registered this way use the default protocol (grpc) and all
+     signals; callers needing per-signal routing or resource_attributes
+     should use option 4 below.
+
+  4. Direct registration via `ctx.telemetry.exporters.add(...)` from
+     config.axl or any feature's implementation. This is the full-fidelity
+     API: any combination of `url`/`file`, `protocol`, `headers`, `signals`,
+     `format`, `resource_attributes` is supported. Use this when the
+     CI-driven env-var path and the simple `--telemetry:endpoint` flag
+     don't fit — for example, per-task overrides, secrets fetched at
+     runtime, or per-signal routing to different collectors.
+
+     Example (config.axl):
+         def config(ctx):
+             ctx.telemetry.exporters.add(
+                 url = "https://otel.internal:4317",
+                 headers = {"authorization": "Bearer " + ctx.std.env.var("INTERNAL_OTEL_TOKEN")},
+                 signals = ["traces", "logs"],
+                 resource_attributes = {"tenant": "acme"},
+             )
+
+     Example (custom feature):
+         def _my_feature_impl(ctx: FeatureContext):
+             if ctx.std.env.var("CI_HOST") == "buildkite":
+                 ctx.telemetry.exporters.add(url = "https://otel.buildkite.example/v1")
+
+This feature itself is just a convenience layer over option 4 — it reads
+env vars / CLI flags and turns them into `add(...)` calls. Anything you
+can do here you can do directly via option 4.
+
+Future versions of this feature may layer additional default behaviors on
+top (detected CI-host endpoints, sampling defaults, etc.).
+
+Environment variables read when `discover_endpoints = True`:
+  OTEL_EXPORTER_OTLP_ENDPOINT          — single endpoint for all signals
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT   — traces-only override
+  OTEL_EXPORTER_OTLP_LOGS_ENDPOINT     — logs-only override
+  OTEL_EXPORTER_OTLP_METRICS_ENDPOINT  — metrics-only override
+  OTEL_EXPORTER_OTLP_PROTOCOL          — "grpc" (default) or "http/protobuf"
+  OTEL_EXPORTER_OTLP_HEADERS           — comma-separated key=value list
+                                         applied to every endpoint registered
+                                         by this feature
+
+Per-signal endpoint overrides take precedence over the catch-all. If only the
+catch-all is set, one endpoint is registered for all signals; if a per-signal
+endpoint is set, it is registered for just that signal (and the catch-all,
+where present, covers any remaining signals).
+"""
+
+
+def _parse_headers(env):
+    raw = env.var("OTEL_EXPORTER_OTLP_HEADERS") or ""
+    if not raw:
+        return {}
+    out = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            continue
+        k, v = entry.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+# Per-signal HTTP path suffixes from the OTel spec. The catch-all
+# `OTEL_EXPORTER_OTLP_ENDPOINT` is treated as a base URL for the
+# `http/protobuf` (and `http/json`) protocol — the SDK appends a
+# signal-specific path. gRPC ignores paths entirely. Per-signal env
+# vars are always taken as-is regardless of protocol.
+_OTLP_HTTP_PATHS = {
+    "traces": "/v1/traces",
+    "logs": "/v1/logs",
+    "metrics": "/v1/metrics",
+}
+
+
+def _register_env_endpoints(ctx):
+    env = ctx.std.env
+    catch_all = env.var("OTEL_EXPORTER_OTLP_ENDPOINT") or ""
+    per_signal = {
+        "traces": env.var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or "",
+        "logs": env.var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") or "",
+        "metrics": env.var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or "",
+    }
+
+    # Nothing to do if the user hasn't opted in.
+    if not (catch_all or per_signal["traces"] or per_signal["logs"] or per_signal["metrics"]):
+        return
+
+    protocol = env.var("OTEL_EXPORTER_OTLP_PROTOCOL") or "grpc"
+    headers = _parse_headers(env)
+
+    # Resolve URL per signal per OTel spec:
+    #   1. Per-signal env wins over catch-all and is used as-is.
+    #   2. Catch-all on gRPC: used as-is for every signal lacking a per-
+    #      signal env (the gRPC exporter dispatches to the right service
+    #      method based on which RPC is invoked).
+    #   3. Catch-all on http/protobuf: a base URL — append /v1/<signal>
+    #      because opentelemetry-rust's `with_endpoint(...)` treats its
+    #      input as the *full* endpoint and does not auto-append a path.
+    by_url = {}
+
+    def _add(url, signal):
+        if not url:
+            return
+        if url not in by_url:
+            by_url[url] = []
+        if signal not in by_url[url]:
+            by_url[url].append(signal)
+
+    is_http = protocol != "grpc"
+    for signal in ("traces", "logs", "metrics"):
+        if per_signal[signal]:
+            _add(per_signal[signal], signal)
+        elif catch_all:
+            if is_http:
+                _add(catch_all.rstrip("/") + _OTLP_HTTP_PATHS[signal], signal)
+            else:
+                _add(catch_all, signal)
+
+    for url, signals in by_url.items():
+        ctx.telemetry.exporters.add(
+            url = url,
+            protocol = protocol,
+            headers = headers,
+            signals = signals,
+        )
+
+
+def _parse_endpoint_entry(entry):
+    """Split a `URL[;k=v...]` string into (url, headers_dict).
+
+    Header pairs without `=` and empty segments are silently skipped.
+    """
+    parts = entry.split(";")
+    url = parts[0].strip()
+    headers = {}
+    for pair in parts[1:]:
+        pair = pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        k, v = pair.split("=", 1)
+        headers[k.strip()] = v.strip()
+    return url, headers
+
+
+def _register_endpoint_args(ctx):
+    """Register endpoints declared via `--telemetry:endpoint`.
+
+    Each entry is `URL[;k=v...]`. URL is required; the optional `;k=v`
+    pairs become per-endpoint headers (auth tokens, tenant routing).
+    """
+    for entry in ctx.args.endpoint:
+        if not entry:
+            continue
+        url, headers = _parse_endpoint_entry(entry)
+        if not url:
+            fail("Telemetry: --telemetry:endpoint entry %r is missing a URL" % entry)
+        ctx.telemetry.exporters.add(url = url, headers = headers)
+
+
+def _register_aspect_debug(ctx):
+    """`ASPECT_DEBUG=1` translates into a stderr exporter (compact format).
+
+    Lives here as a user-space convention rather than a Rust-side special
+    case — there's no ASPECT_DEBUG-aware branching in the runtime; the
+    same exporter mechanism handles stderr the same way it handles OTLP.
+    """
+    if ctx.std.env.var("ASPECT_DEBUG"):
+        ctx.telemetry.exporters.add(file = "stderr", format = "compact")
+
+
+def _describe(spec):
+    """Render an ExporterSpec as a one-line trace.log string."""
+    if spec.kind == "otlp":
+        s = "otlp:%s [%s]" % (spec.url, spec.protocol)
+        if spec.headers:
+            s += " headers=" + ",".join(sorted(spec.headers.keys()))
+    else:
+        s = "file:%s [%s]" % (spec.file, spec.format)
+    if spec.signals:
+        s += " signals=" + ",".join(spec.signals)
+    return s
+
+
+
+def _telemetry_impl(ctx: FeatureContext):
+    # ASPECT_DEBUG is independent of `discover_endpoints` — it controls
+    # local stderr debug output, not OTLP endpoint auto-discovery. Users
+    # may legitimately want one without the other.
+    _register_aspect_debug(ctx)
+    if ctx.args.discover_endpoints:
+        _register_env_endpoints(ctx)
+    if ctx.args.endpoint:
+        _register_endpoint_args(ctx)
+
+    trace.log("telemetry: %d exporter(s) registered:" % len(ctx.telemetry.exporters))
+    for spec in ctx.telemetry.exporters:
+        trace.log("  - " + _describe(spec))
+
+
+Telemetry = feature(
+    display_name = "Telemetry",
+    summary = "Register OTLP exporters. Imports endpoints from OTEL_EXPORTER_OTLP_* " +
+              "env vars by default and accepts additional endpoints (with optional " +
+              "headers) via the --telemetry:endpoint flag.",
+    implementation = _telemetry_impl,
+    args = {
+        # Toggles the env-var import. Kept separate from `enabled` so when
+        # this feature gains more defaults later, callers can opt out of
+        # just the env path without losing the rest.
+        "discover_endpoints": args.boolean(
+            default = True,
+            description = "Auto-discover endpoints from the surrounding environment. " +
+                          "Today this means importing the standard OTEL_EXPORTER_OTLP_* " +
+                          "env vars; future iterations may add CI-host detection. Set " +
+                          "to False to rely exclusively on Starlark-side endpoint " +
+                          "registration.",
+        ),
+        # CLI-friendly endpoint list. Each entry is `URL[;k=v...]`: the
+        # first segment is the URL, optional `;k=v` pairs become headers
+        # for that endpoint (auth tokens, tenant routing, etc.). All
+        # endpoints registered through this arg use the default protocol
+        # (grpc) and all signals. For richer config (per-signal routing,
+        # resource_attributes), call ctx.telemetry.exporters.add() from
+        # config.axl directly.
+        "endpoint": args.string_list(
+            default = [],
+            description = "OTLP endpoints in the form 'URL[;header=value;...]'. " +
+                          "Repeatable. URL is required; optional ';key=value' pairs " +
+                          "become per-endpoint headers. Default protocol is grpc and " +
+                          "all signals are enabled. For per-signal routing or " +
+                          "resource_attributes, call ctx.telemetry.exporters.add() " +
+                          "directly from config.axl.",
+        ),
+    },
+)

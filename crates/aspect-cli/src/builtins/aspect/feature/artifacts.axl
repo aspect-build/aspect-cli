@@ -312,8 +312,6 @@ def _artifact_upload_impl(ctx: FeatureContext):
     ci = detect_ci(ctx.std.env)
     is_local = uploader == None
 
-    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
-
     uuid = _make_uuid(ctx)
     upload_test_logs = ctx.args.upload_test_logs
     upload_testlogs  = upload_test_logs != "none"   # convenience for the gate below
@@ -437,40 +435,39 @@ def _artifact_upload_impl(ctx: FeatureContext):
                     if browse:
                         artifacts_trait.artifacts_browse_url = browse
 
-        if debug:
-
+        if trace.enabled:
             entries = state.get("_test_entries", [])
             skipped = state.get("_skipped_files", [])
-            print("")
-            print("------------------------------------")
-            print("artifact upload debug summary:")
-            print("uploader: " + ("active" if not is_local else "none"))
-            print("profile:  " + profile_path + " (exists=" + str(ctx.std.fs.exists(profile_path)) + ")")
-            print("execlog:  " + execlog_path + " (exists=" + str(ctx.std.fs.exists(execlog_path)) + ")")
-            print("bes/bep:  " + bep_path + " (exists=" + str(ctx.std.fs.exists(bep_path)) + ")")
-            print("testlog entries: " + str(len(entries)))
+            trace.log("")
+            trace.log("------------------------------------")
+            trace.log("artifact upload debug summary:")
+            trace.log("uploader: " + ("active" if not is_local else "none"))
+            trace.log("profile:  " + profile_path + " (exists=" + str(ctx.std.fs.exists(profile_path)) + ")")
+            trace.log("execlog:  " + execlog_path + " (exists=" + str(ctx.std.fs.exists(execlog_path)) + ")")
+            trace.log("bes/bep:  " + bep_path + " (exists=" + str(ctx.std.fs.exists(bep_path)) + ")")
+            trace.log("testlog entries: " + str(len(entries)))
             for f in entries:
-                print("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
+                trace.log("  " + f["label"] + " " + f["src"] + " -> " + f["dest"])
             if skipped:
-                print("skipped files: " + str(len(skipped)))
+                trace.log("skipped files: " + str(len(skipped)))
                 for f in skipped:
-                    print("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
+                    trace.log("  " + f["label"] + " " + f["name"] + " (" + f["reason"] + ": " + f["raw"] + ")")
             if is_local:
-                print("no CI detected, uploads skipped (dry run)")
+                trace.log("no CI detected, uploads skipped (dry run)")
             browse = artifacts_trait.artifacts_browse_url
             if browse:
-                print("artifacts_browse_url: " + browse)
+                trace.log("artifacts_browse_url: " + browse)
             kinds = artifacts_trait.artifact_urls
             if kinds:
                 for k, v in kinds.items():
-                    print("artifact_urls[" + k + "]: " + v)
+                    trace.log("artifact_urls[" + k + "]: " + v)
             label_urls = artifacts_trait.testlogs_label_urls
             if label_urls:
-                print("testlogs_label_urls: " + str(len(label_urls)) + " entries")
+                trace.log("testlogs_label_urls: " + str(len(label_urls)) + " entries")
                 for lbl, file_urls in label_urls.items():
                     for fname, url in file_urls.items():
-                        print("  " + lbl + " [" + fname + "] -> " + url)
-            print("------------------------------------")
+                        trace.log("  " + lbl + " [" + fname + "] -> " + url)
+            trace.log("------------------------------------")
 
     bazel_trait.build_event.append(_on_build_event)
     bazel_trait.build_end.append(_on_build_end)

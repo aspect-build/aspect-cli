@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    sync::mpsc::RecvError,
     thread::{self, JoinHandle},
     time::SystemTime,
 };
@@ -9,10 +9,8 @@ use axl_proto::{
     build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id},
 };
 
-use tokio::task;
-use tracing::{Level, Span, span::EnteredSpan};
+use tracing::{Level, span::EnteredSpan};
 
-use super::super::r#async::rt::AsyncRuntime;
 use super::stream::Subscriber;
 
 #[derive(Debug)]
@@ -31,30 +29,26 @@ fn timestamp_or_now(timestamp: Option<&Timestamp>) -> i64 {
 }
 
 impl TracingEventStreamSink {
-    pub fn spawn(rt: AsyncRuntime, recv: Subscriber<BuildEvent>) -> JoinHandle<()> {
-        let span = tracing::info_span!("events");
+    pub fn spawn(recv: Subscriber<BuildEvent>) -> JoinHandle<()> {
+        let events_span = tracing::info_span!("events");
         thread::spawn(move || {
-            rt.block_on(async { TracingEventStreamSink::task_spawn(span, recv).await.await })
-                .expect("failed to join")
-        })
-    }
-
-    pub async fn task_spawn(span: Span, recv: Subscriber<BuildEvent>) -> task::JoinHandle<()> {
-        tokio::task::spawn(async move {
-            let _guard = span.enter();
-            let mut spans: HashMap<&str, EnteredSpan> = HashMap::new();
+            let _events_guard = events_span.enter();
+            let mut build_span: Option<EnteredSpan> = None;
 
             loop {
-                let event = recv.recv();
+                let event = match recv.recv() {
+                    Ok(e) => e,
+                    Err(RecvError) => break,
+                };
 
-                if event.is_err() {
-                    break;
-                }
-                let event = event.unwrap();
+                let Some(id) = event.id.as_ref().and_then(|w| w.id.as_ref()) else {
+                    continue;
+                };
+                let Some(payload) = event.payload else {
+                    continue;
+                };
 
-                let id = event.id.as_ref().unwrap().id.as_ref().unwrap();
-
-                match (event.payload.unwrap(), id) {
+                match (payload, id) {
                     (_, Id::Fetch(id)) => {
                         tracing::event!(name: "fetch", Level::INFO, url = ?id.url);
                     }
@@ -71,40 +65,54 @@ impl TracingEventStreamSink {
                             let start_time = timestamp_or_now(action.start_time.as_ref());
                             let end_time = timestamp_or_now(action.end_time.as_ref());
 
-                            let span = tracing::info_span!(
+                            // Span is entered+dropped on the same line; the OTel layer
+                            // honors otel.start_time/otel.end_time as timing overrides,
+                            // so the exported span carries the action's real wall-clock
+                            // window rather than this near-zero local duration.
+                            let _action = tracing::info_span!(
                                 "action",
                                 otel.start_time = start_time,
-                                otel.end_time = end_time
+                                otel.end_time = end_time,
+                                label = ?id.label,
+                                success = action.success,
+                                mnemonic = action.r#type,
+                                exit_code = action.exit_code,
+                                command_line = ?action.command_line,
+                                stdout = ?action.stdout,
+                                stderr = ?action.stderr,
+                                primary_output = ?action.primary_output,
+                                action_metadata_logs = ?action.action_metadata_logs,
+                                failure_detail = ?action.failure_detail,
+                                strategy_details = ?action.strategy_details,
                             )
                             .entered();
-                            drop(span);
                         } else {
                             tracing::event!(name: "action_completed", Level::INFO, label = ?id.label);
                         }
                     }
                     (Payload::Started(s), Id::Started(_)) => {
-                        assert!(
-                            spans
-                                .insert(
-                                    "building",
-                                    tracing::info_span!(
-                                        "build_tool",
-                                        version = ?s.build_tool_version,
-                                        pid = ?s.server_pid,
-                                        uuid = ?s.uuid,
-                                        current_dir = ?s.working_directory,
-                                        root_dir = ?s.workspace_directory,
-                                    )
-                                    .entered()
-                                )
-                                .is_none()
+                        if build_span.is_some() {
+                            tracing::warn!("ignoring duplicate Started event");
+                            continue;
+                        }
+                        build_span = Some(
+                            tracing::info_span!(
+                                "build_tool",
+                                version = ?s.build_tool_version,
+                                pid = ?s.server_pid,
+                                uuid = ?s.uuid,
+                                current_dir = ?s.working_directory,
+                                root_dir = ?s.workspace_directory,
+                            )
+                            .entered(),
                         );
                     }
                     (Payload::Finished(_), Id::BuildFinished(_)) => {
-                        spans
-                            .remove("building")
-                            .expect("build_finished should have been called after build_started")
-                            .exit();
+                        if let Some(span) = build_span.take() {
+                            span.exit();
+                        } else {
+                            tracing::warn!("BuildFinished without prior Started");
+                        }
                     }
                     (Payload::Completed(target), Id::TargetCompleted(id)) => {
                         tracing::event!(
@@ -115,9 +123,8 @@ impl TracingEventStreamSink {
                             success = target.success
                         );
                     }
-
                     _ => {}
-                };
+                }
             }
         })
     }

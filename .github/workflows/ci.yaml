@@ -18,6 +18,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+# Workflow-level env. Per-job env: blocks add their own (e.g. ASPECT_API_TOKEN);
+# values defined here are inherited by every step in every job. The Dash0 OTLP
+# endpoint and bearer token feed `.aspect/config.axl`'s `ctx.telemetry.exporters.add(...)`
+# call, which dogfoods the trace.event/trace.log pipeline against a real backend.
+# Both are no-ops if a secret isn't configured (unset env var = empty string,
+# config.axl skips registration).
+env:
+  DASH0_ENDPOINT: ${{ secrets.DASH0_ENDPOINT }}
+  DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
+
 jobs:
   pre-build:
     runs-on: [self-hosted, aspect-workflows, aspect-default]

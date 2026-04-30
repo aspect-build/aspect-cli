@@ -32,6 +32,7 @@ pub fn get_globals() -> GlobalsBuilder {
     ]);
     engine::builtins::register_json(&mut globals);
     engine::register_globals(&mut globals);
+    crate::trace::register_globals(&mut globals);
     globals
 }
 

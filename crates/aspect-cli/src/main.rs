@@ -2,8 +2,8 @@ mod builtins;
 mod cmd;
 mod helpers;
 mod trace;
+mod trace_buffer;
 
-use std::env::var;
 use std::process::ExitCode;
 
 use aspect_telemetry::{cargo_pkg_short_version, do_not_track, send_telemetry};
@@ -16,13 +16,6 @@ use tracing::info_span;
 
 use crate::cmd::Cmd;
 use crate::helpers::{find_repo_root, get_default_axl_search_paths, search_sources};
-
-fn debug_mode() -> bool {
-    match var("ASPECT_DEBUG") {
-        Ok(val) => !val.is_empty(),
-        _ => false,
-    }
-}
 
 // Must use a multi thread runtime with at least 3 threads for following reasons;
 //
@@ -46,8 +39,13 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
         let _ = task::spawn(send_telemetry());
     }
 
-    let _tracing = trace::init();
-    let _root = info_span!("root").entered();
+    let mut _tracing = trace::init();
+    let _root = info_span!(
+        "root",
+        version = cargo_pkg_short_version(),
+        pid = std::process::id(),
+    )
+    .entered();
 
     let current_work_dir = std::env::current_dir()?;
     let repo_root = find_repo_root(&current_work_dir)
@@ -57,8 +55,6 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     let disk_store = DiskStore::new(repo_root.clone());
     let mode = ModEvaluator::new(repo_root.clone());
 
-    let _ = info_span!("expand_module_store").enter();
-
     let root_mod = mode.evaluate(AXL_ROOT_MODULE_NAME.to_string(), repo_root.clone())?;
     let builtins = builtins::expand_builtins(repo_root.clone(), disk_store.builtins_path())?;
     let module_roots = disk_store.expand_store(&root_mod, builtins).await?;
@@ -66,20 +62,19 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
     let mut modules: Vec<Mod> = vec![];
     for (name, root) in module_roots {
         let r#mod = mode.evaluate(name, root)?;
-        if debug_mode() {
-            eprintln!("module @{} at {:?}", r#mod.name, r#mod.root);
-        };
+        axl_runtime::trace!("module @{} at {:?}", r#mod.name, r#mod.root);
         modules.push(r#mod)
     }
 
     let search_paths = get_default_axl_search_paths(&current_work_dir, &repo_root);
     let (scripts, configs) = search_sources(&search_paths).await?;
 
-    let espan = info_span!("eval");
-
+    // `_root` is entered on this thread; spawn_blocking moves work to a
+    // different thread where the span stack is empty. Capture the span and
+    // re-enter it on the worker so the phase spans nest under `root`.
+    let parent_span = tracing::Span::current();
     let out = spawn_blocking(move || -> Result<ExitCode, anyhow::Error> {
-        let _enter = espan.enter();
-
+        let _enter = parent_span.enter();
         let cli_version = cargo_pkg_short_version();
 
         ModuleEnv::with(|env| -> Result<ExitCode, anyhow::Error> {
@@ -126,12 +121,17 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             let dispatch = cmd.dispatch(matches)?;
 
-            let span = info_span!("task");
-            let _enter = span.enter();
-
             // Phase 3: run enabled feature impls.
             mpe.execute_features_with_args(|f, h| dispatch.feature_args(f, h))
                 .map_err(anyhow::Error::from)?;
+
+            // Phase 3.5: install exporters from any registered via
+            // `ctx.telemetry.exporters.add(...)`. Replays buffered spans
+            // and logs to them before phase 4 starts emitting task traces.
+            // No-op (and disables further OTel work for the rest of the run)
+            // if no exporter was registered.
+            let exporters = mpe.drain_exporters();
+            tokio::runtime::Handle::current().block_on(trace::install_late_exporters(exporters))?;
 
             // Phase 4: execute the selected task.
             let exit = mpe

@@ -99,6 +99,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
         handler(ctx)
 
     if ctx.args.cancel:
+        trace.event("build.cancel", fields = {"cancelling": True})
         cancellation = ctx.bazel.cancel_invocation()
         cancellation.wait()
 
@@ -108,11 +109,11 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
         flags = flags,
     )
 
+    trace.event("build.flags",  fields = {"flags": flags})
     rc_startup_flags, flags = rc.expand_all(command = command)
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
     print(rc.announce(command = command, ansi = color_enabled(ctx.std)))
 
-    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
     results = init_results()
 
     for _ in range(10):
@@ -135,7 +136,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
             for event in invocation.build_events():
                 for handler in bazel_trait.build_event:
                     handler(ctx, event)
-                if process_event(results, event, debug = debug):
+                if process_event(results, event):
                     live_status = "failing" if (
                         results["failed_actions_total"] > 0 or
                         results["failed_test_total"] > 0 or

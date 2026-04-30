@@ -22,6 +22,26 @@ def config(ctx: ConfigContext):
     # assert we can call a lambda with a global bind from another module in a config script
     lambda_with_global_bind()("assert")
 
+    # Dogfood the telemetry.exporters API: when our GitHub Actions workflow
+    # injects DASH0_ENDPOINT / DASH0_TOKEN, ship aspect-cli's own traces and
+    # logs to Dash0 so the team can see real instrumentation data from CI
+    # runs. No-op outside of CI (both vars must be set). Auth is a Bearer
+    # header on the OTLP request — Dash0's standard ingestion path.
+    dash0_endpoint = ctx.std.env.var("DASH0_ENDPOINT")
+    dash0_token    = ctx.std.env.var("DASH0_TOKEN")
+    if dash0_endpoint and dash0_token:
+        ctx.telemetry.exporters.add(
+            url = dash0_endpoint,
+            protocol = "grpc",
+            headers = {
+                "Authorization": "Bearer " + dash0_token,
+            },
+            resource_attributes = {
+                "service.name":     "aspect-cli",
+                "deployment.environment": "ci",
+            },
+        )
+
     # enable Github Status Checks
     ctx.features[GithubStatusChecks].enabled = True
 

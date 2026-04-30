@@ -37,20 +37,23 @@ pub struct ConfigContext<'v> {
     tasks: values::Value<'v>,
     trait_map: values::Value<'v>,
     feature_map: values::Value<'v>,
+    telemetry: values::Value<'v>,
 }
 
 impl<'v> ConfigContext<'v> {
     /// Create a new ConfigContext from a pre-allocated `TaskMap` value plus the
-    /// trait and feature map values.
+    /// trait, feature, and telemetry values.
     pub fn new(
         tasks: values::Value<'v>,
         trait_map: values::Value<'v>,
         feature_map: values::Value<'v>,
+        telemetry: values::Value<'v>,
     ) -> Self {
         Self {
             tasks,
             trait_map,
             feature_map,
+            telemetry,
         }
     }
 
@@ -92,6 +95,7 @@ impl<'v> Freeze for ConfigContext<'v> {
             tasks: self.tasks.freeze(freezer)?,
             trait_map: self.trait_map.freeze(freezer)?,
             feature_map: self.feature_map.freeze(freezer)?,
+            telemetry: self.telemetry.freeze(freezer)?,
         })
     }
 }
@@ -106,6 +110,8 @@ pub struct FrozenConfigContext {
     trait_map: FrozenValue,
     #[allocative(skip)]
     feature_map: FrozenValue,
+    #[allocative(skip)]
+    telemetry: FrozenValue,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenConfigContext {
@@ -189,5 +195,18 @@ pub(crate) fn config_context_methods(registry: &mut MethodsBuilder) {
             .downcast_ref_err::<ConfigContext>()
             .into_anyhow_result()?;
         Ok(ctx.feature_map)
+    }
+
+    /// Telemetry handle. Use `ctx.telemetry.exporters.add(url=..., ...)` to
+    /// register OTLP exporters before any task runs.
+    #[starlark(attribute)]
+    fn telemetry<'v>(this: values::Value<'v>) -> anyhow::Result<values::Value<'v>> {
+        if let Some(c) = this.downcast_ref::<ConfigContext>() {
+            return Ok(c.telemetry);
+        }
+        if let Some(c) = this.downcast_ref::<FrozenConfigContext>() {
+            return Ok(c.telemetry.to_value());
+        }
+        Err(anyhow::anyhow!("expected ConfigContext"))
     }
 }

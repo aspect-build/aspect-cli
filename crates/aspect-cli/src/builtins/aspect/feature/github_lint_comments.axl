@@ -371,24 +371,24 @@ def _github_lint_impl(ctx: FeatureContext):
             state["all_comments"] = []
 
     def _lint_end(ctx, relevant_diagnostics):
-        if debug:
-            print("github lint comment debug summary:")
+        if trace.enabled:
+            trace.log("github lint comment debug summary:")
             if gh_inactive_reason:
-                print("inactive reason:  %s" % gh_inactive_reason)
-            print("found comments:   %s" % state["all_comments_count"])
+                trace.log("inactive reason:  %s" % gh_inactive_reason)
+            trace.log("found comments:   %s" % state["all_comments_count"])
             if gh:
-                print("git prefix:       %r" % gh.get("prefix", ""))
+                trace.log("git prefix:       %r" % gh.get("prefix", ""))
                 changed_line_count = 0
                 for v in gh["changed_lines"].values():
                     changed_line_count += len(v)
-                print("changed lines:    %s across %s file(s)" % (changed_line_count, len(gh["changed_lines"])))
-                print("filtered by diff: %s" % state["filtered"])
-            print("posted comments:  %s" % state["posted"])
+                trace.log("changed lines:    %s across %s file(s)" % (changed_line_count, len(gh["changed_lines"])))
+                trace.log("filtered by diff: %s" % state["filtered"])
+            trace.log("posted comments:  %s" % state["posted"])
             for e in state["errors"]:
-                print("  post error: %s" % e)
+                trace.log("  post error: %s" % e)
             for c in state["all_comments"]:
                 lines = c["body"].split("\n")
-                print("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
+                trace.log("  [%s:%d] %s" % (c.get("path", "?"), c.get("line", 0), lines[1] if len(lines) > 1 else lines[0]))
         if gh:
             if gh["stale"] or _check_staleness(ctx, gh):
                 gh["stale"] = True
