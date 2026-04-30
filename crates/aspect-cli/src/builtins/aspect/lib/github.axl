@@ -737,7 +737,7 @@ def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    res = ctx.http().download(url = url, output = output_path, headers = headers).map_err(lambda e: str(e)).block()
+    res = ctx.http().download(url = url, output = output_path, mode = 0o644, headers = headers).map_err(lambda e: str(e)).block()
     if type(res) == "string":
         return {"success": False, "error": "transport error: " + res}
     return {"success": True}
