@@ -18,5 +18,7 @@ rust_library(
     deps = [
         ":build_rs",
         "@crates//:reqwest",
+        "@crates//:serde_json",
+        "@crates//:sha1",
     ],
 )
