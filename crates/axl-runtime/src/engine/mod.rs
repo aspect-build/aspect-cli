@@ -28,6 +28,7 @@ pub mod task;
 pub mod task_context;
 pub mod task_info;
 pub mod task_map;
+pub mod telemetry;
 pub mod trait_map;
 pub mod util;
 
@@ -45,6 +46,9 @@ fn register_types(globals: &mut GlobalsBuilder) {
     const TaskContext: StarlarkValueAsType<task_context::TaskContext> = StarlarkValueAsType::new();
     const TaskInfo: StarlarkValueAsType<task_info::TaskInfo> = StarlarkValueAsType::new();
     const Template: StarlarkValueAsType<template::Template> = StarlarkValueAsType::new();
+    const Telemetry: StarlarkValueAsType<telemetry::Telemetry> = StarlarkValueAsType::new();
+    const Exporters: StarlarkValueAsType<telemetry::Exporters> = StarlarkValueAsType::new();
+    const ExporterSpec: StarlarkValueAsType<telemetry::ExporterSpec> = StarlarkValueAsType::new();
 }
 
 pub fn register_globals(globals: &mut GlobalsBuilder) {

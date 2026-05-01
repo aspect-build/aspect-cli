@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::env::var;
 use std::io;
 use std::process::Child;
 use std::process::Command;
@@ -38,13 +37,6 @@ use super::stream::ExecLogStream;
 use super::stream::WorkspaceEventStream;
 use super::stream_sink::GrpcEventStreamSink;
 use super::stream_tracing::TracingEventStreamSink;
-
-fn debug_mode() -> bool {
-    match var("ASPECT_DEBUG") {
-        Ok(val) => !val.is_empty(),
-        _ => false,
-    }
-}
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.BuildStatus>")]
@@ -302,7 +294,6 @@ impl Build {
             // Use subscribe_realtime() since this subscribes at stream creation
             // and doesn't need history replay.
             sink_handles.push(TracingEventStreamSink::spawn(
-                rt,
                 build_event_stream.as_ref().unwrap().subscribe(),
             ))
         }
@@ -310,9 +301,7 @@ impl Build {
         cmd.arg("--"); // separate flags from target patterns (not strictly necessary for build & test verbs but good form)
         cmd.args(targets);
 
-        if debug_mode() {
-            eprintln!("exec: {:?}", cmd.get_args());
-        }
+        crate::trace!("exec: {:?}", cmd.get_args());
 
         // TODO: if not inheriting, we should pipe and make the streams available to AXL
         cmd.stdout(if inherit_stdout {

@@ -300,8 +300,7 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
     log_file = ctx.std.fs.open(log_path)
     for entry in remote.logging.LogEntry().parse_from_delimited(log_file):
         if entry.method_name == "build.bazel.remote.execution.v2.ActionCache/GetActionResult":
-            if ctx.std.env.var("ASPECT_DEBUG"):
-                print(entry)
+            trace.log(entry)
             canonical_label = entry.metadata.target_id
             if canonical_label in canonical_targets and entry.metadata.action_mnemonic == "DeliveryHash":
                 original_label = canonical_targets[canonical_label]

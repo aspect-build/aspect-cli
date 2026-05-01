@@ -438,17 +438,17 @@ def init_results():
     }
 
 
-def process_event(results, event, debug=False):
+def process_event(results, event):
     """Update results in-place from a single build event.
 
     All BES field accesses go through _bes_get() to guard against AttributeError
-    on schema-mismatched or malformed events. When debug=True a warning is printed
-    to stdout whenever an expected field is absent.
+    on schema-mismatched or malformed events. Diagnostic warnings about missing
+    BES fields go through `trace`, so they only surface under ASPECT_DEBUG
+    or when an OTel endpoint is configured.
 
     Args:
         results: dict from init_results(), mutated in place
         event:   BuildEvent from BazelTrait.build_event hook
-        debug:   when True, print warnings for missing expected BES fields
 
     Returns:
         True if results changed in a way that warrants a status check update,
@@ -464,8 +464,8 @@ def process_event(results, event, debug=False):
         # Capture fields from build_started for invocation details.
         payload = event.payload
         uuid = _bes_get(payload, "uuid", "") or ""
-        if debug and not uuid:
-            print("warning: BES build_started event missing expected field 'uuid'")
+        if not uuid:
+            trace.log("warning: BES build_started event missing expected field 'uuid'")
         results["invocation_id"]       = uuid
         results["build_tool_version"]  = _bes_get(payload, "build_tool_version", "") or ""
         results["build_command"]       = _bes_get(payload, "command", "") or ""
@@ -489,8 +489,7 @@ def process_event(results, event, debug=False):
                             val = _bes_get(opt, "option_value", "") or ""
                             if val:
                                 results["bes_results_url"] = val
-                                if debug:
-                                    print("debug: captured bes_results_url=" + val)
+                                trace.log("debug: captured bes_results_url=" + val)
                             break
         return False
 
@@ -512,10 +511,9 @@ def process_event(results, event, debug=False):
                     if arg.startswith("--bes_results_url="):
                         results["bes_results_url"] = arg[len("--bes_results_url="):]
                         break
-            if debug:
-                print("debug: options_parsed explicit=" + str(len(results["options_parsed"]["explicit_cmd_line"])) +
-                      " startup=" + str(len(results["options_parsed"]["startup_options"])) +
-                      " cmd=" + str(len(results["options_parsed"]["cmd_line"])))
+            trace.log("debug: options_parsed explicit=" + str(len(results["options_parsed"]["explicit_cmd_line"])) +
+                   " startup=" + str(len(results["options_parsed"]["startup_options"])) +
+                   " cmd=" + str(len(results["options_parsed"]["cmd_line"])))
         return False
 
     elif kind == "build_metadata":
@@ -555,8 +553,8 @@ def process_event(results, event, debug=False):
         # (that tally includes cached actions which never fire this event, so
         # counting here would systematically under-report on incremental builds).
         mnemonic = _bes_get(payload, "type", "") or ""
-        if debug and success == None:
-            print("warning: BES action_completed event missing expected field 'success' (label=" + label + ")")
+        if success == None:
+            trace.log("warning: BES action_completed event missing expected field 'success' (label=" + label + ")")
         if not success:
             results["failed_actions_total"] += 1
             # Track unique labels of targets whose own actions failed (root
@@ -614,8 +612,8 @@ def process_event(results, event, debug=False):
         label   = _bes_get(event.id, "label", "") or ""
         # Kind was captured on the prior target_configured event.
         target_kind = results["target_kinds"].get(label, "") if label else ""
-        if debug and success == None:
-            print("warning: BES target_completed event missing expected field 'success' (label=" + label + ")")
+        if success == None:
+            trace.log("warning: BES target_completed event missing expected field 'success' (label=" + label + ")")
         if not success:
             results["failed_targets"].append({"label": label, "kind": target_kind})
             return True
@@ -652,10 +650,10 @@ def process_event(results, event, debug=False):
         # total_run_duration_millis is deprecated in the proto but still populated by Bazel.
         # Bucket duration by whether the test actually ran or was served from cache.
         duration_ms = _bes_get(payload, "total_run_duration_millis", 0) or 0
-        if debug and not status:
-            print("warning: BES test_summary event missing expected field 'overall_status' (label=" + label + ")")
-        if debug and not label:
-            print("warning: BES test_summary event missing expected field 'id.label'")
+        if not status:
+            trace.log("warning: BES test_summary event missing expected field 'overall_status' (label=" + label + ")")
+        if not label:
+            trace.log("warning: BES test_summary event missing expected field 'id.label'")
         cached = num_cached > 0
         if cached:
             if duration_ms:
@@ -769,8 +767,8 @@ def process_event(results, event, debug=False):
                         per_runner[display] = per_runner.get(display, 0) + count
             if per_runner:
                 results["runner_counts"] = per_runner
-        elif debug:
-            print("warning: BES build_metrics event missing expected field 'action_summary'")
+        else:
+            trace.log("warning: BES build_metrics event missing expected field 'action_summary'")
         timing_metrics = _bes_get(payload, "timing_metrics", None)
         if timing_metrics:
             wall_time = _bes_get(timing_metrics, "wall_time_in_ms", 0) or 0
@@ -845,11 +843,10 @@ def process_event(results, event, debug=False):
                         md_list.append({"reason": reason, "count": count})
             if md_list:
                 results["action_cache_stats"]["miss_details"] = md_list
-        if debug:
-            print("debug: build_metrics wall_time_ms=" + str(results["wall_time_ms"]) +
-                  " cpu_time_ms=" + str(results["cpu_time_ms"]) +
-                  " targets_configured=" + str(results["targets_configured"]) +
-                  " packages_loaded=" + str(results["packages_loaded"]))
+        trace.log("debug: build_metrics wall_time_ms=" + str(results["wall_time_ms"]) +
+               " cpu_time_ms=" + str(results["cpu_time_ms"]) +
+               " targets_configured=" + str(results["targets_configured"]) +
+               " packages_loaded=" + str(results["packages_loaded"]))
         return True
 
     elif kind == "build_finished":
@@ -3383,36 +3380,35 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
     Returns:
         dict with keys "title", "summary", "text" — suitable for check run output
     """
-    debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
-    if debug:
-        print("debug [render_check_output] status=" + status)
-        print("debug [render_check_output]   invocation_id=" + (results.get("invocation_id") or ""))
-        print("debug [render_check_output]   wall_time_ms=" + str(results.get("wall_time_ms", 0)))
-        print("debug [render_check_output]   targets_total=" + str(results.get("targets_total", 0)))
-        print("debug [render_check_output]   built_targets=" + str(len(results.get("built_targets", []))))
-        print("debug [render_check_output]   passed_test_total=" + str(results.get("passed_test_total", 0)))
-        print("debug [render_check_output]   passed_tests=" + str(len(results.get("passed_tests", []))))
-        print("debug [render_check_output]   failed_test_total=" + str(results.get("failed_test_total", 0)))
-        print("debug [render_check_output]   flaky_test_total=" + str(results.get("flaky_test_total", 0)))
-        print("debug [render_check_output]   actions_total=" + str(results.get("actions_total", 0)))
+    if trace.enabled:
+        trace.log("debug [render_check_output] status=" + status)
+        trace.log("debug [render_check_output]   invocation_id=" + (results.get("invocation_id") or ""))
+        trace.log("debug [render_check_output]   wall_time_ms=" + str(results.get("wall_time_ms", 0)))
+        trace.log("debug [render_check_output]   targets_total=" + str(results.get("targets_total", 0)))
+        trace.log("debug [render_check_output]   built_targets=" + str(len(results.get("built_targets", []))))
+        trace.log("debug [render_check_output]   passed_test_total=" + str(results.get("passed_test_total", 0)))
+        trace.log("debug [render_check_output]   passed_tests=" + str(len(results.get("passed_tests", []))))
+        trace.log("debug [render_check_output]   failed_test_total=" + str(results.get("failed_test_total", 0)))
+        trace.log("debug [render_check_output]   flaky_test_total=" + str(results.get("flaky_test_total", 0)))
+        trace.log("debug [render_check_output]   actions_total=" + str(results.get("actions_total", 0)))
         op = results.get("options_parsed") or {}
-        print("debug [render_check_output]   options_parsed explicit=" + str(len(op.get("explicit_cmd_line", []))) +
+        trace.log("debug [render_check_output]   options_parsed explicit=" + str(len(op.get("explicit_cmd_line", []))) +
               " startup=" + str(len(op.get("startup_options", []))) +
               " cmd=" + str(len(op.get("cmd_line", []))))
         ws = results.get("workspace_status") or {}
         if ws:
-            print("debug [render_check_output]   workspace_status=" + str(ws))
+            trace.log("debug [render_check_output]   workspace_status=" + str(ws))
         meta = results.get("metadata") or {}
         if meta:
-            print("debug [render_check_output]   metadata=" + str(meta))
+            trace.log("debug [render_check_output]   metadata=" + str(meta))
         passed = results.get("passed_tests") or []
         if passed:
             sample = [t.get("label", "") for t in passed[:5]]
-            print("debug [render_check_output]   passed_tests sample=" + str(sample))
+            trace.log("debug [render_check_output]   passed_tests sample=" + str(sample))
         built = results.get("built_targets") or []
         if built:
             sample = [t.get("label", "") for t in built[:3]]
-            print("debug [render_check_output]   built_targets sample=" + str(sample))
+            trace.log("debug [render_check_output]   built_targets sample=" + str(sample))
 
     # GitHub hard limit for check run output.text is 65535 bytes.
     # We use 65000 as a safe ceiling to leave headroom for encoding overhead.
@@ -3424,20 +3420,20 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
     summary_data = _build_summary_data(ctx, results, status, render_ctx, links, metadata_keys, run_date = run_date)
     details_data = _build_details_data(results, links, render_ctx = render_ctx, status = status, start_date = run_date, finish_date = finish_date, std = ctx.std)
 
-    if debug:
-        print("debug [render_check_output]   summary target_pattern=" + summary_data.get("target_pattern", ""))
-        print("debug [render_check_output]   summary branch=" + summary_data.get("branch", ""))
-        print("debug [render_check_output]   summary short_sha=" + summary_data.get("short_sha", ""))
-        print("debug [render_check_output]   summary detail_rows count=" + str(len(summary_data.get("detail_rows", []))))
-        print("debug [render_check_output]   details startup_options=" + str(len(details_data.get("startup_options", []))) +
+    if trace.enabled:
+        trace.log("debug [render_check_output]   summary target_pattern=" + summary_data.get("target_pattern", ""))
+        trace.log("debug [render_check_output]   summary branch=" + summary_data.get("branch", ""))
+        trace.log("debug [render_check_output]   summary short_sha=" + summary_data.get("short_sha", ""))
+        trace.log("debug [render_check_output]   summary detail_rows count=" + str(len(summary_data.get("detail_rows", []))))
+        trace.log("debug [render_check_output]   details startup_options=" + str(len(details_data.get("startup_options", []))) +
               " cmd_line_options=" + str(len(details_data.get("cmd_line_options", []))) +
               " explicit=" + str(bool(details_data.get("explicit_command_line", ""))))
-        print("debug [render_check_output]   run_date=" + run_date)
-        print("debug [render_check_output]   cpu_arch=" + str(results.get("cpu_arch", "")))
-        print("debug [render_check_output]   compilation_mode=" + str(results.get("compilation_mode", "")))
-        print("debug [render_check_output]   build_tool_version=" + str(results.get("build_tool_version", "")))
-        print("debug [render_check_output]   targets_configured=" + str(results.get("targets_configured", 0)))
-        print("debug [render_check_output]   packages_loaded=" + str(results.get("packages_loaded", 0)))
+        trace.log("debug [render_check_output]   run_date=" + run_date)
+        trace.log("debug [render_check_output]   cpu_arch=" + str(results.get("cpu_arch", "")))
+        trace.log("debug [render_check_output]   compilation_mode=" + str(results.get("compilation_mode", "")))
+        trace.log("debug [render_check_output]   build_tool_version=" + str(results.get("build_tool_version", "")))
+        trace.log("debug [render_check_output]   targets_configured=" + str(results.get("targets_configured", 0)))
+        trace.log("debug [render_check_output]   packages_loaded=" + str(results.get("packages_loaded", 0)))
 
     details_tmpl = t.get("details") or DETAILS_TEMPLATE
     summary_text = ctx.template.jinja2(t.get("summary") or SUMMARY_TEMPLATE, data = summary_data)
@@ -3458,44 +3454,38 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
     # status, invocation details) are redundant with the Aspect Web UI, so drop
     # them first.
     if len(details_text) > _DETAILS_LIMIT:
-        if debug:
-            print("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
-                  "), dropping Build Metadata")
+        trace.log("debug [render_check_output]   OVER LIMIT (" + str(len(details_text)) +
+               "), dropping Build Metadata")
         details_data["build_metadata_rows"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        if debug:
-            print("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping Workspace Status")
+        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+               "), dropping Workspace Status")
         details_data["workspace_status_rows"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        if debug:
-            print("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping Invocation")
+        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+               "), dropping Invocation")
         details_data["invocation_rows"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        if debug:
-            print("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping Aspect Workflows Runner")
+        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+               "), dropping Aspect Workflows Runner")
         details_data["aspect_runner_rows"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        if debug:
-            print("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping Performance")
+        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+               "), dropping Performance")
         details_data["invocation_stats"] = None
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
     if len(details_text) > _DETAILS_LIMIT:
-        if debug:
-            print("debug [render_check_output]   still OVER (" + str(len(details_text)) +
-                  "), dropping parsed-options lists")
+        trace.log("debug [render_check_output]   still OVER (" + str(len(details_text)) +
+               "), dropping parsed-options lists")
         details_data["startup_options"]  = []
         details_data["cmd_line_options"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
@@ -3512,9 +3502,8 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
             details_data["built_targets"] = built
             details_data["built_targets_overflow"] = str(overflow) if overflow > 0 else ""
             details_text = ctx.template.jinja2(details_tmpl, data = details_data)
-        if debug:
-            print("debug [render_check_output]   after target trim: details len=" + str(len(details_text)) +
-                  " built_targets=" + str(len(built)))
+        trace.log("debug [render_check_output]   after target trim: details len=" + str(len(details_text)) +
+               " built_targets=" + str(len(built)))
 
     if len(details_text) > _DETAILS_LIMIT:
         passed = details_data.get("passed_tests", [])
@@ -3527,22 +3516,21 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
             details_data["passed_tests"] = passed
             details_data["passed_tests_overflow"] = str(overflow) if overflow > 0 else ""
             details_text = ctx.template.jinja2(details_tmpl, data = details_data)
-        if debug:
-            print("debug [render_check_output]   after test trim: details len=" + str(len(details_text)) +
-                  " passed_tests=" + str(len(passed)))
+        trace.log("debug [render_check_output]   after test trim: details len=" + str(len(details_text)) +
+               " passed_tests=" + str(len(passed)))
 
     if len(details_text) > _DETAILS_LIMIT:
         # Last resort: drop cached_tests too.
         details_data["cached_tests"] = []
         details_text = ctx.template.jinja2(details_tmpl, data = details_data)
 
-    if debug:
-        print("debug [render_check_output]   summary len=" + str(len(summary_text)))
-        print("debug [render_check_output]   details len=" + str(len(details_text)))
-        print("debug [render_check_output] --- summary ---")
-        print(summary_text)
-        print("debug [render_check_output] --- details (first 5000 chars) ---")
-        print(details_text[:5000])
+    if trace.enabled:
+        trace.log("debug [render_check_output]   summary len=" + str(len(summary_text)))
+        trace.log("debug [render_check_output]   details len=" + str(len(details_text)))
+        trace.log("debug [render_check_output] --- summary ---")
+        trace.log(summary_text)
+        trace.log("debug [render_check_output] --- details (first 5000 chars) ---")
+        trace.log(details_text[:5000])
 
     target_pattern = render_ctx.get("targets", "") if render_ctx else ""
     task_display   = render_ctx.get("task_display_name", "") if render_ctx else ""

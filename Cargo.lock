@@ -193,17 +193,22 @@ dependencies = [
  "anyhow",
  "aspect-telemetry",
  "axl-runtime",
+ "chrono",
  "clap",
  "include_dir",
  "names",
  "opentelemetry",
+ "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "serde_json",
  "sha256",
  "starlark",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tonic",
  "tracing",
  "tracing-core",
  "tracing-opentelemetry",
@@ -2819,6 +2824,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-appender-tracing"
+version = "0.31.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef6a1ac5ca3accf562b8c306fa8483c85f4390f768185ab775f242f7fe8fdcc2"
+dependencies = [
+ "opentelemetry",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "opentelemetry-http"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4833,9 +4850,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-core"
-version = "0.1.34"
+version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9d12581f227e93f094d3af2ae690a574abb8a2b9b7a96e7cfe9647b2b617678"
+checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
  "valuable",
@@ -4854,15 +4871,12 @@ dependencies = [
 
 [[package]]
 name = "tracing-opentelemetry"
-version = "0.32.0"
-source = "git+https://github.com/thesayyn/tracing-opentelemetry?branch=v0.1.x#7cfdc3e93aafd29b8f1edea2b74c20e71d413a10"
+version = "0.32.1"
+source = "git+https://github.com/thesayyn/tracing-opentelemetry?branch=v0.1.x#a296dd9250aa3459d4afd3acb5eef70b328bba8c"
 dependencies = [
  "js-sys",
  "opentelemetry",
- "opentelemetry_sdk",
- "rustversion",
  "smallvec",
- "thiserror 2.0.18",
  "tracing",
  "tracing-core",
  "tracing-log",
@@ -4872,9 +4886,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
-version = "0.3.20"
+version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2054a14f5307d601f88daf0553e1cbf472acc4f2c51afab632431cdcd72124d5"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
  "nu-ansi-term",
  "sharded-slab",

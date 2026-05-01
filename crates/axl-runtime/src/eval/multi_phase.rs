@@ -17,6 +17,7 @@ use crate::engine::task::{FrozenTask, Task, TaskLike};
 use crate::engine::task_context::TaskContext;
 use crate::engine::task_info::TaskInfo;
 use crate::engine::task_map::TaskMap;
+use crate::engine::telemetry::{self, ExporterSpec, Telemetry};
 use crate::engine::r#trait::extract_trait_type_id;
 use crate::engine::trait_map::TraitMap;
 use crate::eval::error::EvalError;
@@ -62,18 +63,31 @@ pub struct MultiPhaseEval<'v, 'l> {
     features: Value<'v>,
     /// Global trait map allocated on the shared heap during Phase 2.
     trait_map_value: Option<Value<'v>>,
+    /// Telemetry handle allocated on the heap and shared between
+    /// ConfigContext and FeatureContext as `ctx.telemetry`. The runtime
+    /// drains exporter specs out of it (via `drain_exporters`) after phase 3.
+    telemetry_value: Value<'v>,
 }
 
 impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     pub fn new(env: &'l ModuleEnv<'v>, loader: &'l AxlLoader<'l>) -> Self {
         let heap = env.heap();
+        let telemetry_value = Telemetry::alloc(heap);
         MultiPhaseEval {
             env,
             loader,
             tasks: heap.alloc(TaskMap::new()),
             features: heap.alloc(FeatureMap::new()),
             trait_map_value: None,
+            telemetry_value,
         }
+    }
+
+    /// Drain exporter specs collected from `ctx.telemetry.exporters.add(...)`
+    /// during phases 2-3. Intended to be called once, after
+    /// `execute_features_with_args` completes and before phase 4 begins.
+    pub fn drain_exporters(&self) -> Vec<ExporterSpec> {
+        telemetry::drain_exporters(self.telemetry_value)
     }
 
     fn heap(&self) -> Heap<'v> {
@@ -82,6 +96,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
 
     /// Load and evaluate an AXL file via AxlLoader (per-file frozen module).
     /// The loader manages caching, cycle detection, and the module-scope stack.
+    #[tracing::instrument(level = "debug", skip_all, fields(path = %abs_path.display()))]
     fn eval_file(&self, scope: &'l Mod, abs_path: &Path) -> Result<FrozenModule, EvalError> {
         self.loader.eval_module(scope, abs_path)
     }
@@ -91,6 +106,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// Each file is loaded into its own frozen module (via `AxlLoader::eval_module`).
     /// `FrozenTask` and `FrozenFeature` values discovered in those modules are
     /// inserted into `self.tasks` and `self.features` on the shared heap.
+    #[tracing::instrument(skip_all)]
     pub fn eval(
         &mut self,
         scripts: &[PathBuf],
@@ -234,6 +250,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// and `Feature` values in-place via `set_attr` — the same `Value<'v>` objects
     /// discovered in Phase 1 are reused, so subsequent phases see the updated state.
     /// `ctx.tasks.add(...)` may insert additional tasks into `self.tasks`.
+    #[tracing::instrument(name = "execute.configs", skip_all)]
     pub fn execute_configs(&mut self, configs: &[PathBuf], mode: &'l Mod) -> Result<(), EvalError> {
         let heap = self.heap();
 
@@ -261,6 +278,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             self.tasks,
             self.trait_map_value.unwrap(),
             self.features,
+            self.telemetry_value,
         ));
 
         for config_path in configs {
@@ -293,6 +311,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// to enable or disable features. `args_builder` builds the fully-merged `Arguments`
     /// for each feature (callers handle CLI/override/default precedence). Features whose
     /// resolved `enabled` is `False` are skipped.
+    #[tracing::instrument(name = "execute.features", skip_all)]
     pub fn execute_features_with_args(
         &mut self,
         args_builder: impl Fn(&dyn FeatureLike<'v>, Heap<'v>) -> Arguments<'v>,
@@ -317,7 +336,11 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             }
 
             let attrs_value = heap.alloc(args);
-            let fctx = heap.alloc(FeatureContext::new(attrs_value, trait_map_value));
+            let fctx = heap.alloc(FeatureContext::new(
+                attrs_value,
+                trait_map_value,
+                self.telemetry_value,
+            ));
             let mut eval = Evaluator::new(&self.env.0);
             eval.set_loader(self.loader);
             eval.extra = Some(&self.loader.env);
@@ -335,6 +358,17 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// The index refers to the position in `self.tasks()` (same Vec returned to
     /// the CLI when building the command tree). `args_builder` returns the
     /// fully-merged `Arguments` (callers handle CLI/override/default precedence).
+    #[tracing::instrument(
+        name = "execute.task",
+        skip_all,
+        err,
+        fields(
+            task_key = %task_key,
+            task = tracing::field::Empty,
+            task_id = tracing::field::Empty,
+            exit_code = tracing::field::Empty,
+        )
+    )]
     pub fn execute_tasks_with_args(
         &mut self,
         task_index: usize,
@@ -349,6 +383,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let heap = self.heap();
         let task_id = task_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let task_args = args_builder(task, heap);
+
+        let span = tracing::Span::current();
+        span.record("task", task.name());
+        span.record("task_id", task_id.as_str());
 
         let task_info = TaskInfo {
             name: task.name(),
@@ -382,7 +420,16 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         eval.extra = Some(&self.loader.env);
 
         let ret = eval.eval_function(task.implementation(), &[context], &[])?;
-        Ok(ret.unpack_i32().map(|ex| ex as u8))
+        let exit_code = ret.unpack_i32().map(|ex| ex as u8);
+
+        tracing::Span::current().record("exit_code", exit_code.unwrap_or(0) as i64);
+        if let Some(code) = exit_code
+            && code != 0
+        {
+            tracing::error!(exit_code = code as i64, "task exited with non-zero status");
+        }
+
+        Ok(exit_code)
     }
 
     pub fn finish(self) -> FinishedEval {

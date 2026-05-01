@@ -26,18 +26,26 @@ pub struct FeatureContext<'v> {
     pub(crate) args: Value<'v>,
     /// The full mutable fragment map — inject hooks here.
     pub(crate) fragments: Value<'v>,
+    /// Telemetry handle: `ctx.telemetry.exporters.add(...)` registers OTLP
+    /// exporters that the runtime installs after phase 3 completes.
+    pub(crate) telemetry: Value<'v>,
 }
 
 unsafe impl<'v> Trace<'v> for FeatureContext<'v> {
     fn trace(&mut self, tracer: &Tracer<'v>) {
         self.args.trace(tracer);
         self.fragments.trace(tracer);
+        self.telemetry.trace(tracer);
     }
 }
 
 impl<'v> FeatureContext<'v> {
-    pub fn new(args: Value<'v>, fragments: Value<'v>) -> Self {
-        Self { args, fragments }
+    pub fn new(args: Value<'v>, fragments: Value<'v>, telemetry: Value<'v>) -> Self {
+        Self {
+            args,
+            fragments,
+            telemetry,
+        }
     }
 }
 
@@ -54,6 +62,7 @@ impl<'v> Freeze for FeatureContext<'v> {
         Ok(FrozenFeatureContext {
             args: self.args.freeze(freezer)?,
             fragments: self.fragments.freeze(freezer)?,
+            telemetry: self.telemetry.freeze(freezer)?,
         })
     }
 }
@@ -73,6 +82,8 @@ pub struct FrozenFeatureContext {
     args: FrozenValue,
     #[allocative(skip)]
     fragments: FrozenValue,
+    #[allocative(skip)]
+    telemetry: FrozenValue,
 }
 
 unsafe impl<'v> Trace<'v> for FrozenFeatureContext {
@@ -125,5 +136,19 @@ fn feature_context_methods(builder: &mut MethodsBuilder) {
     /// HTTP client for making requests during feature initialization.
     fn http<'v>(#[allow(unused)] this: Value<'v>) -> anyhow::Result<Http> {
         Ok(Http::new())
+    }
+
+    /// Telemetry handle. Use `ctx.telemetry.exporters.add(url=..., ...)` to
+    /// register OTLP exporters that the runtime installs after phase 3.
+    /// Buffered spans/logs from earlier phases are replayed to them.
+    #[starlark(attribute)]
+    fn telemetry<'v>(this: Value<'v>) -> anyhow::Result<Value<'v>> {
+        if let Some(c) = this.downcast_ref::<FeatureContext>() {
+            return Ok(c.telemetry);
+        }
+        if let Some(c) = this.downcast_ref::<FrozenFeatureContext>() {
+            return Ok(c.telemetry.to_value());
+        }
+        Err(anyhow::anyhow!("expected FeatureContext"))
     }
 }
