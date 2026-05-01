@@ -20,6 +20,51 @@ use liquid::ParserBuilder as LiquidParserBuilder;
 use liquid_core::model::{KString, Object as LiquidObject, Value as LiquidValue};
 use minijinja::{Environment as MinijinjaEnvironment, value::Value as MinijinjaValue};
 
+/// Convert a `serde_json::Value` directly to a `minijinja::Value`, walking
+/// the tree and building primitive minijinja values for each node.
+///
+/// We CANNOT use `MinijinjaValue::from_serialize(json_value)` here. The
+/// `starlark-rust` we depend on enables `serde_json/arbitrary_precision`,
+/// and cargo's feature unification activates that flag across the workspace.
+/// With that feature on, `serde_json::Number::serialize` emits a tagged
+/// newtype struct (`$serde_json::private::Number`) that only the serde_json
+/// deserializer understands. Other serializers — minijinja included —
+/// see an opaque struct, which surfaces in templates as a map (`{...}`)
+/// instead of a number, breaking arithmetic like `{{ a + b }}` with
+/// "tried to use + operator on unsupported types map and map".
+///
+/// Building the minijinja value directly sidesteps the tagged form.
+fn json_to_minijinja(value: &JsonValue) -> MinijinjaValue {
+    match value {
+        JsonValue::Null => MinijinjaValue::from(()),
+        JsonValue::Bool(b) => MinijinjaValue::from(*b),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                MinijinjaValue::from(i)
+            } else if let Some(u) = n.as_u64() {
+                MinijinjaValue::from(u)
+            } else if let Some(f) = n.as_f64() {
+                MinijinjaValue::from(f)
+            } else {
+                // Number that doesn't fit i64/u64/f64 — surface the string form
+                // so templates at least see something readable.
+                MinijinjaValue::from(n.to_string())
+            }
+        }
+        JsonValue::String(s) => MinijinjaValue::from(s.as_str()),
+        JsonValue::Array(arr) => {
+            MinijinjaValue::from(arr.iter().map(json_to_minijinja).collect::<Vec<_>>())
+        }
+        JsonValue::Object(obj) => {
+            let entries: Vec<(String, MinijinjaValue)> = obj
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
+                .collect();
+            MinijinjaValue::from_iter(entries)
+        }
+    }
+}
+
 pub(super) fn jinja2_render(template: &str, data: &JsonValue) -> anyhow::Result<String> {
     let mut env = MinijinjaEnvironment::new();
     env.add_template("template", template)
@@ -27,7 +72,7 @@ pub(super) fn jinja2_render(template: &str, data: &JsonValue) -> anyhow::Result<
     let tmpl = env
         .get_template("template")
         .map_err(|e| anyhow::anyhow!(e))?;
-    let ctx = MinijinjaValue::from_serialize(data);
+    let ctx = json_to_minijinja(data);
     tmpl.render(&ctx).map_err(|e| anyhow::anyhow!(e))
 }
 
