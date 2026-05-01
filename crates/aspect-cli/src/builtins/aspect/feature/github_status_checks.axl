@@ -10,13 +10,6 @@ Rendering is delegated to the kind-specific library:
 Future kinds (e.g. "delivery_results") add a branch in _task_update and a
 corresponding render_check_output() function in their own library.
 
-Usage in .aspect/config.axl:
-
-    load("@aspect_workflows//:lib.axl", "GithubStatusChecks")
-
-    configure(build, features = [GithubStatusChecks])
-    configure(my_task, features = [GithubStatusChecks])
-
 Templates can be customized per-task via GitHubStatusChecksTrait:
 
     def config(ctx: ConfigContext):
@@ -29,7 +22,7 @@ Templates can be customized per-task via GitHubStatusChecksTrait:
 """
 load("../traits.axl", "TaskLifecycleTrait", "GitHubStatusChecksTrait", "ArtifactsTrait", "TaskUpdate")
 load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
-load("../lib/bazel_results.axl", "init_results", "now_ms", "render_check_output")
+load("../lib/bazel_results.axl", "init_results", "now_ms", "render_check_output", "compute_reproducer_command")
 
 
 def _to_display_name(name):
@@ -307,6 +300,15 @@ def _github_status_checks(ctx: FeatureContext):
         if update.kind != "bazel_results":
             return
         results = update.data.get("results", init_results())
+
+        # Compute the `aspect <task> <labels>` reproducer command and stash it
+        # alongside the results dict for the renderer. The fields go into a
+        # local copy because update.data["results"] is frozen on the final
+        # update (TaskUpdate is a record), so we can't mutate `results` itself.
+        repro_cmd, repro_total = compute_reproducer_command(results, ctx.task.name)
+        results = dict(results)
+        results["reproducer_command"]       = repro_cmd
+        results["reproducer_command_total"] = repro_total
 
         # Set ended_ms before rendering so the terminal check run reflects the
         # final duration. Non-final updates don't populate ended_ms.

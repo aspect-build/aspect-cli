@@ -1,0 +1,438 @@
+"""GitHub Status Comments feature — aggregates per-task status from sibling CI jobs into one PR comment.
+
+Every job is both a producer (uploads its task identity + results subset as an
+artifact) and a writer (polls all sibling-job artifacts in the current run and
+PATCHes one PR comment). Polling is event-paced — the loop ticks when Bazel
+emits BES events, throttled by min_poll_interval_seconds.
+
+GitHub Actions only.
+
+Requires the Aspect GitHub App with roles `prs.write` (issue-comment
+POST/PATCH/DELETE) and `actions.read` (run-artifact list/download).
+
+Body-template variables:
+    marker         — HTML comment used to identify the comment across PATCHes.
+    updated_at     — UTC ISO timestamp of the last render.
+    status_badges  — dict {status -> label}.
+    entries        — list of per-task entry dicts (sorted by job, name, key):
+                       name, key, job, run_attempt, status, ci_run_url,
+                       reproducer_command (precomputed `aspect <task> <labels>` string),
+                       passed_test_total, failed_test_total, flaky_test_total,
+                       cached_test_total, executed_test_total, targets_total,
+                       aborted, abort_reason.
+"""
+load("@std//time.axl", "monotonic")
+load("../traits.axl", "TaskLifecycleTrait")
+load("../lib/github.axl", "github")
+load("../lib/tar.axl", "bsdtar")
+load("../lib/bazel_results.axl", "init_results", "compute_reproducer_command")
+
+
+_ARTIFACT_PREFIX = "aspect-ci-status-"
+_MARKER_FMT      = "<!-- aspect-ci-status:pr-%d -->"
+
+
+_DEFAULT_STATUS_BADGES = {
+    "running": "🟡 running",
+    "passed":  "✅ passed",
+    "failed":  "❌ failed",
+}
+
+
+# Default body template — Jinja2, rendered via ctx.template.jinja2.
+#
+# One row per task in a markdown table; for any failed task, a single
+# `<pre><code>` block at the bottom lists each reproducer command on its
+# own line. `<pre><code>` (the same primitive the legacy Marvin comments
+# used) renders consistently on GitHub — fenced code inside <details>
+# does not. Each command starts with `aspect <task>` so there's no need
+# for a per-row label.
+_DEFAULT_BODY_TEMPLATE = """{{ marker }}
+
+## Aspect CI Status{% if updated_at %} · `{{ updated_at }}`{% endif %}
+
+{% if not entries -%}
+_No tasks have reported yet._
+{% else -%}
+| | Task | Job | Result |
+|---|---|---|---|
+{% for e in entries -%}
+| {{ status_badges[e.status] if e.status in status_badges else e.status }} | `{{ e.name }}` | [`{{ e.job }}`]({{ e.ci_run_url }}) | {% if e.aborted %}:warning: aborted{% if e.abort_reason %} (`{{ e.abort_reason }}`){% endif %}{% elif e.status == "failed" %}{% if e.failed_test_total > 0 %}{{ e.failed_test_total }} test{{ "s" if e.failed_test_total != 1 else "" }} failed{% else %}failed{% endif %}{% elif e.status == "passed" and (e.passed_test_total + e.failed_test_total) > 0 %}{% if e.executed_test_total == 0 %}all {{ e.passed_test_total }} tests cached{% else %}{{ e.passed_test_total }}/{{ e.passed_test_total + e.failed_test_total }} passed{% if e.cached_test_total > 0 %} · {{ e.cached_test_total }} cached{% endif %}{% endif %}{% elif e.status == "passed" and e.targets_total > 0 %}{{ e.targets_total }} target{{ "s" if e.targets_total != 1 else "" }} built{% elif e.status == "passed" %}done{% else %}in progress{% if e.targets_total > 0 %} · {{ e.targets_total }} target{{ "s" if e.targets_total != 1 else "" }}{% endif %}{% endif %} |
+{% endfor -%}
+{% set failed_entries = entries|selectattr("status", "equalto", "failed")|list -%}
+{% if failed_entries %}
+**Reproduce failures locally:**
+
+<pre><code>{% for e in failed_entries %}{{ e.reproducer_command or ("aspect " + e.name) }}
+{% endfor %}</code></pre>
+{% endif -%}
+{% endif -%}
+"""
+
+
+def _extract_zip(ctx, zip_path, dest_dir):
+    """Extract a zip into dest_dir using bsdtar (already cached for zip_create)."""
+    bin_path = bsdtar(ctx)
+    child = ctx.std.process.command(bin_path).args(["xf", zip_path, "-C", dest_dir]).stdout("piped").stderr("piped").spawn()
+    return child.wait().code == 0
+
+
+def _now_iso(ctx):
+    """UTC ISO-8601 timestamp via `date -u`. Used so each PATCH visibly differs
+    even when the task list hasn't changed — confirms the loop is alive."""
+    result = ctx.std.process.command("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"]).stdout("piped").spawn().wait_with_output()
+    if result.status.code == 0:
+        return result.stdout.strip()
+    return ""
+
+
+def _iso_in(ctx, minutes):
+    """RFC 3339 UTC timestamp `minutes` from now via GNU `date -u -d "+N minutes"`.
+    Returns "" on failure so the caller can drop the field rather than send junk."""
+    if minutes <= 0:
+        return ""
+    result = ctx.std.process.command("date").args([
+        "-u", "-d", "+%d minutes" % minutes, "+%Y-%m-%dT%H:%M:%SZ",
+    ]).stdout("piped").spawn().wait_with_output()
+    if result.status.code == 0:
+        return result.stdout.strip()
+    return ""
+
+
+def _ci_run_url(env):
+    """Return the GitHub Actions run URL, or "" if it can't be assembled."""
+    server     = env.var("GITHUB_SERVER_URL") or "https://github.com"
+    repository = env.var("GITHUB_REPOSITORY") or ""
+    run_id     = env.var("GITHUB_RUN_ID") or ""
+    if not repository or not run_id:
+        return ""
+    return server + "/" + repository + "/actions/runs/" + run_id
+
+
+def _results_subset(results, reproducer_command):
+    """Slice `init_results()` down to the fields the comment renderer needs.
+
+    `reproducer_command` is the precomputed `aspect <task> <labels>` repro
+    string passed in by the caller — we don't mutate `results` in place
+    because the dict carried in bazel_runner's TaskUpdate record is frozen
+    on the final update.
+    """
+    return {
+        "passed_test_total":   results.get("passed_test_total", 0),
+        "failed_test_total":   results.get("failed_test_total", 0),
+        "flaky_test_total":    results.get("flaky_test_total", 0),
+        "cached_test_total":   results.get("cached_test_total", 0),
+        "executed_test_total": results.get("executed_test_total", 0),
+        "targets_total":       results.get("targets_total", 0),
+        "reproducer_command":  reproducer_command,
+        "aborted":             results.get("aborted", False),
+        "abort_reason":        results.get("abort_reason", ""),
+    }
+
+
+def _render_body(ctx, marker, entries, updated_at, body_template, status_badges):
+    """Render the comment body via the (possibly user-overridden) Jinja2 template."""
+    body = ctx.template.jinja2(body_template, data = {
+        "marker":        marker,
+        "entries":       entries,
+        "updated_at":    updated_at,
+        "status_badges": status_badges,
+    })
+    if not body.endswith("\n"):
+        body = body + "\n"
+    return body
+
+
+def _github_status_comments(ctx: FeatureContext):
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    mode = ctx.args.mode
+    is_ci = bool(ctx.std.env.var("CI"))
+    if mode == "ci-only" and not is_ci:
+        return
+    if mode == "local-only" and is_ci:
+        return
+
+    # Hard gate: artifact upload uses the GitHub Actions Twirp API.
+    if not ctx.std.env.var("GITHUB_ACTIONS"):
+        return
+
+    pr, _ = github.detect_pr(ctx.std)
+    if pr == None:
+        return
+
+    owner       = pr["owner"]
+    repo        = pr["repo"]
+    pr_number   = pr["pr_number"]
+    marker      = _MARKER_FMT % pr_number
+    job_name    = ctx.std.env.var("GITHUB_JOB") or "unknown-job"
+    run_id      = ctx.std.env.var("GITHUB_RUN_ID") or ""
+    run_attempt = ctx.std.env.var("GITHUB_RUN_ATTEMPT") or "1"
+    if not run_id:
+        print("GitHub status comments: missing GITHUB_RUN_ID; skipping.")
+        return
+
+    ci_run_url                = _ci_run_url(ctx.std.env)
+    min_poll_interval_seconds = ctx.args.min_poll_interval_seconds
+    artifact_expires_minutes  = ctx.args.artifact_expires_minutes
+    # Defensive `or {}` — args.custom(dict, default = {}) returns None at runtime
+    # rather than the declared default. Treat absent the same as empty.
+    templates                 = ctx.args.templates or {}
+    body_template             = templates.get("body") or _DEFAULT_BODY_TEMPLATE
+    status_badges             = dict(_DEFAULT_STATUS_BADGES)
+    status_badges.update(ctx.args.status_badges or {})
+
+    _state = {}
+
+    def _own_payload():
+        """Build our own task entry dict — what _publish_self writes to disk and
+        also what gets folded into the rendered comment without going through a
+        download round-trip."""
+        payload = {
+            "name":        _state["_task_name"],
+            "key":         _state["_task_key"],
+            "job":         job_name,
+            "run_attempt": run_attempt,
+            "status":      _state.get("_status", "running"),
+            "ci_run_url":  ci_run_url,
+        }
+        payload.update(_state.get("_results_subset") or _results_subset(init_results(), ""))
+        return payload
+
+    def _publish_self(ctx, token):
+        """Skip the upload when nothing in our payload has changed since the
+        last successful upload — saves ~half the API calls on quiet builds."""
+        if "_workdir" not in _state:
+            _state["_workdir"] = ctx.std.fs.mkdtemp(prefix = "aspect-ci-status-")
+        _state["_my_artifact_name"] = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_key"] + "-" + run_attempt
+
+        payload     = _own_payload()
+        payload_str = json.encode(payload)
+        if _state.get("_last_payload_str") == payload_str:
+            return True
+
+        payload_path = _state["_workdir"] + "/task.json"
+        ctx.std.fs.write(payload_path, payload_str)
+
+        github.delete_artifact(ctx, _state["_my_artifact_name"])
+        # Server-side TTL — GitHub auto-deletes the artifact at the wall-clock
+        # time we pass. Fresh per-cycle so a still-polling task keeps its
+        # artifact alive while inactive ones expire on their own. No client-side
+        # cleanup needed; no race window across concurrent jobs.
+        expires_at = _iso_in(ctx, artifact_expires_minutes)
+        up = github.upload_artifact(ctx, payload_path, _state["_my_artifact_name"], expires_at = expires_at)
+        if not up.get("success"):
+            print("GitHub status comments: upload failed: %s" % up.get("errors", []))
+            return False
+        _state["_last_payload_str"] = payload_str
+        return True
+
+    def _collect_sibling_entries(ctx, token):
+        """List sibling artifacts; reuse cached entries by artifact id and only
+        download artifacts whose id is new. Returns a sorted list of entry dicts,
+        or None on transport failure.
+
+        The artifact id changes on every replacement (we delete+upload), so a
+        stable id means the producer hasn't pushed a new payload since last poll.
+        """
+        listed = github.actions.list_run_artifacts(ctx, token, owner, repo, run_id, name_prefix = _ARTIFACT_PREFIX)
+        if not listed.get("success"):
+            print("GitHub status comments: list artifacts failed: %s" % listed.get("error", "unknown"))
+            return None
+
+        cache       = _state.setdefault("_entry_cache", {})  # artifact_id (str) -> entry dict
+        own_name    = _state.get("_my_artifact_name", "")
+        workdir     = _state["_workdir"]
+        seen        = {}            # artifact name -> entry
+        current_ids = {}            # current ids in this listing → bool, used to GC cache
+
+        for a in listed["artifacts"]:
+            aname = a.get("name", "")
+            aid   = str(a["id"])
+            current_ids[aid] = True
+
+            # We have authoritative data for our own task in _state — skip the
+            # download and use it directly. Avoids reading our own zip back.
+            if aname == own_name:
+                seen[aname] = _own_payload()
+                continue
+
+            cached = cache.get(aid)
+            if cached != None:
+                seen[aname] = cached
+                continue
+
+            zip_path = workdir + "/" + aid + ".zip"
+            dl = github.actions.download_artifact_zip(ctx, token, owner, repo, a["id"], zip_path)
+            if not dl.get("success"):
+                continue
+            extract_dir = workdir + "/x-" + aid
+            ctx.std.fs.create_dir_all(extract_dir)
+            if not _extract_zip(ctx, zip_path, extract_dir):
+                continue
+            json_path = extract_dir + "/task.json"
+            if not ctx.std.fs.exists(json_path):
+                continue
+            entry = json.try_decode(ctx.std.fs.read_to_string(json_path), None)
+            if not entry:
+                continue
+            cache[aid]  = entry
+            seen[aname] = entry
+
+        # GC cache entries whose ids no longer appear in the listing (their
+        # producer replaced or deleted the artifact). Keeps the cache from
+        # growing unbounded across long-running tasks.
+        for aid in list(cache.keys()):
+            if aid not in current_ids:
+                cache.pop(aid)
+
+        return sorted(
+            seen.values(),
+            key = lambda e: (e.get("job", ""), e.get("name", ""), e.get("key", "")),
+        )
+
+    def _upsert_comment(ctx, token, body):
+        """PATCH the existing comment if known/findable, else POST and dedupe duplicates."""
+        if "_comment_id" in _state:
+            res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
+            if not res.get("success"):
+                print("GitHub status comments: update failed: %s" % res.get("error", "unknown"))
+            return
+
+        listed = github.issues.list_comments(ctx, token, owner, repo, pr_number)
+        if not listed.get("success"):
+            print("GitHub status comments: list comments failed: %s" % listed.get("error", "unknown"))
+            return
+        for c in listed["comments"]:
+            if marker in (c.get("body") or ""):
+                _state["_comment_id"] = c["id"]
+                break
+
+        if "_comment_id" in _state:
+            res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
+            if not res.get("success"):
+                print("GitHub status comments: update failed: %s" % res.get("error", "unknown"))
+            return
+
+        res = github.issues.create_comment(ctx, token, owner, repo, pr_number, body)
+        if not res.get("success"):
+            print("GitHub status comments: create failed: %s" % res.get("error", "unknown"))
+            return
+        _state["_comment_id"] = res["comment_id"]
+
+        # Race mitigation: if two jobs both POSTed within the same window, keep the
+        # lowest comment id and delete the rest. Stable choice across all writers
+        # so they converge on the same survivor.
+        listed2 = github.issues.list_comments(ctx, token, owner, repo, pr_number)
+        if not listed2.get("success"):
+            return
+        dupes = [c for c in listed2["comments"] if marker in (c.get("body") or "")]
+        if len(dupes) <= 1:
+            return
+        dupes_sorted = sorted(dupes, key = lambda c: c["id"])
+        _state["_comment_id"] = dupes_sorted[0]["id"]
+        for d in dupes_sorted[1:]:
+            github.issues.delete_comment(ctx, token, owner, repo, d["id"])
+
+    def _publish(ctx):
+        token = _state.get("_github_token")
+        if not token:
+            return
+        if not _publish_self(ctx, token):
+            return
+        entries = _collect_sibling_entries(ctx, token)
+        if entries == None:
+            return
+        body = _render_body(ctx, marker, entries, _now_iso(ctx), body_template, status_badges)
+        _upsert_comment(ctx, token, body)
+
+    def _task_started(ctx, subject):
+        # Cache task identity from TaskContext so the FeatureContext-level closure
+        # can build the artifact name without reaching for ctx.task (which doesn't
+        # exist on FeatureContext).
+        _state["_task_name"] = ctx.task.name
+        _state["_task_key"]  = ctx.task.key
+        _state["_status"]    = "running"
+
+        auth_reason = {}
+        token = github.authenticate(
+            ctx,
+            owner = owner,
+            repo = repo,
+            roles = ["prs.write", "actions.read"],
+            _reason = auth_reason,
+        )
+        if not token:
+            print("GitHub status comments: authentication failed for %s/%s — %s" % (
+                owner, repo, auth_reason.get("reason", "unknown"),
+            ))
+            return
+        _state["_github_token"] = token
+        _publish(ctx)
+
+    def _task_update(ctx, update):
+        _state["_status"] = update.status
+
+        # Capture BES results so the next render can show test counts and failed
+        # labels. Other update kinds are no-ops here — status stays current but
+        # the results subset doesn't change.
+        if update.kind == "bazel_results":
+            results = update.data.get("results") or init_results()
+            repro_cmd, _ = compute_reproducer_command(results, _state["_task_name"])
+            _state["_results_subset"] = _results_subset(results, repro_cmd)
+
+        final = update.status in ("passed", "failed")
+        if not final:
+            now = monotonic()
+            if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds:
+                return
+            _state["_last_publish_s"] = now
+        _publish(ctx)
+
+    lifecycle.task_started.append(_task_started)
+    lifecycle.task_update.append(_task_update)
+
+
+GithubStatusComments = feature(
+    implementation = _github_status_comments,
+    enabled = True,
+    args = {
+        "mode": args.string(
+            default = "ci-only",
+            values = ["ci-only", "local-only", "always"],
+            description = "When to post PR comments: ci-only (default), local-only, or always.",
+        ),
+        "min_poll_interval_seconds": args.int(
+            default = 10,
+            description = "Lower bound on the gap between poll-render-PATCH cycles. " +
+                          "Acts as a throttle on event-paced ticks (each BES update is a candidate poll). " +
+                          "Different jobs land on different cadences naturally; tune higher to reduce API calls.",
+        ),
+        "artifact_expires_minutes": args.int(
+            default = 30,
+            description = "Server-side TTL for the per-task status artifact. Each upload sets the " +
+                          "GitHub Actions artifact's expiresAt to now + this many minutes. " +
+                          "Active tasks keep refreshing the timestamp on every cycle; inactive ones " +
+                          "auto-expire so we don't accumulate junk in the run's artifact tab. " +
+                          "Set to 0 to disable (no expiry).",
+        ),
+        # Config-only (set via configure(..., feature_args = {...}) in config.axl).
+        "templates": args.custom(
+            dict,
+            default = {},
+            description = "Per-section Jinja2 template overrides. Keys: 'body'. " +
+                          "Vars available to 'body': marker, updated_at, status_badges, " +
+                          "entries (list of {name, key, job, run_attempt, status, ci_run_url, " +
+                          "reproducer_command, passed_test_total, failed_test_total, flaky_test_total, " +
+                          "cached_test_total, executed_test_total, targets_total, aborted, abort_reason}). " +
+                          "Empty dict → built-in default. config.axl only.",
+        ),
+        "status_badges": args.custom(
+            dict,
+            default = {},
+            description = "Override status -> badge label mapping merged over defaults " +
+                          "(running='🟡 running', passed='✅ passed', failed='❌ failed'). " +
+                          "config.axl only.",
+        ),
+    },
+)

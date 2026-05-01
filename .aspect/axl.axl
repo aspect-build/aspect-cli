@@ -3,7 +3,7 @@ Exercise axl
 """
 load("@demo//answer.axl", "ANSWER")
 load("./lambda.axl", "lambda_with_global_bind")
-load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title", "compute_repro")
+load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title", "compute_reproducer_command")
 load("@aspect//delivery.axl", delivery_fmt_elapsed = "fmt_elapsed")
 load("@aspect//lib/path_glob.axl", "match_path", "match_any")
 load("@aspect//lib/github.axl", "github", "detect_commit_sha", "detect_build_url")
@@ -654,7 +654,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     ]
     r2["passed_test_total"] = 3
     r2["passed_tests"] = [{"label": "//pkg:ok_test", "cached": True, "duration_ms": 0}]
-    r2["test_repro"] = "bazel test //pkg:fail_test //pkg:slow_test"
+    r2["reproducer_command"] = "aspect test //pkg:fail_test //pkg:slow_test"
     r2["build_command"] = "test"
     out2 = render_check_output(ctx, r2, "failed", render_ctx, links)
     tc = test_case(tc, "Tests failed" in out2["title"], "failed title: " + out2["title"])
@@ -2076,14 +2076,14 @@ def test_summary_title(tc: int) -> int:
 
 
 def test_compute_repro(tc: int) -> int:
-    """Coverage for bazel_results.compute_repro — repro-command derivation."""
-    # No failures → empty repros, totals 0.
-    r = init_results()
-    compute_repro(r)
-    tc = test_case(tc, r["build_repro"] == "", "compute_repro: no failures → empty build_repro")
-    tc = test_case(tc, r["build_repro_total"] == 0, "compute_repro: no failures → build_repro_total=0")
-    tc = test_case(tc, r["test_repro"] == "", "compute_repro: no failures → empty test_repro")
-    tc = test_case(tc, r["test_repro_total"] == 0, "compute_repro: no failures → test_repro_total=0")
+    """Coverage for bazel_results.compute_reproducer_command — repro derivation.
+
+    Pure function: returns (cmd, total) and does not mutate `results`.
+    """
+    # No failures → empty repro, total 0.
+    cmd, total = compute_reproducer_command(init_results(), "build")
+    tc = test_case(tc, cmd == "", "compute_reproducer_command: no failures → empty cmd")
+    tc = test_case(tc, total == 0, "compute_reproducer_command: no failures → total=0")
 
     # failed_actions: dedupe + ordering.
     r = init_results()
@@ -2092,33 +2092,39 @@ def test_compute_repro(tc: int) -> int:
         {"label": "//b:lib", "mnemonics": ["CppCompile"]},
         {"label": "//a:lib", "mnemonics": ["CppLink"]},  # dup label
     ]
-    compute_repro(r)
-    tc = test_case(tc, r["build_repro"] == "bazel build //a:lib //b:lib", "compute_repro: dedupes labels and preserves insertion order (got %r)" % r["build_repro"])
-    tc = test_case(tc, r["build_repro_total"] == 2, "compute_repro: build_repro_total = unique labels")
+    cmd, total = compute_reproducer_command(r, "build")
+    tc = test_case(tc, cmd == "aspect build //a:lib //b:lib", "compute_reproducer_command: dedupes labels and preserves insertion order (got %r)" % cmd)
+    tc = test_case(tc, total == 2, "compute_reproducer_command: total = unique labels")
 
-    # Falls back to failed_targets when failed_actions is empty.
+    # failed_targets when failed_actions is empty.
     r = init_results()
     r["failed_targets"] = [{"label": "//x:y"}, {"label": "//z:w"}]
-    compute_repro(r)
-    tc = test_case(tc, r["build_repro"] == "bazel build //x:y //z:w", "compute_repro: falls back to failed_targets (got %r)" % r["build_repro"])
-    tc = test_case(tc, r["build_repro_total"] == 2, "compute_repro: build_repro_total from failed_targets")
+    cmd, total = compute_reproducer_command(r, "build")
+    tc = test_case(tc, cmd == "aspect build //x:y //z:w", "compute_reproducer_command: includes failed_targets (got %r)" % cmd)
+    tc = test_case(tc, total == 2, "compute_reproducer_command: total from failed_targets")
 
-    # Action-level labels take precedence over target-level fallback when both present.
+    # Action-level labels appear first, then target-level (deduped against action labels).
     r = init_results()
     r["failed_actions"] = [{"label": "//action:fail"}]
-    r["failed_targets"] = [{"label": "//target:fail"}]
-    compute_repro(r)
-    tc = test_case(tc, r["build_repro"] == "bazel build //action:fail", "compute_repro: prefers action labels over target labels (got %r)" % r["build_repro"])
+    r["failed_targets"] = [{"label": "//target:fail"}, {"label": "//action:fail"}]
+    cmd, _ = compute_reproducer_command(r, "build")
+    tc = test_case(tc, cmd == "aspect build //action:fail //target:fail", "compute_reproducer_command: actions before targets, dedupe across (got %r)" % cmd)
 
-    # failed_tests → test_repro.
+    # failed_tests merge into the same combined repro.
     r = init_results()
     r["failed_tests"] = [
         {"label": "//a:t1", "status": "failed"},
         {"label": "//b:t2", "status": "timeout"},
     ]
-    compute_repro(r)
-    tc = test_case(tc, r["test_repro"] == "bazel test //a:t1 //b:t2", "compute_repro: test_repro joins failed test labels (got %r)" % r["test_repro"])
-    tc = test_case(tc, r["test_repro_total"] == 2, "compute_repro: test_repro_total = failed test count")
+    cmd, total = compute_reproducer_command(r, "test")
+    tc = test_case(tc, cmd == "aspect test //a:t1 //b:t2", "compute_reproducer_command: joins failed test labels (got %r)" % cmd)
+    tc = test_case(tc, total == 2, "compute_reproducer_command: total = failed test count")
+
+    # task_name is the user's task name — non-{build,test} names are surfaced verbatim.
+    r = init_results()
+    r["failed_targets"] = [{"label": "//x:y"}]
+    cmd, _ = compute_reproducer_command(r, "ci")
+    tc = test_case(tc, cmd == "aspect ci //x:y", "compute_reproducer_command: uses task_name as the subcommand (got %r)" % cmd)
 
     # Long label list is truncated at MAX_REPRO_CHARS but total still reflects all.
     r = init_results()
@@ -2126,10 +2132,18 @@ def test_compute_repro(tc: int) -> int:
     for i in range(200):
         long_labels.append({"label": "//pkg/some/longer/path:target_" + str(i)})
     r["failed_targets"] = long_labels
-    compute_repro(r)
-    tc = test_case(tc, r["build_repro_total"] == 200, "compute_repro: total reflects all labels even when repro truncates (got %d)" % r["build_repro_total"])
-    tc = test_case(tc, len(r["build_repro"]) <= 1000, "compute_repro: build_repro respects MAX_REPRO_CHARS (len=%d)" % len(r["build_repro"]))
-    tc = test_case(tc, r["build_repro"].startswith("bazel build //pkg/some/longer/path:target_0"), "compute_repro: truncated repro starts with first labels")
+    cmd, total = compute_reproducer_command(r, "build")
+    tc = test_case(tc, total == 200, "compute_reproducer_command: total reflects all labels even when repro truncates (got %d)" % total)
+    tc = test_case(tc, len(cmd) <= 1000, "compute_reproducer_command: respects MAX_REPRO_CHARS (len=%d)" % len(cmd))
+    tc = test_case(tc, cmd.startswith("aspect build //pkg/some/longer/path:target_0"), "compute_reproducer_command: truncated repro starts with first labels")
+
+    # Does not mutate the input dict — `results["reproducer_command"]` stays
+    # at init_results()'s default empty string.
+    r = init_results()
+    r["failed_targets"] = [{"label": "//x:y"}]
+    compute_reproducer_command(r, "build")
+    tc = test_case(tc, r["reproducer_command"] == "", "compute_reproducer_command: does not mutate results (reproducer_command)")
+    tc = test_case(tc, r["reproducer_command_total"] == 0, "compute_reproducer_command: does not mutate results (reproducer_command_total)")
 
     return tc
 
