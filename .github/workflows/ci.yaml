@@ -29,6 +29,29 @@ env:
   DASH0_TOKEN: ${{ secrets.DASH0_TOKEN }}
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Render CI report
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+          ## Aspect CI Status · `${{ github.run_id }}`
+
+          | Status | Task | Job | Result |
+          | --- | --- | --- | ---: |
+          | $\textsf{\color{green}\textbf{PASS}}$ | `build` | [`build-task`](…) | 1500 targets built |
+          | $\textsf{\color{red}\textbf{FAIL}}$ | `test` | [`robot-test`](…) | [see repro ↓](#repro) |
+
+          <details>
+          <summary id="repro">↓ Reproduce 1 failure locally</summary>
+
+          ```bash
+              aspect test //pkg/a:test //pkg/b:test //pkg/c:test
+          ```
+
+          </details>
+          EOF
+
   pre-build:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     steps:
