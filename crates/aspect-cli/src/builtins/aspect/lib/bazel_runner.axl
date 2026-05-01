@@ -12,7 +12,7 @@ any change to how build events are processed or how status updates are emitted
 applies uniformly to both tasks.
 """
 load("../traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
-load("./bazel_results.axl", "init_results", "process_event", "compute_repro")
+load("./bazel_results.axl", "init_results", "process_event")
 load("./environment.axl", "color_enabled")
 
 
@@ -155,9 +155,6 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
 
         if invocation_status.code == 0 or not bazel_trait.build_retry(invocation_status.code):
             break
-
-    # Deferred post-processing: repro commands after all events consumed.
-    compute_repro(results)
 
     for handler in bazel_trait.build_end:
         handler(ctx, invocation_status.code)

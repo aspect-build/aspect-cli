@@ -230,8 +230,7 @@ def _make_results_failed():
         "PR_SOURCE_BRANCH_NAME": "feature/new-api",
         "PR_TARGET_BRANCH_NAME": "main",
     }
-    r["build_repro"] = "bazel build //pkg/broken:lib"
-    r["test_repro"]  = "bazel test //pkg/a:test //pkg/b:test //pkg/c:test"
+    r["reproducer_command"] = "aspect ci //pkg/broken:lib //pkg/a:test //pkg/b:test //pkg/c:test"
     return r
 
 

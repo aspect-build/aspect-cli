@@ -39,7 +39,8 @@ Payload fields used:
   event.id.label       — target label for all event types
 
 Post-processing (call at build_end, not during streaming):
-  compute_repro(results)        — builds "bazel build/test ..." repro commands
+  compute_reproducer_command(results, task_name)
+                                — builds "aspect <task_name> ..." reproducer command
 
 Note: stderr output is deliberately NOT captured. Bazel's BES stream can include
 action stderr inline when upload strategies put contents in the event payload —
@@ -226,14 +227,14 @@ def _file_uri_to_path(uri):
     return uri
 
 
-def _make_repro(operation, labels, max_chars):
-    """Build a 'bazel <operation> <labels>' repro command string.
+def _repro_with_prefix(prefix, labels, max_chars):
+    """Build a '<prefix> <labels>' repro command string.
 
     Truncates the label list so the total command length does not exceed
     max_chars characters.
 
     Args:
-        operation: "build" or "test"
+        prefix:    leading command (e.g. "bazel build", "aspect mytask")
         labels:    list of target labels to include
         max_chars: maximum character length of the returned command
 
@@ -241,7 +242,7 @@ def _make_repro(operation, labels, max_chars):
         (cmd: str, n_included: int) — cmd is the repro command (empty string
         if no labels fit), n_included is how many labels were included.
     """
-    base = "bazel " + operation + " "
+    base = prefix + " "
     included = []
     used = len(base)
     for label in labels:
@@ -260,7 +261,7 @@ def init_results():
 
     Returns:
         dict to be stored in build state and passed to process_event /
-        resolve_stderr / compute_repro.
+        resolve_stderr / compute_reproducer_command.
     """
     return {
         # Failed build targets (not test-related): [{label}]
@@ -338,11 +339,12 @@ def init_results():
         "aborted": False,
         "abort_reason": "",       # snake_case proto enum, e.g. "interrupted", "analysis_failure"
         "abort_description": "",  # human-readable description from BES
-        # Repro commands — populated by compute_repro(), empty until called.
-        "build_repro": "",        # "bazel build //a //b ..."
-        "build_repro_total": 0,   # total unique failed build labels (some may be omitted)
-        "test_repro": "",         # "bazel test //a //b ..."
-        "test_repro_total": 0,    # total failed test labels
+        # "aspect <task> //a //b ..." reproducer command — set by callers from
+        # compute_reproducer_command()'s return value. Merges build + test
+        # failures under the user's task name so one copy-paste re-runs
+        # everything that broke. Empty until set.
+        "reproducer_command": "",
+        "reproducer_command_total": 0,
         # All successfully-built target labels (test + non-test), capped at MAX_BUILT_TARGETS.
         "built_targets": [],
         # Passed test targets [{label, cached, duration_ms}], capped within MAX_TEST_TARGETS
@@ -903,40 +905,55 @@ def process_event(results, event):
     return False
 
 
-def compute_repro(results):
-    """Compute 'bazel build/test ...' repro commands from accumulated results.
+def compute_reproducer_command(results, task_name, max_chars = MAX_REPRO_CHARS):
+    """Compute an 'aspect <task_name> <labels>' reproducer command from accumulated failures.
 
-    Call this once at build_end (after all events have been processed).
-    Populates results["build_repro"], results["build_repro_total"],
-    results["test_repro"], and results["test_repro_total"] in place.
+    Merges action-level build failures (preferred when present — finer-grained),
+    target-level build failures (fallback for derived breakage with no own action
+    failure), and failed test labels into one deduped list under the user's task
+    name. Returns a tuple `(command, total)` — the command (possibly truncated to
+    fit max_chars) and the total number of unique failed labels (not the count
+    of labels actually in the command, which may be lower after truncation).
 
-    The build repro deduplicates action labels to unique target labels
-    (multiple failed actions may point to the same target).
+    Pure function — does NOT mutate `results`. Earlier revisions wrote
+    `results["reproducer_command"]` in place, but `update.data["results"]` from
+    bazel_runner's TaskUpdate record is frozen on the final update, so the
+    write panics. Callers store the returned values wherever they need.
 
     Args:
-        results: dict from init_results(), updated in place
+        results:   dict from init_results()
+        task_name: ctx.task.name — the task being reproduced
+        max_chars: maximum character length of the repro command
+
+    Returns:
+        (command: str, total: int) — empty string and 0 when there are no failures.
     """
-    # Build repro: unique labels from failed_actions, preserving insertion order.
-    seen = {}
-    build_labels = []
-    for a in results["failed_actions"]:
+    seen   = {}
+    labels = []
+
+    # Action-level failures first (most precise — these are the ones with stderr).
+    for a in results.get("failed_actions", []):
         lbl = a.get("label", "")
         if lbl and lbl not in seen:
             seen[lbl] = True
-            build_labels.append(lbl)
-    # Fall back to failed_targets when there are no action-level labels.
-    if not build_labels:
-        build_labels = [t["label"] for t in results["failed_targets"]]
+            labels.append(lbl)
 
-    results["build_repro_total"] = len(build_labels)
-    cmd, _ = _make_repro("build", build_labels, MAX_REPRO_CHARS)
-    results["build_repro"] = cmd
+    # Target-level failures (covers derived failures with no own action failure).
+    for t in results.get("failed_targets", []):
+        lbl = t.get("label", "")
+        if lbl and lbl not in seen:
+            seen[lbl] = True
+            labels.append(lbl)
 
-    # Test repro: labels of all failed tests (already capped at MAX_TEST_TARGETS).
-    test_labels = [t["label"] for t in results["failed_tests"]]
-    results["test_repro_total"] = len(test_labels)
-    cmd, _ = _make_repro("test", test_labels, MAX_REPRO_CHARS)
-    results["test_repro"] = cmd
+    # Failed test targets.
+    for t in results.get("failed_tests", []):
+        lbl = t.get("label", "")
+        if lbl and lbl not in seen:
+            seen[lbl] = True
+            labels.append(lbl)
+
+    cmd, _ = _repro_with_prefix("aspect " + task_name, labels, max_chars)
+    return (cmd, len(labels))
 
 
 _TITLE_MAX_LEN     = 160
@@ -2440,12 +2457,6 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 {% if derived_failures_overflow %}_{{ derived_failures_overflow }} more not shown._{% endif %}</pre>
 </details>
 {% endif %}
-{% if build_repro %}
-**Reproduce:**
-```
-{{ build_repro }}
-```
-{% endif %}
 </details>
 
 {% endif %}
@@ -2479,10 +2490,10 @@ _{{ build_failures_overflow }} more root failure(s) not shown._
 </details>
 
 {% endif %}
-{%- if (failed_tests or timeout_tests) and test_repro %}
-**Reproduce:**
+{%- if reproducer_command %}
+**Reproduce locally:**
 ```
-{{ test_repro }}
+{{ reproducer_command }}
 ```
 
 {% endif %}
@@ -3272,7 +3283,9 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         "build_failures_header":   _bucket_header(_BUCKET_FAILED_TO_BUILD, build_failure_count),
         "build_failures_overflow": str(failed_actions_overflow) if failed_actions_overflow > 0 else "",
         "build_failures_icon":     _BUCKET_ICONS[_BUCKET_FAILED_TO_BUILD],
-        "build_repro":             results.get("build_repro", ""),
+        # Combined "aspect <task> ..." reproducer command — populated by
+        # compute_reproducer_command in the consumer feature; empty when no failures.
+        "reproducer_command":      results.get("reproducer_command", ""),
         # Derived failures — targets that failed without emitting their own action
         # errors (a dep broke). Shown as a collapsed list under Build Failures.
         # Count is stringified (Jinja2 can't compare AXL ints directly; see
@@ -3295,7 +3308,6 @@ def _build_details_data(results, links, render_ctx = None, status = "", start_da
         "flaky_tests":             _with_duration(results.get("flaky_tests", [])),
         "flaky_tests_header":      _bucket_header(_BUCKET_TEST_FLAKY, flaky_test_count),
         "flaky_tests_icon":        _BUCKET_ICONS[_BUCKET_TEST_FLAKY],
-        "test_repro":              results.get("test_repro", ""),
 
         # Passed-test table: label | kind | duration [| artifacts], with column
         # headers + separator row for readability in <pre> blocks. The artifacts
