@@ -505,6 +505,12 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         // Validate and freeze the default. Live values (e.g. lambdas defined inline) cannot be
         // stored in Arg which requires FrozenValue; silently store None in that case.
         // Type validation still runs when the type is compilable, so mismatches are caught.
+        //
+        // KNOWN LIMITATION: live container literals (`{}`, `[]`) are also not yet frozen here,
+        // so `args.custom(dict, default = {})` ends up with `default = None` at access time.
+        // Callers must defensively `or {}` / `or []`. A proper fix needs to deep-freeze
+        // freezable values (dict/list/string/int/bool/tuple) into the frozen heap before
+        // storing.
         let default_frozen = match default {
             None => None,
             Some(d) => {
@@ -515,7 +521,8 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
                         compiled
                     ));
                 }
-                // Live values (e.g. inline lambdas) cannot be frozen here — store None.
+                // Live values (e.g. inline lambdas, fresh dict/list literals) cannot be frozen
+                // here — store None.
                 d.unpack_frozen()
             }
         };

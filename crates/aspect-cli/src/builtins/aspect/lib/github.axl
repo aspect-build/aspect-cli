@@ -655,6 +655,94 @@ def detect_github_repo(std):
     return _extract_github_owner_repo_from_url(result.stdout.strip())
 
 
+# Issue Comments (PR comments use the issues endpoint)
+
+def _issues_list_comments(ctx, token, owner, repo, issue_number, api_base = DEFAULT_GITHUB_API):
+    """List comments on a PR/issue, paginated. PRs are issues for comment endpoints."""
+    base_url = api_base + "/repos/" + owner + "/" + repo + "/issues/" + str(issue_number) + "/comments"
+    per_page = 100
+    max_pages = 30
+    all_comments = []
+    for page in range(1, max_pages + 1):
+        url = base_url + "?per_page=" + str(per_page) + "&page=" + str(page)
+        success, status_code, body = _do_request(ctx, "GET", url, token)
+        if not success:
+            return {"success": False, "error": "request failed (page %d): %s" % (page, str(status_code))}
+        if type(body) != "list":
+            break
+        all_comments.extend(body)
+        if len(body) < per_page:
+            break
+    return {"success": True, "comments": all_comments}
+
+
+def _issues_create_comment(ctx, token, owner, repo, issue_number, body, api_base = DEFAULT_GITHUB_API):
+    url = api_base + "/repos/" + owner + "/" + repo + "/issues/" + str(issue_number) + "/comments"
+    success, status_code, resp = _do_request(ctx, "POST", url, token, {"body": body})
+    if success:
+        return {"success": True, "comment_id": resp.get("id"), "html_url": resp.get("html_url")}
+    return {"success": False, "error": "HTTP %d: %s" % (status_code, resp)}
+
+
+def _issues_update_comment(ctx, token, owner, repo, comment_id, body, api_base = DEFAULT_GITHUB_API):
+    url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
+    success, status_code, resp = _do_request(ctx, "PATCH", url, token, {"body": body})
+    if success:
+        return {"success": True, "comment_id": resp.get("id")}
+    return {"success": False, "error": "HTTP %d: %s" % (status_code, resp)}
+
+
+def _issues_delete_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
+    url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
+    success, status_code, _ = _do_request(ctx, "DELETE", url, token)
+    return {"success": success}
+
+
+# Workflow run artifacts (sibling-job artifacts in the current run)
+
+def _actions_list_run_artifacts(ctx, token, owner, repo, run_id, name_prefix = "", api_base = DEFAULT_GITHUB_API):
+    """List artifacts for a workflow run, optionally filtering by name prefix client-side.
+
+    GitHub's `name=` query filter is exact-match only, so name_prefix is applied
+    after the page is returned.
+    """
+    base_url = api_base + "/repos/" + owner + "/" + repo + "/actions/runs/" + str(run_id) + "/artifacts"
+    per_page = 100
+    max_pages = 10
+    matched = []
+    for page in range(1, max_pages + 1):
+        url = base_url + "?per_page=" + str(per_page) + "&page=" + str(page)
+        success, status_code, body = _do_request(ctx, "GET", url, token)
+        if not success:
+            return {"success": False, "error": "request failed (page %d): %s" % (page, str(status_code))}
+        if type(body) != "dict":
+            break
+        artifacts = body.get("artifacts", []) or []
+        for a in artifacts:
+            if not name_prefix or a.get("name", "").startswith(name_prefix):
+                matched.append(a)
+        if len(artifacts) < per_page:
+            break
+    return {"success": True, "artifacts": matched}
+
+
+def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_path, api_base = DEFAULT_GITHUB_API):
+    """Download an artifact's zip blob to disk.
+
+    /actions/artifacts/{id}/zip returns a 302 to a signed URL — the http client follows it.
+    """
+    url = api_base + "/repos/" + owner + "/" + repo + "/actions/artifacts/" + str(artifact_id) + "/zip"
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    res = ctx.http().download(url = url, output = output_path, mode = 0o644, headers = headers).map_err(lambda e: str(e)).block()
+    if type(res) == "string":
+        return {"success": False, "error": "transport error: " + res}
+    return {"success": True}
+
+
 # Struct-based API
 
 def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT_GITHUB_API):
@@ -756,10 +844,19 @@ def _github_twirp(ctx, method, payload):
     return (success, body, None)
 
 
-def _upload_artifact(ctx, path, name):
+def _upload_artifact(ctx, path, name, expires_at = ""):
     """Upload a single file to GitHub Actions using the Twirp artifact API.
 
     Flow: CreateArtifact -> PUT to signed Azure Blob URL -> FinalizeArtifact
+
+    Args:
+        ctx, path, name: as before.
+        expires_at:      optional RFC 3339 / ISO-8601 UTC timestamp (e.g.
+                         "2026-05-01T12:34:56Z"). When non-empty, passed to
+                         CreateArtifact as `expiresAt` so GitHub auto-deletes
+                         the artifact at that wall-clock time. Useful for
+                         ephemeral artifacts (status payloads, tick markers)
+                         that shouldn't outlive the workflow run.
 
     Returns {success, artifact_ref, download_url, errors} where:
       artifact_ref — the artifact `name`; passed back to DeleteArtifact for rolling delete.
@@ -775,12 +872,15 @@ def _upload_artifact(ctx, path, name):
     if not run_id or not job_id:
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["failed to decode backend IDs from token"]}
 
-    ok, body, err = _github_twirp(ctx, "CreateArtifact", {
+    create_req = {
         "workflowRunBackendId": run_id,
         "workflowJobRunBackendId": job_id,
         "name": name,
         "version": 4,
-    })
+    }
+    if expires_at:
+        create_req["expiresAt"] = expires_at
+    ok, body, err = _github_twirp(ctx, "CreateArtifact", create_req)
     if not ok or not body:
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": [err or "CreateArtifact failed"]}
 
@@ -1035,6 +1135,16 @@ github = struct(
     upload_artifact = _upload_artifact,
     delete_artifact = _delete_artifact,
     resolve_current_job_url = _resolve_current_job_url,
+    issues = struct(
+        list_comments  = _issues_list_comments,
+        create_comment = _issues_create_comment,
+        update_comment = _issues_update_comment,
+        delete_comment = _issues_delete_comment,
+    ),
+    actions = struct(
+        list_run_artifacts    = _actions_list_run_artifacts,
+        download_artifact_zip = _actions_download_artifact_zip,
+    ),
     pulls = struct(
         list_files           = list_pull_request_files,
         get                  = get_pull_request,
