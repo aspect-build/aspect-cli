@@ -50,6 +50,9 @@ const ASPECT_LAUNCHER_METHOD_HTTP: &str = "http";
 const ASPECT_LAUNCHER_METHOD_GITHUB: &str = "github";
 const ASPECT_LAUNCHER_METHOD_LOCAL: &str = "local";
 
+/// Minimum interval between download-progress prints when running on CI.
+const CI_DOWNLOAD_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn _download_into_cache(
     client: &Client,
     cache_entry: &PathBuf,
@@ -83,6 +86,12 @@ async fn _download_into_cache(
 
     let mut downloaded: u64 = 0;
 
+    // On CI, terminals don't process `\r` line resets so per-chunk progress
+    // is spammy. Throttle update on its own line.
+    let is_ci = var("CI").map(|v| !v.is_empty()).unwrap_or(false);
+    let download_start = std::time::Instant::now();
+    let mut last_progress = download_start;
+
     while let Some(item) = byte_stream
         .try_next()
         .await
@@ -97,22 +106,44 @@ async fn _download_into_cache(
 
         downloaded += chunk_size;
 
-        if let Some(total) = total_size {
-            let percent = ((downloaded as f64 / total as f64) * 100.0) as u64;
-            eprint!(
-                "\r{:.0} / {:.0} KB ({}%)",
-                downloaded as f64 / 1024.0,
-                total as f64 / 1024.0,
-                percent
-            );
+        if !is_ci || last_progress.elapsed() >= CI_DOWNLOAD_PROGRESS_INTERVAL {
+            let line_start = if is_ci { "" } else { "\r" };
+            let line_end = if is_ci { "\n" } else { "" };
+            if let Some(total) = total_size {
+                let percent = ((downloaded as f64 / total as f64) * 100.0) as u64;
+                eprint!(
+                    "{line_start}{:.0} / {:.0} KB ({}%){line_end}",
+                    downloaded as f64 / 1024.0,
+                    total as f64 / 1024.0,
+                    percent
+                );
+            } else {
+                eprint!("{line_start}{:.0} KB{line_end}", downloaded as f64 / 1024.0);
+            }
             io::stderr().flush().into_diagnostic()?;
-        } else {
-            eprint!("\r{:.0} KB", downloaded as f64 / 1024.0);
-            io::stderr().flush().into_diagnostic()?;
+            last_progress = std::time::Instant::now();
         }
     }
 
-    eprintln!();
+    let elapsed = download_start.elapsed();
+    let kb = downloaded as f64 / 1024.0;
+    let size_str = if kb >= 1024.0 {
+        format!("{:.1} MB", kb / 1024.0)
+    } else {
+        format!("{:.0} KB", kb)
+    };
+    let time_str = if elapsed.as_secs_f64() >= 1.0 {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}ms", elapsed.as_millis())
+    };
+    if is_ci {
+        eprintln!("downloaded {size_str} in {time_str}");
+    } else {
+        // \r overwrites the in-progress KB line; \x1b[K clears any stale tail
+        // when the summary is shorter than the last progress print.
+        eprintln!("\rdownloaded {size_str} in {time_str}\x1b[K");
+    }
 
     // And move it into the cache
     tokio::fs::rename(&tmp_file, &cache_entry)
