@@ -24,7 +24,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
 
     env:
-      ASPECT_CLI_DOWNLOADER_CACHE: /tmp/aspect-launcher-ci-cache
+      ASPECT_LAUNCHER_CACHE: /tmp/aspect-launcher-ci-cache
       CARGO_TERM_COLOR: always
       # Use the workflow's GITHUB_TOKEN to avoid rate-limiting on the releases API
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -97,7 +97,7 @@ jobs:
         run: |
           python3 -c "
           import os, time
-          hint_dir = '$ASPECT_CLI_DOWNLOADER_CACHE/launcher/latest'
+          hint_dir = '$ASPECT_LAUNCHER_CACHE/downloader/latest'
           for f in os.listdir(hint_dir):
               p = os.path.join(hint_dir, f)
               os.utime(p, (0, 0))  # epoch = definitely stale
@@ -119,7 +119,7 @@ jobs:
         run: |
           python3 -c "
           import os
-          hint_dir = '$ASPECT_CLI_DOWNLOADER_CACHE/launcher/latest'
+          hint_dir = '$ASPECT_LAUNCHER_CACHE/downloader/latest'
           for f in os.listdir(hint_dir):
               os.utime(os.path.join(hint_dir, f), (0, 0))
           "

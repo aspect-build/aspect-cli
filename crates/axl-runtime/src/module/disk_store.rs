@@ -15,8 +15,7 @@ use super::module::Mod;
 use super::{AxlArchiveDep, AxlLocalDep, Dep};
 
 pub struct DiskStore {
-    #[allow(unused)]
-    root: PathBuf,
+    cache_root: PathBuf,
     root_sha: String,
 }
 
@@ -66,18 +65,28 @@ impl Processor {
 }
 
 impl DiskStore {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(repo_root: PathBuf) -> Self {
+        // Cache root resolution:
+        //   1. ASPECT_CLI_CACHE env (non-empty) → ${ASPECT_CLI_CACHE}/axl
+        //   2. fallback             → ${cache_dir()}/aspect/axl
+        // CI runners point ASPECT_CLI_CACHE at an ephemeral mount that's
+        // included in the warming archive, so the AXL deps cache survives
+        // runner reboots.
+        let cache_root = match std::env::var("ASPECT_CLI_CACHE") {
+            Ok(val) if !val.is_empty() => PathBuf::from(val).join("axl"),
+            _ => cache_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join("aspect")
+                .join("axl"),
+        };
         Self {
-            root_sha: sha256::digest(root.as_os_str().as_bytes()),
-            root,
+            root_sha: sha256::digest(repo_root.as_os_str().as_bytes()),
+            cache_root,
         }
     }
 
     fn root(&self) -> PathBuf {
-        cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("aspect")
-            .join("axl")
+        self.cache_root.clone()
     }
 
     pub fn deps_path(&self) -> PathBuf {

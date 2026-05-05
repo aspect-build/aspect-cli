@@ -17,13 +17,13 @@ impl AspectCache {
     }
 
     pub fn default() -> Result<AspectCache> {
-        let aspect_data_dir = match std::env::var("ASPECT_CLI_DOWNLOADER_CACHE") {
-            Ok(val) if !val.is_empty() => PathBuf::from(val).join("launcher"),
+        let aspect_data_dir = match std::env::var("ASPECT_LAUNCHER_CACHE") {
+            Ok(val) if !val.is_empty() => PathBuf::from(val).join("downloader"),
             _ => {
                 let Some(data_dir) = cache_dir() else {
                     return Err(miette!("unable to identify the user's cache directory"));
                 };
-                data_dir.join(PathBuf::from("aspect/launcher"))
+                data_dir.join(PathBuf::from("aspect/launcher/downloader"))
             }
         };
         fs::create_dir_all(&aspect_data_dir)
