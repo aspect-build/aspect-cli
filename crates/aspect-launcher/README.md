@@ -173,12 +173,14 @@ unavailable.
 ## Caching
 
 Downloaded binaries are cached under the system cache directory
-(`~/Library/Caches/aspect/launcher/` on macOS, `~/.cache/aspect/launcher/` on
-Linux). The cache path is derived from a SHA-256 hash of the tool name and
-source URL, so different versions coexist without conflict.
+(`~/Library/Caches/aspect/launcher/downloader/` on macOS,
+`~/.cache/aspect/launcher/downloader/` on Linux). The cache path is derived
+from a SHA-256 hash of the tool name and source URL, so different versions
+coexist without conflict.
 
-The cache location can be overridden with the `ASPECT_CLI_DOWNLOADER_CACHE`
-environment variable.
+The launcher cache root can be overridden with the `ASPECT_LAUNCHER_CACHE`
+environment variable; the launcher writes its downloader cache to
+`${ASPECT_LAUNCHER_CACHE}/downloader/`.
 
 ## Debugging
 
