@@ -4,12 +4,20 @@ Cleans the prior Bazel state under ${ASPECT__STORAGE_PATH}, then runs
 `bazel build --nobuild` against the given targets so the repository,
 output, and bazel caches under that mount (and the aspect-launcher /
 aspect-cli caches under ${ASPECT__STORAGE_PATH}/caches/{aspect-launcher,
-aspect-cli}) are populated and ready for the warming archive.
+aspect-cli}) are populated and ready for the warming archive. When
+running on an Aspect Workflows runner, this task also invokes
+/etc/aspect/workflows/bin/warming_archive to upload the populated
+caches to the warming bucket — so the customer's CI workflow only
+needs to call `aspect ci warming`.
 """
 load("./traits.axl", "BazelTrait")
 
 
+WARMING_ARCHIVE_BIN = "/etc/aspect/workflows/bin/warming_archive"
+
+
 def _impl(ctx: TaskContext) -> int:
+    on_workflows_runner = bool(ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER"))
     mount = ctx.std.env.var("ASPECT__STORAGE_PATH")
     if mount:
         # Match rosetta's pre-warming cleanup. Best-effort: bazel may have
@@ -42,7 +50,24 @@ def _impl(ctx: TaskContext) -> int:
         flags = flags,
         *ctx.args.targets,
     )
-    return invocation.wait().code
+    code = invocation.wait().code
+    if code != 0:
+        return code
+
+    if on_workflows_runner:
+        # Upload the populated caches to the warming bucket. Inherits the
+        # script's stdout/stderr so the user sees its progress in real time.
+        archive = ctx.std.process.command(WARMING_ARCHIVE_BIN).spawn().wait()
+        return archive.code
+
+    ctx.std.io.stderr.write(
+        "warning: ASPECT_WORKFLOWS_RUNNER is not set; skipping the warming " +
+        "archive upload step. The bazel cache populate step ran successfully. " +
+        "On an Aspect Workflows runner this task also invokes " +
+        WARMING_ARCHIVE_BIN + " to upload the populated caches to the warming " +
+        "bucket.\n"
+    )
+    return 0
 
 
 warming = task(
