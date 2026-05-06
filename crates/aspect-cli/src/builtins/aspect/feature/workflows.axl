@@ -8,7 +8,7 @@ load("../lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata
 load("../traits.axl", "BazelTrait", "HealthCheckTrait")
 load("../lib/health_check.axl", "agent_health_check")
 
-def _default_bazel_behavior(ctx: FeatureContext):
+def _workflows_impl(ctx: FeatureContext):
     environment = get_environment(ctx.std)
 
     health_check = ctx.traits[HealthCheckTrait]
@@ -47,7 +47,12 @@ def _default_bazel_behavior(ctx: FeatureContext):
         if bessie_endpoint:
             bessie_sinks.append(bazel.build_events.grpc(
                 uri = bessie_endpoint,
-                metadata = {} # TODO: how does bessie authenticate?
+                metadata = {}, # TODO: how does bessie authenticate?
+                max_retries = ctx.args.bes_max_retries,
+                retry_min_delay = ctx.args.bes_retry_min_delay,
+                retry_max_buffer_size = ctx.args.bes_retry_max_buffer_size,
+                timeout = ctx.args.bes_timeout,
+                error_strategy = ctx.args.bes_error_strategy,
             ))
 
         bazel_version_output = ctx.std.process.command("bazel").arg("--version").stdout("piped").spawn().wait_with_output()
@@ -75,7 +80,53 @@ def _default_bazel_behavior(ctx: FeatureContext):
             bazel_trait.extra_flags.append("--color=yes")
 
 
-BazelDefaults = feature(
-    implementation = _default_bazel_behavior,
-    args = {}
+Workflows = feature(
+    display_name = "Aspect Workflows",
+    summary = "CI-aware Bazel configuration for Aspect Workflows. Wires BES " +
+              "forwarding, build metadata, health checks, and CI-host quirks " +
+              "(GitHub runner tracking, Buildkite section markers, color " +
+              "forcing). Today this only fully works on Aspect Workflows " +
+              "runners; the CI-host branches for buildkite/github are partial " +
+              "and may grow into general-CI support later.",
+    implementation = _workflows_impl,
+    args = {
+        # BES sink retry/buffer/timeout knobs. Forwarded verbatim to
+        # `bazel.build_events.grpc(...)`; see crates/axl-runtime for the
+        # underlying state machine. Every parameter has a sensible default
+        # that mirrors Bazel's BuildEventServiceUploader, so users only set
+        # these when they want to deviate (e.g. fail builds on BES outage
+        # for compliance, or shrink buffers on memory-constrained runners).
+        "bes_max_retries": args.int(
+            default = 4,
+            description = "Max reconnect attempts after a transient BES error " +
+                          "before giving up. 0 disables retry; the sink remains " +
+                          "non-fatal regardless.",
+        ),
+        "bes_retry_min_delay": args.string(
+            default = "1s",
+            description = "Base delay for full-jitter exponential backoff " +
+                          "between BES reconnect attempts. Duration string " +
+                          "(e.g. '500ms', '2s', '1m').",
+        ),
+        "bes_retry_max_buffer_size": args.int(
+            default = 10000,
+            description = "Cap on the in-flight unacked BES retry buffer. " +
+                          "Exceeding this mid-stream is treated as a terminal " +
+                          "failure per `bes_error_strategy`.",
+        ),
+        "bes_timeout": args.string(
+            default = "0s",
+            description = "Overall BES upload deadline. Duration string; '0s' " +
+                          "disables the deadline. Mirrors Bazel's --bes_timeout.",
+        ),
+        "bes_error_strategy": args.string(
+            default = "warn",
+            values = ["abort", "fail_at_end", "warn", "ignore"],
+            description = "How a terminal BES failure surfaces. " +
+                          "'abort' kills the build; " +
+                          "'fail_at_end' lets the build complete then exits " +
+                          "non-zero; 'warn' (default) prints to stderr and " +
+                          "leaves the exit code alone; 'ignore' is silent.",
+        ),
+    }
 )

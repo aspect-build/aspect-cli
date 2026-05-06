@@ -152,7 +152,7 @@ def _impl(ctx: TaskContext) -> int:
     # Task-time flag contributors — features register hooks that need ctx.task
     # (e.g. --build_metadata=ASPECT_TASK_NAME=...) which features can't produce
     # at activation time because FeatureContext has no task.
-    # See BazelDefaults in feature/defaults.axl.
+    # See Workflows in feature/workflows.axl.
     for hook in bazel_trait.task_flags:
         flags.extend(hook(ctx))
     if bazel_trait.flags:

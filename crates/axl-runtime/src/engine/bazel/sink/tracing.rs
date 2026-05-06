@@ -11,10 +11,11 @@ use axl_proto::{
 
 use tracing::{Level, span::EnteredSpan};
 
-use super::stream::Subscriber;
+use super::super::stream::Subscriber;
+use super::retry::SinkOutcome;
 
 #[derive(Debug)]
-pub struct TracingEventStreamSink {}
+pub struct Tracing {}
 
 fn timestamp_or_now(timestamp: Option<&Timestamp>) -> i64 {
     timestamp.map_or_else(
@@ -28,8 +29,8 @@ fn timestamp_or_now(timestamp: Option<&Timestamp>) -> i64 {
     )
 }
 
-impl TracingEventStreamSink {
-    pub fn spawn(recv: Subscriber<BuildEvent>) -> JoinHandle<()> {
+impl Tracing {
+    pub fn spawn(recv: Subscriber<BuildEvent>) -> JoinHandle<SinkOutcome> {
         let events_span = tracing::info_span!("events");
         thread::spawn(move || {
             let _events_guard = events_span.enter();
@@ -126,6 +127,7 @@ impl TracingEventStreamSink {
                     _ => {}
                 }
             }
+            Ok(())
         })
     }
 }

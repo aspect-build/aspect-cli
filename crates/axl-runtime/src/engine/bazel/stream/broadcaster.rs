@@ -826,7 +826,7 @@ mod tests {
     /// Since both clones share the same `inner` Arc, dropping `broadcaster_for_thread`
     /// only decremented the refcount - it didn't drop the senders in `inner.subscribers`.
     /// The senders were only dropped when `join()` took the broadcaster from the holder.
-    /// But by then, `wait()` was already blocked waiting for TracingEventStreamSink
+    /// But by then, `wait()` was already blocked waiting for sink::tracing::Tracing
     /// to finish, which was blocked on `recv()` that never saw disconnect.
     ///
     /// The fix: Always call `close()` before returning from the BES thread.
