@@ -32,16 +32,14 @@ use axl_proto;
 
 mod build;
 mod cancel;
-mod execlog_sink;
 mod health_check;
 mod info;
 mod iter;
 mod process;
 mod query;
 mod rc;
+mod sink;
 mod stream;
-mod stream_sink;
-mod stream_tracing;
 
 /// Resolve which `bazel` binary to spawn. Honors the `BAZEL_REAL` env var
 /// (the bazelisk convention) so wrapped invocations and tests can substitute
@@ -220,7 +218,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<execlog_sink::ExecLogSink>,
+            UnpackList<sink::execlog::ExecLogSink>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
@@ -323,7 +321,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] workspace_events: bool,
         #[starlark(require = named, default = Either::Left(false))] execution_log: Either<
             bool,
-            UnpackList<execlog_sink::ExecLogSink>,
+            UnpackList<sink::execlog::ExecLogSink>,
         >,
         #[starlark(require = named, default = UnpackList::default())] flags: UnpackList<
             Either<values::StringValue<'v>, (values::StringValue<'v>, values::StringValue<'v>)>,
@@ -576,16 +574,63 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
 
 #[starlark_module]
 fn register_build_events(globals: &mut GlobalsBuilder) {
+    /// Forward Build Event Protocol events to a gRPC backend.
+    ///
+    /// Mirrors Bazel's `BuildEventServiceUploader`: transient transport or
+    /// gRPC errors trigger a bounded reconnect with full-jitter exponential
+    /// backoff, replaying buffered events under their original sequence
+    /// numbers. The BES protocol's per-stream dedup makes replay safe.
+    ///
+    /// # Arguments
+    /// * `uri` - BES endpoint. `grpcs://` is rewritten to `https://`.
+    /// * `metadata` - Headers attached to every request.
+    /// * `max_retries` - Max reconnect attempts after an error before giving
+    ///   up (default `4`). `0` disables retry; the sink is still non-fatal.
+    /// * `retry_min_delay` - Base delay for exponential backoff
+    ///   (default `"1s"`).
+    /// * `retry_max_buffer_size` - Cap on the in-flight unacked retry buffer
+    ///   (default `10000`). Exceeding it mid-stream is terminal.
+    /// * `timeout` - Overall upload deadline (default `"0s"` = no deadline).
+    /// * `error_strategy` - How a terminal failure surfaces. One of
+    ///   `"abort"`, `"fail_at_end"`, `"warn"` (default), `"ignore"`.
     #[starlark(as_type = build::BuildEventSink)]
     fn grpc(
         #[starlark(require = named)] uri: String,
         #[starlark(require = named, default = UnpackDictEntries::default())]
         metadata: UnpackDictEntries<String, String>,
+        #[starlark(require = named, default = 4)] max_retries: i32,
+        #[starlark(require = named, default = "1s")] retry_min_delay: &str,
+        #[starlark(require = named, default = 10_000)] retry_max_buffer_size: i32,
+        #[starlark(require = named, default = "0s")] timeout: &str,
+        #[starlark(require = named, default = "warn")] error_strategy: &str,
     ) -> anyhow::Result<build::BuildEventSink> {
-        // TODO: validate endpoint
+        if max_retries < 0 {
+            anyhow::bail!("max_retries must be >= 0, got {max_retries}");
+        }
+        if retry_max_buffer_size <= 0 {
+            anyhow::bail!("retry_max_buffer_size must be > 0, got {retry_max_buffer_size}");
+        }
+        let retry_min_delay = sink::retry::parse_duration(retry_min_delay)
+            .map_err(|e| anyhow::anyhow!("retry_min_delay: {e}"))?;
+        let timeout_dur =
+            sink::retry::parse_duration(timeout).map_err(|e| anyhow::anyhow!("timeout: {e}"))?;
+        let timeout = if timeout_dur.is_zero() {
+            None
+        } else {
+            Some(timeout_dur)
+        };
+        let error_strategy =
+            sink::retry::ErrorStrategy::parse(error_strategy).map_err(|e| anyhow::anyhow!(e))?;
         Ok(build::BuildEventSink::Grpc {
             uri: uri.replace("grpcs://", "https://"),
             metadata: HashMap::from_iter(metadata.entries),
+            retry: sink::retry::RetryConfig {
+                max_retries: max_retries as u32,
+                retry_min_delay,
+                retry_max_buffer_size: retry_max_buffer_size as usize,
+                timeout,
+                error_strategy,
+            },
         })
     }
 
@@ -596,17 +641,17 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
 
 #[starlark_module]
 fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
-    #[starlark(as_type = execlog_sink::ExecLogSink)]
+    #[starlark(as_type = sink::execlog::ExecLogSink)]
     fn file(
         #[starlark(require = named)] path: String,
-    ) -> anyhow::Result<execlog_sink::ExecLogSink> {
-        Ok(execlog_sink::ExecLogSink::File { path })
+    ) -> anyhow::Result<sink::execlog::ExecLogSink> {
+        Ok(sink::execlog::ExecLogSink::File { path })
     }
 
     fn compact_file(
         #[starlark(require = named)] path: String,
-    ) -> anyhow::Result<execlog_sink::ExecLogSink> {
-        Ok(execlog_sink::ExecLogSink::CompactFile { path })
+    ) -> anyhow::Result<sink::execlog::ExecLogSink> {
+        Ok(sink::execlog::ExecLogSink::CompactFile { path })
     }
 }
 
@@ -626,7 +671,7 @@ fn register_build_types(globals: &mut GlobalsBuilder) {
 
 #[starlark_module]
 fn register_execlog_types(globals: &mut GlobalsBuilder) {
-    const ExecLogSink: StarlarkValueAsType<execlog_sink::ExecLogSink> = StarlarkValueAsType::new();
+    const ExecLogSink: StarlarkValueAsType<sink::execlog::ExecLogSink> = StarlarkValueAsType::new();
 }
 
 #[starlark_module]

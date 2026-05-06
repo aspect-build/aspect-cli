@@ -28,15 +28,16 @@ use starlark::values::starlark_value;
 
 use crate::engine::r#async::rt::AsyncRuntime;
 
-use super::execlog_sink::ExecLogSink;
 use super::iter::BuildEventIterator;
 use super::iter::ExecutionLogIterator;
 use super::iter::WorkspaceEventIterator;
+use super::sink::execlog::ExecLogSink;
+use super::sink::grpc;
+use super::sink::retry::{ErrorStrategy, RetryConfig, SinkError, SinkOutcome};
+use super::sink::tracing as tracing_sink;
 use super::stream::BuildEventStream;
 use super::stream::ExecLogStream;
 use super::stream::WorkspaceEventStream;
-use super::stream_sink::GrpcEventStreamSink;
-use super::stream_tracing::TracingEventStreamSink;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.BuildStatus>")]
@@ -79,6 +80,8 @@ pub enum BuildEventSink {
     Grpc {
         uri: String,
         metadata: HashMap<String, String>,
+        #[allocative(skip)]
+        retry: RetryConfig,
     },
     File {
         path: String,
@@ -109,17 +112,22 @@ impl BuildEventSink {
         rt: AsyncRuntime,
         stream: &BuildEventStream,
         invocation_id: String,
-    ) -> JoinHandle<()> {
+    ) -> JoinHandle<SinkOutcome> {
         match self {
-            BuildEventSink::Grpc { uri, metadata } => {
+            BuildEventSink::Grpc {
+                uri,
+                metadata,
+                retry,
+            } => {
                 // Use subscribe_realtime() since sinks subscribe at stream creation
                 // and don't need history replay.
-                GrpcEventStreamSink::spawn(
+                grpc::Grpc::spawn(
                     rt,
                     stream.subscribe(),
                     uri.clone(),
                     metadata.clone(),
                     invocation_id,
+                    retry.clone(),
                 )
             }
             BuildEventSink::File { .. } => {
@@ -139,8 +147,13 @@ pub struct Build {
     #[allocative(skip)]
     execlog_stream: RefCell<Option<ExecLogStream>>,
 
+    /// Threads forwarding to BES, tracing, or file sinks. Every sink returns
+    /// a `SinkOutcome` so `wait()` can surface failures per the sink's
+    /// `error_strategy`. User-configured BES sinks default to `warn`;
+    /// internal sinks (tracing emitter, execlog writer) default to `abort`,
+    /// since their failures indicate a real bug rather than a flaky backend.
     #[allocative(skip)]
-    sink_handles: RefCell<Vec<JoinHandle<()>>>,
+    sink_handles: RefCell<Vec<JoinHandle<SinkOutcome>>>,
 
     /// The shared invocation_id that every gRPC BES sink uses when forwarding
     /// this build's events. `None` when no BES sinks were configured; `Some`
@@ -308,7 +321,7 @@ impl Build {
         // blocked in `Pipe::open` waiting for bazel to open the FIFO write
         // end, which won't happen until bazel finishes JVM startup — well
         // after these subscribe calls land.
-        let mut sink_handles: Vec<JoinHandle<()>> = vec![];
+        let mut sink_handles: Vec<JoinHandle<SinkOutcome>> = vec![];
         let sink_invocation_id: Option<String> = if !bes_subscriber_sinks.is_empty() {
             let invocation_id = uuid::Uuid::new_v4().to_string();
             for sink in bes_subscriber_sinks {
@@ -336,7 +349,7 @@ impl Build {
         if build_events {
             // Use subscribe_realtime() since this subscribes at stream creation
             // and doesn't need history replay.
-            sink_handles.push(TracingEventStreamSink::spawn(
+            sink_handles.push(tracing_sink::Tracing::spawn(
                 build_event_stream.as_ref().unwrap().subscribe(),
             ))
         }
@@ -483,21 +496,49 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             }
         };
 
-        let handles = build.sink_handles.take();
-        for handle in handles {
+        // Resolve all sink threads. Each returns a `SinkOutcome` describing
+        // its terminal state and how to surface a failure (per Bazel's BES
+        // upload error policy plus `abort` for internal sinks).
+        // `Warn` and `Ignore` already printed (or stayed silent) at the sink;
+        // only `Abort` and `FailAtEnd` propagate further.
+        let mut abort_msg: Option<String> = None;
+        let mut fail_at_end = false;
+        for handle in build.sink_handles.take() {
             match handle.join() {
-                Ok(_) => continue,
-                Err(err) => anyhow::bail!("one of the sinks failed: {:#?}", err),
+                Ok(Ok(())) => continue,
+                Ok(Err(SinkError {
+                    strategy,
+                    last_error,
+                })) => match strategy {
+                    ErrorStrategy::Abort => {
+                        if abort_msg.is_none() {
+                            abort_msg = Some(last_error);
+                        }
+                    }
+                    ErrorStrategy::FailAtEnd => {
+                        fail_at_end = true;
+                    }
+                    ErrorStrategy::Warn | ErrorStrategy::Ignore => {}
+                },
+                Err(err) => anyhow::bail!("sink thread panicked: {:#?}", err),
             }
         }
 
         // Drop the span to end the trace
         drop(build.span.replace(tracing::Span::none()));
 
-        Ok(BuildStatus {
-            success: result.success(),
-            code: result.code(),
-        })
+        if let Some(msg) = abort_msg {
+            anyhow::bail!("BES sink failure (abort): {}", msg);
+        }
+
+        let success = result.success() && !fail_at_end;
+        let code = if fail_at_end && result.code().unwrap_or(0) == 0 {
+            Some(36)
+        } else {
+            result.code()
+        };
+
+        Ok(BuildStatus { success, code })
     }
 }
 
@@ -592,5 +633,209 @@ Test = task(implementation = _impl)
                 assert_eq!(exit, Some(0));
             }
         }
+    }
+
+    // --- bazel.build_events.grpc validation ---
+    //
+    // These exercise the Starlark surface of the failure-knob feature.
+    // `.check()` runs the snippet through eval_module — the call lives at
+    // module level so the function's parameter validation is the *only*
+    // thing under test. No basil, no real network.
+
+    #[test]
+    fn grpc_rejects_unknown_error_strategy() {
+        let err = crate::axl_check!(
+            r#"bazel.build_events.grpc(uri = "http://localhost:1", error_strategy = "nope")"#
+        )
+        .expect_err("expected validation error")
+        .to_string();
+        assert!(
+            err.contains("error_strategy") && err.contains("nope"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn grpc_rejects_negative_max_retries() {
+        let err = crate::axl_check!(
+            r#"bazel.build_events.grpc(uri = "http://localhost:1", max_retries = -1)"#
+        )
+        .expect_err("expected validation error")
+        .to_string();
+        assert!(
+            err.contains("max_retries") && err.contains(">= 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn grpc_rejects_zero_buffer_size() {
+        let err = crate::axl_check!(
+            r#"bazel.build_events.grpc(uri = "http://localhost:1", retry_max_buffer_size = 0)"#
+        )
+        .expect_err("expected validation error")
+        .to_string();
+        assert!(
+            err.contains("retry_max_buffer_size") && err.contains("> 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn grpc_rejects_malformed_retry_min_delay() {
+        let err = crate::axl_check!(
+            r#"bazel.build_events.grpc(uri = "http://localhost:1", retry_min_delay = "garbage")"#
+        )
+        .expect_err("expected validation error")
+        .to_string();
+        assert!(err.contains("retry_min_delay"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn grpc_rejects_malformed_timeout() {
+        let err = crate::axl_check!(
+            r#"bazel.build_events.grpc(uri = "http://localhost:1", timeout = "garbage")"#
+        )
+        .expect_err("expected validation error")
+        .to_string();
+        assert!(err.contains("timeout"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn grpc_accepts_full_knob_set() {
+        crate::axl_check!(
+            r#"bazel.build_events.grpc(
+    uri = "grpcs://bes.example.com",
+    metadata = {"x-auth": "tok"},
+    max_retries = 0,
+    retry_min_delay = "500ms",
+    retry_max_buffer_size = 16,
+    timeout = "30s",
+    error_strategy = "fail_at_end",
+)"#
+        )
+        .expect("snippet should validate");
+    }
+
+    // --- error_strategy end-to-end ---
+    //
+    // The tests below feed an unparseable URI into the gRPC sink so
+    // `Channel::from_shared` returns `InvalidEndpoint` (non-retryable) and
+    // the sink terminates without touching the network. We deliberately
+    // avoid a real TCP target — connect-refused timing varies by platform
+    // and would make these tests flaky.
+    //
+    // basil is told to run the "success" scenario, so bazel itself exits
+    // 0; only the sink path differs across these tests.
+
+    /// `error_strategy = "ignore"`: terminal sink error is suppressed.
+    /// `wait()` returns success and the original bazel exit code.
+    #[test]
+    fn grpc_error_strategy_ignore_swallows_terminal_failure() {
+        use std::time::Duration;
+        let result = crate::test::with_timeout(Duration::from_secs(15), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    sink = bazel.build_events.grpc(
+        uri = "not a uri",
+        max_retries = 0,
+        retry_min_delay = "0s",
+        error_strategy = "ignore",
+    )
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [sink],
+        inherit_stderr = False,
+    )
+    status = build.wait()
+    if not status.success: return 1
+    if status.code != 0: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        })
+        .expect("test hung");
+        assert_eq!(result.expect("run_task"), Some(0));
+    }
+
+    /// `error_strategy = "fail_at_end"`: bazel succeeded but the sink
+    /// failed terminally — `wait()` reports `success = False` with the
+    /// reserved exit code 36 so callers can distinguish a sink-induced
+    /// failure from a genuine build failure.
+    #[test]
+    fn grpc_error_strategy_fail_at_end_reports_code_36() {
+        use std::time::Duration;
+        let result = crate::test::with_timeout(Duration::from_secs(15), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    sink = bazel.build_events.grpc(
+        uri = "not a uri",
+        max_retries = 0,
+        retry_min_delay = "0s",
+        error_strategy = "fail_at_end",
+    )
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [sink],
+        inherit_stderr = False,
+    )
+    status = build.wait()
+    if status.success: return 1
+    if status.code != 36: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        })
+        .expect("test hung");
+        assert_eq!(result.expect("run_task"), Some(0));
+    }
+
+    /// `error_strategy = "abort"`: terminal sink failure is raised out of
+    /// `wait()` as an evaluation error. The error message identifies the
+    /// abort path so users can tell a sink failure from any other Starlark
+    /// runtime error.
+    #[test]
+    fn grpc_error_strategy_abort_propagates_as_eval_error() {
+        use std::time::Duration;
+        let result = crate::test::with_timeout(Duration::from_secs(15), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    sink = bazel.build_events.grpc(
+        uri = "not a uri",
+        max_retries = 0,
+        retry_min_delay = "0s",
+        error_strategy = "abort",
+    )
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = [sink],
+        inherit_stderr = False,
+    )
+    build.wait()
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        })
+        .expect("test hung");
+        let err = result.expect_err("expected wait() to bail").to_string();
+        assert!(
+            err.contains("BES sink failure") && err.contains("abort"),
+            "unexpected error: {err}"
+        );
     }
 }

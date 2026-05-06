@@ -14,6 +14,8 @@ use starlark::values;
 use starlark::values::starlark_value;
 use starlark::values::{NoSerialize, ProvidesStaticType, UnpackValue, ValueLike};
 
+use super::retry::{ErrorStrategy, SinkError, SinkOutcome};
+
 /// Sink types for execution log output.
 ///
 /// | Variant | Format |
@@ -46,21 +48,30 @@ impl<'v> UnpackValue<'v> for ExecLogSink {
 impl ExecLogSink {
     /// Spawns a thread that reads decoded `ExecLogEntry` values from `recv` and
     /// writes them to `path` in varint-length-prefixed binary proto format.
-    pub fn spawn_file(recv: Receiver<ExecLogEntry>, path: String) -> JoinHandle<()> {
+    ///
+    /// I/O errors surface as `Err(SinkError { strategy: Abort, .. })` so the
+    /// build fails cleanly instead of leaving a half-written log behind.
+    pub fn spawn_file(recv: Receiver<ExecLogEntry>, path: String) -> JoinHandle<SinkOutcome> {
         thread::spawn(move || {
-            let file = File::create(&path).expect("failed to create execlog output file");
+            let abort = |last_error: String| SinkError {
+                strategy: ErrorStrategy::Abort,
+                last_error,
+            };
+            let file = File::create(&path)
+                .map_err(|e| abort(format!("ExecLog: failed to create '{path}': {e}")))?;
             let mut file = BufWriter::new(file);
             loop {
                 match recv.recv() {
                     Ok(entry) => {
-                        if let Err(e) = file.write_all(&entry.encode_length_delimited_to_vec()) {
-                            eprintln!("ExecLogSink: failed to write entry: {}", e);
-                            break;
-                        }
+                        file.write_all(&entry.encode_length_delimited_to_vec())
+                            .map_err(|e| {
+                                abort(format!("ExecLog: write to '{path}' failed: {e}"))
+                            })?;
                     }
                     Err(RecvError::Disconnected) => break,
                 }
             }
+            Ok(())
         })
     }
 }
