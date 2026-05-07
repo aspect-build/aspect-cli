@@ -156,7 +156,7 @@ impl Query {
     }
 
     pub fn query(expr: &str) -> anyhow::Result<TargetSet> {
-        let mut cmd = Command::new("bazel");
+        let mut cmd = Command::new(super::bazel_binary());
         cmd.arg("query");
         cmd.arg(expr);
         cmd.arg("--output=streamed_proto");

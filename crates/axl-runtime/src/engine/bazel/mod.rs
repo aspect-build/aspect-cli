@@ -43,6 +43,14 @@ mod stream;
 mod stream_sink;
 mod stream_tracing;
 
+/// Resolve which `bazel` binary to spawn. Honors the `BAZEL_REAL` env var
+/// (the bazelisk convention) so wrapped invocations and tests can substitute
+/// their own binary; falls back to plain `"bazel"` and lets the OS resolve
+/// it via `PATH`.
+pub(crate) fn bazel_binary() -> String {
+    std::env::var("BAZEL_REAL").unwrap_or_else(|_| "bazel".to_string())
+}
+
 /// Resolve a mixed list of plain flags and conditional `(flag, constraint)` tuples into
 /// a `Vec<String>`. Returns only the flags whose semver constraint matches `version`.
 /// When `version` is `None` all items must be plain strings (i.e. `Either::Left`).
@@ -404,7 +412,7 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     fn info<'v>(this: values::Value<'v>) -> anyhow::Result<SmallMap<String, String>> {
         let startup_flags = read_startup_flags(this)?;
 
-        let mut cmd = std::process::Command::new("bazel");
+        let mut cmd = std::process::Command::new(bazel_binary());
         cmd.args(&startup_flags);
         cmd.arg("info");
         cmd.stdout(Stdio::piped());

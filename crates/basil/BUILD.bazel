@@ -1,0 +1,14 @@
+load("//bazel/rust:defs.bzl", "rust_binary")
+
+rust_binary(
+    name = "basil",
+    srcs = glob(["src/**/*.rs"]),
+    version_key = None,
+    visibility = [
+        "//crates/axl-runtime:__pkg__",
+    ],
+    deps = [
+        "//crates/axl-proto",
+        "@crates//:prost",
+    ],
+)

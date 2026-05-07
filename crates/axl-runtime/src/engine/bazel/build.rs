@@ -187,7 +187,7 @@ impl Build {
 
         let targets: Vec<String> = targets.into_iter().collect();
 
-        let mut cmd = Command::new("bazel");
+        let mut cmd = Command::new(super::bazel_binary());
         cmd.args(startup_flags);
         cmd.arg(verb);
         cmd.args(flags);
@@ -477,5 +477,58 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             success: result.success(),
             code: result.code(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! End-to-end coverage of `ctx.bazel.build` through the AXL eval stack.
+    //!
+    //! Uses the `basil` fake-bazel binary (see `crates/basil`) via the
+    //! `BAZEL_REAL` env var (bazelisk convention) so we never shell out to
+    //! real bazel from a unit test. Each scenario is selected by the AXL
+    //! caller via a `--scenario=<name>` flag that basil reads from its argv.
+    /// Smoke test the BAZEL_REAL → basil → ctx.bazel.build path with a
+    /// clean build that ends in `BuildFinished(0, last_message=true)`.
+    /// Verifies basil is callable, the BES stream produces a clean exit,
+    /// `build.wait()` reports success, AND that AXL's `build.build_events()`
+    /// iterator actually receives the two events basil emitted (`Started`
+    /// and `Finished`).
+    #[test]
+    fn build_events_reach_axl_for_success_scenario() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=success"],
+        build_events = True,
+        inherit_stderr = False,
+    )
+    started = 0
+    finished = 0
+    other = 0
+    for event in build.build_events():
+        kind = event.kind
+        if kind == "build_started":
+            started += 1
+        elif kind == "build_finished":
+            finished += 1
+        else:
+            other += 1
+    status = build.wait()
+    if not status.success: return 1
+    if started != 1: return 2
+    if finished != 1: return 3
+    if other != 0: return 4
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .with_fake_bazel()
+        .run_task(0)
+        .expect("run_task");
+
+        assert_eq!(exit, Some(0));
     }
 }

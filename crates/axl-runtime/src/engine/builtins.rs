@@ -588,11 +588,11 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 
 #[cfg(test)]
 mod tests {
-    use crate::eval::api::eval_expr;
+    use crate::axl_eval;
 
     #[test]
     fn sleep_returns_none() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "sleep")
 sleep(1)
@@ -604,7 +604,7 @@ sleep(1)
 
     #[test]
     fn sleep_via_time_struct() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "time")
 time.sleep(1)
@@ -616,7 +616,7 @@ time.sleep(1)
 
     #[test]
     fn sleep_iter_yields_incrementing_ticks() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "sleep_iter")
 ticks = []
@@ -633,7 +633,7 @@ ticks
 
     #[test]
     fn sleep_iter_via_time_struct() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "time")
 ticks = []
@@ -650,7 +650,7 @@ ticks
 
     #[test]
     fn monotonic_returns_float() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "monotonic")
 t = monotonic()
@@ -663,7 +663,7 @@ type(t) == "float"
 
     #[test]
     fn monotonic_is_non_decreasing() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "monotonic")
 t1 = monotonic()
@@ -677,7 +677,7 @@ t2 >= t1
 
     #[test]
     fn monotonic_ns_returns_int() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "monotonic_ns")
 t = monotonic_ns()
@@ -690,7 +690,7 @@ type(t) == "int"
 
     #[test]
     fn monotonic_ns_is_non_decreasing() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "monotonic_ns")
 t1 = monotonic_ns()
@@ -704,7 +704,7 @@ t2 >= t1
 
     #[test]
     fn monotonic_via_time_struct() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "time")
 type(time.monotonic()) == "float"
@@ -716,7 +716,7 @@ type(time.monotonic()) == "float"
 
     #[test]
     fn monotonic_ns_via_time_struct() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "time")
 type(time.monotonic_ns()) == "int"
@@ -728,7 +728,7 @@ type(time.monotonic_ns()) == "int"
 
     #[test]
     fn monotonic_is_positive() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "monotonic")
 monotonic() > 0.0
@@ -740,7 +740,7 @@ monotonic() > 0.0
 
     #[test]
     fn monotonic_ns_is_positive() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "monotonic_ns")
 monotonic_ns() > 0
@@ -752,7 +752,7 @@ monotonic_ns() > 0
 
     #[test]
     fn monotonic_advances_after_sleep() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "monotonic", "sleep")
 t1 = monotonic()
@@ -767,7 +767,7 @@ t2 - t1 >= 0.01
 
     #[test]
     fn monotonic_ns_advances_after_sleep() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "monotonic_ns", "sleep")
 t1 = monotonic_ns()
@@ -783,7 +783,7 @@ t2 - t1 >= 10000000
     #[test]
     fn monotonic_ns_consistent_with_monotonic() {
         // monotonic_ns should be within 1 second of monotonic() * 1e9
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//time.axl", "monotonic", "monotonic_ns")
 s = monotonic()

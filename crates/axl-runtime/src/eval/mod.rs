@@ -6,7 +6,7 @@ mod load_path;
 mod multi_phase;
 pub mod task;
 
-pub use api::{eval_snippet, get_globals};
+pub use api::get_globals;
 pub use error::EvalError;
 pub use load::AxlLoader as Loader;
 pub(crate) use load_path::join_confined;
