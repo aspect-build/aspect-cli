@@ -29,7 +29,7 @@ def _default_bazel_behavior(ctx: FeatureContext):
                 print("--- :bazel: Running bazel %s %s" % (ctx.task.name, " ".join(targets)))
 
         bazel_trait.build_start.append(_buildkite_bazel_section)
-        health_check.pre_health_check.append(lambda ctx: print_environment_info(environment))
+        health_check.pre_health_check.append(lambda ctx: print_environment_info(ctx.std, environment))
         health_check.pre_health_check.append(lambda ctx: agent_health_check(ctx, environment))
 
 
