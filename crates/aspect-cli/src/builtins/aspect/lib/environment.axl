@@ -315,7 +315,7 @@ def _url_encode(s: str) -> str:
     return result
 
 
-def _print_workflows_info(env: Environment) -> None:
+def _print_workflows_info(std, env: Environment) -> None:
     """Print Workflows version and warming status."""
     if env.ci.host == "buildkite":
         print("--- :aspect: Workflows Runner Environment")
@@ -324,6 +324,7 @@ def _print_workflows_info(env: Environment) -> None:
         print("\tVersion: " + env.runner.product_version)
     if env.runner.aspect_launcher_version:
         print("\tAspect Launcher Version: " + env.runner.aspect_launcher_version)
+    print("\tAspect CLI Version: " + std.env.aspect_cli_version())
     if env.runner.ci_agent_version:
         print("\tCI Agent Version: " + env.runner.ci_agent_version)
     print("\tWarming enabled: " + ("true" if env.runner.warming_enabled else "false"))
@@ -379,14 +380,15 @@ def _print_gcp_info(env: Environment) -> None:
         print("\tCLI: 'gcloud logging read --project " + env.runner.account + " \"resource.type=gce_instance resource.labels.instance_id=" + env.runner.instance_id + " log_name=projects/" + env.runner.account + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
 
 
-def print_environment_info(env: Environment) -> None:
+def print_environment_info(std, env: Environment) -> None:
     """
     Print debug/diagnostic information about the runner environment.
 
     Args:
+        std: Standard context (ctx.std)
         env: Environment
     """
-    _print_workflows_info(env)
+    _print_workflows_info(std, env)
 
     if env.runner.cloud_provider == "aws":
         _print_aws_info(env)
