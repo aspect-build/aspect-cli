@@ -16,6 +16,7 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use starlark::environment::Module;
@@ -231,4 +232,20 @@ pub fn install_basil() {
     unsafe {
         std::env::set_var("BAZEL_REAL", basil_bin());
     }
+}
+
+/// Run `f` on a worker thread; return `Some(result)` if it finished within
+/// `timeout`, `None` if it didn't. Used to fail-fast on regression tests
+/// that exercise potential hangs (the worker thread is leaked on timeout —
+/// fine for a test process that exits soon after).
+pub fn with_timeout<F, R>(timeout: Duration, f: F) -> Option<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(timeout).ok()
 }

@@ -34,16 +34,33 @@ pub struct BuildEventStream {
 }
 
 impl BuildEventStream {
-    pub fn spawn_with_pipe(
-        pid: u32,
-        raw_file_sink_paths: Vec<String>,
-    ) -> io::Result<(PathBuf, Self)> {
+    /// Mint a temp FIFO path and create the inode, returning the path so
+    /// the caller can pass it to bazel as `--build_event_binary_file`
+    /// before spawning. Pair with `spawn` once the caller has the bazel
+    /// child pid in hand.
+    pub fn reserve_path() -> io::Result<PathBuf> {
         let out = env::temp_dir().join(format!("build-event-out-{}.bin", uuid::Uuid::new_v4()));
-        let stream = Self::spawn(out.clone(), pid, raw_file_sink_paths)?;
-        Ok((out, stream))
+        galvanize::Pipe::mkfifo(&out)?;
+        Ok(out)
     }
 
-    pub fn spawn(path: PathBuf, pid: u32, raw_file_sink_paths: Vec<String>) -> io::Result<Self> {
+    /// Spawn the BES reader thread.
+    ///
+    /// `server_pid` goes to galvanize for its `IfOpenForPid` retry policy
+    /// (it's the pid that *holds the FIFO write end open during an
+    /// attempt*; for real bazel that's the server/daemon pid).
+    ///
+    /// `writer_pid` is the per-invocation pid whose death signals
+    /// "no more retries coming" — for real bazel that's the spawned
+    /// client process (`Command::spawn().id()`). The BES thread checks
+    /// it in the `expecting_retry` BrokenPipe branch; a live writer
+    /// means an inter-attempt gap, a dead writer means end-of-build.
+    pub fn spawn(
+        path: PathBuf,
+        server_pid: u32,
+        writer_pid: u32,
+        raw_file_sink_paths: Vec<String>,
+    ) -> io::Result<Self> {
         let main_broadcaster = Broadcaster::new();
         let thread_broadcaster = main_broadcaster.clone();
         let handle = thread::spawn(move || {
@@ -57,7 +74,11 @@ impl BuildEventStream {
             };
 
             let mut raw_out = open_file_sinks(&raw_file_sink_paths)?;
-            let mut reader = galvanize::Pipe::new(path, galvanize::RetryPolicy::IfOpenForPid(pid))?;
+            // mkfifo is idempotent (`Pipe::new` tolerates EEXIST), so this
+            // works whether the caller pre-created the FIFO via
+            // `reserve_path` (production) or not (unit tests).
+            let mut reader =
+                galvanize::Pipe::new(path, galvanize::RetryPolicy::IfOpenForPid(server_pid))?;
 
             let mut buf: Vec<u8> = Vec::with_capacity(1024 * 5);
             // Initial size for reading a varint
@@ -165,11 +186,39 @@ impl BuildEventStream {
                     }
                     Err(BuildEventStreamError::IO(err)) if err.kind() == ErrorKind::BrokenPipe => {
                         if expecting_retry {
-                            // Attempt N's writer closed; Bazel is retrying.
-                            // With no writer attached, read() on the FIFO returns
-                            // 0 immediately, so looping without backoff creates a
-                            // hot CPU spin until the next writer opens the pipe.
-                            // Sleep briefly to yield the CPU between polls.
+                            // aspect-build/aspect-cli#1060: a REMOTE_CACHE_EVICTED
+                            // BuildFinished is not always followed by a retry.
+                            // Bazel may emit it as the last message and then
+                            // the invocation ends. If the writer process is
+                            // gone, no retry is coming — close gracefully
+                            // instead of spinning.
+                            //
+                            // We check `writer_pid` (the bazel client process
+                            // the runtime spawned), not the server/daemon pid
+                            // passed to galvanize. A bazel daemon stays alive
+                            // across invocations and would always look alive
+                            // here; only the per-invocation client pid dies
+                            // when the build is truly done.
+                            //
+                            // We use pid liveness, not `is_path_open_for_pid`,
+                            // because Bazel closes the BEP file at the end of
+                            // each attempt and reopens it for the next one
+                            // (FileTransport.SequentialWriter.close() runs on
+                            // every attempt). During that gap the writer pid
+                            // is alive but the FIFO has no writer; mistaking
+                            // that for "no retry coming" would drop attempt 2
+                            // events.
+                            if !galvanize::is_pid_alive(writer_pid) {
+                                broadcaster.close();
+                                raw_out.flush()?;
+                                return Ok(());
+                            }
+                            // Writer is alive; Bazel is between attempts.
+                            // With no writer attached, read() on the FIFO
+                            // returns 0 immediately, so looping without
+                            // backoff creates a hot CPU spin until the next
+                            // writer opens the pipe. Sleep briefly to yield
+                            // the CPU between polls.
                             std::thread::sleep(std::time::Duration::from_millis(10));
                             continue;
                         }
@@ -253,7 +302,14 @@ mod tests {
         }
     }
 
-    /// Poll until the FIFO path exists (created by `galvanize::Pipe::new` in the stream thread).
+    fn temp_fifo_path() -> PathBuf {
+        std::env::temp_dir().join(format!("test-bes-{}.fifo", uuid::Uuid::new_v4()))
+    }
+
+    /// Poll until the FIFO inode appears at `path`. The BES thread mkfifos
+    /// the path lazily (via `Pipe::new` inside `BuildEventStream::spawn`),
+    /// so test main threads that open the writer side need to wait for the
+    /// inode to exist before calling `OpenOptions::open`.
     fn wait_for_fifo(path: &PathBuf) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !path.exists() {
@@ -264,10 +320,6 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-    }
-
-    fn temp_fifo_path() -> PathBuf {
-        std::env::temp_dir().join(format!("test-bes-{}.fifo", uuid::Uuid::new_v4()))
     }
 
     /// Spawn a long-lived `sleep` subprocess and return its pid.
@@ -294,7 +346,7 @@ mod tests {
         let mut holder = spawn_pid_holder();
         let pid = holder.id();
 
-        let mut stream = BuildEventStream::spawn(path.clone(), pid, vec![]).unwrap();
+        let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
         wait_for_fifo(&path);
 
@@ -328,7 +380,7 @@ mod tests {
         let mut holder = spawn_pid_holder();
         let pid = holder.id();
 
-        let mut stream = BuildEventStream::spawn(path.clone(), pid, vec![]).unwrap();
+        let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
         wait_for_fifo(&path);
 
@@ -363,6 +415,7 @@ mod tests {
 
         let mut stream = BuildEventStream::spawn(
             path.clone(),
+            pid,
             pid,
             vec![sink_path.to_str().unwrap().to_string()],
         )
@@ -413,7 +466,7 @@ mod tests {
         let mut holder = spawn_pid_holder();
         let pid = holder.id();
 
-        let mut stream = BuildEventStream::spawn(path.clone(), pid, vec![]).unwrap();
+        let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
         wait_for_fifo(&path);
 
@@ -500,7 +553,7 @@ mod tests {
         let mut holder = spawn_pid_holder();
         let pid = holder.id();
 
-        let mut stream = BuildEventStream::spawn(path.clone(), pid, vec![]).unwrap();
+        let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
         wait_for_fifo(&path);
 
@@ -554,7 +607,7 @@ mod tests {
         let mut holder = spawn_pid_holder();
         let pid = holder.id();
 
-        let mut stream = BuildEventStream::spawn(path.clone(), pid, vec![]).unwrap();
+        let mut stream = BuildEventStream::spawn(path.clone(), pid, pid, vec![]).unwrap();
         let sub = stream.subscribe();
         wait_for_fifo(&path);
 
@@ -614,6 +667,7 @@ mod tests {
 
         let mut stream = BuildEventStream::spawn(
             path.clone(),
+            pid,
             pid,
             vec![sink_path.to_str().unwrap().to_string()],
         )

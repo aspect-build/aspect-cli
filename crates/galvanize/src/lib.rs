@@ -7,7 +7,7 @@ use nix::unistd::mkfifo;
 
 /// Returns `false` when the process does not exist (ESRCH) or is a zombie.
 /// EPERM (process exists but we can't signal it) is treated as alive.
-fn is_pid_alive(pid: u32) -> bool {
+pub fn is_pid_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) is the standard POSIX existence check. Signal 0 is
     // never delivered; the call only validates the pid and our permission to
     // signal it.
@@ -32,8 +32,16 @@ fn is_pid_zombie(pid: u32) -> bool {
 
 #[cfg(target_os = "macos")]
 fn is_pid_zombie(pid: u32) -> bool {
-    // proc_pidinfo(PROC_PIDTBSDINFO) fills proc_bsdinfo; pbi_status holds the
-    // process state where SZOMB == 5 per <sys/proc_info.h>.
+    // Two zombie signals on macOS:
+    //   1. ret > 0 with pbi_status == SZOMB (5) — kernel populated bsdinfo
+    //      and explicitly reports the zombie state.
+    //   2. ret == 0 — kernel returned no bsdinfo even though `kill(pid, 0)`
+    //      succeeded a moment ago. In practice this is what we observe for
+    //      zombies on contemporary macOS: bsdinfo stops being populated
+    //      once the process has exited but the pid slot is held open
+    //      waiting for `wait()` (case (1) is documented but not produced
+    //      in our reproductions). Verified empirically against a `true`
+    //      child that had exited but not yet been waited on.
     use std::mem;
     unsafe {
         let mut info: libc::proc_bsdinfo = mem::zeroed();
@@ -44,14 +52,25 @@ fn is_pid_zombie(pid: u32) -> bool {
             &mut info as *mut _ as *mut libc::c_void,
             mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
         );
-        ret > 0 && info.pbi_status == 5
+        ret == 0 || (ret > 0 && info.pbi_status == 5)
     }
 }
 
 #[cfg(target_os = "linux")]
 fn is_path_open_for_pid(path: &Path, pid: u32) -> io::Result<bool> {
     use procfs::process::{FDTarget, Process};
-    let proc = Process::new(pid as i32).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    // A dead pid has no /proc/<pid> directory. Treat that as "not open"
+    // rather than propagating an error: callers use this to decide whether
+    // to keep waiting for more bytes, and a dead writer can never write more.
+    if !is_pid_alive(pid) {
+        return Ok(false);
+    }
+    let proc = match Process::new(pid as i32) {
+        Ok(p) => p,
+        // Race: pid was alive a moment ago but exited before we could open
+        // its procfs entry. Same logical answer — no longer holding the file.
+        Err(_) => return Ok(false),
+    };
     for fd in proc.fd().map_err(|err| io::Error::other(err))? {
         let fd = fd.map_err(|err| io::Error::other(err))?;
         if let FDTarget::Path(fd_path) = &fd.target {
@@ -66,6 +85,12 @@ fn is_path_open_for_pid(path: &Path, pid: u32) -> io::Result<bool> {
 #[cfg(target_os = "macos")]
 fn is_path_open_for_pid(path: &Path, pid: u32) -> io::Result<bool> {
     use proc_pidinfo::*;
+    // proc_pidinfo silently returns 0 fds for a dead pid on macOS, so the
+    // loop below would already report "not open" — but skip it explicitly
+    // to keep the cross-platform contract identical with the Linux branch.
+    if !is_pid_alive(pid) {
+        return Ok(false);
+    }
     let pid_val = Pid(pid);
     for fd in proc_pidinfo_list::<ProcFDInfo>(pid_val)? {
         match proc_pidfdinfo::<VnodeFdInfoWithPath>(pid_val, fd.proc_fd)? {
@@ -97,8 +122,27 @@ pub enum RetryPolicy {
 }
 
 impl Pipe {
-    pub fn new(path: PathBuf, policy: RetryPolicy) -> io::Result<Self> {
-        mkfifo(&path, Mode::S_IRWXO | Mode::S_IRWXU | Mode::S_IRWXG)?;
+    /// Create the FIFO inode at `path`. Does not open it. Idempotent —
+    /// returns `Ok(())` if the FIFO already exists at `path` (EEXIST).
+    ///
+    /// Useful when the caller needs the FIFO to exist on disk before
+    /// spawning the writer process — e.g. so the spawned process can pass
+    /// the path as a flag and `open(O_WRONLY)` will find the FIFO instead
+    /// of `ENOENT`. After mkfifo, call `open` from whichever thread owns
+    /// the read end.
+    pub fn mkfifo(path: &Path) -> io::Result<()> {
+        match mkfifo(path, Mode::S_IRWXO | Mode::S_IRWXU | Mode::S_IRWXG) {
+            Ok(()) => Ok(()),
+            Err(nix::errno::Errno::EEXIST) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Open the read end of an existing FIFO at `path`. Blocks until a
+    /// writer connects (POSIX FIFO semantics) unless one already has.
+    /// Pair with `mkfifo` when the caller needs to control ordering
+    /// between FIFO creation and writer spawn.
+    pub fn open(path: PathBuf, policy: RetryPolicy) -> io::Result<Self> {
         let inner = File::open(&path)?;
         let path = path.canonicalize()?;
         Ok(Self {
@@ -106,6 +150,14 @@ impl Pipe {
             policy,
             path,
         })
+    }
+
+    /// Convenience: `mkfifo` + `open`. Equivalent to the original
+    /// monolithic constructor; appropriate when the caller does not need
+    /// to interleave other work between the two steps.
+    pub fn new(path: PathBuf, policy: RetryPolicy) -> io::Result<Self> {
+        Self::mkfifo(&path)?;
+        Self::open(path, policy)
     }
 
     fn read_with_policy(&mut self, buf: &mut [u8]) -> io::Result<usize> {

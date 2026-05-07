@@ -208,13 +208,17 @@ impl Build {
             }
         }
 
-        let build_event_stream = if build_events {
-            let (out, stream) = BuildEventStream::spawn_with_pipe(pid, bes_file_paths)?;
+        // Reserve the BES FIFO inode now (before `cmd.spawn()`) so bazel can
+        // find the path when it opens the BEP file. The reader-side thread
+        // is started later — once we have the spawned child's pid in hand
+        // for the per-invocation liveness check.
+        let bes_path = if build_events {
+            let p = BuildEventStream::reserve_path()?;
             cmd.arg("--build_event_publish_all_actions")
                 .arg("--build_event_binary_file_upload_mode=fully_async")
                 .arg("--build_event_binary_file")
-                .arg(&out);
-            Some(stream)
+                .arg(&p);
+            Some(p)
         } else {
             None
         };
@@ -258,6 +262,39 @@ impl Build {
             None
         };
 
+        cmd.arg("--"); // separate flags from target patterns (not strictly necessary for build & test verbs but good form)
+        cmd.args(targets);
+
+        crate::trace!("exec: {:?}", cmd.get_args());
+
+        // TODO: if not inheriting, we should pipe and make the streams available to AXL
+        cmd.stdout(if inherit_stdout {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        });
+        cmd.stderr(if inherit_stderr {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        });
+        cmd.stdin(Stdio::null());
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+
+        // Now that we have the spawned child's pid, start the BES reader.
+        // The child pid is the per-invocation liveness signal the BES thread
+        // uses to detect aspect-build/aspect-cli#1060 — a hung post-
+        // REMOTE_CACHE_EVICTED state. The server (daemon) pid passed to
+        // galvanize stays alive across invocations and cannot signal
+        // end-of-build, which is why we want a separate per-invocation pid.
+        let build_event_stream = match bes_path {
+            Some(p) => Some(BuildEventStream::spawn(p, pid, child.id(), bes_file_paths)?),
+            None => None,
+        };
+
         // Build Event sinks for forwarding the build events.
         //
         // Generate ONE invocation_id and hand it to every sink so all backends
@@ -265,6 +302,12 @@ impl Build {
         // "View invocation" URL that works on whichever backend a user checks.
         // Without this, each sink would mint its own UUID and we'd have no way
         // to know which one corresponded to any particular viewer URL.
+        //
+        // Subscribing here (after `cmd.spawn()` but before bazel's BEP open
+        // unblocks the BES thread) is correct: the BES thread is currently
+        // blocked in `Pipe::open` waiting for bazel to open the FIFO write
+        // end, which won't happen until bazel finishes JVM startup — well
+        // after these subscribe calls land.
         let mut sink_handles: Vec<JoinHandle<()>> = vec![];
         let sink_invocation_id: Option<String> = if !bes_subscriber_sinks.is_empty() {
             let invocation_id = uuid::Uuid::new_v4().to_string();
@@ -297,28 +340,6 @@ impl Build {
                 build_event_stream.as_ref().unwrap().subscribe(),
             ))
         }
-
-        cmd.arg("--"); // separate flags from target patterns (not strictly necessary for build & test verbs but good form)
-        cmd.args(targets);
-
-        crate::trace!("exec: {:?}", cmd.get_args());
-
-        // TODO: if not inheriting, we should pipe and make the streams available to AXL
-        cmd.stdout(if inherit_stdout {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        });
-        cmd.stderr(if inherit_stderr {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        });
-        cmd.stdin(Stdio::null());
-
-        let child = cmd
-            .spawn()
-            .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
 
         drop(_enter);
         Ok(Self {
@@ -530,5 +551,46 @@ Test = task(implementation = _impl)
         .expect("run_task");
 
         assert_eq!(exit, Some(0));
+    }
+
+    /// Regression test for aspect-build/aspect-cli#1060.
+    ///
+    /// Bazel emits `BuildFinished(REMOTE_CACHE_EVICTED, last_message=true)`
+    /// and exits without ever reconnecting to retry. The BES thread sets
+    /// `expecting_retry = true` on the evicted finish, then must observe
+    /// the writer pid is gone and close gracefully instead of looping on
+    /// BrokenPipe forever. See the pid-liveness branch in
+    /// `crates/axl-runtime/src/engine/bazel/stream/build_event.rs`.
+    #[test]
+    fn bug_1060_remote_cache_evicted_without_retry_does_not_hang() {
+        use std::time::Duration;
+        let result = crate::test::with_timeout(Duration::from_secs(5), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=cache_evicted_no_retry"],
+        build_events = True,
+        inherit_stderr = False,
+    )
+    for _ in build.build_events():
+        pass
+    build.wait()
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        });
+
+        match result {
+            None => panic!("build hung past 5s on REMOTE_CACHE_EVICTED with no retry (bug 1060)"),
+            Some(r) => {
+                let exit = r.expect("run_task");
+                assert_eq!(exit, Some(0));
+            }
+        }
     }
 }
