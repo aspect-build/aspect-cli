@@ -144,6 +144,10 @@ impl RetryBuffer {
         self.items.is_empty()
     }
 
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &(i64, PublishBuildToolEventStreamRequest)> {
         self.items.iter()
     }
