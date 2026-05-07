@@ -47,7 +47,7 @@ def _workflows_impl(ctx: FeatureContext):
         if bessie_endpoint:
             bessie_sinks.append(bazel.build_events.grpc(
                 uri = bessie_endpoint,
-                metadata = {}, # TODO: how does bessie authenticate?
+                metadata = {},
                 max_retries = ctx.args.bes_max_retries,
                 retry_min_delay = ctx.args.bes_retry_min_delay,
                 retry_max_buffer_size = ctx.args.bes_retry_max_buffer_size,

@@ -1,5 +1,9 @@
 use std::{
     collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
 };
 
@@ -87,24 +91,64 @@ async fn work(
     retry: RetryConfig,
 ) -> SinkOutcome {
     let strategy = retry.error_strategy;
+    let timeout = retry.timeout;
+    let inner = work_inner(recv, endpoint.clone(), headers, invocation_id, retry);
+
+    // Honor the configured upload deadline. Without this wrapper the BES
+    // sink can stall indefinitely when the backend is slow to respond,
+    // even with retry budgets exhausted: lifecycle calls, the bidi
+    // stream, and `tokio::time::sleep` between retries are each bounded
+    // only by their own internal logic. Wrapping the whole upload in
+    // `tokio::time::timeout` mirrors Bazel's `--bes_timeout` and gives
+    // the user-set knob a real effect.
+    match timeout {
+        Some(d) => match tokio::time::timeout(d, inner).await {
+            Ok(r) => r,
+            Err(_) => Err(finalize(
+                strategy,
+                &endpoint,
+                format!("BES upload timed out after {d:?}"),
+            )),
+        },
+        None => inner.await,
+    }
+}
+
+async fn work_inner(
+    recv: Subscriber<BuildEvent>,
+    endpoint: String,
+    headers: HashMap<String, String>,
+    invocation_id: String,
+    retry: RetryConfig,
+) -> SinkOutcome {
+    let strategy = retry.error_strategy;
     let context = |stage: &str, err: &dyn std::fmt::Display| -> SinkError {
         finalize(strategy, &endpoint, format!("{stage}: {err}"))
     };
 
     // Forward the synchronous broadcaster `recv` into a tokio mpsc so the
     // state machine can `select!` over it alongside the bidi response
-    // stream. The forwarder runs once for the whole sink lifetime — events
-    // are queued on `event_rx` and pulled lazily as we (re)open streams.
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BuildEvent>();
+    // stream. The channel is bounded by `retry_max_buffer_size`: during a
+    // BES outage `drive_stream` stops draining (it's sleeping between
+    // reconnects or replaying the retry buffer), so without a bound the
+    // forwarder would queue events indefinitely and defeat the very knob
+    // meant to cap memory. On overflow we set `overflow_flag` and drop
+    // `event_tx`; `drive_stream` observes the closed receiver, checks the
+    // flag, and exits with `BufferFull` so the configured `error_strategy`
+    // takes effect.
+    let buffer_cap = retry.retry_max_buffer_size;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<BuildEvent>(buffer_cap);
+    let overflow_flag = Arc::new(AtomicBool::new(false));
+    let overflow_flag_forwarder = overflow_flag.clone();
     let _forwarder = tokio::task::spawn_blocking(move || {
-        loop {
-            match recv.recv() {
-                Ok(ev) => {
-                    if event_tx.send(ev).is_err() {
-                        break;
-                    }
+        while let Ok(ev) = recv.recv() {
+            match event_tx.try_send(ev) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    overflow_flag_forwarder.store(true, Ordering::SeqCst);
+                    break;
                 }
-                Err(_) => break,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
             }
         }
     });
@@ -142,6 +186,7 @@ async fn work(
             &build_id,
             &invocation_id,
             &mut event_rx,
+            &overflow_flag,
             &mut buffer,
             &mut next_seq,
             &mut last_message_sent,
@@ -215,11 +260,13 @@ async fn work(
 /// them down the wire. In parallel reads responses and prunes the buffer up
 /// to each ack'd `sequence_number`. Replays any leftover buffered events
 /// under their original seqs at the start of the connection.
+#[allow(clippy::too_many_arguments)]
 async fn drive_stream(
     client: &mut Client,
     build_id: &str,
     invocation_id: &str,
-    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<BuildEvent>,
+    event_rx: &mut tokio::sync::mpsc::Receiver<BuildEvent>,
+    overflow_flag: &AtomicBool,
     buffer: &mut RetryBuffer,
     next_seq: &mut i64,
     last_message_sent: &mut bool,
@@ -259,9 +306,17 @@ async fn drive_stream(
             // Disabled once last_message has been sent.
             ev = event_rx.recv(), if !*last_message_sent && sender_opt.is_some() => {
                 let Some(event) = ev else {
-                    // Upstream closed without a final last_message. Drop the
-                    // request side so the server flushes any pending acks,
-                    // and wait for the response stream to wind down.
+                    // event_rx closed. Either the forwarder hit the bounded
+                    // queue cap and bailed (overflow_flag set) — terminal
+                    // per the retry buffer's BufferOverflow contract — or
+                    // the upstream broadcaster closed without a final
+                    // last_message — clean shutdown.
+                    if overflow_flag.load(Ordering::SeqCst) {
+                        return DriveOutcome::BufferFull(BufferOverflow {
+                            cap: buffer.capacity(),
+                            seq: *next_seq,
+                        });
+                    }
                     sender_opt = None;
                     if buffer.is_empty() {
                         return DriveOutcome::UpstreamClosed;
