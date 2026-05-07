@@ -15,9 +15,9 @@
 //!     on the path, so multi-attempt scenarios faithfully simulate Bazel's
 //!     reconnect-after-eviction behavior on a FIFO.
 //!
-//! Scenarios are added in `scenario_attempts`. Pick names that document the
-//! bug or behavior they exercise (`bug1`, `success`, etc.) so the AXL test
-//! reads obviously: `ctx.bazel.build(flags = ["--scenario=bug1"], ...)`.
+//! Scenarios are added in `scenario`. Pick names that document the behavior
+//! they exercise (`success`, `cache_evicted_no_retry`, etc.) so the AXL test
+//! reads obviously: `ctx.bazel.build(flags = ["--scenario=cache_evicted_no_retry"], ...)`.
 
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -168,14 +168,15 @@ fn scenario(name: &str) -> Scenario {
             attempts: vec![vec![build_started(), build_finished(0, true)]],
         },
 
-        // Bug 1: REMOTE_CACHE_EVICTED (exit code 39) on the *only* attempt.
-        // Bazel emits last_message=true on the evicted BuildFinished, so
-        // axl-runtime's stream sets `expecting_retry = true`. No retry ever
-        // arrives. Today the stream loops swallowing BrokenPipe forever and
-        // never closes its broadcaster — `for event in build.build_events()`
-        // and `build.wait()` both hang. Track in:
-        // crates/axl-runtime/src/engine/bazel/stream/build_event.rs:113
-        "bug1" => Scenario {
+        // Regression for aspect-build/aspect-cli#1060: a single attempt with
+        // REMOTE_CACHE_EVICTED (exit code 39) and last_message=true, then
+        // basil exits without writing a retry attempt. axl-runtime's stream
+        // sets `expecting_retry = true` on the evicted BuildFinished and
+        // would otherwise loop swallowing BrokenPipe forever. The fix in
+        // crates/axl-runtime/src/engine/bazel/stream/build_event.rs falls
+        // through to a graceful close once it observes the writer pid is
+        // dead, so this scenario must terminate the AXL build promptly.
+        "cache_evicted_no_retry" => Scenario {
             open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(39, true)]],
         },
