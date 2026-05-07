@@ -315,7 +315,7 @@ def _url_encode(s: str) -> str:
     return result
 
 
-def _print_workflows_info(std, env: Environment) -> None:
+def _print_workflows_info(std: std.Std, env: Environment) -> None:
     """Print Workflows version and warming status."""
     if env.ci.host == "buildkite":
         print("--- :aspect: Workflows Runner Environment")
@@ -380,7 +380,7 @@ def _print_gcp_info(env: Environment) -> None:
         print("\tCLI: 'gcloud logging read --project " + env.runner.account + " \"resource.type=gce_instance resource.labels.instance_id=" + env.runner.instance_id + " log_name=projects/" + env.runner.account + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
 
 
-def print_environment_info(std, env: Environment) -> None:
+def print_environment_info(std: std.Std, env: Environment) -> None:
     """
     Print debug/diagnostic information about the runner environment.
 
