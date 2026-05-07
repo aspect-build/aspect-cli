@@ -273,7 +273,7 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::TEST_LOCK;
-    use crate::eval::api::eval_expr;
+    use crate::axl_eval;
 
     fn lock_test() -> std::sync::MutexGuard<'static, ()> {
         TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -282,21 +282,21 @@ mod tests {
     #[test]
     fn trace_log_returns_none() {
         let _g = lock_test();
-        let result = eval_expr(r#"trace.log("hello", 1)"#).unwrap();
+        let result = axl_eval!(r#"trace.log("hello", 1)"#).unwrap();
         assert_eq!(result, "None");
     }
 
     #[test]
     fn trace_event_minimal_returns_none() {
         let _g = lock_test();
-        let result = eval_expr(r#"trace.event("evt.name")"#).unwrap();
+        let result = axl_eval!(r#"trace.event("evt.name")"#).unwrap();
         assert_eq!(result, "None");
     }
 
     #[test]
     fn trace_event_full_returns_none() {
         let _g = lock_test();
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"trace.event(
                 "evt.name",
                 message = "human readable",
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn trace_event_requires_string_name() {
         let _g = lock_test();
-        let err = eval_expr(r#"trace.event(42)"#);
+        let err = axl_eval!(r#"trace.event(42)"#);
         assert!(err.is_err());
     }
 
@@ -320,7 +320,7 @@ mod tests {
     fn trace_event_rejects_unknown_kwarg() {
         // `level=` was removed when `trace.event` pivoted to span events.
         let _g = lock_test();
-        let err = eval_expr(r#"trace.event("foo", level = "warn")"#);
+        let err = axl_eval!(r#"trace.event("foo", level = "warn")"#);
         assert!(err.is_err());
     }
 
@@ -329,21 +329,21 @@ mod tests {
         // Old API: `trace.event("name", k = v)` no longer works — kwargs
         // must go through the `fields = {...}` slot under the new shape.
         let _g = lock_test();
-        let err = eval_expr(r#"trace.event("name", random_key = 1)"#);
+        let err = axl_eval!(r#"trace.event("name", random_key = 1)"#);
         assert!(err.is_err());
     }
 
     #[test]
     fn trace_bare_call_aliases_log() {
         let _g = lock_test();
-        let result = eval_expr(r#"trace("hello", 1)"#).unwrap();
+        let result = axl_eval!(r#"trace("hello", 1)"#).unwrap();
         assert_eq!(result, "None");
     }
 
     #[test]
     fn trace_bare_call_rejects_kwargs() {
         let _g = lock_test();
-        let err = eval_expr(r#"trace("name", k = 1)"#);
+        let err = axl_eval!(r#"trace("name", k = 1)"#);
         assert!(err.is_err());
     }
 }
@@ -363,7 +363,7 @@ mod telemetry_tests {
     use tracing::span;
     use tracing::{Event, Metadata, Subscriber};
 
-    use crate::eval::api::eval_expr;
+    use crate::axl_eval;
 
     #[derive(Debug, Clone)]
     struct Recorded {
@@ -450,7 +450,7 @@ mod telemetry_tests {
         };
         let dispatch = Dispatch::new(recorder);
         tracing::dispatcher::with_default(&dispatch, || {
-            eval_expr(expr).unwrap();
+            axl_eval!(expr).unwrap();
         });
         let captured = events.lock().unwrap().clone();
         captured
@@ -542,7 +542,7 @@ mod telemetry_tests {
     fn sanity_recorder_captures_direct_tracing_emit() {
         // Sanity: install the recorder and emit via `tracing::info!`
         // directly. If this fails, the issue is the subscriber wiring,
-        // not eval_expr.
+        // not axl_eval!.
         tracing::callsite::rebuild_interest_cache();
         let events = Arc::new(Mutex::new(Vec::new()));
         let recorder = Recorder {
@@ -560,7 +560,7 @@ mod telemetry_tests {
     #[test]
     fn sanity_recorder_captures_emit_through_eval_runtime() {
         // Same sanity as above but the closure first creates a Tokio
-        // runtime (matching `eval_expr`) before emitting. Isolates whether
+        // runtime (matching `axl_eval!`) before emitting. Isolates whether
         // the tokio runtime creation displaces our dispatcher.
         tracing::callsite::rebuild_interest_cache();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -591,7 +591,7 @@ mod telemetry_tests {
         };
         let dispatch = Dispatch::new(recorder);
         tracing::dispatcher::with_default(&dispatch, || {
-            eval_expr(r#"trace.event("should.not.emit")"#).unwrap();
+            axl_eval!(r#"trace.event("should.not.emit")"#).unwrap();
         });
         let captured = events.lock().unwrap().clone();
         super::enable();

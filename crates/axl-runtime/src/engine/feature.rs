@@ -551,3 +551,147 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Feature-enabled semantics: implicit `enabled` arg, default reflection,
+    //! reservation of the name, kebab derivation. Exercised through real
+    //! Starlark eval.
+    use super::{Feature, FeatureLike, FrozenFeature};
+    use crate::axl_check;
+    use crate::engine::arg::Arg;
+    use crate::engine::names::to_command_name;
+    use crate::test::eval as test_eval;
+    use starlark::values::{Value, ValueLike};
+
+    fn with_feature<R>(value: Value<'_>, f: impl FnOnce(&dyn FeatureLike<'_>) -> R) -> R {
+        if let Some(live) = value.downcast_ref::<Feature>() {
+            return f(live);
+        }
+        if let Some(frozen) = value.downcast_ref::<FrozenFeature>() {
+            return f(frozen);
+        }
+        panic!("value is not a feature: {}", value.get_type());
+    }
+
+    fn ok(code: &str) {
+        axl_check!(code).unwrap_or_else(|e| panic!("expected ok, got: {e}"));
+    }
+
+    fn err(code: &str) -> String {
+        axl_check!(code)
+            .expect_err("expected evaluation to fail")
+            .to_string()
+    }
+
+    #[test]
+    fn feature_enabled_defaults_to_true() {
+        ok(r#"
+def _impl(ctx): pass
+MyFeature = feature(implementation = _impl)
+"#);
+    }
+
+    #[test]
+    fn feature_enabled_false_is_valid() {
+        ok(r#"
+def _impl(ctx): pass
+MyFeature = feature(implementation = _impl, enabled = False)
+"#);
+    }
+
+    #[test]
+    fn feature_enabled_true_explicit_is_valid() {
+        ok(r#"
+def _impl(ctx): pass
+MyFeature = feature(implementation = _impl, enabled = True)
+"#);
+    }
+
+    /// Users must use `enabled = False` on the `feature()` call, not in the `args` dict.
+    #[test]
+    fn feature_enabled_reserved_in_args_dict() {
+        let e = err(r#"
+def _impl(ctx): pass
+MyFeature = feature(implementation = _impl, args = {"enabled": args.boolean()})
+"#);
+        assert!(
+            e.contains("enabled") && (e.contains("implicit") || e.contains("remove")),
+            "expected 'enabled is implicit' error, got: {e}"
+        );
+    }
+
+    /// `to_command_name` converts CamelCase export names to kebab-case CLI prefixes.
+    #[test]
+    fn feature_name_camelcase_to_kebab() {
+        assert_eq!(to_command_name("ArtifactUpload"), "artifact-upload");
+        assert_eq!(to_command_name("BazelDefaults"), "bazel-defaults");
+        assert_eq!(
+            to_command_name("GithubStatusChecks"),
+            "github-status-checks"
+        );
+        assert_eq!(to_command_name("MyFeature"), "my-feature");
+    }
+
+    /// Every feature has an implicit Boolean `enabled` arg regardless of user-supplied args.
+    #[test]
+    fn feature_enabled_arg_always_present() {
+        let (has_enabled, has_mode) = test_eval(
+            r#"
+def _impl(ctx): pass
+ArtifactUpload = feature(implementation = _impl, args = {"mode": args.string(default = "upload")})
+"#,
+        )
+        .with_value("ArtifactUpload", |v| {
+            with_feature(v, |f| {
+                (
+                    f.args().contains_key("enabled"),
+                    f.args().contains_key("mode"),
+                )
+            })
+        });
+
+        assert!(has_enabled, "implicit `enabled` arg must always be present");
+        assert!(has_mode, "user-defined arg `mode` must be present");
+    }
+
+    /// `enabled = True` (the default) is reflected in the `Arg::Boolean` default.
+    #[test]
+    fn feature_enabled_default_true_reflected_in_arg() {
+        let default_val = test_eval(
+            r#"
+def _impl(ctx): pass
+MyFeature = feature(implementation = _impl)
+"#,
+        )
+        .with_value("MyFeature", |v| {
+            with_feature(v, |f| {
+                match f.args().get("enabled").expect("enabled arg not found") {
+                    Arg::Boolean { default, .. } => *default,
+                    other => panic!("expected Boolean arg, got: {other:?}"),
+                }
+            })
+        });
+        assert!(default_val, "default should be true when enabled = True");
+    }
+
+    /// `enabled = False` is reflected in the `Arg::Boolean` default.
+    #[test]
+    fn feature_enabled_default_false_reflected_in_arg() {
+        let default_val = test_eval(
+            r#"
+def _impl(ctx): pass
+MyFeature = feature(implementation = _impl, enabled = False)
+"#,
+        )
+        .with_value("MyFeature", |v| {
+            with_feature(v, |f| {
+                match f.args().get("enabled").expect("enabled arg not found") {
+                    Arg::Boolean { default, .. } => *default,
+                    other => panic!("expected Boolean arg, got: {other:?}"),
+                }
+            })
+        });
+        assert!(!default_val, "default should be false when enabled = False");
+    }
+}

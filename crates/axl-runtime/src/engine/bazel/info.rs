@@ -13,7 +13,7 @@ pub fn server_info() -> io::Result<(u32, semver::Version)> {
 pub fn server_info_with_startup_flags(
     startup_flags: &[String],
 ) -> io::Result<(u32, semver::Version)> {
-    let mut cmd = Command::new("bazel");
+    let mut cmd = Command::new(super::bazel_binary());
     cmd.args(startup_flags);
     cmd.arg("info");
     cmd.arg("server_pid");
@@ -86,7 +86,7 @@ pub fn server_info_with_startup_flags(
 ///   "Another command (pid=12345) is running. Exiting immediately."
 /// We parse the PID from that stderr message.
 pub fn client_pid(startup_flags: &[String]) -> Option<u32> {
-    let mut cmd = Command::new("bazel");
+    let mut cmd = Command::new(super::bazel_binary());
     cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
     cmd.arg("info");
@@ -109,7 +109,7 @@ pub fn client_pid(startup_flags: &[String]) -> Option<u32> {
 
 /// Check if the bazel server lock is currently held by a client.
 pub fn is_server_busy(startup_flags: &[String]) -> bool {
-    let mut cmd = Command::new("bazel");
+    let mut cmd = Command::new(super::bazel_binary());
     cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
     cmd.arg("info");
@@ -128,7 +128,7 @@ pub fn is_server_busy(startup_flags: &[String]) -> bool {
 ///
 /// Returns `None` only if the server is not running or bazel is not available.
 pub fn server_pid_nonblocking(startup_flags: &[String]) -> Option<u32> {
-    let mut cmd = Command::new("bazel");
+    let mut cmd = Command::new(super::bazel_binary());
     cmd.args(startup_flags);
     cmd.arg("--noblock_for_lock");
     cmd.arg("info");

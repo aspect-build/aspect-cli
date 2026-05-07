@@ -78,7 +78,7 @@ struct CheckResult {
 
 /// Runs `bazel [startup_flags] --noblock_for_lock info server_pid` and returns the result.
 fn check_bazel_server(startup_flags: &[String]) -> CheckResult {
-    let output = Command::new("bazel")
+    let output = Command::new(super::bazel_binary())
         .args(startup_flags)
         .arg("--noblock_for_lock")
         .arg("info")
@@ -121,7 +121,7 @@ fn extract_server_pid(server_pid_file: Option<&Path>) -> Option<u32> {
 
 /// Tries to determine the Bazel output base by running `bazel [startup_flags] info output_base`.
 fn get_output_base(startup_flags: &[String]) -> Option<PathBuf> {
-    let output = Command::new("bazel")
+    let output = Command::new(super::bazel_binary())
         .args(startup_flags)
         .arg("info")
         .arg("output_base")

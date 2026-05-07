@@ -28,6 +28,7 @@ rust_library(
     ],
     visibility = [
         "//crates/axl-runtime:__pkg__",
+        "//crates/basil:__pkg__",
         "//crates/build-event-stream:__pkg__",
     ],
     deps = [

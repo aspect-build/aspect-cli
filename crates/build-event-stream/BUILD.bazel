@@ -1,4 +1,4 @@
-load("//bazel/rust:defs.bzl", "rust_library")
+load("//bazel/rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "build-event-stream",
@@ -14,4 +14,9 @@ rust_library(
         "@crates//:thiserror",
         "@crates//:tonic",
     ],
+)
+
+rust_test(
+    name = "test",
+    crate = ":build-event-stream",
 )

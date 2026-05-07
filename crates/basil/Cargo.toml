@@ -1,0 +1,18 @@
+[package]
+name = "basil"
+version.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "basil"
+path = "src/main.rs"
+
+[dependencies]
+axl-proto = { path = "../axl-proto" }
+prost = "0.14.1"

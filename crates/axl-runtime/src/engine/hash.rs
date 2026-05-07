@@ -255,7 +255,7 @@ pub fn register_hash_type(globals: &mut GlobalsBuilder) {
 mod tests {
     use sha2::Sha256;
 
-    use crate::eval::api::eval_expr;
+    use crate::axl_eval;
 
     use super::*;
 
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn starlark_sha256_hexdigest() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//hash.axl", "sha256")
 h = sha256()
@@ -339,7 +339,7 @@ h.hexdigest()
 
     #[test]
     fn starlark_sha256_incremental() {
-        let incremental = eval_expr(
+        let incremental = axl_eval!(
             r#"
 load("@std//hash.axl", "sha256")
 h = sha256()
@@ -349,7 +349,7 @@ h.hexdigest()
 "#,
         )
         .unwrap();
-        let single = eval_expr(
+        let single = axl_eval!(
             r#"
 load("@std//hash.axl", "sha256")
 h = sha256()
@@ -363,7 +363,7 @@ h.hexdigest()
 
     #[test]
     fn starlark_sha256_update_bytes() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//hash.axl", "sha256")
 h = sha256()
@@ -380,7 +380,7 @@ h.hexdigest()
 
     #[test]
     fn starlark_blake2b_digest_length() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//hash.axl", "blake2b")
 h = blake2b()
@@ -394,7 +394,7 @@ len(h.digest())
 
     #[test]
     fn starlark_md5_hexdigest() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//hash.axl", "md5")
 h = md5()
@@ -408,7 +408,7 @@ h.hexdigest()
 
     #[test]
     fn starlark_digest_nondestructive() {
-        let result = eval_expr(
+        let result = axl_eval!(
             r#"
 load("@std//hash.axl", "sha256")
 h = sha256()
@@ -426,7 +426,7 @@ d1 != d2
     #[test]
     fn starlark_builtins_hash_blocked_outside_std() {
         // __builtins__ is always accessible, but .hash() raises outside @std context
-        assert!(eval_expr("__builtins__").is_ok());
-        assert!(eval_expr("__builtins__.hash()").is_err());
+        assert!(axl_eval!("__builtins__").is_ok());
+        assert!(axl_eval!("__builtins__.hash()").is_err());
     }
 }
