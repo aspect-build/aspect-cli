@@ -818,9 +818,15 @@ def _delivery_impl(ctx):
             # check-run body shows them; "Delivering X of N" is the
             # narrowest "what's still happening" signal.
             done = success_count + failed_count
+            # priority=False — fires per chunk-item completion, so a
+            # parallel delivery of fast targets could spam BK / GHSC
+            # PATCHes without throttle. Phase boundary was the
+            # "Delivering 0 of N" prepass announce above; this loop is
+            # progress within that phase.
             announce(ctx, lifecycle, "delivery_results", dr,
                      "Delivering {} of {}".format(done, pluralize(len(pending), "target")),
-                     status = "failing" if failed_count > 0 else "running")
+                     status = "failing" if failed_count > 0 else "running",
+                     priority = False)
 
     # Calculate column widths for alignment
     max_label_width = len("TARGET")

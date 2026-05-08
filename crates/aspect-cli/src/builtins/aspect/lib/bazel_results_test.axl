@@ -541,13 +541,13 @@ def _test_impl(ctx):
         # Progress / "Last update" rendering. Running scenarios surface the
         # phase label below the metadata rows; terminal status suppresses it
         # so the title carries the outcome on its own.
-        ("13. running · spawning · GitHub",    _make_results_passed(),       "running", "//...",   False, "github",    None,                      "Spawning bazel build…"),
-        ("14. failing-live · GitLab · running",_make_results_failing_live(), "failing", "//...",   False, "gitlab",    None,                      "Spawning bazel build…"),
+        ("13. running · spawning · GitHub",    _make_results_passed(),       "running", "//...",   False, "github",    None,                      "Spawning bazel build..."),
+        ("14. failing-live · GitLab · running",_make_results_failing_live(), "failing", "//...",   False, "gitlab",    None,                      "Spawning bazel build..."),
         # Terminal status with a stale progress field — the renderer
         # replaces it with "<Task> complete" on passed (so the row keeps
         # its visual rhythm across the running→passed transition) and
         # blanks it on failed (the failure title already says everything).
-        ("15. passed · stale-progress · GH",   _make_results_passed(),       "passed",  "//...",   False, "github",    None,                      "Spawning bazel build…"),
+        ("15. passed · stale-progress · GH",   _make_results_passed(),       "passed",  "//...",   False, "github",    None,                      "Spawning bazel build..."),
         # HTML escape — branch/commit_msg/tag/extra_meta with `<...>` tokens
         # render as escaped entities (`&lt;hr&gt;`) so BK/GHSC don't
         # interpret them as real HTML and break the metadata layout.

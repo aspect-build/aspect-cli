@@ -48,14 +48,14 @@ def _live_progress(results, command):
             label = "Ran " + pluralize(total, "test")
             if failed > 0:
                 label = label + " · " + pluralize(failed, "failed", plural = "failed")
-            return label + "…"
+            return label + "..."
     targets = results.get("targets_total", 0) or 0
     if targets > 0:
-        return "Built " + pluralize(targets, "target") + "…"
+        return "Built " + pluralize(targets, "target") + "..."
     actions = results.get("actions_executed", 0) or 0
     if actions > 0:
-        return "Executed " + pluralize(actions, "action") + "…"
-    return "Bazel " + command + " running…"
+        return "Executed " + pluralize(actions, "action") + "..."
+    return "Bazel " + command + " running..."
 
 
 def _collect_bes_from_args(ctx):

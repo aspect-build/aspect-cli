@@ -15,7 +15,7 @@ displayed phase.
 load("../traits.axl", "TaskUpdate")
 
 
-def announce(ctx, lifecycle, kind, results, label, status = "running", priority = False):
+def announce(ctx, lifecycle, kind, results, label, status = "running", priority = True):
     """Print a phase label to stderr and emit a TaskUpdate carrying it.
 
     The line is prefixed with `→ ` so phase boundaries stand out in CI
@@ -26,6 +26,15 @@ def announce(ctx, lifecycle, kind, results, label, status = "running", priority 
     filter these lines out. The `Last update` line in the rendered
     annotation / check-run picks up the same decorated string via the
     TaskUpdate so the visual signal matches across surfaces.
+
+    Defaults `priority=True` — `announce` represents a phase boundary
+    (a transition the user actively cares about seeing without delay),
+    not a streaming progress tick. The BK / GHSC throttle exists for
+    streaming within-a-phase emits (e.g. the BES event loop ticking
+    target counts up) where rate-limiting prevents API spam; phase
+    boundaries are sparse by definition and should bypass it. Set
+    `priority=False` only when calling announce in a hot loop where
+    multiple emissions cluster within `min_update_interval_ms`.
 
     Args:
         ctx:       The TaskContext.
@@ -43,9 +52,12 @@ def announce(ctx, lifecycle, kind, results, label, status = "running", priority 
                    Terminal statuses ("passed" / "failed") are not the
                    right shape for this helper — use the per-task final
                    emit path instead.
+        priority:  Whether the rendered annotation / check-run should
+                   bypass the BK / GHSC throttle for this update.
+                   Default True (phase boundary semantics).
     """
     if label:
-        decorated = label + "…"
+        decorated = label + "..."
         # Starlark's `print()` writes to stderr in this runtime — the
         # right channel for a diagnostic phase label (`primary task
         # output → stdout`, `status / progress → stderr`).

@@ -119,7 +119,7 @@ _SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
 :speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"""
 
 _DETAILS_TEMPLATE = """{% if is_running %}
-> 🔄 Format task in progress…
+> 🔄 Format task in progress...
 
 {% elif formatter_error %}
 > ❌ The formatter binary exited with code {{ formatter_error_code }}. Check the task log for details.

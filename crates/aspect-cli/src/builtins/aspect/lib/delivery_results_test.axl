@@ -250,8 +250,8 @@ def _test_impl(ctx):
         ("10. mixed · meta=*",                _make_mixed(),               "failed",   "//apps/...",   "buildkite", ["*"],         ""),
         # Progress scenarios — confirm the "Last update" line surfaces the
         # phase label that delivery.axl threads into TaskUpdate.progress.
-        ("11. progress=building · running · BK",   _make_mixed(),               "running",  "//apps/...",   "buildkite", None,          "Building 8 targets for delivery…"),
-        ("12. progress=delivering · running · BK", _make_mixed(),               "running",  "//apps/...",   "buildkite", None,          "Delivering 3 of 8 targets…"),
+        ("11. progress=building · running · BK",   _make_mixed(),               "running",  "//apps/...",   "buildkite", None,          "Building 8 targets for delivery..."),
+        ("12. progress=delivering · running · BK", _make_mixed(),               "running",  "//apps/...",   "buildkite", None,          "Delivering 3 of 8 targets..."),
         # Mode line — exercises both the default-suppressed path (no
         # qualifiers when `selective` + tracked + non-dry-run) and the
         # all-modifiers path. The dry-run scenario above covers the
