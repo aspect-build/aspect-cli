@@ -331,12 +331,19 @@ async fn drive_stream(
                 match resp {
                     Some(Ok(r)) => {
                         buffer.prune_until(r.sequence_number);
-                        // Successful ack resets the retry budget for any
-                        // future stream-level error: an intermittent flake
-                        // shouldn't burn the budget for a later real failure.
-                        // The reset is on the outer `attempt` counter, but
-                        // we communicate "made progress" by cleanly returning
-                        // Done only when the upstream is exhausted.
+                        // Once we've sent last_message AND every event we
+                        // sent has been ack'd, we're done — exit without
+                        // waiting for the server to close the response
+                        // stream. Some BES backends keep the response
+                        // stream open after the final ack, which previously
+                        // caused this loop to hang indefinitely on every
+                        // successful upload.
+                        if *last_message_sent && buffer.is_empty() {
+                            return DriveOutcome::Done;
+                        }
+                        if sender_opt.is_none() && buffer.is_empty() {
+                            return DriveOutcome::UpstreamClosed;
+                        }
                     }
                     Some(Err(status)) => {
                         let err = ClientError::Status(status);
