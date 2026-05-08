@@ -1,9 +1,5 @@
 use std::{
     collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     thread::{self, JoinHandle},
 };
 
@@ -128,27 +124,13 @@ async fn work_inner(
 
     // Forward the synchronous broadcaster `recv` into a tokio mpsc so the
     // state machine can `select!` over it alongside the bidi response
-    // stream. The channel is bounded by `retry_max_buffer_size`: during a
-    // BES outage `drive_stream` stops draining (it's sleeping between
-    // reconnects or replaying the retry buffer), so without a bound the
-    // forwarder would queue events indefinitely and defeat the very knob
-    // meant to cap memory. On overflow we set `overflow_flag` and drop
-    // `event_tx`; `drive_stream` observes the closed receiver, checks the
-    // flag, and exits with `BufferFull` so the configured `error_strategy`
-    // takes effect.
-    let buffer_cap = retry.retry_max_buffer_size;
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<BuildEvent>(buffer_cap);
-    let overflow_flag = Arc::new(AtomicBool::new(false));
-    let overflow_flag_forwarder = overflow_flag.clone();
+    // stream. The forwarder runs once for the whole sink lifetime — events
+    // are queued on `event_rx` and pulled lazily as we (re)open streams.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BuildEvent>();
     let _forwarder = tokio::task::spawn_blocking(move || {
         while let Ok(ev) = recv.recv() {
-            match event_tx.try_send(ev) {
-                Ok(()) => {}
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    overflow_flag_forwarder.store(true, Ordering::SeqCst);
-                    break;
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+            if event_tx.send(ev).is_err() {
+                break;
             }
         }
     });
@@ -186,7 +168,6 @@ async fn work_inner(
             &build_id,
             &invocation_id,
             &mut event_rx,
-            &overflow_flag,
             &mut buffer,
             &mut next_seq,
             &mut last_message_sent,
@@ -260,13 +241,11 @@ async fn work_inner(
 /// them down the wire. In parallel reads responses and prunes the buffer up
 /// to each ack'd `sequence_number`. Replays any leftover buffered events
 /// under their original seqs at the start of the connection.
-#[allow(clippy::too_many_arguments)]
 async fn drive_stream(
     client: &mut Client,
     build_id: &str,
     invocation_id: &str,
-    event_rx: &mut tokio::sync::mpsc::Receiver<BuildEvent>,
-    overflow_flag: &AtomicBool,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<BuildEvent>,
     buffer: &mut RetryBuffer,
     next_seq: &mut i64,
     last_message_sent: &mut bool,
@@ -306,17 +285,9 @@ async fn drive_stream(
             // Disabled once last_message has been sent.
             ev = event_rx.recv(), if !*last_message_sent && sender_opt.is_some() => {
                 let Some(event) = ev else {
-                    // event_rx closed. Either the forwarder hit the bounded
-                    // queue cap and bailed (overflow_flag set) — terminal
-                    // per the retry buffer's BufferOverflow contract — or
-                    // the upstream broadcaster closed without a final
-                    // last_message — clean shutdown.
-                    if overflow_flag.load(Ordering::SeqCst) {
-                        return DriveOutcome::BufferFull(BufferOverflow {
-                            cap: buffer.capacity(),
-                            seq: *next_seq,
-                        });
-                    }
+                    // Upstream closed without a final last_message. Drop the
+                    // request side so the server flushes any pending acks,
+                    // and wait for the response stream to wind down.
                     sender_opt = None;
                     if buffer.is_empty() {
                         return DriveOutcome::UpstreamClosed;
