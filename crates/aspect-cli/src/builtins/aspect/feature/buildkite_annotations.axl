@@ -20,7 +20,7 @@ Usage in `.aspect/config.axl`:
 """
 
 load("../traits.axl", "ArtifactsTrait", "TaskLifecycleTrait", "TaskUpdate")
-load("../lib/bazel_results.axl", "now_ms", "resolve_aspect_url")
+load("../lib/bazel_results.axl", "html_escape", "now_ms", "resolve_aspect_url")
 load("../lib/check_dispatch.axl",
     "apply_artifact_links",
     "kind_for_task",
@@ -138,6 +138,16 @@ def _format_body(out, kind, status, task_label = ""):
     summary = out.get("summary", "") or ""
     text = out.get("text", "") or ""
 
+    # Escape the title before injecting — it's composed by per-kind
+    # `summary_title` helpers from user-controlled fields (target
+    # patterns, formatter target labels, gazelle target labels) which
+    # are typically bazel labels and therefore HTML-safe in practice,
+    # but defense-in-depth: same vulnerability as the user-controlled
+    # metadata strings (commit message, branch) we already escape on
+    # the way into the metadata rows. `task_label` is composed
+    # internally (see `_task_label`) so it's intentionally raw HTML.
+    safe_title = html_escape(title)
+
     parts = []
     if title:
         if task_label:
@@ -156,10 +166,10 @@ def _format_body(out, kind, status, task_label = ""):
             # otherwise reasserts even with `m0`).
             parts.append(
                 '<div class="flex items-baseline mb2"><span class="bg-blue-light rounded px1 mr2">%s</span><span class="h3 m0">%s</span></div>' %
-                (task_label, title)
+                (task_label, safe_title)
             )
         else:
-            parts.append("### " + title)
+            parts.append("### " + safe_title)
     if summary:
         parts.append(summary.strip())
     # On GHSC the summary and text are separate API fields rendered in

@@ -173,6 +173,14 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
             phase_label = "Spawning bazel " + command
         else:
             phase_label = "Retrying bazel " + command + " (attempt " + str(attempt + 1) + ")"
+            # Reset BES-derived counters from the failed prior attempt so
+            # the retry's live progress + final rendered counts reflect
+            # only the new attempt. `process_event` always-`+= 1`s on
+            # incoming events, so without this a transient retry would
+            # double-count every target / test / action from the first
+            # attempt. build/test have no task-managed fields in
+            # `results` (everything is BES-derived) so re-init is safe.
+            results = init_results()
 
         if command == "test":
             invocation = ctx.bazel.test(

@@ -264,7 +264,17 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     print("  {} {}...".format(_style("Building", _BOLD, ansi), pluralize(len(targets), "target")))
     phase1_flags = bazel_flags + ["--nokeep_state_after_build"]
     _t_phase1 = time.monotonic()
+    # Snapshot pre-loop state so a retry attempt starts from a clean
+    # slate of BES-derived counters (failed_actions_total, targets_total,
+    # actions_executed, …) without re-running the caller-managed setup
+    # done before this function (prefix, commit_sha, mode, …). Restored
+    # in place via .clear()+.update() so the caller's `dr` reference
+    # stays valid across retries.
+    pre_loop_state = dict(results)
     for attempt in range(10):
+        if attempt > 0:
+            results.clear()
+            results.update(pre_loop_state)
         build = ctx.bazel.build(
             flags = phase1_flags,
             build_events = build_events,
