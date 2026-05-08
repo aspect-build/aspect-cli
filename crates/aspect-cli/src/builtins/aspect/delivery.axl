@@ -298,7 +298,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
                      "Building {} for delivery".format(pluralize(len(targets), "target")))
         else:
             announce(ctx, lifecycle, "delivery_results", results,
-                     "Retrying delivery build (attempt {}, {})".format(attempt + 1, pluralize(len(targets), "target")))
+                     "Retrying delivery build... (attempt {}, {})".format(attempt + 1, pluralize(len(targets), "target")))
         for event in events:
             # Stream metadata / target-completed updates into the BK
             # annotation as they arrive instead of only on terminal
@@ -756,7 +756,7 @@ def _delivery_impl(ctx):
     # Emit an intermediate update so that skip/warn state is visible in the
     # check run before the (potentially long) per-target delivery loop starts.
     if dry_run:
-        prepass_progress = "Previewing {} (dry-run)".format(pluralize(len(pending), "target"))
+        prepass_progress = "Previewing {}... (dry-run)".format(pluralize(len(pending), "target"))
     elif pending:
         prepass_progress = "Delivering 0 of {}".format(pluralize(len(pending), "target"))
     else:

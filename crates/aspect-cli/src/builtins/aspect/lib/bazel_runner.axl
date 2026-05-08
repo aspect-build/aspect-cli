@@ -39,12 +39,14 @@ def _live_progress(results, command):
     the generic "Bazel <command> running…" so the line never sits at
     "Spawning bazel build…" once we know the spawn has succeeded.
     """
-    # Layout: leading "Bazel <cmd> running" is honestly present-continuous
-    # (the bazel invocation is in flight); the parenthetical count uses
-    # past participles ("targets built", "tests run") because the
-    # underlying BES events (target_completed, test_summary) only fire
-    # when those units are *done*. Without the past participle the count
-    # would imply "currently building/running N" which BES can't tell us.
+    # Layout: leading "Bazel <cmd> running..." with the ellipsis bound
+    # to the verb (the actually-ongoing thing), then a parenthetical
+    # past-participle snapshot of completed BES events. The trailing
+    # ellipsis would otherwise dangle on the count, which is a
+    # moment-in-time number, not ongoing. Past participles ("targets
+    # built", "tests run") because BES events fire on completion —
+    # without them the count would imply "currently building N"
+    # which BES can't tell us.
     base = "Bazel " + command + " running"
     if command == "test":
         passed = results.get("passed_test_total", 0) or 0
@@ -55,13 +57,13 @@ def _live_progress(results, command):
             detail = pluralize(total, "test") + " run"
             if failed > 0:
                 detail = detail + " · " + pluralize(failed, "failed", plural = "failed")
-            return base + " (" + detail + ")..."
+            return base + "... (" + detail + ")"
     targets = results.get("targets_total", 0) or 0
     if targets > 0:
-        return base + " (" + pluralize(targets, "target") + " built)..."
+        return base + "... (" + pluralize(targets, "target") + " built)"
     actions = results.get("actions_executed", 0) or 0
     if actions > 0:
-        return base + " (" + pluralize(actions, "action") + " executed)..."
+        return base + "... (" + pluralize(actions, "action") + " executed)"
     return base + "..."
 
 
@@ -176,7 +178,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
         if attempt == 0:
             phase_label = "Spawning bazel " + command
         else:
-            phase_label = "Retrying bazel " + command + " (attempt " + str(attempt + 1) + ")"
+            phase_label = "Retrying bazel " + command + "... (attempt " + str(attempt + 1) + ")"
             # Reset BES-derived counters from the failed prior attempt so
             # the retry's live progress + final rendered counts reflect
             # only the new attempt. `process_event` always-`+= 1`s on

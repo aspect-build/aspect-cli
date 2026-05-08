@@ -277,7 +277,7 @@ def _impl(ctx: TaskContext) -> int:
     # waiting for `build.wait()` to surface it.
     results["sink_invocation_id"] = build.sink_invocation_id
     announce(ctx, lifecycle, "gazelle_results", results,
-             "Building gazelle (%s)" % ctx.args.gazelle_target)
+             "Building gazelle... (%s)" % ctx.args.gazelle_target)
 
     for event in events:
         r.event(event)
@@ -368,7 +368,7 @@ def _impl(ctx: TaskContext) -> int:
             out.write("WARNING: --gazelle-flag=%s ignored in diff phase (task controls -mode internally).\n" % f)
     diff_args.append("-mode=diff")
     diff_args.extend(ctx.args.dirs)
-    announce(ctx, lifecycle, "gazelle_results", results, "Running gazelle (-mode=diff)")
+    announce(ctx, lifecycle, "gazelle_results", results, "Running gazelle... (-mode=diff)")
     diff_proc = r.spawn(gazelle, diff_args, capture = True)
     diff_stdout = diff_proc.stdout().read_to_string()
     diff_stderr = diff_proc.stderr().read_to_string()
@@ -415,7 +415,7 @@ def _impl(ctx: TaskContext) -> int:
     # tree.
     if not ctx.args.check:
         announce(ctx, lifecycle, "gazelle_results", results,
-                 "Applying gazelle patch (%s)" % pluralize(len(affected), "file"))
+                 "Applying gazelle patch... (%s)" % pluralize(len(affected), "file"))
         tmp = ctx.std.env.temp_dir()
         patch_path = tmp + "/gazelle-" + ctx.task.key + ".patch"
         ctx.std.fs.write(patch_path, diff_stdout)

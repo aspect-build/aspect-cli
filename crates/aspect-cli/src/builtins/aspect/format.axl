@@ -248,7 +248,7 @@ def _impl(ctx: TaskContext) -> int:
     # waiting for `build.wait()` to surface it.
     results["sink_invocation_id"] = build.sink_invocation_id
     announce(ctx, lifecycle, "format_results", results,
-             "Building formatter (%s)" % ctx.args.formatter_target)
+             "Building formatter... (%s)" % ctx.args.formatter_target)
 
     for event in events:
         r.event(event)
@@ -335,7 +335,7 @@ def _impl(ctx: TaskContext) -> int:
         announce(ctx, lifecycle, "format_results", results,
                  "Formatting %s in scope" % pluralize(len(format_args), "file"))
     else:
-        announce(ctx, lifecycle, "format_results", results, "Formatting (scope=all)")
+        announce(ctx, lifecycle, "format_results", results, "Formatting... (scope=all)")
     exit = r.spawn(formatter, format_args).wait()
 
     if not exit.success:

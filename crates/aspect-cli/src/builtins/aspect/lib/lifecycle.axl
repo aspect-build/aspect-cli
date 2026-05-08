@@ -57,7 +57,14 @@ def announce(ctx, lifecycle, kind, results, label, status = "running", priority 
                    Default True (phase boundary semantics).
     """
     if label:
-        decorated = label + "..."
+        # Auto-append `...` so simple call sites don't have to remember
+        # the convention, but skip the append if the caller already
+        # placed `...` inline — typically because they want a
+        # parenthetical snapshot AFTER the ellipsis (e.g. "Building
+        # formatter... (//tools/format)" so the ellipsis attaches to
+        # the verb, which is the actually-ongoing thing, and the
+        # parens read as a moment-in-time aside).
+        decorated = label if "..." in label else label + "..."
         # Starlark's `print()` writes to stderr in this runtime — the
         # right channel for a diagnostic phase label (`primary task
         # output → stdout`, `status / progress → stderr`).
