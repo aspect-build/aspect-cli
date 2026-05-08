@@ -121,6 +121,7 @@ async fn work_inner(
     let context = |stage: &str, err: &dyn std::fmt::Display| -> SinkError {
         finalize(strategy, &endpoint, format!("{stage}: {err}"))
     };
+    eprintln!("BES: starting sink endpoint={endpoint} invocation_id={invocation_id}");
 
     // Forward the synchronous broadcaster `recv` into a tokio mpsc so the
     // state machine can `select!` over it alongside the bidi response
@@ -135,12 +136,32 @@ async fn work_inner(
         }
     });
 
-    let mut client = Client::new(endpoint.clone(), headers)
-        .await
-        .map_err(|e| context("connect failed", &e))?;
+    // Bound the initial connect: a TLS handshake against an unresponsive
+    // endpoint can stall indefinitely without any of the retry machinery
+    // ever running.
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    eprintln!("BES: connecting to {endpoint}");
+    let mut client = match tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        Client::new(endpoint.clone(), headers),
+    )
+    .await
+    {
+        Ok(r) => r.map_err(|e| context("connect failed", &e))?,
+        Err(_) => {
+            eprintln!("BES: connect to {endpoint} timed out after 10s");
+            return Err(finalize(
+                strategy,
+                &endpoint,
+                "connect timed out after 10s".to_string(),
+            ));
+        }
+    };
+    eprintln!("BES: connected to {endpoint}");
 
     let build_id = invocation_id.clone();
 
+    eprintln!("BES: -> build_enqueued");
     retry_lifecycle(
         &retry,
         &mut client,
@@ -148,7 +169,9 @@ async fn work_inner(
     )
     .await
     .map_err(|e| context("build_enqueued", &e))?;
+    eprintln!("BES: <- build_enqueued ok");
 
+    eprintln!("BES: -> invocation_started");
     retry_lifecycle(
         &retry,
         &mut client,
@@ -156,6 +179,7 @@ async fn work_inner(
     )
     .await
     .map_err(|e| context("invocation_started", &e))?;
+    eprintln!("BES: <- invocation_started ok");
 
     let mut buffer = RetryBuffer::new(retry.retry_max_buffer_size);
     let mut next_seq: i64 = 1;
@@ -163,6 +187,10 @@ async fn work_inner(
     let mut last_message_sent = false;
 
     'reconnect: loop {
+        eprintln!(
+            "BES: drive_stream start attempt={attempt} buffered={}",
+            buffer.len()
+        );
         let outcome = drive_stream(
             &mut client,
             &build_id,
@@ -173,6 +201,10 @@ async fn work_inner(
             &mut last_message_sent,
         )
         .await;
+        eprintln!(
+            "BES: drive_stream end attempt={attempt} buffered={} last_message_sent={last_message_sent}",
+            buffer.len()
+        );
 
         match outcome {
             DriveOutcome::Done | DriveOutcome::UpstreamClosed => break 'reconnect,
@@ -202,36 +234,62 @@ async fn work_inner(
         }
     }
 
+    // Post-stream lifecycle. Bound the entire pair with a hard budget so a
+    // wedged backend cannot keep the sink thread alive past end-of-build —
+    // `wait()` joins this thread before returning, so any hang here hangs
+    // the whole task. The events themselves were already streamed, so
+    // failing these is non-fatal under the `Warn` default.
+    const POST_STREAM_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
     // We don't know the bazel exit code at this point — that lives on the
     // parent process. Submit a successful BuildStatus; a future revision
     // can plumb the real status through.
-    retry_lifecycle(
-        &retry,
-        &mut client,
-        lifecycle::invocation_finished(
-            build_id.clone(),
-            invocation_id.clone(),
-            BuildStatus {
-                result: 0,
-                final_invocation_id: build_id.clone(),
-                build_tool_exit_code: Some(0),
-                error_message: String::new(),
-                details: None,
-            },
-        ),
-    )
-    .await
-    .map_err(|e| context("invocation_finished", &e))?;
+    let post_stream = async {
+        eprintln!("BES: -> invocation_finished");
+        retry_lifecycle(
+            &retry,
+            &mut client,
+            lifecycle::invocation_finished(
+                build_id.clone(),
+                invocation_id.clone(),
+                BuildStatus {
+                    result: 0,
+                    final_invocation_id: build_id.clone(),
+                    build_tool_exit_code: Some(0),
+                    error_message: String::new(),
+                    details: None,
+                },
+            ),
+        )
+        .await
+        .map_err(|e| context("invocation_finished", &e))?;
+        eprintln!("BES: <- invocation_finished ok");
 
-    retry_lifecycle(
-        &retry,
-        &mut client,
-        lifecycle::build_finished(build_id.clone(), invocation_id.clone()),
-    )
-    .await
-    .map_err(|e| context("build_finished", &e))?;
+        eprintln!("BES: -> build_finished");
+        retry_lifecycle(
+            &retry,
+            &mut client,
+            lifecycle::build_finished(build_id.clone(), invocation_id.clone()),
+        )
+        .await
+        .map_err(|e| context("build_finished", &e))?;
+        eprintln!("BES: <- build_finished ok");
 
-    Ok(())
+        Ok::<(), SinkError>(())
+    };
+    let result = match tokio::time::timeout(POST_STREAM_BUDGET, post_stream).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            eprintln!("BES: post-stream lifecycle exceeded 30s budget");
+            Err(finalize(
+                strategy,
+                &endpoint,
+                "post-stream lifecycle exceeded 30s budget".to_string(),
+            ))
+        }
+    };
+    eprintln!("BES: sink exiting endpoint={endpoint} ok={}", result.is_ok());
+    result
 }
 
 /// Drive a single bidi stream until it ends (cleanly or with error).
@@ -253,14 +311,27 @@ async fn drive_stream(
     let (sender, receiver) = tokio::sync::mpsc::channel::<PublishBuildToolEventStreamRequest>(64);
     let request_stream = ReceiverStream::new(receiver);
 
-    let response_stream = match client.publish_build_tool_event_stream(request_stream).await {
-        Ok(s) => s.into_inner(),
-        Err(e) => {
+    // Bound the bidi stream open: tonic does not add a deadline and the
+    // server may accept the TCP/TLS handshake without ever responding.
+    const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let response_stream = match tokio::time::timeout(
+        OPEN_TIMEOUT,
+        client.publish_build_tool_event_stream(request_stream),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s.into_inner(),
+        Ok(Err(e)) => {
             return if is_retryable(&e) {
                 DriveOutcome::Transient(e)
             } else {
                 DriveOutcome::Fatal(e)
             };
+        }
+        Err(_) => {
+            return DriveOutcome::Transient(ClientError::Status(tonic::Status::deadline_exceeded(
+                "stream open timed out",
+            )));
         }
     };
     let mut response_stream = response_stream;
@@ -341,6 +412,10 @@ async fn drive_stream(
                     half_close_deadline.get_or_insert_with(|| {
                         tokio::time::Instant::now() + HALF_CLOSE_DEADLINE
                     });
+                    eprintln!(
+                        "BES: drive_stream half-close after last_message seq={seq} buffered={}",
+                        buffer.len()
+                    );
                 }
             }
             // Reading server acks from the bidi response stream.
@@ -397,6 +472,10 @@ async fn drive_stream(
                     None => std::future::pending::<()>().await,
                 }
             }, if half_close_deadline.is_some() => {
+                eprintln!(
+                    "BES: drive_stream half-close deadline hit, buffered={} last_message_sent={last_message_sent}",
+                    buffer.len()
+                );
                 return if *last_message_sent {
                     DriveOutcome::Done
                 } else {
@@ -411,14 +490,31 @@ async fn drive_stream(
 /// as stream reconnects. Per the design, every call gets `max_retries`
 /// attempts and the counter is local to the call (a successful lifecycle
 /// event resets to a clean state for the next one).
+///
+/// Each attempt is bounded by a per-RPC deadline. Without it, a server
+/// that accepts the connection but never responds wedges the sink thread
+/// forever — `tonic` does not add a default RPC deadline, and the outer
+/// retry loop only spins on errors, never on hangs.
 async fn retry_lifecycle(
     cfg: &RetryConfig,
     client: &mut Client,
     request: PublishLifecycleEventRequest,
 ) -> Result<(), ClientError> {
+    const PER_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     let mut attempt: u32 = 0;
     loop {
-        match client.publish_lifecycle_event(request.clone()).await {
+        let result = match tokio::time::timeout(
+            PER_ATTEMPT_TIMEOUT,
+            client.publish_lifecycle_event(request.clone()),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(ClientError::Status(tonic::Status::deadline_exceeded(
+                "lifecycle attempt timed out",
+            ))),
+        };
+        match result {
             Ok(_) => return Ok(()),
             Err(err) => {
                 if !is_retryable(&err) || attempt >= cfg.max_retries {
