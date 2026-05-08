@@ -279,6 +279,17 @@ async fn drive_stream(
 
     let mut sender_opt = Some(sender);
 
+    // Hard deadline for waiting after the request side is half-closed.
+    // Once we drop `sender_opt` (last_message sent or upstream broadcaster
+    // closed), the server is supposed to ack any pending events and then
+    // close the response stream. In practice some BES backends sit on the
+    // half-closed connection without acking or closing — without this
+    // deadline `wait()` blocks indefinitely on the sink JoinHandle and the
+    // entire build task hangs at end-of-build. 30s is generous enough for
+    // a slow ack while still bounding the total stall.
+    const HALF_CLOSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+    let mut half_close_deadline: Option<tokio::time::Instant> = None;
+
     loop {
         tokio::select! {
             // Pulling new events from the upstream broadcaster.
@@ -292,6 +303,9 @@ async fn drive_stream(
                     if buffer.is_empty() {
                         return DriveOutcome::UpstreamClosed;
                     }
+                    half_close_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + HALF_CLOSE_DEADLINE
+                    });
                     continue;
                 };
 
@@ -324,6 +338,9 @@ async fn drive_stream(
                     // in the loop so we keep draining acks until the server
                     // closes the response side.
                     sender_opt = None;
+                    half_close_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + HALF_CLOSE_DEADLINE
+                    });
                 }
             }
             // Reading server acks from the bidi response stream.
@@ -368,6 +385,23 @@ async fn drive_stream(
                         ));
                     }
                 }
+            }
+            // Hard deadline arm: only enabled once the request side is
+            // half-closed. If the server hasn't responded (acked or closed)
+            // within HALF_CLOSE_DEADLINE we give up and return success —
+            // the events were already buffered into tonic before half-close,
+            // and waiting longer just wedges the build.
+            _ = async {
+                match half_close_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if half_close_deadline.is_some() => {
+                return if *last_message_sent {
+                    DriveOutcome::Done
+                } else {
+                    DriveOutcome::UpstreamClosed
+                };
             }
         }
     }
