@@ -19,13 +19,19 @@ def announce(ctx, lifecycle, kind, results, label, status = "running", priority 
     """Print a phase label to stderr and emit a TaskUpdate carrying it.
 
     The line is prefixed with `→ ` so phase boundaries stand out in CI
-    logs amid the surrounding bazel / formatter / linter output, and
-    a trailing `…` indicates the work is currently in flight. Goes to
-    stderr because phase progress is a diagnostic, not primary output
-    — a downstream parser piping `aspect <task>` should not have to
-    filter these lines out. The `Last update` line in the rendered
-    annotation / check-run picks up the same decorated string via the
+    logs amid the surrounding bazel / formatter / linter output. Goes
+    to stderr because phase progress is a diagnostic, not primary
+    output — a downstream parser piping `aspect <task>` should not
+    have to filter these lines out. The `Last update` line in the
+    rendered annotation / check-run picks up the same string via the
     TaskUpdate so the visual signal matches across surfaces.
+
+    The label is printed verbatim. Callers are responsible for the
+    "ongoing" suffix (`...`) and where it sits — for simple cases
+    that's `"Verb noun..."`; for cases with a parenthetical aside the
+    natural placement is `"Verb noun... (aside)"` so the ellipsis
+    binds to the verb (the actually-ongoing thing) rather than
+    dangling on the aside.
 
     Defaults `priority=True` — `announce` represents a phase boundary
     (a transition the user actively cares about seeing without delay),
@@ -43,9 +49,9 @@ def announce(ctx, lifecycle, kind, results, label, status = "running", priority 
                    "format_results", "gazelle_results", "delivery_results").
         results:   The kind-specific results dict to ship in the update's
                    data payload.
-        label:     The phase label to print and surface (e.g. "Building 8
-                   target(s)"). Empty string is rejected — use a bare
-                   `lifecycle.task_update` emission for label-less updates.
+        label:     The phase label to print and surface verbatim. Empty
+                   string is rejected — use a bare `lifecycle.task_update`
+                   emission for label-less updates.
         status:    Lifecycle status, default "running". Pass "failing"
                    when announcing a phase from inside an already-failing
                    stream so the BK stripe / GHSC conclusion stay red.
@@ -57,24 +63,14 @@ def announce(ctx, lifecycle, kind, results, label, status = "running", priority 
                    Default True (phase boundary semantics).
     """
     if label:
-        # Auto-append `...` so simple call sites don't have to remember
-        # the convention, but skip the append if the caller already
-        # placed `...` inline — typically because they want a
-        # parenthetical snapshot AFTER the ellipsis (e.g. "Building
-        # formatter... (//tools/format)" so the ellipsis attaches to
-        # the verb, which is the actually-ongoing thing, and the
-        # parens read as a moment-in-time aside).
-        decorated = label if "..." in label else label + "..."
         # Starlark's `print()` writes to stderr in this runtime — the
         # right channel for a diagnostic phase label (`primary task
         # output → stdout`, `status / progress → stderr`).
-        print("→ " + decorated)
-    else:
-        decorated = ""
+        print("→ " + label)
     update = TaskUpdate(
         kind = kind,
         status = status,
-        progress = decorated,
+        progress = label,
         priority = priority,
         data = {"results": results},
     )

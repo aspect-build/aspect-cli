@@ -208,7 +208,7 @@ def _impl(ctx: TaskContext) -> int:
         handler(ctx, results["target_pattern"])
 
     # 1. Health checks
-    announce(ctx, lifecycle, "lint_results", results, "Running pre-lint checks")
+    announce(ctx, lifecycle, "lint_results", results, "Running pre-lint checks...")
     for hook in hc_trait.pre_health_check:
         hook(ctx)
 
@@ -218,7 +218,7 @@ def _impl(ctx: TaskContext) -> int:
     # CI host), falling back to local `git diff <base> --unified=0`.
     # Lives in lib/github.axl because format also wants the same
     # precedence.
-    announce(ctx, lifecycle, "lint_results", results, "Detecting changed files")
+    announce(ctx, lifecycle, "lint_results", results, "Detecting changed files...")
     changed_files = detect_changed_files(
         ctx,
         line_level = True,
@@ -315,7 +315,7 @@ def _impl(ctx: TaskContext) -> int:
     # the first SARIF report (or task_complete) to surface it.
     results["sink_invocation_id"] = build.sink_invocation_id
     announce(ctx, lifecycle, "lint_results", results,
-             "Running %s" % pluralize(len(ctx.args.aspects), "lint aspect"))
+             "Running %s..." % pluralize(len(ctx.args.aspects), "lint aspect"))
 
     all_diagnostics = []
     linter_exit_code = 0
@@ -385,13 +385,13 @@ def _impl(ctx: TaskContext) -> int:
     # 9. Apply patches
     if ctx.args.fix and patches:
         announce(ctx, lifecycle, "lint_results", results,
-                 "Applying %s" % pluralize(len(patches), "auto-fix patch", plural = "auto-fix patches"))
+                 "Applying %s..." % pluralize(len(patches), "auto-fix patch", plural = "auto-fix patches"))
         for patch in patches:
             ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
                 .current_dir(ctx.std.env.current_dir()).spawn().wait()
 
     # 10. Apply strategy filter → relevant diagnostics for reporting and exit code
-    announce(ctx, lifecycle, "lint_results", results, "Filtering diagnostics")
+    announce(ctx, lifecycle, "lint_results", results, "Filtering diagnostics...")
     relevant = strategy.filter(all_diagnostics, changed_files)
 
     # 11. lint_end hooks receive filtered diagnostics

@@ -181,7 +181,7 @@ def _impl(ctx: TaskContext) -> int:
     # `--- :aspect: Workflows Runner Health Check` BK section markers.
     # Build / test / lint / delivery already iterate this; without it,
     # format and gazelle steps are missing those collapsible sections.
-    announce(ctx, lifecycle, "format_results", results, "Running pre-format checks")
+    announce(ctx, lifecycle, "format_results", results, "Running pre-format checks...")
     for hook in hc_trait.pre_health_check:
         hook(ctx)
 
@@ -298,7 +298,7 @@ def _impl(ctx: TaskContext) -> int:
         # context (works on any CI host), falling back to a local
         # `git diff <merge-base> --diff-filter=d --name-only`. The
         # --base-ref / --merge-base flags below only apply to that fallback.
-        announce(ctx, lifecycle, "format_results", results, "Detecting changed files")
+        announce(ctx, lifecycle, "format_results", results, "Detecting changed files...")
         changed_files = detect_changed_files(
             ctx,
             line_level = False,
@@ -333,7 +333,7 @@ def _impl(ctx: TaskContext) -> int:
 
     if ctx.args.scope == "changed":
         announce(ctx, lifecycle, "format_results", results,
-                 "Formatting %s in scope" % pluralize(len(format_args), "file"))
+                 "Formatting %s in scope..." % pluralize(len(format_args), "file"))
     else:
         announce(ctx, lifecycle, "format_results", results, "Formatting... (scope=all)")
     exit = r.spawn(formatter, format_args).wait()
@@ -364,7 +364,7 @@ def _impl(ctx: TaskContext) -> int:
     # non-empty diff means the formatter modified files = "formatting
     # required". When `pre_snap` is empty (working tree was clean before),
     # `git diff HEAD` gives the same answer.
-    announce(ctx, lifecycle, "format_results", results, "Computing format diff")
+    announce(ctx, lifecycle, "format_results", results, "Computing format diff...")
     formatter_diff = _diff_against(ctx, pre_snap)
     if not formatter_diff:
         _emit_final(ctx, lifecycle, results, 0)

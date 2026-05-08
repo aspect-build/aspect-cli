@@ -111,7 +111,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
     for handler in lifecycle.task_started:
         handler(ctx, " ".join(ctx.args.targets))
 
-    announce(ctx, lifecycle, "bazel_results", results, "Running pre-" + command + " checks")
+    announce(ctx, lifecycle, "bazel_results", results, "Running pre-" + command + " checks...")
     for hook in hc_trait.pre_health_check:
         hook(ctx)
 
@@ -176,7 +176,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
         # Phase label changes between the first attempt and any retry so the
         # log + Last-update line make it clear when bazel is being re-run.
         if attempt == 0:
-            phase_label = "Spawning bazel " + command
+            phase_label = "Spawning bazel " + command + "..."
         else:
             phase_label = "Retrying bazel " + command + "... (attempt " + str(attempt + 1) + ")"
             # Reset BES-derived counters from the failed prior attempt so

@@ -213,7 +213,7 @@ def _impl(ctx: TaskContext) -> int:
     # and `agent_health_check` here, which print the
     # `--- :aspect: Workflows Runner Environment` and
     # `--- :aspect: Workflows Runner Health Check` BK section markers.
-    announce(ctx, lifecycle, "gazelle_results", results, "Running pre-gazelle checks")
+    announce(ctx, lifecycle, "gazelle_results", results, "Running pre-gazelle checks...")
     for hook in hc_trait.pre_health_check:
         hook(ctx)
 

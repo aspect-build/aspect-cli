@@ -295,7 +295,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         results["sink_invocation_id"] = build.sink_invocation_id
         if attempt == 0:
             announce(ctx, lifecycle, "delivery_results", results,
-                     "Building {} for delivery".format(pluralize(len(targets), "target")))
+                     "Building {} for delivery...".format(pluralize(len(targets), "target")))
         else:
             announce(ctx, lifecycle, "delivery_results", results,
                      "Retrying delivery build... (attempt {}, {})".format(attempt + 1, pluralize(len(targets), "target")))
@@ -323,7 +323,7 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # DeliveryHash was not yet cached remotely, which is expected on first delivery.
     print("  {} {}...".format(_style("Checksuming", _BOLD, ansi), pluralize(len(targets), "target")))
     announce(ctx, lifecycle, "delivery_results", results,
-             "Computing delivery digests for {}".format(pluralize(len(targets), "target")))
+             "Computing delivery digests for {}...".format(pluralize(len(targets), "target")))
     _t_phase2 = time.monotonic()
     log_path = _GRPC_LOG_PATH.format(ctx.task.key)
     phase2_flags = bazel_flags + aspect_flags + [
@@ -429,7 +429,7 @@ def _delivery_impl(ctx):
     for handler in lifecycle.task_started:
         handler(ctx, targets_subject)
 
-    announce(ctx, lifecycle, "delivery_results", dr, "Running pre-delivery checks")
+    announce(ctx, lifecycle, "delivery_results", dr, "Running pre-delivery checks...")
     for hook in hc_trait.pre_health_check:
         hook(ctx)
 
@@ -576,7 +576,7 @@ def _delivery_impl(ctx):
     # failure point).
     dr["target_pattern"] = " ".join(list(targets)) if targets else ""
     announce(ctx, lifecycle, "delivery_results", dr,
-             "Resolving {} to deliver".format(pluralize(len(targets), "target")))
+             "Resolving {} to deliver...".format(pluralize(len(targets), "target")))
 
     if not targets:
         print(_style("No targets to deliver", _BOLD + _YELLOW, ansi))
@@ -625,7 +625,7 @@ def _delivery_impl(ctx):
 
     # Record each target's digest with deliveryd. Skipped when --track-state=false.
     if track_state:
-        announce(ctx, lifecycle, "delivery_results", dr, "Recording delivery digests")
+        announce(ctx, lifecycle, "delivery_results", dr, "Recording delivery digests...")
         for label in targets:
             if label in output_shas:
                 deliveryd_record(ctx, endpoint, ci_host, commit_sha, prefix, label, output_shas[label])
@@ -635,7 +635,7 @@ def _delivery_impl(ctx):
     # regardless of state, so we don't need it).
     if track_state and mode != "always":
         announce(ctx, lifecycle, "delivery_results", dr,
-                 "Checking which targets have already been delivered")
+                 "Checking which targets have already been delivered...")
         delivery_state = deliveryd_query(ctx, endpoint, ci_host, commit_sha, prefix)
     else:
         delivery_state = {}
@@ -663,7 +663,7 @@ def _delivery_impl(ctx):
     if delivery_targets and not preview_only:
         print("  {} {}...".format(_style("Downloading", _BOLD, ansi), pluralize(len(delivery_targets), "target")))
         announce(ctx, lifecycle, "delivery_results", dr,
-                 "Downloading runfiles for {} being delivered".format(pluralize(len(delivery_targets), "target")))
+                 "Downloading runfiles for {} being delivered...".format(pluralize(len(delivery_targets), "target")))
         phase3_flags = list(expanded_flags) + [
             "--experimental_build_event_upload_strategy=local",
             "--noremote_upload_local_results",
@@ -704,7 +704,7 @@ def _delivery_impl(ctx):
     capture = max_par > 1
 
     # Step 1: collect targets needing delivery; record WARN/SKIP immediately
-    announce(ctx, lifecycle, "delivery_results", dr, "Selecting targets for delivery")
+    announce(ctx, lifecycle, "delivery_results", dr, "Selecting targets for delivery...")
     results = []
     skipped_count = 0
     pending_count = 0
@@ -758,7 +758,7 @@ def _delivery_impl(ctx):
     if dry_run:
         prepass_progress = "Previewing {}... (dry-run)".format(pluralize(len(pending), "target"))
     elif pending:
-        prepass_progress = "Delivering 0 of {}".format(pluralize(len(pending), "target"))
+        prepass_progress = "Delivering 0 of {}...".format(pluralize(len(pending), "target"))
     else:
         prepass_progress = "No targets to deliver"
     announce(ctx, lifecycle, "delivery_results", dr, prepass_progress)
@@ -824,7 +824,7 @@ def _delivery_impl(ctx):
             # "Delivering 0 of N" prepass announce above; this loop is
             # progress within that phase.
             announce(ctx, lifecycle, "delivery_results", dr,
-                     "Delivering {} of {}".format(done, pluralize(len(pending), "target")),
+                     "Delivering {} of {}...".format(done, pluralize(len(pending), "target")),
                      status = "failing" if failed_count > 0 else "running",
                      priority = False)
 
