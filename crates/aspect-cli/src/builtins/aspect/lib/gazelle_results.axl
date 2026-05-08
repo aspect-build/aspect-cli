@@ -161,20 +161,6 @@ def _repro_command(results):
     return " ".join(parts)
 
 
-def _config_items(results):
-    """Build the Configuration row for the gazelle summary.
-
-    Surfaces the mode the task is running in directly above "Last
-    update" — analogous to lint's Strategy / format's Scope / delivery's
-    Mode rows. Only emits when `--check` is set; the default
-    apply-the-patch path is the canonical mode and rendering it as
-    `Mode: apply` would just be noise.
-    """
-    if results.get("check_mode"):
-        return [{"key": "Mode", "value": "check"}]
-    return []
-
-
 def _build_details_data(results, status):
     affected = results.get("affected_files", []) or []
     total    = len(affected)
@@ -212,9 +198,13 @@ def render_check_output(ctx, results, status, render_ctx, links, templates = Non
     """
     t = templates or {}
     run_date = format_run_date(ctx, results.get("start_time_ms", 0))
+    # No `config_items` for gazelle — the only variable knob is
+    # `--check` (no-op apply mode otherwise), and `--check` is the
+    # canonical CI mode anyway. Always-True doesn't tell a reviewer
+    # anything they don't already assume; rendering it would just
+    # add a noise row to every gazelle annotation on CI.
     summary_data = build_summary_data(
         ctx, results, status, render_ctx, links, metadata_keys, run_date = run_date,
-        config_items = _config_items(results),
     )
     finish_date = format_run_date(ctx, results.get("finish_time_ms", 0))
     shared_data = build_details_data(
