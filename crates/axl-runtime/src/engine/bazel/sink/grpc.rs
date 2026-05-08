@@ -141,22 +141,18 @@ async fn work_inner(
     // ever running.
     const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     eprintln!("BES: connecting to {endpoint}");
-    let mut client = match tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        Client::new(endpoint.clone(), headers),
-    )
-    .await
-    {
-        Ok(r) => r.map_err(|e| context("connect failed", &e))?,
-        Err(_) => {
-            eprintln!("BES: connect to {endpoint} timed out after 10s");
-            return Err(finalize(
-                strategy,
-                &endpoint,
-                "connect timed out after 10s".to_string(),
-            ));
-        }
-    };
+    let mut client =
+        match tokio::time::timeout(CONNECT_TIMEOUT, Client::new(endpoint.clone(), headers)).await {
+            Ok(r) => r.map_err(|e| context("connect failed", &e))?,
+            Err(_) => {
+                eprintln!("BES: connect to {endpoint} timed out after 10s");
+                return Err(finalize(
+                    strategy,
+                    &endpoint,
+                    "connect timed out after 10s".to_string(),
+                ));
+            }
+        };
     eprintln!("BES: connected to {endpoint}");
 
     let build_id = invocation_id.clone();
@@ -288,7 +284,10 @@ async fn work_inner(
             ))
         }
     };
-    eprintln!("BES: sink exiting endpoint={endpoint} ok={}", result.is_ok());
+    eprintln!(
+        "BES: sink exiting endpoint={endpoint} ok={}",
+        result.is_ok()
+    );
     result
 }
 
