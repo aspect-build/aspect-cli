@@ -39,28 +39,30 @@ def _live_progress(results, command):
     the generic "Bazel <command> running…" so the line never sits at
     "Spawning bazel build…" once we know the spawn has succeeded.
     """
-    # Present-continuous tense (Building / Running / Executing) keeps
-    # the verb consistent with the trailing `...` ongoing cue. Past
-    # tense ("Built 16 targets...") reads as "done, but still going?",
-    # which the trailing ellipsis makes nonsensical. The N is a
-    # running count of completed events ticking up as BES streams.
+    # Layout: leading "Bazel <cmd> running" is honestly present-continuous
+    # (the bazel invocation is in flight); the parenthetical count uses
+    # past participles ("targets built", "tests run") because the
+    # underlying BES events (target_completed, test_summary) only fire
+    # when those units are *done*. Without the past participle the count
+    # would imply "currently building/running N" which BES can't tell us.
+    base = "Bazel " + command + " running"
     if command == "test":
         passed = results.get("passed_test_total", 0) or 0
         failed = results.get("failed_test_total", 0) or 0
         flaky  = results.get("flaky_test_total", 0)  or 0
         total  = passed + failed + flaky
         if total > 0:
-            label = "Running " + pluralize(total, "test")
+            detail = pluralize(total, "test") + " run"
             if failed > 0:
-                label = label + " · " + pluralize(failed, "failed", plural = "failed")
-            return label + "..."
+                detail = detail + " · " + pluralize(failed, "failed", plural = "failed")
+            return base + " (" + detail + ")..."
     targets = results.get("targets_total", 0) or 0
     if targets > 0:
-        return "Building " + pluralize(targets, "target") + "..."
+        return base + " (" + pluralize(targets, "target") + " built)..."
     actions = results.get("actions_executed", 0) or 0
     if actions > 0:
-        return "Executing " + pluralize(actions, "action") + "..."
-    return "Bazel " + command + " running..."
+        return base + " (" + pluralize(actions, "action") + " executed)..."
+    return base + "..."
 
 
 def _collect_bes_from_args(ctx):
