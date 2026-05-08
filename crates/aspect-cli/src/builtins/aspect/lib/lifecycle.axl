@@ -16,16 +16,16 @@ load("../traits.axl", "TaskUpdate")
 
 
 def announce(ctx, lifecycle, kind, results, label, status = "running"):
-    """Print a phase label to stdout and emit a TaskUpdate carrying it.
+    """Print a phase label to stderr and emit a TaskUpdate carrying it.
 
-    The stdout line is prefixed with `→ ` so phase boundaries stand out
-    in CI logs amid the surrounding bazel / formatter / linter output.
-    A trailing `…` is appended to indicate the work is currently in
-    flight — the `Last update` line in the rendered annotation /
-    check-run picks up the same decorated string so the visual signal
-    matches across surfaces. The TaskUpdate has progress=<decorated>
-    and the supplied status, so the GHSC + BK features pick the label
-    up via `_state["_progress"]`.
+    The line is prefixed with `→ ` so phase boundaries stand out in CI
+    logs amid the surrounding bazel / formatter / linter output, and
+    a trailing `…` indicates the work is currently in flight. Goes to
+    stderr because phase progress is a diagnostic, not primary output
+    — a downstream parser piping `aspect <task>` should not have to
+    filter these lines out. The `Last update` line in the rendered
+    annotation / check-run picks up the same decorated string via the
+    TaskUpdate so the visual signal matches across surfaces.
 
     Args:
         ctx:       The TaskContext.
@@ -46,6 +46,9 @@ def announce(ctx, lifecycle, kind, results, label, status = "running"):
     """
     if label:
         decorated = label + "…"
+        # Starlark's `print()` writes to stderr in this runtime — the
+        # right channel for a diagnostic phase label (`primary task
+        # output → stdout`, `status / progress → stderr`).
         print("→ " + decorated)
     else:
         decorated = ""

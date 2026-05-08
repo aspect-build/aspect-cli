@@ -416,13 +416,17 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         } else {
             "→ "
         };
+        // Diagnostic output → stderr. stdout is reserved for the
+        // primary task output (anything a downstream consumer might
+        // want to capture or pipe). The "Running task X" announcement
+        // is a status message, not a result.
         if task_info.task_key != task_info.name {
-            println!(
+            eprintln!(
                 "{prefix}Running task `{}` (key: {})",
                 task_info.name, task_info.task_key
             );
         } else {
-            println!("{prefix}Running task `{}`", task_info.name);
+            eprintln!("{prefix}Running task `{}`", task_info.name);
         }
 
         let task_trait_map = match self.trait_map_value {
