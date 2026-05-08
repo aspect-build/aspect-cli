@@ -17,7 +17,7 @@ load("./environment.axl", "color_enabled")
 load("./lifecycle.axl", "announce")
 
 
-def _live_progress(results, command, default_label):
+def _live_progress(results, command):
     """Compose a live "Last update" label from the latest BES counters.
 
     Called inside the BES streaming loop to give the rendered
@@ -35,12 +35,9 @@ def _live_progress(results, command, default_label):
     For `build`: targets_completed (BES `target_completed` events feed
     `targets_total` in `process_event` — the field is misnamed but
     represents the running completed-target count, not a known total).
-    Falls back to actions when no targets have completed yet.
-
-    Returns `default_label` (the prior phase label, e.g. "Spawning
-    bazel build…") when no countable BES data has arrived yet, so the
-    annotation never goes blank during the burst of metadata events
-    at the start of the stream.
+    Falls back to actions when no targets have completed yet, then to
+    the generic "Bazel <command> running…" so the line never sits at
+    "Spawning bazel build…" once we know the spawn has succeeded.
     """
     if command == "test":
         passed = results.get("passed_test_total", 0) or 0
@@ -58,7 +55,7 @@ def _live_progress(results, command, default_label):
     actions = results.get("actions_executed", 0) or 0
     if actions > 0:
         return "Executed " + pluralize(actions, "action") + "…"
-    return default_label
+    return "Bazel " + command + " running…"
 
 
 def _collect_bes_from_args(ctx):
@@ -220,6 +217,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
         if need_bes:
             announce(ctx, lifecycle, "bazel_results", results, phase_label)
 
+        saw_first_event = False
         if need_bes:
             for event in events:
                 for handler in bazel_trait.build_event:
@@ -238,16 +236,26 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
                         results["failed_actions_total"] > 0 or
                         results["failed_test_total"] > 0
                     ) else "running"
+                    # The first BES event is the moment we can transition
+                    # the rendered "Last update" line off "Spawning bazel
+                    # <cmd>…" — bazel has spawned, BES is streaming, the
+                    # build is genuinely running. Mark `priority=True` so
+                    # the BK + GHSC features bypass the throttle and the
+                    # transition lands immediately rather than waiting up
+                    # to `min_update_interval_ms` after the spawn announce
+                    # (which would otherwise leave the user staring at a
+                    # spawn label for half a second of "running" reality).
+                    is_first = not saw_first_event
+                    saw_first_event = True
                     # Pass `progress` so the rendered "Last update" line
                     # ticks with the latest BES counters (X targets built,
                     # Y tests run, …) instead of sitting at the static
-                    # "Spawning bazel test…" for the entire build. Falls
-                    # back to the prior phase label when no counters have
-                    # arrived yet so the line never goes blank.
+                    # "Spawning bazel test…" for the entire build.
                     update = TaskUpdate(
                         kind = "bazel_results",
                         status = live_status,
-                        progress = _live_progress(results, command, phase_label + "…"),
+                        progress = _live_progress(results, command),
+                        priority = is_first,
                         data = {"results": results},
                     )
                     for handler in lifecycle.task_update:

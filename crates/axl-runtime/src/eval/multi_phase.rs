@@ -410,24 +410,29 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         // sections that BazelDefaults emits. Off Buildkite the marker
         // adds nothing (BK groups on `---`; other terminals just show a
         // plain line) so we keep the simpler `→` form.
-        let on_buildkite = std::env::var_os("BUILDKITE").is_some();
-        let prefix = if on_buildkite {
-            "--- :aspect: "
-        } else {
-            "→ "
-        };
         // Diagnostic output → stderr. stdout is reserved for the
         // primary task output (anything a downstream consumer might
         // want to capture or pipe). The "Running task X" announcement
         // is a status message, not a result.
-        if task_info.task_key != task_info.name {
+        //
+        // On Buildkite an extra `--- :aspect: ...` line opens a
+        // collapsible section so the task's output groups under one
+        // header. The regular `→ Running task ...` line follows on
+        // every CI host so the log line is consistent across surfaces.
+        // Bracket form `[key]` matches BazelDefaults' "Running bazel
+        // <cmd> [<key>] <targets>" so the two adjacent log lines read
+        // as a pair.
+        let on_buildkite = std::env::var_os("BUILDKITE").is_some();
+        if on_buildkite {
             eprintln!(
-                "{prefix}Running task `{}` (key: {})",
+                "--- :aspect: Running task `{}` [{}]",
                 task_info.name, task_info.task_key
             );
-        } else {
-            eprintln!("{prefix}Running task `{}`", task_info.name);
         }
+        eprintln!(
+            "→ Running task `{}` [{}]",
+            task_info.name, task_info.task_key
+        );
 
         let task_trait_map = match self.trait_map_value {
             Some(tmap_val) => {

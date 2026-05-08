@@ -6,9 +6,16 @@ load("./bazel.axl", "default_retry")
 # Structured update passed to task_update hooks.
 #
 # Mandatory fields (always present):
-#   progress: str — human-readable status message; may be "" if there is nothing to say
-#   status:   str — "running" | "failing" | "passed" | "failed"
-#   kind:     str — discriminator for the data payload (see below)
+#   progress: str  — human-readable status message; may be "" if there is nothing to say
+#   status:   str  — "running" | "failing" | "passed" | "failed"
+#   kind:     str  — discriminator for the data payload (see below)
+#   priority: bool — when True, observers should bypass any throttling and emit
+#                    immediately. Used for status transitions the user should see
+#                    without delay (e.g. the first "Bazel build running" tick when
+#                    BES events start arriving — the throttle would otherwise hold
+#                    the rendered "Last update" line at "Spawning bazel build…"
+#                    for up to min_update_interval_ms after the build is already
+#                    well underway).
 #
 # "passed" and "failed" are terminal — the task is done. Features should complete
 # their output (e.g. close a check run) on these statuses.
@@ -23,6 +30,7 @@ TaskUpdate = record(
     progress = field(str, default = ""),
     status   = field(str, default = "running"),
     kind     = field(str, default = "progress"),
+    priority = field(bool, default = False),
     data     = field(dict, default = {}),
 )
 

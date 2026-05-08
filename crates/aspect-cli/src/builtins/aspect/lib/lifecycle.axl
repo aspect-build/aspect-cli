@@ -15,7 +15,7 @@ displayed phase.
 load("../traits.axl", "TaskUpdate")
 
 
-def announce(ctx, lifecycle, kind, results, label, status = "running"):
+def announce(ctx, lifecycle, kind, results, label, status = "running", priority = False):
     """Print a phase label to stderr and emit a TaskUpdate carrying it.
 
     The line is prefixed with `→ ` so phase boundaries stand out in CI
@@ -52,6 +52,12 @@ def announce(ctx, lifecycle, kind, results, label, status = "running"):
         print("→ " + decorated)
     else:
         decorated = ""
-    update = TaskUpdate(kind = kind, status = status, progress = decorated, data = {"results": results})
+    update = TaskUpdate(
+        kind = kind,
+        status = status,
+        progress = decorated,
+        priority = priority,
+        data = {"results": results},
+    )
     for handler in lifecycle.task_update:
         handler(ctx, update)

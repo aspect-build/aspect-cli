@@ -389,14 +389,20 @@ def _buildkite_annotations(ctx: FeatureContext):
             return
         results = update.data.get("results", renderer.init())
 
-        # First transition into "failing" bypasses the throttle so the
-        # red stripe lands on the BK annotation immediately rather than
-        # waiting up to `min_update_interval_ms`. Tracked via
-        # `_state["_seen_failing"]` so subsequent failing-while-failing
-        # ticks still throttle normally.
+        # Throttle bypass:
+        #   - First transition into "failing": red stripe should land
+        #     immediately rather than waiting up to min_update_interval_ms.
+        #     Tracked via `_state["_seen_failing"]` so subsequent
+        #     failing-while-failing ticks still throttle normally.
+        #   - `update.priority`: caller marked this update as a status
+        #     transition the user shouldn't have to wait for (e.g. the
+        #     first BES event flipping the label off "Spawning bazel
+        #     build…" to "Bazel build running…").
         first_failing = status == "failing" and not _state.get("_seen_failing")
         if first_failing:
             _state["_seen_failing"] = True
+            _state["_last_update_ms"] = now_ms(ctx)
+        elif update.priority:
             _state["_last_update_ms"] = now_ms(ctx)
         elif not should_emit_update(_state, now_ms(ctx), min_update_interval_ms, final):
             return

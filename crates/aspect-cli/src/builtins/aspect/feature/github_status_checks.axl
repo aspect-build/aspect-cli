@@ -361,17 +361,22 @@ def _github_status_checks(ctx: FeatureContext):
         results["reproducer_command"]       = repro_cmd
         results["reproducer_command_total"] = repro_total
 
-        # First transition into "failing" (or any conclusion change away
-        # from the current `_gh_conclusion`) is a status-transition event:
-        # bypass the throttle so the early-fail signal lands on the PR
-        # immediately rather than waiting up to `min_update_interval_ms`.
-        # The throttle still gates plain "running" → "running" body
-        # refreshes during a normal build.
+        # Throttle bypass:
+        #   - First transition into "failing" (or any conclusion change
+        #     away from the current `_gh_conclusion`) is a status-
+        #     transition event: bypass the throttle so the early-fail
+        #     signal lands on the PR immediately rather than waiting up
+        #     to `min_update_interval_ms`. The throttle still gates plain
+        #     "running" → "running" body refreshes during a normal build.
+        #   - `update.priority`: caller marked this update as a status
+        #     transition the user shouldn't have to wait for (e.g. the
+        #     first BES event flipping the label off "Spawning bazel
+        #     build…" to "Bazel build running…").
         is_conclusion_transition = (
             (status == "failing" and _state.get("_gh_conclusion") != "failure") or
             (final and _state.get("_gh_conclusion") != ("success" if status == "passed" else "failure"))
         )
-        if not is_conclusion_transition:
+        if not (is_conclusion_transition or update.priority):
             if not should_emit_update(_state, now_ms(ctx), min_update_interval_ms, final):
                 return
         elif final:
