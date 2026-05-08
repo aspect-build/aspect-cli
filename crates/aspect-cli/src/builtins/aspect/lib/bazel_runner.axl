@@ -39,22 +39,27 @@ def _live_progress(results, command):
     the generic "Bazel <command> running…" so the line never sits at
     "Spawning bazel build…" once we know the spawn has succeeded.
     """
+    # Present-continuous tense (Building / Running / Executing) keeps
+    # the verb consistent with the trailing `...` ongoing cue. Past
+    # tense ("Built 16 targets...") reads as "done, but still going?",
+    # which the trailing ellipsis makes nonsensical. The N is a
+    # running count of completed events ticking up as BES streams.
     if command == "test":
         passed = results.get("passed_test_total", 0) or 0
         failed = results.get("failed_test_total", 0) or 0
         flaky  = results.get("flaky_test_total", 0)  or 0
         total  = passed + failed + flaky
         if total > 0:
-            label = "Ran " + pluralize(total, "test")
+            label = "Running " + pluralize(total, "test")
             if failed > 0:
                 label = label + " · " + pluralize(failed, "failed", plural = "failed")
             return label + "..."
     targets = results.get("targets_total", 0) or 0
     if targets > 0:
-        return "Built " + pluralize(targets, "target") + "..."
+        return "Building " + pluralize(targets, "target") + "..."
     actions = results.get("actions_executed", 0) or 0
     if actions > 0:
-        return "Executed " + pluralize(actions, "action") + "..."
+        return "Executing " + pluralize(actions, "action") + "..."
     return "Bazel " + command + " running..."
 
 
