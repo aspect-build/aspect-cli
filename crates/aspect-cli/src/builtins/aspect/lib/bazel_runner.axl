@@ -14,7 +14,7 @@ applies uniformly to both tasks.
 load("../traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
 load("./bazel_results.axl", "init_results", "pluralize", "process_event")
 load("./environment.axl", "color_enabled")
-load("./lifecycle.axl", "announce")
+load("./lifecycle.axl", "announce", "announce_complete")
 
 
 def _live_progress(results, command):
@@ -224,7 +224,13 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
         # BES sinks were configured.
         results["sink_invocation_id"] = invocation.sink_invocation_id
         if need_bes:
-            announce(ctx, lifecycle, "bazel_results", results, phase_label)
+            # cli=False: bazel inherits stdout/stderr (`inherit_stdout=True`
+            # above), so its own `Loading:`/`Analyzing:`/action progress is
+            # already streaming to the terminal. The `→ Spawning bazel ...`
+            # / `→ Retrying bazel ...` line would be redundant on the CLI
+            # but the TaskUpdate is still needed so the BK annotation /
+            # check-run "Last update" line transitions off the prior phase.
+            announce(ctx, lifecycle, "bazel_results", results, phase_label, cli = False)
 
         saw_first_event = False
         if need_bes:
@@ -286,5 +292,10 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
 
     for handler in lifecycle.task_complete:
         handler(ctx, invocation_status.code)
+
+    # Closing CLI marker — `command` is "build" or "test"; .capitalize()
+    # gives "Build"/"Test" to match the `→ <Task> task complete` shape
+    # used by format / lint / gazelle / delivery.
+    announce_complete(command.capitalize(), invocation_status.code)
 
     return invocation_status.code

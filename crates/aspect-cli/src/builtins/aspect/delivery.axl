@@ -127,7 +127,7 @@ load("@aspect//lib/environment.axl", "color_enabled")
 load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha")
 load("@aspect//lib/runnable.axl", "runnable")
 load("@aspect//lib/bazel_results.axl", "now_ms", "pluralize", "process_event")
-load("@aspect//lib/lifecycle.axl", "announce")
+load("@aspect//lib/lifecycle.axl", "announce", "announce_complete")
 load("@aspect//lib/delivery_results.axl",
     delivery_init_results = "init_results",
     delivery_add_result = "add_result",
@@ -293,6 +293,12 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
         # link as soon as the build is spawned. Each retry attempt runs
         # against a fresh UUID and overwrites this field.
         results["sink_invocation_id"] = build.sink_invocation_id
+        # Kept on the CLI: phase 1 `bazel.build` does NOT inherit stdout/stderr
+        # (unlike phase 2/3), so without this `→` line the user sees the
+        # configuration table from `_print_header`, then nothing until
+        # `Build took Ns.` prints after the build completes — potentially
+        # minutes later. The announce is the only "we're working" signal
+        # during that gap.
         if attempt == 0:
             announce(ctx, lifecycle, "delivery_results", results,
                      "Building {} for delivery...".format(pluralize(len(targets), "target")))
@@ -322,8 +328,13 @@ def _get_output_shas(ctx, bazel_trait, lifecycle, build_events, targets, bazel_f
     # We parse the log regardless of exit code; a non-zero result here simply means
     # DeliveryHash was not yet cached remotely, which is expected on first delivery.
     print("  {} {}...".format(_style("Checksuming", _BOLD, ansi), pluralize(len(targets), "target")))
+    # cli=False: the print() above already shows "Checksuming N targets..."
+    # and the phase 2 bazel.build below has inherit_stdout/stderr=True, so
+    # bazel's own progress streams to the terminal. The `→ Computing
+    # delivery digests...` line is redundant on the CLI; status surfaces
+    # still need the TaskUpdate to transition the "Last update" line.
     announce(ctx, lifecycle, "delivery_results", results,
-             "Computing delivery digests for {}...".format(pluralize(len(targets), "target")))
+             "Computing delivery digests for {}...".format(pluralize(len(targets), "target")), cli = False)
     _t_phase2 = time.monotonic()
     log_path = _GRPC_LOG_PATH.format(ctx.task.key)
     phase2_flags = bazel_flags + aspect_flags + [
@@ -396,6 +407,7 @@ def _emit_final(ctx, lifecycle, dr, exit_code):
         ))
     for handler in lifecycle.task_complete:
         handler(ctx, exit_code)
+    announce_complete("Delivery", exit_code)
 
 
 def _delivery_impl(ctx):
@@ -662,8 +674,12 @@ def _delivery_impl(ctx):
     # never run, and we don't need entrypoint info for the preview output.
     if delivery_targets and not preview_only:
         print("  {} {}...".format(_style("Downloading", _BOLD, ansi), pluralize(len(delivery_targets), "target")))
+        # cli=False: the print() above already shows "Downloading N targets..."
+        # The `→ Downloading runfiles...` line is redundant on the CLI; status
+        # surfaces still need the TaskUpdate to transition the "Last update"
+        # line off the prior phase.
         announce(ctx, lifecycle, "delivery_results", dr,
-                 "Downloading runfiles for {} being delivered...".format(pluralize(len(delivery_targets), "target")))
+                 "Downloading runfiles for {} being delivered...".format(pluralize(len(delivery_targets), "target")), cli = False)
         phase3_flags = list(expanded_flags) + [
             "--experimental_build_event_upload_strategy=local",
             "--noremote_upload_local_results",
@@ -823,10 +839,17 @@ def _delivery_impl(ctx):
             # PATCHes without throttle. Phase boundary was the
             # "Delivering 0 of N" prepass announce above; this loop is
             # progress within that phase.
+            #
+            # cli=False: the per-target `Delivering <label>...` print at
+            # the top of the chunk loop already gives the user a CLI
+            # tick per delivery; the aggregate `→ Delivering X of N...`
+            # line would just repeat the same info on every completion.
+            # Status surfaces still need the TaskUpdate so the BK
+            # annotation / check-run "Last update" line ratchets up.
             announce(ctx, lifecycle, "delivery_results", dr,
                      "Delivering {} of {}...".format(done, pluralize(len(pending), "target")),
                      status = "failing" if failed_count > 0 else "running",
-                     priority = False)
+                     priority = False, cli = False)
 
     # Calculate column widths for alignment
     max_label_width = len("TARGET")

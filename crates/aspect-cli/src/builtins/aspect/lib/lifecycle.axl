@@ -1,10 +1,21 @@
 """Task-side helpers for lifecycle event emission.
 
 `announce(ctx, lifecycle, kind, results, label, status="running")`
-prints the phase label to stdout and emits a TaskUpdate carrying it.
+prints the phase label to stderr and emits a TaskUpdate carrying it.
 The two side effects are paired so a single call surfaces the new
 phase in CI logs *and* in the BK annotation / GHSC summary's "Last
-update" line — keeping the two sources of truth in sync.
+update" line — keeping the two sources of truth in sync. Pass
+`cli=False` when the surrounding tool (bazel, the formatter, …) is
+already streaming its own output to the CLI and a redundant `→` line
+would just clutter the local terminal — the TaskUpdate still goes to
+status surfaces so the BK annotation / check-run "Last update" line
+stays current.
+
+`announce_complete(label, exit_code=0)` prints a closing `→ <label>
+task complete` (or `failed`) line to stderr at the end of a task,
+giving the CLI a symmetric phase-end marker. It is CLI-only — status
+surfaces already get terminal status via `lifecycle.task_complete`,
+so they don't need another emission here.
 
 Bare `lifecycle.task_update` emits (without a phase label) are still
 the right shape for live data refreshes within a phase: features now
@@ -15,7 +26,7 @@ displayed phase.
 load("../traits.axl", "TaskUpdate")
 
 
-def announce(ctx, lifecycle, kind, results, label, status = "running", priority = True):
+def announce(ctx, lifecycle, kind, results, label, status = "running", priority = True, cli = True):
     """Print a phase label to stderr and emit a TaskUpdate carrying it.
 
     The line is prefixed with `→ ` so phase boundaries stand out in CI
@@ -42,6 +53,14 @@ def announce(ctx, lifecycle, kind, results, label, status = "running", priority 
     `priority=False` only when calling announce in a hot loop where
     multiple emissions cluster within `min_update_interval_ms`.
 
+    Defaults `cli=True` — most phase boundaries are useful on both
+    surfaces. Set `cli=False` when the surrounding tool (bazel
+    streaming its own progress, the formatter binary, gazelle's
+    diff output, …) is already filling the local terminal — the
+    `→` line would be redundant locally but the TaskUpdate is still
+    needed to keep the BK annotation / status check "Last update"
+    line current.
+
     Args:
         ctx:       The TaskContext.
         lifecycle: The TaskLifecycleTrait with task_update handlers.
@@ -61,8 +80,11 @@ def announce(ctx, lifecycle, kind, results, label, status = "running", priority 
         priority:  Whether the rendered annotation / check-run should
                    bypass the BK / GHSC throttle for this update.
                    Default True (phase boundary semantics).
+        cli:       Whether to print the `→ <label>` line to the local
+                   CLI. Default True. Set False to keep the TaskUpdate
+                   emission while suppressing the local print.
     """
-    if label:
+    if cli and label:
         # Starlark's `print()` writes to stderr in this runtime — the
         # right channel for a diagnostic phase label (`primary task
         # output → stdout`, `status / progress → stderr`).
@@ -76,3 +98,30 @@ def announce(ctx, lifecycle, kind, results, label, status = "running", priority 
     )
     for handler in lifecycle.task_update:
         handler(ctx, update)
+
+
+def announce_complete(label, exit_code = 0):
+    """Print a closing `→ <label> task complete` (or `failed`) line.
+
+    Pairs with `announce()`: announce() opens phase boundaries, this
+    closes the task itself. CLI-only — status surfaces already receive
+    terminal status via `lifecycle.task_complete`, so re-emitting a
+    TaskUpdate here would just produce a duplicate render.
+
+    Call this AFTER firing `task_complete` handlers so the closing
+    line is the very last thing on the local terminal — the natural
+    visual end-of-task marker.
+
+    Args:
+        label:     The task name, capitalized — e.g. "Format", "Build",
+                   "Test", "Lint", "Gazelle", "Delivery". Rendered as
+                   `→ <label> task complete` on success and
+                   `→ <label> task failed (exit code N)` otherwise.
+        exit_code: The task's exit code. 0 → "complete"; non-zero →
+                   "failed (exit code N)" so the CLI shows the same
+                   verdict shape that the status surfaces conclude with.
+    """
+    if exit_code == 0:
+        print("→ " + label + " task complete")
+    else:
+        print("→ " + label + " task failed (exit code " + str(exit_code) + ")")

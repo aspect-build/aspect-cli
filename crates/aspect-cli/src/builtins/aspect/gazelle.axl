@@ -95,7 +95,7 @@ Usage:
 load("./lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
 load("./lib/runnable.axl", "runnable")
 load("./lib/bazel_results.axl", "now_ms", "pluralize", "process_event")
-load("./lib/lifecycle.axl", "announce")
+load("./lib/lifecycle.axl", "announce", "announce_complete")
 load("./lib/gazelle_results.axl",
     gaz_init_results = "init_results",
 )
@@ -175,7 +175,9 @@ def _try_upload_gazelle_diff(ctx, diff_text):
 
 
 def _emit_final(ctx, lifecycle, results, exit_code):
-    """Emit the terminal task_update and task_complete for status-check consumers."""
+    """Emit the terminal task_update and task_complete for status-check consumers,
+    then print the closing CLI marker so the local terminal has a symmetric
+    end-of-task line matching the opening `→` phase announcements."""
     status = "passed" if exit_code == 0 else "failed"
     if not results.get("finish_time_ms"):
         results["finish_time_ms"] = now_ms(ctx)
@@ -189,6 +191,7 @@ def _emit_final(ctx, lifecycle, results, exit_code):
         ))
     for handler in lifecycle.task_complete:
         handler(ctx, exit_code)
+    announce_complete("Gazelle", exit_code)
 
 
 # buildifier: disable=function-docstring
@@ -276,8 +279,12 @@ def _impl(ctx: TaskContext) -> int:
     # the Aspect Workflows link as soon as the build is spawned, rather than
     # waiting for `build.wait()` to surface it.
     results["sink_invocation_id"] = build.sink_invocation_id
+    # cli=False: bazel is streaming its own progress to the terminal,
+    # so the `→ Building gazelle...` line would just clutter the local
+    # output. Status surfaces still need this update for the "Last
+    # update" transition.
     announce(ctx, lifecycle, "gazelle_results", results,
-             "Building gazelle... (%s)" % ctx.args.gazelle_target)
+             "Building gazelle... (%s)" % ctx.args.gazelle_target, cli = False)
 
     for event in events:
         r.event(event)

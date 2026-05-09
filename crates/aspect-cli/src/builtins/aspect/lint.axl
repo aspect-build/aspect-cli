@@ -21,7 +21,7 @@ Usage:
 load("./lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "get_sarif_summary")
 load("./lib/lint_results.axl", lint_init_results = "init_results", lint_accumulate = "accumulate")
 load("./lib/bazel_results.axl", "now_ms", "pluralize", "process_event")
-load("./lib/lifecycle.axl", "announce")
+load("./lib/lifecycle.axl", "announce", "announce_complete")
 load("./traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
 load("./lib/environment.axl", "color_enabled")
 load("./lib/github.axl", "detect_changed_files")
@@ -314,8 +314,14 @@ def _impl(ctx: TaskContext) -> int:
     # Workflows link as soon as the build is spawned, instead of waiting for
     # the first SARIF report (or task_complete) to surface it.
     results["sink_invocation_id"] = build.sink_invocation_id
+    # cli=False: bazel inherits stdout/stderr (`inherit_stderr=True` /
+    # `inherit_stdout=True` above), so its own progress is already
+    # streaming to the terminal. The `→ Running N lint aspect...`
+    # line would be redundant on the CLI but the TaskUpdate is still
+    # needed so the BK annotation / check-run "Last update" line
+    # transitions off the prior phase.
     announce(ctx, lifecycle, "lint_results", results,
-             "Running %s..." % pluralize(len(ctx.args.aspects), "lint aspect"))
+             "Running %s..." % pluralize(len(ctx.args.aspects), "lint aspect"), cli = False)
 
     all_diagnostics = []
     linter_exit_code = 0
@@ -424,6 +430,8 @@ def _impl(ctx: TaskContext) -> int:
         result = hook(ctx)
         if result != None:
             fail(result)
+
+    announce_complete("Lint", exit_code)
 
     return exit_code
 
