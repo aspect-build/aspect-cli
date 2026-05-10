@@ -168,6 +168,15 @@ pub struct Build {
     #[allocative(skip)]
     child: RefCell<Child>,
 
+    /// RAII guard that registers the bazel client PID with `bazel::live`
+    /// for the lifetime of the build. Dropped when the `Build` is dropped
+    /// (typically when AXL releases its reference after `wait()`).
+    /// On OS-level shutdown signals to aspect-cli, the binary's signal
+    /// handler iterates the live registry and forwards SIGINT to each
+    /// registered client so bazel subprocesses don't outlive aspect-cli.
+    #[allocative(skip)]
+    _live_guard: super::live::LiveBazelGuard,
+
     #[allocative(skip)]
     span: RefCell<tracing::Span>,
 }
@@ -297,6 +306,12 @@ impl Build {
             .spawn()
             .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
 
+        // Register the bazel client with the live-subprocess registry so
+        // aspect-cli's OS-signal handler can forward SIGINT to it on
+        // CI cancellation. The guard is stored on `Self` and unregisters
+        // when the `Build` is dropped (after `wait()`).
+        let live_guard = super::live::register(child.id());
+
         // Now that we have the spawned child's pid, start the BES reader.
         // The child pid is the per-invocation liveness signal the BES thread
         // uses to detect aspect-build/aspect-cli#1060 — a hung post-
@@ -372,6 +387,7 @@ impl Build {
             execlog_stream: RefCell::new(execlog_stream),
             sink_handles: RefCell::new(sink_handles),
             sink_invocation_id: RefCell::new(sink_invocation_id),
+            _live_guard: live_guard,
             span: RefCell::new(span),
         })
     }

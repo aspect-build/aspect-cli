@@ -35,6 +35,7 @@ mod cancel;
 mod health_check;
 mod info;
 mod iter;
+pub mod live;
 mod process;
 mod query;
 mod rc;
@@ -416,9 +417,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::null());
         cmd.stdin(Stdio::null());
-        let output = cmd
-            .output()
+        // Register with the live-bazel registry so OS-signal cancellation
+        // can reach this `bazel info` even if the daemon is busy.
+        let (child, _guard) = live::spawn_registered(&mut cmd)
             .map_err(|e| anyhow::anyhow!("failed to spawn bazel: {}", e))?;
+        let output = child
+            .wait_with_output()
+            .map_err(|e| anyhow::anyhow!("failed to wait on bazel: {}", e))?;
 
         if !output.status.success() {
             anyhow::bail!(
