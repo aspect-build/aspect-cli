@@ -78,15 +78,18 @@ struct CheckResult {
 
 /// Runs `bazel [startup_flags] --noblock_for_lock info server_pid` and returns the result.
 fn check_bazel_server(startup_flags: &[String]) -> CheckResult {
-    let output = Command::new(super::bazel_binary())
-        .args(startup_flags)
+    let mut cmd = Command::new(super::bazel_binary());
+    cmd.args(startup_flags)
         .arg("--noblock_for_lock")
         .arg("info")
         .arg("server_pid")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .output();
+        .stdin(Stdio::null());
+    let output = match super::live::spawn_registered(&mut cmd) {
+        Ok((child, _guard)) => child.wait_with_output(),
+        Err(e) => Err(e),
+    };
 
     match output {
         Ok(output) => CheckResult {
@@ -121,15 +124,15 @@ fn extract_server_pid(server_pid_file: Option<&Path>) -> Option<u32> {
 
 /// Tries to determine the Bazel output base by running `bazel [startup_flags] info output_base`.
 fn get_output_base(startup_flags: &[String]) -> Option<PathBuf> {
-    let output = Command::new(super::bazel_binary())
-        .args(startup_flags)
+    let mut cmd = Command::new(super::bazel_binary());
+    cmd.args(startup_flags)
         .arg("info")
         .arg("output_base")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+        .stdin(Stdio::null());
+    let (child, _guard) = super::live::spawn_registered(&mut cmd).ok()?;
+    let output = child.wait_with_output().ok()?;
 
     if !output.status.success() {
         return None;
