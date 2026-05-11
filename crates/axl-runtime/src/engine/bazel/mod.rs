@@ -592,7 +592,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
     ///   (default `10000`). Exceeding it mid-stream is terminal.
     /// * `timeout` - Overall upload deadline (default `"0s"` = no deadline).
     /// * `error_strategy` - How a terminal failure surfaces. One of
-    ///   `"abort"`, `"fail_at_end"`, `"warn"` (default), `"ignore"`.
+    ///   `"fail_at_end"`, `"warn"` (default), `"ignore"`.
     #[starlark(as_type = build::BuildEventSink)]
     fn grpc(
         #[starlark(require = named)] uri: String,
