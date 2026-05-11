@@ -532,7 +532,11 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         }
 
         let success = result.success() && !fail_at_end;
-        let code = if fail_at_end && result.code().unwrap_or(0) == 0 {
+        // Only synthesize the sink-induced exit code 36 when Bazel actually
+        // exited cleanly with status 0. A `None` from `result.code()`
+        // means Bazel was killed by a signal — preserve that, otherwise
+        // the sink failure masks the real abnormal termination.
+        let code = if fail_at_end && result.code() == Some(0) {
             Some(36)
         } else {
             result.code()
