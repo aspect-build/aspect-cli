@@ -15,4 +15,5 @@ path = "src/main.rs"
 
 [dependencies]
 axl-proto = { path = "../axl-proto" }
+libc = "0.2"
 prost = "0.14.1"
