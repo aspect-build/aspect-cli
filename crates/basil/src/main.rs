@@ -99,10 +99,16 @@ fn run_build(args: &[String]) {
     match s.exit {
         ExitBehavior::Code(c) => process::exit(c),
         ExitBehavior::Signal(sig) => {
-            // SAFETY: `libc::raise` is async-signal-safe and only
+            // libc(3)'s `raise` declared directly to avoid pulling in the
+            // libc crate for one symbol. async-signal-safe and only
             // delivers the named signal to the current process.
+            unsafe extern "C" {
+                fn raise(sig: i32) -> i32;
+            }
+            // SAFETY: `raise` is a safe-to-call libc function with a
+            // well-defined contract on every Unix.
             unsafe {
-                libc::raise(sig);
+                raise(sig);
             }
             // If `raise` returned (e.g. signal caught/ignored, which
             // we don't expect with SIGKILL or default handlers), fall
@@ -239,7 +245,9 @@ fn scenario(name: &str) -> Scenario {
         "signal_killed_sigkill" => Scenario {
             open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(0, true)]],
-            exit: ExitBehavior::Signal(libc::SIGKILL),
+            // SIGKILL: signal 9 on every Unix. Hard-coded to avoid a
+            // libc dep for a single constant.
+            exit: ExitBehavior::Signal(9),
         },
 
         other => {
