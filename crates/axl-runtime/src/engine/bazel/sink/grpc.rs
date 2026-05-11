@@ -121,7 +121,6 @@ async fn work_inner(
     let context = |stage: &str, err: &dyn std::fmt::Display| -> SinkError {
         finalize(strategy, &endpoint, format!("{stage}: {err}"))
     };
-    eprintln!("BES: starting sink endpoint={endpoint} invocation_id={invocation_id}");
 
     // Forward the synchronous broadcaster `recv` into a tokio mpsc so the
     // state machine can `select!` over it alongside the bidi response
@@ -140,12 +139,10 @@ async fn work_inner(
     // endpoint can stall indefinitely without any of the retry machinery
     // ever running.
     const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-    eprintln!("BES: connecting to {endpoint}");
     let mut client =
         match tokio::time::timeout(CONNECT_TIMEOUT, Client::new(endpoint.clone(), headers)).await {
             Ok(r) => r.map_err(|e| context("connect failed", &e))?,
             Err(_) => {
-                eprintln!("BES: connect to {endpoint} timed out after 10s");
                 return Err(finalize(
                     strategy,
                     &endpoint,
@@ -153,11 +150,9 @@ async fn work_inner(
                 ));
             }
         };
-    eprintln!("BES: connected to {endpoint}");
 
     let build_id = invocation_id.clone();
 
-    eprintln!("BES: -> build_enqueued");
     retry_lifecycle(
         &retry,
         &mut client,
@@ -165,9 +160,7 @@ async fn work_inner(
     )
     .await
     .map_err(|e| context("build_enqueued", &e))?;
-    eprintln!("BES: <- build_enqueued ok");
 
-    eprintln!("BES: -> invocation_started");
     retry_lifecycle(
         &retry,
         &mut client,
@@ -175,7 +168,6 @@ async fn work_inner(
     )
     .await
     .map_err(|e| context("invocation_started", &e))?;
-    eprintln!("BES: <- invocation_started ok");
 
     let mut buffer = RetryBuffer::new(retry.retry_max_buffer_size);
     let mut next_seq: i64 = 1;
@@ -183,10 +175,6 @@ async fn work_inner(
     let mut last_message_sent = false;
 
     'reconnect: loop {
-        eprintln!(
-            "BES: drive_stream start attempt={attempt} buffered={}",
-            buffer.len()
-        );
         let outcome = drive_stream(
             &mut client,
             &build_id,
@@ -197,10 +185,6 @@ async fn work_inner(
             &mut last_message_sent,
         )
         .await;
-        eprintln!(
-            "BES: drive_stream end attempt={attempt} buffered={} last_message_sent={last_message_sent}",
-            buffer.len()
-        );
 
         match outcome {
             DriveOutcome::Done | DriveOutcome::UpstreamClosed => break 'reconnect,
@@ -240,7 +224,6 @@ async fn work_inner(
     // parent process. Submit a successful BuildStatus; a future revision
     // can plumb the real status through.
     let post_stream = async {
-        eprintln!("BES: -> invocation_finished");
         retry_lifecycle(
             &retry,
             &mut client,
@@ -258,9 +241,7 @@ async fn work_inner(
         )
         .await
         .map_err(|e| context("invocation_finished", &e))?;
-        eprintln!("BES: <- invocation_finished ok");
 
-        eprintln!("BES: -> build_finished");
         retry_lifecycle(
             &retry,
             &mut client,
@@ -268,27 +249,18 @@ async fn work_inner(
         )
         .await
         .map_err(|e| context("build_finished", &e))?;
-        eprintln!("BES: <- build_finished ok");
 
         Ok::<(), SinkError>(())
     };
-    let result = match tokio::time::timeout(POST_STREAM_BUDGET, post_stream).await {
+    match tokio::time::timeout(POST_STREAM_BUDGET, post_stream).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e),
-        Err(_) => {
-            eprintln!("BES: post-stream lifecycle exceeded 30s budget");
-            Err(finalize(
-                strategy,
-                &endpoint,
-                "post-stream lifecycle exceeded 30s budget".to_string(),
-            ))
-        }
-    };
-    eprintln!(
-        "BES: sink exiting endpoint={endpoint} ok={}",
-        result.is_ok()
-    );
-    result
+        Err(_) => Err(finalize(
+            strategy,
+            &endpoint,
+            "post-stream lifecycle exceeded 30s budget".to_string(),
+        )),
+    }
 }
 
 /// Drive a single bidi stream until it ends (cleanly or with error).
@@ -411,10 +383,6 @@ async fn drive_stream(
                     half_close_deadline.get_or_insert_with(|| {
                         tokio::time::Instant::now() + HALF_CLOSE_DEADLINE
                     });
-                    eprintln!(
-                        "BES: drive_stream half-close after last_message seq={seq} buffered={}",
-                        buffer.len()
-                    );
                 }
             }
             // Reading server acks from the bidi response stream.
@@ -471,10 +439,6 @@ async fn drive_stream(
                     None => std::future::pending::<()>().await,
                 }
             }, if half_close_deadline.is_some() => {
-                eprintln!(
-                    "BES: drive_stream half-close deadline hit, buffered={} last_message_sent={last_message_sent}",
-                    buffer.len()
-                );
                 return if *last_message_sent {
                     DriveOutcome::Done
                 } else {
