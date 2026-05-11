@@ -57,7 +57,10 @@ impl Default for RetryConfig {
     }
 }
 
-/// Parse a duration string like `"1s"`, `"500ms"`, `"2m"`, `"0s"`.
+/// Parse a duration string like `"1s"`, `"500ms"`, `"2m"`, `"1h"`, `"1d"`,
+/// `"0s"`.
+///
+/// Accepted suffixes mirror Bazel's `--bes_timeout`: `ms`, `s`, `m`, `h`, `d`.
 ///
 /// `"0s"` (or any zero value) is the documented sentinel for "no deadline"
 /// when used as a timeout; the caller decides what zero means.
@@ -74,9 +77,11 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         (rest, "m")
     } else if let Some(rest) = s.strip_suffix('h') {
         (rest, "h")
+    } else if let Some(rest) = s.strip_suffix('d') {
+        (rest, "d")
     } else {
         return Err(format!(
-            "invalid duration '{s}': expected suffix one of 'ms', 's', 'm', 'h'"
+            "invalid duration '{s}': expected suffix one of 'ms', 's', 'm', 'h', 'd'"
         ));
     };
     let n: u64 = num_str
@@ -88,6 +93,7 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         "s" => Duration::from_secs(n),
         "m" => Duration::from_secs(n * 60),
         "h" => Duration::from_secs(n * 3600),
+        "d" => Duration::from_secs(n * 86_400),
         _ => unreachable!(),
     })
 }
@@ -258,6 +264,7 @@ mod tests {
         assert_eq!(parse_duration("3s").unwrap(), Duration::from_secs(3));
         assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
+        assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86_400));
         assert!(parse_duration("").is_err());
         assert!(parse_duration("10").is_err());
         assert!(parse_duration("abc").is_err());
