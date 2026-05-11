@@ -31,6 +31,7 @@ env:
 jobs:
   pre-build:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - name: Pre-build CLI
@@ -41,6 +42,7 @@ jobs:
   build-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    timeout-minutes: 10
     env:
       ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
@@ -55,6 +57,7 @@ jobs:
   test-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    timeout-minutes: 10
     env:
       ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
@@ -69,6 +72,7 @@ jobs:
   lint-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    timeout-minutes: 10
     env:
       ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
@@ -85,6 +89,7 @@ jobs:
   format-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    timeout-minutes: 10
     env:
       ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
@@ -99,6 +104,7 @@ jobs:
   gazelle-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    timeout-minutes: 10
     env:
       ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
@@ -113,6 +119,7 @@ jobs:
   gazelle-from-source-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    timeout-minutes: 10
     env:
       ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
     steps:
@@ -132,6 +139,7 @@ jobs:
   delivery-task:
     runs-on: [self-hosted, aspect-workflows, aspect-default]
     needs: [pre-build]
+    timeout-minutes: 10
     env:
       ASPECT_API_TOKEN: ${{ secrets.ASPECT_API_TOKEN }}
       ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS: ${{ inputs.force_targets }}

@@ -88,17 +88,35 @@ fn run_info(args: &[String]) {
 
 fn run_build(args: &[String]) {
     let bes_path = find_flag_value(args, "--build_event_binary_file");
-    let scenario = find_flag_value(args, "--scenario").unwrap_or_else(|| "success".to_string());
+    let scenario_name =
+        find_flag_value(args, "--scenario").unwrap_or_else(|| "success".to_string());
+    let s = scenario(&scenario_name);
 
     if let Some(path) = bes_path {
-        write_scenario(&path, &scenario);
+        write_scenario(&path, &s);
     }
 
-    let exit_code: i32 = env::var("BASIL_BUILD_EXIT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    process::exit(exit_code);
+    match s.exit {
+        ExitBehavior::Code(c) => process::exit(c),
+        ExitBehavior::Signal(sig) => {
+            // libc(3)'s `raise` declared directly to avoid pulling in the
+            // libc crate for one symbol. async-signal-safe and only
+            // delivers the named signal to the current process.
+            unsafe extern "C" {
+                fn raise(sig: i32) -> i32;
+            }
+            // SAFETY: `raise` is a safe-to-call libc function with a
+            // well-defined contract on every Unix.
+            unsafe {
+                raise(sig);
+            }
+            // If `raise` returned (e.g. signal caught/ignored, which
+            // we don't expect with SIGKILL or default handlers), fall
+            // through to a non-zero exit so the caller still sees an
+            // abnormal-looking outcome.
+            process::exit(128 + sig);
+        }
+    }
 }
 
 /// Finds `--name <value>` or `--name=<value>` in argv. The runtime emits both
@@ -117,6 +135,15 @@ fn find_flag_value(args: &[String], name: &str) -> Option<String> {
     None
 }
 
+/// How basil terminates after writing the BES event stream. `Code(n)`
+/// shells out to `process::exit(n)`; `Signal(n)` raises Unix signal `n`
+/// on itself so the parent's `ExitStatus::code()` is `None`, modeling
+/// Bazel being killed by a signal rather than exiting cleanly.
+enum ExitBehavior {
+    Code(i32),
+    Signal(i32),
+}
+
 /// One full BES interaction. Each attempt is one open/write/close cycle on
 /// the FIFO. `open_delay` sleeps after the FIFO open and before any writes —
 /// only set this on scenarios whose tests assert on what the AXL iterator
@@ -126,14 +153,18 @@ fn find_flag_value(args: &[String], name: &str) -> Option<String> {
 /// pause widens the window for that subscribe to land before basil starts
 /// fanning out events. Scenarios whose tests only check `build.wait()`
 /// status don't need it — leave at zero.
+///
+/// `exit` controls how basil terminates after the event sequence is
+/// flushed. Defaults to `Code(0)`; set explicitly to model nonzero exits
+/// or signal kills.
 struct Scenario {
     open_delay: Duration,
     attempts: Vec<Vec<BuildEvent>>,
+    exit: ExitBehavior,
 }
 
-fn write_scenario(path: &str, name: &str) {
-    let scenario = scenario(name);
-    for events in scenario.attempts {
+fn write_scenario(path: &str, scenario: &Scenario) {
+    for events in &scenario.attempts {
         // One open/write/close per attempt: the read side observes a writer
         // appear, drain bytes, and disappear — same as Bazel reopening the
         // BEP file on each retry.
@@ -166,6 +197,7 @@ fn scenario(name: &str) -> Scenario {
         "success" => Scenario {
             open_delay: Duration::from_millis(50),
             attempts: vec![vec![build_started(), build_finished(0, true)]],
+            exit: ExitBehavior::Code(0),
         },
 
         // Regression for aspect-build/aspect-cli#1060: a single attempt with
@@ -179,6 +211,7 @@ fn scenario(name: &str) -> Scenario {
         "cache_evicted_no_retry" => Scenario {
             open_delay: Duration::ZERO,
             attempts: vec![vec![build_started(), build_finished(39, true)]],
+            exit: ExitBehavior::Code(0),
         },
 
         // Reference scenario: REMOTE_CACHE_EVICTED followed by a successful
@@ -191,6 +224,30 @@ fn scenario(name: &str) -> Scenario {
                 vec![build_started(), build_finished(39, false)],
                 vec![build_started(), build_finished(0, true)],
             ],
+            exit: ExitBehavior::Code(0),
+        },
+
+        // Like `success`, but basil exits with code 2 (a genuine Bazel
+        // build failure). Used by the fail_at_end-preserves-bazel-exit
+        // regression test: even when the sink reports terminal failure,
+        // wait() must surface code 2 rather than the synthetic 36.
+        "nonzero_exit" => Scenario {
+            open_delay: Duration::ZERO,
+            attempts: vec![vec![build_started(), build_finished(2, true)]],
+            exit: ExitBehavior::Code(2),
+        },
+
+        // Like `success`, but basil is killed by SIGKILL after the event
+        // sequence is flushed. The parent's `ExitStatus::code()` is
+        // `None`, which exercises the signal-kill path in `wait()`'s
+        // exit-code mapping — fail_at_end must not collapse `None` into
+        // the synthetic 36.
+        "signal_killed_sigkill" => Scenario {
+            open_delay: Duration::ZERO,
+            attempts: vec![vec![build_started(), build_finished(0, true)]],
+            // SIGKILL: signal 9 on every Unix. Hard-coded to avoid a
+            // libc dep for a single constant.
+            exit: ExitBehavior::Signal(9),
         },
 
         other => {

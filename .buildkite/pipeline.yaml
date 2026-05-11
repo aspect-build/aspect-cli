@@ -52,7 +52,7 @@ steps:
     label: ":aspect: Pre-build CLI"
     agents:
       queue: aspect-huge
-    timeout_in_minutes: 20
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -65,7 +65,7 @@ steps:
     label: ":aspect: AXL Tests"
     agents:
       queue: aspect-huge
-    timeout_in_minutes: 20
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -116,7 +116,7 @@ steps:
     label: ":bazel: bazelrc e2e (no server restart)"
     agents:
       queue: aspect-default
-    timeout_in_minutes: 20
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -157,7 +157,7 @@ steps:
       - pre-build
     agents:
       queue: aspect-default
-    timeout_in_minutes: 20
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -172,7 +172,7 @@ steps:
       - pre-build
     agents:
       queue: aspect-default
-    timeout_in_minutes: 20
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -187,7 +187,7 @@ steps:
       - pre-build
     agents:
       queue: aspect-default
-    timeout_in_minutes: 30
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -211,7 +211,7 @@ steps:
     label: ":aspect: Build Task"
     agents:
       queue: aspect-default
-    timeout_in_minutes: 20
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -226,7 +226,7 @@ steps:
     label: ":aspect: Test Task"
     agents:
       queue: aspect-default
-    timeout_in_minutes: 20
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
@@ -265,7 +265,7 @@ steps:
         allow_failure: true
     agents:
       queue: aspect-default
-    timeout_in_minutes: 20
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
