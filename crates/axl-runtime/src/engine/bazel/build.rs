@@ -532,17 +532,25 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         }
 
         let success = result.success() && !fail_at_end;
-        // Only synthesize the sink-induced exit code 36 when Bazel actually
-        // exited cleanly with status 0. A `None` from `result.code()`
-        // means Bazel was killed by a signal — preserve that, otherwise
-        // the sink failure masks the real abnormal termination.
-        let code = if fail_at_end && result.code() == Some(0) {
-            Some(36)
-        } else {
-            result.code()
-        };
+        let code = finalize_exit_code(result.code(), fail_at_end);
 
         Ok(BuildStatus { success, code })
+    }
+}
+
+/// Compute the surfaced exit code for `wait()`.
+///
+/// Sink-induced `fail_at_end` failures synthesize the reserved code 36 so
+/// callers can distinguish a sink failure from a real Bazel failure. We
+/// only rewrite when Bazel actually exited cleanly (`Some(0)`); a `None`
+/// means the child was killed by a signal and that abnormal termination
+/// must be preserved unchanged, and a nonzero exit is a genuine Bazel
+/// failure that already conveys the right signal to callers.
+fn finalize_exit_code(bazel_code: Option<i32>, fail_at_end: bool) -> Option<i32> {
+    if fail_at_end && bazel_code == Some(0) {
+        Some(36)
+    } else {
+        bazel_code
     }
 }
 
@@ -804,12 +812,15 @@ Test = task(implementation = _impl)
         assert_eq!(result.expect("run_task"), Some(0));
     }
 
-    /// `error_strategy = "abort"`: terminal sink failure is raised out of
-    /// `wait()` as an evaluation error. The error message identifies the
-    /// abort path so users can tell a sink failure from any other Starlark
-    /// runtime error.
+    /// `error_strategy = "fail_at_end"` + bazel killed by signal: the
+    /// sink failure must not mask the abnormal termination. wait()
+    /// reports `success = False` (sink failed) but `code = None`
+    /// (preserve signal-kill), not `Some(36)`. Regression for the
+    /// `result.code().unwrap_or(0) == 0` bug that conflated signal
+    /// kills with clean exits and overwrote them with the synthetic
+    /// fail_at_end code.
     #[test]
-    fn grpc_error_strategy_abort_propagates_as_eval_error() {
+    fn grpc_error_strategy_fail_at_end_preserves_signal_kill() {
         use std::time::Duration;
         let result = crate::test::with_timeout(Duration::from_secs(15), || {
             crate::test::eval(
@@ -819,14 +830,16 @@ def _impl(ctx):
         uri = "not a uri",
         max_retries = 0,
         retry_min_delay = "0s",
-        error_strategy = "abort",
+        error_strategy = "fail_at_end",
     )
     build = ctx.bazel.build(
-        flags = ["--scenario=success"],
+        flags = ["--scenario=signal_killed_sigkill"],
         build_events = [sink],
         inherit_stderr = False,
     )
-    build.wait()
+    status = build.wait()
+    if status.success: return 1
+    if status.code != None: return 2
     return 0
 
 Test = task(implementation = _impl)
@@ -836,10 +849,90 @@ Test = task(implementation = _impl)
             .run_task(0)
         })
         .expect("test hung");
-        let err = result.expect_err("expected wait() to bail").to_string();
-        assert!(
-            err.contains("BES sink failure") && err.contains("abort"),
-            "unexpected error: {err}"
-        );
+        assert_eq!(result.expect("run_task"), Some(0));
+    }
+
+    /// `error_strategy = "fail_at_end"` + genuine non-zero Bazel exit:
+    /// preserve Bazel's exit code rather than overwriting with the
+    /// synthetic 36, so callers can still see e.g. `code = 2` (build
+    /// failure) or `code = 39` (REMOTE_CACHE_EVICTED).
+    #[test]
+    fn grpc_error_strategy_fail_at_end_preserves_genuine_bazel_failure() {
+        use std::time::Duration;
+        let result = crate::test::with_timeout(Duration::from_secs(15), || {
+            crate::test::eval(
+                r#"
+def _impl(ctx):
+    sink = bazel.build_events.grpc(
+        uri = "not a uri",
+        max_retries = 0,
+        retry_min_delay = "0s",
+        error_strategy = "fail_at_end",
+    )
+    build = ctx.bazel.build(
+        flags = ["--scenario=nonzero_exit"],
+        build_events = [sink],
+        inherit_stderr = False,
+    )
+    status = build.wait()
+    if status.success: return 1
+    if status.code != 2: return 2
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            )
+            .with_fake_bazel()
+            .run_task(0)
+        })
+        .expect("test hung");
+        assert_eq!(result.expect("run_task"), Some(0));
+    }
+
+    // --- finalize_exit_code ---
+    //
+    // Unit-level coverage of the wait() exit-code mapping. Complements
+    // the e2e tests above by covering the matrix of (bazel exit, sink
+    // outcome) combinations without the cost of spawning basil for each.
+
+    #[test]
+    fn finalize_exit_code_preserves_signal_kill_under_fail_at_end() {
+        // `None` from `ExitStatus::code()` means the child was killed by a
+        // signal. fail_at_end must not mask that as the synthetic 36;
+        // callers need to see the abnormal termination unchanged.
+        assert_eq!(super::finalize_exit_code(None, true), None);
+    }
+
+    #[test]
+    fn finalize_exit_code_preserves_signal_kill_without_fail_at_end() {
+        assert_eq!(super::finalize_exit_code(None, false), None);
+    }
+
+    #[test]
+    fn finalize_exit_code_rewrites_clean_exit_to_36_under_fail_at_end() {
+        // Bazel succeeded but a sink reported terminal failure. wait()
+        // exposes 36 so callers can distinguish a sink-induced failure
+        // from a genuine build failure.
+        assert_eq!(super::finalize_exit_code(Some(0), true), Some(36));
+    }
+
+    #[test]
+    fn finalize_exit_code_preserves_clean_exit_without_fail_at_end() {
+        assert_eq!(super::finalize_exit_code(Some(0), false), Some(0));
+    }
+
+    #[test]
+    fn finalize_exit_code_preserves_genuine_bazel_failure_under_fail_at_end() {
+        // A real Bazel failure (any non-zero code) is already meaningful;
+        // fail_at_end must not overwrite it with 36 or callers can't tell
+        // the original failure mode (e.g. 2 = build failure, 39 =
+        // REMOTE_CACHE_EVICTED) from a sink failure.
+        assert_eq!(super::finalize_exit_code(Some(2), true), Some(2));
+        assert_eq!(super::finalize_exit_code(Some(39), true), Some(39));
+    }
+
+    #[test]
+    fn finalize_exit_code_preserves_genuine_bazel_failure_without_fail_at_end() {
+        assert_eq!(super::finalize_exit_code(Some(2), false), Some(2));
     }
 }
