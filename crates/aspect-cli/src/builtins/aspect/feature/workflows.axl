@@ -121,9 +121,8 @@ Workflows = feature(
         ),
         "bes_error_strategy": args.string(
             default = "warn",
-            values = ["abort", "fail_at_end", "warn", "ignore"],
+            values = ["fail_at_end", "warn", "ignore"],
             description = "How a terminal BES failure surfaces. " +
-                          "'abort' kills the build; " +
                           "'fail_at_end' lets the build complete then exits " +
                           "non-zero; 'warn' (default) prints to stderr and " +
                           "leaves the exit code alone; 'ignore' is silent.",
