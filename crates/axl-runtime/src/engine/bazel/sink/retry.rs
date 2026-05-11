@@ -13,7 +13,11 @@ use rand::Rng;
 
 /// How a terminal sink failure surfaces to the user.
 ///
-/// Set per-sink in Starlark via `bazel.build.events.grpc(error_strategy=...)`.
+/// The user-configurable surface (Starlark `error_strategy`) is `warn`,
+/// `fail_at_end`, or `ignore`. `Abort` exists for *internal* sinks
+/// (e.g. the execution-log writer, whose failures indicate a real bug
+/// rather than a flaky backend) and is intentionally **not** exposed
+/// through the Starlark parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorStrategy {
     Abort,
@@ -25,12 +29,11 @@ pub enum ErrorStrategy {
 impl ErrorStrategy {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
-            "abort" => Ok(ErrorStrategy::Abort),
             "fail_at_end" => Ok(ErrorStrategy::FailAtEnd),
             "warn" => Ok(ErrorStrategy::Warn),
             "ignore" => Ok(ErrorStrategy::Ignore),
             other => Err(format!(
-                "invalid error_strategy '{other}': expected one of 'abort', 'fail_at_end', 'warn', 'ignore'"
+                "invalid error_strategy '{other}': expected one of 'fail_at_end', 'warn', 'ignore'"
             )),
         }
     }
@@ -284,7 +287,6 @@ mod tests {
 
     #[test]
     fn error_strategy_parse() {
-        assert_eq!(ErrorStrategy::parse("abort").unwrap(), ErrorStrategy::Abort);
         assert_eq!(
             ErrorStrategy::parse("fail_at_end").unwrap(),
             ErrorStrategy::FailAtEnd
@@ -294,6 +296,8 @@ mod tests {
             ErrorStrategy::parse("ignore").unwrap(),
             ErrorStrategy::Ignore
         );
+        // `abort` is internal-only; the Starlark surface must reject it.
+        assert!(ErrorStrategy::parse("abort").is_err());
         assert!(ErrorStrategy::parse("nope").is_err());
     }
 }
