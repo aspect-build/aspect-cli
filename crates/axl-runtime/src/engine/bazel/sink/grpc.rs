@@ -193,21 +193,18 @@ async fn work_inner(
         }
     }
 
-    // Post-stream lifecycle. Bound the entire pair with a hard budget so a
-    // wedged backend cannot keep the sink thread alive past end-of-build —
-    // `wait()` joins this thread before returning, so any hang here hangs
-    // the whole task. The events themselves were already streamed, so
+    // Post-stream lifecycle. The user's `bes_timeout` knob lands here:
+    // it mirrors Bazel's `--bes_timeout`, the deadline for BES upload
+    // completion *after* the build and tests finish. When unset (or
+    // explicitly `"0s"`, which the Starlark surface maps to None and
+    // documents as "no deadline"), no deadline applies — matching the
+    // documented behavior even at the cost of a possible hang against a
+    // silent backend. The events themselves were already streamed, so
     // failing these is non-fatal under the `Warn` default.
     //
-    // This is where the user's `bes_timeout` knob lands. It mirrors
-    // Bazel's `--bes_timeout`: the deadline for BES upload completion
-    // *after* the build and tests finish. Defaulting to 30s when unset
-    // keeps the sink from wedging on a silent backend even with the
-    // default config.
-    let post_stream_budget = retry.timeout.unwrap_or(std::time::Duration::from_secs(30));
-    // We don't know the bazel exit code at this point — that lives on the
-    // parent process. Submit a successful BuildStatus; a future revision
-    // can plumb the real status through.
+    // We don't know the bazel exit code at this point — that lives on
+    // the parent process. Submit a successful BuildStatus; a future
+    // revision can plumb the real status through.
     let post_stream = async {
         retry_lifecycle(
             &retry,
@@ -237,14 +234,17 @@ async fn work_inner(
 
         Ok::<(), SinkError>(())
     };
-    match tokio::time::timeout(post_stream_budget, post_stream).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(finalize(
-            strategy,
-            &endpoint,
-            format!("post-stream lifecycle exceeded {post_stream_budget:?} budget"),
-        )),
+    match retry.timeout {
+        Some(d) => match tokio::time::timeout(d, post_stream).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(finalize(
+                strategy,
+                &endpoint,
+                format!("post-stream lifecycle exceeded {d:?} budget"),
+            )),
+        },
+        None => post_stream.await,
     }
 }
 
@@ -427,16 +427,32 @@ async fn drive_stream(
                 }
             }
             // Hard deadline arm: only enabled once the request side is
-            // half-closed. If the server hasn't responded (acked or closed)
-            // within HALF_CLOSE_DEADLINE we give up and return success —
-            // the events were already buffered into tonic before half-close,
-            // and waiting longer just wedges the build.
+            // half-closed. Two outcomes:
+            //   * Buffer empty — every event we sent was already acked, so
+            //     the only thing we were waiting for is the server closing
+            //     the response stream. Return Done/UpstreamClosed; this
+            //     bypasses BES backends that keep the stream open forever
+            //     after the final ack.
+            //   * Buffer non-empty — the server stopped acking unacked
+            //     events. Surface as Transient so the outer retry budget
+            //     applies; if every replay attempt also times out, the
+            //     outer loop converts to a terminal SinkError that
+            //     `wait()` resolves per `error_strategy`. Returning Done
+            //     here would silently drop unacked events on `fail_at_end`
+            //     / `abort`.
             _ = async {
                 match half_close_deadline {
                     Some(d) => tokio::time::sleep_until(d).await,
                     None => std::future::pending::<()>().await,
                 }
             }, if half_close_deadline.is_some() => {
+                if !buffer.is_empty() {
+                    return DriveOutcome::Transient(ClientError::Status(
+                        tonic::Status::deadline_exceeded(
+                            "BES half-close deadline elapsed with unacked events",
+                        ),
+                    ));
+                }
                 return if *last_message_sent {
                     DriveOutcome::Done
                 } else {
