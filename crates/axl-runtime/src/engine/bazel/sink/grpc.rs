@@ -86,28 +86,7 @@ async fn work(
     invocation_id: String,
     retry: RetryConfig,
 ) -> SinkOutcome {
-    let strategy = retry.error_strategy;
-    let timeout = retry.timeout;
-    let inner = work_inner(recv, endpoint.clone(), headers, invocation_id, retry);
-
-    // Honor the configured upload deadline. Without this wrapper the BES
-    // sink can stall indefinitely when the backend is slow to respond,
-    // even with retry budgets exhausted: lifecycle calls, the bidi
-    // stream, and `tokio::time::sleep` between retries are each bounded
-    // only by their own internal logic. Wrapping the whole upload in
-    // `tokio::time::timeout` mirrors Bazel's `--bes_timeout` and gives
-    // the user-set knob a real effect.
-    match timeout {
-        Some(d) => match tokio::time::timeout(d, inner).await {
-            Ok(r) => r,
-            Err(_) => Err(finalize(
-                strategy,
-                &endpoint,
-                format!("BES upload timed out after {d:?}"),
-            )),
-        },
-        None => inner.await,
-    }
+    work_inner(recv, endpoint, headers, invocation_id, retry).await
 }
 
 async fn work_inner(
@@ -219,7 +198,13 @@ async fn work_inner(
     // `wait()` joins this thread before returning, so any hang here hangs
     // the whole task. The events themselves were already streamed, so
     // failing these is non-fatal under the `Warn` default.
-    const POST_STREAM_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+    //
+    // This is where the user's `bes_timeout` knob lands. It mirrors
+    // Bazel's `--bes_timeout`: the deadline for BES upload completion
+    // *after* the build and tests finish. Defaulting to 30s when unset
+    // keeps the sink from wedging on a silent backend even with the
+    // default config.
+    let post_stream_budget = retry.timeout.unwrap_or(std::time::Duration::from_secs(30));
     // We don't know the bazel exit code at this point — that lives on the
     // parent process. Submit a successful BuildStatus; a future revision
     // can plumb the real status through.
@@ -252,13 +237,13 @@ async fn work_inner(
 
         Ok::<(), SinkError>(())
     };
-    match tokio::time::timeout(POST_STREAM_BUDGET, post_stream).await {
+    match tokio::time::timeout(post_stream_budget, post_stream).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(finalize(
             strategy,
             &endpoint,
-            "post-stream lifecycle exceeded 30s budget".to_string(),
+            format!("post-stream lifecycle exceeded {post_stream_budget:?} budget"),
         )),
     }
 }
@@ -331,6 +316,19 @@ async fn drive_stream(
     // a slow ack while still bounding the total stall.
     const HALF_CLOSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
     let mut half_close_deadline: Option<tokio::time::Instant> = None;
+
+    // If a previous attempt already sent last_message, the replay above
+    // resent it on this fresh stream. The event-receive arm below stays
+    // disabled (last_message_sent is set), so the `if last { ... }`
+    // branch that normally drops the sender will never fire on this
+    // attempt. Close the request side now and arm the half-close
+    // deadline ourselves — otherwise drive_stream parks in
+    // response_stream.next() forever waiting for an ack or close that a
+    // flaky backend may never send, and Build.wait() hangs.
+    if *last_message_sent {
+        sender_opt = None;
+        half_close_deadline = Some(tokio::time::Instant::now() + HALF_CLOSE_DEADLINE);
+    }
 
     loop {
         tokio::select! {
