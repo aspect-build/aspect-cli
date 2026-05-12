@@ -8,7 +8,7 @@ bazel_dep(name = "aspect_rules_lint", version = "1.9.1")
 bazel_dep(name = "rules_nodejs", version = "6.7.3")  # Transitive dep; bump for bazel9
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "bazelrc-preset.bzl", version = "1.4.0")
-bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2")
+bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.2")
 bazel_dep(name = "gazelle", version = "0.45.0")  # for the build-from-source `//tools/gazelle:gazelle_from_source` regression target; the prebuilt binary is what most users will want
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_cc", version = "0.2.16")  # referenced by .bazelrc (use_libtool_on_macos flag)
@@ -86,20 +86,58 @@ inject_repo(crate, "zstd")
 
 # starlark-rust git fork: crates live in subdirectories, so rules_rs needs
 # explicit strip_prefix hints for each one.
-crate.annotation(crate = "allocative", strip_prefix = "allocative/allocative")
-crate.annotation(crate = "allocative_derive", strip_prefix = "allocative/allocative_derive")
-crate.annotation(crate = "cmp_any", strip_prefix = "gazebo/cmp_any")
-crate.annotation(crate = "display_container", strip_prefix = "gazebo/display_container")
-crate.annotation(crate = "dupe", strip_prefix = "gazebo/dupe")
-crate.annotation(crate = "dupe_derive", strip_prefix = "gazebo/dupe_derive")
-crate.annotation(crate = "starlark", strip_prefix = "starlark")
-crate.annotation(crate = "starlark_derive", strip_prefix = "starlark_derive")
-crate.annotation(crate = "starlark_lsp", strip_prefix = "starlark_lsp")
-crate.annotation(crate = "starlark_map", strip_prefix = "starlark_map")
-crate.annotation(crate = "starlark_syntax", strip_prefix = "starlark_syntax")
-crate.annotation(crate = "strong_hash", strip_prefix = "gazebo/strong_hash")
-crate.annotation(crate = "strong_hash_derive", strip_prefix = "gazebo/strong_hash_derive")
-
+crate.annotation(
+    crate = "allocative",
+    strip_prefix = "allocative/allocative",
+)
+crate.annotation(
+    crate = "allocative_derive",
+    strip_prefix = "allocative/allocative_derive",
+)
+crate.annotation(
+    crate = "cmp_any",
+    strip_prefix = "gazebo/cmp_any",
+)
+crate.annotation(
+    crate = "display_container",
+    strip_prefix = "gazebo/display_container",
+)
+crate.annotation(
+    crate = "dupe",
+    strip_prefix = "gazebo/dupe",
+)
+crate.annotation(
+    crate = "dupe_derive",
+    strip_prefix = "gazebo/dupe_derive",
+)
+crate.annotation(
+    crate = "starlark",
+    strip_prefix = "starlark",
+)
+crate.annotation(
+    crate = "starlark_derive",
+    strip_prefix = "starlark_derive",
+)
+crate.annotation(
+    crate = "starlark_lsp",
+    strip_prefix = "starlark_lsp",
+)
+crate.annotation(
+    crate = "starlark_map",
+    strip_prefix = "starlark_map",
+)
+crate.annotation(
+    crate = "starlark_syntax",
+    strip_prefix = "starlark_syntax",
+)
+crate.annotation(
+    crate = "strong_hash",
+    strip_prefix = "gazebo/strong_hash",
+)
+crate.annotation(
+    crate = "strong_hash_derive",
+    strip_prefix = "gazebo/strong_hash_derive",
+)
 use_repo(crate, "crates")
 
 bazel_dep(name = "rules_multitool", version = "1.9.0")

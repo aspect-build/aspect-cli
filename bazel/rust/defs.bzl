@@ -80,7 +80,7 @@ def rust_library(name, rustc_env_files = [], version_key = "", crate_features = 
                 "CARGO_PKG_VERSION=0.0.0-dev",
             ],
         )
-        stamp = -1 # workaround https://github.com/bazelbuild/rules_rust/pull/3503
+        stamp = -1  # workaround https://github.com/bazelbuild/rules_rust/pull/3503
         rustc_env_files = rustc_env_files + [rustc_env_file]
     _rust_library(
         name = name,

@@ -5,15 +5,13 @@ bazel_dep(name = "googleapis", version = "0.0.0-20250604-de157ca3")
 
 archive_override(
     module_name = "bazel",
+    strip_prefix = "bazel-8.0.0",
     urls = ["https://github.com/bazelbuild/bazel/archive/refs/tags/8.0.0.tar.gz"],
-    strip_prefix = "bazel-8.0.0"
 )
 
 bazel_dep(name = "remoteapis", version = "0.0.0")
-
-
 archive_override(
     module_name = "remoteapis",
+    strip_prefix = "bazel-8.0.0/third_party/remoteapis",
     urls = ["https://github.com/bazelbuild/bazel/archive/refs/tags/8.0.0.tar.gz"],
-    strip_prefix = "bazel-8.0.0/third_party/remoteapis"
 )

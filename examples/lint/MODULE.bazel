@@ -26,8 +26,6 @@ http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "ht
 
 http_archive(
     name = "shellcheck_darwin_aarch64",
-    url = "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.darwin.aarch64.tar.xz",
-    sha256 = "bbd2f14826328eee7679da7221f2bc3afb011f6a928b848c80c321f6046ddf81",
     build_file_content = """\
 genrule(
     name = "shellcheck",
@@ -38,12 +36,12 @@ genrule(
     visibility = ["//visibility:public"],
 )
 """,
+    sha256 = "bbd2f14826328eee7679da7221f2bc3afb011f6a928b848c80c321f6046ddf81",
+    url = "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.darwin.aarch64.tar.xz",
 )
 
 http_archive(
     name = "shellcheck_linux_x86_64",
-    url = "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz",
-    sha256 = "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87",
     build_file_content = """\
 genrule(
     name = "shellcheck",
@@ -54,4 +52,6 @@ genrule(
     visibility = ["//visibility:public"],
 )
 """,
+    sha256 = "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87",
+    url = "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz",
 )
