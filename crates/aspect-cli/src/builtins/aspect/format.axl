@@ -23,7 +23,6 @@ load("./lib/path_glob.axl", "match_any")
 load("./lib/runnable.axl", "runnable")
 load("./traits.axl", "ArtifactsTrait", "BazelTrait")
 
-
 def _git_capture(ctx, *args):
     """Run `git <args>` and return (stdout, exit_code, stderr).
 
@@ -34,7 +33,6 @@ def _git_capture(ctx, *args):
         .current_dir(ctx.std.env.current_dir()) \
         .stdout("piped").stderr("piped").spawn().wait_with_output()
     return result.stdout, result.status.code, result.stderr
-
 
 def _snapshot_tracked_state(ctx):
     """Snapshot the current tracked-tree state via `git stash create`.
@@ -65,6 +63,7 @@ def _snapshot_tracked_state(ctx):
     default ~2-week grace period for unreachable objects). Don't add a
     "leak" cleanup pass — there is no leak.
     """
+
     # Probe for HEAD before attempting `git stash create`. Fresh repos
     # with no commits fail the stash with a confusing "do not have the
     # initial commit yet" message; check explicitly so the caller can
@@ -79,7 +78,6 @@ def _snapshot_tracked_state(ctx):
         fail(msg)
     return out.strip()
 
-
 def _diff_against(ctx, base):
     """Return the diff between `base` (a commit SHA) and the working tree
     as a string. `base=""` means diff against HEAD.
@@ -93,7 +91,6 @@ def _diff_against(ctx, base):
         msg = "`git diff %s` failed (exit %d).\nstderr: %s" % (target, code, err.strip())
         fail(msg)
     return out
-
 
 def _try_upload_format_diff(ctx, diff_text):
     """Write the formatter's diff to a temp file and upload it via the
@@ -135,7 +132,6 @@ def _try_upload_format_diff(ctx, diff_text):
     else:
         out.write("--upload-format-diff: uploaded patch (no stable URL on this CI host).\n")
 
-
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
     out = ctx.std.io.stdout
@@ -149,6 +145,7 @@ def _impl(ctx: TaskContext) -> int:
     ]
     flags.extend(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
+
     # Task-time flag contributors — features register hooks that need ctx.task
     # (e.g. --build_metadata=ASPECT_TASK_NAME=...) which features can't produce
     # at activation time because FeatureContext has no task.
@@ -285,7 +282,11 @@ def _impl(ctx: TaskContext) -> int:
     if ctx.args.upload_format_diff:
         if ignored_count > 0:
             upload_diff, _, _ = _git_capture(
-                ctx, "diff", pre_snap if pre_snap else "HEAD", "--", *affected,
+                ctx,
+                "diff",
+                pre_snap if pre_snap else "HEAD",
+                "--",
+                *affected
             )
         else:
             upload_diff = formatter_diff

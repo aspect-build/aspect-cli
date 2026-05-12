@@ -6,8 +6,9 @@ Usage:
   aspect axl add gh:owner/repo@latest   # same as above
   aspect axl add gh:owner/repo@v1.0.0   # adds specific version
 """
-load("@std//hash.axl", "sha512")
+
 load("@std//base64.axl", "base64")
+load("@std//hash.axl", "sha512")
 
 # ANSI escape codes for terminal UI
 ORANGE = "\033[38;5;208m"
@@ -39,8 +40,10 @@ def show_phase(ctx: TaskContext, phases: list, current: int):
     # Move up and clear previous output (on update calls)
     if current > 0:
         num_lines = len(phases) + 1  # phases + progress bar
+
         # Clear current line first (progress bar has no trailing newline)
         io.stdout.write("\r" + CLEAR_LINE)
+
         # Move up and clear remaining lines
         for _ in range(num_lines - 1):
             io.stdout.write(MOVE_UP + CLEAR_LINE)
@@ -65,8 +68,10 @@ def clear_progress(ctx: TaskContext, num_lines: int):
     if not ctx.std.io.stdout.is_tty:
         return
     io = ctx.std.io
+
     # Clear current line first (progress bar has no trailing newline)
     io.stdout.write("\r" + CLEAR_LINE)
+
     # Move up and clear remaining lines
     for _ in range(num_lines - 1):
         io.stdout.write(MOVE_UP + CLEAR_LINE)
@@ -172,6 +177,7 @@ def fetch_release_by_tag(ctx: TaskContext, owner: str, repo: str, tag: str) -> d
 
 def fetch_tag_as_release(ctx: TaskContext, owner: str, repo: str, tag: str) -> dict:
     """Fetch tag info and create a synthetic release object for tags without releases."""
+
     # Check if the tag exists by trying to fetch it
     url = "https://api.github.com/repos/" + owner + "/" + repo + "/git/refs/tags/" + tag
     response = ctx.http().get(url = url, headers = get_github_headers()).block()
@@ -194,6 +200,7 @@ def compute_integrity(ctx: TaskContext, url: str, temp_file: str) -> str:
     """
     Download a file and compute its SHA512 integrity hash in SSRI format.
     """
+
     # Download the file
     ctx.http().download(url = url, output = temp_file, mode = 0o644, headers = get_github_headers()).block()
 
@@ -206,6 +213,7 @@ def compute_integrity(ctx: TaskContext, url: str, temp_file: str) -> str:
 
 def sanitize_module_name(name: str) -> str:
     """Convert a repository name to a valid module name."""
+
     # Replace hyphens with underscores and ensure it's a valid identifier
     return name.replace("-", "_").lower()
 
@@ -240,6 +248,7 @@ def write_module_aspect(ctx: TaskContext, content: str):
 
 def check_existing_dep(content: str, name: str) -> bool:
     """Check if a dependency with this name already exists."""
+
     # Simple check for the name in quotes
     pattern = "name = \"" + name + "\""
     return pattern in content
@@ -276,7 +285,7 @@ def _impl(ctx: TaskContext) -> int:
     phases = [
         "Querying GitHub for " + ("latest release" if version == "latest" else version),
         "Downloading and computing checksum",
-        "Adding to MODULE.aspect"
+        "Adding to MODULE.aspect",
     ]
 
     # Phase 1: Fetch release info from GitHub
@@ -349,5 +358,5 @@ add = task(
         "dep_spec": args.positional(),
         "name": args.string(),
         "yes": args.boolean(default = False),
-    }
+    },
 )

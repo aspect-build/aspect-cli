@@ -1,6 +1,5 @@
 load("./lib/github.axl", "github")
 
-
 def _token_impl(ctx: TaskContext) -> int:
     repo_args = ctx.args.repo
     if len(repo_args) == 0:
@@ -11,7 +10,7 @@ def _token_impl(ctx: TaskContext) -> int:
         print("Error: repo must be in owner/repo format (e.g. my-org/my-repo)")
         return 1
 
-    creds = ctx.aspect.auth.credentials(profile=ctx.args.profile)
+    creds = ctx.aspect.auth.credentials(profile = ctx.args.profile)
     if creds == None:
         print("Error: " + github.missing_credentials_reason(ctx))
         return 1

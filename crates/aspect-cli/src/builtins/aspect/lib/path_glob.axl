@@ -28,7 +28,6 @@ formatter binary's runtime. If profiling ever shows pressure we can move
 the matcher to Rust and expose via ctx; for now Starlark stays.
 """
 
-
 def _match_chars(pat, name):
     """Match a single segment-level pattern against a name (no `/`).
 
@@ -68,7 +67,6 @@ def _match_chars(pat, name):
         if pi == len(pat) and ni == len(name):
             return True
     return pi == len(pat) and ni == len(name)
-
 
 def _match_segments(pat_segs, name_segs):
     """Match a list of pattern segments against a list of name segments.
@@ -112,11 +110,11 @@ def _match_segments(pat_segs, name_segs):
         ni += 1
     return pi == pn and ni == nn
 
-
 def match_path(pattern, path):
     """Match a single path against a glob pattern. Empty pattern → no match."""
     if not pattern:
         return False
+
     # Trim trailing slash for friendliness — `vendor/` and `vendor` mean
     # the same thing for our use case.
     if pattern.endswith("/"):
@@ -124,7 +122,6 @@ def match_path(pattern, path):
     if not pattern:
         return False
     return _match_segments(pattern.split("/"), path.split("/"))
-
 
 def match_any(patterns, path):
     """Convenience: True if PATH matches at least one of the given patterns."""

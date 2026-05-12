@@ -1,8 +1,8 @@
-load("./lambda.axl", "lambda_with_global_bind")
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
 load("@aspect//traits.axl", "BazelTrait")
+load("./lambda.axl", "lambda_with_global_bind")
 
 def _user_task_impl(ctx: TaskContext) -> int:
     print("I am a task added by .aspect/config.axl")
@@ -12,7 +12,7 @@ _user_task = task(
     name = "user-task-added-by-config",
     group = ["user"],
     implementation = _user_task_impl,
-    args = {}
+    args = {},
 )
 
 def _customize_message(s: str, a: str) -> str:
@@ -28,7 +28,7 @@ def config(ctx: ConfigContext):
     # runs. No-op outside of CI (both vars must be set). Auth is a Bearer
     # header on the OTLP request — Dash0's standard ingestion path.
     dash0_endpoint = ctx.std.env.var("DASH0_ENDPOINT")
-    dash0_token    = ctx.std.env.var("DASH0_TOKEN")
+    dash0_token = ctx.std.env.var("DASH0_TOKEN")
     if dash0_endpoint and dash0_token:
         ctx.telemetry.exporters.add(
             url = dash0_endpoint,
@@ -37,7 +37,7 @@ def config(ctx: ConfigContext):
                 "Authorization": "Bearer " + dash0_token,
             },
             resource_attributes = {
-                "service.name":     "aspect-cli",
+                "service.name": "aspect-cli",
                 "deployment.environment": "ci",
             },
         )
@@ -53,8 +53,8 @@ def config(ctx: ConfigContext):
     # upload_test_logs="failed" — the logs from passing tests are noise;
     # failing/flaky tests' logs are the ones anyone would actually open.
     ctx.features[ArtifactUpload].args.upload_test_logs = "failed"
-    ctx.features[ArtifactUpload].args.upload_profile   = True
-    ctx.features[ArtifactUpload].args.upload_bep       = True
+    ctx.features[ArtifactUpload].args.upload_profile = True
+    ctx.features[ArtifactUpload].args.upload_bep = True
 
     # add a new task
     ctx.tasks.add(_user_task)
@@ -120,6 +120,7 @@ def config(ctx: ConfigContext):
             ctx.std.env.set_var("GITHUB_EVENT_NAME", "workflow_dispatch")
         if not ctx.std.env.var("GITHUB_SHA"):
             ctx.std.env.set_var("GITHUB_SHA", _detect_sha(ctx.std.env))
+
         # Fake a real GitHub Actions run URL for local testing of CI link rendering.
         if not ctx.std.env.var("GITHUB_SERVER_URL"):
             ctx.std.env.set_var("GITHUB_SERVER_URL", "https://github.com")
@@ -176,6 +177,7 @@ def config(ctx: ConfigContext):
         ctx.std.env.set_var("CI_JOB_URL", "https://gitlab.com/aspect-build/aspect-cli/-/jobs/2469624812")
         ctx.std.env.set_var("CI_COMMIT_SHA", _detect_sha(ctx.std.env))
         ctx.std.env.set_var("GITLAB_USER_LOGIN", ctx.std.env.var("USER") or "local-test")
+
         # Since GitLab mirrors GitHub, point at the upstream GitHub URL. This
         # single env var drives both status-check posting (GithubStatusChecks
         # reads it to pick the right owner/repo) and status-check rendering

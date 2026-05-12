@@ -5,7 +5,7 @@ and using them as WASM host functions.
 """
 
 # Import host functions from a separate file (they must be frozen)
-load("./host_funcs.axl", "get_magic_number", "add_numbers")
+load("./host_funcs.axl", "add_numbers", "get_magic_number")
 
 def test_case(tc, cond, msg) -> int:
     if not cond:
@@ -28,7 +28,7 @@ def impl(ctx: TaskContext) -> int:
             "env": {
                 "get_magic_number": get_magic_number,
                 "add_numbers": add_numbers,
-            }
+            },
         },
     )
 
@@ -65,6 +65,6 @@ host_test = task(
     group = ["tests"],
     implementation = impl,
     args = {
-        "test": args.string()
+        "test": args.string(),
     },
 )

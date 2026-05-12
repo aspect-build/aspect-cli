@@ -7,16 +7,16 @@ def _login_impl(ctx: TaskContext) -> int:
         if not token:
             print("Error: no token on stdin")
             return 1
-        creds = ctx.aspect.auth.login(token=token)
-        ctx.aspect.auth.persist(creds, profile=ctx.args.profile)
+        creds = ctx.aspect.auth.login(token = token)
+        ctx.aspect.auth.persist(creds, profile = ctx.args.profile)
         print("Logged in as " + creds.name + " (" + creds.email + ")")
     elif ctx.args.with_api_token:
         inp = ctx.std.io.stdin.read_to_string().strip()
         if not inp:
             print("Error: no API token on stdin")
             return 1
-        creds = ctx.aspect.auth.login(api_token=inp)
-        ctx.aspect.auth.persist(creds, profile=ctx.args.profile)
+        creds = ctx.aspect.auth.login(api_token = inp)
+        ctx.aspect.auth.persist(creds, profile = ctx.args.profile)
         print("Logged in as " + creds.name + " (" + creds.email + ")")
     else:
         session = ctx.aspect.auth.login()
@@ -27,7 +27,7 @@ def _login_impl(ctx: TaskContext) -> int:
         else:
             print("Browser opened. Waiting for authentication...")
         creds = session.wait()
-        ctx.aspect.auth.persist(creds, profile=ctx.args.profile)
+        ctx.aspect.auth.persist(creds, profile = ctx.args.profile)
         print("Logged in as " + creds.name + " (" + creds.email + ")")
     return 0
 
@@ -35,14 +35,14 @@ login = task(
     group = ["auth"],
     implementation = _login_impl,
     args = {
-        "with_token":     args.boolean(default = False),
+        "with_token": args.boolean(default = False),
         "with_api_token": args.boolean(default = False),
-        "profile":        args.string(),
+        "profile": args.string(),
     },
 )
 
 def _logout_impl(ctx: TaskContext) -> int:
-    ctx.aspect.auth.logout(profile=ctx.args.profile)
+    ctx.aspect.auth.logout(profile = ctx.args.profile)
     print("Logged out.")
     return 0
 
@@ -55,7 +55,7 @@ logout = task(
 )
 
 def _whoami_impl(ctx: TaskContext) -> int:
-    creds = ctx.aspect.auth.credentials(profile=ctx.args.profile)
+    creds = ctx.aspect.auth.credentials(profile = ctx.args.profile)
     if creds == None:
         print("Not logged in. Run `aspect auth login` to authenticate.")
         return 1

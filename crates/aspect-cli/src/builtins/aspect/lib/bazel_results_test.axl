@@ -14,8 +14,8 @@ Scenarios covered:
   5. aborted     — build aborted mid-stream
   6. large       — many targets/tests (exercises the trim cascade)
 """
-load("./bazel_results.axl", "render_check_output", "init_results")
 
+load("./bazel_results.axl", "init_results", "render_check_output")
 
 # ---------------------------------------------------------------------------
 # Fake data builders
@@ -24,122 +24,122 @@ load("./bazel_results.axl", "render_check_output", "init_results")
 def _make_results_passed():
     """All tests passed, most cached. Clean successful run."""
     r = init_results()
-    r["invocation_id"]     = "abc12345-def4-5678-9abc-def012345678"
+    r["invocation_id"] = "abc12345-def4-5678-9abc-def012345678"
     r["build_tool_version"] = "9.0.1"
-    r["build_command"]     = "test"
-    r["start_time_ms"]     = 1744630000000
-    r["finish_time_ms"]    = 1744630002200
-    r["wall_time_ms"]      = 2200
-    r["cpu_time_ms"]       = 8100
-    r["analysis_phase_time_ms"]  = 98000
+    r["build_command"] = "test"
+    r["start_time_ms"] = 1744630000000
+    r["finish_time_ms"] = 1744630002200
+    r["wall_time_ms"] = 2200
+    r["cpu_time_ms"] = 8100
+    r["analysis_phase_time_ms"] = 98000
     r["execution_phase_time_ms"] = 120000
-    r["actions_executed"]  = 5
-    r["actions_cached"]    = 136
-    r["actions_total"]     = 141
-    r["targets_total"]     = 141
+    r["actions_executed"] = 5
+    r["actions_cached"] = 136
+    r["actions_total"] = 141
+    r["targets_total"] = 141
     r["targets_configured"] = 156
-    r["packages_loaded"]   = 42
-    r["num_analyses"]      = 9
-    r["num_builds"]        = 19
-    r["cpu_arch"]          = "k8"
-    r["compilation_mode"]  = "fastbuild"
+    r["packages_loaded"] = 42
+    r["num_analyses"] = 9
+    r["num_builds"] = 19
+    r["cpu_arch"] = "k8"
+    r["compilation_mode"] = "fastbuild"
     r["workspace_directory"] = "/mnt/ephemeral/workdir/aspect-build/silo"
-    r["working_directory"]   = "/mnt/ephemeral/workdir/aspect-build/silo"
-    r["server_pid"]          = 13501
+    r["working_directory"] = "/mnt/ephemeral/workdir/aspect-build/silo"
+    r["server_pid"] = 13501
     r["passed_test_total"] = 24
     r["cached_test_total"] = 24
     r["executed_test_total"] = 0
-    r["cached_duration_ms"]  = 754000
+    r["cached_duration_ms"] = 754000
     r["action_mnemonics"] = {
-        "CppCompile":         5768,
-        "Rustc":               990,
-        "CargoBuildScriptRun":  94,
-        "RunfilesTree":         38,
-        "TemplateExpand":       31,
-        "Symlink":              23,
-        "CppArchive":           18,
-        "Action":               12,
+        "CppCompile": 5768,
+        "Rustc": 990,
+        "CargoBuildScriptRun": 94,
+        "RunfilesTree": 38,
+        "TemplateExpand": 31,
+        "Symlink": 23,
+        "CppArchive": 18,
+        "Action": 12,
         "CppTransitiveArchive": 10,
-        "Clippy":                4,
-        "PackageZip":            4,
-        "PackageTar":            4,
-        "CopyFile":              3,
-        "TestRunner":            3,
-        "Jq":                    3,
-        "RunBinary":             2,
-        "ProstGenProto":         2,
+        "Clippy": 4,
+        "PackageZip": 4,
+        "PackageTar": 4,
+        "CopyFile": 3,
+        "TestRunner": 3,
+        "Jq": 3,
+        "RunBinary": 2,
+        "ProstGenProto": 2,
     }
     r["action_cache_stats"] = {
-        "hits":   70515,
+        "hits": 70515,
         "misses": 7024,
         "miss_details": [
-            {"reason": "DIGEST_MISMATCH",          "count": 7021},
-            {"reason": "NOT_CACHED",               "count":    2},
-            {"reason": "UNCONDITIONAL_EXECUTION",  "count":    1},
+            {"reason": "DIGEST_MISMATCH", "count": 7021},
+            {"reason": "NOT_CACHED", "count": 2},
+            {"reason": "UNCONDITIONAL_EXECUTION", "count": 1},
         ],
     }
     r["runner_counts"] = {
         "remote cache hit · Remote": 6934,
-        "internal":                    93,
-        "darwin-sandbox":              23,
+        "internal": 93,
+        "darwin-sandbox": 23,
     }
-    r["workspace_status"]  = {
-        "BUILD_USER":      "aspect-runner",
-        "BUILD_HOST":      "ip-10-0-86-10",
+    r["workspace_status"] = {
+        "BUILD_USER": "aspect-runner",
+        "BUILD_HOST": "ip-10-0-86-10",
         "BUILD_TIMESTAMP": "1776727956",
-        "FORMATTED_DATE":  "2026 Apr 20 23 32 36 Mon",
+        "FORMATTED_DATE": "2026 Apr 20 23 32 36 Mon",
         "BUILD_EMBED_LABEL": "",  # empty value — must be skipped by the renderer
     }
-    r["metadata"]          = {
-        "BRANCH":               "main",
-        "BRANCH_NAME":          "main",
-        "COMMIT_SHA":           "abc123def456789abcdef",
-        "COMMIT_MESSAGE":       "feat: add invocation metadata to status checks",
-        "COMMIT_AUTHOR":        "Derek Cormier <derek@aspect.build>",
-        "COMMIT_AUTHOR_NAME":   "Derek Cormier",
-        "COMMIT_AUTHOR_EMAIL":  "derek@aspect.build",
-        "COMMIT_TIMESTAMP":     "2026-04-20 16:32:09 -0700",
-        "COMMIT_TAG":           "",  # empty value — must be skipped by the renderer
-        "USER":                 "Derek Cormier",
-        "WORKSPACE":            ".",
-        "CI_HOST":              "BUILDKITE",
-        "VCS":                  "GITHUB",
-        "REPO_OWNER":           "aspect-build",
-        "REPO_NAME":            "silo",
-        "BUILD_NUMBER":         "49508",
-        "RUN_TYPE":             "BRANCH_PUSH",
-        "ASPECT_TASK_NAME":     "Test",
-        "ASPECT_TASK_ID":       "test",
-        "ASPECT_TASK_URL":      "https://buildkite.com/aspect-build/silo-aws/builds/49508#019dad3c-f2f7-4433-93e7-1b2d8c7b29f4",
-        "BUILD_URL":            "https://buildkite.com/aspect-build/silo-aws/builds/49508",
-        "TAGS":                 "nightly,release-candidate",
-        "TAG_ENV":              "production",
-        "TAG_REGION":           "us-west-2",
+    r["metadata"] = {
+        "BRANCH": "main",
+        "BRANCH_NAME": "main",
+        "COMMIT_SHA": "abc123def456789abcdef",
+        "COMMIT_MESSAGE": "feat: add invocation metadata to status checks",
+        "COMMIT_AUTHOR": "Derek Cormier <derek@aspect.build>",
+        "COMMIT_AUTHOR_NAME": "Derek Cormier",
+        "COMMIT_AUTHOR_EMAIL": "derek@aspect.build",
+        "COMMIT_TIMESTAMP": "2026-04-20 16:32:09 -0700",
+        "COMMIT_TAG": "",  # empty value — must be skipped by the renderer
+        "USER": "Derek Cormier",
+        "WORKSPACE": ".",
+        "CI_HOST": "BUILDKITE",
+        "VCS": "GITHUB",
+        "REPO_OWNER": "aspect-build",
+        "REPO_NAME": "silo",
+        "BUILD_NUMBER": "49508",
+        "RUN_TYPE": "BRANCH_PUSH",
+        "ASPECT_TASK_NAME": "Test",
+        "ASPECT_TASK_ID": "test",
+        "ASPECT_TASK_URL": "https://buildkite.com/aspect-build/silo-aws/builds/49508#019dad3c-f2f7-4433-93e7-1b2d8c7b29f4",
+        "BUILD_URL": "https://buildkite.com/aspect-build/silo-aws/builds/49508",
+        "TAGS": "nightly,release-candidate",
+        "TAG_ENV": "production",
+        "TAG_REGION": "us-west-2",
         "ASPECT_WORKFLOWS_LINKS": "[Runbook](https://runbooks.example.com/ci),[Dashboard](https://grafana.example.com/d/build-health)",
     }
     r["executed_duration_ms"] = 45000  # 45s of executed test CPU
     r["passed_tests"] = [
         # Cached tests carry a non-zero duration_ms from the last-run the cache
         # is serving — we want that to show up beside the label.
-        {"label": "//pkg/alpha:test",   "cached": True, "duration_ms": 2100, "kind": "cc_test"},
-        {"label": "//pkg/beta:test",    "cached": True, "duration_ms": 850,  "kind": "py_test"},
-        {"label": "//pkg/gamma:test",   "cached": True, "duration_ms": 4300, "kind": "sh_test"},
-        {"label": "//pkg/delta:test",   "cached": True, "duration_ms": 1200, "kind": "cc_test"},
-        {"label": "//pkg/epsilon:test", "cached": True, "duration_ms": 700,  "kind": "java_test"},
+        {"label": "//pkg/alpha:test", "cached": True, "duration_ms": 2100, "kind": "cc_test"},
+        {"label": "//pkg/beta:test", "cached": True, "duration_ms": 850, "kind": "py_test"},
+        {"label": "//pkg/gamma:test", "cached": True, "duration_ms": 4300, "kind": "sh_test"},
+        {"label": "//pkg/delta:test", "cached": True, "duration_ms": 1200, "kind": "cc_test"},
+        {"label": "//pkg/epsilon:test", "cached": True, "duration_ms": 700, "kind": "java_test"},
     ]
     r["built_targets"] = [
-        {"label": "//pkg/alpha:lib",    "kind": "cc_library"},
-        {"label": "//pkg/beta:lib",     "kind": "py_library"},
+        {"label": "//pkg/alpha:lib", "kind": "cc_library"},
+        {"label": "//pkg/beta:lib", "kind": "py_library"},
         {"label": "//pkg/gamma:server", "kind": "cc_binary"},
     ]
     r["target_kinds"] = {
-        "//pkg/alpha:lib":    "cc_library",
-        "//pkg/beta:lib":     "py_library",
+        "//pkg/alpha:lib": "cc_library",
+        "//pkg/beta:lib": "py_library",
         "//pkg/gamma:server": "cc_binary",
-        "//pkg/alpha:test":   "cc_test",
-        "//pkg/beta:test":    "py_test",
-        "//pkg/gamma:test":   "sh_test",
-        "//pkg/delta:test":   "cc_test",
+        "//pkg/alpha:test": "cc_test",
+        "//pkg/beta:test": "py_test",
+        "//pkg/gamma:test": "sh_test",
+        "//pkg/delta:test": "cc_test",
         "//pkg/epsilon:test": "java_test",
     }
     r["sink_invocation_id"] = "sink-uuid-1234-5678-9abc"
@@ -150,113 +150,115 @@ def _make_results_passed():
             # Exercises shell-quoting: value contains spaces + a single quote.
             "--build_metadata=COMMIT_MESSAGE=feat: it's fine",
         ],
-        "startup_options":   ["--nohome_rc", "--output_base=/tmp/bazel"],
-        "cmd_line":          [
+        "startup_options": ["--nohome_rc", "--output_base=/tmp/bazel"],
+        "cmd_line": [
             "--config=ci",
             "--keep_going",
             "--test_output=errors",
             "--remote_upload_local_results",
-            "--action_env=CI=true",                            # safe value (boolean)
+            "--action_env=CI=true",  # safe value (boolean)
             "--repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1",  # safe value (0/1)
-            "--action_env=GITHUB_SHA=abc123def",               # default allowlist
-            "--client_env=GITHUB_TOKEN=ghp_deadbeef",          # redacted (not on allowlist)
-            "--client_env=PATH=/usr/bin",                      # redacted (not on allowlist by default)
-            "--remote_header=Authorization=Bearer secret",     # redacted (header flag)
+            "--action_env=GITHUB_SHA=abc123def",  # default allowlist
+            "--client_env=GITHUB_TOKEN=ghp_deadbeef",  # redacted (not on allowlist)
+            "--client_env=PATH=/usr/bin",  # redacted (not on allowlist by default)
+            "--remote_header=Authorization=Bearer secret",  # redacted (header flag)
             "--bes_backend=grpcs://alice:swordfish@bes.example.com:443",  # URL creds stripped
-            "--build_metadata=COMMIT_MESSAGE=feat: it's fine", # shell-quoted (space + quote)
+            "--build_metadata=COMMIT_MESSAGE=feat: it's fine",  # shell-quoted (space + quote)
             "--build_metadata=REPO_URL=https://ci:secret@github.com/acme/repo.git",  # URL creds stripped (generic flag)
         ],
     }
     return r
 
-
 def _make_results_failed():
     """Build action failure + multiple test failures. Most common failure mode."""
     r = init_results()
-    r["invocation_id"]     = "dead1234-beef-cafe-babe-123456789abc"
+    r["invocation_id"] = "dead1234-beef-cafe-babe-123456789abc"
     r["build_tool_version"] = "9.0.1"
-    r["build_command"]     = "test"
-    r["wall_time_ms"]      = 45000
-    r["cpu_time_ms"]       = 120000
-    r["actions_executed"]  = 50
-    r["actions_cached"]    = 80
-    r["actions_total"]     = 130
-    r["targets_total"]     = 80
+    r["build_command"] = "test"
+    r["wall_time_ms"] = 45000
+    r["cpu_time_ms"] = 120000
+    r["actions_executed"] = 50
+    r["actions_cached"] = 80
+    r["actions_total"] = 130
+    r["targets_total"] = 80
     r["failed_actions_total"] = 2
+
     # One root target had both its compile and link fail — mnemonics list
     # captures both without duplicating the label entry.
     r["failed_actions"] = [{
-        "label":     "//pkg/broken:lib",
+        "label": "//pkg/broken:lib",
         "mnemonics": ["CppCompile", "CppLink"],
     }]
+
     # Labels of targets whose own actions failed — used to classify derived failures.
     r["failed_action_labels"] = ["//pkg/broken:lib"]
+
     # failed_targets includes the root (//pkg/broken:lib) + three derived targets
     # whose build failed only because they depend on //pkg/broken:lib.
     r["failed_targets"] = [
-        {"label": "//pkg/broken:lib"},                # root
-        {"label": "//pkg/broken:bin"},                # derived
-        {"label": "//pkg/consumer:service"},          # derived
-        {"label": "//pkg/consumer:integration_test"}, # derived
+        {"label": "//pkg/broken:lib"},  # root
+        {"label": "//pkg/broken:bin"},  # derived
+        {"label": "//pkg/consumer:service"},  # derived
+        {"label": "//pkg/consumer:integration_test"},  # derived
     ]
     r["failed_test_total"] = 3
     r["failed_tests"] = [
-        {"label": "//pkg/a:test", "cached": False, "duration_ms": 5000,  "status": "failed"},
+        {"label": "//pkg/a:test", "cached": False, "duration_ms": 5000, "status": "failed"},
         {"label": "//pkg/b:test", "cached": False, "duration_ms": 12000, "status": "timeout"},
-        {"label": "//pkg/c:test", "cached": False, "duration_ms": 800,   "status": "failed"},
+        {"label": "//pkg/c:test", "cached": False, "duration_ms": 800, "status": "failed"},
     ]
     r["passed_test_total"] = 21
     r["cached_test_total"] = 18
     r["executed_test_total"] = 3
     r["passed_tests"] = [
-        {"label": "//pkg/d:test", "cached": True,  "duration_ms": 0},
+        {"label": "//pkg/d:test", "cached": True, "duration_ms": 0},
         {"label": "//pkg/e:test", "cached": False, "duration_ms": 3200},
     ]
     r["workspace_status"] = {"BUILD_USER": "ci-bot", "BUILD_HOST": "runner-2"}
+
     # Pull request scenario — exercises the VCS/PR/branch/commit linking path.
     r["metadata"] = {
-        "BRANCH":                "feature/new-api",
-        "BRANCH_NAME":           "feature/new-api",
-        "COMMIT_SHA":            "deadbeef12345678abcdef",
-        "COMMIT_MESSAGE":        "wip: refactor compute() — BROKEN",
-        "COMMIT_AUTHOR_NAME":    "Greg Magolan",
-        "COMMIT_AUTHOR_EMAIL":   "greg@aspect.build",
-        "VCS":                   "GITHUB",
-        "REPO_OWNER":            "aspect-build",
-        "REPO_NAME":             "silo",
-        "RUN_TYPE":              "PULL_REQUEST",
-        "PR_NUMBER":             "1102",
-        "PR_ID":                 "1102",
+        "BRANCH": "feature/new-api",
+        "BRANCH_NAME": "feature/new-api",
+        "COMMIT_SHA": "deadbeef12345678abcdef",
+        "COMMIT_MESSAGE": "wip: refactor compute() — BROKEN",
+        "COMMIT_AUTHOR_NAME": "Greg Magolan",
+        "COMMIT_AUTHOR_EMAIL": "greg@aspect.build",
+        "VCS": "GITHUB",
+        "REPO_OWNER": "aspect-build",
+        "REPO_NAME": "silo",
+        "RUN_TYPE": "PULL_REQUEST",
+        "PR_NUMBER": "1102",
+        "PR_ID": "1102",
         "PR_SOURCE_BRANCH_NAME": "feature/new-api",
         "PR_TARGET_BRANCH_NAME": "main",
     }
     r["reproducer_command"] = "aspect ci //pkg/broken:lib //pkg/a:test //pkg/b:test //pkg/c:test"
     return r
 
-
 def _make_results_flaky():
     """Flaky tests — Bazel exits 0 but test_summary reports FLAKY overall_status."""
     r = init_results()
-    r["invocation_id"]     = "f1a4e512-3456-7890-abcd-ef0123456789"
+    r["invocation_id"] = "f1a4e512-3456-7890-abcd-ef0123456789"
     r["build_tool_version"] = "9.0.1"
-    r["build_command"]     = "test"
-    r["wall_time_ms"]      = 30000
-    r["cpu_time_ms"]       = 90000
-    r["actions_executed"]  = 10
-    r["actions_cached"]    = 120
-    r["actions_total"]     = 130
-    r["targets_total"]     = 60
-    r["flaky_test_total"]  = 2
+    r["build_command"] = "test"
+    r["wall_time_ms"] = 30000
+    r["cpu_time_ms"] = 90000
+    r["actions_executed"] = 10
+    r["actions_cached"] = 120
+    r["actions_total"] = 130
+    r["targets_total"] = 60
+    r["flaky_test_total"] = 2
     r["flaky_tests"] = [
-        {"label": "//flaky:timing_test",   "cached": False, "duration_ms": 8000},
-        {"label": "//flaky:network_test",  "cached": False, "duration_ms": 4000},
+        {"label": "//flaky:timing_test", "cached": False, "duration_ms": 8000},
+        {"label": "//flaky:network_test", "cached": False, "duration_ms": 4000},
     ]
     r["passed_test_total"] = 20
     r["cached_test_total"] = 18
     r["executed_test_total"] = 4
     r["passed_tests"] = [
-        {"label": "//pkg/ok:unit_test", "cached": True,  "duration_ms": 0},
-        {"label": "//pkg/ok:e2e_test",  "cached": False, "duration_ms": 6200},
+        {"label": "//pkg/ok:unit_test", "cached": True, "duration_ms": 0},
+        {"label": "//pkg/ok:e2e_test", "cached": False, "duration_ms": 6200},
     ]
     r["workspace_status"] = {"BUILD_USER": "developer", "BUILD_HOST": "laptop-01"}
     r["metadata"] = {
@@ -265,7 +267,6 @@ def _make_results_flaky():
     }
     return r
 
-
 def _make_results_failing_live():
     """Mid-build state: some failures already recorded, build still running.
 
@@ -273,15 +274,16 @@ def _make_results_failing_live():
     True for a failing test_summary while the build is still streaming events.
     """
     r = init_results()
-    r["invocation_id"]     = "11111111-2222-3333-4444-555555555555"
+    r["invocation_id"] = "11111111-2222-3333-4444-555555555555"
     r["build_tool_version"] = "9.0.1"
-    r["build_command"]     = "test"
+    r["build_command"] = "test"
+
     # wall_time_ms is 0 because build_metrics hasn't arrived yet
-    r["wall_time_ms"]      = 0
-    r["actions_executed"]  = 30
-    r["actions_cached"]    = 80
-    r["actions_total"]     = 110
-    r["targets_total"]     = 45
+    r["wall_time_ms"] = 0
+    r["actions_executed"] = 30
+    r["actions_cached"] = 80
+    r["actions_total"] = 110
+    r["targets_total"] = 45
     r["failed_test_total"] = 1
     r["failed_tests"] = [
         {"label": "//pkg/slow:integration_test", "cached": False, "duration_ms": 14000, "status": "failed"},
@@ -290,7 +292,6 @@ def _make_results_failing_live():
     r["cached_test_total"] = 5
     r["metadata"] = {"BRANCH": "main"}
     return r
-
 
 def _make_results_fully_cached():
     """Incremental rebuild where build_metrics reports targets_configured = 0.
@@ -306,76 +307,78 @@ def _make_results_fully_cached():
     real target count instead of "0 configured".
     """
     r = init_results()
-    r["invocation_id"]    = "cache-1234-5678-9abc-def012345678"
+    r["invocation_id"] = "cache-1234-5678-9abc-def012345678"
     r["build_tool_version"] = "9.0.1"
-    r["build_command"]    = "build"
-    r["wall_time_ms"]     = 4200
+    r["build_command"] = "build"
+    r["wall_time_ms"] = 4200
     r["actions_executed"] = 1
-    r["actions_total"]    = 64604
-    r["targets_total"]    = 146
+    r["actions_total"] = 64604
+    r["targets_total"] = 146
+
     # build_metrics reported 0 targets_configured (incremental rebuild) —
     # but BES streamed 146 target_configured events.
-    r["targets_configured"]         = 0
+    r["targets_configured"] = 0
     r["targets_configured_counted"] = 146
-    r["packages_loaded"]   = 0
+    r["packages_loaded"] = 0
     r["metadata"] = {"BRANCH": "main"}
     return r
-
 
 def _make_results_aborted():
     """Build aborted mid-stream (e.g. Ctrl-C or OOM)."""
     r = init_results()
-    r["invocation_id"]   = "abort123-4567-89ab-cdef-012345678901"
-    r["build_command"]   = "build"
-    r["wall_time_ms"]    = 8500
+    r["invocation_id"] = "abort123-4567-89ab-cdef-012345678901"
+    r["build_command"] = "build"
+    r["wall_time_ms"] = 8500
     r["actions_executed"] = 12
-    r["actions_cached"]  = 30
-    r["actions_total"]   = 42
-    r["targets_total"]   = 20
-    r["aborted"]         = True
-    r["abort_reason"]    = "user_interrupt"
+    r["actions_cached"] = 30
+    r["actions_total"] = 42
+    r["targets_total"] = 20
+    r["aborted"] = True
+    r["abort_reason"] = "user_interrupt"
     r["abort_description"] = "Build interrupted by user"
     r["metadata"] = {"BRANCH": "main", "COMMIT_SHA": "aabbccdd11223344"}
     return r
 
-
 def _make_results_large():
     """Large build: many targets and tests (tests the trim cascade in render_check_output)."""
     r = init_results()
-    r["build_command"]     = "test"
-    r["wall_time_ms"]      = 180000
-    r["cpu_time_ms"]       = 900000
-    r["actions_executed"]  = 500
-    r["actions_cached"]    = 2000
-    r["actions_total"]     = 2500
-    r["targets_total"]     = 600
+    r["build_command"] = "test"
+    r["wall_time_ms"] = 180000
+    r["cpu_time_ms"] = 900000
+    r["actions_executed"] = 500
+    r["actions_cached"] = 2000
+    r["actions_total"] = 2500
+    r["targets_total"] = 600
     r["passed_test_total"] = 200
     r["cached_test_total"] = 180
     for i in range(200):
         r["passed_tests"].append({
-            "label":       "//generated/pkg_" + str(i) + ":test",
-            "cached":      i % 10 != 0,
+            "label": "//generated/pkg_" + str(i) + ":test",
+            "cached": i % 10 != 0,
             "duration_ms": (i % 5 + 1) * 1000,
         })
     r["failed_test_total"] = 2
     r["failed_tests"] = [
-        {"label": "//generated/pkg_42:test",  "cached": False, "duration_ms": 5000, "status": "failed"},
+        {"label": "//generated/pkg_42:test", "cached": False, "duration_ms": 5000, "status": "failed"},
         {"label": "//generated/pkg_137:test", "cached": False, "duration_ms": 3000, "status": "failed"},
     ]
     for i in range(600):
         r["built_targets"].append({"label": "//generated/pkg_" + str(i // 3) + ":lib_" + str(i % 3)})
     r["options_parsed"] = {
         "explicit_cmd_line": ["--config=ci", "--keep_going"],
-        "startup_options":   ["--output_base=/tmp/bazel"],
-        "cmd_line":          ["--config=ci", "--keep_going", "--test_output=errors",
-                              "--bes_backend=grpcs://api.aspect.build",
-                              "--bes_results_url=https://app.aspect.build/invocations/",
-                              "--build_metadata=COMMIT_SHA=abc123",
-                              "--build_metadata=BRANCH=main"],
+        "startup_options": ["--output_base=/tmp/bazel"],
+        "cmd_line": [
+            "--config=ci",
+            "--keep_going",
+            "--test_output=errors",
+            "--bes_backend=grpcs://api.aspect.build",
+            "--bes_results_url=https://app.aspect.build/invocations/",
+            "--build_metadata=COMMIT_SHA=abc123",
+            "--build_metadata=BRANCH=main",
+        ],
     }
     r["metadata"] = {"BRANCH": "main"}
     return r
-
 
 # ---------------------------------------------------------------------------
 # Shared render context and links
@@ -383,14 +386,13 @@ def _make_results_large():
 
 def _render_ctx(targets = "//...", task_display_name = "Test"):
     return {
-        "triggered_by":      "ci-bot (workflow_dispatch)",
-        "targets":           targets,
-        "started_ms":        1744630000000,
-        "ended_ms":          1744630002200,
-        "progress":          "",
+        "triggered_by": "ci-bot (workflow_dispatch)",
+        "targets": targets,
+        "started_ms": 1744630000000,
+        "ended_ms": 1744630002200,
+        "progress": "",
         "task_display_name": task_display_name,
     }
-
 
 def _links(with_artifact = False, ci = "github"):
     """Build a fake links dict for a snapshot scenario.
@@ -399,63 +401,70 @@ def _links(with_artifact = False, ci = "github"):
     """
     if ci == "buildkite":
         ci_label = "Buildkite"
-        ci_url   = "https://buildkite.com/aspect-build/aspect-cli/builds/1354/steps/canvas?sid=s1"
-        browse   = "https://buildkite.com/aspect-build/aspect-cli/builds/1354/steps/canvas?sid=s1&tab=artifacts"
+        ci_url = "https://buildkite.com/aspect-build/aspect-cli/builds/1354/steps/canvas?sid=s1"
+        browse = "https://buildkite.com/aspect-build/aspect-cli/builds/1354/steps/canvas?sid=s1&tab=artifacts"
     elif ci == "circleci":
         ci_label = "CircleCI"
-        ci_url   = "https://circleci.com/gh/aspect-build/aspect-cli/9911"
-        browse   = "https://app.circleci.com/pipelines/github/aspect-build/aspect-cli/4406/workflows/78c35291-a904-4987-9444-54907e75291e/jobs/9911/artifacts"
+        ci_url = "https://circleci.com/gh/aspect-build/aspect-cli/9911"
+        browse = "https://app.circleci.com/pipelines/github/aspect-build/aspect-cli/4406/workflows/78c35291-a904-4987-9444-54907e75291e/jobs/9911/artifacts"
     elif ci == "gitlab":
         ci_label = "GitLab CI"
-        ci_url   = "https://gitlab.com/aspect-build/aspect-cli/-/jobs/2469624812"
+        ci_url = "https://gitlab.com/aspect-build/aspect-cli/-/jobs/2469624812"
+
         # GitLab has no usable per-job browse URL for Generic Packages uploads;
         # _make_artifacts_browse_url returns "" for GitLab. Fixture matches.
-        browse   = ""
+        browse = ""
     else:
         ci_label = "GitHub Actions"
-        ci_url   = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/job/72239404829"
-        browse   = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652"
+        ci_url = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/job/72239404829"
+        browse = "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652"
 
     d = {
-        "ci_label":             ci_label,
-        "ci_url":               ci_url,
+        "ci_label": ci_label,
+        "ci_url": ci_url,
         # Typical live value: feature resolves ASPECT_WORKFLOWS_BES_RESULTS_URL
         # + sink_invocation_id into this field before rendering.
-        "aspect_url":           "https://app.aspect.build/invocations/sink-uuid-1234-5678-9abc",
-        "results_base_url":     "https://app.aspect.build/",
+        "aspect_url": "https://app.aspect.build/invocations/sink-uuid-1234-5678-9abc",
+        "results_base_url": "https://app.aspect.build/",
         "artifacts_browse_url": "",
-        "artifact_urls":        {},
-        "testlogs_label_urls":  {},
+        "artifact_urls": {},
+        "testlogs_label_urls": {},
     }
     if with_artifact:
         d["artifacts_browse_url"] = browse
         if ci == "github":
             d["artifact_urls"] = {
                 "testlogs": "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/artifacts/6565661414",
-                "profile":  "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/artifacts/6565661415",
+                "profile": "https://github.com/aspect-build/aspect-cli/actions/runs/24410554652/artifacts/6565661415",
             }
         elif ci == "gitlab":
             base = "https://gitlab.com/api/v4/projects/1/packages/generic"
             d["artifact_urls"] = {
                 "testlogs": base + "/test.gl-test.testlogs-v1/2469624812/testlogs.tar.gz",
-                "profile":  base + "/test.gl-test.profile.gz/2469624812/profile.gz",
+                "profile": base + "/test.gl-test.profile.gz/2469624812/profile.gz",
             }
         elif ci == "circleci":
             base = "https://output.circle-artifacts.com/output/job/bb66c8b1-b5d5-4aa5-87b7-d26c8a961ce8/artifacts/0/test/test-cci/testlogs"
             d["artifact_urls"] = {
                 "testlogs": base + "/testlogs.tar.gz",
-                "profile":  "https://output.circle-artifacts.com/output/job/bb66c8b1-b5d5-4aa5-87b7-d26c8a961ce8/artifacts/0/test/test-cci/profile.gz",
+                "profile": "https://output.circle-artifacts.com/output/job/bb66c8b1-b5d5-4aa5-87b7-d26c8a961ce8/artifacts/0/test/test-cci/profile.gz",
             }
+
             # CircleCI uploads files individually, so each test label has direct
             # per-file URLs (test.log + test.xml). Populate the labels from both
             # _make_results_passed and _make_results_flaky so the snapshots under
             # `aspect-cli/crates/aspect-cli/src/builtins/aspect/lib/bazel_results_test.axl`
             # exercise the Artifacts column / [xml] bullet links.
             labels = [
-                "//pkg/alpha:test", "//pkg/beta:test", "//pkg/gamma:test",
-                "//pkg/delta:test", "//pkg/epsilon:test",
-                "//flaky:timing_test", "//flaky:network_test",
-                "//pkg/ok:unit_test", "//pkg/ok:e2e_test",
+                "//pkg/alpha:test",
+                "//pkg/beta:test",
+                "//pkg/gamma:test",
+                "//pkg/delta:test",
+                "//pkg/epsilon:test",
+                "//flaky:timing_test",
+                "//flaky:network_test",
+                "//pkg/ok:unit_test",
+                "//pkg/ok:e2e_test",
             ]
             per_label = {}
             for lbl in labels:
@@ -465,9 +474,9 @@ def _links(with_artifact = False, ci = "github"):
                     "test.xml": base + "/" + label_path + "/test.xml",
                 }
             d["testlogs_label_urls"] = per_label
+
         # Buildkite: URLs expire, so no per-kind URLs — just the browse page.
     return d
-
 
 # ---------------------------------------------------------------------------
 # Test task
@@ -482,27 +491,27 @@ def _test_impl(ctx):
         #   None            → default (no extra_meta surfaced)
         #   ["*"]           → surface every non-standard metadata key
         #   ["K1", "K2"]    → surface only the named keys
-        ("1. all-passed · GitHub",            _make_results_passed(),       "passed",  "//...",   True,  "github",    None),
-        ("2. failed · Buildkite",             _make_results_failed(),       "failed",  "//...",   True,  "buildkite", None),
-        ("3. flaky · CircleCI",               _make_results_flaky(),        "passed",  "//...",   True,  "circleci",  None),
-        ("4. failing-live · GitLab",          _make_results_failing_live(), "failing", "//...",   False, "gitlab",    None),
-        ("5. aborted · GitHub",               _make_results_aborted(),      "failed",  "//...",   False, "github",    None),
-        ("6. large · Buildkite",              _make_results_large(),        "failed",  "//...",   False, "buildkite", None),
-        ("7. all-passed · GitLab",            _make_results_passed(),       "passed",  "//...",   True,  "gitlab",    None),
-        ("8. all-passed · CircleCI",          _make_results_passed(),       "passed",  "//...",   True,  "circleci",  None),
-        ("9. all-passed · Buildkite",         _make_results_passed(),       "passed",  "//...",   True,  "buildkite", None),
+        ("1. all-passed · GitHub", _make_results_passed(), "passed", "//...", True, "github", None),
+        ("2. failed · Buildkite", _make_results_failed(), "failed", "//...", True, "buildkite", None),
+        ("3. flaky · CircleCI", _make_results_flaky(), "passed", "//...", True, "circleci", None),
+        ("4. failing-live · GitLab", _make_results_failing_live(), "failing", "//...", False, "gitlab", None),
+        ("5. aborted · GitHub", _make_results_aborted(), "failed", "//...", False, "github", None),
+        ("6. large · Buildkite", _make_results_large(), "failed", "//...", False, "buildkite", None),
+        ("7. all-passed · GitLab", _make_results_passed(), "passed", "//...", True, "gitlab", None),
+        ("8. all-passed · CircleCI", _make_results_passed(), "passed", "//...", True, "circleci", None),
+        ("9. all-passed · Buildkite", _make_results_passed(), "passed", "//...", True, "buildkite", None),
         # metadata_keys=["*"] — operator opts in to showing every non-standard BES
         # metadata key. TAG_ENV, TAG_REGION (from _make_results_passed.metadata)
         # should appear as extra_meta rows; standard keys stay in their slots.
-        ("10. all-passed · GitHub · meta=*",  _make_results_passed(),       "passed",  "//...",   True,  "github",    ["*"]),
+        ("10. all-passed · GitHub · meta=*", _make_results_passed(), "passed", "//...", True, "github", ["*"]),
         # metadata_keys=["TAG_ENV", "TAG_REGION"] — operator allowlists specific
         # keys; TAG_ENV/TAG_REGION appear, WORKSPACE does not (not in list, not standard).
-        ("11. all-passed · GitHub · meta=2",  _make_results_passed(),       "passed",  "//...",   True,  "github",    ["TAG_ENV", "TAG_REGION"]),
+        ("11. all-passed · GitHub · meta=2", _make_results_passed(), "passed", "//...", True, "github", ["TAG_ENV", "TAG_REGION"]),
         # Incremental / fully-cached rebuild: build_metrics reports 0 newly
         # configured targets, but BES still sent 146 target_configured events.
         # The Build graph row should show "146 configured" via the counted
         # fallback, not "0 configured".
-        ("12. fully-cached · GitHub",          _make_results_fully_cached(), "passed",  "//...",   True,  "github",    None),
+        ("12. fully-cached · GitHub", _make_results_fully_cached(), "passed", "//...", True, "github", None),
     ]
 
     sep = "=" * 70
@@ -526,7 +535,6 @@ def _test_impl(ctx):
     print(sep)
     print("All " + str(len(scenarios)) + " scenarios rendered without error.")
     return 0
-
 
 template_snapshot_tests = task(
     name = "test-template-snapshots",

@@ -19,7 +19,6 @@ _SHA256 = {
 _ARCH_MAP = {"x86_64": "amd64", "aarch64": "arm64"}
 _OS_MAP = {"macos": "darwin", "linux": "linux"}
 
-
 def _platform_key(ctx):
     os = _OS_MAP.get(ctx.std.env.os())
     arch = _ARCH_MAP.get(ctx.std.env.arch())
@@ -28,20 +27,17 @@ def _platform_key(ctx):
         fail(msg)
     return os, arch
 
-
 def _cache_dir(ctx):
     home = ctx.std.env.home_dir()
     if not home:
         return None
     return home + "/.cache/aspect/bsdtar/" + _VERSION
 
-
 def _file_sha256(ctx, path):
     h = sha256()
     for chunk in ctx.std.fs.open(path):
         h.update(chunk)
     return h.hexdigest()
-
 
 def bsdtar(ctx):
     """Return the path to a cached bsdtar binary, downloading if necessary.
@@ -111,7 +107,6 @@ def bsdtar(ctx):
 
     return bin_path
 
-
 def tar_create_from_dir(ctx, archive_path, dir_path):
     """Create a tar.gz archive of a directory's contents.
 
@@ -125,11 +120,14 @@ def tar_create_from_dir(ctx, archive_path, dir_path):
     """
     bin_path = bsdtar(ctx)
     child = ctx.std.process.command(bin_path).args([
-        "czf", archive_path, "-C", dir_path, ".",
+        "czf",
+        archive_path,
+        "-C",
+        dir_path,
+        ".",
     ]).stdout("inherit").stderr("inherit").spawn()
     status = child.wait()
     return status.code == 0
-
 
 def tar_create(ctx, archive_path, mtree_spec):
     """Create a tar.gz archive from an mtree spec string.
@@ -148,7 +146,9 @@ def tar_create(ctx, archive_path, mtree_spec):
     ctx.std.fs.write(mtree_path, mtree_spec)
 
     child = ctx.std.process.command(bin_path).args([
-        "czf", archive_path, "@" + mtree_path,
+        "czf",
+        archive_path,
+        "@" + mtree_path,
     ]).stdout("inherit").stderr("inherit").spawn()
     status = child.wait()
 
@@ -156,7 +156,6 @@ def tar_create(ctx, archive_path, mtree_spec):
         ctx.std.fs.remove_file(mtree_path)
 
     return status.code == 0
-
 
 def zip_create(ctx, archive_path, mtree_spec):
     """Create a .zip archive from an mtree spec string.
@@ -180,7 +179,10 @@ def zip_create(ctx, archive_path, mtree_spec):
     ctx.std.fs.write(mtree_path, mtree_spec)
 
     child = ctx.std.process.command(bin_path).args([
-        "--format=zip", "-cf", archive_path, "@" + mtree_path,
+        "--format=zip",
+        "-cf",
+        archive_path,
+        "@" + mtree_path,
     ]).stdout("inherit").stderr("inherit").spawn()
     status = child.wait()
 

@@ -1,47 +1,38 @@
 """
 A default 'build' task that wraps a 'bazel build' command.
 """
-load("./traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "GitHubStatusChecksTrait", "ArtifactsTrait")
-load("./lib/bazel_runner.axl", "run_bazel_task")
 
+load("./lib/bazel_runner.axl", "run_bazel_task")
+load("./traits.axl", "ArtifactsTrait", "BazelTrait", "GitHubStatusChecksTrait", "HealthCheckTrait", "TaskLifecycleTrait")
 
 def _impl(ctx: TaskContext) -> int:
     return run_bazel_task(ctx, command = "build")
 
-
 build = task(
-    implementation = _impl,
-    traits = [
-        BazelTrait,
-        HealthCheckTrait,
-        TaskLifecycleTrait,
-        GitHubStatusChecksTrait,
-        ArtifactsTrait,
-    ],
     args = {
         # TODO: Support a long --pattern_file like bazel does (@./targets)
         # TODO: Support - (list from stdin)
         "targets": args.positional(
-            minimum = 1,
-            maximum = 512,
             default = ["..."],
             description = "Bazel target patterns to build. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect build -- //... -//experimental/...`.",
+            maximum = 512,
+            minimum = 1,
         ),
         "bazel_flags": args.string_list(
-            long = "bazel-flag",
             description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
+            long = "bazel-flag",
         ),
         "bazel_startup_flags": args.string_list(
-            long = "bazel-startup-flag",
             description = "Additional Bazel startup flags (e.g. --bazel-startup-flag=--host_jvm_args=-Xmx2g). Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+            long = "bazel-startup-flag",
         ),
         "bes_backends": args.string_list(
-            long = "bes-backend",
             description = "Build Event Service backend(s) to stream BEP events to. Repeat the flag to pass multiple. Translated to --bes_backend=<value> on the Bazel command.",
+            long = "bes-backend",
         ),
         "bes_headers": args.string_list(
-            long = "bes-header",
             description = "HTTP header(s) attached to BES streams (e.g. --bes-header=x-token=abc). Repeat the flag to pass multiple. Translated to --bes_header=<value> on the Bazel command.",
+            long = "bes-header",
         ),
         "cancel": args.boolean(
             default = False,
@@ -52,4 +43,12 @@ build = task(
             description = "Bazel output base path. Use to target a specific Bazel server instance — distinct paths run independent JVMs and cache contents.",
         ),
     },
+    traits = [
+        BazelTrait,
+        HealthCheckTrait,
+        TaskLifecycleTrait,
+        GitHubStatusChecksTrait,
+        ArtifactsTrait,
+    ],
+    implementation = _impl,
 )

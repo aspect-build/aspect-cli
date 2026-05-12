@@ -1,10 +1,10 @@
 """GitHub API client library."""
+
 load("@std//base64.axl", "base64")
 load("./environment.axl", "color_enabled")
 load("./tar.axl", "zip_create")
 
 DEFAULT_GITHUB_API = "https://api.github.com"
-
 
 # Internal helpers
 
@@ -26,6 +26,7 @@ def _do_request(ctx, method, url, token, payload = None):
         fut = ctx.http().delete(url = url, headers = headers)
     else:
         return (False, 0, "unsupported method: " + method)
+
     # Convert transport errors (DNS failure, TLS error, connection refused, …)
     # to a string result. Without this, the underlying anyhow error would
     # propagate up through any lifecycle hook calling into github.* and fail
@@ -62,7 +63,6 @@ def _do_request(ctx, method, url, token, payload = None):
         return (False, response.status, "non-JSON response (status %d): %s" % (response.status, snippet))
     return (success, response.status, parsed)
 
-
 # Authentication
 
 VALID_ROLES = [
@@ -76,11 +76,9 @@ VALID_ROLES = [
     "actions.read",
 ]
 
-
 def validate_role(role):
     """Validate that a role is in the known set."""
     return role in VALID_ROLES
-
 
 def _missing_credentials_reason(ctx):
     """Human-readable explanation for `ctx.aspect.auth.credentials()` returning
@@ -93,7 +91,6 @@ def _missing_credentials_reason(ctx):
     else:
         msg = "not logged in — run `aspect auth login`"
     return msg + ". Setup guide: " + setup_url
-
 
 def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None):
     """Resolve a GitHub token by exchanging Aspect credentials via the Aspect
@@ -122,6 +119,7 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
     url = ctx.aspect.auth.api_url + "/github/token"
     if roles:
         url = url + "?roles=" + ",".join(roles)
+
     # Transport errors are converted to a string here so they don't bubble up
     # as exceptions and fail the parent task (e.g. when this is called from a
     # lifecycle hook in a feature like GithubStatusChecks).
@@ -163,7 +161,6 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
             _reason["reason"] = "API request failed (HTTP %d): %s" % (resp.status, resp.body)
     return None
 
-
 # Check Runs
 
 def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, output = None, api_base = DEFAULT_GITHUB_API):
@@ -181,7 +178,6 @@ def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, out
     if body and type(body) == "dict" and body.get("message"):
         error_msg = error_msg + " - " + body["message"]
     return {"success": False, "error": error_msg, "status": status_code}
-
 
 def update_check_run(ctx, token, owner, repo, check_run_id, status = None, conclusion = None, output = None, api_base = DEFAULT_GITHUB_API):
     """Update an existing check run."""
@@ -201,17 +197,19 @@ def update_check_run(ctx, token, owner, repo, check_run_id, status = None, concl
         error_msg = error_msg + " - " + body["message"]
     return {"success": False, "error": error_msg, "status": status_code}
 
-
 def complete_check_run(ctx, token, owner, repo, check_run_id, conclusion, output = None, api_base = DEFAULT_GITHUB_API):
     """Complete a check run with a conclusion."""
     return update_check_run(
-        ctx, token, owner, repo, check_run_id,
+        ctx,
+        token,
+        owner,
+        repo,
+        check_run_id,
         status = "completed",
         conclusion = conclusion,
         output = output,
         api_base = api_base,
     )
-
 
 # CI environment detection
 
@@ -239,7 +237,6 @@ def detect_commit_sha(std):
         env.var("CI_COMMIT_SHA") or
         ""
     )
-
 
 def detect_build_url(ctx):
     """Detect the CI build URL from common environment variables.
@@ -277,7 +274,6 @@ def detect_build_url(ctx):
     if env.var("GITLAB_CI"):
         return env.var("CI_JOB_URL") or ""
     return ""
-
 
 def detect_github_pr(std):
     """Detect GitHub pull-request context from common CI environment variables.
@@ -358,11 +354,13 @@ def detect_github_pr(std):
         cci_pr = env.var("CIRCLE_PULL_REQUEST") or ""
         if not cci_pr:
             return None, "CIRCLE_PULL_REQUEST is not set (not a PR build)"
+
         # URL shape: https://github.com/<owner>/<repo>/pull/<n>
         idx = cci_pr.find("/pull/")
         if idx < 0:
             return None, "CIRCLE_PULL_REQUEST does not look like a GitHub PR URL: %r" % cci_pr
         tail = cci_pr[idx + len("/pull/"):]
+
         # Strip trailing slash or query string if present.
         for stop in ["/", "?", "#"]:
             cut = tail.find(stop)
@@ -384,7 +382,6 @@ def detect_github_pr(std):
         }, ""
 
     return None, "no GitHub PR context detected on this CI host"
-
 
 def _parse_local_diff_output(output):
     """Parse `git diff --unified=0` output into [{file, lines}] (0-based added lines)."""
@@ -419,7 +416,6 @@ def _parse_local_diff_output(output):
                     break
     return files
 
-
 def _parse_github_pr_patch(patch):
     """Parse a GitHub PR file `patch` string into 0-based added line numbers."""
     if not patch:
@@ -449,7 +445,6 @@ def _parse_github_pr_patch(patch):
         else:
             current_line += 1
     return lines
-
 
 def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge_base = None):
     """Detect changed files for a build, preferring the GitHub PR Files API
@@ -518,7 +513,11 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
         ansi = color_enabled(ctx.std)
         prefix = ("\033[1m\033[33mWARNING:\033[0m") if ansi else "WARNING:"
         print("%s detected a GitHub PR build (%s/%s#%d) but %s. Falling back to local `git diff` for changed-file detection." % (
-            prefix, pr["owner"], pr["repo"], pr["pr_number"], fallback_reason,
+            prefix,
+            pr["owner"],
+            pr["repo"],
+            pr["pr_number"],
+            fallback_reason,
         ))
 
     # Local-git fallback. Resolve the diff base once for both shapes.
@@ -550,7 +549,6 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
         fail(msg)
     return [f for f in out.stdout.strip().split("\n") if f]
 
-
 def _extract_host(url):
     """Extract host from a git remote URL (SSH or HTTPS)."""
     if not url:
@@ -563,13 +561,12 @@ def _extract_host(url):
     if scheme_end < 0:
         return ""
     rest = url[scheme_end + 3:]
-    at    = rest.find("@")
+    at = rest.find("@")
     slash = rest.find("/")
     if at >= 0 and (slash < 0 or at < slash):
         rest = rest[at + 1:]
     slash = rest.find("/")
     return rest[:slash] if slash >= 0 else rest
-
 
 def _is_public_github_url(url):
     """True when url's host is exactly github.com (not an Enterprise instance).
@@ -585,12 +582,12 @@ def _is_public_github_url(url):
     h = _extract_host(url).lower()
     return h == "github.com" or h == "www.github.com"
 
-
 def _extract_github_owner_repo_from_url(url):
     """Return (owner, repo) if url is a GitHub (Enterprise) URL, else ("", "")."""
     if not url:
         return ("", "")
     path = ""
+
     # SSH form: git@host:owner/repo(.git)
     if url.startswith("git@") and ":" in url:
         rest = url[len("git@"):]
@@ -604,6 +601,7 @@ def _extract_github_owner_repo_from_url(url):
         if scheme_end < 0:
             return ("", "")
         rest = url[scheme_end + 3:]
+
         # Strip user:pass@
         at = rest.find("@")
         slash = rest.find("/")
@@ -622,7 +620,6 @@ def _extract_github_owner_repo_from_url(url):
     if len(parts) == 2 and parts[0] and parts[1]:
         return (parts[0], parts[1])
     return ("", "")
-
 
 def detect_github_repo(std):
     """Detect (owner, repo), or ("", "") on failure.
@@ -654,7 +651,6 @@ def detect_github_repo(std):
         return ("", "")
     return _extract_github_owner_repo_from_url(result.stdout.strip())
 
-
 # Issue Comments (PR comments use the issues endpoint)
 
 def _issues_list_comments(ctx, token, owner, repo, issue_number, api_base = DEFAULT_GITHUB_API):
@@ -675,14 +671,12 @@ def _issues_list_comments(ctx, token, owner, repo, issue_number, api_base = DEFA
             break
     return {"success": True, "comments": all_comments}
 
-
 def _issues_create_comment(ctx, token, owner, repo, issue_number, body, api_base = DEFAULT_GITHUB_API):
     url = api_base + "/repos/" + owner + "/" + repo + "/issues/" + str(issue_number) + "/comments"
     success, status_code, resp = _do_request(ctx, "POST", url, token, {"body": body})
     if success:
         return {"success": True, "comment_id": resp.get("id"), "html_url": resp.get("html_url")}
     return {"success": False, "error": "HTTP %d: %s" % (status_code, resp)}
-
 
 def _issues_update_comment(ctx, token, owner, repo, comment_id, body, api_base = DEFAULT_GITHUB_API):
     url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
@@ -691,12 +685,10 @@ def _issues_update_comment(ctx, token, owner, repo, comment_id, body, api_base =
         return {"success": True, "comment_id": resp.get("id")}
     return {"success": False, "error": "HTTP %d: %s" % (status_code, resp)}
 
-
 def _issues_delete_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
     url = api_base + "/repos/" + owner + "/" + repo + "/issues/comments/" + str(comment_id)
     success, status_code, _ = _do_request(ctx, "DELETE", url, token)
     return {"success": success}
-
 
 # Workflow run artifacts (sibling-job artifacts in the current run)
 
@@ -725,7 +717,6 @@ def _actions_list_run_artifacts(ctx, token, owner, repo, run_id, name_prefix = "
             break
     return {"success": True, "artifacts": matched}
 
-
 def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_path, api_base = DEFAULT_GITHUB_API):
     """Download an artifact's zip blob to disk.
 
@@ -742,24 +733,19 @@ def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_
         return {"success": False, "error": "transport error: " + res}
     return {"success": True}
 
-
 # Struct-based API
 
 def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT_GITHUB_API):
     return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
 
-
 def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
     return update_check_run(ctx, token, owner, repo, check_run_id, status = "in_progress", output = output, api_base = api_base)
-
 
 def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "success", output = output, api_base = api_base)
 
-
 def _status_checks_fail(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "failure", output = output, api_base = api_base)
-
 
 # Artifact upload/delete (GitHub Actions Twirp API)
 
@@ -784,7 +770,6 @@ def _decode_backend_ids(ctx, token):
                 return (scope_parts[1], scope_parts[2])
 
     return (None, None)
-
 
 _MISSING_TOKEN_MSG = """missing ACTIONS_RUNTIME_TOKEN
 
@@ -815,14 +800,15 @@ To make it available, use one of the following options:
             ACTIONS_RUNTIME_TOKEN: ${{ secrets.ACTIONS_RUNTIME_TOKEN }}
 """
 
-
 def _github_twirp(ctx, method, payload):
     """Make a Twirp RPC call to the GitHub Actions artifact service."""
+
     # ACTIONS_ID_TOKEN_REQUEST_TOKEN is the same credential as ACTIONS_RUNTIME_TOKEN —
     # both come from systemConnection.Authorization.Parameters["AccessToken"] in the runner.
     # ScriptHandler injects it into shell steps when permissions: id-token: write is set.
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+
     # ACTIONS_RESULTS_URL is not injected by ScriptHandler; use the well-known default.
     results_url = (ctx.std.env.var("ACTIONS_RESULTS_URL") or
                    "https://results-receiver.actions.githubusercontent.com/")
@@ -842,7 +828,6 @@ def _github_twirp(ctx, method, payload):
     success = resp.status >= 200 and resp.status < 300
     body = json.decode(resp.body) if resp.body else None
     return (success, body, None)
-
 
 def _upload_artifact(ctx, path, name, expires_at = ""):
     """Upload a single file to GitHub Actions using the Twirp artifact API.
@@ -958,7 +943,6 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
 
     return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
 
-
 def _delete_artifact(ctx, name):
     """Delete an artifact from GitHub Actions using the Twirp API."""
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
@@ -977,14 +961,12 @@ def _delete_artifact(ctx, name):
     })
     return {"success": ok}
 
-
 def _check_token(env):
     """Return a warning message if the artifact token is unavailable, else None."""
     token = env.var("ACTIONS_RUNTIME_TOKEN") or env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     if not token:
         return _MISSING_TOKEN_MSG
     return None
-
 
 def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT_GITHUB_API):
     """Resolve the html_url of the currently running GitHub Actions job.
@@ -1002,8 +984,8 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT
         return ""
 
     runner_name = ctx.std.env.var("RUNNER_NAME") or ""
-    github_job  = ctx.std.env.var("GITHUB_JOB") or ""
-    attempt     = ctx.std.env.var("GITHUB_RUN_ATTEMPT") or ""
+    github_job = ctx.std.env.var("GITHUB_JOB") or ""
+    attempt = ctx.std.env.var("GITHUB_RUN_ATTEMPT") or ""
 
     url = api_base + "/repos/" + owner + "/" + repo + "/actions/runs/" + run_id + "/jobs?per_page=100"
     if attempt:
@@ -1027,7 +1009,6 @@ def _resolve_current_job_url(ctx, token, owner, repo, run_id, api_base = DEFAULT
                 return j.get("html_url", "") or ""
 
     return ""
-
 
 # Pull Request Reviews
 
@@ -1055,7 +1036,6 @@ def list_pull_request_files(ctx, token, owner, repo, pull_number, api_base = DEF
             break
     return {"success": True, "files": all_files}
 
-
 def get_pull_request(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
     """Fetch a pull request object."""
     url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number)
@@ -1064,7 +1044,6 @@ def get_pull_request(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GI
         return {"success": True, "pull_request": body}
     return {"success": False, "error": "request failed: " + str(status_code)}
 
-
 def list_review_comments(ctx, token, owner, repo, pull_number, api_base = DEFAULT_GITHUB_API):
     """List all review comments on a pull request."""
     url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
@@ -1072,7 +1051,6 @@ def list_review_comments(ctx, token, owner, repo, pull_number, api_base = DEFAUL
     if success:
         return {"success": True, "comments": body if type(body) == "list" else []}
     return {"success": False, "error": "request failed: " + str(status_code)}
-
 
 def create_review(ctx, token, owner, repo, pull_number, body, event, comments, commit_id, api_base = DEFAULT_GITHUB_API):
     """Create a pull request review with inline comments."""
@@ -1088,10 +1066,20 @@ def create_review(ctx, token, owner, repo, pull_number, body, event, comments, c
         return {"success": True, "review_id": resp_body.get("id") if resp_body else None}
     return {"success": False, "error": "request failed: " + str(status_code)}
 
-
-def create_review_comment(ctx, token, owner, repo, pull_number, body, path, line,
-                          commit_id, side = "RIGHT", start_line = None, start_side = None,
-                          api_base = DEFAULT_GITHUB_API):
+def create_review_comment(
+        ctx,
+        token,
+        owner,
+        repo,
+        pull_number,
+        body,
+        path,
+        line,
+        commit_id,
+        side = "RIGHT",
+        start_line = None,
+        start_side = None,
+        api_base = DEFAULT_GITHUB_API):
     """Create a single review comment on a pull request."""
     url = api_base + "/repos/" + owner + "/" + repo + "/pulls/" + str(pull_number) + "/comments"
     payload = {
@@ -1110,13 +1098,11 @@ def create_review_comment(ctx, token, owner, repo, pull_number, body, path, line
         return {"success": True, "comment_id": resp_body.get("id") if resp_body else None}
     return {"success": False, "error": "HTTP %d: %s" % (status_code, resp_body)}
 
-
 def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
     """Delete a pull request review comment."""
     url = api_base + "/repos/" + owner + "/" + repo + "/pulls/comments/" + str(comment_id)
     success, status_code, _ = _do_request(ctx, "DELETE", url, token)
     return {"success": success}
-
 
 github = struct(
     VALID_ROLES = VALID_ROLES,
@@ -1127,37 +1113,37 @@ github = struct(
     is_public_github_url = _is_public_github_url,
     extract_host = _extract_host,
     status_checks = struct(
-        create   = _status_checks_create,
-        update   = _status_checks_update,
+        create = _status_checks_create,
+        update = _status_checks_update,
         complete = _status_checks_complete,
-        fail     = _status_checks_fail,
+        fail = _status_checks_fail,
     ),
     upload_artifact = _upload_artifact,
     delete_artifact = _delete_artifact,
     resolve_current_job_url = _resolve_current_job_url,
     issues = struct(
-        list_comments  = _issues_list_comments,
+        list_comments = _issues_list_comments,
         create_comment = _issues_create_comment,
         update_comment = _issues_update_comment,
         delete_comment = _issues_delete_comment,
     ),
     actions = struct(
-        list_run_artifacts    = _actions_list_run_artifacts,
+        list_run_artifacts = _actions_list_run_artifacts,
         download_artifact_zip = _actions_download_artifact_zip,
     ),
     pulls = struct(
-        list_files           = list_pull_request_files,
-        get                  = get_pull_request,
+        list_files = list_pull_request_files,
+        get = get_pull_request,
         list_review_comments = list_review_comments,
-        create_review        = create_review,
+        create_review = create_review,
         create_review_comment = create_review_comment,
         delete_review_comment = delete_review_comment,
     ),
-    detect_pr             = detect_github_pr,
-    detect_changed_files  = detect_changed_files,
+    detect_pr = detect_github_pr,
+    detect_changed_files = detect_changed_files,
     # Exposed for testing — also useful for any feature that consumes
     # raw GitHub PR-file or `git diff --unified=0` output.
-    parse_pr_patch        = _parse_github_pr_patch,
-    parse_local_diff      = _parse_local_diff_output,
-    extract_owner_repo    = _extract_github_owner_repo_from_url,
+    parse_pr_patch = _parse_github_pr_patch,
+    parse_local_diff = _parse_local_diff_output,
+    extract_owner_repo = _extract_github_owner_repo_from_url,
 )

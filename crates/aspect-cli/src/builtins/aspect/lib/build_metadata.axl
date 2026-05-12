@@ -12,13 +12,11 @@ kilgore/app/layout/header/ExecutionContext.tsx). Canonical values are
 uppercase enum-style strings (VCS=GITHUB, CI_HOST=BUILDKITE, …).
 """
 
-
 _VCS_HOST_TO_ENUM = {
-    "github.com":    "GITHUB",
-    "gitlab.com":    "GITLAB",
+    "github.com": "GITHUB",
+    "gitlab.com": "GITLAB",
     "bitbucket.org": "BITBUCKET",
 }
-
 
 def detect_vcs_from_host(host):
     """Return the canonical VCS enum for a host, or "" if unrecognized.
@@ -32,6 +30,7 @@ def detect_vcs_from_host(host):
     for domain, enum in _VCS_HOST_TO_ENUM.items():
         if h == domain or h.endswith("." + domain.split(".")[0] + "." + domain.split(".", 1)[1]):
             return enum
+
     # Simple heuristic for self-hosted: "github" or "gitlab" in the hostname.
     if "github" in h:
         return "GITHUB"
@@ -40,7 +39,6 @@ def detect_vcs_from_host(host):
     if "bitbucket" in h:
         return "BITBUCKET"
     return ""
-
 
 def parse_git_remote_url(url):
     """Parse a git remote URL (SSH or HTTPS) into {host, owner, repo, path}.
@@ -70,6 +68,7 @@ def parse_git_remote_url(url):
         if scheme_end < 0:
             return {}
         rest = url[scheme_end + 3:]
+
         # Strip user:pass@ credentials if present.
         at = rest.find("@")
         slash = rest.find("/")
@@ -86,7 +85,6 @@ def parse_git_remote_url(url):
     if len(parts) < 2:
         return {"host": host}
     return {"host": host, "owner": parts[0], "repo": parts[-1], "path": path}
-
 
 def _git_show(process):
     """Run `git show HEAD` and return a dict of commit fields.
@@ -107,12 +105,13 @@ def _git_show(process):
     if len(lines) >= 1 and lines[0].strip():
         result["COMMIT_SHA"] = lines[0].strip()
 
-    name  = lines[1].strip() if len(lines) >= 2 else ""
+    name = lines[1].strip() if len(lines) >= 2 else ""
     email = lines[2].strip() if len(lines) >= 3 else ""
     if name:
         result["COMMIT_AUTHOR_NAME"] = name
     if email:
         result["COMMIT_AUTHOR_EMAIL"] = email
+
     # Keep COMMIT_AUTHOR in the "Name <email>" form the Web UI docs advertise.
     if name and email:
         result["COMMIT_AUTHOR"] = name + " <" + email + ">"
@@ -138,7 +137,6 @@ def _git_show(process):
 
     return result
 
-
 def _apply_repo_url(meta, host, owner, repo, scheme = "https", url_path = None):
     """Set REPO_URL / REPO_OWNER / REPO_NAME / VCS from a parsed triple.
 
@@ -156,7 +154,6 @@ def _apply_repo_url(meta, host, owner, repo, scheme = "https", url_path = None):
     vcs = detect_vcs_from_host(host)
     if vcs and "VCS" not in meta:
         meta["VCS"] = vcs
-
 
 def _apply_vcs_override(env, meta):
     """Apply the ASPECT_VCS_URL override.
@@ -177,23 +174,23 @@ def _apply_vcs_override(env, meta):
         return
 
     parsed = parse_git_remote_url(vcs_url)
-    host      = parsed.get("host", "")
-    owner     = parsed.get("owner", "")
-    repo      = parsed.get("repo", "")
-    url_path  = parsed.get("path") or (owner + "/" + repo if owner and repo else "")
+    host = parsed.get("host", "")
+    owner = parsed.get("owner", "")
+    repo = parsed.get("repo", "")
+    url_path = parsed.get("path") or (owner + "/" + repo if owner and repo else "")
     if not host or not owner or not repo:
         return
 
     scheme = "http" if vcs_url.startswith("http://") else "https"
+
     # Override — these fields win over anything the CI collector set. Use the
     # full parsed path so nested-group GitLab repos keep their subgroups.
-    meta["REPO_URL"]   = scheme + "://" + host + "/" + url_path
+    meta["REPO_URL"] = scheme + "://" + host + "/" + url_path
     meta["REPO_OWNER"] = owner
-    meta["REPO_NAME"]  = repo
+    meta["REPO_NAME"] = repo
     vcs = detect_vcs_from_host(host)
     if vcs:
         meta["VCS"] = vcs
-
 
 # ---------------------------------------------------------------------------
 # GitHub Actions
@@ -201,7 +198,7 @@ def _apply_vcs_override(env, meta):
 
 def _collect_github(env, meta):
     meta["CI_HOST"] = "GITHUB_ACTIONS"
-    meta["VCS"]     = "GITHUB"
+    meta["VCS"] = "GITHUB"
 
     sha = env.var("GITHUB_SHA")
     if sha:
@@ -215,7 +212,7 @@ def _collect_github(env, meta):
     head_ref = env.var("GITHUB_HEAD_REF")
     if head_ref:
         # PR event — head ref is the PR source branch, main ref is "refs/pull/N/merge".
-        meta["BRANCH_NAME"]           = head_ref
+        meta["BRANCH_NAME"] = head_ref
         meta["PR_SOURCE_BRANCH_NAME"] = head_ref
         base_ref = env.var("GITHUB_BASE_REF") or ""
         if base_ref:
@@ -225,7 +222,7 @@ def _collect_github(env, meta):
             pr_num = ref[len("refs/pull/"):].split("/")[0]
             if pr_num:
                 meta["PR_NUMBER"] = pr_num
-                meta["PR_ID"]     = pr_num
+                meta["PR_ID"] = pr_num
     else:
         ref = env.var("GITHUB_REF") or ""
         if ref.startswith("refs/heads/"):
@@ -255,14 +252,18 @@ def _collect_github(env, meta):
     repo = env.var("GITHUB_REPOSITORY") or ""
     if "/" in repo:
         parts = repo.split("/", 1)
-        _apply_repo_url(meta, server_host, parts[0], parts[1],
-                        scheme = "https" if server.startswith("https://") else "http")
+        _apply_repo_url(
+            meta,
+            server_host,
+            parts[0],
+            parts[1],
+            scheme = "https" if server.startswith("https://") else "http",
+        )
 
     # Build URL — link to the GitHub Actions run page.
     run_id = env.var("GITHUB_RUN_ID") or ""
     if repo and run_id:
         meta["BUILD_URL"] = server + "/" + repo + "/actions/runs/" + run_id
-
 
 # ---------------------------------------------------------------------------
 # Buildkite
@@ -292,16 +293,21 @@ def _collect_buildkite(env, meta):
     repo_url = env.var("BUILDKITE_REPO")
     if repo_url:
         parsed = parse_git_remote_url(repo_url)
-        _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
-                        url_path = parsed.get("path"))
+        _apply_repo_url(
+            meta,
+            parsed.get("host", ""),
+            parsed.get("owner", ""),
+            parsed.get("repo", ""),
+            url_path = parsed.get("path"),
+        )
 
     # RUN_TYPE. Check PR before TAG because a PR may coincidentally have a tag.
     pr_num = env.var("BUILDKITE_PULL_REQUEST") or ""
     source = env.var("BUILDKITE_SOURCE") or ""
     if pr_num and pr_num != "false":
-        meta["RUN_TYPE"]   = "PULL_REQUEST"
-        meta["PR_NUMBER"]  = pr_num
-        meta["PR_ID"]      = pr_num
+        meta["RUN_TYPE"] = "PULL_REQUEST"
+        meta["PR_NUMBER"] = pr_num
+        meta["PR_ID"] = pr_num
         if branch:
             meta["PR_SOURCE_BRANCH_NAME"] = branch
         target = env.var("BUILDKITE_PULL_REQUEST_BASE_BRANCH") or ""
@@ -321,12 +327,11 @@ def _collect_buildkite(env, meta):
     # query suffix the link lands on the build page, not on this specific
     # step's job page, which is often not what the user wants.
     build_url = env.var("BUILDKITE_BUILD_URL") or ""
-    step_id   = env.var("BUILDKITE_STEP_ID") or ""
+    step_id = env.var("BUILDKITE_STEP_ID") or ""
     if build_url and step_id:
         meta["BUILD_URL"] = build_url + "/steps/canvas?sid=" + step_id
     elif build_url:
         meta["BUILD_URL"] = build_url
-
 
 # ---------------------------------------------------------------------------
 # CircleCI
@@ -356,8 +361,14 @@ def _collect_circleci(env, meta):
     repo_url = env.var("CIRCLE_REPOSITORY_URL") or ""
     if repo_url:
         parsed = parse_git_remote_url(repo_url)
-        _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
-                        url_path = parsed.get("path"))
+        _apply_repo_url(
+            meta,
+            parsed.get("host", ""),
+            parsed.get("owner", ""),
+            parsed.get("repo", ""),
+            url_path = parsed.get("path"),
+        )
+
     # Fallback to CIRCLE_PROJECT_* for owner/repo when URL parsing didn't cover them.
     if "REPO_OWNER" not in meta:
         owner = env.var("CIRCLE_PROJECT_USERNAME") or ""
@@ -370,9 +381,9 @@ def _collect_circleci(env, meta):
 
     pr_num = env.var("CIRCLE_PR_NUMBER") or ""
     if pr_num:
-        meta["RUN_TYPE"]  = "PULL_REQUEST"
+        meta["RUN_TYPE"] = "PULL_REQUEST"
         meta["PR_NUMBER"] = pr_num
-        meta["PR_ID"]     = pr_num
+        meta["PR_ID"] = pr_num
         if branch:
             meta["PR_SOURCE_BRANCH_NAME"] = branch
     elif tag:
@@ -384,14 +395,13 @@ def _collect_circleci(env, meta):
     if build_url:
         meta["BUILD_URL"] = build_url
 
-
 # ---------------------------------------------------------------------------
 # GitLab CI
 # ---------------------------------------------------------------------------
 
 def _collect_gitlab(env, meta):
     meta["CI_HOST"] = "GITLAB"
-    meta["VCS"]     = "GITLAB"
+    meta["VCS"] = "GITLAB"
 
     sha = env.var("CI_COMMIT_SHA")
     if sha:
@@ -417,36 +427,51 @@ def _collect_gitlab(env, meta):
         server_host = server_host.split("://", 1)[1]
 
     namespace = env.var("CI_PROJECT_NAMESPACE") or ""
-    project   = env.var("CI_PROJECT_NAME") or ""
+    project = env.var("CI_PROJECT_NAME") or ""
     project_path = env.var("CI_PROJECT_PATH") or ""  # full namespace/project path
     if project_path and "/" in project_path:
         # GitLab supports nested subgroups ("group/subgroup/project"). REPO_OWNER
         # carries the top-level group and REPO_NAME the leaf project, but REPO_URL
         # must retain the full path to actually resolve.
         parts = project_path.split("/")
-        _apply_repo_url(meta, server_host, parts[0], parts[-1],
-                        scheme = "https" if server_url.startswith("https://") else "http",
-                        url_path = project_path)
+        _apply_repo_url(
+            meta,
+            server_host,
+            parts[0],
+            parts[-1],
+            scheme = "https" if server_url.startswith("https://") else "http",
+            url_path = project_path,
+        )
     elif namespace and project:
-        _apply_repo_url(meta, server_host, namespace, project,
-                        scheme = "https" if server_url.startswith("https://") else "http")
+        _apply_repo_url(
+            meta,
+            server_host,
+            namespace,
+            project,
+            scheme = "https" if server_url.startswith("https://") else "http",
+        )
     else:
         repo_url = env.var("CI_REPOSITORY_URL") or ""
         if repo_url:
             parsed = parse_git_remote_url(repo_url)
-            _apply_repo_url(meta, parsed.get("host", ""), parsed.get("owner", ""), parsed.get("repo", ""),
-                            url_path = parsed.get("path"))
+            _apply_repo_url(
+                meta,
+                parsed.get("host", ""),
+                parsed.get("owner", ""),
+                parsed.get("repo", ""),
+                url_path = parsed.get("path"),
+            )
 
     # PR (merge request) detection.
-    mr_iid    = env.var("CI_MERGE_REQUEST_IID") or ""
-    source    = env.var("CI_PIPELINE_SOURCE") or ""
+    mr_iid = env.var("CI_MERGE_REQUEST_IID") or ""
+    source = env.var("CI_PIPELINE_SOURCE") or ""
     mr_source = env.var("CI_MERGE_REQUEST_SOURCE_BRANCH_NAME") or ""
     mr_target = env.var("CI_MERGE_REQUEST_TARGET_BRANCH_NAME") or ""
     if source == "merge_request_event" or mr_iid:
         meta["RUN_TYPE"] = "PULL_REQUEST"
         if mr_iid:
             meta["PR_NUMBER"] = mr_iid
-            meta["PR_ID"]     = mr_iid
+            meta["PR_ID"] = mr_iid
         if mr_source:
             meta["PR_SOURCE_BRANCH_NAME"] = mr_source
         if mr_target:
@@ -463,7 +488,6 @@ def _collect_gitlab(env, meta):
     build_url = env.var("CI_JOB_URL")
     if build_url:
         meta["BUILD_URL"] = build_url
-
 
 # ---------------------------------------------------------------------------
 # Task-identity metadata (depends on TaskContext, not just env)
@@ -494,11 +518,9 @@ def version_tuple(s):
             out[i] = int(digits)
     return out
 
-
 def version_gte(a, b):
     """Semver-ish '>=' comparison. Handles "5.18.0" >= "5.18.0"."""
     return version_tuple(a) >= version_tuple(b)
-
 
 def task_display_name(task_name):
     """Derive a display-name from a raw task name.
@@ -514,13 +536,11 @@ def task_display_name(task_name):
     words = [w.capitalize() for w in task_name.replace("_", "-").split("-") if w]
     return " ".join(words) if words else task_name
 
-
 # Workflows runner version at which the Web UI adopts the split
 # DISPLAY_NAME/NAME/KEY/ID metadata schema. Below this we emit the old
 # two-field form (ASPECT_TASK_NAME=display, ASPECT_TASK_ID=key) that the
 # older Web UI knows how to read.
 _TASK_METADATA_NEW_SCHEMA_MIN_VERSION = "5.18.0"
-
 
 def get_task_metadata_flags(ctx):
     """Generate --build_metadata flags for the current Aspect task identity.
@@ -541,10 +561,10 @@ def get_task_metadata_flags(ctx):
     we use the legacy form so check runs rendered against non-Aspect
     backends still show something readable.
     """
-    task         = ctx.task
-    name         = task.name or ""
-    key          = task.key  or ""
-    uuid         = task.id   or ""
+    task = ctx.task
+    name = task.name or ""
+    key = task.key or ""
+    uuid = task.id or ""
     display_name = task_display_name(name)
 
     runner_version = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_VERSION") or ""
@@ -567,7 +587,6 @@ def get_task_metadata_flags(ctx):
         if key:
             flags.append("--build_metadata=ASPECT_TASK_ID=" + key)
     return flags
-
 
 # ---------------------------------------------------------------------------
 # Public entry point

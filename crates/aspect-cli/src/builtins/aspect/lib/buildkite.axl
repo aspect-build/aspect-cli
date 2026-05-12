@@ -1,6 +1,5 @@
 """Buildkite artifact upload library."""
 
-
 def _upload_artifact(ctx, path, name):
     """Upload a single file to Buildkite using the buildkite-agent CLI.
 
@@ -32,14 +31,13 @@ def _upload_artifact(ctx, path, name):
 
     if status.code != 0:
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["exit " + str(status.code)]}
+
     # Buildkite artifact download URLs are short-lived — surface nothing stable.
     return {"success": True, "artifact_ref": name, "download_url": "", "errors": []}
-
 
 def _delete_artifact(ctx, name):
     """Buildkite has no artifact deletion API — no-op."""
     return {"success": True}
-
 
 buildkite = struct(
     upload_artifact = _upload_artifact,

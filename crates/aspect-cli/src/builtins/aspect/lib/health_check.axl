@@ -13,7 +13,6 @@ job. It does two things:
 load("@std//time.axl", "time")
 load("./environment.axl", "AWS_LOG_GROUP", "get_environment", "is_warming_complete")
 
-
 def _url_encode(s):
     """Percent-encode a string for use in URLs."""
     result = ""
@@ -32,7 +31,6 @@ def _url_encode(s):
             result += c
     return result
 
-
 def _bootstrap_log_url(environment):
     """
     Construct the bootstrap log URL based on the cloud provider.
@@ -45,7 +43,6 @@ def _bootstrap_log_url(environment):
         return _gcp_bootstrap_log_url(environment)
     return None
 
-
 def _aws_bootstrap_log_url(environment):
     """Construct AWS CloudWatch Logs URL for bootstrap logs."""
     region = environment.region
@@ -55,12 +52,11 @@ def _aws_bootstrap_log_url(environment):
     escaped_log_group = AWS_LOG_GROUP.replace("/", "%252F")
 
     return (
-        "https://" + region + ".console.aws.amazon.com/cloudwatch/home"
-        + "?region=" + region
-        + "#logsV2:log-groups/log-group/" + escaped_log_group
-        + "/log-events/" + instance_id
+        "https://" + region + ".console.aws.amazon.com/cloudwatch/home" +
+        "?region=" + region +
+        "#logsV2:log-groups/log-group/" + escaped_log_group +
+        "/log-events/" + instance_id
     )
-
 
 def _gcp_bootstrap_log_url(environment):
     """Construct GCP Cloud Logging URL for bootstrap logs."""
@@ -68,18 +64,17 @@ def _gcp_bootstrap_log_url(environment):
     project_id = environment.account
 
     query = (
-        'resource.type="gce_instance"\n'
-        + 'resource.labels.instance_id=' + instance_id + '\n'
-        + 'log_name="projects/' + project_id + '/logs/google_metadata_script_runner"'
+        'resource.type="gce_instance"\n' +
+        "resource.labels.instance_id=" + instance_id + "\n" +
+        'log_name="projects/' + project_id + '/logs/google_metadata_script_runner"'
     )
 
     return (
-        "https://console.cloud.google.com/logs/query"
-        + ";query=" + _url_encode(query)
-        + ";duration=P30D"
-        + "?referrer=search&project=" + project_id
+        "https://console.cloud.google.com/logs/query" +
+        ";query=" + _url_encode(query) +
+        ";duration=P30D" +
+        "?referrer=search&project=" + project_id
     )
-
 
 def _wait_for_warming(std, environment):
     """
@@ -87,6 +82,7 @@ def _wait_for_warming(std, environment):
 
     If warming is not configured, returns immediately.
     """
+
     # If warming is not configured, skip entirely
     if not environment.runner.warming_enabled:
         return environment
@@ -119,7 +115,6 @@ def _wait_for_warming(std, environment):
 
     return environment
 
-
 def _display_bazel_health(health):
     """
     Display the bazel health check result.
@@ -133,7 +128,6 @@ def _display_bazel_health(health):
     elif health.outcome == "inconclusive":
         print("\n\u2022 Bazel Health")
         print("\t? bazel health check inconclusive: " + (health.message or "unknown"))
-
 
 def _display_runner_health(environment):
     """
@@ -153,7 +147,6 @@ def _display_runner_health(environment):
     # data.output is a pre-formatted multi-line string
     print("Last run on " + str(data["timestamp"]) + "\n")
     print(data["output"])
-
 
 def agent_health_check(ctx, environment):
     """

@@ -1,25 +1,27 @@
 """
 Exercise axl
 """
-load("@demo//answer.axl", "ANSWER")
-load("./lambda.axl", "lambda_with_global_bind")
-load("@aspect//lib/bazel_results.axl", "render_check_output", "init_results", "summary_title", "compute_reproducer_command")
+
 load("@aspect//delivery.axl", delivery_fmt_elapsed = "fmt_elapsed")
-load("@aspect//lib/path_glob.axl", "match_path", "match_any")
-load("@aspect//lib/github.axl", "github", "detect_commit_sha", "detect_build_url")
-load("@aspect//lib/environment.axl", "color_enabled", "parse_git_url_name", "sanitize_filename")
-load("@aspect//lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments", "get_sarif_summary", "parse_sarif")
-load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset")
-load("@aspect//lib/runnable.axl", "canonical_label", "runnable")
-load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
-load("@aspect//lib/artifacts.axl", "detect_ci", "artifact_name")
-load("@aspect//lib/build_metadata.axl",
+load("@aspect//lib/artifacts.axl", "artifact_name", "detect_ci")
+load("@aspect//lib/bazel_results.axl", "compute_reproducer_command", "init_results", "render_check_output", "summary_title")
+load(
+    "@aspect//lib/build_metadata.axl",
     "detect_vcs_from_host",
     "parse_git_remote_url",
-    "version_tuple",
-    "version_gte",
     "task_display_name",
+    "version_gte",
+    "version_tuple",
 )
+load("@aspect//lib/deliveryd.axl", deliveryd_parse_endpoint = "parse_endpoint")
+load("@aspect//lib/environment.axl", "color_enabled", "parse_git_url_name", "sanitize_filename")
+load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha", "github")
+load("@aspect//lib/path_glob.axl", "match_any", "match_path")
+load("@aspect//lib/runnable.axl", "canonical_label", "runnable")
+load("@aspect//lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
+load("@aspect//lint.axl", "file_uri_to_path", "filter_all", "filter_changeset")
+load("@demo//answer.axl", "ANSWER")
+load("./lambda.axl", "lambda_with_global_bind")
 
 def test_case(tc, cond, msg) -> int:
     if not cond:
@@ -57,6 +59,7 @@ def test_env(ctx: TaskContext, tc: int, temp_dir: str) -> int:
     all_vars = ctx.std.env.vars()
     tc = test_case(tc, type(all_vars) == "list", "vars should return a list")
     tc = test_case(tc, len(all_vars) > 0, "vars should contain at least one entry")
+
     # Check that vars entries are tuple of two strings
     for var in all_vars:
         tc = test_case(tc, type(var) == "tuple" and len(var) == 2, "Each var entry should be a tuple of length 2")
@@ -129,7 +132,7 @@ def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
     sym_meta = ctx.std.fs.symlink_metadata(file_path)
     tc = test_case(tc, sym_meta.is_file == True, "symlink_metadata.is_file should be True")
     tc = test_case(tc, sym_meta.is_dir == False, "symlink_metadata.is_dir should be False")
-    tc = test_case(tc, sym_meta.is_symlink == False, "symlink_metadata.is_symlink should be False") # TODO: once we can create symlinks then update this test case
+    tc = test_case(tc, sym_meta.is_symlink == False, "symlink_metadata.is_symlink should be False")  # TODO: once we can create symlinks then update this test case
     tc = test_case(tc, sym_meta.size == 11, "metadata.size should match content length")
     tc = test_case(tc, type(sym_meta.modified) == "int" and sym_meta.modified > at_least_epoch, "symlink_metadata.modified should be int and greater than at_least_epoch")
     tc = test_case(tc, type(sym_meta.accessed) == "int" and sym_meta.accessed > at_least_epoch, "symlink_metadata.accessed should be int and greater than at_least_epoch")
@@ -154,6 +157,7 @@ def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
     ctx.std.fs.hard_link(file_path, hard_path)
     tc = test_case(tc, ctx.std.fs.exists(hard_path), "hard_link should create the link")
     tc = test_case(tc, ctx.std.fs.read_to_string(hard_path) == "hello world", "hard_link should share content")
+
     # Modify original and check link
     ctx.std.fs.write(file_path, "updated")
     tc = test_case(tc, ctx.std.fs.read_to_string(hard_path) == "updated", "hard_link should reflect changes")
@@ -162,6 +166,7 @@ def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
     entries = ctx.std.fs.read_dir(test_dir)
     tc = test_case(tc, type(entries) == "list", "read_dir should return a list")
     tc = test_case(tc, len(entries) > 0, "read_dir should find entries")
+
     # Check for specific entries (basenames)
     found_file = False
     found_deep = False
@@ -332,7 +337,7 @@ def test_large_bes(ctx: TaskContext, tc: int, temp_dir: str) -> int:
         "//...",
         flags = ["--noremote_accept_cached"],
         build_events = True,
-        current_dir = "./examples/large_bes"
+        current_dir = "./examples/large_bes",
     )
 
     # Iterate through all build events - this would hang before the fix
@@ -388,6 +393,7 @@ def test_http(ctx: TaskContext, tc: int, temp_dir: str) -> int:
 
     # URL to a small, stable file (Apache 2.0 license text from GitHub)
     url = "https://raw.githubusercontent.com/aspect-build/aspect-cli/refs/heads/main/LICENSE"
+
     # SHA-256 of Apache 2.0 license file
     expected_sha256 = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
     expected_integrity = "sha256-DVQuDIgE45qn836wDaWnYhSdxoLXgpRRKH4RuTjpRZQ="
@@ -453,8 +459,10 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     # Test 1: Server-wide cancel_invocation when no build is running
     cancellation3 = ctx.bazel.cancel_invocation()
     tc = test_case(tc, type(cancellation3.busy) == "bool", "cancel_invocation().busy should be a bool")
+
     # No invocation is active, so client_pid() returns None and busy should be False.
     tc = test_case(tc, cancellation3.busy == False, "cancel_invocation() with no active build should not be busy")
+
     # wait() should return immediately or after short poll
     result3 = cancellation3.wait()
     tc = test_case(tc, result3 == True, "wait() on server-wide cancellation should return True")
@@ -470,6 +478,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     # Now cancel whatever is running on the server
     cancellation4 = ctx.bazel.cancel_invocation()
     tc = test_case(tc, type(cancellation4.busy) == "bool", "cancel_invocation().busy should be a bool while build runs")
+
     # wait() should block until the cancelled invocation finishes
     result4 = cancellation4.wait()
     tc = test_case(tc, result4 == True, "wait() on server-wide cancellation of running build should return True")
@@ -524,6 +533,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
         build_events = True,
     )
     cancellation9 = ctx.bazel.cancel_invocation(force_kill_after_ms = 0)
+
     # Manually force-kill and then wait with timeout
     cancellation9.force()
     result9 = cancellation9.wait(timeout_ms = 5000)
@@ -575,6 +585,7 @@ def test_cancel_invocation(ctx: TaskContext, tc: int) -> int:
     stale.wait()
     status13 = build13.wait()
     tc = test_case(tc, type(status13.code) == "int", "stale cancellation setup should complete")
+
     # Now stale refers to a cancellation from a finished build.
     # Calling wait/force/busy on it should be safe no-ops.
     tc = test_case(tc, stale.busy == False, "stale cancellation.busy should be False")
@@ -639,6 +650,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "title" in out, "render_check_output returns a dict with 'title'")
     tc = test_case(tc, "summary" in out, "render_check_output returns a dict with 'summary'")
     tc = test_case(tc, "text" in out, "render_check_output returns a dict with 'text'")
+
     # New title format: "<Task Name> <Subject> <Invocation State>" (task name optional).
     # In these tests no render_ctx["task_display_name"] is set, so title starts with subject.
     tc = test_case(tc, "Tests passed" in out["title"], "passed title has Tests passed state: " + out["title"])
@@ -676,7 +688,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     r4 = init_results()
     r4["failed_actions_total"] = 1
     r4["failed_actions"] = [{
-        "label":     "//pkg:broken",
+        "label": "//pkg:broken",
         "mnemonics": ["CppCompile"],
     }]
     r4["failed_action_labels"] = ["//pkg:broken"]
@@ -690,23 +702,29 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
 
     # --- Test 5: summary_title corner cases ---
     r5 = init_results()
+
     # "Running..." wins while the build is streaming, regardless of counts.
     tc = test_case(tc, "Running..." in summary_title(r5, "running"), "empty running title")
+
     # No targets and no failures → empty state string (state is "", title is "").
     tc = test_case(tc, summary_title(r5, "passed") == "", "empty passed title (no buckets)")
     tc = test_case(tc, summary_title(r5, "failed") == "", "empty failed title (no buckets)")
     r5["passed_test_total"] = 3
     r5["cached_test_total"] = 2
     title = summary_title(r5, "passed")
+
     # 2 of 3 tests cached (cached != passed_total) → TEST_PASSED bucket wins → "Tests passed"
     tc = test_case(tc, "Tests passed" in title, "passed with tests title: " + title)
+
     # All cached case
     r5["cached_test_total"] = 3
     title_cached = summary_title(r5, "passed")
     tc = test_case(tc, "Tests passed (cached)" in title_cached, "all-cached title: " + title_cached)
+
     # With target pattern + display name
     title_tn = summary_title(r5, "passed", target_pattern = "//foo/...", task_display_name = "Test")
     tc = test_case(tc, title_tn.startswith("Test //foo/..."), "title begins with task and subject: " + title_tn)
+
     # Long target pattern is truncated
     long_p = "//a/very/long/pattern/that/definitely/exceeds/the/sixty/character/limit/for/titles/..."
     title_long = summary_title(r5, "passed", target_pattern = long_p)
@@ -738,6 +756,7 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     out7 = render_check_output(ctx, r7, "failed", render_ctx, links)
     tc = test_case(tc, "Invocation disconnected" in out7["title"], "aborted title: " + out7["title"])
     tc = test_case(tc, "user_interrupt" in out7["text"], "aborted details contain abort reason")
+
     # Aborted runs should NOT show the "Build in progress" placeholder —
     # the aborted notice at the top is authoritative.
     tc = test_case(tc, "Build in progress" not in out7["text"], "aborted details don't show pending message")
@@ -757,9 +776,10 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     r7b["build_command"] = "test"
     out7b = render_check_output(ctx, r7b, "running", render_ctx, links)
     tc = test_case(tc, "Build in progress" in out7b["text"], "running details show waiting placeholder")
+
     # Once targets start completing the placeholder should disappear.
     r7b["passed_test_total"] = 1
-    r7b["passed_tests"]      = [{"label": "//pkg:t", "cached": False, "duration_ms": 100}]
+    r7b["passed_tests"] = [{"label": "//pkg:t", "cached": False, "duration_ms": 100}]
     out7b2 = render_check_output(ctx, r7b, "running", render_ctx, links)
     tc = test_case(tc, "Build in progress" not in out7b2["text"], "waiting placeholder gone once targets appear")
 
@@ -769,14 +789,14 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     r_broken = init_results()
     r_broken["failed_actions_total"] = 2
     r_broken["failed_actions"] = [{
-        "label":     "//pkg/root:lib",
+        "label": "//pkg/root:lib",
         "mnemonics": ["CppCompile", "CppLink"],
     }]
     r_broken["failed_action_labels"] = ["//pkg/root:lib"]
     r_broken["failed_targets"] = [
-        {"label": "//pkg/root:lib"},      # root
+        {"label": "//pkg/root:lib"},  # root
         {"label": "//pkg/consumer:bin"},  # derived (depends on root:lib)
-        {"label": "//pkg/other:test"},    # derived
+        {"label": "//pkg/other:test"},  # derived
     ]
     r_broken["build_command"] = "build"
     out_broken = render_check_output(ctx, r_broken, "failed", render_ctx, links)
@@ -792,15 +812,15 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     # path (passed tests). Each test label has test.log + test.xml URLs.
     r8 = init_results()
     r8["failed_test_total"] = 1
-    r8["failed_tests"]      = [{"label": "//pkg:net_test", "cached": False, "duration_ms": 2000}]
-    r8["flaky_test_total"]  = 1
-    r8["flaky_tests"]       = [{"label": "//pkg:race_test", "cached": False, "duration_ms": 1000}]
+    r8["failed_tests"] = [{"label": "//pkg:net_test", "cached": False, "duration_ms": 2000}]
+    r8["flaky_test_total"] = 1
+    r8["flaky_tests"] = [{"label": "//pkg:race_test", "cached": False, "duration_ms": 1000}]
     r8["passed_test_total"] = 1
-    r8["passed_tests"]      = [{"label": "//pkg:ok_test", "cached": False, "duration_ms": 500}]
+    r8["passed_tests"] = [{"label": "//pkg:ok_test", "cached": False, "duration_ms": 500}]
     base_url = "https://output.circle-artifacts.com/output/job/job-uuid/artifacts/0/test/key/testlogs"
     links_with_label_urls = dict(links)
     links_with_label_urls["testlogs_label_urls"] = {
-        "//pkg:net_test":  {
+        "//pkg:net_test": {
             "test.log": base_url + "/pkg/net_test/test.log",
             "test.xml": base_url + "/pkg/net_test/test.xml",
         },
@@ -817,11 +837,13 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     tc = test_case(tc, "circle-artifacts.com" in out8["text"], "per-file URLs: failed test has clickable link")
     tc = test_case(tc, "net_test" in out8["text"], "per-file URLs: failed test label present")
     tc = test_case(tc, "race_test" in out8["text"], "per-file URLs: flaky test label present")
+
     # Bullet-path: failed and flaky tests each get an inline [xml] link next to the label.
-    tc = test_case(tc, "[xml](" + base_url + "/pkg/net_test/test.xml)"  in out8["text"], "per-file URLs: failed test has xml link")
+    tc = test_case(tc, "[xml](" + base_url + "/pkg/net_test/test.xml)" in out8["text"], "per-file URLs: failed test has xml link")
     tc = test_case(tc, "[xml](" + base_url + "/pkg/race_test/test.xml)" in out8["text"], "per-file URLs: flaky test has xml link")
+
     # <pre>-table path: passed tests get an Artifacts column with HTML anchors.
-    tc = test_case(tc, "Artifacts" in out8["text"],                          "per-file URLs: passed tests show Artifacts column header")
+    tc = test_case(tc, "Artifacts" in out8["text"], "per-file URLs: passed tests show Artifacts column header")
     tc = test_case(tc, '<a href="' + base_url + '/pkg/ok_test/test.log">log</a>' in out8["text"], "per-file URLs: passed test has log <a> in <pre>")
     tc = test_case(tc, '<a href="' + base_url + '/pkg/ok_test/test.xml">xml</a>' in out8["text"], "per-file URLs: passed test has xml <a> in <pre>")
 
@@ -829,149 +851,158 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     # Populate the fields that drive each section and assert they render — plus
     # that empty values are skipped (no "COMMIT_TAG" or "BUILD_EMBED_LABEL" rows).
     r9 = init_results()
-    r9["invocation_id"]           = "1111-aaaa-2222-bbbb"
-    r9["build_command"]           = "test"
-    r9["build_tool_version"]      = "9.0.1"
-    r9["start_time_ms"]           = 1744630000000
-    r9["finish_time_ms"]          = 1744630002000
-    r9["workspace_directory"]     = "/mnt/wd"
-    r9["working_directory"]       = "/mnt/wd"
-    r9["server_pid"]              = 42
-    r9["wall_time_ms"]            = 1234
-    r9["cpu_time_ms"]             = 5000
-    r9["analysis_phase_time_ms"]  = 200
+    r9["invocation_id"] = "1111-aaaa-2222-bbbb"
+    r9["build_command"] = "test"
+    r9["build_tool_version"] = "9.0.1"
+    r9["start_time_ms"] = 1744630000000
+    r9["finish_time_ms"] = 1744630002000
+    r9["workspace_directory"] = "/mnt/wd"
+    r9["working_directory"] = "/mnt/wd"
+    r9["server_pid"] = 42
+    r9["wall_time_ms"] = 1234
+    r9["cpu_time_ms"] = 5000
+    r9["analysis_phase_time_ms"] = 200
     r9["execution_phase_time_ms"] = 1000
-    r9["cached_duration_ms"]      = 60000
-    r9["actions_total"]           = 100
-    r9["actions_cached"]          = 90
-    r9["actions_executed"]        = 10
-    r9["action_mnemonics"]        = {"CppCompile": 50, "Rustc": 40, "Symlink": 10}
-    r9["action_cache_stats"]      = {
-        "hits": 900, "misses": 100,
+    r9["cached_duration_ms"] = 60000
+    r9["actions_total"] = 100
+    r9["actions_cached"] = 90
+    r9["actions_executed"] = 10
+    r9["action_mnemonics"] = {"CppCompile": 50, "Rustc": 40, "Symlink": 10}
+    r9["action_cache_stats"] = {
+        "hits": 900,
+        "misses": 100,
         "miss_details": [{"reason": "DIGEST_MISMATCH", "count": 100}],
     }
     r9["workspace_status"] = {
-        "BUILD_USER":        "tester",
+        "BUILD_USER": "tester",
         "BUILD_EMBED_LABEL": "",  # empty — must be skipped
     }
     r9["metadata"] = {
-        "BRANCH":     "main",
+        "BRANCH": "main",
         "COMMIT_TAG": "",  # empty — must be skipped
     }
     out9 = render_check_output(ctx, r9, "passed", render_ctx, links)
+
     # Performance section
-    tc = test_case(tc, "## Build metrics"                                 in out9["text"], "new sections: Build metrics header renders")
-    tc = test_case(tc, "<summary>⏱ Timing</summary>"                      in out9["text"], "new sections: Timing subsection collapses")
-    tc = test_case(tc, "Cached tests time saved: `1 cpu-minute`"          in out9["text"], "new sections: cached tests time saved value in cpu-minutes")
-    tc = test_case(tc, "<summary>⚡ Actions by mnemonic</summary>"         in out9["text"], "new sections: mnemonic subsection collapses")
-    tc = test_case(tc, "CppCompile"                                       in out9["text"], "new sections: mnemonic CppCompile present")
-    tc = test_case(tc, "**Local actions cache**"                          in out9["text"], "new sections: local cache subheader")
-    tc = test_case(tc, "900 hits"                                         in out9["text"], "new sections: local hits value")
-    tc = test_case(tc, "**Local cache miss reasons**"                     in out9["text"], "new sections: miss reasons subheader")
-    tc = test_case(tc, "Digest mismatch"                                  in out9["text"], "new sections: humanized miss reason")
+    tc = test_case(tc, "## Build metrics" in out9["text"], "new sections: Build metrics header renders")
+    tc = test_case(tc, "<summary>⏱ Timing</summary>" in out9["text"], "new sections: Timing subsection collapses")
+    tc = test_case(tc, "Cached tests time saved: `1 cpu-minute`" in out9["text"], "new sections: cached tests time saved value in cpu-minutes")
+    tc = test_case(tc, "<summary>⚡ Actions by mnemonic</summary>" in out9["text"], "new sections: mnemonic subsection collapses")
+    tc = test_case(tc, "CppCompile" in out9["text"], "new sections: mnemonic CppCompile present")
+    tc = test_case(tc, "**Local actions cache**" in out9["text"], "new sections: local cache subheader")
+    tc = test_case(tc, "900 hits" in out9["text"], "new sections: local hits value")
+    tc = test_case(tc, "**Local cache miss reasons**" in out9["text"], "new sections: miss reasons subheader")
+    tc = test_case(tc, "Digest mismatch" in out9["text"], "new sections: humanized miss reason")
+
     # Invocation
-    tc = test_case(tc, "## Invocation"                                    in out9["text"], "new sections: Invocation header renders")
-    tc = test_case(tc, "**Invocation ID:** `1111-aaaa-2222-bbbb`"         in out9["text"], "new sections: invocation id row")
-    tc = test_case(tc, "**Server PID:** `42`"                             in out9["text"], "new sections: server pid row")
-    tc = test_case(tc, "**User:** `tester`"                               in out9["text"], "new sections: Invocation user row (from workspace_status BUILD_USER)")
+    tc = test_case(tc, "## Invocation" in out9["text"], "new sections: Invocation header renders")
+    tc = test_case(tc, "**Invocation ID:** `1111-aaaa-2222-bbbb`" in out9["text"], "new sections: invocation id row")
+    tc = test_case(tc, "**Server PID:** `42`" in out9["text"], "new sections: server pid row")
+    tc = test_case(tc, "**User:** `tester`" in out9["text"], "new sections: Invocation user row (from workspace_status BUILD_USER)")
 
     # Invocation section: CPU arch + compilation mode from the `configuration` BES event.
     r9b = init_results()
-    r9b["build_command"]     = "test"
-    r9b["targets_total"]     = 1
-    r9b["invocation_id"]     = "id-for-cpu-mode"
-    r9b["cpu_arch"]          = "aarch64"
-    r9b["compilation_mode"]  = "opt"
-    r9b["workspace_status"]  = {"BUILD_USER": "greg", "BUILD_HOST": "MacBook-Pro-2.local"}
+    r9b["build_command"] = "test"
+    r9b["targets_total"] = 1
+    r9b["invocation_id"] = "id-for-cpu-mode"
+    r9b["cpu_arch"] = "aarch64"
+    r9b["compilation_mode"] = "opt"
+    r9b["workspace_status"] = {"BUILD_USER": "greg", "BUILD_HOST": "MacBook-Pro-2.local"}
     out9b = render_check_output(ctx, r9b, "passed", render_ctx, links)
-    tc = test_case(tc, "**CPU Target:** `aarch64`"              in out9b["text"], "invocation: CPU Target row (matches TARGET_CPU source)")
-    tc = test_case(tc, "**Mode:** `opt`"                        in out9b["text"], "invocation: compilation mode row")
-    tc = test_case(tc, "**Host name:** `MacBook-Pro-2.local`"   in out9b["text"], "invocation: host name row (from BUILD_HOST)")
-    tc = test_case(tc, "**User:** `greg`"                       in out9b["text"], "invocation: user row (from BUILD_USER)")
+    tc = test_case(tc, "**CPU Target:** `aarch64`" in out9b["text"], "invocation: CPU Target row (matches TARGET_CPU source)")
+    tc = test_case(tc, "**Mode:** `opt`" in out9b["text"], "invocation: compilation mode row")
+    tc = test_case(tc, "**Host name:** `MacBook-Pro-2.local`" in out9b["text"], "invocation: host name row (from BUILD_HOST)")
+    tc = test_case(tc, "**User:** `greg`" in out9b["text"], "invocation: user row (from BUILD_USER)")
 
     # --- Test 9c: Aspect Workflows Runner row + details section ---
     # Set the runner env vars locally, render, assert the new summary row
     # and the `## Aspect Workflows Runner` section both show up.
     env = ctx.std.env
-    env.set_var("ASPECT_WORKFLOWS_RUNNER",                        "1")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_VERSION",                "5.17.21")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER",         "aws")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_AZ",                     "us-west-2b")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_REGION",                 "us-west-2")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE",          "m6id.xlarge")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID",            "i-0a2cf70da43383661")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME",          "aw-bk-runner--default")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_IMAGE_ID",               "ami-003fd591c394df929")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME",             "default")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE",            "aspect-default")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION","2026.16.4")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION",       "3.123.1")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE",       "1")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_PREEMPTIBLE",            "1")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED",        "1")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER", "1")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_VERSION", "5.17.21")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER", "aws")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_AZ", "us-west-2b")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_REGION", "us-west-2")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE", "m6id.xlarge")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID", "i-0a2cf70da43383661")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME", "aw-bk-runner--default")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_IMAGE_ID", "ami-003fd591c394df929")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME", "default")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE", "aspect-default")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION", "2026.16.4")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION", "3.123.1")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE", "1")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_PREEMPTIBLE", "1")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED", "1")
+
     # Warming state files — write to tempdir, set env pointers at them.
     tmp = ctx.std.fs.mkdtemp(prefix = "runner-warming-", parent = ctx.std.env.temp_dir())
-    marker_path  = tmp + "/warming_complete"
+    marker_path = tmp + "/warming_complete"
     version_path = tmp + "/warming_current_cache"
-    ctx.std.fs.write(marker_path,  "")
+    ctx.std.fs.write(marker_path, "")
     ctx.std.fs.write(version_path, "42\n")
     env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE", marker_path)
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE",   version_path)
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE", version_path)
     r9c = init_results()
     r9c["build_command"] = "test"
     r9c["targets_total"] = 1
     out9c = render_check_output(ctx, r9c, "passed", render_ctx, links)
+
     # Summary row — compact line. Title now reads "Workflows runner v…".
     tc = test_case(tc, "🚀 Workflows runner v5.17.21" in out9c["summary"], "aspect runner: summary row shows Workflows runner version")
-    tc = test_case(tc, "☁️ AWS"                      in out9c["summary"], "aspect runner: summary row cloud provider is uppercase (AWS)")
-    tc = test_case(tc, "📍 us-west-2b"               in out9c["summary"], "aspect runner: summary row shows AZ")
-    tc = test_case(tc, "💠 m6id.xlarge"              in out9c["summary"], "aspect runner: summary row shows instance type")
-    tc = test_case(tc, "🆔 i-0a2cf70da43383661"      in out9c["summary"], "aspect runner: summary row shows instance id")
+    tc = test_case(tc, "☁️ AWS" in out9c["summary"], "aspect runner: summary row cloud provider is uppercase (AWS)")
+    tc = test_case(tc, "📍 us-west-2b" in out9c["summary"], "aspect runner: summary row shows AZ")
+    tc = test_case(tc, "💠 m6id.xlarge" in out9c["summary"], "aspect runner: summary row shows instance type")
+    tc = test_case(tc, "🆔 i-0a2cf70da43383661" in out9c["summary"], "aspect runner: summary row shows instance id")
+
     # Details section — full set of fields, including new Group name + warming state.
-    tc = test_case(tc, "## Aspect Workflows Runner"                 in out9c["text"], "aspect runner: details section header")
-    tc = test_case(tc, "**Workflows version:** `5.17.21`"            in out9c["text"], "aspect runner: version row")
-    tc = test_case(tc, "**Cloud provider:** `AWS`"                   in out9c["text"], "aspect runner: cloud provider uppercase in details")
-    tc = test_case(tc, "**Region:** `us-west-2`"                     in out9c["text"], "aspect runner: region row")
-    tc = test_case(tc, "**Availability zone:** `us-west-2b`"         in out9c["text"], "aspect runner: AZ row")
-    tc = test_case(tc, "**Instance type:** `m6id.xlarge`"            in out9c["text"], "aspect runner: instance type row")
-    tc = test_case(tc, "**Instance name:** `aw-bk-runner--default`"  in out9c["text"], "aspect runner: instance name row")
-    tc = test_case(tc, "**Instance ID:** `i-0a2cf70da43383661`"      in out9c["text"], "aspect runner: instance id row")
-    tc = test_case(tc, "**Image ID:** `ami-003fd591c394df929`"       in out9c["text"], "aspect runner: image id row")
-    tc = test_case(tc, "**Group name:** `default`"                   in out9c["text"], "aspect runner: group name row")
-    tc = test_case(tc, "**Group queue:** `aspect-default`"           in out9c["text"], "aspect runner: group queue row")
-    tc = test_case(tc, "**Aspect launcher version:** `2026.16.4`"    in out9c["text"], "aspect runner: launcher version row")
-    tc = test_case(tc, "**CI agent version:** `3.123.1`"             in out9c["text"], "aspect runner: ci agent version row")
-    tc = test_case(tc, "**NVMe storage:** `yes`"                     in out9c["text"], "aspect runner: NVMe storage normalized to yes")
-    tc = test_case(tc, "**Preemptible:** `yes`"                      in out9c["text"], "aspect runner: preemptible normalized to yes")
-    tc = test_case(tc, "**Warming enabled:** `yes`"                  in out9c["text"], "aspect runner: warming normalized to yes")
-    tc = test_case(tc, "**Warming complete:** `yes`"                 in out9c["text"], "aspect runner: warming complete marker detected")
-    tc = test_case(tc, "**Warming cache version:** `42`"             in out9c["text"], "aspect runner: warming cache version read from file")
+    tc = test_case(tc, "## Aspect Workflows Runner" in out9c["text"], "aspect runner: details section header")
+    tc = test_case(tc, "**Workflows version:** `5.17.21`" in out9c["text"], "aspect runner: version row")
+    tc = test_case(tc, "**Cloud provider:** `AWS`" in out9c["text"], "aspect runner: cloud provider uppercase in details")
+    tc = test_case(tc, "**Region:** `us-west-2`" in out9c["text"], "aspect runner: region row")
+    tc = test_case(tc, "**Availability zone:** `us-west-2b`" in out9c["text"], "aspect runner: AZ row")
+    tc = test_case(tc, "**Instance type:** `m6id.xlarge`" in out9c["text"], "aspect runner: instance type row")
+    tc = test_case(tc, "**Instance name:** `aw-bk-runner--default`" in out9c["text"], "aspect runner: instance name row")
+    tc = test_case(tc, "**Instance ID:** `i-0a2cf70da43383661`" in out9c["text"], "aspect runner: instance id row")
+    tc = test_case(tc, "**Image ID:** `ami-003fd591c394df929`" in out9c["text"], "aspect runner: image id row")
+    tc = test_case(tc, "**Group name:** `default`" in out9c["text"], "aspect runner: group name row")
+    tc = test_case(tc, "**Group queue:** `aspect-default`" in out9c["text"], "aspect runner: group queue row")
+    tc = test_case(tc, "**Aspect launcher version:** `2026.16.4`" in out9c["text"], "aspect runner: launcher version row")
+    tc = test_case(tc, "**CI agent version:** `3.123.1`" in out9c["text"], "aspect runner: ci agent version row")
+    tc = test_case(tc, "**NVMe storage:** `yes`" in out9c["text"], "aspect runner: NVMe storage normalized to yes")
+    tc = test_case(tc, "**Preemptible:** `yes`" in out9c["text"], "aspect runner: preemptible normalized to yes")
+    tc = test_case(tc, "**Warming enabled:** `yes`" in out9c["text"], "aspect runner: warming normalized to yes")
+    tc = test_case(tc, "**Warming complete:** `yes`" in out9c["text"], "aspect runner: warming complete marker detected")
+    tc = test_case(tc, "**Warming cache version:** `42`" in out9c["text"], "aspect runner: warming cache version read from file")
+
     # Cleanup — leave env as we found it so later tests don't see residue.
-    env.set_var("ASPECT_WORKFLOWS_RUNNER",                        "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_VERSION",                "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER",         "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_AZ",                     "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_REGION",                 "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE",          "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID",            "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME",          "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_IMAGE_ID",               "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME",             "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE",            "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION","")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION",       "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE",       "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED",        "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_VERSION", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_CLOUD_PROVIDER", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_AZ", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_REGION", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_TYPE", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_ID", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_INSTANCE_NAME", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_IMAGE_ID", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_NAME", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_GROUP_QUEUE", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_ASPECT_LAUNCHER_VERSION", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_CI_AGENT_VERSION", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_HAS_NVME_STORAGE", "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_ENABLED", "")
     env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE", "")
-    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE",   "")
+    env.set_var("ASPECT_WORKFLOWS_RUNNER_WARMING_CACHE_VERSION_FILE", "")
+
     # Workspace Status — BUILD_USER rendered, BUILD_EMBED_LABEL (empty) skipped
-    tc = test_case(tc, "## Workspace Status"                              in out9["text"], "new sections: Workspace Status header renders")
-    tc = test_case(tc, "**BUILD_USER:** `tester`"                         in out9["text"], "new sections: workspace BUILD_USER row")
-    tc = test_case(tc, "BUILD_EMBED_LABEL"                            not in out9["text"], "new sections: empty workspace value is skipped")
+    tc = test_case(tc, "## Workspace Status" in out9["text"], "new sections: Workspace Status header renders")
+    tc = test_case(tc, "**BUILD_USER:** `tester`" in out9["text"], "new sections: workspace BUILD_USER row")
+    tc = test_case(tc, "BUILD_EMBED_LABEL" not in out9["text"], "new sections: empty workspace value is skipped")
+
     # Build Metadata — BRANCH rendered, COMMIT_TAG (empty) skipped
-    tc = test_case(tc, "## Build Metadata"                                in out9["text"], "new sections: Build Metadata header renders")
-    tc = test_case(tc, "**BRANCH:** `main`"                               in out9["text"], "new sections: metadata BRANCH row")
-    tc = test_case(tc, "COMMIT_TAG"                                   not in out9["text"], "new sections: empty metadata value is skipped")
+    tc = test_case(tc, "## Build Metadata" in out9["text"], "new sections: Build Metadata header renders")
+    tc = test_case(tc, "**BRANCH:** `main`" in out9["text"], "new sections: metadata BRANCH row")
+    tc = test_case(tc, "COMMIT_TAG" not in out9["text"], "new sections: empty metadata value is skipped")
 
     # --- Test 11: flag-value quoting boundary ---
     # For `--flag=value` tokens with spaces in the value, the quote boundary
@@ -979,13 +1010,13 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     # separated "flag value" tokens (one string with an embedded space between
     # flag and its value), the whole token needs to be quoted as a single unit.
     r10 = init_results()
-    r10["build_command"]    = "test"
-    r10["targets_total"]    = 1
+    r10["build_command"] = "test"
+    r10["targets_total"] = 1
     r10["passed_test_total"] = 0
     r10["options_parsed"] = {
         "explicit_cmd_line": [
-            "--config=ci",                                    # safe, unchanged
-            "--build_metadata=COMMIT_AUTHOR=Greg Magolan",    # value-only quoting
+            "--config=ci",  # safe, unchanged
+            "--build_metadata=COMMIT_AUTHOR=Greg Magolan",  # value-only quoting
             "--build_metadata=COMMIT_AUTHOR_EMAIL=greg@aspect.build",  # safe, unchanged
             "--build_event_binary_file /var/folders/zm/build-event-out-fbd8f66b.bin",  # whole-token quoting
         ],
@@ -993,119 +1024,132 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
         "cmd_line": [],
     }
     out10 = render_check_output(ctx, r10, "passed", render_ctx, links)
+
     # Value-only quoting for --flag=value with unsafe value.
-    tc = test_case(tc, "--build_metadata=&#x27;COMMIT_AUTHOR=Greg Magolan&#x27;"                   in out10["text"], "flag quoting: --flag='value with space'")
-    tc = test_case(tc, "--build_metadata=COMMIT_AUTHOR_EMAIL=greg@aspect.build"                    in out10["text"], "flag quoting: safe --flag=value stays unquoted")
-    tc = test_case(tc, "--config=ci"                                                               in out10["text"], "flag quoting: safe --config=ci stays unquoted")
+    tc = test_case(tc, "--build_metadata=&#x27;COMMIT_AUTHOR=Greg Magolan&#x27;" in out10["text"], "flag quoting: --flag='value with space'")
+    tc = test_case(tc, "--build_metadata=COMMIT_AUTHOR_EMAIL=greg@aspect.build" in out10["text"], "flag quoting: safe --flag=value stays unquoted")
+    tc = test_case(tc, "--config=ci" in out10["text"], "flag quoting: safe --config=ci stays unquoted")
+
     # Whole-token quoting for flag-with-space token (no `=`).
     tc = test_case(tc, "&#x27;--build_event_binary_file &#x2f;var&#x2f;folders&#x2f;zm&#x2f;build-event-out-fbd8f66b.bin&#x27;" in out10["text"], "flag quoting: space-separated flag gets whole-token quoting")
 
     # --- Test 12: Build graph one-liners + Runner table + aspects split ---
     r11 = init_results()
-    r11["build_command"]                            = "test"
-    r11["targets_configured"]                       = 134227
+    r11["build_command"] = "test"
+    r11["targets_configured"] = 134227
     r11["targets_configured_not_including_aspects"] = 134094
-    r11["targets_total"]                            = 141
-    r11["packages_loaded"]                          = 735
-    r11["actions_total"]                            = 33305
-    r11["actions_executed"]                         = 20233
-    r11["actions_cached"]                           = 13072
-    r11["action_mnemonics"]                         = {"CppCompile": 100, "Rustc": 41}
-    r11["runner_counts"]                            = {"remote cache hit · Remote": 130, "darwin-sandbox": 11}
-    r11["wall_time_ms"]                             = 2200
+    r11["targets_total"] = 141
+    r11["packages_loaded"] = 735
+    r11["actions_total"] = 33305
+    r11["actions_executed"] = 20233
+    r11["actions_cached"] = 13072
+    r11["action_mnemonics"] = {"CppCompile": 100, "Rustc": 41}
+    r11["runner_counts"] = {"remote cache hit · Remote": 130, "darwin-sandbox": 11}
+    r11["wall_time_ms"] = 2200
     out11 = render_check_output(ctx, r11, "passed", render_ctx, links)
+
     # Bazel-style one-liners.
-    tc = test_case(tc, "<summary>📦 Build graph</summary>"                           in out11["text"], "stats: Build graph subsection collapses")
-    tc = test_case(tc, "<summary>💾 Cache stats</summary>"                           in out11["text"], "stats: Cache stats subsection collapses")
-    tc = test_case(tc, "13,072 of 33,305 cached (39%)"                               in out11["text"], "stats: Cache stats actions line")
+    tc = test_case(tc, "<summary>📦 Build graph</summary>" in out11["text"], "stats: Build graph subsection collapses")
+    tc = test_case(tc, "<summary>💾 Cache stats</summary>" in out11["text"], "stats: Cache stats subsection collapses")
+    tc = test_case(tc, "13,072 of 33,305 cached (39%)" in out11["text"], "stats: Cache stats actions line")
     tc = test_case(tc, "**Targets**: 141 targets (134,094 configured, 133 aspect applications)" in out11["text"], "stats: targets line splits rules vs aspect applications")
-    tc = test_case(tc, "**Actions**: 20,233 actions (33,305 created)"                in out11["text"], "stats: actions line shows executed + created")
-    tc = test_case(tc, "**Packages**: 735 packages loaded"                           in out11["text"], "stats: packages line")
-    tc = test_case(tc, "<summary>🏃 Actions by runner</summary>"                     in out11["text"], "stats: runner subsection collapses")
-    tc = test_case(tc, "remote cache hit"                                            in out11["text"], "stats: runner row label")
-    tc = test_case(tc, "darwin-sandbox"                                              in out11["text"], "stats: second runner row label")
+    tc = test_case(tc, "**Actions**: 20,233 actions (33,305 created)" in out11["text"], "stats: actions line shows executed + created")
+    tc = test_case(tc, "**Packages**: 735 packages loaded" in out11["text"], "stats: packages line")
+    tc = test_case(tc, "<summary>🏃 Actions by runner</summary>" in out11["text"], "stats: runner subsection collapses")
+    tc = test_case(tc, "remote cache hit" in out11["text"], "stats: runner row label")
+    tc = test_case(tc, "darwin-sandbox" in out11["text"], "stats: second runner row label")
 
     # Incremental rebuild: build_metrics reports 0 for top-level actions_total
     # but per-mnemonic action_data carries the actions_created sums. Our
     # handler sums those up to recover the grand total. Simulate this by
     # setting targets_total only (to reflect target_completed events firing).
     r12 = init_results()
-    r12["build_command"]    = "test"
-    r12["targets_total"]    = 141
-    r12["wall_time_ms"]     = 6600
-    r12["cpu_time_ms"]      = 25400
-    r12["packages_loaded"]  = 0         # incremental
+    r12["build_command"] = "test"
+    r12["targets_total"] = 141
+    r12["wall_time_ms"] = 6600
+    r12["cpu_time_ms"] = 25400
+    r12["packages_loaded"] = 0  # incremental
+
     # actions_executed = 1 (workspace status), actions_total stays 0 at
     # this layer — our builder still emits "1 action" and omits "(N created)".
     r12["actions_executed"] = 1
     out12 = render_check_output(ctx, r12, "passed", render_ctx, links)
-    tc = test_case(tc, "**Targets**: 141 targets"                      in out12["text"], "stats: incremental Targets line")
-    tc = test_case(tc, "**Actions**: 1 action"                         in out12["text"], "stats: incremental Actions line shows executed only")
-    tc = test_case(tc, "**Packages**: 0 packages loaded"               in out12["text"], "stats: incremental Packages line shows 0")
+    tc = test_case(tc, "**Targets**: 141 targets" in out12["text"], "stats: incremental Targets line")
+    tc = test_case(tc, "**Actions**: 1 action" in out12["text"], "stats: incremental Actions line shows executed only")
+    tc = test_case(tc, "**Packages**: 0 packages loaded" in out12["text"], "stats: incremental Packages line shows 0")
 
     # --- Test 13: VCS linking, PR, merged metadata, TAGS, ASPECT_WORKFLOWS_LINKS ---
     r13 = init_results()
-    r13["build_command"]    = "test"
+    r13["build_command"] = "test"
     r13["build_tool_version"] = "9.0.1"
-    r13["invocation_id"]    = "abc-123"
-    r13["start_time_ms"]    = 1744630000000   # drives the 📅 row in the summary
-    r13["wall_time_ms"]     = 68000
-    r13["targets_total"]    = 146
+    r13["invocation_id"] = "abc-123"
+    r13["start_time_ms"] = 1744630000000  # drives the 📅 row in the summary
+    r13["wall_time_ms"] = 68000
+    r13["targets_total"] = 146
     r13["actions_executed"] = 361
-    r13["actions_total"]    = 46325
+    r13["actions_total"] = 46325
     r13["passed_test_total"] = 25
     r13["cached_test_total"] = 25
+
     # Metadata takes precedence over workspace_status when both set a key.
     r13["workspace_status"] = {
-        "BUILD_HOST":      "MacBook-Pro-2.local",
-        "REPO_OWNER":      "DIFFERENT_FROM_METADATA",  # should be overridden by metadata below
+        "BUILD_HOST": "MacBook-Pro-2.local",
+        "REPO_OWNER": "DIFFERENT_FROM_METADATA",  # should be overridden by metadata below
     }
     r13["metadata"] = {
-        "VCS":                   "GITHUB",
-        "REPO_OWNER":            "aspect-build",  # overrides workspace_status
-        "REPO_NAME":             "silo",
-        "BRANCH_NAME":           "bazel_status_checks",
-        "COMMIT_SHA":            "417a65c1234567890abc",
-        "COMMIT_MESSAGE":        "GitHub status checks",
-        "COMMIT_AUTHOR_NAME":    "Greg Magolan",
-        "COMMIT_AUTHOR_EMAIL":   "greg@aspect.build",
-        "RUN_TYPE":              "BRANCH_PUSH",
-        "PR_NUMBER":             "1102",
-        "PR_ID":                 "1102",
-        "TAGS":                  "nightly,canary",
-        "TAG_ENV":               "staging",
+        "VCS": "GITHUB",
+        "REPO_OWNER": "aspect-build",  # overrides workspace_status
+        "REPO_NAME": "silo",
+        "BRANCH_NAME": "bazel_status_checks",
+        "COMMIT_SHA": "417a65c1234567890abc",
+        "COMMIT_MESSAGE": "GitHub status checks",
+        "COMMIT_AUTHOR_NAME": "Greg Magolan",
+        "COMMIT_AUTHOR_EMAIL": "greg@aspect.build",
+        "RUN_TYPE": "BRANCH_PUSH",
+        "PR_NUMBER": "1102",
+        "PR_ID": "1102",
+        "TAGS": "nightly,canary",
+        "TAG_ENV": "staging",
         "ASPECT_WORKFLOWS_LINKS": "[Runbook](https://example.com/runbook),[Dashboard](https://example.com/dash)",
     }
     out13 = render_check_output(ctx, r13, "passed", render_ctx, links)
     txt = out13["text"]
     sum_txt = out13["summary"]
+
     # Merged metadata: in the summary line, build_metadata (aspect-build) wins
     # over workspace_status (DIFFERENT_FROM_METADATA). The raw workspace_status
     # value is still shown in the dedicated Workspace Status section below —
     # that's expected.
-    tc = test_case(tc, "DIFFERENT_FROM_METADATA"                           not in sum_txt, "merged meta: build_metadata wins over workspace_status in summary")
+    tc = test_case(tc, "DIFFERENT_FROM_METADATA" not in sum_txt, "merged meta: build_metadata wins over workspace_status in summary")
+
     # New test cache format (mirrors actions format).
-    tc = test_case(tc, "0 of 25 tests (100% cached)"                          in sum_txt, "summary: test format matches actions format")
+    tc = test_case(tc, "0 of 25 tests (100% cached)" in sum_txt, "summary: test format matches actions format")
+
     # CPU no longer in summary row 1.
-    tc = test_case(tc, "CPU"                                                 not in sum_txt, "summary: CPU removed from summary lines")
+    tc = test_case(tc, "CPU" not in sum_txt, "summary: CPU removed from summary lines")
+
     # Row 1 now includes the date (not row 7 anymore).
-    tc = test_case(tc, "📅"                                                   in sum_txt, "summary: date present")
+    tc = test_case(tc, "📅" in sum_txt, "summary: date present")
+
     # VCS row: repo link + PR link + branch link + commit link.
     tc = test_case(tc, "[silo](https://github.com/aspect-build/silo)" in sum_txt, "summary: repo link text is just the repo name")
-    tc = test_case(tc, "[aspect-build/silo]"                      not in sum_txt, "summary: owner prefix not in link text")
+    tc = test_case(tc, "[aspect-build/silo]" not in sum_txt, "summary: owner prefix not in link text")
     tc = test_case(tc, "[#1102](https://github.com/aspect-build/silo/pull/1102)" in sum_txt, "summary: PR link")
     tc = test_case(tc, "[bazel_status_checks](https://github.com/aspect-build/silo/tree/bazel_status_checks)" in sum_txt, "summary: branch link")
     tc = test_case(tc, "github.com/aspect-build/silo/commit/417a65c1234567890abc" in sum_txt, "summary: commit link")
-    tc = test_case(tc, "417a65c - GitHub status checks"                       in sum_txt, "summary: commit short sha + message")
+    tc = test_case(tc, "417a65c - GitHub status checks" in sum_txt, "summary: commit short sha + message")
+
     # Row 5: trigger
-    tc = test_case(tc, "Branch push run"                                      in sum_txt, "summary: trigger label")
+    tc = test_case(tc, "Branch push run" in sum_txt, "summary: trigger label")
+
     # Tags row
-    tc = test_case(tc, "🏷 nightly"                                           in sum_txt, "summary: TAGS nightly tag")
-    tc = test_case(tc, "🏷 canary"                                            in sum_txt, "summary: TAGS canary tag")
-    tc = test_case(tc, "🏷 ENV=staging"                                       in sum_txt, "summary: TAG_ prefix tag")
+    tc = test_case(tc, "🏷 nightly" in sum_txt, "summary: TAGS nightly tag")
+    tc = test_case(tc, "🏷 canary" in sum_txt, "summary: TAGS canary tag")
+    tc = test_case(tc, "🏷 ENV=staging" in sum_txt, "summary: TAG_ prefix tag")
+
     # Custom links row
-    tc = test_case(tc, "🔗 [Runbook](https://example.com/runbook)"            in sum_txt, "summary: ASPECT_WORKFLOWS_LINKS Runbook")
-    tc = test_case(tc, "🔗 [Dashboard](https://example.com/dash)"             in sum_txt, "summary: ASPECT_WORKFLOWS_LINKS Dashboard")
+    tc = test_case(tc, "🔗 [Runbook](https://example.com/runbook)" in sum_txt, "summary: ASPECT_WORKFLOWS_LINKS Runbook")
+    tc = test_case(tc, "🔗 [Dashboard](https://example.com/dash)" in sum_txt, "summary: ASPECT_WORKFLOWS_LINKS Dashboard")
 
     # --- Test 14a: User display precedence (name only, never email) ---
     # GitHub-flavored markdown autolinks bare emails — so we deliberately
@@ -1117,29 +1161,29 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     r_ua["build_command"] = "test"
     r_ua["targets_total"] = 1
     r_ua["metadata"] = {
-        "COMMIT_AUTHOR_NAME":  "Greg Magolan",
-        "COMMIT_AUTHOR":       "Greg Magolan <greg@aspect.build>",
+        "COMMIT_AUTHOR_NAME": "Greg Magolan",
+        "COMMIT_AUTHOR": "Greg Magolan <greg@aspect.build>",
         "COMMIT_AUTHOR_EMAIL": "ignored@example.com",
-        "USER":                "also-ignored",
+        "USER": "also-ignored",
     }
     r_ua["workspace_status"] = {"BUILD_USER": "ignored-too"}
     out_ua = render_check_output(ctx, r_ua, "passed", render_ctx, links)
-    tc = test_case(tc, "👤 Greg Magolan"    in out_ua["summary"], "user fallback: NAME wins")
-    tc = test_case(tc, "@"              not in out_ua["summary"], "user fallback: no '@' in summary (prevents GFM autolink)")
-    tc = test_case(tc, "ignored"        not in out_ua["summary"], "user fallback: email / lower-precedence sources not rendered")
+    tc = test_case(tc, "👤 Greg Magolan" in out_ua["summary"], "user fallback: NAME wins")
+    tc = test_case(tc, "@" not in out_ua["summary"], "user fallback: no '@' in summary (prevents GFM autolink)")
+    tc = test_case(tc, "ignored" not in out_ua["summary"], "user fallback: email / lower-precedence sources not rendered")
 
     # Next: COMMIT_AUTHOR "Name <email>" form with NAME absent → strip the "<email>" tail.
     r_ub = init_results()
     r_ub["build_command"] = "test"
     r_ub["targets_total"] = 1
     r_ub["metadata"] = {
-        "COMMIT_AUTHOR":       "Jane Doe <jane@example.com>",
+        "COMMIT_AUTHOR": "Jane Doe <jane@example.com>",
         "COMMIT_AUTHOR_EMAIL": "jane@example.com",
-        "USER":                "ignored",
+        "USER": "ignored",
     }
     out_ub = render_check_output(ctx, r_ub, "passed", render_ctx, links)
     tc = test_case(tc, "👤 Jane Doe" in out_ub["summary"], "user fallback: COMMIT_AUTHOR name-portion extracted")
-    tc = test_case(tc, "@"       not in out_ub["summary"], "user fallback: COMMIT_AUTHOR email suffix stripped")
+    tc = test_case(tc, "@" not in out_ub["summary"], "user fallback: COMMIT_AUTHOR email suffix stripped")
 
     # Next: USER
     r_ud = init_results()
@@ -1171,18 +1215,18 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     r_rh["build_command"] = "test"
     r_rh["targets_total"] = 1
     r_rh["metadata"] = {
-        "VCS":        "GITHUB",
-        "REPO_URL":   "https://github.mycorp.com/myteam/myrepo",
+        "VCS": "GITHUB",
+        "REPO_URL": "https://github.mycorp.com/myteam/myrepo",
         "REPO_OWNER": "someone-else",
-        "REPO_NAME":  "different-repo",
+        "REPO_NAME": "different-repo",
         "BRANCH_NAME": "feature/x",
-        "COMMIT_SHA":  "abc1234567",
+        "COMMIT_SHA": "abc1234567",
     }
     out_rh = render_check_output(ctx, r_rh, "passed", render_ctx, links)
     tc = test_case(tc, "[myrepo](https://github.mycorp.com/myteam/myrepo)" in out_rh["summary"], "self-hosted: REPO_URL used as repo link with repo name")
-    tc = test_case(tc, "https://github.mycorp.com/myteam/myrepo/tree/feature/x"            in out_rh["summary"], "self-hosted: branch URL built from REPO_URL")
-    tc = test_case(tc, "https://github.mycorp.com/myteam/myrepo/commit/abc1234567"         in out_rh["summary"], "self-hosted: commit URL built from REPO_URL")
-    tc = test_case(tc, "github.com/someone-else/different-repo"                        not in out_rh["summary"], "self-hosted: hardcoded domain not used when REPO_URL is set")
+    tc = test_case(tc, "https://github.mycorp.com/myteam/myrepo/tree/feature/x" in out_rh["summary"], "self-hosted: branch URL built from REPO_URL")
+    tc = test_case(tc, "https://github.mycorp.com/myteam/myrepo/commit/abc1234567" in out_rh["summary"], "self-hosted: commit URL built from REPO_URL")
+    tc = test_case(tc, "github.com/someone-else/different-repo" not in out_rh["summary"], "self-hosted: hardcoded domain not used when REPO_URL is set")
 
     # --- Test 14c: summary row 2 on incremental + fresh ---
     # Back-to-back invocation: wall_time > 0, actions_executed=1 (just the
@@ -1190,68 +1234,67 @@ def test_template_rendering(ctx: TaskContext, tc: int) -> int:
     # summing per-mnemonic action_data.actions_created — so the cached
     # percentage is meaningful ("99% cached") even on a fully incremental run.
     r_inc = init_results()
-    r_inc["build_command"]                = "test"
-    r_inc["wall_time_ms"]                 = 4600
-    r_inc["targets_total"]                = 146
-    r_inc["actions_executed"]             = 1     # just BazelWorkspaceStatusAction
-    r_inc["actions_total"]                = 34010 # sum of per-mnemonic actions_created
-    r_inc["packages_loaded"]              = 0
-    r_inc["passed_test_total"]            = 25
-    r_inc["cached_test_total"]            = 25
+    r_inc["build_command"] = "test"
+    r_inc["wall_time_ms"] = 4600
+    r_inc["targets_total"] = 146
+    r_inc["actions_executed"] = 1  # just BazelWorkspaceStatusAction
+    r_inc["actions_total"] = 34010  # sum of per-mnemonic actions_created
+    r_inc["packages_loaded"] = 0
+    r_inc["passed_test_total"] = 25
+    r_inc["cached_test_total"] = 25
     out_inc = render_check_output(ctx, r_inc, "passed", render_ctx, links)
-    tc = test_case(tc, "📦 146 targets"                          in out_inc["summary"], "summary: targets count (no configured parens)")
-    tc = test_case(tc, "(146 configured)"                    not in out_inc["summary"], "summary: no '(N configured)' parens")
-    tc = test_case(tc, "⚡ 1 of 34,010 actions (99% cached)"     in out_inc["summary"], "summary: actions with cached %% on incremental (per-mnemonic sum)")
-    tc = test_case(tc, "incremental rebuild"                 not in out_inc["summary"], "summary: no incremental pill")
-    tc = test_case(tc, "0 of 25 tests (100% cached)"             in out_inc["summary"], "summary: tests line still shows count + cached pct")
-    tc = test_case(tc, "packages"                            not in out_inc["summary"], "summary: packages dropped from row")
+    tc = test_case(tc, "📦 146 targets" in out_inc["summary"], "summary: targets count (no configured parens)")
+    tc = test_case(tc, "(146 configured)" not in out_inc["summary"], "summary: no '(N configured)' parens")
+    tc = test_case(tc, "⚡ 1 of 34,010 actions (99% cached)" in out_inc["summary"], "summary: actions with cached %% on incremental (per-mnemonic sum)")
+    tc = test_case(tc, "incremental rebuild" not in out_inc["summary"], "summary: no incremental pill")
+    tc = test_case(tc, "0 of 25 tests (100% cached)" in out_inc["summary"], "summary: tests line still shows count + cached pct")
+    tc = test_case(tc, "packages" not in out_inc["summary"], "summary: packages dropped from row")
 
     # Fresh build renders the same shape.
     r_aspect = init_results()
-    r_aspect["build_command"]        = "test"
-    r_aspect["wall_time_ms"]         = 68000
-    r_aspect["targets_total"]        = 146
-    r_aspect["targets_configured"]   = 159453
-    r_aspect["actions_executed"]     = 361
-    r_aspect["actions_total"]        = 46325
-    r_aspect["packages_loaded"]      = 745
+    r_aspect["build_command"] = "test"
+    r_aspect["wall_time_ms"] = 68000
+    r_aspect["targets_total"] = 146
+    r_aspect["targets_configured"] = 159453
+    r_aspect["actions_executed"] = 361
+    r_aspect["actions_total"] = 46325
+    r_aspect["packages_loaded"] = 745
     out_aspect = render_check_output(ctx, r_aspect, "passed", render_ctx, links)
-    tc = test_case(tc, "📦 146 targets"                             in out_aspect["summary"], "fresh build: targets count (no parens)")
-    tc = test_case(tc, "⚡ 361 of 46,325 actions (99% cached)"       in out_aspect["summary"], "fresh build: actions with cached pct")
+    tc = test_case(tc, "📦 146 targets" in out_aspect["summary"], "fresh build: targets count (no parens)")
+    tc = test_case(tc, "⚡ 361 of 46,325 actions (99% cached)" in out_aspect["summary"], "fresh build: actions with cached pct")
 
     # --- Test 14: Performance section Timing labels + cpu-seconds units ---
     r14 = init_results()
-    r14["build_command"]         = "test"
-    r14["wall_time_ms"]          = 10000
-    r14["cpu_time_ms"]           = 60000   # Bazel server CPU
-    r14["executed_duration_ms"]  = 45000   # Executed Tests Time
-    r14["cached_duration_ms"]    = 150000  # Cached tests time saved (2m 30s = 150,000 ms = 2.5 cpu-minutes)
-    r14["critical_path_ms"]      = 3000    # Critical path: 3s
-    r14["passed_test_total"]     = 10
-    r14["targets_total"]         = 5
+    r14["build_command"] = "test"
+    r14["wall_time_ms"] = 10000
+    r14["cpu_time_ms"] = 60000  # Bazel server CPU
+    r14["executed_duration_ms"] = 45000  # Executed Tests Time
+    r14["cached_duration_ms"] = 150000  # Cached tests time saved (2m 30s = 150,000 ms = 2.5 cpu-minutes)
+    r14["critical_path_ms"] = 3000  # Critical path: 3s
+    r14["passed_test_total"] = 10
+    r14["targets_total"] = 5
     out14 = render_check_output(ctx, r14, "passed", render_ctx, links)
-    tc = test_case(tc, "Bazel server time: `1 cpu-minute`"          in out14["text"], "stats: Bazel server time in cpu-minutes")
-    tc = test_case(tc, "Executed Tests Time: `45 cpu-seconds`"      in out14["text"], "stats: Executed Tests Time in cpu-seconds")
+    tc = test_case(tc, "Bazel server time: `1 cpu-minute`" in out14["text"], "stats: Bazel server time in cpu-minutes")
+    tc = test_case(tc, "Executed Tests Time: `45 cpu-seconds`" in out14["text"], "stats: Executed Tests Time in cpu-seconds")
     tc = test_case(tc, "Cached tests time saved: `2.5 cpu-minutes`" in out14["text"], "stats: Cached tests time saved in cpu-minutes")
-    tc = test_case(tc, "Critical path: `3s`"                        in out14["text"], "stats: Critical path uses wall-clock format")
+    tc = test_case(tc, "Critical path: `3s`" in out14["text"], "stats: Critical path uses wall-clock format")
 
     # _format_cpu_seconds scaling boundary tests.
     r14b = init_results()
-    r14b["build_command"]   = "test"
-    r14b["targets_total"]   = 1
-    r14b["cpu_time_ms"]     = 2300     # 2.3 cpu-seconds
+    r14b["build_command"] = "test"
+    r14b["targets_total"] = 1
+    r14b["cpu_time_ms"] = 2300  # 2.3 cpu-seconds
     out14b = render_check_output(ctx, r14b, "passed", render_ctx, links)
     tc = test_case(tc, "Bazel server time: `2.3 cpu-seconds`" in out14b["text"], "cpu-seconds formatter: <60s decimals")
 
     r14c = init_results()
-    r14c["build_command"]   = "test"
-    r14c["targets_total"]   = 1
-    r14c["cpu_time_ms"]     = 3660000  # 61 minutes → 1 cpu-hour
+    r14c["build_command"] = "test"
+    r14c["targets_total"] = 1
+    r14c["cpu_time_ms"] = 3660000  # 61 minutes → 1 cpu-hour
     out14c = render_check_output(ctx, r14c, "passed", render_ctx, links)
     tc = test_case(tc, "Bazel server time: `1 cpu-hour`" in out14c["text"], "cpu-seconds formatter: 1-hour boundary")
 
     return tc
-
 
 # =============================================================================
 # lib/path_glob.axl
@@ -1261,69 +1304,56 @@ def test_path_glob(tc: int) -> int:
     """Coverage for lib/path_glob.axl (match_path / match_any)."""
     cases = [
         # (pattern, path, expected, description)
-        ("*.lock",                "Cargo.lock",                True,  "match_path: *.lock vs Cargo.lock"),
-        ("*.lock",                "subdir/Cargo.lock",         False, "match_path: *.lock vs subdir/Cargo.lock (no recursion)"),
-        ("*.lock",                "Cargo.lockfile",            False, "match_path: *.lock vs Cargo.lockfile (suffix only)"),
-
-        ("vendor/*",              "vendor/foo",                True,  "match_path: vendor/* vs vendor/foo"),
-        ("vendor/*",              "vendor/foo/bar",            False, "match_path: vendor/* vs vendor/foo/bar (single segment)"),
-
-        ("vendor/**",             "vendor/foo",                True,  "match_path: vendor/** vs vendor/foo"),
-        ("vendor/**",             "vendor/foo/bar/baz",        True,  "match_path: vendor/** vs vendor/foo/bar/baz"),
-        ("vendor/**",             "vendor",                    False, "match_path: vendor/** vs vendor (must have child)"),
-
-        ("**/foo",                "foo",                       True,  "match_path: **/foo vs foo (zero leading)"),
-        ("**/foo",                "a/foo",                     True,  "match_path: **/foo vs a/foo"),
-        ("**/foo",                "a/b/c/foo",                 True,  "match_path: **/foo vs a/b/c/foo"),
-        ("**/foo",                "foo/bar",                   False, "match_path: **/foo vs foo/bar (suffix mismatch)"),
-
-        ("a/**/b",                "a/b",                       True,  "match_path: a/**/b vs a/b (zero middle)"),
-        ("a/**/b",                "a/x/b",                     True,  "match_path: a/**/b vs a/x/b (one middle)"),
-        ("a/**/b",                "a/x/y/b",                   True,  "match_path: a/**/b vs a/x/y/b (multi middle)"),
-        ("a/**/b",                "a/x",                       False, "match_path: a/**/b vs a/x (no trailing b)"),
-
-        ("**",                    "foo",                       True,  "match_path: ** vs foo"),
-        ("**",                    "a/b/c",                     True,  "match_path: ** vs a/b/c"),
-
-        ("*.generated.go",        "foo.generated.go",          True,  "match_path: *.generated.go vs foo.generated.go"),
-        ("*.generated.go",        "Foo.Generated.Go",          False, "match_path: case-sensitive"),
-        ("**/*.generated.go",     "a/b/foo.generated.go",      True,  "match_path: **/*.generated.go vs a/b/foo.generated.go"),
-
-        ("?ar",                   "bar",                       True,  "match_path: ?ar vs bar"),
-        ("?ar",                   "ar",                        False, "match_path: ?ar vs ar (? requires one char)"),
-        ("?ar",                   "bar/baz",                   False, "match_path: ?ar vs bar/baz (? doesn't cross /)"),
-
-        ("*",                     "foo",                       True,  "match_path: * vs foo"),
-        ("*",                     "a/foo",                     False, "match_path: * vs a/foo (single segment)"),
-
-        ("foo",                   "foo",                       True,  "match_path: literal exact match"),
-        ("foo",                   "Foo",                       False, "match_path: literal case-sensitive"),
-        ("foo",                   "foobar",                    False, "match_path: literal not prefix"),
-
-        ("foo/",                  "foo",                       True,  "match_path: trailing slash trimmed (foo/ ≡ foo)"),
-        ("vendor/**/",            "vendor/foo",                True,  "match_path: trailing slash trimmed (vendor/**/ ≡ vendor/**)"),
-
-        ("",                      "foo",                       False, "match_path: empty pattern matches nothing"),
-        ("",                      "",                          False, "match_path: empty pattern vs empty path"),
-
-        ("*?",                    "a" * 11,                    True,  "match_path: *? vs 11-char name"),
-        ("*?",                    "a" * 32,                    True,  "match_path: *? vs 32-char name"),
-        ("*b",                    "b" * 11,                    True,  "match_path: *b vs 11 b's"),
-        ("*b",                    "b" * 64,                    True,  "match_path: *b vs 64 b's"),
-        ("*?b",                   "a" * 32 + "b",              True,  "match_path: *?b deep backtracking"),
+        ("*.lock", "Cargo.lock", True, "match_path: *.lock vs Cargo.lock"),
+        ("*.lock", "subdir/Cargo.lock", False, "match_path: *.lock vs subdir/Cargo.lock (no recursion)"),
+        ("*.lock", "Cargo.lockfile", False, "match_path: *.lock vs Cargo.lockfile (suffix only)"),
+        ("vendor/*", "vendor/foo", True, "match_path: vendor/* vs vendor/foo"),
+        ("vendor/*", "vendor/foo/bar", False, "match_path: vendor/* vs vendor/foo/bar (single segment)"),
+        ("vendor/**", "vendor/foo", True, "match_path: vendor/** vs vendor/foo"),
+        ("vendor/**", "vendor/foo/bar/baz", True, "match_path: vendor/** vs vendor/foo/bar/baz"),
+        ("vendor/**", "vendor", False, "match_path: vendor/** vs vendor (must have child)"),
+        ("**/foo", "foo", True, "match_path: **/foo vs foo (zero leading)"),
+        ("**/foo", "a/foo", True, "match_path: **/foo vs a/foo"),
+        ("**/foo", "a/b/c/foo", True, "match_path: **/foo vs a/b/c/foo"),
+        ("**/foo", "foo/bar", False, "match_path: **/foo vs foo/bar (suffix mismatch)"),
+        ("a/**/b", "a/b", True, "match_path: a/**/b vs a/b (zero middle)"),
+        ("a/**/b", "a/x/b", True, "match_path: a/**/b vs a/x/b (one middle)"),
+        ("a/**/b", "a/x/y/b", True, "match_path: a/**/b vs a/x/y/b (multi middle)"),
+        ("a/**/b", "a/x", False, "match_path: a/**/b vs a/x (no trailing b)"),
+        ("**", "foo", True, "match_path: ** vs foo"),
+        ("**", "a/b/c", True, "match_path: ** vs a/b/c"),
+        ("*.generated.go", "foo.generated.go", True, "match_path: *.generated.go vs foo.generated.go"),
+        ("*.generated.go", "Foo.Generated.Go", False, "match_path: case-sensitive"),
+        ("**/*.generated.go", "a/b/foo.generated.go", True, "match_path: **/*.generated.go vs a/b/foo.generated.go"),
+        ("?ar", "bar", True, "match_path: ?ar vs bar"),
+        ("?ar", "ar", False, "match_path: ?ar vs ar (? requires one char)"),
+        ("?ar", "bar/baz", False, "match_path: ?ar vs bar/baz (? doesn't cross /)"),
+        ("*", "foo", True, "match_path: * vs foo"),
+        ("*", "a/foo", False, "match_path: * vs a/foo (single segment)"),
+        ("foo", "foo", True, "match_path: literal exact match"),
+        ("foo", "Foo", False, "match_path: literal case-sensitive"),
+        ("foo", "foobar", False, "match_path: literal not prefix"),
+        ("foo/", "foo", True, "match_path: trailing slash trimmed (foo/ ≡ foo)"),
+        ("vendor/**/", "vendor/foo", True, "match_path: trailing slash trimmed (vendor/**/ ≡ vendor/**)"),
+        ("", "foo", False, "match_path: empty pattern matches nothing"),
+        ("", "", False, "match_path: empty pattern vs empty path"),
+        ("*?", "a" * 11, True, "match_path: *? vs 11-char name"),
+        ("*?", "a" * 32, True, "match_path: *? vs 32-char name"),
+        ("*b", "b" * 11, True, "match_path: *b vs 11 b's"),
+        ("*b", "b" * 64, True, "match_path: *b vs 64 b's"),
+        ("*?b", "a" * 32 + "b", True, "match_path: *?b deep backtracking"),
     ]
     for (pattern, path, expected, desc) in cases:
         got = match_path(pattern, path)
         tc = test_case(tc, got == expected, "%s → %s" % (desc, "match" if expected else "no match"))
 
     # match_any: True if any pattern in the list matches.
-    tc = test_case(tc, match_any(["*.lock", "vendor/**"], "Cargo.lock"),         "match_any: first pattern matches")
-    tc = test_case(tc, match_any(["*.lock", "vendor/**"], "vendor/foo/bar"),     "match_any: second pattern matches")
-    tc = test_case(tc, not match_any(["*.lock", "vendor/**"], "src/main.rs"),    "match_any: no pattern matches")
-    tc = test_case(tc, not match_any([], "anything"),                            "match_any: empty pattern list never matches")
+    tc = test_case(tc, match_any(["*.lock", "vendor/**"], "Cargo.lock"), "match_any: first pattern matches")
+    tc = test_case(tc, match_any(["*.lock", "vendor/**"], "vendor/foo/bar"), "match_any: second pattern matches")
+    tc = test_case(tc, not match_any(["*.lock", "vendor/**"], "src/main.rs"), "match_any: no pattern matches")
+    tc = test_case(tc, not match_any([], "anything"), "match_any: empty pattern list never matches")
 
     return tc
-
 
 # =============================================================================
 # lib/github.axl
@@ -1360,11 +1390,9 @@ _GH_PR_ENVS = [
     "ASPECT_VCS_URL",
 ]
 
-
 def _clear_pr_env(env):
     for k in _GH_PR_ENVS:
         env.remove_var(k)
-
 
 def test_github_lib(ctx: TaskContext, tc: int) -> int:
     """Coverage for lib/github.axl helpers — env-var-driven detection,
@@ -1505,17 +1533,17 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     # ----- extract_owner_repo (URL parsing) -----
 
     cases = [
-        ("https://github.com/acme/widgets",            ("acme", "widgets"),  "https url"),
-        ("https://github.com/acme/widgets.git",        ("acme", "widgets"),  ".git suffix stripped"),
-        ("git@github.com:acme/widgets.git",            ("acme", "widgets"),  "ssh url"),
-        ("git@github.com:acme/widgets",                ("acme", "widgets"),  "ssh url no .git"),
-        ("https://github.mycorp.com/acme/widgets",     ("acme", "widgets"),  "GitHub Enterprise"),
-        ("https://user:pass@github.com/acme/widgets",  ("acme", "widgets"),  "userinfo stripped"),
-        ("https://gitlab.com/acme/widgets",            ("", ""),             "non-github → empty"),
-        ("https://bitbucket.org/acme/widgets",         ("", ""),             "bitbucket → empty"),
-        ("",                                            ("", ""),            "empty url"),
-        ("not-a-url",                                   ("", ""),            "garbage url"),
-        ("https://github.com/onlyowner",                ("", ""),            "missing repo segment"),
+        ("https://github.com/acme/widgets", ("acme", "widgets"), "https url"),
+        ("https://github.com/acme/widgets.git", ("acme", "widgets"), ".git suffix stripped"),
+        ("git@github.com:acme/widgets.git", ("acme", "widgets"), "ssh url"),
+        ("git@github.com:acme/widgets", ("acme", "widgets"), "ssh url no .git"),
+        ("https://github.mycorp.com/acme/widgets", ("acme", "widgets"), "GitHub Enterprise"),
+        ("https://user:pass@github.com/acme/widgets", ("acme", "widgets"), "userinfo stripped"),
+        ("https://gitlab.com/acme/widgets", ("", ""), "non-github → empty"),
+        ("https://bitbucket.org/acme/widgets", ("", ""), "bitbucket → empty"),
+        ("", ("", ""), "empty url"),
+        ("not-a-url", ("", ""), "garbage url"),
+        ("https://github.com/onlyowner", ("", ""), "missing repo segment"),
     ]
     for (url, expected, desc) in cases:
         got = github.extract_owner_repo(url)
@@ -1524,23 +1552,24 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     # ----- extract_host -----
 
     cases = [
-        ("https://github.com/foo/bar",        "github.com",        "https"),
-        ("git@github.com:foo/bar.git",        "github.com",        "ssh"),
+        ("https://github.com/foo/bar", "github.com", "https"),
+        ("git@github.com:foo/bar.git", "github.com", "ssh"),
         ("https://user:pass@gh.example.com/foo/bar", "gh.example.com", "userinfo stripped"),
-        ("",                                  "",                  "empty"),
-        ("not-a-url",                         "",                  "no scheme"),
+        ("", "", "empty"),
+        ("not-a-url", "", "no scheme"),
     ]
     for (url, expected, desc) in cases:
         tc = test_case(tc, github.extract_host(url) == expected, "extract_host: %s → %r" % (desc, expected))
 
     # ----- is_public_github_url -----
 
-    tc = test_case(tc, github.is_public_github_url("https://github.com/foo/bar"),       "is_public_github_url: github.com → True")
-    tc = test_case(tc, github.is_public_github_url("git@github.com:foo/bar"),           "is_public_github_url: ssh github.com → True")
+    tc = test_case(tc, github.is_public_github_url("https://github.com/foo/bar"), "is_public_github_url: github.com → True")
+    tc = test_case(tc, github.is_public_github_url("git@github.com:foo/bar"), "is_public_github_url: ssh github.com → True")
     tc = test_case(tc, not github.is_public_github_url("https://github.mycorp.com/foo"), "is_public_github_url: GHE → False")
-    tc = test_case(tc, not github.is_public_github_url("https://gitlab.com/foo"),       "is_public_github_url: gitlab → False")
+    tc = test_case(tc, not github.is_public_github_url("https://gitlab.com/foo"), "is_public_github_url: gitlab → False")
+
     # Empty URL is intentionally True (defers to other fallback paths) — see docstring.
-    tc = test_case(tc, github.is_public_github_url(""),                                  "is_public_github_url: empty → True (deferral)")
+    tc = test_case(tc, github.is_public_github_url(""), "is_public_github_url: empty → True (deferral)")
 
     # ----- parse_pr_patch (GitHub PR Files API patch format) -----
     # Returns 0-based added-line indices.
@@ -1567,18 +1596,21 @@ def test_github_lib(ctx: TaskContext, tc: int) -> int:
     # With context lines (default unified diff): context advances current_line.
     # @@ -4,1 +5,3 @@: hunk has 1 context line and 2 added lines.
     patch5 = "@@ -4,1 +5,3 @@\n existing\n+new A\n+new B"
+
     # After header current_line=5. " existing" → +1 → 6. "+new A" → append 5; cur=7. "+new B" → append 6; cur=8.
     tc = test_case(tc, github.parse_pr_patch(patch5) == [5, 6], "parse_pr_patch: context lines advance current_line")
 
     # "\ No newline at end of file" metadata marker — diff-internal, not real content.
     # Should NOT count toward current_line. Fixed in this commit.
     patch6 = "@@ -1,1 +1,2 @@\n existing\n+added\n\\ No newline at end of file"
+
     # current_line=1. " existing" → +1 → 2. "+added" → append 1; cur=3.
     # "\ No newline ..." → backslash branch, no advance.
     tc = test_case(tc, github.parse_pr_patch(patch6) == [1], "parse_pr_patch: no-newline marker doesn't advance current_line")
 
     # Marker between context line and another addition — confirms no off-by-one.
     patch7 = "@@ -1,1 +1,3 @@\n existing\n\\ No newline at end of file\n+a\n+b"
+
     # current_line=1. " existing" → +1 → 2. "\ No..." → no advance.
     # "+a" → append 1; cur=3. "+b" → append 2; cur=4.
     tc = test_case(tc, github.parse_pr_patch(patch7) == [1, 2], "parse_pr_patch: marker before additions doesn't shift them")
@@ -1641,7 +1673,6 @@ rename to new.txt
     _clear_pr_env(env)
     return tc
 
-
 # =============================================================================
 # lib/environment.axl (color_enabled)
 # =============================================================================
@@ -1649,13 +1680,13 @@ rename to new.txt
 def test_parse_git_url_name(tc: int) -> int:
     """Coverage for environment.parse_git_url_name."""
     cases = [
-        ("https://github.com/acme/widgets",       "widgets",          "https"),
-        ("https://github.com/acme/widgets.git",   "widgets",          ".git suffix stripped"),
-        ("https://github.com/acme/widgets/",      "widgets",          "trailing slash stripped"),
-        ("https://github.com/acme/widgets.git/",  "widgets",          "trailing slash + .git"),
-        ("git@github.com:acme/widgets.git",       "widgets",          "ssh"),
-        ("git@github.com:widgets",                "widgets",          "ssh no owner"),
-        ("https://gitlab.com/foo/bar/baz",        "baz",              "deep path"),
+        ("https://github.com/acme/widgets", "widgets", "https"),
+        ("https://github.com/acme/widgets.git", "widgets", ".git suffix stripped"),
+        ("https://github.com/acme/widgets/", "widgets", "trailing slash stripped"),
+        ("https://github.com/acme/widgets.git/", "widgets", "trailing slash + .git"),
+        ("git@github.com:acme/widgets.git", "widgets", "ssh"),
+        ("git@github.com:widgets", "widgets", "ssh no owner"),
+        ("https://gitlab.com/foo/bar/baz", "baz", "deep path"),
     ]
     for (url, expected, desc) in cases:
         got = parse_git_url_name(url)
@@ -1664,25 +1695,23 @@ def test_parse_git_url_name(tc: int) -> int:
     tc = test_case(tc, parse_git_url_name("") == "", "parse_git_url_name: empty → \"\"")
     return tc
 
-
 def test_sanitize_filename(tc: int) -> int:
     """Coverage for environment.sanitize_filename."""
     cases = [
-        ("foo",          "foo",          "alphanumeric passes through"),
-        ("foo-bar.txt",  "foo-bar.txt",  "dash and dot allowed"),
-        ("foo_bar",      "foo_bar",      "underscore allowed"),
-        ("foo bar",      "foo_bar",      "space → underscore"),
-        ("foo/bar",      "foo_bar",      "slash → underscore"),
-        ("foo:bar",      "foo_bar",      "colon → underscore"),
-        ("a/b/c",        "a_b_c",        "multiple slashes"),
+        ("foo", "foo", "alphanumeric passes through"),
+        ("foo-bar.txt", "foo-bar.txt", "dash and dot allowed"),
+        ("foo_bar", "foo_bar", "underscore allowed"),
+        ("foo bar", "foo_bar", "space → underscore"),
+        ("foo/bar", "foo_bar", "slash → underscore"),
+        ("foo:bar", "foo_bar", "colon → underscore"),
+        ("a/b/c", "a_b_c", "multiple slashes"),
         ("Mixed Case 123", "Mixed_Case_123", "mixed allowed + underscores"),
-        ("",             "",             "empty"),
+        ("", "", "empty"),
     ]
     for (input, expected, desc) in cases:
         got = sanitize_filename(input)
         tc = test_case(tc, got == expected, "sanitize_filename: %s → %r (got %r)" % (desc, expected, got))
     return tc
-
 
 def test_deliveryd_parse_endpoint(tc: int) -> int:
     """Coverage for deliveryd.parse_endpoint."""
@@ -1703,21 +1732,20 @@ def test_deliveryd_parse_endpoint(tc: int) -> int:
 
     return tc
 
-
 def test_build_metadata_lib(tc: int) -> int:
     """Coverage for the pure helpers in lib/build_metadata.axl."""
 
     # detect_vcs_from_host
     cases = [
-        ("github.com",            "GITHUB",    "github.com → GITHUB"),
-        ("gitlab.com",            "GITLAB",    "gitlab.com → GITLAB"),
-        ("bitbucket.org",         "BITBUCKET", "bitbucket.org → BITBUCKET"),
-        ("github.mycorp.com",     "GITHUB",    "GitHub Enterprise"),
-        ("gitlab.example.com",    "GITLAB",    "GitLab self-hosted"),
-        ("bitbucket.local",       "BITBUCKET", "Bitbucket self-hosted"),
-        ("git.example.com",       "",          "unrecognized → empty"),
-        ("",                      "",          "empty → empty"),
-        ("GitHub.com",            "GITHUB",    "case-insensitive match"),
+        ("github.com", "GITHUB", "github.com → GITHUB"),
+        ("gitlab.com", "GITLAB", "gitlab.com → GITLAB"),
+        ("bitbucket.org", "BITBUCKET", "bitbucket.org → BITBUCKET"),
+        ("github.mycorp.com", "GITHUB", "GitHub Enterprise"),
+        ("gitlab.example.com", "GITLAB", "GitLab self-hosted"),
+        ("bitbucket.local", "BITBUCKET", "Bitbucket self-hosted"),
+        ("git.example.com", "", "unrecognized → empty"),
+        ("", "", "empty → empty"),
+        ("GitHub.com", "GITHUB", "case-insensitive match"),
     ]
     for (host, expected, desc) in cases:
         got = detect_vcs_from_host(host)
@@ -1725,15 +1753,15 @@ def test_build_metadata_lib(tc: int) -> int:
 
     # parse_git_remote_url
     cases = [
-        ("https://github.com/acme/widgets",       {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"},                    "https"),
-        ("https://github.com/acme/widgets.git",   {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"},                    ".git stripped"),
-        ("git@github.com:acme/widgets.git",       {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"},                    "ssh"),
-        ("https://user:pass@github.com/acme/widgets", {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"},                "userinfo stripped"),
-        ("https://gitlab.com/group/sub/proj",     {"host": "gitlab.com", "owner": "group", "repo": "proj", "path": "group/sub/proj"},                    "GitLab nested subgroup"),
-        ("",                                       {},                                                                                                    "empty"),
-        ("not-a-url",                              {},                                                                                                    "garbage"),
-        ("git@host",                               {},                                                                                                    "ssh no colon → {}"),
-        ("https://github.com/onlyowner",           {"host": "github.com"},                                                                                "missing repo segment"),
+        ("https://github.com/acme/widgets", {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"}, "https"),
+        ("https://github.com/acme/widgets.git", {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"}, ".git stripped"),
+        ("git@github.com:acme/widgets.git", {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"}, "ssh"),
+        ("https://user:pass@github.com/acme/widgets", {"host": "github.com", "owner": "acme", "repo": "widgets", "path": "acme/widgets"}, "userinfo stripped"),
+        ("https://gitlab.com/group/sub/proj", {"host": "gitlab.com", "owner": "group", "repo": "proj", "path": "group/sub/proj"}, "GitLab nested subgroup"),
+        ("", {}, "empty"),
+        ("not-a-url", {}, "garbage"),
+        ("git@host", {}, "ssh no colon → {}"),
+        ("https://github.com/onlyowner", {"host": "github.com"}, "missing repo segment"),
     ]
     for (url, expected, desc) in cases:
         got = parse_git_remote_url(url)
@@ -1741,16 +1769,16 @@ def test_build_metadata_lib(tc: int) -> int:
 
     # version_tuple
     cases = [
-        ("1.2.3",          [1, 2, 3],   "simple semver"),
-        ("5.18.0",         [5, 18, 0],  "two-digit minor"),
-        ("0.0.1",          [0, 0, 1],   "leading zeros"),
-        ("",               [0, 0, 0],   "empty → [0,0,0]"),
-        ("5",              [5, 0, 0],   "major-only → patch zero"),
-        ("5.18",           [5, 18, 0],  "major.minor → patch zero"),
-        ("5.18.0-rc1",     [5, 18, 0],  "pre-release suffix tolerated"),
+        ("1.2.3", [1, 2, 3], "simple semver"),
+        ("5.18.0", [5, 18, 0], "two-digit minor"),
+        ("0.0.1", [0, 0, 1], "leading zeros"),
+        ("", [0, 0, 0], "empty → [0,0,0]"),
+        ("5", [5, 0, 0], "major-only → patch zero"),
+        ("5.18", [5, 18, 0], "major.minor → patch zero"),
+        ("5.18.0-rc1", [5, 18, 0], "pre-release suffix tolerated"),
         ("5.18.0-rc1+meta", [5, 18, 0], "build metadata tolerated"),
-        ("garbage",        [0, 0, 0],   "non-numeric → [0,0,0]"),
-        ("1.2.3.4.5",      [1, 2, 3],   "extra segments ignored"),
+        ("garbage", [0, 0, 0], "non-numeric → [0,0,0]"),
+        ("1.2.3.4.5", [1, 2, 3], "extra segments ignored"),
     ]
     for (s, expected, desc) in cases:
         got = version_tuple(s)
@@ -1759,18 +1787,18 @@ def test_build_metadata_lib(tc: int) -> int:
     # version_gte
     tc = test_case(tc, version_gte("5.18.0", "5.18.0"), "version_gte: equal")
     tc = test_case(tc, version_gte("5.18.1", "5.18.0"), "version_gte: patch greater")
-    tc = test_case(tc, version_gte("6.0.0",  "5.99.99"), "version_gte: major greater")
+    tc = test_case(tc, version_gte("6.0.0", "5.99.99"), "version_gte: major greater")
     tc = test_case(tc, not version_gte("5.17.99", "5.18.0"), "version_gte: less")
     tc = test_case(tc, version_gte("5.18.0-rc1", "5.18.0"), "version_gte: pre-release tolerant (treated equal)")
 
     # task_display_name
     cases = [
-        ("test",          "Test",          "single-word"),
-        ("build",         "Build",         "single-word"),
-        ("my-task",       "My Task",       "kebab → Title Case"),
-        ("my_task",       "My Task",       "snake → Title Case"),
+        ("test", "Test", "single-word"),
+        ("build", "Build", "single-word"),
+        ("my-task", "My Task", "kebab → Title Case"),
+        ("my_task", "My Task", "snake → Title Case"),
         ("github-status", "Github Status", "kebab title-case"),
-        ("",              "",              "empty"),
+        ("", "", "empty"),
     ]
     for (input, expected, desc) in cases:
         got = task_display_name(input)
@@ -1778,10 +1806,10 @@ def test_build_metadata_lib(tc: int) -> int:
 
     return tc
 
-
 def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
     """Coverage for lib/artifacts.axl: detect_ci + artifact_name."""
     env = ctx.std.env
+
     # Clear all CI markers up front.
     for k in ["GITHUB_ACTIONS", "BUILDKITE_AGENT_ACCESS_TOKEN", "CI_JOB_TOKEN", "CIRCLE_PROJECT_REPONAME"]:
         env.remove_var(k)
@@ -1814,18 +1842,17 @@ def test_artifacts_lib(ctx: TaskContext, tc: int) -> int:
     # artifact_name
     cases = [
         # (ci, task_name, task_key, filename, expected, desc)
-        ("github",   "test",   "my-build", "profile.gz",   "test.my-build.profile.gz",   "github → flat dotted"),
-        ("buildkite", "test",  "my-build", "profile.gz",   "test/my-build/profile.gz",   "buildkite → path"),
-        ("gitlab",   "test",   "my-build", "profile.gz",   "test/my-build/profile.gz",   "gitlab → path"),
-        ("circleci", "test",   "my-build", "profile.gz",   "test/my-build/profile.gz",   "circleci → path"),
-        ("github",   "lint",   "lint-gha", "format.patch", "lint.lint-gha.format.patch", "github format.patch"),
+        ("github", "test", "my-build", "profile.gz", "test.my-build.profile.gz", "github → flat dotted"),
+        ("buildkite", "test", "my-build", "profile.gz", "test/my-build/profile.gz", "buildkite → path"),
+        ("gitlab", "test", "my-build", "profile.gz", "test/my-build/profile.gz", "gitlab → path"),
+        ("circleci", "test", "my-build", "profile.gz", "test/my-build/profile.gz", "circleci → path"),
+        ("github", "lint", "lint-gha", "format.patch", "lint.lint-gha.format.patch", "github format.patch"),
     ]
     for (ci, task_name, task_key, filename, expected, desc) in cases:
         got = artifact_name(ci, task_name, task_key, filename)
         tc = test_case(tc, got == expected, "artifact_name: %s → %r (got %r)" % (desc, expected, got))
 
     return tc
-
 
 def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     """detect_build_url for the env-var-only paths (Buildkite/CircleCI/GitLab).
@@ -1883,7 +1910,6 @@ def test_detect_build_url(ctx: TaskContext, tc: int) -> int:
     _clear_pr_env(env)
     return tc
 
-
 def test_file_uri_to_path(tc: int) -> int:
     """Coverage for lint.file_uri_to_path BES URI → bb_clientd path."""
     BB = "/mnt/ephemeral/buildbarn/bb_clientd"
@@ -1911,11 +1937,18 @@ def test_file_uri_to_path(tc: int) -> int:
 
     return tc
 
-
 def test_validate_role(tc: int) -> int:
     """Coverage for github.validate_role + VALID_ROLES."""
-    valid = ["checks.read", "checks.write", "statuses.read", "statuses.write",
-             "prs.read", "prs.write", "issues.read", "actions.read"]
+    valid = [
+        "checks.read",
+        "checks.write",
+        "statuses.read",
+        "statuses.write",
+        "prs.read",
+        "prs.write",
+        "issues.read",
+        "actions.read",
+    ]
     for r in valid:
         tc = test_case(tc, github.validate_role(r), "validate_role: %s ok" % r)
 
@@ -1927,7 +1960,6 @@ def test_validate_role(tc: int) -> int:
     for r in github.VALID_ROLES:
         tc = test_case(tc, github.validate_role(r), "validate_role: %s self-consistent" % r)
     return tc
-
 
 def test_lint_filters(tc: int) -> int:
     """Coverage for lint.filter_all and lint.filter_changeset."""
@@ -1963,35 +1995,34 @@ def test_lint_filters(tc: int) -> int:
 
     return tc
 
-
 def test_fmt_elapsed(tc: int) -> int:
     """Coverage for delivery.fmt_elapsed — duration formatting."""
     cases = [
         # (secs, expected, description)
-        (0,        "0.0s",  "zero"),
-        (0.0,      "0.0s",  "zero float"),
-        (0.5,      "0.5s",  "half-second"),
-        (0.55,     "0.5s",  "tenths truncate (no rounding)"),
-        (1,        "1.0s",  "one whole second"),
-        (1.4,      "1.4s",  "below 60 seconds"),
-        (9.99,     "9.9s",  "9.99 → 9.9 (truncated, not rounded)"),
-        (59,       "59.0s", "just under a minute"),
-        (59.9,     "59.9s", "59.9 still sub-minute"),
-        (60,       "1m0s",  "exactly one minute"),
-        (61,       "1m1s",  "minute + 1"),
-        (61.5,     "1m1s",  "minute + 1 (fractional dropped)"),
-        (90,       "1m30s", "90 sec → 1m30s"),
-        (3600,     "60m0s", "one hour → 60m0s (no hour unit)"),
-        (3661,     "61m1s", "hour + minute + sec → 61m1s"),
+        (0, "0.0s", "zero"),
+        (0.0, "0.0s", "zero float"),
+        (0.5, "0.5s", "half-second"),
+        (0.55, "0.5s", "tenths truncate (no rounding)"),
+        (1, "1.0s", "one whole second"),
+        (1.4, "1.4s", "below 60 seconds"),
+        (9.99, "9.9s", "9.99 → 9.9 (truncated, not rounded)"),
+        (59, "59.0s", "just under a minute"),
+        (59.9, "59.9s", "59.9 still sub-minute"),
+        (60, "1m0s", "exactly one minute"),
+        (61, "1m1s", "minute + 1"),
+        (61.5, "1m1s", "minute + 1 (fractional dropped)"),
+        (90, "1m30s", "90 sec → 1m30s"),
+        (3600, "60m0s", "one hour → 60m0s (no hour unit)"),
+        (3661, "61m1s", "hour + minute + sec → 61m1s"),
     ]
     for (secs, expected, desc) in cases:
         got = delivery_fmt_elapsed(secs)
         tc = test_case(tc, got == expected, "fmt_elapsed: %s → %r (got %r)" % (desc, expected, got))
     return tc
 
-
 def test_summary_title(tc: int) -> int:
     """Coverage for bazel_results.summary_title — GitHub check title."""
+
     # status="passed" + no buckets → state empty → just task+subject
     r = init_results()
     title = summary_title(r, "passed", target_pattern = "//...", task_display_name = "Build")
@@ -2074,12 +2105,12 @@ def test_summary_title(tc: int) -> int:
 
     return tc
 
-
 def test_compute_repro(tc: int) -> int:
     """Coverage for bazel_results.compute_reproducer_command — repro derivation.
 
     Pure function: returns (cmd, total) and does not mutate `results`.
     """
+
     # No failures → empty repro, total 0.
     cmd, total = compute_reproducer_command(init_results(), "build")
     tc = test_case(tc, cmd == "", "compute_reproducer_command: no failures → empty cmd")
@@ -2147,7 +2178,6 @@ def test_compute_repro(tc: int) -> int:
 
     return tc
 
-
 def test_process_bes_target_completed(ctx: TaskContext, tc: int) -> int:
     """Regression test for the canonical_label-shadow bug in _process_bes.
 
@@ -2168,6 +2198,7 @@ def test_process_bes_target_completed(ctx: TaskContext, tc: int) -> int:
             struct(name = "default", file_sets = [struct(id = "fs1")]),
         ]),
     )
+
     # Pre-fix this call raised; post-fix it returns None and updates state.
     r.event(fake_event)
     tc = test_case(tc, True, "_process_bes: target_completed does not raise (canonical_label shadow regression)")
@@ -2193,7 +2224,6 @@ def test_process_bes_target_completed(ctx: TaskContext, tc: int) -> int:
 
     return tc
 
-
 def test_json_try_decode(tc: int) -> int:
     """Coverage for the AXL runtime's `json.try_decode` — fallible JSON decode.
 
@@ -2202,6 +2232,7 @@ def test_json_try_decode(tc: int) -> int:
     errors, truncated bodies, partial responses) without crashing the
     parent task.
     """
+
     # Valid JSON inputs decode normally.
     tc = test_case(tc, json.try_decode("{}") == {}, "try_decode: empty object")
     tc = test_case(tc, json.try_decode("[]") == [], "try_decode: empty array")
@@ -2243,29 +2274,28 @@ def test_json_try_decode(tc: int) -> int:
 
     return tc
 
-
 def test_canonical_label(tc: int) -> int:
     """Coverage for runnable.canonical_label — Bazel label normalization."""
     cases = [
-        ("//foo",                      "//foo:foo",         "//foo → //foo:foo"),
-        ("//foo:bar",                  "//foo:bar",         "explicit target unchanged"),
-        ("//foo/bar",                  "//foo/bar:bar",     "deep path → leaf as target"),
-        ("//foo/bar/baz",              "//foo/bar/baz:baz", "deeper path"),
-        ("//foo/bar:baz",              "//foo/bar:baz",     "explicit target with deep path"),
-        ("//",                         "//:",               "root-only edge case"),
-        ("@repo//foo",                 "@repo//foo:foo",    "repo-prefixed label"),
-        ("@repo//foo:bar",             "@repo//foo:bar",    "repo-prefixed with target"),
-        ("//foo:",                     "//foo:",            "empty target name kept (caller error, not normalized)"),
+        ("//foo", "//foo:foo", "//foo → //foo:foo"),
+        ("//foo:bar", "//foo:bar", "explicit target unchanged"),
+        ("//foo/bar", "//foo/bar:bar", "deep path → leaf as target"),
+        ("//foo/bar/baz", "//foo/bar/baz:baz", "deeper path"),
+        ("//foo/bar:baz", "//foo/bar:baz", "explicit target with deep path"),
+        ("//", "//:", "root-only edge case"),
+        ("@repo//foo", "@repo//foo:foo", "repo-prefixed label"),
+        ("@repo//foo:bar", "@repo//foo:bar", "repo-prefixed with target"),
+        ("//foo:", "//foo:", "empty target name kept (caller error, not normalized)"),
     ]
     for (input, expected, desc) in cases:
         got = canonical_label(input)
         tc = test_case(tc, got == expected, "canonical_label: %s → %r (got %r)" % (desc, expected, got))
     return tc
 
-
 def test_color_enabled(ctx: TaskContext, tc: int) -> int:
     """color_enabled: should return True on a TTY OR a recognized CI host."""
     env = ctx.std.env
+
     # Clear all CI vars first so we're testing the predicate cleanly.
     for k in ["GITHUB_ACTIONS", "BUILDKITE", "CIRCLECI", "GITLAB_CI"]:
         env.remove_var(k)
@@ -2280,7 +2310,6 @@ def test_color_enabled(ctx: TaskContext, tc: int) -> int:
         env.remove_var(ci_env)
 
     return tc
-
 
 # =============================================================================
 # lib/sarif.axl
@@ -2315,7 +2344,6 @@ def test_detect_github_repo(ctx: TaskContext, tc: int) -> int:
 
     _clear_pr_env(env)
     return tc
-
 
 def test_sarif_lib(tc: int) -> int:
     """Coverage for parse_sarif_diagnostics + sarif_to_review_comments."""
@@ -2363,6 +2391,7 @@ def test_sarif_lib(tc: int) -> int:
     tc = test_case(tc, comments[0].get("_severity") == "error", "sarif_to_review_comments: _severity present")
     tc = test_case(tc, "shellcheck" in comments[0]["body"], "sarif_to_review_comments: body has tool name")
     tc = test_case(tc, "Can't follow" in comments[0]["body"], "sarif_to_review_comments: body has message")
+
     # Multi-line region: comment carries start_line + start_side.
     tc = test_case(tc, comments[1].get("start_line") == 5 and comments[1].get("line") == 7, "sarif_to_review_comments: multi-line region")
     tc = test_case(tc, comments[1].get("start_side") == "RIGHT", "sarif_to_review_comments: start_side RIGHT")
@@ -2393,6 +2422,7 @@ def test_sarif_lib(tc: int) -> int:
 
     # Empty/no-runs SARIF.
     tc = test_case(tc, get_sarif_summary("""{"runs":[]}""") == "No lint findings.", "get_sarif_summary: empty runs")
+
     # Run with zero results: no individual line, but "No lint findings." returned.
     no_results = """{"runs":[{"tool":{"driver":{"name":"shellcheck"}},"results":[]}]}"""
     tc = test_case(tc, get_sarif_summary(no_results) == "No lint findings.", "get_sarif_summary: zero results")
@@ -2425,6 +2455,7 @@ def test_sarif_lib(tc: int) -> int:
     ]}]}"""
     fix_comments = sarif_to_review_comments(fix_sarif)
     tc = test_case(tc, len(fix_comments) == 3, "fix hint sarif: 3 comments")
+
     # 1st comment has a real fix hint → _fixes populated.
     fixes_a = fix_comments[0].get("_fixes")
     tc = test_case(tc, fixes_a != None and len(fixes_a) == 1, "fix hint: comment 0 has 1 fix")
@@ -2432,15 +2463,16 @@ def test_sarif_lib(tc: int) -> int:
         f = fixes_a[0]
         tc = test_case(tc, f["replacement"] == "$VAR", "fix hint: quoted text unquoted")
         tc = test_case(tc, f["byteOffset"] == 42 and f["byteLength"] == 4, "fix hint: byte offset/length")
+
     # 2nd comment: "trying to be helpful" should NOT match fix-hint format ("try " prefix only).
     fixes_b = fix_comments[1].get("_fixes")
     tc = test_case(tc, fixes_b == None, "fix hint: \"trying ...\" not mistaken for fix")
+
     # 3rd comment: bare "try" → empty replacement.
     fixes_c = fix_comments[2].get("_fixes")
     tc = test_case(tc, fixes_c != None and fixes_c[0]["replacement"] == "", "fix hint: bare \"try\" → empty replacement")
 
     return tc
-
 
 def impl(ctx: TaskContext) -> int:
     tc = 0
@@ -2520,5 +2552,5 @@ def impl(ctx: TaskContext) -> int:
 axl = task(
     group = ["tests"],
     implementation = impl,
-    args = {}
+    args = {},
 )

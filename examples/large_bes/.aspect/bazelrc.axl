@@ -79,17 +79,16 @@ def _strip_comment(line):
                 result += c
             else:
                 result += c
+        elif c == "#":
+            done = True
+        elif c == "\"":
+            in_dq = True
+            result += c
+        elif c == "'":
+            in_sq = True
+            result += c
         else:
-            if c == "#":
-                done = True
-            elif c == "\"":
-                in_dq = True
-                result += c
-            elif c == "'":
-                in_sq = True
-                result += c
-            else:
-                result += c
+            result += c
     return result
 
 # =============================================================================
@@ -107,7 +106,7 @@ def _join_continuation_lines(raw_lines):
     line_num = 0
     for raw in raw_lines:
         line_num += 1
-        line = raw.rstrip("\r")   # normalise CRLF
+        line = raw.rstrip("\r")  # normalise CRLF
         if current == "":
             start = line_num
         if line.endswith("\\"):
@@ -169,20 +168,19 @@ def _tokenize(s):
                 in_sq = False
             else:
                 token += c
+        elif c == " " or c == "\t":
+            if token != "":
+                tokens.append(token)
+                token = ""
+        elif c == "\\" and i + 1 < n:
+            token += s[i + 1]
+            skip = 1
+        elif c == "\"":
+            in_dq = True
+        elif c == "'":
+            in_sq = True
         else:
-            if c == " " or c == "\t":
-                if token != "":
-                    tokens.append(token)
-                    token = ""
-            elif c == "\\" and i + 1 < n:
-                token += s[i + 1]
-                skip = 1
-            elif c == "\"":
-                in_dq = True
-            elif c == "'":
-                in_sq = True
-            else:
-                token += c
+            token += c
     if token != "":
         tokens.append(token)
     return tokens
@@ -233,27 +231,43 @@ def _parse_lines(raw_lines, source_path, workspace_dir, std, visited):
             optional = directive == "try-import"
             if len(tokens) < 2:
                 errors.append("{}:{}: '{}' requires a path argument".format(
-                    source_path, line_num, directive))
+                    source_path,
+                    line_num,
+                    directive,
+                ))
                 continue
             import_path = _resolve_import_path(tokens[1], workspace_dir, source_path)
             if import_path in visited:
                 errors.append("{}:{}: circular import: {}".format(
-                    source_path, line_num, import_path))
+                    source_path,
+                    line_num,
+                    import_path,
+                ))
                 continue
             if std == None:
                 errors.append("{}:{}: '{}' requires std context".format(
-                    source_path, line_num, directive))
+                    source_path,
+                    line_num,
+                    directive,
+                ))
                 continue
             if not std.fs.exists(import_path):
                 if optional:
                     continue
                 errors.append("{}:{}: imported file not found: {}".format(
-                    source_path, line_num, import_path))
+                    source_path,
+                    line_num,
+                    import_path,
+                ))
                 continue
             content = std.fs.read_to_string(import_path)
             (sub_entries, sub_errors) = _parse_lines(
-                content.split("\n"), import_path, workspace_dir, std,
-                visited + [import_path])
+                content.split("\n"),
+                import_path,
+                workspace_dir,
+                std,
+                visited + [import_path],
+            )
             entries.extend(sub_entries)
             errors.extend(sub_errors)
             continue
@@ -261,10 +275,10 @@ def _parse_lines(raw_lines, source_path, workspace_dir, std, visited):
         (command, _sep, config) = directive.partition(":")
         entries.append({
             "command": command,
-            "config":  config,
-            "flags":   tokens[1:],
-            "source":  source_path,
-            "line":    line_num,
+            "config": config,
+            "flags": tokens[1:],
+            "source": source_path,
+            "line": line_num,
         })
     return (entries, errors)
 
@@ -329,7 +343,12 @@ def parse(content, source_path = "", workspace_dir = "", std = None):
     """
     visited = [source_path] if source_path != "" else []
     (entries, errors) = _parse_lines(
-        content.split("\n"), source_path, workspace_dir, std, visited)
+        content.split("\n"),
+        source_path,
+        workspace_dir,
+        std,
+        visited,
+    )
     return {"entries": entries, "errors": errors}
 
 def parse_file(path, workspace_dir = "", std = None):
@@ -347,8 +366,12 @@ def parse_file(path, workspace_dir = "", std = None):
         return {"entries": [], "errors": ["parse_file() requires std context"]}
     if not std.fs.exists(path):
         return {"entries": [], "errors": ["file not found: " + path]}
-    return parse(std.fs.read_to_string(path),
-                 source_path = path, workspace_dir = workspace_dir, std = std)
+    return parse(
+        std.fs.read_to_string(path),
+        source_path = path,
+        workspace_dir = workspace_dir,
+        std = std,
+    )
 
 # =============================================================================
 # Primary API

@@ -26,15 +26,15 @@ def _post(http, endpoint, path, data):
     base_url, socket_path = parse_endpoint(endpoint)
     encoded = json.encode(data)
     if socket_path:
-        return http.post(url = base_url + path, headers={"Content-Type": "application/json"}, data=encoded, unix_socket=socket_path)
-    return http.post(url = base_url + path, headers={"Content-Type": "application/json"}, data=encoded)
+        return http.post(url = base_url + path, headers = {"Content-Type": "application/json"}, data = encoded, unix_socket = socket_path)
+    return http.post(url = base_url + path, headers = {"Content-Type": "application/json"}, data = encoded)
 
 def _get(http, endpoint, path):
     """Make a GET request to deliveryd, handling unix:// endpoints."""
     base_url, socket_path = parse_endpoint(endpoint)
     if socket_path:
-        return http.get(url=base_url + path, unix_socket=socket_path)
-    return http.get(url=base_url + path)
+        return http.get(url = base_url + path, unix_socket = socket_path)
+    return http.get(url = base_url + path)
 
 def health(ctx, endpoint):
     """
@@ -61,7 +61,6 @@ def query(ctx, endpoint, ci_host, commit_sha, workspace):
         "workspace": workspace,
     }).block()
 
-
     if response.status < 200 or response.status >= 300:
         msg = "deliveryd query failed: " + response.body
         fail(msg)
@@ -75,6 +74,7 @@ def query(ctx, endpoint, ci_host, commit_sha, workspace):
         fail("deliveryd /query returned 2xx but body was not valid JSON: " + (response.body or "")[:200].replace("\n", " "))
 
     targets = data.get("targets", []) or []
+
     # Build lookup dict by label
     result = {}
     for target in targets:

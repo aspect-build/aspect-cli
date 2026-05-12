@@ -122,20 +122,18 @@ selective runs).
 User-facing migration guide: https://docs.aspect.build/cli/migration/delivery
 """
 
-load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait")
+load(
+    "@aspect//lib/deliveryd.axl",
+    deliveryd_delete_artifact = "delete_artifact",
+    deliveryd_deliver = "deliver",
+    deliveryd_query = "query",
+    deliveryd_record = "record",
+)
 load("@aspect//lib/environment.axl", "color_enabled")
 load("@aspect//lib/github.axl", "detect_build_url", "detect_commit_sha")
 load("@aspect//lib/runnable.axl", "runnable")
+load("@aspect//traits.axl", "BazelTrait", "DeliveryTrait", "HealthCheckTrait")
 load("@std//time.axl", "time")
-
-load(
-    "@aspect//lib/deliveryd.axl",
-    deliveryd_query = "query",
-    deliveryd_deliver = "deliver",
-    deliveryd_record = "record",
-    deliveryd_delete_artifact = "delete_artifact",
-)
-
 
 # ANSI codes
 _BOLD = "\033[1m"
@@ -192,13 +190,11 @@ def _print_captured_output(label, exit_code, stdout, stderr, ansi):
         print(combined)
     print(_style(sep, _BOLD, ansi))
 
-
 def _canonical(label):
     """Normalize a Bazel label to canonical form: //foo/bar -> //foo/bar:bar."""
     if ":" not in label:
         return label + ":" + label.split("/")[-1]
     return label
-
 
 def _write_aspect_repo(ctx, repo_dir):
     ctx.std.fs.create_dir_all(repo_dir)
@@ -220,7 +216,6 @@ def _write_aspect_repo(ctx, repo_dir):
 
 hashsum = aspect(implementation = _hashsum_impl)
 """)
-
 
 _GRPC_LOG_PATH = "/tmp/aspect-delivery-grpc-{}.bin"
 
@@ -246,7 +241,7 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
     aspect_flags = [
         "--aspects=@aspect_delivery//:hashsum.bzl%hashsum",
         "--output_groups=+delivery_hash",
-        "--inject_repository=aspect_delivery=" + repo_dir
+        "--inject_repository=aspect_delivery=" + repo_dir,
     ]
 
     print("  {} {} target(s)...".format(_style("Building", _BOLD, ansi), len(targets)))
@@ -257,7 +252,7 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
             flags = phase1_flags,
             build_events = build_events,
             execution_log = bazel_trait.execution_log_sinks or False,
-            *targets,
+            *targets
         )
         for event in build.build_events():
             for handler in bazel_trait.build_event:
@@ -281,7 +276,7 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
         "--remote_executor=" + remote_executor_uri,
         "--experimental_remote_require_cached",
         "--remote_grpc_log=" + log_path,
-        "--keep_going"
+        "--keep_going",
     ]
 
     # TODO: Do not swallow errors here and surface them if we can not find the hashes for all the deliverable targets.
@@ -309,7 +304,6 @@ def _get_output_shas(ctx, bazel_trait, build_events, targets, bazel_flags, remot
     print("  Checksum took {}.".format(fmt_elapsed(time.monotonic() - _t_phase2)))
 
     return output_shas, 0
-
 
 def _delivery_impl(ctx):
     hc_trait = ctx.traits[HealthCheckTrait]
@@ -339,6 +333,7 @@ def _delivery_impl(ctx):
     # --mode=always without state tracking and without dry-run (a pure run,
     # no preview).
     phase_1_2_runs = track_state or dry_run
+
     # Derived: a "preview-only" run — phase 3 download is unnecessary because
     # we won't actually `bazel run` and we don't need entrypoint info to build
     # the result table (every candidate is reported as DRY-RUN).
@@ -443,6 +438,7 @@ def _delivery_impl(ctx):
             targets = targets[:limit]
     else:
         targets = ctx.args.targets
+
     # Accept --force-target plus ASPECT_WORKFLOWS_DELIVERY_FORCE_TARGETS
     # (whitespace-separated) so CI systems can wire a parameter field to
     # the env var without templating the flag itself. Whitespace is the
@@ -511,7 +507,8 @@ def _delivery_impl(ctx):
         delivery_targets = list(targets)
     else:
         delivery_targets = [
-            label for label in targets
+            label
+            for label in targets
             if output_shas.get(label) and (
                 label in forced_targets or
                 not (delivery_state.get(label) and delivery_state.get(label).get("delivered"))
@@ -540,6 +537,7 @@ def _delivery_impl(ctx):
         for event in build.build_events():
             run_tracker.event(event)
         status = build.wait()
+
         # When phase 1/2 was skipped (--mode=always + --track-state=false), phase 3
         # is the only Bazel build that ran. Run build_end hooks here with its
         # status so features like ArtifactUpload can finalize uploads.
@@ -602,7 +600,7 @@ def _delivery_impl(ctx):
 
     # Step 2: dispatch in chunks of max_par — spawn all in chunk, poll for completions
     for chunk_start in range(0, len(pending), max_par):
-        chunk = pending[chunk_start : chunk_start + max_par]
+        chunk = pending[chunk_start:chunk_start + max_par]
 
         if dry_run:
             for label, _, is_forced, output_sha in chunk:
@@ -664,14 +662,25 @@ def _delivery_impl(ctx):
 
     print("")
     header = "  {}  {}  {}  {}  {}".format(
-        pad("TARGET", max_label_width), pad("STATUS", max_status_width), pad("DURATION", max_duration_width), pad("HASH", 32), "BUILD URL")
+        pad("TARGET", max_label_width),
+        pad("STATUS", max_status_width),
+        pad("DURATION", max_duration_width),
+        pad("HASH", 32),
+        "BUILD URL",
+    )
     print(_style(header, _BOLD, ansi))
     for label, status_text, status_type, delivered_by, output_sha, duration in results:
         styled_status = _style(status_text, status_styles[status_type], ansi)
         padding = " " * (max_status_width - len(status_text))
         short_hash = output_sha[:32] if output_sha != "-" else "-"
         print("  {}  {}{}  {}  {}  {}".format(
-            pad(label, max_label_width), styled_status, padding, pad(duration, max_duration_width), pad(short_hash, 32), delivered_by))
+            pad(label, max_label_width),
+            styled_status,
+            padding,
+            pad(duration, max_duration_width),
+            pad(short_hash, 32),
+            delivered_by,
+        ))
 
     total_elapsed = fmt_elapsed(time.monotonic() - _t_total)
     print("")
@@ -691,7 +700,6 @@ def _delivery_impl(ctx):
             fail(result)
 
     return 1 if failed_count > 0 else 0
-
 
 delivery = task(
     name = "delivery",

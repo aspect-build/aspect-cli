@@ -4,8 +4,8 @@ sleep_iter = _t.sleep_iter
 monotonic = _t.monotonic
 monotonic_ns = _t.monotonic_ns
 time = struct(
-    sleep=_t.sleep,
-    sleep_iter=_t.sleep_iter,
-    monotonic=_t.monotonic,
-    monotonic_ns=_t.monotonic_ns
+    sleep = _t.sleep,
+    sleep_iter = _t.sleep_iter,
+    monotonic = _t.monotonic,
+    monotonic_ns = _t.monotonic_ns,
 )

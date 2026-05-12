@@ -70,7 +70,6 @@ endpoint is set, it is registered for just that signal (and the catch-all,
 where present, covers any remaining signals).
 """
 
-
 def _parse_headers(env):
     raw = env.var("OTEL_EXPORTER_OTLP_HEADERS") or ""
     if not raw:
@@ -86,7 +85,6 @@ def _parse_headers(env):
         out[k.strip()] = v.strip()
     return out
 
-
 # Per-signal HTTP path suffixes from the OTel spec. The catch-all
 # `OTEL_EXPORTER_OTLP_ENDPOINT` is treated as a base URL for the
 # `http/protobuf` (and `http/json`) protocol — the SDK appends a
@@ -97,7 +95,6 @@ _OTLP_HTTP_PATHS = {
     "logs": "/v1/logs",
     "metrics": "/v1/metrics",
 }
-
 
 def _register_env_endpoints(ctx):
     env = ctx.std.env
@@ -151,7 +148,6 @@ def _register_env_endpoints(ctx):
             signals = signals,
         )
 
-
 def _parse_endpoint_entry(entry):
     """Split a `URL[;k=v...]` string into (url, headers_dict).
 
@@ -168,7 +164,6 @@ def _parse_endpoint_entry(entry):
         headers[k.strip()] = v.strip()
     return url, headers
 
-
 def _register_endpoint_args(ctx):
     """Register endpoints declared via `--telemetry:endpoint`.
 
@@ -183,7 +178,6 @@ def _register_endpoint_args(ctx):
             fail("Telemetry: --telemetry:endpoint entry %r is missing a URL" % entry)
         ctx.telemetry.exporters.add(url = url, headers = headers)
 
-
 def _register_aspect_debug(ctx):
     """`ASPECT_DEBUG=1` translates into a stderr exporter (compact format).
 
@@ -193,7 +187,6 @@ def _register_aspect_debug(ctx):
     """
     if ctx.std.env.var("ASPECT_DEBUG"):
         ctx.telemetry.exporters.add(file = "stderr", format = "compact")
-
 
 def _describe(spec):
     """Render an ExporterSpec as a one-line trace.log string."""
@@ -206,8 +199,6 @@ def _describe(spec):
     if spec.signals:
         s += " signals=" + ",".join(spec.signals)
     return s
-
-
 
 def _telemetry_impl(ctx: FeatureContext):
     # ASPECT_DEBUG is independent of `discover_endpoints` — it controls
@@ -222,7 +213,6 @@ def _telemetry_impl(ctx: FeatureContext):
     trace.log("telemetry: %d exporter(s) registered:" % len(ctx.telemetry.exporters))
     for spec in ctx.telemetry.exporters:
         trace.log("  - " + _describe(spec))
-
 
 Telemetry = feature(
     display_name = "Telemetry",

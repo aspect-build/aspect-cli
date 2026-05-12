@@ -14,7 +14,6 @@ DEFAULT_BIN_DIR = "/etc/aspect/workflows/bin"
 # AWS CloudWatch log group
 AWS_LOG_GROUP = "/aw/runner/cloud-init/output"
 
-
 RemoteCache = record(
     endpoint = field(str, default = ""),
     address = field(str, default = ""),
@@ -94,9 +93,8 @@ def color_enabled(std):
         env.var("GITHUB_ACTIONS") or
         env.var("BUILDKITE") or
         env.var("CIRCLECI") or
-        env.var("GITLAB_CI")
+        env.var("GITLAB_CI"),
     )
-
 
 # --- Reading environment ---
 
@@ -123,7 +121,6 @@ def _read_ci(std) -> CI:
         scm_repo_name = ci_scm_repo_name,
         supports_curses = ci_supports_curses,
     )
-
 
 def get_environment(std) -> Environment | None:
     """
@@ -204,12 +201,10 @@ def get_environment(std) -> Environment | None:
         ci = _read_ci(std),
     )
 
-
 def is_warming_complete(std) -> bool:
     """Check whether cache warming has completed, without reading full environment."""
     path = std.env.var("ASPECT_WORKFLOWS_RUNNER_WARMING_COMPLETE_MARKER_FILE")
     return bool(path) and std.fs.exists(path)
-
 
 def parse_git_url_name(url: str) -> str:
     """Extract the repo name from a git URL. Returns "" on empty input
@@ -222,7 +217,6 @@ def parse_git_url_name(url: str) -> str:
         name = name[:-4]
     return name.split("/")[-1].split(":")[-1]
 
-
 def sanitize_filename(name: str) -> str:
     if not name:
         return ""
@@ -233,7 +227,6 @@ def sanitize_filename(name: str) -> str:
         else:
             result += "_"
     return result
-
 
 def get_bazelrc_flags(environment: Environment, root_dir: str) -> (list, list):
     """
@@ -292,8 +285,6 @@ def get_bazelrc_flags(environment: Environment, root_dir: str) -> (list, list):
 
     return (startup_flags, build_flags)
 
-
-
 # --- Display helpers ---
 
 def _url_encode(s: str) -> str:
@@ -314,7 +305,6 @@ def _url_encode(s: str) -> str:
             result += c
     return result
 
-
 def _print_workflows_info(std: std.Std, env: Environment) -> None:
     """Print Workflows version and warming status."""
     if env.ci.host == "buildkite":
@@ -334,7 +324,6 @@ def _print_workflows_info(std: std.Std, env: Environment) -> None:
         print("\tRunner Group Queue: " + env.runner.runner_group_queue)
     if env.runner.runner_resource_type:
         print("\tRunner Resource Type: " + env.runner.runner_resource_type)
-
 
 def _print_aws_info(env: Environment) -> None:
     """Print AWS-specific runner information."""
@@ -357,7 +346,6 @@ def _print_aws_info(env: Environment) -> None:
     if env.runner.instance_id:
         print("\tCLI: 'aws logs tail \"/aw/runner/cloud-init/output\" --log-stream-names \"" + env.runner.instance_id + "\" --since=30d'")
 
-
 def _print_gcp_info(env: Environment) -> None:
     """Print GCP-specific runner information."""
     print("GCP Information")
@@ -378,7 +366,6 @@ def _print_gcp_info(env: Environment) -> None:
     print("\tPreemptible: " + ("yes" if env.runner.preemptible else "no"))
     if env.runner.account and env.runner.instance_id:
         print("\tCLI: 'gcloud logging read --project " + env.runner.account + " \"resource.type=gce_instance resource.labels.instance_id=" + env.runner.instance_id + " log_name=projects/" + env.runner.account + "/logs/google_metadata_script_runner\" --format=\"value(jsonPayload.message)\" --freshness=30d | tac'")
-
 
 def print_environment_info(std: std.Std, env: Environment) -> None:
     """

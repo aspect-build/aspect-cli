@@ -57,7 +57,7 @@ def _determine_entrypoint(state: struct, target: str) -> str | None:
 def _spawn(ctx: TaskContext, state: struct, entrypoint: str, args: list[str], capture: bool = False) -> std.process.Child:
     runfiles = entrypoint + ".runfiles"
     workspace_name = state.workspace_name[0] or _DEFAULT_WORKSPACE_NAME
-    cmd = ctx.std.process.command(entrypoint)\
+    cmd = ctx.std.process.command(entrypoint) \
         .current_dir(runfiles + "/" + workspace_name) \
         .env("RUNFILES_DIR", runfiles) \
         .env("JAVA_RUNFILES", runfiles) \
@@ -83,5 +83,5 @@ def runnable(ctx, targets: list[str]) -> struct:
     return struct(
         event = lambda event: _process_bes(state, event),
         determine_entrypoint = lambda target: _determine_entrypoint(state, target),
-        spawn = lambda entrypoint, args, capture=False: _spawn(ctx, state, entrypoint, args, capture),
+        spawn = lambda entrypoint, args, capture = False: _spawn(ctx, state, entrypoint, args, capture),
     )
