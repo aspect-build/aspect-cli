@@ -3,6 +3,6 @@
 load("@aspect_rules_lint//lint:shellcheck.bzl", "lint_shellcheck_aspect")
 
 shellcheck = lint_shellcheck_aspect(
-    binary = Label("//:shellcheck"),
+    binary = Label("//tools/lint:shellcheck"),
     config = Label("//:.shellcheckrc"),
 )
