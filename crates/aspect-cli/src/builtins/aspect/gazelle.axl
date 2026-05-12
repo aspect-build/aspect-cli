@@ -327,7 +327,10 @@ def _impl(ctx: TaskContext) -> int:
     # the gazelle check-run / annotation header resolves to a real
     # invocation. See the matching comment in format.axl for why bare
     # `build_events = True` isn't sufficient.
-    build_events = list(bazel_trait.build_event_sinks) if bazel_trait.build_event_sinks else True
+    # See the matching comment in format.axl: the local sink declares
+    # intent to iterate via build.build_events(); the runtime pre-
+    # registers it so we don't miss the early burst.
+    build_events = [bazel.build_events.local()] + list(bazel_trait.build_event_sinks)
 
     # Fire `bazel_trait.build_start` hooks before spawning bazel — features
     # like Workflows register the BK `--- :bazel: Running bazel …`
@@ -355,15 +358,6 @@ def _impl(ctx: TaskContext) -> int:
         flags = flags,
     )
 
-    # Subscribe to the BES stream BEFORE doing any potentially-slow work
-    # (e.g. emitting task_updates that spawn `buildkite-agent annotate`).
-    # The broadcaster only delivers events to subscribers that joined
-    # before the event was sent — on a warm bazel daemon (second
-    # `aspect gazelle` invocation in a step) BES events stream within
-    # milliseconds, so any delay between `ctx.bazel.build` returning and
-    # this `build_events()` call risks missing the early burst
-    # (`build_started`, `target_completed`, `named_set_of_files`) that
-    # `runnable` needs to determine the gazelle target's entrypoint.
     events = build.build_events()
 
     # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`

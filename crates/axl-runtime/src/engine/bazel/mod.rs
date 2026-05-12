@@ -229,7 +229,14 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = match build_events {
-            Either::Left(events) => (events, vec![]),
+            // `False` → no BEP stream; `True` → open the stream and add
+            // a default local sink so the AXL task can iterate via
+            // `build.build_events()` (the only point of `True`).
+            Either::Left(false) => (false, vec![]),
+            Either::Left(true) => (
+                true,
+                vec![build::BuildEventSink::Local { buffer_cap: 10_000 }],
+            ),
             Either::Right(sinks) => (true, sinks.items),
         };
         let execution_log = match execution_log {
@@ -332,7 +339,13 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<build::Build> {
         let build_events = match build_events {
-            Either::Left(events) => (events, vec![]),
+            // See the matching arm in `build` above — `True` is sugar
+            // for a default local sink.
+            Either::Left(false) => (false, vec![]),
+            Either::Left(true) => (
+                true,
+                vec![build::BuildEventSink::Local { buffer_cap: 10_000 }],
+            ),
             Either::Right(sinks) => (true, sinks.items),
         };
         let execution_log = match execution_log {
@@ -636,6 +649,35 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
 
     fn file(#[starlark(require = named)] path: String) -> anyhow::Result<build::BuildEventSink> {
         Ok(build::BuildEventSink::File { path })
+    }
+
+    /// Declare the AXL task's intent to subscribe to the BES stream via
+    /// `build.build_events()`. The runtime pre-registers a receiver
+    /// inside `ctx.bazel.build(...)` — before bazel opens the BEP FIFO
+    /// and before remote sinks touch the network — so the early burst
+    /// (`build_started`, `target_completed`, `named_set_of_files`) is
+    /// buffered for the consumer regardless of how slow the AXL task is
+    /// to call `build_events()` afterward.
+    ///
+    /// `buffer_cap` bounds undrained accumulation. If the consumer
+    /// falls behind by more than `buffer_cap` events, the broadcaster
+    /// drops the subscription on the next overflow send and the AXL
+    /// iterator sees `Disconnected`. Default `10000` is enough headroom
+    /// for tasks that emit progress every BES tick without leaking
+    /// memory if the consumer is buggy and never starts draining.
+    ///
+    /// `ctx.bazel.build(build_events = True)` is sugar for
+    /// `build_events = [bazel.build_events.local()]`.
+    #[starlark(as_type = build::BuildEventSink)]
+    fn local(
+        #[starlark(require = named, default = 10_000)] buffer_cap: i32,
+    ) -> anyhow::Result<build::BuildEventSink> {
+        if buffer_cap <= 0 {
+            anyhow::bail!("buffer_cap must be > 0, got {buffer_cap}");
+        }
+        Ok(build::BuildEventSink::Local {
+            buffer_cap: buffer_cap as usize,
+        })
     }
 }
 

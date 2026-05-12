@@ -36,8 +36,10 @@ use super::sink::grpc;
 use super::sink::retry::{ErrorStrategy, RetryConfig, SinkError, SinkOutcome};
 use super::sink::tracing as tracing_sink;
 use super::stream::BuildEventStream;
+use super::stream::CappedSubscriber;
 use super::stream::ExecLogStream;
 use super::stream::WorkspaceEventStream;
+use axl_proto::build_event_stream::BuildEvent;
 
 #[derive(Debug, ProvidesStaticType, Display, Trace, NoSerialize, Allocative)]
 #[display("<bazel.build.BuildStatus>")]
@@ -86,6 +88,13 @@ pub enum BuildEventSink {
     File {
         path: String,
     },
+    /// AXL-side iterator subscription. Carries an explicit `buffer_cap`
+    /// so the runtime knows the consumer's intent and can drop the
+    /// subscription rather than buffer unboundedly if the AXL task
+    /// falls behind or never drains.
+    Local {
+        buffer_cap: usize,
+    },
 }
 
 starlark_simple_value!(BuildEventSink);
@@ -133,6 +142,9 @@ impl BuildEventSink {
             BuildEventSink::File { .. } => {
                 unreachable!("File sinks are handled as raw file paths, not subscriber threads")
             }
+            BuildEventSink::Local { .. } => {
+                unreachable!("Local sinks are popped out before sink.spawn() is called")
+            }
         }
     }
 }
@@ -154,6 +166,27 @@ pub struct Build {
     /// since their failures indicate a real bug rather than a flaky backend.
     #[allocative(skip)]
     sink_handles: RefCell<Vec<JoinHandle<SinkOutcome>>>,
+
+    /// Pre-subscribed receiver for the AXL-facing `build.build_events()`
+    /// iterator. Created inside `Build::spawn` when (and only when) the
+    /// caller declared intent via a `BuildEventSink::Local` entry — by
+    /// passing `build_events=True` (sugar for a default Local sink) or
+    /// `build_events=[bazel.build_events.local(...), ...]`. Subscribing
+    /// here, before bazel opens the BEP FIFO and before remote sinks
+    /// touch the network, guarantees the AXL receiver registers in time
+    /// for the early burst (`build_started`, `target_completed`,
+    /// `named_set_of_files`) regardless of subsequent task work.
+    ///
+    /// The subscription is capped: if the AXL consumer never starts
+    /// draining (or falls behind by more than `buffer_cap` events), the
+    /// broadcaster drops the subscription and the receiver sees
+    /// `Disconnected` — bounding memory growth for misbehaving tasks.
+    ///
+    /// `None` when no Local sink was configured, or after the first
+    /// `build_events()` call has consumed the receiver. Subsequent
+    /// calls error rather than silently subscribing late.
+    #[allocative(skip)]
+    early_event_subscriber: RefCell<Option<CappedSubscriber<BuildEvent>>>,
 
     /// The shared invocation_id that every gRPC BES sink uses when forwarding
     /// this build's events. `None` when no BES sinks were configured; `Some`
@@ -209,14 +242,27 @@ impl Build {
             cmd.current_dir(current_dir);
         }
 
-        // Split BES sinks: File sinks accumulate raw pipe bytes in memory and
-        // are written after the FIFO closes; subscriber sinks (Grpc, etc.) get
-        // a real-time channel subscription.
+        // Split BES sinks by kind:
+        //   File   — accumulate raw pipe bytes in memory, written after FIFO closes.
+        //   Local  — the AXL-side iterator subscription; at most one. Carries
+        //            the buffer_cap used to bound undrained accumulation.
+        //   Grpc/… — real-time broadcaster subscriptions; spawn their own threads.
         let mut bes_file_paths: Vec<String> = vec![];
         let mut bes_subscriber_sinks: Vec<BuildEventSink> = vec![];
+        let mut local_sink_cap: Option<usize> = None;
         for sink in sinks {
             match &sink {
                 BuildEventSink::File { path } => bes_file_paths.push(path.clone()),
+                BuildEventSink::Local { buffer_cap } => {
+                    if local_sink_cap.is_some() {
+                        return Err(io::Error::other(
+                            "ctx.bazel.build / ctx.bazel.test: multiple Local BES sinks \
+                             configured. Pass at most one `bazel.build_events.local(...)` \
+                             entry; the AXL task subscribes via `build.build_events()`.",
+                        ));
+                    }
+                    local_sink_cap = Some(*buffer_cap);
+                }
                 _ => bes_subscriber_sinks.push(sink),
             }
         }
@@ -322,6 +368,31 @@ impl Build {
         // end, which won't happen until bazel finishes JVM startup — well
         // after these subscribe calls land.
         let mut sink_handles: Vec<JoinHandle<SinkOutcome>> = vec![];
+
+        // Eagerly subscribe the AXL-facing receiver when the caller
+        // declared intent via a `BuildEventSink::Local` entry (either
+        // explicitly, or via the `build_events=True` sugar in the AXL
+        // surface). Subscribing here — before bazel's BEP FIFO opens
+        // and before remote sinks touch the network — closes the race
+        // window where the early burst (`build_started`,
+        // `target_completed`, `named_set_of_files`) was emitted before
+        // a lazy `build_events()` subscribe in the AXL task could
+        // register.
+        //
+        // The cap bounds memory growth: if the AXL task never drains
+        // (or falls behind by more than `buffer_cap` events), the
+        // broadcaster drops the subscription on the next overflow send
+        // and the AXL iterator sees `Disconnected`.
+        //
+        // No Local sink → no eager subscribe; tasks that only pass
+        // remote sinks pay nothing for buffering, and `build_events()`
+        // errors if called (the caller didn't ask for local delivery).
+        let early_event_subscriber: Option<CappedSubscriber<BuildEvent>> =
+            match (build_event_stream.as_ref(), local_sink_cap) {
+                (Some(s), Some(cap)) => Some(s.subscribe_capped(cap)),
+                _ => None,
+            };
+
         let sink_invocation_id: Option<String> = if !bes_subscriber_sinks.is_empty() {
             let invocation_id = uuid::Uuid::new_v4().to_string();
             let debug = std::env::var_os("ASPECT_DEBUG")
@@ -372,6 +443,7 @@ impl Build {
             execlog_stream: RefCell::new(execlog_stream),
             sink_handles: RefCell::new(sink_handles),
             sink_invocation_id: RefCell::new(sink_invocation_id),
+            early_event_subscriber: RefCell::new(early_event_subscriber),
             span: RefCell::new(span),
         })
     }
@@ -415,12 +487,34 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     // TODO: explain backpressure and build events sinks falling behind on poor network conditions.
     fn build_events<'v>(this: values::Value<'v>) -> anyhow::Result<BuildEventIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
-        let event_stream = build.build_event_stream.borrow();
-        let event_stream = event_stream.as_ref().ok_or(anyhow::anyhow!(
-            "call `ctx.bazel.build` with `build_events = true` in order to receive build events."
-        ))?;
+        let _ = build
+            .build_event_stream
+            .borrow()
+            .as_ref()
+            .ok_or(anyhow::anyhow!(
+                "call `ctx.bazel.build` with `build_events = True` (or include \
+             `bazel.build_events.local(...)` in the sink list) to receive build events."
+            ))?;
 
-        Ok(BuildEventIterator::new(event_stream.subscribe()))
+        // Hand over the pre-subscribed receiver created in `Build::spawn`.
+        // The intent was declared up-front via a `BuildEventSink::Local`
+        // entry, so the subscription registered before bazel opened the
+        // BEP FIFO. Calling this method twice is an error: the cap
+        // accounting belongs to one consumer; multi-consumer use needs
+        // the user to subscribe their own broadcaster on top.
+        let recv = build
+            .early_event_subscriber
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`build.build_events()` may be called at most once per build, and only when \
+                 `ctx.bazel.build` was called with `build_events = True` (or an explicit \
+                 `bazel.build_events.local(...)` in the sink list)."
+                )
+            })?;
+
+        Ok(BuildEventIterator::new(recv))
     }
 
     // Creates an iterable `ExecutionLogIterator` type.

@@ -506,7 +506,7 @@ async fn retry_lifecycle(
 
 fn finalize(strategy: ErrorStrategy, endpoint: &str, last_error: String) -> SinkError {
     if matches!(strategy, ErrorStrategy::Warn) {
-        eprintln!("WARN: BES sink {endpoint} giving up: {last_error}");
+        eprintln!("WARNING: BES sink {endpoint} giving up: {last_error}");
     }
     SinkError {
         strategy,

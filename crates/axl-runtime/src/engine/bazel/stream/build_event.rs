@@ -12,7 +12,7 @@ use std::{
 };
 use thiserror::Error;
 
-use super::broadcaster::{Broadcaster, Subscriber};
+use super::broadcaster::{Broadcaster, CappedSubscriber, Subscriber};
 use super::redaction::redact_event;
 use super::util::{MultiWriter, read_varint};
 
@@ -253,6 +253,26 @@ impl BuildEventStream {
                 let (tx, rx) = std::sync::mpsc::channel();
                 drop(tx);
                 rx
+            }
+        }
+    }
+
+    /// Subscribe with a bounded queue depth. When the AXL consumer falls
+    /// behind and `queued >= cap`, the broadcaster drops this
+    /// subscription so memory doesn't grow without limit. The receiver
+    /// then sees `Disconnected` on its next recv.
+    pub fn subscribe_capped(&self, cap: usize) -> CappedSubscriber<BuildEvent> {
+        match self.broadcaster.as_ref() {
+            Some(b) => b.subscribe_capped(cap),
+            None => {
+                // Stream already joined; the broadcaster is gone but we
+                // still need to hand back a usable CappedSubscriber.
+                // Easiest: subscribe via a temp broadcaster, then drop
+                // it so the receiver sees disconnect immediately.
+                let temp = Broadcaster::<BuildEvent>::new();
+                let sub = temp.subscribe_capped(cap);
+                drop(temp);
+                sub
             }
         }
     }
