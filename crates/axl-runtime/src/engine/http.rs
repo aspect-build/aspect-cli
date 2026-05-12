@@ -43,6 +43,23 @@ pub struct Http {
     client: reqwest::Client,
 }
 
+/// Maximum gap between successive reads on a single response. Resets
+/// every time bytes arrive, so a slow-but-progressing transfer (a
+/// large artifact upload on a 1 Mbps CI link) is fine — only stalls
+/// (hung peer, dropped connection without TCP RST, half-closed
+/// socket) trip the limit. AXL feature handlers run synchronously,
+/// so a stuck request would otherwise pin the whole task.
+///
+/// We deliberately do NOT set a total `timeout(...)`: that would cap
+/// every transfer regardless of whether bytes are flowing and would
+/// regress legitimate long uploads/downloads on slow CI links.
+const DEFAULT_HTTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// TCP/TLS handshake ceiling. Connection setup should never take
+/// long; DNS or handshake stalls fail fast instead of waiting for
+/// the read window to expire.
+const DEFAULT_HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 impl Http {
     pub fn new() -> Self {
         Self {
@@ -50,6 +67,8 @@ impl Http {
                 .user_agent("AXL-Runtime")
                 // This is the default but lets be explicit.
                 .redirect(Policy::limited(10))
+                .read_timeout(DEFAULT_HTTP_READ_TIMEOUT)
+                .connect_timeout(DEFAULT_HTTP_CONNECT_TIMEOUT)
                 .build()
                 .expect("failed to build the http client"),
         }
