@@ -14,9 +14,13 @@ def _build_impl(ctx: TaskContext) -> int:
     return tui(ctx, build)
 
 build = task(
-    implementation = _build_impl,
-    group = ["dev"],
     args = {
-        "targets": args.positional(minimum = 1, maximum = 512, default = ["..."]),
-    }
+        "targets": args.positional(
+            default = ["..."],
+            maximum = 512,
+            minimum = 1,
+        ),
+    },
+    group = ["dev"],
+    implementation = _build_impl,
 )

@@ -11,10 +11,10 @@ Keeping a single runner here ensures the status check code path stays unified:
 any change to how build events are processed or how status updates are emitted
 applies uniformly to both tasks.
 """
-load("../traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
+
 load("./bazel_results.axl", "init_results", "process_event")
 load("./environment.axl", "color_enabled")
-
+load("../traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
 
 def _collect_bes_from_args(ctx):
     """Collect BES sinks from CLI args (--bes-backend/--bes-header)."""
@@ -28,10 +28,9 @@ def _collect_bes_from_args(ctx):
             bazel.build_events.grpc(
                 uri = bes_backend,
                 metadata = metadata,
-            )
+            ),
         )
     return sinks
-
 
 def run_bazel_task(ctx: TaskContext, command: str) -> int:
     """Shared impl for build/test tasks.
@@ -47,9 +46,9 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
                  stream (including the presence of test_summary events for
                  tests) follows naturally from this.
     """
-    hc_trait    = ctx.traits[HealthCheckTrait]
+    hc_trait = ctx.traits[HealthCheckTrait]
     bazel_trait = ctx.traits[BazelTrait]
-    lifecycle   = ctx.traits[TaskLifecycleTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
 
     for hook in hc_trait.pre_health_check:
         hook(ctx)
@@ -63,6 +62,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
     flags = ["--isatty=" + str(int(ctx.std.io.stdout.is_tty))]
     flags.extend(ctx.args.bazel_flags)
     flags.extend(bazel_trait.extra_flags)
+
     # Task-time flag contributors — features register hooks that need
     # ctx.task (e.g. --build_metadata=ASPECT_TASK_NAME=...) which features
     # can't produce at activation time because FeatureContext has no task.
@@ -109,7 +109,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
         flags = flags,
     )
 
-    trace.event("build.flags",  fields = {"flags": flags})
+    trace.event("build.flags", fields = {"flags": flags})
     rc_startup_flags, flags = rc.expand_all(command = command)
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
     print(rc.announce(command = command, ansi = color_enabled(ctx.std)))
@@ -123,7 +123,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
                 inherit_stdout = True,
-                *ctx.args.targets,
+                *ctx.args.targets
             )
         else:
             invocation = ctx.bazel.build(
@@ -131,7 +131,7 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
                 execution_log = bazel_trait.execution_log_sinks or False,
                 flags = flags,
                 inherit_stdout = True,
-                *ctx.args.targets,
+                *ctx.args.targets
             )
 
         if need_bes:

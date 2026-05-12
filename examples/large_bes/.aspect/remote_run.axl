@@ -14,7 +14,7 @@ def _sha256(ctx, data):
 def _digest(ctx, proto_msg):
     """Encode a proto message and return (bytes, Digest)."""
     data = proto_msg.encode()
-    return data, remote.execution.Digest(hash=_sha256(ctx, data), size_bytes=len(data))
+    return data, remote.execution.Digest(hash = _sha256(ctx, data), size_bytes = len(data))
 
 def _fetch_blob(cas, instance_name, digest):
     """Fetch a single blob from CAS by digest."""
@@ -40,21 +40,21 @@ def _impl(ctx):
     cmd_bytes, cmd_digest = _digest(ctx, cmd)
 
     action = remote.execution.Action(
-        command_digest    = cmd_digest,
-        input_root_digest = remote.execution.Digest(hash=_EMPTY_HASH, size_bytes=0),
-        do_not_cache      = True,
-        platform          = remote.execution.Platform(
+        command_digest = cmd_digest,
+        input_root_digest = remote.execution.Digest(hash = _EMPTY_HASH, size_bytes = 0),
+        do_not_cache = True,
+        platform = remote.execution.Platform(
             properties = [
-                remote.execution.platform.Property(name="Arch", value="arm64"),
-                remote.execution.platform.Property(name="OSFamily", value="linux"),
-                remote.execution.platform.Property(name="container-image", value="docker://ubuntu:22.04"),
+                remote.execution.platform.Property(name = "Arch", value = "arm64"),
+                remote.execution.platform.Property(name = "OSFamily", value = "linux"),
+                remote.execution.platform.Property(name = "container-image", value = "docker://ubuntu:22.04"),
             ],
         ),
     )
     action_bytes, action_digest = _digest(ctx, action)
 
     print("[2/4] Uploading inputs...")
-    cas = remote.execution.ContentAddressableStorage(uri=cfg.uri, headers=cfg.headers)
+    cas = remote.execution.ContentAddressableStorage(uri = cfg.uri, headers = cfg.headers)
     cas.connect(ctx)
 
     cas.BatchUpdateBlobs(
@@ -63,11 +63,11 @@ def _impl(ctx):
             requests = [
                 remote.execution.batch_update_blobs_request.Request(
                     digest = cmd_digest,
-                    data   = cmd_bytes,
+                    data = cmd_bytes,
                 ),
                 remote.execution.batch_update_blobs_request.Request(
                     digest = action_digest,
-                    data   = action_bytes,
+                    data = action_bytes,
                 ),
             ],
         ),
@@ -75,16 +75,16 @@ def _impl(ctx):
 
     # ── Execution: submit and stream operations ──────────────────────────
     print("[3/4] Executing remotely...")
-    exec_svc = remote.execution.Execution(uri=cfg.uri, headers=cfg.headers)
+    exec_svc = remote.execution.Execution(uri = cfg.uri, headers = cfg.headers)
     exec_svc.connect(ctx)
 
     stream = exec_svc.Execute(
         remote.execution.ExecuteRequest(
-            instance_name     = cfg.instance_name,
-            action_digest     = action_digest,
+            instance_name = cfg.instance_name,
+            action_digest = action_digest,
             skip_cache_lookup = True,
-            inline_stdout     = True,
-            inline_stderr     = True,
+            inline_stdout = True,
+            inline_stderr = True,
         ),
     )
 
@@ -135,10 +135,10 @@ def _impl(ctx):
     return result.exit_code
 
 remote_run = task(
-    name           = "run",
-    group          = ["remote"],
+    name = "run",
+    group = ["remote"],
     implementation = _impl,
-    args           = {
+    args = {
         "command": args.positional(),
     },
 )

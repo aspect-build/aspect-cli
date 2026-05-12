@@ -4,7 +4,7 @@ http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "ht
 
 bazel_dep(name = "aspect_bazel_lib", version = "2.21.1")
 bazel_dep(name = "aspect_gazelle_prebuilt", version = "0.0.8")
-bazel_dep(name = "aspect_rules_lint", version = "1.9.1")
+bazel_dep(name = "aspect_rules_lint", version = "2.5.2")
 bazel_dep(name = "rules_nodejs", version = "6.7.3")  # Transitive dep; bump for bazel9
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "bazelrc-preset.bzl", version = "1.4.0")

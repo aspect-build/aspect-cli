@@ -20,10 +20,10 @@ Templates can be customized per-task via GitHubStatusChecksTrait:
         # Or show everything:
         gh.metadata_keys = ["*"]
 """
-load("../traits.axl", "TaskLifecycleTrait", "GitHubStatusChecksTrait", "ArtifactsTrait", "TaskUpdate")
-load("../lib/github.axl", "github", "detect_commit_sha", "detect_github_repo")
-load("../lib/bazel_results.axl", "init_results", "now_ms", "render_check_output", "compute_reproducer_command")
 
+load("../lib/bazel_results.axl", "compute_reproducer_command", "init_results", "now_ms", "render_check_output")
+load("../lib/github.axl", "detect_commit_sha", "detect_github_repo", "github")
+load("../traits.axl", "ArtifactsTrait", "GitHubStatusChecksTrait", "TaskLifecycleTrait", "TaskUpdate")
 
 def _to_display_name(name):
     """Convert a snake_case task name to a CamelCase display name.
@@ -32,9 +32,7 @@ def _to_display_name(name):
     """
     return "".join([w[0].upper() + w[1:] for w in name.split("_") if w])
 
-
 _SUBJECT_MAX_LEN = 60
-
 
 def _truncate_subject(subject):
     """Truncate subject at a word boundary if it exceeds _SUBJECT_MAX_LEN characters."""
@@ -45,7 +43,6 @@ def _truncate_subject(subject):
     if last_space > 0:
         return window[:last_space] + "..."
     return window + "..."
-
 
 def _detect_triggered_by(env):
     """Return a short string describing who/what triggered this build."""
@@ -65,7 +62,6 @@ def _detect_triggered_by(env):
         return env.var("GITLAB_USER_LOGIN") or "GitLab CI"
     return ""
 
-
 def _collect_ci_links(env, results_base_url):
     """Collect CI job URL and optional Aspect Web UI URL from the environment."""
     ci_label = ""
@@ -81,7 +77,7 @@ def _collect_ci_links(env, results_base_url):
     elif env.var("BUILDKITE"):
         ci_label = "Buildkite"
         build_url = env.var("BUILDKITE_BUILD_URL") or ""
-        step_id   = env.var("BUILDKITE_STEP_ID") or ""
+        step_id = env.var("BUILDKITE_STEP_ID") or ""
         if build_url and step_id:
             ci_url = build_url + "/steps/canvas?sid=" + step_id
         else:
@@ -94,7 +90,6 @@ def _collect_ci_links(env, results_base_url):
         ci_url = env.var("CI_JOB_URL") or ""
 
     return {"ci_label": ci_label, "ci_url": ci_url, "aspect_url": "", "results_base_url": results_base_url}
-
 
 def _resolve_aspect_url(links, results):
     """Return the Aspect Web UI URL for an invocation, or "" if unavailable.
@@ -124,10 +119,9 @@ def _resolve_aspect_url(links, results):
         return ""
     return (base if base.endswith("/") else base + "/") + inv_id
 
-
 def _github_status_checks(ctx: FeatureContext):
-    lifecycle       = ctx.traits[TaskLifecycleTrait]
-    gh_trait        = ctx.traits[GitHubStatusChecksTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+    gh_trait = ctx.traits[GitHubStatusChecksTrait]
     artifacts_trait = ctx.traits[ArtifactsTrait]
 
     mode = ctx.args.mode
@@ -137,6 +131,7 @@ def _github_status_checks(ctx: FeatureContext):
         return
     if mode == "local-only" and is_ci:
         return
+
     # mode == "always" falls through
 
     # Gate on github.com. ASPECT_VCS_URL pointing at a non-github.com host
@@ -180,11 +175,11 @@ def _github_status_checks(ctx: FeatureContext):
         _state at task_started time (from the TaskContext) and read from there.
         """
         return {
-            "triggered_by":      _state.get("_triggered_by", ""),
-            "targets":           _state.get("_subject") or "//...",
-            "started_ms":        _state.get("_started_ms", 0),
-            "ended_ms":          _state.get("_ended_ms", 0),
-            "progress":          _state.get("_progress", ""),
+            "triggered_by": _state.get("_triggered_by", ""),
+            "targets": _state.get("_subject") or "//...",
+            "started_ms": _state.get("_started_ms", 0),
+            "ended_ms": _state.get("_ended_ms", 0),
+            "progress": _state.get("_progress", ""),
             # Used in the check run title: "<Task Name> <Subject> <State>"
             "task_display_name": _state.get("_task_display_name", ""),
         }
@@ -193,11 +188,13 @@ def _github_status_checks(ctx: FeatureContext):
         """Build the links dict from CI env + BES invocation URL + artifact URLs."""
         links = dict(_state.get("_ci_links") or _ci_links_base)
         links["aspect_url"] = _resolve_aspect_url(links, results)
+
         # Surface artifact URLs from ArtifactUpload feature if available.
         links["artifacts_browse_url"] = artifacts_trait.artifacts_browse_url or ""
-        links["artifact_urls"]        = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
+        links["artifact_urls"] = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
+
         # Per-file label URLs (CircleCI/GitLab per-file uploads only). Empty on GitHub/Buildkite.
-        links["testlogs_label_urls"]  = dict(artifacts_trait.testlogs_label_urls) if artifacts_trait.testlogs_label_urls else {}
+        links["testlogs_label_urls"] = dict(artifacts_trait.testlogs_label_urls) if artifacts_trait.testlogs_label_urls else {}
         return links
 
     def _create_check_run(ctx):
@@ -225,7 +222,9 @@ def _github_status_checks(ctx: FeatureContext):
         )
         if not token:
             print("GitHub status check: authentication failed for %s/%s — %s" % (
-                owner, repo, auth_reason.get("reason", "unknown"),
+                owner,
+                repo,
+                auth_reason.get("reason", "unknown"),
             ))
             return
         _state["_github_token"] = token
@@ -241,8 +240,13 @@ def _github_status_checks(ctx: FeatureContext):
         _state["_ci_links"] = _ci_links_base
 
         initial_output = render_check_output(
-            ctx, init_results(), "running", _make_render_ctx(),
-            dict(_ci_links_base), gh_trait.templates, gh_trait.metadata_keys,
+            ctx,
+            init_results(),
+            "running",
+            _make_render_ctx(),
+            dict(_ci_links_base),
+            gh_trait.templates,
+            gh_trait.metadata_keys,
         )
 
         check_name = "aspect / %s (%s)" % (_to_display_name(ctx.task.name), ctx.task.key)
@@ -279,6 +283,7 @@ def _github_status_checks(ctx: FeatureContext):
         subject_str = (" " + subject) if subject else ""
         print("GitHub status check: aspect/%s (%s) — %s%s" % (ctx.task.name, ctx.task.key, _to_display_name(ctx.task.name), subject_str))
         _state["_subject"] = _truncate_subject(subject)
+
         # Stash the display name so _make_render_ctx can include it in the title
         # without needing to reach through a FeatureContext (which has no .task).
         _state["_task_display_name"] = _to_display_name(ctx.task.name)
@@ -286,7 +291,7 @@ def _github_status_checks(ctx: FeatureContext):
 
     def _task_update(ctx, update):
         status = update.status
-        final  = status in ("passed", "failed")
+        final = status in ("passed", "failed")
 
         _state["_progress"] = update.progress
 
@@ -307,7 +312,7 @@ def _github_status_checks(ctx: FeatureContext):
         # update (TaskUpdate is a record), so we can't mutate `results` itself.
         repro_cmd, repro_total = compute_reproducer_command(results, ctx.task.name)
         results = dict(results)
-        results["reproducer_command"]       = repro_cmd
+        results["reproducer_command"] = repro_cmd
         results["reproducer_command_total"] = repro_total
 
         # Set ended_ms before rendering so the terminal check run reflects the
@@ -321,8 +326,13 @@ def _github_status_checks(ctx: FeatureContext):
             _state["_last_update_ms"] = now
 
         output = render_check_output(
-            ctx, results, status, _make_render_ctx(), _make_links(results),
-            gh_trait.templates, gh_trait.metadata_keys,
+            ctx,
+            results,
+            status,
+            _make_render_ctx(),
+            _make_links(results),
+            gh_trait.templates,
+            gh_trait.metadata_keys,
         )
 
         if final:
@@ -332,7 +342,6 @@ def _github_status_checks(ctx: FeatureContext):
 
     lifecycle.task_started.append(_task_started)
     lifecycle.task_update.append(_task_update)
-
 
 GithubStatusChecks = feature(
     implementation = _github_status_checks,

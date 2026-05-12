@@ -16,7 +16,7 @@ deep: {{address.nested.deep}}
 """
     result_hb = ctx.template.handlebars(
         template_hb,
-        data = data
+        data = data,
     )
     print("Handlebars result:\n%s" % result_hb)
 
@@ -29,7 +29,7 @@ deep: {{address.nested.deep}}
 """
     result_j2 = ctx.template.jinja2(
         template_j2,
-        data = data
+        data = data,
     )
 
     print("Jinja2 result:\n%s" % result_j2)
@@ -43,7 +43,7 @@ deep: {{address.nested.deep}}
 """
     result_li = ctx.template.liquid(
         template_li,
-        data = data
+        data = data,
     )
 
     print("Liquid result:\n%s" % result_li)

@@ -1,7 +1,7 @@
 _b = __builtins__.base64()
 base64 = struct(
-    encode     = _b.encode,
-    decode     = _b.decode,
+    encode = _b.encode,
+    decode = _b.decode,
     encode_url = _b.encode_url,
     decode_url = _b.decode_url,
 )

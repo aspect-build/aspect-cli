@@ -8,11 +8,10 @@ CI-specific upload primitives live in their respective lib files:
   lib/github.axl, lib/buildkite.axl, lib/circleci.axl (gitlab inline below)
 """
 
-load("./github.axl", "github")
 load("./buildkite.axl", "buildkite")
 load("./circleci.axl", "circleci")
+load("./github.axl", "github")
 load("./tar.axl", "tar_create", "zip_create")
-
 
 def detect_ci(env):
     """Detect CI platform from environment.
@@ -32,8 +31,6 @@ def detect_ci(env):
     elif env.var("CIRCLE_PROJECT_REPONAME"):
         return "circleci"
     return None
-
-
 
 def artifact_name(ci, task_name, task_key, filename):
     """Format an artifact name based on CI platform conventions.
@@ -55,7 +52,6 @@ def artifact_name(ci, task_name, task_key, filename):
     if ci == "github":
         return task_name + "." + task_key + "." + filename
     return task_name + "/" + task_key + "/" + filename
-
 
 # =============================================================================
 # GitLab CI (inline — no separate lib needed)
@@ -90,15 +86,14 @@ def _upload_file_gitlab(ctx, path, name):
 
     if resp.status < 200 or resp.status >= 300:
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["HTTP " + str(resp.status)]}
+
     # The upload URL is also the stable download URL.
     return {"success": True, "artifact_ref": name, "download_url": url, "errors": []}
-
 
 _gitlab = struct(
     upload_artifact = _upload_file_gitlab,
     delete_artifact = lambda ctx, name: {"success": True},
 )
-
 
 # =============================================================================
 # Testlog upload strategies
@@ -130,6 +125,7 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name, final = False):
     _parent = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
     artifacts_root = ctx.std.fs.mkdtemp(prefix = "aspect-artifacts-", parent = _parent)
     archive_path = artifacts_root + "/" + name + ".tar.gz"
+
     # `name` may contain "/" (GitLab hierarchical artifact names), so ensure the
     # parent directories of archive_path exist before writing into them.
     ctx.std.fs.create_dir_all(archive_path.rsplit("/", 1)[0])
@@ -156,9 +152,9 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name, final = False):
     if result["success"]:
         if group["prev_ref"]:
             provider.delete_artifact(ctx, group["prev_ref"])
-        group["prev_ref"]     = result["artifact_ref"]
+        group["prev_ref"] = result["artifact_ref"]
         group["download_url"] = result.get("download_url", "")
-        group["last_count"]   = count
+        group["last_count"] = count
         return True
     else:
         if not final:
@@ -166,7 +162,6 @@ def _upload_testlogs_tar(ctx, provider, group, entries, name, final = False):
         for err in result["errors"]:
             _print_upload_error(group, err)
         return False
-
 
 def _upload_testlogs_zip(ctx, provider, group, entries, name, final = False):
     """Build a ZIP archive and upload via provider.upload_artifact.
@@ -210,9 +205,9 @@ def _upload_testlogs_zip(ctx, provider, group, entries, name, final = False):
     if result["success"]:
         if group["prev_ref"]:
             provider.delete_artifact(ctx, group["prev_ref"])
-        group["prev_ref"]     = result["artifact_ref"]
+        group["prev_ref"] = result["artifact_ref"]
         group["download_url"] = result.get("download_url", "")
-        group["last_count"]   = count
+        group["last_count"] = count
         return True
     else:
         if not final:
@@ -220,7 +215,6 @@ def _upload_testlogs_zip(ctx, provider, group, entries, name, final = False):
         for err in result["errors"]:
             _print_upload_error(group, err)
         return False
-
 
 def _upload_testlogs_buildkite(ctx, group, entries, name):
     """Upload test files individually to Buildkite via a symlink tree.
@@ -262,7 +256,6 @@ def _upload_testlogs_buildkite(ctx, group, entries, name):
     print("artifact upload: buildkite-agent exit " + str(status.code))
     return False
 
-
 def _upload_testlogs_per_file(ctx, provider, group, entries, name):
     """Upload each new test file individually via provider.upload_artifact.
 
@@ -298,7 +291,6 @@ def _upload_testlogs_per_file(ctx, provider, group, entries, name):
             break
 
     return any_success
-
 
 # =============================================================================
 # Provider factory

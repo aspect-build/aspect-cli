@@ -18,10 +18,10 @@ Usage:
     aspect lint --fix
 """
 
-load("./lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "get_sarif_summary")
-load("./traits.axl", "BazelTrait", "HealthCheckTrait")
 load("./lib/environment.axl", "color_enabled")
 load("./lib/github.axl", "detect_changed_files")
+load("./lib/sarif.axl", "get_sarif_summary", "parse_sarif", "parse_sarif_diagnostics")
+load("./traits.axl", "BazelTrait", "HealthCheckTrait")
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs on Aspect Workflows runners.
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
@@ -45,6 +45,7 @@ def file_uri_to_path(uri):
         rest = uri[len("bytestream://"):]
         parts = rest.split("/")
         host = parts[0].split(":")[0]
+
         # Detect the digest-function segment by checking if parts[2] is
         # one of the known function names. If it is, the hash/size shift
         # right by one. Default sha256 if unspecified.
@@ -75,33 +76,31 @@ def filter_changeset(diagnostics, changed_files):
     changed_paths = {cf["file"]: True for cf in changed_files}
     return [d for d in diagnostics if d["file"] in changed_paths]
 
-
 Strategy = record(
-    filter              = field(typing.Callable[[list, list], list]),
+    filter = field(typing.Callable[[list, list], list]),
     # (all_diagnostics, changed_files) -> relevant_diagnostics
-    fail_on_severity    = field(str | None, "error"),
+    fail_on_severity = field(str | None, "error"),
     # None = never fail on severity; "error" = fail if any diagnostic has severity "error"
     fail_on_linter_error = field(bool, False),
     # True = also fail if any linter exited non-zero
 )
 
-
 # Built-in strategies
 StrategySoft = Strategy(
-    filter              = filter_all,
-    fail_on_severity    = None,    # never fails
+    filter = filter_all,
+    fail_on_severity = None,  # never fails
     fail_on_linter_error = False,
 )
 
 StrategyHard = Strategy(
-    filter              = filter_all,
-    fail_on_severity    = "error",
-    fail_on_linter_error = True,   # also fail if linter exits non-zero
+    filter = filter_all,
+    fail_on_severity = "error",
+    fail_on_linter_error = True,  # also fail if linter exits non-zero
 )
 
 StrategyHoldTheLine = Strategy(
-    filter              = filter_changeset,
-    fail_on_severity    = "error",
+    filter = filter_changeset,
+    fail_on_severity = "error",
     fail_on_linter_error = False,
 )
 
@@ -110,7 +109,6 @@ _STRATEGIES = {
     "hard": StrategyHard,
     "hold-the-line": StrategyHoldTheLine,
 }
-
 
 LintTrait = trait(
     # Canonical changed-file set for this lint run. Populated by the task
@@ -165,7 +163,6 @@ def _impl(ctx: TaskContext) -> int:
     for hook in lint_trait.lint_start:
         hook(ctx)
 
-
     # 3. Build flags — lint-specific first, then BazelTrait additions.
     # Each --aspect=<label> from the user becomes a Bazel --aspects=<label>.
     # At least one aspect is required (enforced by args.string_list(required=True)).
@@ -187,6 +184,7 @@ def _impl(ctx: TaskContext) -> int:
         flags.append("--output_groups=rules_lint_machine")
 
     flags.extend(bazel_trait.extra_flags)
+
     # Task-time flag contributors — features register hooks that need
     # ctx.task (e.g. --build_metadata=ASPECT_TASK_NAME=...) which features
     # can't produce at activation time because FeatureContext has no task.
@@ -232,13 +230,12 @@ def _impl(ctx: TaskContext) -> int:
         build_events = build_events,
         inherit_stderr = True,
         inherit_stdout = True,
-        *ctx.args.targets,
+        *ctx.args.targets
     )
     all_diagnostics = []
     linter_exit_code = 0
     patches = []
     github_output = ctx.std.env.var("GITHUB_OUTPUT")
-
 
     for event in build.build_events():
         for handler in bazel_trait.build_event:

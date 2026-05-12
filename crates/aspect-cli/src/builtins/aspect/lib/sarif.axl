@@ -3,11 +3,9 @@
 Provides parsing of raw SARIF JSON and conversion to GitHub PR review comments.
 """
 
-
 def parse_sarif(content):
     """Parse a SARIF JSON string into a dict."""
     return json.decode(content)
-
 
 def parse_sarif_diagnostics(content):
     """Parse SARIF JSON into a flat list of diagnostic dicts.
@@ -37,7 +35,6 @@ def parse_sarif_diagnostics(content):
             })
     return diagnostics
 
-
 def get_sarif_summary(sarif):
     """Return a human-readable summary of SARIF findings."""
     if type(sarif) == "string":
@@ -53,7 +50,6 @@ def get_sarif_summary(sarif):
     if not lines:
         return "No lint findings."
     return "\n".join(lines) + "\n%d total finding(s)" % total
-
 
 def sarif_result_to_comment(result, tool_name):
     """Convert a single SARIF result to a GitHub review comment dict.
@@ -133,7 +129,6 @@ def sarif_result_to_comment(result, tool_name):
         comment["_fixes"] = fixes
 
     return comment
-
 
 def sarif_to_review_comments(sarif):
     """Convert a parsed SARIF dict (or JSON string) to GitHub review comment dicts."""

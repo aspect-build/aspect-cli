@@ -1,21 +1,18 @@
 """GitHub PR review comment reporter for the lint task."""
 
-load("../lint.axl", "LintTrait")
 load("../lib/environment.axl", "color_enabled")
 load("../lib/github.axl", "github")
 load("../lib/sarif.axl", "parse_sarif", "parse_sarif_diagnostics", "sarif_to_review_comments")
-
+load("../lint.axl", "LintTrait")
 
 # ANSI codes (matching delivery.axl/lint.axl)
 _BOLD = "\033[1m"
 _YELLOW = "\033[33m"
 _RESET = "\033[0m"
 
-
 # SARIF level priority for cap ordering — errors come first, then warnings,
 # then notes. Unknown levels sort last.
 _SEVERITY_RANK = {"error": 0, "warning": 1, "note": 2, "none": 3}
-
 
 def _comment_sort_key(comment):
     """Sort key prioritizing higher severity, then stable by path+line."""
@@ -24,7 +21,6 @@ def _comment_sort_key(comment):
         comment.get("path", ""),
         comment.get("line", 0),
     )
-
 
 def _enrich_with_suggestions(ctx, comments):
     """Append GitHub suggestion blocks to comments that carry fix hints."""
@@ -67,10 +63,8 @@ def _enrich_with_suggestions(ctx, comments):
             comment["body"] += "\n\n```suggestion\n" + fixed + "\n```"
         comment.pop("_fixes", None)
 
-
 def _build_comment_marker(tool, file, line, rule_id):
     return "<!-- aspect-lint:{}:{}:{}:{} -->".format(tool, file, line, rule_id)
-
 
 def _extract_comment_marker(body):
     prefix = "<!-- aspect-lint:"
@@ -85,15 +79,14 @@ def _extract_comment_marker(body):
         return None
     return body[idx:end + len(suffix)]
 
-
 def _filter_by_diff(comments, changed_lines):
     if not changed_lines:
         return list(comments)
     return [
-        c for c in comments
+        c
+        for c in comments
         if (c.get("line", 0) - 1) in (changed_lines.get(c.get("path", "")) or [])
     ]
-
 
 def _build_comments(ctx, filepath):
     """Parse a SARIF report into review comments with markers and suggestions applied."""
@@ -106,15 +99,20 @@ def _build_comments(ctx, filepath):
         if i < len(diagnostics):
             diag = diagnostics[i]
             comment["body"] = _build_comment_marker(
-                diag["tool"], diag["file"], diag["line"], diag["rule_id"],
+                diag["tool"],
+                diag["file"],
+                diag["line"],
+                diag["rule_id"],
             ) + "\n" + comment["body"]
     return comments
 
-
 def _get_existing_markers(ctx, gh):
     result = github.pulls.list_review_comments(
-        ctx, token = gh["token"], owner = gh["owner"],
-        repo = gh["repo"], pull_number = gh["pr_number"],
+        ctx,
+        token = gh["token"],
+        owner = gh["owner"],
+        repo = gh["repo"],
+        pull_number = gh["pr_number"],
     )
     if not result["success"]:
         return {}
@@ -124,7 +122,6 @@ def _get_existing_markers(ctx, gh):
         if marker:
             markers[marker] = True
     return markers
-
 
 def _post_individually(ctx, gh, comments, existing_markers):
     errors = []
@@ -136,10 +133,15 @@ def _post_individually(ctx, gh, comments, existing_markers):
         if marker and marker in existing_markers:
             continue
         result = github.pulls.create_review_comment(
-            ctx, token = gh["token"], owner = gh["owner"],
-            repo = gh["repo"], pull_number = gh["pr_number"],
-            body = c["body"], path = prefix + c["path"],
-            line = c.get("line"), commit_id = gh["head_sha"],
+            ctx,
+            token = gh["token"],
+            owner = gh["owner"],
+            repo = gh["repo"],
+            pull_number = gh["pr_number"],
+            body = c["body"],
+            path = prefix + c["path"],
+            line = c.get("line"),
+            commit_id = gh["head_sha"],
             side = c.get("side", "RIGHT"),
             start_line = c.get("start_line"),
             start_side = c.get("start_side"),
@@ -151,17 +153,18 @@ def _post_individually(ctx, gh, comments, existing_markers):
             errors.append("[%s:%s] %s" % (c.get("path", "?"), c.get("line", 0), result.get("error", "unknown error")))
     return errors
 
-
 def _check_staleness(ctx, gh):
     result = github.pulls.get(
-        ctx, token = gh["token"], owner = gh["owner"],
-        repo = gh["repo"], pull_number = gh["pr_number"],
+        ctx,
+        token = gh["token"],
+        owner = gh["owner"],
+        repo = gh["repo"],
+        pull_number = gh["pr_number"],
     )
     if not result["success"]:
         return False
     head_sha = result["pull_request"].get("head", {}).get("sha", "")
     return head_sha != gh["head_sha"]
-
 
 def _cleanup_comments(ctx, gh, relevant_diagnostics):
     desired = {}
@@ -171,8 +174,11 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics):
             marker = _build_comment_marker(diag["tool"], diag["file"], diag["line"], diag["rule_id"])
             desired[marker] = True
     result = github.pulls.list_review_comments(
-        ctx, token = gh["token"], owner = gh["owner"],
-        repo = gh["repo"], pull_number = gh["pr_number"],
+        ctx,
+        token = gh["token"],
+        owner = gh["owner"],
+        repo = gh["repo"],
+        pull_number = gh["pr_number"],
     )
     if not result["success"]:
         return
@@ -188,17 +194,22 @@ def _cleanup_comments(ctx, gh, relevant_diagnostics):
         if marker not in desired:
             for c in comments:
                 github.pulls.delete_review_comment(
-                    ctx, token = gh["token"], owner = gh["owner"],
-                    repo = gh["repo"], comment_id = c["id"],
+                    ctx,
+                    token = gh["token"],
+                    owner = gh["owner"],
+                    repo = gh["repo"],
+                    comment_id = c["id"],
                 )
         elif len(comments) > 1:
             by_id = sorted(comments, key = lambda c: c["id"])
             for c in by_id[:-1]:
                 github.pulls.delete_review_comment(
-                    ctx, token = gh["token"], owner = gh["owner"],
-                    repo = gh["repo"], comment_id = c["id"],
+                    ctx,
+                    token = gh["token"],
+                    owner = gh["owner"],
+                    repo = gh["repo"],
+                    comment_id = c["id"],
                 )
-
 
 def _github_lint_impl(ctx: FeatureContext):
     debug = bool(ctx.std.env.var("ASPECT_DEBUG"))
@@ -223,12 +234,15 @@ def _github_lint_impl(ctx: FeatureContext):
             }
         else:
             gh_inactive_reason = "authentication failed: %s" % auth_reason.get("reason", "unknown")
+
             # We are demonstrably in a GitHub PR context (detect_pr succeeded)
             # but auth failed — surface that to the build log so the user
             # knows why no comments are appearing. Non-PR contexts stay silent
             # because they mean the feature doesn't apply, not that it failed.
             print("GitHub lint comments: authentication failed for %s/%s — %s" % (
-                pr["owner"], pr["repo"], auth_reason.get("reason", "unknown"),
+                pr["owner"],
+                pr["repo"],
+                auth_reason.get("reason", "unknown"),
             ))
 
     if not gh and not debug:
@@ -436,6 +450,7 @@ def _github_lint_impl(ctx: FeatureContext):
             if state["dropped_due_to_cap"] > 0:
                 ansi = color_enabled(ctx.std)
                 prefix = (_BOLD + _YELLOW + "WARNING:" + _RESET) if ansi else "WARNING:"
+
                 # Build a per-severity breakdown — well-known levels in
                 # priority order, then anything else as "other".
                 by_sev = state["dropped_per_severity"]
@@ -452,13 +467,15 @@ def _github_lint_impl(ctx: FeatureContext):
                     parts.append("%d other" % other)
                 breakdown = " (" + ", ".join(parts) + ")" if parts else ""
                 print("%s capped at %d PR review comment(s); %d additional diagnostic(s)%s not posted to GitHub. The lint task's exit code is unaffected by this cap. Run `aspect lint` locally to see the full list, or raise --github-lint-comments:max-pr-comments=<n> to widen the cap." % (
-                    prefix, max_pr_comments, state["dropped_due_to_cap"], breakdown,
+                    prefix,
+                    max_pr_comments,
+                    state["dropped_due_to_cap"],
+                    breakdown,
                 ))
 
     lint_trait.lint_start.append(_lint_start)
     lint_trait.lint_report.append(_lint_report)
     lint_trait.lint_end.append(_lint_end)
-
 
 GithubLintComments = feature(
     implementation = _github_lint_impl,

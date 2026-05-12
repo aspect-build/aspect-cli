@@ -58,9 +58,8 @@ features like GithubStatusChecks can surface download links:
   - testlogs_label_urls  — per-label, per-file URLs (CircleCI/GitLab)
 """
 
-load("../lib/artifacts.axl", "create_uploader", "detect_ci", "artifact_name")
-load("../traits.axl", "BazelTrait", "ArtifactsTrait")
-
+load("../lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
+load("../traits.axl", "ArtifactsTrait", "BazelTrait")
 
 def _record_artifact_url(artifacts_trait, kind, url):
     """Record a direct download URL for a specific artifact kind.
@@ -74,7 +73,6 @@ def _record_artifact_url(artifacts_trait, kind, url):
     urls[kind] = url
     artifacts_trait.artifact_urls = urls
 
-
 def _update_testlogs_trait(artifacts_trait, state, env, ci):
     """Sync testlogs-related fields from upload state to the trait.
 
@@ -83,10 +81,12 @@ def _update_testlogs_trait(artifacts_trait, state, env, ci):
     - testlogs_label_urls → per-label file URLs (CircleCI/GitLab only)
     """
     group = state.get("_artifact_upload", {}).get("testlogs", {})
+
     # Browse URL is the CI artifacts page/tab — always the "Artifacts" link in the check run.
     browse = _make_artifacts_browse_url(env, ci)
     if browse:
         artifacts_trait.artifacts_browse_url = browse
+
     # Direct testlogs download URL if the provider returned one (GitHub artifactId,
     # GitLab Generic Packages URL). Empty on Buildkite (short-lived URLs).
     _record_artifact_url(artifacts_trait, "testlogs", group.get("download_url", ""))
@@ -94,13 +94,11 @@ def _update_testlogs_trait(artifacts_trait, state, env, ci):
     if label_urls:
         artifacts_trait.testlogs_label_urls = dict(label_urls)
 
-
 # Upload every N new files per group
 _BATCH_SIZE = 5
 
 # bb_clientd FUSE mount root for resolving bytestream:// URIs
 _BB_CLIENTD_ROOT = "/mnt/ephemeral/buildbarn/bb_clientd"
-
 
 _HEX = "0123456789abcdef"
 
@@ -112,7 +110,6 @@ def _make_uuid(ctx):
     b[8] = (b[8] & 0x3F) | 0x80  # variant bits
     h = "".join([_HEX[x >> 4] + _HEX[x & 0x0F] for x in b])
     return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
-
 
 def _file_uri_to_path(uri):
     """Convert a file:// or bytestream:// URI to a local filesystem path.
@@ -135,7 +132,6 @@ def _file_uri_to_path(uri):
         return _BB_CLIENTD_ROOT + "/cas/" + host + "/blobs/sha256/file/" + blob_hash + "-" + blob_size
     return uri
 
-
 # Statuses that count as "not passed" for upload_test_logs="failed". Matches
 # the `_FAILED_STATUSES` set in lib/bazel_results.axl plus flaky — a flaky
 # test's log is exactly as interesting as a failing one.
@@ -149,7 +145,6 @@ _NOT_PASSED_STATUSES = [
     "incomplete",
     "no_status",
 ]
-
 
 def _should_collect_test(strategy, status, cached_locally):
     """Return True if the test's logs should be collected for upload.
@@ -169,9 +164,9 @@ def _should_collect_test(strategy, status, cached_locally):
         return not cached_locally
     if strategy == "failed":
         return status in _NOT_PASSED_STATUSES
+
     # Unknown strategy — fail closed so an operator typo doesn't leak logs.
     return False
-
 
 def _collect_test_files(ctx, state, event, strategy):
     """Collect test output file paths from a test_result event.
@@ -211,7 +206,6 @@ def _collect_test_files(ctx, state, event, strategy):
         dest = label_path + "/" + file.name
         state["_test_entries"].append({"src": src, "dest": dest, "label": label})
 
-
 def _init_upload_state(state):
     """Ensure the upload state is initialized in the shared state dict.
 
@@ -229,7 +223,6 @@ def _init_upload_state(state):
             "testlogs": {"last_count": 0, "version": 0, "prev_ref": None, "download_url": "", "label_urls": {}},
         }
 
-
 def _circleci_vcs(env):
     """Infer CircleCI's VCS path segment from CIRCLE_REPOSITORY_URL.
 
@@ -243,7 +236,6 @@ def _circleci_vcs(env):
     if "bitbucket.org" in url:
         return "bitbucket"
     return "github"
-
 
 def _make_artifacts_browse_url(env, ci):
     """Construct the CI artifacts browse URL for the current job.
@@ -267,32 +259,32 @@ def _make_artifacts_browse_url(env, ci):
     """
     if ci == "github":
         server = env.var("GITHUB_SERVER_URL") or "https://github.com"
-        repo   = env.var("GITHUB_REPOSITORY") or ""
+        repo = env.var("GITHUB_REPOSITORY") or ""
         run_id = env.var("GITHUB_RUN_ID") or ""
         if repo and run_id:
             return server + "/" + repo + "/actions/runs/" + run_id
     elif ci == "buildkite":
         build_url = env.var("BUILDKITE_BUILD_URL") or ""
-        step_id   = env.var("BUILDKITE_STEP_ID") or ""
+        step_id = env.var("BUILDKITE_STEP_ID") or ""
         if build_url and step_id:
             return build_url + "/steps/canvas?sid=" + step_id + "&tab=artifacts"
         return build_url
     elif ci == "circleci":
         # Build the modern app.circleci.com URL. The legacy circleci.com hash
         # anchors (#artifacts, /artifacts) don't route reliably anymore.
-        org          = env.var("CIRCLE_PROJECT_USERNAME") or ""
-        repo         = env.var("CIRCLE_PROJECT_REPONAME") or ""
+        org = env.var("CIRCLE_PROJECT_USERNAME") or ""
+        repo = env.var("CIRCLE_PROJECT_REPONAME") or ""
         pipeline_num = env.var("CIRCLE_PIPELINE_NUMBER") or ""
-        workflow_id  = env.var("CIRCLE_WORKFLOW_ID") or ""
-        job_num      = env.var("CIRCLE_BUILD_NUM") or ""
+        workflow_id = env.var("CIRCLE_WORKFLOW_ID") or ""
+        job_num = env.var("CIRCLE_BUILD_NUM") or ""
         if org and repo and pipeline_num and workflow_id and job_num:
             vcs = _circleci_vcs(env)
             return ("https://app.circleci.com/pipelines/" + vcs + "/" + org + "/" + repo +
                     "/" + pipeline_num + "/workflows/" + workflow_id + "/jobs/" + job_num + "/artifacts")
+
         # Fall back to the legacy build URL if the pipeline env vars aren't set.
         return env.var("CIRCLE_BUILD_URL") or ""
     return ""
-
 
 def _artifact_upload_impl(ctx: FeatureContext):
     """Wire interval-based artifact upload into BazelTrait lifecycle hooks.
@@ -305,7 +297,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
     artifact_urls, testlogs_label_urls) via _update_testlogs_trait and
     _record_artifact_url so GithubStatusChecks can surface download links.
     """
-    bazel_trait     = ctx.traits[BazelTrait]
+    bazel_trait = ctx.traits[BazelTrait]
     artifacts_trait = ctx.traits[ArtifactsTrait]
 
     uploader = create_uploader(ctx.std.env)
@@ -314,10 +306,10 @@ def _artifact_upload_impl(ctx: FeatureContext):
 
     uuid = _make_uuid(ctx)
     upload_test_logs = ctx.args.upload_test_logs
-    upload_testlogs  = upload_test_logs != "none"   # convenience for the gate below
-    upload_profile   = ctx.args.upload_profile
-    upload_bep       = ctx.args.upload_bep
-    upload_exec_log  = ctx.args.upload_exec_log
+    upload_testlogs = upload_test_logs != "none"  # convenience for the gate below
+    upload_profile = ctx.args.upload_profile
+    upload_bep = ctx.args.upload_bep
+    upload_exec_log = ctx.args.upload_exec_log
 
     # Staging paths for the four uploadable artifact kinds. Prefer the Aspect
     # Workflows per-job tmpdir (auto-cleaned between jobs) over shared /tmp,
@@ -325,11 +317,12 @@ def _artifact_upload_impl(ctx: FeatureContext):
     tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
     profile_path = tmpdir + "/" + uuid + ".profile.gz"
     execlog_path = tmpdir + "/" + uuid + ".execlog.zstd"
+
     # `.binpb` is Google's canonical extension for binary-encoded protobuf
     # (docs use it alongside `.textpb` / `.jsonpb`). We avoid `.bep.bin`
     # because macOS Finder's Archive Utility heuristic treats `.bin` as
     # potentially-compressed and auto-expands on double-click.
-    bep_path     = tmpdir + "/" + uuid + ".bep.binpb"
+    bep_path = tmpdir + "/" + uuid + ".bep.binpb"
 
     # Only generate the profile when opt-in. --generate_json_trace_profile +
     # --profile=path cost wall-clock and write a file we'd otherwise leave on
@@ -366,6 +359,7 @@ def _artifact_upload_impl(ctx: FeatureContext):
         if len(entries) >= state["_artifact_upload"]["testlogs"]["last_count"] + _BATCH_SIZE:
             name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
             success = uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
+
             # Surface the artifact URL and per-file label URLs as soon as the first
             # batch is available so GithubStatusChecks can add download links quickly.
             if success:
@@ -381,13 +375,19 @@ def _artifact_upload_impl(ctx: FeatureContext):
                     _init_upload_state(state)
                     entries = state.get("_test_entries", [])
                     name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
+
                     # final = True: publish under the plain `{name}` (no
                     # `.partial.N` suffix) so the user-facing artifact has a
                     # clean filename. Rolling-delete still removes the last
                     # partial via provider.delete_artifact(prev_ref).
                     success = uploader.upload_testlogs(
-                        ctx, state["_artifact_upload"]["testlogs"], entries, name, final = True,
+                        ctx,
+                        state["_artifact_upload"]["testlogs"],
+                        entries,
+                        name,
+                        final = True,
                     )
+
                     # Always update after final upload so both the archive URL and
                     # per-file label URLs reflect the complete set of uploaded files.
                     if success:
@@ -472,7 +472,6 @@ def _artifact_upload_impl(ctx: FeatureContext):
     bazel_trait.build_event.append(_on_build_event)
     bazel_trait.build_end.append(_on_build_end)
 
-
 ArtifactUpload = feature(
     display_name = "Artifact Upload",
     summary = "Automatically upload build artifacts to CI. Supports GitHub Actions, Buildkite, CircleCI, and GitLab.",
@@ -540,5 +539,5 @@ ArtifactUpload = feature(
                           "is not yet implemented. Set to true on private-repo CI " +
                           "where artifact access is controlled.",
         ),
-    }
+    },
 )

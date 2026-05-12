@@ -2,7 +2,6 @@
 
 load("./bazel.axl", "default_retry")
 
-
 # Structured update passed to task_update hooks.
 #
 # Mandatory fields (always present):
@@ -21,11 +20,10 @@ load("./bazel.axl", "default_retry")
 #
 TaskUpdate = record(
     progress = field(str, default = ""),
-    status   = field(str, default = "running"),
-    kind     = field(str, default = "progress"),
-    data     = field(dict, default = {}),
+    status = field(str, default = "running"),
+    kind = field(str, default = "progress"),
+    data = field(dict, default = {}),
 )
-
 
 # Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
 # to observe task progress without coupling to Bazel-specific hooks.
@@ -43,7 +41,6 @@ TaskLifecycleTrait = trait(
     # Called once when the task finishes. Receives (ctx, exit_code: int).
     task_complete = attr(list[typing.Callable[[TaskContext, int], None]], default = []),
 )
-
 
 # Configures the GitHub status check output templates for a task.
 # By default the GithubStatusChecks feature uses its built-in Jinja2 templates.
@@ -69,7 +66,6 @@ GitHubStatusChecksTrait = trait(
     #   gh.metadata_keys = ["DEPLOY_ENV", "WORKSPACE"]
     metadata_keys = attr(list[str], default = []),
 )
-
 
 BazelTrait = trait(
     # Declarative data — composable, zero-cost reads
@@ -97,12 +93,10 @@ BazelTrait = trait(
     build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes, with the exit code"),
 )
 
-
 HealthCheckTrait = trait(
     pre_health_check = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called before the build to validate preconditions (e.g. auth, connectivity)"),
     post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks called after the build; return a non-None string to report a warning"),
 )
-
 
 ArtifactsTrait = trait(
     # CI-wide browse URL for all artifacts uploaded during the current job.
@@ -130,7 +124,6 @@ ArtifactsTrait = trait(
     #        stable direct download URL.
     testlogs_label_urls = attr(dict, default = {}),
 )
-
 
 DeliveryTrait = trait(
     delivery_start = attr(typing.Callable[[], None], default = lambda: None, description = "Hook called once at the start of a delivery run, before any targets are delivered"),

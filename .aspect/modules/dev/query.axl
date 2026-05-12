@@ -15,5 +15,5 @@ query = task(
     group = ["dev"],
     args = {
         "pattern": args.positional(default = ["..."]),
-    }
+    },
 )

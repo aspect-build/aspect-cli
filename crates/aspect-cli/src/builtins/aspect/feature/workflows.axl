@@ -1,12 +1,13 @@
-load("../lib/environment.axl",
+load("../lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
+load(
+    "../lib/environment.axl",
     "color_enabled",
-    "get_environment",
     "get_bazelrc_flags",
+    "get_environment",
     "print_environment_info",
 )
-load("../lib/build_metadata.axl", "get_build_metadata_flags", "get_task_metadata_flags")
-load("../traits.axl", "BazelTrait", "HealthCheckTrait")
 load("../lib/health_check.axl", "agent_health_check")
+load("../traits.axl", "BazelTrait", "HealthCheckTrait")
 
 def _workflows_impl(ctx: FeatureContext):
     environment = get_environment(ctx.std)
@@ -31,7 +32,6 @@ def _workflows_impl(ctx: FeatureContext):
         bazel_trait.build_start.append(_buildkite_bazel_section)
         health_check.pre_health_check.append(lambda ctx: print_environment_info(ctx.std, environment))
         health_check.pre_health_check.append(lambda ctx: agent_health_check(ctx, environment))
-
 
     if environment:
         # Flags to optimize build & test
@@ -67,6 +67,7 @@ def _workflows_impl(ctx: FeatureContext):
         if environment.ci.host == "github":
             # Prevent github actions from reaping the JVM server at the end of a job.
             ctx.std.env.set_var("RUNNER_TRACKING_ID", "")
+
             # Here to ensure we restart the Bazel server.
             bazel_trait.extra_startup_flags.append("--host_jvm_args=-DRUNNER_TRACKING_ID=noop")
 
@@ -78,7 +79,6 @@ def _workflows_impl(ctx: FeatureContext):
         # line-oriented log viewers garble cursor-control sequences.
         if color_enabled(ctx.std):
             bazel_trait.extra_flags.append("--color=yes")
-
 
 Workflows = feature(
     display_name = "Aspect Workflows",
@@ -127,5 +127,5 @@ Workflows = feature(
                           "non-zero; 'warn' (default) prints to stderr and " +
                           "leaves the exit code alone; 'ignore' is silent.",
         ),
-    }
+    },
 )

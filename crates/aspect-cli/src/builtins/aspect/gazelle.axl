@@ -96,7 +96,6 @@ load("./lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
 load("./lib/runnable.axl", "runnable")
 load("./traits.axl", "ArtifactsTrait", "BazelTrait")
 
-
 def _parse_diff_paths(diff_text):
     """Extract the set of affected paths from a unified diff.
 
@@ -118,6 +117,7 @@ def _parse_diff_paths(diff_text):
         if not line.startswith("+++ "):
             continue
         rest = line[len("+++ "):]
+
         # Strip the trailing tab + timestamp if present.
         tab_idx = rest.find("\t")
         path = rest[:tab_idx] if tab_idx >= 0 else rest
@@ -126,7 +126,6 @@ def _parse_diff_paths(diff_text):
             continue
         paths[path] = True
     return sorted(paths.keys())
-
 
 def _try_upload_gazelle_diff(ctx, diff_text):
     """Write gazelle's diff to a temp file and upload it via the
@@ -168,7 +167,6 @@ def _try_upload_gazelle_diff(ctx, diff_text):
     else:
         out.write("--upload-gazelle-diff: uploaded patch (no stable URL on this CI host).\n")
 
-
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
     out = ctx.std.io.stdout
@@ -182,6 +180,7 @@ def _impl(ctx: TaskContext) -> int:
     ]
     flags.extend(ctx.args.bazel_flag)
     flags.extend(bazel_trait.extra_flags)
+
     # Task-time flag contributors — features register hooks that need
     # ctx.task (e.g. --build_metadata=ASPECT_TASK_NAME=...).
     for hook in bazel_trait.task_flags:
@@ -335,7 +334,6 @@ def _impl(ctx: TaskContext) -> int:
 
     out.write("\x1b[0;31mERROR\x1b[0m: BUILD files are out of date. Run `aspect gazelle` locally and commit the result.\n")
     return 1
-
 
 gazelle = task(
     implementation = _impl,

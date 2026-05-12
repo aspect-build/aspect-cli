@@ -1,13 +1,12 @@
 """
 A default 'test' task that wraps a 'bazel test' command.
 """
-load("./traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "GitHubStatusChecksTrait", "ArtifactsTrait")
-load("./lib/bazel_runner.axl", "run_bazel_task")
 
+load("./lib/bazel_runner.axl", "run_bazel_task")
+load("./traits.axl", "ArtifactsTrait", "BazelTrait", "GitHubStatusChecksTrait", "HealthCheckTrait", "TaskLifecycleTrait")
 
 def _impl(ctx: TaskContext) -> int:
     return run_bazel_task(ctx, command = "test")
-
 
 test = task(
     implementation = _impl,

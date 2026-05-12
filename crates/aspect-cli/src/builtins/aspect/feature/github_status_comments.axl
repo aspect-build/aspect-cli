@@ -21,23 +21,21 @@ Body-template variables:
                        cached_test_total, executed_test_total, targets_total,
                        aborted, abort_reason.
 """
+
 load("@std//time.axl", "monotonic")
-load("../traits.axl", "TaskLifecycleTrait")
+load("../lib/bazel_results.axl", "compute_reproducer_command", "init_results")
 load("../lib/github.axl", "github")
 load("../lib/tar.axl", "bsdtar")
-load("../lib/bazel_results.axl", "init_results", "compute_reproducer_command")
-
+load("../traits.axl", "TaskLifecycleTrait")
 
 _ARTIFACT_PREFIX = "aspect-ci-status-"
-_MARKER_FMT      = "<!-- aspect-ci-status:pr-%d -->"
-
+_MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 
 _DEFAULT_STATUS_BADGES = {
     "running": "🟡 running",
-    "passed":  "✅ passed",
-    "failed":  "❌ failed",
+    "passed": "✅ passed",
+    "failed": "❌ failed",
 }
-
 
 # Default body template — Jinja2, rendered via ctx.template.jinja2.
 #
@@ -69,13 +67,11 @@ _No tasks have reported yet._
 {% endif -%}
 """
 
-
 def _extract_zip(ctx, zip_path, dest_dir):
     """Extract a zip into dest_dir using bsdtar (already cached for zip_create)."""
     bin_path = bsdtar(ctx)
     child = ctx.std.process.command(bin_path).args(["xf", zip_path, "-C", dest_dir]).stdout("piped").stderr("piped").spawn()
     return child.wait().code == 0
-
 
 def _now_iso(ctx):
     """UTC ISO-8601 timestamp via `date -u`. Used so each PATCH visibly differs
@@ -85,29 +81,29 @@ def _now_iso(ctx):
         return result.stdout.strip()
     return ""
 
-
 def _iso_in(ctx, minutes):
     """RFC 3339 UTC timestamp `minutes` from now via GNU `date -u -d "+N minutes"`.
     Returns "" on failure so the caller can drop the field rather than send junk."""
     if minutes <= 0:
         return ""
     result = ctx.std.process.command("date").args([
-        "-u", "-d", "+%d minutes" % minutes, "+%Y-%m-%dT%H:%M:%SZ",
+        "-u",
+        "-d",
+        "+%d minutes" % minutes,
+        "+%Y-%m-%dT%H:%M:%SZ",
     ]).stdout("piped").spawn().wait_with_output()
     if result.status.code == 0:
         return result.stdout.strip()
     return ""
 
-
 def _ci_run_url(env):
     """Return the GitHub Actions run URL, or "" if it can't be assembled."""
-    server     = env.var("GITHUB_SERVER_URL") or "https://github.com"
+    server = env.var("GITHUB_SERVER_URL") or "https://github.com"
     repository = env.var("GITHUB_REPOSITORY") or ""
-    run_id     = env.var("GITHUB_RUN_ID") or ""
+    run_id = env.var("GITHUB_RUN_ID") or ""
     if not repository or not run_id:
         return ""
     return server + "/" + repository + "/actions/runs/" + run_id
-
 
 def _results_subset(results, reproducer_command):
     """Slice `init_results()` down to the fields the comment renderer needs.
@@ -118,30 +114,28 @@ def _results_subset(results, reproducer_command):
     on the final update.
     """
     return {
-        "passed_test_total":   results.get("passed_test_total", 0),
-        "failed_test_total":   results.get("failed_test_total", 0),
-        "flaky_test_total":    results.get("flaky_test_total", 0),
-        "cached_test_total":   results.get("cached_test_total", 0),
+        "passed_test_total": results.get("passed_test_total", 0),
+        "failed_test_total": results.get("failed_test_total", 0),
+        "flaky_test_total": results.get("flaky_test_total", 0),
+        "cached_test_total": results.get("cached_test_total", 0),
         "executed_test_total": results.get("executed_test_total", 0),
-        "targets_total":       results.get("targets_total", 0),
-        "reproducer_command":  reproducer_command,
-        "aborted":             results.get("aborted", False),
-        "abort_reason":        results.get("abort_reason", ""),
+        "targets_total": results.get("targets_total", 0),
+        "reproducer_command": reproducer_command,
+        "aborted": results.get("aborted", False),
+        "abort_reason": results.get("abort_reason", ""),
     }
-
 
 def _render_body(ctx, marker, entries, updated_at, body_template, status_badges):
     """Render the comment body via the (possibly user-overridden) Jinja2 template."""
     body = ctx.template.jinja2(body_template, data = {
-        "marker":        marker,
-        "entries":       entries,
-        "updated_at":    updated_at,
+        "marker": marker,
+        "entries": entries,
+        "updated_at": updated_at,
         "status_badges": status_badges,
     })
     if not body.endswith("\n"):
         body = body + "\n"
     return body
-
 
 def _github_status_comments(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
@@ -161,25 +155,26 @@ def _github_status_comments(ctx: FeatureContext):
     if pr == None:
         return
 
-    owner       = pr["owner"]
-    repo        = pr["repo"]
-    pr_number   = pr["pr_number"]
-    marker      = _MARKER_FMT % pr_number
-    job_name    = ctx.std.env.var("GITHUB_JOB") or "unknown-job"
-    run_id      = ctx.std.env.var("GITHUB_RUN_ID") or ""
+    owner = pr["owner"]
+    repo = pr["repo"]
+    pr_number = pr["pr_number"]
+    marker = _MARKER_FMT % pr_number
+    job_name = ctx.std.env.var("GITHUB_JOB") or "unknown-job"
+    run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
     run_attempt = ctx.std.env.var("GITHUB_RUN_ATTEMPT") or "1"
     if not run_id:
         print("GitHub status comments: missing GITHUB_RUN_ID; skipping.")
         return
 
-    ci_run_url                = _ci_run_url(ctx.std.env)
+    ci_run_url = _ci_run_url(ctx.std.env)
     min_poll_interval_seconds = ctx.args.min_poll_interval_seconds
-    artifact_expires_minutes  = ctx.args.artifact_expires_minutes
+    artifact_expires_minutes = ctx.args.artifact_expires_minutes
+
     # Defensive `or {}` — args.custom(dict, default = {}) returns None at runtime
     # rather than the declared default. Treat absent the same as empty.
-    templates                 = ctx.args.templates or {}
-    body_template             = templates.get("body") or _DEFAULT_BODY_TEMPLATE
-    status_badges             = dict(_DEFAULT_STATUS_BADGES)
+    templates = ctx.args.templates or {}
+    body_template = templates.get("body") or _DEFAULT_BODY_TEMPLATE
+    status_badges = dict(_DEFAULT_STATUS_BADGES)
     status_badges.update(ctx.args.status_badges or {})
 
     _state = {}
@@ -189,12 +184,12 @@ def _github_status_comments(ctx: FeatureContext):
         also what gets folded into the rendered comment without going through a
         download round-trip."""
         payload = {
-            "name":        _state["_task_name"],
-            "key":         _state["_task_key"],
-            "job":         job_name,
+            "name": _state["_task_name"],
+            "key": _state["_task_key"],
+            "job": job_name,
             "run_attempt": run_attempt,
-            "status":      _state.get("_status", "running"),
-            "ci_run_url":  ci_run_url,
+            "status": _state.get("_status", "running"),
+            "ci_run_url": ci_run_url,
         }
         payload.update(_state.get("_results_subset") or _results_subset(init_results(), ""))
         return payload
@@ -206,7 +201,7 @@ def _github_status_comments(ctx: FeatureContext):
             _state["_workdir"] = ctx.std.fs.mkdtemp(prefix = "aspect-ci-status-")
         _state["_my_artifact_name"] = _ARTIFACT_PREFIX + job_name + "-" + _state["_task_key"] + "-" + run_attempt
 
-        payload     = _own_payload()
+        payload = _own_payload()
         payload_str = json.encode(payload)
         if _state.get("_last_payload_str") == payload_str:
             return True
@@ -215,6 +210,7 @@ def _github_status_comments(ctx: FeatureContext):
         ctx.std.fs.write(payload_path, payload_str)
 
         github.delete_artifact(ctx, _state["_my_artifact_name"])
+
         # Server-side TTL — GitHub auto-deletes the artifact at the wall-clock
         # time we pass. Fresh per-cycle so a still-polling task keeps its
         # artifact alive while inactive ones expire on their own. No client-side
@@ -240,15 +236,15 @@ def _github_status_comments(ctx: FeatureContext):
             print("GitHub status comments: list artifacts failed: %s" % listed.get("error", "unknown"))
             return None
 
-        cache       = _state.setdefault("_entry_cache", {})  # artifact_id (str) -> entry dict
-        own_name    = _state.get("_my_artifact_name", "")
-        workdir     = _state["_workdir"]
-        seen        = {}            # artifact name -> entry
-        current_ids = {}            # current ids in this listing → bool, used to GC cache
+        cache = _state.setdefault("_entry_cache", {})  # artifact_id (str) -> entry dict
+        own_name = _state.get("_my_artifact_name", "")
+        workdir = _state["_workdir"]
+        seen = {}  # artifact name -> entry
+        current_ids = {}  # current ids in this listing → bool, used to GC cache
 
         for a in listed["artifacts"]:
             aname = a.get("name", "")
-            aid   = str(a["id"])
+            aid = str(a["id"])
             current_ids[aid] = True
 
             # We have authoritative data for our own task in _state — skip the
@@ -276,7 +272,7 @@ def _github_status_comments(ctx: FeatureContext):
             entry = json.try_decode(ctx.std.fs.read_to_string(json_path), None)
             if not entry:
                 continue
-            cache[aid]  = entry
+            cache[aid] = entry
             seen[aname] = entry
 
         # GC cache entries whose ids no longer appear in the listing (their
@@ -351,8 +347,8 @@ def _github_status_comments(ctx: FeatureContext):
         # can build the artifact name without reaching for ctx.task (which doesn't
         # exist on FeatureContext).
         _state["_task_name"] = ctx.task.name
-        _state["_task_key"]  = ctx.task.key
-        _state["_status"]    = "running"
+        _state["_task_key"] = ctx.task.key
+        _state["_status"] = "running"
 
         auth_reason = {}
         token = github.authenticate(
@@ -364,7 +360,9 @@ def _github_status_comments(ctx: FeatureContext):
         )
         if not token:
             print("GitHub status comments: authentication failed for %s/%s — %s" % (
-                owner, repo, auth_reason.get("reason", "unknown"),
+                owner,
+                repo,
+                auth_reason.get("reason", "unknown"),
             ))
             return
         _state["_github_token"] = token
@@ -391,7 +389,6 @@ def _github_status_comments(ctx: FeatureContext):
 
     lifecycle.task_started.append(_task_started)
     lifecycle.task_update.append(_task_update)
-
 
 GithubStatusComments = feature(
     implementation = _github_status_comments,

@@ -3,7 +3,6 @@
 Uses the CircleCI runner API (Unix socket + HTTP) to upload artifacts to S3.
 """
 
-
 def _get_token(ctx):
     """Read auth credentials from the CircleCI runner Unix socket.
 
@@ -18,12 +17,12 @@ def _get_token(ctx):
     child.wait()
     if not output:
         return None
+
     # Use try_decode rather than json.decode — the runner socket is shared
     # infrastructure and a stray non-JSON response (early-EOF, daemon
     # restart, partial read) shouldn't take down the parent task. Return
     # None to mean "couldn't auth", same as the no-output case above.
     return json.try_decode(output, None)
-
 
 def _runner_api(ctx, token, runner_host, method, path, body = None):
     """Make an HTTP request to the CircleCI runner API."""
@@ -40,11 +39,11 @@ def _runner_api(ctx, token, runner_host, method, path, body = None):
         return None
     if resp.status < 200 or resp.status >= 300:
         return None
+
     # try_decode → None on parse failure mirrors the "no body" branch
     # below; both surface as a soft auth failure rather than crashing
     # the parent task on a malformed runner-API response.
     return json.try_decode(resp.body, None) if resp.body else None
-
 
 def _upload_artifact(ctx, path, name):
     """Upload a file to CircleCI via the runner API and S3.
@@ -91,12 +90,19 @@ def _upload_artifact(ctx, path, name):
     s3_url = "https://" + bucket + ".s3." + region + ".amazonaws.com/" + s3_key
 
     curl_args = [
-        "--silent", "--show-error", "--fail",
-        "--aws-sigv4", "aws:amz:" + region + ":s3",
-        "--user", aws_creds["AccessKeyID"] + ":" + aws_creds["SecretAccessKey"],
-        "-H", "x-amz-security-token: " + aws_creds["SessionToken"],
-        "-T", path,
-        "-X", "PUT",
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--aws-sigv4",
+        "aws:amz:" + region + ":s3",
+        "--user",
+        aws_creds["AccessKeyID"] + ":" + aws_creds["SecretAccessKey"],
+        "-H",
+        "x-amz-security-token: " + aws_creds["SessionToken"],
+        "-T",
+        path,
+        "-X",
+        "PUT",
     ]
     if tags:
         tag_str = "&".join([k + "=" + v for k, v in tags.items()])
@@ -123,11 +129,9 @@ def _upload_artifact(ctx, path, name):
         download_url = s3_url
     return {"success": True, "artifact_ref": name, "download_url": download_url, "errors": []}
 
-
 def _delete_artifact(ctx, name):
     """CircleCI has no artifact deletion API — no-op."""
     return {"success": True}
-
 
 circleci = struct(
     upload_artifact = _upload_artifact,
