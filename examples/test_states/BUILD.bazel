@@ -9,24 +9,25 @@ Provides:
   always_fail  — a test that always fails (sh_test exit 1)
   flaky_test   — a test that flips based on a counter file (simulated flaky)
 """
+
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 sh_test(
     name = "always_pass",
-    srcs = ["pass.sh"],
     size = "small",
+    srcs = ["pass.sh"],
 )
 
 sh_test(
     name = "always_fail",
-    srcs = ["fail.sh"],
     size = "small",
+    srcs = ["fail.sh"],
     tags = ["manual"],  # opt-in only; don't run with //...
 )
 
 sh_test(
     name = "flaky_test",
-    srcs = ["flaky.sh"],
     size = "small",
+    srcs = ["flaky.sh"],
     tags = ["manual"],  # opt-in only; don't run with //...
 )
