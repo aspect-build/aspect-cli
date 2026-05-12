@@ -281,15 +281,14 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      cd examples/lint
-      ASPECT_DEBUG=1 aspect lint --task-key lint-bk-debug --fix --aspect=//:linters.bzl%shellcheck -- //... -//exclude/...
+      ASPECT_DEBUG=1 aspect lint --task-key lint-bk-debug --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
       # Revert applied --fix edits before next run. Use git restore (tracked
       # mods only) + git clean -fd (untracked non-ignored files); do NOT use
       # -x because that wipes bazel-out/ and target/ — including the
       # pre-built CLI dropped there by .aspect/bootstrap.sh.
       git restore .
       git clean -fd
-      aspect lint --task-key lint-bk --fix --aspect=//:linters.bzl%shellcheck -- //... -//exclude/...
+      aspect lint --task-key lint-bk --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
 
   # Manual break-glass input — only shown on UI-triggered builds. Users
   # can fill this to force-deliver specific targets without editing the

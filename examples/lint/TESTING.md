@@ -5,7 +5,6 @@ This example uses [ShellCheck](https://www.shellcheck.net/) to lint `hello.sh`.
 ## Run lint locally
 
 ```sh
-cd examples/lint
 aspect lint
 ```
 

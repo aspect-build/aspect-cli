@@ -87,8 +87,7 @@ jobs:
       - run:
           name: Lint Task (ASPECT_DEBUG=1)
           command: |
-            cd examples/lint
-            ASPECT_DEBUG=1 aspect lint --task-key lint-cci-debug --fix --aspect=//:linters.bzl%shellcheck -- //... -//exclude/...
+            ASPECT_DEBUG=1 aspect lint --task-key lint-cci-debug --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
             # Revert applied --fix edits before next run. Use git restore (tracked
             # mods only) + git clean -fd (untracked non-ignored files); do NOT use
             # -x because that wipes bazel-out/ and target/ — including the
@@ -97,7 +96,7 @@ jobs:
             git clean -fd
       - run:
           name: Lint Task
-          command: aspect lint --task-key lint-cci --fix --aspect=//:linters.bzl%shellcheck -- //... -//exclude/...
+          command: aspect lint --task-key lint-cci --fix --aspect=//tools/lint:linters.bzl%shellcheck -- //examples/lint/... -//exclude/...
 
   # Dedicated buildifier-only step that runs in parallel with format-task.
   # Models the legacy Rosetta `buildifier` task using a Starlark-only

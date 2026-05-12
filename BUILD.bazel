@@ -18,7 +18,11 @@ alias(
     actual = "//crates/axl-docgen",
 )
 
-exports_files([
-    "LICENSE",
-    "README.md",
-])
+exports_files(
+    [
+        "LICENSE",
+        "README.md",
+        ".shellcheckrc",
+    ],
+    visibility = ["//visibility:public"],
+)
