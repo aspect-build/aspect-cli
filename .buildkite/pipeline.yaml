@@ -151,6 +151,24 @@ steps:
       fi
       echo "OK: server PID unchanged ($$BEFORE_PID)"
 
+  # Dedicated buildifier-only step that runs in parallel with format-task.
+  # Models the legacy Rosetta `buildifier` task using a Starlark-only
+  # `format_multirun` target — see https://docs.aspect.build/cli/migration/buildifier
+  - key: buildifier-task
+    label: ":aspect: Buildifier Task"
+    depends_on:
+      - pre-build
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 20
+    retry:
+      automatic:
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
+          limit: 1
+    command: |
+      ASPECT_DEBUG=1 aspect format --task-key buildifier-bk-debug --formatter-target=//tools/format:format-starlark
+      aspect format --task-key buildifier-bk --formatter-target=//tools/format:format-starlark
+
   - key: format-task
     label: ":aspect: Format Task"
     depends_on:
@@ -162,9 +180,25 @@ steps:
       automatic:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
+    # Starlark patterns are handled by buildifier-task; ignore them here so
+    # the two steps don't do duplicate work.
     command: |
-      ASPECT_DEBUG=1 aspect format --task-key format-bk-debug
-      aspect format --task-key format-bk
+      ASPECT_DEBUG=1 aspect format --task-key format-bk-debug \
+        --ignore-pattern='**/*.axl' \
+        --ignore-pattern='**/*.bzl' \
+        --ignore-pattern='**/BUILD' \
+        --ignore-pattern='**/BUILD.bazel' \
+        --ignore-pattern='**/MODULE.bazel' \
+        --ignore-pattern='**/WORKSPACE' \
+        --ignore-pattern='**/WORKSPACE.bazel'
+      aspect format --task-key format-bk \
+        --ignore-pattern='**/*.axl' \
+        --ignore-pattern='**/*.bzl' \
+        --ignore-pattern='**/BUILD' \
+        --ignore-pattern='**/BUILD.bazel' \
+        --ignore-pattern='**/MODULE.bazel' \
+        --ignore-pattern='**/WORKSPACE' \
+        --ignore-pattern='**/WORKSPACE.bazel'
 
   - key: gazelle-task
     label: ":aspect: Gazelle Task"
@@ -234,6 +268,28 @@ steps:
     command: |
       ASPECT_DEBUG=1 aspect test --task-key test-bk-debug -- //... -//exclude/...
       aspect test --task-key test-bk -- //... -//exclude/...
+
+  - key: lint-task
+    depends_on:
+      - pre-build
+    label: ":aspect: Lint Task"
+    agents:
+      queue: aspect-default
+    timeout_in_minutes: 20
+    retry:
+      automatic:
+        - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
+          limit: 1
+    command: |
+      cd examples/lint
+      ASPECT_DEBUG=1 aspect lint --task-key lint-bk-debug --fix --aspect=//:linters.bzl%shellcheck -- //... -//exclude/...
+      # Revert applied --fix edits before next run. Use git restore (tracked
+      # mods only) + git clean -fd (untracked non-ignored files); do NOT use
+      # -x because that wipes bazel-out/ and target/ — including the
+      # pre-built CLI dropped there by .aspect/bootstrap.sh.
+      git restore .
+      git clean -fd
+      aspect lint --task-key lint-bk --fix --aspect=//:linters.bzl%shellcheck -- //... -//exclude/...
 
   # Manual break-glass input — only shown on UI-triggered builds. Users
   # can fill this to force-deliver specific targets without editing the
