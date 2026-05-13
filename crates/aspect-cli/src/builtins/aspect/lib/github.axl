@@ -1,6 +1,23 @@
-"""GitHub API client library."""
+"""GitHub API client library.
+
+HTTP failure-handling contract (applies to every helper below):
+
+  - Transport errors (DNS / TLS / refused / reset / timeout) are
+    converted to a string result via `.map_err(lambda e: str(e)).block()`
+    and surfaced as `(False, 0, "transport error: ...")`. Feature
+    handlers that use these helpers stay graceful — flaky network
+    never propagates as a Starlark exception that aborts the task.
+  - Transient failures (transport, 5xx, 429) are retried up to 3
+    times with exponential backoff (250 → 500 → 1000 ms). 4xx is
+    deterministic and not retried.
+  - Retry is gated on HTTP-method idempotency: GET / PUT / PATCH /
+    DELETE retry; POST runs exactly once to avoid duplicate
+    resources on a retry after the server already accepted the
+    first request.
+"""
 
 load("@std//base64.axl", "base64")
+load("@std//time.axl", "time")
 load("./environment.axl", "color_enabled", "info", "warn")
 load("./tar.axl", "zip_create")
 
@@ -8,7 +25,57 @@ DEFAULT_GITHUB_API = "https://api.github.com"
 
 # Internal helpers
 
-def _do_request(ctx, method, url, token, payload = None):
+def _is_retryable_http(success, status):
+    """True for transient failures (transport, 5xx, 429). 4xx → False."""
+    if success:
+        return False
+    return status == 0 or status >= 500 or status == 429
+
+_HTTP_MAX_ATTEMPTS = 3
+_HTTP_BACKOFF_BASE_MS = 250
+
+def _retry_http(fn):
+    """Run `fn()` returning `(success, status, body)`, retrying transient
+    failures up to `_HTTP_MAX_ATTEMPTS` with exponential backoff. Returns
+    `(success, status, body, attempts)`."""
+    result = fn()
+    attempts = 1
+    success, status, _ = result
+    backoff_ms = _HTTP_BACKOFF_BASE_MS
+    for _ in range(_HTTP_MAX_ATTEMPTS - 1):
+        if not _is_retryable_http(success, status):
+            break
+        time.sleep(backoff_ms)
+        result = fn()
+        attempts += 1
+        success, status, _ = result
+
+        # Starlark lacks `**`; double each iteration instead.
+        backoff_ms = backoff_ms * 2
+    return (result[0], result[1], result[2], attempts)
+
+def _warn_http_failure(ctx, label, attempts, status, error):
+    """Emit a single WARNING line summarizing a terminal HTTP failure.
+
+    `label` is a short identifier (e.g. `"GitHub API POST /repos/.../check-runs"`).
+    `error` is the body or transport-error string from the response triple."""
+    if status == 0:
+        detail = error if error else "transport error"
+    else:
+        detail = "HTTP %d" % status
+        if error:
+            extra = error if type(error) == "string" else str(error)
+
+            # Keep one-line: collapse newlines, cap to 200 chars.
+            extra = extra.replace("\n", " ")
+            if len(extra) > 200:
+                extra = extra[:200] + "..."
+            detail = detail + ": " + extra
+    suffix = " after %d attempts" % attempts if attempts > 1 else ""
+    warn(ctx.std, "%s failed%s: %s" % (label, suffix, detail))
+
+def _do_request_once(ctx, method, url, token, payload = None):
+    """Single HTTP attempt. See file docstring for failure contract."""
     headers = {
         "Authorization": "Bearer " + token,
         "Accept": "application/vnd.github+json",
@@ -27,10 +94,6 @@ def _do_request(ctx, method, url, token, payload = None):
     else:
         return (False, 0, "unsupported method: " + method)
 
-    # Convert transport errors (DNS failure, TLS error, connection refused, …)
-    # to a string result. Without this, the underlying anyhow error would
-    # propagate up through any lifecycle hook calling into github.* and fail
-    # the parent task. Callers detect transport errors via type-check.
     response = fut.map_err(lambda e: str(e)).block()
     if type(response) == "string":
         return (False, 0, "transport error: " + response)
@@ -39,29 +102,35 @@ def _do_request(ctx, method, url, token, payload = None):
     if not body:
         return (success, response.status, body)
 
-    # 5xx responses (and any other server-side error) often come back as
-    # HTML or plain text from edge proxies / rate limiters between us
-    # and GitHub. Don't attempt to decode them — surface a transport-
-    # style error snippet so callers fall back to status-driven error
-    # paths.
+    # 5xx bodies are commonly HTML / plain text from edge proxies;
+    # don't try to JSON-decode them.
     if response.status >= 500:
         snippet = body[:200].replace("\n", " ")
         return (False, response.status, "upstream error (status %d): %s" % (response.status, snippet))
 
-    # 2xx success and documented 4xx error envelopes use JSON.
-    # `json.try_decode` returns a sentinel on parse failure (truncated
-    # bodies, empty strings, or anything else malformed) — without it,
-    # a malformed body would crash the parent task (no try/except in
-    # Starlark), including unrelated tasks that only touch GitHub via
-    # a lifecycle hook (e.g. `aspect test` updating a status check).
-    # The sentinel has to be distinguishable from a valid `null` parse,
-    # which would also produce None.
     _PARSE_FAILED = struct(_parse_failed = True)
     parsed = json.try_decode(body, _PARSE_FAILED)
     if parsed == _PARSE_FAILED:
         snippet = body[:200].replace("\n", " ")
         return (False, response.status, "non-JSON response (status %d): %s" % (response.status, snippet))
     return (success, response.status, parsed)
+
+# RFC 7231 idempotent methods — safe to retry. POST is excluded; a
+# retry after the server processed the first request would duplicate
+# the resource (extra check-runs, duplicate PR comments, etc.).
+_IDEMPOTENT_METHODS = ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+
+def _do_request(ctx, method, url, token, payload = None):
+    """Single HTTP call, retried on transient failures for idempotent
+    methods. POST runs exactly once. Returns `(success, status, body)`."""
+    if method in _IDEMPOTENT_METHODS:
+        success, status, body, attempts = _retry_http(lambda: _do_request_once(ctx, method, url, token, payload))
+    else:
+        success, status, body = _do_request_once(ctx, method, url, token, payload)
+        attempts = 1
+    if not success:
+        _warn_http_failure(ctx, "GitHub API %s %s" % (method, url), attempts, status, body)
+    return (success, status, body)
 
 # Authentication
 
@@ -1194,16 +1263,37 @@ To make it available, use one of the following options:
             ACTIONS_RUNTIME_TOKEN: ${{ secrets.ACTIONS_RUNTIME_TOKEN }}
 """
 
-def _github_twirp(ctx, method, payload):
-    """Make a Twirp RPC call to the GitHub Actions artifact service."""
+def _github_twirp_once(ctx, url, headers, payload):
+    """Single Twirp attempt. Returns `(success, status, body_or_None)`
+    matching `_do_request_once` so `_is_retryable_http` applies."""
+    response = ctx.http().post(
+        url = url,
+        headers = headers,
+        data = json.encode(payload),
+    ).map_err(lambda e: str(e)).block()
+    if type(response) == "string":
+        return (False, 0, "transport error: " + response)
+    success = response.status >= 200 and response.status < 300
+    body = None
+    if response.body:
+        _PARSE_FAILED = struct(_parse_failed = True)
+        parsed = json.try_decode(response.body, _PARSE_FAILED)
+        body = None if parsed == _PARSE_FAILED else parsed
+    return (success, response.status, body)
 
-    # ACTIONS_ID_TOKEN_REQUEST_TOKEN is the same credential as ACTIONS_RUNTIME_TOKEN —
-    # both come from systemConnection.Authorization.Parameters["AccessToken"] in the runner.
-    # ScriptHandler injects it into shell steps when permissions: id-token: write is set.
+# Twirp methods semantically safe to retry. CreateArtifact /
+# FinalizeArtifact are excluded — they create or transition state
+# and a retry after partial success would duplicate / half-finalize.
+_TWIRP_IDEMPOTENT_METHODS = ["DeleteArtifact"]
+
+def _github_twirp(ctx, method, payload):
+    """Twirp RPC to the GitHub Actions ArtifactService. Retries
+    transient failures only for `_TWIRP_IDEMPOTENT_METHODS`. Returns
+    `(ok, body_or_None, error_message_or_None)`."""
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
 
-    # ACTIONS_RESULTS_URL is not injected by ScriptHandler; use the well-known default.
+    # ACTIONS_RESULTS_URL is not injected by ScriptHandler — fall back to the well-known default.
     results_url = (ctx.std.env.var("ACTIONS_RESULTS_URL") or
                    "https://results-receiver.actions.githubusercontent.com/")
     if not token:
@@ -1218,10 +1308,23 @@ def _github_twirp(ctx, method, payload):
         "Content-Type": "application/json",
     }
 
-    resp = ctx.http().post(url = url, headers = headers, data = json.encode(payload)).block()
-    success = resp.status >= 200 and resp.status < 300
-    body = json.decode(resp.body) if resp.body else None
-    return (success, body, None)
+    fn = lambda: _github_twirp_once(ctx, url, headers, payload)
+    if method in _TWIRP_IDEMPOTENT_METHODS:
+        success, status, body_or_err, attempts = _retry_http(fn)
+    else:
+        success, status, body_or_err = fn()
+        attempts = 1
+
+    if not success:
+        _warn_http_failure(ctx, "GitHub Actions Twirp %s" % method, attempts, status, body_or_err)
+        if status == 0:
+            err = body_or_err if type(body_or_err) == "string" else "transport error"
+        else:
+            err = "HTTP %d" % status
+            if body_or_err:
+                err = err + ": " + str(body_or_err)
+        return (False, None, err)
+    return (True, body_or_err, None)
 
 def _upload_artifact(ctx, path, name, expires_at = ""):
     """Upload a single file to GitHub Actions using the Twirp artifact API.
@@ -1289,6 +1392,10 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
         owns_zip = True
 
     zip_size = ctx.std.fs.metadata(zip_path).size
+
+    # No retry: body is a non-replayable `fs.open()` stream. Transport
+    # errors still convert to `success=False` so the upload fails
+    # softly rather than aborting the task.
     upload_resp = ctx.http().put(
         url = signed_url,
         headers = {
@@ -1297,14 +1404,18 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
             "Content-Length": str(zip_size),
         },
         data = ctx.std.fs.open(zip_path),
-    ).block()
+    ).map_err(lambda e: str(e)).block()
 
     # Only remove the zip if we owned it — if the caller passed a pre-zipped
     # path, they're responsible for its cleanup (see _upload_testlogs_zip).
     if owns_zip and ctx.std.fs.exists(zip_path):
         ctx.std.fs.remove_file(zip_path)
 
+    if type(upload_resp) == "string":
+        _warn_http_failure(ctx, "GitHub Actions artifact blob PUT", 1, 0, upload_resp)
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload transport error: " + upload_resp]}
     if upload_resp.status < 200 or upload_resp.status >= 300:
+        _warn_http_failure(ctx, "GitHub Actions artifact blob PUT", 1, upload_resp.status, upload_resp.body)
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
 
     ok, body, err = _github_twirp(ctx, "FinalizeArtifact", {
