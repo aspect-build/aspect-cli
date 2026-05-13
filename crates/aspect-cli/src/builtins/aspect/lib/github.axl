@@ -1,6 +1,7 @@
 """GitHub API client library."""
 
 load("@std//base64.axl", "base64")
+load("@std//time.axl", "time")
 load("./environment.axl", "color_enabled", "info", "warn")
 load("./tar.axl", "zip_create")
 
@@ -8,7 +9,68 @@ DEFAULT_GITHUB_API = "https://api.github.com"
 
 # Internal helpers
 
-def _do_request(ctx, method, url, token, payload = None):
+def _is_retryable_http(success, status):
+    """Decide whether an HTTP call result is worth retrying.
+
+    Retry on:
+      - transport-level failures (status == 0 from our `.map_err(str)`
+        guard — DNS resolution, TLS handshake, connection refused,
+        connection reset, request timeout).
+      - 5xx server errors (502 / 503 / 504 in particular are routinely
+        emitted by GitHub's edge during regional incidents and tend to
+        clear on the next attempt).
+      - 429 (rate limited) — GitHub asks us to back off; the retry's
+        exponential backoff is the simplest honor of that.
+
+    Do NOT retry on other 4xx — those are deterministic client-side
+    errors (auth, bad request, not found). Retrying just delays the
+    inevitable error report.
+    """
+    if success:
+        return False
+    if status == 0:
+        return True
+    if status >= 500:
+        return True
+    if status == 429:
+        return True
+    return False
+
+# Default retry knobs. Three attempts with exponential backoff so a
+# single network flake (the typical case) gets one or two free retries
+# before surfacing. Total worst-case wall time: ~1.6s (250ms + 500ms +
+# 1000ms) — well under the 120s `Http::new` timeout, so a deeply hung
+# peer still aborts within bounded time.
+_HTTP_MAX_ATTEMPTS = 3
+_HTTP_BACKOFF_BASE_MS = 250
+
+def _retry_http(fn):
+    """Run `fn()` with retry-on-transient-failure semantics.
+
+    `fn` is a zero-arg closure returning `(success, status, body)` —
+    the shape `_do_request` and `_github_twirp` already produce.
+    Retryable failures (transport / 5xx / 429) are retried up to
+    `_HTTP_MAX_ATTEMPTS` times with exponential backoff. The last
+    result is returned regardless — successful, deterministically
+    failed (4xx), or exhausted-retries (caller still gets the error
+    body and decides whether to log + continue or fail).
+    """
+    result = fn()
+    success, status, _ = result
+    # Accumulator for the exponential backoff — Starlark has no `**`
+    # operator, so we double each iteration.
+    backoff_ms = _HTTP_BACKOFF_BASE_MS
+    for _ in range(_HTTP_MAX_ATTEMPTS - 1):
+        if not _is_retryable_http(success, status):
+            return result
+        time.sleep(backoff_ms)
+        result = fn()
+        success, status, _ = result
+        backoff_ms = backoff_ms * 2
+    return result
+
+def _do_request_once(ctx, method, url, token, payload = None):
+    """Single HTTP attempt — see `_do_request` for the retrying wrapper."""
     headers = {
         "Authorization": "Bearer " + token,
         "Accept": "application/vnd.github+json",
@@ -62,6 +124,17 @@ def _do_request(ctx, method, url, token, payload = None):
         snippet = body[:200].replace("\n", " ")
         return (False, response.status, "non-JSON response (status %d): %s" % (response.status, snippet))
     return (success, response.status, parsed)
+
+def _do_request(ctx, method, url, token, payload = None):
+    """`_do_request_once` wrapped in `_retry_http` — retries the call
+    on transient failures (transport errors, 5xx, 429) so a single
+    network flake doesn't surface as a feature-handler error.
+
+    All callers (`check_runs.update`, `issues.list_comments`,
+    `pulls.list_review_comments`, etc.) receive the same
+    `(success, status, body)` tuple shape as before.
+    """
+    return _retry_http(lambda: _do_request_once(ctx, method, url, token, payload))
 
 # Authentication
 
@@ -1194,12 +1267,40 @@ To make it available, use one of the following options:
             ACTIONS_RUNTIME_TOKEN: ${{ secrets.ACTIONS_RUNTIME_TOKEN }}
 """
 
-def _github_twirp(ctx, method, payload):
-    """Make a Twirp RPC call to the GitHub Actions artifact service."""
+def _github_twirp_once(ctx, url, headers, payload):
+    """Single Twirp attempt — see `_github_twirp` for the retrying wrapper.
 
-    # ACTIONS_ID_TOKEN_REQUEST_TOKEN is the same credential as ACTIONS_RUNTIME_TOKEN —
-    # both come from systemConnection.Authorization.Parameters["AccessToken"] in the runner.
-    # ScriptHandler injects it into shell steps when permissions: id-token: write is set.
+    Returns `(success, status, body_or_err)`:
+      - On a 2xx with a JSON body: `(True, status, decoded_body)`.
+      - On a 2xx with an empty body: `(True, status, None)`.
+      - On a non-2xx: `(False, status, decoded_body_or_str_snippet)`.
+      - On a transport error: `(False, 0, "transport error: ...")` —
+        matches `_do_request_once`'s shape so `_is_retryable_http`
+        retries it the same way.
+    """
+    response = ctx.http().post(
+        url = url,
+        headers = headers,
+        data = json.encode(payload),
+    ).map_err(lambda e: str(e)).block()
+    if type(response) == "string":
+        return (False, 0, "transport error: " + response)
+    success = response.status >= 200 and response.status < 300
+    body = None
+    if response.body:
+        _PARSE_FAILED = struct(_parse_failed = True)
+        parsed = json.try_decode(response.body, _PARSE_FAILED)
+        body = None if parsed == _PARSE_FAILED else parsed
+    return (success, response.status, body)
+
+def _github_twirp(ctx, method, payload):
+    """Make a Twirp RPC call to the GitHub Actions artifact service.
+
+    Retries on transient failures (transport errors, 5xx, 429) via
+    `_retry_http`. Returns `(ok, body_or_None, error_message_or_None)`
+    — the shape the existing `_upload_artifact` / `_delete_artifact`
+    callers already consume.
+    """
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
 
@@ -1218,10 +1319,21 @@ def _github_twirp(ctx, method, payload):
         "Content-Type": "application/json",
     }
 
-    resp = ctx.http().post(url = url, headers = headers, data = json.encode(payload)).block()
-    success = resp.status >= 200 and resp.status < 300
-    body = json.decode(resp.body) if resp.body else None
-    return (success, body, None)
+    success, status, body_or_err = _retry_http(
+        lambda: _github_twirp_once(ctx, url, headers, payload),
+    )
+    if not success:
+        # `_retry_http` returns the final (failed) attempt unchanged.
+        # Surface the failure as `err` text so callers see why instead
+        # of silently swallowing the result.
+        if status == 0:
+            err = body_or_err if type(body_or_err) == "string" else "transport error"
+        else:
+            err = "HTTP %d" % status
+            if body_or_err:
+                err = err + ": " + str(body_or_err)
+        return (False, None, err)
+    return (True, body_or_err, None)
 
 def _upload_artifact(ctx, path, name, expires_at = ""):
     """Upload a single file to GitHub Actions using the Twirp artifact API.
@@ -1289,6 +1401,12 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
         owns_zip = True
 
     zip_size = ctx.std.fs.metadata(zip_path).size
+    # Convert transport errors to a string result so a flaky PUT to
+    # the Azure Blob signed URL surfaces as a `success=False` return
+    # rather than propagating up as an exception that fails the
+    # parent task. No retry here — the PUT body is a `fs.open()`
+    # stream that can't be replayed safely, and a fresh
+    # CreateArtifact + signed-URL exchange is the proper retry path.
     upload_resp = ctx.http().put(
         url = signed_url,
         headers = {
@@ -1297,13 +1415,15 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
             "Content-Length": str(zip_size),
         },
         data = ctx.std.fs.open(zip_path),
-    ).block()
+    ).map_err(lambda e: str(e)).block()
 
     # Only remove the zip if we owned it — if the caller passed a pre-zipped
     # path, they're responsible for its cleanup (see _upload_testlogs_zip).
     if owns_zip and ctx.std.fs.exists(zip_path):
         ctx.std.fs.remove_file(zip_path)
 
+    if type(upload_resp) == "string":
+        return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload transport error: " + upload_resp]}
     if upload_resp.status < 200 or upload_resp.status >= 300:
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
 
