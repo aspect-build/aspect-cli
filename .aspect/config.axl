@@ -7,6 +7,7 @@ load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
 load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
 load("@aspect//lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
+load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/lint_results_test.axl", "lint_template_snapshot_tests")
 load("@aspect//lint.axl", "LintTrait")
 load("@aspect//traits.axl", "BazelTrait")
@@ -67,6 +68,11 @@ def config(ctx: ConfigContext):
     # Template snapshot tests — renders bazel_results templates across failure modes.
     # Run with: aspect test-template-snapshots
     ctx.tasks.add(template_snapshot_tests)
+
+    # GitLab HTTP client smoke tests — pure-fn URL helpers + input
+    # validation on the network-touching surfaces.
+    # Run with: aspect dev test-gitlab-client
+    ctx.tasks.add(gitlab_client_tests)
 
     # Lint template snapshot tests — renders lint_results templates.
     # Run with: aspect dev test-lint-template-snapshots
