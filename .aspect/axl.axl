@@ -1686,6 +1686,14 @@ rename to new.txt
     tc = test_case(tc, len(files_rm) == 1 and files_rm[0]["file"] == "new.txt", "parse_local_diff: rename+modify → entry under new path")
     tc = test_case(tc, files_rm[0]["lines"] == [4], "parse_local_diff: rename+modify added line index")
 
+    # Hunk header with a section heading containing a bare `+` (e.g. when the
+    # function-context line found by git starts with `+`). Earlier versions
+    # scanned every space-split token and hit `int("")` on the bare `+`.
+    diff_sh = "--- a/h.md\n+++ b/h.md\n@@ -1,1 +1,1 @@ + heading\n-old\n+new"
+    files_sh = github.parse_local_diff(diff_sh)
+    tc = test_case(tc, len(files_sh) == 1 and files_sh[0]["file"] == "h.md", "parse_local_diff: section heading parsed")
+    tc = test_case(tc, files_sh[0]["lines"] == [0] and files_sh[0]["additions"] == 1, "parse_local_diff: section heading doesn't break range parse")
+
     _clear_pr_env(env)
     return tc
 
