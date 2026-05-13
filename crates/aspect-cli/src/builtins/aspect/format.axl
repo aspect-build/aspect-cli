@@ -17,11 +17,22 @@ Usage:
 
 """
 
-load("./lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
-load("./lib/github.axl", "detect_changed_files")
+load("@std//time.axl", "sleep_iter")
+load("./bazel.axl", "BazelTrait")
+load("./lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader", "detect_ci")
+load("./lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "now_ms", "pluralize", "process_event")
+load("./lib/checkrun.axl", "GitHubCheckRunTrait")
+load("./lib/environment.axl", "color_enabled", "error", "info", "warn")
+load(
+    "./lib/format_results.axl",
+    fmt_init_data = "init_data",
+)
+load("./lib/github.axl", "detect_changed_files", "print_changed_files_listing")
+load("./lib/health_check.axl", "HealthCheckTrait")
+load("./lib/lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
 load("./lib/path_glob.axl", "match_any")
+load("./lib/repro_commands.axl", "build_aspect_command", "task_cli_path")
 load("./lib/runnable.axl", "runnable")
-load("./traits.axl", "ArtifactsTrait", "BazelTrait")
 
 def _git_capture(ctx, *args):
     """Run `git <args>` and return (stdout, exit_code, stderr).
@@ -101,11 +112,10 @@ def _try_upload_format_diff(ctx, diff_text):
     ArtifactsTrait.artifact_urls["format_diff"] so future status-check
     features can surface a "View patch" link.
     """
-    out = ctx.std.io.stdout
     ci = detect_ci(ctx.std.env)
     uploader = create_uploader(ctx.std.env)
     if not uploader:
-        out.write("--upload-format-diff: not running on a recognized CI host; skipping.\n")
+        info(ctx.std, "Skipping format diff upload — not running on a recognized CI host.")
         return
 
     # Write the patch to a job-scoped tmpdir so concurrent format runs in
@@ -117,7 +127,7 @@ def _try_upload_format_diff(ctx, diff_text):
     name = artifact_name(ci, ctx.task.name, ctx.task.key, "format.patch")
     result = uploader.upload_file(ctx, patch_path, name)
     if not result["success"]:
-        out.write("--upload-format-diff: upload failed: %s\n" % "; ".join(result.get("errors") or ["unknown error"]))
+        warn(ctx.std, "Format diff upload failed: %s" % "; ".join(result.get("errors") or ["unknown error"]))
         return
 
     # Surface the download URL via ArtifactsTrait so status-check or
@@ -128,15 +138,181 @@ def _try_upload_format_diff(ctx, diff_text):
         urls = dict(artifacts_trait.artifact_urls) if artifacts_trait.artifact_urls else {}
         urls["format_diff"] = download_url
         artifacts_trait.artifact_urls = urls
-        out.write("--upload-format-diff: uploaded patch — %s\n" % download_url)
+        info(ctx.std, "Uploaded format diff patch — %s" % download_url)
     else:
-        out.write("--upload-format-diff: uploaded patch (no stable URL on this CI host).\n")
+        info(ctx.std, "Uploaded format diff patch (no stable URL on this CI host).")
+
+def _pick_status(data, had_failure, terminal):
+    """Decide a format task's lifecycle status from accumulated data.
+
+    Aborted (bazel terminated mid-build) → "aborted".
+    Hard failure → "failing"/"failed".
+    `affected_files` non-empty (formatter modified something) → "warning"
+    (live or terminal — the soft-fail signal).
+    Else → "running"/"passed"."""
+    if data.get("bazel", {}).get("aborted"):
+        return "aborted"
+    if had_failure:
+        return "failed" if terminal else "failing"
+    if (data.get("format", {}) or {}).get("affected_files"):
+        return "warning"
+    return "passed" if terminal else "running"
+
+def _compact_text(status, data):
+    """Compact Result-cell text for the PR-comment surface."""
+    n = len((data.get("format", {}) or {}).get("affected_files", []) or [])
+    if status == "failed" or status == "failing":
+        if n > 0:
+            return "%d file%s need%s format" % (n, "s" if n != 1 else "", "" if n != 1 else "s")
+        return ""
+    if status == "passed":
+        return "clean"
+    if status == "warning" or status == "running":
+        if n > 0:
+            return "%d file%s differ%s" % (n, "s" if n != 1 else "", "" if n != 1 else "s")
+        return ""
+    return ""
+
+def _body_text(status, data):
+    """Narrative-form `progress.body` for the PR-comment 💬 line.
+    Wraps `_compact_text` with a status-specific verb prefix."""
+    compact = _compact_text(status, data)
+    if status == "passed" or status == "warning":
+        return "Format complete" + ((" (" + compact + ")") if compact else "")
+    if status == "failed":
+        return "Format failed" + ((" (" + compact + ")") if compact else "")
+    if status == "aborted":
+        return "Format aborted"
+    return ""
+
+# When a single fix command would carry more files than this, the
+# producer emits a truncated positional-list entry plus a re-discovery
+# fallback that uses the detection flags.
+_FIX_FILES_LIMIT = 20
+
+def _append_repro_command(ctx, data):
+    """Append the always-rendered "Reproduce" command. Re-runs the
+    same `aspect format --check=true ...` invocation CI ran, with the
+    same scope / formatter / ignore-pattern flags, so the user gets
+    the same diagnose-without-modifying behavior locally.
+    """
+    flags = [
+        ("--check", "true"),
+        ("--scope", ctx.args.scope),
+        ("--formatter-target", ctx.args.formatter_target),
+    ]
+    if ctx.args.ignore_patterns:
+        flags.append(("--ignore-pattern", list(ctx.args.ignore_patterns)))
+    if ctx.args.base_ref and ctx.args.base_ref != "origin/main":
+        flags.append(("--base-ref", ctx.args.base_ref))
+    if ctx.args.merge_base:
+        flags.append(("--merge-base", ctx.args.merge_base))
+    data["repro_commands"].append({
+        "command": build_aspect_command(task_cli_path(ctx.task), flags, []),
+        "description": "",
+    })
+
+def _append_fix_commands(ctx, data):
+    """Append fix-command entries to `data["fix_commands"]`.
+
+    The fix command flips `--check=false` and carries the affected
+    files as positional args so the user rewrites exactly what CI
+    flagged, bypassing local change-detection. When the affected
+    list exceeds `_FIX_FILES_LIMIT`, also emits a re-discovery entry
+    as a fallback.
+    """
+    affected = (data.get("format", {}) or {}).get("affected_files", []) or []
+    if not affected:
+        return
+    task_path = task_cli_path(ctx.task)
+
+    # Positionals bypass --scope / --base-ref / --merge-base /
+    # --ignore-pattern, so the explicit-file fix command omits them.
+    explicit_flags = [
+        ("--check", "false"),
+        ("--formatter-target", ctx.args.formatter_target),
+    ]
+    if len(affected) <= _FIX_FILES_LIMIT:
+        data["fix_commands"].append({
+            "command": build_aspect_command(task_path, explicit_flags, affected, max_chars = 4096),
+            "description": "",
+        })
+        return
+
+    shown = affected[:_FIX_FILES_LIMIT]
+    remaining = len(affected) - _FIX_FILES_LIMIT
+    data["fix_commands"].append({
+        "command": build_aspect_command(task_path, explicit_flags, shown, max_chars = 4096),
+        "description": "First %d of %d affected files (plus %d other%s)" % (
+            _FIX_FILES_LIMIT,
+            len(affected),
+            remaining,
+            "" if remaining == 1 else "s",
+        ),
+    })
+
+    detection_flags = [
+        ("--scope", ctx.args.scope),
+        ("--formatter-target", ctx.args.formatter_target),
+    ]
+    if ctx.args.ignore_patterns:
+        detection_flags.append(("--ignore-pattern", list(ctx.args.ignore_patterns)))
+    if ctx.args.base_ref and ctx.args.base_ref != "origin/main":
+        detection_flags.append(("--base-ref", ctx.args.base_ref))
+    if ctx.args.merge_base:
+        detection_flags.append(("--merge-base", ctx.args.merge_base))
+    data["fix_commands"].append({
+        "command": build_aspect_command(task_path, [("--check", "false")] + detection_flags, []),
+        "description": "Or re-discover and format all %d affected files" % len(affected),
+    })
+
+def _emit_final(ctx, lifecycle, data, exit_code):
+    """Emit the terminal task_update and task_complete for status-check consumers."""
+    status = _pick_status(data, had_failure = exit_code != 0, terminal = True)
+    if not data.get("finish_time_ms"):
+        data["finish_time_ms"] = now_ms(ctx)
+    if data.get("start_time_ms") and not data["bazel"].get("wall_time_ms"):
+        data["bazel"]["wall_time_ms"] = data["finish_time_ms"] - data["start_time_ms"]
+
+    _append_repro_command(ctx, data)
+    _append_fix_commands(ctx, data)
+
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind = "format_results",
+            status = status,
+            final = True,
+            data = data,
+            progress = ProgressStyles(
+                body = _body_text(status, data),
+            ),
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
 
 # buildifier: disable=function-docstring
 def _impl(ctx: TaskContext) -> int:
-    out = ctx.std.io.stdout
     bazel_trait = ctx.traits[BazelTrait]
-    out.write("Building formatter...\n")
+    hc_trait = ctx.traits[HealthCheckTrait]
+    lifecycle = ctx.traits[TaskLifecycleTrait]
+    ansi = color_enabled(ctx.std)
+
+    # Initialize data and fire task_started FIRST so any subsequent failure
+    # still creates a visible status check.
+    data = fmt_init_data()
+    data["start_time_ms"] = now_ms(ctx)
+    data["format"]["scope"] = ctx.args.scope
+    data["format"]["formatter_target"] = ctx.args.formatter_target
+    data["format"]["soft_fail"] = bool(ctx.args.soft_fail)
+    setup_phase(ctx, lifecycle)
+    for handler in lifecycle.task_started:
+        handler(ctx, ctx.args.formatter_target)
+
+    # Pre-flight: Workflows' `print_environment_info` +
+    # `agent_health_check` hooks fire here, printing the
+    # `--- :computer: Workflows runner environment` and health check
+    # BK section markers.
+    preflight_phase(ctx, lifecycle, hc_trait)
 
     flags = [
         "--remote_download_outputs=toplevel",
@@ -163,46 +339,188 @@ def _impl(ctx: TaskContext) -> int:
 
     r = runnable(ctx, [ctx.args.formatter_target])
 
+    # Pass `bazel_trait.build_event_sinks` (which includes the Aspect
+    # backend gRPC sink in CI deployments) so this build's BES events
+    # actually reach the backend and the "✨ Aspect Workflows" link in
+    # the format check-run / annotation header resolves to a real
+    # invocation. Bare `build_events = True` would set up a local pipe
+    # only — the runtime would still mint a sink_invocation_id, but the
+    # Aspect backend would have no record under that UUID, leading to
+    # the "invocation not found" 404 we observed live.
+    build_events = list(bazel_trait.build_event_sinks) if bazel_trait.build_event_sinks else True
+
+    # Fire `bazel_trait.build_start` hooks before spawning bazel —
+    # Workflows registers the BK `--- :bazel: Running bazel …`
+    # section marker here, and other features hook the build kick-off
+    # for instrumentation / pre-spawn work.
+    for hook in bazel_trait.build_start:
+        hook(ctx)
+
+    status = _pick_status(data, had_failure = False, terminal = False)
+    task_update(
+        ctx,
+        lifecycle,
+        status,
+        ProgressStyles(
+            body = "Building formatter... (%s)" % ctx.args.formatter_target,
+            stream = "Building formatter (%s)" % ctx.args.formatter_target,
+        ),
+        kind = "format_results",
+        data = data,
+        phase = Phase(name = "build", description = "Build formatter", emoji = "🔨"),
+    )
+
     build = ctx.bazel.build(
         ctx.args.formatter_target,
-        build_events = True,
+        build_events = build_events,
         flags = flags,
     )
 
-    for event in build.build_events():
-        r.event(event)
+    # Subscribe BEFORE emitting (broadcaster only delivers to pre-existing
+    # subscribers); a warm daemon can stream BES events within milliseconds,
+    # so any delay between `ctx.bazel.build` returning and the subscribe
+    # risks missing the early burst — including the target_completed for
+    # the formatter that `runnable.determine_entrypoint` needs.
+    events = build.build_events()
 
-    if not build.wait().success:
+    # `build.sink_invocation_id` is minted inside the runtime's `Build::spawn`
+    # before it returns. Populate `data["sink_invocation_id"]` here and
+    # emit a running task_update so the BK annotation / status check picks up
+    # the Aspect Workflows link as soon as the build is spawned, rather than
+    # waiting for `build.wait()` to surface it.
+    data["sink_invocation_id"] = build.sink_invocation_id
+
+    # Re-emit (now that the sink_invocation_id is known so we can show
+    # the Web UI link) but target only the status surfaces — empty
+    # `stream` suppresses the duplicate CLI line.
+    status = _pick_status(data, had_failure = False, terminal = False)
+    task_update(
+        ctx,
+        lifecycle,
+        status,
+        ProgressStyles(
+            body = "Building formatter... (%s)" % ctx.args.formatter_target,
+        ),
+        kind = "format_results",
+        data = data,
+    )
+
+    # Tick-driven drain: fires a heartbeat refresh every
+    # MIN_HEARTBEAT_INTERVAL_MS even when bazel is silent. Per-event
+    # work: r.event() (entrypoint discovery), bazel_trait.build_event
+    # hooks (ArtifactUpload records testlog paths), process_event
+    # populates the shared bazel state for the rendered body.
+    last_emit_ms = now_ms(ctx)
+    for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+        interesting = False
+        for _ in range(10000):
+            event = events.try_pop()
+            if event == None:
+                break
+            r.event(event)
+            for handler in bazel_trait.build_event:
+                handler(ctx, event)
+            if process_event(data, event):
+                interesting = True
+        if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
+            heartbeat_status = _pick_status(data, had_failure = False, terminal = False)
+            for handler in lifecycle.task_update:
+                handler(ctx, TaskUpdate(
+                    kind = "format_results",
+                    status = heartbeat_status,
+                    data = data,
+                    progress = ProgressStyles(),
+                ))
+            last_emit_ms = now_ms(ctx)
+        if events.done():
+            break
+
+    build_status = build.wait()
+
+    # Fire `bazel_trait.build_end` hooks. The ArtifactUpload feature's
+    # `_on_build_end` runs the actual artifact upload step here (Profile /
+    # BEP / Execlog / Testlogs); without it the format task never uploads
+    # any artifacts and the rendered "Artifacts" row is empty.
+    for hook in bazel_trait.build_end:
+        hook(ctx, build_status.code)
+
+    if not build_status.success:
+        _emit_final(ctx, lifecycle, data, build_status.code or 1)
         fail("Building the formatter has failed.")
 
     formatter = r.determine_entrypoint(ctx.args.formatter_target)
     if not formatter:
+        _emit_final(ctx, lifecycle, data, 1)
         fail("Failed to determine the formatter entrypoint.")
 
     ignore_patterns = list(ctx.args.ignore_patterns)
 
+    # Positional files explicitly provided → bypass change-detection
+    # entirely. `--scope`, `--base-ref`, `--merge-base`, and
+    # `--ignore-pattern` are silently ignored here; the formatter
+    # receives exactly the listed paths. This is the typical local
+    # repro path: the user copies the fix command from CI which
+    # carries a positional file list, runs it as-is.
+    explicit_files = list(ctx.args.files)
+
     format_args = []
-    if ctx.args.scope == "changed":
+    if explicit_files:
+        print("Formatting %d file%s from positional arguments." % (
+            len(explicit_files),
+            "" if len(explicit_files) == 1 else "s",
+        ))
+        data["changed_files_count"] = len(explicit_files)
+        format_args = explicit_files
+    elif ctx.args.scope == "changed":
         # Prefers the GitHub PR Files API when authenticated and in a PR
         # context (works on any CI host), falling back to a local
         # `git diff <merge-base> --diff-filter=d --name-only`. The
         # --base-ref / --merge-base flags below only apply to that fallback.
-        changed_files = detect_changed_files(
+        status = _pick_status(data, had_failure = False, terminal = False)
+        task_update(
+            ctx,
+            lifecycle,
+            status,
+            ProgressStyles(
+                body = "Detecting changed files...",
+                stream = "Detecting changed files",
+            ),
+            kind = "format_results",
+            data = data,
+            phase = Phase(name = "detect", description = "Detect changed files", emoji = "🔍"),
+        )
+        detect_result = detect_changed_files(
             ctx,
             line_level = False,
             base_ref = ctx.args.base_ref,
             merge_base = ctx.args.merge_base or None,
         )
+
+        # Shared diagnostic listing — announces the source (PR Files
+        # API vs local git diff with SHAs) and lists every entry the
+        # source returned. format uses line_level=False so the
+        # entries are bare filenames; the listing prints just the
+        # filename per row (no +/- counts — the source didn't give
+        # us per-line data).
+        print_changed_files_listing(ctx, detect_result)
+        changed_files = detect_result["files"]
         if ignore_patterns:
             kept = [f for f in changed_files if not match_any(ignore_patterns, f)]
             ignored_count = len(changed_files) - len(kept)
             if ignored_count > 0:
-                out.write("Filtered %d file(s) via --ignore-pattern.\n" % ignored_count)
+                info(ctx.std, "Filtered %d file(s) via --ignore-pattern." % ignored_count)
             changed_files = kept
         if not changed_files:
-            out.write("No files to format.\n")
+            info(ctx.std, "No files to format")
+            data["format"]["no_files_to_format"] = True
+            _emit_final(ctx, lifecycle, data, 0)
             return 0
-        out.write("Formatting changed files:\n%s\n" % "\n".join(changed_files))
+
+        # Surface the input file count so the Configuration row can show
+        # `Scope: changed — N file(s)` (analogous to lint's
+        # "Strategy: hold-the-line — filtered to N changed files"). This
+        # is the post-ignore-pattern set the formatter actually saw.
+        data["changed_files_count"] = len(changed_files)
         format_args = changed_files
 
     # Snapshot pre-format tracked state so we can detect what the formatter
@@ -212,13 +530,46 @@ def _impl(ctx: TaskContext) -> int:
     # working tree, index, or stash list. Empty output = clean tree.
     pre_snap = _snapshot_tracked_state(ctx)
 
+    if explicit_files or ctx.args.scope == "changed":
+        files_label = pluralize(len(format_args), "file")
+        scope_label = "" if explicit_files else " in scope"
+        status = _pick_status(data, had_failure = False, terminal = False)
+        task_update(
+            ctx,
+            lifecycle,
+            status,
+            ProgressStyles(
+                body = "Formatting %s%s..." % (files_label, scope_label),
+                stream = "Formatting %s%s" % (files_label, scope_label),
+            ),
+            kind = "format_results",
+            data = data,
+            phase = Phase(name = "format", description = "Format files", emoji = "✨"),
+        )
+    else:
+        status = _pick_status(data, had_failure = False, terminal = False)
+        task_update(
+            ctx,
+            lifecycle,
+            status,
+            ProgressStyles(
+                body = "Formatting all files...",
+                stream = "Formatting all files",
+            ),
+            kind = "format_results",
+            data = data,
+            phase = Phase(name = "format", description = "Format files", emoji = "✨"),
+        )
     exit = r.spawn(formatter, format_args).wait()
 
     if not exit.success:
         # Formatter binary itself errored — surface that and skip the
         # formatting-required check. Whatever the formatter wrote to disk
         # is left in place for the user to inspect.
-        out.write("\x1b[0;31mERROR\x1b[0m: formatter exited with code %d\n" % exit.code)
+        error(ctx.std, "Formatter exited with code %d." % exit.code)
+        data["format"]["formatter_error"] = True
+        data["format"]["formatter_error_code"] = exit.code
+        _emit_final(ctx, lifecycle, data, exit.code)
         return exit.code
 
     # No HEAD means snapshot wasn't possible — either we're not in a git
@@ -227,16 +578,44 @@ def _impl(ctx: TaskContext) -> int:
     # diff, so degrade the detection feature with a warning rather than
     # failing the task.
     if pre_snap == None:
-        out.write("\x1b[0;33mWARNING\x1b[0m: cannot resolve HEAD (no initial git commit, or not in a git repository); formatting-required detection is skipped. The formatter ran, but we cannot tell whether it changed anything.\n")
-        out.write("Make at least one commit (or run inside a git repo) and re-run if you want `aspect format` to surface formatter-induced changes.\n")
+        warn(ctx.std, "Cannot resolve HEAD (no initial git commit, or not in a git repository); " +
+                      "formatting-required detection is skipped. The formatter ran, but we cannot tell " +
+                      "whether it changed anything. Make at least one commit (or run inside a git repo) " +
+                      "and re-run if you want `aspect format` to surface formatter-induced changes.")
+        data["format"]["no_git"] = True
+        _emit_final(ctx, lifecycle, data, 0)
         return 0
 
     # Diff the post-format tree against the pre-format snapshot. Any
     # non-empty diff means the formatter modified files = "formatting
     # required". When `pre_snap` is empty (working tree was clean before),
     # `git diff HEAD` gives the same answer.
+    status = _pick_status(data, had_failure = False, terminal = False)
+    task_update(
+        ctx,
+        lifecycle,
+        status,
+        ProgressStyles(
+            body = "Computing format diff...",
+            stream = "Computing format diff",
+        ),
+        kind = "format_results",
+        data = data,
+        phase = Phase(name = "diff", description = "Detect formatter-induced changes", emoji = "📋"),
+    )
     formatter_diff = _diff_against(ctx, pre_snap)
     if not formatter_diff:
+        # CLI verdict is descriptive past-tense ("N files were modified")
+        # — distinct from the prescriptive CI-style status pane phrasing
+        # ("All N files are properly formatted").
+        if explicit_files:
+            scope_text = ""
+        elif ctx.args.scope == "changed":
+            scope_text = " in scope"
+        else:
+            scope_text = ""
+        print("No files%s were modified." % scope_text)
+        _emit_final(ctx, lifecycle, data, 0)
         return 0
 
     # List the affected file set, then filter through --ignore-pattern.
@@ -259,14 +638,29 @@ def _impl(ctx: TaskContext) -> int:
         # user's perspective. Note any working-tree changes the formatter
         # made so they aren't surprising downstream.
         if ignored_count > 0:
-            out.write("Formatter modified %d file(s), all matching --ignore-pattern; treating as OK.\n" % ignored_count)
+            info(ctx.std, "Formatter modified %d file(s), all matching --ignore-pattern; treating as OK." % ignored_count)
+        _emit_final(ctx, lifecycle, data, 0)
         return 0
 
-    out.write("\nFormatting changes were applied to %d file(s):\n" % len(affected))
+    n = len(affected)
+    if explicit_files:
+        scope_qual = ""
+    elif ctx.args.scope == "changed":
+        scope_qual = " in scope"
+    else:
+        scope_qual = ""
+    if n == 1:
+        print("1 file%s was modified:" % scope_qual)
+    else:
+        print("%d files%s were modified:" % (n, scope_qual))
     for f in affected:
-        out.write("  - %s\n" % f)
+        print("  - %s" % f)
     if ignored_count > 0:
-        out.write("(also modified %d file(s) matching --ignore-pattern; not counted toward failure)\n" % ignored_count)
+        print("(also modified %d file(s) matching --ignore-pattern; not counted toward failure)" % ignored_count)
+
+    # Populate data with the affected file set and ignore count for status checks.
+    data["format"]["affected_files"] = affected
+    data["format"]["ignored_count"] = ignored_count
 
     # Optional: archive the diff as a CI artifact so reviewers can apply
     # it locally without re-running the formatter. Off by default.
@@ -292,17 +686,48 @@ def _impl(ctx: TaskContext) -> int:
             upload_diff = formatter_diff
         _try_upload_format_diff(ctx, upload_diff)
 
+        # Surface the patch URL in data so the status-check renderer can link to it.
+        artifacts_trait = ctx.traits[ArtifactsTrait]
+        if artifacts_trait.artifact_urls:
+            data["format"]["patch_url"] = artifacts_trait.artifact_urls.get("format_diff", "") or ""
+
     if ctx.args.soft_fail:
-        out.write("\x1b[0;33mWARNING\x1b[0m: formatting required, but --soft-fail is set; task exits 0.\n")
-        out.write("Run `aspect format` locally and commit the result, or amend with --soft-fail=false to enforce.\n")
+        info(ctx.std, "Formatting required, but --soft-fail is set; task exits 0. " +
+                      "Run `aspect format` locally and commit the result, or amend with --soft-fail=false to enforce.")
+        _emit_final(ctx, lifecycle, data, 0)
         return 0
 
-    out.write("\x1b[0;31mERROR\x1b[0m: formatting required. Run `aspect format` locally and commit the result.\n")
+    # `--check` controls whether a non-empty diff (i.e. files the
+    # formatter rewrote) fails the task or just reports the result:
+    #   auto  (default) → check on CI, apply locally
+    #   true            → always fail on changes
+    #   false           → never fail on changes
+    # The local-apply branch is the answer to "I just ran aspect format
+    # to fix CI; don't tell me to run it again." Off CI, the formatter
+    # already did the work — exiting 0 with a "Formatted N file(s)"
+    # message reflects that. CI still gets the original failure path so
+    # the gate stays effective.
+    check_mode = ctx.args.check
+    if check_mode == "auto":
+        enforce_check = bool(detect_ci(ctx.std.env))
+    elif check_mode == "true":
+        enforce_check = True
+    else:
+        enforce_check = False
+
+    if not enforce_check:
+        print("Formatted %d file(s). Review and commit the changes." % len(affected))
+        data["applied"] = True
+        _emit_final(ctx, lifecycle, data, 0)
+        return 0
+
+    error(ctx.std, "Formatting required. Run `aspect format` locally and commit the result.")
+    _emit_final(ctx, lifecycle, data, 1)
     return 1
 
 format = task(
     implementation = _impl,
-    traits = [BazelTrait, ArtifactsTrait],
+    traits = [BazelTrait, ArtifactsTrait, HealthCheckTrait, TaskLifecycleTrait, GitHubCheckRunTrait],
     args = {
         "scope": args.string(
             default = "changed",
@@ -313,13 +738,18 @@ format = task(
             default = False,
             description = "When true, the task returns 0 even if the formatter modified files, printing a WARNING with the affected file list instead. Useful for teams introducing automated formatting incrementally so the CI step doesn't block merges. The formatter binary's own non-zero exits are still surfaced as task failures regardless of this flag.",
         ),
+        "check": args.string(
+            default = "auto",
+            values = ["auto", "true", "false"],
+            description = "Whether to fail the task when the formatter rewrote files. 'auto' (default) checks when running on a recognized CI host (GitHub Actions / Buildkite / CircleCI / GitLab) and applies-without-failing locally — the formatter already did the work, so a local invocation that returned the failure exit code 'fix locally and commit' would be telling the user to run something they just ran. 'true' always fails on changes (preserves the legacy behavior — useful in scripts that depend on the failure exit). 'false' never fails on changes (exits 0 with a 'Formatted N file(s)' message). The formatter binary's own non-zero exits are still surfaced as task failures regardless of this flag; --soft-fail (which prints a WARNING and exits 0) takes precedence when set.",
+        ),
         "ignore_patterns": args.string_list(
             long = "ignore-pattern",
             description = "Glob pattern(s) of paths to exclude from formatting. Repeat the flag to pass multiple — e.g. `--ignore-pattern='vendor/**' --ignore-pattern='**/*.generated.go'`. Patterns match against repo-relative file paths. In `--scope=changed` (default), filtered files are dropped from the file list passed to the formatter. In `--scope=all`, the formatter discovers files itself, so ignored files may still be rewritten on disk; in either scope, ignored files are excluded from the post-format diff used to decide whether the task fails. Useful for nested Bazel workspaces (where running the parent's formatter would stomp the child's files) and for vendored / generated directories. Pattern syntax: `*` (one segment), `**` (zero or more segments), `?` (one char); case-sensitive.",
         ),
         "upload_format_diff": args.boolean(
-            default = False,
-            description = "Upload the formatter's diff as a CI artifact (named `format.patch`) so reviewers can apply it locally without re-running the formatter. No-op when the working tree is clean post-format, or when not running on a recognized CI host (GitHub Actions, Buildkite, CircleCI, GitLab). The download URL (where the CI provider returns one) is surfaced via ArtifactsTrait.artifact_urls['format_diff']. Off by default.",
+            default = True,
+            description = "Upload the formatter's diff as a CI artifact (named `format.patch`) so reviewers can apply it locally without re-running the formatter. No-op when the working tree is clean post-format, or when not running on a recognized CI host (GitHub Actions, Buildkite, CircleCI, GitLab). The download URL (where the CI provider returns one) is surfaced via ArtifactsTrait.artifact_urls['format_diff']. Pass `--upload-format-diff=false` to disable.",
         ),
         "base_ref": args.string(
             default = "origin/main",
@@ -339,6 +769,25 @@ format = task(
         "bazel_startup_flags": args.string_list(
             long = "bazel-startup-flag",
             description = "Additional Bazel startup flags. Repeat the flag to pass multiple. Note: changing startup flags restarts the Bazel server.",
+        ),
+        # Positional file list. When non-empty, the formatter receives
+        # these files directly — change-detection is skipped, and
+        # `--scope`, `--base-ref`, `--merge-base`, and
+        # `--ignore-pattern` are silently ignored. This is the "format
+        # these specific files" mode reviewers use locally after
+        # picking up a fix command from CI:
+        #
+        #   aspect format -- crates/aspect-cli/src/foo.axl crates/aspect-cli/src/bar.axl
+        #
+        # Defaults to an empty list, which falls back to the
+        # change-detection path driven by `--scope`. Hyphen-led entries
+        # are accepted via the standard `--` separator (`aspect
+        # format -- file1 file2`).
+        "files": args.positional(
+            default = [],
+            description = "Optional positional list of files to format. When non-empty the formatter runs on exactly these paths and the change-detection flags (--scope / --base-ref / --merge-base / --ignore-pattern) are ignored. When empty, the task auto-discovers files via the configured --scope.",
+            maximum = 4096,
+            minimum = 0,
         ),
     },
 )

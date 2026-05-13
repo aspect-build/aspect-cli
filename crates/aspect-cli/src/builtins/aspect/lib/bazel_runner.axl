@@ -5,16 +5,160 @@ flag pipeline, BES wiring, lifecycle hooks, and result accumulation. The only
 difference is which Bazel subcommand they invoke (`bazel build` vs
 `bazel test`). Tests happen to produce `test_summary` events on top of the
 shared event stream, which naturally flows through `process_event` into the
-test-specific buckets in `results`.
+test-specific buckets in `data`.
 
 Keeping a single runner here ensures the status check code path stays unified:
 any change to how build events are processed or how status updates are emitted
 applies uniformly to both tasks.
 """
 
-load("./bazel_results.axl", "init_results", "process_event")
+load("@std//time.axl", "sleep_iter")
+load("./bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "archive_bazel_attempt", "failed_labels", "init_data", "now_ms", "pluralize", "process_event")
 load("./environment.axl", "color_enabled")
-load("../traits.axl", "BazelTrait", "HealthCheckTrait", "TaskLifecycleTrait", "TaskUpdate")
+load("./health_check.axl", "HealthCheckTrait")
+load("./lifecycle.axl", "Phase", "ProgressStyles", "TaskLifecycleTrait", "TaskUpdate", "preflight_phase", "setup_phase", "task_update")
+load("./repro_commands.axl", "build_aspect_command", "task_cli_path")
+load("../bazel.axl", "BazelTrait")
+
+# ─── Lifecycle status + Result-cell text ──────────────────────────────────────
+#
+# Build and test share the same data shape (BES counters in `data["bazel"]`)
+# so the runner owns both branches of the kind-aware switch directly.
+
+def _pick_status(command, data, had_failure, terminal):
+    """Decide a build/test task's lifecycle status from accumulated BES counters.
+
+    `command` — "build" or "test".
+    `had_failure` — hard signal: failed actions or failed tests > 0.
+
+    Aborted is detected via `data["bazel"]["aborted"]` set by the runtime
+    when bazel terminates the invocation (timeout, OOM, ctrl-c).
+    Flaky-only test outcomes flip to `warning` (live or terminal — the
+    soft signal) so surfaces paint yellow rather than red or green.
+    """
+    if data.get("bazel", {}).get("aborted"):
+        return "aborted"
+    if had_failure:
+        return "failed" if terminal else "failing"
+    if command == "test" and data.get("bazel", {}).get("flaky_test_total", 0) > 0:
+        return "warning"
+    return "passed" if terminal else "running"
+
+def _compact_text(command, status, data):
+    """Compact Result-cell text for the PR-comment surface."""
+    bz = data.get("bazel", {}) or {}
+    if status == "running":
+        if command == "test":
+            ran = bz.get("passed_test_total", 0) + bz.get("failed_test_total", 0)
+            total = bz.get("targets_total", 0)
+            if total > 0 and ran > 0:
+                return "%d/%d tests run" % (ran, total)
+        elif command == "build":
+            n = bz.get("targets_total", 0)
+            if n > 0:
+                return "%d targets" % n
+        return ""
+    if status == "warning":
+        # mid-flight or terminal flake-only outcome — share the passed text
+        # so the row reads consistently as the run finishes.
+        return _passed_text(command, bz)
+    if status == "passed":
+        return _passed_text(command, bz)
+    if status == "failing" or status == "failed":
+        if command == "test":
+            f = bz.get("failed_test_total", 0)
+            if f > 0:
+                return "%d test%s failed" % (f, "s" if f != 1 else "")
+            return ""  # phase prefix carries the signal
+
+        # build/failed: detailed reads "Bazel build failed" verbatim;
+        # compact = "" so we don't render the redundant "· build failed"
+        # tail in `_live_progress` or the headline.
+        return ""
+    return ""
+
+def _passed_text(command, bz):
+    if command == "test":
+        passed = bz.get("passed_test_total", 0)
+        failed = bz.get("failed_test_total", 0)
+        flaky = bz.get("flaky_test_total", 0)
+        cached = bz.get("cached_test_total", 0)
+        total = passed + failed
+        if total == 0:
+            return "no tests"
+        text = "%d/%d passed" % (passed, total)
+        extras = []
+        if flaky > 0:
+            extras.append("%d flaky" % flaky)
+        if cached > 0:
+            extras.append("%d cached" % cached)
+        if extras:
+            text = text + " · " + " · ".join(extras)
+        return text
+    n = bz.get("targets_total", 0)
+    return ("%d built" % n) if n > 0 else "ok"
+
+_TERMINAL_VERB = {
+    "passed": "complete",
+    "warning": "complete",
+    "failed": "failed",
+    "failing": "failing",
+    "aborted": "aborted",
+}
+
+def _live_progress(data, command, status):
+    """Compose a "Last update" label from the latest BES counters.
+
+    Returns a `ProgressStyles` record where `body` is the narrative
+    form — verb-prefixed phrase with an optional parenthetical count:
+
+      running:  `Bazel test running (12 tests run)`
+      passed:   `Bazel test complete (58/58 passed)`
+      failed:   `Bazel test failed (3 tests failed)`
+      warning:  `Bazel test complete (2 flaky)`
+      aborted:  `Bazel test aborted`
+
+    `stream` stays empty — bazel_runner doesn't print streaming
+    progress here (the bazel UI does).
+    """
+    base = "Bazel " + command
+    if status == "running" or status == "":
+        # Live form: `Bazel <cmd> running` with a past-participle
+        # parenthetical snapshot of completed BES events.
+        running_detail = ""
+        if command == "test":
+            passed = data["bazel"].get("passed_test_total", 0) or 0
+            failed = data["bazel"].get("failed_test_total", 0) or 0
+            flaky = data["bazel"].get("flaky_test_total", 0) or 0
+            total = passed + failed + flaky
+            if total > 0:
+                running_detail = pluralize(total, "test") + " run"
+                if failed > 0:
+                    running_detail = running_detail + " · " + pluralize(failed, "failed", plural = "failed")
+        if not running_detail:
+            targets = data["bazel"].get("targets_total", 0) or 0
+            if targets > 0:
+                running_detail = pluralize(targets, "target") + " built"
+            else:
+                actions = data["bazel"].get("actions_executed", 0) or 0
+                if actions > 0:
+                    running_detail = pluralize(actions, "action") + " executed"
+        head = base + " running..."
+        body = head + (" (" + running_detail + ")") if running_detail else head
+    else:
+        # Terminal / live-warning / live-failing form: `Bazel <cmd> <verb>`
+        # with the kind-specific count tail appended in parens when
+        # present (test failure count, etc).
+        verb = _TERMINAL_VERB.get(status, status)
+        body = base + " " + verb
+        tail = _compact_text(command, status, data)
+        if tail:
+            body = body + " (" + tail + ")"
+
+    return ProgressStyles(
+        body = body,
+        stream = "",
+    )
 
 def _collect_bes_from_args(ctx):
     """Collect BES sinks from CLI args (--bes-backend/--bes-header)."""
@@ -31,6 +175,24 @@ def _collect_bes_from_args(ctx):
             ),
         )
     return sinks
+
+def _emit_terminal(ctx, lifecycle, command, data, exit_code):
+    """Fire the terminal `task_update(final=True)` + `task_complete`
+    hooks. Used by both the happy path and the early-fail bailouts
+    (post_health_check rejecting, etc.) so status surfaces always
+    conclude rather than stick at "running".
+    """
+    final_status = _pick_status(command, data, had_failure = exit_code != 0, terminal = True)
+    for handler in lifecycle.task_update:
+        handler(ctx, TaskUpdate(
+            kind = "bazel_results",
+            status = final_status,
+            final = True,
+            data = data,
+            progress = _live_progress(data, command, final_status),
+        ))
+    for handler in lifecycle.task_complete:
+        handler(ctx, exit_code)
 
 def run_bazel_task(ctx: TaskContext, command: str) -> int:
     """Shared impl for build/test tasks.
@@ -50,12 +212,27 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
     bazel_trait = ctx.traits[BazelTrait]
     lifecycle = ctx.traits[TaskLifecycleTrait]
 
-    for hook in hc_trait.pre_health_check:
-        hook(ctx)
+    data = init_data()
+
+    # Mark the `setup` phase BEFORE `task_started` so the time spent in
+    # CI-platform handlers (GitHub check-run create, Buildkite annotate)
+    # is tracked as a named phase rather than absorbed into init. CI-only
+    # gate; locally it's a no-op (handlers are fast). See setup_phase().
+    setup_phase(ctx, lifecycle)
+
+    # Fire task_started FIRST so any subsequent failure (pre_health_check
+    # throwing, rc parse error) still surfaces as a failed check run
+    # rather than a silent no-op. This matches the lint / format /
+    # gazelle / delivery convention.
+    for handler in lifecycle.task_started:
+        handler(ctx, " ".join(ctx.args.targets))
+
+    preflight_phase(ctx, lifecycle, hc_trait)
 
     for hook in hc_trait.post_health_check:
         result = hook(ctx)
         if result != None:
+            _emit_terminal(ctx, lifecycle, command, data, 1)
             fail(result)
 
     # Flags: accumulate data, then optionally transform.
@@ -92,9 +269,6 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
     if not build_events:
         build_events = True if need_bes else False
 
-    for handler in lifecycle.task_started:
-        handler(ctx, " ".join(ctx.args.targets))
-
     for handler in bazel_trait.build_start:
         handler(ctx)
 
@@ -112,11 +286,64 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
     trace.event("build.flags", fields = {"flags": flags})
     rc_startup_flags, flags = rc.expand_all(command = command)
     ctx.bazel.startup_flags.extend(startup_flags + rc_startup_flags + ["--ignore_all_rc_files"])
-    print(rc.announce(command = command, ansi = color_enabled(ctx.std)))
 
-    results = init_results()
+    # Parsed-rc disclosure is verbose; print on user opt-in via
+    # --announce-rc, otherwise gate behind trace.log so it only
+    # surfaces under ASPECT_DEBUG.
+    if ctx.args.announce_rc:
+        print(rc.announce(command = command, ansi = color_enabled(ctx.std)))
+    else:
+        trace.log(rc.announce(command = command, ansi = False))
 
-    for _ in range(10):
+    base_desc = "Run bazel tests" if command == "test" else "Build bazel targets"
+    for attempt in range(10):
+        # Distinct phase id per attempt so each retry surfaces as its
+        # own row in the Task timing table — retries are exceptional
+        # and should stand out, not hide inside a cumulative `Build`.
+        if attempt == 0:
+            phase_label = "Spawning bazel " + command + "..."
+            phase_cli = "Spawning bazel " + command
+            phase_id = command
+            phase_desc = base_desc
+        else:
+            phase_label = "Retrying bazel " + command + "... (attempt " + str(attempt + 1) + ")"
+            phase_cli = "Retrying bazel " + command + " (attempt " + str(attempt + 1) + ")"
+            phase_id = command + "_retry_" + str(attempt + 1)
+            phase_desc = "Retry attempt — " + base_desc
+
+            # Archive the just-completed (now-failed) attempt before
+            # init_data() wipes `data["bazel"]`. The 0-indexed loop
+            # var matches the 1-indexed prior-attempt number (iter 0 ran
+            # human attempt 1, iter 1 ran human attempt 2, …).
+            prior_attempts = archive_bazel_attempt(data, attempt, invocation_status.code)
+
+            # Re-init for the new attempt; `process_event` increments
+            # BES counters in-place, so without a fresh dict the retry
+            # would double-count everything from the failed run.
+            data = init_data()
+            data["bazel_attempts"] = prior_attempts
+
+        spawn_status = _pick_status(command, data, had_failure = False, terminal = False)
+        task_update(
+            ctx,
+            lifecycle,
+            spawn_status,
+            ProgressStyles(
+                body = phase_label,
+                stream = phase_cli,
+            ),
+            kind = "bazel_results",
+            data = data,
+            phase = Phase(
+                name = phase_id,
+                description = phase_desc,
+                # `build` / `test` (and their `<command>_retry_N` variants)
+                # all reuse the same icon — retries are the same kind of
+                # work, just attempted again.
+                emoji = "🧪" if command == "test" else "🔨",
+            ),
+        )
+
         if command == "test":
             invocation = ctx.bazel.test(
                 build_events = build_events,
@@ -134,26 +361,83 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
                 *ctx.args.targets
             )
 
+        # Subscribe BEFORE emitting any task_updates (the broadcaster only
+        # delivers to subscribers that joined before the event was sent).
+        # On a warm bazel daemon BES events stream within milliseconds, so
+        # the gap between `ctx.bazel.{build,test}` returning and the
+        # subscribe is enough to drop the early burst (`build_started`,
+        # `target_completed`, …) — which makes the running annotation
+        # render with stale/empty state.
+        events = invocation.build_events() if need_bes else None
+
+        # Capture the sink invocation ID (the UUID used by the Aspect
+        # backend; distinct from Bazel's build_started.uuid). The
+        # runtime mints it inside `Build::spawn` so it's available
+        # before `invocation.wait()`; populate now so the next emit
+        # carries the Aspect Workflows link. Empty when no BES sinks
+        # were configured.
+        data["sink_invocation_id"] = invocation.sink_invocation_id
+
+        # Re-emit to the status surfaces only (stream = "" suppresses
+        # the CLI line) so the Aspect Workflows link surfaces without
+        # duplicating the CLI spawn line.
+        spawn_status = _pick_status(command, data, had_failure = False, terminal = False)
+        task_update(
+            ctx,
+            lifecycle,
+            spawn_status,
+            ProgressStyles(
+                body = phase_label,
+            ),
+            kind = "bazel_results",
+            data = data,
+        )
+
+        saw_first_event = False
+        last_emit_ms = now_ms(ctx)
         if need_bes:
-            for event in invocation.build_events():
-                for handler in bazel_trait.build_event:
-                    handler(ctx, event)
-                if process_event(results, event):
-                    live_status = "failing" if (
-                        results["failed_actions_total"] > 0 or
-                        results["failed_test_total"] > 0 or
-                        results["flaky_test_total"] > 0
-                    ) else "running"
-                    update = TaskUpdate(kind = "bazel_results", status = live_status, data = {"results": results})
+            # Tick-driven drain: each tick non-blocking-polls events,
+            # then decides whether to emit (interesting events seen
+            # this tick OR heartbeat elapsed). The tick keeps firing
+            # every BES_DRAIN_TICK_MS regardless of event flow, so
+            # heartbeats fire even when bazel goes silent for long
+            # stretches (CI reduces progress messages to ~60s).
+            for _tick in sleep_iter(BES_DRAIN_TICK_MS):
+                interesting = False
+                for _ in range(10000):  # safety bound; drains until None
+                    event = events.try_pop()
+                    if event == None:
+                        break
+                    for handler in bazel_trait.build_event:
+                        handler(ctx, event)
+                    if process_event(data, event):
+                        interesting = True
+                if interesting or now_ms(ctx) - last_emit_ms >= MIN_HEARTBEAT_INTERVAL_MS:
+                    # Hard-fail signals → `failing`; flaky-only → `warning`; otherwise `running`.
+                    had_failure = (
+                        data["bazel"]["failed_actions_total"] > 0 or
+                        data["bazel"]["failed_test_total"] > 0
+                    )
+                    live_status = _pick_status(command, data, had_failure = had_failure, terminal = False)
+
+                    # First emit per attempt flips the live surface off
+                    # the spawn label; priority=True bypasses throttle.
+                    is_first = not saw_first_event
+                    saw_first_event = True
+                    update = TaskUpdate(
+                        kind = "bazel_results",
+                        status = live_status,
+                        progress = _live_progress(data, command, live_status),
+                        priority = is_first,
+                        data = data,
+                    )
                     for handler in lifecycle.task_update:
                         handler(ctx, update)
+                    last_emit_ms = now_ms(ctx)
+                if events.done():
+                    break
 
         invocation_status = invocation.wait()
-
-        # Capture the sink invocation ID (the UUID used in the Aspect/BES backend,
-        # distinct from Bazel's build_started.uuid) for Web UI link construction.
-        # Empty string when no BES sinks were configured.
-        results["sink_invocation_id"] = invocation.sink_invocation_id
 
         if invocation_status.code == 0 or not bazel_trait.build_retry(invocation_status.code):
             break
@@ -161,13 +445,18 @@ def run_bazel_task(ctx: TaskContext, command: str) -> int:
     for handler in bazel_trait.build_end:
         handler(ctx, invocation_status.code)
 
-    # Final update with fully resolved results.
-    final_status = "passed" if invocation_status.code == 0 else "failed"
-    update = TaskUpdate(kind = "bazel_results", status = final_status, data = {"results": results})
-    for handler in lifecycle.task_update:
-        handler(ctx, update)
+    # When retries occurred, append the final attempt so
+    # `data["bazel_attempts"]` holds the full history (failed priors
+    # + final) as one ordered list for the rendered section.
+    if data.get("bazel_attempts"):
+        archive_bazel_attempt(data, attempt + 1, invocation_status.code)
 
-    for handler in lifecycle.task_complete:
-        handler(ctx, invocation_status.code)
+    # Narrow the repro to failed labels when present; else fall back to the task's target pattern.
+    _failed = failed_labels(data)
+    _repro_targets = _failed if _failed else list(ctx.args.targets)
+    _repro_cmd = build_aspect_command(task_cli_path(ctx.task), [], _repro_targets)
+    if _repro_cmd:
+        data["repro_commands"].append({"command": _repro_cmd, "description": ""})
 
+    _emit_terminal(ctx, lifecycle, command, data, invocation_status.code)
     return invocation_status.code

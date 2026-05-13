@@ -1,0 +1,45 @@
+"""Status → severity table for every status surface.
+
+Pure pass-through lookup. No kind awareness, no data inspection — every
+kind-specific decision (compact text, status pick, non-fatal-signal
+detection) lives in the producer that owns that kind.
+
+Six lifecycle statuses; surfaces that distinguish live from terminal
+read `update.final` rather than the status name.
+"""
+
+# Status → severity bucket. Surfaces map this to their own visual
+# language (BK stripe color, GitHub conclusion, PR-comment badge, …).
+_STATUS_SEVERITY = {
+    "running": "info",
+    "warning": "warning",  # live or terminal — `update.final` distinguishes
+    "failing": "error",  # live precursor of failed
+    "passed": "success",
+    "failed": "error",
+    "aborted": "error",  # bazel terminated the invocation
+}
+
+def severity_for_status(status):
+    """Map status → severity bucket.
+
+    Returns one of: `success | info | warning | error`. Falls back to
+    `info` for unknown statuses (defensive — shouldn't fire in practice
+    since the lifecycle status set is closed)."""
+    return _STATUS_SEVERITY.get(status, "info")
+
+# Status → leading emoji used in surface titles (BK annotation /
+# GHSC check-run / PR-comment row badge). Same icons across surfaces
+# so a reviewer sees the same verdict whether scanning a check page,
+# a BK annotation, or a PR comment.
+_STATUS_EMOJI = {
+    "running": "🔄",
+    "warning": "⚠️",
+    "failing": "❌",
+    "passed": "✅",
+    "failed": "❌",
+    "aborted": "🔥",
+}
+
+def emoji_for_status(status):
+    """Map status → leading emoji. Falls back to `🔄` for unknown."""
+    return _STATUS_EMOJI.get(status, "🔄")

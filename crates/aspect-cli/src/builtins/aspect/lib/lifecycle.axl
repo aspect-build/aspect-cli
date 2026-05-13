@@ -1,0 +1,534 @@
+"""Task lifecycle: TaskUpdate record, TaskLifecycleTrait, and the
+canonical `task_update()` emitter.
+
+`task_update(ctx, lifecycle, status, progress, ...)` prints a phase
+label to stderr (as `→ <progress>`) *and* emits a `TaskUpdate` to every
+handler on `lifecycle.task_update`. The two side effects are paired so
+a single call surfaces the new phase in CI logs *and* in the BK
+annotation / GHSC summary's "Last update" line — keeping the two
+sources of truth in sync.
+
+`progress` accepts two shapes:
+
+  string         → same text for every surface. The CLI (`stream`) gets it
+                   verbatim; the body surface (`body`) receives the
+                   ANSI-stripped variant. (When the string has no ANSI,
+                   "stripped" is a no-op.) Use this for the common case
+                   where every surface should show the same line.
+
+  ProgressStyles → per-style text. Set whichever fields you want; unset
+                   fields default to `""` (which surfaces interpret as
+                   "no text — keep the prior latched value or render
+                   nothing"). See the `ProgressStyles` record below for
+                   field semantics.
+
+      task_update(ctx, lifecycle, "running", ProgressStyles(
+          stream = "Building 5 targets",
+          body   = "Building 5 targets...",
+      ))
+
+      # str shortcut — same text everywhere:
+      task_update(ctx, lifecycle, "running", "Building...")
+
+Bare `task_update(...)` calls without a `kind` skip template dispatch
+on the status surface — surfaces filter by kind and ignore unset kinds,
+so the basic case (`task_update(ctx, lifecycle, "running", "Building...")`)
+is CLI-only on surfaces. The TaskUpdate still flows through every
+`lifecycle.task_update` handler so non-template observers (telemetry,
+logging) see every state change.
+
+The closing `→ Completed <Task> task in <duration>` (or `→ Failed ...`)
+line is emitted automatically by the runtime after the task's
+`implementation` returns — every task gets it for free without needing
+to call anything from AXL. Status surfaces (BK / GHSC) get the terminal
+status via the per-task `task_update(..., "passed"|"failed", ...)` call
+that the task makes for the rendered annotation / check-run to flip to
+the verdict.
+"""
+
+# ---------------------------------------------------------------------------
+# TaskUpdate record + TaskLifecycleTrait
+#
+# Moved here from `traits.axl` so the record + trait + canonical emitter
+# (`task_update()`) sit together. `traits.axl` now re-exports these for
+# user `config.axl` files.
+# ---------------------------------------------------------------------------
+
+load("./environment.axl", "color_enabled")
+
+# Structured update passed to task_update hooks.
+#
+# Mandatory fields (always present):
+#   progress: str  — human-readable status message; may be "" if there is nothing to say
+#   status:   str  — "running" | "failing" | "passed" | "failed"
+#   kind:     str  — discriminator for the data payload (None / "" → no template)
+#   priority: bool — when True, observers should bypass any throttling and emit
+#                    immediately. Used for status transitions the user should see
+#                    without delay (e.g. the first "Bazel build running" tick when
+#                    BES events start arriving — the throttle would otherwise hold
+#                    the rendered "Last update" line at "Spawning bazel build…"
+#                    for up to min_update_interval_ms after the build is already
+#                    well underway).
+#
+# "passed" and "failed" are terminal — the task is done. Features should complete
+# their output (e.g. close a check run) on these statuses.
+# "failing" means the task is still running but has already accumulated failures.
+#
+# data — kind-specific payload, passed through verbatim to surface renderers.
+# Renderers know the shape because they're selected by `kind`.
+#
+# progress — multi-style progress message. See ProgressStyles for the
+# fields and the per-surface fallback chain. Producers populate
+# whichever variants they're willing to maintain; consumers pick the
+# variant that best matches their rendering capabilities.
+ProgressStyles = record(
+    # Body form for status-surface "Last update" lines (BK annotation
+    # body, GHSC check-run summary, PR-comment 💬 line). Full sentence
+    # with metrics; ANSI-free. e.g. "Bazel test running... (12 tests run)"
+    # while live, "Bazel test complete · 58/58 passed" at terminal.
+    body = field(str, default = ""),
+
+    # Stream form for live terminal output. ANSI codes welcome; tense
+    # and punctuation tuned for streaming (often present-continuous, no
+    # trailing "..." since the line is in a live stream).
+    # e.g. "\033[36mTesting\033[0m 12 tests run".
+    stream = field(str, default = ""),
+)
+
+TaskUpdate = record(
+    progress = field(ProgressStyles, default = ProgressStyles()),
+    # The lifecycle severity bucket. One of:
+    #   running  — clean, in-flight
+    #   warning  — non-fatal signal accumulated (live or terminal)
+    #   failing  — hard failure detected, still in-flight
+    #   passed   — clean, terminal
+    #   failed   — hard failure, terminal
+    #   aborted  — bazel terminated the invocation (timeout, OOM, ctrl-c)
+    # Live/terminal disambiguation lives on `final` below — the `warning`
+    # status is the same name for both live and terminal non-fatal cases,
+    # and surfaces that need to know which it is read `final`.
+    status = field(str, default = "running"),
+    kind = field(str, default = ""),
+    priority = field(bool, default = False),
+    # True iff this is the final TaskUpdate the producer will emit before
+    # `task_complete` fires. Used by surfaces that distinguish live from
+    # terminal renders even when status alone wouldn't (e.g. `warning`
+    # being both live and terminal). Producers pass `final = True` on
+    # their final emit; everywhere else defaults to False.
+    final = field(bool, default = False),
+    data = field(dict, default = {}),
+)
+
+# Input record for `task_update(..., phase = Phase(...))` — what the
+# caller wants the new phase to be. The runtime records the boundary
+# and later exposes a snapshot back via `ctx.task.phases()` /
+# `current_phase()` as the Rust `TaskPhase` value type, which has the
+# same input fields plus runtime-set `duration_ms` + `interrupted`.
+# Phase is intentionally input-only; TaskPhase is intentionally
+# output-only.
+Phase = record(
+    # Phase id — lowercase identifier (`build`, `test`, `preflight`,
+    # `detect`, …). Used as the key for same-name no-op detection in
+    # `ctx.task.phase()` and as the input to titlecase for the
+    # display label when `display_name` is unset.
+    name = field(str),
+
+    # Human-readable description for the phase row in the Task-timing
+    # body table (e.g. `"Build delivery targets"`). Empty when unset
+    # — the table renders the progress text as a fallback.
+    description = field(str, default = ""),
+
+    # Unicode emoji prefixed onto the phase label across every
+    # surface (BK section header `--- 🔨 Build · …`, CLI `→ 🔨 Build`,
+    # Task-timing strip). Empty falls back to `:aspect:` on BK
+    # section headers and no icon elsewhere.
+    emoji = field(str, default = ""),
+
+    # Display-label override. Non-empty wins over titlecase(name);
+    # empty falls back to `<name>[0].upper() + <name>[1:].replace("_",
+    # " ")`. Use when naive titlecase reads oddly (`preflight` →
+    # `Pre-flight`).
+    display_name = field(str, default = ""),
+)
+
+# Lifecycle hooks that any task can fire, allowing features like GithubStatusChecks
+# to observe task progress without coupling to Bazel-specific hooks.
+TaskLifecycleTrait = trait(
+    # Called once at the start of the task. Features should create their status
+    # check here. Receives (ctx, subject: str) where subject is a human-readable
+    # description of what the task is operating on (e.g. "//app/..." for a build,
+    # "production" for a deploy). Pass "" if unused.
+    # Features close over their own state dict rather than receiving one.
+    task_started = attr(list[typing.Callable[[TaskContext, str], None]], default = []),
+
+    # Called to push a structured update during the task. Receives (ctx, update: TaskUpdate).
+    task_update = attr(list[typing.Callable[[TaskContext, TaskUpdate], None]], default = []),
+
+    # Called once when the task finishes. Receives (ctx, exit_code: int).
+    task_complete = attr(list[typing.Callable[[TaskContext, int], None]], default = []),
+)
+
+# ---------------------------------------------------------------------------
+# Highlight: ANSI verb styling
+# ---------------------------------------------------------------------------
+
+_RESET = "\033[0m"
+
+# Default highlight color when ASPECT_CLI_HIGHLIGHT_COLOR isn't set:
+# bold cyan (`\033[1;36m`). Picked for legibility on dark terminals
+# without harshness. Override via env var:
+#
+#   ASPECT_CLI_HIGHLIGHT_COLOR=1;36          bold cyan (default)
+#   ASPECT_CLI_HIGHLIGHT_COLOR=94            bright blue
+#   ASPECT_CLI_HIGHLIGHT_COLOR=38;5;75       256-color sky blue
+#   ASPECT_CLI_HIGHLIGHT_COLOR=              empty disables highlight color
+_DEFAULT_HIGHLIGHT_COLOR = "1;36"
+
+def _highlight_style(std):
+    """ANSI prefix for the styled phase label, or "" when color is off.
+
+    Reads `ASPECT_CLI_HIGHLIGHT_COLOR` (SGR parameters between `\\033[`
+    and `m`); defaults to `1;36` (bold cyan).
+    """
+    if not color_enabled(std):
+        return ""
+    color_arg = std.env.var("ASPECT_CLI_HIGHLIGHT_COLOR")
+    if color_arg == None:
+        color_arg = _DEFAULT_HIGHLIGHT_COLOR
+    if not color_arg:
+        return ""
+    return "\033[" + color_arg + "m"
+
+# ---------------------------------------------------------------------------
+# task_update: the canonical TaskUpdate emitter
+# ---------------------------------------------------------------------------
+
+def _strip_ansi(text):
+    """Return `text` with ANSI CSI/SGR escape sequences removed.
+
+    Drops sequences that start with `\\033[` and end at the next `m`
+    (the SGR terminator). Implemented as a character walk because AXL's
+    Starlark runtime doesn't expose a regex module.
+    """
+    if not text:
+        return text
+    if "\033" not in text:
+        return text
+    out = ""
+    i = 0
+    n = len(text)
+    for _ in range(n):
+        if i >= n:
+            break
+        c = text[i]
+        if c == "\033" and i + 1 < n and text[i + 1] == "[":
+            # Skip until the next 'm' (SGR terminator) — or end of string.
+            j = i + 2
+            for _ in range(n - j):
+                if j >= n:
+                    break
+                if text[j] == "m":
+                    j += 1
+                    break
+                j += 1
+            i = j
+        else:
+            out += c
+            i += 1
+    return out
+
+# Default phase icon when `Phase.emoji` is empty. `:aspect:` is a
+# Buildkite-custom shortcode that renders as the Aspect brand glyph
+# on BK; other surfaces show the literal text. Keeps the BK section
+# header from rendering an empty space for custom user phases that
+# don't supply an emoji.
+_ASPECT_BK_SHORTCODE = ":aspect:"
+
+def _emit_bk_phase_section(ctx, phase, progress_styles = None):
+    """Emit a per-phase BK section header on Buildkite.
+
+    Header shape: `--- <emoji> <Phase> · <cli-text>` where the cli
+    text mirrors the live `→ ...` print so the BK section list (the
+    collapsed step view) carries the same information the user sees in
+    the section body. The text picks `progress_styles.stream` first
+    (matches what the CLI prints) then falls back to `.body`.
+
+    `phase` is a `Phase` input record. `phase.emoji` falls back to
+    `:aspect:` when empty so user-custom phases without an icon still
+    get a section marker. `phase.display_name` falls back to
+    titlecasing `phase.name`.
+
+    Gives a 1:1 mapping between AXL phases and BK collapsible
+    sections so the BK log structure mirrors the rendered Task
+    timing table.
+    """
+    if not ctx.std.env.var("BUILDKITE"):
+        return
+    label = phase.display_name or _titlecase_phase(phase.name)
+    style = _highlight_style(ctx.std)
+    if style:
+        label = style + label + _RESET
+    suffix = ""
+    if progress_styles != None:
+        cli = progress_styles.stream or progress_styles.body
+        if cli:
+            suffix = " · " + cli
+    print("--- " + (phase.emoji or _ASPECT_BK_SHORTCODE) + " " + label + suffix)
+
+def _titlecase_phase(phase):
+    """Title-case a phase id for display. Underscores → spaces; first
+    char upper-cased. Callers that need a non-naive display label
+    (e.g. `preflight` → `Pre-flight`) set `Phase.display_name`; this
+    helper is the fallback when that field is empty.
+    """
+    if not phase:
+        return ""
+    return phase[0].upper() + phase[1:].replace("_", " ")
+
+def _resolve_progress_styles(progress):
+    """Coerce caller-supplied `progress` into a `ProgressStyles` record.
+
+    Accepts two forms:
+      str             → same text for every surface. Stream gets it
+                        verbatim (ANSI preserved); body gets the
+                        ANSI-stripped form so the body surface doesn't
+                        print escape sequences as text.
+      ProgressStyles  → returned as-is. Caller has already chosen which
+                        fields to set; unset fields default to "".
+    """
+    if type(progress) == "string":
+        bare = _strip_ansi(progress)
+        return ProgressStyles(
+            body = bare,
+            stream = progress,
+        )
+
+    # Otherwise assume `progress` is a ProgressStyles record and pass
+    # it through. If a caller passes the wrong type, downstream field
+    # access raises with the actual offending value, which is plenty
+    # of context to fix the call.
+    return progress
+
+def task_update(ctx, lifecycle, status, progress, kind = "", data = None, priority = True, phase = None):
+    """Emit a TaskUpdate to all `lifecycle.task_update` handlers and
+    print a `→ <progress>` line to stderr.
+
+    Args:
+        ctx:       The TaskContext.
+        lifecycle: The TaskLifecycleTrait with task_update handlers.
+        status:    Lifecycle status — one of "running" | "failing" |
+                   "passed" | "failed". Required so callers state
+                   intent at every emit (terminal vs phase boundary).
+        progress:  Either a single string (same text for every
+                   surface — `stream` gets it verbatim, `body` gets
+                   the ANSI-stripped form) or a `ProgressStyles`
+                   record (per-style text; unset fields default to "").
+                   See `ProgressStyles` for field semantics.
+        kind:      Template dispatch key for status surfaces (e.g.
+                   "bazel_results", "lint_results"). Empty string (the
+                   default) means no template — surfaces filter and
+                   ignore the update for rendering, but it still flows
+                   through every `lifecycle.task_update` handler.
+        data:      Kind-specific payload. Passed through to
+                   `TaskUpdate.data` verbatim. Renderers know the shape
+                   because they're selected by `kind`. Defaults to `{}`.
+        priority:  Whether the rendered annotation / check-run should
+                   bypass the BK / GHSC throttle for this update.
+                   Default True (phase boundary semantics).
+        phase:     Optional `Phase` record marking a phase boundary.
+                   When set, calls `ctx.task.phase(name, description,
+                   emoji, display_name)` to record the boundary on
+                   `TaskInfo`; the first call also synthesizes a
+                   leading `init` phase covering pre-first-phase
+                   setup, subsequent same-name calls are no-ops, and
+                   different-name calls close the prior phase and
+                   open the new one. `phase.description` falls back
+                   to the resolved status-surface text (ANSI-stripped)
+                   when empty. `phase.emoji` prefixes the phase label
+                   on every surface (BK section header / CLI `→` line
+                   / Task-timing strip). `phase.display_name` wins
+                   over `titlecase(phase.name)` when non-empty.
+    """
+
+    # Resolve once at entry — every downstream consumer (phase
+    # description fallback, BK section header, CLI print, TaskUpdate
+    # emit) reads from the same ProgressStyles record.
+    progress_styles = _resolve_progress_styles(progress)
+
+    # True when we just printed a `--- <emoji> <Phase> · …` BK section
+    # header — the `→` print below skips itself to avoid duplicating
+    # the same text. False on mid-phase emits (no `phase=`) and off-BK
+    # surfaces, where the `→` print is the only phase marker.
+    bk_section_emitted = False
+
+    if phase != None:
+        # `ctx.task.phase()` no-ops on same-name; capture the prior
+        # phase name so we only auto-emit a BK section header on real
+        # transitions, not on bare task_update re-emits.
+        prev = ctx.task.current_phase()
+        prev_phase = prev.name if prev else ""
+        ctx.task.phase(
+            phase.name,
+            description = phase.description or progress_styles.body,
+            emoji = phase.emoji,
+            display_name = phase.display_name,
+        )
+        if phase.name != prev_phase:
+            _emit_bk_phase_section(ctx, phase, progress_styles)
+            bk_section_emitted = bool(ctx.std.env.var("BUILDKITE"))
+
+    cli_text = progress_styles.stream
+    if cli_text:
+        # Phase entries lead with a styled `<emoji> <Title>` and a
+        # leading blank line so they visually break up the stream of
+        # `→` progress prints. Mid-phase updates print as plain
+        # `→ <text>`.
+        if phase != None:
+            style = _highlight_style(ctx.std)
+            label = phase.display_name or _titlecase_phase(phase.name)
+            if phase.emoji:
+                label = phase.emoji + " " + label
+            if style:
+                cli_text = style + label + _RESET + " · " + cli_text
+            else:
+                cli_text = label + " · " + cli_text
+
+            # Skip the leading blank on BK — the section marker
+            # `_emit_bk_phase_section` just printed already provides
+            # the visual break.
+            if not ctx.std.env.var("BUILDKITE"):
+                print("")
+
+        # On BK, the section header just emitted carries the same text
+        # this `→` line would; skip to avoid duplicate output. Mid-
+        # phase emits (no new section header) still print `→` so
+        # streaming progress stays visible inside the section body.
+        if not bk_section_emitted:
+            # Starlark `print()` writes to stderr in this runtime — the
+            # right channel for diagnostic phase labels.
+            print("→ " + cli_text)
+
+    update = TaskUpdate(
+        kind = kind,
+        status = status,
+        progress = progress_styles,
+        priority = priority,
+        data = data if data != None else {},
+    )
+    for handler in lifecycle.task_update:
+        handler(ctx, update)
+
+def _on_ci(ctx):
+    """True when running on a recognized CI host."""
+    return bool(
+        ctx.std.env.var("CI") or
+        ctx.std.env.var("BUILDKITE") or
+        ctx.std.env.var("GITHUB_ACTIONS") or
+        ctx.std.env.var("CIRCLECI") or
+        ctx.std.env.var("GITLAB_CI"),
+    )
+
+def setup_phase(ctx, lifecycle):
+    """Open the `setup` phase covering CI-platform task setup.
+
+    `lifecycle.task_started` handlers do non-trivial work on CI:
+      - GitHub status check: 3-4 network round-trips (App auth, optional
+        job-URL resolve, create check run, initial PATCH update).
+        Typically 500ms-2s end-to-end depending on cold-cache + latency.
+      - Buildkite annotation: spawns `buildkite-agent annotate` with a
+        ~1.7KB body via stdin. Typically 100-300ms.
+
+    Without an explicit phase mark, that 600ms-2.3s gets swallowed into
+    the synthetic `init` phase — the breakdown line shows
+    `Init 1.5s · Pre-flight 245ms` and users wonder where the
+    1.5s went. Opening a `setup` phase here makes it explicit:
+    `Setup 1.5s — Authenticating and creating CI status checks · Pre-flight 245ms`.
+
+    Locally those handlers are no-ops (no GitHub App auth, no
+    `buildkite-agent`), so the time is negligible (~10ms) and the
+    mark is skipped — it folds into init like before.
+
+    Call this from each task's `_impl` immediately *before* iterating
+    `lifecycle.task_started` handlers. No-op when:
+      - the trait has no started handlers, or
+      - we're not running on a recognized CI host.
+    """
+    if not lifecycle.task_started:
+        return
+    if not _on_ci(ctx):
+        return
+    task_update(
+        ctx,
+        lifecycle,
+        "running",
+        ProgressStyles(
+            body = "Authenticating and creating CI status checks...",
+            stream = "Authenticating and creating CI status checks",
+        ),
+        phase = Phase(
+            name = "setup",
+            description = "Authenticate and create CI status checks",
+            emoji = "⚙",
+        ),
+    )
+
+def preflight_phase(ctx, lifecycle, hc_trait):
+    """Mark the `preflight` phase and run the pre-health-check hooks.
+
+    On CI hosts (BK / GHA / CircleCI / GitLab / generic CI), the
+    pre-health-check hooks Workflows registers print substantial
+    structural output: the `--- :computer: Workflows runner environment`
+    section table, the `--- :thermometer: Workflows runner health check`
+    section, and the bazel server health check result. The phase
+    boundary is marked BEFORE the hooks run so their time is
+    attributed to Pre-flight in the timing table; the surface
+    `→ Running pre-flight...` line lands AFTER the hooks so on BK
+    the section markers open the chronologically-first content for
+    the phase.
+
+    Locally, the same hooks collapse to a couple of terminal prints
+    that aren't worth a separate phase. They fold into the synthetic
+    `init` phase instead — no phase mark, no `→` print, but the
+    hooks still run so the env table + health check info show up.
+
+    Call this from each task's `_impl` instead of iterating
+    `hc_trait.pre_health_check` directly. No-op when the trait has
+    no hooks registered.
+
+    Args:
+      ctx:       TaskContext.
+      lifecycle: TaskLifecycleTrait — dispatch target for the phase-
+                 boundary TaskUpdate so status surfaces see the
+                 transition.
+      hc_trait:  HealthCheckTrait. Skipped when its pre_health_check
+                 hook list is empty (no work to bracket).
+    """
+    if not hc_trait.pre_health_check:
+        return
+
+    if _on_ci(ctx):
+        # task_update marks the phase, emits the BK section header
+        # (`--- :airplane: Pre-flight · …`), prints the styled `→`
+        # phase entry on the CLI, and dispatches the surface update —
+        # all leading the hook content below so the phase entry
+        # consistently introduces the phase work.
+        task_update(
+            ctx,
+            lifecycle,
+            "running",
+            ProgressStyles(
+                body = "Running pre-flight...",
+                stream = "Running pre-flight",
+            ),
+            phase = Phase(
+                name = "preflight",
+                description = "Run pre-flight checks",
+                emoji = "✈",
+                # `preflight` titlecases naively to `Preflight`;
+                # override to the hyphenated form that reads better.
+                display_name = "Pre-flight",
+            ),
+        )
+
+    for hook in hc_trait.pre_health_check:
+        hook(ctx)

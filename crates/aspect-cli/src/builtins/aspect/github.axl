@@ -1,24 +1,25 @@
+load("./lib/environment.axl", "error")
 load("./lib/github.axl", "github")
 
 def _token_impl(ctx: TaskContext) -> int:
     repo_args = ctx.args.repo
     if len(repo_args) == 0:
-        print("Error: repo argument is required (format: OWNER/REPO)")
+        error(ctx.std, "Repo argument is required (format: OWNER/REPO).")
         return 1
     (owner, sep, repo_name) = repo_args[0].partition("/")
     if not sep or not owner or not repo_name:
-        print("Error: repo must be in owner/repo format (e.g. my-org/my-repo)")
+        error(ctx.std, "Repo must be in owner/repo format (e.g. my-org/my-repo).")
         return 1
 
     creds = ctx.aspect.auth.credentials(profile = ctx.args.profile)
     if creds == None:
-        print("Error: " + github.missing_credentials_reason(ctx))
+        error(ctx.std, github.missing_credentials_reason(ctx))
         return 1
 
     if ctx.args.roles:
         for role in ctx.args.roles:
             if not github.validate_role(role):
-                print("Error: unknown role %r, valid roles: %s" % (role, ", ".join(github.VALID_ROLES)))
+                error(ctx.std, "Unknown role %r; valid roles: %s" % (role, ", ".join(github.VALID_ROLES)))
                 return 1
 
     body = json.encode({"owner": owner, "repo": repo_name})
@@ -37,21 +38,21 @@ def _token_impl(ctx: TaskContext) -> int:
     ).block()
 
     if resp.status == 401:
-        print("Error: authentication failed. Run `aspect auth login` to re-authenticate.")
+        error(ctx.std, "Authentication failed. Run `aspect auth login` to re-authenticate.")
         return 1
     if resp.status == 403:
-        print("Error: access denied. %s" % resp.body)
+        error(ctx.std, "Access denied: %s" % resp.body)
         return 1
     if resp.status == 404:
-        print("Error: GitHub App not installed. See https://docs.aspect.build/cli/authentication")
+        error(ctx.std, "GitHub App not installed. See https://docs.aspect.build/cli/authentication")
         return 1
     if resp.status < 200 or resp.status >= 300:
-        print("Error: API request failed (HTTP " + str(resp.status) + "): " + resp.body)
+        error(ctx.std, "API request failed (HTTP " + str(resp.status) + "): " + resp.body)
         return 1
 
     parsed = json.try_decode(resp.body, None)
     if parsed == None or "token" not in parsed:
-        print("Error: API returned 2xx but the body was not a valid token response.")
+        error(ctx.std, "API returned 2xx but the body was not a valid token response.")
         return 1
     print(parsed["token"])
     return 0

@@ -742,8 +742,11 @@ impl Drop for OtelGuard {
         // Fast paths (no telemetry installed: `--help`, `version`, or runs
         // with the Telemetry feature disabled) shut down silently.
         let any_otel = ANY_LATE_EXPORTER.load(std::sync::atomic::Ordering::Relaxed);
+        let debug = std::env::var_os("ASPECT_DEBUG")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
         let timeout = shutdown_timeout();
-        if any_otel {
+        if any_otel && debug {
             eprintln!(
                 "telemetry: flushing exporters (per-provider timeout {}ms; \
                  set ASPECT_TELEMETRY_SHUTDOWN_TIMEOUT_MS to override)",
@@ -770,10 +773,11 @@ impl Drop for OtelGuard {
         if any_otel {
             let elapsed_ms = start.elapsed().as_millis();
             if errors.is_empty() {
-                eprintln!("telemetry: flush complete in {}ms", elapsed_ms);
+                if debug {
+                    eprintln!("telemetry: flush complete in {}ms", elapsed_ms);
+                }
             } else {
-                // Surface — but never propagate. Telemetry shutdown failure
-                // is a visibility gap, not a build failure.
+                // Always surface errors — visibility gap, not a build failure.
                 eprintln!(
                     "telemetry: flush completed with errors after {}ms — \
                      some records may have been dropped (this does not affect \

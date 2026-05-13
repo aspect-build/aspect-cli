@@ -523,11 +523,14 @@ def version_gte(a, b):
     return version_tuple(a) >= version_tuple(b)
 
 def task_display_name(task_name):
-    """Derive a display-name from a raw task name.
+    """Derive a Title-Case display-name from a raw task name.
 
-    Converts "test" → "Test", "my-task" / "my_task" → "My Task". Matches
-    github_status_checks._to_display_name so the status-check title and
-    the ASPECT_TASK_* metadata agree.
+    Converts "test" → "Test", "my-task" / "my_task" → "My Task". Used
+    for the `ASPECT_TASK_DISPLAY_NAME` build metadata field consumed
+    by the Aspect Web UI for its task-list rendering. The check-run /
+    BK annotation titles render the raw lowercase `task_name` instead
+    (with a leading status emoji), so this is no longer required to
+    match those surfaces.
     """
     if not task_name:
         return task_name

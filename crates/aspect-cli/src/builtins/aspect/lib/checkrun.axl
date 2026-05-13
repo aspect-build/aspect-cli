@@ -1,0 +1,21 @@
+"""Cross-feature plumbing for the GitHub Status Check URL.
+
+`feature/github_status_checks.axl` populates `html_url` after creating
+the per-task check-run; `feature/github_status_comments.axl` reads it
+so the PR-comment can link directly to the per-task check-run page.
+
+Same pattern as `ArtifactsTrait` in `lib/artifacts.axl` —
+producer-feature writes, consumer-feature reads, both within the
+same task instance. Empty string until populated (or when the GHSC
+checkrun feature is disabled / its create_check_run hasn't returned
+yet).
+"""
+
+GitHubCheckRunTrait = trait(
+    # The check-run's html_url, populated by github_status_checks.axl
+    # right after its create_check_run API call returns. Surfaces that
+    # render per-task links (currently github_status_comments.axl) read
+    # it; consumers must tolerate empty (no checkrun feature, or
+    # API call hasn't returned yet).
+    html_url = attr(str, default = ""),
+)

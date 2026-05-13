@@ -1,7 +1,7 @@
 """GitHub API client library."""
 
 load("@std//base64.axl", "base64")
-load("./environment.axl", "color_enabled")
+load("./environment.axl", "color_enabled", "info", "warn")
 load("./tar.axl", "zip_create")
 
 DEFAULT_GITHUB_API = "https://api.github.com"
@@ -383,14 +383,101 @@ def detect_github_pr(std):
 
     return None, "no GitHub PR context detected on this CI host"
 
+# GitHub's default displayed-context width around each diff hunk.
+# `_widen_lines` uses this when approximating `hunk_lines` from the
+# local-git fallback (which runs `git diff --unified=0` and so doesn't
+# carry context lines through the parser). The PR Files API path
+# extracts the actual hunk window from the patch and ignores this.
+_HUNK_CONTEXT_LINES = 3
+
+def _widen_lines(lines, radius):
+    """Return the union of `lines` and every line within `radius` of
+    each entry. Used to approximate GitHub's hunk-context window when
+    the source diff was generated without context (`--unified=0`).
+    """
+    if not lines:
+        return []
+    seen = {}
+    for ln in lines:
+        for k in range(-radius, radius + 1):
+            v = ln + k
+            if v >= 0:
+                seen[v] = True
+    out = list(seen.keys())
+    out = sorted(out)
+    return out
+
+def _try_local_git_diff_from_base_sha(ctx, line_level, base_sha):
+    """Run a local `git diff <base_sha>` and return the structured
+    {files, skipped, source} dict, or None on any failure.
+
+    Used by the API-inconsistency fallback path: when GitHub's PR
+    Files API returns degenerate data (rebase-stale +0/-0 entries),
+    we'd rather get accurate counts from local git than render the
+    broken API view. Best-effort — falls through to None if:
+      - the base SHA isn't locally available and `git fetch` can't
+        retrieve it (rare; usually means the SHA was force-pushed
+        away)
+      - `git diff` itself fails for any reason
+
+    Caller decides what to do when this returns None (typically
+    falls back to the original API response + a WARNING).
+    """
+    process = ctx.std.process
+    cwd = ctx.std.env.current_dir()
+
+    # Ensure the base SHA is available locally. On CI with
+    # `fetch-depth: 1` (the GHA default), the base SHA isn't in the
+    # local repo and `git diff` would fail. Try a targeted fetch
+    # first. `--depth=1` keeps the cost low.
+    have_sha = process.command("git").args(["cat-file", "-e", base_sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
+    if not have_sha.status.success:
+        fetched = process.command("git").args(["fetch", "origin", base_sha, "--depth=1"]).current_dir(cwd).stdout("null").stderr("piped").spawn().wait_with_output()
+        if not fetched.status.success:
+            return None
+        recheck = process.command("git").args(["cat-file", "-e", base_sha]).current_dir(cwd).stdout("null").stderr("null").spawn().wait_with_output()
+        if not recheck.status.success:
+            return None
+
+    head_out = process.command("git").args(["rev-parse", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
+    head_sha = head_out.stdout.strip() if head_out.status.success else ""
+    source = "local git diff %s..%s (fallback after PR Files API inconsistency)" % (base_sha, head_sha) if head_sha else "local git diff %s..HEAD (fallback after PR Files API inconsistency)" % base_sha
+
+    if line_level:
+        result = process.command("git").args(["diff", base_sha, "--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+        if not result.status.success:
+            return None
+        parsed = _parse_local_diff_output(result.stdout)
+        for entry in parsed:
+            entry["hunk_lines"] = _widen_lines(entry["lines"], _HUNK_CONTEXT_LINES)
+        return {"files": parsed, "skipped": [], "source": source}
+
+    out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", base_sha]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not out.status.success:
+        return None
+    names = [f for f in out.stdout.strip().split("\n") if f]
+    return {"files": names, "skipped": [], "source": source}
+
 def _parse_local_diff_output(output):
-    """Parse `git diff --unified=0` output into [{file, lines}] (0-based added lines)."""
+    """Parse `git diff --unified=0` output into per-file change records.
+
+    Returns `[{file, lines, additions, deletions}]`:
+      lines:     0-based new-side added-line indices (drives line-level filters).
+      additions: total added lines across all hunks (sum of new_count).
+      deletions: total removed lines across all hunks (sum of old_count).
+
+    Counts come from the `@@ -old_start,old_count +new_start,new_count @@`
+    hunk headers. With `--unified=0` (no context lines) old_count equals
+    the number of `-` lines and new_count equals the number of `+`
+    lines, so the header sums match what GitHub's PR Files API reports
+    via `additions` / `deletions` on the same diff.
+    """
     files = []
     current_file = None
     for line in output.split("\n"):
         if line.startswith("+++ b/"):
             path = line.removeprefix("+++ b/")
-            current_file = {"file": path, "lines": []}
+            current_file = {"file": path, "lines": [], "additions": 0, "deletions": 0}
             files.append(current_file)
         elif line.startswith("--- /dev/null"):
             pass
@@ -401,7 +488,14 @@ def _parse_local_diff_output(output):
         elif line.startswith("@@ ") and current_file != None:
             parts = line.split(" ")
             for part in parts:
-                if part.startswith("+") and part != "+++":
+                if part.startswith("-"):
+                    minus = part.removeprefix("-")
+                    if "," in minus:
+                        old_count = int(minus.split(",")[1])
+                    else:
+                        old_count = 1
+                    current_file["deletions"] += old_count
+                elif part.startswith("+") and part != "+++":
                     plus = part.removeprefix("+")
                     if "," in plus:
                         chunks = plus.split(",")
@@ -410,17 +504,36 @@ def _parse_local_diff_output(output):
                     else:
                         start = int(plus)
                         count = 1
+                    current_file["additions"] += count
                     if count > 0:
                         for i in range(count):
                             current_file["lines"].append(start - 1 + i)
-                    break
     return files
 
 def _parse_github_pr_patch(patch):
-    """Parse a GitHub PR file `patch` string into 0-based added line numbers."""
+    """Parse a GitHub PR file `patch` string.
+
+    Returns `(added_lines, hunk_lines)` — both 0-based indices on the
+    new side:
+      added_lines: lines that were added in this revision (`+` lines).
+                   What annotation/strategy filters use to decide
+                   whether a finding is on a freshly-edited line.
+      hunk_lines:  every line visible in any displayed hunk on the new
+                   side (added + context). GitHub's PR review comment
+                   API accepts comments on any line in this set; lines
+                   outside the displayed hunk window return 422. So
+                   this is the right filter for "where can we post a
+                   review comment?", which is broader than "what did
+                   the user edit?".
+
+    GitHub's default hunk context is 3 lines, so `hunk_lines` typically
+    extends `added_lines` by ±3 around each change — exactly the
+    window a reviewer sees in the Files Changed tab.
+    """
     if not patch:
-        return []
-    lines = []
+        return ([], [])
+    added = []
+    hunk = []
     current_line = 0
     for line in patch.split("\n"):
         if line.startswith("@@"):
@@ -434,7 +547,8 @@ def _parse_github_pr_patch(patch):
                         current_line = int(plus)
                     break
         elif line.startswith("+"):
-            lines.append(current_line - 1)
+            added.append(current_line - 1)
+            hunk.append(current_line - 1)
             current_line += 1
         elif line.startswith("-"):
             pass
@@ -443,28 +557,55 @@ def _parse_github_pr_patch(patch):
             # lines) — not real content. Don't advance current_line.
             pass
         else:
+            # Context line — present in new file, in the displayed
+            # hunk window. Counts toward `hunk_lines` (commentable
+            # via PR review API) but not `added_lines`.
+            hunk.append(current_line - 1)
             current_line += 1
-    return lines
+    return (added, hunk)
 
 def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge_base = None):
     """Detect changed files for a build, preferring the GitHub PR Files API
     when available and falling back to local `git diff` otherwise.
 
+    Returns a dict (not a bare list — callers want diagnostics too):
+
+      {
+        "files":   [...],   # entries that actually carry line-level changes;
+                            # what the strategy filter should operate on.
+                            # Per-entry shape is dict {file, lines, hunk_lines,
+                            # additions, deletions} when line_level=True,
+                            # plain filename string when False.
+        "skipped": [...],   # API entries the source listed but with
+                            # additions+deletions == 0 (rename-only,
+                            # rebase-stale modified entries, etc.).
+                            # Excluded from `files` so they don't poison
+                            # the strategy filter, but exposed here so
+                            # callers can show them as `[+0 / -0]` in
+                            # diagnostic listings — useful for spotting
+                            # when GitHub's API reports a file as
+                            # changed but with no actual line diff.
+                            # Same per-entry shape as `files`.
+        "source":  "...",   # human-readable description of where this
+                            # data came from. Surfaces as the first line
+                            # under the Detect phase so users can tell at
+                            # a glance whether they're looking at PR Files
+                            # API data or a local-git fallback.
+      }
+
     Args:
       ctx:        TaskContext.
-      line_level: if True (default), return [{file, lines: [int]}] with
-                  0-based added-line indices (lint usage). If False, return
-                  a flat list of file paths (format usage).
-      base_ref:   merge-base argument for the local-git fallback when
-                  line_level=False (e.g. "origin/main"). Ignored on the PR
-                  API path and when line_level=True.
-      merge_base: explicit merge-base SHA for the local-git fallback when
-                  line_level=False. Overrides `base_ref` if set.
+      line_level: if True (default), per-entry dict (lint usage). If
+                  False, per-entry filename string (format usage).
+      base_ref:   merge-base argument for the local-git fallback
+                  (e.g. "origin/main"). Ignored on the PR API path.
+      merge_base: explicit merge-base SHA for the local-git fallback.
+                  Overrides `base_ref` if set.
 
     PR-API path (when in a GitHub PR + auth succeeds):
       - calls github.pulls.list_files via authenticate(roles=["prs.read"])
       - parses each file's `patch` to extract added-line indices
-      - returns the same shape regardless of CI host
+      - source: "GitHub PR Files API: GET /repos/<o>/<r>/pulls/<n>/files"
 
     Local-git fallback (always available). The diff base is resolved as:
       - explicit `merge_base` SHA if provided, else
@@ -472,13 +613,11 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
     Then:
       - line_level=True:  `git diff <base> --unified=0`
       - line_level=False: `git diff --diff-filter=d --name-only <base>`
+      - source: "local git diff <base_sha>..<head_sha>"
 
     If a GitHub PR context is detected but the PR-API path is unavailable
     (auth failure, transient API error), a yellow WARNING is printed
-    explaining the reason before falling through. Outside PR contexts the
-    fallback is silent — local-git is the expected source.
-
-    Returns an empty list if neither source produces results.
+    explaining the reason before falling through.
     """
     pr, _ = detect_github_pr(ctx.std)
     fallback_reason = ""
@@ -495,25 +634,132 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
                 git_out = ctx.std.process.command("git").arg("rev-parse").arg("--show-prefix").current_dir(ctx.std.env.root_dir()).stdout("piped").stderr("null").spawn().wait_with_output()
                 prefix = git_out.stdout.strip() if git_out.status.success else ""
                 files = []
+                skipped = []
+                suspects = []
                 for f in result["files"]:
-                    if f.get("status", "") == "removed":
-                        continue
                     filename = f.get("filename", "")
                     if prefix and filename.startswith(prefix):
                         filename = filename[len(prefix):]
+                    previous_filename = f.get("previous_filename", "") or ""
+                    if prefix and previous_filename.startswith(prefix):
+                        previous_filename = previous_filename[len(prefix):]
+                    status = f.get("status", "") or ""
+                    additions = f.get("additions", 0) or 0
+                    deletions = f.get("deletions", 0) or 0
+
+                    # Flag obviously-inconsistent API responses. GitHub's
+                    # PR Files API occasionally returns degenerate data
+                    # — most commonly after a rebase that leaves its
+                    # diff cache stale. The three obviously-broken
+                    # patterns:
+                    #
+                    #   status="modified" with +0/-0  — there's no such
+                    #     thing as a content-modified file with no diff.
+                    #   status="added" with +0        — an empty added
+                    #     file is technically legal but rare; usually
+                    #     means the API didn't count the lines.
+                    #   status="removed" with -0      — symmetric.
+                    #
+                    # We can't always verify cheaply (would need to
+                    # read disk / old blobs), so we flag and warn — the
+                    # user can refresh GitHub's diff cache with an
+                    # empty commit + push, or close+reopen the PR.
+                    if status == "modified" and additions == 0 and deletions == 0:
+                        suspects.append("%s — API says modified with +0/-0 (no line diff to operate on)" % filename)
+                    elif status == "added" and additions == 0:
+                        suspects.append("%s — API says added with +0 (possibly an empty file, more likely stale API data)" % filename)
+                    elif status == "removed" and deletions == 0:
+                        suspects.append("%s — API says removed with -0 (possibly was empty, more likely stale API data)" % filename)
+
+                    # Bucket each entry:
+                    #   - `removed` and zero-change entries land in
+                    #     `skipped` so they appear in the diagnostic
+                    #     listing (deleted files; rename-only and
+                    #     rebase-stale modified entries with +0/-0)
+                    #     but don't poison the strategy filter
+                    #     (deleted files have no content to lint;
+                    #     rebase-stale entries have no line diff to
+                    #     anchor comments / annotations on).
+                    #   - everything else (modified with real
+                    #     additions+deletions, added, renamed with a
+                    #     real content change) flows into `files`.
                     if line_level:
-                        added_lines = _parse_github_pr_patch(f.get("patch", ""))
-                        files.append({"file": filename, "lines": added_lines})
+                        added_lines, hunk_lines = _parse_github_pr_patch(f.get("patch", "") or "")
+                        entry = {
+                            "file": filename,
+                            "lines": added_lines,
+                            "hunk_lines": hunk_lines,
+                            "additions": additions,
+                            "deletions": deletions,
+                            "status": status,
+                            "previous_filename": previous_filename,
+                        }
                     else:
-                        files.append(filename)
-                return files
+                        entry = filename
+                    is_skipped = status == "removed" or additions + deletions == 0
+                    if is_skipped:
+                        skipped.append(entry)
+                    else:
+                        files.append(entry)
+
+                # Inconsistency handling: when any entries trip the
+                # suspect rules above, the API's view of the world is
+                # almost certainly stale. We try to recover by going
+                # local: fetch the PR's base SHA via `get_pull_request`,
+                # ensure it's present in the working tree (CI clones
+                # are often `fetch-depth: 1`, so a targeted git fetch
+                # may be needed), then re-derive the changed-file set
+                # from `git diff <base_sha>`. The local git view
+                # doesn't lie about line counts and gives us a working
+                # set that the lint task can actually operate on.
+                #
+                # If the local-git fallback isn't reachable (network
+                # down, base SHA force-pushed away, …) we keep the
+                # original API result and emit only the WARNING — the
+                # user at least knows the rendered data is suspect.
+                if suspects:
+                    # Single multi-line warn so the indented suspect
+                    # listing stays attached to its header, then advice.
+                    suspect_lines = "\n  ".join(suspects)
+                    warn(ctx.std, ("GitHub PR Files API returned %d entr%s with inconsistent line counts on PR %s/%s#%d:\n  " +
+                                   "%s\n" +
+                                   "This usually means GitHub's PR diff cache is stale (common after a rebase). " +
+                                   "Push an empty commit (`git commit --allow-empty -m 'refresh PR diff' && git push`) " +
+                                   "or rebase onto the current base branch to force a refresh.") % (
+                        len(suspects),
+                        "y" if len(suspects) == 1 else "ies",
+                        pr["owner"],
+                        pr["repo"],
+                        pr["pr_number"],
+                        suspect_lines,
+                    ))
+
+                    pr_result = get_pull_request(ctx, token, pr["owner"], pr["repo"], pr["pr_number"])
+                    base_sha = ""
+                    if pr_result["success"]:
+                        base_sha = (pr_result["pull_request"].get("base") or {}).get("sha", "") or ""
+                    if base_sha:
+                        fallback = _try_local_git_diff_from_base_sha(ctx, line_level, base_sha)
+                        if fallback:
+                            info(ctx.std, "Falling back to %s — using local diff counts instead of the API's." % fallback["source"])
+                            return fallback
+
+                        # Fallback failed → data quality remains degraded; warn.
+                        warn(ctx.std, "Could not fall back to local `git diff %s` (base SHA not fetchable, or git diff failed). Continuing with the API's view; the listing will reflect the broken counts." % base_sha[:8])
+                    else:
+                        # Same reason as above — no base SHA means we can't recover.
+                        warn(ctx.std, "Could not fetch PR base SHA via API — continuing with the broken counts in the listing.")
+
+                source = "GitHub PR Files API: GET /repos/%s/%s/pulls/%d/files" % (
+                    pr["owner"],
+                    pr["repo"],
+                    pr["pr_number"],
+                )
+                return {"files": files, "skipped": skipped, "source": source}
             fallback_reason = "GitHub PR Files API call failed: %s" % result.get("error", "unknown")
 
     if fallback_reason:
-        ansi = color_enabled(ctx.std)
-        prefix = ("\033[1m\033[33mWARNING:\033[0m") if ansi else "WARNING:"
-        print("%s detected a GitHub PR build (%s/%s#%d) but %s. Falling back to local `git diff` for changed-file detection." % (
-            prefix,
+        warn(ctx.std, "Detected a GitHub PR build (%s/%s#%d) but %s. Falling back to local `git diff` for changed-file detection." % (
             pr["owner"],
             pr["repo"],
             pr["pr_number"],
@@ -536,18 +782,134 @@ def detect_changed_files(ctx, line_level = True, base_ref = "origin/main", merge
             fail(msg)
         diff_base = mb.stdout.strip()
 
+    # Resolve HEAD for the source string. Don't fail if it's unresolvable
+    # (a brand-new repo with no commits); just leave the SHA empty.
+    head_out = process.command("git").args(["rev-parse", "HEAD"]).current_dir(cwd).stdout("piped").stderr("null").spawn().wait_with_output()
+    head_sha = head_out.stdout.strip() if head_out.status.success else ""
+    source = "local git diff %s..%s" % (diff_base, head_sha) if head_sha else "local git diff %s..HEAD" % diff_base
+
     if line_level:
         result = process.command("git").args(["diff", diff_base, "--unified=0"]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
         if not result.status.success:
             msg = "`git diff %s --unified=0` failed (exit %d).\nstderr: %s" % (diff_base, result.status.code, result.stderr.strip())
             fail(msg)
-        return _parse_local_diff_output(result.stdout)
+        parsed = _parse_local_diff_output(result.stdout)
+
+        # `--unified=0` doesn't carry context lines, so the local-git
+        # path can't read GitHub's actual hunk window. Approximate it
+        # by widening each added-line set by ±3 — matches GitHub's
+        # default displayed-context width, so review-comment posting
+        # using `hunk_lines` rarely misses a commentable line. The
+        # PR Files API path above gets this exactly from the patch.
+        for entry in parsed:
+            entry["hunk_lines"] = _widen_lines(entry["lines"], _HUNK_CONTEXT_LINES)
+
+        # Local-git path can't produce zero-change "modified" entries
+        # (a no-content-diff file just doesn't appear in `git diff`
+        # output), so `skipped` is always empty here. Keep the same
+        # return shape for symmetry with the PR-API path.
+        return {"files": parsed, "skipped": [], "source": source}
 
     out = process.command("git").args(["diff", "--diff-filter=d", "--name-only", diff_base]).current_dir(cwd).stdout("piped").stderr("piped").spawn().wait_with_output()
     if not out.status.success:
         msg = "`git diff --diff-filter=d --name-only %s` failed (exit %d).\nstderr: %s" % (diff_base, out.status.code, out.stderr.strip())
         fail(msg)
-    return [f for f in out.stdout.strip().split("\n") if f]
+    names = [f for f in out.stdout.strip().split("\n") if f]
+    return {"files": names, "skipped": [], "source": source}
+
+def print_changed_files_listing(ctx, detect_result):
+    """Print the standard diagnostic listing for a `detect_changed_files`
+    result. Used by lint and format so both tasks render their
+    changed-files view identically.
+
+    Format:
+
+        Detecting changed files via <source>
+        Changed files:
+          path/to/foo.txt [+5 / -2] (changed)        — modified
+          path/to/bar.txt [+10] (added)              — new file
+          path/to/baz.txt [-9] (deleted)             — removed file
+
+    Renames split into two rows — the old path as `(deleted)`, the
+    new path as `(added)` — so they sort into their natural
+    alphabetical positions. The sort runs across the combined
+    `files` + `skipped` set so rebase-stale `[+0 / -0]` entries
+    appear inline, surfacing inconsistent upstream data instead of
+    hiding it.
+
+    Handles both shapes returned by `detect_changed_files`:
+      - line_level=True  → entries are dicts with file/additions/
+                           deletions/status/previous_filename. Counts
+                           and status tag render in full.
+      - line_level=False → entries are bare filename strings. Rows
+                           render as plain `  filename` with no
+                           brackets (the source didn't provide
+                           per-file counts).
+    """
+    print("Detecting changed files via %s" % detect_result["source"])
+    ansi = color_enabled(ctx.std)
+    green = "\033[32m" if ansi else ""
+    red = "\033[31m" if ansi else ""
+    reset = "\033[0m" if ansi else ""
+
+    def _entry_to_rows(entry):
+        # Bare filename (line_level=False) → single row, no counts.
+        if type(entry) == "string":
+            return [{"file": entry, "_kind": "", "_counts_known": False, "additions": 0, "deletions": 0}]
+        status = entry.get("status", "") or ""
+        if status == "renamed":
+            previous = entry.get("previous_filename", "") or entry["file"]
+            return [
+                {
+                    "file": previous,
+                    "_kind": "deleted",
+                    "_counts_known": True,
+                    "additions": 0,
+                    "deletions": entry.get("deletions", 0) or 0,
+                },
+                {
+                    "file": entry["file"],
+                    "_kind": "added",
+                    "_counts_known": True,
+                    "additions": entry.get("additions", 0) or 0,
+                    "deletions": 0,
+                },
+            ]
+        kind = {"added": "added", "removed": "deleted"}.get(status, "changed")
+        return [{
+            "file": entry["file"],
+            "_kind": kind,
+            "_counts_known": True,
+            "additions": entry.get("additions", 0) or 0,
+            "deletions": entry.get("deletions", 0) or 0,
+        }]
+
+    def _fmt_row(row):
+        if not row["_counts_known"]:
+            return "  " + row["file"]
+        adds = row["additions"]
+        dels = row["deletions"]
+        kind = row["_kind"]
+        if kind == "added":
+            bracket = "[%s+%d%s]" % (green, adds, reset)
+        elif kind == "deleted":
+            bracket = "[%s-%d%s]" % (red, dels, reset)
+        else:
+            bracket = "[%s+%d%s / %s-%d%s]" % (green, adds, reset, red, dels, reset)
+        return "  %s %s (%s)" % (row["file"], bracket, kind)
+
+    rows = []
+    for e in detect_result["files"]:
+        rows.extend(_entry_to_rows(e))
+    for e in detect_result["skipped"]:
+        rows.extend(_entry_to_rows(e))
+    rows = sorted(rows, key = lambda r: r["file"])
+    if rows:
+        print("Changed files:")
+        for r in rows:
+            print(_fmt_row(r))
+    else:
+        print("No changed files detected.")
 
 def _extract_host(url):
     """Extract host from a git remote URL (SSH or HTTPS)."""
@@ -581,6 +943,31 @@ def _is_public_github_url(url):
         return True
     h = _extract_host(url).lower()
     return h == "github.com" or h == "www.github.com"
+
+def _bail_if_not_public_github(std, log, skip_label):
+    """Return True when `ASPECT_VCS_URL` points at a non-github.com
+    host (the feature should bail), logging an actionable info()
+    first. False when unset or pointing at github.com.
+
+    Every feature that authenticates via the Aspect GitHub App needs
+    this gate — the App is only installed on github.com, so calling
+    its APIs against Enterprise would 401 with a hard-to-action error.
+    Self-hosted Enterprise (user-provided token + custom API base) is
+    the planned follow-up.
+
+    `skip_label` is what specifically isn't going to happen, e.g.
+    `"Skipping check-run creation."` — surfaces per-feature so the
+    user knows which surface didn't render.
+    """
+    vcs_url = std.env.var("ASPECT_VCS_URL") or ""
+    if not vcs_url or _is_public_github_url(vcs_url):
+        return False
+    host = _extract_host(vcs_url)
+    log.info(std, ("ASPECT_VCS_URL points at '%s', not github.com. " +
+                   "This feature currently only supports github.com via the Aspect GitHub App. " +
+                   "Support for GitHub Enterprise (user-provided token + custom API base URL) " +
+                   "is planned. %s") % (host, skip_label))
+    return True
 
 def _extract_github_owner_repo_from_url(url):
     """Return (owner, repo) if url is a GitHub (Enterprise) URL, else ("", "")."""
@@ -746,6 +1133,13 @@ def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None
 
 def _status_checks_fail(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "failure", output = output, api_base = api_base)
+
+def _status_checks_neutral(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
+    """Complete with `conclusion = "neutral"` — GitHub's native verdict for
+    "the check ran and finished, with non-fatal findings". Used for
+    terminal `warned` status (e.g. lint warnings, format diffs, delivery
+    warns). UI: gray dot, no red ❌."""
+    return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "neutral", output = output, api_base = api_base)
 
 # Artifact upload/delete (GitHub Actions Twirp API)
 
@@ -962,7 +1356,7 @@ def _delete_artifact(ctx, name):
     return {"success": ok}
 
 def _check_token(env):
-    """Return a warning message if the artifact token is unavailable, else None."""
+    """Return an info message if the artifact token is unavailable, else None."""
     token = env.var("ACTIONS_RUNTIME_TOKEN") or env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     if not token:
         return _MISSING_TOKEN_MSG
@@ -1095,7 +1489,16 @@ def create_review_comment(
         payload["start_side"] = start_side
     success, status_code, resp_body = _do_request(ctx, "POST", url, token, payload)
     if success:
-        return {"success": True, "comment_id": resp_body.get("id") if resp_body else None}
+        return {
+            "success": True,
+            "comment_id": resp_body.get("id") if resp_body else None,
+            # `html_url` is the direct in-browser link to the review
+            # comment thread on the PR; callers surface it on other
+            # status surfaces (lint check-run details, BK annotation)
+            # so reviewers can jump from the summary list to the
+            # specific comment.
+            "html_url": resp_body.get("html_url", "") if resp_body else "",
+        }
     return {"success": False, "error": "HTTP %d: %s" % (status_code, resp_body)}
 
 def delete_review_comment(ctx, token, owner, repo, comment_id, api_base = DEFAULT_GITHUB_API):
@@ -1111,12 +1514,14 @@ github = struct(
     validate_role = validate_role,
     check_token = _check_token,
     is_public_github_url = _is_public_github_url,
+    bail_if_not_public_github = _bail_if_not_public_github,
     extract_host = _extract_host,
     status_checks = struct(
         create = _status_checks_create,
         update = _status_checks_update,
         complete = _status_checks_complete,
         fail = _status_checks_fail,
+        neutral = _status_checks_neutral,
     ),
     upload_artifact = _upload_artifact,
     delete_artifact = _delete_artifact,

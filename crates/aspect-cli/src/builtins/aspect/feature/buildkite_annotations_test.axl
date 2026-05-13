@@ -1,0 +1,181 @@
+"""Snapshot tests for `feature/buildkite_annotations.axl`.
+
+Run with:
+  aspect dev test-bk-annotation-snapshots
+
+Dry-run style — we don't actually invoke `buildkite-agent annotate`. Instead,
+we call the per-kind renderers + the feature's `format_body` / `severity_for_status`
+helpers directly and print what *would* be sent to BK for each scenario.
+
+Coverage:
+  - Each task kind (bazel_results, lint_results, delivery_results,
+    format_results, gazelle_results)
+  - Each terminal status (passed, failed)
+  - Style selection edge cases: soft-lint passing with warnings, delivery
+    all-skipped, delivery all-failed, soft-format passing with files.
+"""
+
+load("./buildkite_annotations.axl", "format_body")
+
+# Shared fixture factories — also consumed by github_status_comments_test.axl.
+load(
+    "./test_fixtures.axl",
+    _make_build_failing_actions = "make_build_failing_actions",
+    _make_build_passed = "make_build_passed",
+    _make_delivery_all_ok = "make_delivery_all_ok",
+    _make_delivery_all_skipped = "make_delivery_all_skipped",
+    _make_delivery_fail = "make_delivery_fail",
+    _make_delivery_mixed_warn = "make_delivery_mixed_warn",
+    _make_format_clean = "make_format_clean",
+    _make_format_files_need_format = "make_format_files_need_format",
+    _make_format_soft_fail = "make_format_soft_fail",
+    _make_gazelle_clean = "make_gazelle_clean",
+    _make_gazelle_fix_applied = "make_gazelle_fix_applied",
+    _make_gazelle_out_of_date = "make_gazelle_out_of_date",
+    _make_lint_failed_errors = "make_lint_failed_errors",
+    _make_lint_passed_clean = "make_lint_passed_clean",
+    _make_lint_passed_with_warnings = "make_lint_passed_with_warnings",
+    _make_test_failed = "make_test_failed",
+    _make_test_failing_test_fails = "make_test_failing_test_fails",
+    _make_test_failing_with_flaky = "make_test_failing_with_flaky",
+    _make_test_passed_flaky_only = "make_test_passed_flaky_only",
+    _make_test_running_flaky_only = "make_test_running_flaky_only",
+)
+load(
+    "../lib/bazel_results.axl",
+    bazel_render_check_output = "render_check_output",
+)
+load(
+    "../lib/delivery_results.axl",
+    delivery_render_check_output = "render_check_output",
+)
+load(
+    "../lib/format_results.axl",
+    format_render_check_output = "render_check_output",
+)
+load(
+    "../lib/gazelle_results.axl",
+    gazelle_render_check_output = "render_check_output",
+)
+load(
+    "../lib/lint_results.axl",
+    lint_render_check_output = "render_check_output",
+)
+load("../lib/result_text.axl", "severity_for_status")
+
+# ─── Test harness ─────────────────────────────────────────────────────────────
+
+def _bk_links():
+    # Mirror the live wiring: ArtifactsTrait fields are surfaced into the
+    # links dict by `_make_links` in the BK feature whenever the running
+    # task uploaded artifacts via the ArtifactUpload feature. The snapshot
+    # exercises that path so renderer regressions in the Artifacts row /
+    # Artifacts detail block trip a visible diff.
+    return {
+        "ci_label": "Buildkite",
+        "ci_url": "https://buildkite.com/aspect-build/silo-aws/builds/49508/steps/canvas?sid=s1",
+        "aspect_url": "https://app.aspect.build/invocations/sink-uuid-1234-5678-9abc",
+        "results_base_url": "https://app.aspect.build/",
+        "artifacts_browse_url": "https://buildkite.com/organizations/aspect-build/pipelines/silo-aws/builds/49508/jobs/j1/artifacts",
+        "artifact_urls": {
+            "testlogs": "https://buildkite.com/organizations/aspect-build/pipelines/silo-aws/builds/49508/jobs/j1/artifacts/aaaa-1111/testlogs.tar.zst",
+            "profile": "https://buildkite.com/organizations/aspect-build/pipelines/silo-aws/builds/49508/jobs/j1/artifacts/bbbb-2222/profile.json.gz",
+            "bep": "https://buildkite.com/organizations/aspect-build/pipelines/silo-aws/builds/49508/jobs/j1/artifacts/cccc-3333/bep.json",
+            # Patch artifacts uploaded by format / gazelle when the
+            # working tree had post-task drift. Surfaced in the
+            # Artifacts row alongside Profile / BEP / etc. so reviewers
+            # can apply the patch locally without re-running the task.
+            "format_diff": "https://buildkite.com/organizations/aspect-build/pipelines/silo-aws/builds/49508/jobs/j1/artifacts/dddd-4444/format.patch",
+            "gazelle_diff": "https://buildkite.com/organizations/aspect-build/pipelines/silo-aws/builds/49508/jobs/j1/artifacts/eeee-5555/gazelle.patch",
+        },
+        "testlogs_label_urls": {},
+    }
+
+def _render_ctx(targets, task_name):
+    return {
+        "triggered_by": "Greg Magolan (BUILDKITE_BUILD_CREATOR)",
+        "targets": targets,
+        "started_ms": 1744630000000,
+        "ended_ms": 1744630004500,
+        "progress": "",
+        "task_name": task_name,
+    }
+
+_RENDERERS = {
+    "bazel_results": bazel_render_check_output,
+    "lint_results": lint_render_check_output,
+    "delivery_results": delivery_render_check_output,
+    "format_results": format_render_check_output,
+    "gazelle_results": gazelle_render_check_output,
+}
+
+def _test_impl(ctx):
+    scenarios = [
+        # (label,                                       kind,                data,                               status,    final, targets,      task_name)
+        ("1. build-passed", "bazel_results", _make_build_passed(), "passed", True, "//...", "build"),
+        ("2. test-failed", "bazel_results", _make_test_failed(), "failed", True, "//...", "test"),
+        ("3. lint-passed-clean", "lint_results", _make_lint_passed_clean(), "passed", True, "//...", "lint"),
+        ("4. lint-warning-terminal-with-warnings", "lint_results", _make_lint_passed_with_warnings(), "warning", True, "//...", "lint"),
+        ("5. lint-failed-errors", "lint_results", _make_lint_failed_errors(), "failed", True, "//...", "lint"),
+        ("6. delivery-all-ok", "delivery_results", _make_delivery_all_ok(), "passed", True, "//apps/...", "delivery"),
+        ("7. delivery-all-skipped", "delivery_results", _make_delivery_all_skipped(), "passed", True, "//apps/...", "delivery"),
+        ("8. delivery-warning-mixed-warn", "delivery_results", _make_delivery_mixed_warn(), "warning", True, "//apps/...", "delivery"),
+        ("9. delivery-fail", "delivery_results", _make_delivery_fail(), "failed", True, "//apps/...", "delivery"),
+        ("10. lint-warning (live)", "lint_results", _make_lint_passed_with_warnings(), "warning", False, "//...", "lint"),
+        ("11. format-clean", "format_results", _make_format_clean(), "passed", True, "", "format"),
+        ("12. format-files-failed", "format_results", _make_format_files_need_format(), "failed", True, "", "format"),
+        ("13. format-warning-soft-fail", "format_results", _make_format_soft_fail(), "warning", True, "", "format"),
+        ("14. gazelle-clean", "gazelle_results", _make_gazelle_clean(), "passed", True, "", "gazelle"),
+        ("15. gazelle-out-of-date", "gazelle_results", _make_gazelle_out_of_date(), "failed", True, "", "gazelle"),
+        ("16. gazelle-warning-fix-applied", "gazelle_results", _make_gazelle_fix_applied(), "warning", True, "", "gazelle"),
+        # Early-feedback `failing` scenarios — bazel_runner streams a failure
+        # before invocation.wait() returns; BK should flip to red right away.
+        ("17. build-failing-actions", "bazel_results", _make_build_failing_actions(), "failing", False, "//...", "build"),
+        ("18. test-failing-tests", "bazel_results", _make_test_failing_test_fails(), "failing", False, "//...", "test"),
+        # Flaky-only scenarios — no real failures, just flakes. Producer
+        # emits `warning` for both live and terminal; BK picks yellow.
+        ("19. test-warning-live-flaky-only", "bazel_results", _make_test_running_flaky_only(), "warning", False, "//...", "test"),
+        ("20. test-warning-terminal-flaky-only", "bazel_results", _make_test_passed_flaky_only(), "warning", True, "//...", "test"),
+        # Mixed — real failure plus flakes. Failures dominate; stripe stays red.
+        ("21. test-failing-with-flaky", "bazel_results", _make_test_failing_with_flaky(), "failing", False, "//...", "test"),
+    ]
+
+    sep = "=" * 70
+
+    for (label, kind, data, status, final, targets, task_name) in scenarios:
+        renderer = _RENDERERS[kind]
+        rc = _render_ctx(targets, task_name)
+        out = renderer(ctx, data, status, rc, _bk_links(), None, None)
+
+        # Mirror the live wiring: include a `:aspect: task <code>key</code>`
+        # pill so the snapshot exercises the flex-header path as well as the
+        # body.
+        task_label = ":aspect: task <code>%s</code>" % "local-test"
+        body = format_body(out, kind, status, task_label = task_label, final = final)
+        style = severity_for_status(status)
+
+        context_id = "aspect-%s-%s" % (task_name, "local-test")
+
+        print(sep)
+        print("SCENARIO: " + label)
+        print(sep)
+        print("buildkite-agent annotate --style %s --context %s --scope=job" % (style, context_id))
+        print("─" * 70)
+
+        # Show first 2500 chars of the formatted body — enough to see the
+        # title/summary and the first chunk of the body without flooding.
+        print(body[:2500])
+        if len(body) > 2500:
+            print("... [truncated, full length: %d chars]" % len(body))
+        print("")
+
+    print(sep)
+    print("All " + str(len(scenarios)) + " BK annotation scenarios rendered without error (including format + gazelle).")
+    return 0
+
+bk_annotation_snapshot_tests = task(
+    name = "test-bk-annotation-snapshots",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

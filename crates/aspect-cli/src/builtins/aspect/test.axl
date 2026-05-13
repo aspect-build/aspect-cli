@@ -2,8 +2,13 @@
 A default 'test' task that wraps a 'bazel test' command.
 """
 
+load("./bazel.axl", "BazelTrait")
+load("./feature/github_status_checks.axl", "GitHubStatusChecksTrait")
+load("./lib/artifacts.axl", "ArtifactsTrait")
 load("./lib/bazel_runner.axl", "run_bazel_task")
-load("./traits.axl", "ArtifactsTrait", "BazelTrait", "GitHubStatusChecksTrait", "HealthCheckTrait", "TaskLifecycleTrait")
+load("./lib/checkrun.axl", "GitHubCheckRunTrait")
+load("./lib/health_check.axl", "HealthCheckTrait")
+load("./lib/lifecycle.axl", "TaskLifecycleTrait")
 
 def _impl(ctx: TaskContext) -> int:
     return run_bazel_task(ctx, command = "test")
@@ -15,6 +20,7 @@ test = task(
         HealthCheckTrait,
         TaskLifecycleTrait,
         GitHubStatusChecksTrait,
+        GitHubCheckRunTrait,
         ArtifactsTrait,
     ],
     args = {
@@ -25,6 +31,10 @@ test = task(
             maximum = 512,
             default = ["..."],
             description = "Bazel target patterns to test. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect test -- //... -//experimental/...`.",
+        ),
+        "announce_rc": args.boolean(
+            default = False,
+            description = "Print the resolved Bazel `.bazelrc` flags before running the test. Useful when debugging which config sections fired or what the final flag set looks like. ASPECT_DEBUG=1 logs the same disclosure regardless of this flag.",
         ),
         "bazel_flags": args.string_list(
             long = "bazel-flag",

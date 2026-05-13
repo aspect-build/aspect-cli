@@ -1,0 +1,261 @@
+"""Unified-diff (`patch`) helpers.
+
+aspect-cli's lint task collects per-target `.patch` files produced by
+linters that can suggest fixes (today: rules_lint's shellcheck wrapper
+running with `--format=diff`). Those patches are unified diffs in the
+same shape `git diff` / `diff -u` emit. This module parses them into
+structured hunks so consumers can:
+
+  - apply them to the working tree (existing behavior, via `patch -p1`)
+  - generate per-edit-block PR review comments with a GitHub
+    `suggestion` block, so reviewers can click "Commit suggestion" to
+    accept the linter's proposed fix without leaving the PR
+
+The parser is deliberately small and unified-diff-only — no rename
+detection, no binary-patch decoding, no fuzz/offset handling. Inputs
+are linter-emitted patches, which are well-formed by construction.
+
+A patch represents one or more *file changes*; each file change has
+one or more *hunks*; each hunk has a sequence of *ops* (context, add,
+remove). A single hunk can carry multiple non-adjacent edits when the
+unified-diff context window groups them — `hunk_edit_blocks(hunk)`
+splits each contiguous run of `+`/`-` ops into its own block, so each
+distinct edit gets its own focused review-comment suggestion rather
+than one big one that swallows the surrounding context lines.
+
+The shape returned by `parse(patch_text)`:
+
+    [
+        {
+            "file": "examples/lint/hello.sh",      # path on the new side
+            "hunks": [
+                {
+                    "old_start": 11,    # 1-based line on old side
+                    "old_count": 1,
+                    "new_start": 11,    # 1-based line on new side
+                    "new_count": 1,
+                    "ops": [
+                        {"kind": "context", "text": " ..."},
+                        {"kind": "remove",  "text": "if [ $name = ..."},
+                        {"kind": "add",     "text": "if [ \\"$name\\" = ..."},
+                        ...
+                    ],
+                },
+                ...
+            ],
+        },
+        ...
+    ]
+"""
+
+def parse(patch_text):
+    """Parse unified-diff text into [{file, hunks: [...]}].
+
+    Returns an empty list for empty/invalid input. Tolerates trailing
+    "\\ No newline at end of file" markers.
+    """
+    if not patch_text:
+        return []
+
+    files = []
+    current = None  # current file dict
+    current_hunk = None  # current hunk dict
+    for line in patch_text.split("\n"):
+        if line.startswith("+++ b/"):
+            path = line[len("+++ b/"):]
+            current = {"file": path, "hunks": []}
+            files.append(current)
+            current_hunk = None
+            continue
+        if line.startswith("+++ "):
+            # Some tools emit `+++ <path>` without the `b/` prefix.
+            path = line[len("+++ "):]
+            current = {"file": path, "hunks": []}
+            files.append(current)
+            current_hunk = None
+            continue
+        if line.startswith("--- ") or line.startswith("diff ") or line.startswith("index "):
+            continue
+        if line.startswith("@@"):
+            if current == None:
+                continue
+            old_start, old_count, new_start, new_count = _parse_hunk_header(line)
+            current_hunk = {
+                "old_start": old_start,
+                "old_count": old_count,
+                "new_start": new_start,
+                "new_count": new_count,
+                "ops": [],
+            }
+            current["hunks"].append(current_hunk)
+            continue
+        if current_hunk == None:
+            continue
+        if line.startswith("\\"):
+            # `\ No newline at end of file` etc. — diff metadata, skip.
+            continue
+        if line.startswith("+"):
+            current_hunk["ops"].append({"kind": "add", "text": line[1:]})
+            continue
+        if line.startswith("-"):
+            current_hunk["ops"].append({"kind": "remove", "text": line[1:]})
+            continue
+        if line.startswith(" "):
+            current_hunk["ops"].append({"kind": "context", "text": line[1:]})
+            continue
+
+        # Anything else (blank trailing line at EOF, junk before first
+        # @@, etc.) is ignored.
+
+    return files
+
+def _parse_hunk_header(line):
+    """Parse `@@ -a,b +c,d @@ ...` → (a, b, c, d).
+
+    The `,b` / `,d` are optional in unified diff (default 1 when
+    omitted, e.g. single-line change `@@ -5 +5 @@`).
+    """
+    parts = line.split(" ")
+    old = ""
+    new = ""
+    for p in parts:
+        if p.startswith("-"):
+            old = p[1:]
+        elif p.startswith("+"):
+            new = p[1:]
+    old_start, old_count = _parse_range(old)
+    new_start, new_count = _parse_range(new)
+    return (old_start, old_count, new_start, new_count)
+
+def _parse_range(spec):
+    """`12,3` → (12, 3); `12` → (12, 1); empty → (0, 0)."""
+    if not spec:
+        return (0, 0)
+    if "," in spec:
+        a, b = spec.split(",", 1)
+        return (int(a), int(b))
+    return (int(spec), 1)
+
+def hunk_edit_blocks(hunk):
+    """Split a hunk into discrete edit blocks for one-suggestion-per-edit posting.
+
+    A unified-diff hunk groups every change within the configured
+    context window into a single `@@` region. shellcheck's
+    `--format=diff` (and `git diff`'s default `--unified=3`) routinely
+    pulls multiple unrelated edits into one hunk because they sit
+    within a few lines of each other. Posting one PR-comment
+    `suggestion` block for the whole hunk swallows all the
+    intervening context lines, so reviewers see a wall of `-`/`+`
+    lines that mostly look identical — visually noisy and slow to
+    accept.
+
+    `hunk_edit_blocks` walks the per-line ops and yields one block
+    per contiguous run of `add` / `remove` ops with no `context`
+    interspersed:
+
+        [
+            {
+                "start_line":  int,    # 1-based new-side line
+                "end_line":    int,    # 1-based new-side line, inclusive
+                "replacement": str,    # joined `+` lines, "" for pure-delete
+                "removes":     int,    # count of `-` lines in block
+                "adds":        int,    # count of `+` lines in block
+            },
+            ...
+        ]
+
+    Pure-add and pure-delete blocks are returned with the appropriate
+    field as 0; callers can filter on `removes > 0 and adds > 0` if
+    they only want straight replacements (the most common case for
+    linter fixes).
+
+    For pure-delete blocks the new-side range is the line *before* the
+    deletion (so the suggestion replaces a real line with itself,
+    effectively removing the deleted span); replacement is the empty
+    string.
+
+    Returns `[]` for hunks with only context (no real edits).
+    """
+    blocks = []
+    new_line = hunk["new_start"]
+
+    block_start = None  # 1-based new-side line where current block begins
+    block_adds = []
+    block_removes = 0
+
+    for op in hunk["ops"]:
+        kind = op["kind"]
+        if kind == "context":
+            # Close any open block on context boundary.
+            if block_start != None:
+                _close_block(blocks, block_start, block_adds, block_removes, new_line)
+                block_start = None
+                block_adds = []
+                block_removes = 0
+            new_line += 1
+            continue
+        if kind == "add":
+            if block_start == None:
+                block_start = new_line
+            block_adds.append(op["text"])
+            new_line += 1
+            continue
+        if kind == "remove":
+            if block_start == None:
+                # Provisional anchor at `new_line`: this is the
+                # position the `-` line occupied on the new side, and
+                # also the position any following `+` in the block
+                # will land (since `remove` doesn't advance new_line).
+                # Mixed blocks (remove then add) end with the block
+                # correctly anchored at the new-side line that ends
+                # up holding the replacement.
+                #
+                # For PURE-delete blocks (no `+` at all), `_close_block`
+                # adjusts to `block_start - 1` — the deleted lines
+                # leave a gap on the new side, so the suggestion-block
+                # range anchors on the line above.
+                block_start = new_line
+            block_removes += 1
+
+            # `remove` doesn't advance new_line — the line is gone on the new side.
+            continue
+
+    # Close any block left open at end of hunk.
+    if block_start != None:
+        _close_block(blocks, block_start, block_adds, block_removes, new_line)
+
+    return blocks
+
+def _close_block(blocks, block_start, block_adds, block_removes, new_line):
+    """Append a block dict to `blocks`. Used by `hunk_edit_blocks` at
+    every context boundary and at end-of-hunk.
+
+    For mixed blocks (remove + add), `block_start` is already the
+    correct new-side line where the replacement lands — the remove
+    op sets it to the position the `-` occupied (which the `+` then
+    inherits). For pure-delete blocks, `block_start` points at the
+    first removed line's new-side position, which doesn't exist on
+    the new side anymore — adjust to the line above the gap.
+    """
+    adds = len(block_adds)
+    if adds > 0:
+        end_line = block_start + adds - 1
+        replacement = "\n".join(block_adds)
+    else:
+        # Pure delete — block_start currently points to the position
+        # of the first removed line. After the deletion the new side
+        # has nothing there, so anchor the suggestion on the line
+        # above the gap. (Edge case: if the first remove was at
+        # line 1, `block_start - 1` would be 0; clamp to 1 so we
+        # produce a valid GitHub anchor.)
+        if block_start > 1:
+            block_start = block_start - 1
+        end_line = block_start
+        replacement = ""
+    blocks.append({
+        "start_line": block_start,
+        "end_line": end_line,
+        "replacement": replacement,
+        "removes": block_removes,
+        "adds": adds,
+    })

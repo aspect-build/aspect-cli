@@ -11,7 +11,7 @@ job. It does two things:
 """
 
 load("@std//time.axl", "time")
-load("./environment.axl", "AWS_LOG_GROUP", "get_environment", "is_warming_complete")
+load("./environment.axl", "AWS_LOG_GROUP", "get_workflows_environment", "is_warming_complete")
 
 def _url_encode(s):
     """Percent-encode a string for use in URLs."""
@@ -78,12 +78,14 @@ def _gcp_bootstrap_log_url(environment):
 
 def _wait_for_warming(std, environment):
     """
-    Wait for warming to complete and report the result.
+    Block until warming completes (or return immediately if warming isn't
+    configured / already done). Side-effect only: re-reads the environment
+    so the caller sees `warming_complete` / `warming_current_cache` set.
 
-    If warming is not configured, returns immediately.
+    Display is intentionally separate (`_display_warming`): the saved
+    Runner Health output from the previous job should render *first*, then
+    per-section sub-blocks (Warming, Bazel Health) underneath.
     """
-
-    # If warming is not configured, skip entirely
     if not environment.runner.warming_enabled:
         return environment
 
@@ -98,36 +100,70 @@ def _wait_for_warming(std, environment):
 
     # Re-read environment to pick up warming result fields.
     # TODO: replace with agent http api call once available
-    environment = get_environment(std)
+    return get_workflows_environment(std)
 
-    # Report warming result
+# `_section_heading` and `_status_marker` keep the AXL-rendered sub-sections
+# (Warming, Bazel Health) visually consistent with the saved vigor output
+# that comes out of `_display_runner_health` — blue `•` bullet + label,
+# colored ✓ / ✗ status markers.
+
+def _section_heading(label):
+    """Sub-section heading: blank line + blue `• <label>`."""
+    return "\n\x1b[34m• " + label + "\x1b[0m"
+
+def _status_marker(kind):
+    """Status glyph: ✓ green, ✗ red, ? yellow. Used as the
+    leading char on a status line under a sub-section heading."""
+    if kind == "ok":
+        return "\x1b[32m✓\x1b[0m"
+    if kind == "fail":
+        return "\x1b[31m✗\x1b[0m"
+    return "\x1b[33m?\x1b[0m"
+
+def _display_warming(environment):
+    """
+    Render the Warming sub-section under Runner Health.
+
+    Runs after `_display_runner_health` so the saved-from-previous-job
+    output appears first and warming context for *this* job appears
+    underneath, alongside Bazel Health.
+    """
+    if not environment.runner.warming_enabled:
+        return
+
+    print(_section_heading("Warming"))
     if environment.runner.warming_current_cache:
-        print("Runner warmed from cache version: " + environment.runner.warming_current_cache + "\n")
-    elif environment.runner.runner_job_history == "":
-        # This is the first job on the runner and warming failed.
-        # On subsequent jobs, previous work has already populated caches,
-        # so no warning is needed.
-        print("Warming was unsuccessful. This first build on this runner will be cold.")
+        print("\t" + _status_marker("ok") +
+              " runner warmed from cache version: " +
+              environment.runner.warming_current_cache)
+        return
+    if environment.runner.runner_job_history == "":
+        # First job on the runner and warming didn't produce a cache. On
+        # subsequent jobs the runner has already done real work, so a
+        # missing cache isn't a warning.
+        print("\t" + _status_marker("fail") +
+              " warming was unsuccessful — this first build will be cold")
         url = _bootstrap_log_url(environment.runner)
         if url:
-            print("See bootstrap logs for more details:")
-            print(url + "\n")
+            print("\tSee bootstrap logs for more details:")
+            print("\t" + url)
+        return
 
-    return environment
+    # Warming enabled, no fresh cache, but we've been running jobs — quiet
+    # informational line so the section still renders.
+    print("\t" + _status_marker("ok") + " warmed by previous jobs on this runner")
 
 def _display_bazel_health(health):
-    """
-    Display the bazel health check result.
-    """
+    """Render the Bazel Health sub-section under Runner Health."""
+    print(_section_heading("Bazel Health"))
     if health.outcome == "healthy":
-        print("\n\u2022 Bazel Health")
-        print("\t\u2713 bazel health check passed")
+        print("\t" + _status_marker("ok") + " bazel health check passed")
     elif health.outcome == "unhealthy":
-        print("\n\u2022 Bazel Health")
-        print("\t\u2717 bazel health check failed: " + (health.message or "unknown error"))
+        print("\t" + _status_marker("fail") +
+              " bazel health check failed: " + (health.message or "unknown error"))
     elif health.outcome == "inconclusive":
-        print("\n\u2022 Bazel Health")
-        print("\t? bazel health check inconclusive: " + (health.message or "unknown"))
+        print("\t" + _status_marker("warn") +
+              " bazel health check inconclusive: " + (health.message or "unknown"))
 
 def _display_runner_health(environment):
     """
@@ -148,6 +184,11 @@ def _display_runner_health(environment):
     print("Last run on " + str(data["timestamp"]) + "\n")
     print(data["output"])
 
+HealthCheckTrait = trait(
+    pre_health_check = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called before the build to validate preconditions (e.g. auth, connectivity)"),
+    post_health_check = attr(list[typing.Callable[[TaskContext], str | None]], default = [], description = "Hooks called after the build; return a non-None string to report a warning"),
+)
+
 def agent_health_check(ctx, environment):
     """
     Post health check hook for HealthCheckFragment.
@@ -163,11 +204,12 @@ def agent_health_check(ctx, environment):
     Returns:
         None if healthy, or a str error message if the Bazel server is unhealthy.
     """
-    if environment.ci.host == "buildkite":
-        print("--- :aspect: Workflows Runner Health Check")
+    if environment.ci and environment.ci.host == "buildkite":
+        print("--- :thermometer: Workflows runner health check")
 
     environment = _wait_for_warming(ctx.std, environment)
     _display_runner_health(environment)
+    _display_warming(environment)
     health = ctx.bazel.health_check()
     _display_bazel_health(health)
 

@@ -58,8 +58,9 @@ features like GithubStatusChecks can surface download links:
   - testlogs_label_urls  — per-label, per-file URLs (CircleCI/GitLab)
 """
 
-load("../lib/artifacts.axl", "artifact_name", "create_uploader", "detect_ci")
-load("../traits.axl", "ArtifactsTrait", "BazelTrait")
+load("../bazel.axl", "BazelTrait")
+load("../lib/artifacts.axl", "ArtifactsTrait", "artifact_name", "create_uploader", "detect_ci")
+load("../lib/environment.axl", "info", "warn")
 
 def _record_artifact_url(artifacts_trait, kind, url):
     """Record a direct download URL for a specific artifact kind.
@@ -173,7 +174,7 @@ def _collect_test_files(ctx, state, event, strategy):
 
     Records source paths and desired archive paths in state without copying.
     The archive is built later via mtree + bsdtar. `strategy` controls which
-    test results' files get collected — see _should_collect_test.
+    test data' files get collected — see _should_collect_test.
     """
     if event.kind != "test_result":
         return
@@ -311,22 +312,18 @@ def _artifact_upload_impl(ctx: FeatureContext):
     upload_bep = ctx.args.upload_bep
     upload_exec_log = ctx.args.upload_exec_log
 
-    # Staging paths for the four uploadable artifact kinds. Prefer the Aspect
-    # Workflows per-job tmpdir (auto-cleaned between jobs) over shared /tmp,
-    # which is world-readable on most systems. Matches lib/artifacts.axl.
+    # Prefer the Aspect Workflows per-job tmpdir over the shared,
+    # world-readable /tmp. Matches lib/artifacts.axl.
     tmpdir = ctx.std.env.var("ASPECT_WORKFLOWS_RUNNER_JOB_TMPDIR") or ctx.std.env.temp_dir()
     profile_path = tmpdir + "/" + uuid + ".profile.gz"
     execlog_path = tmpdir + "/" + uuid + ".execlog.zstd"
 
-    # `.binpb` is Google's canonical extension for binary-encoded protobuf
-    # (docs use it alongside `.textpb` / `.jsonpb`). We avoid `.bep.bin`
-    # because macOS Finder's Archive Utility heuristic treats `.bin` as
-    # potentially-compressed and auto-expands on double-click.
+    # `.binpb` is Google's canonical extension for binary-encoded
+    # protobuf. Avoid `.bep.bin` — macOS Finder's Archive Utility
+    # auto-expands `.bin` files on double-click.
     bep_path = tmpdir + "/" + uuid + ".bep.binpb"
 
-    # Only generate the profile when opt-in. --generate_json_trace_profile +
-    # --profile=path cost wall-clock and write a file we'd otherwise leave on
-    # disk. Skip them entirely when upload_profile is off.
+    # Profile generation costs wall-clock + disk; only opt-in.
     if upload_profile:
         bazel_trait.extra_flags.extend([
             "--generate_json_trace_profile",
@@ -334,9 +331,8 @@ def _artifact_upload_impl(ctx: FeatureContext):
             "--profile=" + profile_path,
         ])
 
-    # Register sinks only when their upload is opt-in. When off, Bazel never
-    # writes the file at all — no leaked bytes on disk, no wasted I/O, and the
-    # matching upload branch below finds nothing to publish.
+    # Sinks only register when opt-in — otherwise Bazel never writes
+    # the file at all.
     if upload_exec_log:
         bazel_trait.execution_log_sinks.append(
             bazel.execution_log.compact_file(path = execlog_path),
@@ -349,8 +345,6 @@ def _artifact_upload_impl(ctx: FeatureContext):
     state = {}
 
     def _on_build_event(ctx, event):
-        # Skip collection entirely when testlog upload is opt-out — no point
-        # scanning test_result events and stashing paths we'll never read.
         if not upload_testlogs or is_local:
             return
         _collect_test_files(ctx, state, event, upload_test_logs)
@@ -360,25 +354,25 @@ def _artifact_upload_impl(ctx: FeatureContext):
             name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
             success = uploader.upload_testlogs(ctx, state["_artifact_upload"]["testlogs"], entries, name)
 
-            # Surface the artifact URL and per-file label URLs as soon as the first
-            # batch is available so GithubStatusChecks can add download links quickly.
+            # Surface URLs as soon as the first batch lands so
+            # GithubStatusChecks can add download links quickly.
             if success:
                 _update_testlogs_trait(artifacts_trait, state, ctx.std.env, ci)
 
     def _on_build_end(ctx, exit_code):
         if not is_local:
-            warning = uploader.check(ctx.std.env)
-            if warning:
-                print("\nwarning: artifact upload skipped — " + warning)
+            reason = uploader.check(ctx.std.env)
+            if reason:
+                info(ctx.std, "Artifact upload skipped: " + reason)
             else:
                 if upload_testlogs:
                     _init_upload_state(state)
                     entries = state.get("_test_entries", [])
                     name = artifact_name(ci, ctx.task.name, ctx.task.key, "testlogs")
 
-                    # final = True: publish under the plain `{name}` (no
-                    # `.partial.N` suffix) so the user-facing artifact has a
-                    # clean filename. Rolling-delete still removes the last
+                    # final=True: publish under the plain `{name}` (no
+                    # `.partial.N` suffix) for a clean user-facing
+                    # filename. Rolling-delete still reaps the prior
                     # partial via provider.delete_artifact(prev_ref).
                     success = uploader.upload_testlogs(
                         ctx,
@@ -388,20 +382,15 @@ def _artifact_upload_impl(ctx: FeatureContext):
                         final = True,
                     )
 
-                    # Always update after final upload so both the archive URL and
-                    # per-file label URLs reflect the complete set of uploaded files.
+                    # Refresh after final so URLs reflect the complete set.
                     if success:
                         _update_testlogs_trait(artifacts_trait, state, ctx.std.env, ci)
 
-                # Upload profile/bep/execlog. `download_url` is an HTTP URL on
-                # GitHub/GitLab/CircleCI (empty on Buildkite) — record it so
-                # status checks can link directly to the downloads. Remove the
-                # source on BOTH success and failure: a failed upload does not
-                # get a retry in this pipeline, so keeping the file just leaks
-                # a potentially-sensitive artifact into /tmp.
-                #
-                # Each kind is included only when its corresponding opt-in
-                # arg is set on the feature.
+                # Upload profile/bep/execlog (opt-in each). Buildkite
+                # returns empty download_urls so artifact_urls stays
+                # empty there. Remove the source on success and on
+                # failure — a failed upload doesn't retry, so keeping
+                # the file just leaks a potentially-sensitive artifact.
                 task_name = ctx.task.name
                 task_key = ctx.task.key
                 uploads = []
@@ -420,16 +409,12 @@ def _artifact_upload_impl(ctx: FeatureContext):
                             uploaded_any = True
                         else:
                             for err in result["errors"]:
-                                print("artifact upload error (" + aname + "): " + err)
+                                warn(ctx.std, "Artifact upload failed (" + aname + "): " + err)
                         ctx.std.fs.remove_file(src)
 
-                # Set the "Artifacts" browse URL whenever ANY upload succeeded
-                # in this impl — not just when artifact_urls is populated.
-                # Buildkite returns empty download_urls (short-lived), so
-                # _record_artifact_url skips them and artifact_urls stays empty
-                # even though the upload itself landed. Keying off
-                # `uploaded_any` covers that path; testlogs still take the
-                # earlier branch via _update_testlogs_trait.
+                # Set the browse URL on any successful upload — on
+                # Buildkite artifact_urls is empty because download_urls
+                # are short-lived, so we can't rely on it alone.
                 if uploaded_any and not artifacts_trait.artifacts_browse_url:
                     browse = _make_artifacts_browse_url(ctx.std.env, ci)
                     if browse:

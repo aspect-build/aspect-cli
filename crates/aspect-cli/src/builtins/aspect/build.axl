@@ -2,8 +2,13 @@
 A default 'build' task that wraps a 'bazel build' command.
 """
 
+load("./bazel.axl", "BazelTrait")
+load("./feature/github_status_checks.axl", "GitHubStatusChecksTrait")
+load("./lib/artifacts.axl", "ArtifactsTrait")
 load("./lib/bazel_runner.axl", "run_bazel_task")
-load("./traits.axl", "ArtifactsTrait", "BazelTrait", "GitHubStatusChecksTrait", "HealthCheckTrait", "TaskLifecycleTrait")
+load("./lib/checkrun.axl", "GitHubCheckRunTrait")
+load("./lib/health_check.axl", "HealthCheckTrait")
+load("./lib/lifecycle.axl", "TaskLifecycleTrait")
 
 def _impl(ctx: TaskContext) -> int:
     return run_bazel_task(ctx, command = "build")
@@ -17,6 +22,10 @@ build = task(
             description = "Bazel target patterns to build. Defaults to '...' which expands to all rule targets in the package at and beneath the current directory. When any pattern is hyphen-led (e.g. excludes like `-//experimental/...`), separate them from flags with `--`: `aspect build -- //... -//experimental/...`.",
             maximum = 512,
             minimum = 1,
+        ),
+        "announce_rc": args.boolean(
+            default = False,
+            description = "Print the resolved Bazel `.bazelrc` flags before running the build. Useful when debugging which config sections fired or what the final flag set looks like. ASPECT_DEBUG=1 logs the same disclosure regardless of this flag.",
         ),
         "bazel_flags": args.string_list(
             description = "Additional Bazel flags forwarded to the build (e.g. --bazel-flag=--config=ci --bazel-flag=--keep_going). Repeat the flag to pass multiple.",
@@ -48,6 +57,7 @@ build = task(
         HealthCheckTrait,
         TaskLifecycleTrait,
         GitHubStatusChecksTrait,
+        GitHubCheckRunTrait,
         ArtifactsTrait,
     ],
     implementation = _impl,

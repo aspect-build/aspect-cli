@@ -1,6 +1,6 @@
 """GitHub Status Comments feature — aggregates per-task status from sibling CI jobs into one PR comment.
 
-Every job is both a producer (uploads its task identity + results subset as an
+Every job is both a producer (uploads its task identity + data subset as an
 artifact) and a writer (polls all sibling-job artifacts in the current run and
 PATCHes one PR comment). Polling is event-paced — the loop ticks when Bazel
 emits BES events, throttled by min_poll_interval_seconds.
@@ -10,62 +10,326 @@ GitHub Actions only.
 Requires the Aspect GitHub App with roles `prs.write` (issue-comment
 POST/PATCH/DELETE) and `actions.read` (run-artifact list/download).
 
+The comment shape is precomputed in AXL — the Jinja2 template is a pure
+renderer. `_prepare_for_render` walks raw entry payloads and decorates
+each with:
+  - `_severity`     ("error" | "warning" | "info" | "success") — drives the
+                    badge and the row sort.
+  - `_badge_key`    ("failed" | "warning" | "running" | "passed" | "aborted")
+                    used to look up `status_badges[...]`.
+  - `_links_text`   Multi-link Markdown for the Links cell, gracefully
+                    omitting URLs that aren't populated.
+  - `_result_text`  Task-kind-specific Result cell text + elapsed.
+
 Body-template variables:
     marker         — HTML comment used to identify the comment across PATCHes.
-    updated_at     — UTC ISO timestamp of the last render.
-    status_badges  — dict {status -> label}.
-    entries        — list of per-task entry dicts (sorted by job, name, key):
-                       name, key, job, run_attempt, status, ci_run_url,
-                       reproducer_command (precomputed `aspect <task> <labels>` string),
-                       passed_test_total, failed_test_total, flaky_test_total,
-                       cached_test_total, executed_test_total, targets_total,
-                       aborted, abort_reason.
+    started_at     — Earliest sibling-task start time, formatted UTC.
+    status_badges  — dict {badge_key -> label}.
+    rollup         — counts dict ({error, warning, running, passed, aborted})
+                     used in the **Status:** rollup line.
+    entries        — list of per-task entry dicts, alphabetical by (job, name, key).
 """
 
 load("@std//time.axl", "monotonic")
-load("../lib/bazel_results.axl", "compute_reproducer_command", "init_results")
+load(
+    "../lib/bazel_results.axl",
+    "format_duration_ms",
+    "format_run_date",
+    "init_data",
+    "render_bes_url",
+    "resolve_aspect_url",
+)
+load("../lib/checkrun.axl", "GitHubCheckRunTrait")
+load("../lib/environment.axl", "feature_logger", "workflows_results_url")
 load("../lib/github.axl", "github")
+load("../lib/lifecycle.axl", "TaskLifecycleTrait")
+load("../lib/repro_commands.axl", "dedup_and_attribute")
+load("../lib/result_text.axl", "severity_for_status")
 load("../lib/tar.axl", "bsdtar")
-load("../traits.axl", "TaskLifecycleTrait")
 
 _ARTIFACT_PREFIX = "aspect-ci-status-"
 _MARKER_FMT = "<!-- aspect-ci-status:pr-%d -->"
 
+# Status badges keyed by the precomputed `_badge_key` on each entry,
+# *not* the raw lifecycle status. `_badge_key` is one of:
+#   "failed"  — terminal `failed` or live `failing` (severity error)
+#   "warning" — passed/running with non-fatal signal (severity warning)
+#   "running" — still in flight, no warning yet
+#   "passed"  — terminal `passed` clean
+#   "aborted" — Bazel aborted the invocation (timeout, OOM, ctrl-c)
+#
+# Emoji-only — placed directly in front of the task name so the row
+# reads as `✅ build (build-gha)` rather than `✅ Passed · 🔨 build`.
+# The status emoji effectively replaces the per-kind icon (the kind
+# is implicit in the task name); the rollup line above the table
+# spells out severity counts in words for screen readers / scanning.
 _DEFAULT_STATUS_BADGES = {
-    "running": "🟡 running",
-    "passed": "✅ passed",
-    "failed": "❌ failed",
+    "running": "🔄",
+    "passed": "✅",
+    "warning": "⚠️",
+    "failed": "❌",
+    "aborted": "🔥",
 }
 
+# Rows sort alphabetically by (job, name, key) so a row's position
+# stays stable across PATCHes — reviewers scan by muscle memory and
+# the badge column carries the verdict. Severity-first sort would
+# surface red at the top but shuffle rows on every status transition.
+
 # Default body template — Jinja2, rendered via ctx.template.jinja2.
+# The renderer is intentionally dumb — every cell is precomputed in
+# AXL (`_prepare_for_render`). The template only stitches values into
+# the markdown shell, so changes to *what* a cell says happen in AXL.
 #
-# One row per task in a markdown table; for any failed task, a single
-# `<pre><code>` block at the bottom lists each reproducer command on its
-# own line. `<pre><code>` (the same primitive the legacy Marvin comments
-# used) renders consistently on GitHub — fenced code inside <details>
-# does not. Each command starts with `aspect <task>` so there's no need
-# for a per-row label.
+# `<pre><code>` for the reproducer block (the same primitive the
+# legacy Marvin comments used) renders consistently on GitHub — fenced
+# code inside <details> does not.
 _DEFAULT_BODY_TEMPLATE = """{{ marker }}
 
-## Aspect CI Status{% if updated_at %} · `{{ updated_at }}`{% endif %}
-
-{% if not entries -%}
+## ✨ Aspect Workflows Tasks
+{% if started_at %}📅 {{ started_at }}<br>
+{% endif %}{% if not entries -%}
 _No tasks have reported yet._
 {% else -%}
-| | Task | Job | Result |
-|---|---|---|---|
-{% for e in entries -%}
-| {{ status_badges[e.status] if e.status in status_badges else e.status }} | `{{ e.name }}` | [`{{ e.job }}`]({{ e.ci_run_url }}) | {% if e.aborted %}:warning: aborted{% if e.abort_reason %} (`{{ e.abort_reason }}`){% endif %}{% elif e.status == "failed" %}{% if e.failed_test_total > 0 %}{{ e.failed_test_total }} test{{ "s" if e.failed_test_total != 1 else "" }} failed{% else %}failed{% endif %}{% elif e.status == "passed" and (e.passed_test_total + e.failed_test_total) > 0 %}{% if e.executed_test_total == 0 %}all {{ e.passed_test_total }} tests cached{% else %}{{ e.passed_test_total }}/{{ e.passed_test_total + e.failed_test_total }} passed{% if e.cached_test_total > 0 %} · {{ e.cached_test_total }} cached{% endif %}{% endif %}{% elif e.status == "passed" and e.targets_total > 0 %}{{ e.targets_total }} target{{ "s" if e.targets_total != 1 else "" }} built{% elif e.status == "passed" %}done{% else %}in progress{% if e.targets_total > 0 %} · {{ e.targets_total }} target{{ "s" if e.targets_total != 1 else "" }}{% endif %}{% endif %} |
-{% endfor -%}
-{% set failed_entries = entries|selectattr("status", "equalto", "failed")|list -%}
-{% if failed_entries %}
-**Reproduce failures locally:**
+{% macro section(label, icon, items) -%}
+{% if items %}
+## {{ icon }} {{ items|length }} {{ label }} task{{ "s" if items|length != 1 else "" }}
 
-<pre><code>{% for e in failed_entries %}{{ e.reproducer_command or ("aspect " + e.name) }}
-{% endfor %}</code></pre>
+{% for e in items -%}
+- {{ status_badges[e._badge_key] }} {{ e.name }}{% if e.key and e.key != e.name %} ({{ e.key }}){% endif %}{% if e._elapsed_text %} · {{ e._elapsed_text }}{% endif %}{% if e._links_text %} · {{ e._links_text }}{% endif %}{% if e._result_text %}<br>💬 {{ e._result_text }}{% endif %}
+{% endfor -%}
 {% endif -%}
+{% endmacro -%}
+{{ section("in progress", "🔄", sections.running) -}}
+{{ section("failed",      "❌", sections.failed) -}}
+{{ section("failing",     "❌", sections.failing) -}}
+{{ section("flagged",     "⚠️", sections.flagged) -}}
+{{ section("successful",  "✅", sections.successful) -}}
+{% if repro_rows %}
+## 🔁 Reproduce
+{% for r in repro_rows %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}
+```
+{{ r.command }}
+```
+{% if r.description %}_{{ r.description }}_
+{% endif %}{% endfor %}
 {% endif -%}
+{% if fix_rows %}
+## 🛠️ Fix
+{% for r in fix_rows %}
+#### {% if r.severity_emoji %}{{ r.severity_emoji }} {% endif %}{% if r.kind %}{{ r.kind }}{% endif %}{% if r.task_keys %} ({{ r.task_keys|join(" · ") }}){% endif %}
+```
+{{ r.command }}
+```
+{% if r.description %}_{{ r.description }}_
+{% endif %}{% endfor %}
+{% endif -%}
+{% endif %}
+---
+
+<sub>Powered by [Aspect Build](https://aspect.build/) · [GitHub](https://github.com/aspect-build) · [X](https://twitter.com/aspect_build) · [LinkedIn](https://www.linkedin.com/company/aspect-dev/) · [YouTube](http://www.youtube.com/@aspectbuild)</sub>
 """
+
+# ─── Status → badge ───────────────────────────────────────────────────────────
+
+_LOG = feature_logger("GitHub status comments")
+
+# Direct mapping from the producer-supplied status to the badge key.
+# `warning` covers both live (non-fatal signal mid-flight) and terminal
+# (passed-with-warnings); `failing` is the live precursor of `failed`.
+# Aborted is a status of its own (no longer a separate flag).
+_STATUS_BADGE_KEY = {
+    "running": "running",
+    "warning": "warning",
+    "failing": "failed",
+    "passed": "passed",
+    "failed": "failed",
+    "aborted": "aborted",
+}
+
+def _badge_key_for(entry):
+    return _STATUS_BADGE_KEY.get(entry.get("status", "running"), "running")
+
+# ─── Cell formatters ──────────────────────────────────────────────────────────
+
+def _links_cell_text(entry):
+    """Build the link line for the row. Each link is `<icon> <label>`;
+    the link line sits on its own row in the list so there's
+    horizontal budget for full names:
+
+      ✨ Aspect          — Aspect Web UI (per-task BES sink view).
+                            Aspect's product surface leads since this
+                            is the most differentiated link of the
+                            four; GitHub-side links are universal,
+                            this one is the reason to be using us.
+      🔗 BES             — generic BES results link from
+                            `--bes_results_url` + Bazel's invocation_id.
+                            Independent of Aspect; both render when both
+                            point at distinct backends.
+      🐙 GitHub Actions  — workflow run / per-job page (the producer
+                            upgrades to the per-job URL when the
+                            GitHub Actions API resolves one).
+      ☑️ Check           — GitHub Status Check. Distinct icon from the
+                            GitHub Actions row so the two GitHub-side
+                            links are visually separable; the per-row
+                            status badge conveys the verdict, so this
+                            icon stays constant rather than mirroring
+                            severity.
+
+    Each is omitted when its URL isn't populated (graceful
+    degradation — see _publish for which URLs are sourced where).
+    """
+    parts = []
+
+    if entry.get("aspect_url"):
+        parts.append("✨ [Aspect](%s)" % entry["aspect_url"])
+
+    # Independent of the Aspect link — both render when set.
+    bes_url = entry.get("bes_url", "")
+    if bes_url and bes_url != entry.get("aspect_url", ""):
+        parts.append("🔗 [BES](%s)" % bes_url)
+
+    if entry.get("ci_run_url"):
+        parts.append("🐙 [GitHub Actions](%s)" % entry["ci_run_url"])
+
+    if entry.get("check_run_url"):
+        parts.append("☑️ [Check](%s)" % entry["check_run_url"])
+
+    return " · ".join(parts)
+
+def _elapsed_text(entry):
+    """Format the elapsed-time segment as `⏱ <duration>` for the row.
+    Returns "" when no elapsed has accrued yet."""
+    ms = entry.get("elapsed_ms", 0) or 0
+    if ms <= 0:
+        return ""
+    return "⏱ " + format_duration_ms(ms)
+
+def _result_cell_text(entry):
+    """Compose the row's trailing result text from the producer-authored
+    `progress.body` narrative.
+
+    Layout per status:
+      aborted                       — `aborted (reason)?`
+      failed (with failed_in_phase) — `failed in <phase> · <body>?`
+      failed (no phase prefix)      — `<body or "failed">`
+      running / warning / failing   — `<body or status>`
+      passed                        — `<body or status>`
+
+    Elapsed is rendered separately by `_elapsed_text` and placed earlier
+    in the row (right after task name); not appended here.
+
+    All kind-specific composition lives upstream in each producer's
+    `_body_text` helper; this function has zero kind awareness."""
+    status = entry.get("status", "running")
+    if status == "aborted":
+        text = "aborted"
+        if entry.get("abort_reason"):
+            text = text + " (%s)" % entry["abort_reason"]
+        return text
+    pg = entry.get("progress", {}) or {}
+    body = pg.get("body", "")
+
+    parts = []
+    if status == "failed":
+        failed_in = entry.get("failed_in_phase", "")
+        if failed_in:
+            parts.append("failed in %s" % failed_in)
+
+        # Drop "build failed" tail when phase prefix already says it.
+        if body and not (failed_in == "build" and body == "build failed"):
+            parts.append(body)
+        if not parts:
+            parts.append("failed")
+    else:  # running / warning / failing / passed
+        if body:
+            parts.append(body)
+        elif status == "running":
+            # No body yet — task hasn't reported a phase narrative.
+            # "Starting..." reads better than the bare "running" status.
+            parts.append("Starting...")
+        else:
+            parts.append(status)
+
+    return " · ".join(parts)
+
+# ─── Pre-render decoration + rollup ───────────────────────────────────────────
+
+def _prepare_for_render(entries):
+    """Return a list of entries decorated for the template, sorted
+    alphabetically by (job, name, key). The leading status badge on
+    each row carries the verdict; row position stays stable across
+    PATCHes so reviewers can return to a row by muscle memory.
+
+    Severity comes from `severity_for_status(entry["status"])` — a
+    pure status lookup, exposed on `entry["_severity"]` for templates
+    that want it.
+    """
+    for e in entries:
+        e["_severity"] = severity_for_status(e.get("status", "running"))
+        e["_badge_key"] = _badge_key_for(e)
+        e["_links_text"] = _links_cell_text(e)
+        e["_elapsed_text"] = _elapsed_text(e)
+        e["_result_text"] = _result_cell_text(e)
+    return sorted(entries, key = lambda e: (
+        e.get("job", ""),
+        e.get("name", ""),
+        e.get("key", ""),
+    ))
+
+def _bucket_entries(entries):
+    """Split entries into status sections for the rendered comment.
+
+    The five sections mirror how GitHub Actions organizes its check
+    runs: in-progress at top (action-cue: still happening), then
+    decided-bad (failed → fix now) before still-going-bad (failing →
+    will likely fail), then non-fatal flagged (warnings), and finally
+    successful at the bottom. Within each section rows stay
+    alphabetical by (job, name, key) so a row's vertical position
+    inside its bucket is stable across PATCHes — only the bucket
+    membership changes as a task transitions, not the per-row order.
+
+    Aborted is folded into `failed` rather than getting its own
+    section: the user-facing list is five buckets per the GitHub
+    Actions analogy, and aborted is a flavor of terminal failure.
+
+    `entries` should already be `_prepare_for_render`-d so the
+    decoration fields the template reads are populated.
+    """
+    running = []
+    failed = []
+    failing = []
+    flagged = []
+    successful = []
+    for e in entries:
+        status = e.get("status", "running")
+        if status == "running":
+            running.append(e)
+        elif status == "failed" or status == "aborted":
+            failed.append(e)
+        elif status == "failing":
+            failing.append(e)
+        elif status == "warning" or status == "warned":
+            # `warning` is the live non-fatal signal; `warned` is its
+            # terminal counterpart. Both surface in the flagged
+            # section so a passed-with-non-fatal task still gets a
+            # visible callout (rather than blending into the bottom
+            # ✅ successful list).
+            flagged.append(e)
+        elif status == "passed":
+            successful.append(e)
+        else:
+            # Unknown status — bucket as in-progress so it surfaces
+            # somewhere rather than vanishing.
+            running.append(e)
+    return {
+        "running": running,
+        "failed": failed,
+        "failing": failing,
+        "flagged": flagged,
+        "successful": successful,
+    }
 
 def _extract_zip(ctx, zip_path, dest_dir):
     """Extract a zip into dest_dir using bsdtar (already cached for zip_create)."""
@@ -73,13 +337,16 @@ def _extract_zip(ctx, zip_path, dest_dir):
     child = ctx.std.process.command(bin_path).args(["xf", zip_path, "-C", dest_dir]).stdout("piped").stderr("piped").spawn()
     return child.wait().code == 0
 
-def _now_iso(ctx):
-    """UTC ISO-8601 timestamp via `date -u`. Used so each PATCH visibly differs
-    even when the task list hasn't changed — confirms the loop is alive."""
-    result = ctx.std.process.command("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"]).stdout("piped").spawn().wait_with_output()
-    if result.status.code == 0:
-        return result.stdout.strip()
-    return ""
+def _earliest_start_ms(entries):
+    """Pick the smallest `start_time_ms` across entries — the moment
+    the first sibling task started, used as the body's headline
+    timestamp. Returns 0 if no entry carries one."""
+    best = 0
+    for e in entries:
+        s = e.get("start_time_ms", 0) or 0
+        if s > 0 and (best == 0 or s < best):
+            best = s
+    return best
 
 def _iso_in(ctx, minutes):
     """RFC 3339 UTC timestamp `minutes` from now via GNU `date -u -d "+N minutes"`.
@@ -105,33 +372,163 @@ def _ci_run_url(env):
         return ""
     return server + "/" + repository + "/actions/runs/" + run_id
 
-def _results_subset(results, reproducer_command):
-    """Slice `init_results()` down to the fields the comment renderer needs.
-
-    `reproducer_command` is the precomputed `aspect <task> <labels>` repro
-    string passed in by the caller — we don't mutate `results` in place
-    because the dict carried in bazel_runner's TaskUpdate record is frozen
-    on the final update.
-    """
+def _progress_dict(progress_styles):
+    """Serialize a ProgressStyles record to the dict shape that
+    survives the artifact-upload JSON round-trip. Reader-side
+    consumers see entry["progress"]["body"] / ["stream"]."""
+    if progress_styles == None:
+        return {"body": "", "stream": ""}
     return {
-        "passed_test_total": results.get("passed_test_total", 0),
-        "failed_test_total": results.get("failed_test_total", 0),
-        "flaky_test_total": results.get("flaky_test_total", 0),
-        "cached_test_total": results.get("cached_test_total", 0),
-        "executed_test_total": results.get("executed_test_total", 0),
-        "targets_total": results.get("targets_total", 0),
-        "reproducer_command": reproducer_command,
-        "aborted": results.get("aborted", False),
-        "abort_reason": results.get("abort_reason", ""),
+        "body": progress_styles.body or "",
+        "stream": progress_styles.stream or "",
     }
 
-def _render_body(ctx, marker, entries, updated_at, body_template, status_badges):
-    """Render the comment body via the (possibly user-overridden) Jinja2 template."""
+def _results_subset(
+        data,
+        elapsed_ms,
+        aspect_url,
+        bes_url,
+        check_run_url,
+        current_phase,
+        current_phase_elapsed_ms,
+        progress_styles,
+        failed_in_phase,
+        start_time_ms = 0):
+    """Slice `init_data()` + live state down to the fields the
+    comment renderer needs.
+
+    Kind-agnostic: every kind-specific count is composed at producer
+    time and shipped via `progress.body`. Repro/fix commands pass
+    through verbatim; the renderer dedupes at render time.
+
+    `data` is frozen on the final update so we copy out fields.
+    Live-state fields (phase, progress, failed_in_phase) come from
+    `_state` and outlive any single update.
+    """
+    bz = data.get("bazel", {})
+    return {
+        "elapsed_ms": elapsed_ms,
+        # Earliest moment the producer started — used at render time
+        # to pick the earliest start across all sibling tasks for the
+        # body's headline timestamp.
+        "start_time_ms": start_time_ms or 0,
+        "aspect_url": aspect_url or "",
+        "bes_url": bes_url or "",
+        "check_run_url": check_run_url or "",
+        # Live-state fields (running rows + failed-in-phase):
+        "current_phase": current_phase or "",
+        "current_phase_elapsed_ms": current_phase_elapsed_ms or 0,
+        "progress": _progress_dict(progress_styles),
+        "failed_in_phase": failed_in_phase or "",
+        # Producer-authored; `_collect_repro_fix_rows` dedupes across
+        # siblings into the "🔁 Reproduce" / "🛠️ Fix" sections.
+        "repro_commands": list(data.get("repro_commands", []) or []),
+        "fix_commands": list(data.get("fix_commands", []) or []),
+        # `status == "aborted"` carries the verdict; abort_reason is
+        # the human-readable rider (timeout, OOM, ctrl-c, …).
+        "abort_reason": bz.get("abort_reason", ""),
+    }
+
+# Severity rank per bucket, highest first. Drives both the per-row
+# emoji (max severity across the row's contributing tasks) and the
+# in-section row ordering (most-severe first).
+_BUCKET_SEVERITY_RANK = {
+    "failed": 3,
+    "failing": 3,
+    "flagged": 2,
+    "running": 1,
+    "successful": 0,
+}
+
+_RANK_EMOJI = {3: "❌", 2: "⚠️", 1: "🔄", 0: "✅"}
+
+def _collect_repro_fix_rows(sections):
+    """Walk every entry's `repro_commands` / `fix_commands` and return
+    `(repro_rows, fix_rows)` ready for the template, each row shaped
+    `{"kind", "command", "description", "task_keys": [...], "severity_emoji"}`.
+
+    Scope: repro = non-passing only (failed/failing/flagged); fix =
+    every task that contributed (so format/gazelle can always
+    advertise their fix even on green).
+
+    Dedup keys on `(kind, command, description)` so identical commands
+    from different kinds keep their own heading. `severity_emoji` is
+    the max across contributors. Rows are sorted most-severe first,
+    first-seen-order tiebreak.
+    """
+
+    # task_key → highest severity rank across buckets it appears in.
+    task_rank = {}
+    for bucket, rank in _BUCKET_SEVERITY_RANK.items():
+        for e in sections.get(bucket, []) or []:
+            tk = e.get("key", "") or e.get("name", "")
+            if tk:
+                task_rank[tk] = max(task_rank.get(tk, -1), rank)
+
+    def _gather(buckets, command_field):
+        entries = []
+        for bucket in buckets:
+            for e in sections.get(bucket, []) or []:
+                kind = e.get("name", "") or ""
+                task_key = e.get("key", "") or kind
+                for c in e.get(command_field, []) or []:
+                    command = c.get("command", "") or ""
+                    if not command:
+                        continue
+                    entries.append({
+                        "kind": kind,
+                        "task_key": task_key,
+                        "command": command,
+                        "description": c.get("description", "") or "",
+                    })
+        rows = dedup_and_attribute(entries)
+        for r in rows:
+            ranks = [task_rank.get(tk, 0) for tk in r["task_keys"]] or [0]
+            r["_rank"] = max(ranks)
+            r["severity_emoji"] = _RANK_EMOJI.get(r["_rank"], "")
+
+        # Stable sort: most-severe first, first-seen for the tiebreak.
+        return sorted(rows, key = lambda r: -r["_rank"])
+
+    repro_rows = _gather(("failed", "failing", "flagged"), "repro_commands")
+    fix_rows = _gather(("running", "failed", "failing", "flagged", "successful"), "fix_commands")
+    return (repro_rows, fix_rows)
+
+def _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections):
+    """Render the comment body via the (possibly user-overridden) Jinja2 template.
+
+    `entries` is expected to be the output of `_prepare_for_render` —
+    each entry is decorated with `_severity`, `_badge_key`,
+    `_links_text`, `_elapsed_text`, and `_result_text` so the template
+    stays a pure renderer.
+
+    `sections` is the `_bucket_entries` output: {running, failed,
+    failing, flagged, successful} → list[entry]. The default template
+    renders one `## N <label> tasks` section per non-empty bucket,
+    in that fixed order; a custom template can iterate them
+    differently or fall back to the flat `entries` list.
+
+    `started_at` is the formatted earliest start time across all
+    sibling tasks (`format_run_date(_earliest_start_ms(...))`). Pinned
+    to the start so the headline timestamp doesn't wobble across
+    PATCHes once the run is underway. Empty string until at least one
+    task has started.
+
+    `repro_rows` / `fix_rows` are computed from the per-entry
+    `repro_commands` / `fix_commands` lists via
+    `_collect_repro_fix_rows`, with dedup-and-attribute applied so a
+    command contributed by two tasks renders as one row with both
+    task keys.
+    """
+    repro_rows, fix_rows = _collect_repro_fix_rows(sections)
     body = ctx.template.jinja2(body_template, data = {
         "marker": marker,
         "entries": entries,
-        "updated_at": updated_at,
+        "started_at": started_at,
         "status_badges": status_badges,
+        "sections": sections,
+        "repro_rows": repro_rows,
+        "fix_rows": fix_rows,
     })
     if not body.endswith("\n"):
         body = body + "\n"
@@ -139,6 +536,10 @@ def _render_body(ctx, marker, entries, updated_at, body_template, status_badges)
 
 def _github_status_comments(ctx: FeatureContext):
     lifecycle = ctx.traits[TaskLifecycleTrait]
+
+    # The GHSC check-run feature populates html_url after its API
+    # call; empty until then.
+    checkrun_trait = ctx.traits[GitHubCheckRunTrait]
 
     mode = ctx.args.mode
     is_ci = bool(ctx.std.env.var("CI"))
@@ -149,6 +550,9 @@ def _github_status_comments(ctx: FeatureContext):
 
     # Hard gate: artifact upload uses the GitHub Actions Twirp API.
     if not ctx.std.env.var("GITHUB_ACTIONS"):
+        return
+
+    if github.bail_if_not_public_github(ctx.std, _LOG, "Skipping PR comment."):
         return
 
     pr, _ = github.detect_pr(ctx.std)
@@ -163,15 +567,14 @@ def _github_status_comments(ctx: FeatureContext):
     run_id = ctx.std.env.var("GITHUB_RUN_ID") or ""
     run_attempt = ctx.std.env.var("GITHUB_RUN_ATTEMPT") or "1"
     if not run_id:
-        print("GitHub status comments: missing GITHUB_RUN_ID; skipping.")
+        _LOG.info(ctx.std, "Missing GITHUB_RUN_ID; skipping.")
         return
 
     ci_run_url = _ci_run_url(ctx.std.env)
     min_poll_interval_seconds = ctx.args.min_poll_interval_seconds
     artifact_expires_minutes = ctx.args.artifact_expires_minutes
 
-    # Defensive `or {}` — args.custom(dict, default = {}) returns None at runtime
-    # rather than the declared default. Treat absent the same as empty.
+    # args.custom(dict, ...) hands us None at runtime, not the declared default.
     templates = ctx.args.templates or {}
     body_template = templates.get("body") or _DEFAULT_BODY_TEMPLATE
     status_badges = dict(_DEFAULT_STATUS_BADGES)
@@ -179,19 +582,43 @@ def _github_status_comments(ctx: FeatureContext):
 
     _state = {}
 
+    def _empty_results_subset():
+        """Default _results_subset for the brief window between
+        _task_started and the first BES update."""
+        return _results_subset(
+            init_data(),
+            0,  # elapsed_ms
+            "",  # aspect_url
+            "",  # bes_url
+            checkrun_trait.html_url,  # check_run_url
+            "",  # current_phase
+            0,  # current_phase_elapsed_ms
+            None,  # progress_styles
+            "",  # failed_in_phase
+        )
+
     def _own_payload():
         """Build our own task entry dict — what _publish_self writes to disk and
         also what gets folded into the rendered comment without going through a
         download round-trip."""
+
+        # Prefer the per-job URL when we have it — drops the reviewer
+        # straight on the failing job's logs.
+        link_url = _state.get("_ci_link_url") or ci_run_url
         payload = {
             "name": _state["_task_name"],
             "key": _state["_task_key"],
             "job": job_name,
             "run_attempt": run_attempt,
             "status": _state.get("_status", "running"),
-            "ci_run_url": ci_run_url,
+            "ci_run_url": link_url,
         }
-        payload.update(_state.get("_results_subset") or _results_subset(init_results(), ""))
+        payload.update(_state.get("_results_subset") or _empty_results_subset())
+
+        # Re-read each publish — the check-run feature populates
+        # html_url asynchronously, after the first bazel_results update.
+        if checkrun_trait.html_url:
+            payload["check_run_url"] = checkrun_trait.html_url
         return payload
 
     def _publish_self(ctx, token):
@@ -211,14 +638,12 @@ def _github_status_comments(ctx: FeatureContext):
 
         github.delete_artifact(ctx, _state["_my_artifact_name"])
 
-        # Server-side TTL — GitHub auto-deletes the artifact at the wall-clock
-        # time we pass. Fresh per-cycle so a still-polling task keeps its
-        # artifact alive while inactive ones expire on their own. No client-side
-        # cleanup needed; no race window across concurrent jobs.
+        # Server-side TTL — fresh per-cycle so a still-polling task
+        # keeps its artifact alive while inactive ones expire on their own.
         expires_at = _iso_in(ctx, artifact_expires_minutes)
         up = github.upload_artifact(ctx, payload_path, _state["_my_artifact_name"], expires_at = expires_at)
         if not up.get("success"):
-            print("GitHub status comments: upload failed: %s" % up.get("errors", []))
+            _LOG.warn(ctx.std, "Upload failed: %s" % up.get("errors", []))
             return False
         _state["_last_payload_str"] = payload_str
         return True
@@ -233,7 +658,7 @@ def _github_status_comments(ctx: FeatureContext):
         """
         listed = github.actions.list_run_artifacts(ctx, token, owner, repo, run_id, name_prefix = _ARTIFACT_PREFIX)
         if not listed.get("success"):
-            print("GitHub status comments: list artifacts failed: %s" % listed.get("error", "unknown"))
+            _LOG.warn(ctx.std, "List artifacts failed: %s" % listed.get("error", "unknown"))
             return None
 
         cache = _state.setdefault("_entry_cache", {})  # artifact_id (str) -> entry dict
@@ -275,29 +700,25 @@ def _github_status_comments(ctx: FeatureContext):
             cache[aid] = entry
             seen[aname] = entry
 
-        # GC cache entries whose ids no longer appear in the listing (their
-        # producer replaced or deleted the artifact). Keeps the cache from
-        # growing unbounded across long-running tasks.
+        # GC cache entries whose artifacts were replaced or deleted.
         for aid in list(cache.keys()):
             if aid not in current_ids:
                 cache.pop(aid)
 
-        return sorted(
-            seen.values(),
-            key = lambda e: (e.get("job", ""), e.get("name", ""), e.get("key", "")),
-        )
+        # `_prepare_for_render` decorates and sorts; just return raw.
+        return list(seen.values())
 
     def _upsert_comment(ctx, token, body):
         """PATCH the existing comment if known/findable, else POST and dedupe duplicates."""
         if "_comment_id" in _state:
             res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
             if not res.get("success"):
-                print("GitHub status comments: update failed: %s" % res.get("error", "unknown"))
+                _LOG.warn(ctx.std, "Update failed: %s" % res.get("error", "unknown"))
             return
 
         listed = github.issues.list_comments(ctx, token, owner, repo, pr_number)
         if not listed.get("success"):
-            print("GitHub status comments: list comments failed: %s" % listed.get("error", "unknown"))
+            _LOG.warn(ctx.std, "List comments failed: %s" % listed.get("error", "unknown"))
             return
         for c in listed["comments"]:
             if marker in (c.get("body") or ""):
@@ -307,12 +728,12 @@ def _github_status_comments(ctx: FeatureContext):
         if "_comment_id" in _state:
             res = github.issues.update_comment(ctx, token, owner, repo, _state["_comment_id"], body)
             if not res.get("success"):
-                print("GitHub status comments: update failed: %s" % res.get("error", "unknown"))
+                _LOG.warn(ctx.std, "Update failed: %s" % res.get("error", "unknown"))
             return
 
         res = github.issues.create_comment(ctx, token, owner, repo, pr_number, body)
         if not res.get("success"):
-            print("GitHub status comments: create failed: %s" % res.get("error", "unknown"))
+            _LOG.warn(ctx.std, "Create failed: %s" % res.get("error", "unknown"))
             return
         _state["_comment_id"] = res["comment_id"]
 
@@ -336,10 +757,26 @@ def _github_status_comments(ctx: FeatureContext):
             return
         if not _publish_self(ctx, token):
             return
-        entries = _collect_sibling_entries(ctx, token)
-        if entries == None:
+        raw_entries = _collect_sibling_entries(ctx, token)
+        if raw_entries == None:
             return
-        body = _render_body(ctx, marker, entries, _now_iso(ctx), body_template, status_badges)
+        prepared = _prepare_for_render(raw_entries)
+        sections = _bucket_entries(prepared)
+
+        # Earliest start across all sibling tasks — formatted as the
+        # body's headline timestamp. Pinned to the run's wall-clock
+        # start so it doesn't wobble across PATCHes.
+        earliest_ms = _earliest_start_ms(prepared)
+        started_at = format_run_date(ctx, earliest_ms)
+        body = _render_body(
+            ctx,
+            marker,
+            prepared,
+            started_at,
+            body_template,
+            status_badges,
+            sections,
+        )
         _upsert_comment(ctx, token, body)
 
     def _task_started(ctx, subject):
@@ -359,28 +796,101 @@ def _github_status_comments(ctx: FeatureContext):
             _reason = auth_reason,
         )
         if not token:
-            print("GitHub status comments: authentication failed for %s/%s — %s" % (
+            _LOG.warn(ctx.std, "Authentication failed for %s/%s — %s" % (
                 owner,
                 repo,
                 auth_reason.get("reason", "unknown"),
             ))
             return
         _state["_github_token"] = token
+
+        # Upgrade the GHA workflow-run URL to the per-job URL via the
+        # GitHub Actions API (`/repos/.../actions/runs/{id}/jobs`). The
+        # job URL drops a reviewer directly on the failing job's logs
+        # instead of the workflow-run summary. Same path
+        # `feature/github_status_checks.axl::_create_check_run` uses.
+        # Falls back silently to `_ci_run_url` if the resolution fails
+        # (e.g. the App lacks `actions:read`).
+        if run_id:
+            job_url = github.resolve_current_job_url(ctx, token, owner, repo, run_id)
+            if job_url:
+                _state["_ci_link_url"] = job_url
+
         _publish(ctx)
 
     def _task_update(ctx, update):
         _state["_status"] = update.status
 
-        # Capture BES results so the next render can show test counts and failed
-        # labels. Other update kinds are no-ops here — status stays current but
-        # the results subset doesn't change.
-        if update.kind == "bazel_results":
-            results = update.data.get("results") or init_results()
-            repro_cmd, _ = compute_reproducer_command(results, _state["_task_name"])
-            _state["_results_subset"] = _results_subset(results, repro_cmd)
+        # Latch the producer-supplied progress record. Mirrors the BK /
+        # GHSC body trick of overwriting only when the producer set a
+        # value, so a quiet-tick TaskUpdate (empty record) doesn't wipe
+        # the prior in-flight text.
+        if update.progress.body or update.progress.stream:
+            _state["_progress_styles"] = update.progress
 
-        final = update.status in ("passed", "failed")
-        if not final:
+        # Latch the phase we were in when the task first transitioned
+        # to failing/failed. ctx.task.current_phase() auto-clears on
+        # terminal failure, so we have to capture it before the
+        # transition completes.
+        if update.status in ("failing", "failed") and not _state.get("_failed_in_phase"):
+            cur = ctx.task.current_phase()
+            _state["_failed_in_phase"] = cur.name if cur else ""
+
+        # Capture data on every update kind we know how to render —
+        # not just bazel_results. The lint/format/gazelle/delivery
+        # results dicts all extend `init_data()` (they layer their
+        # kind-specific keys onto the same `data["bazel"]` skeleton),
+        # so `resolve_aspect_url` and `_results_subset` work
+        # uniformly. Without this, the Aspect Web UI link is missing
+        # from format/lint/gazelle/delivery rows in the PR comment
+        # because the subset-builder never runs for those kinds.
+        if update.kind in (
+            "bazel_results",
+            "lint_results",
+            "format_results",
+            "gazelle_results",
+            "delivery_results",
+        ):
+            data = update.data if update.data else init_data()
+
+            # Aspect Web UI URL — same resolver every other surface uses.
+            aspect_url = resolve_aspect_url(
+                {"results_base_url": workflows_results_url(ctx.std)},
+                data,
+            )
+
+            # Generic BES results link from `--bes_results_url` + the
+            # Bazel-side invocation_id captured from the BES stream.
+            bes_url = render_bes_url(data)
+
+            cur = ctx.task.current_phase()
+            _state["_results_subset"] = _results_subset(
+                data,
+                ctx.task.elapsed_ms,
+                aspect_url,
+                bes_url,
+                checkrun_trait.html_url,
+                cur.name if cur else "",
+                cur.duration_ms if cur else 0,
+                _state.get("_progress_styles"),
+                _state.get("_failed_in_phase", ""),
+                start_time_ms = data.get("start_time_ms", 0) or 0,
+            )
+
+        # Final emits bypass the throttle so the terminal `body`
+        # ("Lint complete", "Bazel test failed (3 tests failed)", …)
+        # always lands on the artifact and the rendered PR comment
+        # picks it up — without this gate, a final emit that arrives
+        # within the poll-interval window after the prior phase's
+        # publish would be silently dropped, leaving the PR comment
+        # stuck on a stale phase progress line.
+        #
+        # Use `update.final` rather than `update.status in (passed, failed)`
+        # — the latter misses `warning` and `aborted`, which are also
+        # terminal statuses (e.g. a lint run with warning-only findings
+        # or a bazel-aborted task). Both arrive with `final = True`
+        # and need to bypass the throttle.
+        if not update.final:
             now = monotonic()
             if now - _state.get("_last_publish_s", 0.0) < min_poll_interval_seconds:
                 return
@@ -389,6 +899,59 @@ def _github_status_comments(ctx: FeatureContext):
 
     lifecycle.task_started.append(_task_started)
     lifecycle.task_update.append(_task_update)
+
+# ─── Public test hooks ────────────────────────────────────────────────────────
+#
+# Re-exports of internals so `github_status_comments_test.axl` can drive
+# the renderer without standing up the whole feature machinery. Same
+# pattern as `buildkite_annotations.axl`'s `format_body` / `severity_for`
+# public test hooks.
+
+def prepare_for_render(entries):
+    """Public test hook; see `_prepare_for_render`."""
+    return _prepare_for_render(entries)
+
+def bucket_entries(entries):
+    """Public test hook; see `_bucket_entries`."""
+    return _bucket_entries(entries)
+
+def render_body(ctx, marker, entries, started_at, body_template, status_badges, sections):
+    """Public test hook; see `_render_body`."""
+    return _render_body(ctx, marker, entries, started_at, body_template, status_badges, sections)
+
+def results_subset(
+        data,
+        elapsed_ms,
+        aspect_url = "",
+        bes_url = "",
+        check_run_url = "",
+        current_phase = "",
+        current_phase_elapsed_ms = 0,
+        progress_styles = None,
+        failed_in_phase = "",
+        start_time_ms = 0):
+    """Public test hook; see `_results_subset`. Defaults match an empty
+    artifact payload so test fixtures can omit the live-state fields.
+    Producer-authored `repro_commands` / `fix_commands` lists on `data`
+    are passed through verbatim — fixtures should populate them via
+    the standard `data["repro_commands"]` / `data["fix_commands"]`
+    fields, not a separate parameter."""
+    return _results_subset(
+        data,
+        elapsed_ms,
+        aspect_url,
+        bes_url,
+        check_run_url,
+        current_phase,
+        current_phase_elapsed_ms,
+        progress_styles,
+        failed_in_phase,
+        start_time_ms = start_time_ms,
+    )
+
+DEFAULT_BODY_TEMPLATE = _DEFAULT_BODY_TEMPLATE
+DEFAULT_STATUS_BADGES = _DEFAULT_STATUS_BADGES
+MARKER_FMT = _MARKER_FMT
 
 GithubStatusComments = feature(
     implementation = _github_status_comments,
@@ -418,17 +981,24 @@ GithubStatusComments = feature(
             dict,
             default = {},
             description = "Per-section Jinja2 template overrides. Keys: 'body'. " +
-                          "Vars available to 'body': marker, updated_at, status_badges, " +
-                          "entries (list of {name, key, job, run_attempt, status, ci_run_url, " +
-                          "reproducer_command, passed_test_total, failed_test_total, flaky_test_total, " +
-                          "cached_test_total, executed_test_total, targets_total, aborted, abort_reason}). " +
+                          "Vars available to 'body': marker, started_at, status_badges, rollup " +
+                          "(dict with error/warning/running/passed/aborted counts), entries " +
+                          "(alphabetical by (job, name, key); each decorated with _severity, " +
+                          "_badge_key, _links_text, _elapsed_text, _result_text plus " +
+                          "the raw {name, key, job, run_attempt, status, kind, elapsed_ms, " +
+                          "ci_run_url, aspect_url, check_run_url, current_phase, progress, " +
+                          "failed_in_phase, repro_commands, fix_commands, …}), and `repro_rows` / " +
+                          "`fix_rows` (deduped across siblings via dedup_and_attribute). " +
                           "Empty dict → built-in default. config.axl only.",
         ),
         "status_badges": args.custom(
             dict,
             default = {},
-            description = "Override status -> badge label mapping merged over defaults " +
-                          "(running='🟡 running', passed='✅ passed', failed='❌ failed'). " +
+            description = "Override badge_key -> label mapping merged over defaults " +
+                          "(failed='❌ failed', warning='⚠️ warning', running='🔄 running', " +
+                          "passed='✅ passed', aborted='🔥 aborted'). The badge_key is " +
+                          "precomputed in AXL from severity + status + aborted, so the " +
+                          "override is keyed by badge_key not raw lifecycle status. " +
                           "config.axl only.",
         ),
     },

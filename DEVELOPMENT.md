@@ -11,6 +11,24 @@ This includes the most recent release of the `aspect` command.
 - `aspect-launcher` fetches and hands off control the version of the Aspect CLI binary configured in a repository (what is actually installed as `aspect` on the PATH)
 - `axl-runtime` AXL engine for extending the CLI
 
+## Built-in tasks (AXL)
+
+The `build` / `test` / `lint` / `format` / `gazelle` / `delivery` tasks
+that ship with `aspect-cli` live as AXL sources under
+[`crates/aspect-cli/src/builtins/aspect/`](crates/aspect-cli/src/builtins/aspect/).
+Two docs live alongside the sources:
+
+- [**`crates/aspect-cli/src/builtins/aspect/README.md`**](crates/aspect-cli/src/builtins/aspect/README.md)
+  — user-facing reference: per-task flag surface, what each task
+  produces on status surfaces, cross-cutting features
+  (`Workflows` / `GithubStatusChecks` / `GithubStatusComments` /
+  `GithubLintComments` / `BuildkiteAnnotations` / `ArtifactUpload` /
+  `Telemetry`), and the per-kind result libraries.
+- [**`crates/aspect-cli/src/builtins/aspect/DEVELOPMENT.md`**](crates/aspect-cli/src/builtins/aspect/DEVELOPMENT.md)
+  — contributor guide: per-task lifecycle, trait surface, BES streaming
+  and the broadcaster race, results-dict shape, status-surface
+  rendering, and how to add a new task or task kind.
+
 ## Syntax highlight .axl files as Starlark
 
 ### Visual Studio Code

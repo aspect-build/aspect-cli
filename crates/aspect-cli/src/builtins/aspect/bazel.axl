@@ -39,3 +39,29 @@ def default_retry(code: int) -> bool:
         a queued command failing because the server is crashing.
     """
     return code == exit_codes.BLAZE_INTERNAL_ERROR or code == exit_codes.LOCAL_ENVIRONMENTAL_ERROR
+
+BazelTrait = trait(
+    # Declarative data — composable, zero-cost reads
+    extra_flags = attr(list[str], default = [], description = "Additional Bazel flags appended to every build/test invocation"),
+    extra_startup_flags = attr(list[str], default = [], description = "Additional Bazel startup flags prepended before the command"),
+    build_event_sinks = attr(list[bazel.build.BuildEventSink], default = [], description = "Build Event Protocol sinks to stream events to during the build"),
+    execution_log_sinks = attr(list[bazel.execution_log.ExecLogSink], default = [], description = "Execution log sinks to receive the Bazel execution log after the build"),
+
+    # Optional transforms — only called when set
+    flags = attr(typing.Callable[[list[str]], list[str]] | None, default = None, description = "Transform function called with the full flag list; return value replaces the list"),
+    startup_flags = attr(typing.Callable[[list[str]], list[str]] | None, default = None, description = "Transform function called with the full startup flag list; return value replaces the list"),
+
+    # Task-time flag contributors — hooks that receive TaskContext and return
+    # additional flags to append to the invocation. Fires late enough in the
+    # task lifecycle (after the task is known but before Bazel is spawned) that
+    # features can inject ctx.task-dependent flags (e.g. --build_metadata=
+    # ASPECT_TASK_NAME=...). Invoked by bazel_runner.axl for build/test and by
+    # each task's impl for lint/delivery.
+    task_flags = attr(list[typing.Callable[[TaskContext], list[str]]], default = [], description = "Hooks returning additional flags; called with TaskContext at invocation time"),
+
+    # Lifecycle hooks — lists of callables; callers close over their own state
+    build_start = attr(list[typing.Callable[[TaskContext], None]], default = [], description = "Hooks called once before the Bazel invocation starts"),
+    build_event = attr(list[typing.Callable[[TaskContext, dict], None]], default = [], description = "Hooks called for each Build Event Protocol event received during the build"),
+    build_retry = attr(typing.Callable[[int], bool], default = default_retry, description = "Predicate called with the exit code; return True to retry the build"),
+    build_end = attr(list[typing.Callable[[TaskContext, int], None]], default = [], description = "Hooks called once after the Bazel invocation completes, with the exit code"),
+)

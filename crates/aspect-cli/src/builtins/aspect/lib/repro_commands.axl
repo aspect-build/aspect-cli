@@ -1,0 +1,257 @@
+"""Generic repro & fix command framework.
+
+Every built-in task contributes one or more "command suggestions" to its
+data dict at terminal-emit time:
+
+    data["repro_commands"] = [
+        {"command": "aspect lint --strategy=hold-the-line --aspect=... -- //...", "description": ""},
+        ...
+    ]
+    data["fix_commands"] = [
+        {"command": "aspect lint --fix --strategy=hold-the-line --aspect=... -- //...", "description": ""},
+        ...
+    ]
+
+Each entry is a `{command, description}` dict — the command is the
+shell-ready line, the description is an optional short label that
+disambiguates multiple commands of the same type from the same task
+(e.g., "Update snapshot 1" vs "Update snapshot 2"). The description
+stays empty when there's only one of its type per task.
+
+`build_aspect_command(subcommand, flags, targets)` is the canonical
+way producers compose these strings — handling flag normalization,
+target joining, the `--` separator before targets, and length-bounded
+truncation when the target list is large.
+
+`dedup_and_attribute(entries)` is what status surfaces use to merge
+the per-task lists into a single rolled-up view across tasks: two
+contributions of the same `(command, description)` collapse into one
+row that lists every contributing task_key.
+
+Both helpers are pure — no I/O, no ctx access.
+"""
+
+# Soft cap on a composed command's length; targets past it collapse to
+# ` … +N more` so the output stays copy-paste-able.
+_DEFAULT_MAX_CHARS = 1000
+
+# Threshold above which the command wraps onto multiple lines —
+# kept readable in the GHSC sidebar which doesn't auto-wrap.
+_DEFAULT_WRAP_AT = 100
+
+# Bare bazel labels parse fine, but `git diff --name-only` paths can
+# contain spaces / parens / etc.
+_SHELL_META = " \t\n\"'\\`$&|;<>()*?[]{}#!~"
+
+def _shell_quote(s):
+    """Single-quote `s` for POSIX shells when it carries any shell-
+    meta character; otherwise return it untouched so bazel labels
+    stay readable. Inner single quotes are spliced via `'\\''`."""
+    if not s:
+        return "''"
+    needs_quote = False
+    for c in s.elems():
+        if c in _SHELL_META:
+            needs_quote = True
+            break
+    if not needs_quote:
+        return s
+    return "'" + s.replace("'", "'\\''") + "'"
+
+def task_cli_path(task):
+    """Return the task's CLI invocation path — `<group...> <name>`.
+
+    Pass `ctx.task` (or anything with `.group: list[str]` and `.name:
+    str`) and feed the result to `build_aspect_command`.
+    """
+    return " ".join(list(task.group) + [task.name])
+
+def build_aspect_command(subcommand, flags, targets, max_chars = _DEFAULT_MAX_CHARS, wrap_at = _DEFAULT_WRAP_AT):
+    """Compose `aspect <subcommand> <flags...> [-- <targets>]`.
+
+    Args:
+        subcommand:  the aspect CLI subcommand path — either a bare
+                     task name (`"test"`, `"lint"`, …) or the
+                     fully-qualified group path (`"utils frontend
+                     format"`). Use `task_cli_path(ctx.task)` to
+                     derive it from a task value.
+        flags:       list of flag specs. Each entry is one of:
+                       - `"--name"` — bare flag, no value
+                       - `("--name", "value")` — single value
+                       - `("--name", ["a", "b"])` — repeated; emits
+                         `--name=a --name=b` in order
+                     Order is preserved end-to-end. Pass an empty list
+                     when there are no flags.
+        targets:     list of target patterns. Joined after a leading
+                     `--` separator. Truncated entry-wise (whole
+                     labels, never mid-label) to keep the total
+                     length within `max_chars`; when truncation
+                     kicks in, ` … +N more` is appended so the user
+                     can see the command is incomplete.
+                     Pass an empty list for commands that don't take
+                     positional targets.
+        max_chars:   soft length cap. When the head + flags already
+                     exceed it, the head still renders and `targets`
+                     collapses to `… +N more`.
+        wrap_at:     soft width target. When the composed single-line
+                     command exceeds this, switch to a multi-line
+                     form: head + flags + ` -- \\` on the first line,
+                     one indented target per line, ` \\` continuation
+                     on every line but the last. The status check
+                     sidebar on GitHub doesn't auto-wrap, so a long
+                     line stretches the whole panel.
+
+    Returns:
+        The composed command string. Never None / empty when at least
+        `subcommand` is provided.
+    """
+    head = "aspect " + subcommand
+    flag_parts = []
+    for f in flags:
+        if type(f) == "string":
+            flag_parts.append(f)
+            continue
+        name = f[0]
+        value = f[1] if len(f) > 1 else None
+        if value == None:
+            flag_parts.append(name)
+        elif type(value) == "list":
+            for v in value:
+                flag_parts.append("%s=%s" % (name, v))
+        else:
+            flag_parts.append("%s=%s" % (name, value))
+
+    head_part = " ".join([head] + flag_parts)
+
+    if not targets:
+        if len(head_part) <= wrap_at:
+            return head_part
+
+        # Flag list alone exceeds wrap_at — wrap each flag onto its
+        # own line. Common on lint with many `--aspect=` entries.
+        return _join_continued([head] + ["  " + fp for fp in flag_parts])
+
+    separator = " -- "
+    used = len(head_part) + len(separator)
+    included = []
+    omitted = 0
+    for t in targets:
+        quoted = _shell_quote(t)
+        needed = (1 if included else 0) + len(quoted)
+        if used + needed > max_chars:
+            omitted = len(targets) - len(included)
+            break
+        included.append(quoted)
+        used += needed
+
+    if not included:
+        return head_part + separator + "… +%d more" % omitted
+
+    single_line = head_part + separator + " ".join(included)
+    if omitted > 0:
+        single_line += " … +%d more" % omitted
+    if len(single_line) <= wrap_at:
+        return single_line
+
+    # Multi-line. Wrap flags individually too when head + flags
+    # alone overflow. `# … +N more` is a shell comment so the
+    # wrapped block stays copy-paste-runnable.
+    flag_overflow = len(head_part) + len(" -- \\") > wrap_at
+    lines = []
+    if flag_overflow:
+        lines.append(head)
+        for fp in flag_parts:
+            lines.append("  " + fp)
+        lines.append("  --")
+    else:
+        lines.append(head_part + " --")
+    for t in included:
+        lines.append("  " + t)
+    if omitted > 0:
+        lines.append("  # … +%d more" % omitted)
+    return _join_continued(lines)
+
+def _join_continued(lines):
+    """Join multi-line shell continuations: all but the last line gain
+    a trailing ` \\`, then `\n` between lines."""
+    return " \\\n".join(lines)
+
+def dedup_and_attribute(entries):
+    """Collapse `{kind, task_key, command, description}` entries across tasks.
+
+    Two entries dedup when `(kind, command, description)` matches
+    exactly. Commands differing only by target subset stay separate;
+    different task kinds (build vs test, lint vs format, …) also stay
+    separate even when the literal command is the same. Output
+    preserves first-seen order for both rows and their `task_keys`.
+
+    Returns one `{"kind", "command", "description", "task_keys"}` dict
+    per unique `(kind, command, description)` triple. `kind` is the
+    empty string when no entry provided one.
+    """
+    by_key = {}
+    order = []
+    for e in entries:
+        command = e.get("command", "") or ""
+        description = e.get("description", "") or ""
+        kind = e.get("kind", "") or ""
+        task_key = e.get("task_key", "") or ""
+        if not command:
+            continue
+        k = (kind, command, description)
+        if k not in by_key:
+            by_key[k] = {
+                "kind": kind,
+                "command": command,
+                "description": description,
+                "task_keys": [],
+                "_seen": {},
+            }
+            order.append(k)
+        slot = by_key[k]
+        if task_key and task_key not in slot["_seen"]:
+            slot["_seen"][task_key] = True
+            slot["task_keys"].append(task_key)
+
+    out = []
+    for k in order:
+        slot = by_key[k]
+        out.append({
+            "kind": slot["kind"],
+            "command": slot["command"],
+            "description": slot["description"],
+            "task_keys": slot["task_keys"],
+        })
+    return out
+
+def patch_download_cmd(patch_url, strip = 1):
+    """Shell one-liner that downloads + applies a patch artifact, or
+    "" when the host isn't one we know how to fetch unauthenticated —
+    the caller drops the disclosure block in that case.
+
+    BK URLs are public during retention, so `curl` works directly.
+    GHA URLs are web-UI links that 404 under `curl`; route through
+    `gh api` (user's `gh auth` token) and pipe through `unzip -p`.
+
+    `strip` is the `-p` for `git apply`. Format: `-p1`. Gazelle: `-p0`.
+    """
+    if not patch_url:
+        return ""
+    apply_cmd = "git apply -p%s" % str(strip)
+    if patch_url.startswith("https://buildkite.com/"):
+        return "curl -fsSL \\\n  '%s' \\\n  | %s" % (patch_url, apply_cmd)
+
+    # GHA: extract owner/repo/artifact_id from
+    # `{host}/{owner}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}`.
+    if "/actions/runs/" in patch_url and "/artifacts/" in patch_url:
+        without_scheme = patch_url.split("://", 1)[-1] if "://" in patch_url else patch_url
+        parts = without_scheme.split("/")
+        if (len(parts) >= 8 and
+            parts[3] == "actions" and parts[4] == "runs" and parts[6] == "artifacts"):
+            owner = parts[1]
+            repo = parts[2]
+            artifact_id = parts[7]
+            return ("gh api repos/%s/%s/actions/artifacts/%s/zip > /tmp/aspect-patch.zip \\\n" +
+                    "  && unzip -p /tmp/aspect-patch.zip \\\n" +
+                    "  | %s") % (owner, repo, artifact_id, apply_cmd)
+    return ""
