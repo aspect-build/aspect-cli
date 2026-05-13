@@ -125,16 +125,32 @@ def _do_request_once(ctx, method, url, token, payload = None):
         return (False, response.status, "non-JSON response (status %d): %s" % (response.status, snippet))
     return (success, response.status, parsed)
 
-def _do_request(ctx, method, url, token, payload = None):
-    """`_do_request_once` wrapped in `_retry_http` — retries the call
-    on transient failures (transport errors, 5xx, 429) so a single
-    network flake doesn't surface as a feature-handler error.
+# HTTP methods that are idempotent per RFC 7231 — safe to retry
+# because re-executing them produces the same server-side effect.
+# Retrying POST is unsafe: a transient transport failure AFTER the
+# server has processed the first request would create a duplicate
+# resource on retry (extra check-runs, duplicate PR comments,
+# multiple reviews, etc.). Callers that POST and want retry need to
+# implement their own idempotency strategy (server-side dedup key,
+# read-after-write check, etc.).
+_IDEMPOTENT_METHODS = ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
-    All callers (`check_runs.update`, `issues.list_comments`,
-    `pulls.list_review_comments`, etc.) receive the same
-    `(success, status, body)` tuple shape as before.
+def _do_request(ctx, method, url, token, payload = None):
+    """`_do_request_once` with retry gated on HTTP idempotency.
+
+    GET / PUT / PATCH / DELETE retry on transient failures (transport
+    errors, 5xx, 429) via `_retry_http`. POST runs once — retrying it
+    after the server may have already accepted the first request
+    risks duplicate resources, which is a strictly worse failure mode
+    than the original error. Callers that need retry on POST should
+    use server-side idempotency keys or check-then-write patterns.
+
+    All callers receive the same `(success, status, body)` tuple
+    shape as before.
     """
-    return _retry_http(lambda: _do_request_once(ctx, method, url, token, payload))
+    if method in _IDEMPOTENT_METHODS:
+        return _retry_http(lambda: _do_request_once(ctx, method, url, token, payload))
+    return _do_request_once(ctx, method, url, token, payload)
 
 # Authentication
 
@@ -1293,13 +1309,31 @@ def _github_twirp_once(ctx, url, headers, payload):
         body = None if parsed == _PARSE_FAILED else parsed
     return (success, response.status, body)
 
+# Twirp methods that are safe to retry. Each entry is an
+# ArtifactService operation whose semantics make re-execution
+# idempotent:
+#   DeleteArtifact — DELETE-shaped; second call is a no-op or 4xx.
+# CreateArtifact and FinalizeArtifact are deliberately excluded
+# because each is non-idempotent (they create / transition server
+# state and a retry after a transient error would either duplicate
+# the resource or surface a confusing "already finalized" 4xx that
+# masks the original network flake).
+_TWIRP_IDEMPOTENT_METHODS = ["DeleteArtifact"]
+
 def _github_twirp(ctx, method, payload):
     """Make a Twirp RPC call to the GitHub Actions artifact service.
 
-    Retries on transient failures (transport errors, 5xx, 429) via
-    `_retry_http`. Returns `(ok, body_or_None, error_message_or_None)`
-    — the shape the existing `_upload_artifact` / `_delete_artifact`
-    callers already consume.
+    Retries on transient failures (transport errors, 5xx, 429) ONLY
+    for idempotent operations listed in `_TWIRP_IDEMPOTENT_METHODS`.
+    Non-idempotent operations (`CreateArtifact`, `FinalizeArtifact`)
+    run once — a transient transport error after the server has
+    processed the first request would create a duplicate or
+    half-finalized artifact on retry, which is strictly worse than
+    the original error.
+
+    Returns `(ok, body_or_None, error_message_or_None)` — the shape
+    the existing `_upload_artifact` / `_delete_artifact` callers
+    already consume.
     """
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
@@ -1319,13 +1353,16 @@ def _github_twirp(ctx, method, payload):
         "Content-Type": "application/json",
     }
 
-    success, status, body_or_err = _retry_http(
-        lambda: _github_twirp_once(ctx, url, headers, payload),
-    )
+    fn = lambda: _github_twirp_once(ctx, url, headers, payload)
+    if method in _TWIRP_IDEMPOTENT_METHODS:
+        success, status, body_or_err = _retry_http(fn)
+    else:
+        success, status, body_or_err = fn()
+
     if not success:
-        # `_retry_http` returns the final (failed) attempt unchanged.
-        # Surface the failure as `err` text so callers see why instead
-        # of silently swallowing the result.
+        # `_retry_http` (or the single attempt) returns the final
+        # failed result unchanged. Surface as `err` text so callers
+        # see why instead of silently swallowing it.
         if status == 0:
             err = body_or_err if type(body_or_err) == "string" else "transport error"
         else:
