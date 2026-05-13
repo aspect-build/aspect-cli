@@ -555,28 +555,34 @@ def _parse_local_diff_output(output):
                 files.pop()
                 current_file = None
         elif line.startswith("@@ ") and current_file != None:
+            # Parse positionally: the trailing section heading is free-form
+            # text that may itself contain `+`/`-` tokens, so iterating
+            # every space-split part would misparse `@@ -10,3 +10,3 @@ + heading`.
             parts = line.split(" ")
-            for part in parts:
-                if part.startswith("-"):
-                    minus = part.removeprefix("-")
-                    if "," in minus:
-                        old_count = int(minus.split(",")[1])
-                    else:
-                        old_count = 1
-                    current_file["deletions"] += old_count
-                elif part.startswith("+") and part != "+++":
-                    plus = part.removeprefix("+")
-                    if "," in plus:
-                        chunks = plus.split(",")
-                        start = int(chunks[0])
-                        count = int(chunks[1])
-                    else:
-                        start = int(plus)
-                        count = 1
-                    current_file["additions"] += count
-                    if count > 0:
-                        for i in range(count):
-                            current_file["lines"].append(start - 1 + i)
+            if len(parts) < 3:
+                continue
+            minus_part = parts[1]
+            plus_part = parts[2]
+            if minus_part.startswith("-") and minus_part != "-":
+                minus = minus_part.removeprefix("-")
+                if "," in minus:
+                    old_count = int(minus.split(",")[1])
+                else:
+                    old_count = 1
+                current_file["deletions"] += old_count
+            if plus_part.startswith("+") and plus_part not in ("+", "+++"):
+                plus = plus_part.removeprefix("+")
+                if "," in plus:
+                    chunks = plus.split(",")
+                    start = int(chunks[0])
+                    count = int(chunks[1])
+                else:
+                    start = int(plus)
+                    count = 1
+                current_file["additions"] += count
+                if count > 0:
+                    for i in range(count):
+                        current_file["lines"].append(start - 1 + i)
     return files
 
 def _parse_github_pr_patch(patch):
