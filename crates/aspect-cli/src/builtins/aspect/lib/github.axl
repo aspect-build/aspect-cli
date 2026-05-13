@@ -36,19 +36,43 @@ _HTTP_BACKOFF_BASE_MS = 250
 
 def _retry_http(fn):
     """Run `fn()` returning `(success, status, body)`, retrying transient
-    failures up to `_HTTP_MAX_ATTEMPTS` with exponential backoff."""
+    failures up to `_HTTP_MAX_ATTEMPTS` with exponential backoff. Returns
+    `(success, status, body, attempts)`."""
     result = fn()
+    attempts = 1
     success, status, _ = result
     backoff_ms = _HTTP_BACKOFF_BASE_MS
     for _ in range(_HTTP_MAX_ATTEMPTS - 1):
         if not _is_retryable_http(success, status):
-            return result
+            break
         time.sleep(backoff_ms)
         result = fn()
+        attempts += 1
         success, status, _ = result
+
         # Starlark lacks `**`; double each iteration instead.
         backoff_ms = backoff_ms * 2
-    return result
+    return (result[0], result[1], result[2], attempts)
+
+def _warn_http_failure(ctx, label, attempts, status, error):
+    """Emit a single WARNING line summarizing a terminal HTTP failure.
+
+    `label` is a short identifier (e.g. `"GitHub API POST /repos/.../check-runs"`).
+    `error` is the body or transport-error string from the response triple."""
+    if status == 0:
+        detail = error if error else "transport error"
+    else:
+        detail = "HTTP %d" % status
+        if error:
+            extra = error if type(error) == "string" else str(error)
+
+            # Keep one-line: collapse newlines, cap to 200 chars.
+            extra = extra.replace("\n", " ")
+            if len(extra) > 200:
+                extra = extra[:200] + "..."
+            detail = detail + ": " + extra
+    suffix = " after %d attempts" % attempts if attempts > 1 else ""
+    warn(ctx.std, "%s failed%s: %s" % (label, suffix, detail))
 
 def _do_request_once(ctx, method, url, token, payload = None):
     """Single HTTP attempt. See file docstring for failure contract."""
@@ -100,8 +124,13 @@ def _do_request(ctx, method, url, token, payload = None):
     """Single HTTP call, retried on transient failures for idempotent
     methods. POST runs exactly once. Returns `(success, status, body)`."""
     if method in _IDEMPOTENT_METHODS:
-        return _retry_http(lambda: _do_request_once(ctx, method, url, token, payload))
-    return _do_request_once(ctx, method, url, token, payload)
+        success, status, body, attempts = _retry_http(lambda: _do_request_once(ctx, method, url, token, payload))
+    else:
+        success, status, body = _do_request_once(ctx, method, url, token, payload)
+        attempts = 1
+    if not success:
+        _warn_http_failure(ctx, "GitHub API %s %s" % (method, url), attempts, status, body)
+    return (success, status, body)
 
 # Authentication
 
@@ -1263,6 +1292,7 @@ def _github_twirp(ctx, method, payload):
     `(ok, body_or_None, error_message_or_None)`."""
     token = (ctx.std.env.var("ACTIONS_RUNTIME_TOKEN") or
              ctx.std.env.var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+
     # ACTIONS_RESULTS_URL is not injected by ScriptHandler — fall back to the well-known default.
     results_url = (ctx.std.env.var("ACTIONS_RESULTS_URL") or
                    "https://results-receiver.actions.githubusercontent.com/")
@@ -1280,11 +1310,13 @@ def _github_twirp(ctx, method, payload):
 
     fn = lambda: _github_twirp_once(ctx, url, headers, payload)
     if method in _TWIRP_IDEMPOTENT_METHODS:
-        success, status, body_or_err = _retry_http(fn)
+        success, status, body_or_err, attempts = _retry_http(fn)
     else:
         success, status, body_or_err = fn()
+        attempts = 1
 
     if not success:
+        _warn_http_failure(ctx, "GitHub Actions Twirp %s" % method, attempts, status, body_or_err)
         if status == 0:
             err = body_or_err if type(body_or_err) == "string" else "transport error"
         else:
@@ -1360,6 +1392,7 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
         owns_zip = True
 
     zip_size = ctx.std.fs.metadata(zip_path).size
+
     # No retry: body is a non-replayable `fs.open()` stream. Transport
     # errors still convert to `success=False` so the upload fails
     # softly rather than aborting the task.
@@ -1379,8 +1412,10 @@ def _upload_artifact(ctx, path, name, expires_at = ""):
         ctx.std.fs.remove_file(zip_path)
 
     if type(upload_resp) == "string":
+        _warn_http_failure(ctx, "GitHub Actions artifact blob PUT", 1, 0, upload_resp)
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload transport error: " + upload_resp]}
     if upload_resp.status < 200 or upload_resp.status >= 300:
+        _warn_http_failure(ctx, "GitHub Actions artifact blob PUT", 1, upload_resp.status, upload_resp.body)
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["blob upload: HTTP " + str(upload_resp.status)]}
 
     ok, body, err = _github_twirp(ctx, "FinalizeArtifact", {

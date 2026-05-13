@@ -115,8 +115,13 @@ def _upload_file_gitlab(ctx, path, name):
     ).map_err(lambda e: str(e)).block()
 
     if type(resp) == "string":
+        warn(ctx.std, "GitLab PUT %s failed: transport error: %s" % (url, resp))
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["transport error: " + resp]}
     if resp.status < 200 or resp.status >= 300:
+        body_snippet = (resp.body or "").replace("\n", " ")
+        if len(body_snippet) > 200:
+            body_snippet = body_snippet[:200] + "..."
+        warn(ctx.std, "GitLab PUT %s failed: HTTP %d%s" % (url, resp.status, ": " + body_snippet if body_snippet else ""))
         return {"success": False, "artifact_ref": None, "download_url": "", "errors": ["HTTP " + str(resp.status)]}
 
     # The upload URL is also the stable download URL.
