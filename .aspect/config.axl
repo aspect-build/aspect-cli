@@ -7,6 +7,7 @@ load("@aspect//lib/bazel_results_test.axl", "template_snapshot_tests")
 load("@aspect//lib/delivery_results_test.axl", "delivery_template_snapshot_tests")
 load("@aspect//lib/format_results_test.axl", "format_template_snapshot_tests")
 load("@aspect//lib/gazelle_results_test.axl", "gazelle_template_snapshot_tests")
+load("@aspect//lib/gitlab_detect_test.axl", "gitlab_detect_tests")
 load("@aspect//lib/gitlab_test.axl", "gitlab_client_tests")
 load("@aspect//lib/lint_results_test.axl", "lint_template_snapshot_tests")
 load("@aspect//lint.axl", "LintTrait")
@@ -73,6 +74,10 @@ def config(ctx: ConfigContext):
     # validation on the network-touching surfaces.
     # Run with: aspect dev test-gitlab-client
     ctx.tasks.add(gitlab_client_tests)
+
+    # GitLab MR detection smoke — env-var detection across CI hosts.
+    # Run with: aspect dev test-gitlab-detect
+    ctx.tasks.add(gitlab_detect_tests)
 
     # Lint template snapshot tests — renders lint_results templates.
     # Run with: aspect dev test-lint-template-snapshots
