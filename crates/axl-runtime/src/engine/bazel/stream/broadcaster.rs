@@ -228,31 +228,51 @@ struct BroadcasterInner<T> {
 
 pub type Subscriber<T> = mpsc::Receiver<T>;
 
-/// A subscription with a bounded queue depth. Wraps a [`mpsc::Receiver`]
-/// and a shared counter; each [`recv`](Self::recv) / [`try_recv`](Self::try_recv)
-/// decrements the counter so the broadcaster sees back-pressure. When
-/// `queued >= cap` on a send, the broadcaster drops this subscription
-/// and the receiver sees `Disconnected`.
+/// A subscription with an optional bounded queue depth. Wraps a
+/// [`mpsc::Receiver`] and, when subscribed via
+/// [`Broadcaster::subscribe_capped`], a shared counter; each
+/// [`recv`](Self::recv) / [`try_recv`](Self::try_recv) decrements the
+/// counter so the broadcaster sees back-pressure. When `queued >= cap`
+/// on a send, the broadcaster drops this subscription and the receiver
+/// sees `Disconnected`.
 ///
 /// Use for AXL-side iterators where the runtime needs to bound memory
 /// growth if the consumer falls behind or never drains.
+///
+/// Late subscribers wrapped via [`from_unbounded`](Self::from_unbounded)
+/// hold `queued = None` — they're plain `Receiver` consumers on the
+/// broadcaster's `Subscription::Unbounded` path, so there's no shared
+/// counter to track, and `recv` / `try_recv` skip the decrement.
 #[derive(Debug)]
 pub struct CappedSubscriber<T> {
     rx: mpsc::Receiver<T>,
-    queued: Arc<AtomicUsize>,
+    queued: Option<Arc<AtomicUsize>>,
 }
 
 impl<T> CappedSubscriber<T> {
     pub fn recv(&self) -> Result<T, mpsc::RecvError> {
         let v = self.rx.recv()?;
-        self.queued.fetch_sub(1, Ordering::Relaxed);
+        if let Some(q) = &self.queued {
+            q.fetch_sub(1, Ordering::Relaxed);
+        }
         Ok(v)
     }
 
     pub fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
         let v = self.rx.try_recv()?;
-        self.queued.fetch_sub(1, Ordering::Relaxed);
+        if let Some(q) = &self.queued {
+            q.fetch_sub(1, Ordering::Relaxed);
+        }
         Ok(v)
+    }
+
+    /// Wrap a plain [`mpsc::Receiver`] (obtained from
+    /// [`Broadcaster::subscribe`]) as a [`CappedSubscriber`] with no
+    /// back-pressure tracking. Use for late-subscribe paths where the
+    /// caller has already taken the broadcaster's pre-subscribed
+    /// (capped) receiver but needs another iterator handle.
+    pub fn from_unbounded(rx: mpsc::Receiver<T>) -> Self {
+        Self { rx, queued: None }
     }
 }
 
@@ -378,14 +398,20 @@ impl<T: Clone> Broadcaster<T> {
         let queued = Arc::new(AtomicUsize::new(0));
         if inner.closed {
             drop(tx);
-            return CappedSubscriber { rx, queued };
+            return CappedSubscriber {
+                rx,
+                queued: Some(queued),
+            };
         }
         inner.subscribers.push(Subscription::Capped {
             tx,
             queued: queued.clone(),
             cap,
         });
-        CappedSubscriber { rx, queued }
+        CappedSubscriber {
+            rx,
+            queued: Some(queued),
+        }
     }
 
     /// Sends an event to all current subscribers.

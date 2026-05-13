@@ -184,9 +184,25 @@ pub struct Build {
     ///
     /// `None` when no Local sink was configured, or after the first
     /// `build_events()` call has consumed the receiver. Subsequent
-    /// calls error rather than silently subscribing late.
+    /// `build_events()` calls (with a Local sink configured) fall
+    /// back to a fresh `event_stream.subscribe()` — late-subscriber
+    /// semantics, missing any events already broadcast before that
+    /// fresh subscribe. The pre-subscribed receiver is the race-free
+    /// path; additional iterators are an explicit caller decision.
     #[allocative(skip)]
     early_event_subscriber: RefCell<Option<CappedSubscriber<BuildEvent>>>,
+
+    /// True iff a `BuildEventSink::Local` was configured at spawn
+    /// time. Drives the `build_events()` method's gating:
+    ///   - `had_local_sink == false`: error on every call (the caller
+    ///     didn't declare local-iteration intent).
+    ///   - `had_local_sink == true` + receiver still present: hand
+    ///     over the race-free pre-subscribed receiver.
+    ///   - `had_local_sink == true` + receiver already taken: fall
+    ///     back to a fresh late `subscribe()` so helper-style code
+    ///     that wants its own iterator handle still works.
+    #[allocative(skip)]
+    had_local_sink: bool,
 
     /// The shared invocation_id that every gRPC BES sink uses when forwarding
     /// this build's events. `None` when no BES sinks were configured; `Some`
@@ -444,6 +460,7 @@ impl Build {
             sink_handles: RefCell::new(sink_handles),
             sink_invocation_id: RefCell::new(sink_invocation_id),
             early_event_subscriber: RefCell::new(early_event_subscriber),
+            had_local_sink: local_sink_cap.is_some(),
             span: RefCell::new(span),
         })
     }
@@ -483,36 +500,42 @@ impl<'v> values::StarlarkValue<'v> for Build {
 #[starlark_module]
 pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     // Creates an iterable `BuildEventIterator` type.
-    // Every call to this function will return a new iterator.
-    // TODO: explain backpressure and build events sinks falling behind on poor network conditions.
+    // Every call to this function returns a new iterator. The first
+    // call returns the receiver pre-subscribed inside `Build::spawn`
+    // (so the early burst was buffered before bazel opened the BEP
+    // FIFO — no late-subscribe race). Subsequent calls fall back to a
+    // fresh `event_stream.subscribe()` with normal late-subscriber
+    // semantics: each new iterator only sees events broadcast after
+    // its subscribe call. Helper-style code that hands a fresh
+    // iterator to each subroutine still works; the primary consumer
+    // (the one that calls `build_events()` first) gets the race-free
+    // path.
     fn build_events<'v>(this: values::Value<'v>) -> anyhow::Result<BuildEventIterator> {
         let build = this.downcast_ref::<Build>().unwrap();
-        let _ = build
-            .build_event_stream
-            .borrow()
-            .as_ref()
-            .ok_or(anyhow::anyhow!(
-                "call `ctx.bazel.build` with `build_events = True` (or include \
+        let event_stream = build.build_event_stream.borrow();
+        let event_stream = event_stream.as_ref().ok_or(anyhow::anyhow!(
+            "call `ctx.bazel.build` with `build_events = True` (or include \
              `bazel.build_events.local(...)` in the sink list) to receive build events."
-            ))?;
+        ))?;
 
-        // Hand over the pre-subscribed receiver created in `Build::spawn`.
-        // The intent was declared up-front via a `BuildEventSink::Local`
-        // entry, so the subscription registered before bazel opened the
-        // BEP FIFO. Calling this method twice is an error: the cap
-        // accounting belongs to one consumer; multi-consumer use needs
-        // the user to subscribe their own broadcaster on top.
-        let recv = build
-            .early_event_subscriber
-            .borrow_mut()
-            .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "`build.build_events()` may be called at most once per build, and only when \
-                 `ctx.bazel.build` was called with `build_events = True` (or an explicit \
-                 `bazel.build_events.local(...)` in the sink list)."
-                )
-            })?;
+        if !build.had_local_sink {
+            anyhow::bail!(
+                "`build.build_events()` requires `bazel.build_events.local(...)` in the \
+                 `build_events` sink list (or the `build_events = True` shorthand). Without \
+                 it the runtime won't subscribe an AXL-side receiver, because every undrained \
+                 subscription is buffered memory."
+            );
+        }
+
+        let recv = match build.early_event_subscriber.borrow_mut().take() {
+            Some(c) => c,
+            // First handoff already happened — return an unbounded
+            // late-subscriber. Caller accepts the late-subscribe
+            // window for this extra iterator (the primary one used
+            // the pre-subscribed receiver and is already past the
+            // race window).
+            None => CappedSubscriber::from_unbounded(event_stream.subscribe()),
+        };
 
         Ok(BuildEventIterator::new(recv))
     }
