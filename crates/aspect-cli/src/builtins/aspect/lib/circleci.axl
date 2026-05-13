@@ -37,9 +37,8 @@ def _runner_api(ctx, token, runner_host, method, path, body = None):
         fut = ctx.http().post(url = url, headers = headers, data = json.encode(body) if body else None)
     else:
         return None
-    # Convert transport errors to a `None` result so a flaky runner-
-    # API call surfaces as a soft auth failure rather than aborting
-    # the calling feature handler (and the task).
+    # Transport errors → None so a flaky runner-API call surfaces as
+    # a soft auth failure, not a task abort.
     resp = fut.map_err(lambda e: str(e)).block()
     if type(resp) == "string":
         return None

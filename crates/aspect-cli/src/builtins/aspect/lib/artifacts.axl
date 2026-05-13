@@ -106,9 +106,8 @@ def _upload_file_gitlab(ctx, path, name):
     file_name = path.split("/")[-1]
     url = api_url + "/projects/" + project_id + "/packages/generic/" + safe_name + "/" + pipeline_id + "/" + file_name
 
-    # Transport errors → string result so a flaky GitLab API call
-    # doesn't propagate as an exception into the calling feature
-    # handler (ArtifactUpload) and fail the task.
+    # Transport errors → string result so the ArtifactUpload feature
+    # sees a soft `{success: False}`, not a task abort.
     resp = ctx.http().put(
         url = url,
         headers = {"JOB-TOKEN": token},
