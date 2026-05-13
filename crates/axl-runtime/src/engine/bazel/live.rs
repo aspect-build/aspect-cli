@@ -132,4 +132,19 @@ mod tests {
         drop(_g2);
         assert!(!live_pids().contains(&222));
     }
+
+    /// `Build` stores the guard inside `RefCell<Option<…>>` so it can
+    /// release the registration the moment the child is observed exited
+    /// (rather than waiting for the Starlark object to be GC'd). Verify
+    /// that `.take()` on the wrapped guard does in fact unregister the
+    /// PID — this is the pattern `build.rs::wait()` / `try_wait()` rely
+    /// on to keep us from SIGINT/SIGKILLing a reused PID.
+    #[test]
+    fn take_on_option_wrapped_guard_unregisters_pid() {
+        use std::cell::RefCell;
+        let cell = RefCell::new(Some(register(333)));
+        assert!(live_pids().contains(&333));
+        let _ = cell.borrow_mut().take();
+        assert!(!live_pids().contains(&333));
+    }
 }
