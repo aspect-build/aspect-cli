@@ -1,5 +1,5 @@
 version(
-    "2026.19.2",
+    "2026.20.8",
     sources = [
         # Cargo build
         local("target/debug/aspect-cli"),
