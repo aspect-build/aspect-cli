@@ -39,6 +39,19 @@ def _test_impl(ctx):
         "just-a-name",
     )
 
+    # Numeric project IDs (e.g. CI_PROJECT_ID) must round-trip unchanged.
+    # GitLab accepts both the numeric ID and the URL-encoded path as `:id`.
+    _eq(
+        "encode_project_path / numeric int",
+        gitlab.encode_project_path(12345),
+        "12345",
+    )
+    _eq(
+        "encode_project_path / numeric string",
+        gitlab.encode_project_path("12345"),
+        "12345",
+    )
+
     # extract_host
     _eq(
         "extract_host / gitlab.com",
@@ -56,6 +69,33 @@ def _test_impl(ctx):
         "gitlab.com",
     )
     _eq("extract_host / empty input", gitlab.extract_host(""), "")
+
+    # Credential-stripping: GitLab CI populates CI_REPOSITORY_URL as
+    # `https://gitlab-ci-token:<job-token>@<host>/...`. The host
+    # extractor must drop the userinfo so tokens never bleed into
+    # logs or derived API endpoints.
+    _eq(
+        "extract_host / strips gitlab-ci-token userinfo",
+        gitlab.extract_host("https://gitlab-ci-token:abc123@gitlab.example.com/group/project.git"),
+        "gitlab.example.com",
+    )
+    _eq(
+        "extract_host / strips oauth2 PAT userinfo",
+        gitlab.extract_host("https://oauth2:glpat-xyz@gitlab.com/group/project"),
+        "gitlab.com",
+    )
+    _eq(
+        "extract_host / strips bare user (no password)",
+        gitlab.extract_host("https://user@gitlab.com/group/project"),
+        "gitlab.com",
+    )
+
+    # An `@` after the path separator must NOT be treated as userinfo.
+    _eq(
+        "extract_host / @ in path is not userinfo",
+        gitlab.extract_host("https://gitlab.com/group/project@v1"),
+        "gitlab.com",
+    )
 
     # extract_project_path
     _eq(

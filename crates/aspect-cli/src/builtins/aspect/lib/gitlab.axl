@@ -95,8 +95,10 @@ def encode_project_path(path):
     GitLab accepts either the numeric project ID or the URL-encoded
     full path (e.g. `mygroup%2Fmyproject`). Callers usually start with
     `CI_PROJECT_PATH`, which is the slash form, so this is the path
-    they'll hit most.
+    they'll hit most — but numeric IDs (e.g. from `CI_PROJECT_ID`) are
+    coerced to string so they round-trip unchanged.
     """
+    path = str(path)
     out = ""
     for ch in path.elems():
         out += _PERCENT_ENCODE.get(ch, ch)
@@ -266,13 +268,24 @@ def _mr_list_changes(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API,
 
 def _extract_host(url):
     """Extract the host (without scheme) from a URL. Returns "" on
-    failure. Mirrors `lib/github.axl::_extract_host`."""
+    failure. Mirrors `lib/github.axl::_extract_host`.
+
+    Strips any `user:password@` userinfo segment first — GitLab CI
+    populates `CI_REPOSITORY_URL` as
+    `https://gitlab-ci-token:<job-token>@<host>/...`, and we must not
+    leak the token into the returned host string (which gets logged
+    and used to derive API endpoints).
+    """
     if not url:
         return ""
     after_scheme = url
     sep = url.find("://")
     if sep >= 0:
         after_scheme = url[sep + 3:]
+    at = after_scheme.find("@")
+    slash = after_scheme.find("/")
+    if at >= 0 and (slash < 0 or at < slash):
+        after_scheme = after_scheme[at + 1:]
     for stop in ["/", "?", "#"]:
         cut = after_scheme.find(stop)
         if cut >= 0:
