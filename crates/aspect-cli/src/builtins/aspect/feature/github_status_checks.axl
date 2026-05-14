@@ -273,8 +273,22 @@ def _github_status_checks(ctx: FeatureContext):
         # Publish on GitHubCheckRunTrait so sibling features (today:
         # GithubStatusComments) can deep-link to this per-task check
         # run. Consumers tolerate the empty case.
-        checkrun_trait.html_url = result.get("html_url") or ""
-        github.status_checks.update(ctx, token, owner, repo, _state["_check_run_id"], output = initial_output)
+        html_url = result.get("html_url") or ""
+        checkrun_trait.html_url = html_url
+
+        # Point details_url at the check-run page itself so external
+        # integrations (e.g. Graphite) link users to the rendered
+        # outputs. Without this, GitHub auto-fills details_url with the
+        # GitHub App's homepage URL, which is useless to consumers.
+        github.status_checks.update(
+            ctx,
+            token,
+            owner,
+            repo,
+            _state["_check_run_id"],
+            output = initial_output,
+            details_url = html_url or None,
+        )
 
     def _push_status(ctx, status, final, output = None):
         """Send a check-run update to GitHub for the given `(status, final)`.

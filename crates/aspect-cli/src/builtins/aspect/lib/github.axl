@@ -232,7 +232,7 @@ def _authenticate(ctx, owner, repo, profile = None, roles = None, _reason = None
 
 # Check Runs
 
-def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, output = None, api_base = DEFAULT_GITHUB_API):
+def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, output = None, details_url = None, api_base = DEFAULT_GITHUB_API):
     """Create a new check run on a commit."""
     url = api_base + "/repos/" + owner + "/" + repo + "/check-runs"
     payload = {"name": name, "head_sha": head_sha}
@@ -240,6 +240,8 @@ def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, out
         payload["status"] = status
     if output:
         payload["output"] = output
+    if details_url:
+        payload["details_url"] = details_url
     success, status_code, body = _do_request(ctx, "POST", url, token, payload)
     if success:
         return {"success": True, "check_run_id": body.get("id"), "html_url": body.get("html_url")}
@@ -248,7 +250,7 @@ def create_check_run(ctx, token, owner, repo, name, head_sha, status = None, out
         error_msg = error_msg + " - " + body["message"]
     return {"success": False, "error": error_msg, "status": status_code}
 
-def update_check_run(ctx, token, owner, repo, check_run_id, status = None, conclusion = None, output = None, api_base = DEFAULT_GITHUB_API):
+def update_check_run(ctx, token, owner, repo, check_run_id, status = None, conclusion = None, output = None, details_url = None, api_base = DEFAULT_GITHUB_API):
     """Update an existing check run."""
     url = api_base + "/repos/" + owner + "/" + repo + "/check-runs/" + str(check_run_id)
     payload = {}
@@ -258,6 +260,8 @@ def update_check_run(ctx, token, owner, repo, check_run_id, status = None, concl
         payload["conclusion"] = conclusion
     if output:
         payload["output"] = output
+    if details_url:
+        payload["details_url"] = details_url
     success, status_code, body = _do_request(ctx, "PATCH", url, token, payload)
     if success:
         return {"success": True, "check_run_id": body.get("id"), "html_url": body.get("html_url")}
@@ -1200,8 +1204,8 @@ def _actions_download_artifact_zip(ctx, token, owner, repo, artifact_id, output_
 def _status_checks_create(ctx, token, owner, repo, sha, name, api_base = DEFAULT_GITHUB_API):
     return create_check_run(ctx, token, owner, repo, name, sha, status = "in_progress", api_base = api_base)
 
-def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
-    return update_check_run(ctx, token, owner, repo, check_run_id, status = "in_progress", output = output, api_base = api_base)
+def _status_checks_update(ctx, token, owner, repo, check_run_id, output = None, details_url = None, api_base = DEFAULT_GITHUB_API):
+    return update_check_run(ctx, token, owner, repo, check_run_id, status = "in_progress", output = output, details_url = details_url, api_base = api_base)
 
 def _status_checks_complete(ctx, token, owner, repo, check_run_id, output = None, api_base = DEFAULT_GITHUB_API):
     return complete_check_run(ctx, token, owner, repo, check_run_id, conclusion = "success", output = output, api_base = api_base)
