@@ -1,0 +1,133 @@
+"""GitLab merge-request context detection from CI environment variables.
+
+Mirrors `lib/github.axl::detect_github_pr` for the GitLab side. Pure
+env-var inspection — no HTTP, no auth — so the gitlab feature path
+(ENG-1651) can wire this in early without dragging the HTTP client
+(ENG-1648) or auth (ENG-1650) along as load-time prerequisites.
+
+`detect_gitlab_mr(std)` is the single public entry point. It returns
+`(dict, "")` on success, or `(None, reason)` when no MR context can be
+determined.
+
+The dict shape:
+  {
+    "project_path":   str,   # "group/subgroup/project" — GitLab supports
+                             #   arbitrarily deep nested subgroups, so this
+                             #   is a single slash-separated path, not a
+                             #   (owner, repo) split like GitHub.
+    "project_id":     int?,  # GitLab numeric project ID when CI surfaces
+                             #   it (always present under native GitLab CI;
+                             #   may be None under the explicit override
+                             #   path). Either project_path or project_id
+                             #   can be used as `:id` in the REST API.
+    "mr_iid":         int,   # MR's per-project IID (the integer in the
+                             #   URL: gitlab.com/<path>/-/merge_requests/<iid>).
+    "sha":            str,   # Commit SHA the status surfaces should attach
+                             #   to. See `_resolve_sha` for why we prefer
+                             #   the source-branch HEAD over CI_COMMIT_SHA
+                             #   on MR-result pipelines.
+    "source_branch":  str,   # MR source branch (may be empty under the
+                             #   explicit override).
+    "target_branch":  str,   # MR target branch (may be empty under the
+                             #   explicit override).
+  }
+"""
+
+def _resolve_sha(env):
+    """Resolve the commit SHA to surface status against.
+
+    On GitLab's merged-result pipelines, `CI_COMMIT_SHA` is a synthetic
+    merge commit between the source branch and the target — not a real
+    commit in either branch's history. Status surfaces attached to that
+    SHA don't appear on the MR widget the way the per-pipeline status
+    does, and external tools that follow the SHA back to a branch get
+    nothing. `CI_MERGE_REQUEST_SOURCE_BRANCH_SHA` is the real source
+    branch HEAD and is what users expect statuses to attach to.
+
+    Same shape as `lib/github.axl::detect_commit_sha`, which uses the
+    `pull_request.head.sha` payload to bypass the equivalent GitHub
+    Actions synthetic merge SHA.
+    """
+    return (
+        env.var("CI_MERGE_REQUEST_SOURCE_BRANCH_SHA") or
+        env.var("CI_COMMIT_SHA") or
+        ""
+    )
+
+def detect_gitlab_mr(std):
+    """Detect GitLab merge-request context from CI environment variables.
+
+    Detection order — first match wins:
+      1. ASPECT_GITLAB_MR_IID env var (explicit override). Pairs with
+         ASPECT_GITLAB_PROJECT_PATH and a SHA from either
+         ASPECT_GITLAB_SHA or CI_COMMIT_SHA. Escape hatch for setups
+         where no native GitLab CI var is set — e.g., Aspect-Workflows-
+         managed runners executing on a non-GitLab CI host that still
+         want to post status back to a GitLab MR.
+      2. Native GitLab CI: GITLAB_CI=true plus the standard
+         CI_MERGE_REQUEST_* variables that GitLab populates on every
+         MR pipeline (detached, merged-result, or merge-train).
+
+    Returns `(dict, "")` on success, or `(None, reason)` when no MR
+    context can be determined. The reason string is what the caller
+    surfaces under the Detect phase output, so it should be specific
+    enough that a misconfigured pipeline is debuggable from logs alone.
+    """
+    env = std.env
+
+    explicit = env.var("ASPECT_GITLAB_MR_IID") or ""
+    if explicit:
+        if not explicit.isdigit():
+            return None, "ASPECT_GITLAB_MR_IID must be numeric, got %r" % explicit
+        project_path = env.var("ASPECT_GITLAB_PROJECT_PATH") or env.var("CI_PROJECT_PATH") or ""
+        if not project_path:
+            return None, "ASPECT_GITLAB_MR_IID set but no project path could be determined (set ASPECT_GITLAB_PROJECT_PATH or CI_PROJECT_PATH)"
+        sha = env.var("ASPECT_GITLAB_SHA") or _resolve_sha(env)
+        if not sha:
+            return None, "ASPECT_GITLAB_MR_IID set but no commit SHA could be determined (set ASPECT_GITLAB_SHA, CI_MERGE_REQUEST_SOURCE_BRANCH_SHA, or CI_COMMIT_SHA)"
+        return {
+            "project_path": project_path,
+            "project_id": _parse_int_or_none(env.var("CI_MERGE_REQUEST_PROJECT_ID") or env.var("CI_PROJECT_ID")),
+            "mr_iid": int(explicit),
+            "sha": sha,
+            "source_branch": env.var("CI_MERGE_REQUEST_SOURCE_BRANCH_NAME") or "",
+            "target_branch": env.var("CI_MERGE_REQUEST_TARGET_BRANCH_NAME") or "",
+        }, ""
+
+    if not env.var("GITLAB_CI"):
+        return None, "no GitLab MR context detected on this CI host"
+
+    iid = env.var("CI_MERGE_REQUEST_IID") or ""
+    if not iid:
+        # GitLab populates CI_MERGE_REQUEST_IID on every MR pipeline
+        # variant (detached, merged-result, merge-train). Its absence
+        # under GITLAB_CI means the current pipeline isn't running for
+        # an MR — branch pipelines, scheduled pipelines, tag pipelines,
+        # API-triggered pipelines all hit this path.
+        return None, "GitLab CI detected but CI_MERGE_REQUEST_IID is not set (not an MR pipeline)"
+    if not iid.isdigit():
+        return None, "CI_MERGE_REQUEST_IID is not numeric: %r" % iid
+
+    project_path = env.var("CI_MERGE_REQUEST_PROJECT_PATH") or env.var("CI_PROJECT_PATH") or ""
+    if not project_path:
+        return None, "no GitLab project path (CI_MERGE_REQUEST_PROJECT_PATH / CI_PROJECT_PATH unset)"
+
+    sha = _resolve_sha(env)
+    if not sha:
+        return None, "no commit SHA (CI_MERGE_REQUEST_SOURCE_BRANCH_SHA / CI_COMMIT_SHA unset)"
+
+    return {
+        "project_path": project_path,
+        "project_id": _parse_int_or_none(env.var("CI_MERGE_REQUEST_PROJECT_ID") or env.var("CI_PROJECT_ID")),
+        "mr_iid": int(iid),
+        "sha": sha,
+        "source_branch": env.var("CI_MERGE_REQUEST_SOURCE_BRANCH_NAME") or "",
+        "target_branch": env.var("CI_MERGE_REQUEST_TARGET_BRANCH_NAME") or "",
+    }, ""
+
+def _parse_int_or_none(s):
+    if not s:
+        return None
+    if not s.isdigit():
+        return None
+    return int(s)

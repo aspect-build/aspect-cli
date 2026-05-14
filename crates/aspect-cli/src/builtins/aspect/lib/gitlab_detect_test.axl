@@ -1,0 +1,202 @@
+"""Smoke tests for `lib/gitlab_detect.axl`.
+
+`detect_gitlab_mr` reads `std.env.var(name)`, so we stub `std` with a
+fake env backed by a dict. Each scenario asserts the detection branch
+that fires for a given set of env vars.
+
+Run with:
+  aspect dev test-gitlab-detect
+"""
+
+load("./gitlab_detect.axl", "detect_gitlab_mr")
+
+def _fake_std(vars):
+    """Stub std with an env that resolves `var(name)` against `vars`."""
+    return struct(
+        env = struct(
+            var = lambda name: vars.get(name, ""),
+        ),
+    )
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _expect_ok(label, vars, expected):
+    got, reason = detect_gitlab_mr(_fake_std(vars))
+    if got == None:
+        fail("%s: expected success but got None (%s)" % (label, reason))
+    for k, want in expected.items():
+        _eq(label + " / " + k, got.get(k), want)
+    if reason != "":
+        fail("%s: unexpected reason on success: %r" % (label, reason))
+
+def _expect_none(label, vars, reason_contains):
+    got, reason = detect_gitlab_mr(_fake_std(vars))
+    if got != None:
+        fail("%s: expected None but got %r" % (label, got))
+    if reason_contains not in reason:
+        fail("%s: reason %r missing substring %r" % (label, reason, reason_contains))
+
+def _test_impl(ctx):
+    # ── Native GitLab CI on a detached MR pipeline ──────────────────────
+    _expect_ok(
+        "native MR pipeline (detached)",
+        {
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_IID": "42",
+            "CI_MERGE_REQUEST_PROJECT_PATH": "aspect-build/example",
+            "CI_MERGE_REQUEST_PROJECT_ID": "12345",
+            "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME": "feature/x",
+            "CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "main",
+            "CI_MERGE_REQUEST_SOURCE_BRANCH_SHA": "aaaaaaaaaaaaaaaa",
+            "CI_COMMIT_SHA": "bbbbbbbbbbbbbbbb",
+        },
+        {
+            "project_path": "aspect-build/example",
+            "project_id": 12345,
+            "mr_iid": 42,
+            # CI_MERGE_REQUEST_SOURCE_BRANCH_SHA wins over CI_COMMIT_SHA
+            # because CI_COMMIT_SHA on merged-result pipelines is a
+            # synthetic SHA the MR UI doesn't follow.
+            "sha": "aaaaaaaaaaaaaaaa",
+            "source_branch": "feature/x",
+            "target_branch": "main",
+        },
+    )
+
+    # ── CI_COMMIT_SHA fallback when source-branch SHA absent ────────────
+    _expect_ok(
+        "fallback to CI_COMMIT_SHA",
+        {
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_IID": "7",
+            "CI_MERGE_REQUEST_PROJECT_PATH": "g/p",
+            "CI_COMMIT_SHA": "cccccccccccccccc",
+        },
+        {"sha": "cccccccccccccccc", "mr_iid": 7},
+    )
+
+    # ── CI_PROJECT_PATH fallback when MR-specific var absent ────────────
+    _expect_ok(
+        "CI_PROJECT_PATH fallback",
+        {
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_IID": "9",
+            "CI_PROJECT_PATH": "fallback/group/project",
+            "CI_COMMIT_SHA": "ffffffffffffffff",
+        },
+        {"project_path": "fallback/group/project"},
+    )
+
+    # ── Nested subgroup path is preserved verbatim ──────────────────────
+    _expect_ok(
+        "nested subgroup",
+        {
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_IID": "1",
+            "CI_MERGE_REQUEST_PROJECT_PATH": "org/team/sub/svc",
+            "CI_COMMIT_SHA": "dddddddddddddddd",
+        },
+        {"project_path": "org/team/sub/svc"},
+    )
+
+    # ── Explicit override: ASPECT_GITLAB_MR_IID ─────────────────────────
+    _expect_ok(
+        "explicit override (no GITLAB_CI)",
+        {
+            "ASPECT_GITLAB_MR_IID": "100",
+            "ASPECT_GITLAB_PROJECT_PATH": "manual/repo",
+            "ASPECT_GITLAB_SHA": "eeeeeeeeeeeeeeee",
+        },
+        {
+            "project_path": "manual/repo",
+            "mr_iid": 100,
+            "sha": "eeeeeeeeeeeeeeee",
+            "source_branch": "",
+            "target_branch": "",
+            "project_id": None,
+        },
+    )
+
+    # Override falls back to CI_PROJECT_PATH / CI_COMMIT_SHA when its own
+    # ASPECT_GITLAB_* pair isn't set.
+    _expect_ok(
+        "override w/ CI_PROJECT_PATH + CI_COMMIT_SHA fallback",
+        {
+            "ASPECT_GITLAB_MR_IID": "55",
+            "CI_PROJECT_PATH": "fb/project",
+            "CI_COMMIT_SHA": "1234567890abcdef",
+        },
+        {"project_path": "fb/project", "mr_iid": 55, "sha": "1234567890abcdef"},
+    )
+
+    # ── Negative cases ──────────────────────────────────────────────────
+    _expect_none(
+        "no CI vars at all",
+        {},
+        "no GitLab MR context detected",
+    )
+    _expect_none(
+        "GitLab CI but not an MR pipeline (branch / tag / scheduled)",
+        {
+            "GITLAB_CI": "true",
+            "CI_PROJECT_PATH": "g/p",
+            "CI_COMMIT_SHA": "abc",
+        },
+        "not an MR pipeline",
+    )
+    _expect_none(
+        "MR pipeline but project path missing",
+        {
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_IID": "1",
+            "CI_COMMIT_SHA": "abc",
+        },
+        "no GitLab project path",
+    )
+    _expect_none(
+        "MR pipeline but SHA missing",
+        {
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_IID": "1",
+            "CI_MERGE_REQUEST_PROJECT_PATH": "g/p",
+        },
+        "no commit SHA",
+    )
+    _expect_none(
+        "explicit override but project path missing",
+        {"ASPECT_GITLAB_MR_IID": "1"},
+        "no project path",
+    )
+    _expect_none(
+        "explicit override but SHA missing",
+        {
+            "ASPECT_GITLAB_MR_IID": "1",
+            "ASPECT_GITLAB_PROJECT_PATH": "g/p",
+        },
+        "no commit SHA",
+    )
+    _expect_none(
+        "non-numeric IID",
+        {
+            "GITLAB_CI": "true",
+            "CI_MERGE_REQUEST_IID": "not-a-number",
+        },
+        "not numeric",
+    )
+    _expect_none(
+        "non-numeric override IID",
+        {"ASPECT_GITLAB_MR_IID": "abc"},
+        "must be numeric",
+    )
+
+    print("gitlab_detect.axl smoke: OK (12 scenarios)")
+    return 0
+
+gitlab_detect_tests = task(
+    name = "test-gitlab-detect",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
