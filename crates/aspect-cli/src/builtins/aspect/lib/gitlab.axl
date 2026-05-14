@@ -1,0 +1,354 @@
+"""GitLab API client library.
+
+Mirrors the shape of `lib/github.axl` so the per-VCS feature modules can
+call into the right backend with the same call-site ergonomics.
+
+Auth is intentionally not implemented here: callers pass a `token` they
+obtained however they like (PAT, group/project access token, OAuth bearer
+from the Aspect GitLab App). The `auth_kind` argument toggles between the
+two GitLab header conventions:
+
+  * `"private_token"` (default) → `PRIVATE-TOKEN: <token>`
+    Works for personal access tokens, group access tokens, and project
+    access tokens — the primary surface MVP customers will use.
+  * `"bearer"`                  → `Authorization: Bearer <token>`
+    For OAuth/Application tokens (e.g. the Aspect GitLab App once
+    ENG-1650 lands).
+"""
+
+DEFAULT_GITLAB_API = "https://gitlab.com/api/v4"
+
+# Internal helpers
+
+def _auth_headers(token, auth_kind):
+    if auth_kind == "bearer":
+        return {"Authorization": "Bearer " + token}
+    return {"PRIVATE-TOKEN": token}
+
+def _do_request(ctx, method, url, token, auth_kind = "private_token", payload = None):
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    for k, v in _auth_headers(token, auth_kind).items():
+        headers[k] = v
+
+    data = json.encode(payload) if payload else None
+    if method == "GET":
+        fut = ctx.http().get(url = url, headers = headers)
+    elif method == "POST":
+        fut = ctx.http().post(url = url, headers = headers, data = data)
+    elif method == "PUT":
+        fut = ctx.http().put(url = url, headers = headers, data = data)
+    elif method == "PATCH":
+        fut = ctx.http().patch(url = url, headers = headers, data = data)
+    elif method == "DELETE":
+        fut = ctx.http().delete(url = url, headers = headers)
+    else:
+        return (False, 0, "unsupported method: " + method)
+
+    # Convert transport errors (DNS, TLS, connection refused, …) to a
+    # string so they don't propagate as anyhow exceptions and fail the
+    # parent task. Same pattern as `lib/github.axl::_do_request`.
+    response = fut.map_err(lambda e: str(e)).block()
+    if type(response) == "string":
+        return (False, 0, "transport error: " + response)
+    success = response.status >= 200 and response.status < 300
+    body = response.body
+    if not body:
+        return (success, response.status, body)
+
+    # 5xx commonly comes back as HTML/text from edge proxies; don't try
+    # to decode. Surface a transport-style snippet instead.
+    if response.status >= 500:
+        snippet = body[:200].replace("\n", " ")
+        return (False, response.status, "upstream error (status %d): %s" % (response.status, snippet))
+
+    _PARSE_FAILED = struct(_parse_failed = True)
+    parsed = json.try_decode(body, _PARSE_FAILED)
+    if parsed == _PARSE_FAILED:
+        snippet = body[:200].replace("\n", " ")
+        return (False, response.status, "non-JSON response (status %d): %s" % (response.status, snippet))
+    return (success, response.status, parsed)
+
+# URL-encoding helpers
+
+# Characters reserved in GitLab project paths that must be percent-
+# encoded when the path appears inside a URL path segment (the `:id`
+# slot). Group/project slugs are restricted to letters/digits/`._-`
+# plus `/` as the group separator, so this short table covers every
+# real case.
+_PERCENT_ENCODE = {
+    "/": "%2F",
+    " ": "%20",
+    "+": "%2B",
+    "?": "%3F",
+    "#": "%23",
+    "&": "%26",
+    "=": "%3D",
+    "%": "%25",
+}
+
+def encode_project_path(path):
+    """Percent-encode a GitLab project path for use as `:id` in URLs.
+
+    GitLab accepts either the numeric project ID or the URL-encoded
+    full path (e.g. `mygroup%2Fmyproject`). Callers usually start with
+    `CI_PROJECT_PATH`, which is the slash form, so this is the path
+    they'll hit most — but numeric IDs (e.g. from `CI_PROJECT_ID`) are
+    coerced to string so they round-trip unchanged.
+    """
+    path = str(path)
+    out = ""
+    for ch in path.elems():
+        out += _PERCENT_ENCODE.get(ch, ch)
+    return out
+
+def _project_url(api_base, project, suffix):
+    return api_base + "/projects/" + encode_project_path(project) + suffix
+
+# Commit Status API (free tier — works on every GitLab plan)
+#
+# Reference: https://docs.gitlab.com/ee/api/commits.html#post-the-build-status-to-a-commit
+#
+# State values per GitLab: pending | running | success | failed | canceled | skipped.
+
+_COMMIT_STATUS_STATES = ["pending", "running", "success", "failed", "canceled", "skipped"]
+
+def _commit_status_post(ctx, token, project, sha, state, name, target_url = None, description = None, coverage = None, pipeline_id = None, ref = None, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    """Post a commit status to a SHA. GitLab does not have a distinct
+    create/update split — POSTing the same `(name, sha, ref)` triple
+    transitions the existing entry."""
+    if state not in _COMMIT_STATUS_STATES:
+        return {"success": False, "error": "invalid state %r (valid: %s)" % (state, ", ".join(_COMMIT_STATUS_STATES))}
+    url = _project_url(api_base, project, "/statuses/" + sha)
+    payload = {"state": state, "name": name}
+    if target_url:
+        payload["target_url"] = target_url
+    if description:
+        payload["description"] = description
+    if coverage != None:
+        payload["coverage"] = coverage
+    if pipeline_id != None:
+        payload["pipeline_id"] = pipeline_id
+    if ref:
+        payload["ref"] = ref
+    success, status_code, body = _do_request(ctx, "POST", url, token, auth_kind = auth_kind, payload = payload)
+    if success:
+        return {"success": True, "id": body.get("id") if type(body) == "dict" else None, "status": body if type(body) == "dict" else None}
+    return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
+
+def _commit_status_pending(ctx, token, project, sha, name, **kwargs):
+    return _commit_status_post(ctx, token, project, sha, "pending", name, **kwargs)
+
+def _commit_status_running(ctx, token, project, sha, name, **kwargs):
+    return _commit_status_post(ctx, token, project, sha, "running", name, **kwargs)
+
+def _commit_status_success(ctx, token, project, sha, name, **kwargs):
+    return _commit_status_post(ctx, token, project, sha, "success", name, **kwargs)
+
+def _commit_status_failed(ctx, token, project, sha, name, **kwargs):
+    return _commit_status_post(ctx, token, project, sha, "failed", name, **kwargs)
+
+def _commit_status_canceled(ctx, token, project, sha, name, **kwargs):
+    return _commit_status_post(ctx, token, project, sha, "canceled", name, **kwargs)
+
+def _commit_status_skipped(ctx, token, project, sha, name, **kwargs):
+    """Maps to "this task ran and emitted non-fatal findings" — GitLab
+    has no native neutral state, so callers that surface lint-warns or
+    delivery-warns use `skipped` (no red ✗ in the UI) and stick the
+    summary in `description`."""
+    return _commit_status_post(ctx, token, project, sha, "skipped", name, **kwargs)
+
+# External Status Checks API (Premium/Ultimate tier)
+#
+# Reference: https://docs.gitlab.com/ee/api/status_checks.html
+#
+# Premium customers register an External Status Check on the project;
+# pipelines respond against `(mr_iid, sha, external_status_check_id)`.
+# We don't manage registration here — that's a one-time admin action.
+
+def _external_status_check_respond(ctx, token, project, mr_iid, sha, external_status_check_id, status, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    """Set the response for a registered External Status Check.
+
+    `status` is one of `passed`, `failed`, or `pending`.
+    """
+    if status not in ("passed", "failed", "pending"):
+        return {"success": False, "error": "invalid status %r (valid: passed, failed, pending)" % status}
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/status_check_responses")
+    payload = {
+        "sha": sha,
+        "external_status_check_id": external_status_check_id,
+        "status": status,
+    }
+    success, status_code, body = _do_request(ctx, "POST", url, token, auth_kind = auth_kind, payload = payload)
+    if success:
+        return {"success": True, "response": body if type(body) == "dict" else None}
+    return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
+
+def _external_status_check_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    """List registered External Status Checks visible on an MR.
+
+    Useful for discovering the `external_status_check_id` to respond
+    against without hard-coding it in customer config.
+    """
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/status_checks")
+    success, status_code, body = _do_request(ctx, "GET", url, token, auth_kind = auth_kind)
+    if success:
+        return {"success": True, "checks": body if type(body) == "list" else []}
+    return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
+
+# Merge Request Notes (the GitLab equivalent of a GitHub issue/PR comment)
+
+def _notes_list(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    """List notes on an MR, paginated. GitLab returns up to 100 per
+    page; we walk until short page or the safety cap."""
+    base = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/notes")
+    per_page = 100
+    max_pages = 30
+    all_notes = []
+    for page in range(1, max_pages + 1):
+        url = base + "?per_page=" + str(per_page) + "&page=" + str(page) + "&order_by=created_at&sort=asc"
+        success, status_code, body = _do_request(ctx, "GET", url, token, auth_kind = auth_kind)
+        if not success:
+            return {"success": False, "error": "request failed (page %d): %d" % (page, status_code)}
+        if type(body) != "list":
+            break
+        all_notes.extend(body)
+        if len(body) < per_page:
+            break
+    return {"success": True, "notes": all_notes}
+
+def _notes_create(ctx, token, project, mr_iid, body, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/notes")
+    success, status_code, resp = _do_request(ctx, "POST", url, token, auth_kind = auth_kind, payload = {"body": body})
+    if success:
+        return {"success": True, "note_id": resp.get("id") if type(resp) == "dict" else None, "note": resp}
+    return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": resp}
+
+def _notes_update(ctx, token, project, mr_iid, note_id, body, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/notes/" + str(note_id))
+    success, status_code, resp = _do_request(ctx, "PUT", url, token, auth_kind = auth_kind, payload = {"body": body})
+    if success:
+        return {"success": True, "note_id": resp.get("id") if type(resp) == "dict" else note_id, "note": resp}
+    return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": resp}
+
+def _notes_delete(ctx, token, project, mr_iid, note_id, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/notes/" + str(note_id))
+    success, status_code, _ = _do_request(ctx, "DELETE", url, token, auth_kind = auth_kind)
+    return {"success": success, "status": status_code}
+
+# Merge Request fetch
+
+def _mr_get(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid))
+    success, status_code, body = _do_request(ctx, "GET", url, token, auth_kind = auth_kind)
+    if success:
+        return {"success": True, "merge_request": body}
+    return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
+
+def _mr_list_changes(ctx, token, project, mr_iid, api_base = DEFAULT_GITLAB_API, auth_kind = "private_token"):
+    """List the file changes for an MR. Returns the raw `changes` array
+    from GitLab (each entry has `old_path`, `new_path`, `diff`, …).
+
+    Note: `/changes` is paginated implicitly by GitLab via a size cap on
+    the response. For very large MRs callers should fall back to a
+    local `git diff` rather than relying on the API (same pattern as
+    `lib/github.axl::detect_changed_files`).
+    """
+    url = _project_url(api_base, project, "/merge_requests/" + str(mr_iid) + "/changes")
+    success, status_code, body = _do_request(ctx, "GET", url, token, auth_kind = auth_kind)
+    if success:
+        if type(body) == "dict":
+            return {"success": True, "merge_request": body, "changes": body.get("changes", [])}
+        return {"success": True, "merge_request": None, "changes": []}
+    return {"success": False, "error": "request failed: %d" % status_code, "status": status_code, "body": body}
+
+# URL helpers
+
+def _extract_host(url):
+    """Extract the host (without scheme) from a URL. Returns "" on
+    failure. Mirrors `lib/github.axl::_extract_host`.
+
+    Strips any `user:password@` userinfo segment first — GitLab CI
+    populates `CI_REPOSITORY_URL` as
+    `https://gitlab-ci-token:<job-token>@<host>/...`, and we must not
+    leak the token into the returned host string (which gets logged
+    and used to derive API endpoints).
+    """
+    if not url:
+        return ""
+    after_scheme = url
+    sep = url.find("://")
+    if sep >= 0:
+        after_scheme = url[sep + 3:]
+    at = after_scheme.find("@")
+    slash = after_scheme.find("/")
+    if at >= 0 and (slash < 0 or at < slash):
+        after_scheme = after_scheme[at + 1:]
+    for stop in ["/", "?", "#"]:
+        cut = after_scheme.find(stop)
+        if cut >= 0:
+            after_scheme = after_scheme[:cut]
+    return after_scheme
+
+def _extract_project_path_from_url(url):
+    """Parse `https://gitlab.example.com/<group>/<project>(.git)?` →
+    `<group>/<project>`. Returns "" on failure.
+
+    GitLab supports nested subgroups, so the path can be arbitrarily
+    deep (e.g. `org/team/project`). We keep every segment after the
+    host and strip a trailing `.git` if present.
+    """
+    if not url:
+        return ""
+    after_scheme = url
+    sep = url.find("://")
+    if sep >= 0:
+        after_scheme = url[sep + 3:]
+    slash = after_scheme.find("/")
+    if slash < 0:
+        return ""
+    tail = after_scheme[slash + 1:]
+    for stop in ["?", "#"]:
+        cut = tail.find(stop)
+        if cut >= 0:
+            tail = tail[:cut]
+    if tail.endswith("/"):
+        tail = tail[:-1]
+    if tail.endswith(".git"):
+        tail = tail[:-len(".git")]
+    return tail
+
+# Public facade
+
+gitlab = struct(
+    DEFAULT_API = DEFAULT_GITLAB_API,
+    encode_project_path = encode_project_path,
+    extract_host = _extract_host,
+    extract_project_path = _extract_project_path_from_url,
+    commit_status = struct(
+        STATES = _COMMIT_STATUS_STATES,
+        post = _commit_status_post,
+        pending = _commit_status_pending,
+        running = _commit_status_running,
+        success = _commit_status_success,
+        failed = _commit_status_failed,
+        canceled = _commit_status_canceled,
+        skipped = _commit_status_skipped,
+    ),
+    external_status_checks = struct(
+        respond = _external_status_check_respond,
+        list = _external_status_check_list,
+    ),
+    notes = struct(
+        list = _notes_list,
+        create = _notes_create,
+        update = _notes_update,
+        delete = _notes_delete,
+    ),
+    merge_requests = struct(
+        get = _mr_get,
+        list_changes = _mr_list_changes,
+    ),
+)

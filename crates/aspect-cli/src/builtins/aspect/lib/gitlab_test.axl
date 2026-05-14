@@ -1,0 +1,191 @@
+"""Smoke tests for `lib/gitlab.axl`.
+
+Exercises the pure helpers (URL parsing, project-path encoding) and the
+input-validation branches of the HTTP-calling functions (which return
+without making a request when given an invalid state/status). The
+network-touching code paths are validated by the GitLab feature tickets
+(ENG-1651) and the dogfood ticket (ENG-1652).
+
+Run with:
+  aspect dev test-gitlab-client
+"""
+
+load("./gitlab.axl", "gitlab")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_impl(ctx):
+    # encode_project_path
+    _eq(
+        "encode_project_path / basic",
+        gitlab.encode_project_path("group/project"),
+        "group%2Fproject",
+    )
+    _eq(
+        "encode_project_path / nested subgroup",
+        gitlab.encode_project_path("org/team/project"),
+        "org%2Fteam%2Fproject",
+    )
+    _eq(
+        "encode_project_path / leaves dots and dashes",
+        gitlab.encode_project_path("my-org/my.project"),
+        "my-org%2Fmy.project",
+    )
+    _eq(
+        "encode_project_path / no slashes",
+        gitlab.encode_project_path("just-a-name"),
+        "just-a-name",
+    )
+
+    # Numeric project IDs (e.g. CI_PROJECT_ID) must round-trip unchanged.
+    # GitLab accepts both the numeric ID and the URL-encoded path as `:id`.
+    _eq(
+        "encode_project_path / numeric int",
+        gitlab.encode_project_path(12345),
+        "12345",
+    )
+    _eq(
+        "encode_project_path / numeric string",
+        gitlab.encode_project_path("12345"),
+        "12345",
+    )
+
+    # extract_host
+    _eq(
+        "extract_host / gitlab.com",
+        gitlab.extract_host("https://gitlab.com/group/project"),
+        "gitlab.com",
+    )
+    _eq(
+        "extract_host / self-hosted with path",
+        gitlab.extract_host("https://gitlab.example.com/group/project.git"),
+        "gitlab.example.com",
+    )
+    _eq(
+        "extract_host / no scheme",
+        gitlab.extract_host("gitlab.com/foo/bar"),
+        "gitlab.com",
+    )
+    _eq("extract_host / empty input", gitlab.extract_host(""), "")
+
+    # Credential-stripping: GitLab CI populates CI_REPOSITORY_URL as
+    # `https://gitlab-ci-token:<job-token>@<host>/...`. The host
+    # extractor must drop the userinfo so tokens never bleed into
+    # logs or derived API endpoints.
+    _eq(
+        "extract_host / strips gitlab-ci-token userinfo",
+        gitlab.extract_host("https://gitlab-ci-token:abc123@gitlab.example.com/group/project.git"),
+        "gitlab.example.com",
+    )
+    _eq(
+        "extract_host / strips oauth2 PAT userinfo",
+        gitlab.extract_host("https://oauth2:glpat-xyz@gitlab.com/group/project"),
+        "gitlab.com",
+    )
+    _eq(
+        "extract_host / strips bare user (no password)",
+        gitlab.extract_host("https://user@gitlab.com/group/project"),
+        "gitlab.com",
+    )
+
+    # An `@` after the path separator must NOT be treated as userinfo.
+    _eq(
+        "extract_host / @ in path is not userinfo",
+        gitlab.extract_host("https://gitlab.com/group/project@v1"),
+        "gitlab.com",
+    )
+
+    # extract_project_path
+    _eq(
+        "extract_project_path / strips .git",
+        gitlab.extract_project_path("https://gitlab.com/group/project.git"),
+        "group/project",
+    )
+    _eq(
+        "extract_project_path / keeps nested subgroups",
+        gitlab.extract_project_path("https://gitlab.example.com/org/team/svc"),
+        "org/team/svc",
+    )
+    _eq(
+        "extract_project_path / strips query",
+        gitlab.extract_project_path("https://gitlab.com/group/project?ref=main"),
+        "group/project",
+    )
+    _eq(
+        "extract_project_path / no host segment",
+        gitlab.extract_project_path("https://gitlab.com"),
+        "",
+    )
+
+    # commit_status.STATES exposed
+    if "success" not in gitlab.commit_status.STATES:
+        fail("commit_status.STATES missing 'success'")
+    if "failed" not in gitlab.commit_status.STATES:
+        fail("commit_status.STATES missing 'failed'")
+
+    # Input-validation branches don't need a live HTTP client — they
+    # return early with a structured error.
+    res = gitlab.commit_status.post(
+        ctx = None,
+        token = "fake",
+        project = "group/project",
+        sha = "deadbeef",
+        state = "not-a-state",
+        name = "build",
+    )
+    if res.get("success"):
+        fail("commit_status.post should reject invalid state")
+    if "invalid state" not in (res.get("error") or ""):
+        fail("commit_status.post error message changed: %r" % res)
+
+    res = gitlab.external_status_checks.respond(
+        ctx = None,
+        token = "fake",
+        project = "group/project",
+        mr_iid = 1,
+        sha = "deadbeef",
+        external_status_check_id = 42,
+        status = "approved",  # not a valid GitLab value
+    )
+    if res.get("success"):
+        fail("external_status_checks.respond should reject invalid status")
+    if "invalid status" not in (res.get("error") or ""):
+        fail("external_status_checks.respond error message changed: %r" % res)
+
+    # Struct shape sanity — every documented attribute is present.
+    for name in (
+        "DEFAULT_API",
+        "encode_project_path",
+        "extract_host",
+        "extract_project_path",
+        "commit_status",
+        "external_status_checks",
+        "notes",
+        "merge_requests",
+    ):
+        if not hasattr(gitlab, name):
+            fail("gitlab struct missing %r" % name)
+    for name in ("post", "pending", "running", "success", "failed", "canceled", "skipped", "STATES"):
+        if not hasattr(gitlab.commit_status, name):
+            fail("gitlab.commit_status missing %r" % name)
+    for name in ("respond", "list"):
+        if not hasattr(gitlab.external_status_checks, name):
+            fail("gitlab.external_status_checks missing %r" % name)
+    for name in ("list", "create", "update", "delete"):
+        if not hasattr(gitlab.notes, name):
+            fail("gitlab.notes missing %r" % name)
+    for name in ("get", "list_changes"):
+        if not hasattr(gitlab.merge_requests, name):
+            fail("gitlab.merge_requests missing %r" % name)
+
+    print("gitlab.axl smoke: OK")
+    return 0
+
+gitlab_client_tests = task(
+    name = "test-gitlab-client",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
