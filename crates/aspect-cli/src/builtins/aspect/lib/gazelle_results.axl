@@ -8,6 +8,9 @@ Public API:
 
   init_data()                                  → dict
   render_check_output(ctx, data, status, …)    → {title, summary, text}
+  extract_changed_dirs(changed_files)          → [str, ...]
+  dir_at_or_below(path, scopes)                → bool
+  dedupe_subtrees(dirs)                        → [str, ...]
 """
 
 load(
@@ -19,6 +22,7 @@ load(
     "build_details_data",
     "build_summary_data",
     "format_run_date",
+    "pluralize",
     bazel_init_data = "init_data",
 )
 load("./repro_commands.axl", "patch_download_cmd")
@@ -43,8 +47,14 @@ def init_data():
         "affected_files": [],  # BUILD file paths extracted from gazelle's diff
         "gazelle_target": "",  # Bazel label of the gazelle target
         "gazelle_command": "",  # subcommand forwarded to gazelle ("fix", "update", "")
-        "check_mode": False,  # --check was set (tree not modified)
-        "dirs": [],  # positional dir args passed to gazelle
+        "check_mode": "auto",  # raw --check arg value ("auto" | "true" | "false")
+        "enforce_check": False,  # resolved enforcement (auto → CI? true : false)
+        "scope": "all",  # raw --scope arg value ("all" | "changed")
+        "scope_all_on_change": [],  # glob patterns that escalate scope=changed → all
+        "changed_file_patterns": [],  # glob filter on changed files contributing dirs
+        "soft_fail": False,  # --soft-fail was set
+        "no_changed_dirs": False,  # --scope=changed found no surviving dirs → no-op exit 0
+        "dirs": [],  # effective dir list passed to gazelle (post-resolution)
         "gazelle_error": False,  # non-zero exit with empty diff → config error
         "gazelle_error_code": 0,
         "apply_error": False,  # git apply -p0 failed after getting the diff
@@ -52,6 +62,90 @@ def init_data():
         "patch_url": "",  # download URL for gazelle.patch artifact (optional)
     }
     return r
+
+# ─── Changed-dir derivation helpers ──────────────────────────────────────────
+#
+# Pure functions composed by `gazelle.axl::_resolve_effective_dirs`. Kept in
+# this lib (rather than inline in gazelle.axl) so they're importable by the
+# AXL test suite under `.aspect/axl.axl`.
+
+def extract_changed_dirs(changed_files):
+    """Parent dirs of changed files, deduped. Top-level files (no
+    parent dir) are dropped — a single top-level edit (MODULE.bazel,
+    .bazelversion, …) almost never wants gazelle to re-update every
+    BUILD file in the repo just because of one file. Callers that
+    want repo-wide-on-config-change should use the
+    `--scope-all-on-change` escalation list instead.
+
+    Returns a sorted list of unique parent dirs. Does NOT filter for
+    existence on disk — that's the caller's responsibility (the caller
+    has `ctx.std.fs`; this helper is pure for testability)."""
+    seen = {}
+    for f in changed_files:
+        if "/" not in f:
+            continue
+        d = f.rsplit("/", 1)[0]
+        seen[d] = True
+    return sorted(seen.keys())
+
+def _normalize_dir(d):
+    """Normalize a dir path for prefix comparison.
+
+    - Strip trailing `/` so `services/` and `services` are equivalent.
+    - Strip leading `./` so `./services` matches `services`.
+    - Collapse `.` (workspace root) to the empty string so it acts as
+      an ancestor of every path under prefix comparison.
+    """
+    n = d.rstrip("/") if d else d
+    if n.startswith("./"):
+        n = n[2:]
+    if n == ".":
+        n = ""
+    return n
+
+def dir_at_or_below(path, scopes):
+    """True if `path` equals any entry in `scopes` or lives under one
+    of them. Used by `--scope=changed × --dirs` intersection: a changed
+    subtree qualifies if it's at-or-below the user's interest scope.
+
+    Scopes are normalized first (`./services` ≡ `services`, `.` ≡
+    workspace root) so the common shell forms of dir paths all behave
+    the same."""
+    for s in scopes:
+        s_norm = _normalize_dir(s)
+        if s_norm == "":
+            # Workspace root — every path is at-or-below.
+            return True
+        if path == s_norm:
+            return True
+        if path.startswith(s_norm + "/"):
+            return True
+    return False
+
+def dedupe_subtrees(dirs):
+    """Drop dirs whose ancestor is already in the result. `["services",
+    "services/api", "services/api/v2"]` collapses to `["services"]` —
+    passing `services` to gazelle already covers updates to descendants.
+
+    Process shortest path first; keep a dir only if no kept ancestor
+    contains it. Returns a sorted list of normalized dirs. `.` and
+    `./` collapse to the empty string and are dropped from the result
+    — passing the workspace root verbatim to gazelle is equivalent to
+    passing no positionals (`gazelle .` ≡ `gazelle`), so we return an
+    empty list to keep the downstream invocation clean."""
+    kept = []
+    for d in sorted(dirs, key = len):
+        norm = _normalize_dir(d)
+        is_under_kept = False
+        for k in kept:
+            # Empty `k` is the workspace-root sentinel; treat it as
+            # an ancestor of every path.
+            if norm == k or k == "" or norm.startswith(k + "/"):
+                is_under_kept = True
+                break
+        if not is_under_kept:
+            kept.append(norm)
+    return sorted([k for k in kept if k != ""])
 
 # ─── Title ────────────────────────────────────────────────────────────────────
 
@@ -162,6 +256,46 @@ _… {{ overflow }} more file(s) not shown._
 
 # ─── Details body ─────────────────────────────────────────────────────────────
 
+def _config_items(data):
+    """Build the Configuration row for the gazelle summary.
+
+    Surfaces the run-shape knobs directly above "Last update":
+      - Scope: always shown. When `scope == "changed"` and the task
+        recorded a non-zero post-intersection effective-dir count,
+        append it as ` — N changed dirs` so reviewers can tell at a
+        glance how many subtrees gazelle was asked to update.
+      - Soft-fail: only shown when True. Default is False; rendering
+        `Soft-fail: false` on every clean run would be noise.
+      - Scope-all-on-change: only when `scope == "changed"` and the
+        flag is non-empty. The flag has a non-empty default
+        (`BUILD.bazel`, `MODULE.bazel`) so this row appears on every
+        scope=changed run by default — useful for transparency about
+        which file changes would escalate to a whole-repo update.
+      - Changed-file-pattern: only when `scope == "changed"` and the
+        flag is non-empty. Default is empty; rendering an empty list
+        on every run would be noise.
+    """
+    items = []
+    g = data["gazelle"]
+    scope = g.get("scope", "") or ""
+    if scope:
+        value = scope
+        if scope == "changed":
+            dirs_count = len(g.get("dirs", []) or [])
+            if dirs_count > 0:
+                value = "%s — %s" % (scope, pluralize(dirs_count, "changed dir"))
+        items.append({"key": "Scope", "value": value})
+    if g.get("soft_fail"):
+        items.append({"key": "Soft-fail", "value": "true"})
+    if scope == "changed":
+        triggers = g.get("scope_all_on_change", []) or []
+        if triggers:
+            items.append({"key": "Scope-all-on-change", "value": ", ".join(triggers)})
+        patterns = g.get("changed_file_patterns", []) or []
+        if patterns:
+            items.append({"key": "Changed-file-pattern", "value": ", ".join(patterns)})
+    return items
+
 def _build_details_data(data, status):
     affected = data["gazelle"].get("affected_files", []) or []
     total = len(affected)
@@ -191,7 +325,10 @@ def _build_details_data(data, status):
                      not data["gazelle"].get("gazelle_error") and
                      not data["gazelle"].get("apply_error"),
         "has_overflow": overflow > 0,
-        "check_mode": bool(data["gazelle"].get("check_mode")),
+        # In the template, `check_mode` means "did we run in CI-style
+        # gate mode (skipped the apply step)?" — keyed off the resolved
+        # `enforce_check` bool, not the raw arg string which may be "auto".
+        "check_mode": bool(data["gazelle"].get("enforce_check")),
         "gazelle_error": bool(data["gazelle"].get("gazelle_error")),
         "gazelle_error_code": str(data["gazelle"].get("gazelle_error_code", 0) or 0),
         "apply_error": bool(data["gazelle"].get("apply_error")),
@@ -214,11 +351,6 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
     t = templates or {}
     run_date = format_run_date(ctx, data.get("start_time_ms", 0))
 
-    # No `config_items` for gazelle — the only variable knob is
-    # `--check` (no-op apply mode otherwise), and `--check` is the
-    # canonical CI mode anyway. Always-True doesn't tell a reviewer
-    # anything they don't already assume; rendering it would just
-    # add a noise row to every gazelle annotation on CI.
     summary_data = build_summary_data(
         ctx,
         data,
@@ -227,6 +359,7 @@ def render_check_output(ctx, data, status, render_ctx, links, templates = None, 
         links,
         metadata_keys,
         run_date = run_date,
+        config_items = _config_items(data),
     )
     finish_date = format_run_date(ctx, data.get("finish_time_ms", 0))
     shared_data = build_details_data(

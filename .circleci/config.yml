@@ -162,10 +162,10 @@ jobs:
           command: .aspect/bootstrap.sh
       - run:
           name: Gazelle Task (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect gazelle --check --task-key gazelle-cci-debug
+          command: ASPECT_DEBUG=1 aspect gazelle --task-key gazelle-cci-debug
       - run:
           name: Gazelle Task
-          command: aspect gazelle --check --task-key gazelle-cci
+          command: aspect gazelle --task-key gazelle-cci
 
   # Regression test for the build-from-source gazelle path — upstream
   # `gazelle()` macro + rules_go toolchain. Most users will adopt the
@@ -183,10 +183,10 @@ jobs:
       # lld can't accept Go's non-PIC relocations on x86_64. See .bazelrc.
       - run:
           name: Gazelle Task — from-source (ASPECT_DEBUG=1)
-          command: ASPECT_DEBUG=1 aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-cci-debug
+          command: ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-cci-debug
       - run:
           name: Gazelle Task — from-source
-          command: aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-cci
+          command: aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-cci
 
   delivery-task:
     machine: true

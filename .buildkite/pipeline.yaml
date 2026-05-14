@@ -212,8 +212,8 @@ steps:
         - exit_status: 78 # unhealthy signal from .buildkite/hooks/pre-command
           limit: 1
     command: |
-      ASPECT_DEBUG=1 aspect gazelle --check --task-key gazelle-bk-debug
-      aspect gazelle --check --task-key gazelle-bk
+      ASPECT_DEBUG=1 aspect gazelle --task-key gazelle-bk-debug
+      aspect gazelle --task-key gazelle-bk
 
   - key: gazelle-from-source-task
     label: ":aspect: Gazelle Task (from-source)"
@@ -236,8 +236,8 @@ steps:
       # `--config=pure_go` is required on Linux: toolchains_llvm_bootstrapped's
       # lld can't accept Go's non-PIC relocations on x86_64. Pure Go skips the
       # cc-toolchain link step entirely. See .bazelrc for the config definition.
-      ASPECT_DEBUG=1 aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-bk-debug
-      aspect gazelle --check --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-bk
+      ASPECT_DEBUG=1 aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-bk-debug
+      aspect gazelle --gazelle-target=//tools/gazelle:gazelle_from_source --bazel-flag=--config=pure_go --task-key gazelle-from-source-bk
 
   - key: build-task
     depends_on:
