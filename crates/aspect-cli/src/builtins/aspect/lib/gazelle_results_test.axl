@@ -19,6 +19,8 @@ Scenarios:
  13. scope=changed       — Configuration row with Scope + default escalation list
  14. scope=changed full  — all four Config rows fire (Scope, Soft-fail, escalate, pattern)
  15. scope=changed empty — no-op short-circuit, dirs=[]
+ 16. ignore-untracked-files — Config row shows Ignore untracked files: true
+ 17. ignore-gitignored-files=false — Config row shows Ignore gitignored files: false
 """
 
 load("./gazelle_results.axl", "init_data", "render_check_output")
@@ -142,7 +144,7 @@ def _make_scope_changed():
     default escalation patterns (BUILD.bazel, MODULE.bazel)."""
     r = _make_base()
     r["gazelle"]["scope"] = "changed"
-    r["gazelle"]["scope_all_on_change"] = ["BUILD.bazel", "MODULE.bazel"]
+    r["gazelle"]["scope_all_on_changes"] = ["BUILD.bazel", "MODULE.bazel"]
     r["gazelle"]["dirs"] = ["services/api", "services/worker"]
     r["gazelle"]["affected_files"] = [
         "services/api/BUILD.bazel",
@@ -156,7 +158,7 @@ def _make_scope_changed_with_filter():
     fire: Scope, Soft-fail, Scope-all-on-change, Changed-file-pattern."""
     r = _make_base()
     r["gazelle"]["scope"] = "changed"
-    r["gazelle"]["scope_all_on_change"] = ["BUILD.bazel", "MODULE.bazel", "gazelle_python.yaml"]
+    r["gazelle"]["scope_all_on_changes"] = ["BUILD.bazel", "MODULE.bazel", "gazelle_python.yaml"]
     r["gazelle"]["changed_file_patterns"] = ["**/*.py", "**/*.ts", "**/*.tsx", "**/BUILD.bazel"]
     r["gazelle"]["soft_fail"] = True
     r["gazelle"]["dirs"] = ["apps/web", "services/api"]
@@ -172,7 +174,7 @@ def _make_scope_changed_empty():
     `Scope: changed` (no count suffix since dirs is empty)."""
     r = _make_base()
     r["gazelle"]["scope"] = "changed"
-    r["gazelle"]["scope_all_on_change"] = ["BUILD.bazel", "MODULE.bazel"]
+    r["gazelle"]["scope_all_on_changes"] = ["BUILD.bazel", "MODULE.bazel"]
     r["gazelle"]["no_changed_dirs"] = True
     r["gazelle"]["dirs"] = []
     return r
@@ -184,6 +186,24 @@ def _make_large():
         "services/svc_%d/BUILD.bazel" % i
         for i in range(300)
     ]
+    return r
+
+def _make_ignore_untracked():
+    """--ignore-untracked-files set; Config row gains the
+    Ignore untracked files: true entry alongside Scope."""
+    r = _make_base()
+    r["gazelle"]["ignore_untracked_files"] = True
+    r["gazelle"]["affected_files"] = ["services/api/BUILD.bazel"]
+    return r
+
+def _make_ignore_gitignored_disabled():
+    """--ignore-gitignored-files=false (opt out of the default). Rare,
+    but covers the edge case where a gitignored file needs to be
+    visible to gazelle (e.g., uncommitted build-time-generated source).
+    Config row shows `Ignore gitignored files: false`."""
+    r = _make_base()
+    r["gazelle"]["ignore_gitignored_files"] = False
+    r["gazelle"]["affected_files"] = ["services/api/BUILD.bazel"]
     return r
 
 # ─── Test harness ─────────────────────────────────────────────────────────────
@@ -239,6 +259,8 @@ def _test_impl(ctx):
         ("13. scope=changed default · GH", _make_scope_changed(), "failed", "github", None),
         ("14. scope=changed full config · GH", _make_scope_changed_with_filter(), "failed", "github", None),
         ("15. scope=changed empty no-op · GH", _make_scope_changed_empty(), "passed", "github", None),
+        ("16. ignore-untracked-files · GH", _make_ignore_untracked(), "failed", "github", None),
+        ("17. ignore-gitignored-files=false (opt out) · GH", _make_ignore_gitignored_disabled(), "failed", "github", None),
     ]
 
     sep = "=" * 70

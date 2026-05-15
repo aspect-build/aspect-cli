@@ -560,6 +560,7 @@ def _impl(ctx: TaskContext) -> int:
             data = data,
             phase = Phase(name = "format", description = "Format files", emoji = "✨"),
         )
+    trace.log("formatter invocation: %s %s" % (formatter, " ".join(format_args)))
     exit = r.spawn(formatter, format_args).wait()
 
     if not exit.success:

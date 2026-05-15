@@ -11,6 +11,8 @@ Public API:
   extract_changed_dirs(changed_files)          → [str, ...]
   dir_at_or_below(path, scopes)                → bool
   dedupe_subtrees(dirs)                        → [str, ...]
+  parse_bazelignore(content)                   → {path: True, ...}
+  parse_repo_bazel_ignore_directories(content) → [glob, ...]
 """
 
 load(
@@ -50,9 +52,11 @@ def init_data():
         "check_mode": "auto",  # raw --check arg value ("auto" | "true" | "false")
         "enforce_check": False,  # resolved enforcement (auto → CI? true : false)
         "scope": "all",  # raw --scope arg value ("all" | "changed")
-        "scope_all_on_change": [],  # glob patterns that escalate scope=changed → all
+        "scope_all_on_changes": [],  # glob patterns that escalate scope=changed → all
         "changed_file_patterns": [],  # glob filter on changed files contributing dirs
         "soft_fail": False,  # --soft-fail was set
+        "ignore_untracked_files": False,  # --ignore-untracked-files default
+        "ignore_gitignored_files": True,  # --ignore-gitignored-files default — gazelle doesn't honor .gitignore natively, so we opt in by default
         "no_changed_dirs": False,  # --scope=changed found no surviving dirs → no-op exit 0
         "dirs": [],  # effective dir list passed to gazelle (post-resolution)
         "gazelle_error": False,  # non-zero exit with empty diff → config error
@@ -121,6 +125,72 @@ def dir_at_or_below(path, scopes):
         if path.startswith(s_norm + "/"):
             return True
     return False
+
+def parse_bazelignore(content):
+    """Parse a `.bazelignore` file body into a literal-path set
+    (dict-as-set; values are unused). Mirrors gazelle's
+    [walk/config.go::loadBazelIgnore] rules:
+
+    - Strip whitespace on each line.
+    - Skip blank lines and `#` comments.
+    - Drop entries containing glob chars (`*`, `?`, `[`) — gazelle's
+      loader logs a warning and ignores them; we do the same.
+    - Normalize a leading `./` away and strip trailing `/` so
+      `./foo/` and `foo` are equivalent."""
+    seen = {}
+    for raw in content.split("\n"):
+        entry = raw.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if "*" in entry or "?" in entry or "[" in entry:
+            continue
+        entry = entry.rstrip("/")
+        if entry.startswith("./"):
+            entry = entry[2:]
+        if entry:
+            seen[entry] = True
+    return seen
+
+def parse_repo_bazel_ignore_directories(content):
+    """Parse a `REPO.bazel` file body and return the list of glob
+    patterns from its top-level `ignore_directories([...])` call, if
+    present. Gazelle parses this as Starlark; AXL has no Starlark
+    parser handy so we do a naive lift: locate the
+    `ignore_directories(` identifier, then extract quoted strings
+    until the matching `]`.
+
+    Supports both `"` and `'` quote delimiters. Does NOT handle
+    escaped quotes inside path patterns (vanishingly rare). Returns
+    `[]` when no call is present or the syntax doesn't match the
+    expected shape."""
+    idx = content.find("ignore_directories")
+    if idx < 0:
+        return []
+    bracket = content.find("[", idx)
+    if bracket < 0:
+        return []
+    close = content.find("]", bracket)
+    if close < bracket:
+        return []
+    body = content[bracket + 1:close]
+    patterns = []
+    pos = 0
+
+    # Bounded loop: Starlark forbids `while True`. 10000 is far above
+    # any realistic ignore_directories entry count.
+    for _ in range(10000):
+        candidates = [c for c in (body.find('"', pos), body.find("'", pos)) if c >= 0]
+        if not candidates:
+            break
+        q = min(candidates)
+        end = body.find(body[q], q + 1)
+        if end < 0:
+            break
+        pattern = body[q + 1:end]
+        if pattern:
+            patterns.append(pattern)
+        pos = end + 1
+    return patterns
 
 def dedupe_subtrees(dirs):
     """Drop dirs whose ancestor is already in the result. `["services",
@@ -209,7 +279,10 @@ _SUMMARY_TEMPLATE = """{% if detail_rows %}{% for row in detail_rows %}
 :gear: {% for item in config_items %}**{{ item.key }}:** `{{ item.value }}`{% if not loop.last %} · {% endif %}{% endfor %}{% if last_update %}  {% endif %}{% endif %}{% if last_update %}
 :speech_balloon: **Last update:** `{{ last_update }}`{% endif %}"""
 
-_DETAILS_TEMPLATE = """{% if gazelle_error %}
+_DETAILS_TEMPLATE = """{% if is_running %}
+> 🔄 Gazelle task in progress...
+
+{% elif gazelle_error %}
 > ❌ Gazelle exited with code {{ gazelle_error_code }} without producing a diff. This usually indicates a configuration error — check the task log.
 
 {% elif apply_error %}
@@ -266,6 +339,11 @@ def _config_items(data):
         glance how many subtrees gazelle was asked to update.
       - Soft-fail: only shown when True. Default is False; rendering
         `Soft-fail: false` on every clean run would be noise.
+      - Ignore untracked files (default False): shown when True.
+      - Ignore gitignored files (default True): shown when False.
+        Both follow the "surface only departures from default" rule
+        so a stock invocation has a clean Config row and any row that
+        does appear signals an explicit user choice.
       - Scope-all-on-change: only when `scope == "changed"` and the
         flag is non-empty. The flag has a non-empty default
         (`BUILD.bazel`, `MODULE.bazel`) so this row appears on every
@@ -286,14 +364,22 @@ def _config_items(data):
                 value = "%s — %s" % (scope, pluralize(dirs_count, "changed dir"))
         items.append({"key": "Scope", "value": value})
     if g.get("soft_fail"):
-        items.append({"key": "Soft-fail", "value": "true"})
+        items.append({"key": "Soft fail", "value": "true"})
+
+    # Each Ignore-* row appears only when the value departs from the
+    # arg's default, so a default invocation has a clean Config row
+    # and any row that does appear signals user intent.
+    if g.get("ignore_untracked_files"):  # default False
+        items.append({"key": "Ignore untracked files", "value": "true"})
+    if not g.get("ignore_gitignored_files", True):  # default True
+        items.append({"key": "Ignore gitignored files", "value": "false"})
     if scope == "changed":
-        triggers = g.get("scope_all_on_change", []) or []
+        triggers = g.get("scope_all_on_changes", []) or []
         if triggers:
-            items.append({"key": "Scope-all-on-change", "value": ", ".join(triggers)})
+            items.append({"key": "Scope all on changes", "value": ", ".join(triggers)})
         patterns = g.get("changed_file_patterns", []) or []
         if patterns:
-            items.append({"key": "Changed-file-pattern", "value": ", ".join(patterns)})
+            items.append({"key": "Changed file patterns", "value": ", ".join(patterns)})
     return items
 
 def _build_details_data(data, status):
@@ -311,6 +397,12 @@ def _build_details_data(data, status):
         "file_list": "\n".join(shown),
         "overflow": str(overflow) if overflow > 0 else "",
         # Boolean flags for Jinja2 conditions.
+        # `is_running` short-circuits the rest so a live render during
+        # the bazel build / diff phase doesn't fall through to the
+        # "N BUILD files out of date" branch with N=0 and an empty
+        # file list (the affected_files set is only populated once
+        # gazelle's -mode=diff completes).
+        "is_running": status not in ("passed", "failed", "aborted"),
         # `is_clean` is only true on a real passing run — `failed` with
         # no recorded affected_files happens on early-bail paths and
         # would otherwise misleadingly claim "All BUILD files are up to
