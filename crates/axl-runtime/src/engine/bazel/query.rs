@@ -168,9 +168,13 @@ impl Query {
         cmd.stderr(Stdio::null());
         cmd.stdout(outfile);
         cmd.stdin(Stdio::null());
-        cmd.spawn()
-            .with_context(|| "failed to spawn bazel")?
-            .wait()?;
+        // Register with the live-bazel registry so a CI cancel
+        // (SIGINT/SIGTERM to aspect-cli) escalates to the bazel
+        // client. Large queries can run for many seconds; without
+        // registration they'd outlive an aborted aspect-cli.
+        let (mut child, _guard) =
+            super::live::spawn_registered(&mut cmd).with_context(|| "failed to spawn bazel")?;
+        child.wait()?;
 
         let mut buf = vec![];
         File::open(&out)?.read_to_end(&mut buf)?;

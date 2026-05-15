@@ -168,6 +168,20 @@ pub struct Build {
     #[allocative(skip)]
     child: RefCell<Child>,
 
+    /// RAII guard that registers the bazel client PID with `bazel::live`
+    /// for the lifetime of the build. On OS-level shutdown signals to
+    /// aspect-cli, the binary's signal handler iterates the live registry
+    /// and forwards SIGINT to each registered client so bazel subprocesses
+    /// don't outlive aspect-cli.
+    ///
+    /// Wrapped in `RefCell<Option<…>>` so `wait()` / `try_wait()` can
+    /// `.take()` it the moment the child is observed exited. Otherwise the
+    /// PID stays in the registry until the Starlark `Build` object is
+    /// garbage-collected — and if the OS reuses the PID in that window,
+    /// the shutdown handler would SIGINT/SIGKILL an unrelated process.
+    #[allocative(skip)]
+    live_guard: RefCell<Option<super::live::LiveBazelGuard>>,
+
     #[allocative(skip)]
     span: RefCell<tracing::Span>,
 }
@@ -297,6 +311,12 @@ impl Build {
             .spawn()
             .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
 
+        // Register the bazel client with the live-subprocess registry so
+        // aspect-cli's OS-signal handler can forward SIGINT to it on
+        // CI cancellation. The guard is stored on `Self` and unregisters
+        // when the `Build` is dropped (after `wait()`).
+        let live_guard = super::live::register(child.id());
+
         // Now that we have the spawned child's pid, start the BES reader.
         // The child pid is the per-invocation liveness signal the BES thread
         // uses to detect aspect-build/aspect-cli#1060 — a hung post-
@@ -372,6 +392,7 @@ impl Build {
             execlog_stream: RefCell::new(execlog_stream),
             sink_handles: RefCell::new(sink_handles),
             sink_invocation_id: RefCell::new(sink_invocation_id),
+            live_guard: RefCell::new(Some(live_guard)),
             span: RefCell::new(span),
         })
     }
@@ -451,10 +472,16 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         let status = build.child.borrow_mut().try_wait()?;
         Ok(match status {
-            Some(status) => NoneOr::Other(BuildStatus {
-                success: status.success(),
-                code: status.code(),
-            }),
+            Some(status) => {
+                // Child has been reaped — release the PID registration
+                // immediately so a reused PID can't be targeted by a
+                // later shutdown-signal escalation.
+                build.live_guard.borrow_mut().take();
+                NoneOr::Other(BuildStatus {
+                    success: status.success(),
+                    code: status.code(),
+                })
+            }
             None => NoneOr::None,
         })
     }
@@ -477,6 +504,12 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let _enter = span.enter();
 
         let result = build.child.borrow_mut().wait()?;
+
+        // Child has been reaped — release the PID registration before any
+        // other work in this function. Otherwise the PID could be reused
+        // by the OS while we drain BES/execlog sinks, and a CI cancel in
+        // that window would target an unrelated process.
+        build.live_guard.borrow_mut().take();
 
         // Wait for BES stream to complete.
         // Note: We don't take() the stream here so that build_events() can still

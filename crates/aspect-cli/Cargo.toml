@@ -31,7 +31,7 @@ sha256 = "1.6.0"
 uuid = { version = "1", features = ["v4"] }
 starlark = "0.13.0"
 thiserror = "2.0.17"
-tokio = { version = "1.47.1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1.47.1", features = ["macros", "rt", "rt-multi-thread", "signal", "time"] }
 tonic = "0.14"
 tracing = "0.1.41"
 tracing-core = "0.1.34"

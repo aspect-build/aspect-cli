@@ -21,10 +21,12 @@ pub fn server_info_with_startup_flags(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
-    let c = cmd
-        .spawn()
-        .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?
-        .wait_with_output()?;
+    // `bazel info` (without --noblock_for_lock) can hang on a busy
+    // server. Register so the OS signal handler can SIGINT it on
+    // CI-cancel.
+    let (child, _guard) = super::live::spawn_registered(&mut cmd)
+        .map_err(|e| io::Error::other(format!("failed to spawn bazel: {e}")))?;
+    let c = child.wait_with_output()?;
     if !c.status.success() {
         let stderr = String::from_utf8_lossy(&c.stderr);
         let stderr = stderr.trim();
@@ -94,7 +96,8 @@ pub fn client_pid(startup_flags: &[String]) -> Option<u32> {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
-    let output = cmd.output().ok()?;
+    let (child, _guard) = super::live::spawn_registered(&mut cmd).ok()?;
+    let output = child.wait_with_output().ok()?;
     // Exit code 9 means the lock is held — stderr contains the client PID.
     if output.status.code() != Some(9) {
         return None;
@@ -117,7 +120,10 @@ pub fn is_server_busy(startup_flags: &[String]) -> bool {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
     cmd.stdin(Stdio::null());
-    matches!(cmd.output(), Ok(o) if o.status.code() == Some(9))
+    let Ok((child, _guard)) = super::live::spawn_registered(&mut cmd) else {
+        return false;
+    };
+    matches!(child.wait_with_output(), Ok(o) if o.status.code() == Some(9))
 }
 
 /// Query the server PID without blocking on the lock.
@@ -136,7 +142,8 @@ pub fn server_pid_nonblocking(startup_flags: &[String]) -> Option<u32> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
     cmd.stdin(Stdio::null());
-    let output = cmd.output().ok()?;
+    let (child, _guard) = super::live::spawn_registered(&mut cmd).ok()?;
+    let output = child.wait_with_output().ok()?;
     if !output.status.success() {
         return None;
     }
